@@ -1,15 +1,15 @@
 # NEXUS 个人 AI 投资组合诊断与优化平台设计规格
 
 - 日期：2026-08-22
-- 版本：v3（组合诊断与优化重构版）
-- 状态：已完成复星能力核验与产品重定位，等待最终书面确认
+- 版本：v4（实施前门禁收敛版）
+- 状态：已完成实施前复审，可生成阶段 0–1 编码计划；真实复星只读启用仍受外部门禁约束
 - 目标用户：单一私人用户
 - 首期市场：美股
 - 投资风格：中长期持有为主，兼顾波段交易
 
 ## 0. 架构复审结论与修正
 
-首版方向正确，但还不能直接生成实施计划：它描述了“要有什么”，没有完整规定“代码如何分层、数据由谁拥有、接口如何认证、状态如何转换、页面在异常时显示什么”。本版关闭以下会导致返工或安全事故的问题。
+首版方向正确，但不能直接生成实施计划：它描述了“要有什么”，没有完整规定“代码如何分层、数据由谁拥有、接口如何认证、状态如何转换、页面在异常时显示什么”。v3 完成产品与主架构重构；v4 再关闭实施前审查发现的 ID、状态机、只读订阅、快照一致性、存储实体和仓库基线问题。
 
 | 严重度 | 首版问题 | 本版决定 |
 | --- | --- | --- |
@@ -27,6 +27,11 @@
 | P0 | 产品主线仍偏向“AI 选股并产生订单”，没有首先回答“当前组合是否需要优化” | 核心闭环改为真实组合快照 → 确定性诊断 → Agent 研究 → 多方案优化 → 历史/前向比较 → 人工选择；订单只是可选的末端动作 |
 | P0 | 行情默认以 Alpaca 为首选，与用户已有复星账户和 OpenAPI 条件不一致 | 按数据域设权威来源：复星优先承担券商账户、持仓、订单、资金和具备权限的行情；SEC/FRED 继续分别承担财报与宏观；Alpaca 作为行情补缺和独立交叉验证 |
 | P0 | “优化”若只有一个 AI 分数或目标权重，容易制造伪精确结论 | 输出三个受版本化约束的可解释方案，并逐项比较集中度、回撤、波动、流动性、换手和成本；没有足够证据时只诊断、不建议交易 |
+| P0 | 阶段 1 `READ_ONLY` 与创建 Webhook 订阅相冲突，且公开事件只覆盖订单 | 阶段 1 不创建、更新或删除复星订阅，也不注册券商回调入口；账户、现金、持仓、订单和流水全部主动轮询。Webhook 延后到阶段 3 冻结写契约后实现 |
+| P0 | 真实组合“现金双读”不能检测持仓或未结订单在同步窗口内变化 | 改为现金、持仓和未结订单全部双读并比较规范化哈希；资金流水使用重叠窗口增量拉取并以 Provider 流水 ID 消重 |
+| P0 | 提案组 ID、页面参数和状态机语义不一致 | 页面与 API 统一使用 `proposal_group_id`；组状态固定为 `draft/compared/shadowing/validated/rejected/expired`，验证与未来执行批准彻底分离 |
+| P0 | 缺少 `portfolio_snapshots`、提案组、价格产物、宏观观测和幂等记录等父实体 | 补齐业务事实表及唯一约束；子记录不能脱离冻结父快照或提案组存在 |
+| P1 | 当前 Web 脚手架全部未跟踪，直接创建 worktree 会丢失它 | 实施计划第一个任务只在当前工作区完成无秘密基线提交；之后才进入隔离 worktree 执行编码任务 |
 
 本版仍是主架构规格，但可直接用于生成阶段 0–1 的实施计划。阶段 2–4 只保留稳定接口与门禁，不在首轮代码计划中展开。
 
@@ -43,7 +48,7 @@ NEXUS 是一个私人、单用户的 **AI 辅助投资组合诊断与优化平�
 - 盘中指示性行情和波动提醒；它只用于监控，不直接触发首期交易决策。
 - 流动性良好的美国大盘股、超大盘股和主流非杠杆 ETF 的版本化白名单。
 - 当前组合的集中度、行业、币种、流动性、趋势、回撤、相关性和证据完整度诊断。
-- 多 Agent 研究、证据审计、优化假设、当前组合与三个候选方案的对比简报。
+- 多 Agent 研究、证据审计、优化假设，以及同组 `hold_current/minimum_change/strategy_target` 三候选方案的对比简报。
 - 以 10,000 美元为初始资金的美股策略模拟盘，以及以指数 100 起始的“保持现状 vs 优化方案”前向影子组合。
 - 时点正确的回测、基准比较和绩效归因；策略页在阶段 2 前只展示 baseline 和阶段锁。
 - 风控、订单、成交、Agent 调用和策略版本的完整审计。
@@ -117,7 +122,7 @@ flowchart LR
 
 ### 3.2 Python 投资引擎
 
-使用 Python 3.12、FastAPI、Pydantic 2、SQLAlchemy 2、Alembic 和 PostgreSQL。依赖由 `uv.lock` 固定；引擎镜像运行两个进程角色：无状态 `api` 和领取数据库任务的 `worker`。它们共享代码与数据库，不使用 Redis、Celery 或第二套消息系统。
+使用 Python 3.12、FastAPI、Pydantic 2、SQLAlchemy 2、Alembic 和 PostgreSQL。仓库根目录是 uv workspace，根 `uv.lock` 同时固定 `nexus-engine` 与 `nexus-fosun-gateway`，但两个成员构建成不同镜像、进程身份和依赖集合；引擎镜像运行两个进程角色：无状态 `api` 和领取数据库任务的 `worker`。它们共享引擎代码与数据库，不使用 Redis、Celery 或第二套消息系统。
 
 引擎通用 Provider HTTP 使用 `httpx`；隔离复星网关若通过准入则在防腐层内使用锁定官方 SDK 及其 HTTP 栈，不能让 SDK 类型泄漏到引擎。分析数据使用 Polars + PyArrow + DuckDB，交易日历使用 `exchange-calendars`，模型调用使用 OpenAI 官方 Python SDK。阶段 0–1 自建小型事件驱动回测器并复用生产策略/风控/成交领域函数，不直接嵌入 Qlib、LEAN、vn.py 或 TradingAgents 运行时。
 
@@ -188,9 +193,10 @@ app/                         # Next 页面、布局、BFF Route Handlers
   components/                # 页面组件与状态组件
   lib/generated/             # 从引擎 OpenAPI 生成的 TS 客户端
 worker/                      # Sites/vinext 平台入口，仅基础设施适配
+pyproject.toml               # uv workspace 与共享开发工具，不包含服务运行依赖
+uv.lock                      # 两个 Python 成员的唯一锁文件
 engine/
-  pyproject.toml
-  uv.lock
+  pyproject.toml             # nexus-engine 包与运行依赖
   src/nexus/
     api/                     # FastAPI 路由、认证、错误映射
     domain/                  # 无框架领域模型与不变量
@@ -201,6 +207,7 @@ engine/
   tests/                     # unit/contract/integration
 integrations/
   fosun_gateway/             # 唯一持有复星凭据；阶段化 route allowlist
+    pyproject.toml           # nexus-fosun-gateway 独立包与最小依赖
     adapter/                 # 对锁定 SDK 的防腐层，不泄漏 SDK 类型
     policy/                  # READ_ONLY/SIMULATION_WRITE/LIVE_WRITE 强制门禁
     tests/                   # 脱敏 fixture、契约、安全与回放测试
@@ -221,7 +228,7 @@ Python 引擎是业务逻辑和 PostgreSQL 的唯一拥有者。当前 `db/`、`
 ### 4.1 数据源
 
 - **复星券商域：** 公开契约确认支持港股/美股/A 股通行情查询与 WebSocket 推送、日/分钟等 K 线、账户资金、持仓、订单、资金流水、模拟证券账户及订单状态回调。账户、现金、持仓、订单和实际成交以复星为唯一权威源；其他 Provider 只能用于研究交叉验证，不能覆盖券商事实。依据：[复星 OpenAPI 介绍](https://openapi-docs.fosunxcz.com/)、[Market 契约](https://openapi-docs.fosunxcz.com/specs/public/market/market/openapi.yaml)、[Trade 契约](https://openapi-docs.fosunxcz.com/specs/public/trade/openapi.yaml)、[Push 契约](https://openapi-docs.fosunxcz.com/specs/public/market/push/openapi.yaml)。
-- **复星接入限制：** 公开 K 线契约包含周期、起止时间、条数和复权类型，但没有承诺可查询历史深度、分页上限、SLA、精确限流和 point-in-time 证券池；真实接入前必须用轮换后的凭据完成只读 capability probe。订阅接口文字提到订单、持仓和资金事件，但当前公开 `EventType` 只枚举 `orderUpdate`，因此阶段 1 对资金、持仓和订单执行定时全量轮询；Webhook 仅加速订单状态，不作为唯一同步机制。
+- **复星接入限制：** 公开 K 线契约包含周期、起止时间、条数和复权类型，但没有承诺可查询历史深度、分页上限、SLA、精确限流和 point-in-time 证券池；真实接入前必须用轮换后的凭据完成只读 capability probe。订阅接口文字提到订单、持仓和资金事件，但当前公开 `EventType` 只枚举 `orderUpdate`，而创建/更新/删除订阅本身是外部写操作；因此阶段 1 不管理订阅、不暴露券商 Webhook，资金、持仓、订单和流水全部使用主动轮询。Webhook 从阶段 3 冻结模拟交易写契约后才作为订单更新加速通道，主动轮询始终是最终补偿机制。
 - **复星限流策略：** 旧版 Skill 文档给出 5 QPS/60 次每分钟，但公开 OpenAPI 契约未形成同等承诺，不能把 Skill 数字当 SLA，也不能用压测“探测”生产限额。网关初始使用 concurrency=1、2 QPS、30 次/分钟的 token bucket，正确遵守 `429/Retry-After`；取得账户级书面限额后只允许下调或通过审计配置发布新值。
 - **补充行情：** 当复星行情权限未开通、历史深度不足或健康检查失败时，Alpaca 作为美股补充来源。Basic/IEX 只覆盖单一交易所且 WebSocket 最多 30 个 symbol，界面明确它不是 consolidated quote。需要全市场历史 bar 的回测和内部模拟成交可使用 `feed=sip` 且 `end <= now - 15 minutes`，等待延迟数据合法可用后运行。依据：[Alpaca 数据计划](https://docs.alpaca.markets/us/docs/about-market-data-api)、[实时股票流](https://docs.alpaca.markets/us/docs/real-time-stock-pricing-data)、[Market Data FAQ](https://docs.alpaca.markets/us/docs/market-data-faq)。
 - **财报：** SEC EDGAR submissions/companyfacts/XBRL 为美股公司文件的权威原始来源，保存原文、解析结果、提交时间和引用位置。批量初始化优先使用 SEC nightly bulk archives；增量请求全局限速 5 req/s、携带可联系的 User-Agent，低于 SEC 当前 10 req/s 的公平访问上限。依据：[SEC EDGAR APIs](https://www.sec.gov/search-filings/edgar-application-programming-interfaces)、[SEC Developer Resources](https://www.sec.gov/about/developer-resources)。
@@ -283,9 +290,10 @@ Provider 的网络错误只能由适配器重试；上层业务不得自行无�
 
 - 内部始终使用不可变 `instrument_id`，ticker 只是一段带 `valid_from/valid_to` 的别名。
 - 首期股票池是显式、版本化快照，最多 120 个美国普通股和 20 个非杠杆主流 ETF；不在运行时自动读取“当前指数成分”回填历史。
+- 阶段 0–1 的首个工程股票池 `us_liquid_v1` 固定为 `AAPL, ABBV, ABT, AMD, AMGN, AMT, AMZN, APD, AVGO, BAC, CAT, COST, CRM, CSCO, CVX, GE, GOOGL, GS, HD, IBM, JNJ, JPM, KO, LLY, MA, MCD, META, MSFT, NEE, NFLX, NVDA, ORCL, PG, QCOM, RTX, SHW, TSLA, TXN, UNH, V, WMT, XOM` 与 `SPY, QQQ, IWM, DIA, VTI, TLT, GLD`。这是可审计的工程初值，不宣称等于任何指数成分；新增、移除或行业变更只能发布新快照，不能改写 `us_liquid_v1`。
 - 首期排除 OTC、优先股、权证、杠杆/反向 ETF、ADR、非美国公司和价格低于 5 美元的证券。
 - 每个快照保存生效日、纳入/移除原因、数据来源和内容哈希。回测使用当日有效快照，不能使用今天的白名单回测过去。
-- 初始 ETF 观察集合固定为 `SPY, QQQ, IWM, DIA, VTI, TLT, GLD`；它们仍受单品种 15% 上限。权益 ETF 必须通过受控 CSV 导入发行人披露的行业权重，字段固定为 `instrument_id, sector_code, weight, as_of, source_url, content_hash`，权重合计容差为 99.5%–100.5%。阶段 0–1 不写脆弱的网页抓取器。
+- 初始 ETF 观察集合固定为 `SPY, QQQ, IWM, DIA, VTI, TLT, GLD`；它们仍受单品种 15% 上限。权益 ETF 必须通过受控 CSV 导入发行人披露的行业权重，字段固定为 `instrument_id, sector_code, weight, as_of, source_url, content_hash`，权重合计容差为 99.5%–100.5%。fixture 可使用明确标记为 synthetic 的固定暴露；非 fixture 模式没有 30 日内人工复核的发行人 CSV 时，权益 ETF 可以展示但不能成为新增仓位。ETF 的“完整研究证据”由合格价格、流动性、基金元数据和行业暴露组成，不强制要求 SEC companyfacts。阶段 0–1 不写脆弱的网页抓取器。
 - 股票行业使用内部版本化 `NEXUS_SECTOR_V1`，固定 11 个标签：`communication_services, consumer_discretionary, consumer_staples, energy, financials, health_care, industrials, information_technology, materials, real_estate, utilities`。映射 CSV 固定字段为 `instrument_id, sector_code, valid_from, valid_to, source_url, override_reason, content_hash`，不依赖需要额外授权的分类数据。权益 ETF 行业权重超过 30 个自然日未更新时可展示但禁止新增订单。`TLT` 和 `GLD` 分别进入 `US_TREASURY`、`GOLD` 非权益风险桶，不参与 11 行业上限，但仍受单品种和现金上限。
 - 拆股、ticker 变更、并购和退市通过 `instrument_id` 关联历史，禁止按 ticker 直接拼接时间序列。
 
@@ -307,10 +315,11 @@ Provider 的网络错误只能由适配器重试；上层业务不得自行无�
 
 ### 4.7 真实组合快照
 
-组合诊断只能针对冻结的 `portfolio_snapshot_id` 运行。复星没有单个“原子组合快照”接口，因此同步事务固定为 `CashSummary A -> Holdings 全分页 -> OrderList 未终结订单 -> CashSummary B`：
+组合诊断只能针对冻结的 `portfolio_snapshot_id` 运行。复星没有单个“原子组合快照”接口，也不能在阶段 1 依赖 Webhook，因此同步尝试固定为 `CashSummary A -> Holdings A 全分页 -> OrderList A 未终结订单 -> Holdings B 全分页 -> OrderList B 未终结订单 -> CashSummary B`：
 
-- 全部请求使用同一内部 `sync_run_id`，总窗口不超过 60 秒；期间收到 `orderUpdate` 或 A/B 的任一币种账面余额差异超过 `max(1 原币种单位, 组合净值 5 bps)` 时整轮作废并重试一次；
+- 全部请求使用同一内部 `sync_run_id`，总窗口不超过 60 秒；A/B 的任一币种账面余额差异超过 `max(1 原币种单位, 组合净值 5 bps)`、规范化持仓哈希不同，或规范化未结订单哈希不同时整轮作废并重试一次。持仓哈希覆盖 instrument、总量、可用量、冻结量、两种成本和币种；订单哈希覆盖订单 ID、方向、总量、累计成交量、价格、状态和更新时间，排序后再做 SHA-256；
 - 第二次仍不一致则保存原始事实但快照为 `RECONCILIATION_REQUIRED`，只能展示，不能生成优化提案；
+- CashFlows 不进入上述原子窗口；成功冻结快照后按“上次成功 cursor 前回看 3 个自然日”的重叠窗口拉取，以 `(provider, provider_cash_flow_id)` 唯一键消重并关联 `sync_run_id`。没有稳定 Provider 流水 ID 时，以冻结契约规定的规范化字段哈希作为替代 ID，并把 capability 标为 `PARTIAL`；
 - 保存原币种现金、数量、`avgCost`、`dilutedCost`、现价、冻结/可用数量、未结订单及各自 Provider 时点；两种成本必须分别命名展示，禁止合成一个“成本价”；内部账户 ID 与复星子账户 ID 分开，外部 ID 加密保存；
 - 真实金额只进入确定性诊断和界面。Agent 工具默认只获得匿名组合 ID、归一化权重、风险暴露和分桶后的金额区间，不获得账号、客户号或精确总资产；
 - 多币种默认分账。只有同一快照含带时点的复星换算率且通过合理性检查时，才生成独立的 `converted_view`；所有风控和账本仍按原币种计算，页面同时显示原币种与汇率来源；
@@ -409,7 +418,7 @@ Agent 委员会采用角色化、对抗式研究，但委员会不是组合计�
 - 硬约束前后值、集中度/行业/币种/相关性/波动/回撤/流动性变化、预计单边换手和成本区间；
 - 所有改善使用区间或历史情景结果，不使用 Agent 自报概率；税务数据未知时固定显示 `tax_impact=unknown`，不得把税后改善写成已计算；
 - 引用的研究意图、证据、诊断、策略、Agent、模型和约束版本，以及无法解决的风险和失效条件；
-- 状态：`draft -> compared -> shadowing -> selected | rejected | expired`。`selected` 只表示用户选择继续验证，不表示批准下单。
+- 状态属于 `OptimizationProposalGroup` 而非三个不可变子方案：`draft -> compared -> shadowing -> validated`，并允许 `draft|compared|shadowing -> rejected|expired`。`compared -> shadowing` 表示用户选择启动同起点影子验证；`validated` 只表示达到第 8.2 节的 63 日/成交数检查点，不表示批准下单。阶段 3 若要执行，必须创建独立的 `execution_intent` 与批次批准，禁止复用提案状态表达交易授权。
 
 `hold_current` 是一等候选而不是空状态；若另外两个方案没有消除硬违例，或不能在成本、回撤、集中度至少一个维度产生明确改善且其他关键维度没有不可接受恶化，系统推荐保持现状。推荐理由由确定性比较规则产生，Agent 只负责解释和提出反例。
 
@@ -443,7 +452,7 @@ Agent 委员会采用角色化、对抗式研究，但委员会不是组合计�
 
 每条诊断项包含 `diagnostic_code`、`metric_value`、`unit`、`reference_limit/range`、`policy_scope`、`severity=info|warning|critical`、`evidence_refs` 和 `actionability=monitor|research|reduce_only|blocked`。严重度只由版本化阈值计算，不由 LLM 决定。真实只读组合使用 `real_advisory_policy_v1`，超限称为“建议阈值偏离”而不是订单硬违例；内部模拟和未来待下订单使用 `risk_policy_v1` 硬限制。首期“需要优化”的判定为：存在 `critical`；或存在至少两个不同风险域的 `warning`；或一个 `warning` 在连续 5 个交易日未消失。若仅有 `info`，默认结论为保持现状。
 
-报告顶层 `optimization_need` 只能取：`BLOCKED`（快照/对账不合格）、`NO_ACTION`（没有触发条件）、`RESEARCH_REQUIRED`（已触发但任何可行动方案所需证据都不足）、`OPTIMIZATION_CANDIDATE`（已触发且至少一个非 `hold_current` 方案可比较）。`minimum_change` 的关键证据是持仓、价格、流动性、费用和建议政策，不强制要求公司基本面；`strategy_target` 还必须有候选标的完整研究证据。首页用这四个可解释状态回答问题，不把它压缩成 0–100 分；`OPTIMIZATION_CANDIDATE` 也不等于“应该卖出”，只表示值得进入方案比较。
+报告顶层 `optimization_need` 只能取：`BLOCKED`（快照不是 READY、对账失败或权威来源冲突）、`RESEARCH_REQUIRED`（快照 READY，但触发判断所需的必需指标未知，或已触发而所有可行动方案证据不足）、`OPTIMIZATION_CANDIDATE`（已触发且至少一个非 `hold_current` 方案可比较）、`NO_ACTION`（其余情况）。优先级严格按上述顺序短路，禁止未知值落入 `NO_ACTION`。`minimum_change` 的关键证据是持仓、价格、流动性、费用和建议政策，不强制要求公司基本面；`strategy_target` 还必须有候选标的完整研究证据。首页用这四个可解释状态回答问题，不把它压缩成 0–100 分；`OPTIMIZATION_CANDIDATE` 也不等于“应该卖出”，只表示值得进入方案比较。
 
 ### 6.2 候选方案构建
 
@@ -453,7 +462,7 @@ Agent 委员会采用角色化、对抗式研究，但委员会不是组合计�
 2. `minimum_change`：只减仓、不新增标的。先处理不可交易、数据失败和单品种超限；若行业/风险桶仍超限，循环从对当前最大超限约束贡献最大的持仓减去 1 bp，直到约束满足，平手按“诊断严重度更高、流动性更好、`instrument_id` 升序”排序。释放权重全部进入现金。输出名称必须包含 `heuristic`，不得宣称数学全局最优。
 3. `strategy_target`：使用 `baseline_v1` 的确定性入选结果和目标权重；Agent 只能否决、延后或降低某候选，不能添加筛选外标的或提高目标。既有但不在候选集的真实持仓在分析方案中目标为 0；真正执行前仍需人工逐笔选择，系统不能把整个方案一键转实盘。
 
-真实只读组合可生成上述三案，但只允许 `hold_current/minimum_change/strategy_target -> compared -> shadowing`，不能创建券商订单。`strategy_target` 在至少 63 个交易日前向影子期完成前只显示“待验证”，不成为平台推荐。`minimum_change` 只有在减少建议阈值偏离、订单硬违例或已持续触发的 warning 时才显示“可考虑”；否则仍推荐 `hold_current`。
+真实只读组合可生成上述三案，但组状态只允许 `draft -> compared -> shadowing -> validated` 或进入拒绝/过期终态，不能创建券商订单。`strategy_target` 在至少 63 个交易日前向影子期完成前只显示“待验证”，不成为平台推荐。`minimum_change` 只有在减少建议阈值偏离、订单硬违例或已持续触发的 warning 时才显示“可考虑”；否则仍推荐 `hold_current`。
 
 跨币种方案用 `DEXHKUS` 只做归一化情景估值，必须额外显示 `requires_fx=true`。没有已发布的换汇成本、可用 USD 现金和执行路径时，该方案可以比较但保持 `analysis_only/non_executable`，不能暗示系统会自动卖出 HKD 资产并换汇买美股。
 
@@ -510,7 +519,7 @@ reconciling -> submitted | partially_filled | filled | cancelled | rejected
 
 终态 `risk_rejected/filled/cancelled/rejected` 不可原地修改。任何更正追加新的 `order_event` 或补偿交易。每个订单包含唯一 `client_order_id`；数据库约束为 `(account_id, client_order_id) UNIQUE`。Provider 事件约束为 `(provider, provider_event_id) UNIQUE`。
 
-所有 Provider Webhook 先验证官方契约实际提供的认证材料、时间窗和重放标识，再使用 Provider 事件 ID 与内部订单 ID 幂等消重；不能假定公开契约未声明的签名或 nonce。复星当前公开回调只承诺 `orderUpdate`，Webhook 只是加速订单状态更新；OrderList、Holdings、CashSummary 和 CashFlows 主动轮询才是最终补偿机制。内部账本与券商状态不一致时进入 `reconciling`，在恢复一致前禁止新的券商订单。
+阶段 0–1 不注册复星 Webhook 路由。阶段 3 起，所有 Provider Webhook 先验证冻结契约实际提供的认证材料、时间窗和重放标识，再使用 Provider 事件 ID 与内部订单 ID 幂等消重；不能假定公开契约未声明的签名或 nonce。复星当前公开回调只承诺 `orderUpdate`，Webhook 只作为订单状态更新的加速通道；OrderList、Holdings、CashSummary 和 CashFlows 主动轮询才是最终补偿机制。内部账本与券商状态不一致时进入 `reconciling`，在恢复一致前禁止新的券商订单。
 
 持仓不是可直接编辑的表单字段，而是成交、现金账本和公司行动投影的结果。每日保存 `position_snapshot` 便于查询，但对账时以不可变事件和券商事实为准重建。
 
@@ -573,7 +582,7 @@ reconciling -> submitted | partially_filled | filled | cancelled | rejected
 
 - 每个 ISO 周由交易所日历给出的最后一个 session 收盘后评估（半日市仍算 session），下一交易日执行；中途只处理数据失效、退市/公司行动和硬风控退出。
 - 候选限于 `PASS` 的美国普通股和初始 ETF 集合；最近 20 日平均日成交额至少 5,000 万美元、收盘价至少 5 美元、收盘价高于 200 日均线、126 日总收益为正。权益 ETF 还必须有合格行业穿透版本。
-- 按 126 日总收益从高到低排序，跳过最近 5 个交易日以降低短期反转影响。
+- 按 `momentum_126_skip5 = close[t-5] / close[t-126] - 1` 从高到低排序；`t` 是决策时最近完整 session，两个端点都必须来自同一复权序列，任一缺失即不合格。
 - 选择前 6 个；单个目标权重 12.5%，ETF 最多 2 个，股票同一 `NEXUS_SECTOR_V1` 行业最多 2 个，最终仍由行业穿透风控限制 30%，至少保留 25% 现金。若不足 6 个合格标的，空缺保持现金。
 - 持仓在周评估时跌破 200 日均线，或连续两次周评估跌出排名前 20，则生成 `reduce_candidate` 到 0%；硬风控退出不等待第二次周评估。
 - 已持仓与排序前 12 个进入 Agent 研究。确定性入选且委员会为 `buy_candidate`、证据审计通过时才可提交 12.5% 目标；其他 stance 保持现金。已持仓出现经审计的 `reduce_candidate` 时，`strategy_target` 将目标设为 0；确定性退出和硬风控退出不受 Agent 阻止。Agent 不能输出数值权重、不能新增筛选之外的标的或提高 12.5% 目标。
@@ -590,12 +599,12 @@ Python 引擎通过 SQLAlchemy/Alembic 唯一读写 PostgreSQL。首期核心表
 | 领域 | 表 | 关键约束 |
 | --- | --- | --- |
 | 主数据 | `instruments`, `instrument_aliases`, `universe_snapshots`, `universe_members`, `sector_exposures`, `watchlists`, `watchlist_members` | ticker 带有效期；snapshot version 唯一；watchlist member 唯一 |
-| 数据 | `data_snapshots`, `provider_runs`, `provider_capabilities`, `source_policies`, `quality_reports`, `latest_quotes`, `filings`, `financial_facts`, `corporate_actions` | source + provider object ID + revision 唯一；capability 带契约哈希与到期 |
+| 数据 | `data_snapshots`, `provider_runs`, `provider_capabilities`, `source_policies`, `quality_reports`, `latest_quotes`, `data_artifacts`, `price_series_manifests`, `macro_observations`, `filings`, `financial_facts`, `corporate_actions` | source + provider object ID + revision 唯一；Parquet 产物有内容哈希、时点范围和冻结快照引用；capability 带契约哈希与到期 |
 | Agent | `agent_runs`, `agent_outputs`, `evidence_refs`, `prompt_versions`, `model_configs` | 输出只追加；Schema/version 必填 |
-| 策略 | `strategy_versions`, `strategy_decisions`, `optimization_policies`, `optimization_proposals`, `proposal_positions`, `proposal_comparisons`, `risk_policies`, `risk_evaluations` | 发布版本不可修改；proposal 引用冻结 baseline；variant 唯一 |
-| 组合 | `accounts`, `portfolios`, `broker_sync_runs`, `cash_snapshots`, `position_snapshots`, `orders`, `order_events`, `fills`, `cash_ledger` | client order 与 provider event 幂等唯一；broker snapshot 状态不可回写为 READY |
+| 策略 | `strategy_versions`, `strategy_decisions`, `optimization_policies`, `optimization_proposal_groups`, `optimization_proposals`, `proposal_positions`, `proposal_comparisons`, `risk_policies`, `risk_evaluations` | 发布版本不可修改；proposal group 引用冻结 baseline；`(proposal_group_id, variant)` 唯一且组提交时恰好三种 variant |
+| 组合 | `accounts`, `portfolios`, `broker_sync_runs`, `portfolio_snapshots`, `cash_snapshots`, `position_snapshots`, `broker_order_snapshots`, `broker_cash_flows`, `orders`, `order_events`, `fills`, `cash_ledger` | 子快照引用同一冻结父快照；券商流水与 client order/provider event 分别幂等唯一；非 READY broker snapshot 不可回写为 READY |
 | 研究 | `experiment_families`, `experiments`, `backtest_runs`, `backtest_metrics`, `shadow_groups`, `shadow_portfolios`, `shadow_checkpoints`, `promotion_events` | 记录尝试数、数据/代码/策略哈希；三方案同组同起点 |
-| 运行 | `jobs`, `job_leases`, `outbox_events`, `webhook_events`, `reconciliation_cases`, `integration_status`, `audit_events`, `used_nonces` | job 幂等键、nonce 和外部事件唯一 |
+| 运行 | `jobs`, `job_leases`, `outbox_events`, `webhook_events`, `reconciliation_cases`, `integration_status`, `idempotency_records`, `audit_events`, `used_nonces` | job/input hash、HTTP 幂等键、nonce 和外部事件分别唯一；阶段 0–1 的 `webhook_events` 只保留未来迁移兼容，不注册复星入口 |
 
 订单、成交、现金和审计使用追加式记录；更正通过补偿事件完成，不覆盖历史。查询用的当前状态可以物化，但必须能从事件重建。
 
@@ -631,7 +640,7 @@ Python 引擎通过 SQLAlchemy/Alembic 唯一读写 PostgreSQL。首期核心表
 | `/overview` | 今天是否需要优化 | 最新复星只读快照状态、明确问题清单、保持现状/可考虑优化结论、影子比较摘要和待处理风险 | 打开组合诊断或提案；不在首页直接下单 |
 | `/portfolio` | 查看当前事实 | 复星真实只读与内部模拟盘分标签展示现金、持仓、成本双口径、未结订单、币种和同步时点 | 切换组合、进入持仓研究或同步详情；无可编辑持仓字段 |
 | `/optimize` | 找到值得处理的问题 | 集中度、行业、币种、相关性、回撤、流动性和数据/论点缺口，按可操作性排序 | 创建三方案提案、选择保持现状或进入影子验证 |
-| `/optimize/[proposalId]` | 比较同口径三方案 | 当前/最小调整/策略目标的权重、风险、成本、证据、未知项及 5/21/63 日影子结果 | 选择/拒绝/过期提案；阶段 0–1 不能生成券商订单 |
+| `/optimize/[proposalGroupId]` | 比较同口径三方案 | 当前/最小调整/策略目标的权重、风险、成本、证据、未知项及 5/21/63 日影子结果 | 启动影子验证或拒绝提案；过期由 worker 推进，阶段 0–1 不能生成券商订单 |
 | `/what-if` | 无副作用情景试算 | 从提案复制目标权重，调整有限参数，实时返回后端确定性诊断与约束结果 | 仅评估；结果不持久化、不生成交易 |
 | `/market` | 监控股票池 | 白名单、指示性价格、变化、数据来源、延迟、筛选结果 | 加入/移出观察列表；进入个股研究 |
 | `/briefs/[sessionDate]` | 每日 Agent 简报 | 市场状态、候选、持仓风险、被否决项、证据完整度、委员会分歧 | 展开证据、打开决策回放 |
@@ -646,6 +655,8 @@ Python 引擎通过 SQLAlchemy/Alembic 唯一读写 PostgreSQL。首期核心表
 
 根路由 `/` 服务端重定向到 `/overview`。不存在的 instrument、sessionDate 或 run ID 返回明确 404 页面；无权限统一返回 403，不伪装为 404。
 
+全局一级导航固定为六项：`/overview`、`/portfolio`、`/optimize`、`/market`、`/paper`、`/risk-audit`。`/strategies` 与 `/integrations` 放入明确标注的二级“系统”分组；`/what-if` 只从提案上下文进入，`/briefs/[sessionDate]` 和 `/research/[instrumentId]` 只从简报/市场/证据链接进入，动态详情页不占一级导航。阶段锁定的 broker simulation/live approval 入口只在 integrations 和相关说明中可见，不挤占日常决策路径。窄屏使用顶部栏 + 抽屉复用同一层级，不再叠加底部一级导航；返回时保留列表筛选与滚动位置。
+
 ### 10.2 全局页面状态与视觉规则
 
 每个页面顶部固定显示互不混淆的状态轴：
@@ -657,6 +668,12 @@ Python 引擎通过 SQLAlchemy/Alembic 唯一读写 PostgreSQL。首期核心表
 - 全局熔断、对账锁和任务异常。
 
 所有数据组件必须实现 `loading`、`empty`、`ready`、`partial`、`stale`、`error`、`forbidden` 七种状态。`stale` 保留最后已知值但加醒目标识、截止时间和失败原因；不得把旧数据显示成实时。关键页面支持键盘操作、可见焦点、语义表格、颜色以外的涨跌/风险编码，以及 `prefers-reduced-motion`。
+
+视觉系统固定为低变化、低动效、高信息密度的 `NEXUS_LIGHT_V1`，保留原型的深绿/米白语言但不继承其假数据：`background=#F6F4ED`、`surface=#FFFEFA`、`foreground=#14241F`、`muted_foreground=#52635D`、`primary=#0B5D46`、`on_primary=#FFFFFF`、`warning=#8A5A00`、`danger=#A12B2B`、`info=#245D7A`、`border=#D8DED9`、`focus=#0B6FB8`。这些前景/背景组合的普通文本对比度均不得低于 4.5:1；组件只引用 primitive→semantic→component token，不出现页面级任意 hex。字体继续使用已内置的 Geist Sans，金额、价格、百分比和时间使用 tabular figures/Geist Mono；移动端正文不低于 16px、行高不低于 1.5，间距使用 4/8px 标尺。
+
+全局交互门禁为：首个可聚焦元素是 skip link；路由切换后焦点进入 `main`；桌面侧栏和窄屏抽屉使用同一层级，不同时出现两套一级导航；图标统一使用一个 SVG 图标集，不用 Emoji；有可见文字的装饰图标 `aria-hidden`，图标按钮有可访问名称和状态；Web 主操作命中区域至少 44×44 CSS px，相邻目标至少 8px；每页最多一个 primary action。异步按钮提交中禁用并显示进度，超时/错误显示原因和恢复动作；表单有可见 label、字段内联错误和多错误时可聚焦的 error summary。只读状态必须与 disabled 在语义和视觉上不同。
+
+断点测试固定为 375、390、768、1024 和 1440px，并补 390×844 横屏；不得禁用缩放。核心摘要在窄屏优先重排为卡片/定义列表；只有字段不可安全拆分的审计或订单表才允许带可访问名称的局部横向滚动。sticky 状态栏不能遮挡键盘焦点。页面状态更新使用一个 `aria-live=polite` 原子区域，不移动当前焦点。
 
 禁止使用没有定义的“AI 72/100”“健康度 64/100”或单一信任分。风险以明确的 `当前值 / 上限 / 余量` 展示；Agent 以证据完整度、角色投票和分歧展示。货币在每个金额旁明确标注，USD 模拟盘和 HKD/其他币种复星持仓不合并；只有当前快照具备合格复星换算率并由 `DEXHKUS` 通过合理性检查时，才能增加单独标注口径的 `converted_view`，原币种视图始终保留。
 
@@ -675,12 +692,14 @@ Python 引擎通过 SQLAlchemy/Alembic 唯一读写 PostgreSQL。首期核心表
 - `DataState`：统一 `loading/empty/ready/partial/stale/error/forbidden` 七种 UI。
 - `PriceChart`：Client Component 动态加载 `lightweight-charts`，输入只包含 typed OHLCV；同时提供同数据的可访问表格。组合绩效和风险余量使用简单 SVG，不再引入第二套图表库。
 
+图表类型固定：价格 OHLC 使用 candlestick，组合/影子 NAV 使用不超过 3 条的 line chart，离散风险/方案指标使用直接标值的 grouped bar 或语义表格；禁止用 radar、3D、仪表盘分数或超过 5 类的饼/环图表达精确比较。多序列除颜色外还使用实线/虚线/点线和直接标签；图例可用键盘操作，tooltip 不依赖 hover，所有图表提供同口径表格与一句文本摘要。动效只允许 opacity/transform 的短反馈，`prefers-reduced-motion` 下直接显示最终状态，任何业务正确性不依赖 animation end。
+
 URL 承担可分享的筛选、日期和选中标的状态。桌面为侧栏，窄屏改为顶部/抽屉导航；核心表格在窄屏使用字段优先级和横向滚动，不能丢失金额币种或状态。
 
 ### 10.4 每日时序
 
 1. 16:30 ET，交易所日历确认正常收盘后创建 `daily_pipeline` job；半日市使用相对收盘时间 +30 分钟。
-2. 阶段 1 若复星网关健康，执行 CashSummary/Holdings/OrderList 双读冻结真实组合快照；同时采集并归档行情、SEC 更新、宏观和内部模拟状态。失败在 18:00 ET 前有界重试。
+2. 阶段 1 若复星网关健康，执行 CashSummary/Holdings/OrderList 全域双读冻结真实组合快照，再用重叠窗口同步 CashFlows；同时采集并归档行情、SEC 更新、宏观和内部模拟状态。失败在 18:00 ET 前有界重试。
 3. 执行质量、来源冲突与对账检查并冻结 `data_snapshot_id`。18:00 ET 仍未 `PASS` 时当日结束为 `skipped_data_quality`，不创建新提案或订单。
 4. 对真实/模拟组合运行确定性诊断，再筛选美股池并执行分层 Agent 研究、反驳和证据审计。
 5. 对存在优化触发条件的组合生成三方案提案与同口径比较；没有触发条件则记录 `hold_current`。`baseline_v1` 只在周最后 session 为内部模拟盘创建候选，运行硬风控后创建内部模拟订单。
@@ -688,7 +707,7 @@ URL 承担可分享的筛选、日期和选中标的状态。桌面为侧栏，�
 7. 更新账本、组合快照、诊断变化、提案检查点、绩效、归因、审计和当天简报。
 8. 策略研发使用独立 job queue 优先级，不得抢占真实持仓同步、对账和诊断。
 
-所有 job 状态固定为 `queued/running/succeeded/failed/skipped/dead_letter`。幂等键为 `job_type:session_date:data_snapshot_id:strategy_version`。worker 使用 `SELECT ... FOR UPDATE SKIP LOCKED` 领取任务和 lease heartbeat；进程退出后 lease 到期可重领，同一 job 的副作用仍受业务幂等约束保护。
+所有 job 状态固定为 `queued/running/succeeded/failed/skipped/dead_letter`。幂等键统一为 `job_type:scope_id:effective_at:input_hash`：`scope_id` 是 portfolio/instrument/provider/global 之一对应的稳定 ID，`effective_at` 是 session date 或计划触发时点，`input_hash` 是包含 data snapshot、policy/strategy/model 版本和业务参数的 canonical JSON SHA-256；不适用字段从 canonical JSON 中省略而不是填空字符串。worker 使用 `SELECT ... FOR UPDATE SKIP LOCKED` 领取任务和 lease heartbeat；进程退出后 lease 到期可重领，同一 job 的副作用仍受业务幂等约束保护。
 
 ### 10.5 当前原型的处理结论
 
@@ -707,7 +726,7 @@ URL 承担可分享的筛选、日期和选中标的状态。桌面为侧栏，�
 | 行情、财报或持仓过期 | 不产生新订单，界面显示来源和最后成功时间 |
 | Agent 超时、超预算或输出不合格 | 该标的观望，不使用部分报告触发交易 |
 | 风控服务不可用 | 拒绝全部新订单；继续监控已有持仓 |
-| Webhook 丢失、重复或乱序 | 幂等消重并主动轮询补偿 |
+| 阶段 3+ Webhook 丢失、重复或乱序 | 幂等消重并主动轮询补偿；阶段 0–1 不注册复星 Webhook |
 | 订单与券商状态不一致 | 进入对账状态，冻结全部新券商订单 |
 | 数据库或对象存储不可用 | 停止新决策和执行，保留告警与恢复记录 |
 | 模型或 Provider 限流 | 有界退避重试；超过时限后观望，不切换到未经评测的来源 |
@@ -723,7 +742,7 @@ URL 承担可分享的筛选、日期和选中标的状态。桌面为侧栏，�
 - 当前工作区中的 PEM 文件仅按本地敏感文件处理，不能据此假定它们已经在复星后台登记、有效或安全。实施阶段不读取、提交或复制其内容；阶段 1 真实只读启用前重新执行来源确认和密钥轮换。
 - 虽然 FW-trading Skill 支持对话回填与 `fosun.env`，本平台明确不采用该凭据流：不在聊天中再次接收 Key/私钥/服务端公钥，不把凭据写入仓库或工作区；由用户在部署 secret manager 的带外界面配置。
 - 复星 SDK 在生产固定 `logging_enable=false`、`log_body=false`，由网关输出自有 allowlist 日志字段。故障排查也不得临时记录账户/持仓/订单原始 body；需要样本时只使用经批准的脱敏 fixture。
-- Webhook 只验证复星冻结契约实际提供的认证头/签名、时间字段和事件 ID，不自行发明 nonce；若契约缺少消息级签名，则使用随机高熵回调路径、TLS、来源网络 allowlist（如官方稳定提供）、事件幂等与主动轮询补偿，并将“弱认证 Webhook”标为上线风险。
+- 阶段 0–1 不创建订阅、不注册复星 Webhook。阶段 3 冻结写契约后，Webhook 只验证复星契约实际提供的认证头/签名、时间字段和事件 ID，不自行发明 nonce；若契约缺少消息级签名，则使用随机高熵回调路径、TLS、来源网络 allowlist（如官方稳定提供）、事件幂等与主动轮询补偿，并将“弱认证 Webhook”标为上线风险。
 - SEC 文档和新闻属于不可信输入；Agent 评测覆盖提示注入，文档内容不得改变系统指令或工具权限。
 - 发送给模型的组合信息使用内部匿名 portfolio ID，不包含券商账号、API 身份、姓名、邮箱或精确总资产；只提供研究所需的归一化权重与风险暴露。
 - Python 引擎只允许出站访问已配置的 OpenAI、SEC、FRED、行情 Provider 和对象存储域名；禁止 Agent 工具接受任意 URL。
@@ -751,7 +770,7 @@ URL 承担可分享的筛选、日期和选中标的状态。桌面为侧栏，�
 
 ### 13.2 执行与恢复测试
 
-- Webhook 重复、乱序、延迟、事件 ID 重放，以及冻结契约实际存在的认证头/签名错误测试；若无消息签名，测试弱认证告警与主动轮询补偿。
+- 阶段 0–1 测试复星订阅和 Webhook 路由不存在，且主动轮询可恢复账户事实；阶段 3 计划再增加重复、乱序、延迟、事件 ID 重放和冻结契约认证测试。
 - 订单提交超时、部分成交、拒单、撤单和主动查询恢复测试。
 - 数据陈旧、Agent 超时、风控宕机、数据库中断和对账差异的故障演练。
 - 端到端模拟盘流程测试；默认不运行真实下单的自动化端到端测试。
@@ -769,7 +788,7 @@ URL 承担可分享的筛选、日期和选中标的状态。桌面为侧栏，�
 
 - Web 单元测试使用 Vitest + Testing Library；每个核心组件覆盖七种数据状态。
 - Playwright 覆盖登录后路由、模拟盘分账、证据跳转、订单时间线、熔断和锁定页；测试只连 fixture 引擎。
-- `axe-core` 阻止关键页面的严重/高等级可访问性问题；桌面和 390px 窄屏都保存视觉快照。
+- `axe-core` 阻止关键页面的严重/高等级可访问性问题；375、390、768、1024、1440px 与 390×844 横屏都覆盖布局门禁，桌面和 390px 窄屏保存视觉快照。额外测试 skip link、路由焦点、44px 目标、表单 error summary、图表表格替代、`prefers-reduced-motion` 和 sticky 元素不遮挡焦点。
 - 旧 `rendered-html.test.mjs` 的 starter skeleton 断言删除，替换为真实 NEXUS 页面 smoke test。
 
 ### 13.5 持续集成必须通过
@@ -780,12 +799,10 @@ npm run typecheck
 npm run test:unit
 npm run test:e2e
 npm run build
-uv run ruff check engine
-uv run mypy engine/src
-uv run pytest engine/tests
-uv run ruff check integrations/fosun_gateway
-uv run mypy integrations/fosun_gateway
-uv run pytest integrations/fosun_gateway/tests
+uv run ruff check engine integrations/fosun_gateway
+uv run mypy engine/src integrations/fosun_gateway/src
+uv run --package nexus-engine pytest engine/tests
+uv run --package nexus-fosun-gateway pytest integrations/fosun_gateway/tests
 docker compose -f infra/compose.yaml config
 ```
 
@@ -862,8 +879,8 @@ GitHub star 只用于发现项目，不作为生产依赖准入标准。准入�
 | GET | `/api/v1/broker-sync-runs/{run_id}` | 查询同步、双读与对账状态 |
 | POST | `/api/v1/optimization-proposals` | 对指定 READY snapshot 创建三方案异步提案；要求 Idempotency-Key |
 | GET | `/api/v1/optimization-proposals/{proposal_group_id}` | 三方案、诊断、成本、未知项和影子检查点 |
-| POST | `/api/v1/optimization-proposals/{proposal_group_id}/shadow` | 用户选择后创建三方案同起点影子组；不创建券商订单 |
-| POST | `/api/v1/optimization-proposals/{proposal_group_id}/reject` | 拒绝/归档提案；要求最新 version |
+| POST | `/api/v1/optimization-proposals/{proposal_group_id}/shadow` | 用户选择后创建三方案同起点影子组并进入 `shadowing`；要求 version 与 Idempotency-Key，不创建券商订单 |
+| POST | `/api/v1/optimization-proposals/{proposal_group_id}/reject` | 拒绝/归档提案；要求最新 version 与 Idempotency-Key |
 | POST | `/api/v1/what-if/evaluate` | 无副作用评估有限目标权重；最多 30 个标的、body 64 KiB |
 | GET | `/api/v1/market?cursor=&limit=&watchlist=` | 股票池、筛选分数和指示性行情；limit 最大 100 |
 | PUT | `/api/v1/watchlist/{instrument_id}` | 幂等加入观察列表 |
@@ -895,11 +912,13 @@ BFF 用生成客户端调用 `/internal/v1/...`。资源名和响应 Schema 与 
 - 写请求的 `Idempotency-Key`、资源 version；
 - 默认读取超时 10 秒、写入 30 秒、研究创建 10 秒内只负责入队。
 
+HMAC v1 的 canonical bytes 固定为 UTF-8：`UPPER_METHOD + "\n" + normalized_path_and_query + "\n" + unix_timestamp_seconds + "\n" + nonce + "\n" + lowercase_body_sha256_hex`。`normalized_path_and_query` 使用原始 path 与按 percent-encoded key、value 字节序排序的 query pair（重复 key 不合并）；空 body 的 SHA-256 仍计算 0 字节正文。`X-Nexus-Signature` 为 HMAC-SHA256 的无 padding base64url。服务端先校验 60 秒时间窗和 key ID，再常量时间比较签名；签名通过后才在同一业务事务中以 `(key_id, nonce)` 唯一插入 `used_nonces`，唯一冲突表示重放。时间窗、key 或签名失败不写 nonce 或业务记录；重放失败只保留第一次成功请求的 nonce。双密钥轮换通过 `X-Nexus-Key-Id` 选择当前或上一把只读验证密钥，BFF 只使用当前签名密钥。
+
 OpenAPI 文件由 FastAPI 生成并提交到 `contracts/openapi.json`；TypeScript 客户端生成到 `app/lib/generated/`。手写前端不得复制 Pydantic 字段定义。
 
 容器提供 `/health/live`（只证明进程事件循环存活，不返回配置）和受 HMAC 保护的 `/health/ready`（检查数据库、对象存储、migration head 和 worker heartbeat）。Provider 故障不会让 API liveness 失败，但会进入 integration/quality 状态并阻止相关业务。
 
-引擎到复星网关使用另一组 mTLS 身份和 HMAC secret，不能复用 BFF secret。阶段 1 网关只注册以下内部操作名：`fosun_capabilities`、`fosun_sync_accounts`、`fosun_sync_portfolio`、`fosun_list_orders`、`fosun_list_cash_flows`、`fosun_get_quotes`、`fosun_get_bars`；操作名映射到编译期 allowlist，不接受调用方传入 URL、SDK method 名或任意路径。每个列表操作强制 cursor/limit，结构化响应包含 `source_request_id`、`has_more`、`next_cursor` 和 `as_of`。
+引擎到复星网关使用另一组 mTLS 身份和 HMAC secret，不能复用 BFF secret。阶段 1 网关只注册以下内部操作名：`fosun_capabilities`、`fosun_sync_accounts`、`fosun_sync_portfolio`、`fosun_list_orders`、`fosun_list_cash_flows`、`fosun_get_quotes`、`fosun_get_bars`；操作名映射到编译期 allowlist，不接受调用方传入 URL、SDK method 名或任意路径。每个列表操作强制 cursor/limit，结构化响应包含 `source_request_id`、`has_more`、`next_cursor` 和 `as_of`。订阅 CRUD 和 Webhook handler 不编入阶段 1 镜像。
 
 `SIMULATION_WRITE` 与 `LIVE_WRITE` 的路由不编入阶段 1 镜像；后续镜像即使包含写代码，也必须由部署 capability、账户类型、批准和网关幂等四重门禁共同开放。研究 Agent 永远不能直接调用此内部 API。
 
@@ -993,7 +1012,7 @@ OpenAPI 文件由 FastAPI 生成并提交到 `contracts/openapi.json`；TypeScri
 
 ## 20. 实施计划就绪门禁
 
-本规格只有在以下陈述全部为真时才允许进入 `writing-plans`：
+本规格只有在以下陈述全部为真时才允许进入 `writing-plans`。这里的“计划就绪”表示 fixture、领域逻辑和真实只读 adapter 都有唯一代码路径；不表示已经满足真实账户上线条件：
 
 - 数据库唯一拥有者、Web/BFF/引擎认证和部署目标已经固定；
 - 阶段 0–1 的路由、API、实体、状态机、时间、Decimal、幂等和错误语义没有未决分支；
@@ -1006,4 +1025,4 @@ OpenAPI 文件由 FastAPI 生成并提交到 `contracts/openapi.json`；TypeScri
 - 阶段 2–4 不会被阶段 0–1 的任何配置或自动化意外启用；
 - 规格中不存在占位符、真实密钥、未定义“实时”或需要实施人员自行选择的核心技术分支。
 
-满足这些条件后，实施计划可以直接引用本规格的章节、目录、路由、表和测试门禁拆成编码任务；仍需在写代码前由用户最终确认本 v3 规格。
+满足这些条件后，实施计划可以直接引用本规格的章节、目录、路由、表和测试门禁拆成编码任务。真实阶段 1 激活仍必须由运行手册逐项证明：用户先吊销已泄露 Key 并轮换；复星书面许可、固定出口、客户端密钥、行情权限、官方 test vector/脱敏响应和 capability probe 全部通过。任一项缺失只阻止 `read_only` 部署，不阻止 fixture 代码、测试和页面完成，也不得由实现人员自行放宽。
