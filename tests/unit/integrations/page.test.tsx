@@ -175,6 +175,38 @@ describe("integrations vertical slice", () => {
     expect(screen.queryByText(/未更改 Provider 模式/)).not.toBeInTheDocument();
   });
 
+  it("treats a BFF INTERNAL_ERROR as unknown and confirms with the same idempotency key", async () => {
+    const disabled = { ...fosunFixture, mode: "disabled" as const, quality: "PARTIAL" as const, version: 2 };
+    const idempotencyKeys: Array<string | null> = [];
+    let postCount = 0;
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (init?.method !== "POST") {
+        return Promise.resolve(Response.json({ data: [fosunFixture], meta: responseMeta() }));
+      }
+      postCount += 1;
+      idempotencyKeys.push(new Headers(init.headers).get("idempotency-key"));
+      return Promise.resolve(postCount === 1
+        ? Response.json({
+          error: {
+            code: "INTERNAL_ERROR",
+            message: "The request could not be completed.",
+            request_id: responseMeta().request_id,
+            details: {},
+          },
+        }, { status: 500 })
+        : Response.json({ data: disabled, meta: responseMeta() }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IntegrationStatusProvider><IntegrationsPage /></IntegrationStatusProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "禁用复星 Provider" }));
+    expect(await screen.findByText("首次结果未知；已使用同一幂等键确认最终结果。")).toBeVisible();
+
+    expect(screen.getByRole("region", { name: "fosun 集成（已禁用）" })).toBeVisible();
+    expect(postCount).toBe(2);
+    expect(new Set(idempotencyKeys).size).toBe(1);
+  });
+
   it("uses one atomic polite live region for global refresh without moving focus", () => {
     render(
       <GlobalSystemStatusView

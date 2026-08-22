@@ -56,7 +56,7 @@ export default function IntegrationsPage(): React.ReactElement {
           kind: "success",
           text: attempt === 0
             ? mutation.action === "test" ? "非交易连接测试已完成。" : "Provider 模式已更新。"
-            : "首次等待超时；已使用同一幂等键确认最终结果。",
+            : "首次结果未知；已使用同一幂等键确认最终结果。",
         });
         return;
       } catch (error) {
@@ -180,6 +180,7 @@ async function requestIntegrationMutation(mutation: PendingMutation): Promise<In
     const payload = await response.json();
     if (!response.ok) {
       const code = typeof payload?.error?.code === "string" ? payload.error.code : "INTERNAL_ERROR";
+      if (code === "INTERNAL_ERROR") throw new Error("Mutation result is unknown");
       throw new KnownMutationError(code);
     }
     return payload as IntegrationMutationEnvelope;
