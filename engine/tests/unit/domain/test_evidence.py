@@ -34,3 +34,16 @@ def test_evidence_ref_rejects_naive_available_time() -> None:
             location="s3://nexus/data/filing-42",
             content_hash="a" * 64,
         )
+
+
+@pytest.mark.parametrize("content_hash", ["a" * 63, "g" * 64, "A" * 64, "sha256:" + "a" * 64])
+def test_evidence_ref_rejects_noncanonical_content_hash(content_hash: str) -> None:
+    """Evidence hashes must be lowercase, bare SHA-256 digests for reliable matching."""
+    with pytest.raises(ValidationError):
+        EvidenceRef(
+            source="sec",
+            object_id="filing-42",
+            available_at=datetime(2026, 8, 22, 13, 30, tzinfo=UTC),
+            location="s3://nexus/data/filing-42",
+            content_hash=content_hash,
+        )

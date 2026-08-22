@@ -21,10 +21,31 @@ UUID = postgresql.UUID(as_uuid=True)
 JSONB = postgresql.JSONB(astext_type=sa.Text())
 UTC = sa.DateTime(timezone=True)
 CREATED_AT = sa.Column("created_at", UTC, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP"))
+IMMUTABLE_TABLES = (
+    "provider_runs",
+    "provider_capabilities",
+    "source_policies",
+    "data_snapshots",
+    "quality_reports",
+    "data_artifacts",
+    "price_series_manifests",
+    "macro_observations",
+    "integration_status",
+    "jobs",
+    "job_leases",
+    "outbox_events",
+    "idempotency_records",
+    "audit_events",
+    "used_nonces",
+)
 
 
 def _id() -> sa.Column[object]:
-    return sa.Column("id", UUID, nullable=False, primary_key=True)
+    return sa.Column("id", UUID, nullable=False)
+
+
+def _primary_key(table_name: str) -> sa.PrimaryKeyConstraint:
+    return sa.PrimaryKeyConstraint("id", name=f"pk_{table_name}")
 
 
 def upgrade() -> None:
@@ -38,6 +59,7 @@ def upgrade() -> None:
         sa.Column("started_at", UTC, nullable=False),
         sa.Column("completed_at", UTC),
         CREATED_AT,
+        _primary_key("provider_runs"),
         sa.UniqueConstraint("provider", "provider_object_id", "revision", name="uq_provider_runs_object"),
     )
     op.create_table(
@@ -50,6 +72,7 @@ def upgrade() -> None:
         sa.Column("schema_version", sa.String(32), nullable=False),
         sa.Column("payload", JSONB, nullable=False),
         CREATED_AT,
+        _primary_key("provider_capabilities"),
         sa.UniqueConstraint("provider", "capability", "contract_hash", name="uq_provider_capabilities_contract"),
     )
     op.create_table(
@@ -60,6 +83,7 @@ def upgrade() -> None:
         sa.Column("schema_version", sa.String(32), nullable=False),
         sa.Column("payload", JSONB, nullable=False),
         CREATED_AT,
+        _primary_key("source_policies"),
         sa.UniqueConstraint("key", "version", name="uq_source_policies_key_version"),
     )
     op.create_table(
@@ -74,6 +98,7 @@ def upgrade() -> None:
         sa.Column("schema_version", sa.String(32), nullable=False),
         sa.Column("payload", JSONB, nullable=False),
         CREATED_AT,
+        _primary_key("data_snapshots"),
         sa.UniqueConstraint("source", "provider_object_id", "revision", name="uq_data_snapshots_source_object_revision"),
     )
     op.create_table(
@@ -84,7 +109,12 @@ def upgrade() -> None:
         sa.Column("schema_version", sa.String(32), nullable=False),
         sa.Column("payload", JSONB, nullable=False),
         CREATED_AT,
-        sa.ForeignKeyConstraint(["data_snapshot_id"], ["data_snapshots.id"], name="fk_quality_reports_snapshot"),
+        _primary_key("quality_reports"),
+        sa.ForeignKeyConstraint(
+            ["data_snapshot_id"],
+            ["data_snapshots.id"],
+            name="fk_quality_reports_data_snapshot_id_data_snapshots",
+        ),
     )
     op.create_table(
         "data_artifacts",
@@ -99,6 +129,7 @@ def upgrade() -> None:
         sa.Column("available_at", UTC, nullable=False),
         sa.Column("received_at", UTC, nullable=False),
         CREATED_AT,
+        _primary_key("data_artifacts"),
         sa.UniqueConstraint("sha256", name="uq_data_artifacts_sha256"),
     )
     op.create_table(
@@ -113,7 +144,12 @@ def upgrade() -> None:
         sa.Column("end_at", UTC, nullable=False),
         sa.Column("row_count", sa.BigInteger(), nullable=False),
         CREATED_AT,
-        sa.ForeignKeyConstraint(["data_artifact_id"], ["data_artifacts.id"], name="fk_price_series_manifests_artifact"),
+        _primary_key("price_series_manifests"),
+        sa.ForeignKeyConstraint(
+            ["data_artifact_id"],
+            ["data_artifacts.id"],
+            name="fk_price_series_manifests_data_artifact_id_data_artifacts",
+        ),
     )
     op.create_table(
         "macro_observations",
@@ -126,6 +162,7 @@ def upgrade() -> None:
         sa.Column("value", sa.Numeric(38, 12), nullable=False),
         sa.Column("unit", sa.String(100), nullable=False),
         CREATED_AT,
+        _primary_key("macro_observations"),
         sa.UniqueConstraint("source", "series", "observed_at", "revision", name="uq_macro_observations_revision"),
     )
     op.create_table(
@@ -135,6 +172,7 @@ def upgrade() -> None:
         sa.Column("status", sa.String(50), nullable=False),
         sa.Column("last_success_at", UTC),
         CREATED_AT,
+        _primary_key("integration_status"),
         sa.UniqueConstraint("provider", name="uq_integration_status_provider"),
     )
     op.create_table(
@@ -146,6 +184,7 @@ def upgrade() -> None:
         sa.Column("schema_version", sa.String(32), nullable=False),
         sa.Column("payload", JSONB, nullable=False),
         CREATED_AT,
+        _primary_key("jobs"),
         sa.UniqueConstraint("job_key", name="uq_jobs_job_key"),
     )
     op.create_table(
@@ -155,7 +194,8 @@ def upgrade() -> None:
         sa.Column("worker_id", sa.String(255), nullable=False),
         sa.Column("expires_at", UTC, nullable=False),
         CREATED_AT,
-        sa.ForeignKeyConstraint(["job_id"], ["jobs.id"], name="fk_job_leases_job"),
+        _primary_key("job_leases"),
+        sa.ForeignKeyConstraint(["job_id"], ["jobs.id"], name="fk_job_leases_job_id_jobs"),
         sa.UniqueConstraint("job_id", name="uq_job_leases_job_id"),
     )
     op.create_table(
@@ -167,6 +207,7 @@ def upgrade() -> None:
         sa.Column("payload", JSONB, nullable=False),
         sa.Column("published_at", UTC),
         CREATED_AT,
+        _primary_key("outbox_events"),
     )
     op.create_table(
         "idempotency_records",
@@ -178,6 +219,7 @@ def upgrade() -> None:
         sa.Column("schema_version", sa.String(32), nullable=False),
         sa.Column("response_payload", JSONB, nullable=False),
         CREATED_AT,
+        _primary_key("idempotency_records"),
         sa.UniqueConstraint("actor_id", "route", "idempotency_key", name="uq_idempotency_records_actor_route_key"),
     )
     op.create_table(
@@ -188,6 +230,7 @@ def upgrade() -> None:
         sa.Column("schema_version", sa.String(32), nullable=False),
         sa.Column("payload", JSONB, nullable=False),
         CREATED_AT,
+        _primary_key("audit_events"),
     )
     op.create_table(
         "used_nonces",
@@ -196,8 +239,27 @@ def upgrade() -> None:
         sa.Column("nonce", sa.String(255), nullable=False),
         sa.Column("used_at", UTC, nullable=False),
         CREATED_AT,
+        _primary_key("used_nonces"),
         sa.UniqueConstraint("key_id", "nonce", name="uq_used_nonces_key_nonce"),
     )
+    op.execute(
+        """
+        CREATE FUNCTION nexus_prevent_created_at_change() RETURNS trigger AS $$
+        BEGIN
+            IF NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+                RAISE EXCEPTION 'created_at is immutable' USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    for table_name in IMMUTABLE_TABLES:
+        op.execute(
+            f"CREATE TRIGGER trg_{table_name}_created_at_immutable "
+            f"BEFORE UPDATE ON {table_name} FOR EACH ROW "
+            "EXECUTE FUNCTION nexus_prevent_created_at_change()"
+        )
 
 
 def downgrade() -> None:
@@ -216,3 +278,4 @@ def downgrade() -> None:
     op.drop_table("source_policies")
     op.drop_table("provider_capabilities")
     op.drop_table("provider_runs")
+    op.execute("DROP FUNCTION nexus_prevent_created_at_change()")

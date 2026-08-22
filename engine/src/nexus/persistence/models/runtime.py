@@ -3,12 +3,12 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import ForeignKey, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nexus.domain.ids import new_uuid7
-from nexus.persistence.base import Base, ImmutableCreatedAt
+from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
 
 
 class IntegrationStatus(ImmutableCreatedAt, Base):
@@ -18,7 +18,7 @@ class IntegrationStatus(ImmutableCreatedAt, Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     provider: Mapped[str] = mapped_column(String(100))
     status: Mapped[str] = mapped_column(String(50))
-    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class Job(ImmutableCreatedAt, Base):
@@ -38,9 +38,9 @@ class JobLease(ImmutableCreatedAt, Base):
     __table_args__ = (UniqueConstraint("job_id", name="uq_job_leases_job_id"),)
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
-    job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id"))
+    job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id", name="fk_job_leases_job_id_jobs"))
     worker_id: Mapped[str] = mapped_column(String(255))
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
 class OutboxEvent(ImmutableCreatedAt, Base):
@@ -51,7 +51,7 @@ class OutboxEvent(ImmutableCreatedAt, Base):
     aggregate_id: Mapped[UUID]
     schema_version: Mapped[str] = mapped_column(String(32))
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class IdempotencyRecord(ImmutableCreatedAt, Base):
@@ -91,4 +91,4 @@ class UsedNonce(ImmutableCreatedAt, Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     key_id: Mapped[str] = mapped_column(String(255))
     nonce: Mapped[str] = mapped_column(String(255))
-    used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime] = mapped_column(UTCDateTime())

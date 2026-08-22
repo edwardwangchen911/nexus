@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from nexus.domain.time import require_utc
 
@@ -14,7 +14,7 @@ class EvidenceRef(BaseModel):
     object_id: str
     available_at: datetime
     location: str
-    content_hash: str
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("available_at")
     @classmethod

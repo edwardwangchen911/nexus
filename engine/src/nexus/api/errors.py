@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from enum import StrEnum
+from uuid import UUID
 
 
 class ErrorCode(StrEnum):
@@ -46,13 +47,17 @@ class NexusError(Exception):
         self.status_code = status_code
         self.details = dict(details or {})
 
-    def to_envelope(self, request_id: str) -> dict[str, dict[str, object]]:
+    def to_envelope(self, request_id: UUID) -> dict[str, dict[str, object]]:
         """Return exactly the public error shape documented for API clients."""
+        if not isinstance(request_id, UUID):
+            raise TypeError("request_id must be a UUID")
+        if request_id.version != 7:
+            raise ValueError("request_id must be a UUIDv7")
         return {
             "error": {
                 "code": self.code.value,
                 "message": self.message,
-                "request_id": request_id,
+                "request_id": str(request_id),
                 "details": self.details,
             }
         }

@@ -4,12 +4,12 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nexus.domain.ids import new_uuid7
-from nexus.persistence.base import Base, ImmutableCreatedAt
+from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
 
 
 class ProviderRun(ImmutableCreatedAt, Base):
@@ -25,8 +25,8 @@ class ProviderRun(ImmutableCreatedAt, Base):
     provider_object_id: Mapped[str] = mapped_column(String(255))
     revision: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(50))
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class ProviderCapability(ImmutableCreatedAt, Base):
@@ -41,7 +41,7 @@ class ProviderCapability(ImmutableCreatedAt, Base):
     provider: Mapped[str] = mapped_column(String(100))
     capability: Mapped[str] = mapped_column(String(100))
     contract_hash: Mapped[str] = mapped_column(String(64))
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
     schema_version: Mapped[str] = mapped_column(String(32))
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
 
@@ -72,9 +72,9 @@ class DataSnapshot(ImmutableCreatedAt, Base):
     source: Mapped[str] = mapped_column(String(100))
     provider_object_id: Mapped[str] = mapped_column(String(255))
     revision: Mapped[str] = mapped_column(String(255))
-    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    received_at: Mapped[datetime] = mapped_column(UTCDateTime())
     schema_version: Mapped[str] = mapped_column(String(32))
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
 
@@ -83,7 +83,9 @@ class QualityReport(ImmutableCreatedAt, Base):
     __tablename__ = "quality_reports"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
-    data_snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("data_snapshots.id"))
+    data_snapshot_id: Mapped[UUID] = mapped_column(
+        ForeignKey("data_snapshots.id", name="fk_quality_reports_data_snapshot_id_data_snapshots")
+    )
     status: Mapped[str] = mapped_column(String(50))
     schema_version: Mapped[str] = mapped_column(String(32))
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
@@ -100,22 +102,27 @@ class DataArtifact(ImmutableCreatedAt, Base):
     mime_type: Mapped[str] = mapped_column(String(255))
     schema_version: Mapped[str] = mapped_column(String(32))
     source: Mapped[str] = mapped_column(String(100))
-    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    received_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
 class PriceSeriesManifest(ImmutableCreatedAt, Base):
     __tablename__ = "price_series_manifests"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
-    data_artifact_id: Mapped[UUID] = mapped_column(ForeignKey("data_artifacts.id"))
+    data_artifact_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "data_artifacts.id",
+            name="fk_price_series_manifests_data_artifact_id_data_artifacts",
+        )
+    )
     instrument: Mapped[str] = mapped_column(String(100))
     source: Mapped[str] = mapped_column(String(100))
     feed: Mapped[str] = mapped_column(String(100))
     adjustment: Mapped[str] = mapped_column(String(100))
-    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    start_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    end_at: Mapped[datetime] = mapped_column(UTCDateTime())
     row_count: Mapped[int] = mapped_column(BigInteger)
 
 
@@ -130,8 +137,8 @@ class MacroObservation(ImmutableCreatedAt, Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     source: Mapped[str] = mapped_column(String(100))
     series: Mapped[str] = mapped_column(String(255))
-    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime())
     revision: Mapped[str] = mapped_column(String(255))
     value: Mapped[Decimal]
     unit: Mapped[str] = mapped_column(String(100))
