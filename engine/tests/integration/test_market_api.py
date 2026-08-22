@@ -10,23 +10,28 @@ import httpx
 import pytest
 from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET, build_test_hmac_headers
 from nexus.main import create_engine_app
+from nexus.persistence.models.data import ProviderCapability
 from nexus.persistence.models.market import (
     Instrument,
     InstrumentAlias,
     LatestQuote,
+    UniverseMember,
+    UniverseSnapshot,
     Watchlist,
     WatchlistMember,
 )
+from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.persistence.session import session_factory
 from nexus.providers.base import InstrumentId, PriceBar, PriceSeries
 from nexus.settings import EngineSettings
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from uuid6 import uuid7
 
 _DECISION_TIME = datetime(2026, 8, 24, 14, 0, tzinfo=UTC)
-_AAPL_ID = UUID("29e18e7a-78fb-5fc1-a65a-6641fbc1cc64")
-_MSFT_ID = UUID("38df053d-1e87-5938-b279-a1ef5ab4643e")
-_NVDA_ID = UUID("60d64dc1-0367-52f2-9ec1-5a2c5355c65b")
+_AAPL_ID = UUID("38df053d-1e87-5938-b279-a1ef5ab4643e")
+_MSFT_ID = UUID("f15da43d-5a56-5f8d-a860-c1494c79fc96")
+_NVDA_ID = UUID("d7a35b5a-ca07-51a7-941a-e996495dbed9")
+_UNIVERSE_ID = UUID("a76624e0-fcad-5e4f-93cd-e4b63281ea3c")
 _CONCURRENT_REQUEST_TIMEOUT_SECONDS = 5.0
 
 
@@ -55,8 +60,21 @@ def _headers(method: str, path_and_query: str, *, nonce: UUID | None = None) -> 
 
 
 @asynccontextmanager
-async def _client(app) -> AsyncIterator[httpx.AsyncClient]:
+async def _client(app, *, publish_universe: bool = True) -> AsyncIterator[httpx.AsyncClient]:
     try:
+        if publish_universe:
+            async with app.state.session_factory() as session:
+                await session.execute(
+                    text(
+                        "UPDATE universe_snapshots SET published_at = :published_at "
+                        "WHERE id = :snapshot_id AND published_at IS NULL"
+                    ),
+                    {
+                        "published_at": _DECISION_TIME - timedelta(seconds=1),
+                        "snapshot_id": _UNIVERSE_ID,
+                    },
+                )
+                await session.commit()
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://testserver"
         ) as client:
@@ -73,6 +91,10 @@ async def _seed_instrument(
     tick_size: Decimal | None = Decimal("0.01"),
     valid_from: date = date(2020, 1, 1),
     valid_to: date | None = None,
+    exchange: str = "XNYS",
+    currency: str = "USD",
+    add_to_universe: bool = True,
+    universe_effective_from: date = date(2026, 1, 1),
 ) -> None:
     factory = session_factory(_settings(database_url))
     try:
@@ -81,8 +103,8 @@ async def _seed_instrument(
                 Instrument(
                     id=instrument_id,
                     asset_type="common_stock",
-                    exchange="XNYS",
-                    currency="USD",
+                    exchange=exchange,
+                    currency=currency,
                     tick_size=tick_size,
                     risk_bucket="EQUITY",
                 )
@@ -96,6 +118,28 @@ async def _seed_instrument(
                     valid_to=valid_to,
                 )
             )
+            if add_to_universe:
+                snapshot = await session.get(UniverseSnapshot, _UNIVERSE_ID)
+                if snapshot is None:
+                    session.add(
+                        UniverseSnapshot(
+                            id=_UNIVERSE_ID,
+                            key="us_liquid",
+                            version="us_liquid_v1",
+                            effective_from=universe_effective_from,
+                            source="versioned_fixture",
+                            content_hash="e" * 64,
+                            published_at=None,
+                        )
+                    )
+                    await session.flush()
+                session.add(
+                    UniverseMember(
+                        universe_snapshot_id=_UNIVERSE_ID,
+                        instrument_id=instrument_id,
+                        inclusion_reason="versioned fixture",
+                    )
+                )
             await session.commit()
     finally:
         await factory.kw["bind"].dispose()
@@ -135,6 +179,46 @@ async def _seed_quote(
         await factory.kw["bind"].dispose()
 
 
+async def _seed_fosun_admission(
+    database_url: str,
+    *,
+    operation: str,
+    contract_hash: str,
+    admitted_contract_hash: str | None = None,
+    expires_at: datetime = _DECISION_TIME + timedelta(hours=1),
+    created_at: datetime = _DECISION_TIME - timedelta(hours=1),
+) -> None:
+    factory = session_factory(_settings(database_url))
+    try:
+        async with factory() as session:
+            session.add(
+                ProviderCapability(
+                    provider="fosun",
+                    capability="READ_ONLY",
+                    contract_hash=contract_hash,
+                    expires_at=expires_at,
+                    schema_version="1",
+                    payload={"operation": operation, "market_scope": "US"},
+                    created_at=created_at,
+                )
+            )
+            status = await session.scalar(
+                select(IntegrationStatus).where(IntegrationStatus.provider == "fosun")
+            )
+            if status is None:
+                session.add(
+                    IntegrationStatus(
+                        provider="fosun",
+                        status="read_only",
+                        admitted_contract_hash=(admitted_contract_hash or contract_hash),
+                        mode_changed_at=created_at,
+                    )
+                )
+            await session.commit()
+    finally:
+        await factory.kw["bind"].dispose()
+
+
 @pytest.mark.asyncio
 async def test_market_requires_hmac_authentication(migrated_database_url: str) -> None:
     """Removing the service-actor dependency would expose private market facts."""
@@ -163,9 +247,7 @@ async def test_market_returns_exact_source_aware_point_in_time_rows(
     migrated_database_url: str,
 ) -> None:
     """Float conversion, future aliases, future quotes, or missing provenance break this."""
-    await _seed_instrument(
-        migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL"
-    )
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
     await _seed_instrument(
         migrated_database_url,
         instrument_id=_MSFT_ID,
@@ -234,12 +316,8 @@ async def test_market_marks_session_quote_stale_and_never_fabricates_missing_pri
     migrated_database_url: str,
 ) -> None:
     """A stale or absent quote must remain evidence, not become a fresh synthetic value."""
-    await _seed_instrument(
-        migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL"
-    )
-    await _seed_instrument(
-        migrated_database_url, instrument_id=_MSFT_ID, symbol="MSFT"
-    )
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    await _seed_instrument(migrated_database_url, instrument_id=_MSFT_ID, symbol="MSFT")
     await _seed_quote(
         migrated_database_url,
         instrument_id=_AAPL_ID,
@@ -271,13 +349,11 @@ async def test_market_marks_session_quote_stale_and_never_fabricates_missing_pri
 
 
 @pytest.mark.asyncio
-async def test_market_fails_closed_on_conflicting_latest_sources(
+async def test_market_keeps_intraday_quote_and_marks_close_source_divergence_partial(
     migrated_database_url: str,
 ) -> None:
-    """Removing the cross-source threshold would display a disputed price as trusted."""
-    await _seed_instrument(
-        migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL"
-    )
+    """An intraday >50 bps difference is monitoring evidence, not an order block."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
     await _seed_quote(
         migrated_database_url,
         instrument_id=_AAPL_ID,
@@ -299,10 +375,135 @@ async def test_market_fails_closed_on_conflicting_latest_sources(
         response = await client.get(path, headers=_headers("GET", path))
 
     item = response.json()["data"]["items"][0]
-    assert item["price"] is None
-    assert item["source"] is None
-    assert item["quality"] == "FAIL"
-    assert item["quality_reasons"] == ["SOURCE_CONFLICT"]
+    assert item["price"] == "100.000000000000"
+    assert item["source"] == "alpaca"
+    assert item["quality"] == "PARTIAL"
+    assert item["quality_reasons"] == ["INTRADAY_SOURCE_DIVERGENCE"]
+
+
+@pytest.mark.asyncio
+async def test_market_does_not_compare_quotes_more_than_five_seconds_apart(
+    migrated_database_url: str,
+) -> None:
+    """Stale-vs-fresh source values must not create a false intraday divergence."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    await _seed_quote(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        source="alpaca",
+        feed="sip",
+        last=Decimal("100.00"),
+        observed_at=_DECISION_TIME - timedelta(seconds=2),
+    )
+    await _seed_quote(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        source="fixture",
+        feed="fixture",
+        last=Decimal("101.00"),
+        observed_at=_DECISION_TIME - timedelta(seconds=8),
+    )
+    path = "/internal/v1/market"
+    app = _app(migrated_database_url)
+
+    async with _client(app) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    item = response.json()["data"]["items"][0]
+    assert item["price"] == "100.000000000000"
+    assert item["quality"] == "PASS"
+    assert item["quality_reasons"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("admission_state", "expected_quality_reason"),
+    [
+        ("missing", "NO_ELIGIBLE_SOURCE"),
+        ("expired", "NO_ELIGIBLE_SOURCE"),
+        ("hash_mismatch", "NO_ELIGIBLE_SOURCE"),
+        ("valid", None),
+    ],
+)
+async def test_fosun_quote_requires_its_own_valid_operation_admission(
+    migrated_database_url: str,
+    admission_state: str,
+    expected_quality_reason: str | None,
+) -> None:
+    """Bars authority, expiry, or a different admitted hash cannot authorize quotes."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    await _seed_quote(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        source="fosun",
+        feed="regular",
+        last=Decimal("123.45"),
+    )
+    if admission_state != "missing":
+        await _seed_fosun_admission(
+            migrated_database_url,
+            operation="fosun_get_quotes",
+            contract_hash="a" * 64,
+            admitted_contract_hash=("b" * 64 if admission_state == "hash_mismatch" else None),
+            expires_at=(
+                _DECISION_TIME
+                if admission_state == "expired"
+                else _DECISION_TIME + timedelta(hours=1)
+            ),
+        )
+    path = "/internal/v1/market"
+    app = _app(migrated_database_url)
+
+    async with _client(app) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    item = response.json()["data"]["items"][0]
+    if expected_quality_reason is None:
+        assert item["price"] == "123.450000000000"
+        assert item["source"] == "fosun"
+        assert item["quality"] == "PASS"
+    else:
+        assert item["price"] is None
+        assert item["source"] is None
+        assert item["quality"] == "FAIL"
+        assert item["quality_reasons"] == [expected_quality_reason]
+
+
+@pytest.mark.asyncio
+async def test_fosun_quote_uses_matching_older_authority_not_newest_bars_authority(
+    migrated_database_url: str,
+) -> None:
+    """A newer bars capability must neither hide nor grant quote authority."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    await _seed_quote(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        source="fosun",
+        feed="regular",
+        last=Decimal("123.45"),
+    )
+    await _seed_fosun_admission(
+        migrated_database_url,
+        operation="fosun_get_quotes",
+        contract_hash="a" * 64,
+        created_at=_DECISION_TIME - timedelta(hours=2),
+    )
+    await _seed_fosun_admission(
+        migrated_database_url,
+        operation="fosun_get_bars",
+        contract_hash="b" * 64,
+        created_at=_DECISION_TIME - timedelta(hours=1),
+    )
+    path = "/internal/v1/market"
+    app = _app(migrated_database_url)
+
+    async with _client(app) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    item = response.json()["data"]["items"][0]
+    assert item["price"] == "123.450000000000"
+    assert item["source"] == "fosun"
+    assert item["quality"] == "PASS"
 
 
 @pytest.mark.asyncio
@@ -315,9 +516,7 @@ async def test_market_cursor_is_stable_and_invalid_or_foreign_values_fail_closed
         (_MSFT_ID, "MSFT"),
         (_NVDA_ID, "NVDA"),
     ):
-        await _seed_instrument(
-            migrated_database_url, instrument_id=instrument_id, symbol=symbol
-        )
+        await _seed_instrument(migrated_database_url, instrument_id=instrument_id, symbol=symbol)
     app = _app(migrated_database_url)
 
     async with _client(app) as client:
@@ -331,9 +530,7 @@ async def test_market_cursor_is_stable_and_invalid_or_foreign_values_fail_closed
         second_path = f"/internal/v1/market?{second_query}"
         second = await client.get(second_path, headers=_headers("GET", second_path))
         malformed_path = "/internal/v1/market?cursor=not-a-market-cursor"
-        malformed = await client.get(
-            malformed_path, headers=_headers("GET", malformed_path)
-        )
+        malformed = await client.get(malformed_path, headers=_headers("GET", malformed_path))
         foreign_path = "/internal/v1/market?cursor=eyJzY29wZSI6Im90aGVyIn0"
         foreign = await client.get(foreign_path, headers=_headers("GET", foreign_path))
         cross_filter_query = urlencode({"limit": 2, "cursor": cursor, "watchlist": "true"})
@@ -355,13 +552,89 @@ async def test_market_cursor_is_stable_and_invalid_or_foreign_values_fail_closed
 
 
 @pytest.mark.asyncio
+async def test_market_and_watchlist_are_bound_to_published_us_liquid_v1_members(
+    migrated_database_url: str,
+) -> None:
+    """Aliases and even an accidental HK member cannot expand the Phase 0-1 universe."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    await _seed_instrument(
+        migrated_database_url,
+        instrument_id=_MSFT_ID,
+        symbol="MSFT",
+        add_to_universe=False,
+    )
+    hk_id = uuid4()
+    await _seed_instrument(
+        migrated_database_url,
+        instrument_id=hk_id,
+        symbol="00656",
+        exchange="XHKG",
+        currency="HKD",
+    )
+    app = _app(migrated_database_url)
+    market_path = "/internal/v1/market"
+    nonmember_path = f"/internal/v1/watchlist/{_MSFT_ID}"
+    hk_path = f"/internal/v1/watchlist/{hk_id}"
+    selected_nonmember_path = f"/internal/v1/market?selected_instrument_id={_MSFT_ID}"
+
+    async with _client(app) as client:
+        market = await client.get(market_path, headers=_headers("GET", market_path))
+        nonmember = await client.put(nonmember_path, headers=_headers("PUT", nonmember_path))
+        hk = await client.put(hk_path, headers=_headers("PUT", hk_path))
+        selected_nonmember = await client.get(
+            selected_nonmember_path,
+            headers=_headers("GET", selected_nonmember_path),
+        )
+
+    assert [item["symbol"] for item in market.json()["data"]["items"]] == ["AAPL"]
+    assert nonmember.status_code == hk.status_code == selected_nonmember.status_code == 404
+    assert nonmember.json()["error"]["code"] == "NOT_FOUND"
+    assert hk.json()["error"]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_market_fails_closed_until_us_liquid_v1_is_published(
+    migrated_database_url: str,
+) -> None:
+    """A draft membership is not decision-time authority."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    path = "/internal/v1/market"
+    app = _app(migrated_database_url)
+
+    async with _client(app, publish_universe=False) as client:
+        market = await client.get(path, headers=_headers("GET", path))
+
+    assert market.status_code == 200
+    assert market.json()["data"]["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_market_excludes_future_effective_us_liquid_v1(
+    migrated_database_url: str,
+) -> None:
+    """Publication does not make a future-effective snapshot visible early."""
+    await _seed_instrument(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        symbol="AAPL",
+        universe_effective_from=_DECISION_TIME.date() + timedelta(days=1),
+    )
+    path = "/internal/v1/market"
+    app = _app(migrated_database_url)
+
+    async with _client(app) as client:
+        market = await client.get(path, headers=_headers("GET", path))
+
+    assert market.status_code == 200
+    assert market.json()["data"]["items"] == []
+
+
+@pytest.mark.asyncio
 async def test_selected_series_uses_repository_authority_and_excludes_future_bars(
     migrated_database_url: str,
 ) -> None:
     """Bypassing Task 7 would expose a future revision through the chart payload."""
-    await _seed_instrument(
-        migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL"
-    )
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
     visible = PriceBar(
         instrument_id=InstrumentId(_AAPL_ID),
         session=date(2026, 8, 21),
@@ -401,9 +674,7 @@ async def test_selected_series_uses_repository_authority_and_excludes_future_bar
     app = _app(migrated_database_url)
     app.state.market_price_series_loader = offline_loader
     async with _client(app) as client:
-        response = await client.get(
-            selected_path, headers=_headers("GET", selected_path)
-        )
+        response = await client.get(selected_path, headers=_headers("GET", selected_path))
 
     series = response.json()["data"]["selected_series"]
     assert series["source"] == "fixture"
@@ -418,9 +689,7 @@ async def test_selected_series_missing_seam_returns_explicit_no_history(
     migrated_database_url: str,
 ) -> None:
     """A missing offline seam must not be filled from the latest quote or a network call."""
-    await _seed_instrument(
-        migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL"
-    )
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
     await _seed_quote(
         migrated_database_url,
         instrument_id=_AAPL_ID,
@@ -446,13 +715,111 @@ async def test_selected_series_missing_seam_returns_explicit_no_history(
 
 
 @pytest.mark.asyncio
+async def test_selected_series_rejects_one_minute_only_history_explicitly(
+    migrated_database_url: str,
+) -> None:
+    """Task 8 must not label intraday dates as a daily OHLCV chart."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    bar = PriceBar(
+        instrument_id=InstrumentId(_AAPL_ID),
+        session=date(2026, 8, 21),
+        open="100",
+        high="101",
+        low="99",
+        close="100",
+        volume="1000",
+        available_at=_DECISION_TIME - timedelta(days=1),
+        revision="1",
+    )
+
+    async def offline_loader(
+        _instrument_id: UUID, _decision_time: datetime
+    ) -> tuple[PriceSeries, ...]:
+        return (
+            PriceSeries(
+                source="fixture",
+                feed="fixture",
+                adjustment="split",
+                interval="1Min",
+                bars=(bar,),
+                mode="fixture",
+                quality="PASS",
+            ),
+        )
+
+    path = f"/internal/v1/market?selected_instrument_id={_AAPL_ID}"
+    app = _app(migrated_database_url)
+    app.state.market_price_series_loader = offline_loader
+    async with _client(app) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    selected = response.json()["data"]["selected_series"]
+    assert selected["interval"] is None
+    assert selected["bars"] == []
+    assert selected["quality"] == "FAIL"
+    assert selected["quality_reasons"] == ["NO_DAILY_HISTORY_DATA"]
+
+
+@pytest.mark.asyncio
+async def test_selected_series_uses_only_daily_candidate_from_mixed_intervals(
+    migrated_database_url: str,
+) -> None:
+    """A higher-priority 1Min series cannot displace Task 8 daily evidence."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    bar = PriceBar(
+        instrument_id=InstrumentId(_AAPL_ID),
+        session=date(2026, 8, 21),
+        open="100",
+        high="101",
+        low="99",
+        close="100",
+        volume="1000",
+        available_at=_DECISION_TIME - timedelta(days=1),
+        revision="1",
+    )
+
+    async def offline_loader(
+        _instrument_id: UUID, _decision_time: datetime
+    ) -> tuple[PriceSeries, ...]:
+        return (
+            PriceSeries(
+                source="alpaca",
+                feed="sip",
+                adjustment="split",
+                interval="1Min",
+                bars=(bar,),
+                mode="fixture",
+                quality="PASS",
+            ),
+            PriceSeries(
+                source="fixture",
+                feed="fixture",
+                adjustment="split",
+                interval="1Day",
+                bars=(bar,),
+                mode="fixture",
+                quality="PASS",
+            ),
+        )
+
+    path = f"/internal/v1/market?selected_instrument_id={_AAPL_ID}"
+    app = _app(migrated_database_url)
+    app.state.market_price_series_loader = offline_loader
+    async with _client(app) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    selected = response.json()["data"]["selected_series"]
+    assert selected["source"] == "fixture"
+    assert selected["interval"] == "1Day"
+    assert len(selected["bars"]) == 1
+
+
+@pytest.mark.asyncio
 async def test_selected_series_is_deterministically_bounded_to_latest_500_bars(
     migrated_database_url: str,
 ) -> None:
     """Removing the response cap would make one chart request return unbounded history."""
-    await _seed_instrument(
-        migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL"
-    )
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
     first_session = date(2025, 1, 1)
     bars = tuple(
         PriceBar(
@@ -518,9 +885,7 @@ async def test_watchlist_put_and_delete_have_idempotent_set_semantics(
     migrated_database_url: str,
 ) -> None:
     """Insert/delete row-count semantics must not leak through the final representation."""
-    await _seed_instrument(
-        migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL"
-    )
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
     path = f"/internal/v1/watchlist/{_AAPL_ID}"
     app = _app(migrated_database_url)
 
@@ -528,14 +893,10 @@ async def test_watchlist_put_and_delete_have_idempotent_set_semantics(
         first_put = await client.put(path, headers=_headers("PUT", path))
         duplicate_put = await client.put(path, headers=_headers("PUT", path))
         market_path = "/internal/v1/market"
-        listed_present = await client.get(
-            market_path, headers=_headers("GET", market_path)
-        )
+        listed_present = await client.get(market_path, headers=_headers("GET", market_path))
         first_delete = await client.delete(path, headers=_headers("DELETE", path))
         absent_delete = await client.delete(path, headers=_headers("DELETE", path))
-        listed_absent = await client.get(
-            market_path, headers=_headers("GET", market_path)
-        )
+        listed_absent = await client.get(market_path, headers=_headers("GET", market_path))
 
     expected_true = {"instrument_id": str(_AAPL_ID), "watchlisted": True}
     expected_false = {"instrument_id": str(_AAPL_ID), "watchlisted": False}
@@ -564,39 +925,55 @@ async def test_watchlist_unknown_instrument_is_not_found(
 
 
 @pytest.mark.asyncio
+async def test_watchlist_fails_closed_when_default_name_has_a_foreign_id(
+    migrated_database_url: str,
+) -> None:
+    """A conflicting name must not silently redirect membership to another list."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    factory = session_factory(_settings(migrated_database_url))
+    try:
+        async with factory() as session:
+            session.add(Watchlist(id=uuid4(), name="default_private"))
+            await session.commit()
+    finally:
+        await factory.kw["bind"].dispose()
+    path = f"/internal/v1/watchlist/{_AAPL_ID}"
+    app = _app(migrated_database_url)
+
+    async with _client(app) as client:
+        response = await client.put(path, headers=_headers("PUT", path))
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "INTERNAL_ERROR"
+    factory = session_factory(_settings(migrated_database_url))
+    try:
+        async with factory() as session:
+            count = await session.scalar(select(func.count()).select_from(WatchlistMember))
+    finally:
+        await factory.kw["bind"].dispose()
+    assert count == 0
+
+
+@pytest.mark.asyncio
 async def test_market_watchlist_boolean_filter_is_applied_in_repository_query(
     migrated_database_url: str,
 ) -> None:
     """A UI-only filter would leak unfiltered pagination and inconsistent counts."""
-    await _seed_instrument(
-        migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL"
-    )
-    await _seed_instrument(
-        migrated_database_url, instrument_id=_MSFT_ID, symbol="MSFT"
-    )
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    await _seed_instrument(migrated_database_url, instrument_id=_MSFT_ID, symbol="MSFT")
     membership_path = f"/internal/v1/watchlist/{_AAPL_ID}"
     app = _app(migrated_database_url)
 
     async with _client(app) as client:
-        added = await client.put(
-            membership_path, headers=_headers("PUT", membership_path)
-        )
+        added = await client.put(membership_path, headers=_headers("PUT", membership_path))
         true_path = "/internal/v1/market?watchlist=true"
-        listed_true = await client.get(
-            true_path, headers=_headers("GET", true_path)
-        )
+        listed_true = await client.get(true_path, headers=_headers("GET", true_path))
         false_path = "/internal/v1/market?watchlist=false"
-        listed_false = await client.get(
-            false_path, headers=_headers("GET", false_path)
-        )
+        listed_false = await client.get(false_path, headers=_headers("GET", false_path))
 
     assert added.status_code == 200
-    assert [
-        item["symbol"] for item in listed_true.json()["data"]["items"]
-    ] == ["AAPL"]
-    assert [
-        item["symbol"] for item in listed_false.json()["data"]["items"]
-    ] == ["MSFT"]
+    assert [item["symbol"] for item in listed_true.json()["data"]["items"]] == ["AAPL"]
+    assert [item["symbol"] for item in listed_false.json()["data"]["items"]] == ["MSFT"]
 
 
 @pytest.mark.asyncio
@@ -604,22 +981,22 @@ async def test_concurrent_duplicate_watchlist_puts_leave_one_membership(
     migrated_database_url: str,
 ) -> None:
     """Removing PostgreSQL conflict authority would allow duplicate membership or a 500."""
-    await _seed_instrument(
-        migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL"
-    )
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
     path = f"/internal/v1/watchlist/{_AAPL_ID}"
     app = _app(migrated_database_url)
 
     async with _client(app) as client:
         responses = await asyncio.wait_for(
             asyncio.gather(
-                client.put(path, headers=_headers("PUT", path)),
-                client.put(path, headers=_headers("PUT", path)),
+                *(
+                    client.put(path, headers=_headers("PUT", path))
+                    for _ in range(8)
+                ),
             ),
             timeout=_CONCURRENT_REQUEST_TIMEOUT_SECONDS,
         )
 
-    assert [response.status_code for response in responses] == [200, 200]
+    assert [response.status_code for response in responses] == [200] * 8
     assert all(response.json()["data"]["watchlisted"] for response in responses)
     factory = session_factory(_settings(migrated_database_url))
     try:
@@ -629,9 +1006,7 @@ async def test_concurrent_duplicate_watchlist_puts_leave_one_membership(
                 .select_from(WatchlistMember)
                 .where(WatchlistMember.instrument_id == _AAPL_ID)
             )
-            watchlist_count = await session.scalar(
-                select(func.count()).select_from(Watchlist)
-            )
+            watchlist_count = await session.scalar(select(func.count()).select_from(Watchlist))
     finally:
         await factory.kw["bind"].dispose()
     assert count == 1

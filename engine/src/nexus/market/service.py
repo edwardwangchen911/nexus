@@ -30,6 +30,8 @@ from nexus.persistence.models.market import (
     Instrument,
     InstrumentAlias,
     LatestQuote,
+    UniverseMember,
+    UniverseSnapshot,
     Watchlist,
     WatchlistMember,
 )
@@ -48,7 +50,12 @@ _CURSOR_SCOPE = "nexus.market.v1"
 _CURSOR_MAX_LENGTH = 2048
 _CURSOR_MAX_AGE = timedelta(minutes=5)
 _STALE_AFTER = timedelta(seconds=45)
+_INTRADAY_COMPARISON_WINDOW = timedelta(seconds=5)
+_INTRADAY_DIVERGENCE_RATE = Decimal("0.005")
 _SELECTED_SERIES_BAR_LIMIT = 500
+_UNIVERSE_KEY = "us_liquid"
+_UNIVERSE_VERSION = "us_liquid_v1"
+_US_EXCHANGES = ("XNYS", "XNAS", "ARCX")
 
 
 class PriceSeriesLoader(Protocol):
@@ -86,9 +93,7 @@ class MarketService:
         selected_instrument_id: UUID | None,
     ) -> tuple[MarketPageResponse, datetime]:
         """Return one point-in-time page and the exact evidence decision time."""
-        cursor_state = (
-            self._decode_cursor(cursor, watchlist) if cursor is not None else None
-        )
+        cursor_state = self._decode_cursor(cursor, watchlist) if cursor is not None else None
         decision_time = cursor_state[0] if cursor_state is not None else self._request_time
         after_symbol = cursor_state[1] if cursor_state is not None else None
         after_instrument_id = cursor_state[2] if cursor_state is not None else None
@@ -111,9 +116,7 @@ class MarketService:
                 last_instrument.id,
                 watchlist=watchlist,
             )
-        selected_series = await self._selected_series(
-            selected_instrument_id, decision_time
-        )
+        selected_series = await self._selected_series(selected_instrument_id, decision_time)
         return (
             MarketPageResponse(
                 items=tuple(items),
@@ -127,7 +130,7 @@ class MarketService:
         self, instrument_id: UUID, *, watchlisted: bool
     ) -> WatchlistMembershipResponse:
         """Apply idempotent set semantics with PostgreSQL uniqueness as authority."""
-        await self._require_instrument(instrument_id)
+        await self._require_instrument(instrument_id, self._request_time)
         if watchlisted:
             watchlist_id = await self._ensure_default_watchlist()
             await self._session.execute(
@@ -193,7 +196,24 @@ class MarketService:
         statement = (
             select(Instrument, aliases.c.symbol)
             .join(aliases, aliases.c.instrument_id == Instrument.id)
-            .where(aliases.c.alias_rank == 1)
+            .join(
+                UniverseMember,
+                UniverseMember.instrument_id == Instrument.id,
+            )
+            .join(
+                UniverseSnapshot,
+                UniverseSnapshot.id == UniverseMember.universe_snapshot_id,
+            )
+            .where(
+                aliases.c.alias_rank == 1,
+                UniverseSnapshot.key == _UNIVERSE_KEY,
+                UniverseSnapshot.version == _UNIVERSE_VERSION,
+                UniverseSnapshot.effective_from <= decision_time.date(),
+                UniverseSnapshot.published_at.is_not(None),
+                UniverseSnapshot.published_at <= decision_time,
+                Instrument.exchange.in_(_US_EXCHANGES),
+                Instrument.currency == "USD",
+            )
             .order_by(aliases.c.symbol.asc(), Instrument.id.asc())
             .limit(limit)
         )
@@ -208,18 +228,16 @@ class MarketService:
                 )
             )
         if watchlist is not None:
+            await self._default_watchlist_id()
             membership_exists = (
                 select(WatchlistMember.id)
-                .join(Watchlist, Watchlist.id == WatchlistMember.watchlist_id)
                 .where(
-                    Watchlist.name == _DEFAULT_WATCHLIST_NAME,
+                    WatchlistMember.watchlist_id == _DEFAULT_WATCHLIST_ID,
                     WatchlistMember.instrument_id == Instrument.id,
                 )
                 .exists()
             )
-            statement = statement.where(
-                membership_exists if watchlist else ~membership_exists
-            )
+            statement = statement.where(membership_exists if watchlist else ~membership_exists)
         return list((await self._session.execute(statement)).all())
 
     async def _market_items(
@@ -261,7 +279,7 @@ class MarketService:
             fosun_admission = await load_fosun_market_admission(
                 self._session,
                 decision_time=decision_time,
-                operation="fosun_get_bars",
+                operation="fosun_get_quotes",
                 market_scope="US",
             )
         return [
@@ -303,14 +321,7 @@ class MarketService:
         selected = eligible[0]
         reasons: set[str] = set()
         quality: Literal["PASS", "PARTIAL", "FAIL"] = "PASS"
-        cross_source = _quote_cross_check(eligible, instrument.tick_size)
-        if cross_source == "SOURCE_CONFLICT":
-            return self._unavailable_item(
-                instrument,
-                symbol,
-                watchlisted=watchlisted,
-                reason="SOURCE_CONFLICT",
-            )
+        cross_source = _quote_cross_check(eligible)
         if cross_source is not None:
             reasons.add(cross_source)
             quality = "PARTIAL"
@@ -332,9 +343,7 @@ class MarketService:
         return MarketItemResponse(
             instrument_id=instrument.id,
             symbol=symbol,
-            price=(
-                decimal_to_string(selected.last) if selected.last is not None else None
-            ),
+            price=(decimal_to_string(selected.last) if selected.last is not None else None),
             source=selected.source,
             feed=selected.feed,
             as_of=selected.observed_at,
@@ -353,20 +362,23 @@ class MarketService:
             raise _instrument_not_found(instrument_id)
         if self._price_series_loader is None:
             return _empty_series(instrument_id, "NO_HISTORY_DATA")
-        candidates = tuple(
-            await self._price_series_loader(instrument_id, decision_time)
-        )
+        candidates = tuple(await self._price_series_loader(instrument_id, decision_time))
         if not candidates:
             return _empty_series(instrument_id, "NO_HISTORY_DATA")
+        daily_candidates = tuple(
+            candidate for candidate in candidates if candidate.interval == "1Day"
+        )
+        if not daily_candidates:
+            return _empty_series(instrument_id, "NO_DAILY_HISTORY_DATA")
         if any(
             bar.instrument_id != instrument_id
-            for candidate in candidates
+            for candidate in daily_candidates
             for bar in candidate.bars
         ):
             return _empty_series(instrument_id, "HISTORY_INSTRUMENT_MISMATCH")
         selection = await select_price_series(
             self._session,
-            candidates,
+            daily_candidates,
             instrument.tick_size,
             decision_time,
         )
@@ -382,6 +394,8 @@ class MarketService:
                 quality_reasons=selection.reasons,
                 bars=(),
             )
+        if selected.interval != "1Day":
+            return _empty_series(instrument_id, "NO_DAILY_HISTORY_DATA")
         bars = selected.bars[-_SELECTED_SERIES_BAR_LIMIT:]
         quality: Literal["PASS", "PARTIAL", "FAIL"] = selection.quality
         reasons = list(selection.reasons)
@@ -394,7 +408,7 @@ class MarketService:
             source=selected.source,
             feed=selected.feed,
             adjustment=selected.adjustment,
-            interval=selected.interval,
+            interval="1Day",
             quality=quality,
             quality_reasons=tuple(reasons),
             bars=tuple(
@@ -421,6 +435,14 @@ class MarketService:
             await self._session.scalar(
                 select(Instrument)
                 .join(InstrumentAlias, InstrumentAlias.instrument_id == Instrument.id)
+                .join(
+                    UniverseMember,
+                    UniverseMember.instrument_id == Instrument.id,
+                )
+                .join(
+                    UniverseSnapshot,
+                    UniverseSnapshot.id == UniverseMember.universe_snapshot_id,
+                )
                 .where(
                     Instrument.id == instrument_id,
                     InstrumentAlias.alias_type == "ticker",
@@ -429,35 +451,58 @@ class MarketService:
                         InstrumentAlias.valid_to.is_(None),
                         InstrumentAlias.valid_to >= decision_time.date(),
                     ),
+                    UniverseSnapshot.key == _UNIVERSE_KEY,
+                    UniverseSnapshot.version == _UNIVERSE_VERSION,
+                    UniverseSnapshot.effective_from <= decision_time.date(),
+                    UniverseSnapshot.published_at.is_not(None),
+                    UniverseSnapshot.published_at <= decision_time,
+                    Instrument.exchange.in_(_US_EXCHANGES),
+                    Instrument.currency == "USD",
                 )
                 .limit(1)
             ),
         )
 
-    async def _require_instrument(self, instrument_id: UUID) -> None:
-        exists = await self._session.scalar(
-            select(Instrument.id).where(Instrument.id == instrument_id)
-        )
-        if exists is None:
+    async def _require_instrument(self, instrument_id: UUID, decision_time: datetime) -> None:
+        if await self._active_instrument(instrument_id, decision_time) is None:
             raise _instrument_not_found(instrument_id)
 
     async def _default_watchlist_id(self) -> UUID | None:
-        return cast(
-            UUID | None,
-            await self._session.scalar(
-                select(Watchlist.id).where(Watchlist.name == _DEFAULT_WATCHLIST_NAME)
-            ),
+        rows = list(
+            (
+                await self._session.execute(
+                    select(Watchlist.id, Watchlist.name).where(
+                        or_(
+                            Watchlist.id == _DEFAULT_WATCHLIST_ID,
+                            Watchlist.name == _DEFAULT_WATCHLIST_NAME,
+                        )
+                    )
+                )
+            ).all()
         )
+        if not rows:
+            return None
+        if rows != [(_DEFAULT_WATCHLIST_ID, _DEFAULT_WATCHLIST_NAME)]:
+            raise NexusError(
+                ErrorCode.INTERNAL_ERROR,
+                "The request could not be completed.",
+                status_code=500,
+            )
+        return _DEFAULT_WATCHLIST_ID
 
     async def _ensure_default_watchlist(self) -> UUID:
         await self._session.execute(
             insert(Watchlist)
             .values(id=_DEFAULT_WATCHLIST_ID, name=_DEFAULT_WATCHLIST_NAME)
-            .on_conflict_do_nothing(index_elements=[Watchlist.name])
+            .on_conflict_do_nothing()
         )
         watchlist_id = await self._default_watchlist_id()
         if watchlist_id is None:
-            raise RuntimeError("default watchlist was not created")
+            raise NexusError(
+                ErrorCode.INTERNAL_ERROR,
+                "The request could not be completed.",
+                status_code=500,
+            )
         return watchlist_id
 
     async def _watchlisted_ids(self, instrument_ids: Sequence[UUID]) -> set[UUID]:
@@ -564,9 +609,7 @@ class MarketService:
             if cursor_watchlist is not requested_watchlist:
                 raise ValueError
             decision_time = require_utc(
-                datetime.fromisoformat(
-                    cast(str, decoded["decision_time"]).replace("Z", "+00:00")
-                )
+                datetime.fromisoformat(cast(str, decoded["decision_time"]).replace("Z", "+00:00"))
             )
             symbol = decoded["symbol"]
             if not isinstance(symbol, str) or not 1 <= len(symbol) <= 32:
@@ -611,30 +654,38 @@ def _quote_sort_key(quote: LatestQuote, priority: Sequence[str]) -> tuple[object
     )
 
 
-def _quote_cross_check(
-    quotes: Sequence[LatestQuote], tick_size: Decimal | None
-) -> str | None:
+def _quote_cross_check(quotes: Sequence[LatestQuote]) -> str | None:
     latest_by_source: dict[str, LatestQuote] = {}
     for quote in quotes:
-        if quote.last is not None and quote.source not in latest_by_source:
+        previous = latest_by_source.get(quote.source)
+        if quote.last is not None and (
+            previous is None or quote.observed_at > previous.observed_at
+        ):
             latest_by_source[quote.source] = quote
-    values = [quote.last for quote in latest_by_source.values() if quote.last is not None]
-    if len(values) < 2:
+    latest = list(latest_by_source.values())
+    if len(latest) < 2:
         return None
-    if tick_size is None:
-        return "TICK_SIZE_UNKNOWN"
-    for index, first in enumerate(values):
-        for second in values[index + 1 :]:
-            if abs(first - second) > max(
-                tick_size, min(abs(first), abs(second)) * Decimal("0.002")
+    for index, first_quote in enumerate(latest):
+        for second_quote in latest[index + 1 :]:
+            if (
+                abs(first_quote.observed_at - second_quote.observed_at)
+                > _INTRADAY_COMPARISON_WINDOW
             ):
-                return "SOURCE_CONFLICT"
+                continue
+            first = first_quote.last
+            second = second_quote.last
+            if first is None or second is None:
+                continue
+            baseline = min(abs(first), abs(second))
+            threshold = baseline * _INTRADAY_DIVERGENCE_RATE
+            if abs(first - second) > threshold:
+                return "INTRADAY_SOURCE_DIVERGENCE"
     return None
 
 
 def _ordered_reasons(reasons: set[str]) -> tuple[str, ...]:
     order = (
-        "SOURCE_CONFLICT",
+        "INTRADAY_SOURCE_DIVERGENCE",
         "SELECTED_SOURCE_STALE",
         "QUOTE_PRICE_UNAVAILABLE",
         "TICK_SIZE_UNKNOWN",
@@ -672,6 +723,4 @@ def _b64encode(value: bytes) -> str:
 
 
 def _b64decode(value: str) -> bytes:
-    return base64.b64decode(
-        value + "=" * (-len(value) % 4), altchars=b"-_", validate=True
-    )
+    return base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)

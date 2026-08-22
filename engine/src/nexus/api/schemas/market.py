@@ -62,7 +62,7 @@ class SelectedMarketSeriesResponse(_StrictSchema):
     source: str | None
     feed: str | None
     adjustment: str | None
-    interval: Literal["1Min", "1Day"] | None
+    interval: Literal["1Day"] | None
     quality: Literal["PASS", "PARTIAL", "FAIL"]
     quality_reasons: tuple[str, ...]
     bars: tuple[MarketBarResponse, ...]

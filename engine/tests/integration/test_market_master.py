@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from nexus.integrations.service import IntegrationStatusService
 from nexus.persistence.models.data import ProviderCapability
 from nexus.persistence.models.market import (
     Instrument,
@@ -192,9 +193,7 @@ async def test_member_first_blocks_seal_then_commits_exactly_one_preseal_member(
             )
             assert (
                 await session.scalar(
-                    select(UniverseSnapshot.published_at).where(
-                        UniverseSnapshot.id == snapshot_id
-                    )
+                    select(UniverseSnapshot.published_at).where(UniverseSnapshot.id == snapshot_id)
                 )
                 is not None
             )
@@ -291,9 +290,7 @@ async def _exercise_member_first_lock_order(
                     },
                 )
                 member_locked.set()
-                await asyncio.wait_for(
-                    release_member.wait(), timeout=_EVENT_TIMEOUT_SECONDS
-                )
+                await asyncio.wait_for(release_member.wait(), timeout=_EVENT_TIMEOUT_SECONDS)
                 await session.commit()
             except BaseException:
                 await session.rollback()
@@ -307,9 +304,7 @@ async def _exercise_member_first_lock_order(
                 seal_pid = await session.scalar(text("SELECT pg_backend_pid()"))
                 seal_pid_ready.set()
                 await session.execute(
-                    text(
-                        "UPDATE universe_snapshots SET published_at = :now WHERE id = :id"
-                    ),
+                    text("UPDATE universe_snapshots SET published_at = :now WHERE id = :id"),
                     {"now": datetime(2026, 8, 23, tzinfo=UTC), "id": snapshot_id},
                 )
                 await session.commit()
@@ -327,13 +322,9 @@ async def _exercise_member_first_lock_order(
         await asyncio.wait_for(seal_pid_ready.wait(), timeout=_EVENT_TIMEOUT_SECONDS)
         if seal_pid is None:
             raise AssertionError("seal backend PID was not captured")
-        await asyncio.wait_for(
-            observer(factory, seal_pid), timeout=_EVENT_TIMEOUT_SECONDS
-        )
+        await asyncio.wait_for(observer(factory, seal_pid), timeout=_EVENT_TIMEOUT_SECONDS)
         release_member.set()
-        await asyncio.wait_for(
-            asyncio.gather(*tasks), timeout=_EVENT_TIMEOUT_SECONDS
-        )
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=_EVENT_TIMEOUT_SECONDS)
     finally:
         release_member.set()
         await _cancel_and_gather(tasks)
@@ -381,15 +372,11 @@ async def _exercise_seal_first_lock_order(
                         await session.rollback()
                         raise
 
-            tasks.append(
-                asyncio.create_task(member_second(), name="market-lock-member-second")
-            )
+            tasks.append(asyncio.create_task(member_second(), name="market-lock-member-second"))
             await asyncio.wait_for(member_pid_ready.wait(), timeout=_EVENT_TIMEOUT_SECONDS)
             if member_pid is None:
                 raise AssertionError("member backend PID was not captured")
-            await asyncio.wait_for(
-                observer(factory, member_pid), timeout=_EVENT_TIMEOUT_SECONDS
-            )
+            await asyncio.wait_for(observer(factory, member_pid), timeout=_EVENT_TIMEOUT_SECONDS)
             await seal_session.commit()
             results = await asyncio.wait_for(
                 asyncio.gather(*tasks, return_exceptions=True),
@@ -533,6 +520,75 @@ async def test_fosun_admission_is_loaded_from_matching_task5_authority(
             )
             is None
         )
+
+
+@pytest.mark.asyncio
+async def test_fosun_quote_and_bars_capabilities_are_operation_scoped(
+    migrated_database_url: str,
+) -> None:
+    """The newest capability of another operation must not grant or hide authority."""
+    now = datetime(2026, 8, 23, 12, tzinfo=UTC)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        session.add_all(
+            [
+                ProviderCapability(
+                    provider="fosun",
+                    capability="READ_ONLY",
+                    contract_hash="a" * 64,
+                    expires_at=now + timedelta(hours=1),
+                    schema_version="1",
+                    payload={
+                        "operation": "fosun_get_quotes",
+                        "market_scope": "US",
+                    },
+                    created_at=now - timedelta(hours=2),
+                ),
+                ProviderCapability(
+                    provider="fosun",
+                    capability="READ_ONLY",
+                    contract_hash="b" * 64,
+                    expires_at=now + timedelta(hours=1),
+                    schema_version="1",
+                    payload={
+                        "operation": "fosun_get_bars",
+                        "market_scope": "US",
+                    },
+                    created_at=now - timedelta(hours=1),
+                ),
+                IntegrationStatus(
+                    provider="fosun",
+                    status="read_only",
+                    admitted_contract_hash="a" * 64,
+                    mode_changed_at=now - timedelta(hours=1),
+                ),
+            ]
+        )
+        await session.commit()
+
+        service = IntegrationStatusService(session, now)
+        generic = await service.capability("fosun")
+        quote_scoped = await service.capability(
+            "fosun", operation="fosun_get_quotes", market_scope="US"
+        )
+        quote_admission = await load_fosun_market_admission(
+            session,
+            decision_time=now,
+            operation="fosun_get_quotes",
+            market_scope="US",
+        )
+        bars_admission = await load_fosun_market_admission(
+            session,
+            decision_time=now,
+            operation="fosun_get_bars",
+            market_scope="US",
+        )
+
+    assert generic.contract_hash == "b" * 64
+    assert quote_scoped.contract_hash == "a" * 64
+    assert quote_admission is not None
+    assert quote_admission.operation == "fosun_get_quotes"
+    assert bars_admission is None
 
 
 @pytest.mark.asyncio

@@ -73,15 +73,29 @@ class IntegrationStatusService:
         rows = await self._session.scalars(select(IntegrationStatus))
         return {row.provider: row for row in rows}
 
-    async def capability(self, provider: ProviderName) -> CapabilityProjection:
-        authority = await self._session.scalar(
-            select(ProviderCapability)
-            .where(
-                ProviderCapability.provider == provider,
-                ProviderCapability.capability == "READ_ONLY",
+    async def capability(
+        self,
+        provider: ProviderName,
+        *,
+        operation: str | None = None,
+        market_scope: str | None = None,
+    ) -> CapabilityProjection:
+        statement = select(ProviderCapability).where(
+            ProviderCapability.provider == provider,
+            ProviderCapability.capability == "READ_ONLY",
+        )
+        if operation is not None:
+            statement = statement.where(
+                ProviderCapability.payload["operation"].as_string() == operation
             )
-            .order_by(desc(ProviderCapability.created_at), desc(ProviderCapability.id))
-            .limit(1)
+        if market_scope is not None:
+            statement = statement.where(
+                ProviderCapability.payload["market_scope"].as_string() == market_scope
+            )
+        authority = await self._session.scalar(
+            statement.order_by(
+                desc(ProviderCapability.created_at), desc(ProviderCapability.id)
+            ).limit(1)
         )
         return CapabilityProjection(authority, self._now)
 

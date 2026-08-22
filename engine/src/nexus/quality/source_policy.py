@@ -51,7 +51,7 @@ class SourcePolicy(BaseModel):
 
 
 class FosunMarketAdmission(BaseModel):
-    """Validated Task 5 authority scoped to the read-only bars operation."""
+    """Validated Task 5 authority scoped to one read-only market operation."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -64,7 +64,7 @@ class FosunMarketAdmission(BaseModel):
     admitted_contract_hash: str
     provider: Literal["fosun"]
     mode: Literal["read_only"]
-    operation: Literal["fosun_get_bars"]
+    operation: Literal["fosun_get_quotes", "fosun_get_bars"]
     market_scope: Literal["US"]
     contract_hash: str
     expires_at: datetime
@@ -117,11 +117,11 @@ async def load_fosun_market_admission(
     market_scope: str,
 ) -> FosunMarketAdmission | None:
     decision_time = require_utc(decision_time)
-    if operation != "fosun_get_bars" or market_scope != "US":
+    if operation not in {"fosun_get_quotes", "fosun_get_bars"} or market_scope != "US":
         return None
     service = IntegrationStatusService(session, decision_time)
     status = await service.find_status("fosun")
-    capability = await service.capability("fosun")
+    capability = await service.capability("fosun", operation=operation, market_scope=market_scope)
     authority = capability.valid
     if (
         status is None
@@ -149,7 +149,7 @@ async def load_fosun_market_admission(
         admitted_contract_hash=status.admitted_contract_hash,
         provider="fosun",
         mode="read_only",
-        operation=cast(Literal["fosun_get_bars"], payload_operation),
+        operation=cast(Literal["fosun_get_quotes", "fosun_get_bars"], payload_operation),
         market_scope=cast(Literal["US"], payload_market_scope),
         contract_hash=authority.contract_hash,
         expires_at=authority.expires_at,
@@ -166,9 +166,7 @@ async def select_price_series(
     """Load repository authority and choose one complete point-in-time series."""
     decision_time = require_utc(decision_time)
     try:
-        policy = await load_source_policy_v1(
-            session, instrument_tick_size=instrument_tick_size
-        )
+        policy = await load_source_policy_v1(session, instrument_tick_size=instrument_tick_size)
     except ValueError:
         return SourceSelection(
             selected=None,
@@ -257,6 +255,8 @@ def _valid_fosun_candidate(
         and admission.admitted_contract_hash == admission.contract_hash
         and candidate.contract_hash == admission.contract_hash
     )
+
+
 def _canonical_bars(series: PriceSeries, bars: Sequence[PriceBar]) -> tuple[PriceBar, ...]:
     latest: dict[tuple[object, ...], PriceBar] = {}
     for bar in bars:
