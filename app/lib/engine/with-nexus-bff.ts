@@ -41,6 +41,6 @@ async function boundedRequest(request: Request, options: NexusBffOptions): Promi
 }
 async function readBounded(request: Request, limit: number): Promise<Uint8Array> {
   if (!request.body) return new Uint8Array(); const reader = request.body.getReader(); const chunks: Uint8Array[] = []; let total = 0;
-  while (true) { const { done, value } = await reader.read(); if (done) break; total += value.byteLength; if (total > limit) { await reader.cancel(); throw new NexusBffError(400, "VALIDATION_ERROR", "Request body is too large."); } chunks.push(value); }
+  while (true) { const { done, value } = await reader.read(); if (done) break; total += value.byteLength; if (total > limit) { void reader.cancel().catch(() => undefined); throw new NexusBffError(400, "VALIDATION_ERROR", "Request body is too large."); } chunks.push(value); }
   const all = new Uint8Array(total); let offset = 0; for (const chunk of chunks) { all.set(chunk, offset); offset += chunk.byteLength; } return all;
 }

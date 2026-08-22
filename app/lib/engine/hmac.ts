@@ -40,7 +40,7 @@ export function createEngineHmacHeaders(input: EngineHmacInput): Record<string, 
 function normalizePathAndQuery(pathAndQuery: string): string {
   const questionMark = pathAndQuery.indexOf("?");
   const rawPath = questionMark === -1 ? pathAndQuery : pathAndQuery.slice(0, questionMark);
-  if (!rawPath.startsWith("/")) throw new Error("engine paths must be absolute");
+  if (!rawPath.startsWith("/") || !hasValidPercentEscapes(pathAndQuery)) throw new Error("engine paths must be absolute and percent-encoded");
   const rawQuery = questionMark === -1 ? "" : pathAndQuery.slice(questionMark + 1);
   const pairs = Array.from(new URLSearchParams(rawQuery), ([key, value]) => [
     strictPercentEncode(key),
@@ -52,6 +52,16 @@ function normalizePathAndQuery(pathAndQuery: string): string {
   return pairs.length === 0
     ? rawPath
     : `${rawPath}?${pairs.map(([key, value]) => `${key}=${value}`).join("&")}`;
+}
+
+function hasValidPercentEscapes(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] === "%") {
+      if (!/^[0-9a-fA-F]{2}$/.test(value.slice(index + 1, index + 3))) return false;
+      index += 2;
+    }
+  }
+  return true;
 }
 
 function strictPercentEncode(value: string): string {

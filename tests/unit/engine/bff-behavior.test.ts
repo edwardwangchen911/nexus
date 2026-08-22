@@ -37,6 +37,19 @@ beforeEach(() => {
 });
 
 describe("withNexusBff", () => {
+  it.each([
+    [200, { proposal_id: "proposal-1" }, {}],
+    [202, { run_id: "run-1" }, { location: "/api/v1/runs/run-1" }],
+    [409, null, { error: { code: "VERSION_CONFLICT", message: "conflict", request_id: actor.requestId, details: {} } }],
+    [503, null, { error: { code: "PROVIDER_UNAVAILABLE", message: "unavailable", request_id: actor.requestId, details: {} } }],
+  ])("passes safe generic engine envelope status %s", async (status, data, error) => {
+    const payload = data === null
+      ? error
+      : { data, meta: { request_id: actor.requestId, schema_version: "1", as_of: "2026-08-22T00:00:00Z" } };
+    const response = await withNexusBff(async () => Response.json(payload, { status, headers: { location: "/api/v1/runs/run-1", "x-upstream": "discard" } }))(request(new Uint8Array()));
+    expect(response.status).toBe(status);
+    expect(response.headers.get("x-upstream")).toBeNull();
+  });
   it("streams an exact allowed body to the real handler", async () => {
     let received: number[] = [];
     const handler = vi.fn(async (incoming: Request) => {

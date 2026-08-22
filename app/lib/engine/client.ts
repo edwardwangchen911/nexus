@@ -30,13 +30,13 @@ export async function sanitizeEngineResponse<Path extends keyof TemporaryInterna
   if (!response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return internalFailure<Path>();
   const bytes = await boundedResponseBytes(response, MAX_ENGINE_RESPONSE_BYTES);
   if (!bytes) return internalFailure<Path>();
-  try { return (rebuildAllowedEngineResponse(response.status, JSON.parse(new TextDecoder().decode(bytes))) ?? internalFailure<Path>()) as EngineResponse<Path>; } catch { return internalFailure<Path>(); }
+  try { return (rebuildAllowedEngineResponse(response.status, JSON.parse(new TextDecoder().decode(bytes)), response.headers) ?? internalFailure<Path>()) as EngineResponse<Path>; } catch { return internalFailure<Path>(); }
 }
 
 async function boundedResponseBytes(response: Response, limit: number): Promise<Uint8Array | null> {
   if (!response.body) return null;
   const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let total = 0;
-  try { while (true) { const { done, value } = await reader.read(); if (done) break; total += value.byteLength; if (total > limit) { await reader.cancel(); return null; } chunks.push(value); } } catch { return null; }
+  try { while (true) { const { done, value } = await reader.read(); if (done) break; total += value.byteLength; if (total > limit) { void reader.cancel().catch(() => undefined); return null; } chunks.push(value); } } catch { return null; }
   const all = new Uint8Array(total); let offset = 0; for (const chunk of chunks) { all.set(chunk, offset); offset += chunk.byteLength; } return all;
 }
 

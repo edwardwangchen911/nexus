@@ -22,13 +22,14 @@ def make_request(
     body: bytes,
     *,
     raw_path: bytes | None = None,
+    decoded_path: str | None = None,
 ) -> Request:
     path, _, query = path_and_query.partition("?")
     return Request(
         {
             "type": "http",
             "method": method,
-            "path": path,
+            "path": decoded_path or path,
             "raw_path": raw_path or path.encode("ascii"),
             "query_string": query.encode("ascii"),
             "headers": [(key.lower().encode(), value.encode()) for key, value in headers.items()],
@@ -84,6 +85,7 @@ async def test_percent_encoded_raw_path_is_verified_without_framework_decoding()
         headers,
         body,
         raw_path=b"/internal%2Fv1/system-status",
+        decoded_path="/internal/v1/system-status",
     )
 
     with pytest.raises(AssertionError, match="database"):

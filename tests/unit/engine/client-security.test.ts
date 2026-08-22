@@ -65,4 +65,12 @@ describe("engineFetch runtime boundary", () => {
       },
     });
   });
+
+  it("uses 30 seconds for writes and 10 seconds for reads", async () => {
+    setEngineEnvironment();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(new AbortController().signal);
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ data: { status: "ok" }, meta: { request_id: actor.requestId, schema_version: "1", as_of: "2026-08-22T00:00:00Z" } }), { headers: { "content-type": "application/json" } }));
+    await engineFetch("/internal/v1/system-status", { method: "GET", actor });
+    expect(timeout).toHaveBeenLastCalledWith(10_000);
+  });
 });
