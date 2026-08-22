@@ -5,7 +5,7 @@ from uuid import UUID
 
 import httpx
 import pytest
-from nexus.providers.base import BarsRequest, PriceBar, ProviderPage
+from nexus.providers.base import BarsRequest, MarketDataProvenance, PriceBar, ProviderPage
 from nexus.providers.market.alpaca import (
     AlpacaMarketDataProvider,
     MarketProviderDeadlineExceeded,
@@ -43,6 +43,13 @@ def _page() -> ProviderPage[PriceBar]:
         ),
         next_cursor="next",
         raw_payload=b'{"fixture":true}',
+        provenance=MarketDataProvenance(
+            source="fixture",
+            feed="synthetic",
+            adjustment="all",
+            interval="1Day",
+            mode="fixture",
+        ),
     )
 
 
@@ -113,6 +120,13 @@ async def test_alpaca_adapter_owns_bounded_retry_and_normalizes_decimal_strings(
     assert page.items[0].received_at == END
     assert page.next_cursor == "next"
     assert b'"request_id":"request-1"' in page.raw_payload
+    assert page.provenance == MarketDataProvenance(
+        source="alpaca",
+        feed="sip",
+        adjustment="all",
+        interval="1Day",
+        mode="delayed",
+    )
 
 
 @pytest.mark.asyncio

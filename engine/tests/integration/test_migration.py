@@ -79,6 +79,24 @@ def test_initial_migration_creates_an_exact_reversible_schema(
     _assert_schema(temporary_database_url)
 
 
+def test_0005_upgrades_and_round_trips_the_committed_0004_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> None:
+    engine_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = Config(str(engine_root / "alembic.ini"))
+
+    command.upgrade(config, "0004_market_master")
+    assert "published_at" not in _table_columns(temporary_database_url, "universe_snapshots")
+    command.upgrade(config, "0005_market_integrity")
+    assert "published_at" in _table_columns(temporary_database_url, "universe_snapshots")
+    command.downgrade(config, "0004_market_master")
+    assert "published_at" not in _table_columns(temporary_database_url, "universe_snapshots")
+    command.upgrade(config, "head")
+    _assert_schema(temporary_database_url)
+
+
 def test_0003_backfills_admission_state_after_the_released_0002_schema(
     monkeypatch: pytest.MonkeyPatch,
     temporary_database_url: str,
@@ -442,3 +460,20 @@ async def _table_names_async(database_url: str) -> set[str]:
             )
     finally:
         await engine.dispose()
+
+
+def _table_columns(database_url: str, table_name: str) -> set[str]:
+    async def inspect_columns() -> set[str]:
+        engine = create_async_engine(database_url)
+        try:
+            async with engine.connect() as connection:
+                return await connection.run_sync(
+                    lambda sync_connection: {
+                        column["name"]
+                        for column in inspect(sync_connection).get_columns(table_name)
+                    }
+                )
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(inspect_columns())

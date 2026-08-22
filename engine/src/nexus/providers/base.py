@@ -60,6 +60,18 @@ class PriceBar(BaseModel):
         return None if value is None else require_utc(value)
 
 
+class MarketDataProvenance(BaseModel):
+    """Inseparable provider identity and normalization contract for one page."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source: Literal["fosun", "alpaca", "fixture"]
+    feed: str
+    adjustment: Literal["raw", "split", "all"]
+    interval: Literal["1Min", "1Day"]
+    mode: Literal["fixture", "read_only", "delayed"]
+
+
 class ProviderPage[T](BaseModel):
     """A recoverable provider page plus its exact raw archive payload."""
 
@@ -70,6 +82,7 @@ class ProviderPage[T](BaseModel):
     raw_payload: bytes = b""
     source_request_id: str | None = None
     as_of: datetime | None = None
+    provenance: MarketDataProvenance
 
     @field_validator("as_of")
     @classmethod
@@ -89,12 +102,7 @@ class PriceSeries(BaseModel):
     interval: Literal["1Min", "1Day"] = "1Day"
     mode: Literal["fixture", "read_only", "delayed"]
     quality: Literal["PASS", "PARTIAL", "FAIL"]
-    capability_expires_at: datetime | None = None
-
-    @field_validator("capability_expires_at")
-    @classmethod
-    def _capability_aware_utc(cls, value: datetime | None) -> datetime | None:
-        return None if value is None else require_utc(value)
+    contract_hash: str | None = None
 
 
 class MarketDataProvider(Protocol):

@@ -67,6 +67,7 @@ class PositionEligibility(BaseModel):
 
 def etf_new_position_eligibility(
     *,
+    instrument_id: InstrumentId,
     asset_type: Literal["equity_etf", "non_equity_etf"],
     mode: Literal["fixture", "production"],
     exposures: tuple[SectorExposureRecord, ...],
@@ -77,6 +78,22 @@ def etf_new_position_eligibility(
         return PositionEligibility(eligible=True, quality="PASS", reasons=())
     if not exposures:
         return _ineligible()
+    if any(record.instrument_id != instrument_id for record in exposures):
+        return _ineligible("ETF_EXPOSURE_INSTRUMENT_MISMATCH")
+    if any(record.sector_code not in EQUITY_SECTOR_CODES for record in exposures):
+        return _ineligible("ETF_EXPOSURE_SECTOR_INVALID")
+    snapshots = {
+        (
+            record.as_of,
+            record.source_url,
+            record.content_hash,
+            record.synthetic,
+            record.reviewed,
+        )
+        for record in exposures
+    }
+    if len(snapshots) != 1:
+        return _ineligible("ETF_EXPOSURE_SNAPSHOT_MISMATCH")
     weight = sum((record.weight for record in exposures), start=Decimal(0))
     if not Decimal("0.995") <= weight <= Decimal("1.005"):
         return _ineligible("ETF_EXPOSURE_WEIGHT_INVALID")

@@ -67,12 +67,14 @@ def test_equity_etf_requires_recent_reviewed_exposure_outside_fixture_mode() -> 
     )
 
     assert etf_new_position_eligibility(
+        instrument_id=stable_instrument_id("SPY"),
         asset_type="equity_etf",
         mode="production",
         exposures=(exposure,),
         decision_date=decision_date,
     ).eligible is True
     assert etf_new_position_eligibility(
+        instrument_id=stable_instrument_id("SPY"),
         asset_type="equity_etf",
         mode="production",
         exposures=(),
@@ -94,20 +96,97 @@ def test_synthetic_exposure_is_fixture_only_and_non_equity_etfs_use_risk_buckets
     )
 
     assert etf_new_position_eligibility(
+        instrument_id=stable_instrument_id("SPY"),
         asset_type="equity_etf",
         mode="fixture",
         exposures=(synthetic,),
         decision_date=decision_date,
     ).eligible is True
     assert etf_new_position_eligibility(
+        instrument_id=stable_instrument_id("SPY"),
         asset_type="equity_etf",
         mode="production",
         exposures=(synthetic,),
         decision_date=decision_date,
     ).eligible is False
     assert etf_new_position_eligibility(
+        instrument_id=stable_instrument_id("TLT"),
         asset_type="non_equity_etf",
         mode="production",
         exposures=(),
         decision_date=decision_date,
     ).eligible is True
+
+
+def test_equity_etf_rejects_exposures_for_another_instrument() -> None:
+    decision_date = date(2026, 8, 23)
+    wrong_instrument = SectorExposureRecord(
+        instrument_id=stable_instrument_id("QQQ"),
+        sector_code="information_technology",
+        weight="1.000000",
+        as_of=decision_date,
+        source_url="https://issuer.invalid/spy.csv",
+        content_hash="c" * 64,
+        synthetic=False,
+        reviewed=True,
+    )
+
+    result = etf_new_position_eligibility(
+        instrument_id=stable_instrument_id("SPY"),
+        asset_type="equity_etf",
+        mode="production",
+        exposures=(wrong_instrument,),
+        decision_date=decision_date,
+    )
+
+    assert result.eligible is False
+    assert result.reasons == ("ETF_EXPOSURE_INSTRUMENT_MISMATCH",)
+
+
+def test_equity_etf_rejects_uncontrolled_sector_and_mixed_snapshots() -> None:
+    decision_date = date(2026, 8, 23)
+    target = stable_instrument_id("SPY")
+
+    def exposure(
+        sector: str,
+        weight: str,
+        *,
+        as_of: date = decision_date,
+        content_hash: str = "d" * 64,
+    ) -> SectorExposureRecord:
+        return SectorExposureRecord(
+            instrument_id=target,
+            sector_code=sector,
+            weight=weight,
+            as_of=as_of,
+            source_url="https://issuer.invalid/spy.csv",
+            content_hash=content_hash,
+            synthetic=False,
+            reviewed=True,
+        )
+
+    uncontrolled = etf_new_position_eligibility(
+        instrument_id=target,
+        asset_type="equity_etf",
+        mode="production",
+        exposures=(exposure("crypto", "1.000000"),),
+        decision_date=decision_date,
+    )
+    mixed = etf_new_position_eligibility(
+        instrument_id=target,
+        asset_type="equity_etf",
+        mode="production",
+        exposures=(
+            exposure("information_technology", "0.500000"),
+            exposure(
+                "financials",
+                "0.500000",
+                as_of=decision_date - timedelta(days=1),
+                content_hash="e" * 64,
+            ),
+        ),
+        decision_date=decision_date,
+    )
+
+    assert uncontrolled.reasons == ("ETF_EXPOSURE_SECTOR_INVALID",)
+    assert mixed.reasons == ("ETF_EXPOSURE_SNAPSHOT_MISMATCH",)

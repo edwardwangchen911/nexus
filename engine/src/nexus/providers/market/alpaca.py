@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from nexus.providers.base import BarsRequest, PriceBar, ProviderPage
+from nexus.providers.base import BarsRequest, MarketDataProvenance, PriceBar, ProviderPage
 
 NEW_YORK = ZoneInfo("America/New_York")
 
@@ -132,6 +132,13 @@ class AlpacaMarketDataProvider:
             raw_payload=raw_payload,
             source_request_id=request_id,
             as_of=received_at,
+            provenance=MarketDataProvenance(
+                source="alpaca",
+                feed="sip",
+                adjustment=request.adjustment,
+                interval=request.interval,
+                mode="delayed",
+            ),
         )
 
 

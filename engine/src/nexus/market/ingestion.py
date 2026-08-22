@@ -13,7 +13,7 @@ import pyarrow.parquet as pq  # type: ignore[import-untyped]
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.persistence.models.data import DataArtifact, PriceSeriesManifest
-from nexus.providers.base import PriceBar, ProviderPage
+from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
 
 
 class MarketObjectStore(Protocol):
@@ -27,8 +27,6 @@ class MarketObjectStore(Protocol):
 
     async def delete_temporary(self, key: str) -> None: ...
 
-    async def delete(self, key: str) -> None: ...
-
 
 @dataclass(frozen=True)
 class MarketIngestionResult:
@@ -37,16 +35,13 @@ class MarketIngestionResult:
     raw_uri: str
     artifact: DataArtifact
     manifest: PriceSeriesManifest
+    provenance: MarketDataProvenance
 
 
 async def ingest_price_page(
     session: AsyncSession,
     object_store: MarketObjectStore,
     page: ProviderPage[PriceBar],
-    *,
-    source: str,
-    feed: str,
-    adjustment: str,
 ) -> MarketIngestionResult:
     """Archive raw, atomically publish Parquet, then commit metadata."""
     if not page.items:
@@ -64,8 +59,6 @@ async def ingest_price_page(
     raw_key = f"raw/market/{date_path}/{request_id}/{raw_digest}.json"
     temporary_key: str | None = None
     final_key: str | None = None
-    promoted = False
-    committed = False
     try:
         raw_uri = await object_store.archive_raw(raw_key, page.raw_payload)
         parquet_payload = serialize_price_bars(page.items)
@@ -77,7 +70,6 @@ async def ingest_price_page(
         temporary_key = f"temporary/market/{uuid4()}.parquet"
         await object_store.put_temporary(temporary_key, parquet_payload)
         parquet_uri = await object_store.promote(temporary_key, final_key)
-        promoted = True
 
         observed = [bar.observed_at or bar.available_at for bar in page.items]
         artifact = DataArtifact(
@@ -86,7 +78,7 @@ async def ingest_price_page(
             byte_size=len(parquet_payload),
             mime_type="application/vnd.apache.parquet",
             schema_version="price_bars_v1",
-            source=source,
+            source=page.provenance.source,
             observed_at=min(observed),
             available_at=max(bar.available_at for bar in page.items),
             received_at=received_at,
@@ -96,21 +88,23 @@ async def ingest_price_page(
         manifest = PriceSeriesManifest(
             data_artifact_id=artifact.id,
             instrument=str(instrument_id),
-            source=source,
-            feed=feed,
-            adjustment=adjustment,
+            source=page.provenance.source,
+            feed=page.provenance.feed,
+            adjustment=page.provenance.adjustment,
             start_at=min(observed),
             end_at=max(observed),
             row_count=len(page.items),
         )
         session.add(manifest)
         await session.commit()
-        committed = True
-        return MarketIngestionResult(raw_uri=raw_uri, artifact=artifact, manifest=manifest)
+        return MarketIngestionResult(
+            raw_uri=raw_uri,
+            artifact=artifact,
+            manifest=manifest,
+            provenance=page.provenance,
+        )
     except Exception:
         await session.rollback()
-        if promoted and not committed and final_key is not None:
-            await _safe_delete_final(object_store, final_key)
         raise
     finally:
         if temporary_key is not None:
@@ -124,9 +118,16 @@ def serialize_price_bars(bars: Sequence[PriceBar]) -> bytes:
         key=lambda bar: (
             str(bar.instrument_id),
             bar.session,
-            bar.available_at,
-            bar.revision,
+            str(bar.open),
+            str(bar.high),
+            str(bar.low),
             str(bar.close),
+            str(bar.volume),
+            bar.observed_at or bar.available_at,
+            bar.available_at,
+            bar.received_at or bar.available_at,
+            bar.revision,
+            tuple(sorted(bar.quality_flags)),
         ),
     )
     decimal_type = pa.decimal128(38, 12)
@@ -159,7 +160,7 @@ def serialize_price_bars(bars: Sequence[PriceBar]) -> bytes:
             "available_at": bar.available_at,
             "received_at": bar.received_at or bar.available_at,
             "revision": bar.revision,
-            "quality_flags": list(bar.quality_flags),
+            "quality_flags": sorted(bar.quality_flags),
         }
         for bar in ordered
     ]
@@ -180,12 +181,5 @@ def serialize_price_bars(bars: Sequence[PriceBar]) -> bytes:
 async def _safe_delete_temporary(store: MarketObjectStore, key: str) -> None:
     try:
         await store.delete_temporary(key)
-    except Exception:
-        return
-
-
-async def _safe_delete_final(store: MarketObjectStore, key: str) -> None:
-    try:
-        await store.delete(key)
     except Exception:
         return

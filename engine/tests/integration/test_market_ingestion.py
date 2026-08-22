@@ -1,12 +1,13 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from itertools import permutations
 from uuid import UUID
 
 import pytest
 from nexus.market.ingestion import ingest_price_page, serialize_price_bars
 from nexus.persistence.models.data import DataArtifact, PriceSeriesManifest
 from nexus.persistence.session import session_factory
-from nexus.providers.base import PriceBar, ProviderPage
+from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
 from nexus.settings import EngineSettings
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -43,6 +44,13 @@ def _page() -> ProviderPage[PriceBar]:
         raw_payload=b'{"bars":[{"fixture":true}],"request_id":"fixture-1"}',
         source_request_id="fixture-1",
         as_of=RECEIVED_AT,
+        provenance=MarketDataProvenance(
+            source="fixture",
+            feed="synthetic",
+            adjustment="all",
+            interval="1Day",
+            mode="fixture",
+        ),
     )
 
 
@@ -93,9 +101,6 @@ async def test_ingestion_archives_raw_then_promotes_parquet_before_metadata_comm
             session,
             store,
             _page(),
-            source="fixture",
-            feed="synthetic",
-            adjustment="all",
         )
 
     assert [event for event, _ in store.events[:3]] == [
@@ -127,9 +132,6 @@ async def test_object_failure_rolls_back_metadata_and_safely_cleans_temporary_ob
                 session,
                 store,
                 _page(),
-                source="fixture",
-                feed="synthetic",
-                adjustment="all",
             )
 
     assert store.temporary == {}
@@ -139,41 +141,92 @@ async def test_object_failure_rolls_back_metadata_and_safely_cleans_temporary_ob
 
 
 @pytest.mark.asyncio
-async def test_database_commit_failure_rolls_back_new_manifest_and_cleans_promoted_object(
+async def test_duplicate_ingestion_never_deletes_the_shared_content_addressed_object(
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    first_store = FakeObjectStore()
+    store = FakeObjectStore()
     async with factory() as session:
-        await ingest_price_page(
-            session,
-            first_store,
-            _page(),
-            source="fixture",
-            feed="synthetic",
-            adjustment="all",
-        )
+        first = await ingest_price_page(session, store, _page())
 
-    second_store = FakeObjectStore()
     async with factory() as session:
         with pytest.raises(IntegrityError):
-            await ingest_price_page(
-                session,
-                second_store,
-                _page(),
-                source="fixture",
-                feed="synthetic",
-                adjustment="all",
-            )
+            await ingest_price_page(session, store, _page())
 
-    assert any(event == "delete" for event, _ in second_store.events)
-    assert not any(key.startswith("normalized/market/") for key in second_store.objects)
+    final_key = first.artifact.uri.removeprefix("memory://")
+    assert final_key in store.objects
+    assert not any(event == "delete" for event, _ in store.events)
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 1
         assert await session.scalar(select(func.count()).select_from(PriceSeriesManifest)) == 1
 
 
-def test_normalized_parquet_is_deterministic_for_the_same_bars() -> None:
-    bars = _bars()
+@pytest.mark.asyncio
+async def test_concurrent_duplicate_ingestion_keeps_the_shared_final_object(
+    migrated_database_url: str,
+) -> None:
+    import asyncio
 
-    assert serialize_price_bars(bars) == serialize_price_bars(tuple(reversed(bars)))
+    store = FakeObjectStore()
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+
+    async def ingest_once() -> object:
+        async with factory() as session:
+            try:
+                return await ingest_price_page(session, store, _page())
+            except IntegrityError as error:
+                return error
+
+    results = await asyncio.gather(ingest_once(), ingest_once())
+
+    assert sum(not isinstance(result, IntegrityError) for result in results) == 1
+    final_keys = [key for key in store.objects if key.startswith("normalized/market/")]
+    assert len(final_keys) == 1
+    assert store.objects[final_keys[0]].startswith(b"PAR1")
+    assert not any(event == "delete" for event, _ in store.events)
+
+
+@pytest.mark.asyncio
+async def test_ingestion_provenance_cannot_be_overridden_by_the_caller(
+    migrated_database_url: str,
+) -> None:
+    store = FakeObjectStore()
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        with pytest.raises(TypeError):
+            await ingest_price_page(  # type: ignore[call-arg]
+                session,
+                store,
+                _page(),
+                source="alpaca",
+            )
+
+
+def test_normalized_parquet_is_deterministic_under_complete_row_permutations() -> None:
+    base = _bars()[0]
+    bars = (
+        base,
+        base.model_copy(
+            update={
+                "open": Decimal("99.5"),
+                "high": Decimal("101.5"),
+                "volume": Decimal("900"),
+                "observed_at": OBSERVED_AT.replace(microsecond=1),
+                "received_at": RECEIVED_AT.replace(microsecond=1),
+                "quality_flags": ("z", "a"),
+            }
+        ),
+        base.model_copy(
+            update={
+                "low": Decimal("98.5"),
+                "volume": Decimal("1100"),
+                "observed_at": OBSERVED_AT.replace(microsecond=2),
+                "received_at": RECEIVED_AT.replace(microsecond=2),
+                "quality_flags": ("a", "z"),
+            }
+        ),
+    )
+
+    payloads = {serialize_price_bars(order) for order in permutations(bars)}
+
+    assert len(payloads) == 1

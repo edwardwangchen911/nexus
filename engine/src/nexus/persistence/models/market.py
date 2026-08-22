@@ -56,6 +56,7 @@ class UniverseSnapshot(ImmutableCreatedAt, Base):
     effective_from: Mapped[date] = mapped_column(Date)
     source: Mapped[str] = mapped_column(String(255))
     content_hash: Mapped[str] = mapped_column(String(64))
+    published_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class UniverseMember(ImmutableCreatedAt, Base):
