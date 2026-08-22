@@ -13,9 +13,12 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 _TEMPORARY_DATABASE_NAME = re.compile(r"^nexus_test_[0-9a-f]{32}$")
+_FORCE_DROP_ATTEMPTS = 20
+_FORCE_DROP_RETRY_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -103,14 +106,27 @@ async def _create_database(admin_url: URL, database_name: str) -> None:
 
 async def _drop_database(admin_url: URL, database_name: str) -> None:
     _require_temporary_database_name(database_name)
-    engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
-    try:
-        async with engine.connect() as connection:
-            await connection.execute(
-                text(f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)')
-            )
-    finally:
-        await engine.dispose()
+    statement = text(f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)')
+    for attempt in range(_FORCE_DROP_ATTEMPTS):
+        engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(statement)
+            return
+        except DBAPIError as error:
+            if not _is_transient_protected_backend(error) or attempt == _FORCE_DROP_ATTEMPTS - 1:
+                raise
+        finally:
+            await engine.dispose()
+        await asyncio.sleep(_FORCE_DROP_RETRY_SECONDS)
+
+
+def _is_transient_protected_backend(error: DBAPIError) -> bool:
+    """Recognize only FORCE-drop collisions with PostgreSQL protected workers."""
+    return (
+        getattr(error.orig, "sqlstate", None) == "42501"
+        and "permission denied to terminate process" in str(error.orig)
+    )
 
 
 def _require_temporary_database_name(database_name: str) -> None:

@@ -1,25 +1,34 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
 
 import conftest as integration_conftest
 import pytest
 from conftest import (
+    _FORCE_DROP_ATTEMPTS,
     TemporaryDatabase,
     TemporaryDatabaseFactory,
     _create_database,
     _drop_database,
 )
 from sqlalchemy.engine import URL
+from sqlalchemy.exc import ProgrammingError
 
 
 class _InjectedSetupFailure(RuntimeError):
     """Deliberately interrupt setup after PostgreSQL has created a temporary database."""
 
 
+class _ProtectedBackendError(Exception):
+    sqlstate = "42501"
+
+
 class _RecordingEngine:
-    def __init__(self) -> None:
+    def __init__(self, *, transient_failures: int = 0, error_message: str = "") -> None:
         self.statements: list[str] = []
+        self.transient_failures = transient_failures
+        self.error_message = error_message
 
     @asynccontextmanager
     async def connect(self) -> AsyncIterator["_RecordingEngine"]:
@@ -27,6 +36,13 @@ class _RecordingEngine:
 
     async def execute(self, statement) -> None:
         self.statements.append(str(statement))
+        if self.transient_failures > 0:
+            self.transient_failures -= 1
+            raise ProgrammingError(
+                str(statement),
+                {},
+                _ProtectedBackendError(self.error_message),
+            )
 
     async def dispose(self) -> None:
         return None
@@ -54,6 +70,93 @@ def test_drop_database_delegates_backend_cleanup_to_force_drop(
     assert engine.statements == [
         f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)'
     ]
+
+
+def test_drop_database_retries_a_transient_protected_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A short-lived PostgreSQL background worker must not leak the temporary database."""
+    database_name = "nexus_test_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    engine = _RecordingEngine(
+        transient_failures=1,
+        error_message="permission denied to terminate process",
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(integration_conftest, "asyncio", type("Asyncio", (), {"sleep": sleep}))
+    monkeypatch.setattr(
+        integration_conftest,
+        "create_async_engine",
+        lambda *_args, **_kwargs: engine,
+    )
+
+    asyncio.run(
+        _drop_database(
+            URL.create("postgresql+asyncpg", database="postgres"),
+            database_name,
+        )
+    )
+
+    statement = f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)'
+    assert engine.statements == [statement, statement]
+    sleep.assert_awaited_once()
+
+
+def test_drop_database_does_not_retry_an_unrelated_privilege_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real ownership/permission defect must remain fail closed."""
+    database_name = "nexus_test_cccccccccccccccccccccccccccccccc"
+    engine = _RecordingEngine(
+        transient_failures=1,
+        error_message="permission denied for database postgres",
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(integration_conftest, "asyncio", type("Asyncio", (), {"sleep": sleep}))
+    monkeypatch.setattr(
+        integration_conftest,
+        "create_async_engine",
+        lambda *_args, **_kwargs: engine,
+    )
+
+    with pytest.raises(ProgrammingError, match="permission denied for database"):
+        asyncio.run(
+            _drop_database(
+                URL.create("postgresql+asyncpg", database="postgres"),
+                database_name,
+            )
+        )
+
+    assert len(engine.statements) == 1
+    sleep.assert_not_awaited()
+
+
+def test_drop_database_retry_is_bounded_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persistent protected backend must surface after the bounded retry window."""
+    database_name = "nexus_test_dddddddddddddddddddddddddddddddd"
+    engine = _RecordingEngine(
+        transient_failures=_FORCE_DROP_ATTEMPTS,
+        error_message="permission denied to terminate process",
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(integration_conftest, "asyncio", type("Asyncio", (), {"sleep": sleep}))
+    monkeypatch.setattr(
+        integration_conftest,
+        "create_async_engine",
+        lambda *_args, **_kwargs: engine,
+    )
+
+    with pytest.raises(ProgrammingError, match="permission denied to terminate process"):
+        asyncio.run(
+            _drop_database(
+                URL.create("postgresql+asyncpg", database="postgres"),
+                database_name,
+            )
+        )
+
+    assert len(engine.statements) == _FORCE_DROP_ATTEMPTS
+    assert sleep.await_count == _FORCE_DROP_ATTEMPTS - 1
 
 
 def test_temporary_database_is_dropped_when_post_create_setup_fails(
