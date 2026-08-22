@@ -1,37 +1,44 @@
 import "server-only";
 
 import { v7 as uuidv7 } from "uuid";
+import type { paths } from "../generated/schema";
 import type { NexusActor } from "../auth/nexus-user";
 import { errorResponse, rebuildAllowedEngineResponse } from "./errors";
 import { createEngineHmacHeaders } from "./hmac";
 
-const SYSTEM_STATUS_PATH = "/internal/v1/system-status";
 const MAX_ENGINE_RESPONSE_BYTES = 64 * 1024;
-type TemporaryInternalPaths = { "/internal/v1/system-status": unknown };
-export type EngineRequestInit<Path extends keyof TemporaryInternalPaths> = Omit<RequestInit, "body"> & { actor: NexusActor; body?: string | Uint8Array | ArrayBuffer; method?: Path extends "/internal/v1/system-status" ? "GET" : never };
-export type EngineResponse<Path extends keyof TemporaryInternalPaths> = Response & { readonly nexusPath?: Path };
+type InternalPath = Extract<keyof paths, `/internal/v1/${string}`>;
+type EngineBody = string | Uint8Array | ArrayBuffer;
+type MethodFor<Path extends InternalPath> =
+  | (Exclude<paths[Path]["get"], undefined> extends never ? never : "GET")
+  | (Exclude<paths[Path]["post"], undefined> extends never ? never : "POST")
+  | (Exclude<paths[Path]["put"], undefined> extends never ? never : "PUT")
+  | (Exclude<paths[Path]["delete"], undefined> extends never ? never : "DELETE");
+export type EngineTarget<Path extends InternalPath> = Path | { template: Path; path: string };
+export type EngineRequestInit<Path extends InternalPath> = Omit<RequestInit, "body" | "method"> & { actor: NexusActor; body?: EngineBody; method?: MethodFor<Path> };
+export type EngineResponse<Path extends InternalPath> = Response & { readonly nexusPath?: Path };
 
-export async function engineFetch<Path extends keyof TemporaryInternalPaths>(path: Path, init: EngineRequestInit<Path>): Promise<EngineResponse<Path>> {
+export async function engineFetch<Path extends InternalPath>(target: EngineTarget<Path>, init: EngineRequestInit<Path>): Promise<EngineResponse<Path>> {
   const config = engineConfig();
-  const target = allowedTarget(path, config.baseUrl);
-  if (!target) return internalFailure<Path>();
+  const resolved = allowedTarget(target, config.baseUrl);
+  if (!resolved) return internalFailure<Path>();
   const method = (init.method ?? "GET").toUpperCase();
   const body = exactBodyBytes(init.body);
   const headers = new Headers(init.headers);
-  const protectedHeaders = createEngineHmacHeaders({ keyId: config.keyId, secret: config.secret, method, pathAndQuery: SYSTEM_STATUS_PATH, timestamp: Math.floor(Date.now() / 1000), nonce: uuidv7(), actorId: init.actor.userId, requestId: init.actor.requestId || uuidv7(), body });
+  const protectedHeaders = createEngineHmacHeaders({ keyId: config.keyId, secret: config.secret, method, pathAndQuery: resolved.pathAndQuery, timestamp: Math.floor(Date.now() / 1000), nonce: uuidv7(), actorId: init.actor.userId, requestId: init.actor.requestId || uuidv7(), body });
   for (const name of Object.keys(protectedHeaders)) headers.delete(name);
   for (const [name, value] of Object.entries(protectedHeaders)) headers.set(name, value);
   try {
-    const response = await fetch(target, { ...init, method, headers, body: body.byteLength ? body as unknown as BodyInit : undefined, signal: AbortSignal.any([init.signal, AbortSignal.timeout(timeoutForMethod(method))].filter(Boolean) as AbortSignal[]) });
-    return await sanitizeEngineResponse<Path>(response);
+    const response = await fetch(resolved.url, { ...init, method, headers, body: body.byteLength ? body as unknown as BodyInit : undefined, signal: AbortSignal.any([init.signal, AbortSignal.timeout(timeoutForMethod(method))].filter(Boolean) as AbortSignal[]) });
+    return await sanitizeEngineResponse<Path>(response, undefined, resolved.url.pathname);
   } catch { return internalFailure<Path>(); }
 }
 
-export async function sanitizeEngineResponse<Path extends keyof TemporaryInternalPaths>(response: Response, requestUrl?: string): Promise<EngineResponse<Path>> {
+export async function sanitizeEngineResponse<Path extends InternalPath>(response: Response, requestUrl?: string, schemaPath?: string): Promise<EngineResponse<Path>> {
   if (!response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return internalFailure<Path>();
   const bytes = await boundedResponseBytes(response, MAX_ENGINE_RESPONSE_BYTES);
   if (!bytes) return internalFailure<Path>();
-  try { return (rebuildAllowedEngineResponse(response.status, JSON.parse(new TextDecoder().decode(bytes)), response.headers, requestUrl) ?? internalFailure<Path>()) as EngineResponse<Path>; } catch { return internalFailure<Path>(); }
+  try { return (rebuildAllowedEngineResponse(response.status, JSON.parse(new TextDecoder().decode(bytes)), response.headers, requestUrl, schemaPath) ?? internalFailure<Path>()) as EngineResponse<Path>; } catch { return internalFailure<Path>(); }
 }
 
 async function boundedResponseBytes(response: Response, limit: number): Promise<Uint8Array | null> {
@@ -41,8 +48,9 @@ async function boundedResponseBytes(response: Response, limit: number): Promise<
   const all = new Uint8Array(total); let offset = 0; for (const chunk of chunks) { all.set(chunk, offset); offset += chunk.byteLength; } return all;
 }
 
-function internalFailure<Path extends keyof TemporaryInternalPaths>(): EngineResponse<Path> { return errorResponse(500, "INTERNAL_ERROR", "The request could not be completed.") as EngineResponse<Path>; }
+function internalFailure<Path extends InternalPath>(): EngineResponse<Path> { return errorResponse(500, "INTERNAL_ERROR", "The request could not be completed.") as EngineResponse<Path>; }
 export function timeoutForMethod(method: string): number { return ["GET", "HEAD"].includes(method.toUpperCase()) ? 10_000 : 30_000; }
-function allowedTarget(path: string, baseUrl: string): URL | null { if (path !== SYSTEM_STATUS_PATH) return null; try { const base = new URL(baseUrl); if (base.username || base.password || (process.env.NEXUS_ENV === "production" && base.protocol !== "https:")) return null; const target = new URL(SYSTEM_STATUS_PATH, base); return target.origin === base.origin && target.pathname === SYSTEM_STATUS_PATH && !target.search ? target : null; } catch { return null; } }
+function allowedTarget<Path extends InternalPath>(target: EngineTarget<Path>, baseUrl: string): { url: URL; pathAndQuery: string } | null { const template = typeof target === "string" ? target : target.template; const path = typeof target === "string" ? target : target.path; if (!matchesTemplate(template, path)) return null; try { const base = new URL(baseUrl); if (base.username || base.password || (process.env.NEXUS_ENV === "production" && base.protocol !== "https:")) return null; const url = new URL(path, base); if (url.origin !== base.origin || url.pathname !== path || url.search || url.hash || url.username || url.password) return null; return { url, pathAndQuery: url.pathname }; } catch { return null; } }
+function matchesTemplate(template: InternalPath, path: string): boolean { if (template === "/internal/v1/system-status" || template === "/internal/v1/integrations") return path === template; const match = /^\/internal\/v1\/integrations\/(fosun|alpaca|sec|fred|openai)\/(test|mode)$/.exec(path); if (!match) return false; return template === `/internal/v1/integrations/{provider}/${match[2]}`; }
 function engineConfig(): { baseUrl: string; keyId: string; secret: string } { const baseUrl = process.env.NEXUS_ENGINE_BASE_URL; const keyId = process.env.NEXUS_ENGINE_HMAC_CURRENT_KEY_ID ?? "current"; const secret = process.env.NEXUS_ENGINE_HMAC_CURRENT_SECRET ?? process.env.NEXUS_ENGINE_HMAC_SECRET; if (!baseUrl || !secret) throw new Error("NEXUS engine service configuration is incomplete"); return { baseUrl, keyId, secret }; }
-function exactBodyBytes(body: EngineRequestInit<keyof TemporaryInternalPaths>["body"]): Uint8Array { if (body === undefined) return new Uint8Array(); if (typeof body === "string") return new TextEncoder().encode(body); if (body instanceof Uint8Array) return body; if (body instanceof ArrayBuffer) return new Uint8Array(body); throw new TypeError("engine request bodies must have exact byte representation"); }
+function exactBodyBytes(body: EngineBody | undefined): Uint8Array { if (body === undefined) return new Uint8Array(); if (typeof body === "string") return new TextEncoder().encode(body); if (body instanceof Uint8Array) return body; if (body instanceof ArrayBuffer) return new Uint8Array(body); throw new TypeError("engine request bodies must have exact byte representation"); }

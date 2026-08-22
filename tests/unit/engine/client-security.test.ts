@@ -13,6 +13,19 @@ function successPayload(asOf = "2026-08-22T00:00:00Z") {
   };
 }
 
+function integrationStatus() {
+  return {
+    as_of: "2026-08-22T00:00:00Z",
+    capability_expires_at: null,
+    contract_hash: null,
+    mode: "fixture",
+    next_action: "Read-only admission is required.",
+    provider: "fosun",
+    quality: "PASS",
+    version: 1,
+  };
+}
+
 function jsonResponse(value: unknown, status = 200, headers: HeadersInit = {}): Response {
   return new Response(JSON.stringify(value), {
     status,
@@ -95,6 +108,69 @@ describe("engineFetch runtime boundary", () => {
         as_of: "2026-08-22T00:00:00Z",
       },
     });
+  });
+
+  it("accepts the strict integration list envelope without leaking extra fields", async () => {
+    setEngineEnvironment();
+    vi.stubGlobal("fetch", async () => jsonResponse({
+      data: [integrationStatus()],
+      meta: successPayload().meta,
+    }));
+
+    const response = await engineFetch("/internal/v1/integrations", { method: "GET", actor });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: [integrationStatus()],
+      meta: successPayload().meta,
+    });
+
+    vi.stubGlobal("fetch", async () => jsonResponse({
+      data: [{ ...integrationStatus(), credential: "must-not-escape" }],
+      meta: successPayload().meta,
+    }));
+    await expectSafeInternalError(
+      await engineFetch("/internal/v1/integrations", { method: "GET", actor }),
+    );
+  });
+
+  it("signs the resolved dynamic integration path and rejects template mismatches", async () => {
+    setEngineEnvironment();
+    vi.spyOn(Date, "now").mockReturnValue(1_787_371_200_000);
+    let sentInit: RequestInit | undefined;
+    let calls = 0;
+    vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls += 1;
+      sentInit = init;
+      return jsonResponse({ data: integrationStatus(), meta: successPayload().meta });
+    });
+    const body = new Uint8Array([123, 125]);
+    const response = await engineFetch({
+      template: "/internal/v1/integrations/{provider}/test",
+      path: "/internal/v1/integrations/fosun/test",
+    }, { method: "POST", actor, body });
+
+    expect(response.status).toBe(200);
+    const sentHeaders = new Headers(sentInit?.headers);
+    const expectedHeaders = createEngineHmacHeaders({
+      keyId: "test-current",
+      secret: "nexus-test-hmac-key-32-bytes!!!!",
+      method: "POST",
+      pathAndQuery: "/internal/v1/integrations/fosun/test",
+      timestamp: 1_787_371_200,
+      nonce: sentHeaders.get("x-nexus-nonce")!,
+      actorId: actor.userId,
+      requestId: actor.requestId,
+      body,
+    });
+    expect(sentHeaders.get("x-nexus-signature")).toBe(expectedHeaders["X-Nexus-Signature"]);
+
+    const rejected = await engineFetch({
+      template: "/internal/v1/integrations/{provider}/mode",
+      path: "/internal/v1/integrations/fosun/test",
+    }, { method: "POST", actor, body });
+    await expectSafeInternalError(rejected);
+    expect(calls).toBe(1);
   });
 
   it.each([["GET", 10_000], ["HEAD", 10_000], ["POST", 30_000], ["PUT", 30_000]])("uses %i ms timeout for %s", (method, expected) => {

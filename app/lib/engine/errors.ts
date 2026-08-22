@@ -21,11 +21,14 @@ export function safeBffErrorResponse(error: unknown): Response {
   return errorResponse(500, "INTERNAL_ERROR", "The request could not be completed.");
 }
 
-export function rebuildAllowedEngineResponse(status: number, value: unknown, upstreamHeaders = new Headers(), requestUrl?: string): Response | null {
+export function rebuildAllowedEngineResponse(status: number, value: unknown, upstreamHeaders = new Headers(), requestUrl?: string, schemaPath?: string): Response | null {
   if ([200, 201, 202].includes(status) && isObject(value, ["data", "meta"])) {
     const { data, meta } = value;
-    if (isPlain(data) && isObject(meta, ["request_id", "schema_version", "as_of"])
-      && isV7(meta.request_id) && meta.schema_version === "1" && isUtcIso(meta.as_of)) return Response.json(value, { status, headers: safeHeaders(upstreamHeaders, requestUrl) });
+    const safeData = allowedSuccessData(data, requestUrl, schemaPath);
+    if (safeData !== INVALID_DATA && isObject(meta, ["request_id", "schema_version", "as_of"])
+      && isV7(meta.request_id) && meta.schema_version === "1" && isUtcIso(meta.as_of)) {
+      return Response.json({ data: safeData, meta }, { status, headers: safeHeaders(upstreamHeaders, requestUrl) });
+    }
   }
   if ([400, 401, 403, 404, 409, 422, 429, 500, 502, 503, 504].includes(status) && isObject(value, ["error"])) {
     const { error } = value;
@@ -33,6 +36,61 @@ export function rebuildAllowedEngineResponse(status: number, value: unknown, ups
   }
   return null;
 }
+
+const INVALID_DATA = Symbol("invalid engine data");
+const INTEGRATION_PROVIDERS = ["fosun", "alpaca", "sec", "fred", "openai"] as const;
+const INTEGRATION_MODES = ["disabled", "fixture", "read_only"] as const;
+const INTEGRATION_QUALITIES = ["PASS", "PARTIAL", "FAIL"] as const;
+
+function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: string): unknown | typeof INVALID_DATA {
+  const pathname = enginePathname(requestUrl, schemaPath);
+  if (pathname === "/internal/v1/system-status") {
+    return isObject(data, ["status"]) && data.status === "ok" ? { status: "ok" } : INVALID_DATA;
+  }
+  if (pathname === "/internal/v1/integrations") {
+    if (!Array.isArray(data)) return INVALID_DATA;
+    const statuses = data.map((status) => safeIntegrationStatus(status));
+    return statuses.every((status) => status !== null) ? statuses : INVALID_DATA;
+  }
+  const integrationAction = /^\/internal\/v1\/integrations\/(fosun|alpaca|sec|fred|openai)\/(test|mode)$/.exec(pathname);
+  if (integrationAction) {
+    const status = safeIntegrationStatus(data);
+    return status?.provider === integrationAction[1] ? status : INVALID_DATA;
+  }
+  return schemaPath === undefined && isPlain(data) ? data : INVALID_DATA;
+}
+
+function safeIntegrationStatus(value: unknown): Record<string, unknown> | null {
+  const keys = ["as_of", "capability_expires_at", "contract_hash", "mode", "next_action", "provider", "quality", "version"];
+  if (!isObject(value, keys)) return null;
+  if (!isNullableUtcIso(value.as_of) || !isNullableUtcIso(value.capability_expires_at)) return null;
+  if (value.contract_hash !== null && (typeof value.contract_hash !== "string" || !/^[a-f0-9]{64}$/.test(value.contract_hash))) return null;
+  if (value.next_action !== null && typeof value.next_action !== "string") return null;
+  if (!includes(INTEGRATION_PROVIDERS, value.provider) || !includes(INTEGRATION_MODES, value.mode) || !includes(INTEGRATION_QUALITIES, value.quality)) return null;
+  if (!Number.isInteger(value.version) || (value.version as number) < 0) return null;
+  return {
+    as_of: value.as_of,
+    capability_expires_at: value.capability_expires_at,
+    contract_hash: value.contract_hash,
+    mode: value.mode,
+    next_action: value.next_action,
+    provider: value.provider,
+    quality: value.quality,
+    version: value.version,
+  };
+}
+
+function enginePathname(requestUrl?: string, schemaPath?: string): string {
+  if (schemaPath) return schemaPath;
+  if (!requestUrl) return "";
+  try {
+    const pathname = new URL(requestUrl).pathname;
+    return pathname.startsWith("/api/v1/") ? pathname.replace("/api/v1/", "/internal/v1/") : pathname;
+  } catch { return ""; }
+}
+
+function isNullableUtcIso(value: unknown): boolean { return value === null || isUtcIso(value); }
+function includes<const T extends readonly string[]>(values: T, value: unknown): value is T[number] { return typeof value === "string" && values.includes(value as T[number]); }
 
 function isV7(value: unknown): boolean { return typeof value === "string" && validateUuid(value) && uuidVersion(value) === 7; }
 function isUtcIso(value: unknown): boolean { if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(value)) return false; const date = new Date(value); return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 19) === value.slice(0, 19); }

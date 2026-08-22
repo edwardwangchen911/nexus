@@ -5,14 +5,12 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool
-from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
-
 from nexus.persistence.base import Base
 from nexus.persistence.models import data, runtime  # noqa: F401
 from nexus.settings import EngineSettings
-
+from sqlalchemy import pool
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import async_engine_from_config
 
 config = context.config
 
