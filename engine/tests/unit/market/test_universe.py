@@ -1,0 +1,113 @@
+import csv
+from datetime import date, timedelta
+from pathlib import Path
+
+from nexus.market.universe import (
+    EQUITY_SECTOR_CODES,
+    SectorExposureRecord,
+    etf_new_position_eligibility,
+    stable_instrument_id,
+)
+
+STOCKS = {
+    "AAPL", "ABBV", "ABT", "AMD", "AMGN", "AMT", "AMZN", "APD", "AVGO", "BAC",
+    "CAT", "COST", "CRM", "CSCO", "CVX", "GE", "GOOGL", "GS", "HD", "IBM", "JNJ",
+    "JPM", "KO", "LLY", "MA", "MCD", "META", "MSFT", "NEE", "NFLX", "NVDA", "ORCL",
+    "PG", "QCOM", "RTX", "SHW", "TSLA", "TXN", "UNH", "V", "WMT", "XOM",
+}
+ETFS = {"SPY", "QQQ", "IWM", "DIA", "VTI", "TLT", "GLD"}
+
+
+def _seed_rows() -> list[dict[str, str]]:
+    seed_path = Path(__file__).resolve().parents[3] / "seed/universe/us_liquid_v1.csv"
+    with seed_path.open(newline="", encoding="utf-8") as seed_file:
+        return list(csv.DictReader(seed_file))
+
+
+def test_us_liquid_v1_has_exact_versioned_symbol_sets_and_stable_ids() -> None:
+    rows = _seed_rows()
+    stocks = {row["symbol"] for row in rows if row["asset_type"] == "common_stock"}
+    etfs = {row["symbol"] for row in rows if row["asset_type"].endswith("_etf")}
+
+    assert stocks == STOCKS
+    assert etfs == ETFS
+    assert len(rows) == 49
+    assert {row["universe_version"] for row in rows} == {"us_liquid_v1"}
+    assert all(row["instrument_id"] == str(stable_instrument_id(row["symbol"])) for row in rows)
+
+
+def test_seed_uses_only_the_bound_sector_codes_and_explicit_non_equity_buckets() -> None:
+    rows = _seed_rows()
+    equity_sectors = {
+        row["sector_code"]
+        for row in rows
+        if row["asset_type"] == "common_stock"
+    }
+    non_equity = {
+        row["symbol"]: row["risk_bucket"]
+        for row in rows
+        if row["symbol"] in {"TLT", "GLD"}
+    }
+
+    assert equity_sectors == set(EQUITY_SECTOR_CODES)
+    assert non_equity == {"TLT": "US_TREASURY", "GLD": "GOLD"}
+
+
+def test_equity_etf_requires_recent_reviewed_exposure_outside_fixture_mode() -> None:
+    decision_date = date(2026, 8, 23)
+    exposure = SectorExposureRecord(
+        instrument_id=stable_instrument_id("SPY"),
+        sector_code="information_technology",
+        weight="1.000000",
+        as_of=decision_date - timedelta(days=30),
+        source_url="https://issuer.invalid/spy.csv",
+        content_hash="a" * 64,
+        synthetic=False,
+        reviewed=True,
+    )
+
+    assert etf_new_position_eligibility(
+        asset_type="equity_etf",
+        mode="production",
+        exposures=(exposure,),
+        decision_date=decision_date,
+    ).eligible is True
+    assert etf_new_position_eligibility(
+        asset_type="equity_etf",
+        mode="production",
+        exposures=(),
+        decision_date=decision_date,
+    ).reasons == ("ETF_EXPOSURE_REVIEW_REQUIRED",)
+
+
+def test_synthetic_exposure_is_fixture_only_and_non_equity_etfs_use_risk_buckets() -> None:
+    decision_date = date(2026, 8, 23)
+    synthetic = SectorExposureRecord(
+        instrument_id=stable_instrument_id("SPY"),
+        sector_code="information_technology",
+        weight="1.000000",
+        as_of=decision_date,
+        source_url="fixture://us_liquid_v1",
+        content_hash="b" * 64,
+        synthetic=True,
+        reviewed=False,
+    )
+
+    assert etf_new_position_eligibility(
+        asset_type="equity_etf",
+        mode="fixture",
+        exposures=(synthetic,),
+        decision_date=decision_date,
+    ).eligible is True
+    assert etf_new_position_eligibility(
+        asset_type="equity_etf",
+        mode="production",
+        exposures=(synthetic,),
+        decision_date=decision_date,
+    ).eligible is False
+    assert etf_new_position_eligibility(
+        asset_type="non_equity_etf",
+        mode="production",
+        exposures=(),
+        decision_date=decision_date,
+    ).eligible is True

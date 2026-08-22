@@ -10,7 +10,7 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from nexus.integrations.service import IntegrationStatusService
 from nexus.persistence.base import Base
-from nexus.persistence.models import data, runtime  # noqa: F401
+from nexus.persistence.models import data, market, runtime  # noqa: F401
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import DateTime, inspect, text
@@ -34,12 +34,31 @@ EXPECTED_TABLES = {
     "idempotency_records",
     "audit_events",
     "used_nonces",
+    "instruments",
+    "instrument_aliases",
+    "universe_snapshots",
+    "universe_members",
+    "sector_exposures",
+    "latest_quotes",
+    "watchlists",
+    "watchlist_members",
 }
 
 EXPECTED_FOREIGN_KEYS = {
     "quality_reports": "fk_quality_reports_data_snapshot_id_data_snapshots",
     "price_series_manifests": "fk_price_series_manifests_data_artifact_id_data_artifacts",
     "job_leases": "fk_job_leases_job_id_jobs",
+    "instrument_aliases": "fk_instrument_aliases_instrument_id_instruments",
+    "universe_members": {
+        "fk_universe_members_instrument_id_instruments",
+        "fk_universe_members_universe_snapshot_id_universe_snapshots",
+    },
+    "sector_exposures": "fk_sector_exposures_instrument_id_instruments",
+    "latest_quotes": "fk_latest_quotes_instrument_id_instruments",
+    "watchlist_members": {
+        "fk_watchlist_members_instrument_id_instruments",
+        "fk_watchlist_members_watchlist_id_watchlists",
+    },
 }
 
 
@@ -357,10 +376,13 @@ def _assert_reflected_schema(connection: Connection) -> None:
     assert {constraint["name"] for constraint in nonce_constraints} == {
         "uq_used_nonces_key_nonce"
     }
-    for table_name, foreign_key_name in EXPECTED_FOREIGN_KEYS.items():
-        assert {foreign_key["name"] for foreign_key in inspector.get_foreign_keys(table_name)} == {
-            foreign_key_name
-        }
+    for table_name, foreign_key_names in EXPECTED_FOREIGN_KEYS.items():
+        expected_names = (
+            foreign_key_names if isinstance(foreign_key_names, set) else {foreign_key_names}
+        )
+        assert {
+            foreign_key["name"] for foreign_key in inspector.get_foreign_keys(table_name)
+        } == expected_names
 
     artifacts = {column["name"]: column for column in inspector.get_columns("data_artifacts")}
     assert isinstance(artifacts["id"]["type"], postgresql.UUID)

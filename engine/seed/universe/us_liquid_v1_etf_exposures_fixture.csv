@@ -1,0 +1,6 @@
+instrument_id,sector_code,weight,as_of,source_url,content_hash
+d3286fbe-b624-567e-ae89-31335d1d2e78,information_technology,1.000000,2026-08-01,synthetic://fixture/us_liquid_v1/SPY,a1cc8786675b8e894975db5f9c9cb3b600f518235e367b1a0251ac9c3416a321
+c31b1693-5958-5acb-8732-c4fcae3c2091,information_technology,1.000000,2026-08-01,synthetic://fixture/us_liquid_v1/QQQ,1989a91ef6ac7ff21040a3d589b272de90b63afeb2f4c36faf5096d32c2ef8c1
+74164d48-fc0b-50f2-9206-8275146dc93b,industrials,1.000000,2026-08-01,synthetic://fixture/us_liquid_v1/IWM,005b44b230f7518e4ae95a8bdc26196990a1d2e31b14638d5f9190f9bcc2b059
+fb43cdf9-152f-58fb-95bc-bb32015343de,financials,1.000000,2026-08-01,synthetic://fixture/us_liquid_v1/DIA,df2bb0c9d9258c06a27dc87935eef5cfe4894def947aa40e83a952182274fc0e
+f097d195-d462-5a5c-a162-42f3caf0fa52,consumer_staples,1.000000,2026-08-01,synthetic://fixture/us_liquid_v1/VTI,1b6af0dafa151481d80e916ef524eeb1b5ac072211ceb5cdead98e28fd7858e9
