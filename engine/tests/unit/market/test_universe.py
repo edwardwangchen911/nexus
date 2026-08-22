@@ -190,3 +190,62 @@ def test_equity_etf_rejects_uncontrolled_sector_and_mixed_snapshots() -> None:
 
     assert uncontrolled.reasons == ("ETF_EXPOSURE_SECTOR_INVALID",)
     assert mixed.reasons == ("ETF_EXPOSURE_SNAPSHOT_MISMATCH",)
+
+
+def test_equity_etf_rejects_duplicate_sector_rows() -> None:
+    decision_date = date(2026, 8, 23)
+    target = stable_instrument_id("SPY")
+    rows = tuple(
+        SectorExposureRecord(
+            instrument_id=target,
+            sector_code="information_technology",
+            weight="0.500000",
+            as_of=decision_date,
+            source_url="https://issuer.invalid/spy.csv",
+            content_hash="f" * 64,
+            synthetic=False,
+            reviewed=True,
+        )
+        for _ in range(2)
+    )
+
+    result = etf_new_position_eligibility(
+        instrument_id=target,
+        asset_type="equity_etf",
+        mode="production",
+        exposures=rows,
+        decision_date=decision_date,
+    )
+
+    assert result.reasons == ("ETF_EXPOSURE_SECTOR_DUPLICATE",)
+
+
+def test_equity_etf_rejects_each_out_of_range_weight_before_aggregation() -> None:
+    decision_date = date(2026, 8, 23)
+    target = stable_instrument_id("SPY")
+    rows = tuple(
+        SectorExposureRecord(
+            instrument_id=target,
+            sector_code=sector,
+            weight=weight,
+            as_of=decision_date,
+            source_url="https://issuer.invalid/spy.csv",
+            content_hash="0" * 64,
+            synthetic=False,
+            reviewed=True,
+        )
+        for sector, weight in (
+            ("information_technology", "-1.000000"),
+            ("financials", "2.000000"),
+        )
+    )
+
+    result = etf_new_position_eligibility(
+        instrument_id=target,
+        asset_type="equity_etf",
+        mode="production",
+        exposures=rows,
+        decision_date=decision_date,
+    )
+
+    assert result.reasons == ("ETF_EXPOSURE_WEIGHT_OUT_OF_RANGE",)

@@ -82,6 +82,11 @@ def etf_new_position_eligibility(
         return _ineligible("ETF_EXPOSURE_INSTRUMENT_MISMATCH")
     if any(record.sector_code not in EQUITY_SECTOR_CODES for record in exposures):
         return _ineligible("ETF_EXPOSURE_SECTOR_INVALID")
+    sector_codes = [record.sector_code for record in exposures]
+    if len(sector_codes) != len(set(sector_codes)):
+        return _ineligible("ETF_EXPOSURE_SECTOR_DUPLICATE")
+    if any(not Decimal(0) <= record.weight <= Decimal(1) for record in exposures):
+        return _ineligible("ETF_EXPOSURE_WEIGHT_OUT_OF_RANGE")
     snapshots = {
         (
             record.as_of,
