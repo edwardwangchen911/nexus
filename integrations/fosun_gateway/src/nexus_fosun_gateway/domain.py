@@ -35,6 +35,12 @@ class CashItem(GatewayModel):
     currency: str
     cash_balance: Decimal
     available_cash: Decimal
+    provider_as_of: datetime | None = None
+
+    @field_validator("provider_as_of")
+    @classmethod
+    def cash_provider_as_of_is_aware_utc(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _as_utc(value)
 
 
 class PositionItem(GatewayModel):
@@ -46,6 +52,16 @@ class PositionItem(GatewayModel):
     available_quantity: Decimal
     frozen_quantity: Decimal
     average_cost: Decimal | None = None
+    diluted_cost: Decimal | None = None
+    current_price: Decimal | None = None
+    provider_as_of: datetime | None = None
+
+    @field_validator("provider_as_of")
+    @classmethod
+    def position_provider_as_of_is_aware_utc(
+        cls, value: datetime | None
+    ) -> datetime | None:
+        return None if value is None else _as_utc(value)
 
 
 class OrderItem(GatewayModel):
@@ -57,12 +73,13 @@ class OrderItem(GatewayModel):
     filled_quantity: Decimal
     price: Decimal | None = None
     status: str
-    updated_at: datetime
+    submitted_at: datetime
+    updated_at: datetime | None = None
 
-    @field_validator("updated_at")
+    @field_validator("submitted_at", "updated_at")
     @classmethod
-    def updated_at_is_aware_utc(cls, value: datetime) -> datetime:
-        return _as_utc(value)
+    def order_times_are_aware_utc(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _as_utc(value)
 
 
 class CashFlowItem(GatewayModel):
@@ -126,6 +143,7 @@ class GatewayPage[ItemT: BaseModel](GatewayModel):
     has_more: bool
     next_cursor: str | None
     as_of: datetime
+    quality: Literal["PASS", "PARTIAL"] = "PASS"
 
     @field_validator("as_of")
     @classmethod

@@ -7,7 +7,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from nexus_fosun_gateway.adapter.normalization import (
-    normalize_portfolio_responses,
+    normalize_cash_summary_response,
+    normalize_holdings_response,
     normalize_provider_response,
 )
 from nexus_fosun_gateway.domain import CapabilityItem, GatewayItem, GatewayPage
@@ -46,12 +47,20 @@ class FixtureFosunTransport:
                 account_id = context.get("account_id")
                 if not isinstance(account_id, str):
                     raise ValueError("portfolio fixture account missing")
-                return normalize_portfolio_responses(
-                    responses.get("assets"),
-                    responses.get("holdings"),
-                    account_id=account_id,
-                    received_at=received_at,
-                )
+                read_kind = context.get("read_kind")
+                if read_kind == "cash":
+                    return normalize_cash_summary_response(
+                        responses.get("assets"),
+                        account_id=account_id,
+                        received_at=received_at,
+                    )
+                if read_kind == "holdings":
+                    return normalize_holdings_response(
+                        responses.get("holdings"),
+                        account_id=account_id,
+                        received_at=received_at,
+                    )
+                raise ValueError("portfolio fixture read kind missing")
             return normalize_provider_response(
                 operation,
                 document.get("provider_response"),

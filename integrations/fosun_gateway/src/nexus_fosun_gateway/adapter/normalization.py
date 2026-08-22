@@ -62,32 +62,52 @@ def normalize_provider_response(
     raise _malformed()
 
 
-def normalize_portfolio_responses(
-    assets_raw: object,
-    holdings_raw: object,
+def normalize_cash_summary_response(
+    raw: object,
     *,
     account_id: str,
     received_at: datetime,
 ) -> GatewayPage[GatewayItem]:
-    """Normalize the required cash-summary plus holdings double read."""
-    assets, assets_request_id = _success_envelope(assets_raw)
-    holdings, holdings_request_id = _success_envelope(holdings_raw)
+    """Normalize one cash-summary call without reading holdings implicitly."""
+    assets, request_id = _success_envelope(raw)
     try:
         breakdown = assets.get("breakdown")
         if not isinstance(breakdown, list):
             raise ValueError
         cash = tuple(_cash(item, account_id) for item in breakdown)
+        return GatewayPage[GatewayItem](
+            items=cash,
+            source_request_id=request_id,
+            has_more=False,
+            next_cursor=None,
+            as_of=received_at,
+            quality="PARTIAL",
+        )
+    except (KeyError, TypeError, ValueError, InvalidOperation):
+        raise _malformed() from None
+
+
+def normalize_holdings_response(
+    raw: object,
+    *,
+    account_id: str,
+    received_at: datetime,
+) -> GatewayPage[GatewayItem]:
+    """Normalize exactly one holdings page with no hidden cash call."""
+    holdings, request_id = _success_envelope(raw)
+    try:
         positions = tuple(
             _position(item, account_id) for item in _mappings(_list(holdings))
         )
         start, count, total = _pagination(holdings)
         next_cursor = str(start + count) if start + count < total else None
         return GatewayPage[GatewayItem](
-            items=(*cash, *positions),
-            source_request_id=f"{assets_request_id}:{holdings_request_id}",
+            items=positions,
+            source_request_id=request_id,
             has_more=next_cursor is not None,
             next_cursor=next_cursor,
             as_of=received_at,
+            quality="PARTIAL",
         )
     except (KeyError, TypeError, ValueError, InvalidOperation):
         raise _malformed() from None
@@ -153,6 +173,8 @@ def _position(item: Mapping[str, object], account_id: str) -> PositionItem:
     market = _required_str(item, "marketCode")
     stock = _required_str(item, "stockCode")
     average_cost = item.get("avgCost")
+    diluted_cost = item.get("dilutedCost")
+    current_price = item.get("price")
     return PositionItem(
         external_account_id=account_id,
         instrument_code=f"{market}{stock}",
@@ -161,6 +183,9 @@ def _position(item: Mapping[str, object], account_id: str) -> PositionItem:
         available_quantity=_decimal(item, "quantityAvail"),
         frozen_quantity=_decimal(item, "qtyOnHold"),
         average_cost=Decimal(str(average_cost)) if average_cost is not None else None,
+        diluted_cost=Decimal(str(diluted_cost)) if diluted_cost is not None else None,
+        current_price=Decimal(str(current_price)) if current_price is not None else None,
+        provider_as_of=None,
     )
 
 
@@ -178,7 +203,8 @@ def _order(item: Mapping[str, object]) -> OrderItem:
         filled_quantity=_decimal(item, "filledQuantity"),
         price=_scaled_optional(item.get("price"), item.get("power")),
         status=str(_required_value(item, "orderStatus")),
-        updated_at=_epoch_datetime(timestamp),
+        submitted_at=_epoch_datetime(timestamp),
+        updated_at=None,
     )
 
 
@@ -251,12 +277,16 @@ def _list_page(
 ) -> GatewayPage[GatewayItem]:
     start, count, total = _pagination(data)
     next_cursor = str(start + count) if start + count < total else None
+    quality: Literal["PASS", "PARTIAL"] = (
+        "PARTIAL" if items and isinstance(items[0], OrderItem) else "PASS"
+    )
     return GatewayPage[GatewayItem](
         items=items,
         source_request_id=request_id,
         has_more=next_cursor is not None,
         next_cursor=next_cursor,
         as_of=received_at,
+        quality=quality,
     )
 
 

@@ -3,6 +3,7 @@
   "operation": "fosun_sync_portfolio",
   "request_payload": {
     "account_id": "synthetic-account-001",
+    "read_kind": "holdings",
     "cursor": "0",
     "limit": 1
   },
@@ -38,7 +39,9 @@
             "quantity": "10",
             "quantityAvail": "10",
             "qtyOnHold": "0",
-            "avgCost": "100.00"
+            "avgCost": "100.00",
+            "dilutedCost": null,
+            "price": "123.45"
           }
         ],
         "start": 0,

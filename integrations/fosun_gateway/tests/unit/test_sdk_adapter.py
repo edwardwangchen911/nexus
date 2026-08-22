@@ -2,6 +2,8 @@ import asyncio
 import logging
 import threading
 import time
+from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 import nexus_fosun_gateway.adapter.sdk as sdk_module
@@ -82,6 +84,8 @@ def client() -> SimpleNamespace:
                                 "quantityAvail": "10",
                                 "qtyOnHold": "0",
                                 "avgCost": "100.00",
+                                "dilutedCost": "98.50",
+                                "price": "123.45",
                             }
                         ],
                         "start": 20,
@@ -182,9 +186,23 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
     adapter = SdkFosunTransport(client, rate_limiter=NoopRateLimiter())
 
     accounts = await adapter.execute("fosun_sync_accounts", {})
-    portfolio = await adapter.execute(
+    cash = await adapter.execute(
         "fosun_sync_portfolio",
-        {"account_id": "synthetic-account-001", "cursor": "20", "limit": 20},
+        {
+            "account_id": "synthetic-account-001",
+            "read_kind": "cash",
+            "cursor": None,
+            "limit": 100,
+        },
+    )
+    holdings = await adapter.execute(
+        "fosun_sync_portfolio",
+        {
+            "account_id": "synthetic-account-001",
+            "read_kind": "holdings",
+            "cursor": "20",
+            "limit": 20,
+        },
     )
     orders = await adapter.execute(
         "fosun_list_orders",
@@ -213,8 +231,17 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
     )
 
     assert accounts.items[0].external_account_id == "synthetic-account-001"
-    assert len(portfolio.items) == 2
+    assert len(cash.items) == 1
+    assert len(holdings.items) == 1
+    assert holdings.items[0].average_cost == 100
+    assert holdings.items[0].diluted_cost == Decimal("98.50")
+    assert holdings.items[0].current_price == Decimal("123.45")
+    assert holdings.items[0].provider_as_of is None
+    assert holdings.quality == "PARTIAL"
     assert orders.items[0].external_order_id == "synthetic-order-001"
+    assert orders.items[0].submitted_at == datetime(2026, 8, 22, 4, 0, tzinfo=UTC)
+    assert orders.items[0].updated_at is None
+    assert orders.quality == "PARTIAL"
     assert flows.items[0].external_cash_flow_id == "synthetic-cash-flow-001"
     assert str(quotes.items[0].price) == "123.45"
     assert str(bars.items[0].close) == "105"

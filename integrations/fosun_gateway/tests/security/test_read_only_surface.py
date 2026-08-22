@@ -324,6 +324,26 @@ def test_authority_overrides_are_rejected(
             },
             "0198f7a0-2222-7777-8222-222222222243",
         ),
+        (
+            "fosun_sync_portfolio",
+            {
+                "account_id": "synthetic-account-001",
+                "cursor": "0",
+                "limit": 20,
+            },
+            "0198f7a0-2222-7777-8222-222222222244",
+        ),
+        (
+            "fosun_sync_portfolio",
+            {
+                "account_id": "synthetic-account-001",
+                "read_kind": "cash",
+                "cursor": "0",
+                "limit": 20,
+                "url": "https://provider.invalid",
+            },
+            "0198f7a0-2222-7777-8222-222222222245",
+        ),
     ],
 )
 def test_typed_parameters_reject_invalid_temporal_values_and_cursors(

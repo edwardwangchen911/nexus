@@ -111,6 +111,9 @@ async def test_success_empty_pagination_and_partial_fixtures_normalize() -> None
     assert empty.items == ()
     assert pagination.has_more is True
     assert pagination.next_cursor == "1"
+    assert pagination.items[0].diluted_cost is None
+    assert str(pagination.items[0].current_price) == "123.45"
+    assert pagination.quality == "PARTIAL"
     assert partial.items[0].price is None
     assert success.as_of.utcoffset().total_seconds() == 0
 

@@ -11,7 +11,8 @@ from functools import partial
 from typing import Protocol, cast
 
 from nexus_fosun_gateway.adapter.normalization import (
-    normalize_portfolio_responses,
+    normalize_cash_summary_response,
+    normalize_holdings_response,
     normalize_provider_response,
 )
 from nexus_fosun_gateway.domain import CapabilityItem, GatewayError, GatewayItem, GatewayPage
@@ -212,23 +213,36 @@ class SdkFosunTransport:
         payload: Mapping[str, object],
     ) -> GatewayPage[GatewayItem]:
         account_id = _required_str(payload, "account_id")
-        assets = await self._invoke(
-            "fosun_sync_portfolio",
-            self._method("portfolio", "get_assets_summary"),
-            sub_account_id=account_id,
-        )
-        holdings = await self._invoke(
-            "fosun_sync_portfolio",
-            self._method("portfolio", "get_holdings"),
-            sub_account_id=account_id,
-            start=_cursor(payload),
-            count=_required_int(payload, "limit"),
-        )
-        return normalize_portfolio_responses(
-            assets,
-            holdings,
-            account_id=account_id,
-            received_at=datetime.now(UTC),
+        read_kind = _required_str(payload, "read_kind")
+        if read_kind == "cash":
+            raw = await self._invoke(
+                "fosun_sync_portfolio",
+                self._method("portfolio", "get_assets_summary"),
+                sub_account_id=account_id,
+            )
+            return normalize_cash_summary_response(
+                raw,
+                account_id=account_id,
+                received_at=datetime.now(UTC),
+            )
+        if read_kind == "holdings":
+            raw = await self._invoke(
+                "fosun_sync_portfolio",
+                self._method("portfolio", "get_holdings"),
+                sub_account_id=account_id,
+                start=_cursor(payload),
+                count=_required_int(payload, "limit"),
+            )
+            return normalize_holdings_response(
+                raw,
+                account_id=account_id,
+                received_at=datetime.now(UTC),
+            )
+        raise GatewayError(
+            "VALIDATION_ERROR",
+            "Request payload is invalid.",
+            status_code=422,
+            next_action="FIX_REQUEST",
         )
 
     def _method(self, section_name: str, method_name: str) -> Callable[..., object]:

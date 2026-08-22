@@ -12,6 +12,7 @@ from pydantic import (
     StringConstraints,
     ValidationError,
     field_validator,
+    model_validator,
 )
 
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
@@ -34,6 +35,16 @@ class AccountPageRequest(RequestModel):
     account_id: str
     cursor: Cursor | None = None
     limit: Annotated[int, Field(ge=1, le=100)] = 100
+
+
+class PortfolioReadRequest(AccountPageRequest):
+    read_kind: Literal["cash", "holdings"]
+
+    @model_validator(mode="after")
+    def cash_does_not_accept_a_pagination_cursor(self) -> "PortfolioReadRequest":
+        if self.read_kind == "cash" and self.cursor is not None:
+            raise ValueError("cash summary is not paginated")
+        return self
 
 
 class CashFlowRequest(AccountPageRequest):
@@ -93,7 +104,7 @@ async def fosun_sync_accounts(request: Request) -> GatewayPage[GatewayItem]:
 
 
 async def fosun_sync_portfolio(request: Request) -> GatewayPage[GatewayItem]:
-    return await _execute(request, "fosun_sync_portfolio", AccountPageRequest)
+    return await _execute(request, "fosun_sync_portfolio", PortfolioReadRequest)
 
 
 async def fosun_list_orders(request: Request) -> GatewayPage[GatewayItem]:
