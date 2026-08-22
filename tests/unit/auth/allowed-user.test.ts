@@ -18,7 +18,11 @@ describe("isAllowedUser", () => {
 describe("assertAllowedUser", () => {
   it("rejects production when no allowlist is configured", () => {
     expect(() =>
-      assertAllowedUser("user-123", { ...process.env, NEXUS_ENV: "production" }),
+      assertAllowedUser("user-123", {
+        NODE_ENV: "test",
+        NEXUS_AUTH_MODE: "sites",
+        NEXUS_ENV: "production",
+      }),
     ).toThrow("NEXUS_ALLOWED_USER_ID");
   });
 

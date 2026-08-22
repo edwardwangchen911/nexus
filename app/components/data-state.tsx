@@ -1,3 +1,4 @@
+import { useId, type ReactNode } from "react";
 import type React from "react";
 
 export type DataStateKind =
@@ -23,16 +24,18 @@ type DataStateProps = {
   state: DataStateKind;
   title: string;
   detail?: string;
-  children?: React.ReactNode;
+  children?: ReactNode;
 };
 
 export function DataState({ state, title, detail, children }: DataStateProps): React.ReactElement {
+  const headingId = useId();
+
   return (
-    <section className="data-state" data-state={state} aria-labelledby="data-state-title">
+    <section className="data-state" data-state={state} aria-labelledby={headingId}>
       <p className="data-state__label" role="status" aria-label={stateLabels[state]}>
         {stateLabels[state]}
       </p>
-      <h2 id="data-state-title">{title}</h2>
+      <h2 id={headingId}>{title}</h2>
       {detail ? <p className="data-state__detail">{detail}</p> : null}
       {children}
     </section>

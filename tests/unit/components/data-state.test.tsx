@@ -20,4 +20,20 @@ describe("DataState", () => {
     expect(screen.getByText("组合快照")).toBeVisible();
     expect(screen.getByText("说明")).toBeVisible();
   });
+
+  it("gives multiple instances distinct heading IDs and relationships", () => {
+    const { container } = render(
+      <>
+        <DataState state="empty" title="组合快照" />
+        <DataState state="error" title="市场快照" />
+      </>,
+    );
+
+    const sections = [...container.querySelectorAll(".data-state")];
+    const headings = screen.getAllByRole("heading");
+
+    expect(headings.map((heading) => heading.id)).toEqual(expect.not.arrayContaining([""]));
+    expect(new Set(headings.map((heading) => heading.id)).size).toBe(2);
+    expect(sections.map((section) => section.getAttribute("aria-labelledby"))).toEqual(headings.map((heading) => heading.id));
+  });
 });

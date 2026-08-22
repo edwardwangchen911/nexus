@@ -21,6 +21,8 @@
   --component-sidebar-background: var(--color-surface);
   --component-nav-text: var(--color-text);
   --component-status-background: var(--color-surface);
+  --component-navigation-group-gap: var(--space-2);
+  --component-numeric-font-family: var(--font-geist-mono), ui-monospace, monospace;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -38,10 +40,12 @@ a:focus-visible, summary:focus-visible, main:focus-visible { outline: 3px solid 
 .skip-link:focus { transform: translateY(0); }
 .app-shell__sidebar { position: fixed; inset: 0 auto 0 0; inline-size: 16rem; padding: var(--space-6); border-inline-end: 1px solid var(--color-border); background: var(--component-sidebar-background); }
 .app-shell__brand { margin: 0 0 var(--space-6); font-weight: 700; letter-spacing: 0.08em; }
+.app-shell__navigation-groups { display: grid; gap: var(--component-navigation-group-gap); }
 .app-shell__nav-list, .app-shell__system-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
-.app-shell__nav-list a, .app-shell__system-list a, .app-shell__drawer summary { display: flex; align-items: center; min-block-size: 44px; padding-inline: var(--space-2); }
+.app-shell__navigation-control { display: flex; align-items: center; min-block-size: 44px; min-inline-size: 44px; padding-inline: var(--space-2); }
 .app-shell__drawer { display: none; }
 main { min-block-size: 100vh; margin-inline-start: 16rem; padding: var(--space-6); }
+.numeric-data { font-family: var(--component-numeric-font-family); font-variant-numeric: tabular-nums; }
 .data-state { max-inline-size: 40rem; padding: var(--space-6); border: 1px solid var(--color-border); background: var(--component-status-background); }
 .data-state__label { margin: 0; color: var(--color-text-muted); font-weight: 700; }
 .data-state__detail { color: var(--color-text-muted); }
