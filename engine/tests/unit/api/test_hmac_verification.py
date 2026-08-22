@@ -16,7 +16,12 @@ class NoDatabaseAccess:
 
 
 def make_request(
-    method: str, path_and_query: str, headers: Mapping[str, str], body: bytes
+    method: str,
+    path_and_query: str,
+    headers: Mapping[str, str],
+    body: bytes,
+    *,
+    raw_path: bytes | None = None,
 ) -> Request:
     path, _, query = path_and_query.partition("?")
     return Request(
@@ -24,6 +29,7 @@ def make_request(
             "type": "http",
             "method": method,
             "path": path,
+            "raw_path": raw_path or path.encode("ascii"),
             "query_string": query.encode("ascii"),
             "headers": [(key.lower().encode(), value.encode()) for key, value in headers.items()],
         }
@@ -64,3 +70,21 @@ async def test_rejected_hmac_never_reaches_nonce_storage(
 
     assert exc_info.value.code is ErrorCode.UNAUTHENTICATED
     assert exc_info.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_percent_encoded_raw_path_is_verified_without_framework_decoding() -> None:
+    """Changing `%2F` to `/` before signing verification would authenticate a different target."""
+    body = b""
+    path_and_query = "/internal%2Fv1/system-status?space=+&space=%20&tag=%E4%B8%AD"
+    headers = build_test_hmac_headers("GET", path_and_query, body)
+    request = make_request(
+        "GET",
+        path_and_query,
+        headers,
+        body,
+        raw_path=b"/internal%2Fv1/system-status",
+    )
+
+    with pytest.raises(AssertionError, match="database"):
+        await verify_hmac_v1(request, body, NoDatabaseAccess(), hmac_settings())  # type: ignore[arg-type]

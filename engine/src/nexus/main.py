@@ -2,9 +2,11 @@
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from nexus.api.errors import NexusError
+from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.routes.system import router as system_router
 from nexus.domain.ids import new_uuid7
 from nexus.persistence.session import session_factory
@@ -22,6 +24,34 @@ def create_engine_app(settings: EngineSettings | None = None) -> FastAPI:
         return JSONResponse(
             status_code=error.status_code,
             content=error.to_envelope(new_uuid7()),
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error_handler(_: Request, error: StarletteHTTPException) -> JSONResponse:
+        code = ErrorCode.NOT_FOUND if error.status_code == 404 else ErrorCode.VALIDATION_ERROR
+        return JSONResponse(
+            status_code=error.status_code,
+            content=NexusError(
+                code, "The request could not be completed.", status_code=error.status_code
+            ).to_envelope(new_uuid7()),
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(_: Request, _error: RequestValidationError) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content=NexusError(
+                ErrorCode.VALIDATION_ERROR, "The request could not be completed.", status_code=422
+            ).to_envelope(new_uuid7()),
+        )
+
+    @app.exception_handler(Exception)
+    async def unexpected_error_handler(_: Request, _error: Exception) -> JSONResponse:
+        return JSONResponse(
+            status_code=500,
+            content=NexusError(
+                ErrorCode.INTERNAL_ERROR, "The request could not be completed.", status_code=500
+            ).to_envelope(new_uuid7()),
         )
 
     @app.get("/health/live")

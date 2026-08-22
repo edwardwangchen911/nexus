@@ -3,7 +3,7 @@
 from enum import StrEnum
 from typing import Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,12 +49,14 @@ class EngineSettings(_SafeSettings):
         validation_alias="OBJECT_STORE_SECRET_ACCESS_KEY",
     )
     engine_hmac_current_key_id: str | None = Field(
-        default=None,
+        default="current",
         validation_alias="NEXUS_ENGINE_HMAC_CURRENT_KEY_ID",
     )
     engine_hmac_current_secret: SecretStr | None = Field(
         default=None,
-        validation_alias="NEXUS_ENGINE_HMAC_CURRENT_SECRET",
+        validation_alias=AliasChoices(
+            "NEXUS_ENGINE_HMAC_CURRENT_SECRET", "NEXUS_ENGINE_HMAC_SECRET"
+        ),
     )
     engine_hmac_previous_key_id: str | None = Field(
         default=None,
@@ -100,17 +102,23 @@ class EngineSettings(_SafeSettings):
         return self
 
     def _validate_hmac_key_pairs(self) -> None:
-        if self.engine_hmac_current_key_id is None or self.engine_hmac_current_secret is None:
+        current_key_id = _nonempty(self.engine_hmac_current_key_id)
+        current_secret = _nonempty_secret(self.engine_hmac_current_secret)
+        if current_key_id is None or current_secret is None:
             raise ValueError(
                 "NEXUS_ENGINE_HMAC_CURRENT_KEY_ID and NEXUS_ENGINE_HMAC_CURRENT_SECRET are required"
             )
-        has_previous_key_id = self.engine_hmac_previous_key_id is not None
-        has_previous_secret = self.engine_hmac_previous_secret is not None
+        previous_key_id = _nonempty(self.engine_hmac_previous_key_id)
+        previous_secret = _nonempty_secret(self.engine_hmac_previous_secret)
+        has_previous_key_id = previous_key_id is not None
+        has_previous_secret = previous_secret is not None
         if has_previous_key_id != has_previous_secret:
             raise ValueError(
                 "NEXUS_ENGINE_HMAC_PREVIOUS_KEY_ID and "
                 "NEXUS_ENGINE_HMAC_PREVIOUS_SECRET must be configured together"
             )
+        if has_previous_key_id and previous_key_id == current_key_id:
+            raise ValueError("NEXUS_ENGINE_HMAC_PREVIOUS_KEY_ID must differ from current key ID")
 
     def _required_values(self) -> dict[str, object | None]:
         return {
@@ -129,3 +137,11 @@ class EngineSettings(_SafeSettings):
     @classmethod
     def for_test(cls) -> Self:
         return cls(environment=Environment.TEST)
+
+
+def _nonempty(value: str | None) -> str | None:
+    return value.strip() if value is not None and value.strip() else None
+
+
+def _nonempty_secret(value: SecretStr | None) -> str | None:
+    return _nonempty(value.get_secret_value()) if value is not None else None

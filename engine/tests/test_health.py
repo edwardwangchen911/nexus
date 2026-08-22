@@ -14,6 +14,17 @@ def test_engine_liveness_is_minimal() -> None:
     assert response.json() == {"status": "alive", "service": "nexus-engine"}
 
 
+def test_engine_404_uses_the_safe_error_envelope() -> None:
+    """Framework-generated 404s must not bypass the public error contract."""
+    response = TestClient(create_engine_app(EngineSettings.for_test())).get("/not-a-route")
+
+    assert response.status_code == 404
+    payload = response.json()
+    assert payload["error"]["code"] == "NOT_FOUND"
+    assert payload["error"]["details"] == {}
+    assert payload["error"]["request_id"].split("-")[2].startswith("7")
+
+
 def test_engine_settings_never_render_fixture_secrets() -> None:
     settings = EngineSettings.for_test()
 
@@ -69,6 +80,40 @@ def test_engine_production_rejects_an_incomplete_previous_hmac_key_pair() -> Non
             NEXUS_ENGINE_HMAC_CURRENT_KEY_ID="current",
             NEXUS_ENGINE_HMAC_CURRENT_SECRET="placeholder-engine-secret",
             NEXUS_ENGINE_HMAC_PREVIOUS_KEY_ID="previous",
+            FOSUN_GATEWAY_BASE_URL="https://gateway.invalid",
+            FOSUN_GATEWAY_HMAC_SECRET="placeholder-gateway-secret",
+        )
+
+
+@pytest.mark.parametrize(
+    ("current_key_id", "current_secret", "previous_key_id", "previous_secret"),
+    [
+        (" ", "placeholder-engine-secret", None, None),
+        ("current", " ", None, None),
+        ("current", "placeholder-engine-secret", "current", "previous-secret"),
+        ("current", "placeholder-engine-secret", "previous", " "),
+    ],
+)
+def test_engine_production_rejects_blank_or_duplicate_hmac_rotation_values(
+    current_key_id: str,
+    current_secret: str,
+    previous_key_id: str | None,
+    previous_secret: str | None,
+) -> None:
+    """Whitespace and repeated IDs would make key rotation ambiguous or disable signing."""
+    with pytest.raises(ValidationError):
+        EngineSettings(
+            NEXUS_ENV="production",
+            DATABASE_URL="postgresql+asyncpg://safe:placeholder@db/nexus",
+            OBJECT_STORE_ENDPOINT="https://object-store.invalid",
+            OBJECT_STORE_REGION="us-east-1",
+            OBJECT_STORE_BUCKET="nexus",
+            OBJECT_STORE_ACCESS_KEY_ID="placeholder-access-key",
+            OBJECT_STORE_SECRET_ACCESS_KEY="placeholder-secret-key",
+            NEXUS_ENGINE_HMAC_CURRENT_KEY_ID=current_key_id,
+            NEXUS_ENGINE_HMAC_CURRENT_SECRET=current_secret,
+            NEXUS_ENGINE_HMAC_PREVIOUS_KEY_ID=previous_key_id,
+            NEXUS_ENGINE_HMAC_PREVIOUS_SECRET=previous_secret,
             FOSUN_GATEWAY_BASE_URL="https://gateway.invalid",
             FOSUN_GATEWAY_HMAC_SECRET="placeholder-gateway-secret",
         )

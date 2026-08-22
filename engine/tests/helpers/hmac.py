@@ -19,6 +19,7 @@ def build_test_hmac_headers(
     body: bytes,
     *,
     key_id: str = TEST_HMAC_KEY_ID,
+    secret: str = TEST_HMAC_SECRET,
     nonce: str = TEST_NONCE,
     timestamp: int | None = None,
     signature_override: str | None = None,
@@ -37,7 +38,7 @@ def build_test_hmac_headers(
     canonical = "\n".join((method.upper(), normalized, str(issued_at), nonce, body_hash))
     signature = (
         base64.urlsafe_b64encode(
-            hmac.new(TEST_HMAC_SECRET.encode(), canonical.encode(), hashlib.sha256).digest()
+        hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).digest()
         )
         .rstrip(b"=")
         .decode()

@@ -40,7 +40,7 @@ def canonical_hmac_v1(
 ) -> str:
     """Return the UTF-8 HMAC v1 canonical form before it is signed."""
     parsed = urlsplit(path_and_query)
-    if not parsed.path.startswith("/"):
+    if not parsed.path.startswith("/") or not _valid_percent_escapes(path_and_query):
         raise ValueError("path_and_query must contain an absolute path")
     query_pairs = [
         (quote(key, safe="~-._"), quote(value, safe="~-._"))
@@ -107,10 +107,13 @@ async def verify_hmac_v1(
     signature = _decode_signature(values["X-Nexus-Signature"])
     if signature is None:
         raise _unauthenticated()
-    path_and_query = request.url.path
-    if request.url.query:
-        path_and_query = f"{path_and_query}?{request.url.query}"
-    canonical = canonical_hmac_v1(request.method, path_and_query, timestamp, str(nonce), body)
+    path_and_query = _raw_path_and_query(request)
+    if path_and_query is None:
+        raise _unauthenticated()
+    try:
+        canonical = canonical_hmac_v1(request.method, path_and_query, timestamp, str(nonce), body)
+    except ValueError:
+        raise _unauthenticated() from None
     expected = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).digest()
     if not hmac.compare_digest(signature, expected):
         raise _unauthenticated()
@@ -154,6 +157,40 @@ def _decode_signature(value: str | None) -> bytes | None:
         return base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
     except ValueError:
         return None
+
+
+def _raw_path_and_query(request: Request) -> str | None:
+    raw_path = request.scope.get("raw_path")
+    raw_query = request.scope.get("query_string")
+    if not isinstance(raw_path, bytes) or not isinstance(raw_query, bytes):
+        return None
+    try:
+        path = raw_path.decode("ascii")
+        query = raw_query.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    if (
+        not path.startswith("/")
+        or not _valid_percent_escapes(path)
+        or not _valid_percent_escapes(query)
+    ):
+        return None
+    return path if not query else f"{path}?{query}"
+
+
+def _valid_percent_escapes(value: str) -> bool:
+    index = 0
+    while index < len(value):
+        if value[index] == "%":
+            if index + 2 >= len(value) or any(
+                character not in "0123456789abcdefABCDEF"
+                for character in value[index + 1 : index + 3]
+            ):
+                return False
+            index += 3
+        else:
+            index += 1
+    return True
 
 
 def _unauthenticated() -> NexusError:

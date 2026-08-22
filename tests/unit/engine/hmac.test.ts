@@ -65,4 +65,14 @@ describe("createEngineHmacHeaders", () => {
       "FTX4MTbJapN28aKxVkVhDAfEVYuVRQKQl2F9wNKeQLE",
     );
   });
+
+  it("keeps a percent-encoded path raw while normalizing plus and percent spaces", () => {
+    const headers = createEngineHmacHeaders({
+      keyId: "test-current", secret: "nexus-test-hmac-key-32-bytes!!!!", method: "GET",
+      pathAndQuery: "/internal%2Fv1/system-status?space=+&space=%20&tag=%E4%B8%AD&tag=%E4%B8%AD",
+      timestamp: 1787371200, nonce: "0198f7a0-1111-7777-8111-111111111117",
+      actorId: "nexus-test-user", requestId: "0198f7a0-1111-7777-8111-111111111114", body: new Uint8Array(),
+    });
+    expect(headers["X-Nexus-Signature"]).toBe("jATOKzEs-blPMZIdQUpWdevDjE7YuPZiBAmW4w9yFws");
+  });
 });

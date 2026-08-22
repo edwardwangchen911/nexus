@@ -28,6 +28,13 @@ HMAC_KEY = "nexus-test-hmac-key-32-bytes!!!!"
             "0198f7a0-1111-7777-8111-111111111113",
             "FTX4MTbJapN28aKxVkVhDAfEVYuVRQKQl2F9wNKeQLE",
         ),
+        (
+            "GET",
+            "/internal%2Fv1/system-status?space=+&space=%20&tag=%E4%B8%AD&tag=%E4%B8%AD",
+            b"",
+            "0198f7a0-1111-7777-8111-111111111117",
+            "jATOKzEs-blPMZIdQUpWdevDjE7YuPZiBAmW4w9yFws",
+        ),
     ],
 )
 def test_hmac_v1_golden_vectors_are_byte_exact(
@@ -52,3 +59,15 @@ def test_hmac_v1_golden_vectors_are_byte_exact(
             ),
         }[body]
     )
+
+
+def test_hmac_v1_rejects_malformed_percent_escapes() -> None:
+    """Both service implementations fail closed rather than signing an ambiguous target."""
+    with pytest.raises(ValueError, match="path_and_query"):
+        canonical_hmac_v1(
+            "GET",
+            "/internal/v1/system-status?bad=%ZZ",
+            1787371200,
+            "0198f7a0-1111-7777-8111-111111111111",
+            b"",
+        )
