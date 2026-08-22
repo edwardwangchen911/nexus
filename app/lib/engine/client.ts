@@ -23,7 +23,7 @@ export async function engineFetch<Path extends keyof TemporaryInternalPaths>(pat
   try {
     const method = (init.method ?? "GET").toUpperCase();
     const response = await fetch(target, { ...init, method, headers, body: body.byteLength ? body as unknown as BodyInit : undefined, signal: AbortSignal.any([init.signal, AbortSignal.timeout(timeoutForMethod(method))].filter(Boolean) as AbortSignal[]) });
-    return await sanitizeEngineResponse<Path>(response, target.href);
+    return await sanitizeEngineResponse<Path>(response);
   } catch { return internalFailure<Path>(); }
 }
 
