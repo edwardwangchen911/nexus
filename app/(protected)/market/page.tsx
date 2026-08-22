@@ -12,6 +12,7 @@ export type SelectedMarketSeries = components["schemas"]["SelectedMarketSeriesRe
 export type MarketQuality = MarketItem["quality"];
 type MarketData = components["schemas"]["MarketPageResponse"];
 type MarketEnvelope = components["schemas"]["MarketPageEnvelope"];
+type WatchlistEnvelope = components["schemas"]["WatchlistMembershipEnvelope"];
 
 type Notice = { kind: "error" | "success"; text: string } | null;
 
@@ -35,14 +36,13 @@ type MarketPanelProps = {
 const LOAD_TIMEOUT_MS = 10_000;
 
 export default function MarketPage(): React.ReactElement {
+  const initialLocation = useMemo(() => readMarketLocation(), []);
   const [state, setState] = useState<DataStateKind>("loading");
   const [items, setItems] = useState<MarketItem[]>([]);
   const [selectedSeries, setSelectedSeries] = useState<SelectedMarketSeries | null>(null);
-  const [selectedInstrumentId, setSelectedInstrumentId] = useState<string | null>(() =>
-    typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("selected"),
-  );
-  const [watchlistOnly, setWatchlistOnly] = useState(false);
-  const [cursor, setCursor] = useState<string | null>(null);
+  const [selectedInstrumentId, setSelectedInstrumentId] = useState<string | null>(initialLocation.selectedInstrumentId);
+  const [watchlistOnly, setWatchlistOnly] = useState(initialLocation.watchlistOnly);
+  const [cursor, setCursor] = useState<string | null>(initialLocation.cursor);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [pendingInstrumentId, setPendingInstrumentId] = useState<string | null>(null);
@@ -67,14 +67,26 @@ export default function MarketPage(): React.ReactElement {
         return;
       }
       const data = result.envelope.data;
+      const nextSelectedInstrumentId = selectedInstrumentId !== null
+        && data.items.some((item) => item.instrument_id === selectedInstrumentId)
+        ? selectedInstrumentId
+        : data.items[0]?.instrument_id ?? null;
       itemsRef.current = data.items;
       setItems(data.items);
-      setSelectedSeries(data.selected_series);
+      setSelectedSeries(
+        data.selected_series?.instrument_id === nextSelectedInstrumentId
+          ? data.selected_series
+          : null,
+      );
       setNextCursor(data.next_cursor);
       setState(classifyMarketState(data));
-      if (!selectedInstrumentId && data.items[0]) {
-        setSelectedInstrumentId(data.items[0].instrument_id);
-        replaceSelectedQuery(data.items[0].instrument_id);
+      if (nextSelectedInstrumentId !== selectedInstrumentId) {
+        setSelectedInstrumentId(nextSelectedInstrumentId);
+        replaceMarketQuery({
+          selectedInstrumentId: nextSelectedInstrumentId,
+          watchlistOnly,
+          cursor,
+        });
       }
     } catch (error) {
       if (refreshVersion !== refreshVersionRef.current) return;
@@ -120,11 +132,15 @@ export default function MarketPage(): React.ReactElement {
   }, [refresh]);
 
   function setSelected(instrumentId: string): void {
+    refreshVersionRef.current += 1;
     setSelectedInstrumentId(instrumentId);
-    replaceSelectedQuery(instrumentId);
+    setSelectedSeries(null);
+    replaceMarketQuery({ selectedInstrumentId: instrumentId, watchlistOnly, cursor });
   }
 
   async function toggleWatchlist(item: MarketItem): Promise<void> {
+    refreshVersionRef.current += 1;
+    setRefreshing(false);
     setPendingInstrumentId(item.instrument_id);
     setNotice(null);
     try {
@@ -132,18 +148,23 @@ export default function MarketPage(): React.ReactElement {
         method: item.watchlisted ? "DELETE" : "PUT",
       });
       if (!response.ok) throw new Error("watchlist mutation failed");
-      if (watchlistOnly && item.watchlisted) {
+      const envelope = await response.json() as WatchlistEnvelope;
+      if (envelope.data.instrument_id !== item.instrument_id) {
+        throw new Error("watchlist membership mismatch");
+      }
+      const finalWatchlisted = envelope.data.watchlisted;
+      if (watchlistOnly && !finalWatchlisted) {
         await refresh();
       } else {
         setItems((current) => {
           const updated = current.map((candidate) => candidate.instrument_id === item.instrument_id
-            ? { ...candidate, watchlisted: !item.watchlisted }
+            ? { ...candidate, watchlisted: finalWatchlisted }
             : candidate);
           itemsRef.current = updated;
           return updated;
         });
       }
-      setNotice({ kind: "success", text: item.watchlisted ? `${item.symbol} 已移出观察列表。` : `${item.symbol} 已加入观察列表。` });
+      setNotice({ kind: "success", text: finalWatchlisted ? `${item.symbol} 已加入观察列表。` : `${item.symbol} 已移出观察列表。` });
     } catch {
       setNotice({ kind: "error", text: "观察列表未更新。当前行情和交易状态均未改变，请重试。" });
     } finally {
@@ -166,10 +187,23 @@ export default function MarketPage(): React.ReactElement {
       onSelect={(item) => setSelected(item.instrument_id)}
       onToggleWatchlist={(item) => void toggleWatchlist(item)}
       onToggleWatchlistOnly={() => {
+        const nextWatchlistOnly = !watchlistOnly;
+        refreshVersionRef.current += 1;
         setCursor(null);
-        setWatchlistOnly((current) => !current);
+        setNextCursor(null);
+        setSelectedInstrumentId(null);
+        setSelectedSeries(null);
+        setWatchlistOnly(nextWatchlistOnly);
+        replaceMarketQuery({ selectedInstrumentId: null, watchlistOnly: nextWatchlistOnly, cursor: null });
       }}
-      onNextPage={() => { if (nextCursor) setCursor(nextCursor); }}
+      onNextPage={() => {
+        if (!nextCursor) return;
+        refreshVersionRef.current += 1;
+        setCursor(nextCursor);
+        setSelectedInstrumentId(null);
+        setSelectedSeries(null);
+        replaceMarketQuery({ selectedInstrumentId: null, watchlistOnly, cursor: nextCursor });
+      }}
     />
   );
 }
@@ -253,16 +287,17 @@ export function MarketPanel({
           <div className="market-detail">
             {selectedItem ? (
               <>
-                <section className="market-evidence-band" aria-label={`${selectedItem.symbol} 来源完整性`}>
+                <section className="market-evidence-band" aria-label={`${selectedItem.symbol} 报价证据`}>
                   <div>
-                    <p className="eyebrow">SELECTED SOURCE</p>
+                    <p className="eyebrow">QUOTE EVIDENCE</p>
                     <h2>{selectedItem.symbol}</h2>
                   </div>
                   <dl>
-                    <EvidenceFact term="来源" value={selectedSeriesForItem?.source?.toUpperCase() ?? selectedItem.source?.toUpperCase() ?? "未选定"} />
-                    <EvidenceFact term="Feed" value={selectedSeriesForItem?.feed?.toUpperCase() ?? selectedItem.feed?.toUpperCase() ?? "未选定"} />
-                    <EvidenceFact term="截止时间" value={formatUtc(selectedItem.as_of)} />
-                    <EvidenceFact term="质量" value={selectedSeriesForItem?.quality ?? selectedItem.quality} />
+                    <EvidenceFact term="报价来源" value={selectedItem.source?.toUpperCase() ?? "未选定"} />
+                    <EvidenceFact term="Feed" value={selectedItem.feed?.toUpperCase() ?? "未选定"} />
+                    <EvidenceFact term="报价截止" value={formatUtc(selectedItem.as_of)} />
+                    <EvidenceFact term="实时性口径" value={feedLatencyLabel(selectedItem.feed)} />
+                    <EvidenceFact term="报价质量" value={selectedItem.quality} />
                   </dl>
                   <button
                     className="button button--quiet"
@@ -283,17 +318,21 @@ export function MarketPanel({
                   </div>
                 ) : null}
 
-                {state === "stale" ? (
+                {isSelectedEvidenceStale(selectedSeriesForItem, selectedItem) ? (
                   <p className="inline-notice">显示最后已知行情；截止时间和来源保持可见，不触发任何业务动作。</p>
                 ) : null}
 
-                {selectedSeriesForItem?.source && selectedSeriesForItem.feed && selectedSeriesForItem.quality !== "FAIL" && selectedSeriesForItem.bars.length > 0 ? (
-                  <PriceChart key={selectedItem.instrument_id} series={{
-                    symbol: selectedItem.symbol,
-                    source: selectedSeriesForItem.source,
-                    feed: selectedSeriesForItem.feed,
-                    bars: selectedSeriesForItem.bars,
-                  }} />
+                {selectedSeriesForItem?.source && selectedSeriesForItem.feed && selectedSeriesForItem.interval === "1Day" && selectedSeriesForItem.quality !== "FAIL" && selectedSeriesForItem.bars.length > 0 ? (
+                  <>
+                    <HistoryEvidence symbol={selectedItem.symbol} series={selectedSeriesForItem} />
+                    <PriceChart key={selectedItem.instrument_id} series={{
+                      symbol: selectedItem.symbol,
+                      source: selectedSeriesForItem.source,
+                      feed: selectedSeriesForItem.feed,
+                      interval: selectedSeriesForItem.interval,
+                      bars: selectedSeriesForItem.bars,
+                    }} />
+                  </>
                 ) : (
                   <section className="market-history-empty" aria-label="历史行情不可用">
                     <DatabaseZap aria-hidden="true" size={20} />
@@ -356,14 +395,48 @@ function qualityReasons(series: SelectedMarketSeries | null, item: MarketItem): 
   return [...new Set([...(series?.quality_reasons ?? []), ...item.quality_reasons])];
 }
 
+function isSelectedEvidenceStale(series: SelectedMarketSeries | null, item: MarketItem): boolean {
+  return qualityReasons(series, item).some((reason) =>
+    reason === "SELECTED_SOURCE_STALE" || reason === "QUOTE_STALE",
+  );
+}
+
 function sourceLabel(source: string | null, feed: string | null): string {
   return source && feed ? `${source.toUpperCase()} · ${feed.toUpperCase()}` : "来源未选定";
 }
 
-function replaceSelectedQuery(instrumentId: string): void {
+type MarketLocationState = {
+  selectedInstrumentId: string | null;
+  watchlistOnly: boolean;
+  cursor: string | null;
+};
+
+function readMarketLocation(): MarketLocationState {
+  if (typeof window === "undefined") {
+    return { selectedInstrumentId: null, watchlistOnly: false, cursor: null };
+  }
+  const params = new URLSearchParams(window.location.search);
+  return {
+    selectedInstrumentId: params.get("selected"),
+    watchlistOnly: params.get("watchlist") === "true",
+    cursor: params.get("cursor"),
+  };
+}
+
+function replaceMarketQuery(state: MarketLocationState): void {
   const url = new URL(globalThis.location.href);
-  url.searchParams.set("selected", instrumentId);
+  for (const key of ["selected", "watchlist", "cursor"]) url.searchParams.delete(key);
+  if (state.selectedInstrumentId) url.searchParams.set("selected", state.selectedInstrumentId);
+  if (state.watchlistOnly) url.searchParams.set("watchlist", "true");
+  if (state.cursor) url.searchParams.set("cursor", state.cursor);
   globalThis.history.replaceState(null, "", url);
+}
+
+function feedLatencyLabel(feed: string | null): string {
+  if (!feed) return "未声明";
+  return feed.toLowerCase().includes("delayed")
+    ? "延迟（具体时长未声明）"
+    : "由 Feed 声明（具体时长未声明）";
 }
 
 function formatUtc(value: string | null): string {
@@ -375,6 +448,26 @@ function formatUtc(value: string | null): string {
 
 function EvidenceFact({ term, value }: { term: string; value: string }): React.ReactElement {
   return <div><dt>{term}</dt><dd className="numeric-data">{value}</dd></div>;
+}
+
+function HistoryEvidence({ symbol, series }: { symbol: string; series: SelectedMarketSeries }): React.ReactElement {
+  const latestBar = series.bars.at(-1);
+  return (
+    <section className="market-evidence-band market-evidence-band--history" aria-label={`${symbol} OHLCV 证据`}>
+      <div>
+        <p className="eyebrow">OHLCV EVIDENCE</p>
+        <h2>{symbol} 历史序列</h2>
+      </div>
+      <dl>
+        <EvidenceFact term="序列来源" value={series.source?.toUpperCase() ?? "未选定"} />
+        <EvidenceFact term="Feed" value={series.feed?.toUpperCase() ?? "未选定"} />
+        <EvidenceFact term="周期" value={series.interval ?? "未选定"} />
+        <EvidenceFact term="最新可用时间" value={formatUtc(latestBar?.available_at ?? null)} />
+        <EvidenceFact term="最新观测时间" value={formatUtc(latestBar?.observed_at ?? null)} />
+        <EvidenceFact term="序列质量" value={series.quality} />
+      </dl>
+    </section>
+  );
 }
 
 function stateTitle(state: DataStateKind): string {

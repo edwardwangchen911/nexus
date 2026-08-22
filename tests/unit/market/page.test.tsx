@@ -1,7 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import {
+import MarketPage, {
   buildMarketQuery,
   MarketPanel,
   refreshIntervalMs,
@@ -68,8 +68,37 @@ const stateLabels: Array<[DataStateKind, string]> = [
 ];
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  window.history.replaceState(null, "", "/market");
 });
+
+function marketEnvelope(overrides: {
+  items?: MarketItem[];
+  selectedSeries?: SelectedMarketSeries | null;
+  nextCursor?: string | null;
+} = {}) {
+  return {
+    data: {
+      items: overrides.items ?? [item],
+      next_cursor: overrides.nextCursor ?? null,
+      selected_series: overrides.selectedSeries === undefined ? selectedSeries : overrides.selectedSeries,
+    },
+    meta: {
+      request_id: "0198f7a0-1111-7777-8111-111111111115",
+      schema_version: "1",
+      as_of: "2026-08-22T00:00:00Z",
+    },
+  };
+}
+
+function jsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
 
 describe("market vertical slice", () => {
   it.each(stateLabels)("renders the visible %s data state", (state, label) => {
@@ -99,13 +128,14 @@ describe("market vertical slice", () => {
     );
   });
 
-  it("makes source integrity first-class and keeps watchlist writes explicit", () => {
+  it("separates quote evidence from OHLCV evidence and keeps watchlist writes explicit", () => {
     const onToggleWatchlist = vi.fn();
+    const historySeries = { ...selectedSeries, source: "polygon", feed: "delayed" };
     render(
       <MarketPanel
         state="ready"
         items={[item]}
-        selectedSeries={selectedSeries}
+        selectedSeries={historySeries}
         selectedInstrumentId={item.instrument_id}
         watchlistOnly={false}
         nextCursor="opaque-next"
@@ -120,13 +150,15 @@ describe("market vertical slice", () => {
       />,
     );
 
-    expect(screen.getByRole("region", { name: "AAPL 来源完整性" })).toHaveTextContent(
+    expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent(
       "ALPACA",
     );
-    expect(screen.getByRole("region", { name: "AAPL 来源完整性" })).toHaveTextContent(
+    expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent(
       "SIP-DELAYED",
     );
-    expect(screen.getByText("2026-08-21 20:00:00 UTC")).toBeVisible();
+    expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("POLYGON");
+    expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("2026-08-22 00:01:00 UTC");
+    expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent("2026-08-21 20:00:00 UTC");
     fireEvent.click(screen.getByRole("button", { name: "将 AAPL 移出观察列表" }));
     expect(onToggleWatchlist).toHaveBeenCalledWith(item);
   });
@@ -193,11 +225,42 @@ describe("market vertical slice", () => {
     expect(onToggleWatchlist).not.toHaveBeenCalled();
   });
 
+  it("does not mark a fresh selected instrument stale because another row is stale", () => {
+    const staleItem = {
+      ...item,
+      instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e782",
+      symbol: "MSFT",
+      quality: "PARTIAL" as const,
+      quality_reasons: ["QUOTE_STALE"],
+    };
+    render(
+      <MarketPanel
+        state="stale"
+        items={[item, staleItem]}
+        selectedSeries={selectedSeries}
+        selectedInstrumentId={item.instrument_id}
+        watchlistOnly={false}
+        nextCursor={null}
+        refreshing={false}
+        pendingInstrumentId={null}
+        notice={null}
+        onRefresh={vi.fn()}
+        onSelect={vi.fn()}
+        onToggleWatchlist={vi.fn()}
+        onToggleWatchlistOnly={vi.fn()}
+        onNextPage={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText(/显示最后已知行情/)).not.toBeInTheDocument();
+  });
+
   it("renders the same OHLCV as a semantic table and keyboard point controls", () => {
     render(<PriceChart series={{
       symbol: item.symbol,
       source: selectedSeries.source!,
       feed: selectedSeries.feed!,
+      interval: "1Day",
       bars: selectedSeries.bars,
     }} />);
 
@@ -214,6 +277,30 @@ describe("market vertical slice", () => {
     expect(screen.getByRole("button", { name: "重置可见范围" })).toHaveClass("button");
   });
 
+  it("refuses to label or chart a minute series as daily history", () => {
+    render(
+      <MarketPanel
+        state="partial"
+        items={[item]}
+        selectedSeries={{ ...selectedSeries, interval: "1Min" } as unknown as SelectedMarketSeries}
+        selectedInstrumentId={item.instrument_id}
+        watchlistOnly={false}
+        nextCursor={null}
+        refreshing={false}
+        pendingInstrumentId={null}
+        notice={null}
+        onRefresh={vi.fn()}
+        onSelect={vi.fn()}
+        onToggleWatchlist={vi.fn()}
+        onToggleWatchlistOnly={vi.fn()}
+        onNextPage={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("region", { name: "AAPL 价格图表" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "历史行情不可用" })).toBeVisible();
+  });
+
   it("uses the approved visible and hidden refresh cadence", () => {
     expect(refreshIntervalMs("visible")).toBe(15_000);
     expect(refreshIntervalMs("hidden")).toBe(60_000);
@@ -222,5 +309,118 @@ describe("market vertical slice", () => {
   it("omits the tri-state watchlist filter unless the UI explicitly asks for watched instruments", () => {
     expect(buildMarketQuery({ cursor: null, selectedInstrumentId: null, watchlistOnly: false }).toString()).toBe("limit=50");
     expect(buildMarketQuery({ cursor: null, selectedInstrumentId: null, watchlistOnly: true }).toString()).toBe("limit=50&watchlist=true");
+  });
+
+  it("falls back to the first returned instrument and retains filter and cursor in the URL", async () => {
+    const missingId = "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e799";
+    window.history.replaceState(null, "", `/market?selected=${missingId}`);
+    const queries: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "https://nexus.test");
+      queries.push(url.search);
+      return jsonResponse(marketEnvelope({
+        selectedSeries: url.searchParams.get("selected_instrument_id") === item.instrument_id
+          ? selectedSeries
+          : null,
+        nextCursor: "opaque-next",
+      }));
+    }));
+
+    render(<MarketPage />);
+
+    expect(await screen.findByRole("region", { name: "AAPL 价格图表" })).toBeVisible();
+    expect(window.location.search).toContain(`selected=${item.instrument_id}`);
+    expect(queries.some((query) => query.includes(`selected_instrument_id=${missingId}`))).toBe(true);
+    expect(queries.some((query) => query.includes(`selected_instrument_id=${item.instrument_id}`))).toBe(true);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "只看观察列表" }));
+    expect(window.location.search).toBe("?watchlist=true");
+    fireEvent.click(await screen.findByRole("button", { name: "下一页" }));
+    expect(window.location.search).toBe("?watchlist=true&cursor=opaque-next");
+    await waitFor(() => {
+      expect(window.location.search).toContain("watchlist=true");
+      expect(window.location.search).toContain("cursor=opaque-next");
+      expect(window.location.search).toContain(`selected=${item.instrument_id}`);
+    });
+  });
+
+  it("uses the server membership and prevents an older refresh from overwriting a watchlist write", async () => {
+    window.history.replaceState(null, "", `/market?selected=${item.instrument_id}`);
+    let resolveRefresh: ((response: Response) => void) | undefined;
+    let marketCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (method === "DELETE") {
+        return jsonResponse({
+          data: { instrument_id: item.instrument_id, watchlisted: false },
+          meta: marketEnvelope().meta,
+        });
+      }
+      marketCalls += 1;
+      if (marketCalls === 2) {
+        return new Promise<Response>((resolve) => { resolveRefresh = resolve; });
+      }
+      return jsonResponse(marketEnvelope());
+    }));
+
+    render(<MarketPage />);
+    expect(await screen.findByRole("button", { name: "将 AAPL 移出观察列表" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "刷新行情" }));
+    await waitFor(() => expect(resolveRefresh).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: "将 AAPL 移出观察列表" }));
+    expect(await screen.findByRole("button", { name: "将 AAPL 加入观察列表" })).toBeVisible();
+
+    await act(async () => {
+      resolveRefresh?.(jsonResponse(marketEnvelope()));
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("button", { name: "将 AAPL 加入观察列表" })).toBeVisible();
+  });
+
+  it("polls stale market data at 15 seconds without issuing business writes", async () => {
+    vi.useFakeTimers();
+    window.history.replaceState(null, "", `/market?selected=${item.instrument_id}`);
+    const methods: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      methods.push(init?.method ?? "GET");
+      return jsonResponse(marketEnvelope({
+        items: [{ ...item, quality: "PARTIAL", quality_reasons: ["QUOTE_STALE"] }],
+        selectedSeries: { ...selectedSeries, quality: "PARTIAL", quality_reasons: ["SELECTED_SOURCE_STALE"] },
+      }));
+    }));
+
+    const view = render(<MarketPage />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(46_000); });
+
+    expect(methods.length).toBeGreaterThanOrEqual(4);
+    expect(methods.every((method) => method === "GET")).toBe(true);
+    expect(screen.getByText(/显示最后已知行情/)).toBeVisible();
+    view.unmount();
+  });
+
+  it("reschedules actual polling from 15 to 60 seconds on visibility changes", async () => {
+    vi.useFakeTimers();
+    window.history.replaceState(null, "", `/market?selected=${item.instrument_id}`);
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    const fetchMock = vi.fn(async () => jsonResponse(marketEnvelope()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const view = render(<MarketPage />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    visibility = "hidden";
+    fireEvent(document, new Event("visibilitychange"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    view.unmount();
   });
 });

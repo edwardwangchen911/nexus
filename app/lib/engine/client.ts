@@ -8,6 +8,7 @@ import { errorResponse, rebuildAllowedEngineResponse } from "./errors";
 import { createEngineHmacHeaders } from "./hmac";
 
 const MAX_ENGINE_RESPONSE_BYTES = 64 * 1024;
+const MAX_MARKET_RESPONSE_BYTES = 256 * 1024;
 type InternalPath = Extract<keyof paths, `/internal/v1/${string}`>;
 type DynamicInternalPath = Extract<InternalPath, `${string}{${string}}${string}`>;
 type EngineBody = string | Uint8Array | ArrayBuffer;
@@ -42,9 +43,24 @@ export async function engineFetch<Path extends InternalPath>(target: EngineTarge
 
 export async function sanitizeEngineResponse<Path extends InternalPath>(response: Response, requestUrl?: string, schemaPath?: string): Promise<EngineResponse<Path>> {
   if (!response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return internalFailure<Path>();
-  const bytes = await boundedResponseBytes(response, MAX_ENGINE_RESPONSE_BYTES);
+  const bytes = await boundedResponseBytes(response, responseLimit(requestUrl, schemaPath));
   if (!bytes) return internalFailure<Path>();
   try { return (rebuildAllowedEngineResponse(response.status, JSON.parse(new TextDecoder().decode(bytes)), response.headers, requestUrl, schemaPath) ?? internalFailure<Path>()) as EngineResponse<Path>; } catch { return internalFailure<Path>(); }
+}
+
+function responseLimit(requestUrl?: string, schemaPath?: string): number {
+  if (schemaPath === "/internal/v1/market") return MAX_MARKET_RESPONSE_BYTES;
+  if (requestUrl) {
+    try {
+      const pathname = new URL(requestUrl).pathname;
+      if (pathname === "/api/v1/market" || pathname === "/internal/v1/market") {
+        return MAX_MARKET_RESPONSE_BYTES;
+      }
+    } catch {
+      return MAX_ENGINE_RESPONSE_BYTES;
+    }
+  }
+  return MAX_ENGINE_RESPONSE_BYTES;
 }
 
 async function boundedResponseBytes(response: Response, limit: number): Promise<Uint8Array | null> {

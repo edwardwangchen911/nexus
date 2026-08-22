@@ -10,6 +10,7 @@ export type PriceChartSeries = {
   symbol: string;
   source: string;
   feed: string;
+  interval: "1Day";
   bars: PriceChartBar[];
 };
 

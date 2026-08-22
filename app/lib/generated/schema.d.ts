@@ -345,7 +345,7 @@ export interface components {
              */
             instrument_id: string;
             /** Interval */
-            interval: ("1Min" | "1Day") | null;
+            interval: "1Day" | null;
             /**
              * Quality
              * @enum {string}

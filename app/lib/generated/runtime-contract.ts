@@ -348,10 +348,7 @@ export const runtimeContractSchemas = {
       "interval": {
         "anyOf": [
           {
-            "enum": [
-              "1Min",
-              "1Day"
-            ],
+            "const": "1Day",
             "type": "string"
           },
           {

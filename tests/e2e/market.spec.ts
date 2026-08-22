@@ -59,7 +59,8 @@ for (const viewport of [
     await installMarketFixtures(page);
     await page.goto("/market");
 
-    await expect(page.getByRole("region", { name: "AAPL 来源完整性" })).toContainText("ALPACA");
+    await expect(page.getByRole("region", { name: "AAPL 报价证据" })).toContainText("ALPACA");
+    await expect(page.getByRole("region", { name: "AAPL OHLCV 证据" })).toContainText("ALPACA");
     await expect(page.getByRole("region", { name: "AAPL 价格图表" })).toBeVisible();
     await expect(page.locator(".price-chart__canvas canvas").first()).toBeVisible();
     await expect(page.getByRole("table", { name: "AAPL OHLCV 数据" })).toContainText("227.160000000000");

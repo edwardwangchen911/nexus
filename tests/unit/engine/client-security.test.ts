@@ -26,7 +26,18 @@ function integrationStatus() {
   };
 }
 
-function marketEnvelope() {
+function marketEnvelope(barCount = 1) {
+  const bar = {
+    session: "2026-08-21",
+    open: "228.200000000000",
+    high: "229.400000000000",
+    low: "225.900000000000",
+    close: "227.160000000000",
+    volume: "46300000.000000000000",
+    available_at: "2026-08-22T00:01:00Z",
+    observed_at: "2026-08-21T20:00:00Z",
+    quality_flags: [],
+  };
   return {
     data: {
       items: [{
@@ -49,17 +60,10 @@ function marketEnvelope() {
         interval: "1Day",
         quality: "PASS",
         quality_reasons: [],
-        bars: [{
-          session: "2026-08-21",
-          open: "228.200000000000",
-          high: "229.400000000000",
-          low: "225.900000000000",
-          close: "227.160000000000",
-          volume: "46300000.000000000000",
-          available_at: "2026-08-22T00:01:00Z",
-          observed_at: "2026-08-21T20:00:00Z",
-          quality_flags: [],
-        }],
+        bars: Array.from({ length: barCount }, (_, index) => ({
+          ...bar,
+          session: new Date(Date.UTC(2025, 0, index + 1)).toISOString().slice(0, 10),
+        })),
       },
     },
     meta: successPayload().meta,
@@ -199,6 +203,24 @@ describe("engineFetch runtime boundary", () => {
       undefined,
       "/internal/v1/market",
     ));
+  });
+
+  it("streams the legal 500-bar market envelope through the real engine client", async () => {
+    setEngineEnvironment();
+    const payload = marketEnvelope(500);
+    const encodedBytes = new TextEncoder().encode(JSON.stringify(payload)).byteLength;
+    expect(encodedBytes).toBeGreaterThan(64 * 1024);
+    expect(encodedBytes).toBeLessThanOrEqual(256 * 1024);
+    vi.stubGlobal("fetch", async () => jsonResponse(payload));
+
+    const response = await engineFetch({
+      template: "/internal/v1/market",
+      path: "/internal/v1/market",
+      query: "limit=50",
+    }, { method: "GET", actor });
+
+    expect(response.status).toBe(200);
+    expect((await response.json()).data.selected_series.bars).toHaveLength(500);
   });
 
   it("enforces explicit market and selected-series collection bounds", () => {
