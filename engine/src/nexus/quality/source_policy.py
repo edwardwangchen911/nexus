@@ -1,14 +1,12 @@
 """Published whole-series market source selection policy."""
 
-import json
 from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
-from hashlib import sha256
 from typing import Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, PrivateAttr, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,8 +29,6 @@ SOURCE_POLICY_PAYLOAD: dict[str, object] = {
     "fixture": {"mode": "fixture"},
 }
 _PRIORITY = ("fosun", "alpaca", "fixture")
-_POLICY_LOADER_TOKEN = object()
-_ADMISSION_LOADER_TOKEN = object()
 
 
 class SourcePolicy(BaseModel):
@@ -44,10 +40,7 @@ class SourcePolicy(BaseModel):
     key: Literal["market_price"]
     version: Literal["source_policy_v1"] = "source_policy_v1"
     schema_version: Literal["1"]
-    payload_sha256: str
     instrument_tick_size: Decimal | None
-    _loader_token: object | None = PrivateAttr(default=None)
-    _identity_fingerprint: str | None = PrivateAttr(default=None)
 
     @field_validator("record_id")
     @classmethod
@@ -75,8 +68,6 @@ class FosunMarketAdmission(BaseModel):
     market_scope: Literal["US"]
     contract_hash: str
     expires_at: datetime
-    _loader_token: object | None = PrivateAttr(default=None)
-    _identity_fingerprint: str | None = PrivateAttr(default=None)
 
     @field_validator("expires_at", "capability_created_at", "capability_invalidated_at")
     @classmethod
@@ -113,11 +104,8 @@ async def load_source_policy_v1(
         key=cast(Literal["market_price"], record.key),
         version=cast(Literal["source_policy_v1"], record.version),
         schema_version=cast(Literal["1"], record.schema_version),
-        payload_sha256=_canonical_hash(record.payload),
         instrument_tick_size=instrument_tick_size,
     )
-    policy._loader_token = _POLICY_LOADER_TOKEN
-    policy._identity_fingerprint = _model_fingerprint(policy)
     return policy
 
 
@@ -166,21 +154,49 @@ async def load_fosun_market_admission(
         contract_hash=authority.contract_hash,
         expires_at=authority.expires_at,
     )
-    admission._loader_token = _ADMISSION_LOADER_TOKEN
-    admission._identity_fingerprint = _model_fingerprint(admission)
     return admission
 
 
-def select_price_series(
+async def select_price_series(
+    session: AsyncSession,
+    candidates: Sequence[PriceSeries],
+    instrument_tick_size: Decimal | None,
+    decision_time: datetime,
+) -> SourceSelection:
+    """Load repository authority and choose one complete point-in-time series."""
+    decision_time = require_utc(decision_time)
+    try:
+        policy = await load_source_policy_v1(
+            session, instrument_tick_size=instrument_tick_size
+        )
+    except ValueError:
+        return SourceSelection(
+            selected=None,
+            quality="FAIL",
+            reasons=("SOURCE_POLICY_UNAVAILABLE",),
+        )
+    fosun_admission = None
+    if any(candidate.source == "fosun" for candidate in candidates):
+        fosun_admission = await load_fosun_market_admission(
+            session,
+            decision_time=decision_time,
+            operation="fosun_get_bars",
+            market_scope="US",
+        )
+    return _apply_source_policy_v1(
+        candidates,
+        policy,
+        decision_time,
+        fosun_admission,
+    )
+
+
+def _apply_source_policy_v1(
     candidates: Sequence[PriceSeries],
     policy: SourcePolicy,
     decision_time: datetime,
-    *,
-    fosun_admission: FosunMarketAdmission | None = None,
+    fosun_admission: FosunMarketAdmission | None,
 ) -> SourceSelection:
-    decision_time = require_utc(decision_time)
-    if not _has_loader_attestation(policy, _POLICY_LOADER_TOKEN):
-        raise ValueError("source policy loader attestation is required")
     reasons: set[str] = set()
     eligible: list[PriceSeries] = []
     point_in_time_candidate_seen = False
@@ -237,28 +253,10 @@ def _valid_fosun_candidate(
     return (
         candidate.mode == "read_only"
         and admission is not None
-        and _has_loader_attestation(admission, _ADMISSION_LOADER_TOKEN)
         and admission.expires_at > decision_time
         and admission.admitted_contract_hash == admission.contract_hash
         and candidate.contract_hash == admission.contract_hash
     )
-
-
-def _has_loader_attestation(model: BaseModel, token: object) -> bool:
-    return getattr(model, "_loader_token", None) is token and getattr(
-        model, "_identity_fingerprint", None
-    ) == _model_fingerprint(model)
-
-
-def _model_fingerprint(model: BaseModel) -> str:
-    return _canonical_hash(model.model_dump(mode="json"))
-
-
-def _canonical_hash(value: object) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return sha256(payload.encode("utf-8")).hexdigest()
-
-
 def _canonical_bars(series: PriceSeries, bars: Sequence[PriceBar]) -> tuple[PriceBar, ...]:
     latest: dict[tuple[object, ...], PriceBar] = {}
     for bar in bars:

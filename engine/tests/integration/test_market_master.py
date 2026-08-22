@@ -1,6 +1,6 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,47 +13,17 @@ from nexus.persistence.models.market import (
 )
 from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.persistence.session import session_factory
-from nexus.providers.base import PriceBar, PriceSeries
 from nexus.quality.source_policy import (
     SOURCE_POLICY_ID,
-    FosunMarketAdmission,
-    SourcePolicy,
     load_fosun_market_admission,
     load_source_policy_v1,
-    select_price_series,
 )
 from nexus.settings import EngineSettings
-from pydantic import ValidationError
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 INSTRUMENT_ID = UUID("38df053d-1e87-5938-b279-a1ef5ab4643e")
-
-
-def _selection_series(source: str, *, contract_hash: str | None = None) -> PriceSeries:
-    decision_time = datetime(2026, 8, 23, 12, tzinfo=UTC)
-    price = Decimal("100")
-    return PriceSeries(
-        source=source,
-        feed="authorized" if source == "fosun" else "sip",
-        adjustment="all",
-        interval="1Day",
-        mode="read_only" if source == "fosun" else "delayed",
-        quality="PASS",
-        contract_hash=contract_hash,
-        bars=(
-            PriceBar(
-                instrument_id=INSTRUMENT_ID,
-                session=date(2026, 8, 23),
-                open=price,
-                high=price,
-                low=price,
-                close=price,
-                volume=Decimal("100"),
-                available_at=decision_time,
-            ),
-        ),
-    )
+_EVENT_TIMEOUT_SECONDS = 2.0
 
 
 @pytest.mark.asyncio
@@ -207,61 +177,29 @@ async def test_member_first_blocks_seal_then_commits_exactly_one_preseal_member(
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    snapshot_id, instrument_id = await _create_draft_universe(factory)
-    member_locked = asyncio.Event()
-    release_member = asyncio.Event()
-    seal_pid_ready = asyncio.Event()
-    seal_pid: int | None = None
+    try:
+        snapshot_id, instrument_id = await _create_draft_universe(factory)
+        await _exercise_member_first_lock_order(factory, snapshot_id, instrument_id)
 
-    async def member_first() -> None:
         async with factory() as session:
-            await session.execute(
-                text(
-                    "INSERT INTO universe_members "
-                    "(id, universe_snapshot_id, instrument_id, inclusion_reason) "
-                    "VALUES (:id, :snapshot_id, :instrument_id, 'pre-seal')"
-                ),
-                {"id": uuid4(), "snapshot_id": snapshot_id, "instrument_id": instrument_id},
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(UniverseMember)
+                    .where(UniverseMember.universe_snapshot_id == snapshot_id)
+                )
+                == 1
             )
-            member_locked.set()
-            await release_member.wait()
-            await session.commit()
-
-    async def seal_second() -> None:
-        nonlocal seal_pid
-        await member_locked.wait()
-        async with factory() as session:
-            seal_pid = await session.scalar(text("SELECT pg_backend_pid()"))
-            seal_pid_ready.set()
-            await session.execute(
-                text("UPDATE universe_snapshots SET published_at = :now WHERE id = :id"),
-                {"now": datetime(2026, 8, 23, tzinfo=UTC), "id": snapshot_id},
+            assert (
+                await session.scalar(
+                    select(UniverseSnapshot.published_at).where(
+                        UniverseSnapshot.id == snapshot_id
+                    )
+                )
+                is not None
             )
-            await session.commit()
-
-    member_task = asyncio.create_task(member_first())
-    seal_task = asyncio.create_task(seal_second())
-    await seal_pid_ready.wait()
-    assert seal_pid is not None
-    await _assert_backend_waits_on_lock(factory, seal_pid)
-    release_member.set()
-    await asyncio.gather(member_task, seal_task)
-
-    async with factory() as session:
-        assert (
-            await session.scalar(
-                select(func.count())
-                .select_from(UniverseMember)
-                .where(UniverseMember.universe_snapshot_id == snapshot_id)
-            )
-            == 1
-        )
-        assert (
-            await session.scalar(
-                select(UniverseSnapshot.published_at).where(UniverseSnapshot.id == snapshot_id)
-            )
-            is not None
-        )
+    finally:
+        await factory.kw["bind"].dispose()
 
 
 @pytest.mark.asyncio
@@ -269,26 +207,82 @@ async def test_seal_first_blocks_then_rejects_postpublication_member(
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    snapshot_id, instrument_id = await _create_draft_universe(factory)
-    member_pid_ready = asyncio.Event()
-    member_pid: int | None = None
+    try:
+        snapshot_id, instrument_id = await _create_draft_universe(factory)
+        await _exercise_seal_first_lock_order(factory, snapshot_id, instrument_id)
 
-    async with factory() as seal_session:
-        await seal_session.execute(
-            text("UPDATE universe_snapshots SET published_at = :now WHERE id = :id"),
-            {"now": datetime(2026, 8, 23, tzinfo=UTC), "id": snapshot_id},
-        )
+        async with factory() as session:
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(UniverseMember)
+                    .where(UniverseMember.universe_snapshot_id == snapshot_id)
+                )
+                == 0
+            )
+    finally:
+        await factory.kw["bind"].dispose()
 
-        async def member_second() -> None:
-            nonlocal member_pid
-            async with factory() as session:
-                member_pid = await session.scalar(text("SELECT pg_backend_pid()"))
-                member_pid_ready.set()
+
+@pytest.mark.asyncio
+async def test_lock_observer_failure_releases_tasks_sessions_and_database_lock(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    try:
+        snapshot_id, instrument_id = await _create_draft_universe(factory)
+
+        async def fail_observer(_factory, _backend_pid: int) -> None:
+            raise RuntimeError("controlled observer failure")
+
+        with pytest.raises(RuntimeError, match="controlled observer failure"):
+            await _exercise_member_first_lock_order(
+                factory,
+                snapshot_id,
+                instrument_id,
+                observe_lock=fail_observer,
+            )
+
+        assert not {
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith("market-lock-")
+            and not task.done()
+        }
+        async with factory() as session:
+            await session.execute(text("SET LOCAL lock_timeout = '250ms'"))
+            await session.execute(
+                text("UPDATE universe_snapshots SET published_at = :now WHERE id = :id"),
+                {"now": datetime(2026, 8, 23, tzinfo=UTC), "id": snapshot_id},
+            )
+            await session.commit()
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+async def _exercise_member_first_lock_order(
+    factory,
+    snapshot_id: UUID,
+    instrument_id: UUID,
+    *,
+    observe_lock: Callable[[object, int], Awaitable[None]] | None = None,
+) -> None:
+    member_locked = asyncio.Event()
+    release_member = asyncio.Event()
+    seal_pid_ready = asyncio.Event()
+    seal_pid: int | None = None
+    tasks: list[asyncio.Task[None]] = []
+    observer = observe_lock or _assert_backend_waits_on_lock
+
+    async def member_first() -> None:
+        async with factory() as session:
+            try:
                 await session.execute(
                     text(
                         "INSERT INTO universe_members "
                         "(id, universe_snapshot_id, instrument_id, inclusion_reason) "
-                        "VALUES (:id, :snapshot_id, :instrument_id, 'post-seal')"
+                        "VALUES (:id, :snapshot_id, :instrument_id, 'pre-seal')"
                     ),
                     {
                         "id": uuid4(),
@@ -296,25 +290,126 @@ async def test_seal_first_blocks_then_rejects_postpublication_member(
                         "instrument_id": instrument_id,
                     },
                 )
+                member_locked.set()
+                await asyncio.wait_for(
+                    release_member.wait(), timeout=_EVENT_TIMEOUT_SECONDS
+                )
                 await session.commit()
+            except BaseException:
+                await session.rollback()
+                raise
 
-        member_task = asyncio.create_task(member_second())
-        await member_pid_ready.wait()
-        assert member_pid is not None
-        await _assert_backend_waits_on_lock(factory, member_pid)
-        await seal_session.commit()
-        with pytest.raises(DBAPIError, match="published universe membership is immutable"):
-            await member_task
+    async def seal_second() -> None:
+        nonlocal seal_pid
+        await asyncio.wait_for(member_locked.wait(), timeout=_EVENT_TIMEOUT_SECONDS)
+        async with factory() as session:
+            try:
+                seal_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+                seal_pid_ready.set()
+                await session.execute(
+                    text(
+                        "UPDATE universe_snapshots SET published_at = :now WHERE id = :id"
+                    ),
+                    {"now": datetime(2026, 8, 23, tzinfo=UTC), "id": snapshot_id},
+                )
+                await session.commit()
+            except BaseException:
+                await session.rollback()
+                raise
 
-    async with factory() as session:
-        assert (
-            await session.scalar(
-                select(func.count())
-                .select_from(UniverseMember)
-                .where(UniverseMember.universe_snapshot_id == snapshot_id)
-            )
-            == 0
+    tasks.extend(
+        (
+            asyncio.create_task(member_first(), name="market-lock-member-first"),
+            asyncio.create_task(seal_second(), name="market-lock-seal-second"),
         )
+    )
+    try:
+        await asyncio.wait_for(seal_pid_ready.wait(), timeout=_EVENT_TIMEOUT_SECONDS)
+        if seal_pid is None:
+            raise AssertionError("seal backend PID was not captured")
+        await asyncio.wait_for(
+            observer(factory, seal_pid), timeout=_EVENT_TIMEOUT_SECONDS
+        )
+        release_member.set()
+        await asyncio.wait_for(
+            asyncio.gather(*tasks), timeout=_EVENT_TIMEOUT_SECONDS
+        )
+    finally:
+        release_member.set()
+        await _cancel_and_gather(tasks)
+
+
+async def _exercise_seal_first_lock_order(
+    factory,
+    snapshot_id: UUID,
+    instrument_id: UUID,
+    *,
+    observe_lock: Callable[[object, int], Awaitable[None]] | None = None,
+) -> None:
+    member_pid_ready = asyncio.Event()
+    member_pid: int | None = None
+    tasks: list[asyncio.Task[None]] = []
+    observer = observe_lock or _assert_backend_waits_on_lock
+
+    async with factory() as seal_session:
+        try:
+            await seal_session.execute(
+                text("UPDATE universe_snapshots SET published_at = :now WHERE id = :id"),
+                {"now": datetime(2026, 8, 23, tzinfo=UTC), "id": snapshot_id},
+            )
+
+            async def member_second() -> None:
+                nonlocal member_pid
+                async with factory() as session:
+                    try:
+                        member_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+                        member_pid_ready.set()
+                        await session.execute(
+                            text(
+                                "INSERT INTO universe_members "
+                                "(id, universe_snapshot_id, instrument_id, inclusion_reason) "
+                                "VALUES (:id, :snapshot_id, :instrument_id, 'post-seal')"
+                            ),
+                            {
+                                "id": uuid4(),
+                                "snapshot_id": snapshot_id,
+                                "instrument_id": instrument_id,
+                            },
+                        )
+                        await session.commit()
+                    except BaseException:
+                        await session.rollback()
+                        raise
+
+            tasks.append(
+                asyncio.create_task(member_second(), name="market-lock-member-second")
+            )
+            await asyncio.wait_for(member_pid_ready.wait(), timeout=_EVENT_TIMEOUT_SECONDS)
+            if member_pid is None:
+                raise AssertionError("member backend PID was not captured")
+            await asyncio.wait_for(
+                observer(factory, member_pid), timeout=_EVENT_TIMEOUT_SECONDS
+            )
+            await seal_session.commit()
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=_EVENT_TIMEOUT_SECONDS,
+            )
+            if not results or not isinstance(results[0], DBAPIError):
+                raise AssertionError("post-publication member was not rejected")
+            if "published universe membership is immutable" not in str(results[0]):
+                raise AssertionError("member rejection did not come from publication guard")
+        finally:
+            await seal_session.rollback()
+            await _cancel_and_gather(tasks)
+
+
+async def _cancel_and_gather(tasks: list[asyncio.Task[None]]) -> None:
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _create_draft_universe(factory) -> tuple[UUID, UUID]:
@@ -377,38 +472,6 @@ async def test_canonical_source_policy_is_single_loadable_and_database_immutable
             with pytest.raises(DBAPIError, match="published source policy is immutable"):
                 await session.execute(text(statement), {"id": SOURCE_POLICY_ID})
             await session.rollback()
-
-
-@pytest.mark.asyncio
-async def test_source_policy_requires_loader_attestation_bound_to_every_field(
-    migrated_database_url: str,
-) -> None:
-    decision_time = datetime(2026, 8, 23, 12, tzinfo=UTC)
-    factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    async with factory() as session:
-        loaded = await load_source_policy_v1(session, instrument_tick_size=Decimal("0.01"))
-
-    candidate = _selection_series("alpaca")
-    assert select_price_series((candidate,), loaded, decision_time).selected == candidate
-    with pytest.raises(ValidationError):
-        SourcePolicy(**loaded.model_dump(), priority=("fixture",))  # type: ignore[call-arg]
-    direct = SourcePolicy(**loaded.model_dump())
-    constructed = SourcePolicy.model_construct(**loaded.model_dump())
-    modified = tuple(
-        loaded.model_copy(update=update)
-        for update in (
-            {"record_id": uuid4()},
-            {"key": "other"},
-            {"version": "source_policy_v2"},
-            {"schema_version": "2"},
-            {"payload_sha256": "0" * 64},
-            {"instrument_tick_size": Decimal("1")},
-        )
-    )
-
-    for forged in (direct, constructed, *modified):
-        with pytest.raises(ValueError, match="loader attestation"):
-            select_price_series((candidate,), forged, decision_time)
 
 
 @pytest.mark.asyncio
@@ -555,87 +618,3 @@ async def test_fosun_admission_expiring_at_decision_time_is_invalid(
             )
             is None
         )
-
-
-@pytest.mark.asyncio
-async def test_fosun_admission_requires_loader_attestation_bound_to_every_field(
-    migrated_database_url: str,
-) -> None:
-    now = datetime(2026, 8, 23, 12, tzinfo=UTC)
-    factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    async with factory() as session:
-        capability = ProviderCapability(
-            provider="fosun",
-            capability="READ_ONLY",
-            contract_hash="a" * 64,
-            expires_at=now + timedelta(hours=1),
-            schema_version="1",
-            payload={"operation": "fosun_get_bars", "market_scope": "US"},
-            created_at=now - timedelta(hours=2),
-        )
-        session.add(capability)
-        session.add(
-            IntegrationStatus(
-                provider="fosun",
-                status="read_only",
-                admitted_contract_hash="a" * 64,
-                mode_changed_at=now - timedelta(hours=1),
-            )
-        )
-        await session.commit()
-        loaded = await load_fosun_market_admission(
-            session,
-            decision_time=now,
-            operation="fosun_get_bars",
-            market_scope="US",
-        )
-
-    assert loaded is not None
-    direct = FosunMarketAdmission(**loaded.model_dump())
-    constructed = FosunMarketAdmission.model_construct(**loaded.model_dump())
-    modified = tuple(
-        loaded.model_copy(update=update)
-        for update in (
-            {"capability_id": uuid4()},
-            {"capability_schema_version": "2"},
-            {"capability_created_at": now},
-            {"status_id": uuid4()},
-            {"status_version": loaded.status_version + 1},
-            {"capability_invalidated_at": now},
-            {"admitted_contract_hash": "b" * 64},
-            {"provider": "alpaca"},
-            {"mode": "fixture"},
-            {"operation": "fosun_sync_portfolio"},
-            {"market_scope": "HK"},
-            {"contract_hash": "b" * 64},
-            {"expires_at": now + timedelta(days=365)},
-        )
-    )
-    candidates = (
-        _selection_series("fosun", contract_hash="a" * 64),
-        _selection_series("alpaca"),
-    )
-
-    assert (
-        select_price_series(
-            candidates,
-            await _load_policy(migrated_database_url),
-            now,
-            fosun_admission=loaded,
-        ).selected
-        == candidates[0]
-    )
-    for forged in (direct, constructed, *modified):
-        result = select_price_series(
-            candidates,
-            await _load_policy(migrated_database_url),
-            now,
-            fosun_admission=forged,
-        )
-        assert result.selected == candidates[1]
-
-
-async def _load_policy(database_url: str) -> SourcePolicy:
-    factory = session_factory(EngineSettings(database_url=database_url))
-    async with factory() as session:
-        return await load_source_policy_v1(session, instrument_tick_size=Decimal("0.01"))
