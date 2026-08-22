@@ -15,13 +15,13 @@ export async function engineFetch<Path extends keyof TemporaryInternalPaths>(pat
   const config = engineConfig();
   const target = allowedTarget(path, config.baseUrl);
   if (!target) return internalFailure<Path>();
+  const method = (init.method ?? "GET").toUpperCase();
   const body = exactBodyBytes(init.body);
   const headers = new Headers(init.headers);
-  const protectedHeaders = createEngineHmacHeaders({ keyId: config.keyId, secret: config.secret, method: init.method ?? "GET", pathAndQuery: SYSTEM_STATUS_PATH, timestamp: Math.floor(Date.now() / 1000), nonce: uuidv7(), actorId: init.actor.userId, requestId: init.actor.requestId || uuidv7(), body });
+  const protectedHeaders = createEngineHmacHeaders({ keyId: config.keyId, secret: config.secret, method, pathAndQuery: SYSTEM_STATUS_PATH, timestamp: Math.floor(Date.now() / 1000), nonce: uuidv7(), actorId: init.actor.userId, requestId: init.actor.requestId || uuidv7(), body });
   for (const name of Object.keys(protectedHeaders)) headers.delete(name);
   for (const [name, value] of Object.entries(protectedHeaders)) headers.set(name, value);
   try {
-    const method = (init.method ?? "GET").toUpperCase();
     const response = await fetch(target, { ...init, method, headers, body: body.byteLength ? body as unknown as BodyInit : undefined, signal: AbortSignal.any([init.signal, AbortSignal.timeout(timeoutForMethod(method))].filter(Boolean) as AbortSignal[]) });
     return await sanitizeEngineResponse<Path>(response);
   } catch { return internalFailure<Path>(); }
