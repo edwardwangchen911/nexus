@@ -1,7 +1,7 @@
 """Gateway settings isolated from engine and provider implementations."""
 
 from enum import StrEnum
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,6 +20,7 @@ class GatewaySettings(BaseSettings):
         env_file=None,
         env_ignore_empty=True,
         extra="ignore",
+        hide_input_in_errors=True,
         populate_by_name=True,
     )
 
@@ -27,7 +28,10 @@ class GatewaySettings(BaseSettings):
         default=Environment.DEVELOPMENT,
         validation_alias="NEXUS_ENV",
     )
-    capability: str | None = Field(default=None, validation_alias="FOSUN_GATEWAY_CAPABILITY")
+    capability: Literal["READ_ONLY"] | None = Field(
+        default=None,
+        validation_alias="FOSUN_GATEWAY_CAPABILITY",
+    )
     gateway_hmac_secret: SecretStr | None = Field(
         default=None,
         validation_alias="FOSUN_GATEWAY_HMAC_SECRET",

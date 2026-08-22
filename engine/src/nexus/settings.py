@@ -20,6 +20,7 @@ class _SafeSettings(BaseSettings):
         env_file=None,
         env_ignore_empty=True,
         extra="ignore",
+        hide_input_in_errors=True,
         populate_by_name=True,
     )
 

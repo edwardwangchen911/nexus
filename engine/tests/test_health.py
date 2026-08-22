@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from nexus.main import create_engine_app
 from nexus.settings import EngineSettings, Environment
 from nexus.worker import run_worker
+from pydantic import ValidationError
 
 
 def test_engine_liveness_is_minimal() -> None:
@@ -35,6 +36,15 @@ def test_engine_reads_nexus_environment_alias_for_production() -> None:
     )
 
     assert settings.environment is Environment.PRODUCTION
+
+
+def test_engine_production_validation_hides_input_canary() -> None:
+    canary = "synthetic-engine-validation-canary"
+
+    with pytest.raises(ValidationError) as exc_info:
+        EngineSettings(NEXUS_ENV="production", DATABASE_URL=canary)
+
+    assert canary not in str(exc_info.value)
 
 
 @pytest.mark.asyncio
