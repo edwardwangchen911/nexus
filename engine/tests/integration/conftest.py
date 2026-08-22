@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -13,6 +14,8 @@ from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import create_async_engine
+
+_TEMPORARY_DATABASE_NAME = re.compile(r"^nexus_test_[0-9a-f]{32}$")
 
 
 @dataclass(frozen=True)
@@ -53,9 +56,11 @@ class TemporaryDatabaseFactory:
         """Read the real PostgreSQL catalog for an isolated database name."""
         return asyncio.run(_database_exists(self.admin_url, database_name))
 
-    def drop(self, database_name: str) -> None:
+    def drop(self, temporary_database: TemporaryDatabase) -> None:
         """Explicit test cleanup for failure-path assertions."""
-        asyncio.run(_drop_database(self.admin_url, database_name))
+        if not isinstance(temporary_database, TemporaryDatabase):
+            raise TypeError("temporary_database must be a TemporaryDatabase")
+        asyncio.run(_drop_database(self.admin_url, temporary_database.name))
 
 
 @pytest.fixture
@@ -87,6 +92,7 @@ def migrated_database_url(
 
 
 async def _create_database(admin_url: URL, database_name: str) -> None:
+    _require_temporary_database_name(database_name)
     engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
     try:
         async with engine.connect() as connection:
@@ -96,6 +102,7 @@ async def _create_database(admin_url: URL, database_name: str) -> None:
 
 
 async def _drop_database(admin_url: URL, database_name: str) -> None:
+    _require_temporary_database_name(database_name)
     engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
     try:
         async with engine.connect() as connection:
@@ -109,6 +116,12 @@ async def _drop_database(admin_url: URL, database_name: str) -> None:
             await connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
     finally:
         await engine.dispose()
+
+
+def _require_temporary_database_name(database_name: str) -> None:
+    """Limit destructive test database operations to UUID-derived temporary names."""
+    if _TEMPORARY_DATABASE_NAME.fullmatch(database_name) is None:
+        raise ValueError("invalid temporary database name")
 
 
 async def _database_exists(admin_url: URL, database_name: str) -> bool:
