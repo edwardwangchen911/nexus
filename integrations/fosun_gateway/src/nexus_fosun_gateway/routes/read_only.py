@@ -66,7 +66,8 @@ async def _execute(
     request_type: type[RequestModel],
 ) -> GatewayPage[GatewayItem]:
     body = await request.body()
-    await request.app.state.hmac_verifier.verify(request, body)
+    actor = await request.app.state.hmac_verifier.verify(request, body)
+    request.state.verified_gateway_actor = actor
     try:
         decoded = json.loads(body)
         if not isinstance(decoded, dict):

@@ -8,6 +8,7 @@ COPY pyproject.toml uv.lock ./
 COPY engine/pyproject.toml engine/pyproject.toml
 COPY integrations/fosun_gateway/pyproject.toml integrations/fosun_gateway/pyproject.toml
 COPY integrations/fosun_gateway/src integrations/fosun_gateway/src
+COPY contracts/providers/fosun/manifest.json contracts/providers/fosun/manifest.json
 RUN uv sync --frozen --no-dev --package nexus-fosun-gateway \
     && groupadd --system nexus \
     && useradd --system --gid nexus --home-dir /app --shell /usr/sbin/nologin nexus \

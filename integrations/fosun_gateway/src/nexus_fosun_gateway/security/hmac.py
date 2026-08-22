@@ -66,9 +66,9 @@ class ReplayCache:
             identity = (key_id, nonce)
             if identity in self._entries:
                 return False
+            if len(self._entries) >= self._max_entries:
+                return False
             self._entries[identity] = now
-            while len(self._entries) > self._max_entries:
-                self._entries.popitem(last=False)
             return True
 
 

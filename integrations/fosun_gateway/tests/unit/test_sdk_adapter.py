@@ -4,6 +4,7 @@ import threading
 import time
 from types import SimpleNamespace
 
+import nexus_fosun_gateway.adapter.sdk as sdk_module
 import pytest
 from nexus_fosun_gateway.adapter.sdk import (
     DualTokenBucket,
@@ -293,6 +294,99 @@ async def test_sdk_adapter_serializes_calls_with_concurrency_one() -> None:
 
 
 @pytest.mark.asyncio
+async def test_provider_timeout_never_retries_while_blocking_call_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out worker must not overlap a retry or a later provider call."""
+    monkeypatch.setattr(sdk_module, "_DEADLINE_SECONDS", 0.03)
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    state = {"active": 0, "maximum": 0, "calls": 0}
+    lock = threading.Lock()
+
+    def list_accounts() -> object:
+        with lock:
+            state["calls"] += 1
+            state["active"] += 1
+            state["maximum"] = max(state["maximum"], state["active"])
+        started.set()
+        release.wait(timeout=2)
+        with lock:
+            state["active"] -= 1
+        finished.set()
+        return _raw({"subAccounts": []}, "synthetic-timeout-request")
+
+    adapter = SdkFosunTransport(
+        SimpleNamespace(account=SimpleNamespace(list_accounts=list_accounts)),
+        rate_limiter=NoopRateLimiter(),
+    )
+
+    try:
+        first = asyncio.create_task(adapter.execute("fosun_sync_accounts", {}))
+        assert await asyncio.to_thread(started.wait, 1)
+        with pytest.raises(GatewayError, match="bounded retry policy"):
+            await first
+
+        second = asyncio.create_task(adapter.execute("fosun_sync_accounts", {}))
+        with pytest.raises(GatewayError, match="bounded retry policy"):
+            await second
+
+        assert state == {"active": 1, "maximum": 1, "calls": 1}
+    finally:
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_keeps_actual_provider_calls_at_concurrency_one() -> None:
+    """Cancelling the waiter must not let another SDK thread overlap the live call."""
+    first_started = threading.Event()
+    first_release = threading.Event()
+    second_finished = threading.Event()
+    state = {"active": 0, "maximum": 0, "calls": 0}
+    lock = threading.Lock()
+
+    def list_accounts() -> object:
+        with lock:
+            state["calls"] += 1
+            call_number = state["calls"]
+            state["active"] += 1
+            state["maximum"] = max(state["maximum"], state["active"])
+        if call_number == 1:
+            first_started.set()
+            first_release.wait(timeout=2)
+        with lock:
+            state["active"] -= 1
+        if call_number == 2:
+            second_finished.set()
+        return _raw({"subAccounts": []}, f"synthetic-cancel-request-{call_number}")
+
+    adapter = SdkFosunTransport(
+        SimpleNamespace(account=SimpleNamespace(list_accounts=list_accounts)),
+        rate_limiter=NoopRateLimiter(),
+    )
+    first = asyncio.create_task(adapter.execute("fosun_sync_accounts", {}))
+
+    try:
+        assert await asyncio.to_thread(first_started.wait, 1)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        second = asyncio.create_task(adapter.execute("fosun_sync_accounts", {}))
+        await asyncio.sleep(0.03)
+        assert state == {"active": 1, "maximum": 1, "calls": 1}
+
+        first_release.set()
+        page = await second
+        assert page.source_request_id == "synthetic-cancel-request-2"
+        assert await asyncio.to_thread(second_finished.wait, 1)
+    finally:
+        first_release.set()
+
+
+@pytest.mark.asyncio
 async def test_cash_flow_cursor_and_limit_are_enforced_inside_gateway() -> None:
     """The frozen cash-flow SDK method has no page args, so gateway paging must still be bounded."""
     response = _raw(
@@ -342,6 +436,57 @@ async def test_cash_flow_cursor_and_limit_are_enforced_inside_gateway() -> None:
     ]
     assert page.has_more is False
     assert page.next_cursor is None
+
+
+@pytest.mark.asyncio
+async def test_sdk_adapter_normalizes_provider_epoch_seconds_and_milliseconds_to_utc() -> None:
+    """Reviewed integer epoch shapes must not leak or become naive timestamps."""
+    response = _raw(
+        {
+            "count": 2,
+            "list": [
+                {
+                    "flowId": "synthetic-cash-flow-seconds",
+                    "currency": "USD",
+                    "amount": "100.00",
+                    "createdAt": 1787356800,
+                    "flowType": 1,
+                },
+                {
+                    "flowId": "synthetic-cash-flow-milliseconds",
+                    "currency": "USD",
+                    "amount": "200.00",
+                    "createdAt": 1787356800000,
+                    "flowType": 1,
+                },
+            ],
+            "start": 0,
+            "total": 2,
+        },
+        "synthetic-request-epoch-shapes",
+    )
+    adapter = SdkFosunTransport(
+        SimpleNamespace(
+            trade=SimpleNamespace(get_cash_flows=RecordingMethod(response))
+        ),
+        rate_limiter=NoopRateLimiter(),
+    )
+
+    page = await adapter.execute(
+        "fosun_list_cash_flows",
+        {
+            "account_id": "synthetic-account-001",
+            "date_from": "2026-08-01",
+            "date_to": "2026-08-22",
+            "cursor": None,
+            "limit": 20,
+        },
+    )
+
+    assert [item.occurred_at.isoformat() for item in page.items] == [
+        "2026-08-22T00:00:00+00:00",
+        "2026-08-22T00:00:00+00:00",
+    ]
 
 
 @pytest.mark.asyncio
@@ -429,14 +574,17 @@ async def test_dual_token_bucket_applies_two_qps_burst_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_dual_token_bucket_applies_thirty_per_minute_budget() -> None:
-    """A sustained 2 QPS stream must also slow when the minute bucket is exhausted."""
+    """Call 31 must wait until the earliest call leaves the rolling minute window."""
     clock = FakeClock()
     limiter = DualTokenBucket(clock=clock, sleeper=clock.sleep)
 
-    for _ in range(40):
+    for _ in range(30):
         await limiter.acquire()
+    assert clock.now == pytest.approx(14.0)
 
-    assert clock.now == pytest.approx(20.0)
+    await limiter.acquire()
+
+    assert clock.now == pytest.approx(60.0)
 
 
 class NoopRateLimiter:

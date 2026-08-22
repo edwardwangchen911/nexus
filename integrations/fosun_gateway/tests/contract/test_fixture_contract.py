@@ -7,6 +7,7 @@ from nexus_fosun_gateway.domain import GatewayError
 
 FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "fosun"
 MANIFEST_PATH = Path(__file__).parents[4] / "contracts" / "providers" / "fosun" / "manifest.json"
+DOCKERFILE_PATH = Path(__file__).parents[4] / "infra" / "docker" / "fosun-gateway.Dockerfile"
 
 EXPECTED_FIXTURES = {
     "success.json",
@@ -27,7 +28,21 @@ def test_provider_manifest_pins_reviewed_public_contracts_and_sdk_source() -> No
     assert manifest == {
         "provider": "fosun",
         "reviewed_at": "2026-08-22",
-        "admission": "blocked",
+        "admission": {
+            "status": "blocked",
+            "sdk_commit": "891d95fb4967efaa682387c1b35966ceea38fb21",
+            "openapi_sha256": {
+                "market": "f35cfaa3484d8507723729b68a2b8d60fa85d4d28d06991b4a434995cbfac22a",
+                "trade": "379561548be045c8e531f31e88ee76c8cbdb7bda5b59e12a9b9d5c9040abd204",
+                "push": "15f5416f268c9c47cdcef6a2ff7eaaa89ab4b61f1c9927074969b1e3fef32c05",
+            },
+            "evidence": {
+                "written_permission": None,
+                "provider_test_vector": None,
+                "security_review": None,
+                "tls_verification_remediation": None,
+            },
+        },
         "sdk": {
             "tag": "v1.2.0",
             "commit": "891d95fb4967efaa682387c1b35966ceea38fb21",
@@ -48,6 +63,16 @@ def test_provider_manifest_pins_reviewed_public_contracts_and_sdk_source() -> No
             },
         },
     }
+
+
+def test_gateway_image_contains_machine_readable_provider_manifest() -> None:
+    """Production admission cannot evaluate a reviewed record missing from the image."""
+    dockerfile = DOCKERFILE_PATH.read_text()
+
+    assert (
+        "COPY contracts/providers/fosun/manifest.json "
+        "contracts/providers/fosun/manifest.json"
+    ) in dockerfile
 
 
 def test_fixture_corpus_is_synthetic_and_covers_required_contract_cases() -> None:

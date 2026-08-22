@@ -3,8 +3,11 @@
 import asyncio
 import logging
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from functools import partial
 from typing import Protocol, cast
 
 from nexus_fosun_gateway.adapter.normalization import (
@@ -67,11 +70,46 @@ class DualTokenBucket:
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._qps = _TokenBucket(2.0, 2.0, clock=clock, sleeper=sleeper)
-        self._minute = _TokenBucket(30.0, 30.0 / 60.0, clock=clock, sleeper=sleeper)
+        self._minute = _RollingWindowLimiter(
+            30,
+            60.0,
+            clock=clock,
+            sleeper=sleeper,
+        )
 
     async def acquire(self) -> None:
         await self._qps.acquire()
         await self._minute.acquire()
+
+
+class _RollingWindowLimiter:
+    def __init__(
+        self,
+        limit: int,
+        window_seconds: float,
+        *,
+        clock: Callable[[], float],
+        sleeper: Callable[[float], Awaitable[None]],
+    ) -> None:
+        self._limit = limit
+        self._window_seconds = window_seconds
+        self._clock = clock
+        self._sleeper = sleeper
+        self._timestamps: deque[float] = deque()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        while True:
+            async with self._lock:
+                now = self._clock()
+                cutoff = now - self._window_seconds
+                while self._timestamps and self._timestamps[0] <= cutoff:
+                    self._timestamps.popleft()
+                if len(self._timestamps) < self._limit:
+                    self._timestamps.append(now)
+                    return
+                wait_for = self._timestamps[0] + self._window_seconds - now
+            await self._sleeper(wait_for)
 
 
 class SdkFosunTransport:
@@ -90,6 +128,10 @@ class SdkFosunTransport:
         self._sleeper = sleeper
         self._clock = clock
         self._concurrency = asyncio.Semaphore(1)
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="nexus-fosun-sdk",
+        )
 
     async def execute(
         self,
@@ -223,10 +265,21 @@ class SdkFosunTransport:
                 extra={"operation": operation, "attempt": attempt, "outcome": "started"},
             )
             try:
+                loop = asyncio.get_running_loop()
                 result = await asyncio.wait_for(
-                    asyncio.to_thread(method, **kwargs),
+                    loop.run_in_executor(self._executor, partial(method, **kwargs)),
                     timeout=remaining,
                 )
+            except TimeoutError:
+                # A running Python thread cannot be cancelled safely. The dedicated
+                # single-worker executor remains the execution boundary, and timeout
+                # is terminal so no retry is queued behind a still-active SDK call.
+                raise GatewayError(
+                    "PROVIDER_UNAVAILABLE",
+                    "Provider request failed within the bounded retry policy.",
+                    status_code=503,
+                    next_action="RETRY_LATER",
+                ) from None
             except Exception as error:
                 if type(error).__name__ == "PermissionError":
                     raise GatewayError(

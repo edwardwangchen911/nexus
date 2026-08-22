@@ -178,7 +178,7 @@ def _order(item: Mapping[str, object]) -> OrderItem:
         filled_quantity=_decimal(item, "filledQuantity"),
         price=_scaled_optional(item.get("price"), item.get("power")),
         status=str(_required_value(item, "orderStatus")),
-        updated_at=datetime.fromtimestamp(timestamp, UTC),
+        updated_at=_epoch_datetime(timestamp),
     )
 
 
@@ -357,12 +357,27 @@ def _power(value: object) -> int:
 
 
 def _aware_datetime(value: object) -> datetime:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return _epoch_datetime(value)
     if not isinstance(value, str):
         raise ValueError
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError
     return parsed.astimezone(UTC)
+
+
+def _epoch_datetime(value: int) -> datetime:
+    # Bound the two reviewed wire units to contemporary dates so unrelated
+    # integers cannot be silently reinterpreted as timestamps.
+    seconds: float
+    if 946_684_800 <= value <= 4_102_444_800:
+        seconds = float(value)
+    elif 946_684_800_000 <= value <= 4_102_444_800_000:
+        seconds = value / 1000
+    else:
+        raise ValueError
+    return datetime.fromtimestamp(seconds, UTC)
 
 
 def _bar_timestamp(value: object) -> datetime:

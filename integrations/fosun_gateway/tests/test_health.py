@@ -90,6 +90,34 @@ def test_previous_gateway_hmac_identity_must_be_complete_and_distinct() -> None:
         GatewaySettings.model_validate(duplicate)
 
 
+@pytest.mark.parametrize(
+    "secret",
+    ["", "   ", "synthetic-weak", "x" * 31, f" {'x' * 32}"],
+)
+def test_production_rejects_empty_whitespace_or_weak_current_hmac_secret(
+    secret: str,
+) -> None:
+    """Production authentication must require an unpadded 32-byte secret or stronger."""
+    values = _production_settings()
+    values["FOSUN_GATEWAY_HMAC_CURRENT_SECRET"] = secret
+
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(values)
+
+
+def test_production_rejects_equal_current_and_previous_hmac_secrets() -> None:
+    """Distinct key IDs must not disguise reuse of the same gateway secret."""
+    values = {
+        **_production_settings(),
+        "FOSUN_GATEWAY_HMAC_PREVIOUS_KEY_ID": "gateway-previous",
+        "FOSUN_GATEWAY_HMAC_PREVIOUS_SECRET": "x" * 32,
+        "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "x" * 32,
+    }
+
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(values)
+
+
 def test_development_read_only_mode_does_not_receive_fixture_hmac_defaults() -> None:
     """Switching transport mode must not carry fixture authentication into an SDK process."""
     with pytest.raises(ValidationError):
@@ -107,7 +135,7 @@ def _production_settings() -> dict[str, object]:
         "FOSUN_GATEWAY_CAPABILITY": "READ_ONLY",
         "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
         "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "gateway-current",
-        "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret",
+        "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret-32-bytes",
         "FOSUN_GATEWAY_SERVER_CERT": "/run/secrets/synthetic-server-cert",
         "FOSUN_GATEWAY_SERVER_KEY": "/run/secrets/synthetic-server-key",
         "FOSUN_GATEWAY_SERVER_CLIENT_CA": "/run/secrets/synthetic-client-ca",

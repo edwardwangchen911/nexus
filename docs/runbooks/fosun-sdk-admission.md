@@ -6,6 +6,10 @@ Admission is **BLOCKED**. The gateway supports offline `fixture` mode and contai
 production-code `read_only` seam, but `fsopenapi` is intentionally absent from `uv.lock`.
 Do not call a Fosun endpoint, enable provider credentials, or set `FOSUN_SDK_ADMITTED=true`
 until every gate below has signed evidence.
+The committed manifest has machine-readable `status: blocked` and null evidence references;
+the runtime boolean alone cannot override it. The gateway image carries that exact record and
+admits only when its SDK/OpenAPI subject matches the frozen constants and all written-permission,
+provider-test-vector, security-review, and TLS-remediation references are populated.
 
 The reviewed candidate is tag `v1.2.0` at commit
 `891d95fb4967efaa682387c1b35966ceea38fb21`. The repository has no standard license file,

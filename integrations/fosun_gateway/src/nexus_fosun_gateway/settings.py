@@ -1,5 +1,6 @@
 """Gateway settings isolated from engine and provider implementations."""
 
+import hmac
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Self
@@ -66,6 +67,10 @@ class GatewaySettings(BaseSettings):
         validation_alias="FOSUN_GATEWAY_SERVER_CLIENT_CA",
     )
     sdk_admitted: bool = Field(default=False, validation_alias="FOSUN_SDK_ADMITTED")
+    provider_manifest: Path = Field(
+        default=Path("contracts/providers/fosun/manifest.json"),
+        validation_alias="FOSUN_PROVIDER_MANIFEST",
+    )
     fsopenapi_base_url: str | None = Field(
         default=None,
         validation_alias="FSOPENAPI_BASE_URL",
@@ -140,6 +145,14 @@ class GatewaySettings(BaseSettings):
             raise ValueError("previous gateway HMAC identity must be complete")
         if self.gateway_hmac_previous_key_id == self.gateway_hmac_current_key_id:
             raise ValueError("gateway HMAC key IDs must be distinct")
+        current_value = _strong_hmac_secret(self.gateway_hmac_current_secret)
+        previous_value = _strong_hmac_secret(self.gateway_hmac_previous_secret)
+        if (
+            current_value is not None
+            and previous_value is not None
+            and hmac.compare_digest(current_value.encode(), previous_value.encode())
+        ):
+            raise ValueError("gateway HMAC rotation secrets must be distinct")
         return self
 
     @classmethod
@@ -159,3 +172,12 @@ class GatewaySettings(BaseSettings):
                 ),
             }
         )
+
+
+def _strong_hmac_secret(secret: SecretStr | None) -> str | None:
+    if secret is None:
+        return None
+    value = secret.get_secret_value()
+    if value != value.strip() or len(value.encode()) < 32:
+        raise ValueError("gateway HMAC secrets must be unpadded and at least 32 bytes")
+    return value
