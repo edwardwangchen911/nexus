@@ -6,6 +6,7 @@ from uuid import UUID
 
 from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
+from nexus.providers.base import DeliveryMode
 from pydantic import BaseModel, ConfigDict, field_validator
 
 
@@ -21,6 +22,7 @@ class MarketItemResponse(_StrictSchema):
     price: DecimalString | None
     source: str | None
     feed: str | None
+    delivery_mode: DeliveryMode
     as_of: datetime | None
     quality: Literal["PASS", "PARTIAL", "FAIL"]
     quality_reasons: tuple[str, ...]
@@ -61,6 +63,7 @@ class SelectedMarketSeriesResponse(_StrictSchema):
     instrument_id: UUID
     source: str | None
     feed: str | None
+    delivery_mode: DeliveryMode | None
     adjustment: str | None
     interval: Literal["1Day"] | None
     quality: Literal["PASS", "PARTIAL", "FAIL"]

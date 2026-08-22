@@ -15,8 +15,10 @@ from nexus.persistence.models.market import (
 from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.persistence.session import session_factory
 from nexus.quality.source_policy import (
+    QUOTE_SOURCE_POLICY_ID,
     SOURCE_POLICY_ID,
     load_fosun_market_admission,
+    load_quote_source_policy_v1,
     load_source_policy_v1,
 )
 from nexus.settings import EngineSettings
@@ -447,11 +449,13 @@ async def test_canonical_source_policy_is_single_loadable_and_database_immutable
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     async with factory() as session:
         policy = await load_source_policy_v1(session, instrument_tick_size=None)
+        quote_policy = await load_quote_source_policy_v1(session)
         records = list(
-            await session.scalars(text("SELECT id FROM source_policies WHERE key = 'market_price'"))
+            await session.scalars(text("SELECT id FROM source_policies ORDER BY key"))
         )
         assert policy.record_id == SOURCE_POLICY_ID
-        assert records == [SOURCE_POLICY_ID]
+        assert quote_policy.record_id == QUOTE_SOURCE_POLICY_ID
+        assert records == [SOURCE_POLICY_ID, QUOTE_SOURCE_POLICY_ID]
         for statement in (
             "UPDATE source_policies SET payload = '{}'::jsonb WHERE id = :id",
             "DELETE FROM source_policies WHERE id = :id",
@@ -547,7 +551,7 @@ async def test_fosun_quote_and_bars_capabilities_are_operation_scoped(
                 ProviderCapability(
                     provider="fosun",
                     capability="READ_ONLY",
-                    contract_hash="b" * 64,
+                    contract_hash="a" * 64,
                     expires_at=now + timedelta(hours=1),
                     schema_version="1",
                     payload={
@@ -571,6 +575,9 @@ async def test_fosun_quote_and_bars_capabilities_are_operation_scoped(
         quote_scoped = await service.capability(
             "fosun", operation="fosun_get_quotes", market_scope="US"
         )
+        bars_scoped = await service.capability(
+            "fosun", operation="fosun_get_bars", market_scope="US"
+        )
         quote_admission = await load_fosun_market_admission(
             session,
             decision_time=now,
@@ -584,11 +591,13 @@ async def test_fosun_quote_and_bars_capabilities_are_operation_scoped(
             market_scope="US",
         )
 
-    assert generic.contract_hash == "b" * 64
+    assert generic.contract_hash == "a" * 64
     assert quote_scoped.contract_hash == "a" * 64
+    assert bars_scoped.contract_hash == "a" * 64
     assert quote_admission is not None
     assert quote_admission.operation == "fosun_get_quotes"
-    assert bars_admission is None
+    assert bars_admission is not None
+    assert bars_admission.operation == "fosun_get_bars"
 
 
 @pytest.mark.asyncio

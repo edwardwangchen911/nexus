@@ -9,7 +9,8 @@ const item = {
   symbol: "AAPL",
   price: "227.160000000000",
   source: "alpaca",
-  feed: "sip",
+  feed: "iex",
+  delivery_mode: "real_time",
   as_of: "2026-08-21T20:00:00Z",
   quality: "PASS",
   quality_reasons: [],
@@ -20,6 +21,7 @@ const selectedSeries = {
   instrument_id: instrumentId,
   source: "alpaca",
   feed: "sip",
+  delivery_mode: "delayed",
   adjustment: "raw",
   interval: "1Day",
   quality: "PASS",
@@ -60,7 +62,9 @@ for (const viewport of [
     await page.goto("/market");
 
     await expect(page.getByRole("region", { name: "AAPL 报价证据" })).toContainText("ALPACA");
+    await expect(page.getByRole("region", { name: "AAPL 报价证据" })).toContainText("实时");
     await expect(page.getByRole("region", { name: "AAPL OHLCV 证据" })).toContainText("ALPACA");
+    await expect(page.getByRole("region", { name: "AAPL OHLCV 证据" })).toContainText("延迟");
     await expect(page.getByRole("region", { name: "AAPL 价格图表" })).toBeVisible();
     await expect(page.locator(".price-chart__canvas canvas").first()).toBeVisible();
     await expect(page.getByRole("table", { name: "AAPL OHLCV 数据" })).toContainText("227.160000000000");

@@ -49,6 +49,33 @@ export default function MarketPage(): React.ReactElement {
   const [notice, setNotice] = useState<Notice>(null);
   const itemsRef = useRef<MarketItem[]>([]);
   const refreshVersionRef = useRef(0);
+  const locationVersionRef = useRef(0);
+  const watchlistMutationVersionRef = useRef(0);
+  const scrollRestoreRef = useRef<number | null | undefined>(undefined);
+
+  useEffect(() => {
+    scrollRestoreRef.current = readMarketScrollY();
+    const saveScrollPosition = () => saveMarketScrollY(globalThis.scrollY);
+    globalThis.addEventListener("scroll", saveScrollPosition, { passive: true });
+    return () => {
+      globalThis.removeEventListener("scroll", saveScrollPosition);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      scrollRestoreRef.current === undefined
+      || scrollRestoreRef.current === null
+      || items.length === 0
+      || !["ready", "partial", "stale"].includes(state)
+    ) return;
+    const savedScrollY = scrollRestoreRef.current;
+    scrollRestoreRef.current = null;
+    const restoreTimer = globalThis.setTimeout(() => {
+      globalThis.scrollTo({ top: savedScrollY, left: 0, behavior: "auto" });
+    }, 0);
+    return () => globalThis.clearTimeout(restoreTimer);
+  }, [items.length, state]);
 
   const refresh = useCallback(async () => {
     const refreshVersion = refreshVersionRef.current + 1;
@@ -111,10 +138,14 @@ export default function MarketPage(): React.ReactElement {
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let scheduleGeneration = 0;
     const schedule = () => {
       if (!active) return;
+      const generation = scheduleGeneration + 1;
+      scheduleGeneration = generation;
       timer = globalThis.setTimeout(async () => {
         await refresh();
+        if (!active || generation !== scheduleGeneration) return;
         schedule();
       }, refreshIntervalMs(document.visibilityState));
     };
@@ -126,6 +157,7 @@ export default function MarketPage(): React.ReactElement {
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       active = false;
+      scheduleGeneration += 1;
       if (timer) globalThis.clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
@@ -133,6 +165,7 @@ export default function MarketPage(): React.ReactElement {
 
   function setSelected(instrumentId: string): void {
     refreshVersionRef.current += 1;
+    locationVersionRef.current += 1;
     setSelectedInstrumentId(instrumentId);
     setSelectedSeries(null);
     replaceMarketQuery({ selectedInstrumentId: instrumentId, watchlistOnly, cursor });
@@ -140,6 +173,9 @@ export default function MarketPage(): React.ReactElement {
 
   async function toggleWatchlist(item: MarketItem): Promise<void> {
     refreshVersionRef.current += 1;
+    const locationVersion = locationVersionRef.current;
+    const mutationVersion = watchlistMutationVersionRef.current + 1;
+    watchlistMutationVersionRef.current = mutationVersion;
     setRefreshing(false);
     setPendingInstrumentId(item.instrument_id);
     setNotice(null);
@@ -152,6 +188,11 @@ export default function MarketPage(): React.ReactElement {
       if (envelope.data.instrument_id !== item.instrument_id) {
         throw new Error("watchlist membership mismatch");
       }
+      if (
+        mutationVersion !== watchlistMutationVersionRef.current
+        || locationVersion !== locationVersionRef.current
+      ) return;
+      refreshVersionRef.current += 1;
       const finalWatchlisted = envelope.data.watchlisted;
       if (watchlistOnly && !finalWatchlisted) {
         await refresh();
@@ -164,11 +205,23 @@ export default function MarketPage(): React.ReactElement {
           return updated;
         });
       }
-      setNotice({ kind: "success", text: finalWatchlisted ? `${item.symbol} 已加入观察列表。` : `${item.symbol} 已移出观察列表。` });
+      if (
+        mutationVersion === watchlistMutationVersionRef.current
+        && locationVersion === locationVersionRef.current
+      ) {
+        setNotice({ kind: "success", text: finalWatchlisted ? `${item.symbol} 已加入观察列表。` : `${item.symbol} 已移出观察列表。` });
+      }
     } catch {
-      setNotice({ kind: "error", text: "观察列表未更新。当前行情和交易状态均未改变，请重试。" });
+      if (
+        mutationVersion === watchlistMutationVersionRef.current
+        && locationVersion === locationVersionRef.current
+      ) {
+        setNotice({ kind: "error", text: "观察列表未更新。当前行情和交易状态均未改变，请重试。" });
+      }
     } finally {
-      setPendingInstrumentId(null);
+      if (mutationVersion === watchlistMutationVersionRef.current) {
+        setPendingInstrumentId(null);
+      }
     }
   }
 
@@ -189,6 +242,7 @@ export default function MarketPage(): React.ReactElement {
       onToggleWatchlistOnly={() => {
         const nextWatchlistOnly = !watchlistOnly;
         refreshVersionRef.current += 1;
+        locationVersionRef.current += 1;
         setCursor(null);
         setNextCursor(null);
         setSelectedInstrumentId(null);
@@ -199,6 +253,7 @@ export default function MarketPage(): React.ReactElement {
       onNextPage={() => {
         if (!nextCursor) return;
         refreshVersionRef.current += 1;
+        locationVersionRef.current += 1;
         setCursor(nextCursor);
         setSelectedInstrumentId(null);
         setSelectedSeries(null);
@@ -296,7 +351,7 @@ export function MarketPanel({
                     <EvidenceFact term="报价来源" value={selectedItem.source?.toUpperCase() ?? "未选定"} />
                     <EvidenceFact term="Feed" value={selectedItem.feed?.toUpperCase() ?? "未选定"} />
                     <EvidenceFact term="报价截止" value={formatUtc(selectedItem.as_of)} />
-                    <EvidenceFact term="实时性口径" value={feedLatencyLabel(selectedItem.feed)} />
+                    <EvidenceFact term="实时性口径" value={deliveryModeLabel(selectedItem.delivery_mode)} />
                     <EvidenceFact term="报价质量" value={selectedItem.quality} />
                   </dl>
                   <button
@@ -429,14 +484,34 @@ function replaceMarketQuery(state: MarketLocationState): void {
   if (state.selectedInstrumentId) url.searchParams.set("selected", state.selectedInstrumentId);
   if (state.watchlistOnly) url.searchParams.set("watchlist", "true");
   if (state.cursor) url.searchParams.set("cursor", state.cursor);
-  globalThis.history.replaceState(null, "", url);
+  globalThis.history.replaceState(globalThis.history.state, "", url);
 }
 
-function feedLatencyLabel(feed: string | null): string {
-  if (!feed) return "未声明";
-  return feed.toLowerCase().includes("delayed")
-    ? "延迟（具体时长未声明）"
-    : "由 Feed 声明（具体时长未声明）";
+function readMarketScrollY(): number | null {
+  const state: unknown = globalThis.history.state;
+  if (typeof state !== "object" || state === null || !("nexusMarketScrollY" in state)) {
+    return null;
+  }
+  const value = (state as { nexusMarketScrollY?: unknown }).nexusMarketScrollY;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function saveMarketScrollY(scrollY: number): void {
+  const current: unknown = globalThis.history.state;
+  const state = typeof current === "object" && current !== null
+    ? { ...current, nexusMarketScrollY: scrollY }
+    : { nexusMarketScrollY: scrollY };
+  globalThis.history.replaceState(state, "", globalThis.location.href);
+}
+
+function deliveryModeLabel(mode: MarketItem["delivery_mode"]): string {
+  const labels: Record<MarketItem["delivery_mode"], string> = {
+    real_time: "实时",
+    delayed: "延迟（具体时长未声明）",
+    fixture: "离线 Fixture",
+    unknown: "未声明",
+  };
+  return labels[mode];
 }
 
 function formatUtc(value: string | null): string {
@@ -461,6 +536,7 @@ function HistoryEvidence({ symbol, series }: { symbol: string; series: SelectedM
       <dl>
         <EvidenceFact term="序列来源" value={series.source?.toUpperCase() ?? "未选定"} />
         <EvidenceFact term="Feed" value={series.feed?.toUpperCase() ?? "未选定"} />
+        <EvidenceFact term="实时性口径" value={series.delivery_mode ? deliveryModeLabel(series.delivery_mode) : "未声明"} />
         <EvidenceFact term="周期" value={series.interval ?? "未选定"} />
         <EvidenceFact term="最新可用时间" value={formatUtc(latestBar?.available_at ?? null)} />
         <EvidenceFact term="最新观测时间" value={formatUtc(latestBar?.observed_at ?? null)} />

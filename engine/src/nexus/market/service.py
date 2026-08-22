@@ -35,12 +35,12 @@ from nexus.persistence.models.market import (
     Watchlist,
     WatchlistMember,
 )
-from nexus.providers.base import PriceSeries
+from nexus.providers.base import DeliveryMode, PriceSeries
 from nexus.quality.market import xnys_session_window
 from nexus.quality.source_policy import (
-    SOURCE_POLICY_PAYLOAD,
+    QUOTE_SOURCE_POLICY_PAYLOAD,
     load_fosun_market_admission,
-    load_source_policy_v1,
+    load_quote_source_policy_v1,
     select_price_series,
 )
 
@@ -263,7 +263,7 @@ class MarketService:
             quotes_by_instrument[quote.instrument_id].append(quote)
         watchlisted = await self._watchlisted_ids(instrument_ids)
         try:
-            await load_source_policy_v1(self._session, instrument_tick_size=None)
+            await load_quote_source_policy_v1(self._session)
         except ValueError:
             return [
                 self._unavailable_item(
@@ -304,13 +304,20 @@ class MarketService:
         decision_time: datetime,
         fosun_admitted: bool,
     ) -> MarketItemResponse:
-        priority, alpaca_feed = _published_quote_policy()
+        priority, alpaca_feed, alpaca_delivery_modes = _published_quote_policy()
         eligible = [
             quote
             for quote in quotes
             if quote.source in priority
+            and _quote_delivery_mode_is_consistent(quote)
             and (quote.source != "fosun" or fosun_admitted)
-            and (quote.source != "alpaca" or quote.feed == alpaca_feed)
+            and (
+                quote.source != "alpaca"
+                or (
+                    quote.feed == alpaca_feed
+                    and quote.delivery_mode in alpaca_delivery_modes
+                )
+            )
         ]
         if not eligible:
             reason = "NO_ELIGIBLE_SOURCE" if quotes else "QUOTE_UNAVAILABLE"
@@ -346,6 +353,7 @@ class MarketService:
             price=(decimal_to_string(selected.last) if selected.last is not None else None),
             source=selected.source,
             feed=selected.feed,
+            delivery_mode=cast(DeliveryMode, selected.delivery_mode),
             as_of=selected.observed_at,
             quality=quality,
             quality_reasons=_ordered_reasons(reasons),
@@ -388,6 +396,7 @@ class MarketService:
                 instrument_id=instrument_id,
                 source=None,
                 feed=None,
+                delivery_mode=None,
                 adjustment=None,
                 interval=None,
                 quality=selection.quality,
@@ -407,6 +416,7 @@ class MarketService:
             instrument_id=instrument_id,
             source=selected.source,
             feed=selected.feed,
+            delivery_mode=selected.delivery_mode,
             adjustment=selected.adjustment,
             interval="1Day",
             quality=quality,
@@ -532,6 +542,7 @@ class MarketService:
             price=None,
             source=None,
             feed=None,
+            delivery_mode="unknown",
             as_of=None,
             quality="FAIL",
             quality_reasons=(reason,),
@@ -627,17 +638,31 @@ class MarketService:
             ) from None
 
 
-def _published_quote_policy() -> tuple[tuple[str, ...], str]:
-    priority = SOURCE_POLICY_PAYLOAD.get("priority")
-    alpaca = SOURCE_POLICY_PAYLOAD.get("alpaca")
+def _published_quote_policy() -> tuple[tuple[str, ...], str, tuple[str, ...]]:
+    priority = QUOTE_SOURCE_POLICY_PAYLOAD.get("priority")
+    alpaca = QUOTE_SOURCE_POLICY_PAYLOAD.get("alpaca")
     if (
         not isinstance(priority, list)
         or not all(isinstance(source, str) for source in priority)
         or not isinstance(alpaca, dict)
         or not isinstance(alpaca.get("feed"), str)
+        or not isinstance(alpaca.get("delivery_modes"), list)
+        or not all(isinstance(mode, str) for mode in alpaca["delivery_modes"])
     ):
         raise RuntimeError("published quote source policy is invalid")
-    return tuple(priority), cast(str, alpaca["feed"])
+    return (
+        tuple(priority),
+        cast(str, alpaca["feed"]),
+        tuple(cast(list[str], alpaca["delivery_modes"])),
+    )
+
+
+def _quote_delivery_mode_is_consistent(quote: LatestQuote) -> bool:
+    return (
+        quote.delivery_mode in {"real_time", "delayed", "fixture", "unknown"}
+        and (quote.source != "fixture" or quote.delivery_mode == "fixture")
+        and (quote.source != "fosun" or quote.delivery_mode != "fixture")
+    )
 
 
 def _quote_sort_key(quote: LatestQuote, priority: Sequence[str]) -> tuple[object, ...]:
@@ -701,6 +726,7 @@ def _empty_series(instrument_id: UUID, reason: str) -> SelectedMarketSeriesRespo
         instrument_id=instrument_id,
         source=None,
         feed=None,
+        delivery_mode=None,
         adjustment=None,
         interval=None,
         quality="FAIL",

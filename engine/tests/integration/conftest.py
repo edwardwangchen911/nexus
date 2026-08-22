@@ -123,9 +123,11 @@ async def _drop_database(admin_url: URL, database_name: str) -> None:
 
 def _is_transient_protected_backend(error: DBAPIError) -> bool:
     """Recognize only FORCE-drop collisions with PostgreSQL protected workers."""
+    first_line = str(error.orig).splitlines()[0]
+    reason = first_line.rsplit(": ", 1)[-1]
     return (
         getattr(error.orig, "sqlstate", None) == "42501"
-        and "permission denied to terminate process" in str(error.orig)
+        and reason == "permission denied to terminate process"
     )
 
 

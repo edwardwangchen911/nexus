@@ -90,6 +90,7 @@ async def ingest_price_page(
             instrument=str(instrument_id),
             source=page.provenance.source,
             feed=page.provenance.feed,
+            delivery_mode=page.provenance.delivery_mode,
             adjustment=page.provenance.adjustment,
             start_at=min(observed),
             end_at=max(observed),

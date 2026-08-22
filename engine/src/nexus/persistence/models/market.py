@@ -114,6 +114,18 @@ class LatestQuote(ImmutableCreatedAt, Base):
         UniqueConstraint(
             "instrument_id", "source", "feed", name="uq_latest_quotes_instrument_source_feed"
         ),
+        CheckConstraint(
+            "delivery_mode IN ('real_time', 'delayed', 'fixture', 'unknown')",
+            name="delivery_mode_allowed",
+        ),
+        CheckConstraint(
+            "source <> 'fixture' OR delivery_mode = 'fixture'",
+            name="fixture_delivery_mode",
+        ),
+        CheckConstraint(
+            "source <> 'fosun' OR delivery_mode <> 'fixture'",
+            name="fosun_delivery_mode",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
@@ -122,6 +134,7 @@ class LatestQuote(ImmutableCreatedAt, Base):
     )
     source: Mapped[str] = mapped_column(String(100))
     feed: Mapped[str] = mapped_column(String(100))
+    delivery_mode: Mapped[str] = mapped_column(String(20))
     bid: Mapped[Decimal | None]
     ask: Mapped[Decimal | None]
     last: Mapped[Decimal | None]

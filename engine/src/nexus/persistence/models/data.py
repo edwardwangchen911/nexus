@@ -4,7 +4,16 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import BigInteger, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,11 +40,6 @@ class ProviderRun(ImmutableCreatedAt, Base):
 
 class ProviderCapability(ImmutableCreatedAt, Base):
     __tablename__ = "provider_capabilities"
-    __table_args__ = (
-        UniqueConstraint(
-            "provider", "capability", "contract_hash", name="uq_provider_capabilities_contract"
-        ),
-    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     provider: Mapped[str] = mapped_column(String(100))
@@ -44,6 +48,17 @@ class ProviderCapability(ImmutableCreatedAt, Base):
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
     schema_version: Mapped[str] = mapped_column(String(32))
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+Index(
+    "uq_provider_capabilities_contract_scope",
+    ProviderCapability.provider,
+    ProviderCapability.capability,
+    ProviderCapability.contract_hash,
+    text("COALESCE(payload ->> 'operation', '')"),
+    text("COALESCE(payload ->> 'market_scope', '')"),
+    unique=True,
+)
 
 
 class SourcePolicy(ImmutableCreatedAt, Base):
@@ -109,6 +124,20 @@ class DataArtifact(ImmutableCreatedAt, Base):
 
 class PriceSeriesManifest(ImmutableCreatedAt, Base):
     __tablename__ = "price_series_manifests"
+    __table_args__ = (
+        CheckConstraint(
+            "delivery_mode IN ('real_time', 'delayed', 'fixture', 'unknown')",
+            name="delivery_mode_allowed",
+        ),
+        CheckConstraint(
+            "source <> 'fixture' OR delivery_mode = 'fixture'",
+            name="fixture_delivery_mode",
+        ),
+        CheckConstraint(
+            "source <> 'fosun' OR delivery_mode <> 'fixture'",
+            name="fosun_delivery_mode",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     data_artifact_id: Mapped[UUID] = mapped_column(
@@ -120,6 +149,7 @@ class PriceSeriesManifest(ImmutableCreatedAt, Base):
     instrument: Mapped[str] = mapped_column(String(100))
     source: Mapped[str] = mapped_column(String(100))
     feed: Mapped[str] = mapped_column(String(100))
+    delivery_mode: Mapped[str] = mapped_column(String(20))
     adjustment: Mapped[str] = mapped_column(String(100))
     start_at: Mapped[datetime] = mapped_column(UTCDateTime())
     end_at: Mapped[datetime] = mapped_column(UTCDateTime())

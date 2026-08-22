@@ -12,6 +12,7 @@ from nexus.providers.market.alpaca import (
     MarketProviderPayloadError,
 )
 from nexus.providers.market.fixture import FixtureMarketDataProvider
+from pydantic import ValidationError
 
 INSTRUMENT_ID = UUID("38df053d-1e87-5938-b279-a1ef5ab4643e")
 START = datetime(2026, 8, 21, 0, tzinfo=UTC)
@@ -23,6 +24,29 @@ REQUEST = BarsRequest(
     interval="1Day",
     adjustment="all",
 )
+
+
+@pytest.mark.parametrize(
+    ("mode", "delivery_mode"),
+    [
+        ("delayed", "real_time"),
+        ("fixture", "delayed"),
+        ("read_only", "fixture"),
+    ],
+)
+def test_provider_provenance_rejects_contradictory_delivery_authority(
+    mode: str,
+    delivery_mode: str,
+) -> None:
+    with pytest.raises(ValidationError, match="delivery mode contradicts provider mode"):
+        MarketDataProvenance(
+            source="alpaca",
+            feed="sip",
+            adjustment="all",
+            interval="1Day",
+            mode=mode,
+            delivery_mode=delivery_mode,
+        )
 
 
 def _page() -> ProviderPage[PriceBar]:
@@ -49,6 +73,7 @@ def _page() -> ProviderPage[PriceBar]:
             adjustment="all",
             interval="1Day",
             mode="fixture",
+            delivery_mode="fixture",
         ),
     )
 
@@ -126,6 +151,7 @@ async def test_alpaca_adapter_owns_bounded_retry_and_normalizes_decimal_strings(
         adjustment="all",
         interval="1Day",
         mode="delayed",
+        delivery_mode="delayed",
     )
 
 

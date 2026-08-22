@@ -264,6 +264,11 @@ export interface components {
         MarketItemResponse: {
             /** As Of */
             as_of: string | null;
+            /**
+             * Delivery Mode
+             * @enum {string}
+             */
+            delivery_mode: "real_time" | "delayed" | "fixture" | "unknown";
             /** Feed */
             feed: string | null;
             /**
@@ -337,6 +342,8 @@ export interface components {
             adjustment: string | null;
             /** Bars */
             bars: components["schemas"]["MarketBarResponse"][];
+            /** Delivery Mode */
+            delivery_mode: ("real_time" | "delayed" | "fixture" | "unknown") | null;
             /** Feed */
             feed: string | null;
             /**

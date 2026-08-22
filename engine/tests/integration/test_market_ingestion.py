@@ -50,6 +50,7 @@ def _page() -> ProviderPage[PriceBar]:
             adjustment="all",
             interval="1Day",
             mode="fixture",
+            delivery_mode="fixture",
         ),
     )
 
@@ -110,12 +111,16 @@ async def test_ingestion_archives_raw_then_promotes_parquet_before_metadata_comm
     ]
     assert result.raw_uri.startswith("memory://raw/market/")
     assert result.artifact.uri.startswith("memory://normalized/market/")
+    assert result.manifest.delivery_mode == "fixture"
     assert store.objects[result.artifact.uri.removeprefix("memory://")].startswith(b"PAR1")
     assert store.temporary == {}
 
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 1
         assert await session.scalar(select(func.count()).select_from(PriceSeriesManifest)) == 1
+        persisted = await session.scalar(select(PriceSeriesManifest))
+        assert persisted is not None
+        assert persisted.delivery_mode == "fixture"
 
 
 @pytest.mark.asyncio

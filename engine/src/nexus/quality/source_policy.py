@@ -13,7 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.domain.time import require_utc
 from nexus.integrations.service import IntegrationStatusService
 from nexus.persistence.models.data import SourcePolicy as SourcePolicyRecord
-from nexus.providers.base import PriceBar, PriceSeries
+from nexus.providers.base import (
+    PriceBar,
+    PriceSeries,
+    delivery_mode_matches_provider_mode,
+)
 
 SOURCE_POLICY_ID = UUID("3c60888d-e92d-5e04-913c-7d427004cfef")
 SOURCE_POLICY_KEY = "market_price"
@@ -27,6 +31,22 @@ SOURCE_POLICY_PAYLOAD: dict[str, object] = {
     },
     "alpaca": {"feed": "sip", "modes": ["delayed", "fixture"]},
     "fixture": {"mode": "fixture"},
+}
+QUOTE_SOURCE_POLICY_ID = UUID("6d243c22-a020-5d1d-b884-e6240cc2d8bb")
+QUOTE_SOURCE_POLICY_KEY = "market_quote"
+QUOTE_SOURCE_POLICY_VERSION = "quote_source_policy_v1"
+QUOTE_SOURCE_POLICY_PAYLOAD: dict[str, object] = {
+    "priority": ["fosun", "alpaca", "fixture"],
+    "fosun": {
+        "mode": "read_only",
+        "operation": "fosun_get_quotes",
+        "market_scope": "US",
+    },
+    "alpaca": {
+        "feed": "iex",
+        "delivery_modes": ["real_time", "delayed", "unknown"],
+    },
+    "fixture": {"delivery_mode": "fixture"},
 }
 _PRIORITY = ("fosun", "alpaca", "fixture")
 
@@ -47,6 +67,24 @@ class SourcePolicy(BaseModel):
     def _canonical_record(cls, value: UUID) -> UUID:
         if value != SOURCE_POLICY_ID:
             raise ValueError("source policy must be bound to the published v1 record")
+        return value
+
+
+class QuoteSourcePolicy(BaseModel):
+    """Runtime projection of the independently published intraday quote policy."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    record_id: UUID
+    key: Literal["market_quote"]
+    version: Literal["quote_source_policy_v1"] = "quote_source_policy_v1"
+    schema_version: Literal["1"]
+
+    @field_validator("record_id")
+    @classmethod
+    def _canonical_record(cls, value: UUID) -> UUID:
+        if value != QUOTE_SOURCE_POLICY_ID:
+            raise ValueError("quote source policy must be bound to the published v1 record")
         return value
 
 
@@ -107,6 +145,29 @@ async def load_source_policy_v1(
         instrument_tick_size=instrument_tick_size,
     )
     return policy
+
+
+async def load_quote_source_policy_v1(session: AsyncSession) -> QuoteSourcePolicy:
+    """Load only the immutable quote-domain policy; bar policy cannot authorize quotes."""
+    record = await session.scalar(
+        select(SourcePolicyRecord).where(
+            SourcePolicyRecord.key == QUOTE_SOURCE_POLICY_KEY,
+            SourcePolicyRecord.version == QUOTE_SOURCE_POLICY_VERSION,
+        )
+    )
+    if (
+        record is None
+        or record.id != QUOTE_SOURCE_POLICY_ID
+        or record.schema_version != "1"
+        or record.payload != QUOTE_SOURCE_POLICY_PAYLOAD
+    ):
+        raise ValueError("published quote_source_policy_v1 is missing or invalid")
+    return QuoteSourcePolicy(
+        record_id=record.id,
+        key=cast(Literal["market_quote"], record.key),
+        version=cast(Literal["quote_source_policy_v1"], record.version),
+        schema_version=cast(Literal["1"], record.schema_version),
+    )
 
 
 async def load_fosun_market_admission(
@@ -201,6 +262,8 @@ def _apply_source_policy_v1(
 
     for candidate in candidates:
         if candidate.source not in _PRIORITY or candidate.quality == "FAIL":
+            continue
+        if not delivery_mode_matches_provider_mode(candidate.mode, candidate.delivery_mode):
             continue
         if candidate.source == "alpaca" and (
             candidate.feed != "sip" or candidate.mode not in {"fixture", "delayed"}

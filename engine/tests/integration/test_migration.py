@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -12,10 +13,15 @@ from nexus.integrations.service import IntegrationStatusService
 from nexus.persistence.base import Base
 from nexus.persistence.models import data, market, runtime  # noqa: F401
 from nexus.persistence.session import session_factory
+from nexus.quality.source_policy import (
+    QUOTE_SOURCE_POLICY_ID,
+    QUOTE_SOURCE_POLICY_PAYLOAD,
+)
 from nexus.settings import EngineSettings
 from sqlalchemy import DateTime, inspect, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 EXPECTED_TABLES = {
@@ -95,6 +101,91 @@ def test_0005_upgrades_and_round_trips_the_committed_0004_schema(
     assert "published_at" not in _table_columns(temporary_database_url, "universe_snapshots")
     command.upgrade(config, "head")
     _assert_schema(temporary_database_url)
+
+
+def test_0006_preserves_existing_admission_and_allows_same_contract_across_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> None:
+    """One manifest hash must independently authorize quotes and bars without duplicates."""
+    engine_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = Config(str(engine_root / "alembic.ini"))
+    contract_hash = "a" * 64
+
+    command.upgrade(config, "0005_market_integrity")
+    _insert_provider_capability(
+        temporary_database_url,
+        contract_hash=contract_hash,
+        operation="fosun_get_bars",
+    )
+    command.upgrade(config, "0006_market_delivery_authority")
+    assert "delivery_mode" in _table_columns(temporary_database_url, "latest_quotes")
+    assert "delivery_mode" in _table_columns(
+        temporary_database_url, "price_series_manifests"
+    )
+
+    assert _provider_capability_scopes(temporary_database_url) == [
+        (contract_hash, "fosun_get_bars", "US")
+    ]
+    _insert_provider_capability(
+        temporary_database_url,
+        contract_hash=contract_hash,
+        operation="fosun_get_quotes",
+    )
+    assert _provider_capability_scopes(temporary_database_url) == [
+        (contract_hash, "fosun_get_bars", "US"),
+        (contract_hash, "fosun_get_quotes", "US"),
+    ]
+
+    with pytest.raises(IntegrityError):
+        _insert_provider_capability(
+            temporary_database_url,
+            contract_hash=contract_hash,
+            operation="fosun_get_quotes",
+        )
+    assert len(_provider_capability_scopes(temporary_database_url)) == 2
+
+    with pytest.raises(RuntimeError, match="scoped duplicates exist"):
+        command.downgrade(config, "0005_market_integrity")
+    assert len(_provider_capability_scopes(temporary_database_url)) == 2
+
+
+def test_0006_publishes_and_exactly_removes_the_quote_domain_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> None:
+    """Quote IEX authority is independent of the committed delayed-SIP bar policy."""
+    engine_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = Config(str(engine_root / "alembic.ini"))
+
+    command.upgrade(config, "0005_market_integrity")
+    _seed_0005_delivery_rows(temporary_database_url)
+    assert _quote_source_policy_record(temporary_database_url) is None
+    command.upgrade(config, "0006_market_delivery_authority")
+    assert _quote_source_policy_record(temporary_database_url) == {
+        "id": QUOTE_SOURCE_POLICY_ID,
+        "key": "market_quote",
+        "version": "quote_source_policy_v1",
+        "schema_version": "1",
+        "payload": QUOTE_SOURCE_POLICY_PAYLOAD,
+    }
+    assert _delivery_mode_rows(temporary_database_url, "latest_quotes") == [
+        ("alpaca", "unknown"),
+        ("fixture", "fixture"),
+    ]
+    assert _delivery_mode_rows(temporary_database_url, "price_series_manifests") == [
+        ("alpaca", "unknown"),
+        ("fixture", "fixture"),
+    ]
+    for table_name in ("latest_quotes", "price_series_manifests"):
+        with pytest.raises(IntegrityError, match="fixture_delivery_mode"):
+            _set_fixture_delivery_mode(
+                temporary_database_url, table_name, delivery_mode="real_time"
+            )
+    command.downgrade(config, "0005_market_integrity")
+    assert _quote_source_policy_record(temporary_database_url) is None
 
 
 def test_0003_backfills_admission_state_after_the_released_0002_schema(
@@ -325,6 +416,75 @@ def _integration_status_row(
     return asyncio.run(_integration_status_row_async(database_url, columns))
 
 
+def _insert_provider_capability(
+    database_url: str,
+    *,
+    contract_hash: str,
+    operation: str,
+) -> None:
+    asyncio.run(
+        _insert_provider_capability_async(
+            database_url,
+            contract_hash=contract_hash,
+            operation=operation,
+        )
+    )
+
+
+async def _insert_provider_capability_async(
+    database_url: str,
+    *,
+    contract_hash: str,
+    operation: str,
+) -> None:
+    now = datetime(2026, 8, 23, 12, tzinfo=UTC)
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO provider_capabilities "
+                    "(id, provider, capability, contract_hash, expires_at, "
+                    "schema_version, payload, created_at) "
+                    "VALUES (:id, 'fosun', 'READ_ONLY', :contract_hash, :expires_at, "
+                    "'1', CAST(:payload AS jsonb), :created_at)"
+                ),
+                {
+                    "id": uuid4(),
+                    "contract_hash": contract_hash,
+                    "expires_at": now + timedelta(hours=1),
+                    "payload": json.dumps({"operation": operation, "market_scope": "US"}),
+                    "created_at": now,
+                },
+            )
+    finally:
+        await engine.dispose()
+
+
+def _provider_capability_scopes(database_url: str) -> list[tuple[str, str, str]]:
+    return asyncio.run(_provider_capability_scopes_async(database_url))
+
+
+async def _provider_capability_scopes_async(
+    database_url: str,
+) -> list[tuple[str, str, str]]:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text(
+                        "SELECT contract_hash, payload ->> 'operation', "
+                        "payload ->> 'market_scope' FROM provider_capabilities "
+                        "ORDER BY payload ->> 'operation'"
+                    )
+                )
+            ).tuples()
+            return [(row[0], row[1], row[2]) for row in rows]
+    finally:
+        await engine.dispose()
+
+
 async def _integration_status_row_async(
     database_url: str, columns: tuple[str, ...]
 ) -> dict[str, object]:
@@ -477,3 +637,141 @@ def _table_columns(database_url: str, table_name: str) -> set[str]:
             await engine.dispose()
 
     return asyncio.run(inspect_columns())
+
+
+def _quote_source_policy_record(database_url: str) -> dict[str, object] | None:
+    async def load_record() -> dict[str, object] | None:
+        engine = create_async_engine(database_url)
+        try:
+            async with engine.connect() as connection:
+                row = (
+                    await connection.execute(
+                        text(
+                            "SELECT id, key, version, schema_version, payload "
+                            "FROM source_policies WHERE id = :id"
+                        ),
+                        {"id": QUOTE_SOURCE_POLICY_ID},
+                    )
+                ).mappings().one_or_none()
+                return None if row is None else dict(row)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(load_record())
+
+
+def _seed_0005_delivery_rows(database_url: str) -> None:
+    async def seed_rows() -> None:
+        engine = create_async_engine(database_url)
+        instrument_id = uuid4()
+        fixture_artifact_id, alpaca_artifact_id = uuid4(), uuid4()
+        observed_at = datetime(2026, 8, 22, tzinfo=UTC)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "INSERT INTO instruments "
+                        "(id, asset_type, exchange, currency, tick_size, risk_bucket) "
+                        "VALUES (:id, 'common_stock', 'XNYS', 'USD', 0.01, 'EQUITY')"
+                    ),
+                    {"id": instrument_id},
+                )
+                for source, feed in (("fixture", "fixture"), ("alpaca", "iex")):
+                    await connection.execute(
+                        text(
+                            "INSERT INTO latest_quotes "
+                            "(id, instrument_id, source, feed, bid, ask, last, observed_at, "
+                            "available_at, received_at, revision, quality_flags) VALUES "
+                            "(:id, :instrument_id, :source, :feed, NULL, NULL, 100, "
+                            ":observed_at, :observed_at, :observed_at, '1', '[]'::jsonb)"
+                        ),
+                        {
+                            "id": uuid4(),
+                            "instrument_id": instrument_id,
+                            "source": source,
+                            "feed": feed,
+                            "observed_at": observed_at,
+                        },
+                    )
+                for artifact_id, source, digest in (
+                    (fixture_artifact_id, "fixture", "a" * 64),
+                    (alpaca_artifact_id, "alpaca", "b" * 64),
+                ):
+                    await connection.execute(
+                        text(
+                            "INSERT INTO data_artifacts "
+                            "(id, uri, sha256, byte_size, mime_type, schema_version, source, "
+                            "observed_at, available_at, received_at) VALUES "
+                            "(:id, :uri, :sha256, 1, 'application/parquet', '1', :source, "
+                            ":observed_at, :observed_at, :observed_at)"
+                        ),
+                        {
+                            "id": artifact_id,
+                            "uri": f"memory://{source}",
+                            "sha256": digest,
+                            "source": source,
+                            "observed_at": observed_at,
+                        },
+                    )
+                    await connection.execute(
+                        text(
+                            "INSERT INTO price_series_manifests "
+                            "(id, data_artifact_id, instrument, source, feed, adjustment, "
+                            "start_at, end_at, row_count) VALUES "
+                            "(:id, :artifact_id, :instrument, :source, :feed, 'all', "
+                            ":observed_at, :observed_at, 1)"
+                        ),
+                        {
+                            "id": uuid4(),
+                            "artifact_id": artifact_id,
+                            "instrument": str(instrument_id),
+                            "source": source,
+                            "feed": "fixture" if source == "fixture" else "sip",
+                            "observed_at": observed_at,
+                        },
+                    )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(seed_rows())
+
+
+def _delivery_mode_rows(database_url: str, table_name: str) -> list[tuple[str, str]]:
+    if table_name not in {"latest_quotes", "price_series_manifests"}:
+        raise ValueError("unsupported delivery-mode table")
+
+    async def load_rows() -> list[tuple[str, str]]:
+        engine = create_async_engine(database_url)
+        try:
+            async with engine.connect() as connection:
+                rows = await connection.execute(
+                    text(f"SELECT source, delivery_mode FROM {table_name} ORDER BY source")
+                )
+                return [(str(source), str(mode)) for source, mode in rows]
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(load_rows())
+
+
+def _set_fixture_delivery_mode(
+    database_url: str, table_name: str, *, delivery_mode: str
+) -> None:
+    if table_name not in {"latest_quotes", "price_series_manifests"}:
+        raise ValueError("unsupported delivery-mode table")
+
+    async def update_row() -> None:
+        engine = create_async_engine(database_url)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        f"UPDATE {table_name} SET delivery_mode = :delivery_mode "
+                        "WHERE source = 'fixture'"
+                    ),
+                    {"delivery_mode": delivery_mode},
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(update_row())

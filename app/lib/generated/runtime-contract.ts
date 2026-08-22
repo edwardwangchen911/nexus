@@ -188,6 +188,16 @@ export const runtimeContractSchemas = {
         ],
         "title": "As Of"
       },
+      "delivery_mode": {
+        "enum": [
+          "real_time",
+          "delayed",
+          "fixture",
+          "unknown"
+        ],
+        "title": "Delivery Mode",
+        "type": "string"
+      },
       "feed": {
         "anyOf": [
           {
@@ -258,6 +268,7 @@ export const runtimeContractSchemas = {
       "price",
       "source",
       "feed",
+      "delivery_mode",
       "as_of",
       "quality",
       "quality_reasons",
@@ -329,6 +340,23 @@ export const runtimeContractSchemas = {
         "title": "Bars",
         "type": "array"
       },
+      "delivery_mode": {
+        "anyOf": [
+          {
+            "enum": [
+              "real_time",
+              "delayed",
+              "fixture",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Delivery Mode"
+      },
       "feed": {
         "anyOf": [
           {
@@ -389,6 +417,7 @@ export const runtimeContractSchemas = {
       "instrument_id",
       "source",
       "feed",
+      "delivery_mode",
       "adjustment",
       "interval",
       "quality",

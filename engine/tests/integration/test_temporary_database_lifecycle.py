@@ -29,6 +29,7 @@ class _RecordingEngine:
         self.statements: list[str] = []
         self.transient_failures = transient_failures
         self.error_message = error_message
+        self.dispose_count = 0
 
     @asynccontextmanager
     async def connect(self) -> AsyncIterator["_RecordingEngine"]:
@@ -45,7 +46,7 @@ class _RecordingEngine:
             )
 
     async def dispose(self) -> None:
-        return None
+        self.dispose_count += 1
 
 
 def test_drop_database_delegates_backend_cleanup_to_force_drop(
@@ -77,16 +78,19 @@ def test_drop_database_retries_a_transient_protected_backend(
 ) -> None:
     """A short-lived PostgreSQL background worker must not leak the temporary database."""
     database_name = "nexus_test_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    engine = _RecordingEngine(
+    failed_engine = _RecordingEngine(
         transient_failures=1,
-        error_message="permission denied to terminate process",
+        error_message="<class 'asyncpg.exceptions.InsufficientPrivilegeError'>: "
+        "permission denied to terminate process",
     )
+    successful_engine = _RecordingEngine()
+    engines = iter((failed_engine, successful_engine))
     sleep = AsyncMock()
     monkeypatch.setattr(integration_conftest, "asyncio", type("Asyncio", (), {"sleep": sleep}))
     monkeypatch.setattr(
         integration_conftest,
         "create_async_engine",
-        lambda *_args, **_kwargs: engine,
+        lambda *_args, **_kwargs: next(engines),
     )
 
     asyncio.run(
@@ -97,8 +101,41 @@ def test_drop_database_retries_a_transient_protected_backend(
     )
 
     statement = f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)'
-    assert engine.statements == [statement, statement]
+    assert failed_engine.statements == [statement]
+    assert successful_engine.statements == [statement]
+    assert failed_engine.dispose_count == 1
+    assert successful_engine.dispose_count == 1
     sleep.assert_awaited_once()
+
+
+def test_drop_database_does_not_retry_a_near_match_privilege_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text that merely contains the protected-worker reason must fail closed."""
+    database_name = "nexus_test_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    engine = _RecordingEngine(
+        transient_failures=1,
+        error_message="permission denied to terminate process owned by another role",
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(integration_conftest, "asyncio", type("Asyncio", (), {"sleep": sleep}))
+    monkeypatch.setattr(
+        integration_conftest,
+        "create_async_engine",
+        lambda *_args, **_kwargs: engine,
+    )
+
+    with pytest.raises(ProgrammingError, match="owned by another role"):
+        asyncio.run(
+            _drop_database(
+                URL.create("postgresql+asyncpg", database="postgres"),
+                database_name,
+            )
+        )
+
+    assert len(engine.statements) == 1
+    assert engine.dispose_count == 1
+    sleep.assert_not_awaited()
 
 
 def test_drop_database_does_not_retry_an_unrelated_privilege_failure(
@@ -135,16 +172,20 @@ def test_drop_database_retry_is_bounded_and_fails_closed(
 ) -> None:
     """A persistent protected backend must surface after the bounded retry window."""
     database_name = "nexus_test_dddddddddddddddddddddddddddddddd"
-    engine = _RecordingEngine(
-        transient_failures=_FORCE_DROP_ATTEMPTS,
-        error_message="permission denied to terminate process",
-    )
+    engines = [
+        _RecordingEngine(
+            transient_failures=1,
+            error_message="permission denied to terminate process",
+        )
+        for _ in range(_FORCE_DROP_ATTEMPTS)
+    ]
+    engine_iterator = iter(engines)
     sleep = AsyncMock()
     monkeypatch.setattr(integration_conftest, "asyncio", type("Asyncio", (), {"sleep": sleep}))
     monkeypatch.setattr(
         integration_conftest,
         "create_async_engine",
-        lambda *_args, **_kwargs: engine,
+        lambda *_args, **_kwargs: next(engine_iterator),
     )
 
     with pytest.raises(ProgrammingError, match="permission denied to terminate process"):
@@ -155,7 +196,8 @@ def test_drop_database_retry_is_bounded_and_fails_closed(
             )
         )
 
-    assert len(engine.statements) == _FORCE_DROP_ATTEMPTS
+    assert all(len(engine.statements) == 1 for engine in engines)
+    assert all(engine.dispose_count == 1 for engine in engines)
     assert sleep.await_count == _FORCE_DROP_ATTEMPTS - 1
 
 

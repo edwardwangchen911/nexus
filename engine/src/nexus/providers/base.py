@@ -5,11 +5,23 @@ from decimal import Decimal
 from typing import Literal, NewType, Protocol
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from nexus.domain.time import require_utc
 
 InstrumentId = NewType("InstrumentId", UUID)
+DeliveryMode = Literal["real_time", "delayed", "fixture", "unknown"]
+
+
+def delivery_mode_matches_provider_mode(mode: str, delivery_mode: str) -> bool:
+    """Keep access/fixture mode and market-data delivery authority non-contradictory."""
+    if mode == "delayed":
+        return delivery_mode == "delayed"
+    if mode == "fixture":
+        return delivery_mode == "fixture"
+    if mode == "read_only":
+        return delivery_mode in {"real_time", "delayed", "unknown"}
+    return False
 
 
 class BarsRequest(BaseModel):
@@ -70,6 +82,13 @@ class MarketDataProvenance(BaseModel):
     adjustment: Literal["raw", "split", "all"]
     interval: Literal["1Min", "1Day"]
     mode: Literal["fixture", "read_only", "delayed"]
+    delivery_mode: DeliveryMode
+
+    @model_validator(mode="after")
+    def _consistent_delivery_authority(self) -> "MarketDataProvenance":
+        if not delivery_mode_matches_provider_mode(self.mode, self.delivery_mode):
+            raise ValueError("delivery mode contradicts provider mode")
+        return self
 
 
 class ProviderPage[T](BaseModel):
@@ -101,8 +120,15 @@ class PriceSeries(BaseModel):
     bars: tuple[PriceBar, ...]
     interval: Literal["1Min", "1Day"] = "1Day"
     mode: Literal["fixture", "read_only", "delayed"]
+    delivery_mode: DeliveryMode
     quality: Literal["PASS", "PARTIAL", "FAIL"]
     contract_hash: str | None = None
+
+    @model_validator(mode="after")
+    def _consistent_delivery_authority(self) -> "PriceSeries":
+        if not delivery_mode_matches_provider_mode(self.mode, self.delivery_mode):
+            raise ValueError("delivery mode contradicts provider mode")
+        return self
 
 
 class MarketDataProvider(Protocol):

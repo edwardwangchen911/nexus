@@ -61,6 +61,14 @@ def test_openapi_exposes_only_redacted_integration_contracts() -> None:
     assert len(operation_ids) == len(set(operation_ids))
     assert "HTTPValidationError" not in schemas
     assert "ValidationError" not in schemas
+    delivery_mode_schema = {
+        "enum": ["real_time", "delayed", "fixture", "unknown"],
+        "type": "string",
+    }
+    market_mode = schemas["MarketItemResponse"]["properties"]["delivery_mode"]
+    assert {key: market_mode[key] for key in ("enum", "type")} == delivery_mode_schema
+    series_mode = schemas["SelectedMarketSeriesResponse"]["properties"]["delivery_mode"]
+    assert series_mode["anyOf"] == [delivery_mode_schema, {"type": "null"}]
 
     for path, statuses in {
         "/internal/v1/integrations": ("401", "422"),

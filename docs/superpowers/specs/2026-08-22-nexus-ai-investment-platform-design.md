@@ -248,7 +248,7 @@ Python 引擎是业务逻辑和 PostgreSQL 的唯一拥有者。当前 `db/`、`
 | 美股公司行动研究事件 | Alpaca | 发行人披露人工证据 | 冲突时阻止对应标的新订单 |
 | 真实账户公司行动入账 | 复星现金/持仓事实 | 无 | 对账差异转人工复核 |
 
-`source_policy_v1` 选择整条时间序列或完整快照，不对同一 bar、持仓或财务事实做字段级拼接。双行情源同时可用时保存独立记录并交叉检查；同一日线收盘价偏差超过 `max(instrument_tick_size, 20 bps)`、复权口径不一致或交易日缺失时标记 `SOURCE_CONFLICT`，该证券只能研究不能产生新订单；tick size 未知时该交叉检查本身为 `PARTIAL`。盘中报价偏差超过 50 bps 产生监控告警，但不据此自动交易。
+`source_policy_v1` 选择整条时间序列或完整快照，不对同一 bar、持仓或财务事实做字段级拼接。双行情源同时可用时保存独立记录并交叉检查；同一日线收盘价偏差超过 `max(instrument_tick_size, 20 bps)`、复权口径不一致或交易日缺失时标记 `SOURCE_CONFLICT`，该证券只能研究不能产生新订单；tick size 未知时该交叉检查本身为 `PARTIAL`。盘中报价偏差超过 50 bps 产生监控告警，但不据此自动交易。报价和历史序列必须从 Provider 到持久化、API 和 UI 传递闭合的 `delivery_mode=real_time|delayed|fixture|unknown`，不得根据 feed 名称推测实时性。
 
 ### 4.2 统一 Provider 接口
 

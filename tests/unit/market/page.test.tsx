@@ -16,7 +16,8 @@ const item: MarketItem = {
   symbol: "AAPL",
   price: "227.160000000000",
   source: "alpaca",
-  feed: "sip-delayed",
+  feed: "iex",
+  delivery_mode: "real_time",
   as_of: "2026-08-21T20:00:00Z",
   quality: "PASS",
   quality_reasons: [],
@@ -26,7 +27,8 @@ const item: MarketItem = {
 const selectedSeries: SelectedMarketSeries = {
   instrument_id: item.instrument_id,
   source: "alpaca",
-  feed: "sip-delayed",
+  feed: "sip",
+  delivery_mode: "delayed",
   adjustment: "raw",
   interval: "1Day",
   quality: "PASS",
@@ -57,6 +59,20 @@ const selectedSeries: SelectedMarketSeries = {
   ],
 };
 
+const msftItem: MarketItem = {
+  ...item,
+  instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e782",
+  symbol: "MSFT",
+  price: "418.790000000000",
+  watchlisted: false,
+};
+
+const msftSeries: SelectedMarketSeries = {
+  ...selectedSeries,
+  instrument_id: msftItem.instrument_id,
+  bars: selectedSeries.bars.map((bar) => ({ ...bar, close: "418.790000000000" })),
+};
+
 const stateLabels: Array<[DataStateKind, string]> = [
   ["loading", "正在加载"],
   ["empty", "暂无数据"],
@@ -72,6 +88,11 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/market");
+  Object.defineProperty(window, "scrollY", { configurable: true, value: 0 });
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "visible",
+  });
 });
 
 function marketEnvelope(overrides: {
@@ -130,7 +151,12 @@ describe("market vertical slice", () => {
 
   it("separates quote evidence from OHLCV evidence and keeps watchlist writes explicit", () => {
     const onToggleWatchlist = vi.fn();
-    const historySeries = { ...selectedSeries, source: "polygon", feed: "delayed" };
+    const historySeries = {
+      ...selectedSeries,
+      source: "fosun",
+      feed: "regular",
+      delivery_mode: "real_time" as const,
+    };
     render(
       <MarketPanel
         state="ready"
@@ -154,9 +180,13 @@ describe("market vertical slice", () => {
       "ALPACA",
     );
     expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent(
-      "SIP-DELAYED",
+      "IEX",
     );
-    expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("POLYGON");
+    expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent(
+      "实时",
+    );
+    expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("FOSUN");
+    expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("实时");
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("2026-08-22 00:01:00 UTC");
     expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent("2026-08-21 20:00:00 UTC");
     fireEvent.click(screen.getByRole("button", { name: "将 AAPL 移出观察列表" }));
@@ -169,6 +199,7 @@ describe("market vertical slice", () => {
       price: null,
       source: null,
       feed: null,
+      delivery_mode: "unknown",
       quality: "FAIL",
       quality_reasons: ["SOURCE_CONFLICT"],
     };
@@ -344,6 +375,29 @@ describe("market vertical slice", () => {
     });
   });
 
+  it("restores and records the market list scroll position in history state", async () => {
+    window.history.replaceState(
+      { nexusMarketScrollY: 320 },
+      "",
+      `/market?selected=${item.instrument_id}`,
+    );
+    const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(marketEnvelope())));
+
+    const view = render(<MarketPage />);
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({
+      top: 320,
+      left: 0,
+      behavior: "auto",
+    }));
+    Object.defineProperty(window, "scrollY", { configurable: true, value: 640 });
+    fireEvent.scroll(window);
+
+    expect(window.history.state).toMatchObject({ nexusMarketScrollY: 640 });
+    expect(window.location.search).toContain(`selected=${item.instrument_id}`);
+    view.unmount();
+  });
+
   it("uses the server membership and prevents an older refresh from overwriting a watchlist write", async () => {
     window.history.replaceState(null, "", `/market?selected=${item.instrument_id}`);
     let resolveRefresh: ((response: Response) => void) | undefined;
@@ -377,6 +431,121 @@ describe("market vertical slice", () => {
     expect(screen.getByRole("button", { name: "将 AAPL 加入观察列表" })).toBeVisible();
   });
 
+  it("does not let a pending watchlist mutation restore an obsolete filter and selection", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      `/market?watchlist=true&selected=${item.instrument_id}`,
+    );
+    let resolveMutation: ((response: Response) => void) | undefined;
+    const marketQueries: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "DELETE") {
+        return new Promise<Response>((resolve) => { resolveMutation = resolve; });
+      }
+      const url = new URL(String(input), "https://nexus.test");
+      marketQueries.push(url.search);
+      if (url.searchParams.get("watchlist") === "true") {
+        return jsonResponse(marketEnvelope({ items: [item], selectedSeries }));
+      }
+      return jsonResponse(marketEnvelope({ items: [msftItem], selectedSeries: msftSeries }));
+    }));
+
+    render(<MarketPage />);
+    expect(await screen.findByRole("button", { name: "将 AAPL 移出观察列表" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "将 AAPL 移出观察列表" }));
+    await waitFor(() => expect(resolveMutation).toBeDefined());
+    fireEvent.click(screen.getByRole("checkbox", { name: "只看观察列表" }));
+    expect(await screen.findByRole("region", { name: "MSFT 价格图表" })).toBeVisible();
+
+    await act(async () => {
+      resolveMutation?.(jsonResponse({
+        data: { instrument_id: item.instrument_id, watchlisted: false },
+        meta: marketEnvelope().meta,
+      }));
+      await Promise.resolve();
+    });
+
+    expect(window.location.search).toBe(`?selected=${msftItem.instrument_id}`);
+    expect(screen.getByRole("region", { name: "MSFT 价格图表" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "AAPL 价格图表" })).not.toBeInTheDocument();
+    expect(marketQueries.filter((query) => query.includes("watchlist=true"))).toHaveLength(1);
+  });
+
+  it("does not show an obsolete mutation error after the user changes market context", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      `/market?watchlist=true&selected=${item.instrument_id}`,
+    );
+    let rejectMutation: ((reason?: unknown) => void) | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "DELETE") {
+        return new Promise<Response>((_resolve, reject) => { rejectMutation = reject; });
+      }
+      return jsonResponse(marketEnvelope());
+    }));
+
+    render(<MarketPage />);
+    expect(await screen.findByRole("button", { name: "将 AAPL 移出观察列表" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "将 AAPL 移出观察列表" }));
+    await waitFor(() => expect(rejectMutation).toBeDefined());
+    fireEvent.click(screen.getByRole("checkbox", { name: "只看观察列表" }));
+
+    await act(async () => {
+      rejectMutation?.(new Error("old mutation failed"));
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("观察列表未更新。当前行情和交易状态均未改变，请重试。")).not.toBeInTheDocument();
+    expect(window.location.search).not.toContain("watchlist=true");
+  });
+
+  it("keeps a newer selected instrument when two market responses resolve out of order", async () => {
+    window.history.replaceState(null, "", `/market?selected=${item.instrument_id}`);
+    let resolveOldAapl: ((response: Response) => void) | undefined;
+    let resolveNewMsft: ((response: Response) => void) | undefined;
+    let marketCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "https://nexus.test");
+      marketCalls += 1;
+      if (marketCalls === 1) {
+        return jsonResponse(marketEnvelope({ items: [item, msftItem], selectedSeries }));
+      }
+      if (url.searchParams.get("selected_instrument_id") === msftItem.instrument_id) {
+        return new Promise<Response>((resolve) => { resolveNewMsft = resolve; });
+      }
+      return new Promise<Response>((resolve) => { resolveOldAapl = resolve; });
+    }));
+
+    render(<MarketPage />);
+    expect(await screen.findByRole("region", { name: "AAPL 价格图表" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "刷新行情" }));
+    await waitFor(() => expect(resolveOldAapl).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: /MSFT/ }));
+    await waitFor(() => expect(resolveNewMsft).toBeDefined());
+
+    await act(async () => {
+      resolveNewMsft?.(jsonResponse(marketEnvelope({
+        items: [item, msftItem],
+        selectedSeries: msftSeries,
+      })));
+      await Promise.resolve();
+    });
+    expect(await screen.findByRole("region", { name: "MSFT 价格图表" })).toBeVisible();
+
+    await act(async () => {
+      resolveOldAapl?.(jsonResponse(marketEnvelope({
+        items: [item, msftItem],
+        selectedSeries,
+      })));
+      await Promise.resolve();
+    });
+    expect(window.location.search).toBe(`?selected=${msftItem.instrument_id}`);
+    expect(screen.getByRole("region", { name: "MSFT 价格图表" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "AAPL 价格图表" })).not.toBeInTheDocument();
+  });
+
   it("polls stale market data at 15 seconds without issuing business writes", async () => {
     vi.useFakeTimers();
     window.history.replaceState(null, "", `/market?selected=${item.instrument_id}`);
@@ -396,6 +565,9 @@ describe("market vertical slice", () => {
     expect(methods.every((method) => method === "GET")).toBe(true);
     expect(screen.getByText(/显示最后已知行情/)).toBeVisible();
     view.unmount();
+    const callsAfterUnmount = methods.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(methods).toHaveLength(callsAfterUnmount);
   });
 
   it("reschedules actual polling from 15 to 60 seconds on visibility changes", async () => {
@@ -421,6 +593,45 @@ describe("market vertical slice", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(fetchMock).toHaveBeenCalledTimes(3);
+    view.unmount();
+  });
+
+  it("does not duplicate polling when visibility changes during an in-flight refresh", async () => {
+    vi.useFakeTimers();
+    window.history.replaceState(null, "", `/market?selected=${item.instrument_id}`);
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    let resolveInFlight: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length === 2) {
+        return new Promise<Response>((resolve) => { resolveInFlight = resolve; });
+      }
+      return jsonResponse(marketEnvelope());
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const view = render(<MarketPage />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    act(() => { vi.advanceTimersByTime(15_000); });
+    await act(async () => { await Promise.resolve(); });
+    expect(resolveInFlight).toBeDefined();
+
+    visibility = "hidden";
+    fireEvent(document, new Event("visibilitychange"));
+    await act(async () => {
+      resolveInFlight?.(jsonResponse(marketEnvelope()));
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(59_999);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     view.unmount();
   });
 });

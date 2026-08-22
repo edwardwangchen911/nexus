@@ -59,6 +59,22 @@ def test_missing_database_policy_fails_closed(
 
 
 @pytest.mark.asyncio
+async def test_historical_policy_rejects_a_bypassed_delivery_mode_contradiction(
+    migrated_database_url: str,
+) -> None:
+    """Even a model-copy bypass cannot label delayed SIP history as real-time."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    contradictory = _series("alpaca", "100").model_copy(
+        update={"delivery_mode": "real_time"}
+    )
+    async with factory() as session:
+        result = await _select(session, (contradictory,))
+
+    assert result.selected is None
+    assert result.reasons == ("NO_ELIGIBLE_SOURCE",)
+
+
+@pytest.mark.asyncio
 async def test_public_selector_rejects_caller_authority_parameters(
     migrated_database_url: str,
 ) -> None:
@@ -203,12 +219,21 @@ def _series(
     adjustment: str = "all",
     contract_hash: str | None = None,
 ) -> PriceSeries:
+    mode = (
+        "read_only"
+        if source == "fosun"
+        else "fixture"
+        if source == "fixture"
+        else "delayed"
+    )
+    delivery_mode = "unknown" if source == "fosun" else mode
     return PriceSeries(
         source=source,
         feed="authorized" if source == "fosun" else "sip",
         adjustment=adjustment,
         interval=interval,
-        mode="read_only" if source == "fosun" else "delayed",
+        mode=mode,
+        delivery_mode=delivery_mode,
         quality=quality,
         contract_hash=contract_hash if source == "fosun" else None,
         bars=bars or (_bar(close),),

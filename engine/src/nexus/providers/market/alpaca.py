@@ -138,6 +138,7 @@ class AlpacaMarketDataProvider:
                 adjustment=request.adjustment,
                 interval=request.interval,
                 mode="delayed",
+                delivery_mode="delayed",
             ),
         )
 

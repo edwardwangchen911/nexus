@@ -151,6 +151,7 @@ async def _seed_quote(
     instrument_id: UUID,
     source: str = "fixture",
     feed: str = "fixture",
+    delivery_mode: str = "fixture",
     last: Decimal | None = Decimal("100.00"),
     observed_at: datetime = _DECISION_TIME - timedelta(seconds=10),
     available_at: datetime | None = None,
@@ -164,6 +165,7 @@ async def _seed_quote(
                     instrument_id=instrument_id,
                     source=source,
                     feed=feed,
+                    delivery_mode=delivery_mode,
                     bid=None,
                     ask=None,
                     last=last,
@@ -279,7 +281,8 @@ async def test_market_returns_exact_source_aware_point_in_time_rows(
         migrated_database_url,
         instrument_id=_AAPL_ID,
         source="alpaca",
-        feed="sip",
+        feed="iex",
+        delivery_mode="real_time",
         last=Decimal("999.00"),
         observed_at=_DECISION_TIME + timedelta(minutes=1),
         available_at=_DECISION_TIME + timedelta(minutes=1),
@@ -299,6 +302,7 @@ async def test_market_returns_exact_source_aware_point_in_time_rows(
                 "price": "123.450000000000",
                 "source": "fixture",
                 "feed": "fixture",
+                "delivery_mode": "fixture",
                 "as_of": "2026-08-24T13:59:52Z",
                 "quality": "PASS",
                 "quality_reasons": [],
@@ -337,6 +341,7 @@ async def test_market_marks_session_quote_stale_and_never_fabricates_missing_pri
         "price": "100.000000000000",
         "source": "fixture",
         "feed": "fixture",
+        "delivery_mode": "fixture",
         "as_of": "2026-08-24T13:59:14Z",
         "quality": "PARTIAL",
         "quality_reasons": ["SELECTED_SOURCE_STALE"],
@@ -358,7 +363,8 @@ async def test_market_keeps_intraday_quote_and_marks_close_source_divergence_par
         migrated_database_url,
         instrument_id=_AAPL_ID,
         source="alpaca",
-        feed="sip",
+        feed="iex",
+        delivery_mode="real_time",
         last=Decimal("100.00"),
     )
     await _seed_quote(
@@ -391,7 +397,8 @@ async def test_market_does_not_compare_quotes_more_than_five_seconds_apart(
         migrated_database_url,
         instrument_id=_AAPL_ID,
         source="alpaca",
-        feed="sip",
+        feed="iex",
+        delivery_mode="real_time",
         last=Decimal("100.00"),
         observed_at=_DECISION_TIME - timedelta(seconds=2),
     )
@@ -416,6 +423,88 @@ async def test_market_does_not_compare_quotes_more_than_five_seconds_apart(
 
 
 @pytest.mark.asyncio
+async def test_market_uses_iex_quote_policy_without_reusing_delayed_sip_bars_policy(
+    migrated_database_url: str,
+) -> None:
+    """The intraday Alpaca fallback is IEX; SIP remains historical-series authority."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    await _seed_quote(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        source="alpaca",
+        feed="iex",
+        delivery_mode="real_time",
+        last=Decimal("100.00"),
+        observed_at=_DECISION_TIME - timedelta(seconds=2),
+    )
+    await _seed_quote(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        source="alpaca",
+        feed="sip",
+        delivery_mode="delayed",
+        last=Decimal("999.00"),
+        observed_at=_DECISION_TIME - timedelta(seconds=1),
+    )
+    path = "/internal/v1/market"
+    app = _app(migrated_database_url)
+
+    async with _client(app) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    item = response.json()["data"]["items"][0]
+    assert item["price"] == "100.000000000000"
+    assert item["feed"] == "iex"
+    assert item["delivery_mode"] == "real_time"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_price", "seconds_apart", "expected_reasons"),
+    [
+        (Decimal("100.5000"), 5, []),
+        (Decimal("100.5001"), 5, ["INTRADAY_SOURCE_DIVERGENCE"]),
+        (Decimal("101.00"), 5.000001, []),
+    ],
+)
+async def test_market_locks_exact_intraday_comparison_boundaries(
+    migrated_database_url: str,
+    second_price: Decimal,
+    seconds_apart: float,
+    expected_reasons: list[str],
+) -> None:
+    """Exactly 5 seconds is comparable; only a difference above 50 bps is partial."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    first_observed_at = _DECISION_TIME - timedelta(seconds=1)
+    await _seed_quote(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        source="alpaca",
+        feed="iex",
+        delivery_mode="real_time",
+        last=Decimal("100.00"),
+        observed_at=first_observed_at,
+    )
+    await _seed_quote(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        last=second_price,
+        observed_at=first_observed_at - timedelta(seconds=seconds_apart),
+    )
+    path = "/internal/v1/market"
+    app = _app(migrated_database_url)
+
+    async with _client(app) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    item = response.json()["data"]["items"][0]
+    assert item["price"] == "100.000000000000"
+    assert item["delivery_mode"] == "real_time"
+    assert item["quality"] == ("PARTIAL" if expected_reasons else "PASS")
+    assert item["quality_reasons"] == expected_reasons
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("admission_state", "expected_quality_reason"),
     [
@@ -437,6 +526,7 @@ async def test_fosun_quote_requires_its_own_valid_operation_admission(
         instrument_id=_AAPL_ID,
         source="fosun",
         feed="regular",
+        delivery_mode="unknown",
         last=Decimal("123.45"),
     )
     if admission_state != "missing":
@@ -480,6 +570,7 @@ async def test_fosun_quote_uses_matching_older_authority_not_newest_bars_authori
         instrument_id=_AAPL_ID,
         source="fosun",
         feed="regular",
+        delivery_mode="unknown",
         last=Decimal("123.45"),
     )
     await _seed_fosun_admission(
@@ -630,6 +721,38 @@ async def test_market_excludes_future_effective_us_liquid_v1(
 
 
 @pytest.mark.asyncio
+async def test_market_excludes_us_liquid_v1_published_after_decision_time(
+    migrated_database_url: str,
+) -> None:
+    """A future publication timestamp must not leak a universe into this decision time."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    factory = session_factory(_settings(migrated_database_url))
+    try:
+        async with factory() as session:
+            await session.execute(
+                text(
+                    "UPDATE universe_snapshots SET published_at = :published_at "
+                    "WHERE id = :snapshot_id"
+                ),
+                {
+                    "published_at": _DECISION_TIME + timedelta(microseconds=1),
+                    "snapshot_id": _UNIVERSE_ID,
+                },
+            )
+            await session.commit()
+    finally:
+        await factory.kw["bind"].dispose()
+    path = "/internal/v1/market"
+    app = _app(migrated_database_url)
+
+    async with _client(app, publish_universe=False) as client:
+        market = await client.get(path, headers=_headers("GET", path))
+
+    assert market.status_code == 200
+    assert market.json()["data"]["items"] == []
+
+
+@pytest.mark.asyncio
 async def test_selected_series_uses_repository_authority_and_excludes_future_bars(
     migrated_database_url: str,
 ) -> None:
@@ -666,6 +789,7 @@ async def test_selected_series_uses_repository_authority_and_excludes_future_bar
                 adjustment="split",
                 bars=(future, visible),
                 mode="fixture",
+                delivery_mode="fixture",
                 quality="PASS",
             ),
         )
@@ -679,6 +803,7 @@ async def test_selected_series_uses_repository_authority_and_excludes_future_bar
     series = response.json()["data"]["selected_series"]
     assert series["source"] == "fixture"
     assert series["feed"] == "fixture"
+    assert series["delivery_mode"] == "fixture"
     assert series["quality"] == "PARTIAL"
     assert series["quality_reasons"] == ["FUTURE_DATA_EXCLUDED"]
     assert [bar["close"] for bar in series["bars"]] == ["101.00"]
@@ -706,6 +831,7 @@ async def test_selected_series_missing_seam_returns_explicit_no_history(
         "instrument_id": str(_AAPL_ID),
         "source": None,
         "feed": None,
+        "delivery_mode": None,
         "adjustment": None,
         "interval": None,
         "quality": "FAIL",
@@ -743,6 +869,7 @@ async def test_selected_series_rejects_one_minute_only_history_explicitly(
                 interval="1Min",
                 bars=(bar,),
                 mode="fixture",
+                delivery_mode="fixture",
                 quality="PASS",
             ),
         )
@@ -789,6 +916,7 @@ async def test_selected_series_uses_only_daily_candidate_from_mixed_intervals(
                 interval="1Min",
                 bars=(bar,),
                 mode="fixture",
+                delivery_mode="fixture",
                 quality="PASS",
             ),
             PriceSeries(
@@ -798,6 +926,7 @@ async def test_selected_series_uses_only_daily_candidate_from_mixed_intervals(
                 interval="1Day",
                 bars=(bar,),
                 mode="fixture",
+                delivery_mode="fixture",
                 quality="PASS",
             ),
         )
@@ -846,6 +975,7 @@ async def test_selected_series_is_deterministically_bounded_to_latest_500_bars(
                 adjustment="split",
                 bars=bars,
                 mode="fixture",
+                delivery_mode="fixture",
                 quality="PASS",
             ),
         )
