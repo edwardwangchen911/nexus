@@ -5,12 +5,21 @@ import hostingConfig from "./.openai/hosting.json";
 
 const { r2 } = hostingConfig;
 
+const localEnvironment = Object.fromEntries(
+  Object.entries({
+    NEXUS_ALLOWED_USER_ID: process.env.NEXUS_ALLOWED_USER_ID,
+    NEXUS_AUTH_MODE: process.env.NEXUS_AUTH_MODE,
+    NEXUS_ENV: process.env.NEXUS_ENV,
+  }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+) as Record<string, string>;
+
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 
 const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
+  vars: localEnvironment,
   r2_buckets: r2
     ? [
         {
