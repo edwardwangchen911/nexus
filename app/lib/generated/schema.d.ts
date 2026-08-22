@@ -81,6 +81,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/market": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Market
+         * @description List point-in-time quote evidence and optionally one selected series.
+         */
+        get: operations["listMarket"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/system-status": {
         parameters: {
             query?: never;
@@ -96,6 +116,30 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/watchlist/{instrument_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Watchlist Membership
+         * @description Ensure the instrument belongs to the stable default private watchlist.
+         */
+        put: operations["putWatchlistMembership"];
+        post?: never;
+        /**
+         * Delete Watchlist Membership
+         * @description Ensure the instrument is absent from the stable default private watchlist.
+         */
+        delete: operations["deleteWatchlistMembership"];
         options?: never;
         head?: never;
         patch?: never;
@@ -184,6 +228,82 @@ export interface components {
             version: number;
         };
         /**
+         * MarketBarResponse
+         * @description Exact selected-source OHLCV evidence for a semantic chart table.
+         */
+        MarketBarResponse: {
+            /**
+             * Available At
+             * Format: date-time
+             */
+            available_at: string;
+            /** Close */
+            close: string;
+            /** High */
+            high: string;
+            /** Low */
+            low: string;
+            /** Observed At */
+            observed_at: string | null;
+            /** Open */
+            open: string;
+            /** Quality Flags */
+            quality_flags: string[];
+            /**
+             * Session
+             * Format: date
+             */
+            session: string;
+            /** Volume */
+            volume: string;
+        };
+        /**
+         * MarketItemResponse
+         * @description One point-in-time instrument row with explicit source quality.
+         */
+        MarketItemResponse: {
+            /** As Of */
+            as_of: string | null;
+            /** Feed */
+            feed: string | null;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Price */
+            price: string | null;
+            /**
+             * Quality
+             * @enum {string}
+             */
+            quality: "PASS" | "PARTIAL" | "FAIL";
+            /** Quality Reasons */
+            quality_reasons: string[];
+            /** Source */
+            source: string | null;
+            /** Symbol */
+            symbol: string;
+            /** Watchlisted */
+            watchlisted: boolean;
+        };
+        /** MarketPageEnvelope */
+        MarketPageEnvelope: {
+            data: components["schemas"]["MarketPageResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /**
+         * MarketPageResponse
+         * @description A bounded deterministic page plus one optional chart series.
+         */
+        MarketPageResponse: {
+            /** Items */
+            items: components["schemas"]["MarketItemResponse"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+            selected_series: components["schemas"]["SelectedMarketSeriesResponse"] | null;
+        };
+        /**
          * NexusErrorEnvelope
          * @description The public stable error envelope.
          */
@@ -209,6 +329,34 @@ export interface components {
             request_id: string;
         };
         /**
+         * SelectedMarketSeriesResponse
+         * @description At most one repository-selected historical series in a market page.
+         */
+        SelectedMarketSeriesResponse: {
+            /** Adjustment */
+            adjustment: string | null;
+            /** Bars */
+            bars: components["schemas"]["MarketBarResponse"][];
+            /** Feed */
+            feed: string | null;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Interval */
+            interval: ("1Min" | "1Day") | null;
+            /**
+             * Quality
+             * @enum {string}
+             */
+            quality: "PASS" | "PARTIAL" | "FAIL";
+            /** Quality Reasons */
+            quality_reasons: string[];
+            /** Source */
+            source: string | null;
+        };
+        /**
          * SuccessMetaResponse
          * @description The stable public success metadata shape.
          */
@@ -229,6 +377,24 @@ export interface components {
              * @constant
              */
             schema_version: "1";
+        };
+        /** WatchlistMembershipEnvelope */
+        WatchlistMembershipEnvelope: {
+            data: components["schemas"]["WatchlistMembershipResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /**
+         * WatchlistMembershipResponse
+         * @description Final set representation shared by idempotent PUT and DELETE.
+         */
+        WatchlistMembershipResponse: {
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Watchlisted */
+            watchlisted: boolean;
         };
     };
     responses: never;
@@ -449,6 +615,58 @@ export interface operations {
             };
         };
     };
+    listMarket: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                limit?: number;
+                selected_instrument_id?: string | null;
+                watchlist?: boolean | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarketPageEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
     system_status_internal_v1_system_status_get: {
         parameters: {
             query?: never;
@@ -467,6 +685,104 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    putWatchlistMembership: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                instrument_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WatchlistMembershipEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    deleteWatchlistMembership: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                instrument_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WatchlistMembershipEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
                 };
             };
         };

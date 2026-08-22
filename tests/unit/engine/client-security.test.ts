@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { engineFetch, sanitizeEngineResponse, timeoutForMethod } from "../../../app/lib/engine/client";
-import { ERROR_STATUSES, SAFE_ENGINE_ERROR_MESSAGES } from "../../../app/lib/engine/errors";
+import { ERROR_STATUSES, rebuildAllowedEngineResponse, SAFE_ENGINE_ERROR_MESSAGES } from "../../../app/lib/engine/errors";
 import { createEngineHmacHeaders } from "../../../app/lib/engine/hmac";
 
 const actor = { userId: "nexus-test-user", requestId: "0198f7a0-1111-7777-8111-111111111114" };
@@ -23,6 +23,46 @@ function integrationStatus() {
     provider: "fosun",
     quality: "PASS",
     version: 1,
+  };
+}
+
+function marketEnvelope() {
+  return {
+    data: {
+      items: [{
+        instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e781",
+        symbol: "AAPL",
+        price: "227.160000000000",
+        source: "alpaca",
+        feed: "sip",
+        as_of: "2026-08-21T20:00:00Z",
+        quality: "PASS",
+        quality_reasons: [],
+        watchlisted: true,
+      }],
+      next_cursor: null,
+      selected_series: {
+        instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e781",
+        source: "alpaca",
+        feed: "sip",
+        adjustment: "raw",
+        interval: "1Day",
+        quality: "PASS",
+        quality_reasons: [],
+        bars: [{
+          session: "2026-08-21",
+          open: "228.200000000000",
+          high: "229.400000000000",
+          low: "225.900000000000",
+          close: "227.160000000000",
+          volume: "46300000.000000000000",
+          available_at: "2026-08-22T00:01:00Z",
+          observed_at: "2026-08-21T20:00:00Z",
+          quality_flags: [],
+        }],
+      },
+    },
+    meta: successPayload().meta,
   };
 }
 
@@ -134,6 +174,63 @@ describe("engineFetch runtime boundary", () => {
     );
   });
 
+  it("accepts only the generated closed market contract at the runtime boundary", async () => {
+    const payload = marketEnvelope();
+    const accepted = await sanitizeEngineResponse(
+      jsonResponse(payload),
+      undefined,
+      "/internal/v1/market",
+    );
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toEqual(payload);
+
+    const withNestedSecret = marketEnvelope();
+    Object.assign(withNestedSecret.data.selected_series.bars[0], { credential: "must-not-escape" });
+    await expectSafeInternalError(await sanitizeEngineResponse(
+      jsonResponse(withNestedSecret),
+      undefined,
+      "/internal/v1/market",
+    ));
+
+    const invalidDecimal = marketEnvelope();
+    invalidDecimal.data.items[0].price = "NaN";
+    await expectSafeInternalError(await sanitizeEngineResponse(
+      jsonResponse(invalidDecimal),
+      undefined,
+      "/internal/v1/market",
+    ));
+  });
+
+  it("enforces explicit market and selected-series collection bounds", () => {
+    const tooManyItems = marketEnvelope();
+    tooManyItems.data.items = Array.from({ length: 101 }, () => tooManyItems.data.items[0]);
+    expect(rebuildAllowedEngineResponse(200, tooManyItems, new Headers(), undefined, "/internal/v1/market")).toBeNull();
+
+    const tooManyBars = marketEnvelope();
+    tooManyBars.data.selected_series.bars = Array.from({ length: 501 }, () => tooManyBars.data.selected_series.bars[0]);
+    expect(rebuildAllowedEngineResponse(200, tooManyBars, new Headers(), undefined, "/internal/v1/market")).toBeNull();
+  });
+
+  it("accepts only the generated closed watchlist membership contract", async () => {
+    const payload = {
+      data: { instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e781", watchlisted: true },
+      meta: successPayload().meta,
+    };
+    const accepted = await sanitizeEngineResponse(
+      jsonResponse(payload),
+      undefined,
+      "/internal/v1/watchlist/018f3f4e-8e8f-7f5b-9f26-a3cc4da1e781",
+    );
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toEqual(payload);
+
+    await expectSafeInternalError(await sanitizeEngineResponse(
+      jsonResponse({ ...payload, data: { ...payload.data, account_id: "must-not-escape" } }),
+      undefined,
+      "/internal/v1/watchlist/018f3f4e-8e8f-7f5b-9f26-a3cc4da1e781",
+    ));
+  });
+
   it("signs the resolved dynamic integration path and rejects template mismatches", async () => {
     setEngineEnvironment();
     vi.spyOn(Date, "now").mockReturnValue(1_787_371_200_000);
@@ -171,6 +268,81 @@ describe("engineFetch runtime boundary", () => {
     }, { method: "POST", actor, body });
     await expectSafeInternalError(rejected);
     expect(calls).toBe(1);
+  });
+
+  it("sends and signs one canonical allowlisted market query", async () => {
+    setEngineEnvironment();
+    vi.spyOn(Date, "now").mockReturnValue(1_787_371_200_000);
+    let sentInput: RequestInfo | URL | undefined;
+    let sentInit: RequestInit | undefined;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      sentInput = input;
+      sentInit = init;
+      return jsonResponse({
+        error: {
+          code: "PROVIDER_UNAVAILABLE",
+          message: "must be redacted",
+          request_id: engineRequestId,
+          details: {},
+        },
+      }, 503);
+    });
+    const query = `watchlist=true&selected_instrument_id=018f3f4e-8e8f-7f5b-9f26-a3cc4da1e781&limit=50&cursor=opaque%2Bcursor`;
+
+    const response = await engineFetch({
+      template: "/internal/v1/market",
+      path: "/internal/v1/market",
+      query,
+    }, { method: "GET", actor });
+
+    expect(response.status).toBe(503);
+    const canonicalPath = "/internal/v1/market?cursor=opaque%2Bcursor&limit=50&selected_instrument_id=018f3f4e-8e8f-7f5b-9f26-a3cc4da1e781&watchlist=true";
+    expect(String(sentInput)).toBe(`http://127.0.0.1:8000${canonicalPath}`);
+    const sentHeaders = new Headers(sentInit?.headers);
+    const expected = createEngineHmacHeaders({
+      keyId: "test-current",
+      secret: "nexus-test-hmac-key-32-bytes!!!!",
+      method: "GET",
+      pathAndQuery: canonicalPath,
+      timestamp: 1_787_371_200,
+      nonce: sentHeaders.get("x-nexus-nonce")!,
+      actorId: actor.userId,
+      requestId: actor.requestId,
+      body: new Uint8Array(),
+    });
+    expect(sentHeaders.get("x-nexus-signature")).toBe(expected["X-Nexus-Signature"]);
+  });
+
+  it.each([
+    { template: "/internal/v1/market", path: "/internal/v1/market", query: "limit=10&limit=20" },
+    { template: "/internal/v1/market", path: "/internal/v1/market", query: "limit=101" },
+    { template: "/internal/v1/market", path: "/internal/v1/market", query: "selected_instrument_id=not-a-uuid" },
+    { template: "/internal/v1/market", path: "/internal/v1/market", query: "redirect=https%3A%2F%2Fattacker.invalid" },
+    { template: "/internal/v1/integrations/{provider}/test", path: "/internal/v1/integrations/fosun/test", query: "limit=1" },
+  ])("rejects a non-canonical or unauthorized engine query %# before fetch", async (target) => {
+    setEngineEnvironment();
+    const fetchSpy = vi.fn(async () => jsonResponse(successPayload()));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(engineFetch(target as never, { method: "GET", actor } as never)).resolves.toMatchObject({ status: 500 });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "//attacker.invalid/internal/v1/market",
+    "/internal/v1/market/../system-status",
+    "/internal/v1/market%2F..%2Fsystem-status",
+  ])("rejects unsafe market target path %s before fetch", async (path) => {
+    setEngineEnvironment();
+    const fetchSpy = vi.fn(async () => jsonResponse(successPayload()));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(engineFetch({
+      template: "/internal/v1/market",
+      path,
+      query: "limit=10",
+    } as never, { method: "GET", actor } as never)).resolves.toMatchObject({ status: 500 });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it.each([["GET", 10_000], ["HEAD", 10_000], ["POST", 30_000], ["PUT", 30_000]])("uses %i ms timeout for %s", (method, expected) => {

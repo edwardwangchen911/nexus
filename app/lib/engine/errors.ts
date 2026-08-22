@@ -1,7 +1,12 @@
 import "server-only";
 
 import { v7 as uuidv7, validate as validateUuid, version as uuidVersion } from "uuid";
-import { integrationStatusRuntimeSchema } from "../generated/runtime-contract";
+import {
+  integrationStatusRuntimeSchema,
+  marketPageRuntimeSchema,
+  runtimeContractSchemas,
+  watchlistMembershipRuntimeSchema,
+} from "../generated/runtime-contract";
 import { integrationProviders } from "../integrations/providers";
 
 export type NexusErrorCode = "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "INTERNAL_ERROR";
@@ -87,6 +92,20 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     const status = safeIntegrationStatus(data);
     return status?.provider === integrationAction[1] ? status : INVALID_DATA;
   }
+  if (pathname === "/internal/v1/market") {
+    if (!matchesRuntimeSchema(data, marketPageRuntimeSchema) || !isPlain(data)) return INVALID_DATA;
+    if (!Array.isArray(data.items) || data.items.length > 100) return INVALID_DATA;
+    if (data.next_cursor !== null && (typeof data.next_cursor !== "string" || data.next_cursor.length > 2048)) return INVALID_DATA;
+    const selected = data.selected_series;
+    if (selected !== null && (!isPlain(selected) || !Array.isArray(selected.bars) || selected.bars.length > 500)) return INVALID_DATA;
+    return data;
+  }
+  const watchlistAction = /^\/internal\/v1\/watchlist\/([^/]+)$/.exec(pathname);
+  if (watchlistAction && validateUuid(watchlistAction[1])) {
+    return matchesRuntimeSchema(data, watchlistMembershipRuntimeSchema) && isPlain(data)
+      ? data
+      : INVALID_DATA;
+  }
   return schemaPath === undefined && isPlain(data) ? data : INVALID_DATA;
 }
 
@@ -100,12 +119,34 @@ function safeIntegrationStatus(value: unknown): Record<string, unknown> | null {
 
 function matchesRuntimeSchema(value: unknown, schema: unknown): boolean {
   if (!isPlain(schema)) return false;
+  if (typeof schema.$ref === "string") {
+    const prefix = "#/components/schemas/";
+    if (!schema.$ref.startsWith(prefix)) return false;
+    const referenced = (runtimeContractSchemas as Record<string, unknown>)[schema.$ref.slice(prefix.length)];
+    return referenced !== undefined && matchesRuntimeSchema(value, referenced);
+  }
   if (Array.isArray(schema.anyOf)) return schema.anyOf.some((candidate) => matchesRuntimeSchema(value, candidate));
+  if (Array.isArray(schema.oneOf)) return schema.oneOf.filter((candidate) => matchesRuntimeSchema(value, candidate)).length === 1;
+  if (Array.isArray(schema.allOf)) return schema.allOf.every((candidate) => matchesRuntimeSchema(value, candidate));
+  if ("const" in schema && !Object.is(schema.const, value)) return false;
   if (Array.isArray(schema.enum) && !schema.enum.some((candidate) => Object.is(candidate, value))) return false;
   if (schema.type === "null") return value === null;
-  if (schema.type === "string") return typeof value === "string" && (schema.format !== "date-time" || isUtcIso(value));
-  if (schema.type === "integer") return Number.isInteger(value) && (typeof schema.minimum !== "number" || (value as number) >= schema.minimum);
-  if (schema.type === "array") return Array.isArray(value) && isPlain(schema.items) && value.every((item) => matchesRuntimeSchema(item, schema.items));
+  if (schema.type === "boolean") return typeof value === "boolean";
+  if (schema.type === "string") return matchesRuntimeString(value, schema);
+  if (schema.type === "integer" || schema.type === "number") {
+    return typeof value === "number"
+      && Number.isFinite(value)
+      && (schema.type !== "integer" || Number.isInteger(value))
+      && (typeof schema.minimum !== "number" || value >= schema.minimum)
+      && (typeof schema.maximum !== "number" || value <= schema.maximum);
+  }
+  if (schema.type === "array") {
+    return Array.isArray(value)
+      && (typeof schema.minItems !== "number" || value.length >= schema.minItems)
+      && (typeof schema.maxItems !== "number" || value.length <= schema.maxItems)
+      && isPlain(schema.items)
+      && value.every((item) => matchesRuntimeSchema(item, schema.items));
+  }
   if (schema.type !== "object" || !isPlain(value) || !isPlain(schema.properties)) return false;
   const properties = schema.properties;
   const required = Array.isArray(schema.required) && schema.required.every((key) => typeof key === "string")
@@ -114,6 +155,19 @@ function matchesRuntimeSchema(value: unknown, schema: unknown): boolean {
   if (!required.every((key) => key in value)) return false;
   if (schema.additionalProperties === false && Object.keys(value).some((key) => !(key in properties))) return false;
   return Object.entries(value).every(([key, item]) => key in properties && matchesRuntimeSchema(item, properties[key]));
+}
+
+function matchesRuntimeString(value: unknown, schema: Record<string, unknown>): boolean {
+  if (typeof value !== "string") return false;
+  if (typeof schema.minLength === "number" && value.length < schema.minLength) return false;
+  if (typeof schema.maxLength === "number" && value.length > schema.maxLength) return false;
+  if (typeof schema.pattern === "string") {
+    try { if (!new RegExp(schema.pattern).test(value)) return false; } catch { return false; }
+  }
+  if (schema.format === "date-time" && !isUtcIso(value)) return false;
+  if (schema.format === "date" && !isIsoDate(value)) return false;
+  if (schema.format === "uuid" && !validateUuid(value)) return false;
+  return true;
 }
 
 function enginePathname(requestUrl?: string, schemaPath?: string): string {
@@ -128,6 +182,7 @@ function enginePathname(requestUrl?: string, schemaPath?: string): string {
 
 function isV7(value: unknown): boolean { return typeof value === "string" && validateUuid(value) && uuidVersion(value) === 7; }
 function isUtcIso(value: unknown): boolean { if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(value)) return false; const date = new Date(value); return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 19) === value.slice(0, 19); }
+function isIsoDate(value: unknown): boolean { if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false; const date = new Date(`${value}T00:00:00Z`); return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value; }
 function isStableCode(value: unknown): value is StableEngineErrorCode { return typeof value === "string" && Object.hasOwn(ERROR_STATUSES, value); }
 function allowsStatus(code: unknown, status: number): boolean { return isStableCode(code) && ERROR_STATUSES[code].includes(status as never); }
 function safeHeaders(upstream: Headers, requestUrl?: string): Headers { const headers = new Headers(); for (const name of ["retry-after", "etag"]) { const value = upstream.get(name); if (value) headers.set(name, value); } const location = upstream.get("location"); if (location && requestUrl) try { const target = new URL(location, requestUrl); const origin = new URL(requestUrl).origin; if (target.origin === origin && !target.username && !target.password) headers.set("location", `${target.pathname}${target.search}${target.hash}`); } catch { return headers; } return headers; }

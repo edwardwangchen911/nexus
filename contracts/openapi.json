@@ -211,6 +211,231 @@
         "title": "IntegrationStatusResponse",
         "type": "object"
       },
+      "MarketBarResponse": {
+        "additionalProperties": false,
+        "description": "Exact selected-source OHLCV evidence for a semantic chart table.",
+        "properties": {
+          "available_at": {
+            "format": "date-time",
+            "title": "Available At",
+            "type": "string"
+          },
+          "close": {
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Close",
+            "type": "string"
+          },
+          "high": {
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "High",
+            "type": "string"
+          },
+          "low": {
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Low",
+            "type": "string"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "open": {
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Open",
+            "type": "string"
+          },
+          "quality_flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Quality Flags",
+            "type": "array"
+          },
+          "session": {
+            "format": "date",
+            "title": "Session",
+            "type": "string"
+          },
+          "volume": {
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Volume",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume",
+          "available_at",
+          "observed_at",
+          "quality_flags"
+        ],
+        "title": "MarketBarResponse",
+        "type": "object"
+      },
+      "MarketItemResponse": {
+        "additionalProperties": false,
+        "description": "One point-in-time instrument row with explicit source quality.",
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "feed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feed"
+          },
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price"
+          },
+          "quality": {
+            "enum": [
+              "PASS",
+              "PARTIAL",
+              "FAIL"
+            ],
+            "title": "Quality",
+            "type": "string"
+          },
+          "quality_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Quality Reasons",
+            "type": "array"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          },
+          "watchlisted": {
+            "title": "Watchlisted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "instrument_id",
+          "symbol",
+          "price",
+          "source",
+          "feed",
+          "as_of",
+          "quality",
+          "quality_reasons",
+          "watchlisted"
+        ],
+        "title": "MarketItemResponse",
+        "type": "object"
+      },
+      "MarketPageEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/MarketPageResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "MarketPageEnvelope",
+        "type": "object"
+      },
+      "MarketPageResponse": {
+        "additionalProperties": false,
+        "description": "A bounded deterministic page plus one optional chart series.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MarketItemResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "selected_series": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SelectedMarketSeriesResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "selected_series"
+        ],
+        "title": "MarketPageResponse",
+        "type": "object"
+      },
       "NexusErrorEnvelope": {
         "additionalProperties": false,
         "description": "The public stable error envelope.",
@@ -256,6 +481,100 @@
         "title": "NexusErrorResponse",
         "type": "object"
       },
+      "SelectedMarketSeriesResponse": {
+        "additionalProperties": false,
+        "description": "At most one repository-selected historical series in a market page.",
+        "properties": {
+          "adjustment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adjustment"
+          },
+          "bars": {
+            "items": {
+              "$ref": "#/components/schemas/MarketBarResponse"
+            },
+            "title": "Bars",
+            "type": "array"
+          },
+          "feed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feed"
+          },
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "interval": {
+            "anyOf": [
+              {
+                "enum": [
+                  "1Min",
+                  "1Day"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interval"
+          },
+          "quality": {
+            "enum": [
+              "PASS",
+              "PARTIAL",
+              "FAIL"
+            ],
+            "title": "Quality",
+            "type": "string"
+          },
+          "quality_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Quality Reasons",
+            "type": "array"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          }
+        },
+        "required": [
+          "instrument_id",
+          "source",
+          "feed",
+          "adjustment",
+          "interval",
+          "quality",
+          "quality_reasons",
+          "bars"
+        ],
+        "title": "SelectedMarketSeriesResponse",
+        "type": "object"
+      },
       "SuccessMetaResponse": {
         "additionalProperties": false,
         "description": "The stable public success metadata shape.",
@@ -282,6 +601,44 @@
           "as_of"
         ],
         "title": "SuccessMetaResponse",
+        "type": "object"
+      },
+      "WatchlistMembershipEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/WatchlistMembershipResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "WatchlistMembershipEnvelope",
+        "type": "object"
+      },
+      "WatchlistMembershipResponse": {
+        "additionalProperties": false,
+        "description": "Final set representation shared by idempotent PUT and DELETE.",
+        "properties": {
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "watchlisted": {
+            "title": "Watchlisted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "instrument_id",
+          "watchlisted"
+        ],
+        "title": "WatchlistMembershipResponse",
         "type": "object"
       }
     }
@@ -604,6 +961,120 @@
         "summary": "Test Integration Connectivity"
       }
     },
+    "/internal/v1/market": {
+      "get": {
+        "description": "List point-in-time quote evidence and optionally one selected series.",
+        "operationId": "listMarket",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "watchlist",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Watchlist"
+            }
+          },
+          {
+            "in": "query",
+            "name": "selected_instrument_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Selected Instrument Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketPageEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "List Market"
+      }
+    },
     "/internal/v1/system-status": {
       "get": {
         "description": "Return a fixture-only status envelope without exposing configuration.",
@@ -623,6 +1094,126 @@
           }
         },
         "summary": "System Status"
+      }
+    },
+    "/internal/v1/watchlist/{instrument_id}": {
+      "delete": {
+        "description": "Ensure the instrument is absent from the stable default private watchlist.",
+        "operationId": "deleteWatchlistMembership",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instrument_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Instrument Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchlistMembershipEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Delete Watchlist Membership"
+      },
+      "put": {
+        "description": "Ensure the instrument belongs to the stable default private watchlist.",
+        "operationId": "putWatchlistMembership",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instrument_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Instrument Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchlistMembershipEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Put Watchlist Membership"
       }
     }
   }
