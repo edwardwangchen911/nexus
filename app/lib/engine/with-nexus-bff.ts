@@ -15,7 +15,7 @@ export function withNexusBff(handler: NexusBffHandler, options: NexusBffOptions 
     try {
       const actor = await requireNexusApiActor(request);
       const safeRequest = await boundedRequest(request, options);
-      return await sanitizeEngineResponse(await handler(safeRequest, actor));
+      return await sanitizeEngineResponse(await handler(safeRequest, actor), safeRequest.url);
     } catch (error) {
       if (error instanceof NexusApiAuthError) return safeBffErrorResponse(new NexusBffError(error.status, error.status === 401 ? "UNAUTHENTICATED" : "FORBIDDEN", error.message));
       return safeBffErrorResponse(error);
