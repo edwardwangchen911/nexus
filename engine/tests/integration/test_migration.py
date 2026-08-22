@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -8,8 +8,11 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
+from nexus.integrations.service import IntegrationStatusService
 from nexus.persistence.base import Base
 from nexus.persistence.models import data, runtime  # noqa: F401
+from nexus.persistence.session import session_factory
+from nexus.settings import EngineSettings
 from sqlalchemy import DateTime, inspect, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import Connection
@@ -144,14 +147,72 @@ def test_0003_fail_closed_backfills_disabled_admission_epoch(
     assert upgraded["admitted_contract_hash"] is None
 
 
-def _seed_0001_integration_status(
-    database_url: str, created_at: datetime, *, status: str = "fixture"
+def test_0003_legacy_read_only_with_old_admission_fails_closed_across_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
 ) -> None:
-    asyncio.run(_seed_0001_integration_status_async(database_url, created_at, status))
+    """0003 cannot infer an old admission hash for a legacy read-only status row."""
+    engine_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = Config(str(engine_root / "alembic.ini"))
+    created_at = datetime(2026, 8, 22, 11, 30, tzinfo=UTC)
+    projection_now = created_at + timedelta(hours=1)
+
+    command.upgrade(config, "0001_runtime_and_data")
+    _seed_0001_integration_status(
+        temporary_database_url,
+        created_at,
+        status="read_only",
+        with_valid_capability=True,
+    )
+    command.upgrade(config, "0002_integration_status_version")
+    command.upgrade(config, "head")
+
+    upgraded = _integration_status_row(temporary_database_url)
+    assert upgraded == {
+        "provider": "fosun",
+        "status": "read_only",
+        "version": 1,
+        "mode_changed_at": created_at,
+        "capability_invalidated_at": None,
+        "admitted_contract_hash": None,
+    }
+    _assert_legacy_read_only_is_effectively_disabled(temporary_database_url, projection_now)
+
+    command.downgrade(config, "0002_integration_status_version")
+    assert _integration_status_row(temporary_database_url, columns=("version",)) == {
+        "provider": "fosun",
+        "status": "read_only",
+        "version": 1,
+    }
+    command.upgrade(config, "head")
+
+    assert _integration_status_row(temporary_database_url) == upgraded
+    _assert_legacy_read_only_is_effectively_disabled(temporary_database_url, projection_now)
+
+
+def _seed_0001_integration_status(
+    database_url: str,
+    created_at: datetime,
+    *,
+    status: str = "fixture",
+    with_valid_capability: bool = False,
+) -> None:
+    asyncio.run(
+        _seed_0001_integration_status_async(
+            database_url,
+            created_at,
+            status,
+            with_valid_capability,
+        )
+    )
 
 
 async def _seed_0001_integration_status_async(
-    database_url: str, created_at: datetime, status: str
+    database_url: str,
+    created_at: datetime,
+    status: str,
+    with_valid_capability: bool,
 ) -> None:
     engine = create_async_engine(database_url)
     try:
@@ -170,8 +231,48 @@ async def _seed_0001_integration_status_async(
                     "created_at": created_at,
                 },
             )
+            if with_valid_capability:
+                await connection.execute(
+                    text(
+                        "INSERT INTO provider_capabilities "
+                        "(id, provider, capability, contract_hash, expires_at, "
+                        "schema_version, payload, created_at) "
+                        "VALUES (:id, :provider, :capability, :contract_hash, :expires_at, "
+                        ":schema_version, CAST(:payload AS jsonb), :created_at)"
+                    ),
+                    {
+                        "id": uuid4(),
+                        "provider": "fosun",
+                        "capability": "READ_ONLY",
+                        "contract_hash": "a" * 64,
+                        "expires_at": created_at + timedelta(days=1),
+                        "schema_version": "1",
+                        "payload": "{}",
+                        "created_at": created_at,
+                    },
+                )
     finally:
         await engine.dispose()
+
+
+def _assert_legacy_read_only_is_effectively_disabled(database_url: str, now: datetime) -> None:
+    asyncio.run(_assert_legacy_read_only_is_effectively_disabled_async(database_url, now))
+
+
+async def _assert_legacy_read_only_is_effectively_disabled_async(
+    database_url: str, now: datetime
+) -> None:
+    factory = session_factory(EngineSettings(database_url=database_url))
+    async with factory() as session:
+        service = IntegrationStatusService(session, now)
+        persisted = await service.find_status("fosun")
+        capability = await service.capability("fosun")
+        response = service.response("fosun", persisted, capability)
+    assert response.mode == "disabled"
+    assert response.quality == "FAIL"
+    assert response.contract_hash == "a" * 64
+    assert response.capability_expires_at == now + timedelta(hours=23)
+    assert response.next_action == "A valid capability admission is required."
 
 
 def _integration_status_row(

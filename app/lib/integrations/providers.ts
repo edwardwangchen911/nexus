@@ -1,11 +1,12 @@
 import type { components } from "../generated/schema";
+import { integrationStatusRuntimeSchema } from "../generated/runtime-contract";
 
 export type IntegrationStatus = components["schemas"]["IntegrationStatusResponse"];
 export type IntegrationProvider = IntegrationStatus["provider"];
 export type IntegrationListEnvelope = components["schemas"]["IntegrationStatusListEnvelope"];
 export type IntegrationMutationEnvelope = components["schemas"]["IntegrationModeChangeResponse"];
 
-export const integrationProviders = ["fosun", "alpaca", "sec", "fred", "openai"] as const satisfies readonly IntegrationProvider[];
+export const integrationProviders = integrationStatusRuntimeSchema.properties.provider.enum satisfies readonly IntegrationProvider[];
 type MissingProvider = Exclude<IntegrationProvider, (typeof integrationProviders)[number]>;
 const providerListIsExhaustive: MissingProvider extends never ? true : never = true;
 void providerListIsExhaustive;

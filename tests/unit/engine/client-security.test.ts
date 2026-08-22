@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { engineFetch, sanitizeEngineResponse, timeoutForMethod } from "../../../app/lib/engine/client";
-import { ERROR_STATUSES } from "../../../app/lib/engine/errors";
+import { ERROR_STATUSES, SAFE_ENGINE_ERROR_MESSAGES } from "../../../app/lib/engine/errors";
 import { createEngineHmacHeaders } from "../../../app/lib/engine/hmac";
 
 const actor = { userId: "nexus-test-user", requestId: "0198f7a0-1111-7777-8111-111111111114" };
@@ -199,20 +199,27 @@ describe("engineFetch runtime boundary", () => {
 
   it.each(Object.entries(ERROR_STATUSES).flatMap(([code, statuses]) =>
     statuses.map((status) => [code, status] as const),
-  ))("rebuilds the exact public %s envelope at allowed status %i", async (code, status) => {
+  ))("rebuilds a redacted public %s envelope at allowed status %i", async (code, status) => {
     const payload = {
       error: {
         code,
-        message: "public engine message",
+        message: "upstream message must not escape",
         request_id: engineRequestId,
-        details: { field: "value" },
+        details: { api_key: "must-not-escape", nested: { credential: "must-not-escape" } },
       },
     };
 
     const response = await sanitizeEngineResponse(jsonResponse(payload, status));
 
     expect(response.status).toBe(status);
-    expect(await response.json()).toEqual(payload);
+    expect(await response.json()).toEqual({
+      error: {
+        code,
+        message: SAFE_ENGINE_ERROR_MESSAGES[code as keyof typeof SAFE_ENGINE_ERROR_MESSAGES],
+        request_id: engineRequestId,
+        details: {},
+      },
+    });
   });
 
   it.each([

@@ -132,4 +132,31 @@ describe("integration BFF routes", () => {
     expect((await response.json()).error.code).toBe("VALIDATION_ERROR");
     expect(engineFetch).not.toHaveBeenCalled();
   });
+
+  it("rejects cross-origin or non-idempotent writes before the engine boundary", async () => {
+    const { POST } = await import("../../../app/api/v1/integrations/[provider]/mode/route");
+    const missingIdempotency = new Request("https://nexus.test/api/v1/integrations/fosun/mode", {
+      method: "POST",
+      headers: { origin: "https://nexus.test", "if-match": '"1"' },
+      body: '{"mode":"disabled"}',
+    });
+    const crossOrigin = new Request("https://nexus.test/api/v1/integrations/fosun/mode", {
+      method: "POST",
+      headers: {
+        origin: "https://attacker.invalid",
+        "idempotency-key": "cross-origin",
+        "if-match": '"1"',
+      },
+      body: '{"mode":"disabled"}',
+    });
+
+    const missingIdempotencyResponse = await POST(missingIdempotency);
+    const crossOriginResponse = await POST(crossOrigin);
+
+    expect(missingIdempotencyResponse.status).toBe(400);
+    expect((await missingIdempotencyResponse.json()).error.code).toBe("VALIDATION_ERROR");
+    expect(crossOriginResponse.status).toBe(403);
+    expect((await crossOriginResponse.json()).error.code).toBe("FORBIDDEN");
+    expect(engineFetch).not.toHaveBeenCalled();
+  });
 });

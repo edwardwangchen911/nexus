@@ -1,12 +1,36 @@
 import "server-only";
 
 import { v7 as uuidv7, validate as validateUuid, version as uuidVersion } from "uuid";
+import { integrationStatusRuntimeSchema } from "../generated/runtime-contract";
+import { integrationProviders } from "../integrations/providers";
 
 export type NexusErrorCode = "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "INTERNAL_ERROR";
 export const ERROR_STATUSES = {
   UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], BUDGET_EXHAUSTED: [429], PROVIDER_UNAVAILABLE: [503], INTERNAL_ERROR: [500],
 } as const;
 export type StableEngineErrorCode = keyof typeof ERROR_STATUSES;
+export const SAFE_ENGINE_ERROR_MESSAGES: Record<StableEngineErrorCode, string> = {
+  UNAUTHENTICATED: "Authentication is required.",
+  FORBIDDEN: "Access is not permitted.",
+  VALIDATION_ERROR: "The request is invalid.",
+  NOT_FOUND: "The requested resource was not found.",
+  VERSION_CONFLICT: "The resource changed. Refresh and try again.",
+  IDEMPOTENCY_CONFLICT: "The idempotency key was already used for a different request.",
+  DATA_PARTIAL: "Required data is incomplete.",
+  DATA_STALE: "Required data is stale.",
+  BROKER_STALE: "Broker data is stale.",
+  SOURCE_CONFLICT: "Data sources disagree.",
+  CAPABILITY_EXPIRED: "The provider capability is unavailable or expired.",
+  PROPOSAL_NOT_EXECUTABLE: "The proposal is not executable.",
+  ACCOUNT_TYPE_MISMATCH: "The account type is not permitted for this action.",
+  APPROVAL_REQUIRED: "Human approval is required.",
+  RISK_REJECTED: "The action was rejected by deterministic risk controls.",
+  DRAWDOWN_LOCKED: "The drawdown lock is active.",
+  RECONCILIATION_REQUIRED: "Reconciliation is required before continuing.",
+  BUDGET_EXHAUSTED: "The configured budget is exhausted.",
+  PROVIDER_UNAVAILABLE: "The provider is unavailable.",
+  INTERNAL_ERROR: "The request could not be completed.",
+};
 
 export class NexusBffError extends Error {
   constructor(readonly status: number, readonly code: NexusErrorCode, message: string) { super(message); }
@@ -32,15 +56,21 @@ export function rebuildAllowedEngineResponse(status: number, value: unknown, ups
   }
   if ([400, 401, 403, 404, 409, 422, 429, 500, 502, 503, 504].includes(status) && isObject(value, ["error"])) {
     const { error } = value;
-    if (isObject(error, ["code", "message", "request_id", "details"]) && isStableCode(error.code) && allowsStatus(error.code, status) && typeof error.message === "string" && isV7(error.request_id) && isPlain(error.details)) return Response.json(value, { status, headers: safeHeaders(upstreamHeaders, requestUrl) });
+    if (isObject(error, ["code", "message", "request_id", "details"]) && isStableCode(error.code) && allowsStatus(error.code, status) && typeof error.message === "string" && isV7(error.request_id) && isPlain(error.details)) {
+      return Response.json({
+        error: {
+          code: error.code,
+          message: SAFE_ENGINE_ERROR_MESSAGES[error.code],
+          request_id: error.request_id,
+          details: {},
+        },
+      }, { status, headers: safeHeaders(upstreamHeaders, requestUrl) });
+    }
   }
   return null;
 }
 
 const INVALID_DATA = Symbol("invalid engine data");
-const INTEGRATION_PROVIDERS = ["fosun", "alpaca", "sec", "fred", "openai"] as const;
-const INTEGRATION_MODES = ["disabled", "fixture", "read_only"] as const;
-const INTEGRATION_QUALITIES = ["PASS", "PARTIAL", "FAIL"] as const;
 
 function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: string): unknown | typeof INVALID_DATA {
   const pathname = enginePathname(requestUrl, schemaPath);
@@ -52,8 +82,8 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     const statuses = data.map((status) => safeIntegrationStatus(status));
     return statuses.every((status) => status !== null) ? statuses : INVALID_DATA;
   }
-  const integrationAction = /^\/internal\/v1\/integrations\/(fosun|alpaca|sec|fred|openai)\/(test|mode)$/.exec(pathname);
-  if (integrationAction) {
+  const integrationAction = /^\/internal\/v1\/integrations\/([^/]+)\/(test|mode)$/.exec(pathname);
+  if (integrationAction && integrationProviders.includes(integrationAction[1] as (typeof integrationProviders)[number])) {
     const status = safeIntegrationStatus(data);
     return status?.provider === integrationAction[1] ? status : INVALID_DATA;
   }
@@ -61,23 +91,29 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
 }
 
 function safeIntegrationStatus(value: unknown): Record<string, unknown> | null {
-  const keys = ["as_of", "capability_expires_at", "contract_hash", "mode", "next_action", "provider", "quality", "version"];
-  if (!isObject(value, keys)) return null;
-  if (!isNullableUtcIso(value.as_of) || !isNullableUtcIso(value.capability_expires_at)) return null;
+  if (!matchesRuntimeSchema(value, integrationStatusRuntimeSchema) || !isPlain(value)) return null;
   if (value.contract_hash !== null && (typeof value.contract_hash !== "string" || !/^[a-f0-9]{64}$/.test(value.contract_hash))) return null;
-  if (value.next_action !== null && typeof value.next_action !== "string") return null;
-  if (!includes(INTEGRATION_PROVIDERS, value.provider) || !includes(INTEGRATION_MODES, value.mode) || !includes(INTEGRATION_QUALITIES, value.quality)) return null;
-  if (!Number.isInteger(value.version) || (value.version as number) < 0) return null;
-  return {
-    as_of: value.as_of,
-    capability_expires_at: value.capability_expires_at,
-    contract_hash: value.contract_hash,
-    mode: value.mode,
-    next_action: value.next_action,
-    provider: value.provider,
-    quality: value.quality,
-    version: value.version,
-  };
+  return Object.fromEntries(
+    Object.keys(integrationStatusRuntimeSchema.properties).map((key) => [key, value[key]]),
+  );
+}
+
+function matchesRuntimeSchema(value: unknown, schema: unknown): boolean {
+  if (!isPlain(schema)) return false;
+  if (Array.isArray(schema.anyOf)) return schema.anyOf.some((candidate) => matchesRuntimeSchema(value, candidate));
+  if (Array.isArray(schema.enum) && !schema.enum.some((candidate) => Object.is(candidate, value))) return false;
+  if (schema.type === "null") return value === null;
+  if (schema.type === "string") return typeof value === "string" && (schema.format !== "date-time" || isUtcIso(value));
+  if (schema.type === "integer") return Number.isInteger(value) && (typeof schema.minimum !== "number" || (value as number) >= schema.minimum);
+  if (schema.type === "array") return Array.isArray(value) && isPlain(schema.items) && value.every((item) => matchesRuntimeSchema(item, schema.items));
+  if (schema.type !== "object" || !isPlain(value) || !isPlain(schema.properties)) return false;
+  const properties = schema.properties;
+  const required = Array.isArray(schema.required) && schema.required.every((key) => typeof key === "string")
+    ? schema.required as string[]
+    : [];
+  if (!required.every((key) => key in value)) return false;
+  if (schema.additionalProperties === false && Object.keys(value).some((key) => !(key in properties))) return false;
+  return Object.entries(value).every(([key, item]) => key in properties && matchesRuntimeSchema(item, properties[key]));
 }
 
 function enginePathname(requestUrl?: string, schemaPath?: string): string {
@@ -89,8 +125,6 @@ function enginePathname(requestUrl?: string, schemaPath?: string): string {
   } catch { return ""; }
 }
 
-function isNullableUtcIso(value: unknown): boolean { return value === null || isUtcIso(value); }
-function includes<const T extends readonly string[]>(values: T, value: unknown): value is T[number] { return typeof value === "string" && values.includes(value as T[number]); }
 
 function isV7(value: unknown): boolean { return typeof value === "string" && validateUuid(value) && uuidVersion(value) === 7; }
 function isUtcIso(value: unknown): boolean { if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(value)) return false; const date = new Date(value); return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 19) === value.slice(0, 19); }

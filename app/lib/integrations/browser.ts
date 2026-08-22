@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { createContext, createElement, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import type { DataStateKind } from "../../components/data-state";
 import type { IntegrationListEnvelope, IntegrationStatus } from "./providers";
 
@@ -11,14 +11,29 @@ type IntegrationLoadResult = {
   notice: LoadNotice;
 };
 
-export function useIntegrationStatuses(): {
+export type IntegrationStatusResource = {
   state: DataStateKind;
   integrations: IntegrationStatus[];
   refreshing: boolean;
   notice: LoadNotice;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<DataStateKind>;
   replaceStatus: (status: IntegrationStatus) => void;
-} {
+};
+
+const IntegrationStatusContext = createContext<IntegrationStatusResource | null>(null);
+
+export function IntegrationStatusProvider({ children }: { children: ReactNode }): ReactNode {
+  const resource = useIntegrationStatusResource();
+  return createElement(IntegrationStatusContext.Provider, { value: resource }, children);
+}
+
+export function useIntegrationStatuses(): IntegrationStatusResource {
+  const resource = useContext(IntegrationStatusContext);
+  if (!resource) throw new Error("IntegrationStatusProvider is required");
+  return resource;
+}
+
+function useIntegrationStatusResource(): IntegrationStatusResource {
   const [state, setState] = useState<DataStateKind>("loading");
   const [integrations, setIntegrations] = useState<IntegrationStatus[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -32,6 +47,7 @@ export function useIntegrationStatuses(): {
     if (result.integrations !== null) setIntegrations(result.integrations);
     setNotice(result.notice);
     setRefreshing(false);
+    return result.state;
   }, []);
 
   useEffect(() => {

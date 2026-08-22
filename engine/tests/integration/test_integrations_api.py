@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import httpx
 import pytest
@@ -9,7 +10,12 @@ from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET, build_test_hmac_hea
 from nexus.domain.ids import new_uuid7
 from nexus.main import create_engine_app
 from nexus.persistence.models.data import ProviderCapability
-from nexus.persistence.models.runtime import IdempotencyRecord, IntegrationStatus, UsedNonce
+from nexus.persistence.models.runtime import (
+    AuditEvent,
+    IdempotencyRecord,
+    IntegrationStatus,
+    UsedNonce,
+)
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import func, select
@@ -73,6 +79,7 @@ async def _add_capability(
     contract_hash: str = _CONTRACT_HASH,
     expires_at: datetime,
     created_at: datetime | None = None,
+    capability_id: UUID | None = None,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     async with factory() as session:
@@ -84,6 +91,8 @@ async def _add_capability(
             schema_version="1",
             payload={},
         )
+        if capability_id is not None:
+            capability.id = capability_id
         if created_at is not None:
             capability.created_at = created_at
         session.add(capability)
@@ -95,6 +104,20 @@ async def _add_read_only_status(migrated_database_url: str) -> None:
     async with factory() as session:
         session.add(IntegrationStatus(provider="fosun", status="read_only"))
         await session.commit()
+
+
+async def _runtime_counts(migrated_database_url: str) -> dict[str, int]:
+    """Return the transactionally sensitive runtime rows for a rollback assertion."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        return {
+            "status": await session.scalar(select(func.count()).select_from(IntegrationStatus)),
+            "idempotency": await session.scalar(
+                select(func.count()).select_from(IdempotencyRecord)
+            ),
+            "nonce": await session.scalar(select(func.count()).select_from(UsedNonce)),
+            "audit": await session.scalar(select(func.count()).select_from(AuditEvent)),
+        }
 
 
 @pytest.mark.asyncio
@@ -411,6 +434,12 @@ async def test_mode_requires_idempotency_key_and_if_match(
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert await _runtime_counts(migrated_database_url) == {
+        "status": 0,
+        "idempotency": 0,
+        "nonce": 0,
+        "audit": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -744,6 +773,156 @@ async def test_newest_short_lived_capability_is_persisted_without_expiry_fallbac
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("contract_hash", "idempotency_key"),
+    (("A" * 64, "uppercase-hash"), ("z" * 64, "invalid-hash")),
+)
+async def test_read_only_rejects_noncanonical_authoritative_contract_hashes(
+    migrated_database_url: str,
+    contract_hash: str,
+    idempotency_key: str,
+) -> None:
+    """The newest admission must be lowercase hexadecimal before it can authorize read-only."""
+    await _add_capability(
+        migrated_database_url,
+        contract_hash=contract_hash,
+        expires_at=_CLOCK + timedelta(days=1),
+    )
+    app = _app(migrated_database_url)
+    path = "/internal/v1/integrations/fosun/mode"
+    body = b'{"mode":"read_only"}'
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.post(
+            path,
+            content=body,
+            headers=_mode_headers(path, body, idempotency_key=idempotency_key, version=0),
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "CAPABILITY_EXPIRED"
+    assert await _runtime_counts(migrated_database_url) == {
+        "status": 0,
+        "idempotency": 0,
+        "nonce": 0,
+        "audit": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_read_only_rejects_capability_expiring_at_the_current_clock(
+    migrated_database_url: str,
+) -> None:
+    """An admission at its exact expiry boundary must not be usable for this request."""
+    await _add_capability(
+        migrated_database_url,
+        expires_at=_CLOCK,
+    )
+    app = _app(migrated_database_url)
+    path = "/internal/v1/integrations/fosun/mode"
+    body = b'{"mode":"read_only"}'
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.post(
+            path,
+            content=body,
+            headers=_mode_headers(path, body, idempotency_key="expires-now", version=0),
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "CAPABILITY_EXPIRED"
+
+
+@pytest.mark.asyncio
+async def test_read_only_rejects_capability_created_at_the_disable_epoch(
+    migrated_database_url: str,
+) -> None:
+    """A re-admission must be strictly later than disabling, not merely timestamp-equal."""
+    await _add_capability(
+        migrated_database_url,
+        contract_hash="b" * 64,
+        expires_at=_CLOCK + timedelta(days=1),
+        created_at=_CLOCK - timedelta(seconds=1),
+    )
+    app = _app(migrated_database_url)
+    path = "/internal/v1/integrations/fosun/mode"
+    disabled = b'{"mode":"disabled"}'
+    fixture = b'{"mode":"fixture"}'
+    read_only = b'{"mode":"read_only"}'
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        disabled_response = await client.post(
+            path,
+            content=disabled,
+            headers=_mode_headers(path, disabled, idempotency_key="equal-disable", version=0),
+        )
+        fixture_response = await client.post(
+            path,
+            content=fixture,
+            headers=_mode_headers(path, fixture, idempotency_key="equal-fixture", version=1),
+        )
+        await _add_capability(
+            migrated_database_url,
+            contract_hash="c" * 64,
+            expires_at=_CLOCK + timedelta(days=1),
+            created_at=_CLOCK,
+        )
+        response = await client.post(
+            path,
+            content=read_only,
+            headers=_mode_headers(path, read_only, idempotency_key="equal-reprobe", version=2),
+        )
+
+    assert disabled_response.status_code == fixture_response.status_code == 200
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "CAPABILITY_EXPIRED"
+
+
+@pytest.mark.asyncio
+async def test_equal_created_at_capabilities_choose_the_newest_uuid_as_authority(
+    migrated_database_url: str,
+) -> None:
+    """Equal admission timestamps must have a deterministic immutable UUID tie-break."""
+    created_at = _CLOCK - timedelta(minutes=1)
+    await _add_capability(
+        migrated_database_url,
+        contract_hash="b" * 64,
+        expires_at=_CLOCK + timedelta(days=1),
+        created_at=created_at,
+        capability_id=UUID("00000000-0000-7000-8000-000000000001"),
+    )
+    await _add_capability(
+        migrated_database_url,
+        contract_hash="c" * 64,
+        expires_at=_CLOCK + timedelta(minutes=1),
+        created_at=created_at,
+        capability_id=UUID("00000000-0000-7000-8000-000000000002"),
+    )
+    app = _app(migrated_database_url)
+    path = "/internal/v1/integrations/fosun/mode"
+    body = b'{"mode":"read_only"}'
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.post(
+            path,
+            content=body,
+            headers=_mode_headers(path, body, idempotency_key="uuid-authority", version=0),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["contract_hash"] == "c" * 64
+    assert response.json()["data"]["capability_expires_at"] == "2026-08-23T12:01:00Z"
+
+
+@pytest.mark.asyncio
 async def test_newer_admission_disables_old_read_only_until_it_is_reprobed(
     migrated_database_url: str,
 ) -> None:
@@ -945,6 +1124,12 @@ async def test_connectivity_body_rejects_extra_fields(migrated_database_url: str
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert await _runtime_counts(migrated_database_url) == {
+        "status": 0,
+        "idempotency": 0,
+        "nonce": 0,
+        "audit": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -971,3 +1156,114 @@ async def test_mode_idempotency_and_hmac_nonce_share_the_business_transaction(
         assert await session.scalar(select(func.count()).select_from(UsedNonce)) == 1
         assert await session.scalar(select(func.count()).select_from(IdempotencyRecord)) == 1
         assert await session.scalar(select(func.count()).select_from(IntegrationStatus)) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_integration_requests_rollback_runtime_state_and_allow_safe_retry(
+    migrated_database_url: str,
+) -> None:
+    """Business, policy, and validation failures cannot burn a nonce or idempotency key."""
+    app = _app(migrated_database_url)
+    fosun_mode_path = "/internal/v1/integrations/fosun/mode"
+    alpaca_mode_path = "/internal/v1/integrations/alpaca/mode"
+    read_only = b'{"mode":"read_only"}'
+    fixture = b'{"mode":"fixture"}'
+    invalid = b'{"mode":"live"}'
+    disabled = b'{"mode":"disabled"}'
+    admission_headers = _mode_headers(
+        fosun_mode_path, read_only, idempotency_key="retry-admission", version=0
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        capability_expired = await client.post(
+            fosun_mode_path,
+            content=read_only,
+            headers=admission_headers,
+        )
+        assert capability_expired.status_code == 409
+        assert capability_expired.json()["error"]["code"] == "CAPABILITY_EXPIRED"
+        assert await _runtime_counts(migrated_database_url) == {
+            "status": 0,
+            "idempotency": 0,
+            "nonce": 0,
+            "audit": 0,
+        }
+
+        await _add_capability(
+            migrated_database_url,
+            expires_at=_CLOCK + timedelta(days=1),
+        )
+        retried_admission = await client.post(
+            fosun_mode_path,
+            content=read_only,
+            headers=admission_headers,
+        )
+        assert retried_admission.status_code == 200
+        assert retried_admission.json()["data"]["mode"] == "read_only"
+
+        unavailable = await client.post(
+            alpaca_mode_path,
+            content=read_only,
+            headers=_mode_headers(
+                alpaca_mode_path, read_only, idempotency_key="unavailable", version=0
+            ),
+        )
+        assert unavailable.status_code == 503
+        assert unavailable.json()["error"]["code"] == "PROVIDER_UNAVAILABLE"
+        assert await _runtime_counts(migrated_database_url) == {
+            "status": 1,
+            "idempotency": 1,
+            "nonce": 1,
+            "audit": 0,
+        }
+
+        forbidden = await client.post(
+            alpaca_mode_path,
+            content=fixture,
+            headers=_mode_headers(
+                alpaca_mode_path, fixture, idempotency_key="forbidden", version=0
+            ),
+        )
+        assert forbidden.status_code == 403
+        assert forbidden.json()["error"]["code"] == "FORBIDDEN"
+        assert await _runtime_counts(migrated_database_url) == {
+            "status": 1,
+            "idempotency": 1,
+            "nonce": 1,
+            "audit": 0,
+        }
+
+        validation = await client.post(
+            fosun_mode_path,
+            content=invalid,
+            headers=_mode_headers(
+                fosun_mode_path, invalid, idempotency_key="retry-validation", version=1
+            ),
+        )
+        assert validation.status_code == 422
+        assert validation.json()["error"]["code"] == "VALIDATION_ERROR"
+        assert await _runtime_counts(migrated_database_url) == {
+            "status": 1,
+            "idempotency": 1,
+            "nonce": 1,
+            "audit": 0,
+        }
+
+        retried_validation = await client.post(
+            fosun_mode_path,
+            content=disabled,
+            headers=_mode_headers(
+                fosun_mode_path, disabled, idempotency_key="retry-validation", version=1
+            ),
+        )
+
+    assert retried_validation.status_code == 200
+    assert retried_validation.json()["data"]["mode"] == "disabled"
+    assert await _runtime_counts(migrated_database_url) == {
+        "status": 1,
+        "idempotency": 2,
+        "nonce": 2,
+        "audit": 0,
+    }

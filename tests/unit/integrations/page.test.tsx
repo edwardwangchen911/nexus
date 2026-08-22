@@ -1,14 +1,14 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import BrokerSimulationPage from "../../../app/(protected)/broker-simulation/page";
-import { IntegrationsPanel } from "../../../app/(protected)/integrations/page";
+import IntegrationsPage, { IntegrationsPanel } from "../../../app/(protected)/integrations/page";
 import LiveApprovalsPage from "../../../app/(protected)/live-approvals/page";
-import {
-  GlobalSystemStatusView,
+import { GlobalSystemStatus, GlobalSystemStatusView,
   type IntegrationStatus,
 } from "../../../app/components/global-system-status";
 import type { DataStateKind } from "../../../app/components/data-state";
+import { IntegrationStatusProvider } from "../../../app/lib/integrations/browser";
 
 const fosunFixture: IntegrationStatus = {
   provider: "fosun",
@@ -30,6 +30,11 @@ const stateLabels: Array<[DataStateKind, string]> = [
   ["error", "加载失败"],
   ["forbidden", "无权访问"],
 ];
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("integrations vertical slice", () => {
   it.each(stateLabels)("renders the visible %s data state", (state, label) => {
@@ -75,23 +80,80 @@ describe("integrations vertical slice", () => {
     expect(card).not.toHaveAttribute("disabled");
     expect(screen.getByText("FIXTURE")).toBeVisible();
     expect(screen.queryByText(/ak_must|account-must|internal\.invalid/)).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "复星模拟盘验证" })).toHaveClass("button");
+    expect(screen.getByRole("link", { name: "实盘逐笔批准" })).toHaveClass("button");
   });
 
-  it("disables only the pending action and shows an inline timeout recovery path", () => {
+  it("locks the provider while reconciling an unknown timeout result", () => {
     render(
       <IntegrationsPanel
         state="ready"
         integrations={[fosunFixture]}
-        pendingAction="fosun:test"
-        notice={{ kind: "error", text: "连接测试超时。未更改 Provider 模式，请重试。" }}
+        pendingAction="fosun:reconcile"
+        notice={{ kind: "error", text: "请求等待超时，结果未知；正在重新读取权威状态，请勿重试。" }}
         onTest={vi.fn()}
         onModeChange={vi.fn()}
       />,
     );
 
-    expect(screen.getByRole("button", { name: "正在测试复星非交易连接" })).toBeDisabled();
-    expect(screen.getByText("连接测试超时。未更改 Provider 模式，请重试。")).toBeVisible();
-    expect(screen.getByRole("button", { name: "禁用复星 Provider" })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在对账权威状态" })).toBeDisabled();
+    expect(screen.getByText("请求等待超时，结果未知；正在重新读取权威状态，请勿重试。")).toBeVisible();
+    expect(screen.getByRole("button", { name: "禁用复星 Provider" })).toBeDisabled();
+  });
+
+  it("shares one integration source so a mutation updates the global status and page together", async () => {
+    const disabled = { ...fosunFixture, mode: "disabled" as const, quality: "PARTIAL" as const, version: 2 };
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "POST"
+        ? Response.json({ data: disabled, meta: responseMeta() })
+        : Response.json({ data: [fosunFixture], meta: responseMeta() }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <IntegrationStatusProvider>
+        <GlobalSystemStatus />
+        <IntegrationsPage />
+      </IntegrationStatusProvider>,
+    );
+
+    expect(await screen.findByText("FOSUN · FIXTURE")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "禁用复星 Provider" }));
+    expect(await screen.findByText("FOSUN · DISABLED")).toBeVisible();
+    expect(screen.getByRole("region", { name: "fosun 集成（已禁用）" })).toBeVisible();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method !== "POST")).toHaveLength(1);
+  });
+
+  it("treats an aborted mutation as unknown and reconciles before enabling another action", async () => {
+    const disabled = { ...fosunFixture, mode: "disabled" as const, quality: "PARTIAL" as const, version: 2 };
+    let getCount = 0;
+    const fetchMock = vi.fn((_: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (init?.method !== "POST") {
+        getCount += 1;
+        return Promise.resolve(Response.json({
+          data: [getCount === 1 ? fosunFixture : disabled],
+          meta: responseMeta(),
+        }));
+      }
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IntegrationStatusProvider><IntegrationsPage /></IntegrationStatusProvider>);
+    expect(await screen.findByRole("button", { name: "禁用复星 Provider" })).toBeVisible();
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "禁用复星 Provider" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    expect(screen.getByText("请求结果曾超时；已重新读取权威状态，请核对模式和资源版本后再操作。")).toBeVisible();
+    expect(screen.getByRole("region", { name: "fosun 集成（已禁用）" })).toBeVisible();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    expect(getCount).toBe(2);
+    expect(screen.queryByText(/未更改 Provider 模式/)).not.toBeInTheDocument();
   });
 
   it("uses one atomic polite live region for global refresh without moving focus", () => {
@@ -117,10 +179,16 @@ describe("integrations vertical slice", () => {
     expect(screen.getByText("阶段 3 前锁定")).toBeVisible();
     expect(screen.queryByRole("form")).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "返回集成状态" })).toHaveClass("button");
 
     rerender(<LiveApprovalsPage />);
     expect(screen.getByText("阶段 4 前锁定")).toBeVisible();
     expect(screen.queryByRole("form")).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "返回集成状态" })).toHaveClass("button");
   });
 });
+
+function responseMeta() {
+  return { request_id: "0198f7a0-1111-7777-8111-111111111114", schema_version: "1", as_of: "2026-08-22T12:00:00Z" };
+}

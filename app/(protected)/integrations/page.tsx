@@ -6,7 +6,7 @@ import { DataState, dataStateLabels, type DataStateKind } from "../../components
 import { useIntegrationStatuses } from "../../lib/integrations/browser";
 import type { IntegrationMutationEnvelope, IntegrationStatus } from "../../lib/integrations/providers";
 
-type PendingAction = `${IntegrationStatus["provider"]}:${"test" | "mode"}` | null;
+type PendingAction = `${IntegrationStatus["provider"]}:${"test" | "mode" | "reconcile"}` | null;
 type Notice = { kind: "error" | "success"; text: string } | null;
 type IntegrationsPanelProps = {
   state: DataStateKind;
@@ -58,12 +58,22 @@ export default function IntegrationsPage(): React.ReactElement {
       setNotice({ kind: "success", text: action === "test" ? "非交易连接测试已完成。" : "Provider 模式已更新。" });
     } catch (error) {
       const timedOut = error instanceof DOMException && error.name === "AbortError";
-      setNotice({
-        kind: "error",
-        text: timedOut
-          ? "连接测试超时。未更改 Provider 模式，请重试。"
-          : `操作未完成（${error instanceof Error ? error.message : "INTERNAL_ERROR"}）。状态保持安全默认值，请刷新后重试。`,
-      });
+      if (timedOut) {
+        setPendingAction(`${status.provider}:reconcile`);
+        setNotice({ kind: "error", text: "请求等待超时，结果未知；正在重新读取权威状态，请勿重试。" });
+        const reconciledState = await resource.refresh();
+        setNotice({
+          kind: "error",
+          text: reconciledState === "error" || reconciledState === "forbidden"
+            ? "请求结果未知，且权威状态对账失败。相关操作保持锁定；请先使用全局刷新恢复状态。"
+            : "请求结果曾超时；已重新读取权威状态，请核对模式和资源版本后再操作。",
+        });
+      } else {
+        setNotice({
+          kind: "error",
+          text: `操作未完成（${error instanceof Error ? error.message : "INTERNAL_ERROR"}）。状态保持安全默认值，请刷新后重试。`,
+        });
+      }
     } finally {
       globalThis.clearTimeout(timeout);
       setPendingAction(null);
@@ -115,7 +125,13 @@ export function IntegrationsPanel({ state, integrations, pendingAction, notice, 
 
       <aside className="locked-links" aria-label="后续阶段入口">
         <LockKeyhole aria-hidden="true" size={18} />
-        <p><a href="/broker-simulation">复星模拟盘验证</a>与<a href="/live-approvals">实盘逐笔批准</a>路由已存在，但当前阶段保持锁定。</p>
+        <div>
+          <p>以下路由已存在，但当前阶段保持锁定。</p>
+          <ul className="locked-links__actions">
+            <li><a className="button button--quiet" href="/broker-simulation">复星模拟盘验证</a></li>
+            <li><a className="button button--quiet" href="/live-approvals">实盘逐笔批准</a></li>
+          </ul>
+        </div>
       </aside>
     </section>
   );
@@ -123,8 +139,9 @@ export function IntegrationsPanel({ state, integrations, pendingAction, notice, 
 
 function IntegrationCard({ status, pendingAction, onTest, onModeChange }: Omit<IntegrationsPanelProps, "state" | "integrations" | "notice"> & { status: IntegrationStatus }): React.ReactElement {
   const readOnly = status.mode !== "disabled";
-  const testing = pendingAction === `${status.provider}:test`;
-  const changing = pendingAction === `${status.provider}:mode`;
+  const reconciling = pendingAction === `${status.provider}:reconcile`;
+  const testing = pendingAction === `${status.provider}:test` || reconciling;
+  const changing = pendingAction === `${status.provider}:mode` || reconciling;
   const label = providerLabels[status.provider];
   return (
     <section className="integration-card" aria-label={`${status.provider} 集成（${readOnly ? "只读" : "已禁用"}）`} data-read-only={readOnly ? "true" : "false"}>
@@ -144,13 +161,13 @@ function IntegrationCard({ status, pendingAction, onTest, onModeChange }: Omit<I
         {status.provider === "fosun" && status.mode === "fixture" ? (
           <button className="button button--primary" type="button" onClick={() => onTest(status)} disabled={testing}>
             <FlaskConical aria-hidden="true" size={17} />
-            {testing ? "正在测试复星非交易连接" : "测试非交易连接"}
+            {reconciling ? "正在对账权威状态" : testing ? "正在测试复星非交易连接" : "测试非交易连接"}
           </button>
         ) : null}
         {status.provider === "fosun" ? (
           <button className="button button--quiet" type="button" onClick={() => onModeChange(status, status.mode === "disabled" ? "fixture" : "disabled")} disabled={changing} aria-label={status.mode === "disabled" ? "启用复星 fixture" : "禁用复星 Provider"}>
             <Power aria-hidden="true" size={17} />
-            {changing ? "正在更新" : status.mode === "disabled" ? "启用 fixture" : "禁用 Provider"}
+            {reconciling ? "正在对账" : changing ? "正在更新" : status.mode === "disabled" ? "启用 fixture" : "禁用 Provider"}
           </button>
         ) : null}
       </div>

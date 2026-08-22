@@ -86,6 +86,7 @@ main { min-block-size: 100vh; margin-inline-start: 16rem; padding: var(--space-6
 .inline-notice--success { border-inline-start-color: var(--color-action); color: var(--color-action); }
 .locked-links { display: flex; align-items: start; gap: var(--space-2); border-block-start: 1px solid var(--color-border); padding-block-start: var(--space-4); color: var(--color-text-muted); }
 .locked-links p { margin: 0; }
+.locked-links__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0 0; padding: 0; list-style: none; }
 .locked-page { display: grid; justify-items: start; max-inline-size: 44rem; gap: var(--space-3); border: 1px solid var(--color-border); background: var(--color-surface); padding: var(--space-6); }
 .locked-page p { max-inline-size: 65ch; margin: 0; }
 
