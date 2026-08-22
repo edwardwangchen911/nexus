@@ -89,7 +89,7 @@ def test_openapi_exposes_only_redacted_integration_contracts() -> None:
 
     public_contract_words = {
         word.lower()
-        for word in _walk_openapi_strings(schemas)
+        for word in _walk_openapi_strings(document)
     }
     assert not any(
         forbidden in value

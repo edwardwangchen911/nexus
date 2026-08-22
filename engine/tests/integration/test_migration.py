@@ -57,11 +57,11 @@ def test_initial_migration_creates_an_exact_reversible_schema(
     _assert_schema(temporary_database_url)
 
 
-def test_0002_backfills_existing_integration_status_rows_reversibly(
+def test_0003_backfills_admission_state_after_the_released_0002_schema(
     monkeypatch: pytest.MonkeyPatch,
     temporary_database_url: str,
 ) -> None:
-    """A pre-0002 row gains deterministic state fields without losing its version-one data."""
+    """A released 0002 database upgrades admission state without rewriting its version history."""
     engine_root = Path(__file__).resolve().parents[2]
     monkeypatch.setenv("DATABASE_URL", temporary_database_url)
     config = Config(str(engine_root / "alembic.ini"))
@@ -70,28 +70,89 @@ def test_0002_backfills_existing_integration_status_rows_reversibly(
     command.upgrade(config, "0001_runtime_and_data")
     _seed_0001_integration_status(temporary_database_url, created_at)
     command.upgrade(config, "0002_integration_status_version")
-    upgraded = _integration_status_row(temporary_database_url)
+    released_0002 = _integration_status_row(temporary_database_url, columns=("version",))
+    assert released_0002 == {
+        "provider": "fosun",
+        "status": "fixture",
+        "version": 1,
+    }
+    assert _integration_status_columns(temporary_database_url) == {
+        "id",
+        "provider",
+        "status",
+        "last_success_at",
+        "created_at",
+        "version",
+    }
+
+    command.upgrade(config, "head")
+    upgraded = _integration_status_row(
+        temporary_database_url,
+        columns=(
+            "version",
+            "mode_changed_at",
+            "capability_invalidated_at",
+            "admitted_contract_hash",
+        ),
+    )
     assert upgraded == {
         "provider": "fosun",
         "status": "fixture",
         "version": 1,
         "mode_changed_at": created_at,
+        "capability_invalidated_at": None,
         "admitted_contract_hash": None,
     }
 
-    command.downgrade(config, "0001_runtime_and_data")
-    downgraded = _integration_status_row(temporary_database_url, include_0002_columns=False)
-    assert downgraded == {"provider": "fosun", "status": "fixture"}
+    command.downgrade(config, "0002_integration_status_version")
+    downgraded = _integration_status_row(temporary_database_url, columns=("version",))
+    assert downgraded == released_0002
+    assert _integration_status_columns(temporary_database_url) == {
+        "id",
+        "provider",
+        "status",
+        "last_success_at",
+        "created_at",
+        "version",
+    }
 
-    command.upgrade(config, "0002_integration_status_version")
+    command.upgrade(config, "head")
     assert _integration_status_row(temporary_database_url) == upgraded
 
 
-def _seed_0001_integration_status(database_url: str, created_at: datetime) -> None:
-    asyncio.run(_seed_0001_integration_status_async(database_url, created_at))
+def test_0003_fail_closed_backfills_disabled_admission_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> None:
+    """A legacy disabled row cannot reuse an admission from before migration time."""
+    engine_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = Config(str(engine_root / "alembic.ini"))
+    created_at = datetime(2026, 8, 22, 11, 30, tzinfo=UTC)
+
+    command.upgrade(config, "0001_runtime_and_data")
+    _seed_0001_integration_status(temporary_database_url, created_at, status="disabled")
+    command.upgrade(config, "0002_integration_status_version")
+    command.upgrade(config, "head")
+    upgraded = _integration_status_row(
+        temporary_database_url,
+        columns=("mode_changed_at", "capability_invalidated_at", "admitted_contract_hash"),
+    )
+
+    assert upgraded["mode_changed_at"] == created_at
+    assert isinstance(upgraded["capability_invalidated_at"], datetime)
+    assert upgraded["admitted_contract_hash"] is None
 
 
-async def _seed_0001_integration_status_async(database_url: str, created_at: datetime) -> None:
+def _seed_0001_integration_status(
+    database_url: str, created_at: datetime, *, status: str = "fixture"
+) -> None:
+    asyncio.run(_seed_0001_integration_status_async(database_url, created_at, status))
+
+
+async def _seed_0001_integration_status_async(
+    database_url: str, created_at: datetime, status: str
+) -> None:
     engine = create_async_engine(database_url)
     try:
         async with engine.begin() as connection:
@@ -104,7 +165,7 @@ async def _seed_0001_integration_status_async(database_url: str, created_at: dat
                 {
                     "id": uuid4(),
                     "provider": "fosun",
-                    "status": "fixture",
+                    "status": status,
                     "last_success_at": created_at,
                     "created_at": created_at,
                 },
@@ -114,13 +175,20 @@ async def _seed_0001_integration_status_async(database_url: str, created_at: dat
 
 
 def _integration_status_row(
-    database_url: str, *, include_0002_columns: bool = True
+    database_url: str,
+    *,
+    columns: tuple[str, ...] = (
+        "version",
+        "mode_changed_at",
+        "capability_invalidated_at",
+        "admitted_contract_hash",
+    ),
 ) -> dict[str, object]:
-    return asyncio.run(_integration_status_row_async(database_url, include_0002_columns))
+    return asyncio.run(_integration_status_row_async(database_url, columns))
 
 
 async def _integration_status_row_async(
-    database_url: str, include_0002_columns: bool
+    database_url: str, columns: tuple[str, ...]
 ) -> dict[str, object]:
     engine = create_async_engine(database_url)
     try:
@@ -129,17 +197,31 @@ async def _integration_status_row_async(
                 await connection.execute(
                     text(
                         "SELECT provider, status"
-                        + (
-                            ", version, mode_changed_at, admitted_contract_hash"
-                            if include_0002_columns
-                            else ""
-                        )
+                        + "".join(f", {column}" for column in columns)
                         + " "
                         "FROM integration_status"
                     )
                 )
             ).mappings().one()
             return dict(row)
+    finally:
+        await engine.dispose()
+
+
+def _integration_status_columns(database_url: str) -> set[str]:
+    return asyncio.run(_integration_status_columns_async(database_url))
+
+
+async def _integration_status_columns_async(database_url: str) -> set[str]:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            return await connection.run_sync(
+                lambda sync_connection: {
+                    column["name"]
+                    for column in inspect(sync_connection).get_columns("integration_status")
+                }
+            )
     finally:
         await engine.dispose()
 
@@ -193,6 +275,9 @@ def _assert_reflected_schema(connection: Connection) -> None:
     assert integration_status["mode_changed_at"]["nullable"] is False
     assert isinstance(integration_status["mode_changed_at"]["type"], DateTime)
     assert integration_status["mode_changed_at"]["type"].timezone is True
+    assert integration_status["capability_invalidated_at"]["nullable"] is True
+    assert isinstance(integration_status["capability_invalidated_at"]["type"], DateTime)
+    assert integration_status["capability_invalidated_at"]["type"].timezone is True
     assert isinstance(integration_status["admitted_contract_hash"]["type"], postgresql.VARCHAR)
     macro_columns = {
         column["name"]: column for column in inspector.get_columns("macro_observations")

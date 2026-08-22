@@ -107,12 +107,8 @@ async def test_integration_connectivity(
         )
     if current.mode != "fixture":
         raise NexusError(ErrorCode.FORBIDDEN, "The operation is not permitted.", status_code=403)
-    status = await service.write_status(
-        provider,
-        mode="fixture",
-        expected_version=expected_version,
-        last_success_at=now,
-        admitted_contract_hash=None,
+    status = await service.refresh_fixture(
+        provider, expected_version=expected_version, last_success_at=now
     )
     result = IntegrationConnectivityTestResponse(
         data=service.response(provider, status, capability), meta=_success_meta(actor, now)

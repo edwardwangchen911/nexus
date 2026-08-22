@@ -23,6 +23,7 @@ class IntegrationStatus(ImmutableCreatedAt, Base):
     mode_changed_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now()
     )
+    capability_invalidated_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     admitted_contract_hash: Mapped[str | None] = mapped_column(String(64))
 
 

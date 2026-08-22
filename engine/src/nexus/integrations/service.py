@@ -101,6 +101,7 @@ class IntegrationStatusService:
                 persisted is not None
                 and capability.valid is not None
                 and persisted.admitted_contract_hash == capability.valid.contract_hash
+                and _capability_is_after_invalidation(capability.valid, persisted)
             ):
                 if persisted.last_success_at is not None:
                     return IntegrationStatusResponse(
@@ -157,10 +158,8 @@ class IntegrationStatusService:
             )
         if mode != "read_only":
             return None
-        if capability.valid is None or (
-            persisted is not None
-            and _stored_mode(persisted) == "disabled"
-            and capability.valid.created_at <= persisted.mode_changed_at
+        if capability.valid is None or not _capability_is_after_invalidation(
+            capability.valid, persisted
         ):
             if provider == "fosun":
                 raise NexusError(
@@ -182,6 +181,7 @@ class IntegrationStatusService:
         last_success_at: datetime | None,
         admitted_contract_hash: str | None,
     ) -> IntegrationStatus:
+        invalidated_at = self._now if mode == "disabled" else None
         if expected_version == 0:
             insert_statement = (
                 insert(IntegrationStatus)
@@ -191,6 +191,7 @@ class IntegrationStatusService:
                     last_success_at=last_success_at,
                     version=1,
                     mode_changed_at=self._now,
+                    capability_invalidated_at=invalidated_at,
                     admitted_contract_hash=admitted_contract_hash,
                 )
                 .on_conflict_do_nothing(index_elements=[IntegrationStatus.provider])
@@ -209,7 +210,56 @@ class IntegrationStatusService:
                     last_success_at=last_success_at,
                     version=IntegrationStatus.version + 1,
                     mode_changed_at=self._now,
+                    capability_invalidated_at=(
+                        self._now
+                        if mode == "disabled"
+                        else IntegrationStatus.capability_invalidated_at
+                    ),
                     admitted_contract_hash=admitted_contract_hash,
+                )
+                .returning(IntegrationStatus.id)
+            )
+            write_id = (await self._session.execute(update_statement)).scalar_one_or_none()
+        if write_id is None:
+            raise _version_conflict()
+        await self._session.flush()
+        status = await self.find_status(provider)
+        if status is None:
+            raise NexusError(
+                ErrorCode.INTERNAL_ERROR, "The request could not be completed.", status_code=500
+            )
+        return status
+
+    async def refresh_fixture(
+        self, provider: ProviderName, *, expected_version: int, last_success_at: datetime
+    ) -> IntegrationStatus:
+        """CAS-refresh fixture connectivity without changing mode/admission state."""
+        if expected_version == 0:
+            insert_statement = (
+                insert(IntegrationStatus)
+                .values(
+                    provider=provider,
+                    status="fixture",
+                    last_success_at=last_success_at,
+                    version=1,
+                    mode_changed_at=self._now,
+                    capability_invalidated_at=None,
+                    admitted_contract_hash=None,
+                )
+                .on_conflict_do_nothing(index_elements=[IntegrationStatus.provider])
+                .returning(IntegrationStatus.id)
+            )
+            write_id = (await self._session.execute(insert_statement)).scalar_one_or_none()
+        else:
+            update_statement = (
+                update(IntegrationStatus)
+                .where(
+                    IntegrationStatus.provider == provider,
+                    IntegrationStatus.version == expected_version,
+                )
+                .values(
+                    last_success_at=last_success_at,
+                    version=IntegrationStatus.version + 1,
                 )
                 .returning(IntegrationStatus.id)
             )
@@ -334,6 +384,16 @@ def _is_valid_capability(capability: ProviderCapability, now: datetime) -> bool:
     return (
         _CONTRACT_HASH.fullmatch(capability.contract_hash) is not None
         and capability.expires_at > now
+    )
+
+
+def _capability_is_after_invalidation(
+    capability: ProviderCapability, persisted: IntegrationStatus | None
+) -> bool:
+    return (
+        persisted is None
+        or persisted.capability_invalidated_at is None
+        or capability.created_at > persisted.capability_invalidated_at
     )
 
 

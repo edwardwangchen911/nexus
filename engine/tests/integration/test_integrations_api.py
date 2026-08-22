@@ -803,6 +803,7 @@ async def test_disabled_mode_requires_a_newer_admission_before_read_only_reprobe
     app.state.utc_clock = lambda: clock["now"]
     path = "/internal/v1/integrations/fosun/mode"
     disabled = b'{"mode":"disabled"}'
+    fixture = b'{"mode":"fixture"}'
     read_only = b'{"mode":"read_only"}'
 
     async with httpx.AsyncClient(
@@ -815,8 +816,15 @@ async def test_disabled_mode_requires_a_newer_admission_before_read_only_reprobe
         )
         blocked = await client.post(
             path,
+            content=fixture,
+            headers=_mode_headers(
+                path, fixture, idempotency_key="fixture-after-disable", version=1
+            ),
+        )
+        old_reprobe = await client.post(
+            path,
             content=read_only,
-            headers=_mode_headers(path, read_only, idempotency_key="old-reprobe", version=1),
+            headers=_mode_headers(path, read_only, idempotency_key="old-reprobe", version=2),
         )
         clock["now"] = _CLOCK + timedelta(seconds=2)
         await _add_capability(
@@ -828,14 +836,72 @@ async def test_disabled_mode_requires_a_newer_admission_before_read_only_reprobe
         enabled = await client.post(
             path,
             content=read_only,
-            headers=_mode_headers(path, read_only, idempotency_key="new-reprobe", version=1),
+            headers=_mode_headers(path, read_only, idempotency_key="new-reprobe", version=2),
         )
 
     assert disabled_response.status_code == 200
-    assert blocked.status_code == 409
-    assert blocked.json()["error"]["code"] == "CAPABILITY_EXPIRED"
+    assert blocked.status_code == 200
+    assert blocked.json()["data"]["mode"] == "fixture"
+    assert old_reprobe.status_code == 409
+    assert old_reprobe.json()["error"]["code"] == "CAPABILITY_EXPIRED"
     assert enabled.status_code == 200
     assert enabled.json()["data"]["contract_hash"] == "b" * 64
+
+
+@pytest.mark.asyncio
+async def test_fixture_connectivity_preserves_admission_epochs_and_hash(
+    migrated_database_url: str,
+) -> None:
+    """Fixture refresh is a connectivity write, not a mode transition or admission reset."""
+    clock = {"now": _CLOCK}
+    app = _app(migrated_database_url)
+    app.state.utc_clock = lambda: clock["now"]
+    mode_path = "/internal/v1/integrations/fosun/mode"
+    test_path = "/internal/v1/integrations/fosun/test"
+    disabled = b'{"mode":"disabled"}'
+    fixture = b'{"mode":"fixture"}'
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        disabled_response = await client.post(
+            mode_path,
+            content=disabled,
+            headers=_mode_headers(
+                mode_path, disabled, idempotency_key="refresh-disable", version=0
+            ),
+        )
+        clock["now"] = _CLOCK + timedelta(minutes=1)
+        fixture_response = await client.post(
+            mode_path,
+            content=fixture,
+            headers=_mode_headers(mode_path, fixture, idempotency_key="refresh-fixture", version=1),
+        )
+        factory = session_factory(EngineSettings(database_url=migrated_database_url))
+        async with factory() as session:
+            before = await session.scalar(
+                select(IntegrationStatus).where(IntegrationStatus.provider == "fosun")
+            )
+        clock["now"] = _CLOCK + timedelta(minutes=2)
+        refreshed = await client.post(
+            test_path,
+            headers=_test_headers(test_path, idempotency_key="refresh-state", version=2),
+        )
+
+    assert disabled_response.status_code == 200
+    assert fixture_response.status_code == 200
+    assert refreshed.status_code == 200
+    assert before is not None
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        after = await session.scalar(
+            select(IntegrationStatus).where(IntegrationStatus.provider == "fosun")
+        )
+    assert after is not None
+    assert after.last_success_at == _CLOCK + timedelta(minutes=2)
+    assert after.mode_changed_at == before.mode_changed_at
+    assert after.capability_invalidated_at == before.capability_invalidated_at
+    assert after.admitted_contract_hash == before.admitted_contract_hash
 
 
 @pytest.mark.asyncio
