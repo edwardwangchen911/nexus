@@ -16,15 +16,11 @@ def test_gateway_liveness_is_minimal() -> None:
 def test_gateway_settings_never_render_fixture_secrets() -> None:
     settings = GatewaySettings.for_test()
 
-    assert "fixture-gateway-hmac-secret" not in repr(settings)
+    assert "fixture-gateway-current-secret-32-bytes" not in repr(settings)
 
 
 def test_gateway_reads_nexus_environment_alias_for_production() -> None:
-    settings = GatewaySettings(
-        NEXUS_ENV="production",
-        FOSUN_GATEWAY_CAPABILITY="READ_ONLY",
-        FOSUN_GATEWAY_HMAC_SECRET="placeholder-gateway-secret",
-    )
+    settings = GatewaySettings.model_validate(_production_settings())
 
     assert settings.environment is Environment.PRODUCTION
 
@@ -33,7 +29,12 @@ def test_gateway_production_validation_hides_input_canary() -> None:
     canary = "synthetic-gateway-validation-canary"
 
     with pytest.raises(ValidationError) as exc_info:
-        GatewaySettings(NEXUS_ENV="production", FOSUN_GATEWAY_HMAC_SECRET=canary)
+        GatewaySettings.model_validate(
+            {
+                "NEXUS_ENV": "production",
+                "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": canary,
+            }
+        )
 
     assert canary not in str(exc_info.value)
 
@@ -41,8 +42,78 @@ def test_gateway_production_validation_hides_input_canary() -> None:
 @pytest.mark.parametrize("capability", ["LIVE_WRITE", ""])
 def test_gateway_rejects_non_read_only_capability(capability: str) -> None:
     with pytest.raises(ValidationError):
-        GatewaySettings(
-            NEXUS_ENV="production",
-            FOSUN_GATEWAY_CAPABILITY=capability,
-            FOSUN_GATEWAY_HMAC_SECRET="synthetic-capability-test-canary",
+        GatewaySettings.model_validate(
+            {**_production_settings(), "FOSUN_GATEWAY_CAPABILITY": capability}
         )
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "FOSUN_GATEWAY_SERVER_CERT",
+        "FOSUN_GATEWAY_SERVER_KEY",
+        "FOSUN_GATEWAY_SERVER_CLIENT_CA",
+        "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID",
+        "FOSUN_GATEWAY_HMAC_CURRENT_SECRET",
+        "FSOPENAPI_BASE_URL",
+        "FSOPENAPI_API_KEY",
+        "FSOPENAPI_CLIENT_PRIVATE_KEY",
+        "FSOPENAPI_SERVER_PUBLIC_KEY",
+    ],
+)
+def test_gateway_production_settings_fail_closed_when_required_input_is_missing(
+    missing: str,
+) -> None:
+    """Production must not start with incomplete TLS, HMAC, or provider admission config."""
+    values = _production_settings()
+    values.pop(missing)
+
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(values)
+
+
+def test_previous_gateway_hmac_identity_must_be_complete_and_distinct() -> None:
+    """A partial or duplicate rotation identity makes authentication ambiguous."""
+    partial = {
+        **_production_settings(),
+        "FOSUN_GATEWAY_HMAC_PREVIOUS_KEY_ID": "gateway-previous",
+    }
+    duplicate = {
+        **_production_settings(),
+        "FOSUN_GATEWAY_HMAC_PREVIOUS_KEY_ID": "gateway-current",
+        "FOSUN_GATEWAY_HMAC_PREVIOUS_SECRET": "synthetic-previous-secret",
+    }
+
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(partial)
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(duplicate)
+
+
+def test_development_read_only_mode_does_not_receive_fixture_hmac_defaults() -> None:
+    """Switching transport mode must not carry fixture authentication into an SDK process."""
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(
+            {
+                "NEXUS_ENV": "development",
+                "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
+            }
+        )
+
+
+def _production_settings() -> dict[str, object]:
+    return {
+        "NEXUS_ENV": "production",
+        "FOSUN_GATEWAY_CAPABILITY": "READ_ONLY",
+        "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
+        "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "gateway-current",
+        "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret",
+        "FOSUN_GATEWAY_SERVER_CERT": "/run/secrets/synthetic-server-cert",
+        "FOSUN_GATEWAY_SERVER_KEY": "/run/secrets/synthetic-server-key",
+        "FOSUN_GATEWAY_SERVER_CLIENT_CA": "/run/secrets/synthetic-client-ca",
+        "FOSUN_SDK_ADMITTED": True,
+        "FSOPENAPI_BASE_URL": "https://provider.invalid",
+        "FSOPENAPI_API_KEY": "synthetic-api-key",
+        "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-client-private-key",
+        "FSOPENAPI_SERVER_PUBLIC_KEY": "synthetic-server-public-key",
+    }

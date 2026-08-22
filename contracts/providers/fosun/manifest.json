@@ -1,0 +1,24 @@
+{
+  "provider": "fosun",
+  "reviewed_at": "2026-08-22",
+  "admission": "blocked",
+  "sdk": {
+    "tag": "v1.2.0",
+    "commit": "891d95fb4967efaa682387c1b35966ceea38fb21",
+    "license": "UNRESOLVED"
+  },
+  "openapi": {
+    "market": {
+      "url": "https://openapi-docs.fosunxcz.com/specs/public/market/market/openapi.yaml",
+      "sha256": "f35cfaa3484d8507723729b68a2b8d60fa85d4d28d06991b4a434995cbfac22a"
+    },
+    "trade": {
+      "url": "https://openapi-docs.fosunxcz.com/specs/public/trade/openapi.yaml",
+      "sha256": "379561548be045c8e531f31e88ee76c8cbdb7bda5b59e12a9b9d5c9040abd204"
+    },
+    "push": {
+      "url": "https://openapi-docs.fosunxcz.com/specs/public/market/push/openapi.yaml",
+      "sha256": "15f5416f268c9c47cdcef6a2ff7eaaa89ab4b61f1c9927074969b1e3fef32c05"
+    }
+  }
+}

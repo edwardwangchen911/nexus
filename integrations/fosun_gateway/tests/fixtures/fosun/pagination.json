@@ -1,0 +1,50 @@
+{
+  "case": "pagination",
+  "operation": "fosun_sync_portfolio",
+  "request_payload": {
+    "account_id": "synthetic-account-001",
+    "cursor": "0",
+    "limit": 1
+  },
+  "provider_responses": {
+    "assets": {
+      "code": 0,
+      "requestId": "synthetic-request-assets",
+      "data": {
+        "breakdown": [
+          {
+            "currency": "USD",
+            "ledgerBalance": "10000.00",
+            "cashPurchasingPower": "9000.00"
+          }
+        ],
+        "summary": {
+          "currency": "USD",
+          "ledgerBalance": "10000.00",
+          "cashPurchasingPower": "9000.00"
+        }
+      }
+    },
+    "holdings": {
+      "code": 0,
+      "requestId": "synthetic-request-holdings",
+      "data": {
+        "count": 1,
+        "list": [
+          {
+            "marketCode": "us",
+            "stockCode": "AAPL",
+            "currency": "USD",
+            "quantity": "10",
+            "quantityAvail": "10",
+            "qtyOnHold": "0",
+            "avgCost": "100.00"
+          }
+        ],
+        "start": 0,
+        "total": 2
+      }
+    }
+  },
+  "received_at": "2026-08-22T04:00:00Z"
+}

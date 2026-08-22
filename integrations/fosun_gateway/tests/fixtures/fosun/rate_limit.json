@@ -1,0 +1,11 @@
+{
+  "case": "rate_limit",
+  "operation": "fosun_get_quotes",
+  "provider_response": {
+    "code": 429,
+    "message": "synthetic-provider-message",
+    "requestId": "synthetic-request-rate-limit",
+    "retryAfter": "2"
+  },
+  "received_at": "2026-08-22T04:00:00Z"
+}

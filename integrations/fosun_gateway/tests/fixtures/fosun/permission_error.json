@@ -1,0 +1,10 @@
+{
+  "case": "permission_error",
+  "operation": "fosun_get_quotes",
+  "provider_response": {
+    "code": 40301,
+    "message": "synthetic-provider-message",
+    "requestId": "synthetic-request-permission"
+  },
+  "received_at": "2026-08-22T04:00:00Z"
+}

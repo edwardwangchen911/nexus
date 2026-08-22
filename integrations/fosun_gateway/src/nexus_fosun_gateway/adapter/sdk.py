@@ -1,0 +1,330 @@
+"""Anti-corruption adapter for the frozen Fosun SDK v1.2.0 read surface."""
+
+import asyncio
+import logging
+import time
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime
+from typing import Protocol, cast
+
+from nexus_fosun_gateway.adapter.normalization import (
+    normalize_portfolio_responses,
+    normalize_provider_response,
+)
+from nexus_fosun_gateway.domain import CapabilityItem, GatewayError, GatewayItem, GatewayPage
+from nexus_fosun_gateway.policy.operations import READ_ONLY_OPERATIONS, GatewayOperation
+
+_LOGGER = logging.getLogger("nexus_fosun_gateway.provider")
+_MAX_ATTEMPTS = 3
+_DEADLINE_SECONDS = 10.0
+
+
+class RateLimiter(Protocol):
+    async def acquire(self) -> None: ...
+
+
+class _TokenBucket:
+    def __init__(
+        self,
+        capacity: float,
+        refill_per_second: float,
+        *,
+        clock: Callable[[], float],
+        sleeper: Callable[[float], Awaitable[None]],
+    ) -> None:
+        self._capacity = capacity
+        self._refill_per_second = refill_per_second
+        self._tokens = capacity
+        self._updated_at = clock()
+        self._clock = clock
+        self._sleeper = sleeper
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        while True:
+            async with self._lock:
+                now = self._clock()
+                elapsed = max(now - self._updated_at, 0.0)
+                self._tokens = min(
+                    self._capacity,
+                    self._tokens + elapsed * self._refill_per_second,
+                )
+                self._updated_at = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait_for = (1.0 - self._tokens) / self._refill_per_second
+            await self._sleeper(wait_for)
+
+
+class DualTokenBucket:
+    """Enforce a two-request burst and thirty-request minute budget."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._qps = _TokenBucket(2.0, 2.0, clock=clock, sleeper=sleeper)
+        self._minute = _TokenBucket(30.0, 30.0 / 60.0, clock=clock, sleeper=sleeper)
+
+    async def acquire(self) -> None:
+        await self._qps.acquire()
+        await self._minute.acquire()
+
+
+class SdkFosunTransport:
+    """Call only seven reviewed operations and return gateway-owned Pydantic models."""
+
+    def __init__(
+        self,
+        client: object,
+        *,
+        rate_limiter: RateLimiter | None = None,
+        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._client = client
+        self._rate_limiter = rate_limiter or DualTokenBucket(clock=clock, sleeper=sleeper)
+        self._sleeper = sleeper
+        self._clock = clock
+        self._concurrency = asyncio.Semaphore(1)
+
+    async def execute(
+        self,
+        operation: GatewayOperation,
+        payload: Mapping[str, object],
+    ) -> GatewayPage[GatewayItem]:
+        if operation not in READ_ONLY_OPERATIONS:
+            raise GatewayError(
+                "OPERATION_NOT_ALLOWED",
+                "Gateway operation is not allowed.",
+                status_code=404,
+                next_action="USE_READ_ONLY_OPERATION",
+            )
+        if operation == "fosun_capabilities":
+            return GatewayPage[GatewayItem](
+                items=(
+                    CapabilityItem(
+                        mode="read_only",
+                        operations=tuple(sorted(READ_ONLY_OPERATIONS)),
+                    ),
+                ),
+                source_request_id="gateway-local-capabilities",
+                has_more=False,
+                next_cursor=None,
+                as_of=datetime.now(UTC),
+            )
+        async with self._concurrency:
+            if operation == "fosun_sync_accounts":
+                raw = await self._invoke(
+                    operation,
+                    self._method("account", "list_accounts"),
+                )
+            elif operation == "fosun_sync_portfolio":
+                return await self._portfolio(payload)
+            elif operation == "fosun_list_orders":
+                raw = await self._invoke(
+                    operation,
+                    self._method("trade", "list_orders"),
+                    sub_account_id=_required_str(payload, "account_id"),
+                    start=_cursor(payload),
+                    count=_required_int(payload, "limit"),
+                )
+            elif operation == "fosun_list_cash_flows":
+                raw = await self._invoke(
+                    operation,
+                    self._method("trade", "get_cash_flows"),
+                    sub_account_id=_required_str(payload, "account_id"),
+                    trade_date_from=_required_str(payload, "date_from"),
+                    trade_date_to=_required_str(payload, "date_to"),
+                )
+            elif operation == "fosun_get_quotes":
+                raw = await self._invoke(
+                    operation,
+                    self._method("market", "quote"),
+                    codes=list(_required_strings(payload, "codes")),
+                )
+            elif operation == "fosun_get_bars":
+                raw = await self._invoke(
+                    operation,
+                    self._method("market", "kline"),
+                    code=_required_str(payload, "code"),
+                    ktype=_required_str(payload, "ktype"),
+                    start_time=_optional_timestamp_ms(payload.get("start_time")),
+                    end_time=_optional_timestamp_ms(payload.get("end_time")),
+                    num=_required_int(payload, "limit"),
+                )
+            else:
+                raise AssertionError("unreachable operation")
+        return normalize_provider_response(
+            operation,
+            raw,
+            received_at=datetime.now(UTC),
+            context=payload,
+        )
+
+    async def _portfolio(
+        self,
+        payload: Mapping[str, object],
+    ) -> GatewayPage[GatewayItem]:
+        account_id = _required_str(payload, "account_id")
+        assets = await self._invoke(
+            "fosun_sync_portfolio",
+            self._method("portfolio", "get_assets_summary"),
+            sub_account_id=account_id,
+        )
+        holdings = await self._invoke(
+            "fosun_sync_portfolio",
+            self._method("portfolio", "get_holdings"),
+            sub_account_id=account_id,
+            start=_cursor(payload),
+            count=_required_int(payload, "limit"),
+        )
+        return normalize_portfolio_responses(
+            assets,
+            holdings,
+            account_id=account_id,
+            received_at=datetime.now(UTC),
+        )
+
+    def _method(self, section_name: str, method_name: str) -> Callable[..., object]:
+        section = getattr(self._client, section_name, None)
+        method = getattr(section, method_name, None)
+        if not callable(method):
+            raise GatewayError(
+                "SDK_CONTRACT_MISMATCH",
+                "Provider SDK does not match the reviewed method surface.",
+                status_code=503,
+                next_action="REVIEW_SDK_SOURCE",
+            )
+        return cast("Callable[..., object]", method)
+
+    async def _invoke(
+        self,
+        operation: GatewayOperation,
+        method: Callable[..., object],
+        **kwargs: object,
+    ) -> object:
+        deadline = self._clock() + _DEADLINE_SECONDS
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            await self._rate_limiter.acquire()
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                raise GatewayError(
+                    "PROVIDER_UNAVAILABLE",
+                    "Provider request failed within the bounded retry policy.",
+                    status_code=503,
+                    next_action="RETRY_LATER",
+                )
+            _LOGGER.info(
+                "provider_call",
+                extra={"operation": operation, "attempt": attempt, "outcome": "started"},
+            )
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(method, **kwargs),
+                    timeout=remaining,
+                )
+            except Exception as error:
+                if type(error).__name__ == "PermissionError":
+                    raise GatewayError(
+                        "PROVIDER_PERMISSION_DENIED",
+                        "Provider permission denied.",
+                        status_code=502,
+                        next_action="REVIEW_PROVIDER_PERMISSION",
+                    ) from None
+                delay = _retry_after(error)
+                remaining = deadline - self._clock()
+                if attempt == _MAX_ATTEMPTS or delay > remaining:
+                    raise GatewayError(
+                        "PROVIDER_UNAVAILABLE",
+                        "Provider request failed within the bounded retry policy.",
+                        status_code=503,
+                        next_action="RETRY_LATER",
+                    ) from None
+                _LOGGER.info(
+                    "provider_retry",
+                    extra={
+                        "operation": operation,
+                        "attempt": attempt,
+                        "outcome": "retry",
+                    },
+                )
+                await self._sleeper(delay)
+                continue
+            _LOGGER.info(
+                "provider_call",
+                extra={"operation": operation, "attempt": attempt, "outcome": "success"},
+            )
+            return result
+        raise AssertionError("bounded retry loop exhausted")
+
+
+def _retry_after(error: Exception) -> float:
+    value = getattr(error, "retry_after", None)
+    if value is None:
+        data = getattr(error, "data", None)
+        value = data.get("retryAfter") if isinstance(data, Mapping) else None
+    if value is None:
+        return 0.5
+    try:
+        return min(max(float(str(value)), 0.0), _DEADLINE_SECONDS)
+    except ValueError:
+        return 0.5
+
+
+def _required_str(payload: Mapping[str, object], name: str) -> str:
+    value = payload.get(name)
+    if not isinstance(value, str) or not value:
+        raise _invalid_payload()
+    return value
+
+
+def _optional_timestamp_ms(value: object) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise _invalid_payload()
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise _invalid_payload() from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise _invalid_payload()
+    return int(parsed.timestamp() * 1000)
+
+
+def _required_int(payload: Mapping[str, object], name: str) -> int:
+    value = payload.get(name)
+    if not isinstance(value, int):
+        raise _invalid_payload()
+    return value
+
+
+def _required_strings(payload: Mapping[str, object], name: str) -> tuple[str, ...]:
+    value = payload.get(name)
+    if not isinstance(value, tuple | list) or not value:
+        raise _invalid_payload()
+    if not all(isinstance(item, str) and item for item in value):
+        raise _invalid_payload()
+    return tuple(cast("list[str] | tuple[str, ...]", value))
+
+
+def _cursor(payload: Mapping[str, object]) -> int:
+    value = payload.get("cursor")
+    if value is None:
+        return 0
+    if not isinstance(value, str) or not value.isascii() or not value.isdecimal():
+        raise _invalid_payload()
+    return int(value)
+
+
+def _invalid_payload() -> GatewayError:
+    return GatewayError(
+        "VALIDATION_ERROR",
+        "Request payload is invalid.",
+        status_code=422,
+        next_action="FIX_REQUEST",
+    )

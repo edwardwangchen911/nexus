@@ -1,0 +1,389 @@
+"""Normalize frozen public Fosun response shapes into gateway-owned models."""
+
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
+from typing import Literal, cast
+
+from nexus_fosun_gateway.domain import (
+    AccountItem,
+    BarItem,
+    CashFlowItem,
+    CashItem,
+    GatewayError,
+    GatewayItem,
+    GatewayPage,
+    OrderItem,
+    PositionItem,
+    QuoteItem,
+)
+from nexus_fosun_gateway.policy.operations import GatewayOperation
+
+
+def normalize_provider_response(
+    operation: GatewayOperation,
+    raw: object,
+    *,
+    received_at: datetime,
+    context: Mapping[str, object] | None = None,
+) -> GatewayPage[GatewayItem]:
+    """Normalize one frozen SDK response without returning raw provider data."""
+    data, request_id = _success_envelope(raw)
+    payload = context or {}
+    try:
+        if operation == "fosun_sync_accounts":
+            items = _accounts(data)
+            return _page(items, request_id, received_at)
+        if operation == "fosun_list_orders":
+            items = tuple(_order(item) for item in _mappings(_list(data)))
+            return _list_page(items, data, request_id, received_at)
+        if operation == "fosun_list_cash_flows":
+            rows = _mappings(_list(data))
+            start = _context_cursor(payload)
+            limit = _context_limit(payload)
+            items = tuple(_cash_flow(item) for item in rows[start : start + limit])
+            total = _provider_total(data, len(rows))
+            next_cursor = str(start + len(items)) if start + len(items) < total else None
+            return GatewayPage[GatewayItem](
+                items=items,
+                source_request_id=request_id,
+                has_more=next_cursor is not None,
+                next_cursor=next_cursor,
+                as_of=received_at,
+            )
+        if operation == "fosun_get_quotes":
+            items = _quotes(data, received_at)
+            return _page(items, request_id, received_at)
+        if operation == "fosun_get_bars":
+            items = _bars(data, payload)
+            return _page(items, request_id, received_at)
+    except (KeyError, TypeError, ValueError, InvalidOperation):
+        raise _malformed() from None
+    raise _malformed()
+
+
+def normalize_portfolio_responses(
+    assets_raw: object,
+    holdings_raw: object,
+    *,
+    account_id: str,
+    received_at: datetime,
+) -> GatewayPage[GatewayItem]:
+    """Normalize the required cash-summary plus holdings double read."""
+    assets, assets_request_id = _success_envelope(assets_raw)
+    holdings, holdings_request_id = _success_envelope(holdings_raw)
+    try:
+        breakdown = assets.get("breakdown")
+        if not isinstance(breakdown, list):
+            raise ValueError
+        cash = tuple(_cash(item, account_id) for item in breakdown)
+        positions = tuple(
+            _position(item, account_id) for item in _mappings(_list(holdings))
+        )
+        start, count, total = _pagination(holdings)
+        next_cursor = str(start + count) if start + count < total else None
+        return GatewayPage[GatewayItem](
+            items=(*cash, *positions),
+            source_request_id=f"{assets_request_id}:{holdings_request_id}",
+            has_more=next_cursor is not None,
+            next_cursor=next_cursor,
+            as_of=received_at,
+        )
+    except (KeyError, TypeError, ValueError, InvalidOperation):
+        raise _malformed() from None
+
+
+def _success_envelope(raw: object) -> tuple[Mapping[str, object], str]:
+    if not isinstance(raw, Mapping) or "code" not in raw:
+        raise _malformed()
+    code = raw.get("code")
+    if code != 0:
+        if code == 429:
+            raise GatewayError(
+                "PROVIDER_RATE_LIMITED",
+                "Provider rate limit reached.",
+                status_code=503,
+                next_action="RETRY_AFTER_DELAY",
+                retry_after_seconds=_bounded_retry_after(raw.get("retryAfter")),
+            )
+        if code == 40301:
+            raise GatewayError(
+                "PROVIDER_PERMISSION_DENIED",
+                "Provider permission denied.",
+                status_code=502,
+                next_action="REVIEW_PROVIDER_PERMISSION",
+            )
+        raise GatewayError(
+            "PROVIDER_ERROR",
+            "Provider returned an unsuccessful response.",
+            status_code=502,
+            next_action="REVIEW_PROVIDER_STATUS",
+        )
+    data = raw.get("data")
+    request_id = raw.get("requestId")
+    if not isinstance(data, Mapping) or not isinstance(request_id, str) or not request_id:
+        raise _malformed()
+    return data, request_id
+
+
+def _accounts(data: Mapping[str, object]) -> tuple[GatewayItem, ...]:
+    accounts = data.get("subAccounts")
+    if not isinstance(accounts, list):
+        raise ValueError
+    return tuple(
+        AccountItem(
+            external_account_id=_required_str(item, "subAccountId"),
+            status=str(_required_value(item, "status")),
+            base_currency=None,
+        )
+        for item in _mappings(accounts)
+    )
+
+
+def _cash(item: Mapping[str, object], account_id: str) -> CashItem:
+    return CashItem(
+        external_account_id=account_id,
+        currency=_required_str(item, "currency"),
+        cash_balance=_decimal(item, "ledgerBalance"),
+        available_cash=_decimal(item, "cashPurchasingPower"),
+    )
+
+
+def _position(item: Mapping[str, object], account_id: str) -> PositionItem:
+    market = _required_str(item, "marketCode")
+    stock = _required_str(item, "stockCode")
+    average_cost = item.get("avgCost")
+    return PositionItem(
+        external_account_id=account_id,
+        instrument_code=f"{market}{stock}",
+        currency=_required_str(item, "currency"),
+        quantity=_decimal(item, "quantity"),
+        available_quantity=_decimal(item, "quantityAvail"),
+        frozen_quantity=_decimal(item, "qtyOnHold"),
+        average_cost=Decimal(str(average_cost)) if average_cost is not None else None,
+    )
+
+
+def _order(item: Mapping[str, object]) -> OrderItem:
+    timestamp = _required_value(item, "submittedTimestamp")
+    if not isinstance(timestamp, int) or isinstance(timestamp, bool):
+        raise ValueError
+    return OrderItem(
+        external_order_id=str(_required_value(item, "orderId")),
+        instrument_code=(
+            f"{_required_str(item, 'marketCode')}{_required_str(item, 'stockCode')}"
+        ),
+        side=_side(_required_value(item, "direction")),
+        quantity=_decimal(item, "quantity"),
+        filled_quantity=_decimal(item, "filledQuantity"),
+        price=_scaled_optional(item.get("price"), item.get("power")),
+        status=str(_required_value(item, "orderStatus")),
+        updated_at=datetime.fromtimestamp(timestamp, UTC),
+    )
+
+
+def _cash_flow(item: Mapping[str, object]) -> CashFlowItem:
+    return CashFlowItem(
+        external_cash_flow_id=str(_required_value(item, "flowId")),
+        currency=_required_str(item, "currency"),
+        amount=_decimal(item, "amount"),
+        occurred_at=_aware_datetime(_required_value(item, "createdAt")),
+        flow_type=str(_required_value(item, "flowType")),
+    )
+
+
+def _quotes(data: Mapping[str, object], received_at: datetime) -> tuple[GatewayItem, ...]:
+    return tuple(
+        QuoteItem(
+            instrument_code=code,
+            price=_scaled_optional(quote.get("price"), quote.get("power")),
+            as_of=received_at,
+        )
+        for code, quote in data.items()
+        if isinstance(code, str) and isinstance(quote, Mapping)
+    )
+
+
+def _bars(
+    data: Mapping[str, object],
+    context: Mapping[str, object],
+) -> tuple[GatewayItem, ...]:
+    rows = data.get("data")
+    if not isinstance(rows, list):
+        raise ValueError
+    power = data.get("power")
+    code = _required_str(context, "code")
+    interval = _required_str(context, "ktype")
+    return tuple(
+        BarItem(
+            instrument_code=code,
+            interval=interval,
+            timestamp=_bar_timestamp(_required_value(item, "time")),
+            open=_scaled_required(_required_value(item, "open"), power),
+            high=_scaled_required(_required_value(item, "high"), power),
+            low=_scaled_required(_required_value(item, "low"), power),
+            close=_scaled_required(_required_value(item, "close"), power),
+            volume=_decimal(item, "vol"),
+        )
+        for item in _mappings(rows)
+    )
+
+
+def _page(
+    items: tuple[GatewayItem, ...],
+    request_id: str,
+    received_at: datetime,
+) -> GatewayPage[GatewayItem]:
+    return GatewayPage[GatewayItem](
+        items=items,
+        source_request_id=request_id,
+        has_more=False,
+        next_cursor=None,
+        as_of=received_at,
+    )
+
+
+def _list_page(
+    items: tuple[GatewayItem, ...],
+    data: Mapping[str, object],
+    request_id: str,
+    received_at: datetime,
+) -> GatewayPage[GatewayItem]:
+    start, count, total = _pagination(data)
+    next_cursor = str(start + count) if start + count < total else None
+    return GatewayPage[GatewayItem](
+        items=items,
+        source_request_id=request_id,
+        has_more=next_cursor is not None,
+        next_cursor=next_cursor,
+        as_of=received_at,
+    )
+
+
+def _pagination(data: Mapping[str, object]) -> tuple[int, int, int]:
+    start = _required_value(data, "start")
+    count = _required_value(data, "count")
+    total = _required_value(data, "total")
+    if not all(
+        isinstance(value, int) and not isinstance(value, bool)
+        for value in (start, count, total)
+    ):
+        raise ValueError
+    return cast("tuple[int, int, int]", (start, count, total))
+
+
+def _context_cursor(context: Mapping[str, object]) -> int:
+    value = context.get("cursor")
+    if value is None:
+        return 0
+    if not isinstance(value, str) or not value.isascii() or not value.isdecimal():
+        raise ValueError
+    return int(value)
+
+
+def _context_limit(context: Mapping[str, object]) -> int:
+    value = context.get("limit")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError
+    return value
+
+
+def _provider_total(data: Mapping[str, object], fallback: int) -> int:
+    value = data.get("total")
+    if not isinstance(value, int) or isinstance(value, bool) or value < fallback:
+        return fallback
+    return value
+
+
+def _list(data: Mapping[str, object]) -> list[object]:
+    value = data.get("list")
+    if not isinstance(value, list):
+        raise ValueError
+    return value
+
+
+def _mappings(values: list[object]) -> tuple[Mapping[str, object], ...]:
+    if not all(isinstance(value, Mapping) for value in values):
+        raise ValueError
+    return tuple(cast("Mapping[str, object]", value) for value in values)
+
+
+def _required_value(item: Mapping[str, object], name: str) -> object:
+    if name not in item or item[name] is None:
+        raise ValueError
+    return item[name]
+
+
+def _required_str(item: Mapping[str, object], name: str) -> str:
+    value = _required_value(item, name)
+    if not isinstance(value, str) or not value:
+        raise ValueError
+    return value
+
+
+def _decimal(item: Mapping[str, object], name: str) -> Decimal:
+    return Decimal(str(_required_value(item, name)))
+
+
+def _side(value: object) -> Literal["buy", "sell"]:
+    if value == 1:
+        return "buy"
+    if value == 2:
+        return "sell"
+    raise ValueError
+
+
+def _scaled_optional(value: object, power: object) -> Decimal | None:
+    if value is None:
+        return None
+    return _scaled_required(value, power)
+
+
+def _scaled_required(value: object, power: object) -> Decimal:
+    exponent = _power(power)
+    return Decimal(str(value)) / (Decimal(10) ** exponent)
+
+
+def _power(value: object) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        exponent = value
+    elif isinstance(value, str) and value.isascii() and value.isdecimal():
+        exponent = int(value)
+    else:
+        raise ValueError
+    if exponent < 0 or exponent > 12:
+        raise ValueError
+    return exponent
+
+
+def _aware_datetime(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError
+    return parsed.astimezone(UTC)
+
+
+def _bar_timestamp(value: object) -> datetime:
+    if isinstance(value, int) and not isinstance(value, bool):
+        text = str(value)
+        if len(text) == 8:
+            return datetime.strptime(text, "%Y%m%d").replace(tzinfo=UTC)
+    return _aware_datetime(value)
+
+
+def _bounded_retry_after(value: object) -> float:
+    try:
+        return min(max(float(str(value)), 0.0), 10.0)
+    except ValueError:
+        return 1.0
+
+
+def _malformed() -> GatewayError:
+    return GatewayError(
+        "PROVIDER_MALFORMED_RESPONSE",
+        "Provider response did not match the reviewed contract.",
+        status_code=502,
+        next_action="REVIEW_PROVIDER_CONTRACT",
+    )

@@ -1,0 +1,22 @@
+{
+  "case": "success",
+  "operation": "fosun_sync_accounts",
+  "provider_response": {
+    "code": 0,
+    "requestId": "synthetic-request-success",
+    "data": {
+      "clientId": 100000,
+      "clientStatus": 1,
+      "clientType": 1,
+      "subAccounts": [
+        {
+          "subAccountId": "synthetic-account-001",
+          "status": 1,
+          "subAccountType": 0,
+          "openDate": "2026-01-01"
+        }
+      ]
+    }
+  },
+  "received_at": "2026-08-22T04:00:00Z"
+}

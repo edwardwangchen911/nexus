@@ -1,0 +1,17 @@
+{
+  "case": "partial_fields",
+  "operation": "fosun_get_quotes",
+  "provider_response": {
+    "code": 0,
+    "requestId": "synthetic-request-partial",
+    "data": {
+      "usAAPL": {
+        "qtDate": 20260822,
+        "qtTime": 120000000,
+        "power": 2,
+        "tradeStatus": 0
+      }
+    }
+  },
+  "received_at": "2026-08-22T04:00:00Z"
+}
