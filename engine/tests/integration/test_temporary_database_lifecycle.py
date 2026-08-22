@@ -1,5 +1,8 @@
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
+import conftest as integration_conftest
 import pytest
 from conftest import (
     TemporaryDatabase,
@@ -7,10 +10,50 @@ from conftest import (
     _create_database,
     _drop_database,
 )
+from sqlalchemy.engine import URL
 
 
 class _InjectedSetupFailure(RuntimeError):
     """Deliberately interrupt setup after PostgreSQL has created a temporary database."""
+
+
+class _RecordingEngine:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    @asynccontextmanager
+    async def connect(self) -> AsyncIterator["_RecordingEngine"]:
+        yield self
+
+    async def execute(self, statement) -> None:
+        self.statements.append(str(statement))
+
+    async def dispose(self) -> None:
+        return None
+
+
+def test_drop_database_delegates_backend_cleanup_to_force_drop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup must not issue a broad manual backend-termination query."""
+    database_name = "nexus_test_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    engine = _RecordingEngine()
+    monkeypatch.setattr(
+        integration_conftest,
+        "create_async_engine",
+        lambda *_args, **_kwargs: engine,
+    )
+
+    asyncio.run(
+        _drop_database(
+            URL.create("postgresql+asyncpg", database="postgres"),
+            database_name,
+        )
+    )
+
+    assert engine.statements == [
+        f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)'
+    ]
 
 
 def test_temporary_database_is_dropped_when_post_create_setup_fails(

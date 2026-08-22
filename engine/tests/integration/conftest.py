@@ -107,13 +107,8 @@ async def _drop_database(admin_url: URL, database_name: str) -> None:
     try:
         async with engine.connect() as connection:
             await connection.execute(
-                text(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                    "WHERE datname = :database_name AND pid <> pg_backend_pid()"
-                ),
-                {"database_name": database_name},
+                text(f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)')
             )
-            await connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
     finally:
         await engine.dispose()
 
