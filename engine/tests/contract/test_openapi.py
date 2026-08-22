@@ -73,15 +73,27 @@ def test_openapi_exposes_only_redacted_integration_contracts() -> None:
                 "$ref": "#/components/schemas/NexusErrorEnvelope"
             }
 
-    property_names = {
-        property_name.lower()
-        for schema in schemas.values()
-        if isinstance(schema, dict)
-        for property_name in schema.get("properties", {})
+    for path in (
+        "/internal/v1/integrations/{provider}/test",
+        "/internal/v1/integrations/{provider}/mode",
+    ):
+        operation = paths[path]["post"]
+        headers = {
+            parameter["name"]: parameter
+            for parameter in operation["parameters"]
+            if parameter["in"] == "header"
+        }
+        assert headers["Idempotency-Key"]["required"] is True
+        assert headers["If-Match"]["required"] is True
+        assert "ETag" in operation["responses"]["200"]["headers"]
+
+    public_contract_words = {
+        word.lower()
+        for word in _walk_openapi_strings(schemas)
     }
     assert not any(
-        forbidden in property_name
-        for property_name in property_names
+        forbidden in value
+        for value in public_contract_words
         for forbidden in (
             "password",
             "secret",
@@ -92,6 +104,14 @@ def test_openapi_exposes_only_redacted_integration_contracts() -> None:
             "private_key",
             "base_url",
             "account_id",
+            "database_url",
+            "api_key",
+            "authorization",
+            "bearer",
+            "postgres",
+            "localhost",
+            "http://",
+            "https://",
         )
     )
 
@@ -109,3 +129,15 @@ def test_integration_status_rejects_naive_wire_timestamps() -> None:
             next_action=None,
             version=0,
         )
+
+
+def _walk_openapi_strings(value: object) -> list[str]:
+    """Return names and nested values so defaults/examples cannot hide configuration."""
+    if isinstance(value, dict):
+        return [
+            *[str(key) for key in value],
+            *[item for child in value.values() for item in _walk_openapi_strings(child)],
+        ]
+    if isinstance(value, list):
+        return [item for child in value for item in _walk_openapi_strings(child)]
+    return [value] if isinstance(value, str) else []

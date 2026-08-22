@@ -1,5 +1,7 @@
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from alembic import command
@@ -55,6 +57,93 @@ def test_initial_migration_creates_an_exact_reversible_schema(
     _assert_schema(temporary_database_url)
 
 
+def test_0002_backfills_existing_integration_status_rows_reversibly(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> None:
+    """A pre-0002 row gains deterministic state fields without losing its version-one data."""
+    engine_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = Config(str(engine_root / "alembic.ini"))
+    created_at = datetime(2026, 8, 22, 11, 30, tzinfo=UTC)
+
+    command.upgrade(config, "0001_runtime_and_data")
+    _seed_0001_integration_status(temporary_database_url, created_at)
+    command.upgrade(config, "0002_integration_status_version")
+    upgraded = _integration_status_row(temporary_database_url)
+    assert upgraded == {
+        "provider": "fosun",
+        "status": "fixture",
+        "version": 1,
+        "mode_changed_at": created_at,
+        "admitted_contract_hash": None,
+    }
+
+    command.downgrade(config, "0001_runtime_and_data")
+    downgraded = _integration_status_row(temporary_database_url, include_0002_columns=False)
+    assert downgraded == {"provider": "fosun", "status": "fixture"}
+
+    command.upgrade(config, "0002_integration_status_version")
+    assert _integration_status_row(temporary_database_url) == upgraded
+
+
+def _seed_0001_integration_status(database_url: str, created_at: datetime) -> None:
+    asyncio.run(_seed_0001_integration_status_async(database_url, created_at))
+
+
+async def _seed_0001_integration_status_async(database_url: str, created_at: datetime) -> None:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO integration_status "
+                    "(id, provider, status, last_success_at, created_at) "
+                    "VALUES (:id, :provider, :status, :last_success_at, :created_at)"
+                ),
+                {
+                    "id": uuid4(),
+                    "provider": "fosun",
+                    "status": "fixture",
+                    "last_success_at": created_at,
+                    "created_at": created_at,
+                },
+            )
+    finally:
+        await engine.dispose()
+
+
+def _integration_status_row(
+    database_url: str, *, include_0002_columns: bool = True
+) -> dict[str, object]:
+    return asyncio.run(_integration_status_row_async(database_url, include_0002_columns))
+
+
+async def _integration_status_row_async(
+    database_url: str, include_0002_columns: bool
+) -> dict[str, object]:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    text(
+                        "SELECT provider, status"
+                        + (
+                            ", version, mode_changed_at, admitted_contract_hash"
+                            if include_0002_columns
+                            else ""
+                        )
+                        + " "
+                        "FROM integration_status"
+                    )
+                )
+            ).mappings().one()
+            return dict(row)
+    finally:
+        await engine.dispose()
+
+
 def _assert_schema(database_url: str) -> None:
     asyncio.run(_assert_schema_async(database_url))
 
@@ -101,6 +190,10 @@ def _assert_reflected_schema(connection: Connection) -> None:
     }
     assert integration_status["version"]["nullable"] is False
     assert isinstance(integration_status["version"]["type"], postgresql.INTEGER)
+    assert integration_status["mode_changed_at"]["nullable"] is False
+    assert isinstance(integration_status["mode_changed_at"]["type"], DateTime)
+    assert integration_status["mode_changed_at"]["type"].timezone is True
+    assert isinstance(integration_status["admitted_contract_hash"]["type"], postgresql.VARCHAR)
     macro_columns = {
         column["name"]: column for column in inspector.get_columns("macro_observations")
     }

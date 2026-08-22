@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import ForeignKey, Integer, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -20,6 +20,10 @@ class IntegrationStatus(ImmutableCreatedAt, Base):
     status: Mapped[str] = mapped_column(String(50))
     last_success_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    mode_changed_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now()
+    )
+    admitted_contract_hash: Mapped[str | None] = mapped_column(String(64))
 
 
 class Job(ImmutableCreatedAt, Base):

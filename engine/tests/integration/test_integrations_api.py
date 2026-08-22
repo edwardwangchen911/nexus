@@ -47,6 +47,19 @@ def _mode_headers(
     return headers
 
 
+def _test_headers(
+    path: str,
+    body: bytes = b"",
+    *,
+    idempotency_key: str,
+    version: int,
+) -> dict[str, str]:
+    headers = _headers("POST", path, body)
+    headers["Idempotency-Key"] = idempotency_key
+    headers["If-Match"] = f'"{version}"'
+    return headers
+
+
 def _app(migrated_database_url: str):
     app = create_engine_app(_settings(migrated_database_url))
     app.state.utc_clock = lambda: _CLOCK
@@ -59,19 +72,21 @@ async def _add_capability(
     provider: str = "fosun",
     contract_hash: str = _CONTRACT_HASH,
     expires_at: datetime,
+    created_at: datetime | None = None,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     async with factory() as session:
-        session.add(
-            ProviderCapability(
-                provider=provider,
-                capability="READ_ONLY",
-                contract_hash=contract_hash,
-                expires_at=expires_at,
-                schema_version="1",
-                payload={},
-            )
+        capability = ProviderCapability(
+            provider=provider,
+            capability="READ_ONLY",
+            contract_hash=contract_hash,
+            expires_at=expires_at,
+            schema_version="1",
+            payload={},
         )
+        if created_at is not None:
+            capability.created_at = created_at
+        session.add(capability)
         await session.commit()
 
 
@@ -133,7 +148,7 @@ async def test_fixture_connectivity_returns_refreshed_status_and_replay_is_rejec
     """A route without the HMAC dependency or a non-fixture result must fail this test."""
     app = _app(migrated_database_url)
     path = "/internal/v1/integrations/fosun/test"
-    headers = _headers("POST", path)
+    headers = _test_headers(path, idempotency_key="fixture-first", version=0)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
@@ -163,9 +178,15 @@ async def test_fixture_connectivity_refresh_advances_status_and_meta_time(
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
     ) as client:
-        first = await client.post(path, headers=_headers("POST", path))
+        first = await client.post(
+            path,
+            headers=_test_headers(path, idempotency_key="refresh-first", version=0),
+        )
         clock["now"] = _CLOCK + timedelta(minutes=5)
-        second = await client.post(path, headers=_headers("POST", path))
+        second = await client.post(
+            path,
+            headers=_test_headers(path, idempotency_key="refresh-second", version=1),
+        )
 
     assert first.status_code == second.status_code == 200
     assert first.json()["data"]["as_of"] == "2026-08-23T12:00:00Z"
@@ -227,6 +248,14 @@ async def test_safe_mode_change_persists_once_and_replay_cannot_change_it(
     assert listed.status_code == 200
     statuses = {status["provider"]: status for status in listed.json()["data"]}
     assert statuses["fosun"]["mode"] == "fixture"
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        persisted = await session.scalar(
+            select(IntegrationStatus).where(IntegrationStatus.provider == "fosun")
+        )
+    assert persisted is not None
+    assert persisted.admitted_contract_hash is None
+    assert persisted.mode_changed_at == _CLOCK
 
 
 @pytest.mark.asyncio
@@ -238,7 +267,10 @@ async def test_disabled_provider_test_is_unavailable(migrated_database_url: str)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
     ) as client:
-        response = await client.post(path, headers=_headers("POST", path))
+        response = await client.post(
+            path,
+            headers=_test_headers(path, idempotency_key="alpaca-test", version=0),
+        )
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "PROVIDER_UNAVAILABLE"
@@ -267,10 +299,10 @@ async def test_fosun_read_only_mode_requires_valid_capability(
 
 
 @pytest.mark.asyncio
-async def test_unadmitted_broker_read_only_mode_is_forbidden(
+async def test_unimplemented_supplemental_read_only_mode_is_unavailable(
     migrated_database_url: str,
 ) -> None:
-    """Allowing an unadmitted broker capability must fail this test."""
+    """An unimplemented supplemental provider is unavailable, not broker-forbidden."""
     app = _app(migrated_database_url)
     path = "/internal/v1/integrations/alpaca/mode"
     body = b'{"mode":"read_only"}'
@@ -382,6 +414,23 @@ async def test_mode_requires_idempotency_key_and_if_match(
 
 
 @pytest.mark.asyncio
+async def test_connectivity_requires_idempotency_key_and_if_match(
+    migrated_database_url: str,
+) -> None:
+    """A status-changing fixture test cannot bypass the write concurrency controls."""
+    app = _app(migrated_database_url)
+    path = "/internal/v1/integrations/fosun/test"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.post(path, headers=_headers("POST", path))
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
 async def test_same_idempotency_key_with_different_mode_conflicts(
     migrated_database_url: str,
 ) -> None:
@@ -443,6 +492,68 @@ async def test_same_idempotency_key_and_request_replays_original_response(
 
 
 @pytest.mark.asyncio
+async def test_mode_idempotency_key_binds_the_if_match_precondition(
+    migrated_database_url: str,
+) -> None:
+    """Changing If-Match with the same key must not replay a stale mode result."""
+    app = _app(migrated_database_url)
+    path = "/internal/v1/integrations/fosun/mode"
+    body = b'{"mode":"disabled"}'
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        first = await client.post(
+            path,
+            content=body,
+            headers=_mode_headers(path, body, idempotency_key="if-match-key", version=0),
+        )
+        conflict = await client.post(
+            path,
+            content=body,
+            headers=_mode_headers(path, body, idempotency_key="if-match-key", version=1),
+        )
+
+    assert first.status_code == 200
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_mode_idempotency_key_replays_one_committed_result(
+    migrated_database_url: str,
+) -> None:
+    """Concurrent same-key retries cannot create duplicate status or idempotency rows."""
+    app = _app(migrated_database_url)
+    path = "/internal/v1/integrations/fosun/mode"
+    body = b'{"mode":"disabled"}'
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        first, retry = await asyncio.gather(
+            client.post(
+                path,
+                content=body,
+                headers=_mode_headers(path, body, idempotency_key="same-concurrent", version=0),
+            ),
+            client.post(
+                path,
+                content=body,
+                headers=_mode_headers(path, body, idempotency_key="same-concurrent", version=0),
+            ),
+        )
+
+    assert first.status_code == retry.status_code == 200
+    assert first.json() == retry.json()
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(IntegrationStatus)) == 1
+        assert await session.scalar(select(func.count()).select_from(IdempotencyRecord)) == 1
+        assert await session.scalar(select(func.count()).select_from(UsedNonce)) == 2
+
+
+@pytest.mark.asyncio
 async def test_concurrent_opposing_mode_writes_return_one_version_conflict(
     migrated_database_url: str,
 ) -> None:
@@ -478,6 +589,48 @@ async def test_concurrent_opposing_mode_writes_return_one_version_conflict(
 
 
 @pytest.mark.asyncio
+async def test_connectivity_mutation_replays_and_rejects_stale_preconditions(
+    migrated_database_url: str,
+) -> None:
+    """Fixture refresh uses the same replay and optimistic-lock contract as mode writes."""
+    app = _app(migrated_database_url)
+    path = "/internal/v1/integrations/fosun/test"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        first = await client.post(
+            path,
+            headers=_test_headers(path, idempotency_key="refresh-key", version=0),
+        )
+        replay = await client.post(
+            path,
+            headers=_test_headers(path, idempotency_key="refresh-key", version=0),
+        )
+        key_conflict = await client.post(
+            path,
+            headers=_test_headers(path, idempotency_key="refresh-key", version=1),
+        )
+        version_conflict = await client.post(
+            path,
+            headers=_test_headers(path, idempotency_key="refresh-stale", version=0),
+        )
+
+    assert first.status_code == replay.status_code == 200
+    assert replay.json() == first.json()
+    assert replay.headers["etag"] == '"1"'
+    assert key_conflict.status_code == 409
+    assert key_conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+    assert version_conflict.status_code == 409
+    assert version_conflict.json()["error"]["code"] == "VERSION_CONFLICT"
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(IntegrationStatus)) == 1
+        assert await session.scalar(select(func.count()).select_from(IdempotencyRecord)) == 1
+        assert await session.scalar(select(func.count()).select_from(UsedNonce)) == 2
+
+
+@pytest.mark.asyncio
 async def test_valid_read_only_capability_enables_and_projects_latest_contract(
     migrated_database_url: str,
 ) -> None:
@@ -505,13 +658,184 @@ async def test_valid_read_only_capability_enables_and_projects_latest_contract(
     assert response.json()["data"] == {
         "provider": "fosun",
         "mode": "read_only",
-        "quality": "PASS",
+        "quality": "PARTIAL",
         "as_of": None,
         "capability_expires_at": "2026-08-23T14:00:00Z",
         "contract_hash": _CONTRACT_HASH,
-        "next_action": None,
+        "next_action": "A successful read-only connectivity check is required.",
         "version": 1,
     }
+
+
+@pytest.mark.asyncio
+async def test_newest_expired_capability_blocks_an_older_valid_admission(
+    migrated_database_url: str,
+) -> None:
+    """A newly revoked READ_ONLY record may not fall back to an older valid record."""
+    await _add_capability(
+        migrated_database_url,
+        contract_hash="b" * 64,
+        expires_at=_CLOCK + timedelta(days=7),
+        created_at=_CLOCK - timedelta(days=2),
+    )
+    await _add_capability(
+        migrated_database_url,
+        contract_hash="c" * 64,
+        expires_at=_CLOCK - timedelta(seconds=1),
+        created_at=_CLOCK - timedelta(days=1),
+    )
+    app = _app(migrated_database_url)
+    path = "/internal/v1/integrations/fosun/mode"
+    body = b'{"mode":"read_only"}'
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.post(
+            path,
+            content=body,
+            headers=_mode_headers(path, body, idempotency_key="newest-expired", version=0),
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "CAPABILITY_EXPIRED"
+
+
+@pytest.mark.asyncio
+async def test_newest_short_lived_capability_is_persisted_without_expiry_fallback(
+    migrated_database_url: str,
+) -> None:
+    """Authority order is immutable admission time, never the longest expiry."""
+    await _add_capability(
+        migrated_database_url,
+        contract_hash="b" * 64,
+        expires_at=_CLOCK + timedelta(days=7),
+        created_at=_CLOCK - timedelta(days=2),
+    )
+    await _add_capability(
+        migrated_database_url,
+        contract_hash="c" * 64,
+        expires_at=_CLOCK + timedelta(minutes=1),
+        created_at=_CLOCK - timedelta(days=1),
+    )
+    app = _app(migrated_database_url)
+    path = "/internal/v1/integrations/fosun/mode"
+    body = b'{"mode":"read_only"}'
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.post(
+            path,
+            content=body,
+            headers=_mode_headers(path, body, idempotency_key="newest-short", version=0),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["contract_hash"] == "c" * 64
+    assert response.json()["data"]["capability_expires_at"] == "2026-08-23T12:01:00Z"
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        status = await session.scalar(
+            select(IntegrationStatus).where(IntegrationStatus.provider == "fosun")
+        )
+    assert status is not None
+    assert status.admitted_contract_hash == "c" * 64
+
+
+@pytest.mark.asyncio
+async def test_newer_admission_disables_old_read_only_until_it_is_reprobed(
+    migrated_database_url: str,
+) -> None:
+    """A new authoritative admission invalidates a status bound to the old hash."""
+    await _add_capability(
+        migrated_database_url,
+        contract_hash="b" * 64,
+        expires_at=_CLOCK + timedelta(days=7),
+        created_at=_CLOCK - timedelta(days=2),
+    )
+    app = _app(migrated_database_url)
+    mode_path = "/internal/v1/integrations/fosun/mode"
+    list_path = "/internal/v1/integrations"
+    body = b'{"mode":"read_only"}'
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        enabled = await client.post(
+            mode_path,
+            content=body,
+            headers=_mode_headers(mode_path, body, idempotency_key="old-admission", version=0),
+        )
+        await _add_capability(
+            migrated_database_url,
+            contract_hash="c" * 64,
+            expires_at=_CLOCK + timedelta(minutes=1),
+            created_at=_CLOCK - timedelta(days=1),
+        )
+        stale = await client.get(list_path, headers=_headers("GET", list_path))
+        reprobed = await client.post(
+            mode_path,
+            content=body,
+            headers=_mode_headers(mode_path, body, idempotency_key="new-admission", version=1),
+        )
+
+    assert enabled.status_code == 200
+    stale_status = {item["provider"]: item for item in stale.json()["data"]}["fosun"]
+    assert stale_status["mode"] == "disabled"
+    assert stale_status["contract_hash"] == "c" * 64
+    assert reprobed.status_code == 200
+    assert reprobed.json()["data"]["contract_hash"] == "c" * 64
+
+
+@pytest.mark.asyncio
+async def test_disabled_mode_requires_a_newer_admission_before_read_only_reprobe(
+    migrated_database_url: str,
+) -> None:
+    """Disabling invalidates every capability admitted before the disable epoch."""
+    await _add_capability(
+        migrated_database_url,
+        expires_at=_CLOCK + timedelta(days=7),
+        created_at=_CLOCK - timedelta(days=1),
+    )
+    clock = {"now": _CLOCK}
+    app = _app(migrated_database_url)
+    app.state.utc_clock = lambda: clock["now"]
+    path = "/internal/v1/integrations/fosun/mode"
+    disabled = b'{"mode":"disabled"}'
+    read_only = b'{"mode":"read_only"}'
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        disabled_response = await client.post(
+            path,
+            content=disabled,
+            headers=_mode_headers(path, disabled, idempotency_key="disable-epoch", version=0),
+        )
+        blocked = await client.post(
+            path,
+            content=read_only,
+            headers=_mode_headers(path, read_only, idempotency_key="old-reprobe", version=1),
+        )
+        clock["now"] = _CLOCK + timedelta(seconds=2)
+        await _add_capability(
+            migrated_database_url,
+            contract_hash="b" * 64,
+            expires_at=_CLOCK + timedelta(days=1),
+            created_at=_CLOCK + timedelta(seconds=1),
+        )
+        enabled = await client.post(
+            path,
+            content=read_only,
+            headers=_mode_headers(path, read_only, idempotency_key="new-reprobe", version=1),
+        )
+
+    assert disabled_response.status_code == 200
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "CAPABILITY_EXPIRED"
+    assert enabled.status_code == 200
+    assert enabled.json()["data"]["contract_hash"] == "b" * 64
 
 
 @pytest.mark.asyncio
@@ -547,7 +871,11 @@ async def test_connectivity_body_rejects_extra_fields(migrated_database_url: str
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
     ) as client:
-        response = await client.post(path, content=body, headers=_headers("POST", path, body))
+        response = await client.post(
+            path,
+            content=body,
+            headers=_test_headers(path, body, idempotency_key="invalid-connectivity", version=0),
+        )
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
