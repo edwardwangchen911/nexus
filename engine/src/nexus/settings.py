@@ -48,9 +48,21 @@ class EngineSettings(_SafeSettings):
         default=None,
         validation_alias="OBJECT_STORE_SECRET_ACCESS_KEY",
     )
-    engine_hmac_secret: SecretStr | None = Field(
+    engine_hmac_current_key_id: str | None = Field(
         default=None,
-        validation_alias="NEXUS_ENGINE_HMAC_SECRET",
+        validation_alias="NEXUS_ENGINE_HMAC_CURRENT_KEY_ID",
+    )
+    engine_hmac_current_secret: SecretStr | None = Field(
+        default=None,
+        validation_alias="NEXUS_ENGINE_HMAC_CURRENT_SECRET",
+    )
+    engine_hmac_previous_key_id: str | None = Field(
+        default=None,
+        validation_alias="NEXUS_ENGINE_HMAC_PREVIOUS_KEY_ID",
+    )
+    engine_hmac_previous_secret: SecretStr | None = Field(
+        default=None,
+        validation_alias="NEXUS_ENGINE_HMAC_PREVIOUS_SECRET",
     )
     fosun_gateway_base_url: str | None = Field(
         default=None,
@@ -64,6 +76,7 @@ class EngineSettings(_SafeSettings):
     @model_validator(mode="after")
     def apply_environment_policy(self) -> Self:
         if self.environment is Environment.PRODUCTION:
+            self._validate_hmac_key_pairs()
             missing = [name for name, value in self._required_values().items() if value is None]
             if missing:
                 raise ValueError(f"production settings require: {', '.join(missing)}")
@@ -76,7 +89,8 @@ class EngineSettings(_SafeSettings):
             "object_store_bucket": "nexus-fixtures",
             "object_store_access_key_id": SecretStr("fixture-object-store-access-key"),
             "object_store_secret_access_key": SecretStr("fixture-object-store-secret"),
-            "engine_hmac_secret": SecretStr("fixture-engine-hmac-secret"),
+            "engine_hmac_current_key_id": "fixture-current",
+            "engine_hmac_current_secret": SecretStr("fixture-engine-hmac-secret"),
             "fosun_gateway_base_url": "http://fosun-gateway:8081",
             "fosun_gateway_hmac_secret": SecretStr("fixture-gateway-hmac-secret"),
         }
@@ -84,6 +98,19 @@ class EngineSettings(_SafeSettings):
             if getattr(self, name) is None:
                 setattr(self, name, value)
         return self
+
+    def _validate_hmac_key_pairs(self) -> None:
+        if self.engine_hmac_current_key_id is None or self.engine_hmac_current_secret is None:
+            raise ValueError(
+                "NEXUS_ENGINE_HMAC_CURRENT_KEY_ID and NEXUS_ENGINE_HMAC_CURRENT_SECRET are required"
+            )
+        has_previous_key_id = self.engine_hmac_previous_key_id is not None
+        has_previous_secret = self.engine_hmac_previous_secret is not None
+        if has_previous_key_id != has_previous_secret:
+            raise ValueError(
+                "NEXUS_ENGINE_HMAC_PREVIOUS_KEY_ID and "
+                "NEXUS_ENGINE_HMAC_PREVIOUS_SECRET must be configured together"
+            )
 
     def _required_values(self) -> dict[str, object | None]:
         return {
@@ -93,7 +120,8 @@ class EngineSettings(_SafeSettings):
             "OBJECT_STORE_BUCKET": self.object_store_bucket,
             "OBJECT_STORE_ACCESS_KEY_ID": self.object_store_access_key_id,
             "OBJECT_STORE_SECRET_ACCESS_KEY": self.object_store_secret_access_key,
-            "NEXUS_ENGINE_HMAC_SECRET": self.engine_hmac_secret,
+            "NEXUS_ENGINE_HMAC_CURRENT_KEY_ID": self.engine_hmac_current_key_id,
+            "NEXUS_ENGINE_HMAC_CURRENT_SECRET": self.engine_hmac_current_secret,
             "FOSUN_GATEWAY_BASE_URL": self.fosun_gateway_base_url,
             "FOSUN_GATEWAY_HMAC_SECRET": self.fosun_gateway_hmac_secret,
         }

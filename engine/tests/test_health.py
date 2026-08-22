@@ -30,12 +30,48 @@ def test_engine_reads_nexus_environment_alias_for_production() -> None:
         OBJECT_STORE_BUCKET="nexus",
         OBJECT_STORE_ACCESS_KEY_ID="placeholder-access-key",
         OBJECT_STORE_SECRET_ACCESS_KEY="placeholder-secret-key",
-        NEXUS_ENGINE_HMAC_SECRET="placeholder-engine-secret",
+        NEXUS_ENGINE_HMAC_CURRENT_KEY_ID="current",
+        NEXUS_ENGINE_HMAC_CURRENT_SECRET="placeholder-engine-secret",
         FOSUN_GATEWAY_BASE_URL="https://gateway.invalid",
         FOSUN_GATEWAY_HMAC_SECRET="placeholder-gateway-secret",
     )
 
     assert settings.environment is Environment.PRODUCTION
+
+
+def test_engine_production_requires_a_current_hmac_key_pair() -> None:
+    """A production engine without a signing key must refuse to start."""
+    with pytest.raises(ValidationError, match="NEXUS_ENGINE_HMAC_CURRENT"):
+        EngineSettings(
+            NEXUS_ENV="production",
+            DATABASE_URL="postgresql+asyncpg://safe:placeholder@db/nexus",
+            OBJECT_STORE_ENDPOINT="https://object-store.invalid",
+            OBJECT_STORE_REGION="us-east-1",
+            OBJECT_STORE_BUCKET="nexus",
+            OBJECT_STORE_ACCESS_KEY_ID="placeholder-access-key",
+            OBJECT_STORE_SECRET_ACCESS_KEY="placeholder-secret-key",
+            FOSUN_GATEWAY_BASE_URL="https://gateway.invalid",
+            FOSUN_GATEWAY_HMAC_SECRET="placeholder-gateway-secret",
+        )
+
+
+def test_engine_production_rejects_an_incomplete_previous_hmac_key_pair() -> None:
+    """Rotation cannot silently enable a key ID without its verification secret."""
+    with pytest.raises(ValidationError, match="NEXUS_ENGINE_HMAC_PREVIOUS"):
+        EngineSettings(
+            NEXUS_ENV="production",
+            DATABASE_URL="postgresql+asyncpg://safe:placeholder@db/nexus",
+            OBJECT_STORE_ENDPOINT="https://object-store.invalid",
+            OBJECT_STORE_REGION="us-east-1",
+            OBJECT_STORE_BUCKET="nexus",
+            OBJECT_STORE_ACCESS_KEY_ID="placeholder-access-key",
+            OBJECT_STORE_SECRET_ACCESS_KEY="placeholder-secret-key",
+            NEXUS_ENGINE_HMAC_CURRENT_KEY_ID="current",
+            NEXUS_ENGINE_HMAC_CURRENT_SECRET="placeholder-engine-secret",
+            NEXUS_ENGINE_HMAC_PREVIOUS_KEY_ID="previous",
+            FOSUN_GATEWAY_BASE_URL="https://gateway.invalid",
+            FOSUN_GATEWAY_HMAC_SECRET="placeholder-gateway-secret",
+        )
 
 
 def test_engine_production_validation_hides_input_canary() -> None:
