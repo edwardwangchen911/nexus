@@ -4,7 +4,8 @@ from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from nexus.api.errors import ErrorCode
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 type ProviderName = Literal["fosun", "alpaca", "sec", "fred", "openai"]
 type IntegrationMode = Literal["disabled", "fixture", "read_only"]
@@ -24,6 +25,7 @@ class IntegrationStatusResponse(_StrictSchema):
     capability_expires_at: datetime | None
     contract_hash: str | None
     next_action: str | None
+    version: int = Field(ge=0)
 
     @field_validator("as_of", "capability_expires_at")
     @classmethod
@@ -80,3 +82,18 @@ class IntegrationConnectivityTestResponse(IntegrationStatusEnvelope):
 
 class IntegrationModeChangeResponse(IntegrationStatusEnvelope):
     """The response to a safe persisted mode change."""
+
+
+class NexusErrorResponse(_StrictSchema):
+    """The stable public error body used by every documented failure response."""
+
+    code: ErrorCode
+    message: str
+    request_id: UUID
+    details: dict[str, object]
+
+
+class NexusErrorEnvelope(_StrictSchema):
+    """The public stable error envelope."""
+
+    error: NexusErrorResponse

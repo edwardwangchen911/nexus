@@ -96,6 +96,11 @@ def _assert_reflected_schema(connection: Connection) -> None:
     observed_at_type = artifacts["observed_at"]["type"]
     assert isinstance(observed_at_type, DateTime)
     assert observed_at_type.timezone is True
+    integration_status = {
+        column["name"]: column for column in inspector.get_columns("integration_status")
+    }
+    assert integration_status["version"]["nullable"] is False
+    assert isinstance(integration_status["version"]["type"], postgresql.INTEGER)
     macro_columns = {
         column["name"]: column for column in inspector.get_columns("macro_observations")
     }
