@@ -90,15 +90,17 @@ describe("integrations vertical slice", () => {
         state="ready"
         integrations={[fosunFixture]}
         pendingAction="fosun:reconcile"
-        notice={{ kind: "error", text: "请求等待超时，结果未知；正在重新读取权威状态，请勿重试。" }}
+        notice={{ kind: "error", text: "请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请使用同一幂等键继续确认。" }}
+        unresolvedProvider="fosun"
         onTest={vi.fn()}
         onModeChange={vi.fn()}
       />,
     );
 
     expect(screen.getByRole("button", { name: "正在对账权威状态" })).toBeDisabled();
-    expect(screen.getByText("请求等待超时，结果未知；正在重新读取权威状态，请勿重试。")).toBeVisible();
+    expect(screen.getByText("请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请使用同一幂等键继续确认。")).toBeVisible();
     expect(screen.getByRole("button", { name: "禁用复星 Provider" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "使用同一幂等键继续确认" })).toBeEnabled();
   });
 
   it("shares one integration source so a mutation updates the global status and page together", async () => {
@@ -126,14 +128,19 @@ describe("integrations vertical slice", () => {
   it("treats an aborted mutation as unknown and reconciles before enabling another action", async () => {
     const disabled = { ...fosunFixture, mode: "disabled" as const, quality: "PARTIAL" as const, version: 2 };
     let getCount = 0;
+    let postCount = 0;
+    const idempotencyKeys: Array<string | null> = [];
     const fetchMock = vi.fn((_: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       if (init?.method !== "POST") {
         getCount += 1;
         return Promise.resolve(Response.json({
-          data: [getCount === 1 ? fosunFixture : disabled],
+          data: [fosunFixture],
           meta: responseMeta(),
         }));
       }
+      postCount += 1;
+      idempotencyKeys.push(new Headers(init.headers).get("idempotency-key"));
+      if (postCount > 2) return Promise.resolve(Response.json({ data: disabled, meta: responseMeta() }));
       return new Promise((_resolve, reject) => {
         init.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
       });
@@ -146,13 +153,25 @@ describe("integrations vertical slice", () => {
     fireEvent.click(screen.getByRole("button", { name: "禁用复星 Provider" }));
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(70_000);
     });
 
-    expect(screen.getByText("请求结果曾超时；已重新读取权威状态，请核对模式和资源版本后再操作。")).toBeVisible();
-    expect(screen.getByRole("region", { name: "fosun 集成（已禁用）" })).toBeVisible();
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    expect(screen.getByText("请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请使用同一幂等键继续确认。")).toBeVisible();
+    expect(screen.getByRole("region", { name: "fosun 集成（只读）" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "正在对账权威状态" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "禁用复星 Provider" })).toBeDisabled();
+    expect(postCount).toBe(2);
     expect(getCount).toBe(2);
+    expect(new Set(idempotencyKeys).size).toBe(1);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "使用同一幂等键继续确认" }));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("region", { name: "fosun 集成（已禁用）" })).toBeVisible();
+    expect(postCount).toBe(3);
+    expect(new Set(idempotencyKeys).size).toBe(1);
     expect(screen.queryByText(/未更改 Provider 模式/)).not.toBeInTheDocument();
   });
 

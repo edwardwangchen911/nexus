@@ -8,14 +8,26 @@ import type { IntegrationMutationEnvelope, IntegrationStatus } from "../../lib/i
 
 type PendingAction = `${IntegrationStatus["provider"]}:${"test" | "mode" | "reconcile"}` | null;
 type Notice = { kind: "error" | "success"; text: string } | null;
+type MutationAction = "test" | "mode";
+type PendingMutation = {
+  status: IntegrationStatus;
+  action: MutationAction;
+  mode?: "disabled" | "fixture";
+  idempotencyKey: string;
+  body: string;
+};
 type IntegrationsPanelProps = {
   state: DataStateKind;
   integrations: IntegrationStatus[];
   pendingAction: PendingAction;
   notice: Notice;
+  unresolvedProvider?: IntegrationStatus["provider"] | null;
   onTest: (status: IntegrationStatus) => void;
   onModeChange: (status: IntegrationStatus, mode: "disabled" | "fixture") => void;
+  onResolveUnknown?: () => void;
 };
+
+const MUTATION_CONFIRM_TIMEOUT_MS = 35_000;
 
 const providerLabels: Record<IntegrationStatus["provider"], string> = {
   fosun: "复星",
@@ -29,55 +41,58 @@ export default function IntegrationsPage(): React.ReactElement {
   const resource = useIntegrationStatuses();
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [notice, setNotice] = useState<Notice>(null);
+  const [unresolved, setUnresolved] = useState<PendingMutation | null>(null);
 
-  async function runAction(status: IntegrationStatus, action: "test" | "mode", mode?: "disabled" | "fixture") {
-    const actionKey: PendingAction = `${status.provider}:${action}`;
-    setPendingAction(actionKey);
+  async function confirmMutation(mutation: PendingMutation) {
+    setPendingAction(`${mutation.status.provider}:${mutation.action}`);
+    setUnresolved(null);
     setNotice(null);
-    const controller = new AbortController();
-    const timeout = globalThis.setTimeout(() => controller.abort(), 30_000);
-    const body = action === "test" ? "{}" : JSON.stringify({ mode });
-    try {
-      const response = await fetch(`/api/v1/integrations/${status.provider}/${action}`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "idempotency-key": crypto.randomUUID(),
-          "if-match": `"${status.version}"`,
-        },
-        body,
-        signal: controller.signal,
-      });
-      const payload = await response.json();
-      if (!response.ok) {
-        const code = typeof payload?.error?.code === "string" ? payload.error.code : "INTERNAL_ERROR";
-        throw new Error(code);
-      }
-      const envelope = payload as IntegrationMutationEnvelope;
-      resource.replaceStatus(envelope.data);
-      setNotice({ kind: "success", text: action === "test" ? "非交易连接测试已完成。" : "Provider 模式已更新。" });
-    } catch (error) {
-      const timedOut = error instanceof DOMException && error.name === "AbortError";
-      if (timedOut) {
-        setPendingAction(`${status.provider}:reconcile`);
-        setNotice({ kind: "error", text: "请求等待超时，结果未知；正在重新读取权威状态，请勿重试。" });
-        const reconciledState = await resource.refresh();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const envelope = await requestIntegrationMutation(mutation);
+        resource.replaceStatus(envelope.data);
+        setPendingAction(null);
+        setNotice({
+          kind: "success",
+          text: attempt === 0
+            ? mutation.action === "test" ? "非交易连接测试已完成。" : "Provider 模式已更新。"
+            : "首次等待超时；已使用同一幂等键确认最终结果。",
+        });
+        return;
+      } catch (error) {
+        if (error instanceof KnownMutationError) {
+          setPendingAction(null);
+          setNotice({
+            kind: "error",
+            text: `操作未完成（${error.code}）。状态保持安全默认值，请刷新后重试。`,
+          });
+          return;
+        }
+        setPendingAction(`${mutation.status.provider}:reconcile`);
+        if (attempt === 0) {
+          setNotice({ kind: "error", text: "请求结果未知；正在使用同一幂等键确认最终结果。" });
+          continue;
+        }
+        await resource.refresh();
+        setUnresolved(mutation);
         setNotice({
           kind: "error",
-          text: reconciledState === "error" || reconciledState === "forbidden"
-            ? "请求结果未知，且权威状态对账失败。相关操作保持锁定；请先使用全局刷新恢复状态。"
-            : "请求结果曾超时；已重新读取权威状态，请核对模式和资源版本后再操作。",
+          text: "请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请使用同一幂等键继续确认。",
         });
-      } else {
-        setNotice({
-          kind: "error",
-          text: `操作未完成（${error instanceof Error ? error.message : "INTERNAL_ERROR"}）。状态保持安全默认值，请刷新后重试。`,
-        });
+        return;
       }
-    } finally {
-      globalThis.clearTimeout(timeout);
-      setPendingAction(null);
     }
+  }
+
+  function runAction(status: IntegrationStatus, action: MutationAction, mode?: "disabled" | "fixture") {
+    const mutation: PendingMutation = {
+      status,
+      action,
+      mode,
+      idempotencyKey: crypto.randomUUID(),
+      body: action === "test" ? "{}" : JSON.stringify({ mode }),
+    };
+    void confirmMutation(mutation);
   }
 
   return (
@@ -86,13 +101,15 @@ export default function IntegrationsPage(): React.ReactElement {
       integrations={resource.integrations}
       pendingAction={pendingAction}
       notice={notice ?? resource.notice}
+      unresolvedProvider={unresolved?.status.provider}
       onTest={(status) => void runAction(status, "test")}
       onModeChange={(status, mode) => void runAction(status, "mode", mode)}
+      onResolveUnknown={() => { if (unresolved) void confirmMutation(unresolved); }}
     />
   );
 }
 
-export function IntegrationsPanel({ state, integrations, pendingAction, notice, onTest, onModeChange }: IntegrationsPanelProps): React.ReactElement {
+export function IntegrationsPanel({ state, integrations, pendingAction, notice, unresolvedProvider = null, onTest, onModeChange, onResolveUnknown = () => undefined }: IntegrationsPanelProps): React.ReactElement {
   const hasData = ["ready", "partial", "stale"].includes(state) && integrations.length > 0;
   return (
     <section className="page-stack integrations-page" aria-label="数据与能力状态页面" data-state={state}>
@@ -106,6 +123,11 @@ export function IntegrationsPanel({ state, integrations, pendingAction, notice, 
       </header>
 
       {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
+      {unresolvedProvider ? (
+        <button className="button button--primary" type="button" onClick={onResolveUnknown}>
+          使用同一幂等键继续确认
+        </button>
+      ) : null}
 
       {!hasData ? (
         <DataState state={state} title="集成状态" detail={stateDetail(state)} announce={false} />
@@ -137,6 +159,35 @@ export function IntegrationsPanel({ state, integrations, pendingAction, notice, 
   );
 }
 
+class KnownMutationError extends Error {
+  constructor(readonly code: string) { super(code); }
+}
+
+async function requestIntegrationMutation(mutation: PendingMutation): Promise<IntegrationMutationEnvelope> {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), MUTATION_CONFIRM_TIMEOUT_MS);
+  try {
+    const response = await fetch(`/api/v1/integrations/${mutation.status.provider}/${mutation.action}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": mutation.idempotencyKey,
+        "if-match": `"${mutation.status.version}"`,
+      },
+      body: mutation.body,
+      signal: controller.signal,
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      const code = typeof payload?.error?.code === "string" ? payload.error.code : "INTERNAL_ERROR";
+      throw new KnownMutationError(code);
+    }
+    return payload as IntegrationMutationEnvelope;
+  } finally {
+    globalThis.clearTimeout(timeout);
+  }
+}
+
 function IntegrationCard({ status, pendingAction, onTest, onModeChange }: Omit<IntegrationsPanelProps, "state" | "integrations" | "notice"> & { status: IntegrationStatus }): React.ReactElement {
   const readOnly = status.mode !== "disabled";
   const reconciling = pendingAction === `${status.provider}:reconcile`;
@@ -159,7 +210,7 @@ function IntegrationCard({ status, pendingAction, onTest, onModeChange }: Omit<I
       <p className="integration-card__next">{status.next_action ?? "无需操作"}</p>
       <div className="integration-card__actions">
         {status.provider === "fosun" && status.mode === "fixture" ? (
-          <button className="button button--primary" type="button" onClick={() => onTest(status)} disabled={testing}>
+          <button className={`button ${reconciling ? "button--quiet" : "button--primary"}`} type="button" onClick={() => onTest(status)} disabled={testing}>
             <FlaskConical aria-hidden="true" size={17} />
             {reconciling ? "正在对账权威状态" : testing ? "正在测试复星非交易连接" : "测试非交易连接"}
           </button>
