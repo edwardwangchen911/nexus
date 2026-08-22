@@ -191,8 +191,6 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
         {
             "account_id": "synthetic-account-001",
             "read_kind": "cash",
-            "cursor": None,
-            "limit": 100,
         },
     )
     holdings = await adapter.execute(

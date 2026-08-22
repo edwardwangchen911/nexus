@@ -9,6 +9,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictInt,
     StringConstraints,
     ValidationError,
     field_validator,
@@ -20,7 +21,10 @@ from nexus_fosun_gateway.domain import GatewayError, GatewayItem, GatewayPage
 from nexus_fosun_gateway.policy.operations import GatewayOperation
 
 router = APIRouter(prefix="/internal/v1/read-only")
-Cursor = Annotated[str, StringConstraints(pattern=r"^[0-9]+$", max_length=12)]
+Cursor = Annotated[
+    str,
+    StringConstraints(strict=True, pattern=r"^[0-9]+$", max_length=12),
+]
 
 
 class RequestModel(BaseModel):
@@ -37,13 +41,30 @@ class AccountPageRequest(RequestModel):
     limit: Annotated[int, Field(ge=1, le=100)] = 100
 
 
-class PortfolioReadRequest(AccountPageRequest):
+class PortfolioReadRequest(RequestModel):
+    account_id: str
     read_kind: Literal["cash", "holdings"]
+    cursor: Cursor | None = None
+    limit: StrictInt | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def read_kind_owns_its_exact_shape(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            raise ValueError("portfolio request must be an object")
+        read_kind = value.get("read_kind")
+        if read_kind == "cash" and ({"cursor", "limit"} & value.keys()):
+            raise ValueError("cash summary does not accept pagination")
+        if read_kind == "holdings" and not {"cursor", "limit"}.issubset(value):
+            raise ValueError("holdings requires explicit cursor and limit")
+        return value
 
     @model_validator(mode="after")
-    def cash_does_not_accept_a_pagination_cursor(self) -> "PortfolioReadRequest":
-        if self.read_kind == "cash" and self.cursor is not None:
-            raise ValueError("cash summary is not paginated")
+    def holdings_pagination_is_bounded(self) -> "PortfolioReadRequest":
+        if self.read_kind == "holdings" and (
+            self.limit is None or not 1 <= self.limit <= 100
+        ):
+            raise ValueError("holdings limit is outside the fixed range")
         return self
 
 

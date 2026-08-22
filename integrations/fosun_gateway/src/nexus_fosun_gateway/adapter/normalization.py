@@ -53,7 +53,12 @@ def normalize_provider_response(
             )
         if operation == "fosun_get_quotes":
             items = _quotes(data, received_at)
-            return _page(items, request_id, received_at)
+            quality: Literal["PASS", "PARTIAL"] = (
+                "PARTIAL"
+                if any(isinstance(item, QuoteItem) and item.price is None for item in items)
+                else "PASS"
+            )
+            return _page(items, request_id, received_at, quality=quality)
         if operation == "fosun_get_bars":
             items = _bars(data, payload)
             return _page(items, request_id, received_at)
@@ -259,6 +264,8 @@ def _page(
     items: tuple[GatewayItem, ...],
     request_id: str,
     received_at: datetime,
+    *,
+    quality: Literal["PASS", "PARTIAL"] = "PASS",
 ) -> GatewayPage[GatewayItem]:
     return GatewayPage[GatewayItem](
         items=items,
@@ -266,6 +273,7 @@ def _page(
         has_more=False,
         next_cursor=None,
         as_of=received_at,
+        quality=quality,
     )
 
 

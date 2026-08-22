@@ -293,6 +293,24 @@ def test_authority_overrides_are_rejected(
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
+def test_portfolio_authority_override_is_rejected_independently(
+    gateway_client: TestClient,
+) -> None:
+    response = _post_signed(
+        gateway_client,
+        "fosun_sync_portfolio",
+        {
+            "account_id": "synthetic-account-001",
+            "read_kind": "cash",
+            "url": "https://provider.invalid",
+        },
+        nonce="0198f7a0-2222-7777-8222-222222222236",
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
 @pytest.mark.parametrize(
     ("operation", "payload", "nonce"),
     [
@@ -333,17 +351,6 @@ def test_authority_overrides_are_rejected(
             },
             "0198f7a0-2222-7777-8222-222222222244",
         ),
-        (
-            "fosun_sync_portfolio",
-            {
-                "account_id": "synthetic-account-001",
-                "read_kind": "cash",
-                "cursor": "0",
-                "limit": 20,
-                "url": "https://provider.invalid",
-            },
-            "0198f7a0-2222-7777-8222-222222222245",
-        ),
     ],
 )
 def test_typed_parameters_reject_invalid_temporal_values_and_cursors(
@@ -357,6 +364,135 @@ def test_typed_parameters_reject_invalid_temporal_values_and_cursors(
 
     assert response.status_code == 422
     assert response.json()["error"]["next_action"] == "FIX_REQUEST"
+
+
+@pytest.mark.parametrize(
+    ("payload", "nonce"),
+    [
+        (
+            {"account_id": "synthetic-account-001", "read_kind": "cash", "cursor": None},
+            "0198f7a0-2222-7777-8222-222222222261",
+        ),
+        (
+            {"account_id": "synthetic-account-001", "read_kind": "cash", "limit": 20},
+            "0198f7a0-2222-7777-8222-222222222262",
+        ),
+        (
+            {"account_id": "synthetic-account-001", "read_kind": "holdings", "limit": 20},
+            "0198f7a0-2222-7777-8222-222222222263",
+        ),
+        (
+            {
+                "account_id": "synthetic-account-001",
+                "read_kind": "holdings",
+                "cursor": None,
+            },
+            "0198f7a0-2222-7777-8222-222222222264",
+        ),
+        (
+            {
+                "account_id": "synthetic-account-001",
+                "read_kind": "holdings",
+                "cursor": None,
+                "limit": None,
+            },
+            "0198f7a0-2222-7777-8222-222222222265",
+        ),
+        (
+            {
+                "account_id": "synthetic-account-001",
+                "read_kind": "holdings",
+                "cursor": None,
+                "limit": True,
+            },
+            "0198f7a0-2222-7777-8222-222222222266",
+        ),
+        (
+            {
+                "account_id": "synthetic-account-001",
+                "read_kind": "holdings",
+                "cursor": None,
+                "limit": "20",
+            },
+            "0198f7a0-2222-7777-8222-222222222267",
+        ),
+        (
+            {
+                "account_id": "synthetic-account-001",
+                "read_kind": "holdings",
+                "cursor": None,
+                "limit": 0,
+            },
+            "0198f7a0-2222-7777-8222-222222222268",
+        ),
+        (
+            {
+                "account_id": "synthetic-account-001",
+                "read_kind": "holdings",
+                "cursor": None,
+                "limit": 101,
+            },
+            "0198f7a0-2222-7777-8222-222222222269",
+        ),
+        (
+            {
+                "account_id": "synthetic-account-001",
+                "read_kind": "holdings",
+                "cursor": True,
+                "limit": 20,
+            },
+            "0198f7a0-2222-7777-8222-222222222270",
+        ),
+        (
+            {
+                "account_id": "synthetic-account-001",
+                "read_kind": "holdings",
+                "cursor": "1" * 13,
+                "limit": 20,
+            },
+            "0198f7a0-2222-7777-8222-222222222271",
+        ),
+    ],
+)
+def test_portfolio_read_kind_has_strict_disjoint_payloads(
+    gateway_client: TestClient,
+    payload: dict[str, object],
+    nonce: str,
+) -> None:
+    response = _post_signed(
+        gateway_client,
+        "fosun_sync_portfolio",
+        payload,
+        nonce=nonce,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_portfolio_cash_and_first_holdings_page_accept_only_their_valid_shapes(
+    gateway_client: TestClient,
+) -> None:
+    cash = _post_signed(
+        gateway_client,
+        "fosun_sync_portfolio",
+        {"account_id": "synthetic-account-001", "read_kind": "cash"},
+        nonce="0198f7a0-2222-7777-8222-222222222272",
+    )
+    holdings = _post_signed(
+        gateway_client,
+        "fosun_sync_portfolio",
+        {
+            "account_id": "synthetic-account-001",
+            "read_kind": "holdings",
+            "cursor": None,
+            "limit": 100,
+        },
+        nonce="0198f7a0-2222-7777-8222-222222222273",
+    )
+
+    assert cash.status_code == 200
+    assert holdings.status_code == 200
 
 
 @pytest.mark.parametrize(

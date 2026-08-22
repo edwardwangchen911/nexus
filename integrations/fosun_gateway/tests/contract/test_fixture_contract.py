@@ -115,6 +115,7 @@ async def test_success_empty_pagination_and_partial_fixtures_normalize() -> None
     assert str(pagination.items[0].current_price) == "123.45"
     assert pagination.quality == "PARTIAL"
     assert partial.items[0].price is None
+    assert partial.quality == "PARTIAL"
     assert success.as_of.utcoffset().total_seconds() == 0
 
 
