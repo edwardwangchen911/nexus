@@ -1,0 +1,58 @@
+"""Stable API error semantics."""
+
+from collections.abc import Mapping
+from enum import StrEnum
+
+
+class ErrorCode(StrEnum):
+    """Client-visible error codes defined by the API contract."""
+
+    UNAUTHENTICATED = "UNAUTHENTICATED"
+    FORBIDDEN = "FORBIDDEN"
+    VALIDATION_ERROR = "VALIDATION_ERROR"
+    NOT_FOUND = "NOT_FOUND"
+    VERSION_CONFLICT = "VERSION_CONFLICT"
+    IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+    DATA_PARTIAL = "DATA_PARTIAL"
+    DATA_STALE = "DATA_STALE"
+    BROKER_STALE = "BROKER_STALE"
+    SOURCE_CONFLICT = "SOURCE_CONFLICT"
+    CAPABILITY_EXPIRED = "CAPABILITY_EXPIRED"
+    PROPOSAL_NOT_EXECUTABLE = "PROPOSAL_NOT_EXECUTABLE"
+    ACCOUNT_TYPE_MISMATCH = "ACCOUNT_TYPE_MISMATCH"
+    APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
+    RISK_REJECTED = "RISK_REJECTED"
+    DRAWDOWN_LOCKED = "DRAWDOWN_LOCKED"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+class NexusError(Exception):
+    """An expected API failure with an HTTP status and stable code."""
+
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        status_code: int,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status_code = status_code
+        self.details = dict(details or {})
+
+    def to_envelope(self, request_id: str) -> dict[str, dict[str, object]]:
+        """Return exactly the public error shape documented for API clients."""
+        return {
+            "error": {
+                "code": self.code.value,
+                "message": self.message,
+                "request_id": request_id,
+                "details": self.details,
+            }
+        }
