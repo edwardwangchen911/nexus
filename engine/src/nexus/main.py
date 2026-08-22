@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from nexus.api.errors import ErrorCode, NexusError
+from nexus.api.routes.integrations import router as integrations_router
 from nexus.api.routes.system import router as system_router
 from nexus.domain.ids import new_uuid7
 from nexus.persistence.session import session_factory
@@ -59,6 +60,7 @@ def create_engine_app(settings: EngineSettings | None = None) -> FastAPI:
         return {"status": "alive", "service": "nexus-engine"}
 
     app.include_router(system_router)
+    app.include_router(integrations_router)
     return app
 
 
