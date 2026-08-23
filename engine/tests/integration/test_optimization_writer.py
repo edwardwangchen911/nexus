@@ -316,7 +316,6 @@ async def test_idempotent_group_writer_has_one_concurrent_identity_and_conflicts
 async def test_composite_parent_identity_rejects_child_baseline_mismatch_and_parent_rewrite(
     migrated_database_url: str,
 ) -> None:
-    """Children bind both group and baseline; neither parent identity field is mutable."""
     await seed_portfolio_list(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
     authority = await _seed_authority(factory)
