@@ -7,6 +7,7 @@ dependencies = [
     "alembic>=1.16,<2",
     "asyncpg>=0.30,<1",
     "boto3>=1.40,<2",
+    "cryptography>=45,<46",
     "duckdb>=1.3,<2",
     "exchange-calendars>=4.11,<5",
     "fastapi>=0.116,<0.141",
@@ -23,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 nexus-engine-api = "nexus.main:run"
+nexus-engine-broker-worker = "nexus.broker_worker:main"
 nexus-engine-worker = "nexus.worker:main"
 
 [dependency-groups]
