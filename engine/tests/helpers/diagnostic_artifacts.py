@@ -1,4 +1,14 @@
-from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
+from datetime import UTC, datetime
+
+from nexus.diagnostics.calendar_policy import (
+    XNYS_CALENDAR_ADOPTION_ID,
+    XNYS_CALENDAR_ADOPTION_KEY,
+    XNYS_CALENDAR_ADOPTION_PAYLOAD,
+    XNYS_CALENDAR_ADOPTION_VERSION,
+    XnysCalendarAdoption,
+    validate_xnys_calendar_adoption,
+)
+from nexus.persistence.models.diagnostics import DiagnosticPolicy, PortfolioDiagnosticReportRecord
 from nexus.persistence.session import session_factory
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +22,22 @@ class FixtureArtifactReader:
 
     async def __call__(self, uri: str) -> bytes:
         return self.payloads[uri]
+
+
+def fixture_xnys_calendar_adoption(
+    created_at: datetime = datetime(2026, 1, 1, tzinfo=UTC),
+) -> XnysCalendarAdoption:
+    return validate_xnys_calendar_adoption(
+        DiagnosticPolicy(
+            id=XNYS_CALENDAR_ADOPTION_ID,
+            key=XNYS_CALENDAR_ADOPTION_KEY,
+            version=XNYS_CALENDAR_ADOPTION_VERSION,
+            schema_version="1",
+            payload=XNYS_CALENDAR_ADOPTION_PAYLOAD,
+            created_at=created_at,
+        ),
+        datetime(2026, 12, 31, tzinfo=UTC),
+    )
 
 
 async def diagnostic_report_count(session: AsyncSession) -> int:

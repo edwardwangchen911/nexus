@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.diagnostics.artifacts import ArtifactByteReader
 from nexus.diagnostics.calendar import completed_xnys_calendar, is_xnys_session
+from nexus.diagnostics.calendar_policy import load_xnys_calendar_adoption
 from nexus.diagnostics.evidence import combine_refs
 from nexus.diagnostics.models import (
     DiagnosticEvidence,
@@ -74,7 +75,8 @@ async def assemble_diagnostic_evidence(
         )
     snapshot_bindings, snapshot_inputs = await _snapshot_bindings(session, snapshot)
     policy_ref = await _source_policy_ref(session, snapshot.as_of)
-    calendar = completed_xnys_calendar(snapshot.as_of, policy_ref)
+    calendar_adoption = await load_xnys_calendar_adoption(session, snapshot.as_of)
+    calendar = completed_xnys_calendar(snapshot.as_of, calendar_adoption)
     benchmark_result = await _canonical_spy_series(
         session, snapshot.as_of, artifact_reader, policy_ref
     )

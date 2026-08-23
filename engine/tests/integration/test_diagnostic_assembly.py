@@ -9,6 +9,7 @@ from helpers.diagnostic_artifacts import (
     FixtureArtifactReader,
     diagnostic_report_count,
     diagnostic_report_count_from_url,
+    fixture_xnys_calendar_adoption,
 )
 from helpers.portfolio_api import (
     INSTRUMENT_ID,
@@ -29,7 +30,6 @@ from nexus.diagnostics.repository import (
     load_instrument_identities,
 )
 from nexus.diagnostics.service import diagnose_and_persist, diagnose_portfolio
-from nexus.domain.evidence import EvidenceRef
 from nexus.market.ingestion import serialize_price_bars
 from nexus.market.universe import stable_instrument_id
 from nexus.persistence.models.data import DataArtifact, PriceSeriesManifest
@@ -484,11 +484,6 @@ def _bars(
 
 
 def _published_sessions(count: int) -> tuple[date, ...]:
-    policy_ref = EvidenceRef(
-        source="nexus_db",
-        object_id="source-policy:fixture:v1",
-        available_at=SNAPSHOT_AT - timedelta(days=365),
-        location="db://source-policies/fixture",
-        content_hash="a" * 64,
-    )
-    return completed_xnys_calendar(SNAPSHOT_AT, policy_ref, count=count).sessions
+    return completed_xnys_calendar(
+        SNAPSHOT_AT, fixture_xnys_calendar_adoption(), count=count
+    ).sessions
