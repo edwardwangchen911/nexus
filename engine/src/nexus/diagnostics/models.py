@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from nexus.domain.decimal import DecimalString
 from nexus.domain.evidence import EvidenceRef
+from nexus.domain.time import require_utc
 from nexus.providers.base import PriceSeries
 
 type OptimizationNeed = Literal[
@@ -47,6 +48,31 @@ def _assert_no_binary_float(value: object) -> None:
             _assert_no_binary_float(nested)
 
 
+class EvidenceBinding(_DiagnosticModel):
+    """Point-in-time metadata binding one input to immutable source refs."""
+
+    available_at: datetime
+    as_of: datetime
+    session: date | None = None
+    refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+
+    @field_validator("available_at", "as_of")
+    @classmethod
+    def _aware_utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+
+class DiagnosticEvidence(_DiagnosticModel):
+    snapshot: EvidenceBinding | None = None
+    cash: Mapping[str, EvidenceBinding] = {}
+    position_prices: Mapping[UUID, EvidenceBinding] = {}
+    adv20: Mapping[UUID, EvidenceBinding] = {}
+    risk_buckets: Mapping[UUID, EvidenceBinding] = {}
+    price_series: Mapping[UUID, EvidenceBinding] = {}
+    benchmark: EvidenceBinding | None = None
+    trading_calendar: EvidenceBinding | None = None
+
+
 class MarketEvidence(_DiagnosticModel):
     prices: Mapping[UUID, PriceSeries] = {}
     adv20: Mapping[UUID, Decimal] = {}
@@ -57,6 +83,7 @@ class MarketEvidence(_DiagnosticModel):
     benchmark: PriceSeries | None = None
     evidence_refs: tuple[EvidenceRef, ...] = ()
     input_evidence: Mapping[str, tuple[EvidenceRef, ...]] = {}
+    evidence: DiagnosticEvidence = DiagnosticEvidence()
     source_conflict: bool = False
 
     @model_validator(mode="after")
