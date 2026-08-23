@@ -3,10 +3,13 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from nexus.diagnostics.items import upper_threshold_item as _upper_threshold_item
 from nexus.diagnostics.models import (
     ComparableVariantEvidence,
+    DiagnosticEvidence,
     DiagnosticHistory,
     DiagnosticItem,
+    EvidenceBinding,
     MarketEvidence,
     PortfolioDiagnosticReport,
 )
@@ -14,7 +17,6 @@ from nexus.diagnostics.policy import RealAdvisoryPolicy
 from nexus.diagnostics.service import (
     _assert_fosun_read_only_scope,
     _optimization_need,
-    _upper_threshold_item,
     diagnose_portfolio,
 )
 from nexus.domain.evidence import EvidenceRef
@@ -75,7 +77,9 @@ def test_days_to_exit_uses_only_its_item_specific_adv_evidence() -> None:
     market = _complete_market(snapshot).model_copy(
         update={
             "evidence_refs": (unrelated_ref,),
-            "input_evidence": {f"adv20:{instrument_id}": (adv_ref,)},
+            "evidence": _complete_market(snapshot).evidence.model_copy(
+                update={"adv20": {instrument_id: _binding(adv_ref)}}
+            ),
         }
     )
 
@@ -89,7 +93,12 @@ def test_days_to_exit_uses_only_its_item_specific_adv_evidence() -> None:
     )
 
     assert item.unknown_reason is None
-    assert item.evidence_refs == (adv_ref,)
+    assert item.evidence_refs == (
+        market.evidence.snapshot.refs[0],  # type: ignore[union-attr]
+        market.evidence.position_prices[instrument_id].refs[0],
+        adv_ref,
+    )
+    assert unrelated_ref not in item.evidence_refs
 
 
 def test_non_ready_snapshot_is_blocked_before_any_metric_evaluation() -> None:
@@ -399,16 +408,41 @@ def _evidence_ref(object_id: str, hash_character: str) -> EvidenceRef:
     )
 
 
+def _binding(ref: EvidenceRef, *, session: date | None = None) -> EvidenceBinding:
+    return EvidenceBinding(
+        available_at=ref.available_at,
+        as_of=ref.available_at,
+        session=session,
+        refs=(ref,),
+    )
+
+
 def _complete_market(snapshot: PortfolioSnapshot) -> MarketEvidence:
     instrument_id = snapshot.positions[0].instrument_id
     series = _series(snapshot, 253)
+    last_session = series.bars[-1].session
     return MarketEvidence(
         prices={instrument_id: series},
         adv20={instrument_id: Decimal("1000")},
         quality="PASS",
         risk_buckets={instrument_id: {"equity": Decimal(1)}},
+        trading_sessions=tuple(bar.session for bar in series.bars),
         benchmark=series,
         input_evidence={f"adv20:{instrument_id}": (_evidence_ref("adv20", "d"),)},
+        evidence=DiagnosticEvidence(
+            snapshot=_binding(_evidence_ref("snapshot", "1")),
+            cash={"USD": _binding(_evidence_ref("cash", "2"))},
+            position_prices={instrument_id: _binding(_evidence_ref("position", "3"))},
+            adv20={instrument_id: _binding(_evidence_ref("adv20", "4"))},
+            risk_buckets={instrument_id: _binding(_evidence_ref("risk-bucket", "5"))},
+            price_series={
+                instrument_id: _binding(_evidence_ref("prices", "6"), session=last_session)
+            },
+            benchmark=_binding(_evidence_ref("benchmark", "7"), session=last_session),
+            trading_calendar=_binding(
+                _evidence_ref("trading-calendar", "8"), session=last_session
+            ),
+        ),
     )
 
 
