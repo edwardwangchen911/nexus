@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
-from nexus.api.schemas.diagnostics import PortfolioDiagnosticEnvelope
+from nexus.api.schemas.diagnostics import PortfolioDiagnosticEnvelope, PortfolioDiagnosticResponse
 from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
 from nexus.diagnostics.repository import latest_report
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,8 +43,15 @@ async def get_latest_diagnostic(
             status_code=404,
             details={"portfolio_id": str(portfolio_id)},
         )
+    if report.trading_day is None:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL,
+            "The persisted diagnostic snapshot time is unavailable.",
+            status_code=422,
+            details={"portfolio_id": str(portfolio_id)},
+        )
     as_of = datetime.combine(report.trading_day, datetime.min.time(), tzinfo=UTC)
     return PortfolioDiagnosticEnvelope(
-        data=report.model_dump(),
+        data=PortfolioDiagnosticResponse.model_validate(report.model_dump()),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=as_of),
     )
