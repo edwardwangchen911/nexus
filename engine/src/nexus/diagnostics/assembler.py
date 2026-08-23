@@ -155,17 +155,19 @@ async def assemble_diagnostic_evidence(
             )
         if authority.selected is not None:
             series, binding = authority.selected
-            selected[position.instrument_id] = (
-                series,
-                binding.model_copy(
-                    update={
-                        "refs": combine_refs(
-                            binding.refs,
-                            identities[position.instrument_id].authority_refs,
-                        )
-                    }
-                ),
+            selected_binding = binding.model_copy(
+                update={
+                    "refs": combine_refs(
+                        binding.refs, identities[position.instrument_id].authority_refs
+                    )
+                }
             )
+            selected[position.instrument_id] = (series, selected_binding)
+            if any(
+                bar.session > snapshot.as_of.date() and bar.available_at <= snapshot.as_of
+                for bar in series.bars
+            ):
+                conflict_refs.extend((*selected_binding.refs, *calendar.binding.refs))
     trading_sessions = calendar.sessions
     adv20: dict[UUID, Decimal] = {}
     adv_bindings: dict[UUID, EvidenceBinding] = {}
