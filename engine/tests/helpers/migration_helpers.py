@@ -18,6 +18,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from helpers.migration_assertions import created_at_trigger_exists
 from helpers.migration_schema_expectations import EXPECTED_FOREIGN_KEYS, EXPECTED_TABLES
 
 
@@ -306,7 +307,7 @@ def _assert_reflected_schema(connection: Connection) -> None:
     assert macro_value["type"].precision == 38
     assert macro_value["type"].scale == 12
     for table_name in expected_tables:
-        assert _created_at_trigger_exists(connection, table_name)
+        assert created_at_trigger_exists(connection, table_name)
     if diagnostic_tables <= actual_tables:
         evidence_columns = {
             column["name"]: column
@@ -319,20 +320,6 @@ def _assert_reflected_schema(connection: Connection) -> None:
     context = MigrationContext.configure(connection)
     if diagnostic_tables <= actual_tables:
         assert compare_metadata(context, Base.metadata) == []
-
-
-def _created_at_trigger_exists(connection: Connection, table_name: str) -> bool:
-    trigger_name = f"trg_{table_name}_created_at_immutable"
-    return bool(
-        connection.execute(
-            text(
-                "SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = :trigger_name "
-                "AND NOT tgisinternal)"
-            ),
-            {"trigger_name": trigger_name},
-        ).scalar_one()
-    )
-
 
 def _table_names(database_url: str) -> set[str]:
     return asyncio.run(_table_names_async(database_url))
