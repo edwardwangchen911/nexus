@@ -7,7 +7,6 @@ from uuid import uuid4
 
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from migration_schema_expectations import EXPECTED_FOREIGN_KEYS, EXPECTED_TABLES
 from nexus.integrations.service import IntegrationStatusService
 from nexus.persistence.base import Base
 from nexus.persistence.models import data, market, portfolio, runtime  # noqa: F401
@@ -18,6 +17,8 @@ from sqlalchemy import DateTime, inspect, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
+
+from helpers.migration_schema_expectations import EXPECTED_FOREIGN_KEYS, EXPECTED_TABLES
 
 
 def _seed_0001_integration_status(
