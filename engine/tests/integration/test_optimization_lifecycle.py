@@ -101,6 +101,7 @@ async def test_shadow_and_reject_api_require_idempotency_and_replay_stably(
     assert missing.status_code == 422
     assert missing.json()["error"]["code"] == "VALIDATION_ERROR"
     assert first.status_code == replay.status_code == 200
+    assert set(first.json()["meta"]) == {"request_id", "schema_version", "as_of"}
     assert (
         first.json()["data"]
         == replay.json()["data"]

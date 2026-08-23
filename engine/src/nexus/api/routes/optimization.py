@@ -12,7 +12,14 @@ from fastapi.responses import JSONResponse
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
-from nexus.api.schemas.integrations import NexusErrorEnvelope
+from nexus.api.routes.portfolios import _utc_now
+from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
+from nexus.api.schemas.optimization import (
+    OptimizationJobData,
+    OptimizationJobEnvelope,
+    OptimizationLifecycleData,
+    OptimizationLifecycleEnvelope,
+)
 from nexus.domain.decimal import DecimalString
 from nexus.optimizer.admission import admit_queued_job
 from nexus.optimizer.authority import load_admission_authority
@@ -25,7 +32,11 @@ from nexus.persistence.models.optimization import (
     ProposalPositionRecord,
 )
 from nexus.persistence.models.runtime import AuditEvent
-from nexus.reconciliation.persistence_errors import IdempotencyConflict
+from nexus.reconciliation.admission_claim import validate_request_identity
+from nexus.reconciliation.persistence_errors import (
+    BrokerSyncPersistenceError,
+    IdempotencyConflict,
+)
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +46,13 @@ _MAX_WHAT_IF_BYTES = 64 * 1024
 _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     status: {"model": NexusErrorEnvelope, "description": "Stable NEXUS error envelope."}
     for status in (401, 404, 409, 422)
+}
+_CREATE_RESPONSES = {
+    202: {
+        "description": "Optimization job accepted or replayed.",
+        "headers": {"Location": {"schema": {"type": "string"}}},
+    },
+    **_ERROR_RESPONSES,
 }
 
 
@@ -117,7 +135,11 @@ async def evaluate_what_if(
     }
 
 
-@router.post("/internal/v1/optimization-proposals", responses=_ERROR_RESPONSES)
+@router.post(
+    "/internal/v1/optimization-proposals",
+    response_model=OptimizationJobEnvelope,
+    responses=_CREATE_RESPONSES,
+)
 async def admit_optimization_proposal(
     request: Request,
     actor: VerifiedServiceActor = Depends(require_service_actor),
@@ -138,6 +160,7 @@ async def admit_optimization_proposal(
         raise NexusError(
             ErrorCode.VALIDATION_ERROR, "Idempotency-Key is required.", status_code=422
         )
+    _validate_claim(actor.actor_id, route, idempotency_key, request_hash)
     loaded = await load_admission_authority(
         session,
         portfolio_snapshot_id=body.portfolio_snapshot_id,
@@ -170,11 +193,16 @@ async def admit_optimization_proposal(
             "Idempotency key has a different request body.",
             status_code=409,
         ) from error
-    payload = {
-        "data": {"job_id": str(job.job_id), "status": "QUEUED"},
-        "meta": {"request_id": str(actor.request_id), "schema_version": "1"},
-    }
-    return JSONResponse(status_code=202, content=payload)
+    payload = OptimizationJobEnvelope(
+        data=OptimizationJobData(job_id=job.job_id, status="QUEUED"),
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=_utc_now(request)),
+    )
+    location = f"/api/v1/jobs/{job.job_id}"
+    return JSONResponse(
+        status_code=202,
+        content=payload.model_dump(mode="json"),
+        headers={"Location": location},
+    )
 
 
 @router.get("/internal/v1/optimization-proposals/{group_id}", responses=_ERROR_RESPONSES)
@@ -270,20 +298,27 @@ async def _transition_endpoint(
     request: Request,
     actor: VerifiedServiceActor,
     session: AsyncSession,
-) -> dict[str, object]:
+) -> OptimizationLifecycleEnvelope:
     raw_body = await request.body()
     idempotency_key = request.headers.get("Idempotency-Key")
     if not idempotency_key:
         raise NexusError(
             ErrorCode.VALIDATION_ERROR, "Idempotency-Key is required.", status_code=422
         )
+    request_hash = hashlib.sha256(target.encode() + b"\0" + raw_body).hexdigest()
+    _validate_claim(
+        actor.actor_id,
+        f"optimization-proposal-lifecycle:{group_id}",
+        idempotency_key,
+        request_hash,
+    )
     try:
         body = _LifecycleRequest.model_validate(json.loads(raw_body))
         group = await transition_group_idempotently(
             session,
             actor_id=actor.actor_id,
             idempotency_key=idempotency_key,
-            request_hash=hashlib.sha256(target.encode() + b"\0" + raw_body).hexdigest(),
+            request_hash=request_hash,
             group_id=group_id,
             target=target,  # type: ignore[arg-type]
             expected_version=body.version,
@@ -307,34 +342,41 @@ async def _transition_endpoint(
             "Proposal lifecycle transition was rejected.",
             status_code=409 if code == ErrorCode.VERSION_CONFLICT else 422,
         ) from error
-    return {
-        "data": {
-            "proposal_group_id": str(group.group_id),
-            "status": group.status,
-            "version": group.version,
-        }
-    }
+    return OptimizationLifecycleEnvelope(
+        data=OptimizationLifecycleData(
+            proposal_group_id=group.group_id, status=group.status, version=group.version  # type: ignore[arg-type]
+        ),
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=_utc_now(request)),
+    )
 
 
-@router.post("/internal/v1/optimization-proposals/{group_id}/shadow", responses=_ERROR_RESPONSES)
+@router.post(
+    "/internal/v1/optimization-proposals/{group_id}/shadow",
+    response_model=OptimizationLifecycleEnvelope,
+    responses=_ERROR_RESPONSES,
+)
 async def shadow_optimization_group(
     group_id: str,
     request: Request,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
-) -> dict[str, object]:
+) -> OptimizationLifecycleEnvelope:
     return await _transition_endpoint(
         _parse_group_id(group_id), "shadowing", request, actor, session
     )
 
 
-@router.post("/internal/v1/optimization-proposals/{group_id}/reject", responses=_ERROR_RESPONSES)
+@router.post(
+    "/internal/v1/optimization-proposals/{group_id}/reject",
+    response_model=OptimizationLifecycleEnvelope,
+    responses=_ERROR_RESPONSES,
+)
 async def reject_optimization_group(
     group_id: str,
     request: Request,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
-) -> dict[str, object]:
+) -> OptimizationLifecycleEnvelope:
     return await _transition_endpoint(
         _parse_group_id(group_id), "rejected", request, actor, session
     )
@@ -346,4 +388,13 @@ def _parse_group_id(value: str) -> UUID:
     except ValueError as error:
         raise NexusError(
             ErrorCode.VALIDATION_ERROR, "Proposal group id is invalid.", status_code=422
+        ) from error
+
+
+def _validate_claim(actor_id: str, route: str, key: str, request_hash: str) -> None:
+    try:
+        validate_request_identity(actor_id, route, key, request_hash)
+    except BrokerSyncPersistenceError as error:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "Idempotency identity is invalid.", status_code=422
         ) from error

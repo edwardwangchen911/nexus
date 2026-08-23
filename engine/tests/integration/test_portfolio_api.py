@@ -101,9 +101,7 @@ async def test_portfolio_list_is_stable_paginated_and_redacted(
             {"kind": "real_read_only", "limit": 2, "cursor": cursor}
         )
         second = await client.get(second_path, headers=_headers("GET", second_path))
-        drift_path = "/internal/v1/portfolios?" + urlencode(
-            {"kind": "shadow", "cursor": cursor}
-        )
+        drift_path = "/internal/v1/portfolios?" + urlencode({"kind": "shadow", "cursor": cursor})
         drift = await client.get(drift_path, headers=_headers("GET", drift_path))
         bad_path = "/internal/v1/portfolios?cursor=not-a-cursor"
         bad = await client.get(bad_path, headers=_headers("GET", bad_path))
@@ -263,9 +261,20 @@ async def test_sync_admission_requires_auth_idempotency_and_exact_body(
         extra = await client.post(
             _SYNC_PATH, content=extra_body, headers=_sync_headers(extra_body, "key-extra")
         )
+        oversized = await client.post(
+            _SYNC_PATH, content=body, headers=_sync_headers(body, "x" * 256)
+        )
+        malformed_body = b"{"
+        malformed = await client.post(
+            _SYNC_PATH, content=malformed_body, headers=_sync_headers(malformed_body, "malformed")
+        )
 
     assert unauthenticated.status_code == 401
     assert missing_key.status_code == extra.status_code == 422
+    assert oversized.status_code == malformed.status_code == 422
+    assert {oversized.json()["error"]["code"], malformed.json()["error"]["code"]} == {
+        "VALIDATION_ERROR"
+    }
 
 
 @pytest.mark.asyncio

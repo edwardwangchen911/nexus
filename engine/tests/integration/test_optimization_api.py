@@ -377,6 +377,9 @@ async def test_proposal_admission_returns_one_queued_job_for_idempotent_replay(
         replay_headers = headers("POST", path, body)
         replay_headers["Idempotency-Key"] = "proposal-key-711"
         replay = await client.post(path, content=body, headers=replay_headers)
+        oversized_headers = headers("POST", path, body)
+        oversized_headers["Idempotency-Key"] = "x" * 256
+        oversized_key = await client.post(path, content=body, headers=oversized_headers)
         changed = await client.post(
             path,
             content=body + b" ",
@@ -395,6 +398,10 @@ async def test_proposal_admission_returns_one_queued_job_for_idempotent_replay(
         )
     assert first.status_code == replay.status_code == 202
     assert first.json()["data"]["job_id"] == replay.json()["data"]["job_id"]
+    expected_location = f"/api/v1/jobs/{first.json()['data']['job_id']}"
+    assert first.headers["location"] == replay.headers["location"] == expected_location
+    assert oversized_key.status_code == 422
+    assert oversized_key.json()["error"]["code"] == "VALIDATION_ERROR"
     assert changed.status_code == 409
     assert changed.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
     assert {response.status_code for response in concurrent} == {202}
