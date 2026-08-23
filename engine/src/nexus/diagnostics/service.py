@@ -42,6 +42,18 @@ def diagnose_portfolio(snapshot: PortfolioSnapshot, market: MarketEvidence, hist
     currencies = {item.currency for item in snapshot.cash} | {item.currency for item in snapshot.positions}
     if len(currencies) > 1:
         items.append(_unknown_item("CURRENCY_EXPOSURE", "ratio", "FX_QUALIFIED_VIEW_MISSING", "portfolio:unqualified_fx", market))
+    elif currencies:
+        items.append(
+            _threshold_item(
+                "CURRENCY_EXPOSURE",
+                Decimal(1),
+                "ratio",
+                policy.currency_warning,
+                f"currency:{next(iter(currencies))}",
+                market,
+                warning=True,
+            )
+        )
     return _report(snapshot, policy, _optimization_need(items, history), tuple(items))
 
 
@@ -113,8 +125,8 @@ def _exposure_items(values: list[tuple[BrokerPosition, Decimal]], scope: str, ma
         definitions = market.risk_buckets.get(position.instrument_id)
         if not definitions:
             return [_unknown_item("RISK_BUCKET_EXPOSURE", "ratio", "RISK_BUCKET_MISSING", scope, market)]
-        for bucket in definitions:
-            buckets[bucket] += value / total
+        for bucket, bucket_weight in definitions.items():
+            buckets[bucket] += (value / total) * bucket_weight
     return [_upper_threshold_item(f"RISK_BUCKET_EXPOSURE:{bucket}", weight, policy.sector_warning, policy.sector_critical, scope, market) for bucket, weight in sorted(buckets.items())]
 
 

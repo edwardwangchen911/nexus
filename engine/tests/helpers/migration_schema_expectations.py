@@ -89,10 +89,10 @@ EXPECTED_FOREIGN_KEYS = {
     },
     "account_external_id_envelopes": ("fk_account_external_id_envelopes_account_id_accounts"),
     "portfolio_diagnostic_reports": {
-        "fk_portfolio_diagnostic_reports_portfolio_id_portfolios",
-        "fk_portfolio_diagnostic_reports_portfolio_snapshot_id_portfolio_snapshots",
-        "fk_portfolio_diagnostic_reports_policy_id_diagnostic_policies",
+        "fk_diag_reports_portfolio",
+        "fk_diag_reports_snapshot",
+        "fk_diag_reports_policy",
     },
-    "portfolio_diagnostic_items": "fk_portfolio_diagnostic_items_report_id_portfolio_diagnostic_reports",
-    "portfolio_diagnostic_evidence_refs": "fk_portfolio_diagnostic_evidence_refs_item_id_portfolio_diagnostic_items",
+    "portfolio_diagnostic_items": "fk_diag_items_report",
+    "portfolio_diagnostic_evidence_refs": "fk_diag_evidence_item",
 }

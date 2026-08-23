@@ -301,7 +301,7 @@ def _assert_reflected_schema(connection: Connection) -> None:
     assert isinstance(macro_value["type"], postgresql.NUMERIC)
     assert macro_value["type"].precision == 38
     assert macro_value["type"].scale == 12
-    for table_name in EXPECTED_TABLES:
+    for table_name in expected_tables:
         assert _created_at_trigger_exists(connection, table_name)
 
     context = MigrationContext.configure(connection)

@@ -5,6 +5,7 @@ from uuid import UUID
 from nexus.diagnostics.models import ComparableVariantEvidence, DiagnosticHistory, MarketEvidence
 from nexus.diagnostics.policy import RealAdvisoryPolicy
 from nexus.diagnostics.service import diagnose_portfolio
+from nexus.domain.evidence import EvidenceRef
 from nexus.providers.base import PriceBar, PriceSeries
 from nexus.providers.broker.base import BrokerPosition, CashBalance, PortfolioSnapshot
 
@@ -100,6 +101,9 @@ def test_critical_trigger_becomes_candidate_only_with_non_hold_comparison_eviden
             ComparableVariantEvidence(
                 variant="minimum_change",
                 proposal_group_id=UUID("0198d500-1000-7000-8000-000000000014"),
+                evidence_refs=(
+                    EvidenceRef(source="fixture", object_id="comparison-1", available_at=datetime(2026, 8, 23, tzinfo=UTC), location="fixture://comparison-1", content_hash="b" * 64),
+                ),
             ),
         ),
     )
@@ -141,6 +145,6 @@ def _complete_market(snapshot: PortfolioSnapshot) -> MarketEvidence:
         prices={instrument_id: series},
         adv20={instrument_id: Decimal("1000")},
         quality="PASS",
-        risk_buckets={instrument_id: ("equity",)},
+        risk_buckets={instrument_id: {"equity": Decimal(1)}},
         benchmark=series,
     )
