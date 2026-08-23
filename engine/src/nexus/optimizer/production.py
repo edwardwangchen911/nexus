@@ -41,6 +41,13 @@ class PersistedProposalGroup:
     replayed: bool
 
 
+@dataclass(frozen=True)
+class MinimumChangeInputs:
+    candidates: tuple[ReductionCandidate, ...]
+    excess_weight: Decimal
+    evidence_complete: bool
+
+
 async def build_and_persist_proposal_group(
     session: AsyncSession,
     *,
@@ -85,15 +92,15 @@ async def build_and_persist_proposal_group(
             valuation_time=loaded.persistence.valuation_time,
         )
     )
-    candidates, excess_weight = _minimum_change_inputs(snapshot, report)
+    minimum_inputs = _minimum_change_inputs(snapshot, report)
     group = build_proposal_group(
         snapshot,
         report,
         research,
         OptimizationPolicy.v1(),
         selection_authority=selection,
-        minimum_change_candidates=candidates,
-        excess_weight=excess_weight,
+        minimum_change_candidates=minimum_inputs.candidates,
+        excess_weight=minimum_inputs.excess_weight,
         portfolio_scope=loaded.persistence.portfolio_scope,  # type: ignore[arg-type]
     ).model_copy(
         update={
@@ -103,7 +110,7 @@ async def build_and_persist_proposal_group(
             "cost_model_version": "cost_policy_v1",
         }
     )
-    comparisons = _comparison_inputs(group, report, excess_weight)
+    comparisons = _comparison_inputs(group, report, minimum_inputs)
     return await create_proposal_group_idempotently(
         session,
         actor_id=actor_id,
@@ -117,20 +124,30 @@ async def build_and_persist_proposal_group(
 
 def _minimum_change_inputs(
     snapshot: PortfolioSnapshot, report: PortfolioDiagnosticReport
-) -> tuple[tuple[ReductionCandidate, ...], Decimal]:
-    """Convert only typed reduce-only diagnostic excess into exact one-bp inputs."""
-    violations = tuple(
-        Decimal(item.metric_value) - Decimal(item.reference_limit)
-        for item in report.items
-        if item.actionability == "reduce_only"
-        and item.metric_value is not None
-        and item.reference_limit is not None
-        and Decimal(item.metric_value) > Decimal(item.reference_limit)
-    )
+) -> MinimumChangeInputs:
+    """Derive reductions only when Task 11 proves excess, contribution, and liquidity."""
+    violations = tuple(item for item in report.items if item.actionability == "reduce_only")
     if not violations:
-        return (), Decimal("0")
+        return MinimumChangeInputs((), Decimal("0"), True)
+    as_of = report.snapshot_as_of
+    if as_of is None or any(
+        item.metric_value is None
+        or item.reference_limit is None
+        or item.unit != "ratio"
+        or Decimal(item.metric_value) <= Decimal(item.reference_limit)
+        or not item.evidence_refs
+        or any(ref.available_at > as_of for ref in item.evidence_refs)
+        or item.diagnostic_code not in {"CONCENTRATION_TOP1", "CONCENTRATION_TOP3"}
+        for item in violations
+    ):
+        return MinimumChangeInputs((), Decimal("0"), False)
     one_bp = Decimal("0.0001")
-    excess = (max(violations) / one_bp).to_integral_value(rounding=ROUND_CEILING) * one_bp
+    excess = max(
+        Decimal(item.metric_value) - Decimal(item.reference_limit)
+        for item in violations
+        if item.metric_value is not None and item.reference_limit is not None
+    )
+    excess = (excess / one_bp).to_integral_value(rounding=ROUND_CEILING) * one_bp
     values = tuple(
         (position.instrument_id, position.quantity * (position.current_price or Decimal("0")))
         for position in snapshot.positions
@@ -140,23 +157,53 @@ def _minimum_change_inputs(
     )
     if total <= 0:
         raise ValueError("minimum-change baseline value is unavailable")
+    security_total = sum((value for _, value in values), Decimal("0"))
+    if security_total <= 0:
+        return MinimumChangeInputs((), Decimal("0"), False)
+    ranked = tuple(sorted(values, key=lambda row: (-row[1], row[0])))
+    contribution: dict[UUID, Decimal] = {instrument_id: Decimal("0") for instrument_id, _ in values}
+    severity: dict[UUID, int] = {instrument_id: 0 for instrument_id, _ in values}
+    ranks = {"info": 0, "warning": 1, "critical": 2}
+    for violation in violations:
+        contributor_count = 1 if violation.diagnostic_code == "CONCENTRATION_TOP1" else 3
+        for instrument_id, value in ranked[:contributor_count]:
+            contribution[instrument_id] = max(contribution[instrument_id], value / security_total)
+            severity[instrument_id] = max(severity[instrument_id], ranks[violation.severity])
+    liquidity: dict[UUID, Decimal] = {}
+    for instrument_id, _ in values:
+        matches = tuple(
+            item for item in report.items
+            if item.diagnostic_code == f"LIQUIDITY_DAYS_TO_EXIT:{instrument_id}"
+        )
+        if len(matches) != 1:
+            return MinimumChangeInputs((), Decimal("0"), False)
+        item = matches[0]
+        if (
+            item.metric_value is None
+            or item.unknown_reason is not None
+            or Decimal(item.metric_value) < 0
+            or not item.evidence_refs
+            or any(ref.available_at > as_of for ref in item.evidence_refs)
+        ):
+            return MinimumChangeInputs((), Decimal("0"), False)
+        liquidity[instrument_id] = Decimal("1") / (Decimal("1") + Decimal(item.metric_value))
     candidates = tuple(
         ReductionCandidate(
             instrument_id=instrument_id,
             current_weight=value / total,
-            contribution=value / total,
-            severity_rank=2,
-            liquidity_score=Decimal("0"),
+            contribution=contribution[instrument_id],
+            severity_rank=severity[instrument_id],
+            liquidity_score=liquidity[instrument_id],
         )
         for instrument_id, value in values
     )
-    return candidates, excess
+    return MinimumChangeInputs(candidates, excess, True)
 
 
 def _comparison_inputs(
     group: OptimizationProposalGroup,
     report: PortfolioDiagnosticReport,
-    excess_weight: Decimal,
+    minimum_inputs: MinimumChangeInputs,
 ) -> tuple[ProposalComparisonInput, ProposalComparisonInput, ProposalComparisonInput]:
     violations = sum(
         item.severity in {"warning", "critical"} for item in report.items
@@ -167,30 +214,34 @@ def _comparison_inputs(
             proposal.variant == "strategy_target"
             and not proposal.strategy_evidence_complete
         )
+        incomplete_minimum = (
+            proposal.variant == "minimum_change" and not minimum_inputs.evidence_complete
+        )
         violation_count = max(
             0,
             violations
-            - int(proposal.variant == "minimum_change" and excess_weight > 0),
+            - int(proposal.variant == "minimum_change" and minimum_inputs.excess_weight > 0),
         )
         dimensions = evaluate_dimensions(
             proposal,
             report,
             hard_violations=violation_count,
-            cost=None if incomplete_strategy else Decimal("0"),
+            cost=None if incomplete_strategy or incomplete_minimum else Decimal("0"),
         )
         result.append(
             ProposalComparisonInput(
                 variant=proposal.variant,
                 violation_count=violation_count,
                 turnover=proposal.turnover,
-                cost=Decimal("0") if not incomplete_strategy else None,
+                cost=Decimal("0") if not incomplete_strategy and not incomplete_minimum else None,
                 unknown_metrics=dimensions.unknown_ranked_dimensions
-                + (("strategy_evidence",) if incomplete_strategy else ()),
+                + (("strategy_evidence",) if incomplete_strategy else ())
+                + (("minimum_change_evidence",) if incomplete_minimum else ()),
                 requires_fx=False,
                 source_conflict=False,
                 partial=False,
                 cost_complete=True,
-                evidence_complete=not incomplete_strategy,
+                evidence_complete=not incomplete_strategy and not incomplete_minimum,
                 dimensions=dimensions,
             )
         )

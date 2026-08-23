@@ -42,7 +42,12 @@ _ADMISSION_ID = UUID("0198d500-1000-7000-8000-000000000b03")
 _OPTIMIZER_POLICY_ID = UUID("e690b91d-1e24-5de3-b2b2-566a463fca25")
 
 
-async def _seed_authority(database_url: str, selected_id: UUID | None = INSTRUMENT_ID) -> None:
+async def _seed_authority(
+    database_url: str,
+    selected_id: UUID | None = INSTRUMENT_ID,
+    *,
+    include_liquidity: bool = True,
+) -> None:
     await seed_portfolio_list(database_url)
     factory = session_factory(settings(database_url))
     async with factory() as session, session.begin():
@@ -84,15 +89,32 @@ async def _seed_authority(database_url: str, selected_id: UUID | None = INSTRUME
         )
         session.add(item)
         await session.flush()
-        session.add(
+        evidence_items = [item]
+        if include_liquidity:
+            liquidity = PortfolioDiagnosticItemRecord(
+                report_id=report.id,
+                diagnostic_code=f"LIQUIDITY_DAYS_TO_EXIT:{INSTRUMENT_ID}",
+                metric_value=Decimal("1"),
+                unit="trading_days",
+                reference_limit=Decimal("2"),
+                policy_scope="currency:HKD",
+                severity="info",
+                actionability="monitor",
+                unknown_reason=None,
+            )
+            session.add(liquidity)
+            evidence_items.append(liquidity)
+            await session.flush()
+        session.add_all(
             PortfolioDiagnosticEvidenceRefRecord(
-                item_id=item.id,
+                item_id=evidence_item.id,
                 source="nexus_db",
-                object_id="diagnostic:fixture",
+                object_id=f"diagnostic:{evidence_item.diagnostic_code}",
                 available_at=_CLOCK,
-                location="db://diagnostics/fixture",
+                location=f"db://diagnostics/{evidence_item.id}",
                 content_hash="e" * 64,
             )
+            for evidence_item in evidence_items
         )
         if selected_id is not None:
             session.add(
@@ -246,6 +268,43 @@ async def test_production_builder_absent_selection_is_only_strategy_noop(
     assert strategy_position is not None
     assert strategy_position.current_weight == strategy_position.target_weight
     assert comparison is not None and comparison.non_executable is True
+
+
+@pytest.mark.asyncio
+async def test_production_builder_missing_liquidity_makes_minimum_noop_nonshadowable(
+    migrated_database_url: str,
+) -> None:
+    """An unproved zero liquidity score must never choose a reduction candidate."""
+    await _seed_authority(migrated_database_url, include_liquidity=False)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        result = await build_and_persist_proposal_group(
+            session,
+            actor_id="builder",
+            idempotency_key="builder-missing-liquidity",
+            request_hash="5" * 64,
+            admission_authority_id=_ADMISSION_ID,
+            research=(),
+        )
+    async with factory() as session:
+        minimum = await session.scalar(
+            select(OptimizationProposalRecord).where(
+                OptimizationProposalRecord.proposal_group_id == result.group_id,
+                OptimizationProposalRecord.variant == "minimum_change",
+            )
+        )
+        assert minimum is not None
+        position = await session.scalar(
+            select(ProposalPositionRecord).where(ProposalPositionRecord.proposal_id == minimum.id)
+        )
+        comparison = await session.scalar(
+            select(ProposalComparisonRecord).where(
+                ProposalComparisonRecord.proposal_id == minimum.id
+            )
+        )
+    assert position is not None and position.target_weight == position.current_weight
+    assert comparison is not None and comparison.non_executable is True
+    assert "minimum_change_evidence" in comparison.metrics["unknown_metrics"]
 
 
 @pytest.mark.asyncio
