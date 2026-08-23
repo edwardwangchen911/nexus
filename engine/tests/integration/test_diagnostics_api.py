@@ -6,6 +6,7 @@ import httpx
 import pytest
 from helpers.portfolio_api import PORTFOLIOS, app, headers, seed_portfolio_list, settings
 from nexus.api.routes.diagnostics import router as diagnostics_router
+from nexus.diagnostics.assembler import DiagnosticEvidenceCapabilityUnavailable
 from nexus.diagnostics.models import DiagnosticItem, PortfolioDiagnosticReport
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID, load_real_advisory_policy_v1
 from nexus.diagnostics.repository import (
@@ -149,21 +150,18 @@ async def test_database_triggers_reject_update_and_delete_for_every_diagnostic_r
                         )
 
 @pytest.mark.asyncio
-async def test_production_diagnosis_accepts_only_database_snapshot_authority(
+async def test_production_diagnosis_requires_artifact_transport_capability(
     migrated_database_url: str,
 ) -> None:
     await seed_portfolio_list(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session, session.begin():
-        report = await diagnose_and_persist(
-            session,
-            portfolio_id=PORTFOLIOS[0],
-            snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
-        )
-
-    assert report.optimization_need == "RESEARCH_REQUIRED"
-    assert report.trading_day is not None
-    assert report.items[0].unknown_reason == "MARKET_EVIDENCE_UNAVAILABLE"
+        with pytest.raises(DiagnosticEvidenceCapabilityUnavailable):
+            await diagnose_and_persist(
+                session,
+                portfolio_id=PORTFOLIOS[0],
+                snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
+            )
 
 
 @pytest.mark.asyncio

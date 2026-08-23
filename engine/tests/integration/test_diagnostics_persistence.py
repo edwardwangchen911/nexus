@@ -22,7 +22,7 @@ SNAPSHOT_ID = UUID("0198d500-1000-7000-8000-000000000041")
 def test_production_diagnosis_has_no_caller_snapshot_history_or_comparable_parameters() -> None:
     parameters = tuple(inspect.signature(diagnose_and_persist).parameters)
 
-    assert parameters == ("session", "portfolio_id", "snapshot_id")
+    assert parameters == ("session", "portfolio_id", "snapshot_id", "artifact_reader")
 
 
 @pytest.mark.asyncio

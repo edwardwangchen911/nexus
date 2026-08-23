@@ -41,15 +41,21 @@ from nexus.providers.broker.base import (
 
 
 async def persist_report(
-    session: AsyncSession, *, portfolio_id: UUID, report: PortfolioDiagnosticReport
+    session: AsyncSession,
+    *,
+    portfolio_id: UUID,
+    report: PortfolioDiagnosticReport,
+    diagnostic_input_hash: str = "0" * 64,
 ) -> UUID:
     """Insert one report graph atomically after deriving snapshot ownership from the database."""
     policy = await load_real_advisory_policy_v1(session)
     snapshot = await session.scalar(
-        select(PortfolioSnapshotRecord).where(
+        select(PortfolioSnapshotRecord)
+        .where(
             PortfolioSnapshotRecord.id == report.portfolio_snapshot_id,
             PortfolioSnapshotRecord.portfolio_id == portfolio_id,
-        ).with_for_update()
+        )
+        .with_for_update()
     )
     if snapshot is None or report.policy_version != policy.version:
         raise ValueError("diagnostic report snapshot or policy authority is invalid")
@@ -57,11 +63,13 @@ async def persist_report(
         raise ValueError("diagnostic report trading day must match its frozen snapshot")
     if snapshot.as_of is None or report.snapshot_as_of not in {None, snapshot.as_of}:
         raise ValueError("diagnostic report timestamp must match its frozen snapshot")
+    if len(diagnostic_input_hash) != 64 or any(
+        character not in "0123456789abcdef" for character in diagnostic_input_hash
+    ):
+        raise ValueError("diagnostic input hash must be lowercase SHA-256")
     report = report.model_copy(update={"snapshot_as_of": snapshot.as_of})
     if any(
-        ref.available_at > snapshot.as_of
-        for item in report.items
-        for ref in item.evidence_refs
+        ref.available_at > snapshot.as_of for item in report.items for ref in item.evidence_refs
     ):
         raise ValueError("diagnostic evidence is unavailable at frozen snapshot")
     existing = await session.scalar(
@@ -71,7 +79,9 @@ async def persist_report(
         )
     )
     if existing is not None:
-        if not _reports_equivalent(await _read_report(session, existing), report):
+        if existing.diagnostic_input_hash != diagnostic_input_hash or not _reports_equivalent(
+            await _read_report(session, existing), report
+        ):
             raise ValueError("diagnostic report replay conflicts with immutable report")
         return existing.id
     stored = PortfolioDiagnosticReportRecord(
@@ -82,6 +92,7 @@ async def persist_report(
         policy_id=REAL_ADVISORY_POLICY_ID,
         policy_version=report.policy_version,
         optimization_need=report.optimization_need,
+        diagnostic_input_hash=diagnostic_input_hash,
     )
     session.add(stored)
     await session.flush()
@@ -281,13 +292,11 @@ async def load_history(
                 select(PortfolioDiagnosticReportRecord)
                 .where(
                     PortfolioDiagnosticReportRecord.portfolio_id == portfolio_id,
-                    PortfolioDiagnosticReportRecord.portfolio_snapshot_id
-                    != current_snapshot_id,
+                    PortfolioDiagnosticReportRecord.portfolio_snapshot_id != current_snapshot_id,
                     PortfolioDiagnosticReportRecord.policy_id == REAL_ADVISORY_POLICY_ID,
                     PortfolioDiagnosticReportRecord.policy_version == policy_version,
                     PortfolioDiagnosticReportRecord.snapshot_as_of < current_snapshot_as_of,
-                    PortfolioDiagnosticReportRecord.trading_day
-                    < current_snapshot_as_of.date(),
+                    PortfolioDiagnosticReportRecord.trading_day < current_snapshot_as_of.date(),
                 )
                 .order_by(
                     PortfolioDiagnosticReportRecord.snapshot_as_of,

@@ -60,6 +60,7 @@ class PortfolioDiagnosticReportRecord(ImmutableCreatedAt, Base):
     policy_id: Mapped[UUID] = mapped_column(ForeignKey("diagnostic_policies.id"))
     policy_version: Mapped[str] = mapped_column(String(100))
     optimization_need: Mapped[str] = mapped_column(String(40))
+    diagnostic_input_hash: Mapped[str] = mapped_column(String(64))
 
 
 class PortfolioDiagnosticItemRecord(ImmutableCreatedAt, Base):

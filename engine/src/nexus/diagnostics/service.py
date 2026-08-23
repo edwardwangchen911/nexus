@@ -5,8 +5,11 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.diagnostics.artifacts import ArtifactByteReader
+from nexus.diagnostics.assembler import assemble_diagnostic_evidence
 from nexus.diagnostics.decision import optimization_need as _optimization_need
 from nexus.diagnostics.evidence import EvidenceResolver, EvidenceResult
+from nexus.diagnostics.input_hash import diagnostic_input_hash
 from nexus.diagnostics.items import item as _item
 from nexus.diagnostics.items import threshold_item as _threshold_item
 from nexus.diagnostics.items import unknown_item as _unknown_item
@@ -79,9 +82,7 @@ def diagnose_portfolio(
             "RESEARCH_REQUIRED",
             tuple(missing_items),
         )
-    items = evaluate_currency_scopes(
-        snapshot, market, policy, resolver, snapshot_evidence.refs
-    )
+    items = evaluate_currency_scopes(snapshot, market, policy, resolver, snapshot_evidence.refs)
     currencies = {item.currency for item in snapshot.cash} | {
         item.currency for item in snapshot.positions
     }
@@ -154,6 +155,7 @@ async def diagnose_and_persist(
     *,
     portfolio_id: UUID,
     snapshot_id: UUID,
+    artifact_reader: ArtifactByteReader | None = None,
 ) -> PortfolioDiagnosticReport:
     """Production entry point accepts IDs only and fails closed without stored market evidence."""
     policy = await load_real_advisory_policy_v1(session)
@@ -170,9 +172,25 @@ async def diagnose_and_persist(
         current_snapshot_as_of=snapshot.as_of,
         policy_version=policy.version,
     )
-    market = MarketEvidence(quality="PARTIAL", identities=identities)
-    report = diagnose_portfolio(snapshot, market, history, policy)
-    await persist_report(session, portfolio_id=portfolio_id, report=report)
+    assembly = await assemble_diagnostic_evidence(
+        session,
+        snapshot=snapshot,
+        identities=identities,
+        artifact_reader=artifact_reader,
+    )
+    report = diagnose_portfolio(snapshot, assembly.market, history, policy)
+    input_hash = diagnostic_input_hash(
+        snapshot=snapshot,
+        assembly=assembly,
+        history=history,
+        policy_version=policy.version,
+    )
+    await persist_report(
+        session,
+        portfolio_id=portfolio_id,
+        report=report,
+        diagnostic_input_hash=input_hash,
+    )
     return report
 
 
