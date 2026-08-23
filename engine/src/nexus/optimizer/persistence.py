@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.optimizer.compare import ComparisonDimensions
 from nexus.optimizer.models import OptimizationProposalGroup
 from nexus.persistence.models.optimization import (
     OptimizationProposalGroupRecord,
@@ -55,6 +56,7 @@ class ProposalComparisonInput:
     source_conflict: bool
     partial: bool
     cost_complete: bool
+    dimensions: ComparisonDimensions
     constraint_complete: bool = True
     eligibility_complete: bool = True
     evidence_complete: bool = True
@@ -71,7 +73,7 @@ class ProposalComparisonInput:
     @property
     def non_executable(self) -> bool:
         return (
-            self.cost is None
+            not self.dimensions.all_ranked_dimensions_known
             or bool(self.unknown_metrics)
             or self.requires_fx
             or self.source_conflict
@@ -83,7 +85,7 @@ class ProposalComparisonInput:
             or self.stale
         )
 
-    def metrics_payload(self) -> dict[str, object]:
+    def metrics_payload(self, authority: ProposalPersistenceAuthority) -> dict[str, object]:
         return {
             "violation_count": self.violation_count,
             "turnover": str(self.turnover),
@@ -94,6 +96,14 @@ class ProposalComparisonInput:
             "evidence_complete": self.evidence_complete,
             "stale": self.stale,
             "ranking_eligible": not self.non_executable,
+            "dimensions": self.dimensions.model_dump(mode="json"),
+            "authority": {
+                "diagnostic_report_id": str(authority.diagnostic_report_id),
+                "data_snapshot_id": str(authority.data_snapshot_id),
+                "source_policy_id": str(authority.source_policy_id),
+                "optimizer_policy_id": str(authority.optimizer_policy_id),
+                "cost_policy_id": str(authority.cost_policy_id),
+            },
         }
 
 
@@ -162,7 +172,7 @@ async def persist_proposal_group(
         session.add(
             ProposalComparisonRecord(
                 proposal_id=child.id,
-                metrics=comparison.metrics_payload(),
+                metrics=comparison.metrics_payload(authority),
                 tax_impact="unknown",
                 requires_fx=comparison.requires_fx,
                 non_executable=comparison.non_executable,

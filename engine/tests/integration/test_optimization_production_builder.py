@@ -183,6 +183,14 @@ async def test_production_builder_uses_frozen_diagnostics_selection_and_atomic_w
             )
             for child in children
         }
+        comparisons = {
+            child.variant: await session.scalar(
+                select(ProposalComparisonRecord).where(
+                    ProposalComparisonRecord.proposal_id == child.id
+                )
+            )
+            for child in children
+        }
     assert group is not None
     assert (group.selection_authority_id, group.data_snapshot_id) == (_SELECTION_ID, _DATA_ID)
     minimum = positions["minimum_change"][0]
@@ -190,6 +198,14 @@ async def test_production_builder_uses_frozen_diagnostics_selection_and_atomic_w
     assert minimum.target_weight == minimum.current_weight - Decimal("0.0002")
     assert strategy.target_weight == Decimal("0.125000000000")
     assert tuple(child.strategy_evidence_complete for child in children) == (False, False, True)
+    hold_metrics = comparisons["hold_current"].metrics["dimensions"]  # type: ignore[union-attr,index]
+    minimum_metrics = comparisons["minimum_change"].metrics["dimensions"]  # type: ignore[union-attr,index]
+    assert Decimal(minimum_metrics["top1"]["value"]) < Decimal(hold_metrics["top1"]["value"])
+    assert minimum_metrics["sector_exposure"] == {
+        "status": "unknown",
+        "value": None,
+        "reason": "SECTOR_EXPOSURE_NOT_PROVEN",
+    }
 
 
 @pytest.mark.asyncio

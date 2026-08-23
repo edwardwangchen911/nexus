@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.diagnostics.models import PortfolioDiagnosticReport
 from nexus.diagnostics.repository import _read_report, load_frozen_snapshot
 from nexus.optimizer.authority import load_admission_authority
+from nexus.optimizer.compare import evaluate_dimensions
 from nexus.optimizer.minimum_change import ReductionCandidate
 from nexus.optimizer.models import (
     OptimizationPolicy,
@@ -166,24 +167,31 @@ def _comparison_inputs(
             proposal.variant == "strategy_target"
             and not proposal.strategy_evidence_complete
         )
+        violation_count = max(
+            0,
+            violations
+            - int(proposal.variant == "minimum_change" and excess_weight > 0),
+        )
+        dimensions = evaluate_dimensions(
+            proposal,
+            report,
+            hard_violations=violation_count,
+            cost=None if incomplete_strategy else Decimal("0"),
+        )
         result.append(
             ProposalComparisonInput(
                 variant=proposal.variant,
-                violation_count=max(
-                    0,
-                    violations
-                    - int(
-                        proposal.variant == "minimum_change" and excess_weight > 0
-                    ),
-                ),
+                violation_count=violation_count,
                 turnover=proposal.turnover,
                 cost=Decimal("0") if not incomplete_strategy else None,
-                unknown_metrics=("strategy_evidence",) if incomplete_strategy else (),
+                unknown_metrics=dimensions.unknown_ranked_dimensions
+                + (("strategy_evidence",) if incomplete_strategy else ()),
                 requires_fx=False,
                 source_conflict=False,
                 partial=False,
                 cost_complete=True,
                 evidence_complete=not incomplete_strategy,
+                dimensions=dimensions,
             )
         )
     return result[0], result[1], result[2]

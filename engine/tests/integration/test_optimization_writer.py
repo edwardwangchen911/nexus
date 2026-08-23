@@ -16,6 +16,7 @@ from helpers.portfolio_api import (
     settings,
 )
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
+from nexus.optimizer.compare import ComparisonDimensions, TypedMetric
 from nexus.optimizer.cost_policy import COST_POLICY_ID
 from nexus.optimizer.models import OptimizationProposal, OptimizationProposalGroup, ProposalPosition
 from nexus.optimizer.persistence import (
@@ -43,6 +44,17 @@ _OPTIMIZER_POLICY_ID = UUID("e690b91d-1e24-5de3-b2b2-566a463fca25")
 _CLOCK = datetime(2026, 8, 24, tzinfo=UTC)
 
 
+def _known_dimensions() -> ComparisonDimensions:
+    metric = TypedMetric.known
+    return ComparisonDimensions(
+        hard_violations=0,
+        top1=metric("1"), top3=metric("1"), hhi=metric("1"),
+        sector_exposure=metric("1"), currency_exposure=metric("1"),
+        volatility=metric("1"), drawdown=metric("1"), correlation=metric("1"),
+        liquidity=metric("1"), turnover=metric("0"), cost=metric("0"),
+    )
+
+
 @pytest.mark.asyncio
 async def test_writer_commits_exact_group_children_positions_and_comparisons_atomically(
     migrated_database_url: str,
@@ -63,6 +75,7 @@ async def test_writer_commits_exact_group_children_positions_and_comparisons_ato
             source_conflict=False,
             partial=False,
             cost_complete=True,
+            dimensions=_known_dimensions(),
         )
         for variant in ("hold_current", "minimum_change", "strategy_target")
     )
@@ -101,6 +114,30 @@ async def test_writer_commits_exact_group_children_positions_and_comparisons_ato
     )
     assert all(len(item["positions"]) == 1 for item in body["proposals"])
     assert all(item["comparison"]["tax_impact"] == "unknown" for item in body["proposals"])
+    for item in body["proposals"]:
+        metrics = item["comparison"]["metrics"]
+        assert set(metrics["dimensions"]) == {
+            "hard_violations",
+            "top1",
+            "top3",
+            "hhi",
+            "sector_exposure",
+            "currency_exposure",
+            "volatility",
+            "drawdown",
+            "correlation",
+            "liquidity",
+            "turnover",
+            "cost",
+            "tax_impact",
+        }
+        assert metrics["authority"] == {
+            "diagnostic_report_id": str(authority.diagnostic_report_id),
+            "data_snapshot_id": str(authority.data_snapshot_id),
+            "source_policy_id": str(authority.source_policy_id),
+            "optimizer_policy_id": str(authority.optimizer_policy_id),
+            "cost_policy_id": str(authority.cost_policy_id),
+        }
 
 
 @pytest.mark.asyncio
@@ -353,6 +390,7 @@ def _comparisons() -> tuple[
             source_conflict=False,
             partial=False,
             cost_complete=True,
+            dimensions=_known_dimensions(),
         )
         for variant in ("hold_current", "minimum_change", "strategy_target")
     )  # type: ignore[return-value]
