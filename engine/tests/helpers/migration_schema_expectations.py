@@ -50,6 +50,18 @@ EXPECTED_TABLES = {
     "proposal_comparisons",
 }
 
+OPTIONAL_MIGRATION_TABLE_GROUPS = (
+    frozenset({
+        "diagnostic_policies", "portfolio_diagnostic_reports",
+        "portfolio_diagnostic_items", "portfolio_diagnostic_evidence_refs",
+    }),
+    frozenset({
+        "optimization_policies", "cost_policies", "baseline_selection_authorities",
+        "optimization_admission_authorities", "optimization_proposal_groups",
+        "optimization_proposals", "proposal_positions", "proposal_comparisons",
+    }),
+)
+
 EXPECTED_FOREIGN_KEYS = {
     "quality_reports": "fk_quality_reports_data_snapshot_id_data_snapshots",
     "price_series_manifests": "fk_price_series_manifests_data_artifact_id_data_artifacts",

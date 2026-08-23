@@ -19,7 +19,11 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from helpers.migration_assertions import created_at_trigger_exists
-from helpers.migration_schema_expectations import EXPECTED_FOREIGN_KEYS, EXPECTED_TABLES
+from helpers.migration_schema_expectations import (
+    EXPECTED_FOREIGN_KEYS,
+    EXPECTED_TABLES,
+    OPTIONAL_MIGRATION_TABLE_GROUPS,
+)
 
 
 def _seed_0001_integration_status(
@@ -247,27 +251,11 @@ async def _assert_schema_async(database_url: str) -> None:
 def _assert_reflected_schema(connection: Connection) -> None:
     inspector = inspect(connection)
     actual_tables = set(inspector.get_table_names()) - {"alembic_version"}
-    diagnostic_tables = {
-        "diagnostic_policies",
-        "portfolio_diagnostic_reports",
-        "portfolio_diagnostic_items",
-        "portfolio_diagnostic_evidence_refs",
-    }
-    optimization_tables = {
-        "optimization_policies",
-        "cost_policies",
-        "baseline_selection_authorities",
-        "optimization_admission_authorities",
-        "optimization_proposal_groups",
-        "optimization_proposals",
-        "proposal_positions",
-        "proposal_comparisons",
-    }
+    diagnostic_tables = OPTIONAL_MIGRATION_TABLE_GROUPS[0]
     expected_tables = set(EXPECTED_TABLES)
-    if not diagnostic_tables <= actual_tables:
-        expected_tables -= diagnostic_tables
-    if not optimization_tables <= actual_tables:
-        expected_tables -= optimization_tables
+    for optional_group in OPTIONAL_MIGRATION_TABLE_GROUPS:
+        if not optional_group <= actual_tables:
+            expected_tables -= optional_group
     assert actual_tables == expected_tables, {
         "unexpected": sorted(actual_tables - expected_tables),
         "missing": sorted(expected_tables - actual_tables),
