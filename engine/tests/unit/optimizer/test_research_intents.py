@@ -1,6 +1,9 @@
 # ruff: noqa: E501
 """Strict, non-executable Agent research intent contracts."""
 
+from json import loads
+from pathlib import Path
+
 import pytest
 from jsonschema import Draft202012Validator
 from nexus.strategy.intents import ResearchIntent
@@ -35,13 +38,13 @@ def test_research_intent_rejects_agent_numeric_targets_and_unsafe_text() -> None
         ],
         "counter_theses": [],
         "uncertainties": ["margin pressure"],
-        "invalidation_conditions": ["price_below_200d_sma"],
-        "entry_conditions": ["quality_pass"],
-        "exit_conditions": ["invalidation_triggered"],
+        "invalidation_conditions": [_condition("price_below_200d_sma", body_ref=None)],
+        "entry_conditions": [_condition("quality_pass", body_ref=None)],
+        "exit_conditions": [_condition("invalidation_triggered", body_ref=None)],
         "valid_until": "2026-09-01T00:00:00Z",
         "quality_status": "complete",
         "evidence_audit": "complete",
-        "role_votes": {"fundamental": "support"},
+        "role_votes": [{"role": "fundamental", "vote": "support"}],
         "disagreement": "none",
         "strategy_version": "baseline_v1",
         "model_version": "model_fixture_v1",
@@ -57,7 +60,14 @@ def test_research_intent_rejects_agent_numeric_targets_and_unsafe_text() -> None
             }
         ],
     }
+    condition_ref = body["evidence_refs"][0]
+    for field in ("invalidation_conditions", "entry_conditions", "exit_conditions"):
+        body[field][0]["evidence_refs"] = [condition_ref]
     assert ResearchIntent.model_validate(body).display_symbol == "ABC"
+    schema_path = Path(__file__).parents[4] / "contracts/agent/research-intent-v1.schema.json"
+    validator = Draft202012Validator(loads(schema_path.read_text()))
+    assert not list(validator.iter_errors(body))
+    assert list(validator.iter_errors({**body, "entry_conditions": ["quality_pass"]}))
     for forbidden in (
         {"target_weight": "0.2"},
         {
@@ -71,6 +81,16 @@ def test_research_intent_rejects_agent_numeric_targets_and_unsafe_text() -> None
     ):
         with pytest.raises(ValidationError):
             ResearchIntent.model_validate({**body, **forbidden})
+    with pytest.raises(ValidationError):
+        ResearchIntent.model_validate({**body, "entry_conditions": ["quality_pass"]})
+    with pytest.raises(ValidationError):
+        ResearchIntent.model_validate({
+            **body,
+            "role_votes": [
+                {"role": "fundamental", "vote": "support"},
+                {"role": "fundamental", "vote": "oppose"},
+            ],
+        })
 
 
 def test_research_intent_json_schema_rejects_unsafe_agent_text() -> None:
@@ -104,7 +124,7 @@ def test_research_intent_json_schema_rejects_unsafe_agent_text() -> None:
         "valid_until": "2026-09-01T00:00:00Z",
         "quality_status": "complete",
         "evidence_audit": "complete",
-        "role_votes": {"fundamental": "support"},
+        "role_votes": [{"role": "fundamental", "vote": "support"}],
         "disagreement": "none",
         "strategy_version": "baseline_v1",
         "model_version": "model_fixture_v1",
@@ -145,7 +165,7 @@ def test_research_intent_json_schema_rejects_external_evidence_url() -> None:
                 "valid_until": "2026-09-01T00:00:00Z",
                 "quality_status": "complete",
                 "evidence_audit": "complete",
-                "role_votes": {"fundamental": "support"},
+                "role_votes": [{"role": "fundamental", "vote": "support"}],
                 "disagreement": "none",
                 "strategy_version": "baseline_v1",
                 "model_version": "model_fixture_v1",
@@ -163,3 +183,13 @@ def test_research_intent_json_schema_rejects_external_evidence_url() -> None:
             }
         )
     )
+
+
+def _condition(signal: str, body_ref: object) -> dict[str, object]:
+    return {
+        "signal": signal,
+        "operator": "is_true",
+        "threshold": True,
+        "unit": "boolean",
+        "evidence_refs": [] if body_ref is None else [body_ref],
+    }

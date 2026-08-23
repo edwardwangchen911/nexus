@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nexus.domain.time import require_utc
 
@@ -10,10 +10,12 @@ from nexus.domain.time import require_utc
 class EvidenceRef(BaseModel):
     """A point-in-time reference to immutable source content."""
 
-    source: str
-    object_id: str
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source: str = Field(min_length=1, max_length=1000)
+    object_id: str = Field(min_length=1, max_length=1000)
     available_at: datetime
-    location: str
+    location: str = Field(min_length=1, max_length=1000)
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("available_at")

@@ -18,13 +18,22 @@
     "theses": {"type": "array", "maxItems": 5, "items": {"$ref": "#/$defs/claim"}},
     "counter_theses": {"type": "array", "maxItems": 5, "items": {"$ref": "#/$defs/claim"}},
     "uncertainties": {"type": "array", "maxItems": 10, "items": {"$ref": "#/$defs/safeText"}},
-    "invalidation_conditions": {"type": "array", "maxItems": 10, "items": {"$ref": "#/$defs/safeText"}},
-    "entry_conditions": {"type": "array", "maxItems": 10, "items": {"$ref": "#/$defs/safeText"}},
-    "exit_conditions": {"type": "array", "maxItems": 10, "items": {"$ref": "#/$defs/safeText"}},
+    "invalidation_conditions": {"type": "array", "maxItems": 10, "items": {"$ref": "#/$defs/condition"}},
+    "entry_conditions": {"type": "array", "maxItems": 10, "items": {"$ref": "#/$defs/condition"}},
+    "exit_conditions": {"type": "array", "maxItems": 10, "items": {"$ref": "#/$defs/condition"}},
     "valid_until": {"type": "string", "format": "date-time"},
     "quality_status": {"enum": ["complete", "partial"]},
     "evidence_audit": {"enum": ["complete", "partial", "failed"]},
-    "role_votes": {"type": "object", "additionalProperties": {"enum": ["support", "oppose", "abstain"]}},
+    "role_votes": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/$defs/roleVote"}, "allOf": [
+      {"contains": {"properties": {"role": {"const": "orchestrator"}}}, "minContains": 0, "maxContains": 1},
+      {"contains": {"properties": {"role": {"const": "fundamental"}}}, "minContains": 0, "maxContains": 1},
+      {"contains": {"properties": {"role": {"const": "market_state"}}}, "minContains": 0, "maxContains": 1},
+      {"contains": {"properties": {"role": {"const": "macro_sector"}}}, "minContains": 0, "maxContains": 1},
+      {"contains": {"properties": {"role": {"const": "bull"}}}, "minContains": 0, "maxContains": 1},
+      {"contains": {"properties": {"role": {"const": "bear"}}}, "minContains": 0, "maxContains": 1},
+      {"contains": {"properties": {"role": {"const": "evidence_audit"}}}, "minContains": 0, "maxContains": 1},
+      {"contains": {"properties": {"role": {"const": "portfolio"}}}, "minContains": 0, "maxContains": 1}
+    ]},
     "disagreement": {"allOf": [{"$ref": "#/$defs/safeText"}, {"maxLength": 500}]},
     "strategy_version": {"allOf": [{"$ref": "#/$defs/safeText"}, {"maxLength": 100}]},
     "model_version": {"allOf": [{"$ref": "#/$defs/safeText"}, {"maxLength": 100}]},
@@ -35,6 +44,8 @@
   "$defs": {
     "safeText": {"type": "string", "minLength": 1, "maxLength": 1000, "not": {"pattern": "(?i)(https?://|file://|\\.\\./|\\\\|;|\\||&&|`|\\b(select|insert|update|delete|import|curl|wget|bash|sh)\\b|exec\\(|eval\\()"}},
     "claim": {"type": "object", "additionalProperties": false, "required": ["text", "evidence_refs"], "properties": {"text": {"$ref": "#/$defs/safeText"}, "evidence_refs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidenceRef"}}}},
+    "condition": {"type": "object", "additionalProperties": false, "required": ["signal", "operator", "threshold", "unit", "evidence_refs"], "properties": {"signal": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[a-z][a-z0-9_.:-]*$"}, "operator": {"enum": ["lt", "lte", "eq", "gte", "gt", "is_true", "is_false"]}, "threshold": {"oneOf": [{"type": "string", "maxLength": 40, "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$"}, {"type": "boolean"}]}, "unit": {"enum": ["ratio", "basis_points", "days", "currency", "boolean", "count", "state"]}, "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"$ref": "#/$defs/evidenceRef"}}}, "allOf": [{"if": {"properties": {"operator": {"enum": ["is_true", "is_false"]}}}, "then": {"properties": {"threshold": {"type": "boolean"}, "unit": {"const": "boolean"}}}, "else": {"properties": {"threshold": {"type": "string"}, "unit": {"not": {"const": "boolean"}}}}}]},
+    "roleVote": {"type": "object", "additionalProperties": false, "required": ["role", "vote"], "properties": {"role": {"enum": ["orchestrator", "fundamental", "market_state", "macro_sector", "bull", "bear", "evidence_audit", "portfolio"]}, "vote": {"enum": ["support", "oppose", "abstain"]}}},
     "evidenceRef": {"type": "object", "additionalProperties": false, "required": ["source", "object_id", "available_at", "location", "content_hash"], "properties": {"source": {"$ref": "#/$defs/safeText"}, "object_id": {"$ref": "#/$defs/safeText"}, "available_at": {"type": "string", "format": "date-time"}, "location": {"$ref": "#/$defs/safeText"}, "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}
   }
 }

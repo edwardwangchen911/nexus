@@ -6,8 +6,9 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
+from nexus.domain.decimal import DecimalString
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
 
@@ -77,6 +78,33 @@ class ResearchClaim(_IntentModel):
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
 
 
+class ResearchCondition(_IntentModel):
+    """A deterministic signal predicate, never an executable expression."""
+
+    signal: str = Field(min_length=1, max_length=100, pattern=r"^[a-z][a-z0-9_.:-]*$")
+    operator: Literal["lt", "lte", "eq", "gte", "gt", "is_true", "is_false"]
+    threshold: DecimalString | StrictBool
+    unit: Literal["ratio", "basis_points", "days", "currency", "boolean", "count", "state"]
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1, max_length=10)
+
+    @model_validator(mode="after")
+    def _operator_matches_threshold(self) -> "ResearchCondition":
+        boolean_operator = self.operator in {"is_true", "is_false"}
+        if boolean_operator != isinstance(self.threshold, bool):
+            raise ValueError("boolean operators require booleans; comparison operators require decimals")
+        if boolean_operator != (self.unit == "boolean"):
+            raise ValueError("boolean predicates require boolean units")
+        return self
+
+
+class RoleVote(_IntentModel):
+    role: Literal[
+        "orchestrator", "fundamental", "market_state", "macro_sector",
+        "bull", "bear", "evidence_audit", "portfolio",
+    ]
+    vote: Literal["support", "oppose", "abstain"]
+
+
 class ResearchIntent(_IntentModel):
     schema_version: Literal["research_intent_v1"]
     decision_id: UUID
@@ -90,13 +118,13 @@ class ResearchIntent(_IntentModel):
     theses: tuple[ResearchClaim, ...] = Field(max_length=5)
     counter_theses: tuple[ResearchClaim, ...] = Field(max_length=5)
     uncertainties: tuple[str, ...] = Field(max_length=10)
-    invalidation_conditions: tuple[str, ...] = Field(max_length=10)
-    entry_conditions: tuple[str, ...] = Field(max_length=10)
-    exit_conditions: tuple[str, ...] = Field(max_length=10)
+    invalidation_conditions: tuple[ResearchCondition, ...] = Field(max_length=10)
+    entry_conditions: tuple[ResearchCondition, ...] = Field(max_length=10)
+    exit_conditions: tuple[ResearchCondition, ...] = Field(max_length=10)
     valid_until: datetime
     quality_status: Literal["complete", "partial"]
     evidence_audit: Literal["complete", "partial", "failed"]
-    role_votes: Mapping[str, Literal["support", "oppose", "abstain"]]
+    role_votes: tuple[RoleVote, ...] = Field(min_length=1, max_length=8)
     disagreement: str = Field(min_length=1, max_length=500)
     strategy_version: str = Field(min_length=1, max_length=100)
     model_version: str = Field(min_length=1, max_length=100)
@@ -121,4 +149,14 @@ class ResearchIntent(_IntentModel):
             for ref in claim.evidence_refs
         ):
             raise ValueError("claim evidence cannot become available after decision_time")
+        if len({vote.role for vote in self.role_votes}) != len(self.role_votes):
+            raise ValueError("research roles must vote at most once")
+        if any(
+            ref.available_at > self.decision_time
+            for condition in (
+                *self.invalidation_conditions, *self.entry_conditions, *self.exit_conditions
+            )
+            for ref in condition.evidence_refs
+        ):
+            raise ValueError("condition evidence cannot become available after decision_time")
         return self

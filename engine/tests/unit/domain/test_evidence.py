@@ -22,6 +22,10 @@ def test_evidence_ref_serializes_available_time_as_utc() -> None:
         "location": "s3://nexus/data/filing-42",
         "content_hash": "a" * 64,
     }
+    with pytest.raises(ValidationError):
+        EvidenceRef.model_validate({**evidence.model_dump(), "extra": "forbidden"})
+    with pytest.raises(ValidationError):
+        evidence.source = "rewritten"
 
 
 def test_evidence_ref_rejects_naive_available_time() -> None:
@@ -31,6 +35,17 @@ def test_evidence_ref_rejects_naive_available_time() -> None:
             source="sec",
             object_id="filing-42",
             available_at=datetime(2026, 8, 22, 13, 30),
+            location="s3://nexus/data/filing-42",
+            content_hash="a" * 64,
+        )
+
+
+def test_evidence_ref_rejects_unbounded_identifiers() -> None:
+    with pytest.raises(ValidationError):
+        EvidenceRef(
+            source="x" * 1001,
+            object_id="filing-42",
+            available_at=datetime(2026, 8, 22, 13, 30, tzinfo=UTC),
             location="s3://nexus/data/filing-42",
             content_hash="a" * 64,
         )

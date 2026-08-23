@@ -167,7 +167,7 @@ def test_research_can_veto_a_deterministic_addition_but_cannot_create_one() -> N
             "valid_until": datetime(2026, 8, 25, tzinfo=UTC),
             "quality_status": "complete",
             "evidence_audit": "complete",
-            "role_votes": {"auditor": "abstain"},
+            "role_votes": [{"role": "evidence_audit", "vote": "abstain"}],
             "disagreement": "watch",
             "strategy_version": "baseline_v1",
             "model_version": "fixture_v1",
