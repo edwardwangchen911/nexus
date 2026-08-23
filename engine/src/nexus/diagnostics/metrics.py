@@ -1,6 +1,7 @@
 """Exact portfolio metric primitives; threshold callers receive Decimal or unknown."""
 
 from collections.abc import Mapping, Sequence
+from datetime import date
 from decimal import Decimal
 from math import ceil
 from uuid import UUID
@@ -83,6 +84,23 @@ def beta_and_correlation(
     return covariance / benchmark_variance, correlation
 
 
+def beta_and_correlation_by_session(
+    asset_closes: Mapping[date, Decimal],
+    benchmark_closes: Mapping[date, Decimal],
+    window: int = 126,
+) -> tuple[Decimal, Decimal] | None:
+    """Align returns by their actual sessions before applying the 126-session window."""
+    asset_returns = _returns_by_session(asset_closes)
+    benchmark_returns = _returns_by_session(benchmark_closes)
+    sessions = tuple(sorted(set(asset_returns) & set(benchmark_returns)))[-window:]
+    required = _coverage_minimum(window)
+    if len(sessions) < required:
+        return None
+    return _beta_from_pairs(
+        tuple((asset_returns[session], benchmark_returns[session]) for session in sessions)
+    )
+
+
 def correlation_components(
     returns_by_instrument: Mapping[UUID, Sequence[Decimal]],
 ) -> tuple[tuple[UUID, ...], ...]:
@@ -155,3 +173,32 @@ def _correlation(left: Sequence[Decimal], right: Sequence[Decimal]) -> Decimal |
     if left_variance == 0 or right_variance == 0:
         return None
     return covariance / (left_variance * right_variance).sqrt()
+
+
+def _returns_by_session(closes: Mapping[date, Decimal]) -> dict[date, Decimal]:
+    sessions = tuple(sorted(closes))
+    return {
+        current: closes[current] / closes[prior] - Decimal(1)
+        for prior, current in zip(sessions, sessions[1:])
+        if closes[prior] > 0 and closes[current] > 0
+    }
+
+
+def _beta_from_pairs(pairs: tuple[tuple[Decimal, Decimal], ...]) -> tuple[Decimal, Decimal] | None:
+    count = len(pairs)
+    asset_mean = sum((asset for asset, _ in pairs), Decimal(0)) / Decimal(count)
+    benchmark_mean = sum((benchmark for _, benchmark in pairs), Decimal(0)) / Decimal(count)
+    covariance = sum(
+        ((asset - asset_mean) * (benchmark - benchmark_mean) for asset, benchmark in pairs),
+        Decimal(0),
+    ) / Decimal(count)
+    asset_variance = sum(
+        ((asset - asset_mean) ** 2 for asset, _ in pairs), Decimal(0)
+    ) / Decimal(count)
+    benchmark_variance = sum(
+        ((benchmark - benchmark_mean) ** 2 for _, benchmark in pairs), Decimal(0)
+    ) / Decimal(count)
+    if asset_variance == 0 or benchmark_variance == 0:
+        return None
+    correlation = covariance / (asset_variance * benchmark_variance).sqrt()
+    return covariance / benchmark_variance, correlation

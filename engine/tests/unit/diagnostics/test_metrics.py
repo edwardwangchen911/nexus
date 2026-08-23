@@ -1,3 +1,4 @@
+from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -5,6 +6,7 @@ import pytest
 from nexus.diagnostics.metrics import (
     annualized_volatility,
     beta_and_correlation,
+    beta_and_correlation_by_session,
     correlation_components,
     days_to_exit,
     maximum_drawdown,
@@ -63,6 +65,16 @@ def test_beta_and_correlation_use_matched_returns() -> None:
 
 def test_beta_and_correlation_is_unknown_when_coverage_is_insufficient() -> None:
     assert beta_and_correlation((Decimal("100"),) * 100, (Decimal("100"),) * 100, 126) is None
+
+
+def test_beta_by_session_fails_closed_when_shifted_sessions_lack_eighty_percent_overlap() -> None:
+    start = date(2026, 1, 1)
+    asset = {start + timedelta(days=index): Decimal(100 + index) for index in range(102)}
+    benchmark = {
+        start + timedelta(days=index + 1): Decimal(200 + index * 2) for index in range(102)
+    }
+
+    assert beta_and_correlation_by_session(asset, benchmark) is None
 
 
 def test_correlation_components_connect_at_the_eighty_percent_boundary() -> None:
