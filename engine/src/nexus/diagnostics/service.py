@@ -1,13 +1,33 @@
 """Deterministic diagnosis entry point with fail-closed readiness precedence."""
+# ruff: noqa: E501
 
 from collections import defaultdict
 from collections.abc import Iterable
 from decimal import Decimal
+from uuid import UUID
 
-from nexus.diagnostics.metrics import annualized_volatility, beta_and_correlation, correlation_components, days_to_exit, maximum_drawdown, security_hhi, top_weights
-from nexus.diagnostics.models import DiagnosticHistory, DiagnosticItem, MarketEvidence, OptimizationNeed, PortfolioDiagnosticReport
-from nexus.diagnostics.policy import RealAdvisoryPolicy
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from nexus.diagnostics.metrics import (
+    annualized_volatility,
+    beta_and_correlation,
+    correlation_components,
+    days_to_exit,
+    maximum_drawdown,
+    security_hhi,
+    top_weights,
+)
+from nexus.diagnostics.models import (
+    DiagnosticHistory,
+    DiagnosticItem,
+    MarketEvidence,
+    OptimizationNeed,
+    PortfolioDiagnosticReport,
+)
+from nexus.diagnostics.policy import RealAdvisoryPolicy, load_real_advisory_policy_v1
+from nexus.diagnostics.repository import persist_report
 from nexus.domain.decimal import decimal_to_string
+from nexus.providers.base import PriceSeries
 from nexus.providers.broker.base import BrokerPosition, PortfolioSnapshot
 from nexus.research.features.price import point_in_time_closes
 
@@ -23,6 +43,17 @@ def diagnose_portfolio(snapshot: PortfolioSnapshot, market: MarketEvidence, hist
     if len(currencies) > 1:
         items.append(_unknown_item("CURRENCY_EXPOSURE", "ratio", "FX_QUALIFIED_VIEW_MISSING", "portfolio:unqualified_fx", market))
     return _report(snapshot, policy, _optimization_need(items, history), tuple(items))
+
+
+async def diagnose_and_persist(
+    session: AsyncSession, *, portfolio_id: UUID, snapshot: PortfolioSnapshot,
+    market: MarketEvidence, history: DiagnosticHistory,
+) -> PortfolioDiagnosticReport:
+    """Production entry point loads only the database-sealed advisory policy."""
+    policy = await load_real_advisory_policy_v1(session)
+    report = diagnose_portfolio(snapshot, market, history, policy)
+    await persist_report(session, portfolio_id=portfolio_id, report=report)
+    return report
 
 
 def _evaluate_currency_scopes(snapshot: PortfolioSnapshot, market: MarketEvidence, policy: RealAdvisoryPolicy) -> list[DiagnosticItem]:
@@ -103,7 +134,7 @@ def _market_risk_items(values: list[tuple[BrokerPosition, Decimal]], scope: str,
     if snapshot.as_of is None:
         return [_unknown_item("MARKET_RISK", "ratio", "SNAPSHOT_AS_OF_MISSING", scope, market)]
     benchmark = _closes(market.benchmark, snapshot)
-    returns_by_instrument: dict[object, tuple[Decimal, ...]] = {}
+    returns_by_instrument: dict[UUID, tuple[Decimal, ...]] = {}
     items: list[DiagnosticItem] = []
     for position, _ in values:
         closes = _closes(market.prices.get(position.instrument_id), snapshot)
@@ -115,6 +146,8 @@ def _market_risk_items(values: list[tuple[BrokerPosition, Decimal]], scope: str,
         if None in (volatility20, volatility63, drawdown, beta_correlation):
             items.append(_unknown_item(f"MARKET_RISK:{position.instrument_id}", "ratio", "MARKET_RISK_COVERAGE_INSUFFICIENT", scope, market))
             continue
+        assert volatility20 is not None and volatility63 is not None and drawdown is not None
+        assert beta_correlation is not None
         returns_by_instrument[position.instrument_id] = tuple(current / prior - Decimal(1) for prior, current in zip(closes, closes[1:]) if prior > 0 and current > 0)
         items.extend((
             _item(f"VOLATILITY_20:{position.instrument_id}", volatility20, "annualized_ratio", None, scope, "info", "monitor", None, market),
@@ -133,8 +166,8 @@ def _market_risk_items(values: list[tuple[BrokerPosition, Decimal]], scope: str,
     return items
 
 
-def _closes(series: object, snapshot: PortfolioSnapshot) -> tuple[Decimal, ...] | None:
-    if series is None or snapshot.as_of is None or getattr(series, "quality", None) != "PASS":
+def _closes(series: PriceSeries | None, snapshot: PortfolioSnapshot) -> tuple[Decimal, ...] | None:
+    if series is None or snapshot.as_of is None or series.quality != "PASS":
         return None
     return point_in_time_closes(series.bars, snapshot.as_of)
 

@@ -1,4 +1,5 @@
 """Immutable database records for advisory policy and diagnostic projections."""
+# ruff: noqa: E501
 
 from decimal import Decimal
 from uuid import UUID

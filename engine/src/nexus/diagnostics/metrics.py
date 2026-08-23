@@ -1,4 +1,5 @@
 """Exact portfolio metric primitives; threshold callers receive Decimal or unknown."""
+# ruff: noqa: E501
 
 from collections.abc import Mapping, Sequence
 from decimal import Decimal
