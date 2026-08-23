@@ -66,10 +66,23 @@ async def test_latest_diagnostic_is_redacted_and_returns_persisted_item_shape(
             ),
         )
     path = f"/internal/v1/portfolios/{PORTFOLIOS[0]}/diagnostics/latest"
+    engine_app = app(migrated_database_url)
+    operation = engine_app.openapi()["paths"][
+        "/internal/v1/portfolios/{portfolio_id}/diagnostics/latest"
+    ]["get"]
+    assert operation["operationId"] == "getLatestPortfolioDiagnostic"
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/PortfolioDiagnosticEnvelope"
+    }
+    for status_code in ("404", "422"):
+        assert operation["responses"][status_code]["content"]["application/json"][
+            "schema"
+        ] == {"$ref": "#/components/schemas/NexusErrorEnvelope"}
+    request_headers = headers("GET", path)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
+        transport=httpx.ASGITransport(app=engine_app), base_url="http://testserver"
     ) as client:
-        response = await client.get(path, headers=headers("GET", path))
+        response = await client.get(path, headers=request_headers)
         for portfolio_id in PORTFOLIOS[1:]:
             missing_path = f"/internal/v1/portfolios/{portfolio_id}/diagnostics/latest"
             missing = await client.get(missing_path, headers=headers("GET", missing_path))
@@ -84,6 +97,11 @@ async def test_latest_diagnostic_is_redacted_and_returns_persisted_item_shape(
     assert item["evidence_refs"][0]["content_hash"] == "a" * 64
     assert item["evidence_refs"][0]["available_at"] == "2026-08-24T00:00:00Z"
     assert response.json()["data"]["policy_version"] == "real_advisory_policy_v1"
+    assert response.json()["meta"] == {
+        "request_id": request_headers["X-Request-Id"],
+        "schema_version": "1",
+        "as_of": "2026-08-24T00:00:00Z",
+    }
     assert "account_id" not in json.dumps(response.json())
 
 
