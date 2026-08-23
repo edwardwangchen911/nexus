@@ -36,7 +36,7 @@ class PortfolioListItemResponse(_StrictSchema):
 
 
 class PortfolioPageResponse(_StrictSchema):
-    items: tuple[PortfolioListItemResponse, ...]
+    items: tuple[PortfolioListItemResponse, ...] = Field(max_length=50)
     next_cursor: str | None
 
 
@@ -85,9 +85,9 @@ class PortfolioSnapshotResponse(_StrictSchema):
     portfolio_id: UUID
     coverage_scope: Literal["broker_account"] = "broker_account"
     status: SnapshotStatus
-    cash: tuple[CashBucketResponse, ...]
-    positions: tuple[PositionResponse, ...]
-    open_orders: tuple[OpenOrderResponse, ...]
+    cash: tuple[CashBucketResponse, ...] = Field(max_length=32)
+    positions: tuple[PositionResponse, ...] = Field(max_length=5000)
+    open_orders: tuple[OpenOrderResponse, ...] = Field(max_length=5000)
     converted_view: None = None
     as_of: AwareDatetime | None
 

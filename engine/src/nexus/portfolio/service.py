@@ -32,6 +32,10 @@ from nexus.persistence.models.portfolio import (
 )
 from nexus.portfolio.cursor import PortfolioCursorCodec, PortfolioCursorState
 
+_MAX_CASH_BUCKETS = 32
+_MAX_POSITIONS = 5000
+_MAX_OPEN_ORDERS = 5000
+
 
 class PortfolioService:
     def __init__(
@@ -189,8 +193,10 @@ class PortfolioService:
                 )
                 .where(CashSnapshot.portfolio_snapshot_id == snapshot.snapshot_id)
                 .order_by(CashSnapshot.currency, CashSnapshot.id)
+                .limit(_MAX_CASH_BUCKETS + 1)
             )
         ).all()
+        _require_bounded_collection("cash", cash_rows, _MAX_CASH_BUCKETS)
         position_rows = (
             await self._session.execute(
                 select(
@@ -208,8 +214,10 @@ class PortfolioService:
                 .join(Instrument, Instrument.id == PositionSnapshot.instrument_id)
                 .where(PositionSnapshot.portfolio_snapshot_id == snapshot.snapshot_id)
                 .order_by(PositionSnapshot.instrument_id)
+                .limit(_MAX_POSITIONS + 1)
             )
         ).all()
+        _require_bounded_collection("positions", position_rows, _MAX_POSITIONS)
         order_rows = (
             await self._session.execute(
                 select(
@@ -224,8 +232,10 @@ class PortfolioService:
                 )
                 .where(BrokerOrderSnapshot.portfolio_snapshot_id == snapshot.snapshot_id)
                 .order_by(BrokerOrderSnapshot.id)
+                .limit(_MAX_OPEN_ORDERS + 1)
             )
         ).all()
+        _require_bounded_collection("open_orders", order_rows, _MAX_OPEN_ORDERS)
         instrument_ids = {row.instrument_id for row in position_rows}
         instrument_ids.update(row.instrument_id for row in order_rows)
         symbols = await self._symbols(tuple(instrument_ids), snapshot.as_of)
@@ -315,4 +325,15 @@ def _snapshot_not_found(portfolio_id: UUID) -> NexusError:
         "The portfolio snapshot was not found.",
         status_code=404,
         details={"portfolio_id": str(portfolio_id)},
+    )
+
+
+def _require_bounded_collection(name: str, values: Sequence[object], maximum: int) -> None:
+    if len(values) <= maximum:
+        return
+    raise NexusError(
+        ErrorCode.DATA_PARTIAL,
+        "The portfolio snapshot exceeds a safe response bound.",
+        status_code=409,
+        details={"collection": name, "maximum": maximum},
     )

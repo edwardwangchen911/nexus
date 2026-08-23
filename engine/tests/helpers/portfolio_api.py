@@ -209,6 +209,22 @@ async def add_snapshot_state(
     return snapshot_id
 
 
+async def add_cash_bucket_overflow(database_url: str) -> None:
+    factory = session_factory(settings(database_url))
+    async with factory() as session, session.begin():
+        for index in range(32):
+            currency = f"A{chr(65 + index // 26)}{chr(65 + index % 26)}"
+            session.add(
+                CashSnapshot(
+                    portfolio_snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
+                    currency=currency,
+                    cash_balance=Decimal(index),
+                    available_cash=Decimal(index),
+                    provider_as_of=CLOCK,
+                )
+            )
+
+
 def snapshot_record(
     snapshot_id: UUID,
     run_id: UUID,

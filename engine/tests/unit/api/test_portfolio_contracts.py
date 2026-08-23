@@ -3,6 +3,7 @@ from uuid import UUID
 import pytest
 from nexus.api.schemas.portfolio import (
     BrokerSyncCreateRequest,
+    PortfolioPageResponse,
     PortfolioSnapshotResponse,
     PositionResponse,
 )
@@ -60,3 +61,13 @@ def test_snapshot_contract_forbids_an_unadmitted_converted_view() -> None:
 
     with pytest.raises(ValidationError):
         PortfolioSnapshotResponse.model_validate(payload)
+
+
+def test_portfolio_contracts_publish_fixed_collection_bounds() -> None:
+    page_schema = PortfolioPageResponse.model_json_schema()
+    snapshot_schema = PortfolioSnapshotResponse.model_json_schema()
+
+    assert page_schema["properties"]["items"]["maxItems"] == 50
+    assert snapshot_schema["properties"]["cash"]["maxItems"] == 32
+    assert snapshot_schema["properties"]["positions"]["maxItems"] == 5000
+    assert snapshot_schema["properties"]["open_orders"]["maxItems"] == 5000

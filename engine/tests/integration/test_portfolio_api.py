@@ -10,6 +10,9 @@ from helpers.portfolio_api import (
     PORTFOLIOS as _PORTFOLIOS,
 )
 from helpers.portfolio_api import (
+    add_cash_bucket_overflow as _add_cash_bucket_overflow,
+)
+from helpers.portfolio_api import (
     add_snapshot_state as _add_snapshot_state,
 )
 from helpers.portfolio_api import (
@@ -166,3 +169,22 @@ async def test_latest_snapshot_requires_auth_and_returns_safe_not_found(
     assert unauthenticated.status_code == 401
     assert missing.status_code == unknown.status_code == 404
     assert missing.json()["error"]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_latest_snapshot_fails_closed_before_serializing_oversized_collections(
+    migrated_database_url: str,
+) -> None:
+    await _seed_portfolio_list(migrated_database_url)
+    await _add_cash_bucket_overflow(migrated_database_url)
+    path = f"/internal/v1/portfolios/{_PORTFOLIOS[0]}/snapshots/latest"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "DATA_PARTIAL"
+    assert response.json()["error"]["details"] == {"collection": "cash", "maximum": 32}
+    assert "data" not in response.json()

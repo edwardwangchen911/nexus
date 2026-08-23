@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 router = APIRouter()
 _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     status: {"model": NexusErrorEnvelope, "description": "Stable NEXUS error envelope."}
-    for status in (401, 404, 422)
+    for status in (401, 404, 409, 422)
 }
 
 
@@ -66,7 +66,7 @@ async def list_portfolios(
     "/internal/v1/portfolios/{portfolio_id}/snapshots/latest",
     operation_id="getLatestPortfolioSnapshot",
     response_model=PortfolioSnapshotEnvelope,
-    responses={status: _ERROR_RESPONSES[status] for status in (401, 404, 422)},
+    responses={status: _ERROR_RESPONSES[status] for status in (401, 404, 409, 422)},
 )
 async def get_latest_portfolio_snapshot(
     portfolio_id: UUID,
