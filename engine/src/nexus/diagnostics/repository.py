@@ -48,7 +48,7 @@ async def persist_report(
         select(PortfolioSnapshotRecord).where(
             PortfolioSnapshotRecord.id == report.portfolio_snapshot_id,
             PortfolioSnapshotRecord.portfolio_id == portfolio_id,
-        )
+        ).with_for_update()
     )
     if snapshot is None or report.policy_version != policy.version:
         raise ValueError("diagnostic report snapshot or policy authority is invalid")
@@ -61,7 +61,7 @@ async def persist_report(
         )
     )
     if existing is not None:
-        if await _read_report(session, existing) != report:
+        if not _reports_equivalent(await _read_report(session, existing), report):
             raise ValueError("diagnostic report replay conflicts with immutable report")
         return existing.id
     stored = PortfolioDiagnosticReportRecord(
@@ -398,3 +398,30 @@ def _evidence(record: PortfolioDiagnosticEvidenceRefRecord) -> EvidenceRef:
         location=record.location,
         content_hash=record.content_hash,
     )
+
+
+def _reports_equivalent(
+    stored: PortfolioDiagnosticReport, replay: PortfolioDiagnosticReport
+) -> bool:
+    if (
+        stored.portfolio_snapshot_id != replay.portfolio_snapshot_id
+        or stored.trading_day != replay.trading_day
+        or stored.policy_version != replay.policy_version
+        or stored.optimization_need != replay.optimization_need
+        or len(stored.items) != len(replay.items)
+    ):
+        return False
+    for left, right in zip(stored.items, replay.items, strict=True):
+        if (
+            left.diagnostic_code != right.diagnostic_code
+            or _decimal(left.metric_value) != _decimal(right.metric_value)
+            or left.unit != right.unit
+            or _decimal(left.reference_limit) != _decimal(right.reference_limit)
+            or left.policy_scope != right.policy_scope
+            or left.severity != right.severity
+            or left.actionability != right.actionability
+            or left.unknown_reason != right.unknown_reason
+            or left.evidence_refs != right.evidence_refs
+        ):
+            return False
+    return True
