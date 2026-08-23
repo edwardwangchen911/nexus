@@ -4,7 +4,7 @@
 from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -13,6 +13,10 @@ from nexus.diagnostics.models import PortfolioDiagnosticReport
 from nexus.domain.ids import new_uuid7
 from nexus.domain.time import require_utc
 from nexus.providers.broker.base import PortfolioSnapshot
+
+if TYPE_CHECKING:
+    from nexus.optimizer.minimum_change import ReductionCandidate
+    from nexus.optimizer.strategy_target import DeterministicSelectionAuthority
 
 ProposalVariant = Literal["hold_current", "minimum_change", "strategy_target"]
 ProposalGroupStatus = Literal["draft", "compared", "shadowing", "validated", "rejected", "expired"]
@@ -170,8 +174,13 @@ def build_proposal_group(
     report: PortfolioDiagnosticReport,
     research: tuple[object, ...],
     policy: OptimizationPolicy,
+    *,
+    selection_authority: "DeterministicSelectionAuthority | None" = None,
+    minimum_change_candidates: tuple["ReductionCandidate", ...] = (),
+    excess_weight: Decimal = _ZERO,
+    portfolio_scope: PortfolioScope = "real_read_only",
 ) -> OptimizationProposalGroup:
-    """Build a fail-closed, analysis-only group without deriving targets from Agent input."""
+    """Compose three simultaneous deterministic variants without accepting Agent weights."""
     del research
     if snapshot.status != "READY":
         raise ValueError("READY baseline is required")
@@ -182,20 +191,81 @@ def build_proposal_group(
     if policy.version != "optimizer_v1":
         raise ValueError("unsupported optimization policy")
     current, cash_weight = _current_positions(snapshot)
+    analysis_only = portfolio_scope == "real_read_only"
     hold = OptimizationProposal(
         variant="hold_current",
         baseline_portfolio_snapshot_id=snapshot.id,
         positions=current,
         cash_current_weight=cash_weight,
         cash_target_weight=cash_weight,
-        analysis_only=True,
+        analysis_only=analysis_only,
         strategy_evidence_complete=False,
-        portfolio_scope="real_read_only",
+        portfolio_scope=portfolio_scope,
     )
-    minimum = hold.model_copy(update={"proposal_id": new_uuid7(), "variant": "minimum_change"})
-    strategy = hold.model_copy(update={"proposal_id": new_uuid7(), "variant": "strategy_target"})
+    minimum_positions = current
+    minimum_cash = cash_weight
+    if excess_weight > _ZERO:
+        from nexus.optimizer.minimum_change import reduce_until_satisfied
+
+        minimum_result = reduce_until_satisfied(
+            minimum_change_candidates, excess_weight=excess_weight
+        )
+        if {item.instrument_id for item in minimum_result.positions} != {
+            item.instrument_id for item in current
+        }:
+            raise ValueError("minimum-change candidates must exactly match baseline positions")
+        minimum_positions = minimum_result.positions
+        minimum_cash += minimum_result.cash_released
+    minimum = OptimizationProposal(
+        proposal_id=new_uuid7(),
+        variant="minimum_change",
+        baseline_portfolio_snapshot_id=snapshot.id,
+        positions=minimum_positions,
+        cash_current_weight=cash_weight,
+        cash_target_weight=minimum_cash,
+        analysis_only=analysis_only,
+        strategy_evidence_complete=False,
+        portfolio_scope=portfolio_scope,
+    )
+    current_weights = tuple((item.instrument_id, item.current_weight) for item in current)
+    from nexus.optimizer.strategy_target import build_strategy_target
+
+    strategy_result = build_strategy_target(current_weights, authority=selection_authority)
+    if selection_authority is None:
+        strategy_positions = current
+        strategy_cash = cash_weight
+    else:
+        strategy_positions = tuple(
+            ProposalPosition(
+                instrument_id=instrument_id,
+                current_weight=dict(current_weights).get(instrument_id, _ZERO),
+                target_weight=target_weight,
+                action=(
+                    "increase"
+                    if target_weight > dict(current_weights).get(instrument_id, _ZERO)
+                    else "reduce"
+                    if target_weight < dict(current_weights).get(instrument_id, _ZERO)
+                    else "maintain"
+                ),
+                reason_code="BASELINE_SELECTION_AUTHORITY",
+            )
+            for instrument_id, target_weight in strategy_result.targets
+        )
+        strategy_cash = strategy_result.cash_target_weight
+    strategy = OptimizationProposal(
+        proposal_id=new_uuid7(),
+        variant="strategy_target",
+        baseline_portfolio_snapshot_id=snapshot.id,
+        positions=strategy_positions,
+        cash_current_weight=cash_weight,
+        cash_target_weight=strategy_cash,
+        analysis_only=analysis_only,
+        strategy_evidence_complete=strategy_result.evidence_complete,
+        portfolio_scope=portfolio_scope,
+    )
     return OptimizationProposalGroup(
         baseline_portfolio_snapshot_id=snapshot.id,
+        portfolio_scope=portfolio_scope,
         proposals=(hold, minimum, strategy),
         valuation_time=snapshot.as_of,
     )
