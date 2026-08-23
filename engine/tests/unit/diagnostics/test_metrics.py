@@ -45,13 +45,21 @@ def test_annualized_volatility_is_unknown_below_eighty_percent_coverage() -> Non
     assert annualized_volatility((Decimal("100"),) * 16, 20) is None
 
 
-def test_session_volatility_uses_adjacent_published_intervals_and_coverage_boundary() -> None:
-    sessions = tuple(date(2026, 1, 1) + timedelta(days=index) for index in range(21))
-    sufficient = {session: Decimal(100 + index) for index, session in enumerate(sessions[-17:])}
+@pytest.mark.parametrize(("window", "minimum"), ((20, 16), (63, 51)))
+def test_session_volatility_uses_adjacent_published_intervals_and_coverage_boundary(
+    window: int, minimum: int
+) -> None:
+    sessions = tuple(
+        date(2026, 1, 1) + timedelta(days=index) for index in range(window + 1)
+    )
+    sufficient = {
+        session: Decimal(100 + index)
+        for index, session in enumerate(sessions[-(minimum + 1) :])
+    }
     insufficient = dict(tuple(sufficient.items())[1:])
 
-    assert annualized_volatility_by_session(sufficient, sessions, 20) is not None
-    assert annualized_volatility_by_session(insufficient, sessions, 20) is None
+    assert annualized_volatility_by_session(sufficient, sessions, window) is not None
+    assert annualized_volatility_by_session(insufficient, sessions, window) is None
 
 
 def test_maximum_drawdown_uses_the_worst_peak_to_trough_decline() -> None:
@@ -117,6 +125,25 @@ def test_beta_by_session_never_pairs_returns_from_different_published_intervals(
     }
 
     assert beta_and_correlation_by_session(asset, benchmark, 2, published) is None
+
+
+def test_beta_by_session_straddles_one_hundred_and_one_interval_boundary() -> None:
+    sessions = tuple(date(2026, 1, 1) + timedelta(days=index) for index in range(127))
+    benchmark = {
+        session: Decimal(100 + index) for index, session in enumerate(sessions)
+    }
+    sufficient = {session: benchmark[session] for session in sessions[-102:]}
+    insufficient = {session: benchmark[session] for session in sessions[-101:]}
+
+    assert beta_and_correlation_by_session(
+        sufficient, benchmark, published_sessions=sessions
+    ) is not None
+    assert (
+        beta_and_correlation_by_session(
+            insufficient, benchmark, published_sessions=sessions
+        )
+        is None
+    )
 
 
 def test_qualified_session_closes_selects_latest_revision_independent_of_input_order() -> None:
