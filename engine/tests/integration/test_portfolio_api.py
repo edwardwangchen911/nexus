@@ -147,6 +147,8 @@ async def test_latest_snapshot_preserves_currency_costs_and_read_only_ids(
     assert position["read_only"] is True
     order = data["open_orders"][0]
     assert order["broker_order_snapshot_id"] == str(_ORDER_ID)
+    assert order["symbol"] == "00700.HK"
+    assert order["currency"] == "HKD"
     assert order["read_only"] is True
     assert "provider_order_id" not in order
     encoded = json.dumps(response.json())

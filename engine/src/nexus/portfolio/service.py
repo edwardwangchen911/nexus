@@ -223,6 +223,7 @@ class PortfolioService:
                 select(
                     BrokerOrderSnapshot.id.label("snapshot_order_id"),
                     BrokerOrderSnapshot.instrument_id,
+                    Instrument.currency,
                     BrokerOrderSnapshot.side,
                     BrokerOrderSnapshot.quantity,
                     BrokerOrderSnapshot.filled_quantity,
@@ -230,6 +231,7 @@ class PortfolioService:
                     BrokerOrderSnapshot.status,
                     BrokerOrderSnapshot.updated_at,
                 )
+                .join(Instrument, Instrument.id == BrokerOrderSnapshot.instrument_id)
                 .where(BrokerOrderSnapshot.portfolio_snapshot_id == snapshot.snapshot_id)
                 .order_by(BrokerOrderSnapshot.id)
                 .limit(_MAX_OPEN_ORDERS + 1)
@@ -273,6 +275,7 @@ class PortfolioService:
                     broker_order_snapshot_id=row.snapshot_order_id,
                     instrument_id=row.instrument_id,
                     symbol=symbols.get(row.instrument_id),
+                    currency=row.currency,
                     side=row.side,
                     quantity=decimal_to_string(row.quantity),
                     filled_quantity=decimal_to_string(row.filled_quantity),

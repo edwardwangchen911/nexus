@@ -71,6 +71,7 @@ class OpenOrderResponse(_StrictSchema):
     broker_order_snapshot_id: UUID
     instrument_id: UUID
     symbol: str | None = Field(default=None, min_length=1, max_length=32)
+    currency: CurrencyCode
     side: str = Field(min_length=1, max_length=10)
     quantity: DecimalString
     filled_quantity: DecimalString

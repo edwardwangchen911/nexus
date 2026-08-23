@@ -23,6 +23,7 @@ from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET, build_test_hmac_hea
 
 CLOCK = datetime(2026, 8, 24, 4, 0, tzinfo=UTC)
 INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000000001")
+ORDER_INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000000003")
 ORDER_ID = UUID("0198d500-1000-7000-8000-000000000002")
 PORTFOLIOS = (
     UUID("0198d500-1000-7000-8000-000000000011"),
@@ -72,6 +73,25 @@ async def seed_portfolio_list(database_url: str) -> None:
             InstrumentAlias(
                 instrument_id=INSTRUMENT_ID,
                 symbol="00656.HK",
+                alias_type="ticker",
+                valid_from=date(2020, 1, 1),
+                valid_to=None,
+            )
+        )
+        session.add(
+            Instrument(
+                id=ORDER_INSTRUMENT_ID,
+                asset_type="equity",
+                exchange="XHKG",
+                currency="HKD",
+                tick_size=Decimal("0.001"),
+                risk_bucket="hk_equity",
+            )
+        )
+        session.add(
+            InstrumentAlias(
+                instrument_id=ORDER_INSTRUMENT_ID,
+                symbol="00700.HK",
                 alias_type="ticker",
                 valid_from=date(2020, 1, 1),
                 valid_to=None,
@@ -147,7 +167,7 @@ async def seed_portfolio_list(database_url: str) -> None:
                             portfolio_snapshot_id=snapshot.id,
                             provider="fosun",
                             provider_order_id="provider-order-secret-canary",
-                            instrument_id=INSTRUMENT_ID,
+                            instrument_id=ORDER_INSTRUMENT_ID,
                             side="sell",
                             quantity=Decimal("1000"),
                             filled_quantity=Decimal("0"),
