@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
+from nexus.api.schemas.integrations import NexusErrorEnvelope
 from nexus.domain.decimal import DecimalString
 from nexus.optimizer.admission import admit_queued_job
 from nexus.optimizer.repository import transition_group
@@ -31,6 +32,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
 _MAX_WHAT_IF_BYTES = 64 * 1024
+_ERROR_RESPONSES = {
+    status: {"model": NexusErrorEnvelope, "description": "Stable NEXUS error envelope."}
+    for status in (401, 404, 409, 422)
+}
 
 
 class _WhatIfPosition(BaseModel):
@@ -71,7 +76,7 @@ class _LifecycleRequest(BaseModel):
     version: int = Field(ge=0)
 
 
-@router.post("/internal/v1/what-if/evaluate")
+@router.post("/internal/v1/what-if/evaluate", responses=_ERROR_RESPONSES)
 async def evaluate_what_if(
     request: Request,
     actor: VerifiedServiceActor = Depends(require_service_actor),
@@ -109,7 +114,7 @@ async def evaluate_what_if(
     }
 
 
-@router.post("/internal/v1/optimization-proposals")
+@router.post("/internal/v1/optimization-proposals", responses=_ERROR_RESPONSES)
 async def admit_optimization_proposal(
     request: Request,
     actor: VerifiedServiceActor = Depends(require_service_actor),
@@ -178,21 +183,22 @@ async def admit_optimization_proposal(
     return JSONResponse(status_code=202, content=payload)
 
 
-@router.get("/internal/v1/optimization-proposals/{group_id}")
+@router.get("/internal/v1/optimization-proposals/{group_id}", responses=_ERROR_RESPONSES)
 async def get_optimization_group(
-    group_id: UUID,
+    group_id: str,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> dict[str, object]:
     """Return immutable children and the sole mutable lifecycle state."""
-    group = await session.get(OptimizationProposalGroupRecord, group_id)
+    proposal_group_id = _parse_group_id(group_id)
+    group = await session.get(OptimizationProposalGroupRecord, proposal_group_id)
     if group is None:
         raise NexusError(ErrorCode.NOT_FOUND, "Proposal group was not found.", status_code=404)
     children = list(
         (
             await session.execute(
             select(OptimizationProposalRecord)
-            .where(OptimizationProposalRecord.proposal_group_id == group_id)
+            .where(OptimizationProposalRecord.proposal_group_id == proposal_group_id)
             .order_by(OptimizationProposalRecord.variant)
         )
         )
@@ -269,11 +275,22 @@ async def _transition_endpoint(
     return {"data": {"proposal_group_id": str(group.id), "status": group.status, "version": group.version}}
 
 
-@router.post("/internal/v1/optimization-proposals/{group_id}/shadow")
-async def shadow_optimization_group(group_id: UUID, request: Request, actor: VerifiedServiceActor = Depends(require_service_actor), session: AsyncSession = Depends(transactional_session)) -> dict[str, object]:
-    return await _transition_endpoint(group_id, "shadowing", request, actor, session)
+@router.post(
+    "/internal/v1/optimization-proposals/{group_id}/shadow", responses=_ERROR_RESPONSES
+)
+async def shadow_optimization_group(group_id: str, request: Request, actor: VerifiedServiceActor = Depends(require_service_actor), session: AsyncSession = Depends(transactional_session)) -> dict[str, object]:
+    return await _transition_endpoint(_parse_group_id(group_id), "shadowing", request, actor, session)
 
 
-@router.post("/internal/v1/optimization-proposals/{group_id}/reject")
-async def reject_optimization_group(group_id: UUID, request: Request, actor: VerifiedServiceActor = Depends(require_service_actor), session: AsyncSession = Depends(transactional_session)) -> dict[str, object]:
-    return await _transition_endpoint(group_id, "rejected", request, actor, session)
+@router.post(
+    "/internal/v1/optimization-proposals/{group_id}/reject", responses=_ERROR_RESPONSES
+)
+async def reject_optimization_group(group_id: str, request: Request, actor: VerifiedServiceActor = Depends(require_service_actor), session: AsyncSession = Depends(transactional_session)) -> dict[str, object]:
+    return await _transition_endpoint(_parse_group_id(group_id), "rejected", request, actor, session)
+
+
+def _parse_group_id(value: str) -> UUID:
+    try:
+        return UUID(value)
+    except ValueError as error:
+        raise NexusError(ErrorCode.VALIDATION_ERROR, "Proposal group id is invalid.", status_code=422) from error
