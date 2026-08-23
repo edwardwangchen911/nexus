@@ -1,3 +1,5 @@
+"""Reusable read-only gateway cases collected by smaller domain modules."""
+
 import base64
 import hashlib
 import hmac
