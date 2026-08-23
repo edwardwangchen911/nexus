@@ -175,15 +175,11 @@ async def test_writer_rejects_overweight_or_unselected_strategy_targets(
     factory = session_factory(settings(migrated_database_url))
     authority = await _seed_authority(factory)
     strategy = _group().proposals[2]
+    overweight_position = strategy.positions[0].model_copy(
+        update={"target_weight": Decimal("0.126")}
+    )
     overweight = strategy.model_copy(
-        update={
-            "positions": (
-                strategy.positions[0].model_copy(
-                    update={"target_weight": Decimal("0.126")}
-                ),
-            ),
-            "cash_target_weight": Decimal("0.874"),
-        }
+        update={"positions": (overweight_position,), "cash_target_weight": Decimal("0.874")}
     )
     unrelated = strategy.model_copy(
         update={
@@ -201,7 +197,12 @@ async def test_writer_rejects_overweight_or_unselected_strategy_targets(
             ),
         }
     )
-    for invalid in (overweight, unrelated):
+    negative = strategy.model_copy(
+        update={"positions": (strategy.positions[0].model_copy(
+            update={"target_weight": Decimal("-0.001")}
+        ),)}
+    )
+    for invalid in (overweight, unrelated, negative):
         group = _group().model_copy(
             update={"proposals": (*_group().proposals[:2], invalid)}
         )
@@ -479,9 +480,8 @@ def _group() -> OptimizationProposalGroup:
     )
 
 
-def _comparisons() -> tuple[
-    ProposalComparisonInput, ProposalComparisonInput, ProposalComparisonInput
-]:
+def _comparisons() -> tuple[ProposalComparisonInput, ProposalComparisonInput,
+                            ProposalComparisonInput]:
     return tuple(
         ProposalComparisonInput(
             variant=variant,

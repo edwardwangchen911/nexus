@@ -223,7 +223,8 @@ async def _validate_strategy_binding(
         return
     selected = set(selection.selected_instrument_ids)
     if any(
-        position.target_weight > Decimal("0.125")
+        position.target_weight < Decimal("0")
+        or position.target_weight > Decimal("0.125")
         or (position.target_weight > 0 and position.instrument_id not in selected)
         for position in strategy.positions
     ):

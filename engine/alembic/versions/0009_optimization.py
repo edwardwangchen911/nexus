@@ -238,6 +238,14 @@ def upgrade() -> None:
         "CREATE TRIGGER trg_baseline_selection_authorities_validate BEFORE INSERT OR UPDATE ON baseline_selection_authorities FOR EACH ROW EXECUTE FUNCTION nexus_validate_selection_authority()"
     )
     op.execute(
+        "CREATE FUNCTION nexus_validate_group_selection() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+        "IF NEW.selection_authority_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM baseline_selection_authorities b WHERE b.id = NEW.selection_authority_id AND b.data_snapshot_id = NEW.data_snapshot_id AND b.evidence_hash = NEW.selection_evidence_hash) THEN RAISE EXCEPTION 'proposal group selection evidence hash is invalid' USING ERRCODE = '23514'; END IF; "
+        "RETURN NEW; END; $$"
+    )
+    op.execute(
+        "CREATE TRIGGER trg_optimization_groups_selection_binding BEFORE INSERT OR UPDATE ON optimization_proposal_groups FOR EACH ROW EXECUTE FUNCTION nexus_validate_group_selection()"
+    )
+    op.execute(
         "CREATE FUNCTION nexus_optimization_group_lifecycle() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
         "IF NEW.baseline_portfolio_snapshot_id IS DISTINCT FROM OLD.baseline_portfolio_snapshot_id OR NEW.portfolio_scope IS DISTINCT FROM OLD.portfolio_scope OR NEW.selection_authority_id IS DISTINCT FROM OLD.selection_authority_id OR NEW.selection_evidence_hash IS DISTINCT FROM OLD.selection_evidence_hash OR NEW.policy_id IS DISTINCT FROM OLD.policy_id OR NEW.diagnostic_report_id IS DISTINCT FROM OLD.diagnostic_report_id OR NEW.data_snapshot_id IS DISTINCT FROM OLD.data_snapshot_id OR NEW.source_policy_id IS DISTINCT FROM OLD.source_policy_id OR NEW.cost_policy_id IS DISTINCT FROM OLD.cost_policy_id OR NEW.diagnostic_input_hash IS DISTINCT FROM OLD.diagnostic_input_hash OR NEW.valuation_time IS DISTINCT FROM OLD.valuation_time OR NEW.baseline_ready IS DISTINCT FROM OLD.baseline_ready OR NEW.diagnostic_complete IS DISTINCT FROM OLD.diagnostic_complete OR NEW.source_conflict IS DISTINCT FROM OLD.source_conflict OR NEW.partial IS DISTINCT FROM OLD.partial OR NEW.requires_fx IS DISTINCT FROM OLD.requires_fx OR NEW.cost_complete IS DISTINCT FROM OLD.cost_complete OR NEW.authority_stale IS DISTINCT FROM OLD.authority_stale THEN RAISE EXCEPTION 'optimization group authority is immutable' USING ERRCODE = '23514'; END IF; "
         "IF NEW.version <> OLD.version + 1 THEN RAISE EXCEPTION 'optimization group version conflict' USING ERRCODE = '40001'; END IF; "
@@ -261,7 +269,7 @@ def upgrade() -> None:
         "CREATE TRIGGER trg_optimization_groups_lifecycle BEFORE UPDATE ON optimization_proposal_groups FOR EACH ROW EXECUTE FUNCTION nexus_optimization_group_lifecycle()"
     )
     op.execute(
-        "CREATE FUNCTION nexus_validate_strategy_position() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE proposal_variant text; evidence_complete boolean; selection_ref uuid; BEGIN SELECT p.variant, p.strategy_evidence_complete, g.selection_authority_id INTO proposal_variant, evidence_complete, selection_ref FROM optimization_proposals p JOIN optimization_proposal_groups g ON g.id = p.proposal_group_id WHERE p.id = NEW.proposal_id; IF proposal_variant = 'strategy_target' AND NOT evidence_complete AND NEW.target_weight IS DISTINCT FROM NEW.current_weight THEN RAISE EXCEPTION 'incomplete strategy must preserve baseline' USING ERRCODE = '23514'; END IF; IF proposal_variant = 'strategy_target' AND evidence_complete AND (selection_ref IS NULL OR NEW.target_weight > 0.125 OR (NEW.target_weight > 0 AND NOT EXISTS (SELECT 1 FROM baseline_selection_authorities b, jsonb_array_elements_text(b.selected_instrument_ids) selected WHERE b.id = selection_ref AND selected = NEW.instrument_id::text))) THEN RAISE EXCEPTION 'strategy target exceeds bound selection' USING ERRCODE = '23514'; END IF; RETURN NEW; END; $$"
+        "CREATE FUNCTION nexus_validate_strategy_position() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE proposal_variant text; evidence_complete boolean; selection_ref uuid; selection_hash text; BEGIN SELECT p.variant, p.strategy_evidence_complete, g.selection_authority_id, g.selection_evidence_hash INTO proposal_variant, evidence_complete, selection_ref, selection_hash FROM optimization_proposals p JOIN optimization_proposal_groups g ON g.id = p.proposal_group_id WHERE p.id = NEW.proposal_id; IF proposal_variant = 'strategy_target' AND NOT evidence_complete AND NEW.target_weight IS DISTINCT FROM NEW.current_weight THEN RAISE EXCEPTION 'incomplete strategy must preserve baseline' USING ERRCODE = '23514'; END IF; IF proposal_variant = 'strategy_target' AND evidence_complete AND (selection_ref IS NULL OR NEW.target_weight < 0 OR NEW.target_weight > 0.125 OR (NEW.target_weight > 0 AND NOT EXISTS (SELECT 1 FROM baseline_selection_authorities b, jsonb_array_elements_text(b.selected_instrument_ids) selected WHERE b.id = selection_ref AND b.evidence_hash = selection_hash AND selected = NEW.instrument_id::text))) THEN RAISE EXCEPTION 'strategy target exceeds bound selection' USING ERRCODE = '23514'; END IF; RETURN NEW; END; $$"
     )
     op.execute(
         "CREATE TRIGGER trg_proposal_positions_strategy_binding BEFORE INSERT ON proposal_positions FOR EACH ROW EXECUTE FUNCTION nexus_validate_strategy_position()"
@@ -296,6 +304,10 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP TRIGGER trg_proposal_positions_strategy_binding ON proposal_positions")
     op.execute("DROP FUNCTION nexus_validate_strategy_position()")
+    op.execute(
+        "DROP TRIGGER trg_optimization_groups_selection_binding ON optimization_proposal_groups"
+    )
+    op.execute("DROP FUNCTION nexus_validate_group_selection()")
     op.execute(
         "DROP TRIGGER trg_baseline_selection_authorities_validate ON baseline_selection_authorities"
     )

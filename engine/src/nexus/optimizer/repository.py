@@ -134,7 +134,7 @@ async def _has_executable_shadow_authority(
         )
         and strategy.strategy_evidence_complete
         and all(
-            position.target_weight <= Decimal("0.125")
+            Decimal("0") <= position.target_weight <= Decimal("0.125")
             and (
                 position.target_weight == Decimal("0")
                 or position.instrument_id in selection.selected_instrument_ids
