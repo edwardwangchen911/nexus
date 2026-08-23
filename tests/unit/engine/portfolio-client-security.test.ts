@@ -6,6 +6,11 @@ const portfolioId = "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e701";
 const snapshotId = "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e702";
 const runId = "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e705";
 
+vi.mock("../../../app/lib/auth/nexus-user", () => ({
+  NexusApiAuthError: class NexusApiAuthError extends Error {},
+  requireNexusApiActor: vi.fn(async () => actor),
+}));
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -78,6 +83,29 @@ describe("portfolio engine client boundary", () => {
     expect(response.status).toBe(202);
     expect(response.headers.get("location")).toBeNull();
     expect(response.headers.get("x-provider-secret")).toBeNull();
+  });
+
+  it("rebuilds exactly one public Location through the real BFF sanitization chain", async () => {
+    setEngineEnvironment();
+    vi.stubGlobal("fetch", async () => jsonResponse(syncEnvelope(), 202, {
+      location: "/internal/v1/untrusted-next",
+      "x-provider-secret": "discard",
+    }));
+    const { POST } = await import("../../../app/api/v1/broker-sync-runs/route");
+    const response = await POST(new Request("https://nexus.test/api/v1/broker-sync-runs", {
+      method: "POST",
+      headers: {
+        origin: "https://nexus.test",
+        "content-type": "application/json",
+        "idempotency-key": "sync-key",
+      },
+      body: JSON.stringify({ portfolio_id: portfolioId }),
+    }));
+
+    expect(response.status).toBe(202);
+    expect(response.headers.get("location")).toBe(`/api/v1/broker-sync-runs/${runId}`);
+    expect(response.headers.get("x-provider-secret")).toBeNull();
+    expect((await response.json()).data.broker_sync_run_id).toBe(runId);
   });
 
   it("passes a sanitized cooldown while discarding upstream details", async () => {
