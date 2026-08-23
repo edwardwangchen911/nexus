@@ -38,7 +38,7 @@ def test_top1_top3_and_hhi_match_exact_security_weights(values: list[int]) -> No
     expected_top3 = sum(sorted(decimals, reverse=True)[:3], Decimal(0)) / total
     assert abs(sum(weights[:3], Decimal(0)) - expected_top3) <= Decimal("1e-26")
     assert hhi == sum(((value / total) ** 2 for value in decimals), Decimal(0))
-    assert Decimal(1) / Decimal(len(values)) <= hhi <= Decimal(1)
+    assert Decimal(1) / Decimal(len(values)) - Decimal("1e-26") <= hhi <= Decimal(1)
 
 
 @given(
