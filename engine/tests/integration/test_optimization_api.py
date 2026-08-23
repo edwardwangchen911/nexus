@@ -71,3 +71,26 @@ async def test_what_if_rejects_oversized_and_more_than_thirty_instruments(
             response = await client.post(path, content=body, headers=headers("POST", path, body))
             assert response.status_code == 422
             assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_proposal_admission_fails_closed_without_persisted_authority(
+    migrated_database_url: str,
+) -> None:
+    """Creating a job from a fabricated data/cost authority must be rejected before persistence."""
+    payload = json.dumps(
+        {
+            "portfolio_snapshot_id": "0198d500-1000-7000-8000-000000000041",
+            "data_snapshot_id": "0198d500-1000-7000-8000-000000000699",
+            "cost_model_version": "cost_model_v1",
+        },
+        separators=(",", ":"),
+    ).encode()
+    path = "/internal/v1/optimization-proposals"
+    engine_app = app(migrated_database_url)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=engine_app), base_url="http://testserver"
+    ) as client:
+        response = await client.post(path, content=payload, headers=headers("POST", path, payload))
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "DATA_PARTIAL"
