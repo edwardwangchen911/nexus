@@ -1,0 +1,54 @@
+"""Small facade over transactional broker persistence boundaries."""
+
+from datetime import datetime
+from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from nexus.reconciliation.admission import AdmissionResult, TriggerKind, admit_broker_sync
+from nexus.reconciliation.persistence_errors import (
+    BrokerSyncPersistenceError,
+    IdempotencyConflict,
+    SnapshotNotProposalEligible,
+    SyncCooldownActive,
+)
+
+__all__ = [
+    "AdmissionResult",
+    "BrokerSyncPersistenceError",
+    "BrokerSyncRepository",
+    "IdempotencyConflict",
+    "SnapshotNotProposalEligible",
+    "SyncCooldownActive",
+]
+
+
+class BrokerSyncRepository:
+    """Own short database transactions around external broker reads."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def admit(
+        self,
+        *,
+        account_id: UUID,
+        portfolio_id: UUID,
+        trigger_kind: TriggerKind,
+        actor_id: str,
+        route: str,
+        idempotency_key: str,
+        request_hash: str,
+        accepted_at: datetime,
+    ) -> AdmissionResult:
+        return await admit_broker_sync(
+            self._session,
+            account_id=account_id,
+            portfolio_id=portfolio_id,
+            trigger_kind=trigger_kind,
+            actor_id=actor_id,
+            route=route,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            accepted_at=accepted_at,
+        )
