@@ -261,6 +261,70 @@ def upgrade() -> None:
             name="uq_broker_order_snapshots_snapshot_provider_order",
         ),
     )
+    op.create_table(
+        "broker_cash_flows",
+        sa.Column("id", _UUID, primary_key=True),
+        sa.Column("account_id", _UUID, nullable=False),
+        sa.Column("sync_run_id", _UUID, nullable=False),
+        sa.Column("provider", sa.String(50), nullable=False),
+        sa.Column("provider_cash_flow_id", sa.String(255), nullable=False),
+        sa.Column("identity_version", sa.String(50), nullable=False),
+        sa.Column("identity_quality", sa.String(30), nullable=False),
+        sa.Column("currency", sa.String(3), nullable=False),
+        sa.Column("amount", _NUMERIC, nullable=False),
+        sa.Column("occurred_at", _TIMESTAMP, nullable=False),
+        sa.Column("provider_business_date", sa.Date(), nullable=False),
+        sa.Column("kind", sa.String(100), nullable=False),
+        sa.Column("source_request_id", sa.String(128), nullable=False),
+        sa.Column("response_as_of", _TIMESTAMP, nullable=False),
+        sa.Column("created_at", _TIMESTAMP, nullable=False, server_default=sa.func.now()),
+        sa.CheckConstraint(
+            "identity_quality IN ('STABLE', 'FALLBACK_PARTIAL')",
+            name=op.f("ck_broker_cash_flows_identity_quality_allowed"),
+        ),
+        sa.CheckConstraint(
+            "currency ~ '^[A-Z]{3}$'",
+            name=op.f("ck_broker_cash_flows_currency_canonical"),
+        ),
+        _fk("account_id", "accounts.id", "fk_broker_cash_flows_account_id_accounts"),
+        _fk("sync_run_id", "broker_sync_runs.id", "fk_broker_cash_flows_sync_run_id_runs"),
+        sa.UniqueConstraint(
+            "provider",
+            "provider_cash_flow_id",
+            name="uq_broker_cash_flows_provider_id",
+        ),
+    )
+    op.create_table(
+        "broker_cash_flow_watermarks",
+        sa.Column("id", _UUID, primary_key=True),
+        sa.Column("account_id", _UUID, nullable=False),
+        sa.Column("provider_business_date", sa.Date(), nullable=False),
+        sa.Column("identity_quality", sa.String(30), nullable=False),
+        sa.Column("version", sa.Integer(), nullable=False),
+        sa.Column("created_at", _TIMESTAMP, nullable=False, server_default=sa.func.now()),
+        sa.CheckConstraint(
+            "identity_quality IN ('STABLE', 'FALLBACK_PARTIAL')",
+            name=op.f("ck_broker_cash_flow_watermarks_identity_quality_allowed"),
+        ),
+        sa.CheckConstraint(
+            "version >= 1",
+            name=op.f("ck_broker_cash_flow_watermarks_version_positive"),
+        ),
+        _fk("account_id", "accounts.id", "fk_cash_flow_watermarks_account_id_accounts"),
+        sa.UniqueConstraint("account_id", name="uq_cash_flow_watermarks_account_id"),
+    )
+    op.execute(
+        "CREATE FUNCTION nexus_lock_provider_capability_scope() RETURNS trigger "
+        "LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(hashtextextended("
+        "'provider-capability-scope:v1:' || NEW.provider || ':' || NEW.capability || ':' || "
+        "COALESCE(NEW.payload ->> 'operation', '') || ':' || "
+        "COALESCE(NEW.payload ->> 'market_scope', ''), 0)); RETURN NEW; END; $$"
+    )
+    op.execute(
+        "CREATE TRIGGER trg_provider_capabilities_scope_lock BEFORE INSERT "
+        "ON provider_capabilities FOR EACH ROW EXECUTE FUNCTION "
+        "nexus_lock_provider_capability_scope()"
+    )
     op.execute(
         "CREATE FUNCTION nexus_validate_external_id_envelope() RETURNS trigger "
         "LANGUAGE plpgsql AS $$ DECLARE prior account_external_id_envelopes%ROWTYPE; "
@@ -304,6 +368,21 @@ def upgrade() -> None:
         "ON portfolio_snapshots FOR EACH ROW EXECUTE FUNCTION nexus_validate_stale_snapshot()"
     )
     op.execute(
+        "CREATE FUNCTION nexus_validate_cash_flow_watermark_update() RETURNS trigger "
+        "LANGUAGE plpgsql AS $$ BEGIN "
+        "IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'cash-flow watermark deletion is forbidden'; "
+        "END IF; IF NEW.provider_business_date < OLD.provider_business_date OR "
+        "NEW.version <> OLD.version + 1 OR "
+        "(OLD.identity_quality = 'FALLBACK_PARTIAL' AND NEW.identity_quality = 'STABLE') "
+        "THEN RAISE EXCEPTION 'cash-flow watermark regression'; END IF; "
+        "RETURN NEW; END; $$"
+    )
+    op.execute(
+        "CREATE TRIGGER trg_broker_cash_flow_watermarks_monotonic BEFORE UPDATE OR DELETE "
+        "ON broker_cash_flow_watermarks FOR EACH ROW EXECUTE FUNCTION "
+        "nexus_validate_cash_flow_watermark_update()"
+    )
+    op.execute(
         "CREATE FUNCTION nexus_prevent_broker_fact_change() RETURNS trigger "
         "LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'broker fact is immutable'; END; $$"
     )
@@ -318,6 +397,8 @@ def upgrade() -> None:
         "cash_snapshots",
         "position_snapshots",
         "broker_order_snapshots",
+        "broker_cash_flows",
+        "broker_cash_flow_watermarks",
     )
     for table_name in created_at_tables:
         op.execute(
@@ -335,6 +416,7 @@ def upgrade() -> None:
         "cash_snapshots",
         "position_snapshots",
         "broker_order_snapshots",
+        "broker_cash_flows",
     ):
         op.execute(
             f"CREATE TRIGGER trg_{table_name}_immutable BEFORE UPDATE OR DELETE "
@@ -357,6 +439,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     for table_name in (
+        "broker_cash_flow_watermarks",
+        "broker_cash_flows",
         "broker_order_snapshots",
         "position_snapshots",
         "cash_snapshots",
@@ -371,6 +455,11 @@ def downgrade() -> None:
         op.execute(f"DROP TRIGGER trg_{table_name}_created_at_immutable ON {table_name}")
     op.execute("DROP TRIGGER trg_broker_sync_runs_terminal_immutable ON broker_sync_runs")
     op.execute("DROP FUNCTION nexus_protect_terminal_broker_sync()")
+    op.execute(
+        "DROP TRIGGER trg_broker_cash_flow_watermarks_monotonic "
+        "ON broker_cash_flow_watermarks"
+    )
+    op.execute("DROP FUNCTION nexus_validate_cash_flow_watermark_update()")
     op.execute("DROP TRIGGER trg_portfolio_snapshots_stale_ready ON portfolio_snapshots")
     op.execute("DROP FUNCTION nexus_validate_stale_snapshot()")
     op.execute(
@@ -378,7 +467,10 @@ def downgrade() -> None:
         "ON account_external_id_envelopes"
     )
     op.execute("DROP FUNCTION nexus_validate_external_id_envelope()")
+    op.execute("DROP TRIGGER trg_provider_capabilities_scope_lock ON provider_capabilities")
+    op.execute("DROP FUNCTION nexus_lock_provider_capability_scope()")
     for table_name in (
+        "broker_cash_flows",
         "broker_order_snapshots",
         "position_snapshots",
         "cash_snapshots",
@@ -391,6 +483,8 @@ def downgrade() -> None:
     ):
         op.execute(f"DROP TRIGGER trg_{table_name}_immutable ON {table_name}")
     op.execute("DROP FUNCTION nexus_prevent_broker_fact_change()")
+    op.drop_table("broker_cash_flow_watermarks")
+    op.drop_table("broker_cash_flows")
     op.drop_table("broker_order_snapshots")
     op.drop_table("position_snapshots")
     op.drop_table("cash_snapshots")

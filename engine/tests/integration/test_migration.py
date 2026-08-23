@@ -11,7 +11,7 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from nexus.integrations.service import IntegrationStatusService
 from nexus.persistence.base import Base
-from nexus.persistence.models import data, market, runtime  # noqa: F401
+from nexus.persistence.models import data, market, portfolio, runtime  # noqa: F401
 from nexus.persistence.session import session_factory
 from nexus.quality.source_policy import (
     QUOTE_SOURCE_POLICY_ID,
@@ -48,6 +48,18 @@ EXPECTED_TABLES = {
     "latest_quotes",
     "watchlists",
     "watchlist_members",
+    "accounts",
+    "portfolios",
+    "broker_sync_runs",
+    "broker_sync_attempts",
+    "portfolio_snapshots",
+    "cash_snapshots",
+    "position_snapshots",
+    "broker_order_snapshots",
+    "broker_cash_flows",
+    "broker_cash_flow_watermarks",
+    "broker_sync_requests",
+    "account_external_id_envelopes",
 }
 
 EXPECTED_FOREIGN_KEYS = {
@@ -65,6 +77,37 @@ EXPECTED_FOREIGN_KEYS = {
         "fk_watchlist_members_instrument_id_instruments",
         "fk_watchlist_members_watchlist_id_watchlists",
     },
+    "portfolios": "fk_portfolios_account_id_accounts",
+    "broker_sync_runs": {
+        "fk_broker_sync_runs_account_id_accounts",
+        "fk_broker_sync_runs_portfolio_id_portfolios",
+    },
+    "broker_sync_attempts": "fk_broker_sync_attempts_sync_run_id_runs",
+    "portfolio_snapshots": {
+        "fk_portfolio_snapshots_portfolio_id_portfolios",
+        "fk_portfolio_snapshots_stale_source_same_portfolio",
+        "fk_portfolio_snapshots_sync_run_id_runs",
+    },
+    "cash_snapshots": "fk_cash_snapshots_portfolio_snapshot_id_snapshots",
+    "position_snapshots": {
+        "fk_position_snapshots_instrument_id_instruments",
+        "fk_position_snapshots_portfolio_snapshot_id_snapshots",
+    },
+    "broker_order_snapshots": {
+        "fk_broker_order_snapshots_instrument_id_instruments",
+        "fk_broker_order_snapshots_portfolio_snapshot_id_snapshots",
+    },
+    "broker_cash_flows": {
+        "fk_broker_cash_flows_account_id_accounts",
+        "fk_broker_cash_flows_sync_run_id_runs",
+    },
+    "broker_cash_flow_watermarks": "fk_cash_flow_watermarks_account_id_accounts",
+    "broker_sync_requests": {
+        "fk_broker_sync_requests_sync_run_id_runs",
+        "fk_broker_sync_requests_idempotency_record_id_records",
+        "fk_broker_sync_requests_account_id_accounts",
+    },
+    "account_external_id_envelopes": ("fk_account_external_id_envelopes_account_id_accounts"),
 }
 
 
@@ -103,6 +146,28 @@ def test_0005_upgrades_and_round_trips_the_committed_0004_schema(
     _assert_schema(temporary_database_url)
 
 
+def test_0007_round_trips_the_final_broker_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> None:
+    engine_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = Config(str(engine_root / "alembic.ini"))
+
+    command.upgrade(config, "0006_market_delivery_authority")
+    assert "accounts" not in _table_names(temporary_database_url)
+    command.upgrade(config, "0007_portfolio_snapshots")
+    assert {
+        "broker_sync_requests",
+        "account_external_id_envelopes",
+    }.issubset(_table_names(temporary_database_url))
+    _assert_schema(temporary_database_url)
+    command.downgrade(config, "0006_market_delivery_authority")
+    assert "accounts" not in _table_names(temporary_database_url)
+    command.upgrade(config, "head")
+    _assert_schema(temporary_database_url)
+
+
 def test_0006_preserves_existing_admission_and_allows_same_contract_across_scopes(
     monkeypatch: pytest.MonkeyPatch,
     temporary_database_url: str,
@@ -121,9 +186,7 @@ def test_0006_preserves_existing_admission_and_allows_same_contract_across_scope
     )
     command.upgrade(config, "0006_market_delivery_authority")
     assert "delivery_mode" in _table_columns(temporary_database_url, "latest_quotes")
-    assert "delivery_mode" in _table_columns(
-        temporary_database_url, "price_series_manifests"
-    )
+    assert "delivery_mode" in _table_columns(temporary_database_url, "price_series_manifests")
 
     assert _provider_capability_scopes(temporary_database_url) == [
         (contract_hash, "fosun_get_bars", "US")
@@ -492,15 +555,19 @@ async def _integration_status_row_async(
     try:
         async with engine.connect() as connection:
             row = (
-                await connection.execute(
-                    text(
-                        "SELECT provider, status"
-                        + "".join(f", {column}" for column in columns)
-                        + " "
-                        "FROM integration_status"
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT provider, status"
+                            + "".join(f", {column}" for column in columns)
+                            + " "
+                            "FROM integration_status"
+                        )
                     )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             return dict(row)
     finally:
         await engine.dispose()
@@ -551,9 +618,7 @@ def _assert_reflected_schema(connection: Connection) -> None:
         "uq_idempotency_records_actor_route_key"
     }
     nonce_constraints = inspector.get_unique_constraints("used_nonces")
-    assert {constraint["name"] for constraint in nonce_constraints} == {
-        "uq_used_nonces_key_nonce"
-    }
+    assert {constraint["name"] for constraint in nonce_constraints} == {"uq_used_nonces_key_nonce"}
     for table_name, foreign_key_names in EXPECTED_FOREIGN_KEYS.items():
         expected_names = (
             foreign_key_names if isinstance(foreign_key_names, set) else {foreign_key_names}
@@ -645,14 +710,18 @@ def _quote_source_policy_record(database_url: str) -> dict[str, object] | None:
         try:
             async with engine.connect() as connection:
                 row = (
-                    await connection.execute(
-                        text(
-                            "SELECT id, key, version, schema_version, payload "
-                            "FROM source_policies WHERE id = :id"
-                        ),
-                        {"id": QUOTE_SOURCE_POLICY_ID},
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT id, key, version, schema_version, payload "
+                                "FROM source_policies WHERE id = :id"
+                            ),
+                            {"id": QUOTE_SOURCE_POLICY_ID},
+                        )
                     )
-                ).mappings().one_or_none()
+                    .mappings()
+                    .one_or_none()
+                )
                 return None if row is None else dict(row)
         finally:
             await engine.dispose()
@@ -754,9 +823,7 @@ def _delivery_mode_rows(database_url: str, table_name: str) -> list[tuple[str, s
     return asyncio.run(load_rows())
 
 
-def _set_fixture_delivery_mode(
-    database_url: str, table_name: str, *, delivery_mode: str
-) -> None:
+def _set_fixture_delivery_mode(database_url: str, table_name: str, *, delivery_mode: str) -> None:
     if table_name not in {"latest_quotes", "price_series_manifests"}:
         raise ValueError("unsupported delivery-mode table")
 

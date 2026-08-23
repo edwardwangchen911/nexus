@@ -2,6 +2,7 @@ import pytest
 from nexus.persistence.models.portfolio import (
     Account,
     AccountExternalIdEnvelope,
+    BrokerCashFlowWatermark,
     BrokerSyncRun,
     PortfolioSnapshotRecord,
 )
@@ -63,4 +64,26 @@ async def test_sync_snapshot_schema_migration_is_runnable(
         "cash_snapshots",
         "position_snapshots",
         "broker_order_snapshots",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cashflow_schema_and_monotonic_trigger_are_runnable(
+    migrated_database_url: str,
+) -> None:
+    assert BrokerCashFlowWatermark.__table__.name == "broker_cash_flow_watermarks"
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        triggers = set(
+            await session.scalars(
+                text(
+                    "SELECT trigger_name FROM information_schema.triggers "
+                    "WHERE trigger_name IN ('trg_broker_cash_flow_watermarks_monotonic', "
+                    "'trg_provider_capabilities_scope_lock')"
+                )
+            )
+        )
+    assert triggers == {
+        "trg_broker_cash_flow_watermarks_monotonic",
+        "trg_provider_capabilities_scope_lock",
     }

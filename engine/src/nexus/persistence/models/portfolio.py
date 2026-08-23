@@ -1,11 +1,12 @@
 """Immutable broker account, synchronization, snapshot, and cash-flow facts."""
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import (
     CheckConstraint,
+    Date,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -300,3 +301,58 @@ class BrokerOrderSnapshot(ImmutableCreatedAt, Base):
     price: Mapped[Decimal | None]
     status: Mapped[str] = mapped_column(String(30))
     updated_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class BrokerCashFlow(ImmutableCreatedAt, Base):
+    __tablename__ = "broker_cash_flows"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "provider_cash_flow_id",
+            name="uq_broker_cash_flows_provider_id",
+        ),
+        CheckConstraint(
+            "identity_quality IN ('STABLE', 'FALLBACK_PARTIAL')",
+            name="identity_quality_allowed",
+        ),
+        CheckConstraint("currency ~ '^[A-Z]{3}$'", name="currency_canonical"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    account_id: Mapped[UUID] = mapped_column(
+        ForeignKey("accounts.id", name="fk_broker_cash_flows_account_id_accounts")
+    )
+    sync_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("broker_sync_runs.id", name="fk_broker_cash_flows_sync_run_id_runs")
+    )
+    provider: Mapped[str] = mapped_column(String(50))
+    provider_cash_flow_id: Mapped[str] = mapped_column(String(255))
+    identity_version: Mapped[str] = mapped_column(String(50))
+    identity_quality: Mapped[str] = mapped_column(String(30))
+    currency: Mapped[str] = mapped_column(String(3))
+    amount: Mapped[Decimal]
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    provider_business_date: Mapped[date] = mapped_column(Date)
+    kind: Mapped[str] = mapped_column(String(100))
+    source_request_id: Mapped[str] = mapped_column(String(128))
+    response_as_of: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class BrokerCashFlowWatermark(ImmutableCreatedAt, Base):
+    __tablename__ = "broker_cash_flow_watermarks"
+    __table_args__ = (
+        UniqueConstraint("account_id", name="uq_cash_flow_watermarks_account_id"),
+        CheckConstraint(
+            "identity_quality IN ('STABLE', 'FALLBACK_PARTIAL')",
+            name="identity_quality_allowed",
+        ),
+        CheckConstraint("version >= 1", name="version_positive"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    account_id: Mapped[UUID] = mapped_column(
+        ForeignKey("accounts.id", name="fk_cash_flow_watermarks_account_id_accounts")
+    )
+    provider_business_date: Mapped[date] = mapped_column(Date)
+    identity_quality: Mapped[str] = mapped_column(String(30))
+    version: Mapped[int] = mapped_column(Integer, default=1)
