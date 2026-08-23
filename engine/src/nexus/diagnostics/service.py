@@ -3,6 +3,7 @@
 from decimal import Decimal
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.diagnostics.artifacts import ArtifactByteReader
@@ -20,10 +21,15 @@ from nexus.diagnostics.models import (
     OptimizationNeed,
     PortfolioDiagnosticReport,
 )
-from nexus.diagnostics.policy import RealAdvisoryPolicy, load_real_advisory_policy_v1
+from nexus.diagnostics.policy import (
+    REAL_ADVISORY_POLICY_ID,
+    RealAdvisoryPolicy,
+    load_real_advisory_policy_v1,
+)
 from nexus.diagnostics.portfolio_evaluator import evaluate_currency_scopes
 from nexus.diagnostics.repository import (
-    _persist_report,
+    _read_report,
+    _reports_equivalent,
     load_frozen_snapshot,
     load_history,
     load_instrument_identities,
@@ -34,6 +40,12 @@ from nexus.diagnostics.scope import (
 from nexus.diagnostics.scope import (
     has_future_session_conflict as _has_future_session_conflict,
 )
+from nexus.persistence.models.diagnostics import (
+    PortfolioDiagnosticEvidenceRefRecord,
+    PortfolioDiagnosticItemRecord,
+    PortfolioDiagnosticReportRecord,
+)
+from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
 from nexus.providers.broker.base import PortfolioSnapshot
 
 
@@ -185,12 +197,88 @@ async def diagnose_and_persist(
         history=history,
         policy_version=policy.version,
     )
-    await _persist_report(
-        session,
-        portfolio_id=portfolio_id,
-        report=report,
-        diagnostic_input_hash=input_hash,
-    )
+    async def write_authoritative_result() -> UUID:
+        locked_snapshot = await session.scalar(
+            select(PortfolioSnapshotRecord)
+            .where(
+                PortfolioSnapshotRecord.id == snapshot_id,
+                PortfolioSnapshotRecord.portfolio_id == portfolio_id,
+            )
+            .with_for_update()
+        )
+        if (
+            locked_snapshot is None
+            or locked_snapshot.as_of is None
+            or locked_snapshot.as_of != snapshot.as_of
+        ):
+            raise ValueError("diagnostic snapshot authority changed during computation")
+        if any(
+            ref.available_at > locked_snapshot.as_of
+            for item in report.items
+            for ref in item.evidence_refs
+        ):
+            raise ValueError("diagnostic evidence is unavailable at frozen snapshot")
+        existing = await session.scalar(
+            select(PortfolioDiagnosticReportRecord).where(
+                PortfolioDiagnosticReportRecord.portfolio_snapshot_id == snapshot.id,
+                PortfolioDiagnosticReportRecord.policy_id == REAL_ADVISORY_POLICY_ID,
+            )
+        )
+        if existing is not None:
+            same_report = _reports_equivalent(
+                await _read_report(session, existing), report
+            )
+            if existing.diagnostic_input_hash != input_hash or not same_report:
+                raise ValueError("diagnostic report replay conflicts with immutable report")
+            return existing.id
+        stored = PortfolioDiagnosticReportRecord(
+            portfolio_id=portfolio_id,
+            portfolio_snapshot_id=snapshot.id,
+            snapshot_as_of=locked_snapshot.as_of,
+            trading_day=report.trading_day,
+            policy_id=REAL_ADVISORY_POLICY_ID,
+            policy_version=report.policy_version,
+            optimization_need=report.optimization_need,
+            diagnostic_input_hash=input_hash,
+        )
+        session.add(stored)
+        await session.flush()
+        for diagnostic_item in report.items:
+            stored_item = PortfolioDiagnosticItemRecord(
+                report_id=stored.id,
+                diagnostic_code=diagnostic_item.diagnostic_code,
+                metric_value=(
+                    None
+                    if diagnostic_item.metric_value is None
+                    else Decimal(diagnostic_item.metric_value)
+                ),
+                unit=diagnostic_item.unit,
+                reference_limit=(
+                    None
+                    if diagnostic_item.reference_limit is None
+                    else Decimal(diagnostic_item.reference_limit)
+                ),
+                policy_scope=diagnostic_item.policy_scope,
+                severity=diagnostic_item.severity,
+                actionability=diagnostic_item.actionability,
+                unknown_reason=diagnostic_item.unknown_reason,
+            )
+            session.add(stored_item)
+            await session.flush()
+            session.add_all(
+                PortfolioDiagnosticEvidenceRefRecord(
+                    item_id=stored_item.id,
+                    source=ref.source,
+                    object_id=ref.object_id,
+                    available_at=ref.available_at,
+                    location=ref.location,
+                    content_hash=ref.content_hash,
+                )
+                for ref in diagnostic_item.evidence_refs
+            )
+        return stored.id
+
+    await write_authoritative_result()
     return report
 
 
