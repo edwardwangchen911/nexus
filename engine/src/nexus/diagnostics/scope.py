@@ -1,20 +1,36 @@
 """Instrument-specific deterministic diagnostic scope guards."""
 
+from uuid import UUID
+
 from nexus.diagnostics.models import DiagnosticItem, MarketEvidence
 from nexus.providers.broker.base import PortfolioSnapshot
 
-_FOSUN_ALLOWED_PREFIXES = (
-    "CONCENTRATION",
-    "RISK_BUCKET",
-    "CURRENCY",
-    "CASH",
-    "LIQUIDITY",
-    "VOLATILITY",
-    "DRAWDOWN",
-    "BETA",
-    "CORRELATION",
-    "MARKET_RISK",
-    "POSITION_MARKET_VALUE",
+_ALLOWED_EXACT_CODES = frozenset(
+    {
+        "CASH_RATIO",
+        "CONCENTRATION_HHI",
+        "CONCENTRATION_TOP1",
+        "CONCENTRATION_TOP3",
+        "CORRELATION_CLUSTER",
+        "CURRENCY_EXPOSURE",
+        "DATA_COMPLETENESS_TRADING_CALENDAR",
+        "MARKET_EVIDENCE",
+        "POSITION_MARKET_VALUE",
+        "SNAPSHOT_ADMISSION",
+        "SNAPSHOT_EVIDENCE",
+    }
+)
+_ALLOWED_INSTRUMENT_FAMILIES = frozenset(
+    {
+        "BETA_126",
+        "CORRELATION_126",
+        "DRAWDOWN_252",
+        "LIQUIDITY_DAYS_TO_EXIT",
+        "MARKET_RISK",
+        "POSITION_MARKET_VALUE",
+        "VOLATILITY_20",
+        "VOLATILITY_63",
+    }
 )
 
 
@@ -24,12 +40,38 @@ def assert_fosun_read_only_scope(
     items: list[DiagnosticItem],
 ) -> None:
     """Forbid fundamental recommendation domains for the read-only 00656.HK holding."""
-    if not any(
-        market.symbols.get(position.instrument_id) == "00656.HK" for position in snapshot.positions
-    ):
+    restricted_ids = {
+        position.instrument_id
+        for position in snapshot.positions
+        if market.identities.get(
+            position.instrument_id,
+        ) is None
+        or market.identities[position.instrument_id].restriction != "STANDARD"
+    }
+    if not restricted_ids:
         return
-    if any(not item.diagnostic_code.startswith(_FOSUN_ALLOWED_PREFIXES) for item in items):
+    if any(not _allowed_code(item.diagnostic_code, restricted_ids) for item in items):
         raise ValueError("00656.HK diagnostics cannot contain fundamental buy or sell output")
+
+
+def _allowed_code(code: str, restricted_ids: set[UUID]) -> bool:
+    if code in _ALLOWED_EXACT_CODES:
+        return True
+    family, separator, suffix = code.partition(":")
+    if not separator or family not in _ALLOWED_INSTRUMENT_FAMILIES:
+        return False
+    try:
+        instrument_id = UUID(suffix)
+    except ValueError:
+        return False
+    return instrument_id in restricted_ids or family in {
+        "BETA_126",
+        "CORRELATION_126",
+        "DRAWDOWN_252",
+        "MARKET_RISK",
+        "VOLATILITY_20",
+        "VOLATILITY_63",
+    }
 
 
 def has_future_session_conflict(snapshot: PortfolioSnapshot, market: MarketEvidence) -> bool:

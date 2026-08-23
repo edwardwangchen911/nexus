@@ -7,7 +7,12 @@ from uuid import UUID
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.diagnostics.models import DiagnosticHistory, DiagnosticItem, PortfolioDiagnosticReport
+from nexus.diagnostics.models import (
+    DiagnosticHistory,
+    DiagnosticItem,
+    InstrumentIdentity,
+    PortfolioDiagnosticReport,
+)
 from nexus.diagnostics.policy import (
     REAL_ADVISORY_POLICY_ID,
     load_real_advisory_policy_v1,
@@ -19,6 +24,7 @@ from nexus.persistence.models.diagnostics import (
     PortfolioDiagnosticItemRecord,
     PortfolioDiagnosticReportRecord,
 )
+from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.portfolio import (
     BrokerOrderSnapshot,
     CashSnapshot,
@@ -169,6 +175,84 @@ async def load_frozen_snapshot(
         stale_from_snapshot_id=record.stale_from_snapshot_id,
         source_request_ids=tuple(record.source_request_ids),
     )
+
+
+async def load_instrument_identities(
+    session: AsyncSession, *, snapshot: PortfolioSnapshot
+) -> dict[UUID, InstrumentIdentity]:
+    """Mint canonical identities using only records visible at the frozen instant."""
+    instrument_ids = {position.instrument_id for position in snapshot.positions}
+    if not instrument_ids or snapshot.as_of is None:
+        return {
+            instrument_id: InstrumentIdentity.unresolved(instrument_id)
+            for instrument_id in instrument_ids
+        }
+    instruments = (
+        (
+            await session.execute(
+                select(Instrument).where(
+                    Instrument.id.in_(instrument_ids),
+                    Instrument.created_at <= snapshot.as_of,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    aliases = (
+        (
+            await session.execute(
+                select(InstrumentAlias)
+                .where(
+                    InstrumentAlias.instrument_id.in_(instrument_ids),
+                    InstrumentAlias.alias_type == "ticker",
+                    InstrumentAlias.valid_from <= snapshot.as_of.date(),
+                    (
+                        InstrumentAlias.valid_to.is_(None)
+                        | (InstrumentAlias.valid_to >= snapshot.as_of.date())
+                    ),
+                    InstrumentAlias.created_at <= snapshot.as_of,
+                )
+                .order_by(
+                    InstrumentAlias.instrument_id,
+                    InstrumentAlias.valid_from.desc(),
+                    InstrumentAlias.id.desc(),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    instruments_by_id = {record.id: record for record in instruments}
+    aliases_by_id: dict[UUID, InstrumentAlias] = {}
+    for alias in aliases:
+        aliases_by_id.setdefault(alias.instrument_id, alias)
+    result: dict[UUID, InstrumentIdentity] = {}
+    for instrument_id in instrument_ids:
+        record = instruments_by_id.get(instrument_id)
+        selected_alias = aliases_by_id.get(instrument_id)
+        if record is None or selected_alias is None:
+            result[instrument_id] = InstrumentIdentity.unresolved(instrument_id)
+            continue
+        restriction = cast(
+            Literal["STANDARD", "FOSUN_READ_ONLY", "UNRESOLVED"],
+            "FOSUN_READ_ONLY"
+            if record.asset_type == "equity"
+            and record.exchange == "XHKG"
+            and record.currency == "HKD"
+            and selected_alias.symbol == "00656.HK"
+            else "STANDARD",
+        )
+        result[instrument_id] = InstrumentIdentity(
+            instrument_id=instrument_id,
+            asset_type=record.asset_type,
+            exchange=record.exchange,
+            currency=record.currency,
+            risk_bucket=record.risk_bucket,
+            canonical_ticker=selected_alias.symbol,
+            restriction=restriction,
+        )
+    return result
 
 
 async def load_history(

@@ -19,7 +19,12 @@ from nexus.diagnostics.models import (
 )
 from nexus.diagnostics.policy import RealAdvisoryPolicy, load_real_advisory_policy_v1
 from nexus.diagnostics.portfolio_evaluator import evaluate_currency_scopes
-from nexus.diagnostics.repository import load_frozen_snapshot, load_history, persist_report
+from nexus.diagnostics.repository import (
+    load_frozen_snapshot,
+    load_history,
+    load_instrument_identities,
+    persist_report,
+)
 from nexus.diagnostics.scope import (
     assert_fosun_read_only_scope as _assert_fosun_read_only_scope,
 )
@@ -155,8 +160,9 @@ async def diagnose_and_persist(
     snapshot = await load_frozen_snapshot(
         session, portfolio_id=portfolio_id, snapshot_id=snapshot_id
     )
+    identities = await load_instrument_identities(session, snapshot=snapshot)
     history = await load_history(session, portfolio_id=portfolio_id)
-    market = MarketEvidence(quality="PARTIAL")
+    market = MarketEvidence(quality="PARTIAL", identities=identities)
     report = diagnose_portfolio(snapshot, market, history, policy)
     await persist_report(session, portfolio_id=portfolio_id, report=report)
     return report

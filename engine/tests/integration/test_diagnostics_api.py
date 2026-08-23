@@ -8,7 +8,11 @@ from helpers.portfolio_api import PORTFOLIOS, app, headers, seed_portfolio_list,
 from nexus.api.routes.diagnostics import router as diagnostics_router
 from nexus.diagnostics.models import DiagnosticItem, PortfolioDiagnosticReport
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID, load_real_advisory_policy_v1
-from nexus.diagnostics.repository import persist_report
+from nexus.diagnostics.repository import (
+    load_frozen_snapshot,
+    load_instrument_identities,
+    persist_report,
+)
 from nexus.diagnostics.service import diagnose_and_persist
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.diagnostics import (
@@ -141,6 +145,27 @@ async def test_production_diagnosis_accepts_only_database_snapshot_authority(
     assert report.optimization_need == "RESEARCH_REQUIRED"
     assert report.trading_day is not None
     assert report.items[0].unknown_reason == "MARKET_EVIDENCE_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_production_identity_is_minted_from_point_in_time_instrument_master(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        snapshot = await load_frozen_snapshot(
+            session,
+            portfolio_id=PORTFOLIOS[0],
+            snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
+        )
+        identities = await load_instrument_identities(session, snapshot=snapshot)
+
+    identity = identities[snapshot.positions[0].instrument_id]
+    assert identity.canonical_ticker == "00656.HK"
+    assert identity.exchange == "XHKG"
+    assert identity.restriction == "FOSUN_READ_ONLY"
+    assert identity.minted_by == "instrument_repository"
 
 
 def _report(policy_version: str) -> PortfolioDiagnosticReport:

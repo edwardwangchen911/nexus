@@ -10,6 +10,7 @@ from nexus.diagnostics.models import (
     DiagnosticHistory,
     DiagnosticItem,
     EvidenceBinding,
+    InstrumentIdentity,
     MarketEvidence,
     PortfolioDiagnosticReport,
 )
@@ -347,7 +348,13 @@ def test_future_session_with_early_availability_blocks_as_source_conflict() -> N
 def test_00656_hk_guard_rejects_any_future_fundamental_diagnostic() -> None:
     snapshot = _ready_snapshot()
     market = _complete_market(snapshot).model_copy(
-        update={"symbols": {snapshot.positions[0].instrument_id: "00656.HK"}}
+        update={
+            "identities": {
+                snapshot.positions[0].instrument_id: InstrumentIdentity.fosun_read_only(
+                    snapshot.positions[0].instrument_id
+                )
+            }
+        }
     )
     prohibited = _warning_item().model_copy(update={"diagnostic_code": "FUNDAMENTAL_BUY"})
 
@@ -423,6 +430,7 @@ def _complete_market(snapshot: PortfolioSnapshot) -> MarketEvidence:
         adv20={instrument_id: Decimal("1000")},
         quality="PASS",
         risk_buckets={instrument_id: {"equity": Decimal(1)}},
+        identities={instrument_id: InstrumentIdentity.standard(instrument_id)},
         trading_sessions=tuple(bar.session for bar in series.bars),
         benchmark=series,
         evidence=DiagnosticEvidence(

@@ -73,13 +73,76 @@ class DiagnosticEvidence(_DiagnosticModel):
     trading_calendar: EvidenceBinding | None = None
 
 
+class InstrumentIdentity(_DiagnosticModel):
+    """Repository-minted point-in-time instrument identity for scope enforcement."""
+
+    instrument_id: UUID
+    asset_type: str | None
+    exchange: str | None
+    currency: str | None
+    risk_bucket: str | None
+    canonical_ticker: str | None
+    restriction: Literal["STANDARD", "FOSUN_READ_ONLY", "UNRESOLVED"]
+    minted_by: Literal["instrument_repository"] = "instrument_repository"
+
+    @model_validator(mode="after")
+    def _restriction_matches_identity(self) -> "InstrumentIdentity":
+        is_fosun = (
+            self.asset_type == "equity"
+            and self.exchange == "XHKG"
+            and self.currency == "HKD"
+            and self.canonical_ticker == "00656.HK"
+        )
+        if is_fosun != (self.restriction == "FOSUN_READ_ONLY"):
+            raise ValueError("00656.HK identity must use the read-only restriction")
+        if self.restriction == "UNRESOLVED" and self.canonical_ticker is not None:
+            raise ValueError("unresolved identity cannot claim a canonical ticker")
+        return self
+
+    @classmethod
+    def fosun_read_only(cls, instrument_id: UUID) -> "InstrumentIdentity":
+        return cls(
+            instrument_id=instrument_id,
+            asset_type="equity",
+            exchange="XHKG",
+            currency="HKD",
+            risk_bucket="hk_equity",
+            canonical_ticker="00656.HK",
+            restriction="FOSUN_READ_ONLY",
+        )
+
+    @classmethod
+    def standard(cls, instrument_id: UUID) -> "InstrumentIdentity":
+        return cls(
+            instrument_id=instrument_id,
+            asset_type="equity",
+            exchange="XNAS",
+            currency="USD",
+            risk_bucket="us_equity",
+            canonical_ticker="FIXTURE",
+            restriction="STANDARD",
+        )
+
+    @classmethod
+    def unresolved(cls, instrument_id: UUID) -> "InstrumentIdentity":
+        return cls(
+            instrument_id=instrument_id,
+            asset_type=None,
+            exchange=None,
+            currency=None,
+            risk_bucket=None,
+            canonical_ticker=None,
+            restriction="UNRESOLVED",
+        )
+
+
 class MarketEvidence(_DiagnosticModel):
     prices: Mapping[UUID, PriceSeries] = {}
     adv20: Mapping[UUID, Decimal] = {}
     quality: Literal["PASS", "PARTIAL", "FAIL"] = "PARTIAL"
     risk_buckets: Mapping[UUID, Mapping[str, Decimal]] = {}
     trading_sessions: tuple[date, ...] = ()
-    symbols: Mapping[UUID, str] = {}
+    identities: Mapping[UUID, InstrumentIdentity] = {}
     benchmark: PriceSeries | None = None
     evidence: DiagnosticEvidence = DiagnosticEvidence()
     source_conflict: bool = False

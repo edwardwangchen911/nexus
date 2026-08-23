@@ -89,7 +89,12 @@ def _currency_items(
             *(results[position.instrument_id].refs for position, _ in values),
         )
         items.extend(_concentration_items(values, scope, market, policy, value_refs))
-        items.extend(_exposure_items(values, scope, market, policy, resolver, value_refs))
+        if all(
+            market.identities.get(position.instrument_id) is not None
+            and market.identities[position.instrument_id].restriction == "STANDARD"
+            for position, _ in values
+        ):
+            items.extend(_exposure_items(values, scope, market, policy, resolver, value_refs))
         items.extend(_liquidity_items(values, scope, market, policy, resolver, value_refs))
         items.extend(market_risk_items(values, scope, market, policy, snapshot, resolver))
     total = cash + sum((value for _, value in values), Decimal(0))

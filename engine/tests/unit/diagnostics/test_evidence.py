@@ -7,6 +7,7 @@ from nexus.diagnostics.models import (
     DiagnosticEvidence,
     DiagnosticHistory,
     EvidenceBinding,
+    InstrumentIdentity,
     MarketEvidence,
 )
 from nexus.diagnostics.policy import RealAdvisoryPolicy
@@ -221,6 +222,7 @@ def _market(
         adv20={INSTRUMENT_ID: Decimal("1000")},
         quality="PASS",
         risk_buckets={INSTRUMENT_ID: {"equity": Decimal(1)}},
+        identities={INSTRUMENT_ID: InstrumentIdentity.standard(INSTRUMENT_ID)},
         trading_sessions=tuple(bar.session for bar in series.bars),
         benchmark=series,
         evidence=DiagnosticEvidence(
