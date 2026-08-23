@@ -358,6 +358,7 @@ def _position_input(row: PositionSnapshot) -> dict[str, object]:
 def _binding_input(instrument_id: UUID, binding: EvidenceBinding) -> dict[str, object]:
     return {
         "instrument_id": str(instrument_id),
+        "source_policy_decision": "PASS",
         "available_at": _canonical_value(binding.available_at),
         "as_of": _canonical_value(binding.as_of),
         "session": _canonical_value(binding.session),

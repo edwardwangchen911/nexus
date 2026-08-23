@@ -71,6 +71,14 @@ async def test_production_service_assembles_real_diagnostics_from_hashed_parquet
             snapshot_id=SNAPSHOT_ID,
             artifact_reader=FixtureArtifactReader(payloads),
         )
+        payloads["memory://asset"] += b"tampered-after-persist"
+        with pytest.raises(ValueError, match="artifact hash"):
+            await diagnose_and_persist(
+                session,
+                portfolio_id=PORTFOLIOS[0],
+                snapshot_id=SNAPSHOT_ID,
+                artifact_reader=FixtureArtifactReader(payloads),
+            )
 
         stored = await session.scalar(
             select(PortfolioDiagnosticReportRecord).where(
@@ -79,6 +87,7 @@ async def test_production_service_assembles_real_diagnostics_from_hashed_parquet
         )
 
     assert stored is not None
+    assert await _report_count_from_url(migrated_database_url) == 1
     assert len(stored.diagnostic_input_hash) == 64
     assert report.snapshot_as_of == SNAPSHOT_AT
     assert HOLIDAY not in assembly.market.trading_sessions
@@ -274,3 +283,9 @@ async def _report_count(session: AsyncSession) -> int:
     return int(
         await session.scalar(select(func.count()).select_from(PortfolioDiagnosticReportRecord))
     )
+
+
+async def _report_count_from_url(database_url: str) -> int:
+    factory = session_factory(settings(database_url))
+    async with factory() as session:
+        return await _report_count(session)

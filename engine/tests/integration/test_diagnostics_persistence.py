@@ -79,6 +79,13 @@ async def test_same_snapshot_policy_replay_rejects_different_content(
             await _persist_report(
                 session,
                 portfolio_id=PORTFOLIOS[0],
+                report=report,
+                diagnostic_input_hash="d" * 64,
+            )
+        with pytest.raises(ValueError, match="replay conflicts"):
+            await _persist_report(
+                session,
+                portfolio_id=PORTFOLIOS[0],
                 report=report.model_copy(update={"optimization_need": "BLOCKED"}),
                 diagnostic_input_hash=INPUT_HASH,
             )
