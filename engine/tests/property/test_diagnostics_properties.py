@@ -99,25 +99,48 @@ def test_beta_and_correlation_126_are_finite_and_correlation_is_bounded(
 
 @given(
     st.integers(min_value=1, max_value=10_000),
-    st.integers(min_value=60, max_value=126),
+    st.integers(min_value=15, max_value=31),
 )
 @settings(max_examples=40, deadline=None)
-def test_correlation_cluster_uses_point_eight_threshold_with_sixty_overlaps(
-    scale: int, overlap: int,
+def test_production_cluster_straddles_exact_point_eight_correlation(
+    scale: int, repeats: int,
 ) -> None:
     left = UUID("0198d500-1000-7000-8000-000000000001")
     right = UUID("0198d500-1000-7000-8000-000000000002")
-    sessions = tuple(date(2026, 1, 1) + timedelta(days=index) for index in range(overlap))
-    series = {session: Decimal(index * scale) for index, session in enumerate(sessions)}
-    below = {
-        session: Decimal(scale if index % 2 else -scale)
-        for index, session in enumerate(sessions)
-    }
+    sessions = tuple(
+        date(2026, 1, 1) + timedelta(days=index) for index in range(repeats * 4)
+    )
+    base_left = (Decimal(1), Decimal(-1), Decimal(1), Decimal(-1)) * repeats
+    orthogonal = (Decimal(1), Decimal(1), Decimal(-1), Decimal(-1)) * repeats
+    factor = Decimal(scale)
+    left_values = tuple(value * factor for value in base_left)
+    exact_values = tuple(
+        (Decimal(4) * first + Decimal(3) * other) * factor
+        for first, other in zip(base_left, orthogonal, strict=True)
+    )
+    below_values = tuple(
+        (Decimal(3) * first + Decimal(4) * other) * factor
+        for first, other in zip(base_left, orthogonal, strict=True)
+    )
+    above_values = tuple(
+        (Decimal(5) * first + Decimal(3) * other) * factor
+        for first, other in zip(base_left, orthogonal, strict=True)
+    )
+    series = dict(zip(sessions, left_values, strict=True))
+    exact = dict(zip(sessions, exact_values, strict=True))
+    below = dict(zip(sessions, below_values, strict=True))
+    above = dict(zip(sessions, above_values, strict=True))
 
-    assert correlation_components_by_session({left: series, right: dict(series)}) == (
+    assert _correlation(left_values, exact_values) == Decimal("0.8")
+    assert _correlation(left_values, below_values) < Decimal("0.8")
+    assert _correlation(left_values, above_values) > Decimal("0.8")
+    assert correlation_components_by_session({left: series, right: exact}) == (
         (left, right),
     )
     assert correlation_components_by_session({left: series, right: below}) == ()
+    assert correlation_components_by_session({left: series, right: above}) == (
+        (left, right),
+    )
 
 
 @given(st.integers(min_value=1, max_value=10_000))
@@ -133,6 +156,22 @@ def test_correlation_cluster_straddles_fifty_nine_and_sixty_overlap(scale: int) 
     assert correlation_components_by_session({left: series, right: dict(series)}) == (
         (left, right),
     )
+
+
+def _correlation(left: tuple[Decimal, ...], right: tuple[Decimal, ...]) -> Decimal:
+    count = Decimal(len(left))
+    left_mean = sum(left, Decimal(0)) / count
+    right_mean = sum(right, Decimal(0)) / count
+    covariance = sum(
+        (
+            (first - left_mean) * (second - right_mean)
+            for first, second in zip(left, right, strict=True)
+        ),
+        Decimal(0),
+    ) / count
+    left_variance = sum(((value - left_mean) ** 2 for value in left), Decimal(0)) / count
+    right_variance = sum(((value - right_mean) ** 2 for value in right), Decimal(0)) / count
+    return covariance / (left_variance * right_variance).sqrt()
 
 
 @given(
