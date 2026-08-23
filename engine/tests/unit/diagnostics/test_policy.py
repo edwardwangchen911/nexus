@@ -257,9 +257,7 @@ def test_market_evidence_rejects_nested_binary_float_inputs() -> None:
 def test_nonpositive_current_price_is_explicit_unknown_not_a_metric_exception() -> None:
     base_snapshot = _ready_snapshot()
     position = base_snapshot.positions[0].model_copy(update={"current_price": Decimal(0)})
-    snapshot = base_snapshot.model_copy(
-        update={"positions": (position,)}
-    )
+    snapshot = base_snapshot.model_copy(update={"positions": (position,)})
 
     report = diagnose_portfolio(
         snapshot, _complete_market(snapshot), DiagnosticHistory.empty(), RealAdvisoryPolicy.v1()
@@ -267,6 +265,41 @@ def test_nonpositive_current_price_is_explicit_unknown_not_a_metric_exception() 
 
     assert report.optimization_need == "RESEARCH_REQUIRED"
     assert any(item.unknown_reason == "POSITION_PRICE_INVALID" for item in report.items)
+
+
+def test_future_session_with_early_availability_blocks_as_source_conflict() -> None:
+    snapshot = _ready_snapshot()
+    instrument_id = snapshot.positions[0].instrument_id
+    future = PriceBar(
+        instrument_id=instrument_id,
+        session=date(2026, 8, 24),
+        open=Decimal("100"),
+        high=Decimal("100"),
+        low=Decimal("100"),
+        close=Decimal("100"),
+        volume=Decimal("1"),
+        available_at=snapshot.as_of - timedelta(days=1),
+    )
+    market = _complete_market(snapshot).model_copy(
+        update={
+            "prices": {
+                instrument_id: _complete_market(snapshot)
+                .prices[instrument_id]
+                .model_copy(
+                    update={
+                        "bars": (_complete_market(snapshot).prices[instrument_id].bars[0], future)
+                    }
+                )
+            }
+        }
+    )
+
+    report = diagnose_portfolio(
+        snapshot, market, DiagnosticHistory.empty(), RealAdvisoryPolicy.v1()
+    )
+
+    assert report.optimization_need == "BLOCKED"
+    assert report.items[0].unknown_reason == "SOURCE_CONFLICT"
 
 
 def test_00656_hk_guard_rejects_any_future_fundamental_diagnostic() -> None:
@@ -337,7 +370,7 @@ def _series(snapshot: PortfolioSnapshot, count: int) -> PriceSeries:
     bars = tuple(
         PriceBar(
             instrument_id=instrument_id,
-            session=date(2026, 1, 1) + timedelta(days=index),
+            session=snapshot.as_of.date() - timedelta(days=count - index),
             open=Decimal("100") + Decimal(index % 2),
             high=Decimal("101") + Decimal(index % 2),
             low=Decimal("99") + Decimal(index % 2),

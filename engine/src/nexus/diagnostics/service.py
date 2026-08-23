@@ -28,7 +28,12 @@ from nexus.diagnostics.models import (
 )
 from nexus.diagnostics.policy import RealAdvisoryPolicy, load_real_advisory_policy_v1
 from nexus.diagnostics.repository import load_frozen_snapshot, load_history, persist_report
-from nexus.diagnostics.scope import assert_fosun_read_only_scope as _assert_fosun_read_only_scope
+from nexus.diagnostics.scope import (
+    assert_fosun_read_only_scope as _assert_fosun_read_only_scope,
+)
+from nexus.diagnostics.scope import (
+    has_future_session_conflict as _has_future_session_conflict,
+)
 from nexus.domain.decimal import decimal_to_string
 from nexus.providers.base import PriceSeries
 from nexus.providers.broker.base import BrokerPosition, PortfolioSnapshot
@@ -42,8 +47,9 @@ def diagnose_portfolio(
     policy: RealAdvisoryPolicy,
 ) -> PortfolioDiagnosticReport:
     """Diagnose frozen broker facts without cross-currency aggregation or LLM input."""
-    if snapshot.status != "READY" or market.source_conflict:
-        return _report(snapshot, policy, "BLOCKED", (_blocked_item(market),))
+    source_conflict = market.source_conflict or _has_future_session_conflict(snapshot, market)
+    if snapshot.status != "READY" or source_conflict:
+        return _report(snapshot, policy, "BLOCKED", (_blocked_item(market, source_conflict),))
     if market.quality != "PASS":
         return _report(snapshot, policy, "RESEARCH_REQUIRED", (_market_unknown_item(market),))
     items = _evaluate_currency_scopes(snapshot, market, policy)
@@ -110,9 +116,7 @@ def _evaluate_currency_scopes(
         values, value_unknown = _position_values(positions_by_currency[currency])
         if value_unknown is not None:
             items.append(
-                _unknown_item(
-                    "POSITION_MARKET_VALUE", currency, value_unknown, scope, market
-                )
+                _unknown_item("POSITION_MARKET_VALUE", currency, value_unknown, scope, market)
             )
         if values:
             items.extend(_concentration_items(values, scope, market, policy))
@@ -477,11 +481,11 @@ def _report(
     )
 
 
-def _blocked_item(market: MarketEvidence) -> DiagnosticItem:
+def _blocked_item(market: MarketEvidence, source_conflict: bool) -> DiagnosticItem:
     return _unknown_item(
         "SNAPSHOT_ADMISSION",
         "status",
-        "SOURCE_CONFLICT" if market.source_conflict else "SNAPSHOT_NOT_READY",
+        "SOURCE_CONFLICT" if source_conflict else "SNAPSHOT_NOT_READY",
         "portfolio",
         market,
     ).model_copy(update={"severity": "critical", "actionability": "blocked"})

@@ -30,3 +30,15 @@ def assert_fosun_read_only_scope(
         return
     if any(not item.diagnostic_code.startswith(_FOSUN_ALLOWED_PREFIXES) for item in items):
         raise ValueError("00656.HK diagnostics cannot contain fundamental buy or sell output")
+
+
+def has_future_session_conflict(snapshot: PortfolioSnapshot, market: MarketEvidence) -> bool:
+    """A bar for a future trading session cannot be known at the snapshot instant."""
+    if snapshot.as_of is None:
+        return False
+    series = (*market.prices.values(),) + (() if market.benchmark is None else (market.benchmark,))
+    return any(
+        bar.session > snapshot.as_of.date() and bar.available_at <= snapshot.as_of
+        for price_series in series
+        for bar in price_series.bars
+    )
