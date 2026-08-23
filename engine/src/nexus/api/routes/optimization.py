@@ -244,6 +244,7 @@ async def _load_admission_authority(
         requires_fx=authority.requires_fx,
         cost_complete=authority.cost_complete,
         authority_stale=authority.authority_stale,
+        portfolio_scope=authority.portfolio_scope,
     )
 
 
@@ -293,6 +294,7 @@ async def get_optimization_group(
                 "variant": child.variant,
                 "analysis_only": child.analysis_only,
                 "strategy_evidence_complete": child.strategy_evidence_complete,
+                "portfolio_scope": child.portfolio_scope,
                 "positions": [
                     {
                         "instrument_id": str(position.instrument_id),
@@ -318,6 +320,7 @@ async def get_optimization_group(
             "status": group.status,
             "version": group.version,
             "baseline_portfolio_snapshot_id": str(group.baseline_portfolio_snapshot_id),
+            "portfolio_scope": group.portfolio_scope,
             "diagnostic_input_hash": group.diagnostic_input_hash,
             "data_snapshot_id": None
             if group.data_snapshot_id is None

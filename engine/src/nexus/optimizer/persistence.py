@@ -34,6 +34,7 @@ class ProposalPersistenceAuthority:
     requires_fx: bool
     cost_complete: bool
     authority_stale: bool = False
+    portfolio_scope: str = "real_read_only"
 
     def __post_init__(self) -> None:
         if len(self.diagnostic_input_hash) != 64:
@@ -110,9 +111,12 @@ async def persist_proposal_group(
         raise ValueError("comparisons must contain exact ordered variants")
     if group.valuation_time != authority.valuation_time:
         raise ValueError("group valuation time must match its authority")
+    if group.portfolio_scope != authority.portfolio_scope:
+        raise ValueError("group portfolio scope must match its authority")
     record = OptimizationProposalGroupRecord(
         id=group.proposal_group_id,
         baseline_portfolio_snapshot_id=group.baseline_portfolio_snapshot_id,
+        portfolio_scope=group.portfolio_scope,
         status=group.status,
         version=group.version,
         policy_id=authority.optimizer_policy_id,
@@ -139,6 +143,7 @@ async def persist_proposal_group(
             baseline_portfolio_snapshot_id=group.baseline_portfolio_snapshot_id,
             analysis_only=proposal.analysis_only,
             strategy_evidence_complete=proposal.strategy_evidence_complete,
+            portfolio_scope=group.portfolio_scope,
         )
         session.add(child)
         session.add_all(

@@ -17,6 +17,7 @@ from nexus.providers.broker.base import PortfolioSnapshot
 ProposalVariant = Literal["hold_current", "minimum_change", "strategy_target"]
 ProposalGroupStatus = Literal["draft", "compared", "shadowing", "validated", "rejected", "expired"]
 ProposalAction = Literal["none", "reduce", "maintain", "increase"]
+PortfolioScope = Literal["real_read_only", "internal_paper", "fosun_simulation"]
 _ONE = Decimal("1")
 _ZERO = Decimal("0")
 
@@ -74,6 +75,7 @@ class OptimizationProposal(_StrictModel):
     cash_target_weight: Decimal = Field(ge=_ZERO, le=_ONE)
     analysis_only: bool
     strategy_evidence_complete: bool
+    portfolio_scope: PortfolioScope = "real_read_only"
 
     @property
     def turnover(self) -> Decimal:
@@ -129,6 +131,7 @@ class OptimizationProposalGroup(_StrictModel):
     status: ProposalGroupStatus = "draft"
     version: int = Field(default=0, ge=0)
     baseline_portfolio_snapshot_id: UUID
+    portfolio_scope: PortfolioScope = "real_read_only"
     proposals: tuple[OptimizationProposal, OptimizationProposal, OptimizationProposal]
     diagnostic_input_hash: str | None = None
     data_snapshot_id: UUID | None = None
@@ -154,6 +157,11 @@ class OptimizationProposalGroup(_StrictModel):
             for item in self.proposals
         ):
             raise ValueError("proposal variants must share the group baseline")
+        if any(item.portfolio_scope != self.portfolio_scope for item in self.proposals):
+            raise ValueError("proposal variants must share the group portfolio scope")
+        expected_analysis_only = self.portfolio_scope == "real_read_only"
+        if any(item.analysis_only != expected_analysis_only for item in self.proposals):
+            raise ValueError("proposal analysis_only must be derived from portfolio scope")
         return self
 
 
@@ -182,6 +190,7 @@ def build_proposal_group(
         cash_target_weight=cash_weight,
         analysis_only=True,
         strategy_evidence_complete=False,
+        portfolio_scope="real_read_only",
     )
     minimum = hold.model_copy(update={"proposal_id": new_uuid7(), "variant": "minimum_change"})
     strategy = hold.model_copy(update={"proposal_id": new_uuid7(), "variant": "strategy_target"})

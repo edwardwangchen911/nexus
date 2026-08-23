@@ -5,7 +5,15 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -50,6 +58,10 @@ class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
             "cost_policy_id",
             name="uq_optimization_admission_authorities_binding",
         ),
+        CheckConstraint(
+            "portfolio_scope IN ('real_read_only','internal_paper','fosun_simulation')",
+            name="portfolio_scope_allowed",
+        ),
     )
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     portfolio_snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("portfolio_snapshots.id"))
@@ -67,6 +79,7 @@ class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
     requires_fx: Mapped[bool] = mapped_column(Boolean)
     cost_complete: Mapped[bool] = mapped_column(Boolean)
     authority_stale: Mapped[bool] = mapped_column(Boolean, default=False)
+    portfolio_scope: Mapped[str] = mapped_column(String(30), default="real_read_only")
 
 
 class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
@@ -76,22 +89,28 @@ class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
             "status IN ('draft','compared','shadowing','validated','rejected','expired')",
             name="status_allowed",
         ),
+        CheckConstraint(
+            "portfolio_scope IN ('real_read_only','internal_paper','fosun_simulation')",
+            name="portfolio_scope_allowed",
+        ),
+        UniqueConstraint("id", "baseline_portfolio_snapshot_id", name="uq_optimization_groups_id_baseline"),
     )
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     baseline_portfolio_snapshot_id: Mapped[UUID] = mapped_column(
         ForeignKey("portfolio_snapshots.id")
     )
+    portfolio_scope: Mapped[str] = mapped_column(String(30), default="real_read_only")
     status: Mapped[str] = mapped_column(String(20), default="draft")
     version: Mapped[int] = mapped_column(Integer, default=0)
     policy_id: Mapped[UUID] = mapped_column(ForeignKey("optimization_policies.id"))
-    diagnostic_report_id: Mapped[UUID | None] = mapped_column(
+    diagnostic_report_id: Mapped[UUID] = mapped_column(
         ForeignKey("portfolio_diagnostic_reports.id")
     )
-    data_snapshot_id: Mapped[UUID | None] = mapped_column(ForeignKey("data_snapshots.id"))
-    source_policy_id: Mapped[UUID | None] = mapped_column(ForeignKey("source_policies.id"))
-    cost_policy_id: Mapped[UUID | None] = mapped_column(ForeignKey("cost_policies.id"))
-    diagnostic_input_hash: Mapped[str | None] = mapped_column(String(64))
-    valuation_time: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    data_snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("data_snapshots.id"))
+    source_policy_id: Mapped[UUID] = mapped_column(ForeignKey("source_policies.id"))
+    cost_policy_id: Mapped[UUID] = mapped_column(ForeignKey("cost_policies.id"))
+    diagnostic_input_hash: Mapped[str] = mapped_column(String(64))
+    valuation_time: Mapped[datetime] = mapped_column(UTCDateTime())
     baseline_ready: Mapped[bool] = mapped_column(Boolean, default=False)
     diagnostic_complete: Mapped[bool] = mapped_column(Boolean, default=False)
     source_conflict: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -110,15 +129,26 @@ class OptimizationProposalRecord(ImmutableCreatedAt, Base):
         CheckConstraint(
             "variant IN ('hold_current','minimum_change','strategy_target')", name="variant_allowed"
         ),
+        CheckConstraint(
+            "portfolio_scope IN ('real_read_only','internal_paper','fosun_simulation')",
+            name="portfolio_scope_allowed",
+        ),
+        ForeignKeyConstraint(
+            ["proposal_group_id", "baseline_portfolio_snapshot_id"],
+            [
+                "optimization_proposal_groups.id",
+                "optimization_proposal_groups.baseline_portfolio_snapshot_id",
+            ],
+            name="fk_optimization_proposals_group_baseline",
+        ),
     )
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
-    proposal_group_id: Mapped[UUID] = mapped_column(ForeignKey("optimization_proposal_groups.id"))
+    proposal_group_id: Mapped[UUID] = mapped_column()
     variant: Mapped[str] = mapped_column(String(30))
-    baseline_portfolio_snapshot_id: Mapped[UUID] = mapped_column(
-        ForeignKey("portfolio_snapshots.id")
-    )
+    baseline_portfolio_snapshot_id: Mapped[UUID] = mapped_column()
     analysis_only: Mapped[bool]
     strategy_evidence_complete: Mapped[bool]
+    portfolio_scope: Mapped[str] = mapped_column(String(30), default="real_read_only")
 
 
 class ProposalPositionRecord(ImmutableCreatedAt, Base):

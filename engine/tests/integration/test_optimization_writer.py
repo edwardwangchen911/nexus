@@ -35,7 +35,7 @@ from nexus.persistence.models.optimization import (
 from nexus.persistence.session import session_factory
 from nexus.quality.source_policy import SOURCE_POLICY_ID
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 _SNAPSHOT_ID = UUID("0198d500-1000-7000-8000-000000000041")
@@ -202,6 +202,54 @@ async def test_idempotent_group_writer_has_one_concurrent_identity_and_conflicts
     assert (group_count, proposal_count, comparison_count) == (1, 3, 3)
 
 
+@pytest.mark.asyncio
+async def test_composite_parent_identity_rejects_child_baseline_mismatch_and_parent_rewrite(
+    migrated_database_url: str,
+) -> None:
+    """Children bind both group and baseline; neither parent identity field is mutable."""
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    authority = await _seed_authority(factory)
+    group = _group()
+    async with factory() as session, session.begin():
+        await persist_proposal_group(session, group, authority, _comparisons())
+    async with factory() as session:
+        with pytest.raises(IntegrityError):
+            async with session.begin():
+                await session.execute(
+                    text(
+                        "INSERT INTO optimization_proposals "
+                        "(id, proposal_group_id, variant, baseline_portfolio_snapshot_id, "
+                        "analysis_only, strategy_evidence_complete, portfolio_scope) "
+                        "VALUES (:id, :group, 'hold_current', :baseline, false, true, "
+                        "'internal_paper')"
+                    ),
+                    {
+                        "id": UUID("0198d500-1000-7000-8000-000000000919"),
+                        "group": group.proposal_group_id,
+                        "baseline": UUID("0198d500-1000-7000-8000-000000000042"),
+                    },
+                )
+        with pytest.raises(IntegrityError, match="optimization group authority is immutable"):
+            async with session.begin():
+                await session.execute(
+                    text(
+                        "UPDATE optimization_proposal_groups "
+                        "SET baseline_portfolio_snapshot_id = :baseline WHERE id = :group"
+                    ),
+                    {
+                        "baseline": UUID("0198d500-1000-7000-8000-000000000042"),
+                        "group": group.proposal_group_id,
+                    },
+                )
+        with pytest.raises(IntegrityError):
+            async with session.begin():
+                await session.execute(
+                    text("DELETE FROM optimization_proposal_groups WHERE id = :group"),
+                    {"group": group.proposal_group_id},
+                )
+
+
 async def _seed_authority(factory) -> ProposalPersistenceAuthority:
     data_snapshot_id = UUID("0198d500-1000-7000-8000-000000000901")
     source_policy_id = SOURCE_POLICY_ID
@@ -247,6 +295,7 @@ async def _seed_authority(factory) -> ProposalPersistenceAuthority:
         partial=False,
         requires_fx=False,
         cost_complete=True,
+        portfolio_scope="internal_paper",
     )
 
 
@@ -266,9 +315,11 @@ def _group() -> OptimizationProposalGroup:
         cash_target_weight=Decimal("0"),
         analysis_only=False,
         strategy_evidence_complete=True,
+        portfolio_scope="internal_paper",
     )
     return OptimizationProposalGroup(
         baseline_portfolio_snapshot_id=_SNAPSHOT_ID,
+        portfolio_scope="internal_paper",
         valuation_time=_CLOCK,
         proposals=(
             proposal,

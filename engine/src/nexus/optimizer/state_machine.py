@@ -36,7 +36,10 @@ def _eligible_for_shadowing(group: OptimizationProposalGroup) -> bool:
     strategy = group.proposals[2]
     return (
         strategy.strategy_evidence_complete
-        and not strategy.analysis_only
+        and (
+            group.portfolio_scope == "real_read_only"
+            or not strategy.analysis_only
+        )
         and group.shadow_authority is not None
         and group.shadow_authority.executable
     )

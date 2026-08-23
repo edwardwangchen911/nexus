@@ -105,7 +105,10 @@ async def _has_executable_shadow_authority(
         return False
     return bool(
         strategy is not None
-        and not strategy.analysis_only
+        and strategy.portfolio_scope == group.portfolio_scope
+        and (
+            group.portfolio_scope == "real_read_only" or not strategy.analysis_only
+        )
         and strategy.strategy_evidence_complete
         and snapshot is not None
         and snapshot.status == "READY"

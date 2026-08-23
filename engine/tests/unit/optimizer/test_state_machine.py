@@ -73,9 +73,11 @@ def test_shadow_requires_complete_fresh_and_cost_authority() -> None:
         cash_target_weight="0",
         analysis_only=False,
         strategy_evidence_complete=True,
+        portfolio_scope="internal_paper",
     )
     group = OptimizationProposalGroup(
         baseline_portfolio_snapshot_id=baseline,
+        portfolio_scope="internal_paper",
         proposals=(
             proposal,
             proposal.model_copy(
@@ -104,3 +106,53 @@ def test_shadow_requires_complete_fresh_and_cost_authority() -> None:
     compared = transition_proposal_group(group, "compared", expected_version=0)
     with pytest.raises(ProposalLifecycleError, match="PROPOSAL_NOT_EXECUTABLE"):
         transition_proposal_group(compared, "shadowing", expected_version=1)
+
+
+def test_real_read_only_scope_is_analysis_only_but_can_shadow_when_complete() -> None:
+    """Shadow validation is research authority, not execution permission."""
+    baseline = UUID("0198d500-1000-7000-8000-000000000421")
+    position = ProposalPosition(
+        instrument_id=UUID("0198d500-1000-7000-8000-000000000422"),
+        current_weight="1",
+        target_weight="1",
+        action="maintain",
+        reason_code="BASELINE",
+    )
+    proposal = OptimizationProposal(
+        variant="hold_current",
+        baseline_portfolio_snapshot_id=baseline,
+        positions=(position,),
+        cash_current_weight="0",
+        cash_target_weight="0",
+        analysis_only=True,
+        strategy_evidence_complete=True,
+    )
+    group = OptimizationProposalGroup(
+        baseline_portfolio_snapshot_id=baseline,
+        proposals=(
+            proposal,
+            proposal.model_copy(
+                update={
+                    "variant": "minimum_change",
+                    "proposal_id": UUID("0198d500-1000-7000-8000-000000000423"),
+                }
+            ),
+            proposal.model_copy(
+                update={
+                    "variant": "strategy_target",
+                    "proposal_id": UUID("0198d500-1000-7000-8000-000000000424"),
+                }
+            ),
+        ),
+        shadow_authority={
+            "baseline_ready": True,
+            "diagnostic_complete": True,
+            "source_conflict": False,
+            "partial": False,
+            "requires_fx": False,
+            "cost_complete": True,
+        },
+    )
+    assert transition_proposal_group(
+        transition_proposal_group(group, "compared", 0), "shadowing", 1
+    ).status == "shadowing"

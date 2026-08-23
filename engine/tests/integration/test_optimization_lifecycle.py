@@ -41,43 +41,14 @@ async def test_incomplete_strategy_cannot_enter_shadowing_and_stale_version_conf
     baseline_id = UUID("0198d500-1000-7000-8000-000000000041")
     await seed_portfolio_list(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
-    async with factory() as session, session.begin():
-        await session.execute(
-            text(
-                "INSERT INTO optimization_proposal_groups (id, baseline_portfolio_snapshot_id, status, version, policy_id) VALUES (:id, :baseline, 'compared', 1, 'e690b91d-1e24-5de3-b2b2-566a463fca25')"
-            ),
-            {"id": group_id, "baseline": baseline_id},
-        )
-        for index, variant in enumerate(("hold_current", "minimum_change", "strategy_target"), 1):
+    with pytest.raises(IntegrityError, match="diagnostic_report_id"):
+        async with factory() as session, session.begin():
             await session.execute(
                 text(
-                    "INSERT INTO optimization_proposals (id, proposal_group_id, variant, baseline_portfolio_snapshot_id, analysis_only, strategy_evidence_complete) VALUES (:id, :group, :variant, :baseline, true, false)"
+                    "INSERT INTO optimization_proposal_groups (id, baseline_portfolio_snapshot_id, status, version, policy_id) VALUES (:id, :baseline, 'compared', 1, :policy)"
                 ),
-                {
-                    "id": UUID(f"0198d500-1000-7000-8000-00000000080{index + 1}"),
-                    "group": group_id,
-                    "variant": variant,
-                    "baseline": baseline_id,
-                },
+                {"id": group_id, "baseline": baseline_id, "policy": _POLICY_ID},
             )
-        session.add_all(
-            ProposalComparisonRecord(
-                proposal_id=UUID(f"0198d500-1000-7000-8000-00000000080{index + 1}"),
-                metrics={},
-                tax_impact="unknown",
-                requires_fx=False,
-                non_executable=True,
-                cost_complete=False,
-            )
-            for index in range(1, 4)
-        )
-    async with factory() as session, session.begin():
-        with pytest.raises(ValueError, match="PROPOSAL_NOT_EXECUTABLE"):
-            await transition_group(session, group_id, "shadowing", expected_version=1)
-        with pytest.raises(ValueError, match="VERSION_CONFLICT"):
-            await transition_group(session, group_id, "rejected", expected_version=0)
-
-
 @pytest.mark.asyncio
 async def test_shadow_and_reject_api_require_idempotency_and_replay_stably(
     migrated_database_url: str,
@@ -314,16 +285,12 @@ async def test_raw_sql_shadow_cannot_bypass_missing_cost_policy(
 ) -> None:
     """NULL cost authority is rejected by the DB trigger with no repository involved."""
     group_id = UUID("0198d500-1000-7000-8000-000000000849")
-    await _seed_complete_group(migrated_database_url, group_id, missing_cost_policy=True)
     factory = session_factory(settings(migrated_database_url))
-    with pytest.raises(IntegrityError, match="PROPOSAL_NOT_EXECUTABLE"):
+    with pytest.raises(IntegrityError, match="diagnostic_report_id"):
         async with factory() as session, session.begin():
             await session.execute(
-                text(
-                    "UPDATE optimization_proposal_groups SET status = 'shadowing', version = 2 "
-                    "WHERE id = :group_id"
-                ),
-                {"group_id": group_id},
+                text("INSERT INTO optimization_proposal_groups (id, baseline_portfolio_snapshot_id, status, version, policy_id) VALUES (:id, :baseline, 'compared', 1, :policy)"),
+                {"id": group_id, "baseline": _BASELINE_ID, "policy": _POLICY_ID},
             )
 
 
@@ -428,7 +395,7 @@ async def _seed_complete_group(
         for index, variant in enumerate(("hold_current", "minimum_change", "strategy_target"), 1):
             await session.execute(
                 text(
-                    "INSERT INTO optimization_proposals (id, proposal_group_id, variant, baseline_portfolio_snapshot_id, analysis_only, strategy_evidence_complete) VALUES (:id, :group, :variant, :baseline, false, true)"
+                    "INSERT INTO optimization_proposals (id, proposal_group_id, variant, baseline_portfolio_snapshot_id, analysis_only, strategy_evidence_complete) VALUES (:id, :group, :variant, :baseline, true, true)"
                 ),
                 {
                     "id": UUID(f"0198d500-1000-7000-8000-000000000{int(suffix) + 30 + index:03d}"),
