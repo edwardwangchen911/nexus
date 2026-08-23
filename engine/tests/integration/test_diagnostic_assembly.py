@@ -77,6 +77,10 @@ async def test_production_service_assembles_real_diagnostics_from_hashed_parquet
             snapshot_id=SNAPSHOT_ID,
             artifact_reader=FixtureArtifactReader(payloads),
         )
+        with pytest.raises(DiagnosticEvidenceCapabilityUnavailable):
+            await diagnose_and_persist(
+                session, portfolio_id=PORTFOLIOS[0], snapshot_id=SNAPSHOT_ID
+            )
         payloads["memory://asset"] += b"tampered-after-persist"
         with pytest.raises(ValueError, match="artifact hash"):
             await diagnose_and_persist(
