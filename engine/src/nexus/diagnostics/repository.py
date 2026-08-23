@@ -1,7 +1,9 @@
 """Atomic immutable storage and redacted retrieval for diagnostic reports."""
 
+import json
 from datetime import datetime
 from decimal import Decimal
+from hashlib import sha256
 from typing import Literal, cast
 from uuid import UUID
 
@@ -296,6 +298,7 @@ async def load_history(
                     PortfolioDiagnosticReportRecord.policy_id == REAL_ADVISORY_POLICY_ID,
                     PortfolioDiagnosticReportRecord.policy_version == policy_version,
                     PortfolioDiagnosticReportRecord.snapshot_as_of < current_snapshot_as_of,
+                    PortfolioDiagnosticReportRecord.created_at <= current_snapshot_as_of,
                     PortfolioDiagnosticReportRecord.trading_day < current_snapshot_as_of.date(),
                 )
                 .order_by(
@@ -308,7 +311,19 @@ async def load_history(
         .all()
     )
     reports = [await _read_report(session, record) for record in records]
-    return DiagnosticHistory(prior_reports=tuple(reports), comparable_variants=())
+    refs = tuple(
+        EvidenceRef(
+            source="nexus_db",
+            object_id=f"diagnostic-report:{record.id}",
+            available_at=record.created_at,
+            location=f"db://portfolio-diagnostic-reports/{record.id}",
+            content_hash=_report_content_hash(record, report),
+        )
+        for record, report in zip(records, reports, strict=True)
+    )
+    return DiagnosticHistory(
+        prior_reports=tuple(reports), authority_refs=refs, comparable_variants=()
+    )
 
 
 async def latest_report(
@@ -430,3 +445,17 @@ def _reports_equivalent(
         ):
             return False
     return True
+
+
+def _report_content_hash(
+    record: PortfolioDiagnosticReportRecord, report: PortfolioDiagnosticReport
+) -> str:
+    payload = {
+        "id": str(record.id),
+        "diagnostic_input_hash": record.diagnostic_input_hash,
+        "report": report.model_dump(mode="json"),
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode()
+    return sha256(encoded).hexdigest()

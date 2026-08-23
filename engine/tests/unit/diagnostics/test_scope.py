@@ -94,5 +94,5 @@ def _item(code: str) -> DiagnosticItem:
         policy_scope="currency:HKD",
         severity="info",
         actionability="monitor",
-        unknown_reason=None,
+        unknown_reason="TEST_SCOPE_ONLY",
     )

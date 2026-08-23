@@ -35,6 +35,15 @@ def diagnostic_input_hash(
             "payload": REAL_ADVISORY_POLICY_PAYLOAD,
         },
         "history": tuple(_report_input(report) for report in history.prior_reports),
+        "history_authority": tuple(
+            {
+                "source": ref.source,
+                "object_id": ref.object_id,
+                "available_at": _canonical(ref.available_at),
+                "content_hash": ref.content_hash,
+            }
+            for ref in history.authority_refs
+        ),
         "comparison": (),
     }
     encoded = json.dumps(

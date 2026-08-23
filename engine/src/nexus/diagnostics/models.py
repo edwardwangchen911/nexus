@@ -185,6 +185,12 @@ class DiagnosticItem(_DiagnosticModel):
     unknown_reason: str | None
     evidence_refs: tuple[EvidenceRef, ...] = ()
 
+    @model_validator(mode="after")
+    def _known_value_has_evidence(self) -> "DiagnosticItem":
+        if self.unknown_reason is None and not self.evidence_refs:
+            raise ValueError("known diagnostic item requires evidence")
+        return self
+
 
 class PortfolioDiagnosticReport(_DiagnosticModel):
     portfolio_snapshot_id: UUID
@@ -202,6 +208,7 @@ class PortfolioDiagnosticReport(_DiagnosticModel):
 
 class DiagnosticHistory(_DiagnosticModel):
     prior_reports: tuple[PortfolioDiagnosticReport, ...] = ()
+    authority_refs: tuple[EvidenceRef, ...] = ()
     comparable_variants: tuple[ComparableVariantEvidence, ...] = ()
 
     @classmethod

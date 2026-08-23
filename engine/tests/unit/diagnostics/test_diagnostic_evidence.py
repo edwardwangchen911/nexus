@@ -6,6 +6,7 @@ import pytest
 from nexus.diagnostics.models import (
     DiagnosticEvidence,
     DiagnosticHistory,
+    DiagnosticItem,
     EvidenceBinding,
     InstrumentIdentity,
     MarketEvidence,
@@ -18,6 +19,20 @@ from nexus.providers.broker.base import BrokerPosition, CashBalance, PortfolioSn
 
 INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000000013")
 SNAPSHOT_AT = datetime(2026, 8, 23, tzinfo=UTC)
+
+
+def test_known_diagnostic_item_requires_immutable_evidence() -> None:
+    with pytest.raises(ValueError, match="known diagnostic item requires evidence"):
+        DiagnosticItem(
+            diagnostic_code="KNOWN",
+            metric_value="1",
+            unit="ratio",
+            reference_limit=None,
+            policy_scope="portfolio",
+            severity="info",
+            actionability="monitor",
+            unknown_reason=None,
+        )
 
 
 def test_known_diagnostics_retain_only_their_actual_input_evidence() -> None:

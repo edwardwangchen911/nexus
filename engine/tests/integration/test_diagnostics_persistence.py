@@ -191,6 +191,9 @@ async def test_history_excludes_current_and_future_snapshots(
     assert tuple(report.portfolio_snapshot_id for report in history.prior_reports) == (
         prior_id,
     )
+    assert len(history.authority_refs) == 1
+    assert history.authority_refs[0].object_id.startswith("diagnostic-report:")
+    assert len(history.authority_refs[0].content_hash) == 64
 
 
 def _report(policy_version: str) -> PortfolioDiagnosticReport:

@@ -179,7 +179,7 @@ def test_drawdown_thresholds_are_inclusive_at_eight_and_fifteen_percent() -> Non
         policy.drawdown_critical,
         "currency:USD",
         market,
-        inclusive=True,
+        inclusive=True, evidence_refs=(_evidence_ref("drawdown-warning", "9"),),
     )
     critical = _upper_threshold_item(
         "DRAWDOWN_252",
@@ -188,7 +188,7 @@ def test_drawdown_thresholds_are_inclusive_at_eight_and_fifteen_percent() -> Non
         policy.drawdown_critical,
         "currency:USD",
         market,
-        inclusive=True,
+        inclusive=True, evidence_refs=(_evidence_ref("drawdown-critical", "8"),),
     )
 
     assert warning.severity == "warning"
@@ -372,7 +372,7 @@ def _warning_item() -> DiagnosticItem:
         severity="warning",
         actionability="research",
         unknown_reason=None,
-        evidence_refs=(),
+        evidence_refs=(_evidence_ref("warning", "9"),),
     )
 
 
