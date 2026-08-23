@@ -87,11 +87,13 @@ export const runtimeContractSchemas = {
     "additionalProperties": false,
     "properties": {
       "available_cash": {
+        "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Available Cash",
         "type": "string"
       },
       "cash_balance": {
+        "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Cash Balance",
         "type": "string"
@@ -233,16 +235,19 @@ export const runtimeContractSchemas = {
         "type": "string"
       },
       "close": {
+        "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Close",
         "type": "string"
       },
       "high": {
+        "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "High",
         "type": "string"
       },
       "low": {
+        "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Low",
         "type": "string"
@@ -260,6 +265,7 @@ export const runtimeContractSchemas = {
         "title": "Observed At"
       },
       "open": {
+        "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Open",
         "type": "string"
@@ -277,6 +283,7 @@ export const runtimeContractSchemas = {
         "type": "string"
       },
       "volume": {
+        "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Volume",
         "type": "string"
@@ -341,6 +348,7 @@ export const runtimeContractSchemas = {
       "price": {
         "anyOf": [
           {
+            "maxLength": 40,
             "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
             "type": "string"
           },
@@ -454,6 +462,7 @@ export const runtimeContractSchemas = {
         "$ref": "#/components/schemas/CurrencyCode"
       },
       "filled_quantity": {
+        "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Filled Quantity",
         "type": "string"
@@ -466,6 +475,7 @@ export const runtimeContractSchemas = {
       "price": {
         "anyOf": [
           {
+            "maxLength": 40,
             "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
             "type": "string"
           },
@@ -476,13 +486,13 @@ export const runtimeContractSchemas = {
         "title": "Price"
       },
       "quantity": {
+        "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Quantity",
         "type": "string"
       },
       "read_only": {
         "const": true,
-        "default": true,
         "title": "Read Only",
         "type": "boolean"
       },
@@ -527,13 +537,15 @@ export const runtimeContractSchemas = {
     "required": [
       "broker_order_snapshot_id",
       "instrument_id",
+      "symbol",
       "currency",
       "side",
       "quantity",
       "filled_quantity",
       "price",
       "status",
-      "updated_at"
+      "updated_at",
+      "read_only"
     ],
     "title": "OpenOrderResponse",
     "type": "object"
@@ -543,13 +555,11 @@ export const runtimeContractSchemas = {
     "properties": {
       "coverage_scope": {
         "const": "broker_account",
-        "default": "broker_account",
         "title": "Coverage Scope",
         "type": "string"
       },
       "kind": {
         "const": "real_read_only",
-        "default": "real_read_only",
         "title": "Kind",
         "type": "string"
       },
@@ -595,6 +605,7 @@ export const runtimeContractSchemas = {
         "items": {
           "$ref": "#/components/schemas/CurrencyCode"
         },
+        "maxItems": 32,
         "title": "Original Currencies",
         "type": "array"
       },
@@ -613,6 +624,8 @@ export const runtimeContractSchemas = {
     "required": [
       "portfolio_id",
       "name",
+      "kind",
+      "coverage_scope",
       "provider",
       "latest_snapshot_status",
       "latest_snapshot_as_of",
@@ -681,7 +694,6 @@ export const runtimeContractSchemas = {
       },
       "coverage_scope": {
         "const": "broker_account",
-        "default": "broker_account",
         "title": "Coverage Scope",
         "type": "string"
       },
@@ -689,7 +701,7 @@ export const runtimeContractSchemas = {
         "items": {
           "$ref": "#/components/schemas/OpenOrderResponse"
         },
-        "maxItems": 5000,
+        "maxItems": 2000,
         "title": "Open Orders",
         "type": "array"
       },
@@ -707,7 +719,7 @@ export const runtimeContractSchemas = {
         "items": {
           "$ref": "#/components/schemas/PositionResponse"
         },
-        "maxItems": 5000,
+        "maxItems": 2000,
         "title": "Positions",
         "type": "array"
       },
@@ -718,10 +730,12 @@ export const runtimeContractSchemas = {
     "required": [
       "portfolio_snapshot_id",
       "portfolio_id",
+      "coverage_scope",
       "status",
       "cash",
       "positions",
       "open_orders",
+      "converted_view",
       "as_of"
     ],
     "title": "PortfolioSnapshotResponse",
@@ -731,6 +745,7 @@ export const runtimeContractSchemas = {
     "additionalProperties": false,
     "properties": {
       "available_quantity": {
+        "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Available Quantity",
         "type": "string"
@@ -738,6 +753,7 @@ export const runtimeContractSchemas = {
       "avg_cost": {
         "anyOf": [
           {
+            "maxLength": 40,
             "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
             "type": "string"
           },
@@ -753,6 +769,7 @@ export const runtimeContractSchemas = {
       "current_price": {
         "anyOf": [
           {
+            "maxLength": 40,
             "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
             "type": "string"
           },
@@ -765,6 +782,7 @@ export const runtimeContractSchemas = {
       "diluted_cost": {
         "anyOf": [
           {
+            "maxLength": 40,
             "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
             "type": "string"
           },
@@ -781,6 +799,7 @@ export const runtimeContractSchemas = {
         "type": "string"
       },
       "frozen_quantity": {
+        "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Frozen Quantity",
         "type": "string"
@@ -803,13 +822,13 @@ export const runtimeContractSchemas = {
         "title": "Provider As Of"
       },
       "quantity": {
+        "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
         "title": "Quantity",
         "type": "string"
       },
       "read_only": {
         "const": true,
-        "default": true,
         "title": "Read Only",
         "type": "boolean"
       },
@@ -829,6 +848,7 @@ export const runtimeContractSchemas = {
     },
     "required": [
       "instrument_id",
+      "symbol",
       "exchange",
       "currency",
       "quantity",
@@ -837,7 +857,8 @@ export const runtimeContractSchemas = {
       "avg_cost",
       "diluted_cost",
       "current_price",
-      "provider_as_of"
+      "provider_as_of",
+      "read_only"
     ],
     "title": "PositionResponse",
     "type": "object"

@@ -25,6 +25,8 @@ CLOCK = datetime(2026, 8, 24, 4, 0, tzinfo=UTC)
 INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000000001")
 ORDER_INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000000003")
 ORDER_ID = UUID("0198d500-1000-7000-8000-000000000002")
+ORDER_ONLY_INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000000004")
+ORDER_ONLY_ID = UUID("0198d500-1000-7000-8000-000000000005")
 PORTFOLIOS = (
     UUID("0198d500-1000-7000-8000-000000000011"),
     UUID("0198d500-1000-7000-8000-000000000012"),
@@ -245,6 +247,36 @@ async def add_cash_bucket_overflow(database_url: str) -> None:
                     provider_as_of=CLOCK,
                 )
             )
+
+
+async def add_order_only_currency(database_url: str) -> None:
+    factory = session_factory(settings(database_url))
+    async with factory() as session, session.begin():
+        session.add(
+            Instrument(
+                id=ORDER_ONLY_INSTRUMENT_ID,
+                asset_type="equity",
+                exchange="XNAS",
+                currency="CNY",
+                tick_size=Decimal("0.001"),
+                risk_bucket="global_equity",
+            )
+        )
+        session.add(
+            BrokerOrderSnapshot(
+                id=ORDER_ONLY_ID,
+                portfolio_snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
+                provider="fosun",
+                provider_order_id="order-only-currency-canary",
+                instrument_id=ORDER_ONLY_INSTRUMENT_ID,
+                side="buy",
+                quantity=Decimal("1"),
+                filled_quantity=Decimal("0"),
+                price=Decimal("1"),
+                status="submitted",
+                updated_at=CLOCK,
+            )
+        )
 
 
 async def broker_sync_artifact_counts(database_url: str, run_id: UUID) -> tuple[int, int]:

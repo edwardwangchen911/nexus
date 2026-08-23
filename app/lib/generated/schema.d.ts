@@ -481,7 +481,6 @@ export interface components {
             quantity: string;
             /**
              * Read Only
-             * @default true
              * @constant
              */
             read_only: true;
@@ -490,7 +489,7 @@ export interface components {
             /** Status */
             status: string;
             /** Symbol */
-            symbol?: string | null;
+            symbol: string | null;
             /** Updated At */
             updated_at: string | null;
         };
@@ -500,13 +499,11 @@ export interface components {
         PortfolioListItemResponse: {
             /**
              * Coverage Scope
-             * @default broker_account
              * @constant
              */
             coverage_scope: "broker_account";
             /**
              * Kind
-             * @default real_read_only
              * @constant
              */
             kind: "real_read_only";
@@ -550,10 +547,9 @@ export interface components {
             /** Cash */
             cash: components["schemas"]["CashBucketResponse"][];
             /** Converted View */
-            converted_view?: null;
+            converted_view: null;
             /**
              * Coverage Scope
-             * @default broker_account
              * @constant
              */
             coverage_scope: "broker_account";
@@ -599,12 +595,11 @@ export interface components {
             quantity: string;
             /**
              * Read Only
-             * @default true
              * @constant
              */
             read_only: true;
             /** Symbol */
-            symbol?: string | null;
+            symbol: string | null;
         };
         /**
          * SelectedMarketSeriesResponse

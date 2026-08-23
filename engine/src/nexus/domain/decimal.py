@@ -6,7 +6,10 @@ from typing import Annotated
 
 from pydantic import StringConstraints
 
-DecimalString = Annotated[str, StringConstraints(pattern=r"^-?(0|[1-9]\d*)(\.\d+)?$")]
+DecimalString = Annotated[
+    str,
+    StringConstraints(max_length=40, pattern=r"^-?(0|[1-9]\d*)(\.\d+)?$"),
+]
 _DECIMAL_STRING_PATTERN = re.compile(r"^-?(0|[1-9]\d*)(\.\d+)?$")
 
 

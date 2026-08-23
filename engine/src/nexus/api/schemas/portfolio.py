@@ -26,12 +26,12 @@ class BrokerSyncCreateRequest(_StrictSchema):
 class PortfolioListItemResponse(_StrictSchema):
     portfolio_id: UUID
     name: str = Field(min_length=1, max_length=100)
-    kind: Literal["real_read_only"] = "real_read_only"
-    coverage_scope: Literal["broker_account"] = "broker_account"
+    kind: Literal["real_read_only"]
+    coverage_scope: Literal["broker_account"]
     provider: str = Field(min_length=1, max_length=50)
     latest_snapshot_status: SnapshotStatus | None
     latest_snapshot_as_of: AwareDatetime | None
-    original_currencies: tuple[CurrencyCode, ...]
+    original_currencies: tuple[CurrencyCode, ...] = Field(max_length=32)
     last_sync_run_status: SyncRunStatus | None
 
 
@@ -54,7 +54,7 @@ class CashBucketResponse(_StrictSchema):
 
 class PositionResponse(_StrictSchema):
     instrument_id: UUID
-    symbol: str | None = Field(default=None, min_length=1, max_length=32)
+    symbol: str | None = Field(min_length=1, max_length=32)
     exchange: str = Field(min_length=1, max_length=20)
     currency: CurrencyCode
     quantity: DecimalString
@@ -64,13 +64,13 @@ class PositionResponse(_StrictSchema):
     diluted_cost: DecimalString | None
     current_price: DecimalString | None
     provider_as_of: AwareDatetime | None
-    read_only: Literal[True] = True
+    read_only: Literal[True]
 
 
 class OpenOrderResponse(_StrictSchema):
     broker_order_snapshot_id: UUID
     instrument_id: UUID
-    symbol: str | None = Field(default=None, min_length=1, max_length=32)
+    symbol: str | None = Field(min_length=1, max_length=32)
     currency: CurrencyCode
     side: str = Field(min_length=1, max_length=10)
     quantity: DecimalString
@@ -78,18 +78,18 @@ class OpenOrderResponse(_StrictSchema):
     price: DecimalString | None
     status: str = Field(min_length=1, max_length=30)
     updated_at: AwareDatetime | None
-    read_only: Literal[True] = True
+    read_only: Literal[True]
 
 
 class PortfolioSnapshotResponse(_StrictSchema):
     portfolio_snapshot_id: UUID
     portfolio_id: UUID
-    coverage_scope: Literal["broker_account"] = "broker_account"
+    coverage_scope: Literal["broker_account"]
     status: SnapshotStatus
     cash: tuple[CashBucketResponse, ...] = Field(max_length=32)
-    positions: tuple[PositionResponse, ...] = Field(max_length=5000)
-    open_orders: tuple[OpenOrderResponse, ...] = Field(max_length=5000)
-    converted_view: None = None
+    positions: tuple[PositionResponse, ...] = Field(max_length=2000)
+    open_orders: tuple[OpenOrderResponse, ...] = Field(max_length=2000)
+    converted_view: None
     as_of: AwareDatetime | None
 
 

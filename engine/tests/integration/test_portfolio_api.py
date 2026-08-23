@@ -18,6 +18,9 @@ from helpers.portfolio_api import (
     add_cash_bucket_overflow as _add_cash_bucket_overflow,
 )
 from helpers.portfolio_api import (
+    add_order_only_currency as _add_order_only_currency,
+)
+from helpers.portfolio_api import (
     add_snapshot_state as _add_snapshot_state,
 )
 from helpers.portfolio_api import (
@@ -120,6 +123,23 @@ async def test_portfolio_list_is_stable_paginated_and_redacted(
     assert "external-request-canary" not in encoded
     assert "secret-canary" not in encoded
     assert "account_id" not in encoded
+
+
+@pytest.mark.asyncio
+async def test_portfolio_list_includes_a_currency_present_only_in_open_orders(
+    migrated_database_url: str,
+) -> None:
+    await _seed_portfolio_list(migrated_database_url)
+    await _add_order_only_currency(migrated_database_url)
+    path = "/internal/v1/portfolios?kind=real_read_only&limit=2"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["original_currencies"] == ["CNY", "HKD", "USD"]
 
 
 @pytest.mark.asyncio

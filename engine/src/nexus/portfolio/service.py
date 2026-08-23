@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import and_, desc, or_, select, true
+from sqlalchemy import and_, desc, or_, select, true, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.api.errors import ErrorCode, NexusError
@@ -33,8 +33,9 @@ from nexus.persistence.models.portfolio import (
 from nexus.portfolio.cursor import PortfolioCursorCodec, PortfolioCursorState
 
 _MAX_CASH_BUCKETS = 32
-_MAX_POSITIONS = 5000
-_MAX_OPEN_ORDERS = 5000
+_MAX_CURRENCIES = 32
+_MAX_POSITIONS = 2000
+_MAX_OPEN_ORDERS = 2000
 
 
 class PortfolioService:
@@ -126,6 +127,8 @@ class PortfolioService:
             PortfolioListItemResponse(
                 portfolio_id=row.portfolio_id,
                 name=row.name,
+                kind="real_read_only",
+                coverage_scope="broker_account",
                 provider=row.provider,
                 latest_snapshot_status=row.snapshot_status,
                 latest_snapshot_as_of=row.snapshot_as_of,
@@ -146,14 +149,36 @@ class PortfolioService:
         if not snapshot_ids:
             return {}
         values: dict[UUID, set[str]] = {snapshot_id: set() for snapshot_id in snapshot_ids}
-        for model in (CashSnapshot, PositionSnapshot):
-            rows = await self._session.execute(
-                select(model.portfolio_snapshot_id, model.currency).where(
-                    model.portfolio_snapshot_id.in_(snapshot_ids)
-                )
+        currency_facts = union_all(
+            select(
+                CashSnapshot.portfolio_snapshot_id.label("snapshot_id"),
+                CashSnapshot.currency.label("currency"),
+            ).where(CashSnapshot.portfolio_snapshot_id.in_(snapshot_ids)),
+            select(
+                PositionSnapshot.portfolio_snapshot_id.label("snapshot_id"),
+                PositionSnapshot.currency.label("currency"),
+            ).where(PositionSnapshot.portfolio_snapshot_id.in_(snapshot_ids)),
+            select(
+                BrokerOrderSnapshot.portfolio_snapshot_id.label("snapshot_id"),
+                Instrument.currency.label("currency"),
             )
-            for snapshot_id, currency in rows:
-                values[snapshot_id].add(currency)
+            .join(Instrument, Instrument.id == BrokerOrderSnapshot.instrument_id)
+            .where(BrokerOrderSnapshot.portfolio_snapshot_id.in_(snapshot_ids)),
+        ).subquery()
+        rows = (
+            await self._session.execute(
+                select(currency_facts.c.snapshot_id, currency_facts.c.currency)
+                .distinct()
+                .order_by(currency_facts.c.snapshot_id, currency_facts.c.currency)
+                .limit(len(snapshot_ids) * _MAX_CURRENCIES + 1)
+            )
+        ).all()
+        if len(rows) > len(snapshot_ids) * _MAX_CURRENCIES:
+            _raise_collection_overflow("original_currencies", _MAX_CURRENCIES)
+        for snapshot_id, currency in rows:
+            values[snapshot_id].add(currency)
+            if len(values[snapshot_id]) > _MAX_CURRENCIES:
+                _raise_collection_overflow("original_currencies", _MAX_CURRENCIES)
         return {
             snapshot_id: tuple(sorted(currencies))
             for snapshot_id, currencies in values.items()
@@ -244,6 +269,7 @@ class PortfolioService:
         return PortfolioSnapshotResponse(
             portfolio_snapshot_id=snapshot.snapshot_id,
             portfolio_id=snapshot.portfolio_id,
+            coverage_scope="broker_account",
             status=snapshot.status,
             cash=tuple(
                 CashBucketResponse(
@@ -267,6 +293,7 @@ class PortfolioService:
                     diluted_cost=_optional_decimal(row.diluted_cost),
                     current_price=_optional_decimal(row.current_price),
                     provider_as_of=row.provider_as_of,
+                    read_only=True,
                 )
                 for row in position_rows
             ),
@@ -282,9 +309,11 @@ class PortfolioService:
                     price=_optional_decimal(row.price),
                     status=row.status,
                     updated_at=row.updated_at,
+                    read_only=True,
                 )
                 for row in order_rows
             ),
+            converted_view=None,
             as_of=snapshot.as_of,
         )
 
@@ -334,6 +363,10 @@ def _snapshot_not_found(portfolio_id: UUID) -> NexusError:
 def _require_bounded_collection(name: str, values: Sequence[object], maximum: int) -> None:
     if len(values) <= maximum:
         return
+    _raise_collection_overflow(name, maximum)
+
+
+def _raise_collection_overflow(name: str, maximum: int) -> None:
     raise NexusError(
         ErrorCode.DATA_PARTIAL,
         "The portfolio snapshot exceeds a safe response bound.",

@@ -69,6 +69,39 @@ describe("portfolio engine client boundary", () => {
     expect((await sanitizeEngineResponse(jsonResponse(topLevelSecret), undefined, `/internal/v1/portfolios/${portfolioId}/snapshots/latest`)).status).toBe(500);
   });
 
+  it("rejects every omitted safety discriminator that generated types require", async () => {
+    const cases: Array<[unknown, string]> = [
+      [portfolioPage(), "kind"],
+      [portfolioPage(), "coverage_scope"],
+      [snapshotEnvelope(), "coverage_scope"],
+      [snapshotEnvelope(), "converted_view"],
+      [snapshotEnvelope(), "symbol"],
+      [snapshotEnvelope(), "read_only"],
+    ];
+    for (const [payload, field] of cases) {
+      if ("items" in (payload as ReturnType<typeof portfolioPage>).data) {
+        delete ((payload as ReturnType<typeof portfolioPage>).data.items[0] as Record<string, unknown>)[field];
+        expect((await sanitizeEngineResponse(jsonResponse(payload), undefined, "/internal/v1/portfolios")).status).toBe(500);
+      } else {
+        const snapshot = (payload as ReturnType<typeof snapshotEnvelope>).data;
+        const target = ["symbol", "read_only"].includes(field) ? snapshot.open_orders[0] : snapshot;
+        delete (target as Record<string, unknown>)[field];
+        expect((await sanitizeEngineResponse(jsonResponse(payload), undefined, `/internal/v1/portfolios/${portfolioId}/snapshots/latest`)).status).toBe(500);
+      }
+    }
+  });
+
+  it("accepts the maximum legal collection sizes and rejects limit plus one", async () => {
+    const position = { instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e703", symbol: null, exchange: "XNAS", currency: "USD", quantity: "1", available_quantity: "1", frozen_quantity: "0", avg_cost: null, diluted_cost: null, current_price: null, provider_as_of: null, read_only: true };
+    const maximum = snapshotEnvelope() as unknown as { data: { positions: Array<typeof position>; open_orders: Array<Record<string, unknown>> } };
+    maximum.data.positions = Array.from({ length: 2000 }, () => ({ ...position }));
+    maximum.data.open_orders = Array.from({ length: 2000 }, () => ({ ...maximum.data.open_orders[0] }));
+
+    expect((await sanitizeEngineResponse(jsonResponse(maximum), undefined, `/internal/v1/portfolios/${portfolioId}/snapshots/latest`)).status).toBe(200);
+    maximum.data.open_orders.push({ ...maximum.data.open_orders[0] });
+    expect((await sanitizeEngineResponse(jsonResponse(maximum), undefined, `/internal/v1/portfolios/${portfolioId}/snapshots/latest`)).status).toBe(500);
+  });
+
   it("drops engine Location so only the validated BFF may rebuild it", async () => {
     setEngineEnvironment();
     vi.stubGlobal("fetch", async () => jsonResponse(syncEnvelope(), 202, {

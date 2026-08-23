@@ -3,7 +3,9 @@ from uuid import UUID
 import pytest
 from nexus.api.schemas.portfolio import (
     BrokerSyncCreateRequest,
+    PortfolioListItemResponse,
     PortfolioPageResponse,
+    PortfolioSnapshotEnvelope,
     PortfolioSnapshotResponse,
     PositionResponse,
 )
@@ -71,8 +73,78 @@ def test_portfolio_contracts_publish_fixed_collection_bounds() -> None:
 
     assert page_schema["properties"]["items"]["maxItems"] == 50
     assert snapshot_schema["properties"]["cash"]["maxItems"] == 32
-    assert snapshot_schema["properties"]["positions"]["maxItems"] == 5000
-    assert snapshot_schema["properties"]["open_orders"]["maxItems"] == 5000
+    assert snapshot_schema["properties"]["positions"]["maxItems"] == 2000
+    assert snapshot_schema["properties"]["open_orders"]["maxItems"] == 2000
+
+
+def test_safety_discriminators_and_nullable_symbols_are_required() -> None:
+    list_required = set(PortfolioListItemResponse.model_json_schema()["required"])
+    snapshot_schema = PortfolioSnapshotResponse.model_json_schema()
+    snapshot_required = set(snapshot_schema["required"])
+    position_schema = PositionResponse.model_json_schema()
+
+    assert {"kind", "coverage_scope"} <= list_required
+    assert {"coverage_scope", "converted_view"} <= snapshot_required
+    assert {"symbol", "read_only"} <= set(position_schema["required"])
+    assert position_schema["properties"]["quantity"]["maxLength"] == 40
+
+
+def test_maximum_legal_snapshot_envelope_fits_the_bff_four_mebibyte_limit() -> None:
+    decimal = "-12345678901234567890123456.123456789012"
+    common = {
+        "instrument_id": str(_INSTRUMENT_ID),
+        "symbol": "X" * 32,
+        "currency": "USD",
+    }
+    envelope = PortfolioSnapshotEnvelope.model_validate(
+        {
+            "data": {
+                "portfolio_snapshot_id": "0198d500-0000-7000-8000-000000000003",
+                "portfolio_id": str(_PORTFOLIO_ID),
+                "coverage_scope": "broker_account",
+                "status": "READY",
+                "cash": (),
+                "positions": (
+                    {
+                        **common,
+                        "exchange": "X" * 20,
+                        "quantity": decimal,
+                        "available_quantity": decimal,
+                        "frozen_quantity": decimal,
+                        "avg_cost": decimal,
+                        "diluted_cost": decimal,
+                        "current_price": decimal,
+                        "provider_as_of": "2026-08-23T08:00:00.123456Z",
+                        "read_only": True,
+                    },
+                )
+                * 2000,
+                "open_orders": (
+                    {
+                        **common,
+                        "broker_order_snapshot_id": "0198d500-0000-7000-8000-000000000004",
+                        "side": "X" * 10,
+                        "quantity": decimal,
+                        "filled_quantity": decimal,
+                        "price": decimal,
+                        "status": "X" * 30,
+                        "updated_at": "2026-08-23T08:00:00.123456Z",
+                        "read_only": True,
+                    },
+                )
+                * 2000,
+                "converted_view": None,
+                "as_of": "2026-08-23T08:00:00.123456Z",
+            },
+            "meta": {
+                "request_id": "0198f7a0-1111-7777-8111-111111111114",
+                "schema_version": "1",
+                "as_of": "2026-08-23T08:00:00.123456Z",
+            },
+        }
+    )
+
+    assert len(envelope.model_dump_json().encode()) <= 4 * 1024 * 1024
 
 
 def test_sync_admission_openapi_publishes_bff_location_header() -> None:
