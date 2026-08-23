@@ -7,6 +7,8 @@ from nexus.api.schemas.portfolio import (
     PortfolioSnapshotResponse,
     PositionResponse,
 )
+from nexus.main import create_engine_app
+from nexus.settings import EngineSettings
 from pydantic import ValidationError
 
 _PORTFOLIO_ID = UUID("0198d500-0000-7000-8000-000000000001")
@@ -71,3 +73,10 @@ def test_portfolio_contracts_publish_fixed_collection_bounds() -> None:
     assert snapshot_schema["properties"]["cash"]["maxItems"] == 32
     assert snapshot_schema["properties"]["positions"]["maxItems"] == 5000
     assert snapshot_schema["properties"]["open_orders"]["maxItems"] == 5000
+
+
+def test_sync_admission_openapi_publishes_bff_location_header() -> None:
+    document = create_engine_app(EngineSettings.for_test()).openapi()
+
+    response = document["paths"]["/internal/v1/broker-sync-runs"]["post"]["responses"]["202"]
+    assert response["headers"]["Location"]["schema"] == {"type": "string"}

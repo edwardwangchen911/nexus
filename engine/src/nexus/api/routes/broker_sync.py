@@ -21,6 +21,18 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     error_status: {"model": NexusErrorEnvelope, "description": "Stable NEXUS error envelope."}
     for error_status in (401, 404, 409, 422, 429)
 }
+_CREATE_RESPONSES = {
+    status.HTTP_202_ACCEPTED: {
+        "description": "The read-only broker sync run was admitted or joined.",
+        "headers": {
+            "Location": {
+                "description": "Same-origin BFF status resource.",
+                "schema": {"type": "string"},
+            }
+        },
+    },
+    **_ERROR_RESPONSES,
+}
 
 
 @router.post(
@@ -28,7 +40,7 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     operation_id="createBrokerSyncRun",
     response_model=BrokerSyncRunEnvelope,
     status_code=status.HTTP_202_ACCEPTED,
-    responses=_ERROR_RESPONSES,
+    responses=_CREATE_RESPONSES,
 )
 async def create_broker_sync_run(
     payload: BrokerSyncCreateRequest,
