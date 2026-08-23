@@ -5,12 +5,14 @@ from uuid import UUID
 import pytest
 from nexus.diagnostics.metrics import (
     annualized_volatility,
+    annualized_volatility_by_session,
     beta_and_correlation,
     beta_and_correlation_by_session,
     correlation_components,
     correlation_components_by_session,
     days_to_exit,
     maximum_drawdown,
+    maximum_drawdown_by_session,
     qualified_session_closes,
     security_hhi,
     top_weights,
@@ -43,6 +45,15 @@ def test_annualized_volatility_is_unknown_below_eighty_percent_coverage() -> Non
     assert annualized_volatility((Decimal("100"),) * 16, 20) is None
 
 
+def test_session_volatility_uses_adjacent_published_intervals_and_coverage_boundary() -> None:
+    sessions = tuple(date(2026, 1, 1) + timedelta(days=index) for index in range(21))
+    sufficient = {session: Decimal(100 + index) for index, session in enumerate(sessions[-17:])}
+    insufficient = dict(tuple(sufficient.items())[1:])
+
+    assert annualized_volatility_by_session(sufficient, sessions, 20) is not None
+    assert annualized_volatility_by_session(insufficient, sessions, 20) is None
+
+
 def test_maximum_drawdown_uses_the_worst_peak_to_trough_decline() -> None:
     """Using closing loss instead of running peak loss must fail this drawdown example."""
     closes = (Decimal("100"), Decimal("120"), Decimal("90")) + (Decimal("90"),) * 199
@@ -52,6 +63,16 @@ def test_maximum_drawdown_uses_the_worst_peak_to_trough_decline() -> None:
 
 def test_maximum_drawdown_is_unknown_below_eighty_percent_coverage() -> None:
     assert maximum_drawdown((Decimal("100"),) * 201) is None
+
+
+def test_session_drawdown_ignores_non_session_extreme_and_has_coverage_boundary() -> None:
+    sessions = tuple(date(2025, 1, 1) + timedelta(days=index) for index in range(252))
+    sufficient = {session: Decimal("100") for session in sessions[-202:]}
+    with_weekend_extreme = {**sufficient, date(2024, 12, 29): Decimal("1")}
+
+    assert maximum_drawdown_by_session(sufficient, sessions) == Decimal(0)
+    assert maximum_drawdown_by_session(with_weekend_extreme, sessions) == Decimal(0)
+    assert maximum_drawdown_by_session(dict(tuple(sufficient.items())[1:]), sessions) is None
 
 
 def test_beta_and_correlation_use_matched_returns() -> None:

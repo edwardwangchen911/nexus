@@ -35,6 +35,20 @@ def annualized_volatility(closes: Sequence[Decimal], window: int) -> Decimal | N
     returns = _returns(closes[-(window + 1) :])
     if len(returns) < _coverage_minimum(window):
         return None
+    return _annualized_return_volatility(returns)
+
+
+def annualized_volatility_by_session(
+    closes: Mapping[date, Decimal], published_sessions: Sequence[date], window: int
+) -> Decimal | None:
+    """Use only adjacent published-session returns within an exact horizon."""
+    returns = tuple(published_interval_returns(closes, published_sessions, window).values())
+    if len(returns) < _coverage_minimum(window):
+        return None
+    return _annualized_return_volatility(returns)
+
+
+def _annualized_return_volatility(returns: Sequence[Decimal]) -> Decimal:
     mean = sum(returns, Decimal(0)) / Decimal(len(returns))
     variance = sum(((value - mean) ** 2 for value in returns), Decimal(0)) / Decimal(len(returns))
     return variance.sqrt() * Decimal(252).sqrt()
@@ -50,6 +64,17 @@ def maximum_drawdown(closes: Sequence[Decimal], window: int = 252) -> Decimal | 
         Decimal(1) - value / (peak := max(peak, value)) for value in sample
     )
     return max(drawdowns, default=Decimal(0))
+
+
+def maximum_drawdown_by_session(
+    closes: Mapping[date, Decimal], published_sessions: Sequence[date], window: int = 252
+) -> Decimal | None:
+    """Measure drawdown only on qualified closes in the latest published horizon."""
+    horizon = tuple(published_sessions)[-window:]
+    sample = tuple(closes[session] for session in horizon if session in closes)
+    if len(sample) < _coverage_minimum(window):
+        return None
+    return maximum_drawdown(sample, window)
 
 
 def beta_and_correlation(
