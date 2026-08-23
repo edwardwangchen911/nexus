@@ -1,6 +1,7 @@
 """Frozen inputs and outputs for deterministic portfolio diagnostics."""
 
 from collections.abc import Mapping
+from datetime import date
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -32,6 +33,7 @@ class MarketEvidence(_DiagnosticModel):
     adv20: Mapping[UUID, Decimal] = {}
     quality: Literal["PASS", "PARTIAL", "FAIL"] = "PARTIAL"
     risk_buckets: Mapping[UUID, Mapping[str, Decimal]] = {}
+    symbols: Mapping[UUID, str] = {}
     benchmark: PriceSeries | None = None
     evidence_refs: tuple[EvidenceRef, ...] = ()
     source_conflict: bool = False
@@ -70,6 +72,7 @@ class DiagnosticItem(_DiagnosticModel):
 
 class PortfolioDiagnosticReport(_DiagnosticModel):
     portfolio_snapshot_id: UUID
+    trading_day: date | None = None
     policy_version: Literal["real_advisory_policy_v1"]
     optimization_need: OptimizationNeed
     items: tuple[DiagnosticItem, ...]

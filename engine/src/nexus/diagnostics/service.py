@@ -4,6 +4,7 @@
 from collections import defaultdict
 from collections.abc import Iterable
 from decimal import Decimal
+from datetime import date, timedelta
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,7 +55,21 @@ def diagnose_portfolio(snapshot: PortfolioSnapshot, market: MarketEvidence, hist
                 warning=True,
             )
         )
+    _assert_fosun_read_only_scope(snapshot, market, items)
     return _report(snapshot, policy, _optimization_need(items, history), tuple(items))
+
+
+_FOSUN_ALLOWED_PREFIXES = (
+    "CONCENTRATION", "RISK_BUCKET", "CURRENCY", "CASH", "LIQUIDITY", "VOLATILITY",
+    "DRAWDOWN", "BETA", "CORRELATION", "MARKET_RISK", "POSITION_MARKET_VALUE",
+)
+
+
+def _assert_fosun_read_only_scope(snapshot: PortfolioSnapshot, market: MarketEvidence, items: list[DiagnosticItem]) -> None:
+    if not any(market.symbols.get(position.instrument_id) == "00656.HK" for position in snapshot.positions):
+        return
+    if any(not item.diagnostic_code.startswith(_FOSUN_ALLOWED_PREFIXES) for item in items):
+        raise ValueError("00656.HK diagnostics cannot contain fundamental buy or sell output")
 
 
 async def diagnose_and_persist(
@@ -164,7 +179,7 @@ def _market_risk_items(values: list[tuple[BrokerPosition, Decimal]], scope: str,
         items.extend((
             _item(f"VOLATILITY_20:{position.instrument_id}", volatility20, "annualized_ratio", None, scope, "info", "monitor", None, market),
             _item(f"VOLATILITY_63:{position.instrument_id}", volatility63, "annualized_ratio", None, scope, "info", "monitor", None, market),
-            _upper_threshold_item(f"DRAWDOWN_252:{position.instrument_id}", drawdown, policy.drawdown_warning, policy.drawdown_critical, scope, market),
+            _upper_threshold_item(f"DRAWDOWN_252:{position.instrument_id}", drawdown, policy.drawdown_warning, policy.drawdown_critical, scope, market, inclusive=True),
             _item(f"BETA_126:{position.instrument_id}", beta_correlation[0], "ratio", None, scope, "info", "monitor", None, market),
             _item(f"CORRELATION_126:{position.instrument_id}", beta_correlation[1], "ratio", None, scope, "info", "monitor", None, market),
         ))
@@ -200,7 +215,28 @@ def _optimization_need(items: Iterable[DiagnosticItem], history: DiagnosticHisto
 def _warning_persists(item: DiagnosticItem, history: DiagnosticHistory) -> bool:
     if len(history.prior_reports) < 4:
         return False
-    return all(any(prior_item.diagnostic_code == item.diagnostic_code and prior_item.policy_scope == item.policy_scope and prior_item.severity == "warning" for prior_item in report.items) for report in history.prior_reports[-4:])
+    reports = history.prior_reports[-4:]
+    if any(report.trading_day is None for report in reports):
+        return False
+    expected = reports[-1].trading_day
+    assert expected is not None
+    for report in reversed(reports):
+        if report.trading_day != expected or not any(
+            prior_item.diagnostic_code == item.diagnostic_code
+            and prior_item.policy_scope == item.policy_scope
+            and prior_item.severity == "warning"
+            for prior_item in report.items
+        ):
+            return False
+        expected = _previous_trading_day(expected)
+    return True
+
+
+def _previous_trading_day(day: date) -> date:
+    prior = day - timedelta(days=1)
+    while prior.weekday() >= 5:
+        prior -= timedelta(days=1)
+    return prior
 
 
 def _risk_domain(code: str) -> str:
@@ -215,10 +251,10 @@ def _risk_domain(code: str) -> str:
     return code.split(":", 1)[0]
 
 
-def _upper_threshold_item(code: str, value: Decimal, warning_limit: Decimal, critical_limit: Decimal, scope: str, market: MarketEvidence, *, unit: str = "ratio") -> DiagnosticItem:
-    if value > critical_limit:
+def _upper_threshold_item(code: str, value: Decimal, warning_limit: Decimal, critical_limit: Decimal, scope: str, market: MarketEvidence, *, unit: str = "ratio", inclusive: bool = False) -> DiagnosticItem:
+    if value >= critical_limit if inclusive else value > critical_limit:
         return _item(code, value, unit, critical_limit, scope, "critical", "reduce_only", None, market)
-    if value > warning_limit:
+    if value >= warning_limit if inclusive else value > warning_limit:
         return _item(code, value, unit, warning_limit, scope, "warning", "research", None, market)
     return _item(code, value, unit, warning_limit, scope, "info", "monitor", None, market)
 
@@ -237,7 +273,7 @@ def _item(code: str, value: Decimal, unit: str, reference_limit: Decimal | None,
 
 
 def _report(snapshot: PortfolioSnapshot, policy: RealAdvisoryPolicy, optimization_need: OptimizationNeed, items: tuple[DiagnosticItem, ...]) -> PortfolioDiagnosticReport:
-    return PortfolioDiagnosticReport(portfolio_snapshot_id=snapshot.id, policy_version=policy.version, optimization_need=optimization_need, items=items)
+    return PortfolioDiagnosticReport(portfolio_snapshot_id=snapshot.id, trading_day=None if snapshot.as_of is None else snapshot.as_of.date(), policy_version=policy.version, optimization_need=optimization_need, items=items)
 
 
 def _blocked_item(market: MarketEvidence) -> DiagnosticItem:

@@ -40,6 +40,7 @@ async def persist_report(
     stored = PortfolioDiagnosticReportRecord(
         portfolio_id=snapshot.portfolio_id,
         portfolio_snapshot_id=snapshot.id,
+        trading_day=report.trading_day,
         policy_id=REAL_ADVISORY_POLICY_ID,
         policy_version=report.policy_version,
         optimization_need=report.optimization_need,
@@ -107,6 +108,7 @@ async def latest_report(
         ))
     return PortfolioDiagnosticReport(
         portfolio_snapshot_id=record.portfolio_snapshot_id,
+        trading_day=record.trading_day,
         policy_version=cast(Literal["real_advisory_policy_v1"], record.policy_version),
         optimization_need=cast(Literal["BLOCKED", "RESEARCH_REQUIRED", "OPTIMIZATION_CANDIDATE", "NO_ACTION"], record.optimization_need),
         items=tuple(items),

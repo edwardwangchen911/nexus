@@ -1,10 +1,11 @@
 """Immutable database records for advisory policy and diagnostic projections."""
 # ruff: noqa: E501
 
+from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, ForeignKey, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, Date, ForeignKey, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -35,6 +36,7 @@ class PortfolioDiagnosticReportRecord(ImmutableCreatedAt, Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     portfolio_id: Mapped[UUID] = mapped_column(ForeignKey("portfolios.id"))
     portfolio_snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("portfolio_snapshots.id"))
+    trading_day: Mapped[date | None] = mapped_column(Date)
     policy_id: Mapped[UUID] = mapped_column(ForeignKey("diagnostic_policies.id"))
     policy_version: Mapped[str] = mapped_column(String(100))
     optimization_need: Mapped[str] = mapped_column(String(40))
