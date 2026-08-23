@@ -8,23 +8,24 @@ from hashlib import sha256
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import desc, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.diagnostics.artifacts import ArtifactByteReader, parse_price_series_artifact
+from nexus.diagnostics.artifacts import ArtifactByteReader
 from nexus.diagnostics.calendar import completed_xnys_calendar, is_xnys_session
+from nexus.diagnostics.evidence import combine_refs
 from nexus.diagnostics.models import (
     DiagnosticEvidence,
     EvidenceBinding,
     InstrumentIdentity,
     MarketEvidence,
 )
+from nexus.diagnostics.series_authority import (
+    SeriesAuthority,
+    select_authoritative_series,
+)
 from nexus.domain.evidence import EvidenceRef
 from nexus.market.universe import stable_instrument_id
-from nexus.persistence.models.data import (
-    DataArtifact,
-    PriceSeriesManifest,
-)
 from nexus.persistence.models.data import (
     SourcePolicy as SourcePolicyRecord,
 )
@@ -41,7 +42,6 @@ from nexus.quality.source_policy import (
     SOURCE_POLICY_PAYLOAD,
     SOURCE_POLICY_VERSION,
     load_source_policy_v1,
-    select_price_series,
 )
 
 _SPY_ID = cast(UUID, stable_instrument_id("SPY"))
@@ -75,8 +75,11 @@ async def assemble_diagnostic_evidence(
     snapshot_bindings, snapshot_inputs = await _snapshot_bindings(session, snapshot)
     policy_ref = await _source_policy_ref(session, snapshot.as_of)
     calendar = completed_xnys_calendar(snapshot.as_of, policy_ref)
-    benchmark = await _canonical_spy_series(session, snapshot.as_of, artifact_reader, policy_ref)
-    benchmark_input = None if benchmark is None else _binding_input(_SPY_ID, benchmark[1])
+    benchmark_authority = await _canonical_spy_series(
+        session, snapshot.as_of, artifact_reader, policy_ref
+    )
+    benchmark = None if benchmark_authority is None else benchmark_authority.selected
+    benchmark_input = None if benchmark_authority is None else benchmark_authority.canonical_input
     invalid_benchmark_sessions = (
         ()
         if benchmark is None
@@ -90,23 +93,32 @@ async def assemble_diagnostic_evidence(
             )
         )
     )
-    conflict_refs: tuple[EvidenceRef, ...] = ()
+    conflict_refs: list[EvidenceRef] = []
+    benchmark_source_conflict = bool(
+        benchmark_authority is not None and benchmark_authority.source_conflict
+    )
+    if benchmark_source_conflict and benchmark_authority is not None:
+        conflict_refs.extend((*benchmark_authority.relevant_refs, *calendar.binding.refs))
     if benchmark is not None and invalid_benchmark_sessions:
-        conflict_refs = benchmark[1].refs
+        conflict_refs.extend((*benchmark[1].refs, *calendar.binding.refs))
         benchmark = None
     selected: dict[UUID, tuple[PriceSeries, EvidenceBinding]] = {}
+    series_authorities: dict[UUID, SeriesAuthority] = {}
     source_conflict = False
     for position in snapshot.positions:
-        result, conflict = await _selected_series(
+        authority = await select_authoritative_series(
             session,
             position.instrument_id,
             snapshot.as_of,
             artifact_reader,
             policy_ref,
         )
-        source_conflict = source_conflict or conflict
-        if result is not None:
-            selected[position.instrument_id] = result
+        series_authorities[position.instrument_id] = authority
+        source_conflict = source_conflict or authority.source_conflict
+        if authority.source_conflict:
+            conflict_refs.extend(authority.relevant_refs)
+        if authority.selected is not None:
+            selected[position.instrument_id] = authority.selected
     trading_sessions = calendar.sessions
     adv20: dict[UUID, Decimal] = {}
     adv_bindings: dict[UUID, EvidenceBinding] = {}
@@ -135,17 +147,19 @@ async def assemble_diagnostic_evidence(
         trading_sessions=trading_sessions,
         benchmark=None if benchmark is None else benchmark[0],
         evidence=evidence,
-        source_conflict=source_conflict or bool(invalid_benchmark_sessions),
-        conflict_refs=conflict_refs,
+        source_conflict=(
+            source_conflict or benchmark_source_conflict or bool(invalid_benchmark_sessions)
+        ),
+        conflict_refs=combine_refs(tuple(conflict_refs)),
     )
     return DiagnosticAssembly(
         market=market,
         canonical_inputs={
             "snapshot": snapshot_inputs,
             "series": tuple(
-                _binding_input(instrument_id, binding)
-                for instrument_id, (_, binding) in sorted(
-                    selected.items(), key=lambda item: str(item[0])
+                authority.canonical_input
+                for _, authority in sorted(
+                    series_authorities.items(), key=lambda item: str(item[0])
                 )
             ),
             "benchmark": benchmark_input,
@@ -166,7 +180,7 @@ async def _canonical_spy_series(
     as_of: datetime,
     reader: ArtifactByteReader,
     policy_ref: EvidenceRef,
-) -> tuple[PriceSeries, EvidenceBinding] | None:
+) -> SeriesAuthority | None:
     row = (
         await session.execute(
             select(Instrument, InstrumentAlias)
@@ -187,72 +201,7 @@ async def _canonical_spy_series(
     ).one_or_none()
     if row is None:
         return None
-    return (await _selected_series(session, _SPY_ID, as_of, reader, policy_ref))[0]
-
-
-async def _selected_series(
-    session: AsyncSession,
-    instrument_id: UUID,
-    as_of: datetime,
-    reader: ArtifactByteReader,
-    policy_ref: EvidenceRef,
-) -> tuple[tuple[PriceSeries, EvidenceBinding] | None, bool]:
-    instrument = await session.scalar(
-        select(Instrument).where(
-            Instrument.id == instrument_id,
-            Instrument.created_at <= as_of,
-        )
-    )
-    if instrument is None:
-        return None, False
-    rows = (
-        await session.execute(
-            select(PriceSeriesManifest, DataArtifact)
-            .join(DataArtifact, DataArtifact.id == PriceSeriesManifest.data_artifact_id)
-            .where(
-                PriceSeriesManifest.instrument == str(instrument_id),
-                PriceSeriesManifest.end_at <= as_of,
-                PriceSeriesManifest.created_at <= as_of,
-                DataArtifact.created_at <= as_of,
-                DataArtifact.available_at <= as_of,
-                DataArtifact.received_at <= as_of,
-            )
-            .order_by(
-                desc(DataArtifact.available_at),
-                desc(DataArtifact.received_at),
-                desc(PriceSeriesManifest.id),
-            )
-        )
-    ).all()
-    candidates: list[PriceSeries] = []
-    bindings: dict[tuple[str, str, str, str], EvidenceBinding] = {}
-    for manifest, artifact in rows:
-        key = (manifest.source, manifest.feed, manifest.adjustment, manifest.delivery_mode)
-        if key in bindings:
-            continue
-        payload = await reader(artifact.uri)
-        series, artifact_ref = parse_price_series_artifact(
-            payload, artifact, manifest, instrument_id
-        )
-        binding = EvidenceBinding(
-            available_at=max(artifact.available_at, policy_ref.available_at),
-            as_of=max(bar.observed_at or bar.available_at for bar in series.bars),
-            session=max(bar.session for bar in series.bars),
-            refs=(artifact_ref, policy_ref),
-        )
-        bindings[key] = binding
-        candidates.append(series)
-    selection = await select_price_series(session, candidates, instrument.tick_size, as_of)
-    conflict = "SOURCE_CONFLICT" in selection.reasons
-    if selection.selected is None or selection.quality != "PASS":
-        return None, conflict
-    key = (
-        selection.selected.source,
-        selection.selected.feed,
-        selection.selected.adjustment,
-        selection.selected.delivery_mode,
-    )
-    return (selection.selected, bindings[key]), conflict
+    return await select_authoritative_series(session, _SPY_ID, as_of, reader, policy_ref)
 
 
 async def _source_policy_ref(session: AsyncSession, as_of: datetime) -> EvidenceRef:
@@ -375,20 +324,6 @@ def _position_input(row: PositionSnapshot) -> dict[str, object]:
         "quantity": str(row.quantity),
         "current_price": None if row.current_price is None else str(row.current_price),
         "provider_as_of": _canonical_value(row.provider_as_of),
-    }
-
-
-def _binding_input(instrument_id: UUID, binding: EvidenceBinding) -> dict[str, object]:
-    return {
-        "instrument_id": str(instrument_id),
-        "source_policy_decision": "PASS",
-        "available_at": _canonical_value(binding.available_at),
-        "as_of": _canonical_value(binding.as_of),
-        "session": _canonical_value(binding.session),
-        "refs": tuple(
-            {"source": ref.source, "object_id": ref.object_id, "content_hash": ref.content_hash}
-            for ref in binding.refs
-        ),
     }
 
 

@@ -229,6 +229,17 @@ async def test_assembler_executes_source_policy_and_excludes_future_revision(
     selected = assembly.market.evidence.price_series[INSTRUMENT_ID].refs[0]
     assert selected.source == "fixture"
     assert selected.content_hash == sha256(payloads["memory://asset"]).hexdigest()
+    series_input = assembly.canonical_inputs["series"][0]  # type: ignore[index]
+    candidates = series_input["candidates"]  # type: ignore[index]
+    assert {candidate["disposition"] for candidate in candidates} == {
+        "selected",
+        "ineligible",
+    }
+    assert all(candidate["data_artifact_id"] for candidate in candidates)
+    assert all(candidate["artifact"]["sha256"] for candidate in candidates)
+    assert all(candidate["manifest"]["created_at"] for candidate in candidates)
+    assert series_input["selector"]["quality"] == "PASS"  # type: ignore[index]
+    assert "memory://" not in repr(series_input)
 
 
 @pytest.mark.asyncio
