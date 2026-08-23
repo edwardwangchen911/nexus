@@ -803,7 +803,10 @@ uv run ruff check engine integrations/fosun_gateway
 uv run mypy engine/src integrations/fosun_gateway/src
 uv run --package nexus-engine pytest engine/tests
 uv run --package nexus-fosun-gateway pytest integrations/fosun_gateway/tests
-docker compose -f infra/compose.yaml config
+docker compose -f infra/compose.yaml --profile app config --quiet
+docker compose -f infra/compose.yaml --profile app config --services
+docker compose -f infra/compose.yaml --profile broker config --quiet
+docker compose -f infra/compose.yaml --profile broker config --services
 ```
 
 默认 CI 禁止外网访问真实 Provider；只有手工触发的 integration workflow 可以使用轮换后的受限只读测试密钥，并且网关 operation allowlist 仍从网络层拒绝真实和模拟交易端点。
