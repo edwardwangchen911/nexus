@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -11,9 +11,11 @@ from nexus.diagnostics.metrics import (
     correlation_components_by_session,
     days_to_exit,
     maximum_drawdown,
+    qualified_session_closes,
     security_hhi,
     top_weights,
 )
+from nexus.providers.base import PriceBar, PriceSeries
 
 
 def test_top_weights_and_hhi_exclude_cash() -> None:
@@ -78,6 +80,36 @@ def test_beta_by_session_fails_closed_when_shifted_sessions_lack_eighty_percent_
     assert beta_and_correlation_by_session(asset, benchmark) is None
 
 
+def test_beta_by_session_never_pairs_returns_from_different_published_intervals() -> None:
+    start = date(2026, 1, 1)
+    published = tuple(start + timedelta(days=index) for index in range(5))
+    asset = {
+        published[0]: Decimal("100"),
+        published[2]: Decimal("121"),
+        published[4]: Decimal("108.9"),
+    }
+    benchmark = {
+        published[1]: Decimal("100"),
+        published[2]: Decimal("110"),
+        published[3]: Decimal("99"),
+        published[4]: Decimal("118.8"),
+    }
+
+    assert beta_and_correlation_by_session(asset, benchmark, 2, published) is None
+
+
+def test_qualified_session_closes_selects_latest_revision_independent_of_input_order() -> None:
+    instrument_id = UUID("0198d500-1000-7000-8000-000000000099")
+    session = date(2026, 8, 21)
+    first = _bar(instrument_id, session, "100", "r1", minute=1)
+    latest = _bar(instrument_id, session, "101", "r2", minute=2)
+    as_of = datetime(2026, 8, 21, 21, tzinfo=UTC)
+
+    assert qualified_session_closes(_series((latest, first)), as_of) == {
+        session: Decimal("101")
+    }
+
+
 def test_correlation_components_connect_at_the_eighty_percent_boundary() -> None:
     """Changing >= 0.80 to > 0.80 must fail this exact-threshold graph edge."""
     first = UUID("0198d500-1000-7000-8000-000000000021")
@@ -115,3 +147,35 @@ def test_days_to_exit_uses_ten_percent_of_adv() -> None:
 def test_days_to_exit_is_unknown_for_missing_or_zero_adv() -> None:
     assert days_to_exit(Decimal("100"), None) is None
     assert days_to_exit(Decimal("100"), Decimal("0")) is None
+
+
+def _bar(
+    instrument_id: UUID, session: date, close: str, revision: str, *, minute: int
+) -> PriceBar:
+    available_at = datetime(2026, 8, 21, 20, minute, tzinfo=UTC)
+    value = Decimal(close)
+    return PriceBar(
+        instrument_id=instrument_id,
+        session=session,
+        open=value,
+        high=value,
+        low=value,
+        close=value,
+        volume=Decimal("100"),
+        observed_at=available_at,
+        available_at=available_at,
+        received_at=available_at,
+        revision=revision,
+    )
+
+
+def _series(bars: tuple[PriceBar, ...]) -> PriceSeries:
+    return PriceSeries(
+        source="fixture",
+        feed="fixture",
+        adjustment="all",
+        bars=bars,
+        mode="fixture",
+        delivery_mode="fixture",
+        quality="PASS",
+    )

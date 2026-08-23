@@ -18,6 +18,7 @@ from nexus.providers.base import (
     PriceSeries,
     delivery_mode_matches_provider_mode,
 )
+from nexus.quality.price_revision import canonical_price_bars, price_bar_sort_key
 
 SOURCE_POLICY_ID = UUID("3c60888d-e92d-5e04-913c-7d427004cfef")
 SOURCE_POLICY_KEY = "market_price"
@@ -282,7 +283,9 @@ def _apply_source_policy_v1(
             continue
         if len(visible) != len(candidate.bars):
             reasons.add("FUTURE_DATA_EXCLUDED")
-        eligible.append(candidate.model_copy(update={"bars": _canonical_bars(candidate, visible)}))
+        eligible.append(
+            candidate.model_copy(update={"bars": canonical_price_bars(candidate, visible)})
+        )
 
     if not eligible:
         return SourceSelection(
@@ -320,50 +323,6 @@ def _valid_fosun_candidate(
     )
 
 
-def _canonical_bars(series: PriceSeries, bars: Sequence[PriceBar]) -> tuple[PriceBar, ...]:
-    latest: dict[tuple[object, ...], PriceBar] = {}
-    for bar in bars:
-        identity: tuple[object, ...] = (bar.instrument_id, bar.session)
-        if series.interval == "1Min":
-            identity += (bar.observed_at,)
-        current = latest.get(identity)
-        if current is None or _revision_key(bar) > _revision_key(current):
-            latest[identity] = bar
-    return tuple(sorted(latest.values(), key=_bar_sort_key))
-
-
-def _revision_key(bar: PriceBar) -> tuple[object, ...]:
-    return (
-        bar.available_at,
-        bar.received_at or bar.available_at,
-        bar.observed_at or bar.available_at,
-        bar.revision,
-        str(bar.open),
-        str(bar.high),
-        str(bar.low),
-        str(bar.close),
-        str(bar.volume),
-        tuple(sorted(bar.quality_flags)),
-    )
-
-
-def _bar_sort_key(bar: PriceBar) -> tuple[object, ...]:
-    return (
-        str(bar.instrument_id),
-        bar.session.isoformat(),
-        bar.observed_at.isoformat() if bar.observed_at else "",
-        bar.available_at.isoformat(),
-        bar.received_at.isoformat() if bar.received_at else "",
-        bar.revision,
-        str(bar.open),
-        str(bar.high),
-        str(bar.low),
-        str(bar.close),
-        str(bar.volume),
-        tuple(sorted(bar.quality_flags)),
-    )
-
-
 def _series_sort_key(series: PriceSeries) -> tuple[object, ...]:
     return (
         _PRIORITY.index(series.source),
@@ -374,7 +333,7 @@ def _series_sort_key(series: PriceSeries) -> tuple[object, ...]:
         series.interval,
         series.mode,
         series.contract_hash or "",
-        tuple(_bar_sort_key(bar) for bar in series.bars),
+        tuple(price_bar_sort_key(bar) for bar in series.bars),
     )
 
 

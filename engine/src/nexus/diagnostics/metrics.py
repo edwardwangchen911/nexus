@@ -7,6 +7,7 @@ from math import ceil
 from uuid import UUID
 
 from nexus.providers.base import PriceSeries
+from nexus.quality.price_revision import canonical_price_bars
 
 
 def security_hhi(values: Sequence[Decimal]) -> Decimal | None:
@@ -90,17 +91,35 @@ def beta_and_correlation_by_session(
     asset_closes: Mapping[date, Decimal],
     benchmark_closes: Mapping[date, Decimal],
     window: int = 126,
+    published_sessions: Sequence[date] | None = None,
 ) -> tuple[Decimal, Decimal] | None:
-    """Align returns by their actual sessions before applying the 126-session window."""
-    asset_returns = _returns_by_session(asset_closes)
-    benchmark_returns = _returns_by_session(benchmark_closes)
-    sessions = tuple(sorted(set(asset_returns) & set(benchmark_returns)))[-window:]
-    required = _coverage_minimum(window)
-    if len(sessions) < required:
-        return None
-    return _beta_from_pairs(
-        tuple((asset_returns[session], benchmark_returns[session]) for session in sessions)
+    """Form same-period returns only across adjacent published sessions."""
+    sessions = tuple(
+        sorted(set(asset_closes) | set(benchmark_closes))
+        if published_sessions is None
+        else published_sessions
     )
+    window_sessions = sessions[-(window + 1) :]
+    intervals = tuple(zip(window_sessions, window_sessions[1:]))
+    pairs = tuple(
+        (
+            asset_closes[current] / asset_closes[prior] - Decimal(1),
+            benchmark_closes[current] / benchmark_closes[prior] - Decimal(1),
+        )
+        for prior, current in intervals
+        if prior in asset_closes
+        and current in asset_closes
+        and prior in benchmark_closes
+        and current in benchmark_closes
+        and asset_closes[prior] > 0
+        and asset_closes[current] > 0
+        and benchmark_closes[prior] > 0
+        and benchmark_closes[current] > 0
+    )
+    required = _coverage_minimum(window)
+    if len(pairs) < required:
+        return None
+    return _beta_from_pairs(pairs)
 
 
 def qualified_session_closes(
@@ -111,10 +130,14 @@ def qualified_session_closes(
 
     if series is None or not isinstance(as_of, datetime) or series.quality != "PASS":
         return None
-    return {
-        bar.session: bar.close
+    visible = tuple(
+        bar
         for bar in series.bars
         if bar.available_at <= as_of and bar.session <= as_of.date()
+    )
+    return {
+        bar.session: bar.close
+        for bar in canonical_price_bars(series, visible)
     }
 
 
