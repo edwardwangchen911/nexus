@@ -294,6 +294,7 @@ async def _snapshot_bindings(
         "position_hash": record.position_hash,
         "order_hash_version": record.order_hash_version,
         "order_hash": record.order_hash,
+        "created_at": _canonical_value(record.created_at),
     }
     snapshot_ref = _db_ref("portfolio-snapshot", record.id, snapshot.as_of, snapshot_payload)
     cash = {
@@ -360,6 +361,7 @@ def _cash_input(row: CashSnapshot) -> dict[str, object]:
         "cash_balance": str(row.cash_balance),
         "available_cash": str(row.available_cash),
         "provider_as_of": _canonical_value(row.provider_as_of),
+        "created_at": _canonical_value(row.created_at),
     }
 
 
@@ -369,8 +371,13 @@ def _position_input(row: PositionSnapshot) -> dict[str, object]:
         "instrument_id": str(row.instrument_id),
         "currency": row.currency,
         "quantity": str(row.quantity),
+        "available_quantity": str(row.available_quantity),
+        "frozen_quantity": str(row.frozen_quantity),
+        "avg_cost": None if row.avg_cost is None else str(row.avg_cost),
+        "diluted_cost": None if row.diluted_cost is None else str(row.diluted_cost),
         "current_price": None if row.current_price is None else str(row.current_price),
         "provider_as_of": _canonical_value(row.provider_as_of),
+        "created_at": _canonical_value(row.created_at),
     }
 
 

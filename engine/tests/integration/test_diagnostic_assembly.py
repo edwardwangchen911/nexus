@@ -102,6 +102,10 @@ async def test_production_service_assembles_real_diagnostics_from_hashed_parquet
     assert identity_input["instrument_record_id"] == str(INSTRUMENT_ID)
     assert identity_input["alias_record_id"]
     assert len(identity_input["refs"]) == 2
+    position_input = assembly.canonical_inputs["snapshot"]["positions"][0]  # type: ignore[index]
+    assert position_input["available_quantity"] == "90000.000000000000"
+    assert position_input["avg_cost"] == "5.250000000000"
+    assert position_input["created_at"]
     assert all(item.unknown_reason != "MARKET_EVIDENCE_UNAVAILABLE" for item in report.items)
     liquidity = next(
         item for item in report.items if item.diagnostic_code.startswith("LIQUIDITY_DAYS_TO_EXIT")
