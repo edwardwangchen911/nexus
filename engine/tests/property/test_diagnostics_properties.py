@@ -7,7 +7,7 @@ from hypothesis import strategies as st
 from nexus.diagnostics.decision import optimization_need
 from nexus.diagnostics.metrics import (
     annualized_volatility,
-    beta_and_correlation,
+    beta_and_correlation_by_session,
     correlation_components_by_session,
     days_to_exit,
     maximum_drawdown,
@@ -80,9 +80,14 @@ def test_beta_and_correlation_126_are_finite_and_correlation_is_bounded(
     asset: list[int], benchmark: list[int]
 ) -> None:
     assume(len(set(asset)) > 1 and len(set(benchmark)) > 1)
-    result = beta_and_correlation(
-        tuple(Decimal(value) for value in asset),
-        tuple(Decimal(value) for value in benchmark),
+    start = date(2025, 1, 1)
+    sessions = tuple(
+        start + timedelta(days=index) for index in range(min(len(asset), len(benchmark)))
+    )
+    result = beta_and_correlation_by_session(
+        dict(zip(sessions, (Decimal(value) for value in asset), strict=False)),
+        dict(zip(sessions, (Decimal(value) for value in benchmark), strict=False)),
+        published_sessions=sessions,
     )
 
     assume(result is not None)
@@ -92,20 +97,39 @@ def test_beta_and_correlation_126_are_finite_and_correlation_is_bounded(
     assert Decimal(-1) <= correlation <= Decimal(1)
 
 
-@given(st.lists(st.integers(min_value=-100, max_value=100), min_size=60, max_size=126))
+@given(
+    st.integers(min_value=1, max_value=10_000),
+    st.integers(min_value=60, max_value=126),
+)
 @settings(max_examples=40, deadline=None)
 def test_correlation_cluster_uses_point_eight_threshold_with_sixty_overlaps(
-    returns: list[int],
+    scale: int, overlap: int,
 ) -> None:
-    assume(len(set(returns)) > 1)
     left = UUID("0198d500-1000-7000-8000-000000000001")
     right = UUID("0198d500-1000-7000-8000-000000000002")
-    sessions = tuple(date(2026, 1, 1) + timedelta(days=index) for index in range(len(returns)))
-    series = {
-        session: Decimal(value) / Decimal(10_000)
-        for session, value in zip(sessions, returns, strict=True)
+    sessions = tuple(date(2026, 1, 1) + timedelta(days=index) for index in range(overlap))
+    series = {session: Decimal(index * scale) for index, session in enumerate(sessions)}
+    below = {
+        session: Decimal(scale if index % 2 else -scale)
+        for index, session in enumerate(sessions)
     }
 
+    assert correlation_components_by_session({left: series, right: dict(series)}) == (
+        (left, right),
+    )
+    assert correlation_components_by_session({left: series, right: below}) == ()
+
+
+@given(st.integers(min_value=1, max_value=10_000))
+def test_correlation_cluster_straddles_fifty_nine_and_sixty_overlap(scale: int) -> None:
+    left = UUID("0198d500-1000-7000-8000-000000000001")
+    right = UUID("0198d500-1000-7000-8000-000000000002")
+    sessions = tuple(date(2026, 1, 1) + timedelta(days=index) for index in range(60))
+    series = {session: Decimal(index * scale) for index, session in enumerate(sessions)}
+
+    assert correlation_components_by_session(
+        {left: dict(tuple(series.items())[:59]), right: dict(tuple(series.items())[:59])}
+    ) == ()
     assert correlation_components_by_session({left: series, right: dict(series)}) == (
         (left, right),
     )

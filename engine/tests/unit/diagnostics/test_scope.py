@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from nexus.diagnostics.market_risk import correlation_cluster_scope
 from nexus.diagnostics.models import DiagnosticItem, InstrumentIdentity, MarketEvidence
 from nexus.diagnostics.scope import assert_fosun_read_only_scope
 from nexus.providers.broker.base import BrokerPosition, PortfolioSnapshot
@@ -45,6 +46,19 @@ def test_market_evidence_rejects_caller_symbol_claims() -> None:
         MarketEvidence.model_validate(
             {"quality": "PASS", "symbols": {str(INSTRUMENT_ID): "00656.HK"}}
         )
+
+
+def test_correlation_cluster_scope_is_currency_specific_and_component_stable() -> None:
+    first = UUID("0198d500-1000-7000-8000-000000000021")
+    second = UUID("0198d500-1000-7000-8000-000000000022")
+    third = UUID("0198d500-1000-7000-8000-000000000023")
+
+    left = correlation_cluster_scope("currency:USD", (first, second))
+
+    assert left.startswith("currency:USD:correlation-cluster:")
+    assert left == correlation_cluster_scope("currency:USD", (second, first))
+    assert left != correlation_cluster_scope("currency:USD", (first, third))
+    assert left != correlation_cluster_scope("currency:HKD", (first, second))
 
 
 def _snapshot() -> PortfolioSnapshot:

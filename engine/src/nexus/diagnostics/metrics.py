@@ -197,6 +197,23 @@ def correlation_components_by_session(
     return _components(identifiers, neighbours)
 
 
+def published_interval_returns(
+    closes: Mapping[date, Decimal],
+    published_sessions: Sequence[date],
+    window: int = 126,
+) -> dict[date, Decimal]:
+    """Return only adjacent intervals within the latest published-session horizon."""
+    sessions = tuple(published_sessions)[-(window + 1) :]
+    return {
+        current: closes[current] / closes[prior] - Decimal(1)
+        for prior, current in zip(sessions, sessions[1:])
+        if prior in closes
+        and current in closes
+        and closes[prior] > 0
+        and closes[current] > 0
+    }
+
+
 def days_to_exit(position_market_value: Decimal, adv20: Decimal | None) -> Decimal | None:
     """Use a fixed ten-percent ADV participation cap without binary floats."""
     if position_market_value < 0:

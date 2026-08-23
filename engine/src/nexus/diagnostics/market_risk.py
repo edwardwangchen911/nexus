@@ -2,6 +2,7 @@
 
 from datetime import date
 from decimal import Decimal
+from hashlib import sha256
 from uuid import UUID
 
 from nexus.diagnostics.evidence import EvidenceResolver, combine_refs
@@ -11,6 +12,7 @@ from nexus.diagnostics.metrics import (
     beta_and_correlation_by_session,
     correlation_components_by_session,
     maximum_drawdown,
+    published_interval_returns,
     qualified_session_closes,
 )
 from nexus.diagnostics.models import DiagnosticItem, MarketEvidence
@@ -78,7 +80,11 @@ def market_risk_items(
         beta_correlation = (
             None
             if benchmark is None
-            else beta_and_correlation_by_session(session_closes, benchmark)
+            else beta_and_correlation_by_session(
+                session_closes,
+                benchmark,
+                published_sessions=market.trading_sessions,
+            )
         )
         if None in (volatility20, volatility63, drawdown, beta_correlation):
             items.append(
@@ -93,12 +99,9 @@ def market_risk_items(
             continue
         assert volatility20 is not None and volatility63 is not None and drawdown is not None
         assert beta_correlation is not None
-        sessions = tuple(sorted(session_closes))
-        returns_by_instrument[position.instrument_id] = {
-            current: session_closes[current] / session_closes[prior] - Decimal(1)
-            for prior, current in zip(sessions, sessions[1:])
-            if session_closes[prior] > 0 and session_closes[current] > 0
-        }
+        returns_by_instrument[position.instrument_id] = published_interval_returns(
+            session_closes, market.trading_sessions
+        )
         market_refs = combine_refs(price_evidence.refs, benchmark_evidence.refs)
         items.extend(
             (
@@ -162,7 +165,9 @@ def market_risk_items(
                 ),
             )
         )
-    _append_correlation_clusters(items, values, returns_by_instrument, market, policy, resolver)
+    _append_correlation_clusters(
+        items, values, returns_by_instrument, scope, market, policy, resolver
+    )
     return items
 
 
@@ -170,6 +175,7 @@ def _append_correlation_clusters(
     items: list[DiagnosticItem],
     values: list[tuple[BrokerPosition, Decimal]],
     returns_by_instrument: dict[UUID, dict[date, Decimal]],
+    scope: str,
     market: MarketEvidence,
     policy: RealAdvisoryPolicy,
     resolver: EvidenceResolver,
@@ -192,9 +198,15 @@ def _append_correlation_clusters(
                 weight,
                 "ratio",
                 policy.correlation_cluster_warning,
-                "portfolio:market-risk",
+                correlation_cluster_scope(scope, component),
                 market,
                 warning=weight > policy.correlation_cluster_warning,
                 evidence_refs=refs,
             )
         )
+
+
+def correlation_cluster_scope(scope: str, component: tuple[UUID, ...]) -> str:
+    """Bind a cluster to its currency scope and stable connected-component identity."""
+    identity = "|".join(str(instrument_id) for instrument_id in sorted(component, key=str))
+    return f"{scope}:correlation-cluster:{sha256(identity.encode()).hexdigest()[:16]}"
