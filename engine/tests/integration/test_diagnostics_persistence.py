@@ -118,10 +118,12 @@ async def test_cross_portfolio_report_is_rejected_by_repository_and_composite_fk
                     PortfolioDiagnosticReportRecord(
                         portfolio_id=PORTFOLIOS[2],
                         portfolio_snapshot_id=SNAPSHOT_ID,
+                        snapshot_as_of=datetime(2026, 8, 24, 3, 59, tzinfo=UTC),
                         trading_day=date(2026, 8, 24),
                         policy_id=REAL_ADVISORY_POLICY_ID,
                         policy_version="real_advisory_policy_v1",
                         optimization_need="RESEARCH_REQUIRED",
+                        diagnostic_input_hash=INPUT_HASH,
                     )
                 )
                 await session.flush()
