@@ -9,7 +9,15 @@ from uuid import UUID
 
 import httpx
 import pytest
-from helpers.portfolio_api import INSTRUMENT_ID, PORTFOLIOS, app, headers, seed_portfolio_list, settings
+from helpers.optimization import complete_comparison_metrics
+from helpers.portfolio_api import (
+    INSTRUMENT_ID,
+    PORTFOLIOS,
+    app,
+    headers,
+    seed_portfolio_list,
+    settings,
+)
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.optimizer.cost_policy import COST_POLICY_ID
 from nexus.optimizer.lifecycle import LifecycleTransition, transition_group_idempotently
@@ -262,6 +270,19 @@ async def test_shadow_requires_the_frozen_selection_authority(
 
 
 @pytest.mark.asyncio
+async def test_shadow_rejects_comparison_from_different_authority(migrated_database_url: str) -> None:
+    group_id = UUID("0198d500-1000-7000-8000-000000000646")
+    await _seed_complete_group(migrated_database_url, group_id, comparison_authority_conflict=True)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        with pytest.raises(ValueError, match="PROPOSAL_NOT_EXECUTABLE"):
+            await transition_group(session, group_id, "shadowing", expected_version=1)
+    with pytest.raises(IntegrityError, match="PROPOSAL_NOT_EXECUTABLE"):
+        async with factory() as session, session.begin():
+            await session.execute(text("UPDATE optimization_proposal_groups SET status='shadowing', version=2 WHERE id=:id"), {"id": group_id})
+
+
+@pytest.mark.asyncio
 async def test_raw_sql_shadow_cannot_bypass_stale_policy_authority(
     migrated_database_url: str,
 ) -> None:
@@ -346,6 +367,7 @@ async def _seed_complete_group(
     noncanonical_source: bool = False,
     missing_cost_policy: bool = False,
     missing_selection: bool = False,
+    comparison_authority_conflict: bool = False,
 ) -> None:
     await seed_portfolio_list(database_url)
     factory = session_factory(settings(database_url))
@@ -447,13 +469,16 @@ async def _seed_complete_group(
                     f"0198d500-1000-7000-8000-000000000{int(suffix) + 30 + index:03d}"
                 ),
                 metrics={
-                    "cost": "0",
+                    **complete_comparison_metrics(
+                        report_id=report_id, data_id=data_id, source_id=source_id,
+                        optimizer_id=_POLICY_ID, cost_id=COST_POLICY_ID,
+                    ),
                     "ranking_eligible": not comparison_non_executable,
-                    "unknown_metrics": [],
-                    "constraint_complete": True,
-                    "eligibility_complete": True,
-                    "evidence_complete": True,
-                    "stale": False,
+                    "authority": {"diagnostic_report_id": str(_BASELINE_ID)}
+                    if comparison_authority_conflict else complete_comparison_metrics(
+                        report_id=report_id, data_id=data_id, source_id=source_id,
+                        optimizer_id=_POLICY_ID, cost_id=COST_POLICY_ID,
+                    )["authority"],
                 },
                 tax_impact="unknown",
                 requires_fx=False,

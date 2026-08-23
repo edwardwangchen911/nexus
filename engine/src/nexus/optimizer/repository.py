@@ -7,6 +7,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
+from nexus.optimizer.compare import ComparisonDimensions
 from nexus.optimizer.cost_policy import COST_POLICY_ID, load_cost_policy_v1
 from nexus.optimizer.selection_authority import load_selection_authority
 from nexus.persistence.models.data import DataSnapshot
@@ -142,13 +143,27 @@ async def _has_executable_shadow_authority(
         and optimizer_policy.key == "optimizer"
         and optimizer_policy.version == "optimizer_v1"
         and len(comparisons) == 3
-        and all(_comparison_is_executable(comparison) for comparison in comparisons)
+        and all(_comparison_is_executable(comparison, group) for comparison in comparisons)
     )
 
 
-def _comparison_is_executable(comparison: ProposalComparisonRecord) -> bool:
+def _comparison_is_executable(
+    comparison: ProposalComparisonRecord, group: OptimizationProposalGroupRecord
+) -> bool:
     """Require every persisted comparison to retain complete executable authority."""
     metrics = comparison.metrics
+    try:
+        dimensions = ComparisonDimensions.model_validate(metrics.get("dimensions"))
+    except (TypeError, ValueError):
+        return False
+    authority = metrics.get("authority")
+    expected_authority = {
+        "diagnostic_report_id": str(group.diagnostic_report_id),
+        "data_snapshot_id": str(group.data_snapshot_id),
+        "source_policy_id": str(group.source_policy_id),
+        "optimizer_policy_id": str(group.policy_id),
+        "cost_policy_id": str(group.cost_policy_id),
+    }
     return bool(
         not comparison.non_executable
         and not comparison.requires_fx
@@ -160,4 +175,6 @@ def _comparison_is_executable(comparison: ProposalComparisonRecord) -> bool:
         and metrics.get("stale") is False
         and metrics.get("unknown_metrics") == []
         and metrics.get("cost") is not None
+        and dimensions.all_ranked_dimensions_known
+        and authority == expected_authority
     )
