@@ -8,6 +8,10 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.diagnostics.decision import optimization_need as _optimization_need
+from nexus.diagnostics.items import item as _item
+from nexus.diagnostics.items import threshold_item as _threshold_item
+from nexus.diagnostics.items import unknown_item as _unknown_item
+from nexus.diagnostics.items import upper_threshold_item as _upper_threshold_item
 from nexus.diagnostics.metrics import (
     annualized_volatility,
     beta_and_correlation_by_session,
@@ -19,10 +23,8 @@ from nexus.diagnostics.metrics import (
     top_weights,
 )
 from nexus.diagnostics.models import (
-    DiagnosticActionability,
     DiagnosticHistory,
     DiagnosticItem,
-    DiagnosticSeverity,
     MarketEvidence,
     OptimizationNeed,
     PortfolioDiagnosticReport,
@@ -36,7 +38,6 @@ from nexus.diagnostics.scope import (
     has_future_session_conflict as _has_future_session_conflict,
 )
 from nexus.diagnostics.valuation import position_values as _position_values
-from nexus.domain.decimal import decimal_to_string
 from nexus.providers.broker.base import BrokerPosition, PortfolioSnapshot
 
 
@@ -126,7 +127,7 @@ def _evaluate_currency_scopes(
         if values:
             items.extend(_concentration_items(values, scope, market, policy))
             items.extend(_exposure_items(values, scope, market, policy))
-            items.extend(_liquidity_items(values, scope, market, policy))
+            items.extend(_liquidity_items(values, scope, market, policy, snapshot))
             items.extend(_market_risk_items(values, scope, market, policy, snapshot))
         total = cash_by_currency[currency] + sum((value for _, value in values), Decimal(0))
         if total > 0:
@@ -213,12 +214,16 @@ def _liquidity_items(
     scope: str,
     market: MarketEvidence,
     policy: RealAdvisoryPolicy,
+    snapshot: PortfolioSnapshot,
 ) -> list[DiagnosticItem]:
     result: list[DiagnosticItem] = []
     for position, value in values:
+        refs = () if snapshot.as_of is None else market.refs_for(
+            f"adv20:{position.instrument_id}", as_of=snapshot.as_of
+        )
         metric = days_to_exit(value, market.adv20.get(position.instrument_id))
         code = f"LIQUIDITY_DAYS_TO_EXIT:{position.instrument_id}"
-        if metric is None:
+        if metric is None or not refs:
             result.append(_unknown_item(code, "trading_days", "ADV20_MISSING", scope, market))
         else:
             result.append(
@@ -230,6 +235,7 @@ def _liquidity_items(
                     scope,
                     market,
                     unit="trading_days",
+                    evidence_refs=refs,
                 )
             )
     return result
@@ -367,91 +373,6 @@ def _market_risk_items(
                 )
             )
     return items
-
-
-def _upper_threshold_item(
-    code: str,
-    value: Decimal,
-    warning_limit: Decimal,
-    critical_limit: Decimal,
-    scope: str,
-    market: MarketEvidence,
-    *,
-    unit: str = "ratio",
-    inclusive: bool = False,
-) -> DiagnosticItem:
-    if value >= critical_limit if inclusive else value > critical_limit:
-        return _item(
-            code, value, unit, critical_limit, scope, "critical", "reduce_only", None, market
-        )
-    if value >= warning_limit if inclusive else value > warning_limit:
-        return _item(code, value, unit, warning_limit, scope, "warning", "research", None, market)
-    return _item(code, value, unit, warning_limit, scope, "info", "monitor", None, market)
-
-
-def _threshold_item(
-    code: str,
-    value: Decimal,
-    unit: str,
-    reference_limit: Decimal,
-    scope: str,
-    market: MarketEvidence,
-    *,
-    warning: bool,
-) -> DiagnosticItem:
-    severity: DiagnosticSeverity = "warning" if warning else "info"
-    actionability: DiagnosticActionability = "research" if warning else "monitor"
-    return _item(
-        code,
-        value,
-        unit,
-        reference_limit,
-        scope,
-        severity,
-        actionability,
-        None,
-        market,
-    )
-
-
-def _unknown_item(
-    code: str, unit: str, reason: str, scope: str, market: MarketEvidence
-) -> DiagnosticItem:
-    return DiagnosticItem(
-        diagnostic_code=code,
-        metric_value=None,
-        unit=unit,
-        reference_limit=None,
-        policy_scope=scope,
-        severity="info",
-        actionability="research",
-        unknown_reason=reason,
-        evidence_refs=market.evidence_refs,
-    )
-
-
-def _item(
-    code: str,
-    value: Decimal,
-    unit: str,
-    reference_limit: Decimal | None,
-    scope: str,
-    severity: DiagnosticSeverity,
-    actionability: DiagnosticActionability,
-    reason: str | None,
-    market: MarketEvidence,
-) -> DiagnosticItem:
-    return DiagnosticItem(
-        diagnostic_code=code,
-        metric_value=decimal_to_string(value),
-        unit=unit,
-        reference_limit=None if reference_limit is None else decimal_to_string(reference_limit),
-        policy_scope=scope,
-        severity=severity,
-        actionability=actionability,
-        unknown_reason=reason,
-        evidence_refs=market.evidence_refs,
-    )
 
 
 def _report(

@@ -66,6 +66,32 @@ def test_unknown_required_metric_cannot_be_no_action() -> None:
     assert any(item.unknown_reason == "ADV20_MISSING" for item in report.items)
 
 
+def test_days_to_exit_uses_only_its_item_specific_adv_evidence() -> None:
+    """Replacing the ADV binding with global evidence must fail this audit boundary."""
+    snapshot = _ready_snapshot()
+    instrument_id = snapshot.positions[0].instrument_id
+    adv_ref = _evidence_ref("adv20", "a")
+    unrelated_ref = _evidence_ref("unrelated", "b")
+    market = _complete_market(snapshot).model_copy(
+        update={
+            "evidence_refs": (unrelated_ref,),
+            "input_evidence": {f"adv20:{instrument_id}": (adv_ref,)},
+        }
+    )
+
+    report = diagnose_portfolio(
+        snapshot, market, DiagnosticHistory.empty(), RealAdvisoryPolicy.v1()
+    )
+    item = next(
+        item
+        for item in report.items
+        if item.diagnostic_code == f"LIQUIDITY_DAYS_TO_EXIT:{instrument_id}"
+    )
+
+    assert item.unknown_reason is None
+    assert item.evidence_refs == (adv_ref,)
+
+
 def test_non_ready_snapshot_is_blocked_before_any_metric_evaluation() -> None:
     """Changing blocked precedence to research-required must fail this admission guard."""
     report = diagnose_portfolio(
@@ -363,6 +389,16 @@ def _comparison_evidence() -> ComparableVariantEvidence:
     )
 
 
+def _evidence_ref(object_id: str, hash_character: str) -> EvidenceRef:
+    return EvidenceRef(
+        source="fixture",
+        object_id=object_id,
+        available_at=datetime(2026, 8, 23, tzinfo=UTC),
+        location=f"fixture://{object_id}",
+        content_hash=hash_character * 64,
+    )
+
+
 def _complete_market(snapshot: PortfolioSnapshot) -> MarketEvidence:
     instrument_id = snapshot.positions[0].instrument_id
     series = _series(snapshot, 253)
@@ -372,6 +408,7 @@ def _complete_market(snapshot: PortfolioSnapshot) -> MarketEvidence:
         quality="PASS",
         risk_buckets={instrument_id: {"equity": Decimal(1)}},
         benchmark=series,
+        input_evidence={f"adv20:{instrument_id}": (_evidence_ref("adv20", "d"),)},
     )
 
 

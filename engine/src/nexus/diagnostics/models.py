@@ -1,7 +1,7 @@
 """Frozen inputs and outputs for deterministic portfolio diagnostics."""
 
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -56,6 +56,7 @@ class MarketEvidence(_DiagnosticModel):
     symbols: Mapping[UUID, str] = {}
     benchmark: PriceSeries | None = None
     evidence_refs: tuple[EvidenceRef, ...] = ()
+    input_evidence: Mapping[str, tuple[EvidenceRef, ...]] = {}
     source_conflict: bool = False
 
     @model_validator(mode="after")
@@ -71,6 +72,12 @@ class MarketEvidence(_DiagnosticModel):
             ):
                 raise ValueError("risk bucket weights must be nonnegative and sum to one")
         return self
+
+    def refs_for(self, input_kind: str, *, as_of: datetime) -> tuple[EvidenceRef, ...]:
+        refs = self.input_evidence.get(input_kind, ())
+        if not refs or any(ref.available_at > as_of for ref in refs):
+            return ()
+        return refs
 
     @classmethod
     def missing_adv(cls) -> "MarketEvidence":
