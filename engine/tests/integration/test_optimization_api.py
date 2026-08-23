@@ -16,8 +16,11 @@ from nexus.persistence.models.diagnostics import DiagnosticPolicy, PortfolioDiag
 from nexus.persistence.models.optimization import (
     OptimizationAdmissionAuthorityRecord,
     OptimizationProposalGroupRecord,
+    OptimizationProposalRecord,
+    ProposalComparisonRecord,
+    ProposalPositionRecord,
 )
-from nexus.persistence.models.runtime import AuditEvent, Job
+from nexus.persistence.models.runtime import AuditEvent, IdempotencyRecord, Job
 from nexus.persistence.session import session_factory
 from sqlalchemy import func, select
 
@@ -56,6 +59,51 @@ async def test_what_if_writes_only_redacted_audit_summary(migrated_database_url:
             "request_hash": hashlib.sha256(body).hexdigest(),
         }
         assert await session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+
+
+@pytest.mark.asyncio
+async def test_what_if_has_one_redacted_audit_and_no_business_or_idempotency_write(
+    migrated_database_url: str,
+) -> None:
+    """The synchronous endpoint may append one summary, but never retain request values elsewhere."""
+    instrument_id = "0198d500-1000-7000-8000-000000000611"
+    exact_weight = "0.1250"
+    body = json.dumps(
+        {
+            "policy_version": "optimizer_v1",
+            "positions": [{"instrument_id": instrument_id, "weight": exact_weight}],
+        },
+        separators=(",", ":"),
+    ).encode()
+    path = "/internal/v1/what-if/evaluate"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
+    ) as client:
+        response = await client.post(path, content=body, headers=headers("POST", path, body))
+    assert response.status_code == 200
+    assert instrument_id not in response.text
+    assert exact_weight not in response.text
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session:
+        counts = []
+        for table in (
+            Job,
+            IdempotencyRecord,
+            OptimizationProposalGroupRecord,
+            OptimizationProposalRecord,
+            ProposalPositionRecord,
+            ProposalComparisonRecord,
+        ):
+            counts.append(await session.scalar(select(func.count()).select_from(table)))
+        audit = list(
+            await session.scalars(
+                select(AuditEvent).where(AuditEvent.action == "what_if_evaluated")
+            )
+        )
+    assert tuple(counts) == (0, 0, 0, 0, 0, 0)
+    assert len(audit) == 1
+    assert exact_weight not in json.dumps(audit[0].payload)
+    assert instrument_id not in json.dumps(audit[0].payload)
 
 
 @pytest.mark.asyncio
