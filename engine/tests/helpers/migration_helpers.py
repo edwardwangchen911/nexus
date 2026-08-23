@@ -255,6 +255,8 @@ def _assert_reflected_schema(connection: Connection) -> None:
     }
     optimization_tables = {
         "optimization_policies",
+        "cost_policies",
+        "baseline_selection_authorities",
         "optimization_admission_authorities",
         "optimization_proposal_groups",
         "optimization_proposals",
@@ -266,7 +268,10 @@ def _assert_reflected_schema(connection: Connection) -> None:
         expected_tables -= diagnostic_tables
     if not optimization_tables <= actual_tables:
         expected_tables -= optimization_tables
-    assert actual_tables == expected_tables
+    assert actual_tables == expected_tables, {
+        "unexpected": sorted(actual_tables - expected_tables),
+        "missing": sorted(expected_tables - actual_tables),
+    }
     assert {inspector.get_pk_constraint(table_name)["name"] for table_name in expected_tables} == {
         f"pk_{table_name}" for table_name in expected_tables
     }
