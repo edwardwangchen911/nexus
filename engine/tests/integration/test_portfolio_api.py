@@ -1,215 +1,26 @@
 import json
-from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
 from urllib.parse import urlencode
-from uuid import UUID
 
 import httpx
 import pytest
-from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET, build_test_hmac_headers
-from nexus.main import create_engine_app
-from nexus.persistence.models.market import Instrument, InstrumentAlias
-from nexus.persistence.models.portfolio import (
-    Account,
-    BrokerOrderSnapshot,
-    BrokerSyncRun,
-    CashSnapshot,
-    Portfolio,
-    PortfolioSnapshotRecord,
-    PositionSnapshot,
+from helpers.portfolio_api import (
+    ORDER_ID as _ORDER_ID,
 )
-from nexus.persistence.session import session_factory
-from nexus.settings import EngineSettings
-from uuid6 import uuid7
-
-_CLOCK = datetime(2026, 8, 24, 4, 0, tzinfo=UTC)
-_INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000000001")
-_ORDER_ID = UUID("0198d500-1000-7000-8000-000000000002")
-_PORTFOLIOS = (
-    UUID("0198d500-1000-7000-8000-000000000011"),
-    UUID("0198d500-1000-7000-8000-000000000012"),
-    UUID("0198d500-1000-7000-8000-000000000013"),
+from helpers.portfolio_api import (
+    PORTFOLIOS as _PORTFOLIOS,
 )
-_ACCOUNTS = (
-    UUID("0198d500-1000-7000-8000-000000000021"),
-    UUID("0198d500-1000-7000-8000-000000000022"),
-    UUID("0198d500-1000-7000-8000-000000000023"),
+from helpers.portfolio_api import (
+    add_snapshot_state as _add_snapshot_state,
 )
-
-
-def _settings(database_url: str) -> EngineSettings:
-    return EngineSettings(
-        NEXUS_ENV="test",
-        DATABASE_URL=database_url,
-        NEXUS_ENGINE_HMAC_CURRENT_KEY_ID=TEST_HMAC_KEY_ID,
-        NEXUS_ENGINE_HMAC_CURRENT_SECRET=TEST_HMAC_SECRET,
-    )
-
-
-def _app(database_url: str):
-    app = create_engine_app(_settings(database_url))
-    app.state.utc_clock = lambda: _CLOCK
-    return app
-
-
-def _headers(method: str, path: str, body: bytes = b"") -> dict[str, str]:
-    return build_test_hmac_headers(method, path, body, nonce=str(uuid7()))
-
-
-async def _seed_portfolio_list(database_url: str) -> None:
-    factory = session_factory(_settings(database_url))
-    async with factory() as session, session.begin():
-        session.add(
-            Instrument(
-                id=_INSTRUMENT_ID,
-                asset_type="equity",
-                exchange="XHKG",
-                currency="HKD",
-                tick_size=Decimal("0.001"),
-                risk_bucket="hk_equity",
-            )
-        )
-        session.add(
-            InstrumentAlias(
-                instrument_id=_INSTRUMENT_ID,
-                symbol="00656.HK",
-                alias_type="ticker",
-                valid_from=date(2020, 1, 1),
-                valid_to=None,
-            )
-        )
-        for account_id, portfolio_id, name in zip(
-            _ACCOUNTS, _PORTFOLIOS, ("Alpha", "Alpha", "Beta"), strict=True
-        ):
-            session.add(Account(id=account_id, provider="fosun", status="ACTIVE"))
-            session.add(Portfolio(id=portfolio_id, account_id=account_id, name=name))
-        await session.flush()
-        for index, (portfolio_id, account_id, status) in enumerate(
-            ((_PORTFOLIOS[0], _ACCOUNTS[0], "READY"), (_PORTFOLIOS[2], _ACCOUNTS[2], "PARTIAL"))
-        ):
-            run = BrokerSyncRun(
-                id=UUID(f"0198d500-1000-7000-8000-00000000003{index + 1}"),
-                account_id=account_id,
-                portfolio_id=portfolio_id,
-                trigger_kind="AUTOMATIC",
-                actor_id=f"synthetic-{index}",
-                route="broker-sync",
-                idempotency_key=f"synthetic-{index}",
-                request_hash=str(index + 1) * 64,
-                status=status,
-                accepted_at=_CLOCK - timedelta(minutes=2),
-                completed_at=_CLOCK - timedelta(minutes=1),
-                attempt_count=1,
-                failure_reason=None,
-                cash_flow_quality="NOT_RUN",
-            )
-            snapshot = PortfolioSnapshotRecord(
-                id=UUID(f"0198d500-1000-7000-8000-00000000004{index + 1}"),
-                portfolio_id=portfolio_id,
-                sync_run_id=run.id,
-                stale_from_snapshot_id=None,
-                status=status,
-                as_of=_CLOCK - timedelta(minutes=1),
-                position_hash_version="broker_position_hash_v1",
-                position_hash="a" * 64,
-                order_hash_version="broker_order_hash_v1",
-                order_hash="b" * 64,
-                source_request_ids=["external-request-canary"],
-                source_observations=[{"provider": "secret-canary"}],
-            )
-            session.add_all((run, snapshot))
-            await session.flush()
-            session.add(
-                CashSnapshot(
-                    portfolio_snapshot_id=snapshot.id,
-                    currency="USD" if index == 0 else "HKD",
-                    cash_balance=Decimal("1000"),
-                    available_cash=Decimal("900"),
-                    provider_as_of=snapshot.as_of,
-                )
-            )
-            if index == 0:
-                session.add_all(
-                    (
-                    PositionSnapshot(
-                        portfolio_snapshot_id=snapshot.id,
-                        instrument_id=_INSTRUMENT_ID,
-                        currency="HKD",
-                        quantity=Decimal("90000"),
-                        available_quantity=Decimal("90000"),
-                        frozen_quantity=Decimal("0"),
-                        avg_cost=Decimal("5.25"),
-                        diluted_cost=Decimal("4.95"),
-                        current_price=Decimal("6.125"),
-                        provider_as_of=snapshot.as_of,
-                    ),
-                    BrokerOrderSnapshot(
-                        id=_ORDER_ID,
-                        portfolio_snapshot_id=snapshot.id,
-                        provider="fosun",
-                        provider_order_id="provider-order-secret-canary",
-                        instrument_id=_INSTRUMENT_ID,
-                        side="sell",
-                        quantity=Decimal("1000"),
-                        filled_quantity=Decimal("0"),
-                        price=Decimal("6.5"),
-                        status="submitted",
-                        updated_at=None,
-                    ),
-                    )
-                )
-
-
-async def _add_snapshot_state(
-    database_url: str,
-    status: str,
-    *,
-    as_of: datetime | None,
-) -> UUID:
-    factory = session_factory(_settings(database_url))
-    snapshot_id = UUID("0198d500-1000-7000-8000-000000000099")
-    async with factory() as session, session.begin():
-        stale_source_id = None
-        if status == "STALE":
-            prior_run = BrokerSyncRun(
-                id=UUID("0198d500-1000-7000-8000-000000000097"),
-                account_id=_ACCOUNTS[1], portfolio_id=_PORTFOLIOS[1], trigger_kind="AUTOMATIC",
-                actor_id="prior", route="broker-sync", idempotency_key="prior",
-                request_hash="7" * 64, status="READY", accepted_at=_CLOCK,
-                completed_at=_CLOCK, attempt_count=1, failure_reason=None,
-                cash_flow_quality="NOT_RUN",
-            )
-            stale_source_id = UUID("0198d500-1000-7000-8000-000000000098")
-            session.add(prior_run)
-            session.add(_snapshot_record(stale_source_id, prior_run.id, "READY", _CLOCK, None))
-            await session.flush()
-        run = BrokerSyncRun(
-            id=UUID("0198d500-1000-7000-8000-000000000096"),
-            account_id=_ACCOUNTS[1], portfolio_id=_PORTFOLIOS[1], trigger_kind="AUTOMATIC",
-            actor_id="state", route="broker-sync", idempotency_key="state",
-            request_hash="8" * 64, status=status, accepted_at=_CLOCK,
-            completed_at=_CLOCK, attempt_count=1, failure_reason=None,
-            cash_flow_quality="NOT_RUN",
-        )
-        session.add(run)
-        session.add(_snapshot_record(snapshot_id, run.id, status, as_of, stale_source_id))
-    return snapshot_id
-
-
-def _snapshot_record(
-    snapshot_id: UUID,
-    run_id: UUID,
-    status: str,
-    as_of: datetime | None,
-    stale_source_id: UUID | None,
-) -> PortfolioSnapshotRecord:
-    return PortfolioSnapshotRecord(
-        id=snapshot_id, portfolio_id=_PORTFOLIOS[1], sync_run_id=run_id,
-        stale_from_snapshot_id=stale_source_id, status=status, as_of=as_of,
-        position_hash_version="broker_position_hash_v1", position_hash="c" * 64,
-        order_hash_version="broker_order_hash_v1", order_hash="d" * 64,
-        source_request_ids=[], source_observations=[],
-    )
+from helpers.portfolio_api import (
+    app as _app,
+)
+from helpers.portfolio_api import (
+    headers as _headers,
+)
+from helpers.portfolio_api import (
+    seed_portfolio_list as _seed_portfolio_list,
+)
 
 
 @pytest.mark.asyncio
