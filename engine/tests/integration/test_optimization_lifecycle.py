@@ -15,7 +15,10 @@ from nexus.optimizer.lifecycle import LifecycleTransition, transition_group_idem
 from nexus.optimizer.repository import transition_group
 from nexus.persistence.models.data import DataSnapshot, SourcePolicy
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
-from nexus.persistence.models.optimization import OptimizationProposalGroupRecord
+from nexus.persistence.models.optimization import (
+    OptimizationProposalGroupRecord,
+    ProposalComparisonRecord,
+)
 from nexus.persistence.models.portfolio import BrokerOrderSnapshot
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.persistence.session import session_factory
@@ -54,6 +57,17 @@ async def test_incomplete_strategy_cannot_enter_shadowing_and_stale_version_conf
                     "baseline": baseline_id,
                 },
             )
+        session.add_all(
+            ProposalComparisonRecord(
+                proposal_id=UUID(f"0198d500-1000-7000-8000-00000000080{index + 1}"),
+                metrics={},
+                tax_impact="unknown",
+                requires_fx=False,
+                non_executable=True,
+                cost_complete=False,
+            )
+            for index in range(1, 4)
+        )
     async with factory() as session, session.begin():
         with pytest.raises(ValueError, match="PROPOSAL_NOT_EXECUTABLE"):
             await transition_group(session, group_id, "shadowing", expected_version=1)
@@ -307,6 +321,19 @@ async def _seed_complete_group(
                     "baseline": _BASELINE_ID,
                 },
             )
+        session.add_all(
+            ProposalComparisonRecord(
+                proposal_id=UUID(
+                    f"0198d500-1000-7000-8000-000000000{int(suffix) + 30 + index:03d}"
+                ),
+                metrics={},
+                tax_impact="unknown",
+                requires_fx=False,
+                non_executable=True,
+                cost_complete=True,
+            )
+            for index in range(1, 4)
+        )
 
 
 async def _artifact_counts(database_url: str) -> tuple[int, int, int]:

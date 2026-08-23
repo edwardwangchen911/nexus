@@ -1,5 +1,6 @@
 """Real PostgreSQL persistence contracts for complete proposal groups."""
 
+import asyncio
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -21,15 +22,19 @@ from nexus.optimizer.persistence import (
     ProposalPersistenceAuthority,
     persist_proposal_group,
 )
+from nexus.optimizer.production import create_proposal_group_idempotently
 from nexus.persistence.models.data import DataSnapshot, SourcePolicy
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import (
+    OptimizationProposalGroupRecord,
     OptimizationProposalRecord,
     ProposalComparisonRecord,
     ProposalPositionRecord,
 )
 from nexus.persistence.session import session_factory
+from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 _SNAPSHOT_ID = UUID("0198d500-1000-7000-8000-000000000041")
 _OPTIMIZER_POLICY_ID = UUID("e690b91d-1e24-5de3-b2b2-566a463fca25")
@@ -94,6 +99,105 @@ async def test_writer_commits_exact_group_children_positions_and_comparisons_ato
     )
     assert all(len(item["positions"]) == 1 for item in body["proposals"])
     assert all(item["comparison"]["tax_impact"] == "unknown" for item in body["proposals"])
+
+
+@pytest.mark.asyncio
+async def test_writer_rolls_back_every_row_when_a_late_position_is_invalid(
+    migrated_database_url: str,
+) -> None:
+    """An injected child failure must not leave a parent, child, position, or comparison behind."""
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    authority = await _seed_authority(factory)
+    group = _group().model_copy(
+        update={
+            "proposals": (
+                _group().proposals[0].model_copy(
+                    update={
+                        "positions": (
+                            ProposalPosition(
+                                instrument_id=UUID("0198d500-1000-7000-8000-000000009999"),
+                                current_weight=Decimal("1"),
+                                target_weight=Decimal("1"),
+                                action="maintain",
+                                reason_code="INJECTED_FAILURE",
+                            ),
+                        )
+                    }
+                ),
+                _group().proposals[1],
+                _group().proposals[2],
+            )
+        }
+    )
+    with pytest.raises(IntegrityError):
+        async with factory() as session, session.begin():
+            await persist_proposal_group(session, group, authority, _comparisons())
+    async with factory() as session:
+        group_count = await session.scalar(
+            select(func.count()).select_from(OptimizationProposalGroupRecord)
+        )
+        proposal_count = await session.scalar(
+            select(func.count()).select_from(OptimizationProposalRecord)
+        )
+        position_count = await session.scalar(
+            select(func.count()).select_from(ProposalPositionRecord)
+        )
+        comparison_count = await session.scalar(
+            select(func.count()).select_from(ProposalComparisonRecord)
+        )
+    assert (group_count, proposal_count, position_count, comparison_count) == (0, 0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_idempotent_group_writer_has_one_concurrent_identity_and_conflicts_on_hash(
+    migrated_database_url: str,
+) -> None:
+    """Two sessions with one key/hash commit exactly one complete three-way group."""
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    authority = await _seed_authority(factory)
+    group = _group()
+    barrier = asyncio.Barrier(2)
+
+    async def create() -> object:
+        async with factory() as session, session.begin():
+            await barrier.wait()
+            return await create_proposal_group_idempotently(
+                session,
+                actor_id="optimizer-race",
+                idempotency_key="group-race",
+                request_hash="a" * 64,
+                group=group,
+                authority=authority,
+                comparisons=_comparisons(),
+            )
+
+    first, second = await asyncio.wait_for(asyncio.gather(create(), create()), timeout=5)
+    assert first.group_id == second.group_id == group.proposal_group_id
+    assert {first.replayed, second.replayed} == {False, True}
+    with pytest.raises(IdempotencyConflict):
+        async with factory() as session, session.begin():
+            await create_proposal_group_idempotently(
+                session,
+                actor_id="optimizer-race",
+                idempotency_key="group-race",
+                request_hash="b" * 64,
+                group=group,
+                authority=authority,
+                comparisons=_comparisons(),
+            )
+    async with factory() as session:
+        group_count = await session.scalar(
+            select(func.count()).select_from(OptimizationProposalGroupRecord)
+        )
+        proposal_count = await session.scalar(
+            select(func.count()).select_from(OptimizationProposalRecord)
+        )
+        comparison_count = await session.scalar(
+            select(func.count()).select_from(ProposalComparisonRecord)
+        )
+    assert (group_count, proposal_count, comparison_count) == (1, 3, 3)
 
 
 async def _seed_authority(factory) -> ProposalPersistenceAuthority:
@@ -189,3 +293,22 @@ def _group() -> OptimizationProposalGroup:
             ),
         ),
     )
+
+
+def _comparisons() -> tuple[
+    ProposalComparisonInput, ProposalComparisonInput, ProposalComparisonInput
+]:
+    return tuple(
+        ProposalComparisonInput(
+            variant=variant,
+            violation_count=0,
+            turnover=Decimal("0"),
+            cost=Decimal("0"),
+            unknown_metrics=(),
+            requires_fx=False,
+            source_conflict=False,
+            partial=False,
+            cost_complete=True,
+        )
+        for variant in ("hold_current", "minimum_change", "strategy_target")
+    )  # type: ignore[return-value]

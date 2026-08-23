@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 async def test_optimization_group_constraints_and_immutability(migrated_database_url: str) -> None:
     """A partial group, duplicate child variant, or rewritten child must be rejected by PostgreSQL."""
     from helpers.portfolio_api import seed_portfolio_list, settings
+    from nexus.persistence.models.optimization import ProposalComparisonRecord
     from nexus.persistence.session import session_factory
 
     group_id = UUID("0198d500-1000-7000-8000-000000000501")
@@ -39,6 +40,17 @@ async def test_optimization_group_constraints_and_immutability(migrated_database
                     "baseline": baseline_id,
                 },
             )
+        session.add_all(
+            ProposalComparisonRecord(
+                proposal_id=UUID(f"0198d500-1000-7000-8000-00000000050{number + 3}"),
+                metrics={},
+                tax_impact="unknown",
+                requires_fx=False,
+                non_executable=True,
+                cost_complete=False,
+            )
+            for number in range(1, 4)
+        )
     async with factory() as session:
         with pytest.raises(IntegrityError, match="exactly three variants"):
             async with session.begin():
