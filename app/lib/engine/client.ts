@@ -39,7 +39,7 @@ export async function engineFetch<Path extends InternalPath>(target: EngineTarge
   for (const [name, value] of Object.entries(protectedHeaders)) headers.set(name, value);
   try {
     const response = await fetch(resolved.url, { ...init, method, headers, body: body.byteLength ? body as unknown as BodyInit : undefined, signal: AbortSignal.any([init.signal, AbortSignal.timeout(timeoutForMethod(method))].filter(Boolean) as AbortSignal[]) });
-    return await sanitizeEngineResponse<Path>(response, resolved.url.toString(), resolved.url.pathname);
+    return await sanitizeEngineResponse<Path>(response, undefined, resolved.url.pathname);
   } catch { return internalFailure<Path>(); }
 }
 

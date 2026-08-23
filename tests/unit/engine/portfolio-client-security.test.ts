@@ -62,7 +62,7 @@ describe("portfolio engine client boundary", () => {
     expect((await sanitizeEngineResponse(jsonResponse(topLevelSecret), undefined, `/internal/v1/portfolios/${portfolioId}/snapshots/latest`)).status).toBe(500);
   });
 
-  it("preserves a safe BFF Location on accepted sync admission", async () => {
+  it("drops engine Location so only the validated BFF may rebuild it", async () => {
     setEngineEnvironment();
     vi.stubGlobal("fetch", async () => jsonResponse(syncEnvelope(), 202, {
       location: `/api/v1/broker-sync-runs/${runId}`,
@@ -76,7 +76,7 @@ describe("portfolio engine client boundary", () => {
     });
 
     expect(response.status).toBe(202);
-    expect(response.headers.get("location")).toBe(`/api/v1/broker-sync-runs/${runId}`);
+    expect(response.headers.get("location")).toBeNull();
     expect(response.headers.get("x-provider-secret")).toBeNull();
   });
 
