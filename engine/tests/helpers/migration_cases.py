@@ -1,3 +1,5 @@
+"""Reusable migration cases; collected through small domain test modules."""
+
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
