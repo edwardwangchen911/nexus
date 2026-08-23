@@ -69,6 +69,63 @@ def test_cluster_is_independent_of_beta_and_drawdown_coverage() -> None:
     )
 
 
+def test_non_session_extreme_cannot_change_production_volatility_or_drawdown() -> None:
+    sessions = tuple(
+        SNAPSHOT_AT.date() - timedelta(days=252 - index) for index in range(253)
+    )
+    position = _position(FIRST)
+    baseline = _series(FIRST, sessions)
+    extreme = baseline.bars[0].model_copy(
+        update={
+            "session": sessions[0] - timedelta(days=1),
+            "open": Decimal(1),
+            "high": Decimal(1),
+            "low": Decimal(1),
+            "close": Decimal(1),
+            "revision": "non-session-extreme",
+        }
+    )
+    with_extreme = baseline.model_copy(
+        update={"bars": tuple(sorted((*baseline.bars, extreme), key=lambda bar: bar.session))}
+    )
+    evidence = DiagnosticEvidence(
+        price_series={FIRST: _binding("first", sessions[-1])},
+        benchmark=_binding("benchmark", sessions[-1]),
+    )
+
+    def evaluate(series: PriceSeries) -> dict[str, str | None]:
+        market = MarketEvidence(
+            quality="PASS",
+            prices={FIRST: series},
+            benchmark=baseline,
+            trading_sessions=sessions,
+            evidence=evidence,
+        )
+        snapshot = PortfolioSnapshot(
+            id=UUID("0198d500-1000-7000-8000-000000000063"),
+            portfolio_id=UUID("0198d500-1000-7000-8000-000000000064"),
+            status="READY",
+            cash=(),
+            positions=(position,),
+            open_orders=(),
+            as_of=SNAPSHOT_AT,
+        )
+        return {
+            item.diagnostic_code: item.metric_value
+            for item in market_risk_items(
+                [(position, Decimal("100"))],
+                "currency:USD",
+                market,
+                RealAdvisoryPolicy.v1(),
+                snapshot,
+                EvidenceResolver(SNAPSHOT_AT),
+            )
+            if item.diagnostic_code.startswith(("VOLATILITY", "DRAWDOWN"))
+        }
+
+    assert evaluate(with_extreme) == evaluate(baseline)
+
+
 def _position(instrument_id: UUID) -> BrokerPosition:
     return BrokerPosition(
         instrument_id=instrument_id,
