@@ -161,7 +161,15 @@ async def diagnose_and_persist(
         session, portfolio_id=portfolio_id, snapshot_id=snapshot_id
     )
     identities = await load_instrument_identities(session, snapshot=snapshot)
-    history = await load_history(session, portfolio_id=portfolio_id)
+    if snapshot.as_of is None:
+        raise ValueError("diagnostic snapshot timestamp is unavailable")
+    history = await load_history(
+        session,
+        portfolio_id=portfolio_id,
+        current_snapshot_id=snapshot.id,
+        current_snapshot_as_of=snapshot.as_of,
+        policy_version=policy.version,
+    )
     market = MarketEvidence(quality="PARTIAL", identities=identities)
     report = diagnose_portfolio(snapshot, market, history, policy)
     await persist_report(session, portfolio_id=portfolio_id, report=report)

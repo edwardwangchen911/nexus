@@ -1,5 +1,6 @@
 """Atomic immutable storage and redacted retrieval for diagnostic reports."""
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
@@ -266,56 +267,38 @@ async def load_instrument_identities(
 
 
 async def load_history(
-    session: AsyncSession, *, portfolio_id: UUID
+    session: AsyncSession,
+    *,
+    portfolio_id: UUID,
+    current_snapshot_id: UUID,
+    current_snapshot_as_of: datetime,
+    policy_version: str,
 ) -> DiagnosticHistory:
-    """Load ordered prior reports from storage; Task 11 exposes no comparable authority."""
+    """Load only canonical reports strictly before the current frozen snapshot."""
     records = (
-        await session.execute(
-            select(PortfolioDiagnosticReportRecord)
-            .where(PortfolioDiagnosticReportRecord.portfolio_id == portfolio_id)
-            .order_by(
-                PortfolioDiagnosticReportRecord.trading_day,
-                PortfolioDiagnosticReportRecord.id,
-            )
-        )
-    ).scalars()
-    reports = []
-    for record in records:
-        rows = (
+        (
             await session.execute(
-                select(PortfolioDiagnosticItemRecord).where(
-                    PortfolioDiagnosticItemRecord.report_id == record.id
+                select(PortfolioDiagnosticReportRecord)
+                .where(
+                    PortfolioDiagnosticReportRecord.portfolio_id == portfolio_id,
+                    PortfolioDiagnosticReportRecord.portfolio_snapshot_id
+                    != current_snapshot_id,
+                    PortfolioDiagnosticReportRecord.policy_id == REAL_ADVISORY_POLICY_ID,
+                    PortfolioDiagnosticReportRecord.policy_version == policy_version,
+                    PortfolioDiagnosticReportRecord.snapshot_as_of < current_snapshot_as_of,
+                    PortfolioDiagnosticReportRecord.trading_day
+                    < current_snapshot_as_of.date(),
+                )
+                .order_by(
+                    PortfolioDiagnosticReportRecord.snapshot_as_of,
+                    PortfolioDiagnosticReportRecord.id,
                 )
             )
-        ).scalars()
-        reports.append(
-            PortfolioDiagnosticReport(
-                portfolio_snapshot_id=record.portfolio_snapshot_id,
-                snapshot_as_of=record.snapshot_as_of,
-                trading_day=record.trading_day,
-                policy_version=cast(Literal["real_advisory_policy_v1"], record.policy_version),
-                optimization_need=cast(
-                    Literal["BLOCKED", "RESEARCH_REQUIRED", "OPTIMIZATION_CANDIDATE", "NO_ACTION"],
-                    record.optimization_need,
-                ),
-                items=tuple(
-                    DiagnosticItem(
-                        diagnostic_code=row.diagnostic_code,
-                        metric_value=_string(row.metric_value),
-                        unit=row.unit,
-                        reference_limit=_string(row.reference_limit),
-                        policy_scope=row.policy_scope,
-                        severity=cast(Literal["info", "warning", "critical"], row.severity),
-                        actionability=cast(
-                            Literal["monitor", "research", "reduce_only", "blocked"],
-                            row.actionability,
-                        ),
-                        unknown_reason=row.unknown_reason,
-                    )
-                    for row in rows
-                ),
-            )
         )
+        .scalars()
+        .all()
+    )
+    reports = [await _read_report(session, record) for record in records]
     return DiagnosticHistory(prior_reports=tuple(reports), comparable_variants=())
 
 
