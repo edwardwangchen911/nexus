@@ -44,6 +44,7 @@ EXPECTED_TABLES = {
     "optimization_proposal_groups",
     "optimization_proposals",
     "proposal_positions",
+    "proposal_comparisons",
 }
 
 EXPECTED_FOREIGN_KEYS = {

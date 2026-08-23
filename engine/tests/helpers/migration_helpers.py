@@ -258,6 +258,7 @@ def _assert_reflected_schema(connection: Connection) -> None:
         "optimization_proposal_groups",
         "optimization_proposals",
         "proposal_positions",
+        "proposal_comparisons",
     }
     expected_tables = set(EXPECTED_TABLES)
     if not diagnostic_tables <= actual_tables:
