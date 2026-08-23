@@ -1,3 +1,5 @@
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { engineFetch, sanitizeEngineResponse } from "../../../app/lib/engine/client";
 
@@ -108,6 +110,44 @@ describe("portfolio engine client boundary", () => {
     expect((await response.json()).data.broker_sync_run_id).toBe(runId);
   });
 
+  it("does not follow a cross-origin 307 with signed headers or exact POST bytes", async () => {
+    let destinationCalls = 0;
+    const destination = createServer((_request, response) => {
+      destinationCalls += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(syncEnvelope()));
+    });
+    const destinationOrigin = await listen(destination);
+    let originBody = "";
+    let originSignature: string | undefined;
+    const origin = createServer((request, response) => {
+      originSignature = request.headers["x-nexus-signature"] as string | undefined;
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => { originBody += chunk; });
+      request.on("end", () => {
+        response.writeHead(307, { location: `${destinationOrigin}/capture` });
+        response.end();
+      });
+    });
+    const originBaseUrl = await listen(origin);
+    setEngineEnvironment();
+    process.env.NEXUS_ENGINE_BASE_URL = originBaseUrl;
+    const body = JSON.stringify({ portfolio_id: portfolioId });
+    try {
+      const response = await engineFetch("/internal/v1/broker-sync-runs", {
+        method: "POST", actor, body,
+        headers: { "content-type": "application/json", "idempotency-key": "sync-key" },
+      });
+      expect(response.status).toBe(500);
+      expect(originSignature).toBeTruthy();
+      expect(originBody).toBe(body);
+      expect(destinationCalls).toBe(0);
+    } finally {
+      await close(origin);
+      await close(destination);
+    }
+  });
+
   it("passes a sanitized cooldown while discarding upstream details", async () => {
     const response = await sanitizeEngineResponse(jsonResponse({ error: {
       code: "VALIDATION_ERROR", message: "provider cooldown secret", request_id: actor.requestId,
@@ -136,3 +176,5 @@ function syncEnvelope() {
 function meta() { return { request_id: actor.requestId, schema_version: "1", as_of: "2026-08-23T08:00:00Z" }; }
 function jsonResponse(value: unknown, status = 200, headers: HeadersInit = {}): Response { return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json", ...headers } }); }
 function setEngineEnvironment(): void { process.env.NEXUS_ENGINE_BASE_URL = "http://127.0.0.1:8000"; process.env.NEXUS_ENGINE_HMAC_CURRENT_KEY_ID = "test-current"; process.env.NEXUS_ENGINE_HMAC_CURRENT_SECRET = "nexus-test-hmac-key-32-bytes!!!!"; process.env.NEXUS_ENV = "test"; }
+async function listen(server: Server): Promise<string> { await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)); const address = server.address() as AddressInfo; return `http://127.0.0.1:${address.port}`; }
+async function close(server: Server): Promise<void> { if (server.listening) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
