@@ -2,7 +2,6 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
-
 from nexus.diagnostics.metrics import (
     annualized_volatility,
     beta_and_correlation,
