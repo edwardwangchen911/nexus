@@ -24,22 +24,25 @@ export type PortfolioSnapshot = {
   status: "READY" | "PARTIAL" | "STALE" | "RECONCILIATION_REQUIRED";
   cash: Array<{ currency: string; cash_balance: string; available_cash: string; provider_as_of: string | null }>;
   positions: Array<{ instrument_id: string; symbol: string | null; exchange: string; currency: string; quantity: string; available_quantity: string; frozen_quantity: string; avg_cost: string | null; diluted_cost: string | null; current_price: string | null; provider_as_of: string | null; read_only: boolean }>;
-  open_orders: Array<{ broker_order_snapshot_id: string; instrument_id: string; symbol: string | null; side: string; quantity: string; filled_quantity: string; price: string | null; status: string; updated_at: string | null; read_only: boolean }>;
+  open_orders: Array<{ broker_order_snapshot_id: string; instrument_id: string; symbol: string | null; currency: string; side: string; quantity: string; filled_quantity: string; price: string | null; status: string; updated_at: string | null; read_only: boolean }>;
   converted_view: unknown | null;
   as_of: string | null;
 };
 
 type Notice = { kind: "error" | "success"; text: string } | null;
+type PendingSync = { portfolioId: string; idempotencyKey: string; body: string };
 type PortfolioPanelProps = {
   state: DataStateKind;
   portfolios: PortfolioItem[];
   snapshot: PortfolioSnapshot | null;
   selectedPortfolioId: string | null;
   syncing: boolean;
+  unresolvedSync: boolean;
   notice: Notice;
   onSelect: (portfolioId: string) => void;
   onRefresh: () => void;
   onSync: () => void;
+  onResolveSync: () => void;
 };
 
 const LOAD_TIMEOUT_MS = 10_000;
@@ -50,6 +53,7 @@ export default function PortfolioPage(): React.ReactElement {
   const [snapshot, setSnapshot] = useState<PortfolioSnapshot | null>(null);
   const [selectedPortfolioId, setSelectedPortfolioId] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [unresolvedSync, setUnresolvedSync] = useState<PendingSync | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const loadVersion = useRef(0);
   const portfoliosRef = useRef<PortfolioItem[]>([]);
@@ -95,6 +99,11 @@ export default function PortfolioPage(): React.ReactElement {
       const selected = items.some((item) => item.portfolio_id === selectedPortfolioIdRef.current)
         ? selectedPortfolioIdRef.current!
         : items[0].portfolio_id;
+      if (selected !== selectedPortfolioIdRef.current) {
+        snapshotRef.current = null;
+        setSnapshot(null);
+        setState("loading");
+      }
       selectedPortfolioIdRef.current = selected; setSelectedPortfolioId(selected);
       await loadSnapshot(selected, version);
     } catch (error) {
@@ -122,31 +131,40 @@ export default function PortfolioPage(): React.ReactElement {
 
   async function syncSelected(): Promise<void> {
     if (!selectedPortfolioId || syncing) return;
-    const idempotencyKey = crypto.randomUUID();
-    const body = JSON.stringify({ portfolio_id: selectedPortfolioId });
+    await confirmSync({
+      portfolioId: selectedPortfolioId,
+      idempotencyKey: crypto.randomUUID(),
+      body: JSON.stringify({ portfolio_id: selectedPortfolioId }),
+    });
+  }
+
+  async function confirmSync(pending: PendingSync): Promise<void> {
     setSyncing(true); setNotice(null);
     try {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
         const response = await fetch("/api/v1/broker-sync-runs", {
           method: "POST",
-          headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
-          body,
+          headers: { "content-type": "application/json", "idempotency-key": pending.idempotencyKey },
+          body: pending.body,
           signal: AbortSignal.timeout(30_000),
         });
         const payload = await response.json();
         if (!response.ok) {
           if (payload?.error?.code === "INTERNAL_ERROR" && attempt === 0) continue;
+          setUnresolvedSync(null);
           setNotice({ kind: "error", text: syncErrorMessage(payload?.error?.code) });
           return;
         }
+        setUnresolvedSync(null);
         setNotice({ kind: "success", text: attempt === 0
           ? "复星只读同步任务已登记。当前快照不会被静默覆盖。"
           : "首次结果未知；已用同一幂等键确认同步任务。" });
         return;
         } catch {
           if (attempt === 0) continue;
-          setNotice({ kind: "error", text: "同步请求结果仍未知。请先刷新权威状态，不要反复触发。" });
+          setUnresolvedSync(pending);
+          setNotice({ kind: "error", text: "同步请求结果仍未知。当前组合的新同步保持锁定；请使用同一幂等键继续确认。" });
         }
       }
     } finally {
@@ -155,12 +173,13 @@ export default function PortfolioPage(): React.ReactElement {
   }
 
   return <PortfolioPanel state={state} portfolios={portfolios} snapshot={snapshot}
-    selectedPortfolioId={selectedPortfolioId} syncing={syncing} notice={notice}
+    selectedPortfolioId={selectedPortfolioId} syncing={syncing} unresolvedSync={unresolvedSync !== null} notice={notice}
     onSelect={(id) => void selectPortfolio(id)} onRefresh={() => void refresh()}
-    onSync={() => void syncSelected()} />;
+    onSync={() => void syncSelected()}
+    onResolveSync={() => { if (unresolvedSync) void confirmSync(unresolvedSync); }} />;
 }
 
-export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioId, syncing, notice, onSelect, onRefresh, onSync }: PortfolioPanelProps): React.ReactElement {
+export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioId, syncing, unresolvedSync, notice, onSelect, onRefresh, onSync, onResolveSync }: PortfolioPanelProps): React.ReactElement {
   const hasData = ["ready", "partial", "stale"].includes(state) && snapshot !== null;
   const selected = portfolios.find((item) => item.portfolio_id === selectedPortfolioId) ?? null;
   const currencies = selected && snapshot ? [...new Set([...selected.original_currencies, ...snapshot.cash.map((item) => item.currency), ...snapshot.positions.map((item) => item.currency)])].sort() : [];
@@ -168,7 +187,7 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
     <section className="page-stack portfolio-page" aria-label="组合事实页面" data-state={state}>
       <header className="page-heading">
         <div><p className="eyebrow">PORTFOLIO / FROZEN FACTS</p><h1>组合事实</h1><p>复星真实持仓与内部模拟盘分账展示。未有合格 FX 证据时，不合并资产净值。</p></div>
-        <div className="portfolio-page__actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新快照</button>{selected?.kind === "real_read_only" ? <button className="button button--primary" type="button" onClick={onSync} disabled={syncing}><ShieldCheck aria-hidden="true" size={17} />{syncing ? "正在确认同步任务" : "同步复星只读事实"}</button> : null}</div>
+        <div className="portfolio-page__actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新快照</button>{unresolvedSync ? <button className="button button--primary" type="button" onClick={onResolveSync} disabled={syncing}><ShieldCheck aria-hidden="true" size={17} />{syncing ? "正在继续确认" : "使用同一幂等键继续确认"}</button> : selected?.kind === "real_read_only" ? <button className="button button--primary" type="button" onClick={onSync} disabled={syncing}><ShieldCheck aria-hidden="true" size={17} />{syncing ? "正在确认同步任务" : "同步复星只读事实"}</button> : null}</div>
       </header>
       {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
       {!hasData || !selected ? <DataState state={state} title="组合快照" detail={stateDetail(state)} announce={false} /> : (

@@ -37,6 +37,7 @@ const snapshot: PortfolioSnapshot = {
   positions: [{
     instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e703",
     symbol: "00656.HK",
+    currency: "HKD",
     exchange: "XHKG",
     currency: "HKD",
     quantity: "3000",
@@ -82,10 +83,12 @@ describe("portfolio vertical slice", () => {
       snapshot={["ready", "partial", "stale"].includes(state) ? snapshot : null}
       selectedPortfolioId={portfolioId}
       syncing={false}
+      unresolvedSync={false}
       notice={null}
       onSelect={vi.fn()}
       onRefresh={vi.fn()}
       onSync={vi.fn()}
+      onResolveSync={vi.fn()}
     />);
 
     expect(screen.getAllByText(label).length).toBeGreaterThan(0);
@@ -123,6 +126,23 @@ describe("portfolio vertical slice", () => {
     expect(document.body).not.toHaveTextContent(/sub-account-must|provider-order-must|ciphertext-must/);
   });
 
+  it("keeps an open order visible even when its instrument has no position", () => {
+    const orderOnlySnapshot: PortfolioSnapshot = {
+      ...snapshot,
+      open_orders: [{
+        ...snapshot.open_orders[0],
+        broker_order_snapshot_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e706",
+        instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e707",
+        symbol: "MSFT",
+        currency: "USD",
+      }],
+    };
+    render(<PortfolioSummary portfolio={portfolio} snapshot={orderOnlySnapshot} currency="USD" />);
+
+    expect(screen.getByRole("table", { name: /MSFT|\u8131\u654f\u5185\u90e8\u5feb\u7167 ID/ })).toHaveTextContent("MSFT");
+    expect(screen.getByRole("region", { name: "Fosun read-only USD 组合摘要" })).not.toHaveTextContent("00656.HK");
+  });
+
   it("reconciles an unknown sync result with the same idempotency key", async () => {
     let syncCalls = 0;
     const keys: Array<string | null> = [];
@@ -147,6 +167,56 @@ describe("portfolio vertical slice", () => {
     expect(syncCalls).toBe(2);
     expect(keys[0]).toBeTruthy();
     expect(new Set(keys).size).toBe(1);
+  });
+
+  it("keeps a twice-unknown sync locked to the original idempotency key", async () => {
+    let syncCalls = 0;
+    const keys: Array<string | null> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("/api/v1/portfolios?")) return Response.json({ data: { items: [portfolio], next_cursor: null }, meta: responseMeta() });
+      if (url.endsWith("/snapshots/latest")) return Response.json({ data: snapshot, meta: responseMeta() });
+      if (url === "/api/v1/broker-sync-runs") {
+        syncCalls += 1;
+        keys.push(new Headers(init?.headers).get("idempotency-key"));
+        if (syncCalls <= 2) throw new DOMException("Aborted", "AbortError");
+        return Response.json({ data: { broker_sync_run_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e705" }, meta: responseMeta() }, { status: 202 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+
+    render(<PortfolioPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "同步复星只读事实" }));
+    const resolve = await screen.findByRole("button", { name: "使用同一幂等键继续确认" });
+    expect(screen.queryByRole("button", { name: "同步复星只读事实" })).not.toBeInTheDocument();
+    fireEvent.click(resolve);
+
+    expect(await screen.findByText("复星只读同步任务已登记。当前快照不会被静默覆盖。")).toBeVisible();
+    expect(syncCalls).toBe(3);
+    expect(new Set(keys).size).toBe(1);
+  });
+
+  it("does not attach an old snapshot to a newly selected portfolio after refresh failure", async () => {
+    const replacement = { ...portfolio, portfolio_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e799", name: "Replacement portfolio" };
+    let listCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/v1/portfolios?")) {
+        listCalls += 1;
+        return Response.json({ data: { items: [listCalls === 1 ? portfolio : replacement], next_cursor: null }, meta: responseMeta() });
+      }
+      if (url.includes(portfolioId)) return Response.json({ data: snapshot, meta: responseMeta() });
+      if (url.includes(replacement.portfolio_id)) return Response.json({ error: { code: "INTERNAL_ERROR" } }, { status: 500 });
+      throw new Error(`unexpected request: ${url}`);
+    }));
+
+    render(<PortfolioPage />);
+    expect(await screen.findByRole("region", { name: "Fosun read-only HKD 组合摘要" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "刷新快照" }));
+
+    expect(await screen.findByText("无法读取组合事实。当前状态保持只读。")).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Replacement portfolio HKD 组合摘要" })).not.toBeInTheDocument();
+    expect(screen.queryByText("HKD 8,000.00")).not.toBeInTheDocument();
   });
 });
 

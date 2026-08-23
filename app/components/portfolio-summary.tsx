@@ -1,6 +1,8 @@
 import { CircleDollarSign, LockKeyhole } from "lucide-react";
 import type { PortfolioItem, PortfolioSnapshot } from "../(protected)/portfolio/page";
 
+/* eslint-disable jsx-a11y/no-noninteractive-tabindex -- Overflow data tables need keyboard focus for horizontal scrolling. */
+
 type PortfolioSummaryProps = {
   portfolio: PortfolioItem;
   snapshot: PortfolioSnapshot;
@@ -10,8 +12,7 @@ type PortfolioSummaryProps = {
 export function PortfolioSummary({ portfolio, snapshot, currency }: PortfolioSummaryProps): React.ReactElement {
   const cash = snapshot.cash.find((bucket) => bucket.currency === currency) ?? null;
   const positions = snapshot.positions.filter((position) => position.currency === currency);
-  const symbols = new Set(positions.map((position) => position.symbol));
-  const orders = snapshot.open_orders.filter((order) => symbols.has(order.symbol));
+  const orders = snapshot.open_orders.filter((order) => order.currency === currency);
   const containsHongKongHolding = positions.some((position) => position.symbol === "00656.HK");
 
   return (
@@ -33,7 +34,7 @@ export function PortfolioSummary({ portfolio, snapshot, currency }: PortfolioSum
       <div className="portfolio-summary__section">
         <h3>持仓</h3>
         {positions.length === 0 ? <p className="portfolio-summary__empty">该原币种没有持仓事实。</p> : (
-          <div className="table-scroll">
+          <div className="table-scroll" tabIndex={0} role="region" aria-label={`${currency} 持仓表，可横向滚动`}>
             <table className="portfolio-table">
               <caption>{portfolio.name} · {currency} · 原币种</caption>
               <thead><tr><th>标的</th><th>总量</th><th>可用</th><th>冻结</th><th>平均成本</th><th>摊薄成本</th><th>现价</th><th>权限</th></tr></thead>
@@ -57,7 +58,7 @@ export function PortfolioSummary({ portfolio, snapshot, currency }: PortfolioSum
       <div className="portfolio-summary__section">
         <h3>未结订单快照</h3>
         {orders.length === 0 ? <p className="portfolio-summary__empty">该原币种没有未结订单事实。</p> : (
-          <div className="table-scroll">
+          <div className="table-scroll" tabIndex={0} role="region" aria-label={`${currency} 未结订单表，可横向滚动`}>
             <table className="portfolio-table">
               <caption>仅展示脱敏内部快照 ID</caption>
               <thead><tr><th>标的</th><th>方向</th><th>数量</th><th>已成交</th><th>价格</th><th>状态</th><th>权限</th></tr></thead>
