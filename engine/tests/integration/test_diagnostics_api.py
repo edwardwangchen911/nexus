@@ -7,22 +7,21 @@ import pytest
 from helpers.portfolio_api import PORTFOLIOS, app, headers, seed_portfolio_list, settings
 from nexus.api.routes.diagnostics import router as diagnostics_router
 from nexus.diagnostics.assembler import DiagnosticEvidenceCapabilityUnavailable
-from nexus.diagnostics.models import DiagnosticItem, PortfolioDiagnosticReport
-from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID, load_real_advisory_policy_v1
+from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.diagnostics.repository import (
-    _persist_report,
     load_frozen_snapshot,
     load_instrument_identities,
 )
 from nexus.diagnostics.service import diagnose_and_persist
-from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.diagnostics import (
     PortfolioDiagnosticEvidenceRefRecord,
     PortfolioDiagnosticItemRecord,
+    PortfolioDiagnosticReportRecord,
 )
 from nexus.persistence.session import session_factory
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 INPUT_HASH = "e" * 64
 
@@ -36,39 +35,7 @@ async def test_latest_diagnostic_is_redacted_and_returns_persisted_item_shape(
     assert diagnostics_router is not None
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session, session.begin():
-        policy = await load_real_advisory_policy_v1(session)
-        await _persist_report(
-            session,
-            portfolio_id=PORTFOLIOS[0],
-            report=PortfolioDiagnosticReport(
-                portfolio_snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
-                trading_day=date(2026, 8, 24),
-                policy_version=policy.version,
-                optimization_need="RESEARCH_REQUIRED",
-                items=(
-                    DiagnosticItem(
-                        diagnostic_code="LIQUIDITY_DAYS_TO_EXIT",
-                        metric_value=None,
-                        unit="trading_days",
-                        reference_limit="2",
-                        policy_scope="currency:HKD",
-                        severity="info",
-                        actionability="research",
-                        unknown_reason="ADV20_MISSING",
-                        evidence_refs=(
-                            EvidenceRef(
-                                source="fixture",
-                                object_id="market-1",
-                                available_at=datetime(2026, 8, 24, tzinfo=UTC),
-                                location="fixture://market-1",
-                                content_hash="a" * 64,
-                            ),
-                        ),
-                    ),
-                ),
-            ),
-            diagnostic_input_hash=INPUT_HASH,
-        )
+        await _seed_diagnostic_graph(session)
     path = f"/internal/v1/portfolios/{PORTFOLIOS[0]}/diagnostics/latest"
     engine_app = app(migrated_database_url)
     operation = engine_app.openapi()["paths"][
@@ -117,24 +84,7 @@ async def test_database_triggers_reject_update_and_delete_for_every_diagnostic_r
     await seed_portfolio_list(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session, session.begin():
-        policy = await load_real_advisory_policy_v1(session)
-        report_id = await _persist_report(
-            session,
-            portfolio_id=PORTFOLIOS[0],
-            report=_report(policy.version),
-            diagnostic_input_hash=INPUT_HASH,
-        )
-        item_id = await session.scalar(
-            select(PortfolioDiagnosticItemRecord.id).where(
-                PortfolioDiagnosticItemRecord.report_id == report_id
-            )
-        )
-        evidence_id = await session.scalar(
-            select(PortfolioDiagnosticEvidenceRefRecord.id).where(
-                PortfolioDiagnosticEvidenceRefRecord.item_id == item_id
-            )
-        )
-    assert item_id is not None and evidence_id is not None
+        report_id, item_id, evidence_id = await _seed_diagnostic_graph(session)
     records = (
         ("diagnostic_policies", REAL_ADVISORY_POLICY_ID),
         ("portfolio_diagnostic_reports", report_id),
@@ -152,6 +102,7 @@ async def test_database_triggers_reject_update_and_delete_for_every_diagnostic_r
                         await session.execute(
                             text(f"{operation} WHERE id = :id"), {"id": record_id}
                         )
+
 
 @pytest.mark.asyncio
 async def test_production_diagnosis_requires_artifact_transport_capability(
@@ -189,31 +140,40 @@ async def test_production_identity_is_minted_from_point_in_time_instrument_maste
     assert identity.minted_by == "instrument_repository"
 
 
-def _report(policy_version: str) -> PortfolioDiagnosticReport:
-    return PortfolioDiagnosticReport(
+async def _seed_diagnostic_graph(session: AsyncSession) -> tuple[UUID, UUID, UUID]:
+    report = PortfolioDiagnosticReportRecord(
+        portfolio_id=PORTFOLIOS[0],
         portfolio_snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
+        snapshot_as_of=datetime(2026, 8, 24, 3, 59, tzinfo=UTC),
         trading_day=date(2026, 8, 24),
-        policy_version=policy_version,  # type: ignore[arg-type]
+        policy_id=REAL_ADVISORY_POLICY_ID,
+        policy_version="real_advisory_policy_v1",
         optimization_need="RESEARCH_REQUIRED",
-        items=(
-            DiagnosticItem(
-                diagnostic_code="LIQUIDITY_DAYS_TO_EXIT",
-                metric_value=None,
-                unit="trading_days",
-                reference_limit="2",
-                policy_scope="currency:HKD",
-                severity="info",
-                actionability="research",
-                unknown_reason="ADV20_MISSING",
-                evidence_refs=(
-                    EvidenceRef(
-                        source="fixture",
-                        object_id="market-1",
-                        available_at=datetime(2026, 8, 24, tzinfo=UTC),
-                        location="fixture://market-1",
-                        content_hash="a" * 64,
-                    ),
-                ),
-            ),
-        ),
+        diagnostic_input_hash=INPUT_HASH,
     )
+    session.add(report)
+    await session.flush()
+    item = PortfolioDiagnosticItemRecord(
+        report_id=report.id,
+        diagnostic_code="LIQUIDITY_DAYS_TO_EXIT",
+        metric_value=None,
+        unit="trading_days",
+        reference_limit="2",
+        policy_scope="currency:HKD",
+        severity="info",
+        actionability="research",
+        unknown_reason="ADV20_MISSING",
+    )
+    session.add(item)
+    await session.flush()
+    evidence = PortfolioDiagnosticEvidenceRefRecord(
+        item_id=item.id,
+        source="fixture",
+        object_id="market-1",
+        available_at=datetime(2026, 8, 24, tzinfo=UTC),
+        location="fixture://market-1",
+        content_hash="a" * 64,
+    )
+    session.add(evidence)
+    await session.flush()
+    return report.id, item.id, evidence.id
