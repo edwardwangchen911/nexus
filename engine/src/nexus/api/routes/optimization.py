@@ -7,6 +7,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
@@ -14,9 +15,10 @@ from nexus.domain.decimal import DecimalString
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
-from nexus.persistence.models.runtime import AuditEvent
+from nexus.persistence.models.runtime import AuditEvent, IdempotencyRecord, Job
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
@@ -99,13 +101,33 @@ async def admit_optimization_proposal(
     request: Request,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
-) -> dict[str, object]:
+) -> object:
     """Fail closed until one persisted authority binds baseline, diagnosis, data, source, and cost."""
-    del actor
+    route = "/internal/v1/optimization-proposals"
+    raw_body = await request.body()
     try:
-        body = _ProposalAdmissionRequest.model_validate(json.loads(await request.body()))
+        body = _ProposalAdmissionRequest.model_validate(json.loads(raw_body))
     except (json.JSONDecodeError, ValueError) as error:
         raise NexusError(ErrorCode.VALIDATION_ERROR, "Request is invalid.", status_code=422) from error
+    request_hash = hashlib.sha256(raw_body).hexdigest()
+    idempotency_key = request.headers.get("Idempotency-Key")
+    if not idempotency_key:
+        raise NexusError(ErrorCode.VALIDATION_ERROR, "Idempotency-Key is required.", status_code=422)
+    existing = await session.scalar(
+        select(IdempotencyRecord).where(
+            IdempotencyRecord.actor_id == actor.actor_id,
+            IdempotencyRecord.route == route,
+            IdempotencyRecord.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        if existing.request_hash != request_hash:
+            raise NexusError(
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                "Idempotency key has a different request body.",
+                status_code=409,
+            )
+        return JSONResponse(status_code=202, content=existing.response_payload)
     snapshot = await session.scalar(
         select(PortfolioSnapshotRecord).where(PortfolioSnapshotRecord.id == body.portfolio_snapshot_id)
     )
@@ -125,9 +147,43 @@ async def admit_optimization_proposal(
             status_code=422,
             details={"reason": "OPTIMIZATION_AUTHORITY_MISSING"},
         )
-    raise NexusError(
-        ErrorCode.DATA_PARTIAL,
-        "Persisted source and cost authority is incomplete.",
-        status_code=422,
-        details={"reason": "OPTIMIZATION_AUTHORITY_MISSING"},
+    if body.cost_model_version != "cost_model_v1":
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL,
+            "Persisted source and cost authority is incomplete.",
+            status_code=422,
+            details={"reason": "OPTIMIZATION_AUTHORITY_MISSING"},
+        )
+    job = Job(
+        job_key=f"optimization-proposal:{actor.actor_id}:{idempotency_key}",
+        input_hash=request_hash,
+        status="QUEUED",
+        schema_version="1",
+        payload={
+            "portfolio_snapshot_id": str(body.portfolio_snapshot_id),
+            "data_snapshot_id": str(body.data_snapshot_id),
+            "cost_model_version": body.cost_model_version,
+        },
     )
+    session.add(job)
+    await session.flush()
+    payload = {
+        "data": {"job_id": str(job.id), "status": "QUEUED"},
+        "meta": {"request_id": str(actor.request_id), "schema_version": "1"},
+    }
+    inserted = await session.execute(
+        insert(IdempotencyRecord)
+        .values(
+            actor_id=actor.actor_id,
+            route=route,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            schema_version="1",
+            response_payload=payload,
+        )
+        .on_conflict_do_nothing(index_elements=("actor_id", "route", "idempotency_key"))
+        .returning(IdempotencyRecord.id)
+    )
+    if inserted.scalar_one_or_none() is None:
+        raise NexusError(ErrorCode.IDEMPOTENCY_CONFLICT, "Retry the request.", status_code=409)
+    return JSONResponse(status_code=202, content=payload)
