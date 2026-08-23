@@ -102,6 +102,28 @@ class OptimizationPolicy(_StrictModel):
         return cls(version="optimizer_v1")
 
 
+class ShadowAuthority(_StrictModel):
+    """The complete frozen authority set required before a group can shadow."""
+
+    baseline_ready: bool
+    diagnostic_complete: bool
+    source_conflict: bool
+    partial: bool
+    requires_fx: bool
+    cost_complete: bool
+
+    @property
+    def executable(self) -> bool:
+        return (
+            self.baseline_ready
+            and self.diagnostic_complete
+            and not self.source_conflict
+            and not self.partial
+            and not self.requires_fx
+            and self.cost_complete
+        )
+
+
 class OptimizationProposalGroup(_StrictModel):
     proposal_group_id: UUID = Field(default_factory=new_uuid7)
     status: ProposalGroupStatus = "draft"
@@ -113,6 +135,7 @@ class OptimizationProposalGroup(_StrictModel):
     source_policy_version: str | None = None
     cost_model_version: str | None = None
     valuation_time: datetime | None = None
+    shadow_authority: ShadowAuthority | None = None
 
     @field_validator("valuation_time")
     @classmethod
@@ -124,6 +147,8 @@ class OptimizationProposalGroup(_StrictModel):
         variants = tuple(item.variant for item in self.proposals)
         if variants != ("hold_current", "minimum_change", "strategy_target"):
             raise ValueError("proposal group requires exactly ordered unique variants")
+        if len({item.proposal_id for item in self.proposals}) != 3:
+            raise ValueError("proposal group requires unique child identifiers")
         if any(
             item.baseline_portfolio_snapshot_id != self.baseline_portfolio_snapshot_id
             for item in self.proposals

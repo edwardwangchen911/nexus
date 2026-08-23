@@ -1,15 +1,16 @@
 # ruff: noqa: E501
 """Immutable persistence records for deterministic optimization proposals."""
 
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nexus.domain.ids import new_uuid7
-from nexus.persistence.base import Base, ImmutableCreatedAt
+from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
 
 
 class OptimizationPolicyRecord(ImmutableCreatedAt, Base):
@@ -39,6 +40,20 @@ class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
     status: Mapped[str] = mapped_column(String(20), default="draft")
     version: Mapped[int] = mapped_column(Integer, default=0)
     policy_id: Mapped[UUID] = mapped_column(ForeignKey("optimization_policies.id"))
+    diagnostic_report_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("portfolio_diagnostic_reports.id")
+    )
+    data_snapshot_id: Mapped[UUID | None] = mapped_column(ForeignKey("data_snapshots.id"))
+    source_policy_id: Mapped[UUID | None] = mapped_column(ForeignKey("source_policies.id"))
+    cost_model_version: Mapped[str | None] = mapped_column(String(100))
+    diagnostic_input_hash: Mapped[str | None] = mapped_column(String(64))
+    valuation_time: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    baseline_ready: Mapped[bool] = mapped_column(Boolean, default=False)
+    diagnostic_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    source_conflict: Mapped[bool] = mapped_column(Boolean, default=False)
+    partial: Mapped[bool] = mapped_column(Boolean, default=False)
+    requires_fx: Mapped[bool] = mapped_column(Boolean, default=False)
+    cost_complete: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class OptimizationProposalRecord(ImmutableCreatedAt, Base):
@@ -75,3 +90,18 @@ class ProposalPositionRecord(ImmutableCreatedAt, Base):
     target_weight: Mapped[Decimal]
     action: Mapped[str] = mapped_column(String(20))
     reason_code: Mapped[str] = mapped_column(String(100))
+
+
+class ProposalComparisonRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "proposal_comparisons"
+    __table_args__ = (
+        UniqueConstraint("proposal_id", name="uq_proposal_comparisons_proposal"),
+        CheckConstraint("tax_impact = 'unknown'", name="tax_impact_unknown"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("optimization_proposals.id"))
+    metrics: Mapped[dict[str, object]] = mapped_column(JSONB)
+    tax_impact: Mapped[str] = mapped_column(String(20), default="unknown")
+    requires_fx: Mapped[bool] = mapped_column(Boolean, default=False)
+    non_executable: Mapped[bool] = mapped_column(Boolean, default=True)
+    cost_complete: Mapped[bool] = mapped_column(Boolean, default=False)

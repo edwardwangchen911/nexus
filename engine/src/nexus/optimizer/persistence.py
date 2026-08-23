@@ -1,0 +1,153 @@
+"""One transaction writer for immutable, complete three-way proposal groups."""
+
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from nexus.optimizer.models import OptimizationProposalGroup
+from nexus.persistence.models.optimization import (
+    OptimizationProposalGroupRecord,
+    OptimizationProposalRecord,
+    ProposalComparisonRecord,
+    ProposalPositionRecord,
+)
+
+
+@dataclass(frozen=True)
+class ProposalPersistenceAuthority:
+    """Immutable IDs and completeness facts common to all three variants."""
+
+    diagnostic_report_id: UUID
+    data_snapshot_id: UUID
+    source_policy_id: UUID
+    optimizer_policy_id: UUID
+    cost_model_version: str
+    diagnostic_input_hash: str
+    valuation_time: datetime
+    baseline_ready: bool
+    diagnostic_complete: bool
+    source_conflict: bool
+    partial: bool
+    requires_fx: bool
+    cost_complete: bool
+
+    def __post_init__(self) -> None:
+        if len(self.diagnostic_input_hash) != 64:
+            raise ValueError("diagnostic_input_hash must be a SHA-256 digest")
+        if not self.cost_model_version:
+            raise ValueError("cost model version is required")
+
+
+@dataclass(frozen=True)
+class ProposalComparisonInput:
+    """Persisted deterministic output; unknown values remain explicit and non-executable."""
+
+    variant: str
+    violation_count: int
+    turnover: Decimal
+    cost: Decimal | None
+    unknown_metrics: tuple[str, ...]
+    requires_fx: bool
+    source_conflict: bool
+    partial: bool
+    cost_complete: bool
+
+    def __post_init__(self) -> None:
+        if self.variant not in {"hold_current", "minimum_change", "strategy_target"}:
+            raise ValueError("comparison variant is invalid")
+        if self.violation_count < 0 or self.turnover < 0:
+            raise ValueError("comparison values must be nonnegative")
+        if any(not item for item in self.unknown_metrics):
+            raise ValueError("unknown metrics must be named")
+
+    @property
+    def non_executable(self) -> bool:
+        return (
+            self.cost is None
+            or bool(self.unknown_metrics)
+            or self.requires_fx
+            or self.source_conflict
+            or self.partial
+            or not self.cost_complete
+        )
+
+    def metrics_payload(self) -> dict[str, object]:
+        return {
+            "violation_count": self.violation_count,
+            "turnover": str(self.turnover),
+            "cost": None if self.cost is None else str(self.cost),
+            "unknown_metrics": list(self.unknown_metrics),
+        }
+
+
+async def persist_proposal_group(
+    session: AsyncSession,
+    group: OptimizationProposalGroup,
+    authority: ProposalPersistenceAuthority,
+    comparisons: tuple[ProposalComparisonInput, ProposalComparisonInput, ProposalComparisonInput],
+) -> OptimizationProposalGroupRecord:
+    """Stage group, its exact children, positions, and comparison rows atomically."""
+    if tuple(item.variant for item in comparisons) != (
+        "hold_current",
+        "minimum_change",
+        "strategy_target",
+    ):
+        raise ValueError("comparisons must contain exact ordered variants")
+    if group.valuation_time != authority.valuation_time:
+        raise ValueError("group valuation time must match its authority")
+    record = OptimizationProposalGroupRecord(
+        id=group.proposal_group_id,
+        baseline_portfolio_snapshot_id=group.baseline_portfolio_snapshot_id,
+        status=group.status,
+        version=group.version,
+        policy_id=authority.optimizer_policy_id,
+        diagnostic_report_id=authority.diagnostic_report_id,
+        data_snapshot_id=authority.data_snapshot_id,
+        source_policy_id=authority.source_policy_id,
+        cost_model_version=authority.cost_model_version,
+        diagnostic_input_hash=authority.diagnostic_input_hash,
+        valuation_time=authority.valuation_time,
+        baseline_ready=authority.baseline_ready,
+        diagnostic_complete=authority.diagnostic_complete,
+        source_conflict=authority.source_conflict,
+        partial=authority.partial,
+        requires_fx=authority.requires_fx,
+        cost_complete=authority.cost_complete,
+    )
+    session.add(record)
+    for proposal, comparison in zip(group.proposals, comparisons, strict=True):
+        child = OptimizationProposalRecord(
+            id=proposal.proposal_id,
+            proposal_group_id=record.id,
+            variant=proposal.variant,
+            baseline_portfolio_snapshot_id=group.baseline_portfolio_snapshot_id,
+            analysis_only=proposal.analysis_only,
+            strategy_evidence_complete=proposal.strategy_evidence_complete,
+        )
+        session.add(child)
+        session.add_all(
+            ProposalPositionRecord(
+                proposal_id=child.id,
+                instrument_id=position.instrument_id,
+                current_weight=position.current_weight,
+                target_weight=position.target_weight,
+                action=position.action,
+                reason_code=position.reason_code,
+            )
+            for position in proposal.positions
+        )
+        session.add(
+            ProposalComparisonRecord(
+                proposal_id=child.id,
+                metrics=comparison.metrics_payload(),
+                tax_impact="unknown",
+                requires_fx=comparison.requires_fx,
+                non_executable=comparison.non_executable,
+                cost_complete=comparison.cost_complete,
+            )
+        )
+    await session.flush()
+    return record

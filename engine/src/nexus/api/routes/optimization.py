@@ -19,6 +19,8 @@ from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import (
     OptimizationProposalGroupRecord,
     OptimizationProposalRecord,
+    ProposalComparisonRecord,
+    ProposalPositionRecord,
 )
 from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
 from nexus.persistence.models.runtime import AuditEvent
@@ -186,23 +188,69 @@ async def get_optimization_group(
     group = await session.get(OptimizationProposalGroupRecord, group_id)
     if group is None:
         raise NexusError(ErrorCode.NOT_FOUND, "Proposal group was not found.", status_code=404)
-    children = (
-        await session.execute(
+    children = list(
+        (
+            await session.execute(
             select(OptimizationProposalRecord)
             .where(OptimizationProposalRecord.proposal_group_id == group_id)
             .order_by(OptimizationProposalRecord.variant)
         )
-    ).scalars()
+        )
+        .scalars()
+        .all()
+    )
+    if len(children) != 3:
+        raise NexusError(ErrorCode.DATA_PARTIAL, "Proposal group is incomplete.", status_code=422)
+    proposal_data: list[dict[str, object]] = []
+    for child in children:
+        positions = list(
+            await session.scalars(
+                select(ProposalPositionRecord)
+                .where(ProposalPositionRecord.proposal_id == child.id)
+                .order_by(ProposalPositionRecord.instrument_id)
+            )
+        )
+        comparison = await session.scalar(
+            select(ProposalComparisonRecord).where(ProposalComparisonRecord.proposal_id == child.id)
+        )
+        if comparison is None:
+            raise NexusError(ErrorCode.DATA_PARTIAL, "Proposal comparison is incomplete.", status_code=422)
+        proposal_data.append(
+            {
+                "proposal_id": str(child.id),
+                "variant": child.variant,
+                "analysis_only": child.analysis_only,
+                "strategy_evidence_complete": child.strategy_evidence_complete,
+                "positions": [
+                    {
+                        "instrument_id": str(position.instrument_id),
+                        "current_weight": str(position.current_weight),
+                        "target_weight": str(position.target_weight),
+                        "action": position.action,
+                        "reason_code": position.reason_code,
+                    }
+                    for position in positions
+                ],
+                "comparison": {
+                    "metrics": comparison.metrics,
+                    "tax_impact": comparison.tax_impact,
+                    "requires_fx": comparison.requires_fx,
+                    "non_executable": comparison.non_executable,
+                    "cost_complete": comparison.cost_complete,
+                },
+            }
+        )
     return {
         "data": {
             "proposal_group_id": str(group.id),
             "status": group.status,
             "version": group.version,
             "baseline_portfolio_snapshot_id": str(group.baseline_portfolio_snapshot_id),
-            "proposals": [
-                {"proposal_id": str(row.id), "variant": row.variant, "analysis_only": row.analysis_only}
-                for row in children
-            ],
+            "diagnostic_input_hash": group.diagnostic_input_hash,
+            "data_snapshot_id": None if group.data_snapshot_id is None else str(group.data_snapshot_id),
+            "source_policy_id": None if group.source_policy_id is None else str(group.source_policy_id),
+            "cost_model_version": group.cost_model_version,
+            "proposals": proposal_data,
         },
         "meta": {"request_id": str(actor.request_id), "schema_version": "1"},
     }

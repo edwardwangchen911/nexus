@@ -36,11 +36,26 @@ def upgrade() -> None:
         sa.Column("status", sa.String(20), nullable=False, server_default="draft"),
         sa.Column("version", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("policy_id", _UUID, nullable=False),
+        sa.Column("diagnostic_report_id", _UUID, nullable=True),
+        sa.Column("data_snapshot_id", _UUID, nullable=True),
+        sa.Column("source_policy_id", _UUID, nullable=True),
+        sa.Column("cost_model_version", sa.String(100), nullable=True),
+        sa.Column("diagnostic_input_hash", sa.String(64), nullable=True),
+        sa.Column("valuation_time", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("baseline_ready", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("diagnostic_complete", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("source_conflict", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("partial", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("requires_fx", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("cost_complete", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
         ),
         sa.ForeignKeyConstraint(["baseline_portfolio_snapshot_id"], ["portfolio_snapshots.id"]),
         sa.ForeignKeyConstraint(["policy_id"], ["optimization_policies.id"]),
+        sa.ForeignKeyConstraint(["diagnostic_report_id"], ["portfolio_diagnostic_reports.id"]),
+        sa.ForeignKeyConstraint(["data_snapshot_id"], ["data_snapshots.id"]),
+        sa.ForeignKeyConstraint(["source_policy_id"], ["source_policies.id"]),
         sa.CheckConstraint(
             "status IN ('draft','compared','shadowing','validated','rejected','expired')",
             name="status_allowed",
@@ -65,6 +80,22 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "variant IN ('hold_current','minimum_change','strategy_target')", name="variant_allowed"
         ),
+    )
+    op.create_table(
+        "proposal_comparisons",
+        sa.Column("id", _UUID, primary_key=True),
+        sa.Column("proposal_id", _UUID, nullable=False),
+        sa.Column("metrics", postgresql.JSONB(), nullable=False),
+        sa.Column("tax_impact", sa.String(20), nullable=False, server_default="unknown"),
+        sa.Column("requires_fx", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("non_executable", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("cost_complete", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.ForeignKeyConstraint(["proposal_id"], ["optimization_proposals.id"]),
+        sa.UniqueConstraint("proposal_id", name="uq_proposal_comparisons_proposal"),
+        sa.CheckConstraint("tax_impact = 'unknown'", name="tax_impact_unknown"),
     )
     op.create_table(
         "proposal_positions",
@@ -93,6 +124,13 @@ def upgrade() -> None:
         "CREATE FUNCTION nexus_prevent_optimization_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'optimization record is immutable' USING ERRCODE = '23514'; END; $$"
     )
     op.execute(
+        "CREATE FUNCTION nexus_optimization_group_lifecycle() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+        "IF NEW.baseline_portfolio_snapshot_id IS DISTINCT FROM OLD.baseline_portfolio_snapshot_id OR NEW.policy_id IS DISTINCT FROM OLD.policy_id OR NEW.diagnostic_report_id IS DISTINCT FROM OLD.diagnostic_report_id OR NEW.data_snapshot_id IS DISTINCT FROM OLD.data_snapshot_id OR NEW.source_policy_id IS DISTINCT FROM OLD.source_policy_id OR NEW.cost_model_version IS DISTINCT FROM OLD.cost_model_version OR NEW.diagnostic_input_hash IS DISTINCT FROM OLD.diagnostic_input_hash OR NEW.valuation_time IS DISTINCT FROM OLD.valuation_time OR NEW.baseline_ready IS DISTINCT FROM OLD.baseline_ready OR NEW.diagnostic_complete IS DISTINCT FROM OLD.diagnostic_complete OR NEW.source_conflict IS DISTINCT FROM OLD.source_conflict OR NEW.partial IS DISTINCT FROM OLD.partial OR NEW.requires_fx IS DISTINCT FROM OLD.requires_fx OR NEW.cost_complete IS DISTINCT FROM OLD.cost_complete THEN RAISE EXCEPTION 'optimization group authority is immutable' USING ERRCODE = '23514'; END IF; "
+        "IF NEW.version <> OLD.version + 1 THEN RAISE EXCEPTION 'optimization group version conflict' USING ERRCODE = '40001'; END IF; "
+        "IF (OLD.status = 'draft' AND NEW.status NOT IN ('compared','rejected','expired')) OR (OLD.status = 'compared' AND NEW.status NOT IN ('shadowing','rejected','expired')) OR (OLD.status = 'shadowing' AND NEW.status NOT IN ('validated','rejected','expired')) OR (OLD.status IN ('validated','rejected','expired')) THEN RAISE EXCEPTION 'optimization lifecycle transition invalid' USING ERRCODE = '23514'; END IF; "
+        "IF NEW.status = 'shadowing' AND (NOT OLD.baseline_ready OR NOT OLD.diagnostic_complete OR OLD.source_conflict OR OLD.partial OR OLD.requires_fx OR NOT OLD.cost_complete OR NOT EXISTS (SELECT 1 FROM optimization_proposals p WHERE p.proposal_group_id = OLD.id AND p.variant = 'strategy_target' AND p.strategy_evidence_complete AND NOT p.analysis_only)) THEN RAISE EXCEPTION 'PROPOSAL_NOT_EXECUTABLE' USING ERRCODE = '23514'; END IF; RETURN NEW; END; $$"
+    )
+    op.execute(
         "CREATE FUNCTION nexus_require_three_optimization_variants() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE group_ref uuid; variant_count integer; BEGIN IF TG_TABLE_NAME = 'optimization_proposal_groups' THEN group_ref := NEW.id; ELSE group_ref := COALESCE(NEW.proposal_group_id, OLD.proposal_group_id); END IF; SELECT count(*) INTO variant_count FROM optimization_proposals WHERE proposal_group_id = group_ref; IF variant_count <> 3 THEN RAISE EXCEPTION 'optimization group requires exactly three variants' USING ERRCODE = '23514'; END IF; RETURN NULL; END; $$"
     )
     op.execute(
@@ -101,16 +139,25 @@ def upgrade() -> None:
     op.execute(
         "CREATE CONSTRAINT TRIGGER trg_optimization_proposals_three_variants AFTER INSERT OR DELETE ON optimization_proposals DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION nexus_require_three_optimization_variants()"
     )
+    op.execute(
+        "CREATE TRIGGER trg_optimization_groups_lifecycle BEFORE UPDATE ON optimization_proposal_groups FOR EACH ROW EXECUTE FUNCTION nexus_optimization_group_lifecycle()"
+    )
     for table in (
         "optimization_policies",
         "optimization_proposal_groups",
         "optimization_proposals",
         "proposal_positions",
+        "proposal_comparisons",
     ):
         op.execute(
             f"CREATE TRIGGER trg_{table}_created_at_immutable BEFORE UPDATE ON {table} FOR EACH ROW EXECUTE FUNCTION nexus_prevent_created_at_change()"
         )
-    for table in ("optimization_policies", "optimization_proposals", "proposal_positions"):
+    for table in (
+        "optimization_policies",
+        "optimization_proposals",
+        "proposal_positions",
+        "proposal_comparisons",
+    ):
         op.execute(
             f"CREATE TRIGGER trg_{table}_immutable BEFORE UPDATE OR DELETE ON {table} FOR EACH ROW EXECUTE FUNCTION nexus_prevent_optimization_change()"
         )
@@ -118,6 +165,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     for table in (
+        "proposal_comparisons",
         "proposal_positions",
         "optimization_proposals",
         "optimization_proposal_groups",
@@ -125,13 +173,21 @@ def downgrade() -> None:
     ):
         op.execute(f"DROP TRIGGER trg_{table}_created_at_immutable ON {table}")
     op.execute("DROP TRIGGER trg_optimization_proposals_three_variants ON optimization_proposals")
+    op.execute("DROP TRIGGER trg_optimization_groups_lifecycle ON optimization_proposal_groups")
     op.execute(
         "DROP TRIGGER trg_optimization_groups_three_variants ON optimization_proposal_groups"
     )
     op.execute("DROP FUNCTION nexus_require_three_optimization_variants()")
-    for table in ("proposal_positions", "optimization_proposals", "optimization_policies"):
+    op.execute("DROP FUNCTION nexus_optimization_group_lifecycle()")
+    for table in (
+        "proposal_comparisons",
+        "proposal_positions",
+        "optimization_proposals",
+        "optimization_policies",
+    ):
         op.execute(f"DROP TRIGGER trg_{table}_immutable ON {table}")
     op.execute("DROP FUNCTION nexus_prevent_optimization_change()")
+    op.drop_table("proposal_comparisons")
     op.drop_table("proposal_positions")
     op.drop_table("optimization_proposals")
     op.drop_table("optimization_proposal_groups")

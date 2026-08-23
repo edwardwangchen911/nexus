@@ -42,7 +42,17 @@ async def transition_group(
                 OptimizationProposalRecord.variant == "strategy_target",
             )
         )
-        if strategy is None or strategy.analysis_only or not strategy.strategy_evidence_complete:
+        if (
+            strategy is None
+            or strategy.analysis_only
+            or not strategy.strategy_evidence_complete
+            or not group.baseline_ready
+            or not group.diagnostic_complete
+            or group.source_conflict
+            or group.partial
+            or group.requires_fx
+            or not group.cost_complete
+        ):
             raise ValueError("PROPOSAL_NOT_EXECUTABLE")
     result = await session.execute(
         update(OptimizationProposalGroupRecord)

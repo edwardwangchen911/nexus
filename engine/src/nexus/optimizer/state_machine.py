@@ -34,4 +34,9 @@ def transition_proposal_group(
 
 def _eligible_for_shadowing(group: OptimizationProposalGroup) -> bool:
     strategy = group.proposals[2]
-    return strategy.strategy_evidence_complete and not strategy.analysis_only
+    return (
+        strategy.strategy_evidence_complete
+        and not strategy.analysis_only
+        and group.shadow_authority is not None
+        and group.shadow_authority.executable
+    )
