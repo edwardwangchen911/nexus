@@ -15,10 +15,18 @@ REAL_ADVISORY_POLICY_ID = UUID("801f00b8-f963-5164-a6e7-34c4d9955d31")
 REAL_ADVISORY_POLICY_KEY = "real_advisory"
 REAL_ADVISORY_POLICY_VERSION = "real_advisory_policy_v1"
 REAL_ADVISORY_POLICY_PAYLOAD: dict[str, str] = {
-    "single_name_warning": "0.15", "single_name_critical": "0.30", "top3_warning": "0.60",
-    "sector_warning": "0.30", "sector_critical": "0.50", "currency_warning": "0.80",
-    "correlation_cluster_warning": "0.50", "cash_minimum": "0.10", "drawdown_warning": "0.08",
-    "drawdown_critical": "0.15", "days_to_exit_warning": "2", "days_to_exit_critical": "5",
+    "single_name_warning": "0.15",
+    "single_name_critical": "0.30",
+    "top3_warning": "0.60",
+    "sector_warning": "0.30",
+    "sector_critical": "0.50",
+    "currency_warning": "0.80",
+    "correlation_cluster_warning": "0.50",
+    "cash_minimum": "0.10",
+    "drawdown_warning": "0.08",
+    "drawdown_critical": "0.15",
+    "days_to_exit_warning": "2",
+    "days_to_exit_critical": "5",
 }
 
 
@@ -58,7 +66,9 @@ async def load_real_advisory_policy_v1(session: AsyncSession) -> RealAdvisoryPol
         )
     )
     if (
-        record is None or record.id != REAL_ADVISORY_POLICY_ID or record.schema_version != "1"
+        record is None
+        or record.id != REAL_ADVISORY_POLICY_ID
+        or record.schema_version != "1"
         or record.payload != REAL_ADVISORY_POLICY_PAYLOAD
     ):
         raise ValueError("published real_advisory_policy_v1 is missing or invalid")

@@ -252,7 +252,11 @@ def _assert_reflected_schema(connection: Connection) -> None:
         "portfolio_diagnostic_items",
         "portfolio_diagnostic_evidence_refs",
     }
-    expected_tables = EXPECTED_TABLES if diagnostic_tables <= actual_tables else EXPECTED_TABLES - diagnostic_tables
+    expected_tables = (
+        EXPECTED_TABLES
+        if diagnostic_tables <= actual_tables
+        else EXPECTED_TABLES - diagnostic_tables
+    )
     assert actual_tables == expected_tables
     assert {inspector.get_pk_constraint(table_name)["name"] for table_name in expected_tables} == {
         f"pk_{table_name}" for table_name in expected_tables
@@ -303,6 +307,14 @@ def _assert_reflected_schema(connection: Connection) -> None:
     assert macro_value["type"].scale == 12
     for table_name in expected_tables:
         assert _created_at_trigger_exists(connection, table_name)
+    if diagnostic_tables <= actual_tables:
+        evidence_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("portfolio_diagnostic_evidence_refs")
+        }
+        available_at = evidence_columns["available_at"]["type"]
+        assert isinstance(available_at, DateTime)
+        assert available_at.timezone is True
 
     context = MigrationContext.configure(connection)
     if diagnostic_tables <= actual_tables:

@@ -1,7 +1,6 @@
 """Immutable database records for advisory policy and diagnostic projections."""
-# ruff: noqa: E501
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -10,12 +9,14 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nexus.domain.ids import new_uuid7
-from nexus.persistence.base import Base, ImmutableCreatedAt
+from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
 
 
 class DiagnosticPolicy(ImmutableCreatedAt, Base):
     __tablename__ = "diagnostic_policies"
-    __table_args__ = (UniqueConstraint("key", "version", name="uq_diagnostic_policies_key_version"),)
+    __table_args__ = (
+        UniqueConstraint("key", "version", name="uq_diagnostic_policies_key_version"),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
     key: Mapped[str] = mapped_column(String(100))
@@ -28,7 +29,8 @@ class PortfolioDiagnosticReportRecord(ImmutableCreatedAt, Base):
     __tablename__ = "portfolio_diagnostic_reports"
     __table_args__ = (
         CheckConstraint(
-            "optimization_need IN ('BLOCKED', 'RESEARCH_REQUIRED', 'OPTIMIZATION_CANDIDATE', 'NO_ACTION')",
+            "optimization_need IN ("
+            "'BLOCKED', 'RESEARCH_REQUIRED', 'OPTIMIZATION_CANDIDATE', 'NO_ACTION')",
             name="optimization_need_allowed",
         ),
     )
@@ -46,7 +48,10 @@ class PortfolioDiagnosticItemRecord(ImmutableCreatedAt, Base):
     __tablename__ = "portfolio_diagnostic_items"
     __table_args__ = (
         CheckConstraint("severity IN ('info', 'warning', 'critical')", name="severity_allowed"),
-        CheckConstraint("actionability IN ('monitor', 'research', 'reduce_only', 'blocked')", name="actionability_allowed"),
+        CheckConstraint(
+            "actionability IN ('monitor', 'research', 'reduce_only', 'blocked')",
+            name="actionability_allowed",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
@@ -68,6 +73,6 @@ class PortfolioDiagnosticEvidenceRefRecord(ImmutableCreatedAt, Base):
     item_id: Mapped[UUID] = mapped_column(ForeignKey("portfolio_diagnostic_items.id"))
     source: Mapped[str] = mapped_column(String(100))
     object_id: Mapped[str] = mapped_column(String(255))
-    available_at: Mapped[str] = mapped_column(String(64))
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime())
     location: Mapped[str] = mapped_column(String(1000))
     content_hash: Mapped[str] = mapped_column(String(64))

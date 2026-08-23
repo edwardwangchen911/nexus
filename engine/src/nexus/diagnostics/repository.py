@@ -1,7 +1,5 @@
 """Atomic immutable storage and redacted retrieval for diagnostic reports."""
-# ruff: noqa: E501
 
-from datetime import datetime
 from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
@@ -66,7 +64,7 @@ async def persist_report(
                 item_id=stored_item.id,
                 source=ref.source,
                 object_id=ref.object_id,
-                available_at=ref.available_at.isoformat(),
+                available_at=ref.available_at,
                 location=ref.location,
                 content_hash=ref.content_hash,
             )
@@ -78,39 +76,67 @@ async def persist_report(
 async def latest_report(
     session: AsyncSession, *, portfolio_id: UUID
 ) -> PortfolioDiagnosticReport | None:
+    policy = await load_real_advisory_policy_v1(session)
     record = await session.scalar(
         select(PortfolioDiagnosticReportRecord)
         .where(PortfolioDiagnosticReportRecord.portfolio_id == portfolio_id)
-        .order_by(desc(PortfolioDiagnosticReportRecord.created_at), desc(PortfolioDiagnosticReportRecord.id))
+        .order_by(
+            desc(PortfolioDiagnosticReportRecord.created_at),
+            desc(PortfolioDiagnosticReportRecord.id),
+        )
         .limit(1)
     )
     if record is None:
         return None
-    rows = (await session.execute(
-        select(PortfolioDiagnosticItemRecord).where(PortfolioDiagnosticItemRecord.report_id == record.id)
-        .order_by(PortfolioDiagnosticItemRecord.id)
-    )).scalars().all()
+    if record.policy_id != REAL_ADVISORY_POLICY_ID or record.policy_version != policy.version:
+        raise ValueError("diagnostic report policy authority is invalid")
+    rows = (
+        (
+            await session.execute(
+                select(PortfolioDiagnosticItemRecord)
+                .where(PortfolioDiagnosticItemRecord.report_id == record.id)
+                .order_by(PortfolioDiagnosticItemRecord.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
     items = []
     for row in rows:
-        refs = (await session.execute(
-            select(PortfolioDiagnosticEvidenceRefRecord)
-            .where(PortfolioDiagnosticEvidenceRefRecord.item_id == row.id)
-            .order_by(PortfolioDiagnosticEvidenceRefRecord.id)
-        )).scalars().all()
-        items.append(DiagnosticItem(
-            diagnostic_code=row.diagnostic_code,
-            metric_value=_string(row.metric_value), unit=row.unit,
-            reference_limit=_string(row.reference_limit), policy_scope=row.policy_scope,
-            severity=cast(Literal["info", "warning", "critical"], row.severity),
-            actionability=cast(Literal["monitor", "research", "reduce_only", "blocked"], row.actionability),
-            unknown_reason=row.unknown_reason,
-            evidence_refs=tuple(_evidence(ref) for ref in refs),
-        ))
+        refs = (
+            (
+                await session.execute(
+                    select(PortfolioDiagnosticEvidenceRefRecord)
+                    .where(PortfolioDiagnosticEvidenceRefRecord.item_id == row.id)
+                    .order_by(PortfolioDiagnosticEvidenceRefRecord.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        items.append(
+            DiagnosticItem(
+                diagnostic_code=row.diagnostic_code,
+                metric_value=_string(row.metric_value),
+                unit=row.unit,
+                reference_limit=_string(row.reference_limit),
+                policy_scope=row.policy_scope,
+                severity=cast(Literal["info", "warning", "critical"], row.severity),
+                actionability=cast(
+                    Literal["monitor", "research", "reduce_only", "blocked"], row.actionability
+                ),
+                unknown_reason=row.unknown_reason,
+                evidence_refs=tuple(_evidence(ref) for ref in refs),
+            )
+        )
     return PortfolioDiagnosticReport(
         portfolio_snapshot_id=record.portfolio_snapshot_id,
         trading_day=record.trading_day,
         policy_version=cast(Literal["real_advisory_policy_v1"], record.policy_version),
-        optimization_need=cast(Literal["BLOCKED", "RESEARCH_REQUIRED", "OPTIMIZATION_CANDIDATE", "NO_ACTION"], record.optimization_need),
+        optimization_need=cast(
+            Literal["BLOCKED", "RESEARCH_REQUIRED", "OPTIMIZATION_CANDIDATE", "NO_ACTION"],
+            record.optimization_need,
+        ),
         items=tuple(items),
     )
 
@@ -125,7 +151,9 @@ def _string(value: Decimal | None) -> str | None:
 
 def _evidence(record: PortfolioDiagnosticEvidenceRefRecord) -> EvidenceRef:
     return EvidenceRef(
-        source=record.source, object_id=record.object_id,
-        available_at=datetime.fromisoformat(record.available_at), location=record.location,
+        source=record.source,
+        object_id=record.object_id,
+        available_at=record.available_at,
+        location=record.location,
         content_hash=record.content_hash,
     )

@@ -1,5 +1,4 @@
 """Exact portfolio metric primitives; threshold callers receive Decimal or unknown."""
-# ruff: noqa: E501
 
 from collections.abc import Mapping, Sequence
 from decimal import Decimal
@@ -43,7 +42,10 @@ def maximum_drawdown(closes: Sequence[Decimal], window: int = 252) -> Decimal | 
     if len(sample) < _coverage_minimum(window) or any(value <= 0 for value in sample):
         return None
     peak = sample[0]
-    return max((Decimal(1) - value / (peak := max(peak, value)) for value in sample), default=Decimal(0))
+    drawdowns = (
+        Decimal(1) - value / (peak := max(peak, value)) for value in sample
+    )
+    return max(drawdowns, default=Decimal(0))
 
 
 def beta_and_correlation(
@@ -77,7 +79,8 @@ def beta_and_correlation(
     ) / Decimal(len(pairs))
     if asset_variance == 0 or benchmark_variance == 0:
         return None
-    return covariance / benchmark_variance, covariance / (asset_variance * benchmark_variance).sqrt()
+    correlation = covariance / (asset_variance * benchmark_variance).sqrt()
+    return covariance / benchmark_variance, correlation
 
 
 def correlation_components(
@@ -143,8 +146,12 @@ def _correlation(left: Sequence[Decimal], right: Sequence[Decimal]) -> Decimal |
     covariance = sum(
         ((first - left_mean) * (second - right_mean) for first, second in pairs), Decimal(0)
     ) / Decimal(count)
-    left_variance = sum(((first - left_mean) ** 2 for first, _ in pairs), Decimal(0)) / Decimal(count)
-    right_variance = sum(((second - right_mean) ** 2 for _, second in pairs), Decimal(0)) / Decimal(count)
+    left_variance = sum(
+        ((first - left_mean) ** 2 for first, _ in pairs), Decimal(0)
+    ) / Decimal(count)
+    right_variance = sum(
+        ((second - right_mean) ** 2 for _, second in pairs), Decimal(0)
+    ) / Decimal(count)
     if left_variance == 0 or right_variance == 0:
         return None
     return covariance / (left_variance * right_variance).sqrt()

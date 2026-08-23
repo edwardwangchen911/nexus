@@ -15,6 +15,8 @@ from nexus.providers.base import PriceSeries
 type OptimizationNeed = Literal[
     "BLOCKED", "RESEARCH_REQUIRED", "OPTIMIZATION_CANDIDATE", "NO_ACTION"
 ]
+type DiagnosticSeverity = Literal["info", "warning", "critical"]
+type DiagnosticActionability = Literal["monitor", "research", "reduce_only", "blocked"]
 
 
 class _DiagnosticModel(BaseModel):
@@ -41,7 +43,11 @@ class MarketEvidence(_DiagnosticModel):
     @model_validator(mode="after")
     def _bucket_weights_are_complete(self) -> "MarketEvidence":
         for weights in self.risk_buckets.values():
-            if not weights or any(value < 0 for value in weights.values()) or sum(weights.values(), Decimal(0)) != Decimal(1):
+            if (
+                not weights
+                or any(value < 0 for value in weights.values())
+                or sum(weights.values(), Decimal(0)) != Decimal(1)
+            ):
                 raise ValueError("risk bucket weights must be nonnegative and sum to one")
         return self
 
@@ -64,8 +70,8 @@ class DiagnosticItem(_DiagnosticModel):
     unit: str
     reference_limit: DecimalString | None
     policy_scope: str
-    severity: Literal["info", "warning", "critical"]
-    actionability: Literal["monitor", "research", "reduce_only", "blocked"]
+    severity: DiagnosticSeverity
+    actionability: DiagnosticActionability
     unknown_reason: str | None
     evidence_refs: tuple[EvidenceRef, ...] = ()
 

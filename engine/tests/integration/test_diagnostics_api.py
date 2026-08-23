@@ -7,10 +7,16 @@ import pytest
 from helpers.portfolio_api import PORTFOLIOS, app, headers, seed_portfolio_list, settings
 from nexus.api.routes.diagnostics import router as diagnostics_router
 from nexus.diagnostics.models import DiagnosticItem, PortfolioDiagnosticReport
-from nexus.diagnostics.policy import load_real_advisory_policy_v1
+from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID, load_real_advisory_policy_v1
 from nexus.diagnostics.repository import persist_report
 from nexus.domain.evidence import EvidenceRef
+from nexus.persistence.models.diagnostics import (
+    PortfolioDiagnosticEvidenceRefRecord,
+    PortfolioDiagnosticItemRecord,
+)
 from nexus.persistence.session import session_factory
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 
 @pytest.mark.asyncio
@@ -58,6 +64,11 @@ async def test_latest_diagnostic_is_redacted_and_returns_persisted_item_shape(
         transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
     ) as client:
         response = await client.get(path, headers=headers("GET", path))
+        for portfolio_id in PORTFOLIOS[1:]:
+            missing_path = f"/internal/v1/portfolios/{portfolio_id}/diagnostics/latest"
+            missing = await client.get(missing_path, headers=headers("GET", missing_path))
+            assert missing.status_code == 404
+            assert missing.json()["error"]["code"] == "NOT_FOUND"
 
     assert response.status_code == 200
     item = response.json()["data"]["items"][0]
@@ -65,5 +76,78 @@ async def test_latest_diagnostic_is_redacted_and_returns_persisted_item_shape(
     assert item["reference_limit"] == "2.000000000000"
     assert item["policy_scope"] == "currency:HKD"
     assert item["evidence_refs"][0]["content_hash"] == "a" * 64
+    assert item["evidence_refs"][0]["available_at"] == "2026-08-24T00:00:00Z"
     assert response.json()["data"]["policy_version"] == "real_advisory_policy_v1"
     assert "account_id" not in json.dumps(response.json())
+
+
+@pytest.mark.asyncio
+async def test_database_triggers_reject_update_and_delete_for_every_diagnostic_record(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        policy = await load_real_advisory_policy_v1(session)
+        report_id = await persist_report(
+            session,
+            portfolio_id=PORTFOLIOS[0],
+            report=_report(policy.version),
+        )
+        item_id = await session.scalar(
+            select(PortfolioDiagnosticItemRecord.id).where(
+                PortfolioDiagnosticItemRecord.report_id == report_id
+            )
+        )
+        evidence_id = await session.scalar(
+            select(PortfolioDiagnosticEvidenceRefRecord.id).where(
+                PortfolioDiagnosticEvidenceRefRecord.item_id == item_id
+            )
+        )
+    assert item_id is not None and evidence_id is not None
+    records = (
+        ("diagnostic_policies", REAL_ADVISORY_POLICY_ID),
+        ("portfolio_diagnostic_reports", report_id),
+        ("portfolio_diagnostic_items", item_id),
+        ("portfolio_diagnostic_evidence_refs", evidence_id),
+    )
+    for table_name, record_id in records:
+        for operation in (
+            f"UPDATE {table_name} SET created_at = created_at",
+            f"DELETE FROM {table_name}",
+        ):
+            async with factory() as session:
+                with pytest.raises(IntegrityError, match="diagnostic record is immutable"):
+                    async with session.begin():
+                        await session.execute(
+                            text(f"{operation} WHERE id = :id"), {"id": record_id}
+                        )
+
+
+def _report(policy_version: str) -> PortfolioDiagnosticReport:
+    return PortfolioDiagnosticReport(
+        portfolio_snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
+        policy_version=policy_version,  # type: ignore[arg-type]
+        optimization_need="RESEARCH_REQUIRED",
+        items=(
+            DiagnosticItem(
+                diagnostic_code="LIQUIDITY_DAYS_TO_EXIT",
+                metric_value=None,
+                unit="trading_days",
+                reference_limit="2",
+                policy_scope="currency:HKD",
+                severity="info",
+                actionability="research",
+                unknown_reason="ADV20_MISSING",
+                evidence_refs=(
+                    EvidenceRef(
+                        source="fixture",
+                        object_id="market-1",
+                        available_at=datetime(2026, 8, 24, tzinfo=UTC),
+                        location="fixture://market-1",
+                        content_hash="a" * 64,
+                    ),
+                ),
+            ),
+        ),
+    )

@@ -25,7 +25,15 @@ async def get_latest_diagnostic(
 ) -> dict[str, object]:
     """Return the latest immutable server-computed projection, never a browser recalculation."""
     del actor
-    report = await latest_report(session, portfolio_id=portfolio_id)
+    try:
+        report = await latest_report(session, portfolio_id=portfolio_id)
+    except ValueError as error:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL,
+            "The persisted diagnostic policy authority is unavailable.",
+            status_code=422,
+            details={"portfolio_id": str(portfolio_id)},
+        ) from error
     if report is None:
         raise NexusError(
             ErrorCode.NOT_FOUND,
