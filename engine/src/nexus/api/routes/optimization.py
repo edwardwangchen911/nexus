@@ -13,8 +13,13 @@ from nexus.api.dependencies import require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.domain.decimal import DecimalString
 from nexus.optimizer.admission import admit_queued_job
+from nexus.optimizer.repository import transition_group
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
+from nexus.persistence.models.optimization import (
+    OptimizationProposalGroupRecord,
+    OptimizationProposalRecord,
+)
 from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
 from nexus.persistence.models.runtime import AuditEvent
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
@@ -57,6 +62,11 @@ class _ProposalAdmissionRequest(BaseModel):
     portfolio_snapshot_id: UUID
     data_snapshot_id: UUID
     cost_model_version: str = Field(min_length=1, max_length=100)
+
+
+class _LifecycleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int = Field(ge=0)
 
 
 @router.post("/internal/v1/what-if/evaluate")
@@ -164,3 +174,58 @@ async def admit_optimization_proposal(
         "meta": {"request_id": str(actor.request_id), "schema_version": "1"},
     }
     return JSONResponse(status_code=202, content=payload)
+
+
+@router.get("/internal/v1/optimization-proposals/{group_id}")
+async def get_optimization_group(
+    group_id: UUID,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+) -> dict[str, object]:
+    """Return immutable children and the sole mutable lifecycle state."""
+    group = await session.get(OptimizationProposalGroupRecord, group_id)
+    if group is None:
+        raise NexusError(ErrorCode.NOT_FOUND, "Proposal group was not found.", status_code=404)
+    children = (
+        await session.execute(
+            select(OptimizationProposalRecord)
+            .where(OptimizationProposalRecord.proposal_group_id == group_id)
+            .order_by(OptimizationProposalRecord.variant)
+        )
+    ).scalars()
+    return {
+        "data": {
+            "proposal_group_id": str(group.id),
+            "status": group.status,
+            "version": group.version,
+            "baseline_portfolio_snapshot_id": str(group.baseline_portfolio_snapshot_id),
+            "proposals": [
+                {"proposal_id": str(row.id), "variant": row.variant, "analysis_only": row.analysis_only}
+                for row in children
+            ],
+        },
+        "meta": {"request_id": str(actor.request_id), "schema_version": "1"},
+    }
+
+
+async def _transition_endpoint(
+    group_id: UUID, target: str, request: Request, actor: VerifiedServiceActor, session: AsyncSession
+) -> dict[str, object]:
+    del actor
+    try:
+        body = _LifecycleRequest.model_validate(json.loads(await request.body()))
+        group = await transition_group(session, group_id, target, expected_version=body.version)  # type: ignore[arg-type]
+    except ValueError as error:
+        code = ErrorCode.PROPOSAL_NOT_EXECUTABLE if str(error) == "PROPOSAL_NOT_EXECUTABLE" else ErrorCode.VERSION_CONFLICT if str(error) == "VERSION_CONFLICT" else ErrorCode.VALIDATION_ERROR
+        raise NexusError(code, "Proposal lifecycle transition was rejected.", status_code=409 if code == ErrorCode.VERSION_CONFLICT else 422) from error
+    return {"data": {"proposal_group_id": str(group.id), "status": group.status, "version": group.version}}
+
+
+@router.post("/internal/v1/optimization-proposals/{group_id}/shadow")
+async def shadow_optimization_group(group_id: UUID, request: Request, actor: VerifiedServiceActor = Depends(require_service_actor), session: AsyncSession = Depends(transactional_session)) -> dict[str, object]:
+    return await _transition_endpoint(group_id, "shadowing", request, actor, session)
+
+
+@router.post("/internal/v1/optimization-proposals/{group_id}/reject")
+async def reject_optimization_group(group_id: UUID, request: Request, actor: VerifiedServiceActor = Depends(require_service_actor), session: AsyncSession = Depends(transactional_session)) -> dict[str, object]:
+    return await _transition_endpoint(group_id, "rejected", request, actor, session)
