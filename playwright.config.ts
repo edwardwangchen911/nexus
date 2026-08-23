@@ -13,7 +13,7 @@ export default defineConfig({
     },
   },
   webServer: {
-    command: "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev --host 127.0.0.1 --port 4173",
+    command: "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev --hostname 127.0.0.1 --port 4173",
     env: {
       NEXUS_ALLOWED_USER_ID: "task-1-browser-test-user",
       NEXUS_ENV: "development",
