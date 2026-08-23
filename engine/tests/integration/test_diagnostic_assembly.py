@@ -98,6 +98,10 @@ async def test_production_service_assembles_real_diagnostics_from_hashed_parquet
     assert all(day.weekday() < 5 for day in assembly.market.trading_sessions)
     assert assembly.market.evidence.trading_calendar is not None
     assert assembly.market.evidence.trading_calendar.refs[0].source == "exchange_calendars"
+    identity_input = assembly.canonical_inputs["identities"][0]  # type: ignore[index]
+    assert identity_input["instrument_record_id"] == str(INSTRUMENT_ID)
+    assert identity_input["alias_record_id"]
+    assert len(identity_input["refs"]) == 2
     assert all(item.unknown_reason != "MARKET_EVIDENCE_UNAVAILABLE" for item in report.items)
     liquidity = next(
         item for item in report.items if item.diagnostic_code.startswith("LIQUIDITY_DAYS_TO_EXIT")

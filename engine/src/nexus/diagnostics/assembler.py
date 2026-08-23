@@ -1,7 +1,7 @@
 """Database-authoritative diagnostic evidence assembly."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from hashlib import sha256
@@ -75,9 +75,12 @@ async def assemble_diagnostic_evidence(
     snapshot_bindings, snapshot_inputs = await _snapshot_bindings(session, snapshot)
     policy_ref = await _source_policy_ref(session, snapshot.as_of)
     calendar = completed_xnys_calendar(snapshot.as_of, policy_ref)
-    benchmark_authority = await _canonical_spy_series(
+    benchmark_result = await _canonical_spy_series(
         session, snapshot.as_of, artifact_reader, policy_ref
     )
+    benchmark_authority = None if benchmark_result is None else benchmark_result[0]
+    benchmark_identity_input = None if benchmark_result is None else benchmark_result[1]
+    benchmark_identity_refs = () if benchmark_result is None else benchmark_result[2]
     benchmark = None if benchmark_authority is None else benchmark_authority.selected
     benchmark_input = None if benchmark_authority is None else benchmark_authority.canonical_input
     invalid_benchmark_sessions = (
@@ -98,7 +101,13 @@ async def assemble_diagnostic_evidence(
         benchmark_authority is not None and benchmark_authority.source_conflict
     )
     if benchmark_source_conflict and benchmark_authority is not None:
-        conflict_refs.extend((*benchmark_authority.relevant_refs, *calendar.binding.refs))
+        conflict_refs.extend(
+            (
+                *benchmark_authority.relevant_refs,
+                *benchmark_identity_refs,
+                *calendar.binding.refs,
+            )
+        )
     if benchmark is not None and invalid_benchmark_sessions:
         conflict_refs.extend((*benchmark[1].refs, *calendar.binding.refs))
         benchmark = None
@@ -116,9 +125,26 @@ async def assemble_diagnostic_evidence(
         series_authorities[position.instrument_id] = authority
         source_conflict = source_conflict or authority.source_conflict
         if authority.source_conflict:
-            conflict_refs.extend(authority.relevant_refs)
+            conflict_refs.extend(
+                (
+                    *authority.relevant_refs,
+                    *identities[position.instrument_id].authority_refs,
+                    *calendar.binding.refs,
+                )
+            )
         if authority.selected is not None:
-            selected[position.instrument_id] = authority.selected
+            series, binding = authority.selected
+            selected[position.instrument_id] = (
+                series,
+                binding.model_copy(
+                    update={
+                        "refs": combine_refs(
+                            binding.refs,
+                            identities[position.instrument_id].authority_refs,
+                        )
+                    }
+                ),
+            )
     trading_sessions = calendar.sessions
     adv20: dict[UUID, Decimal] = {}
     adv_bindings: dict[UUID, EvidenceBinding] = {}
@@ -156,6 +182,10 @@ async def assemble_diagnostic_evidence(
         market=market,
         canonical_inputs={
             "snapshot": snapshot_inputs,
+            "identities": tuple(
+                _identity_input(identity)
+                for _, identity in sorted(identities.items(), key=lambda item: str(item[0]))
+            ),
             "series": tuple(
                 authority.canonical_input
                 for _, authority in sorted(
@@ -163,6 +193,7 @@ async def assemble_diagnostic_evidence(
                 )
             ),
             "benchmark": benchmark_input,
+            "benchmark_identity": benchmark_identity_input,
             "benchmark_invalid_sessions": tuple(
                 session.isoformat() for session in invalid_benchmark_sessions
             ),
@@ -180,7 +211,7 @@ async def _canonical_spy_series(
     as_of: datetime,
     reader: ArtifactByteReader,
     policy_ref: EvidenceRef,
-) -> SeriesAuthority | None:
+) -> tuple[SeriesAuthority, dict[str, object], tuple[EvidenceRef, ...]] | None:
     row = (
         await session.execute(
             select(Instrument, InstrumentAlias)
@@ -201,7 +232,23 @@ async def _canonical_spy_series(
     ).one_or_none()
     if row is None:
         return None
-    return await select_authoritative_series(session, _SPY_ID, as_of, reader, policy_ref)
+    instrument, alias = row
+    identity_input = _db_identity_input(instrument, alias)
+    identity_refs = (
+        _db_ref("instrument", instrument.id, instrument.created_at, identity_input["instrument"]),
+        _db_ref("instrument-alias", alias.id, alias.created_at, identity_input["alias"]),
+    )
+    authority = await select_authoritative_series(session, _SPY_ID, as_of, reader, policy_ref)
+    if authority.selected is not None:
+        series, binding = authority.selected
+        authority = replace(
+            authority,
+            selected=(
+                series,
+                binding.model_copy(update={"refs": combine_refs(binding.refs, identity_refs)}),
+            ),
+        )
+    return authority, identity_input, identity_refs
 
 
 async def _source_policy_ref(session: AsyncSession, as_of: datetime) -> EvidenceRef:
@@ -324,6 +371,54 @@ def _position_input(row: PositionSnapshot) -> dict[str, object]:
         "quantity": str(row.quantity),
         "current_price": None if row.current_price is None else str(row.current_price),
         "provider_as_of": _canonical_value(row.provider_as_of),
+    }
+
+
+def _identity_input(identity: InstrumentIdentity) -> dict[str, object]:
+    return {
+        "instrument_id": str(identity.instrument_id),
+        "instrument_record_id": _canonical_value(identity.instrument_record_id),
+        "alias_record_id": _canonical_value(identity.alias_record_id),
+        "instrument_created_at": _canonical_value(identity.instrument_created_at),
+        "alias_created_at": _canonical_value(identity.alias_created_at),
+        "asset_type": identity.asset_type,
+        "exchange": identity.exchange,
+        "currency": identity.currency,
+        "risk_bucket": identity.risk_bucket,
+        "canonical_ticker": identity.canonical_ticker,
+        "restriction": identity.restriction,
+        "refs": tuple(
+            {
+                "source": ref.source,
+                "object_id": ref.object_id,
+                "available_at": _canonical_value(ref.available_at),
+                "content_hash": ref.content_hash,
+            }
+            for ref in identity.authority_refs
+        ),
+    }
+
+
+def _db_identity_input(instrument: Instrument, alias: InstrumentAlias) -> dict[str, object]:
+    return {
+        "instrument": {
+            "id": str(instrument.id),
+            "asset_type": instrument.asset_type,
+            "exchange": instrument.exchange,
+            "currency": instrument.currency,
+            "tick_size": None if instrument.tick_size is None else str(instrument.tick_size),
+            "risk_bucket": instrument.risk_bucket,
+            "created_at": _canonical_value(instrument.created_at),
+        },
+        "alias": {
+            "id": str(alias.id),
+            "instrument_id": str(alias.instrument_id),
+            "symbol": alias.symbol,
+            "alias_type": alias.alias_type,
+            "valid_from": _canonical_value(alias.valid_from),
+            "valid_to": _canonical_value(alias.valid_to),
+            "created_at": _canonical_value(alias.created_at),
+        },
     }
 
 

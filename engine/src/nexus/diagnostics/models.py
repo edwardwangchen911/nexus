@@ -83,7 +83,17 @@ class InstrumentIdentity(_DiagnosticModel):
     risk_bucket: str | None
     canonical_ticker: str | None
     restriction: Literal["STANDARD", "FOSUN_READ_ONLY", "UNRESOLVED"]
+    instrument_record_id: UUID | None = None
+    alias_record_id: UUID | None = None
+    instrument_created_at: datetime | None = None
+    alias_created_at: datetime | None = None
+    authority_refs: tuple[EvidenceRef, ...] = ()
     minted_by: Literal["instrument_repository"] = "instrument_repository"
+
+    @field_validator("instrument_created_at", "alias_created_at")
+    @classmethod
+    def _identity_time_utc(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else require_utc(value)
 
     @model_validator(mode="after")
     def _restriction_matches_identity(self) -> "InstrumentIdentity":
@@ -124,7 +134,12 @@ class InstrumentIdentity(_DiagnosticModel):
         )
 
     @classmethod
-    def unresolved(cls, instrument_id: UUID) -> "InstrumentIdentity":
+    def unresolved(
+        cls,
+        instrument_id: UUID,
+        *,
+        authority_refs: tuple[EvidenceRef, ...] = (),
+    ) -> "InstrumentIdentity":
         return cls(
             instrument_id=instrument_id,
             asset_type=None,
@@ -133,6 +148,7 @@ class InstrumentIdentity(_DiagnosticModel):
             risk_bucket=None,
             canonical_ticker=None,
             restriction="UNRESOLVED",
+            authority_refs=authority_refs,
         )
 
 

@@ -1,7 +1,7 @@
 """Atomic immutable storage and redacted retrieval for diagnostic reports."""
 
 import json
-from datetime import datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, localcontext
 from hashlib import sha256
 from typing import Literal, cast
@@ -171,8 +171,27 @@ async def load_instrument_identities(
     for instrument_id in instrument_ids:
         record = instruments_by_id.get(instrument_id)
         selected_alias = aliases_by_id.get(instrument_id)
+        refs: tuple[EvidenceRef, ...] = ()
+        if record is not None:
+            refs = (
+                _authority_ref(
+                    "instrument", record.id, record.created_at, _instrument_input(record)
+                ),
+            )
+        if selected_alias is not None:
+            refs = (
+                *refs,
+                _authority_ref(
+                    "instrument-alias",
+                    selected_alias.id,
+                    selected_alias.created_at,
+                    _alias_input(selected_alias),
+                ),
+            )
         if record is None or selected_alias is None:
-            result[instrument_id] = InstrumentIdentity.unresolved(instrument_id)
+            result[instrument_id] = InstrumentIdentity.unresolved(
+                instrument_id, authority_refs=refs
+            )
             continue
         restriction = cast(
             Literal["STANDARD", "FOSUN_READ_ONLY", "UNRESOLVED"],
@@ -191,6 +210,11 @@ async def load_instrument_identities(
             risk_bucket=record.risk_bucket,
             canonical_ticker=selected_alias.symbol,
             restriction=restriction,
+            instrument_record_id=record.id,
+            alias_record_id=selected_alias.id,
+            instrument_created_at=record.created_at,
+            alias_created_at=selected_alias.created_at,
+            authority_refs=refs,
         )
     return result
 
@@ -339,6 +363,59 @@ def _evidence(record: PortfolioDiagnosticEvidenceRefRecord) -> EvidenceRef:
     )
 
 
+def _authority_ref(
+    kind: str, record_id: UUID, available_at: datetime, payload: object
+) -> EvidenceRef:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=_authority_json,
+    ).encode()
+    return EvidenceRef(
+        source="nexus_db",
+        object_id=f"{kind}:{record_id}",
+        available_at=available_at,
+        location=f"db://{kind}/{record_id}",
+        content_hash=sha256(encoded).hexdigest(),
+    )
+
+
+def _instrument_input(record: Instrument) -> dict[str, object]:
+    return {
+        "id": str(record.id),
+        "asset_type": record.asset_type,
+        "exchange": record.exchange,
+        "currency": record.currency,
+        "tick_size": None if record.tick_size is None else str(record.tick_size),
+        "risk_bucket": record.risk_bucket,
+        "created_at": _authority_json(record.created_at),
+    }
+
+
+def _alias_input(record: InstrumentAlias) -> dict[str, object]:
+    return {
+        "id": str(record.id),
+        "instrument_id": str(record.instrument_id),
+        "symbol": record.symbol,
+        "alias_type": record.alias_type,
+        "valid_from": record.valid_from.isoformat(),
+        "valid_to": None if record.valid_to is None else record.valid_to.isoformat(),
+        "created_at": _authority_json(record.created_at),
+    }
+
+
+def _authority_json(value: object) -> object:
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal | UUID):
+        return str(value)
+    raise TypeError(f"unsupported identity authority value: {type(value).__name__}")
+
+
 def _reports_equivalent(
     stored: PortfolioDiagnosticReport, replay: PortfolioDiagnosticReport
 ) -> bool:
@@ -356,8 +433,7 @@ def _reports_equivalent(
             left.diagnostic_code != right.diagnostic_code
             or _stored_decimal(left.metric_value) != _stored_decimal(right.metric_value)
             or left.unit != right.unit
-            or _stored_decimal(left.reference_limit)
-            != _stored_decimal(right.reference_limit)
+            or _stored_decimal(left.reference_limit) != _stored_decimal(right.reference_limit)
             or left.policy_scope != right.policy_scope
             or left.severity != right.severity
             or left.actionability != right.actionability
@@ -376,7 +452,5 @@ def _report_content_hash(
         "diagnostic_input_hash": record.diagnostic_input_hash,
         "report": report.model_dump(mode="json"),
     }
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode()
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     return sha256(encoded).hexdigest()
