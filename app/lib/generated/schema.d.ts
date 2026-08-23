@@ -21,6 +21,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/broker-sync-runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Broker Sync Run */
+        post: operations["createBrokerSyncRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/broker-sync-runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Broker Sync Run */
+        get: operations["getBrokerSyncRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/integrations": {
         parameters: {
             query?: never;
@@ -101,6 +135,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/portfolios": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Portfolios */
+        get: operations["listPortfolios"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/portfolios/{portfolio_id}/snapshots/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Latest Portfolio Snapshot */
+        get: operations["getLatestPortfolioSnapshot"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/system-status": {
         parameters: {
             query?: never;
@@ -149,6 +217,65 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** BrokerSyncCreateRequest */
+        BrokerSyncCreateRequest: {
+            /**
+             * Portfolio Id
+             * Format: uuid
+             */
+            portfolio_id: string;
+        };
+        /** BrokerSyncRunEnvelope */
+        BrokerSyncRunEnvelope: {
+            data: components["schemas"]["BrokerSyncRunResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** BrokerSyncRunResponse */
+        BrokerSyncRunResponse: {
+            /**
+             * Accepted At
+             * Format: date-time
+             */
+            accepted_at: string;
+            /** Attempt Count */
+            attempt_count: number;
+            /**
+             * Broker Sync Run Id
+             * Format: uuid
+             */
+            broker_sync_run_id: string;
+            /**
+             * Cash Flow Quality
+             * @enum {string}
+             */
+            cash_flow_quality: "PASS" | "PARTIAL" | "NOT_RUN";
+            /** Completed At */
+            completed_at: string | null;
+            /** Failure Category */
+            failure_category: "SYNC_FAILED" | null;
+            /**
+             * Portfolio Id
+             * Format: uuid
+             */
+            portfolio_id: string;
+            status: components["schemas"]["SyncRunStatus"];
+            /**
+             * Trigger Kind
+             * @enum {string}
+             */
+            trigger_kind: "MANUAL" | "AUTOMATIC";
+        };
+        /** CashBucketResponse */
+        CashBucketResponse: {
+            /** Available Cash */
+            available_cash: string;
+            /** Cash Balance */
+            cash_balance: string;
+            currency: components["schemas"]["CurrencyCode"];
+            /** Provider As Of */
+            provider_as_of: string | null;
+        };
+        CurrencyCode: string;
         /**
          * ErrorCode
          * @description Client-visible error codes defined by the API contract.
@@ -333,6 +460,152 @@ export interface components {
              */
             request_id: string;
         };
+        /** OpenOrderResponse */
+        OpenOrderResponse: {
+            /**
+             * Broker Order Snapshot Id
+             * Format: uuid
+             */
+            broker_order_snapshot_id: string;
+            currency: components["schemas"]["CurrencyCode"];
+            /** Filled Quantity */
+            filled_quantity: string;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Price */
+            price: string | null;
+            /** Quantity */
+            quantity: string;
+            /**
+             * Read Only
+             * @default true
+             * @constant
+             */
+            read_only: true;
+            /** Side */
+            side: string;
+            /** Status */
+            status: string;
+            /** Symbol */
+            symbol?: string | null;
+            /** Updated At */
+            updated_at: string | null;
+        };
+        /** @enum {string} */
+        PortfolioKind: "real_read_only" | "internal_paper" | "shadow";
+        /** PortfolioListItemResponse */
+        PortfolioListItemResponse: {
+            /**
+             * Coverage Scope
+             * @default broker_account
+             * @constant
+             */
+            coverage_scope: "broker_account";
+            /**
+             * Kind
+             * @default real_read_only
+             * @constant
+             */
+            kind: "real_read_only";
+            last_sync_run_status: components["schemas"]["SyncRunStatus"] | null;
+            /** Latest Snapshot As Of */
+            latest_snapshot_as_of: string | null;
+            latest_snapshot_status: components["schemas"]["SnapshotStatus"] | null;
+            /** Name */
+            name: string;
+            /** Original Currencies */
+            original_currencies: components["schemas"]["CurrencyCode"][];
+            /**
+             * Portfolio Id
+             * Format: uuid
+             */
+            portfolio_id: string;
+            /** Provider */
+            provider: string;
+        };
+        /** PortfolioPageEnvelope */
+        PortfolioPageEnvelope: {
+            data: components["schemas"]["PortfolioPageResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** PortfolioPageResponse */
+        PortfolioPageResponse: {
+            /** Items */
+            items: components["schemas"]["PortfolioListItemResponse"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** PortfolioSnapshotEnvelope */
+        PortfolioSnapshotEnvelope: {
+            data: components["schemas"]["PortfolioSnapshotResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** PortfolioSnapshotResponse */
+        PortfolioSnapshotResponse: {
+            /** As Of */
+            as_of: string | null;
+            /** Cash */
+            cash: components["schemas"]["CashBucketResponse"][];
+            /** Converted View */
+            converted_view?: null;
+            /**
+             * Coverage Scope
+             * @default broker_account
+             * @constant
+             */
+            coverage_scope: "broker_account";
+            /** Open Orders */
+            open_orders: components["schemas"]["OpenOrderResponse"][];
+            /**
+             * Portfolio Id
+             * Format: uuid
+             */
+            portfolio_id: string;
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+            /** Positions */
+            positions: components["schemas"]["PositionResponse"][];
+            status: components["schemas"]["SnapshotStatus"];
+        };
+        /** PositionResponse */
+        PositionResponse: {
+            /** Available Quantity */
+            available_quantity: string;
+            /** Avg Cost */
+            avg_cost: string | null;
+            currency: components["schemas"]["CurrencyCode"];
+            /** Current Price */
+            current_price: string | null;
+            /** Diluted Cost */
+            diluted_cost: string | null;
+            /** Exchange */
+            exchange: string;
+            /** Frozen Quantity */
+            frozen_quantity: string;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Provider As Of */
+            provider_as_of: string | null;
+            /** Quantity */
+            quantity: string;
+            /**
+             * Read Only
+             * @default true
+             * @constant
+             */
+            read_only: true;
+            /** Symbol */
+            symbol?: string | null;
+        };
         /**
          * SelectedMarketSeriesResponse
          * @description At most one repository-selected historical series in a market page.
@@ -363,6 +636,8 @@ export interface components {
             /** Source */
             source: string | null;
         };
+        /** @enum {string} */
+        SnapshotStatus: "READY" | "PARTIAL" | "STALE" | "RECONCILIATION_REQUIRED";
         /**
          * SuccessMetaResponse
          * @description The stable public success metadata shape.
@@ -385,6 +660,8 @@ export interface components {
              */
             schema_version: "1";
         };
+        /** @enum {string} */
+        SyncRunStatus: "ACTIVE" | "READY" | "PARTIAL" | "STALE" | "RECONCILIATION_REQUIRED" | "FAILED";
         /** WatchlistMembershipEnvelope */
         WatchlistMembershipEnvelope: {
             data: components["schemas"]["WatchlistMembershipResponse"];
@@ -430,6 +707,128 @@ export interface operations {
                     "application/json": {
                         [key: string]: string;
                     };
+                };
+            };
+        };
+    };
+    createBrokerSyncRun: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BrokerSyncCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description The read-only broker sync run was admitted or joined. */
+            202: {
+                headers: {
+                    /** @description Same-origin BFF status resource. */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrokerSyncRunEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getBrokerSyncRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrokerSyncRunEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
                 };
             };
         };
@@ -656,6 +1055,124 @@ export interface operations {
             };
             /** @description Stable NEXUS error envelope. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    listPortfolios: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                kind?: components["schemas"]["PortfolioKind"] | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortfolioPageEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getLatestPortfolioSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                portfolio_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortfolioSnapshotEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
