@@ -44,6 +44,22 @@ def upgrade() -> None:
         sa.UniqueConstraint("key", "version", name="uq_cost_policies_key_version"),
     )
     op.create_table(
+        "baseline_selection_authorities",
+        sa.Column("id", _UUID, primary_key=True),
+        sa.Column("policy_version", sa.String(32), nullable=False),
+        sa.Column("data_snapshot_id", _UUID, nullable=False),
+        sa.Column("decision_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("available_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("evidence_refs", postgresql.JSONB(), nullable=False),
+        sa.Column("candidates", postgresql.JSONB(), nullable=False),
+        sa.Column("selected_instrument_ids", postgresql.JSONB(), nullable=False),
+        sa.Column("evidence_hash", sa.String(64), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.ForeignKeyConstraint(["data_snapshot_id"], ["data_snapshots.id"]),
+        sa.CheckConstraint("policy_version = 'baseline_v1'", name="policy_version_allowed"),
+        sa.CheckConstraint("available_at <= decision_at", name="available_before_decision"),
+    )
+    op.create_table(
         "optimization_admission_authorities",
         sa.Column("id", _UUID, primary_key=True),
         sa.Column("portfolio_snapshot_id", _UUID, nullable=False),
@@ -61,6 +77,7 @@ def upgrade() -> None:
         sa.Column("requires_fx", sa.Boolean(), nullable=False),
         sa.Column("cost_complete", sa.Boolean(), nullable=False),
         sa.Column("authority_stale", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("selection_authority_id", _UUID, nullable=True),
         sa.Column("portfolio_scope", sa.String(30), nullable=False, server_default="real_read_only"),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
@@ -71,6 +88,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["source_policy_id"], ["source_policies.id"]),
         sa.ForeignKeyConstraint(["optimizer_policy_id"], ["optimization_policies.id"]),
         sa.ForeignKeyConstraint(["cost_policy_id"], ["cost_policies.id"]),
+        sa.ForeignKeyConstraint(["selection_authority_id"], ["baseline_selection_authorities.id"]),
         sa.UniqueConstraint(
             "portfolio_snapshot_id",
             "data_snapshot_id",
@@ -87,6 +105,7 @@ def upgrade() -> None:
         sa.Column("version", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("policy_id", _UUID, nullable=False),
         sa.Column("portfolio_scope", sa.String(30), nullable=False, server_default="real_read_only"),
+        sa.Column("selection_authority_id", _UUID, nullable=True),
         sa.Column("diagnostic_report_id", _UUID, nullable=False),
         sa.Column("data_snapshot_id", _UUID, nullable=False),
         sa.Column("source_policy_id", _UUID, nullable=False),
@@ -109,6 +128,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["data_snapshot_id"], ["data_snapshots.id"]),
         sa.ForeignKeyConstraint(["source_policy_id"], ["source_policies.id"]),
         sa.ForeignKeyConstraint(["cost_policy_id"], ["cost_policies.id"]),
+        sa.ForeignKeyConstraint(["selection_authority_id"], ["baseline_selection_authorities.id"]),
         sa.UniqueConstraint("id", "baseline_portfolio_snapshot_id", name="uq_optimization_groups_id_baseline"),
         sa.CheckConstraint("portfolio_scope IN ('real_read_only','internal_paper','fosun_simulation')", name="portfolio_scope_allowed"),
         sa.CheckConstraint(
@@ -213,6 +233,7 @@ def upgrade() -> None:
     for table in (
         "optimization_policies",
         "cost_policies",
+        "baseline_selection_authorities",
         "optimization_admission_authorities",
         "optimization_proposal_groups",
         "optimization_proposals",
@@ -225,6 +246,7 @@ def upgrade() -> None:
     for table in (
         "optimization_policies",
         "cost_policies",
+        "baseline_selection_authorities",
         "optimization_admission_authorities",
         "optimization_proposals",
         "proposal_positions",
@@ -242,6 +264,7 @@ def downgrade() -> None:
         "optimization_proposals",
         "optimization_proposal_groups",
         "optimization_admission_authorities",
+        "baseline_selection_authorities",
         "cost_policies",
         "optimization_policies",
     ):
@@ -269,5 +292,6 @@ def downgrade() -> None:
     op.drop_table("optimization_proposals")
     op.drop_table("optimization_proposal_groups")
     op.drop_table("optimization_admission_authorities")
+    op.drop_table("baseline_selection_authorities")
     op.drop_table("cost_policies")
     op.drop_table("optimization_policies")

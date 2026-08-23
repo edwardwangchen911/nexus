@@ -47,6 +47,21 @@ class CostPolicyRecord(ImmutableCreatedAt, Base):
     available_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
+class BaselineSelectionAuthorityRecord(ImmutableCreatedAt, Base):
+    """Frozen baseline_v1 candidates and selection, independent of research prose."""
+
+    __tablename__ = "baseline_selection_authorities"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    policy_version: Mapped[str] = mapped_column(String(32))
+    data_snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("data_snapshots.id"))
+    decision_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    evidence_refs: Mapped[list[str]] = mapped_column(JSONB)
+    candidates: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
+    selected_instrument_ids: Mapped[list[str]] = mapped_column(JSONB)
+    evidence_hash: Mapped[str] = mapped_column(String(64))
+
+
 class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
     """Frozen upstream proof required before admitting a proposal-construction job."""
 
@@ -79,6 +94,9 @@ class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
     requires_fx: Mapped[bool] = mapped_column(Boolean)
     cost_complete: Mapped[bool] = mapped_column(Boolean)
     authority_stale: Mapped[bool] = mapped_column(Boolean, default=False)
+    selection_authority_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("baseline_selection_authorities.id")
+    )
     portfolio_scope: Mapped[str] = mapped_column(String(30), default="real_read_only")
 
 
@@ -100,6 +118,9 @@ class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
         ForeignKey("portfolio_snapshots.id")
     )
     portfolio_scope: Mapped[str] = mapped_column(String(30), default="real_read_only")
+    selection_authority_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("baseline_selection_authorities.id")
+    )
     status: Mapped[str] = mapped_column(String(20), default="draft")
     version: Mapped[int] = mapped_column(Integer, default=0)
     policy_id: Mapped[UUID] = mapped_column(ForeignKey("optimization_policies.id"))
