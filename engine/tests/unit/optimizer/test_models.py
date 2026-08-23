@@ -186,3 +186,51 @@ def test_research_can_veto_a_deterministic_addition_but_cannot_create_one() -> N
     )
     strategy = group.proposals[2]
     assert next(item for item in strategy.positions if item.instrument_id == candidate).target_weight == 0
+
+    existing_authority = authority.__class__(
+        policy_version="baseline_v1",
+        decision_at=clock,
+        data_snapshot_id=data_snapshot,
+        available_at=clock,
+        evidence_refs=("selection:fixture",),
+        candidates=(SelectionCandidate(existing, ("candidate:fixture",)),),
+        selected_instrument_ids=(existing,),
+        evidence_hash="a" * 64,
+    )
+    reduce_intent = intent.model_copy(
+        update={
+            "instrument_id": existing,
+            "stance": "reduce_candidate",
+            "exposure_action": "reduce",
+        }
+    )
+    reduced = build_proposal_group(
+        snapshot,
+        report,
+        (reduce_intent,),
+        OptimizationPolicy.v1(),
+        selection_authority=existing_authority,
+    ).proposals[2]
+    assert reduced.positions[0].target_weight == Decimal("0")
+    assert reduced.cash_target_weight == Decimal("1")
+
+    cash_snapshot = snapshot.model_copy(
+        update={
+            "cash": (
+                CashBalance(currency="USD", cash_balance="0.4", available_cash="0.4"),
+            )
+        }
+    )
+    incomplete = intent.model_copy(
+        update={"instrument_id": existing, "quality_status": "partial"}
+    )
+    baseline = build_proposal_group(
+        cash_snapshot,
+        report,
+        (incomplete,),
+        OptimizationPolicy.v1(),
+        selection_authority=existing_authority,
+    ).proposals[2]
+    assert baseline.strategy_evidence_complete is False
+    assert baseline.positions[0].target_weight == baseline.positions[0].current_weight
+    assert baseline.cash_target_weight == Decimal("0.4") / Decimal("1.4")

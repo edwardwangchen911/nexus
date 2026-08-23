@@ -233,6 +233,7 @@ def build_proposal_group(
     from nexus.optimizer.strategy_target import build_strategy_target
 
     strategy_result = build_strategy_target(current_weights, authority=selection_authority)
+    effective_selection = selection_authority
     if research:
         if selection_authority is None:
             raise ValueError("research cannot create selection authority")
@@ -252,17 +253,21 @@ def build_proposal_group(
             intent.quality_status != "complete" or intent.evidence_audit != "complete"
             for intent in research
         ):
+            effective_selection = None
             strategy_result = build_strategy_target(current_weights, authority=None)
         else:
             current_by_id = dict(current_weights)
             controlled_targets = tuple(
                 (
                     instrument_id,
-                    min(target, current_by_id.get(instrument_id, _ZERO))
+                    _ZERO
                     if (intent := by_instrument.get(instrument_id)) is not None
+                    and intent.stance == "reduce_candidate"
+                    else min(target, current_by_id.get(instrument_id, _ZERO))
+                    if intent is not None
                     and (
                         intent.exposure_action != "eligible_for_increase"
-                        or intent.stance in {"reduce_candidate", "watch"}
+                        or intent.stance == "watch"
                     )
                     else target,
                 )
@@ -274,7 +279,7 @@ def build_proposal_group(
                 - sum((target for _, target in controlled_targets), _ZERO),
                 evidence_complete=True,
             )
-    if selection_authority is None:
+    if effective_selection is None:
         strategy_positions = current
         strategy_cash = cash_weight
     else:
