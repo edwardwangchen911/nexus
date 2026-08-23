@@ -40,3 +40,27 @@ def test_sync_and_snapshot_models_declare_active_and_stale_invariants() -> None:
         constraint.name for constraint in PortfolioSnapshotRecord.__table__.constraints
     }
     assert "ck_portfolio_snapshots_stale_source_required" in constraint_names
+
+
+@pytest.mark.asyncio
+async def test_sync_snapshot_schema_migration_is_runnable(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        tables = set(
+            await session.scalars(
+                text(
+                    "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+                    "AND tablename IN ('broker_sync_runs', 'portfolio_snapshots', "
+                    "'cash_snapshots', 'position_snapshots', 'broker_order_snapshots')"
+                )
+            )
+        )
+    assert tables == {
+        "broker_sync_runs",
+        "portfolio_snapshots",
+        "cash_snapshots",
+        "position_snapshots",
+        "broker_order_snapshots",
+    }
