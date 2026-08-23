@@ -3,7 +3,7 @@
 import json
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import ConfigDict, ValidationError
@@ -120,9 +120,9 @@ def validate_xnys_calendar_adoption(
     ).hexdigest()
     return XnysCalendarAdoption(
         row_id=record.id,
-        key=record.key,
-        version=record.version,
-        schema_version=record.schema_version,
+        key=cast(Literal["xnys_calendar_adoption"], record.key),
+        version=cast(Literal["xnys_exchange_calendars_v1"], record.version),
+        schema_version=cast(Literal["1"], record.schema_version),
         payload=payload,
         created_at=record.created_at,
         content_hash=content_hash,
