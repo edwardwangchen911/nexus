@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from uuid import UUID
@@ -37,6 +37,10 @@ def test_parser_verifies_hash_and_reconstructs_typed_parquet_series() -> None:
 
     with pytest.raises(ValueError, match="artifact hash"):
         parse_price_series_artifact(payload + b"tampered", artifact, manifest, INSTRUMENT_ID)
+
+    manifest.start_at = manifest.start_at - timedelta(days=1)
+    with pytest.raises(ValueError, match="manifest range"):
+        parse_price_series_artifact(payload, artifact, manifest, INSTRUMENT_ID)
 
 
 def _records(payload: bytes) -> tuple[DataArtifact, PriceSeriesManifest]:

@@ -40,6 +40,13 @@ def parse_price_series_artifact(
     if len(rows) != manifest.row_count or not rows:
         raise ValueError("diagnostic artifact row count is invalid")
     bars = tuple(_price_bar(row, expected_instrument_id) for row in rows)
+    observed = tuple(bar.observed_at for bar in bars)
+    if (
+        any(value is None for value in observed)
+        or manifest.start_at != min(value for value in observed if value is not None)
+        or manifest.end_at != max(value for value in observed if value is not None)
+    ):
+        raise ValueError("diagnostic artifact manifest range is invalid")
     mode = _provider_mode(manifest.source, manifest.delivery_mode)
     return (
         PriceSeries(
