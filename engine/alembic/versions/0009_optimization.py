@@ -163,13 +163,16 @@ def upgrade() -> None:
         "IF NEW.status = 'shadowing' AND (NOT OLD.baseline_ready OR NOT OLD.diagnostic_complete OR OLD.source_conflict OR OLD.partial OR OLD.requires_fx OR NOT OLD.cost_complete OR NOT EXISTS (SELECT 1 FROM optimization_proposals p WHERE p.proposal_group_id = OLD.id AND p.variant = 'strategy_target' AND p.strategy_evidence_complete AND NOT p.analysis_only)) THEN RAISE EXCEPTION 'PROPOSAL_NOT_EXECUTABLE' USING ERRCODE = '23514'; END IF; RETURN NEW; END; $$"
     )
     op.execute(
-        "CREATE FUNCTION nexus_require_three_optimization_variants() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE group_ref uuid; variant_count integer; BEGIN IF TG_TABLE_NAME = 'optimization_proposal_groups' THEN group_ref := NEW.id; ELSE group_ref := COALESCE(NEW.proposal_group_id, OLD.proposal_group_id); END IF; SELECT count(*) INTO variant_count FROM optimization_proposals WHERE proposal_group_id = group_ref; IF variant_count <> 3 THEN RAISE EXCEPTION 'optimization group requires exactly three variants' USING ERRCODE = '23514'; END IF; RETURN NULL; END; $$"
+        "CREATE FUNCTION nexus_require_three_optimization_variants() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE group_ref uuid; variant_count integer; comparison_count integer; BEGIN IF TG_TABLE_NAME = 'optimization_proposal_groups' THEN group_ref := NEW.id; ELSIF TG_TABLE_NAME = 'proposal_comparisons' THEN SELECT p.proposal_group_id INTO group_ref FROM optimization_proposals p WHERE p.id = COALESCE(NEW.proposal_id, OLD.proposal_id); ELSE group_ref := COALESCE(NEW.proposal_group_id, OLD.proposal_group_id); END IF; SELECT count(*) INTO variant_count FROM optimization_proposals WHERE proposal_group_id = group_ref; SELECT count(*) INTO comparison_count FROM proposal_comparisons c JOIN optimization_proposals p ON p.id = c.proposal_id WHERE p.proposal_group_id = group_ref; IF variant_count <> 3 OR comparison_count <> 3 THEN RAISE EXCEPTION 'optimization group requires exactly three variants and comparisons' USING ERRCODE = '23514'; END IF; RETURN NULL; END; $$"
     )
     op.execute(
         "CREATE CONSTRAINT TRIGGER trg_optimization_groups_three_variants AFTER INSERT ON optimization_proposal_groups DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION nexus_require_three_optimization_variants()"
     )
     op.execute(
         "CREATE CONSTRAINT TRIGGER trg_optimization_proposals_three_variants AFTER INSERT OR DELETE ON optimization_proposals DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION nexus_require_three_optimization_variants()"
+    )
+    op.execute(
+        "CREATE CONSTRAINT TRIGGER trg_proposal_comparisons_three_variants AFTER INSERT OR DELETE ON proposal_comparisons DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION nexus_require_three_optimization_variants()"
     )
     op.execute(
         "CREATE TRIGGER trg_optimization_groups_lifecycle BEFORE UPDATE ON optimization_proposal_groups FOR EACH ROW EXECUTE FUNCTION nexus_optimization_group_lifecycle()"
@@ -207,6 +210,7 @@ def downgrade() -> None:
         "optimization_policies",
     ):
         op.execute(f"DROP TRIGGER trg_{table}_created_at_immutable ON {table}")
+    op.execute("DROP TRIGGER trg_proposal_comparisons_three_variants ON proposal_comparisons")
     op.execute("DROP TRIGGER trg_optimization_proposals_three_variants ON optimization_proposals")
     op.execute("DROP TRIGGER trg_optimization_groups_lifecycle ON optimization_proposal_groups")
     op.execute(
