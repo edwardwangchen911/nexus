@@ -34,6 +34,7 @@ const LOAD_TIMEOUT_MS = 10_000;
 const SYNC_CONFIRM_TIMEOUT_MS = 35_000;
 const MAX_PORTFOLIO_PAGES = 10;
 const SYNC_POLL_MS = 5_000;
+const SYNC_LOOKUP_ERROR = "无法刷新同步详情。冻结组合快照保持不变。";
 
 export default function PortfolioPage(): React.ReactElement {
   const [state, setState] = useState<DataStateKind>("loading");
@@ -44,6 +45,7 @@ export default function PortfolioPage(): React.ReactElement {
   const [unresolvedSync, setUnresolvedSync] = useState<PendingSync | null>(null);
   const [trackedSync, setTrackedSync] = useState<TrackedSync | null>(null);
   const [syncRefreshing, setSyncRefreshing] = useState(false);
+  const [syncPollRevision, setSyncPollRevision] = useState(0);
   const [notice, setNotice] = useState<Notice>(null);
   const loadVersion = useRef(0);
   const syncInFlight = useRef(false);
@@ -51,6 +53,10 @@ export default function PortfolioPage(): React.ReactElement {
   const snapshotRef = useRef<PortfolioSnapshot | null>(null);
   const selectedPortfolioIdRef = useRef<string | null>(null);
   const trackedSyncRef = useRef<TrackedSync | null>(null);
+  const unresolvedByPortfolio = useRef(new Map<string, PendingSync>());
+  const trackedByPortfolio = useRef(new Map<string, TrackedSync>());
+  const syncLookupVersion = useRef(0);
+  const syncLookupsInFlight = useRef(new Set<string>());
 
   const loadSnapshot = useCallback(async (portfolioId: string, version: number) => {
     const response = await fetchWithTimeout(`/api/v1/portfolios/${encodeURIComponent(portfolioId)}/snapshots/latest`);
@@ -114,6 +120,11 @@ export default function PortfolioPage(): React.ReactElement {
         snapshotRef.current = null;
         setSnapshot(null);
         setState("loading");
+        syncLookupVersion.current += 1;
+        const pending = unresolvedByPortfolio.current.get(selected) ?? null;
+        const tracked = trackedByPortfolio.current.get(selected) ?? null;
+        setUnresolvedSync(pending);
+        trackedSyncRef.current = tracked; setTrackedSync(tracked); setSyncRefreshing(false);
       }
       selectedPortfolioIdRef.current = selected; setSelectedPortfolioId(selected);
       await loadSnapshot(selected, version);
@@ -129,17 +140,38 @@ export default function PortfolioPage(): React.ReactElement {
   const refreshSyncRun = useCallback(async () => {
     const tracked = trackedSyncRef.current;
     if (!tracked || tracked.run.portfolio_id !== selectedPortfolioIdRef.current) return;
+    const runId = tracked.run.broker_sync_run_id;
+    if (syncLookupsInFlight.current.has(runId)) return;
+    syncLookupsInFlight.current.add(runId);
+    const version = syncLookupVersion.current + 1;
+    syncLookupVersion.current = version;
     setSyncRefreshing(true);
     try {
       const response = await fetchWithTimeout(tracked.location);
       if (!response.ok) throw new Error("sync lookup failed");
       const payload = await response.json() as { data?: BrokerSyncRun };
       const updated = validateSyncRun(payload.data, tracked);
-      if (!updated || tracked.run.portfolio_id !== selectedPortfolioIdRef.current) throw new Error("sync lookup mismatch");
+      const current = trackedByPortfolio.current.get(tracked.run.portfolio_id);
+      if (version !== syncLookupVersion.current || current?.run.broker_sync_run_id !== tracked.run.broker_sync_run_id || tracked.run.portfolio_id !== selectedPortfolioIdRef.current) return;
+      if (!updated) throw new Error("sync lookup mismatch");
+      trackedByPortfolio.current.set(tracked.run.portfolio_id, updated);
       trackedSyncRef.current = updated; setTrackedSync(updated);
+      setNotice((currentNotice) => currentNotice?.kind === "error" && currentNotice.text === SYNC_LOOKUP_ERROR ? null : currentNotice);
     } catch {
-      setNotice({ kind: "error", text: "无法刷新同步详情。冻结组合快照保持不变。" });
-    } finally { setSyncRefreshing(false); }
+      const current = trackedByPortfolio.current.get(tracked.run.portfolio_id);
+      if (version !== syncLookupVersion.current || current?.run.broker_sync_run_id !== tracked.run.broker_sync_run_id || tracked.run.portfolio_id !== selectedPortfolioIdRef.current) return;
+      setNotice({ kind: "error", text: SYNC_LOOKUP_ERROR });
+      setSyncPollRevision((value) => value + 1);
+    } finally {
+      const current = trackedByPortfolio.current.get(tracked.run.portfolio_id);
+      const shouldRearm = version !== syncLookupVersion.current
+        && current?.run.broker_sync_run_id === runId
+        && current.run.status === "ACTIVE"
+        && tracked.run.portfolio_id === selectedPortfolioIdRef.current;
+      syncLookupsInFlight.current.delete(runId);
+      if (version === syncLookupVersion.current) setSyncRefreshing(false);
+      else if (shouldRearm) setSyncPollRevision((value) => value + 1);
+    }
   }, []);
 
   useEffect(() => {
@@ -151,15 +183,17 @@ export default function PortfolioPage(): React.ReactElement {
     if (trackedSync?.run.status !== "ACTIVE") return;
     const timer = globalThis.setTimeout(() => void refreshSyncRun(), SYNC_POLL_MS);
     return () => globalThis.clearTimeout(timer);
-  }, [refreshSyncRun, trackedSync]);
+  }, [refreshSyncRun, syncPollRevision, trackedSync]);
 
   async function selectPortfolio(portfolioId: string): Promise<void> {
     const version = loadVersion.current + 1;
     loadVersion.current = version;
     selectedPortfolioIdRef.current = portfolioId; snapshotRef.current = null;
-    if (trackedSyncRef.current?.run.portfolio_id !== portfolioId) {
-      trackedSyncRef.current = null; setTrackedSync(null);
-    }
+    syncLookupVersion.current += 1;
+    const pending = unresolvedByPortfolio.current.get(portfolioId) ?? null;
+    const tracked = trackedByPortfolio.current.get(portfolioId) ?? null;
+    setUnresolvedSync(pending);
+    trackedSyncRef.current = tracked; setTrackedSync(tracked); setSyncRefreshing(false);
     setSelectedPortfolioId(portfolioId); setSnapshot(null); setState("loading"); setNotice(null);
     try { await loadSnapshot(portfolioId, version); }
     catch { if (version === loadVersion.current) { setState("error"); setNotice({ kind: "error", text: "无法读取该组合的冻结快照。" }); } }
@@ -191,30 +225,49 @@ export default function PortfolioPage(): React.ReactElement {
         if (!response.ok) {
           if (payload?.error?.code === "INTERNAL_ERROR") {
             if (attempt === 0) continue;
-            setUnresolvedSync(pending);
-            setNotice({ kind: "error", text: "同步请求结果仍未知。当前组合的新同步保持锁定；请使用同一幂等键继续确认。" });
+            unresolvedByPortfolio.current.set(pending.portfolioId, pending);
+            if (pending.portfolioId === selectedPortfolioIdRef.current) {
+              setUnresolvedSync(pending);
+              setNotice({ kind: "error", text: "同步请求结果仍未知。当前组合的新同步保持锁定；请使用同一幂等键继续确认。" });
+            }
             return;
           }
-          setUnresolvedSync(null);
-          setNotice({ kind: "error", text: syncErrorMessage(payload?.error?.code, response.status, response.headers.get("retry-after")) });
+          unresolvedByPortfolio.current.delete(pending.portfolioId);
+          if (pending.portfolioId === selectedPortfolioIdRef.current) {
+            setUnresolvedSync(null);
+            setNotice({ kind: "error", text: syncErrorMessage(payload?.error?.code, response.status, response.headers.get("retry-after")) });
+          }
           return;
         }
         const accepted = acceptedSync(payload, response.headers.get("location"), pending);
         if (!accepted) {
-          setUnresolvedSync(pending);
-          setNotice({ kind: "error", text: "同步请求结果仍未知。当前组合的新同步保持锁定；请使用同一幂等键继续确认。" });
+          unresolvedByPortfolio.current.set(pending.portfolioId, pending);
+          if (pending.portfolioId === selectedPortfolioIdRef.current) {
+            setUnresolvedSync(pending);
+            setNotice({ kind: "error", text: "同步请求结果仍未知。当前组合的新同步保持锁定；请使用同一幂等键继续确认。" });
+          }
           return;
         }
-        setUnresolvedSync(null);
-        trackedSyncRef.current = accepted; setTrackedSync(accepted);
-        setNotice({ kind: "success", text: attempt === 0
-          ? "复星只读同步任务已登记。当前快照不会被静默覆盖。"
-          : "首次结果未知；已用同一幂等键确认同步任务。" });
+        unresolvedByPortfolio.current.delete(pending.portfolioId);
+        trackedByPortfolio.current.set(pending.portfolioId, accepted);
+        if (pending.portfolioId === selectedPortfolioIdRef.current) {
+          syncLookupVersion.current += 1;
+          setUnresolvedSync(null);
+          trackedSyncRef.current = accepted; setTrackedSync(accepted);
+        }
+        if (pending.portfolioId === selectedPortfolioIdRef.current) {
+          setNotice({ kind: "success", text: attempt === 0
+            ? "复星只读同步任务已登记。当前快照不会被静默覆盖。"
+            : "首次结果未知；已用同一幂等键确认同步任务。" });
+        }
         return;
         } catch {
           if (attempt === 0) continue;
-          setUnresolvedSync(pending);
-          setNotice({ kind: "error", text: "同步请求结果仍未知。当前组合的新同步保持锁定；请使用同一幂等键继续确认。" });
+          unresolvedByPortfolio.current.set(pending.portfolioId, pending);
+          if (pending.portfolioId === selectedPortfolioIdRef.current) {
+            setUnresolvedSync(pending);
+            setNotice({ kind: "error", text: "同步请求结果仍未知。当前组合的新同步保持锁定；请使用同一幂等键继续确认。" });
+          }
         }
       }
     } finally {
@@ -287,6 +340,7 @@ function acceptedSync(payload: unknown, location: string | null, pending: Pendin
 
 function validateSyncRun(value: BrokerSyncRun | undefined, tracked: TrackedSync): TrackedSync | null {
   if (!value || value.broker_sync_run_id !== tracked.run.broker_sync_run_id || value.portfolio_id !== tracked.run.portfolio_id) return null;
+  if (tracked.run.status !== "ACTIVE" && value.status === "ACTIVE") return null;
   return { location: tracked.location, run: value };
 }
 
