@@ -57,7 +57,7 @@ def completed_xnys_calendar(
     calendar_ref = EvidenceRef(
         source="exchange_calendars",
         object_id=f"calendar:{_CALENDAR_NAME}:{package_version}:{session_set_hash}",
-        available_at=adoption_ref.available_at,
+        available_at=snapshot_utc,
         location=f"package://exchange-calendars/{package_version}/{_CALENDAR_NAME}",
         content_hash=session_set_hash,
     )
@@ -77,7 +77,7 @@ def completed_xnys_calendar(
     return XnysCalendarAuthority(
         sessions=completed,
         binding=EvidenceBinding(
-            available_at=adoption_ref.available_at,
+            available_at=snapshot_utc,
             as_of=snapshot_utc,
             session=completed[-1],
             refs=(calendar_ref, adoption_ref),
