@@ -30,6 +30,20 @@ def upgrade() -> None:
         sa.UniqueConstraint("key", "version", name="uq_optimization_policies_key_version"),
     )
     op.create_table(
+        "cost_policies",
+        sa.Column("id", _UUID, primary_key=True),
+        sa.Column("key", sa.String(100), nullable=False),
+        sa.Column("version", sa.String(100), nullable=False),
+        sa.Column("schema_version", sa.String(32), nullable=False),
+        sa.Column("parameters", postgresql.JSONB(), nullable=False),
+        sa.Column("evidence_refs", postgresql.JSONB(), nullable=False),
+        sa.Column("available_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.UniqueConstraint("key", "version", name="uq_cost_policies_key_version"),
+    )
+    op.create_table(
         "optimization_admission_authorities",
         sa.Column("id", _UUID, primary_key=True),
         sa.Column("portfolio_snapshot_id", _UUID, nullable=False),
@@ -37,7 +51,7 @@ def upgrade() -> None:
         sa.Column("data_snapshot_id", _UUID, nullable=False),
         sa.Column("source_policy_id", _UUID, nullable=False),
         sa.Column("optimizer_policy_id", _UUID, nullable=False),
-        sa.Column("cost_model_version", sa.String(100), nullable=False),
+        sa.Column("cost_policy_id", _UUID, nullable=False),
         sa.Column("diagnostic_input_hash", sa.String(64), nullable=False),
         sa.Column("valuation_time", sa.DateTime(timezone=True), nullable=False),
         sa.Column("baseline_ready", sa.Boolean(), nullable=False),
@@ -46,6 +60,7 @@ def upgrade() -> None:
         sa.Column("partial", sa.Boolean(), nullable=False),
         sa.Column("requires_fx", sa.Boolean(), nullable=False),
         sa.Column("cost_complete", sa.Boolean(), nullable=False),
+        sa.Column("authority_stale", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
         ),
@@ -54,10 +69,11 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["data_snapshot_id"], ["data_snapshots.id"]),
         sa.ForeignKeyConstraint(["source_policy_id"], ["source_policies.id"]),
         sa.ForeignKeyConstraint(["optimizer_policy_id"], ["optimization_policies.id"]),
+        sa.ForeignKeyConstraint(["cost_policy_id"], ["cost_policies.id"]),
         sa.UniqueConstraint(
             "portfolio_snapshot_id",
             "data_snapshot_id",
-            "cost_model_version",
+            "cost_policy_id",
             name="uq_optimization_admission_authorities_binding",
         ),
     )
@@ -71,7 +87,7 @@ def upgrade() -> None:
         sa.Column("diagnostic_report_id", _UUID, nullable=True),
         sa.Column("data_snapshot_id", _UUID, nullable=True),
         sa.Column("source_policy_id", _UUID, nullable=True),
-        sa.Column("cost_model_version", sa.String(100), nullable=True),
+        sa.Column("cost_policy_id", _UUID, nullable=True),
         sa.Column("diagnostic_input_hash", sa.String(64), nullable=True),
         sa.Column("valuation_time", sa.DateTime(timezone=True), nullable=True),
         sa.Column("baseline_ready", sa.Boolean(), nullable=False, server_default=sa.false()),
@@ -80,6 +96,7 @@ def upgrade() -> None:
         sa.Column("partial", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("requires_fx", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("cost_complete", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("authority_stale", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
         ),
@@ -88,6 +105,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["diagnostic_report_id"], ["portfolio_diagnostic_reports.id"]),
         sa.ForeignKeyConstraint(["data_snapshot_id"], ["data_snapshots.id"]),
         sa.ForeignKeyConstraint(["source_policy_id"], ["source_policies.id"]),
+        sa.ForeignKeyConstraint(["cost_policy_id"], ["cost_policies.id"]),
         sa.CheckConstraint(
             "status IN ('draft','compared','shadowing','validated','rejected','expired')",
             name="status_allowed",
@@ -153,14 +171,23 @@ def upgrade() -> None:
         ).bindparams(id=UUID("e690b91d-1e24-5de3-b2b2-566a463fca25"))
     )
     op.execute(
+        sa.text(
+            "INSERT INTO cost_policies (id, key, version, schema_version, parameters, evidence_refs, available_at) VALUES (:id, 'cost_model', 'cost_policy_v1', '1', CAST(:parameters AS jsonb), CAST(:evidence_refs AS jsonb), '2020-01-01T00:00:00+00:00')"
+        ).bindparams(
+            id=UUID("d9cdf971-59f6-5a52-9df4-4e1f861d8075"),
+            parameters='{"commission_bps":"0","slippage_bps":"0","tax_treatment":"unknown"}',
+            evidence_refs='["cost_policy_v1_methodology"]',
+        )
+    )
+    op.execute(
         "CREATE FUNCTION nexus_prevent_optimization_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'optimization record is immutable' USING ERRCODE = '23514'; END; $$"
     )
     op.execute(
         "CREATE FUNCTION nexus_optimization_group_lifecycle() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
-        "IF NEW.baseline_portfolio_snapshot_id IS DISTINCT FROM OLD.baseline_portfolio_snapshot_id OR NEW.policy_id IS DISTINCT FROM OLD.policy_id OR NEW.diagnostic_report_id IS DISTINCT FROM OLD.diagnostic_report_id OR NEW.data_snapshot_id IS DISTINCT FROM OLD.data_snapshot_id OR NEW.source_policy_id IS DISTINCT FROM OLD.source_policy_id OR NEW.cost_model_version IS DISTINCT FROM OLD.cost_model_version OR NEW.diagnostic_input_hash IS DISTINCT FROM OLD.diagnostic_input_hash OR NEW.valuation_time IS DISTINCT FROM OLD.valuation_time OR NEW.baseline_ready IS DISTINCT FROM OLD.baseline_ready OR NEW.diagnostic_complete IS DISTINCT FROM OLD.diagnostic_complete OR NEW.source_conflict IS DISTINCT FROM OLD.source_conflict OR NEW.partial IS DISTINCT FROM OLD.partial OR NEW.requires_fx IS DISTINCT FROM OLD.requires_fx OR NEW.cost_complete IS DISTINCT FROM OLD.cost_complete THEN RAISE EXCEPTION 'optimization group authority is immutable' USING ERRCODE = '23514'; END IF; "
+        "IF NEW.baseline_portfolio_snapshot_id IS DISTINCT FROM OLD.baseline_portfolio_snapshot_id OR NEW.policy_id IS DISTINCT FROM OLD.policy_id OR NEW.diagnostic_report_id IS DISTINCT FROM OLD.diagnostic_report_id OR NEW.data_snapshot_id IS DISTINCT FROM OLD.data_snapshot_id OR NEW.source_policy_id IS DISTINCT FROM OLD.source_policy_id OR NEW.cost_policy_id IS DISTINCT FROM OLD.cost_policy_id OR NEW.diagnostic_input_hash IS DISTINCT FROM OLD.diagnostic_input_hash OR NEW.valuation_time IS DISTINCT FROM OLD.valuation_time OR NEW.baseline_ready IS DISTINCT FROM OLD.baseline_ready OR NEW.diagnostic_complete IS DISTINCT FROM OLD.diagnostic_complete OR NEW.source_conflict IS DISTINCT FROM OLD.source_conflict OR NEW.partial IS DISTINCT FROM OLD.partial OR NEW.requires_fx IS DISTINCT FROM OLD.requires_fx OR NEW.cost_complete IS DISTINCT FROM OLD.cost_complete OR NEW.authority_stale IS DISTINCT FROM OLD.authority_stale THEN RAISE EXCEPTION 'optimization group authority is immutable' USING ERRCODE = '23514'; END IF; "
         "IF NEW.version <> OLD.version + 1 THEN RAISE EXCEPTION 'optimization group version conflict' USING ERRCODE = '40001'; END IF; "
         "IF (OLD.status = 'draft' AND NEW.status NOT IN ('compared','rejected','expired')) OR (OLD.status = 'compared' AND NEW.status NOT IN ('shadowing','rejected','expired')) OR (OLD.status = 'shadowing' AND NEW.status NOT IN ('validated','rejected','expired')) OR (OLD.status IN ('validated','rejected','expired')) THEN RAISE EXCEPTION 'optimization lifecycle transition invalid' USING ERRCODE = '23514'; END IF; "
-        "IF NEW.status = 'shadowing' AND (NOT OLD.baseline_ready OR NOT OLD.diagnostic_complete OR OLD.source_conflict OR OLD.partial OR OLD.requires_fx OR NOT OLD.cost_complete OR NOT EXISTS (SELECT 1 FROM optimization_proposals p WHERE p.proposal_group_id = OLD.id AND p.variant = 'strategy_target' AND p.strategy_evidence_complete AND NOT p.analysis_only) OR (SELECT count(*) FROM proposal_comparisons c JOIN optimization_proposals p ON p.id = c.proposal_id WHERE p.proposal_group_id = OLD.id AND NOT c.non_executable AND NOT c.requires_fx AND c.cost_complete AND COALESCE((c.metrics->>'ranking_eligible')::boolean, false) AND COALESCE((c.metrics->>'constraint_complete')::boolean, false) AND COALESCE((c.metrics->>'eligibility_complete')::boolean, false) AND COALESCE((c.metrics->>'evidence_complete')::boolean, false) AND NOT COALESCE((c.metrics->>'stale')::boolean, true) AND COALESCE(c.metrics->'unknown_metrics', 'null'::jsonb) = '[]'::jsonb AND c.metrics->>'cost' IS NOT NULL) <> 3) THEN RAISE EXCEPTION 'PROPOSAL_NOT_EXECUTABLE' USING ERRCODE = '23514'; END IF; RETURN NEW; END; $$"
+        "IF NEW.status = 'shadowing' AND (NOT OLD.baseline_ready OR NOT OLD.diagnostic_complete OR OLD.source_conflict OR OLD.partial OR OLD.requires_fx OR NOT OLD.cost_complete OR OLD.authority_stale OR OLD.source_policy_id IS DISTINCT FROM '3c60888d-e92d-5e04-913c-7d427004cfef'::uuid OR OLD.cost_policy_id IS DISTINCT FROM 'd9cdf971-59f6-5a52-9df4-4e1f861d8075'::uuid OR NOT EXISTS (SELECT 1 FROM source_policies s WHERE s.id = OLD.source_policy_id AND s.key = 'market_price' AND s.version = 'source_policy_v1' AND s.schema_version = '1' AND s.payload = '{\"priority\":[\"fosun\",\"alpaca\",\"fixture\"],\"fosun\":{\"mode\":\"read_only\",\"operation\":\"fosun_get_bars\",\"market_scope\":\"US\"},\"alpaca\":{\"feed\":\"sip\",\"modes\":[\"delayed\",\"fixture\"]},\"fixture\":{\"mode\":\"fixture\"}}'::jsonb) OR NOT EXISTS (SELECT 1 FROM cost_policies c WHERE c.id = OLD.cost_policy_id AND c.key = 'cost_model' AND c.version = 'cost_policy_v1' AND c.schema_version = '1' AND c.parameters = '{\"commission_bps\":\"0\",\"slippage_bps\":\"0\",\"tax_treatment\":\"unknown\"}'::jsonb AND c.evidence_refs = '[\"cost_policy_v1_methodology\"]'::jsonb AND c.available_at <= OLD.valuation_time) OR NOT EXISTS (SELECT 1 FROM optimization_proposals p WHERE p.proposal_group_id = OLD.id AND p.variant = 'strategy_target' AND p.strategy_evidence_complete AND NOT p.analysis_only) OR (SELECT count(*) FROM proposal_comparisons c JOIN optimization_proposals p ON p.id = c.proposal_id WHERE p.proposal_group_id = OLD.id AND NOT c.non_executable AND NOT c.requires_fx AND c.cost_complete AND COALESCE((c.metrics->>'ranking_eligible')::boolean, false) AND COALESCE((c.metrics->>'constraint_complete')::boolean, false) AND COALESCE((c.metrics->>'eligibility_complete')::boolean, false) AND COALESCE((c.metrics->>'evidence_complete')::boolean, false) AND NOT COALESCE((c.metrics->>'stale')::boolean, true) AND COALESCE(c.metrics->'unknown_metrics', 'null'::jsonb) = '[]'::jsonb AND c.metrics->>'cost' IS NOT NULL) <> 3) THEN RAISE EXCEPTION 'PROPOSAL_NOT_EXECUTABLE' USING ERRCODE = '23514'; END IF; RETURN NEW; END; $$"
     )
     op.execute(
         "CREATE FUNCTION nexus_require_three_optimization_variants() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE group_ref uuid; variant_count integer; comparison_count integer; BEGIN IF TG_TABLE_NAME = 'optimization_proposal_groups' THEN group_ref := NEW.id; ELSIF TG_TABLE_NAME = 'proposal_comparisons' THEN SELECT p.proposal_group_id INTO group_ref FROM optimization_proposals p WHERE p.id = COALESCE(NEW.proposal_id, OLD.proposal_id); ELSE group_ref := COALESCE(NEW.proposal_group_id, OLD.proposal_group_id); END IF; SELECT count(*) INTO variant_count FROM optimization_proposals WHERE proposal_group_id = group_ref; SELECT count(*) INTO comparison_count FROM proposal_comparisons c JOIN optimization_proposals p ON p.id = c.proposal_id WHERE p.proposal_group_id = group_ref; IF variant_count <> 3 OR comparison_count <> 3 THEN RAISE EXCEPTION 'optimization group requires exactly three variants and comparisons' USING ERRCODE = '23514'; END IF; RETURN NULL; END; $$"
@@ -179,6 +206,7 @@ def upgrade() -> None:
     )
     for table in (
         "optimization_policies",
+        "cost_policies",
         "optimization_admission_authorities",
         "optimization_proposal_groups",
         "optimization_proposals",
@@ -190,6 +218,7 @@ def upgrade() -> None:
         )
     for table in (
         "optimization_policies",
+        "cost_policies",
         "optimization_admission_authorities",
         "optimization_proposals",
         "proposal_positions",
@@ -207,6 +236,7 @@ def downgrade() -> None:
         "optimization_proposals",
         "optimization_proposal_groups",
         "optimization_admission_authorities",
+        "cost_policies",
         "optimization_policies",
     ):
         op.execute(f"DROP TRIGGER trg_{table}_created_at_immutable ON {table}")
@@ -223,6 +253,7 @@ def downgrade() -> None:
         "proposal_positions",
         "optimization_proposals",
         "optimization_admission_authorities",
+        "cost_policies",
         "optimization_policies",
     ):
         op.execute(f"DROP TRIGGER trg_{table}_immutable ON {table}")
@@ -232,4 +263,5 @@ def downgrade() -> None:
     op.drop_table("optimization_proposals")
     op.drop_table("optimization_proposal_groups")
     op.drop_table("optimization_admission_authorities")
+    op.drop_table("cost_policies")
     op.drop_table("optimization_policies")

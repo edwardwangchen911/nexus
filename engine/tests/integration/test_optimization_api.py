@@ -11,6 +11,7 @@ import httpx
 import pytest
 from helpers.portfolio_api import PORTFOLIOS, app, headers, seed_portfolio_list, settings
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
+from nexus.optimizer.cost_policy import COST_POLICY_ID
 from nexus.persistence.models.data import DataSnapshot, SourcePolicy
 from nexus.persistence.models.diagnostics import DiagnosticPolicy, PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import (
@@ -22,6 +23,7 @@ from nexus.persistence.models.optimization import (
 )
 from nexus.persistence.models.runtime import AuditEvent, IdempotencyRecord, Job
 from nexus.persistence.session import session_factory
+from nexus.quality.source_policy import SOURCE_POLICY_ID
 from sqlalchemy import func, select
 
 
@@ -140,7 +142,7 @@ async def test_proposal_admission_fails_closed_without_persisted_authority(
         {
             "portfolio_snapshot_id": "0198d500-1000-7000-8000-000000000041",
             "data_snapshot_id": "0198d500-1000-7000-8000-000000000699",
-            "cost_model_version": "cost_model_v1",
+            "cost_policy_id": str(COST_POLICY_ID),
         },
         separators=(",", ":"),
     ).encode()
@@ -173,8 +175,10 @@ async def test_proposal_admission_fails_closed_without_persisted_authority(
         ("source_conflict", {"source_conflict": True}),
         ("partial_authority", {"partial": True}),
         ("unresolved_fx", {"requires_fx": True}),
+        ("stale_authority", {"authority_stale": True}),
+        ("noncanonical_source", {"noncanonical_source": True}),
         ("incomplete_cost", {"cost_complete": False}),
-        ("cost_model_conflict", {"request_cost_model": "cost_model_v2"}),
+        ("cost_policy_conflict", {"request_cost_policy": "0198d500-1000-7000-8000-000000000799"}),
     ),
 )
 async def test_proposal_admission_rejects_every_unproven_authority_without_writes(
@@ -191,7 +195,11 @@ async def test_proposal_admission_rejects_every_unproven_authority_without_write
     baseline_time = datetime(2026, 8, 24, 3, 59, tzinfo=UTC)
     data_time = baseline_time.replace(hour=4) if changes.get("data_time_offset") else baseline_time
     data_id = UUID("0198d500-1000-7000-8000-000000000721")
-    source_policy_id = UUID("0198d500-1000-7000-8000-000000000722")
+    source_policy_id = (
+        UUID("0198d500-1000-7000-8000-000000000722")
+        if changes.get("noncanonical_source")
+        else SOURCE_POLICY_ID
+    )
     report_hash = "d" * 64
     report_policy_id = REAL_ADVISORY_POLICY_ID
     async with factory() as session, session.begin():
@@ -219,15 +227,16 @@ async def test_proposal_admission_rejects_every_unproven_authority_without_write
                 payload={},
             )
         )
-        session.add(
-            SourcePolicy(
-                id=source_policy_id,
-                key="source_policy",
-                version="source_policy_v1",
-                schema_version="1",
-                payload={},
+        if changes.get("noncanonical_source"):
+            session.add(
+                SourcePolicy(
+                    id=source_policy_id,
+                    key="untrusted_source",
+                    version="v1",
+                    schema_version="1",
+                    payload={},
+                )
             )
-        )
         report = PortfolioDiagnosticReportRecord(
             portfolio_id=report_portfolio,
             portfolio_snapshot_id=report_snapshot_id,
@@ -249,7 +258,7 @@ async def test_proposal_admission_rejects_every_unproven_authority_without_write
                 data_snapshot_id=data_id,
                 source_policy_id=source_policy_id,
                 optimizer_policy_id=UUID("e690b91d-1e24-5de3-b2b2-566a463fca25"),
-                cost_model_version="cost_model_v1",
+                cost_policy_id=COST_POLICY_ID,
                 diagnostic_input_hash=str(changes.get("diagnostic_input_hash", report_hash)),
                 valuation_time=baseline_time,
                 baseline_ready=True,
@@ -258,13 +267,14 @@ async def test_proposal_admission_rejects_every_unproven_authority_without_write
                 partial=bool(changes.get("partial", False)),
                 requires_fx=bool(changes.get("requires_fx", False)),
                 cost_complete=bool(changes.get("cost_complete", True)),
+                authority_stale=bool(changes.get("authority_stale", False)),
             )
         )
     body = json.dumps(
         {
             "portfolio_snapshot_id": str(baseline_id),
             "data_snapshot_id": str(data_id),
-            "cost_model_version": str(changes.get("request_cost_model", "cost_model_v1")),
+            "cost_policy_id": str(changes.get("request_cost_policy", COST_POLICY_ID)),
         },
         separators=(",", ":"),
     ).encode()
@@ -299,7 +309,7 @@ async def test_proposal_admission_returns_one_queued_job_for_idempotent_replay(
     factory = session_factory(settings(migrated_database_url))
     authority_time = datetime(2026, 8, 24, 3, 59, tzinfo=UTC)
     data_snapshot_id = UUID("0198d500-1000-7000-8000-000000000711")
-    source_policy_id = UUID("0198d500-1000-7000-8000-000000000712")
+    source_policy_id = SOURCE_POLICY_ID
     async with factory() as session, session.begin():
         session.add(
             DataSnapshot(
@@ -310,15 +320,6 @@ async def test_proposal_admission_returns_one_queued_job_for_idempotent_replay(
                 observed_at=authority_time,
                 available_at=authority_time,
                 received_at=authority_time,
-                schema_version="1",
-                payload={},
-            )
-        )
-        session.add(
-            SourcePolicy(
-                id=source_policy_id,
-                key="source_policy",
-                version="source_policy_v1",
                 schema_version="1",
                 payload={},
             )
@@ -342,7 +343,7 @@ async def test_proposal_admission_returns_one_queued_job_for_idempotent_replay(
                 data_snapshot_id=data_snapshot_id,
                 source_policy_id=source_policy_id,
                 optimizer_policy_id=UUID("e690b91d-1e24-5de3-b2b2-566a463fca25"),
-                cost_model_version="cost_model_v1",
+                cost_policy_id=COST_POLICY_ID,
                 diagnostic_input_hash="d" * 64,
                 valuation_time=authority_time,
                 baseline_ready=True,
@@ -357,7 +358,7 @@ async def test_proposal_admission_returns_one_queued_job_for_idempotent_replay(
         {
             "portfolio_snapshot_id": "0198d500-1000-7000-8000-000000000041",
             "data_snapshot_id": str(data_snapshot_id),
-            "cost_model_version": "cost_model_v1",
+            "cost_policy_id": str(COST_POLICY_ID),
         },
         separators=(",", ":"),
     ).encode()

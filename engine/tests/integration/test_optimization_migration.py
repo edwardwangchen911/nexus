@@ -18,6 +18,7 @@ def test_0009_round_trips_from_0008_with_one_head(
     monkeypatch.setenv("DATABASE_URL", temporary_database_url)
     config = Config(str(engine_root / "alembic.ini"))
     optimization_tables = {
+        "cost_policies",
         "optimization_admission_authorities",
         "optimization_policies",
         "optimization_proposal_groups",

@@ -16,6 +16,7 @@ from helpers.portfolio_api import (
     settings,
 )
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
+from nexus.optimizer.cost_policy import COST_POLICY_ID
 from nexus.optimizer.models import OptimizationProposal, OptimizationProposalGroup, ProposalPosition
 from nexus.optimizer.persistence import (
     ProposalComparisonInput,
@@ -23,7 +24,7 @@ from nexus.optimizer.persistence import (
     persist_proposal_group,
 )
 from nexus.optimizer.production import create_proposal_group_idempotently
-from nexus.persistence.models.data import DataSnapshot, SourcePolicy
+from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import (
     OptimizationProposalGroupRecord,
@@ -32,6 +33,7 @@ from nexus.persistence.models.optimization import (
     ProposalPositionRecord,
 )
 from nexus.persistence.session import session_factory
+from nexus.quality.source_policy import SOURCE_POLICY_ID
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -202,7 +204,7 @@ async def test_idempotent_group_writer_has_one_concurrent_identity_and_conflicts
 
 async def _seed_authority(factory) -> ProposalPersistenceAuthority:
     data_snapshot_id = UUID("0198d500-1000-7000-8000-000000000901")
-    source_policy_id = UUID("0198d500-1000-7000-8000-000000000902")
+    source_policy_id = SOURCE_POLICY_ID
     report_id = UUID("0198d500-1000-7000-8000-000000000903")
     async with factory() as session, session.begin():
         session.add(
@@ -214,15 +216,6 @@ async def _seed_authority(factory) -> ProposalPersistenceAuthority:
                 observed_at=_CLOCK,
                 available_at=_CLOCK,
                 received_at=_CLOCK,
-                schema_version="1",
-                payload={},
-            )
-        )
-        session.add(
-            SourcePolicy(
-                id=source_policy_id,
-                key="source_policy",
-                version="source_policy_v1",
                 schema_version="1",
                 payload={},
             )
@@ -245,7 +238,7 @@ async def _seed_authority(factory) -> ProposalPersistenceAuthority:
         data_snapshot_id=data_snapshot_id,
         source_policy_id=source_policy_id,
         optimizer_policy_id=_OPTIMIZER_POLICY_ID,
-        cost_model_version="cost_model_v1",
+        cost_policy_id=COST_POLICY_ID,
         diagnostic_input_hash="d" * 64,
         valuation_time=_CLOCK,
         baseline_ready=True,

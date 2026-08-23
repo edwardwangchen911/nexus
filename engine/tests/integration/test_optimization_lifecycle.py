@@ -11,6 +11,7 @@ import httpx
 import pytest
 from helpers.portfolio_api import PORTFOLIOS, app, headers, seed_portfolio_list, settings
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
+from nexus.optimizer.cost_policy import COST_POLICY_ID
 from nexus.optimizer.lifecycle import LifecycleTransition, transition_group_idempotently
 from nexus.optimizer.repository import transition_group
 from nexus.persistence.models.data import DataSnapshot, SourcePolicy
@@ -22,6 +23,7 @@ from nexus.persistence.models.optimization import (
 from nexus.persistence.models.portfolio import BrokerOrderSnapshot
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.persistence.session import session_factory
+from nexus.quality.source_policy import SOURCE_POLICY_ID
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -269,6 +271,63 @@ async def test_raw_sql_shadow_cannot_bypass_non_executable_comparison(
 
 
 @pytest.mark.asyncio
+async def test_raw_sql_shadow_cannot_bypass_stale_policy_authority(
+    migrated_database_url: str,
+) -> None:
+    """A stale persisted authority must block raw SQL, not just the repository path."""
+    group_id = UUID("0198d500-1000-7000-8000-000000000847")
+    await _seed_complete_group(migrated_database_url, group_id, authority_stale=True)
+    factory = session_factory(settings(migrated_database_url))
+    with pytest.raises(IntegrityError, match="PROPOSAL_NOT_EXECUTABLE"):
+        async with factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "UPDATE optimization_proposal_groups SET status = 'shadowing', version = 2 "
+                    "WHERE id = :group_id"
+                ),
+                {"group_id": group_id},
+            )
+
+
+@pytest.mark.asyncio
+async def test_raw_sql_shadow_cannot_bypass_noncanonical_source_policy(
+    migrated_database_url: str,
+) -> None:
+    """An arbitrary source-policy row cannot substitute for source_policy_v1."""
+    group_id = UUID("0198d500-1000-7000-8000-000000000848")
+    await _seed_complete_group(migrated_database_url, group_id, noncanonical_source=True)
+    factory = session_factory(settings(migrated_database_url))
+    with pytest.raises(IntegrityError, match="PROPOSAL_NOT_EXECUTABLE"):
+        async with factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "UPDATE optimization_proposal_groups SET status = 'shadowing', version = 2 "
+                    "WHERE id = :group_id"
+                ),
+                {"group_id": group_id},
+            )
+
+
+@pytest.mark.asyncio
+async def test_raw_sql_shadow_cannot_bypass_missing_cost_policy(
+    migrated_database_url: str,
+) -> None:
+    """NULL cost authority is rejected by the DB trigger with no repository involved."""
+    group_id = UUID("0198d500-1000-7000-8000-000000000849")
+    await _seed_complete_group(migrated_database_url, group_id, missing_cost_policy=True)
+    factory = session_factory(settings(migrated_database_url))
+    with pytest.raises(IntegrityError, match="PROPOSAL_NOT_EXECUTABLE"):
+        async with factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "UPDATE optimization_proposal_groups SET status = 'shadowing', version = 2 "
+                    "WHERE id = :group_id"
+                ),
+                {"group_id": group_id},
+            )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("terminal", ("validated", "rejected", "expired"))
 async def test_every_terminal_lifecycle_state_is_immutable(
     migrated_database_url: str, terminal: str
@@ -296,12 +355,19 @@ async def _seed_complete_group(
     *,
     source_conflict: bool = False,
     comparison_non_executable: bool = False,
+    authority_stale: bool = False,
+    noncanonical_source: bool = False,
+    missing_cost_policy: bool = False,
 ) -> None:
     await seed_portfolio_list(database_url)
     factory = session_factory(settings(database_url))
     suffix = str(group_id)[-3:]
     data_id = UUID(f"0198d500-1000-7000-8000-000000000{suffix}")
-    source_id = UUID(f"0198d500-1000-7000-8000-000000000{int(suffix) + 10:03d}")
+    source_id = (
+        UUID(f"0198d500-1000-7000-8000-000000000{int(suffix) + 10:03d}")
+        if noncanonical_source
+        else SOURCE_POLICY_ID
+    )
     report_id = UUID(f"0198d500-1000-7000-8000-000000000{int(suffix) + 20:03d}")
     async with factory() as session, session.begin():
         session.add_all(
@@ -314,13 +380,6 @@ async def _seed_complete_group(
                     observed_at=_CLOCK,
                     available_at=_CLOCK,
                     received_at=_CLOCK,
-                    schema_version="1",
-                    payload={},
-                ),
-                SourcePolicy(
-                    id=source_id,
-                    key=f"source-{suffix}",
-                    version="v1",
                     schema_version="1",
                     payload={},
                 ),
@@ -337,10 +396,20 @@ async def _seed_complete_group(
                 ),
             )
         )
+        if noncanonical_source:
+            session.add(
+                SourcePolicy(
+                    id=source_id,
+                    key="untrusted_source",
+                    version="v1",
+                    schema_version="1",
+                    payload={},
+                )
+            )
         await session.flush()
         await session.execute(
             text(
-                "INSERT INTO optimization_proposal_groups (id, baseline_portfolio_snapshot_id, status, version, policy_id, diagnostic_report_id, data_snapshot_id, source_policy_id, cost_model_version, diagnostic_input_hash, valuation_time, baseline_ready, diagnostic_complete, source_conflict, partial, requires_fx, cost_complete) VALUES (:id, :baseline, 'compared', 1, :policy, :report, :data, :source, 'cost_model_v1', :hash, :valuation, true, true, :source_conflict, false, false, true)"
+                "INSERT INTO optimization_proposal_groups (id, baseline_portfolio_snapshot_id, status, version, policy_id, diagnostic_report_id, data_snapshot_id, source_policy_id, cost_policy_id, diagnostic_input_hash, valuation_time, baseline_ready, diagnostic_complete, source_conflict, partial, requires_fx, cost_complete, authority_stale) VALUES (:id, :baseline, 'compared', 1, :policy, :report, :data, :source, :cost_policy, :hash, :valuation, true, true, :source_conflict, false, false, true, :authority_stale)"
             ),
             {
                 "id": group_id,
@@ -349,9 +418,11 @@ async def _seed_complete_group(
                 "report": report_id,
                 "data": data_id,
                 "source": source_id,
+                "cost_policy": None if missing_cost_policy else COST_POLICY_ID,
                 "hash": "e" * 64,
                 "valuation": _CLOCK,
                 "source_conflict": source_conflict,
+                "authority_stale": authority_stale,
             },
         )
         for index, variant in enumerate(("hold_current", "minimum_change", "strategy_target"), 1):

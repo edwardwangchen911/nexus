@@ -25,6 +25,20 @@ class OptimizationPolicyRecord(ImmutableCreatedAt, Base):
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
 
 
+class CostPolicyRecord(ImmutableCreatedAt, Base):
+    """Versioned, evidenced cost inputs; rows are immutable once published."""
+
+    __tablename__ = "cost_policies"
+    __table_args__ = (UniqueConstraint("key", "version", name="uq_cost_policies_key_version"),)
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(100))
+    version: Mapped[str] = mapped_column(String(100))
+    schema_version: Mapped[str] = mapped_column(String(32))
+    parameters: Mapped[dict[str, object]] = mapped_column(JSONB)
+    evidence_refs: Mapped[list[str]] = mapped_column(JSONB)
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
 class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
     """Frozen upstream proof required before admitting a proposal-construction job."""
 
@@ -33,7 +47,7 @@ class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
         UniqueConstraint(
             "portfolio_snapshot_id",
             "data_snapshot_id",
-            "cost_model_version",
+            "cost_policy_id",
             name="uq_optimization_admission_authorities_binding",
         ),
     )
@@ -43,7 +57,7 @@ class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
     data_snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("data_snapshots.id"))
     source_policy_id: Mapped[UUID] = mapped_column(ForeignKey("source_policies.id"))
     optimizer_policy_id: Mapped[UUID] = mapped_column(ForeignKey("optimization_policies.id"))
-    cost_model_version: Mapped[str] = mapped_column(String(100))
+    cost_policy_id: Mapped[UUID] = mapped_column(ForeignKey("cost_policies.id"))
     diagnostic_input_hash: Mapped[str] = mapped_column(String(64))
     valuation_time: Mapped[datetime] = mapped_column(UTCDateTime())
     baseline_ready: Mapped[bool] = mapped_column(Boolean)
@@ -52,6 +66,7 @@ class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
     partial: Mapped[bool] = mapped_column(Boolean)
     requires_fx: Mapped[bool] = mapped_column(Boolean)
     cost_complete: Mapped[bool] = mapped_column(Boolean)
+    authority_stale: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
@@ -74,7 +89,7 @@ class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
     )
     data_snapshot_id: Mapped[UUID | None] = mapped_column(ForeignKey("data_snapshots.id"))
     source_policy_id: Mapped[UUID | None] = mapped_column(ForeignKey("source_policies.id"))
-    cost_model_version: Mapped[str | None] = mapped_column(String(100))
+    cost_policy_id: Mapped[UUID | None] = mapped_column(ForeignKey("cost_policies.id"))
     diagnostic_input_hash: Mapped[str | None] = mapped_column(String(64))
     valuation_time: Mapped[datetime | None] = mapped_column(UTCDateTime())
     baseline_ready: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -83,6 +98,7 @@ class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
     partial: Mapped[bool] = mapped_column(Boolean, default=False)
     requires_fx: Mapped[bool] = mapped_column(Boolean, default=False)
     cost_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    authority_stale: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class OptimizationProposalRecord(ImmutableCreatedAt, Base):

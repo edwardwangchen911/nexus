@@ -7,7 +7,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
-from nexus.persistence.models.data import DataSnapshot, SourcePolicy
+from nexus.optimizer.cost_policy import COST_POLICY_ID, load_cost_policy_v1
+from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import (
     OptimizationPolicyRecord,
@@ -16,6 +17,7 @@ from nexus.persistence.models.optimization import (
     ProposalComparisonRecord,
 )
 from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
+from nexus.quality.source_policy import SOURCE_POLICY_ID, load_source_policy_v1
 
 TargetStatus = Literal["compared", "shadowing", "validated", "rejected", "expired"]
 _ALLOWED = {
@@ -66,7 +68,7 @@ async def _has_executable_shadow_authority(
         group.diagnostic_report_id is None
         or group.data_snapshot_id is None
         or group.source_policy_id is None
-        or group.cost_model_version is None
+        or group.cost_policy_id is None
         or group.diagnostic_input_hash is None
         or group.valuation_time is None
         or not group.baseline_ready
@@ -75,6 +77,7 @@ async def _has_executable_shadow_authority(
         or group.partial
         or group.requires_fx
         or not group.cost_complete
+        or group.authority_stale
     ):
         return False
     strategy = await session.scalar(
@@ -86,7 +89,6 @@ async def _has_executable_shadow_authority(
     snapshot = await session.get(PortfolioSnapshotRecord, group.baseline_portfolio_snapshot_id)
     report = await session.get(PortfolioDiagnosticReportRecord, group.diagnostic_report_id)
     data_snapshot = await session.get(DataSnapshot, group.data_snapshot_id)
-    source_policy = await session.get(SourcePolicy, group.source_policy_id)
     optimizer_policy = await session.get(OptimizationPolicyRecord, group.policy_id)
     comparisons = tuple(
         await session.scalars(
@@ -96,6 +98,11 @@ async def _has_executable_shadow_authority(
             .with_for_update()
         )
     )
+    try:
+        source_policy = await load_source_policy_v1(session, instrument_tick_size=None)
+        cost_policy = await load_cost_policy_v1(session)
+    except ValueError:
+        return False
     return bool(
         strategy is not None
         and not strategy.analysis_only
@@ -113,7 +120,9 @@ async def _has_executable_shadow_authority(
         and data_snapshot is not None
         and data_snapshot.available_at <= group.valuation_time
         and data_snapshot.received_at <= group.valuation_time
-        and source_policy is not None
+        and source_policy.record_id == SOURCE_POLICY_ID == group.source_policy_id
+        and cost_policy.id == COST_POLICY_ID == group.cost_policy_id
+        and cost_policy.available_at <= group.valuation_time
         and optimizer_policy is not None
         and optimizer_policy.key == "optimizer"
         and optimizer_policy.version == "optimizer_v1"

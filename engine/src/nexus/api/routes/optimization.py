@@ -16,9 +16,10 @@ from nexus.api.schemas.integrations import NexusErrorEnvelope
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.domain.decimal import DecimalString
 from nexus.optimizer.admission import admit_queued_job
+from nexus.optimizer.cost_policy import COST_POLICY_ID, load_cost_policy_v1
 from nexus.optimizer.lifecycle import transition_group_idempotently
 from nexus.optimizer.persistence import ProposalPersistenceAuthority
-from nexus.persistence.models.data import DataSnapshot, SourcePolicy
+from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import (
     OptimizationAdmissionAuthorityRecord,
@@ -30,6 +31,7 @@ from nexus.persistence.models.optimization import (
 )
 from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
 from nexus.persistence.models.runtime import AuditEvent
+from nexus.quality.source_policy import SOURCE_POLICY_ID, load_source_policy_v1
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
@@ -73,7 +75,7 @@ class _ProposalAdmissionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     portfolio_snapshot_id: UUID
     data_snapshot_id: UUID
-    cost_model_version: str = Field(min_length=1, max_length=100)
+    cost_policy_id: UUID
 
 
 class _LifecycleRequest(BaseModel):
@@ -158,7 +160,7 @@ async def admit_optimization_proposal(
             payload={
                 "portfolio_snapshot_id": str(body.portfolio_snapshot_id),
                 "data_snapshot_id": str(body.data_snapshot_id),
-                "cost_model_version": body.cost_model_version,
+                "cost_policy_id": str(body.cost_policy_id),
             },
         )
     except IdempotencyConflict as error:
@@ -184,19 +186,22 @@ async def _load_admission_authority(
             OptimizationAdmissionAuthorityRecord.portfolio_snapshot_id
             == body.portfolio_snapshot_id,
             OptimizationAdmissionAuthorityRecord.data_snapshot_id == body.data_snapshot_id,
-            OptimizationAdmissionAuthorityRecord.cost_model_version == body.cost_model_version,
+            OptimizationAdmissionAuthorityRecord.cost_policy_id == body.cost_policy_id,
         )
     )
     if snapshot is None or snapshot.status != "READY" or authority is None:
         return None
     report = await session.get(PortfolioDiagnosticReportRecord, authority.diagnostic_report_id)
     data_snapshot = await session.get(DataSnapshot, authority.data_snapshot_id)
-    source_policy = await session.get(SourcePolicy, authority.source_policy_id)
     optimizer_policy = await session.get(OptimizationPolicyRecord, authority.optimizer_policy_id)
+    try:
+        source_policy = await load_source_policy_v1(session, instrument_tick_size=None)
+        cost_policy = await load_cost_policy_v1(session)
+    except ValueError:
+        return None
     if (
         report is None
         or data_snapshot is None
-        or source_policy is None
         or optimizer_policy is None
         or report.portfolio_id != snapshot.portfolio_id
         or report.portfolio_snapshot_id != snapshot.id
@@ -216,6 +221,12 @@ async def _load_admission_authority(
         or authority.partial
         or authority.requires_fx
         or not authority.cost_complete
+        or authority.authority_stale
+        or source_policy.record_id != SOURCE_POLICY_ID
+        or authority.source_policy_id != SOURCE_POLICY_ID
+        or cost_policy.id != COST_POLICY_ID
+        or authority.cost_policy_id != COST_POLICY_ID
+        or cost_policy.available_at > snapshot.as_of
     ):
         return None
     return ProposalPersistenceAuthority(
@@ -223,7 +234,7 @@ async def _load_admission_authority(
         data_snapshot_id=authority.data_snapshot_id,
         source_policy_id=authority.source_policy_id,
         optimizer_policy_id=authority.optimizer_policy_id,
-        cost_model_version=authority.cost_model_version,
+        cost_policy_id=authority.cost_policy_id,
         diagnostic_input_hash=authority.diagnostic_input_hash,
         valuation_time=authority.valuation_time,
         baseline_ready=authority.baseline_ready,
@@ -232,6 +243,7 @@ async def _load_admission_authority(
         partial=authority.partial,
         requires_fx=authority.requires_fx,
         cost_complete=authority.cost_complete,
+        authority_stale=authority.authority_stale,
     )
 
 
@@ -313,7 +325,7 @@ async def get_optimization_group(
             "source_policy_id": None
             if group.source_policy_id is None
             else str(group.source_policy_id),
-            "cost_model_version": group.cost_model_version,
+            "cost_policy_id": None if group.cost_policy_id is None else str(group.cost_policy_id),
             "proposals": proposal_data,
         },
         "meta": {"request_id": str(actor.request_id), "schema_version": "1"},

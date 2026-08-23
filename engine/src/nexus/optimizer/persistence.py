@@ -24,7 +24,7 @@ class ProposalPersistenceAuthority:
     data_snapshot_id: UUID
     source_policy_id: UUID
     optimizer_policy_id: UUID
-    cost_model_version: str
+    cost_policy_id: UUID
     diagnostic_input_hash: str
     valuation_time: datetime
     baseline_ready: bool
@@ -33,12 +33,11 @@ class ProposalPersistenceAuthority:
     partial: bool
     requires_fx: bool
     cost_complete: bool
+    authority_stale: bool = False
 
     def __post_init__(self) -> None:
         if len(self.diagnostic_input_hash) != 64:
             raise ValueError("diagnostic_input_hash must be a SHA-256 digest")
-        if not self.cost_model_version:
-            raise ValueError("cost model version is required")
 
 
 @dataclass(frozen=True)
@@ -120,7 +119,7 @@ async def persist_proposal_group(
         diagnostic_report_id=authority.diagnostic_report_id,
         data_snapshot_id=authority.data_snapshot_id,
         source_policy_id=authority.source_policy_id,
-        cost_model_version=authority.cost_model_version,
+        cost_policy_id=authority.cost_policy_id,
         diagnostic_input_hash=authority.diagnostic_input_hash,
         valuation_time=authority.valuation_time,
         baseline_ready=authority.baseline_ready,
@@ -129,6 +128,7 @@ async def persist_proposal_group(
         partial=authority.partial,
         requires_fx=authority.requires_fx,
         cost_complete=authority.cost_complete,
+        authority_stale=authority.authority_stale,
     )
     session.add(record)
     for proposal, comparison in zip(group.proposals, comparisons, strict=True):
