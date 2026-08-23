@@ -224,14 +224,16 @@ async def test_production_builder_uses_frozen_diagnostics_selection_and_atomic_w
     assert tuple(child.strategy_evidence_complete for child in children) == (False, False, True)
     hold_metrics = comparisons["hold_current"].metrics["dimensions"]  # type: ignore[union-attr,index]
     minimum_metrics = comparisons["minimum_change"].metrics["dimensions"]  # type: ignore[union-attr,index]
-    assert minimum_metrics["top1"] == hold_metrics["top1"] == {
-        "status": "known", "value": "1", "reason": None,
-    }
-    assert minimum_metrics["top3"] == minimum_metrics["hhi"] == minimum_metrics["top1"]
+    strategy_metrics = comparisons["strategy_target"].metrics["dimensions"]  # type: ignore[union-attr,index]
+    tolerance = Decimal("1e-12")
+    assert abs(Decimal(hold_metrics["top1"]["value"]) - minimum.current_weight) <= tolerance
+    assert abs(Decimal(minimum_metrics["top1"]["value"]) - minimum.target_weight) <= tolerance
+    assert abs(Decimal(strategy_metrics["top1"]["value"]) - strategy.target_weight) <= tolerance
+    assert minimum_metrics["top3"] == minimum_metrics["top1"]
+    assert minimum_metrics["hhi"] == {"status": "known", "value": "1", "reason": None}
     assert minimum_metrics["currency_exposure"] == minimum_metrics["top1"]
-    assert minimum_metrics["liquidity"] == {
-        "status": "known", "value": "0.5", "reason": None,
-    }
+    expected_liquidity = Decimal("1") / (Decimal("1") + minimum.target_weight)
+    assert abs(Decimal(minimum_metrics["liquidity"]["value"]) - expected_liquidity) <= tolerance
     assert Decimal(minimum_metrics["turnover"]["value"]) == Decimal("0.0001")
     assert minimum_metrics["cost"]["status"] == "known"
     assert Decimal(minimum_metrics["cost"]["value"]) == Decimal("0")

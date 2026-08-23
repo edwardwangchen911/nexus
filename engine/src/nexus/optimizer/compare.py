@@ -169,17 +169,20 @@ def evaluate_dimensions(
     positive = tuple(
         position for position in proposal.positions if position.target_weight > 0
     )
+    raw_by_id = {
+        position.instrument_id: position.target_weight for position in positive
+    }
     security_total = sum((position.target_weight for position in positive), Decimal("0"))
-    normalized_by_id = {
-        position.instrument_id: position.target_weight / security_total
-        for position in positive
-    } if security_total > 0 else {}
-    weights = sorted(normalized_by_id.values(), reverse=True)
+    normalized = (
+        tuple(weight / security_total for weight in raw_by_id.values())
+        if security_total > 0 else ()
+    )
+    weights = sorted(raw_by_id.values(), reverse=True)
     top1 = weights[0] if weights else Decimal("0")
     top3 = sum(weights[:3], Decimal("0"))
-    hhi = sum((weight * weight for weight in weights), Decimal("0"))
-    liquidity = _weighted_liquidity(report, normalized_by_id)
-    currency_exposure = _currency_exposure(normalized_by_id, instrument_currencies)
+    hhi = sum((weight * weight for weight in normalized), Decimal("0"))
+    liquidity = _weighted_liquidity(report, raw_by_id)
+    currency_exposure = _currency_exposure(raw_by_id, instrument_currencies)
     return ComparisonDimensions(
         hard_violations=sum(weight > Decimal("0.30") for weight in weights),
         top1=TypedMetric.known(top1),

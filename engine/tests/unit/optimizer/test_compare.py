@@ -125,7 +125,7 @@ def test_comparison_excludes_partial_stale_and_incomplete_evidence() -> None:
     assert result.excluded_variants == ("minimum_change", "strategy_target")
 
 
-def test_dimension_evaluator_uses_each_variants_normalized_post_weights() -> None:
+def test_dimension_evaluator_uses_raw_portfolio_weights_except_security_hhi() -> None:
     first = UUID("0198d500-1000-7000-8000-000000000e01")
     second = UUID("0198d500-1000-7000-8000-000000000e02")
     baseline = UUID("0198d500-1000-7000-8000-000000000e03")
@@ -168,10 +168,64 @@ def test_dimension_evaluator_uses_each_variants_normalized_post_weights() -> Non
         proposal, report, cost=Decimal("0.001"),
         instrument_currencies={first: "USD", second: "HKD"},
     )
-    assert result.hard_violations == 2
-    assert result.top1.value == Decimal("2") / Decimal("3")
-    assert result.top3.value == Decimal("1")
+    assert result.hard_violations == 1
+    assert result.top1.value == Decimal("0.4")
+    assert result.top3.value == Decimal("0.6")
     assert result.hhi.value == Decimal("5") / Decimal("9")
-    assert result.currency_exposure.value == Decimal("2") / Decimal("3")
-    assert result.liquidity.value == Decimal("0.3")
+    assert result.currency_exposure.value == Decimal("0.4")
+    assert result.liquidity.value == Decimal("5") / Decimal("12")
     assert result.volatility.status == result.drawdown.status == "unknown"
+
+
+def test_cash_denominator_prevents_false_concentration_recommendation() -> None:
+    instrument = UUID("0198d500-1000-7000-8000-000000000e11")
+    baseline = UUID("0198d500-1000-7000-8000-000000000e12")
+    now = datetime(2026, 8, 24, tzinfo=UTC)
+    report = PortfolioDiagnosticReport(
+        portfolio_snapshot_id=baseline, snapshot_as_of=now,
+        policy_version="real_advisory_policy_v1", optimization_need="OPTIMIZATION_CANDIDATE",
+        items=(),
+    )
+
+    def proposal(variant: str, target: str) -> OptimizationProposal:
+        target_weight = Decimal(target)
+        return OptimizationProposal(
+            variant=variant,
+            baseline_portfolio_snapshot_id=baseline,
+            positions=(ProposalPosition(
+                instrument_id=instrument, current_weight="0.10", target_weight=target_weight,
+                action="maintain" if target_weight == Decimal("0.10") else
+                "reduce" if target_weight < Decimal("0.10") else "increase",
+                reason_code="CASH_DENOMINATOR",
+            ),),
+            cash_current_weight="0.90", cash_target_weight=Decimal("1") - target_weight,
+            analysis_only=True, strategy_evidence_complete=variant == "strategy_target",
+        )
+
+    proposals = (
+        proposal("hold_current", "0.10"),
+        proposal("minimum_change", "0.08"),
+        proposal("strategy_target", "0.20"),
+    )
+    dimensions = tuple(
+        evaluate_dimensions(
+            item, report, cost=Decimal("0"), instrument_currencies={instrument: "USD"},
+        ).model_copy(update={
+            "sector_exposure": TypedMetric.known("0"),
+            "volatility": TypedMetric.known("0"),
+            "drawdown": TypedMetric.known("0"),
+            "correlation": TypedMetric.known("0"),
+            "liquidity": TypedMetric.known("1"),
+        })
+        for item in proposals
+    )
+    assert dimensions[0].top1.value == dimensions[0].top3.value == Decimal("0.10")
+    assert dimensions[0].hhi.value == Decimal("1")
+    assert dimensions[0].currency_exposure.value == Decimal("0.10")
+    assert dimensions[0].hard_violations == 0
+    comparison = compare_proposals(tuple(
+        ComparableProposal(item.variant, metric)
+        for item, metric in zip(proposals, dimensions, strict=True)
+    ))
+    assert comparison.recommendation == "minimum_change"
+    assert comparison.excluded_variants == ("strategy_target",)
