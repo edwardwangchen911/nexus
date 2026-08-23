@@ -35,6 +35,17 @@ def test_decimal_to_string_rejects_float_input() -> None:
         decimal_to_string(1.25)  # type: ignore[arg-type]
 
 
+def test_decimal_to_string_rejects_values_beyond_the_wire_length_contract() -> None:
+    """The serializer itself must not produce a value rejected by DecimalString."""
+    with pytest.raises(ValueError, match="40 characters"):
+        decimal_to_string(Decimal("1" * 41))
+
+
+def test_decimal_to_string_accepts_the_maximum_wire_length() -> None:
+    """A legal 40-character database value must remain serializable."""
+    assert decimal_to_string(Decimal("1" * 40)) == "1" * 40
+
+
 def test_decimal_string_rejects_scientific_notation() -> None:
     """Scientific notation could change a financial value's canonical wire representation."""
     with pytest.raises(ValidationError):

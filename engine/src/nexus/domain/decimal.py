@@ -22,4 +22,6 @@ def decimal_to_string(value: Decimal) -> DecimalString:
     result = format(value, "f")
     if _DECIMAL_STRING_PATTERN.fullmatch(result) is None:
         raise ValueError("value cannot be represented as a DecimalString")
+    if len(result) > 40:
+        raise ValueError("value cannot exceed 40 characters")
     return result
