@@ -12,8 +12,8 @@ const portfolio = {
   provider: "fosun",
   latest_snapshot_status: "READY",
   latest_snapshot_as_of: "2026-08-23T08:00:00Z",
-  currencies: ["HKD", "USD"],
-  last_sync_status: "READY",
+  original_currencies: ["HKD", "USD"],
+  last_sync_run_status: "READY",
 };
 
 const snapshot = {

@@ -13,8 +13,8 @@ export type PortfolioItem = {
   provider: string;
   latest_snapshot_status: PortfolioSnapshot["status"] | null;
   latest_snapshot_as_of: string | null;
-  currencies: string[];
-  last_sync_status: string | null;
+  original_currencies: string[];
+  last_sync_run_status: string | null;
 };
 
 export type PortfolioSnapshot = {
@@ -163,7 +163,7 @@ export default function PortfolioPage(): React.ReactElement {
 export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioId, syncing, notice, onSelect, onRefresh, onSync }: PortfolioPanelProps): React.ReactElement {
   const hasData = ["ready", "partial", "stale"].includes(state) && snapshot !== null;
   const selected = portfolios.find((item) => item.portfolio_id === selectedPortfolioId) ?? null;
-  const currencies = selected && snapshot ? [...new Set([...selected.currencies, ...snapshot.cash.map((item) => item.currency), ...snapshot.positions.map((item) => item.currency)])].sort() : [];
+  const currencies = selected && snapshot ? [...new Set([...selected.original_currencies, ...snapshot.cash.map((item) => item.currency), ...snapshot.positions.map((item) => item.currency)])].sort() : [];
   return (
     <section className="page-stack portfolio-page" aria-label="组合事实页面" data-state={state}>
       <header className="page-heading">
@@ -173,7 +173,7 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
       {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
       {!hasData || !selected ? <DataState state={state} title="组合快照" detail={stateDetail(state)} announce={false} /> : (
         <div className="portfolio-workspace">
-          <nav className="portfolio-rail" aria-label="组合选择"><ul>{portfolios.map((item) => <li key={item.portfolio_id}><button type="button" aria-pressed={item.portfolio_id === selectedPortfolioId} onClick={() => onSelect(item.portfolio_id)}><strong>{item.name}</strong><span>{kindLabel(item.kind)} · {item.coverage_scope}</span><span>{item.currencies.join(" / ") || "币种未知"}</span></button></li>)}</ul></nav>
+          <nav className="portfolio-rail" aria-label="组合选择"><ul>{portfolios.map((item) => <li key={item.portfolio_id}><button type="button" aria-pressed={item.portfolio_id === selectedPortfolioId} onClick={() => onSelect(item.portfolio_id)}><strong>{item.name}</strong><span>{kindLabel(item.kind)} · {item.coverage_scope}</span><span>{item.original_currencies.join(" / ") || "币种未知"}</span></button></li>)}</ul></nav>
           <div className="portfolio-detail">
             <div className="portfolio-snapshot-band"><div><p className="eyebrow">FROZEN SNAPSHOT</p><h2>{selected.name}</h2></div><dl><div><dt>状态</dt><dd>{snapshot.status}</dd></div><div><dt>覆盖范围</dt><dd>{snapshot.coverage_scope}</dd></div><div><dt>快照时点</dt><dd>{formatTime(snapshot.as_of)}</dd></div></dl></div>
             {snapshot.status === "RECONCILIATION_REQUIRED" ? <p className="inline-notice inline-notice--error">双读对账未通过。快照仅供展示，不能用作优化基线。</p> : null}
