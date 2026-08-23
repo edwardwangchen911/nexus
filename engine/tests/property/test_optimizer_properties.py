@@ -5,9 +5,32 @@ from uuid import UUID
 
 from hypothesis import given
 from hypothesis import strategies as st
-from nexus.optimizer.compare import ComparableProposal, compare_proposals
+from nexus.optimizer.compare import (
+    ComparableProposal,
+    ComparisonDimensions,
+    TypedMetric,
+    compare_proposals,
+)
 from nexus.optimizer.minimum_change import ReductionCandidate, reduce_until_satisfied
 from nexus.optimizer.strategy_target import build_strategy_target
+
+
+def _dimensions(violations: int, cost: Decimal | None) -> ComparisonDimensions:
+    known = TypedMetric.known
+    return ComparisonDimensions(
+        hard_violations=violations,
+        top1=known("0.5"),
+        top3=known("0.6"),
+        hhi=known("0.4"),
+        sector_exposure=known("0.3"),
+        currency_exposure=known("0.8"),
+        volatility=known("0.2"),
+        drawdown=known("0.2"),
+        correlation=known("0.5"),
+        liquidity=known("1"),
+        turnover=known("0"),
+        cost=TypedMetric.unknown("COST_UNKNOWN") if cost is None else known(cost),
+    )
 
 
 @given(st.integers(min_value=1, max_value=10_000))
@@ -44,9 +67,9 @@ def test_unknown_cost_is_never_ranked_as_zero(cost: Decimal) -> None:
     """Unknown-cost alternatives remain excluded regardless of known hold cost."""
     result = compare_proposals(
         (
-            ComparableProposal("hold_current", 1, Decimal("0"), cost, False),
-            ComparableProposal("minimum_change", 0, Decimal("0.1"), None, False),
-            ComparableProposal("strategy_target", 0, Decimal("0.2"), None, False),
+            ComparableProposal("hold_current", _dimensions(1, cost)),
+            ComparableProposal("minimum_change", _dimensions(0, None)),
+            ComparableProposal("strategy_target", _dimensions(0, None)),
         )
     )
     assert result.recommendation == "hold_current"
