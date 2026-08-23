@@ -41,6 +41,7 @@ EXPECTED_TABLES = {
     "portfolio_diagnostic_items",
     "portfolio_diagnostic_evidence_refs",
     "optimization_policies",
+    "optimization_admission_authorities",
     "optimization_proposal_groups",
     "optimization_proposals",
     "proposal_positions",

@@ -30,6 +30,38 @@ def upgrade() -> None:
         sa.UniqueConstraint("key", "version", name="uq_optimization_policies_key_version"),
     )
     op.create_table(
+        "optimization_admission_authorities",
+        sa.Column("id", _UUID, primary_key=True),
+        sa.Column("portfolio_snapshot_id", _UUID, nullable=False),
+        sa.Column("diagnostic_report_id", _UUID, nullable=False),
+        sa.Column("data_snapshot_id", _UUID, nullable=False),
+        sa.Column("source_policy_id", _UUID, nullable=False),
+        sa.Column("optimizer_policy_id", _UUID, nullable=False),
+        sa.Column("cost_model_version", sa.String(100), nullable=False),
+        sa.Column("diagnostic_input_hash", sa.String(64), nullable=False),
+        sa.Column("valuation_time", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("baseline_ready", sa.Boolean(), nullable=False),
+        sa.Column("diagnostic_complete", sa.Boolean(), nullable=False),
+        sa.Column("source_conflict", sa.Boolean(), nullable=False),
+        sa.Column("partial", sa.Boolean(), nullable=False),
+        sa.Column("requires_fx", sa.Boolean(), nullable=False),
+        sa.Column("cost_complete", sa.Boolean(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.ForeignKeyConstraint(["portfolio_snapshot_id"], ["portfolio_snapshots.id"]),
+        sa.ForeignKeyConstraint(["diagnostic_report_id"], ["portfolio_diagnostic_reports.id"]),
+        sa.ForeignKeyConstraint(["data_snapshot_id"], ["data_snapshots.id"]),
+        sa.ForeignKeyConstraint(["source_policy_id"], ["source_policies.id"]),
+        sa.ForeignKeyConstraint(["optimizer_policy_id"], ["optimization_policies.id"]),
+        sa.UniqueConstraint(
+            "portfolio_snapshot_id",
+            "data_snapshot_id",
+            "cost_model_version",
+            name="uq_optimization_admission_authorities_binding",
+        ),
+    )
+    op.create_table(
         "optimization_proposal_groups",
         sa.Column("id", _UUID, primary_key=True),
         sa.Column("baseline_portfolio_snapshot_id", _UUID, nullable=False),
@@ -144,6 +176,7 @@ def upgrade() -> None:
     )
     for table in (
         "optimization_policies",
+        "optimization_admission_authorities",
         "optimization_proposal_groups",
         "optimization_proposals",
         "proposal_positions",
@@ -154,6 +187,7 @@ def upgrade() -> None:
         )
     for table in (
         "optimization_policies",
+        "optimization_admission_authorities",
         "optimization_proposals",
         "proposal_positions",
         "proposal_comparisons",
@@ -169,6 +203,7 @@ def downgrade() -> None:
         "proposal_positions",
         "optimization_proposals",
         "optimization_proposal_groups",
+        "optimization_admission_authorities",
         "optimization_policies",
     ):
         op.execute(f"DROP TRIGGER trg_{table}_created_at_immutable ON {table}")
@@ -183,6 +218,7 @@ def downgrade() -> None:
         "proposal_comparisons",
         "proposal_positions",
         "optimization_proposals",
+        "optimization_admission_authorities",
         "optimization_policies",
     ):
         op.execute(f"DROP TRIGGER trg_{table}_immutable ON {table}")
@@ -191,4 +227,5 @@ def downgrade() -> None:
     op.drop_table("proposal_positions")
     op.drop_table("optimization_proposals")
     op.drop_table("optimization_proposal_groups")
+    op.drop_table("optimization_admission_authorities")
     op.drop_table("optimization_policies")

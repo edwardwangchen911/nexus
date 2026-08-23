@@ -13,12 +13,16 @@ from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.integrations import NexusErrorEnvelope
+from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.domain.decimal import DecimalString
 from nexus.optimizer.admission import admit_queued_job
+from nexus.optimizer.persistence import ProposalPersistenceAuthority
 from nexus.optimizer.repository import transition_group
-from nexus.persistence.models.data import DataSnapshot
+from nexus.persistence.models.data import DataSnapshot, SourcePolicy
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import (
+    OptimizationAdmissionAuthorityRecord,
+    OptimizationPolicyRecord,
     OptimizationProposalGroupRecord,
     OptimizationProposalRecord,
     ProposalComparisonRecord,
@@ -132,29 +136,11 @@ async def admit_optimization_proposal(
     idempotency_key = request.headers.get("Idempotency-Key")
     if not idempotency_key:
         raise NexusError(ErrorCode.VALIDATION_ERROR, "Idempotency-Key is required.", status_code=422)
-    snapshot = await session.scalar(
-        select(PortfolioSnapshotRecord).where(PortfolioSnapshotRecord.id == body.portfolio_snapshot_id)
-    )
-    report = await session.scalar(
-        select(PortfolioDiagnosticReportRecord).where(
-            PortfolioDiagnosticReportRecord.portfolio_snapshot_id == body.portfolio_snapshot_id,
-            PortfolioDiagnosticReportRecord.optimization_need == "OPTIMIZATION_CANDIDATE",
-        )
-    )
-    data_snapshot = await session.scalar(
-        select(DataSnapshot).where(DataSnapshot.id == body.data_snapshot_id)
-    )
-    if snapshot is None or snapshot.status != "READY" or report is None or data_snapshot is None:
+    authority = await _load_admission_authority(session, body)
+    if authority is None:
         raise NexusError(
             ErrorCode.DATA_PARTIAL,
             "Persisted optimization authority is incomplete.",
-            status_code=422,
-            details={"reason": "OPTIMIZATION_AUTHORITY_MISSING"},
-        )
-    if body.cost_model_version != "cost_model_v1":
-        raise NexusError(
-            ErrorCode.DATA_PARTIAL,
-            "Persisted source and cost authority is incomplete.",
             status_code=422,
             details={"reason": "OPTIMIZATION_AUTHORITY_MISSING"},
         )
@@ -182,6 +168,67 @@ async def admit_optimization_proposal(
         "meta": {"request_id": str(actor.request_id), "schema_version": "1"},
     }
     return JSONResponse(status_code=202, content=payload)
+
+
+async def _load_admission_authority(
+    session: AsyncSession, body: _ProposalAdmissionRequest
+) -> ProposalPersistenceAuthority | None:
+    """Return only a DB-proven, exact Task 11/data/source/cost authority binding."""
+    snapshot = await session.get(PortfolioSnapshotRecord, body.portfolio_snapshot_id)
+    authority = await session.scalar(
+        select(OptimizationAdmissionAuthorityRecord).where(
+            OptimizationAdmissionAuthorityRecord.portfolio_snapshot_id
+            == body.portfolio_snapshot_id,
+            OptimizationAdmissionAuthorityRecord.data_snapshot_id == body.data_snapshot_id,
+            OptimizationAdmissionAuthorityRecord.cost_model_version == body.cost_model_version,
+        )
+    )
+    if snapshot is None or snapshot.status != "READY" or authority is None:
+        return None
+    report = await session.get(PortfolioDiagnosticReportRecord, authority.diagnostic_report_id)
+    data_snapshot = await session.get(DataSnapshot, authority.data_snapshot_id)
+    source_policy = await session.get(SourcePolicy, authority.source_policy_id)
+    optimizer_policy = await session.get(OptimizationPolicyRecord, authority.optimizer_policy_id)
+    if (
+        report is None
+        or data_snapshot is None
+        or source_policy is None
+        or optimizer_policy is None
+        or report.portfolio_id != snapshot.portfolio_id
+        or report.portfolio_snapshot_id != snapshot.id
+        or report.policy_id != REAL_ADVISORY_POLICY_ID
+        or report.policy_version != "real_advisory_policy_v1"
+        or report.optimization_need != "OPTIMIZATION_CANDIDATE"
+        or report.diagnostic_input_hash != authority.diagnostic_input_hash
+        or report.snapshot_as_of != snapshot.as_of
+        or authority.valuation_time != snapshot.as_of
+        or data_snapshot.available_at > snapshot.as_of
+        or data_snapshot.received_at > snapshot.as_of
+        or optimizer_policy.key != "optimizer"
+        or optimizer_policy.version != "optimizer_v1"
+        or not authority.baseline_ready
+        or not authority.diagnostic_complete
+        or authority.source_conflict
+        or authority.partial
+        or authority.requires_fx
+        or not authority.cost_complete
+    ):
+        return None
+    return ProposalPersistenceAuthority(
+        diagnostic_report_id=authority.diagnostic_report_id,
+        data_snapshot_id=authority.data_snapshot_id,
+        source_policy_id=authority.source_policy_id,
+        optimizer_policy_id=authority.optimizer_policy_id,
+        cost_model_version=authority.cost_model_version,
+        diagnostic_input_hash=authority.diagnostic_input_hash,
+        valuation_time=authority.valuation_time,
+        baseline_ready=authority.baseline_ready,
+        diagnostic_complete=authority.diagnostic_complete,
+        source_conflict=authority.source_conflict,
+        partial=authority.partial,
+        requires_fx=authority.requires_fx,
+        cost_complete=authority.cost_complete,
+    )
 
 
 @router.get("/internal/v1/optimization-proposals/{group_id}", responses=_ERROR_RESPONSES)

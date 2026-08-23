@@ -9,10 +9,15 @@ from uuid import UUID
 
 import httpx
 import pytest
-from helpers.portfolio_api import app, headers, settings
-from nexus.persistence.models.data import DataSnapshot
-from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
-from nexus.persistence.models.runtime import AuditEvent
+from helpers.portfolio_api import PORTFOLIOS, app, headers, seed_portfolio_list, settings
+from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
+from nexus.persistence.models.data import DataSnapshot, SourcePolicy
+from nexus.persistence.models.diagnostics import DiagnosticPolicy, PortfolioDiagnosticReportRecord
+from nexus.persistence.models.optimization import (
+    OptimizationAdmissionAuthorityRecord,
+    OptimizationProposalGroupRecord,
+)
+from nexus.persistence.models.runtime import AuditEvent, Job
 from nexus.persistence.session import session_factory
 from sqlalchemy import func, select
 
@@ -101,6 +106,137 @@ async def test_proposal_admission_fails_closed_without_persisted_authority(
         response = await client.post(path, content=payload, headers=request_headers)
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "DATA_PARTIAL"
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Job)) == 0
+        assert await session.scalar(select(func.count()).select_from(OptimizationProposalGroupRecord)) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "changes"),
+    (
+        ("partial_snapshot", {"snapshot_id": "0198d500-1000-7000-8000-000000000042"}),
+        ("diagnostic_hash_conflict", {"diagnostic_input_hash": "c" * 64}),
+        ("non_task11_diagnostic", {"alternate_diagnostic_policy": True}),
+        ("different_report_snapshot", {"report_snapshot_id": "0198d500-1000-7000-8000-000000000042"}),
+        ("future_data", {"data_time_offset": 1}),
+        ("incomplete_diagnostic", {"diagnostic_complete": False}),
+        ("source_conflict", {"source_conflict": True}),
+        ("partial_authority", {"partial": True}),
+        ("unresolved_fx", {"requires_fx": True}),
+        ("incomplete_cost", {"cost_complete": False}),
+        ("cost_model_conflict", {"request_cost_model": "cost_model_v2"}),
+    ),
+)
+async def test_proposal_admission_rejects_every_unproven_authority_without_writes(
+    migrated_database_url: str, case: str, changes: dict[str, object]
+) -> None:
+    """Any stale, partial, conflicting, or unlinked authority must create neither job nor group."""
+    del case
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    partial_snapshot_id = UUID("0198d500-1000-7000-8000-000000000042")
+    baseline_id = UUID(str(changes.get("snapshot_id", "0198d500-1000-7000-8000-000000000041")))
+    report_snapshot_id = UUID(str(changes.get("report_snapshot_id", baseline_id)))
+    report_portfolio = PORTFOLIOS[2] if report_snapshot_id == partial_snapshot_id else PORTFOLIOS[0]
+    baseline_time = datetime(2026, 8, 24, 3, 59, tzinfo=UTC)
+    data_time = baseline_time.replace(hour=4) if changes.get("data_time_offset") else baseline_time
+    data_id = UUID("0198d500-1000-7000-8000-000000000721")
+    source_policy_id = UUID("0198d500-1000-7000-8000-000000000722")
+    report_hash = "d" * 64
+    report_policy_id = REAL_ADVISORY_POLICY_ID
+    async with factory() as session, session.begin():
+        if changes.get("alternate_diagnostic_policy"):
+            report_policy_id = UUID("0198d500-1000-7000-8000-000000000723")
+            session.add(
+                DiagnosticPolicy(
+                    id=report_policy_id,
+                    key="other",
+                    version="other_v1",
+                    schema_version="1",
+                    payload={},
+                )
+            )
+        session.add(
+            DataSnapshot(
+                id=data_id,
+                source="fixture",
+                provider_object_id="optimization-authority",
+                revision="1",
+                observed_at=data_time,
+                available_at=data_time,
+                received_at=data_time,
+                schema_version="1",
+                payload={},
+            )
+        )
+        session.add(
+            SourcePolicy(
+                id=source_policy_id,
+                key="source_policy",
+                version="source_policy_v1",
+                schema_version="1",
+                payload={},
+            )
+        )
+        report = PortfolioDiagnosticReportRecord(
+            portfolio_id=report_portfolio,
+            portfolio_snapshot_id=report_snapshot_id,
+            snapshot_as_of=baseline_time,
+            trading_day=date(2026, 8, 24),
+                policy_id=report_policy_id,
+                policy_version=(
+                    "other_v1" if changes.get("alternate_diagnostic_policy") else "real_advisory_policy_v1"
+                ),
+            optimization_need="OPTIMIZATION_CANDIDATE",
+            diagnostic_input_hash=report_hash,
+        )
+        session.add(report)
+        await session.flush()
+        session.add(
+            OptimizationAdmissionAuthorityRecord(
+                portfolio_snapshot_id=baseline_id,
+                diagnostic_report_id=report.id,
+                data_snapshot_id=data_id,
+                source_policy_id=source_policy_id,
+                optimizer_policy_id=UUID("e690b91d-1e24-5de3-b2b2-566a463fca25"),
+                cost_model_version="cost_model_v1",
+                diagnostic_input_hash=str(changes.get("diagnostic_input_hash", report_hash)),
+                valuation_time=baseline_time,
+                baseline_ready=True,
+                diagnostic_complete=bool(changes.get("diagnostic_complete", True)),
+                source_conflict=bool(changes.get("source_conflict", False)),
+                partial=bool(changes.get("partial", False)),
+                requires_fx=bool(changes.get("requires_fx", False)),
+                cost_complete=bool(changes.get("cost_complete", True)),
+            )
+        )
+    body = json.dumps(
+        {
+            "portfolio_snapshot_id": str(baseline_id),
+            "data_snapshot_id": str(data_id),
+            "cost_model_version": str(changes.get("request_cost_model", "cost_model_v1")),
+        },
+        separators=(",", ":"),
+    ).encode()
+    path = "/internal/v1/optimization-proposals"
+    request_headers = headers("POST", path, body)
+    request_headers["Idempotency-Key"] = "reject-unproven-authority"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
+    ) as client:
+        response = await client.post(path, content=body, headers=request_headers)
+    assert response.status_code == 422
+    assert response.json()["error"] == {
+        "code": "DATA_PARTIAL",
+        "message": "Persisted optimization authority is incomplete.",
+        "request_id": response.json()["error"]["request_id"],
+        "details": {"reason": "OPTIMIZATION_AUTHORITY_MISSING"},
+    }
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Job)) == 0
+        assert await session.scalar(select(func.count()).select_from(OptimizationProposalGroupRecord)) == 0
 
 
 @pytest.mark.asyncio
@@ -113,7 +249,9 @@ async def test_proposal_admission_returns_one_queued_job_for_idempotent_replay(
 
     await seed_portfolio_list(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
+    authority_time = datetime(2026, 8, 24, 3, 59, tzinfo=UTC)
     data_snapshot_id = UUID("0198d500-1000-7000-8000-000000000711")
+    source_policy_id = UUID("0198d500-1000-7000-8000-000000000712")
     async with factory() as session, session.begin():
         session.add(
             DataSnapshot(
@@ -121,23 +259,50 @@ async def test_proposal_admission_returns_one_queued_job_for_idempotent_replay(
                 source="fixture",
                 provider_object_id="optimization-711",
                 revision="1",
-                observed_at=datetime(2026, 8, 24, tzinfo=UTC),
-                available_at=datetime(2026, 8, 24, tzinfo=UTC),
-                received_at=datetime(2026, 8, 24, tzinfo=UTC),
+                observed_at=authority_time,
+                available_at=authority_time,
+                received_at=authority_time,
                 schema_version="1",
                 payload={},
             )
         )
         session.add(
-            PortfolioDiagnosticReportRecord(
-                portfolio_id=PORTFOLIOS[0],
+            SourcePolicy(
+                id=source_policy_id,
+                key="source_policy",
+                version="source_policy_v1",
+                schema_version="1",
+                payload={},
+            )
+        )
+        report = PortfolioDiagnosticReportRecord(
+            portfolio_id=PORTFOLIOS[0],
+            portfolio_snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
+            snapshot_as_of=authority_time,
+            trading_day=date(2026, 8, 24),
+            policy_id=REAL_ADVISORY_POLICY_ID,
+            policy_version="real_advisory_policy_v1",
+            optimization_need="OPTIMIZATION_CANDIDATE",
+            diagnostic_input_hash="d" * 64,
+        )
+        session.add(report)
+        await session.flush()
+        session.add(
+            OptimizationAdmissionAuthorityRecord(
                 portfolio_snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
-                snapshot_as_of=datetime(2026, 8, 24, tzinfo=UTC),
-                trading_day=date(2026, 8, 24),
-                policy_id=REAL_ADVISORY_POLICY_ID,
-                policy_version="real_advisory_policy_v1",
-                optimization_need="OPTIMIZATION_CANDIDATE",
+                diagnostic_report_id=report.id,
+                data_snapshot_id=data_snapshot_id,
+                source_policy_id=source_policy_id,
+                optimizer_policy_id=UUID("e690b91d-1e24-5de3-b2b2-566a463fca25"),
+                cost_model_version="cost_model_v1",
                 diagnostic_input_hash="d" * 64,
+                valuation_time=authority_time,
+                baseline_ready=True,
+                diagnostic_complete=True,
+                source_conflict=False,
+                partial=False,
+                requires_fx=False,
+                cost_complete=True,
             )
         )
     body = json.dumps(
@@ -181,3 +346,6 @@ async def test_proposal_admission_returns_one_queued_job_for_idempotent_replay(
     assert changed.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
     assert {response.status_code for response in concurrent} == {202}
     assert len({response.json()["data"]["job_id"] for response in concurrent}) == 1
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Job)) == 2
+        assert await session.scalar(select(func.count()).select_from(OptimizationProposalGroupRecord)) == 0

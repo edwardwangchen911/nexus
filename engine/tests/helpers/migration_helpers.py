@@ -255,6 +255,7 @@ def _assert_reflected_schema(connection: Connection) -> None:
     }
     optimization_tables = {
         "optimization_policies",
+        "optimization_admission_authorities",
         "optimization_proposal_groups",
         "optimization_proposals",
         "proposal_positions",

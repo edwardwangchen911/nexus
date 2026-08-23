@@ -25,6 +25,35 @@ class OptimizationPolicyRecord(ImmutableCreatedAt, Base):
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
 
 
+class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
+    """Frozen upstream proof required before admitting a proposal-construction job."""
+
+    __tablename__ = "optimization_admission_authorities"
+    __table_args__ = (
+        UniqueConstraint(
+            "portfolio_snapshot_id",
+            "data_snapshot_id",
+            "cost_model_version",
+            name="uq_optimization_admission_authorities_binding",
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    portfolio_snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("portfolio_snapshots.id"))
+    diagnostic_report_id: Mapped[UUID] = mapped_column(ForeignKey("portfolio_diagnostic_reports.id"))
+    data_snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("data_snapshots.id"))
+    source_policy_id: Mapped[UUID] = mapped_column(ForeignKey("source_policies.id"))
+    optimizer_policy_id: Mapped[UUID] = mapped_column(ForeignKey("optimization_policies.id"))
+    cost_model_version: Mapped[str] = mapped_column(String(100))
+    diagnostic_input_hash: Mapped[str] = mapped_column(String(64))
+    valuation_time: Mapped[datetime] = mapped_column(UTCDateTime())
+    baseline_ready: Mapped[bool] = mapped_column(Boolean)
+    diagnostic_complete: Mapped[bool] = mapped_column(Boolean)
+    source_conflict: Mapped[bool] = mapped_column(Boolean)
+    partial: Mapped[bool] = mapped_column(Boolean)
+    requires_fx: Mapped[bool] = mapped_column(Boolean)
+    cost_complete: Mapped[bool] = mapped_column(Boolean)
+
+
 class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
     __tablename__ = "optimization_proposal_groups"
     __table_args__ = (
