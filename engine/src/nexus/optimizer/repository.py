@@ -127,6 +127,7 @@ async def _has_executable_shadow_authority(
     return bool(
         strategy is not None
         and selection is not None
+        and group.selection_evidence_hash == selection.evidence_hash
         and strategy.portfolio_scope == group.portfolio_scope
         and (
             group.portfolio_scope == "real_read_only" or not strategy.analysis_only

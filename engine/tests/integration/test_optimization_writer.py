@@ -1,5 +1,3 @@
-"""Real PostgreSQL persistence contracts for complete proposal groups."""
-
 import asyncio
 from dataclasses import replace
 from datetime import UTC, date, datetime
@@ -149,7 +147,8 @@ async def test_writer_rejects_strategy_without_bound_selection_atomically(
 ) -> None:
     await seed_portfolio_list(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
-    authority = replace(await _seed_authority(factory), selection_authority_id=None)
+    seeded = await _seed_authority(factory)
+    authority = replace(seeded, selection_authority_id=None, selection_evidence_hash=None)
     invalid = _group().model_copy(
         update={
             "proposals": (
@@ -426,6 +425,7 @@ async def _seed_authority(factory) -> ProposalPersistenceAuthority:
         cost_complete=True,
         portfolio_scope="internal_paper",
         selection_authority_id=_SELECTION_ID,
+        selection_evidence_hash="a" * 64,
     )
 
 

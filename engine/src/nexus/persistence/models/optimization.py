@@ -85,6 +85,10 @@ class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
             "portfolio_scope IN ('real_read_only','internal_paper','fosun_simulation')",
             name="portfolio_scope_allowed",
         ),
+        CheckConstraint(
+            "(selection_authority_id IS NULL) = (selection_evidence_hash IS NULL)",
+            name="selection_hash_binding",
+        ),
         ForeignKeyConstraint(
             ["selection_authority_id", "data_snapshot_id"],
             [
@@ -113,6 +117,7 @@ class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
     selection_authority_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("baseline_selection_authorities.id")
     )
+    selection_evidence_hash: Mapped[str | None] = mapped_column(String(64))
     portfolio_scope: Mapped[str] = mapped_column(String(30), default="real_read_only")
 
 
@@ -126,6 +131,10 @@ class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
         CheckConstraint(
             "portfolio_scope IN ('real_read_only','internal_paper','fosun_simulation')",
             name="portfolio_scope_allowed",
+        ),
+        CheckConstraint(
+            "(selection_authority_id IS NULL) = (selection_evidence_hash IS NULL)",
+            name="selection_hash_binding",
         ),
         UniqueConstraint("id", "baseline_portfolio_snapshot_id", name="uq_optimization_groups_id_baseline"),
         ForeignKeyConstraint(
@@ -145,6 +154,7 @@ class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
     selection_authority_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("baseline_selection_authorities.id")
     )
+    selection_evidence_hash: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(20), default="draft")
     version: Mapped[int] = mapped_column(Integer, default=0)
     policy_id: Mapped[UUID] = mapped_column(ForeignKey("optimization_policies.id"))

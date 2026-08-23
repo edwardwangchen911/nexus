@@ -71,6 +71,7 @@ async def test_raw_overweight_strategy_position_is_rejected_before_group_commit(
                 OptimizationProposalGroupRecord(
                     id=_GROUP, baseline_portfolio_snapshot_id=_BASELINE,
                     portfolio_scope="internal_paper", selection_authority_id=_SELECTION,
+                    selection_evidence_hash="a" * 64,
                     status="draft", version=0, policy_id=_POLICY, diagnostic_report_id=_REPORT,
                     data_snapshot_id=_DATA, source_policy_id=SOURCE_POLICY_ID,
                     cost_policy_id=COST_POLICY_ID, diagnostic_input_hash="d" * 64,

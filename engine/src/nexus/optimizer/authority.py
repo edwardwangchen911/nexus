@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.optimizer.cost_policy import COST_POLICY_ID, load_cost_policy_v1
 from nexus.optimizer.persistence import ProposalPersistenceAuthority
+from nexus.optimizer.selection_authority import load_selection_authority
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import (
@@ -56,6 +57,16 @@ async def load_admission_authority(
     try:
         source_policy = await load_source_policy_v1(session, instrument_tick_size=None)
         cost_policy = await load_cost_policy_v1(session)
+        selection = (
+            None
+            if authority is None or authority.selection_authority_id is None
+            else await load_selection_authority(
+                session,
+                authority.selection_authority_id,
+                data_snapshot_id=authority.data_snapshot_id,
+                valuation_time=authority.valuation_time,
+            )
+        )
     except ValueError:
         return None
     if (
@@ -81,6 +92,11 @@ async def load_admission_authority(
         or authority.requires_fx
         or not authority.cost_complete
         or authority.authority_stale
+        or (
+            selection is not None
+            and authority.selection_evidence_hash != selection.evidence_hash
+        )
+        or (selection is None and authority.selection_evidence_hash is not None)
         or source_policy.record_id != SOURCE_POLICY_ID
         or authority.source_policy_id != SOURCE_POLICY_ID
         or source_policy.available_at > snapshot.as_of
@@ -109,5 +125,6 @@ async def load_admission_authority(
             authority_stale=authority.authority_stale,
             portfolio_scope=authority.portfolio_scope,
             selection_authority_id=authority.selection_authority_id,
+            selection_evidence_hash=authority.selection_evidence_hash,
         ),
     )

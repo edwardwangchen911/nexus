@@ -425,13 +425,14 @@ async def _seed_complete_group(
         await session.flush()
         await session.execute(
             text(
-                "INSERT INTO optimization_proposal_groups (id, baseline_portfolio_snapshot_id, status, version, policy_id, selection_authority_id, diagnostic_report_id, data_snapshot_id, source_policy_id, cost_policy_id, diagnostic_input_hash, valuation_time, baseline_ready, diagnostic_complete, source_conflict, partial, requires_fx, cost_complete, authority_stale) VALUES (:id, :baseline, 'compared', 1, :policy, :selection, :report, :data, :source, :cost_policy, :hash, :valuation, true, true, :source_conflict, false, false, true, :authority_stale)"
+                "INSERT INTO optimization_proposal_groups (id, baseline_portfolio_snapshot_id, status, version, policy_id, selection_authority_id, selection_evidence_hash, diagnostic_report_id, data_snapshot_id, source_policy_id, cost_policy_id, diagnostic_input_hash, valuation_time, baseline_ready, diagnostic_complete, source_conflict, partial, requires_fx, cost_complete, authority_stale) VALUES (:id, :baseline, 'compared', 1, :policy, :selection, :selection_hash, :report, :data, :source, :cost_policy, :hash, :valuation, true, true, :source_conflict, false, false, true, :authority_stale)"
             ),
             {
                 "id": group_id,
                 "baseline": _BASELINE_ID,
                 "policy": _POLICY_ID,
                 "selection": None if missing_selection else selection_id,
+                "selection_hash": None if missing_selection else "a" * 64,
                 "report": report_id,
                 "data": data_id,
                 "source": source_id,

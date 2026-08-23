@@ -38,10 +38,18 @@ class ProposalPersistenceAuthority:
     authority_stale: bool = False
     portfolio_scope: str = "real_read_only"
     selection_authority_id: UUID | None = None
+    selection_evidence_hash: str | None = None
 
     def __post_init__(self) -> None:
         if len(self.diagnostic_input_hash) != 64:
             raise ValueError("diagnostic_input_hash must be a SHA-256 digest")
+        if (self.selection_authority_id is None) != (self.selection_evidence_hash is None):
+            raise ValueError("selection authority and evidence hash must be bound together")
+        if self.selection_evidence_hash is not None and (
+            len(self.selection_evidence_hash) != 64
+            or any(char not in "0123456789abcdef" for char in self.selection_evidence_hash)
+        ):
+            raise ValueError("selection evidence hash must be a SHA-256 digest")
 
 
 @dataclass(frozen=True)
@@ -131,6 +139,7 @@ async def persist_proposal_group(
         baseline_portfolio_snapshot_id=group.baseline_portfolio_snapshot_id,
         portfolio_scope=group.portfolio_scope,
         selection_authority_id=authority.selection_authority_id,
+        selection_evidence_hash=authority.selection_evidence_hash,
         status=group.status,
         version=group.version,
         policy_id=authority.optimizer_policy_id,
@@ -203,6 +212,8 @@ async def _validate_strategy_binding(
         data_snapshot_id=authority.data_snapshot_id,
         valuation_time=authority.valuation_time,
     )
+    if selection.evidence_hash != authority.selection_evidence_hash:
+        raise ValueError("strategy target is not bound to selection evidence")
     if not strategy.strategy_evidence_complete:
         if any(
             position.target_weight != position.current_weight

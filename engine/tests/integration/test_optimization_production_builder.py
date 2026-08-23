@@ -154,6 +154,7 @@ async def _seed_authority(
                 cost_complete=True,
                 authority_stale=False,
                 selection_authority_id=None if selected_id is None else _SELECTION_ID,
+                selection_evidence_hash=None if selected_id is None else "a" * 64,
                 portfolio_scope="internal_paper",
             )
         )
@@ -215,6 +216,7 @@ async def test_production_builder_uses_frozen_diagnostics_selection_and_atomic_w
         }
     assert group is not None
     assert (group.selection_authority_id, group.data_snapshot_id) == (_SELECTION_ID, _DATA_ID)
+    assert group.selection_evidence_hash == "a" * 64
     minimum = positions["minimum_change"][0]
     strategy = positions["strategy_target"][0]
     assert minimum.target_weight == minimum.current_weight - Decimal("0.0002")
