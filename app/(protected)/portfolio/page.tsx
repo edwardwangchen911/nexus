@@ -151,7 +151,12 @@ export default function PortfolioPage(): React.ReactElement {
         });
         const payload = await response.json();
         if (!response.ok) {
-          if (payload?.error?.code === "INTERNAL_ERROR" && attempt === 0) continue;
+          if (payload?.error?.code === "INTERNAL_ERROR") {
+            if (attempt === 0) continue;
+            setUnresolvedSync(pending);
+            setNotice({ kind: "error", text: "同步请求结果仍未知。当前组合的新同步保持锁定；请使用同一幂等键继续确认。" });
+            return;
+          }
           setUnresolvedSync(null);
           setNotice({ kind: "error", text: syncErrorMessage(payload?.error?.code) });
           return;

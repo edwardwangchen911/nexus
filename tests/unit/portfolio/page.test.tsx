@@ -179,7 +179,7 @@ describe("portfolio vertical slice", () => {
       if (url === "/api/v1/broker-sync-runs") {
         syncCalls += 1;
         keys.push(new Headers(init?.headers).get("idempotency-key"));
-        if (syncCalls <= 2) throw new DOMException("Aborted", "AbortError");
+        if (syncCalls <= 2) return Response.json({ error: { code: "INTERNAL_ERROR", message: "safe", request_id: responseMeta().request_id, details: {} } }, { status: 500 });
         return Response.json({ data: { broker_sync_run_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e705" }, meta: responseMeta() }, { status: 202 });
       }
       throw new Error(`unexpected request: ${url}`);
