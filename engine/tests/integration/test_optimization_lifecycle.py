@@ -228,6 +228,27 @@ async def test_shadow_incomplete_persisted_authority_rolls_back_its_claim(
 
 
 @pytest.mark.asyncio
+async def test_shadow_rejects_non_executable_persisted_comparison(
+    migrated_database_url: str,
+) -> None:
+    """A complete group authority cannot override a non-executable child comparison."""
+    group_id = UUID("0198d500-1000-7000-8000-000000000845")
+    await _seed_complete_group(migrated_database_url, group_id, comparison_non_executable=True)
+    body = b'{"version":1}'
+    path = f"/internal/v1/optimization-proposals/{group_id}/shadow"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
+    ) as client:
+        response = await client.post(
+            path,
+            content=body,
+            headers={**headers("POST", path, body), "Idempotency-Key": "non-executable-comparison"},
+        )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("terminal", ("validated", "rejected", "expired"))
 async def test_every_terminal_lifecycle_state_is_immutable(
     migrated_database_url: str, terminal: str
@@ -250,7 +271,11 @@ async def test_every_terminal_lifecycle_state_is_immutable(
 
 
 async def _seed_complete_group(
-    database_url: str, group_id: UUID, *, source_conflict: bool = False
+    database_url: str,
+    group_id: UUID,
+    *,
+    source_conflict: bool = False,
+    comparison_non_executable: bool = False,
 ) -> None:
     await seed_portfolio_list(database_url)
     factory = session_factory(settings(database_url))
@@ -326,10 +351,18 @@ async def _seed_complete_group(
                 proposal_id=UUID(
                     f"0198d500-1000-7000-8000-000000000{int(suffix) + 30 + index:03d}"
                 ),
-                metrics={},
+                metrics={
+                    "cost": "0",
+                    "ranking_eligible": not comparison_non_executable,
+                    "unknown_metrics": [],
+                    "constraint_complete": True,
+                    "eligibility_complete": True,
+                    "evidence_complete": True,
+                    "stale": False,
+                },
                 tax_impact="unknown",
                 requires_fx=False,
-                non_executable=True,
+                non_executable=comparison_non_executable,
                 cost_complete=True,
             )
             for index in range(1, 4)

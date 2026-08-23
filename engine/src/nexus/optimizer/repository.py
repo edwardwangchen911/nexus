@@ -13,6 +13,7 @@ from nexus.persistence.models.optimization import (
     OptimizationPolicyRecord,
     OptimizationProposalGroupRecord,
     OptimizationProposalRecord,
+    ProposalComparisonRecord,
 )
 from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
 
@@ -87,6 +88,14 @@ async def _has_executable_shadow_authority(
     data_snapshot = await session.get(DataSnapshot, group.data_snapshot_id)
     source_policy = await session.get(SourcePolicy, group.source_policy_id)
     optimizer_policy = await session.get(OptimizationPolicyRecord, group.policy_id)
+    comparisons = tuple(
+        await session.scalars(
+            select(ProposalComparisonRecord)
+            .join(OptimizationProposalRecord)
+            .where(OptimizationProposalRecord.proposal_group_id == group.id)
+            .with_for_update()
+        )
+    )
     return bool(
         strategy is not None
         and not strategy.analysis_only
@@ -108,4 +117,23 @@ async def _has_executable_shadow_authority(
         and optimizer_policy is not None
         and optimizer_policy.key == "optimizer"
         and optimizer_policy.version == "optimizer_v1"
+        and len(comparisons) == 3
+        and all(_comparison_is_executable(comparison) for comparison in comparisons)
+    )
+
+
+def _comparison_is_executable(comparison: ProposalComparisonRecord) -> bool:
+    """Require every persisted comparison to retain complete executable authority."""
+    metrics = comparison.metrics
+    return bool(
+        not comparison.non_executable
+        and not comparison.requires_fx
+        and comparison.cost_complete
+        and metrics.get("ranking_eligible") is True
+        and metrics.get("constraint_complete") is True
+        and metrics.get("eligibility_complete") is True
+        and metrics.get("evidence_complete") is True
+        and metrics.get("stale") is False
+        and metrics.get("unknown_metrics") == []
+        and metrics.get("cost") is not None
     )
