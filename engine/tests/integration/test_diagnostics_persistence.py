@@ -10,9 +10,13 @@ from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID, load_real_advisory
 from nexus.diagnostics.repository import _persist_report, load_history
 from nexus.diagnostics.service import diagnose_and_persist
 from nexus.domain.evidence import EvidenceRef
-from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
+from nexus.persistence.models.diagnostics import (
+    PortfolioDiagnosticItemRecord,
+    PortfolioDiagnosticReportRecord,
+)
 from nexus.persistence.models.portfolio import BrokerSyncRun, PortfolioSnapshotRecord
 from nexus.persistence.session import session_factory
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -144,6 +148,47 @@ async def test_report_rejects_evidence_unavailable_at_frozen_snapshot(
                 report=report.model_copy(update={"items": (future_item,)}),
                 diagnostic_input_hash=INPUT_HASH,
             )
+
+
+@pytest.mark.asyncio
+async def test_same_currency_correlation_components_persist_with_distinct_scopes(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    scopes = (
+        "currency:USD:correlation-cluster:component-a",
+        "currency:USD:correlation-cluster:component-b",
+    )
+    async with factory() as session, session.begin():
+        policy = await load_real_advisory_policy_v1(session)
+        base = _report(policy.version)
+        items = tuple(
+            base.items[0].model_copy(
+                update={
+                    "diagnostic_code": "CORRELATION_CLUSTER",
+                    "metric_value": "0.9",
+                    "policy_scope": scope,
+                    "unknown_reason": None,
+                }
+            )
+            for scope in scopes
+        )
+        report_id = await _persist_report(
+            session,
+            portfolio_id=PORTFOLIOS[0],
+            report=base.model_copy(update={"items": items}),
+            diagnostic_input_hash=INPUT_HASH,
+        )
+        stored_scopes = tuple(
+            await session.scalars(
+                select(PortfolioDiagnosticItemRecord.policy_scope)
+                .where(PortfolioDiagnosticItemRecord.report_id == report_id)
+                .order_by(PortfolioDiagnosticItemRecord.policy_scope)
+            )
+        )
+
+    assert stored_scopes == scopes
 
 
 @pytest.mark.asyncio
