@@ -1,6 +1,7 @@
 """Deterministic diagnosis entry point with fail-closed readiness precedence."""
 
 from collections import defaultdict
+from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
@@ -10,7 +11,7 @@ from nexus.diagnostics.decision import optimization_need as _optimization_need
 from nexus.diagnostics.metrics import (
     annualized_volatility,
     beta_and_correlation_by_session,
-    correlation_components,
+    correlation_components_by_session,
     days_to_exit,
     maximum_drawdown,
     qualified_session_closes,
@@ -244,7 +245,7 @@ def _market_risk_items(
     if snapshot.as_of is None:
         return [_unknown_item("MARKET_RISK", "ratio", "SNAPSHOT_AS_OF_MISSING", scope, market)]
     benchmark = qualified_session_closes(market.benchmark, snapshot.as_of)
-    returns_by_instrument: dict[UUID, tuple[Decimal, ...]] = {}
+    returns_by_instrument: dict[UUID, dict[date, Decimal]] = {}
     items: list[DiagnosticItem] = []
     for position, _ in values:
         session_closes = qualified_session_closes(
@@ -285,11 +286,12 @@ def _market_risk_items(
             continue
         assert volatility20 is not None and volatility63 is not None and drawdown is not None
         assert beta_correlation is not None
-        returns_by_instrument[position.instrument_id] = tuple(
-            current / prior - Decimal(1)
-            for prior, current in zip(closes, closes[1:])
-            if prior > 0 and current > 0
-        )
+        sessions = tuple(sorted(session_closes))
+        returns_by_instrument[position.instrument_id] = {
+            current: session_closes[current] / session_closes[prior] - Decimal(1)
+            for prior, current in zip(sessions, sessions[1:])
+            if session_closes[prior] > 0 and session_closes[current] > 0
+        }
         items.extend(
             (
                 _item(
@@ -347,7 +349,7 @@ def _market_risk_items(
                 ),
             )
         )
-    components = correlation_components(returns_by_instrument)  # type: ignore[arg-type]
+    components = correlation_components_by_session(returns_by_instrument)
     if components:
         amounts = {position.instrument_id: value for position, value in values}
         total = sum(amounts.values(), Decimal(0))

@@ -8,6 +8,7 @@ from nexus.diagnostics.metrics import (
     beta_and_correlation,
     beta_and_correlation_by_session,
     correlation_components,
+    correlation_components_by_session,
     days_to_exit,
     maximum_drawdown,
     security_hhi,
@@ -94,6 +95,16 @@ def test_correlation_components_require_sixty_overlapping_returns() -> None:
     returns = tuple(Decimal(value) for value in range(59))
 
     assert correlation_components({first: returns, second: returns}) == ()
+
+
+def test_session_cluster_uses_only_recent_common_window_and_sixty_overlap() -> None:
+    first = UUID("0198d500-1000-7000-8000-000000000031")
+    second = UUID("0198d500-1000-7000-8000-000000000032")
+    start = date(2026, 1, 1)
+    aligned = {start + timedelta(days=index): Decimal(index) for index in range(126)}
+    shifted = {start + timedelta(days=index + 1): Decimal(index) for index in range(59)}
+
+    assert correlation_components_by_session({first: aligned, second: shifted}) == ()
 
 
 def test_days_to_exit_uses_ten_percent_of_adv() -> None:

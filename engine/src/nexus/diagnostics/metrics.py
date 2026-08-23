@@ -130,6 +130,12 @@ def correlation_components(
             if correlation is not None and correlation >= Decimal("0.80"):
                 neighbours[left].add(right)
                 neighbours[right].add(left)
+    return _components(identifiers, neighbours)
+
+
+def _components(
+    identifiers: tuple[UUID, ...], neighbours: Mapping[UUID, set[UUID]]
+) -> tuple[tuple[UUID, ...], ...]:
     components: list[tuple[UUID, ...]] = []
     remaining = set(identifiers)
     while remaining:
@@ -146,6 +152,26 @@ def correlation_components(
         if len(component) > 1:
             components.append(tuple(sorted(component, key=str)))
     return tuple(components)
+
+
+def correlation_components_by_session(
+    returns_by_instrument: Mapping[UUID, Mapping[date, Decimal]],
+) -> tuple[tuple[UUID, ...], ...]:
+    """Connect only pairs with >=60 common returns in their latest 126 sessions."""
+    identifiers = tuple(sorted(returns_by_instrument, key=str))
+    neighbours: dict[UUID, set[UUID]] = {identifier: set() for identifier in identifiers}
+    for index, left in enumerate(identifiers):
+        for right in identifiers[index + 1 :]:
+            common_sessions = set(returns_by_instrument[left]) & set(returns_by_instrument[right])
+            sessions = tuple(sorted(common_sessions))[-126:]
+            correlation = _correlation(
+                tuple(returns_by_instrument[left][session] for session in sessions),
+                tuple(returns_by_instrument[right][session] for session in sessions),
+            )
+            if correlation is not None and correlation >= Decimal("0.80"):
+                neighbours[left].add(right)
+                neighbours[right].add(left)
+    return _components(identifiers, neighbours)
 
 
 def days_to_exit(position_market_value: Decimal, adv20: Decimal | None) -> Decimal | None:
