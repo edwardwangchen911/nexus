@@ -81,8 +81,6 @@ class MarketEvidence(_DiagnosticModel):
     trading_sessions: tuple[date, ...] = ()
     symbols: Mapping[UUID, str] = {}
     benchmark: PriceSeries | None = None
-    evidence_refs: tuple[EvidenceRef, ...] = ()
-    input_evidence: Mapping[str, tuple[EvidenceRef, ...]] = {}
     evidence: DiagnosticEvidence = DiagnosticEvidence()
     source_conflict: bool = False
 
@@ -99,12 +97,6 @@ class MarketEvidence(_DiagnosticModel):
             ):
                 raise ValueError("risk bucket weights must be nonnegative and sum to one")
         return self
-
-    def refs_for(self, input_kind: str, *, as_of: datetime) -> tuple[EvidenceRef, ...]:
-        refs = self.input_evidence.get(input_kind, ())
-        if not refs or any(ref.available_at > as_of for ref in refs):
-            return ()
-        return refs
 
     @classmethod
     def missing_adv(cls) -> "MarketEvidence":

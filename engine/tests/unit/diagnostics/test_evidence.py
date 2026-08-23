@@ -58,6 +58,16 @@ def test_known_diagnostics_retain_only_their_actual_input_evidence() -> None:
     assert "unrelated" not in used_object_ids
 
 
+def test_market_evidence_rejects_a_global_ref_bag() -> None:
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        MarketEvidence.model_validate(
+            {
+                "quality": "PASS",
+                "evidence_refs": [_ref("unrelated", "f").model_dump()],
+            }
+        )
+
+
 @pytest.mark.parametrize(
     ("case", "expected_reason"),
     (

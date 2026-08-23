@@ -73,10 +73,8 @@ def test_days_to_exit_uses_only_its_item_specific_adv_evidence() -> None:
     snapshot = _ready_snapshot()
     instrument_id = snapshot.positions[0].instrument_id
     adv_ref = _evidence_ref("adv20", "a")
-    unrelated_ref = _evidence_ref("unrelated", "b")
     market = _complete_market(snapshot).model_copy(
         update={
-            "evidence_refs": (unrelated_ref,),
             "evidence": _complete_market(snapshot).evidence.model_copy(
                 update={"adv20": {instrument_id: _binding(adv_ref)}}
             ),
@@ -98,7 +96,6 @@ def test_days_to_exit_uses_only_its_item_specific_adv_evidence() -> None:
         market.evidence.position_prices[instrument_id].refs[0],
         adv_ref,
     )
-    assert unrelated_ref not in item.evidence_refs
 
 
 def test_non_ready_snapshot_is_blocked_before_any_metric_evaluation() -> None:
@@ -428,7 +425,6 @@ def _complete_market(snapshot: PortfolioSnapshot) -> MarketEvidence:
         risk_buckets={instrument_id: {"equity": Decimal(1)}},
         trading_sessions=tuple(bar.session for bar in series.bars),
         benchmark=series,
-        input_evidence={f"adv20:{instrument_id}": (_evidence_ref("adv20", "d"),)},
         evidence=DiagnosticEvidence(
             snapshot=_binding(_evidence_ref("snapshot", "1")),
             cash={"USD": _binding(_evidence_ref("cash", "2"))},
