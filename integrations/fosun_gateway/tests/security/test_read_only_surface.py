@@ -1,6 +1,6 @@
 """Capability and payload boundaries of the read-only gateway image."""
 
-from read_only_surface_cases import gateway_client as gateway_client
+from read_only_helpers import gateway_client as gateway_client
 from read_only_surface_cases import (
     test_authority_overrides_are_rejected as test_authority_overrides_are_rejected,
 )
