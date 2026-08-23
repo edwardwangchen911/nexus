@@ -1,3 +1,5 @@
+"""Reusable SDK adapter cases collected by smaller domain modules."""
+
 import asyncio
 import logging
 import threading
