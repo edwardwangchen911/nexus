@@ -141,8 +141,8 @@ def test_adv_evidence_gaps_are_explicit_unknowns(
         ({"cash": {}}, "CASH_RATIO", "CASH_EVIDENCE_MISSING"),
         ({"position_prices": {}}, "POSITION_MARKET_VALUE", "POSITION_PRICE_EVIDENCE_MISSING"),
         ({"risk_buckets": {}}, "RISK_BUCKET_EXPOSURE", "RISK_BUCKET_EVIDENCE_MISSING"),
-        ({"price_series": {}}, "MARKET_RISK", "PRICE_SERIES_EVIDENCE_MISSING"),
-        ({"benchmark": None}, "MARKET_RISK", "BENCHMARK_EVIDENCE_MISSING"),
+        ({"price_series": {}}, "VOLATILITY_20", "PRICE_SERIES_EVIDENCE_MISSING"),
+        ({"benchmark": None}, "BETA_126", "BENCHMARK_EVIDENCE_MISSING"),
         (
             {"trading_calendar": None},
             "DATA_COMPLETENESS_TRADING_CALENDAR",

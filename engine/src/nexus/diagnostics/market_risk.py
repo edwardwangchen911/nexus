@@ -8,15 +8,16 @@ from uuid import UUID
 from nexus.diagnostics.evidence import EvidenceResolver, combine_refs
 from nexus.diagnostics.items import item, threshold_item, unknown_item, upper_threshold_item
 from nexus.diagnostics.metrics import (
-    annualized_volatility,
+    annualized_volatility_by_session,
     beta_and_correlation_by_session,
     correlation_components_by_session,
-    maximum_drawdown,
+    maximum_drawdown_by_session,
     published_interval_returns,
     qualified_session_closes,
 )
 from nexus.diagnostics.models import DiagnosticItem, MarketEvidence
 from nexus.diagnostics.policy import RealAdvisoryPolicy
+from nexus.domain.evidence import EvidenceRef
 from nexus.providers.broker.base import BrokerPosition, PortfolioSnapshot
 
 
@@ -30,8 +31,8 @@ def market_risk_items(
 ) -> list[DiagnosticItem]:
     if snapshot.as_of is None:
         return [unknown_item("MARKET_RISK", "ratio", "SNAPSHOT_AS_OF_MISSING", scope, market)]
-    benchmark = qualified_session_closes(market.benchmark, snapshot.as_of)
-    benchmark_session = None if not benchmark else max(benchmark)
+    benchmark_visible = qualified_session_closes(market.benchmark, snapshot.as_of)
+    benchmark_session = None if not benchmark_visible else max(benchmark_visible)
     benchmark_evidence = resolver.resolve(
         market.evidence.benchmark,
         "BENCHMARK",
@@ -40,135 +41,204 @@ def market_risk_items(
     returns_by_instrument: dict[UUID, dict[date, Decimal]] = {}
     items: list[DiagnosticItem] = []
     for position, _ in values:
-        session_closes = qualified_session_closes(
+        visible_closes = qualified_session_closes(
             market.prices.get(position.instrument_id), snapshot.as_of
         )
-        price_session = None if not session_closes else max(session_closes)
+        price_session = None if not visible_closes else max(visible_closes)
         price_evidence = resolver.resolve(
             market.evidence.price_series.get(position.instrument_id),
             "PRICE_SERIES",
             expected_session=price_session,
         )
-        if session_closes is None or price_evidence.reason is not None:
-            items.append(
-                unknown_item(
-                    f"MARKET_RISK:{position.instrument_id}",
-                    "ratio",
+        if visible_closes is None or price_evidence.reason is not None:
+            items.extend(
+                _unknown_metrics(
+                    position.instrument_id,
                     price_evidence.reason or "PRICE_HISTORY_MISSING",
                     scope,
                     market,
+                    price_evidence.refs,
                 )
             )
             continue
-        if benchmark_evidence.reason is not None:
-            items.append(
-                unknown_item(
-                    f"MARKET_RISK:{position.instrument_id}",
-                    "ratio",
-                    benchmark_evidence.reason,
-                    scope,
-                    market,
-                )
-            )
-            continue
-        closes = tuple(session_closes[session] for session in sorted(session_closes))
-        volatility20, volatility63, drawdown = (
-            annualized_volatility(closes, 20),
-            annualized_volatility(closes, 63),
-            maximum_drawdown(closes),
+        session_closes = {
+            session: visible_closes[session]
+            for session in market.trading_sessions
+            if session in visible_closes
+        }
+        returns_by_instrument[position.instrument_id] = published_interval_returns(
+            session_closes, market.trading_sessions
+        )
+        volatility20 = annualized_volatility_by_session(
+            session_closes, market.trading_sessions, 20
+        )
+        volatility63 = annualized_volatility_by_session(
+            session_closes, market.trading_sessions, 63
+        )
+        drawdown = maximum_drawdown_by_session(
+            session_closes, market.trading_sessions
+        )
+        _append_single_series_metrics(
+            items,
+            position.instrument_id,
+            volatility20,
+            volatility63,
+            drawdown,
+            scope,
+            market,
+            policy,
+            price_evidence.refs,
+        )
+        benchmark = (
+            None
+            if benchmark_visible is None
+            else {
+                session: benchmark_visible[session]
+                for session in market.trading_sessions
+                if session in benchmark_visible
+            }
         )
         beta_correlation = (
             None
-            if benchmark is None
+            if benchmark is None or benchmark_evidence.reason is not None
             else beta_and_correlation_by_session(
                 session_closes,
                 benchmark,
                 published_sessions=market.trading_sessions,
             )
         )
-        if None in (volatility20, volatility63, drawdown, beta_correlation):
-            items.append(
+        market_refs = combine_refs(price_evidence.refs, benchmark_evidence.refs)
+        if beta_correlation is None:
+            reason = (
+                benchmark_evidence.reason
+                or "BETA_CORRELATION_126_COVERAGE_INSUFFICIENT"
+            )
+            items.extend(
                 unknown_item(
-                    f"MARKET_RISK:{position.instrument_id}",
+                    f"{family}:{position.instrument_id}",
                     "ratio",
-                    "MARKET_RISK_COVERAGE_INSUFFICIENT",
+                    reason,
                     scope,
                     market,
+                    evidence_refs=market_refs,
+                )
+                for family in ("BETA_126", "CORRELATION_126")
+            )
+        else:
+            items.extend(
+                item(
+                    f"{family}:{position.instrument_id}",
+                    value,
+                    "ratio",
+                    None,
+                    scope,
+                    "info",
+                    "monitor",
+                    None,
+                    market,
+                    evidence_refs=market_refs,
+                )
+                for family, value in zip(
+                    ("BETA_126", "CORRELATION_126"), beta_correlation, strict=True
                 )
             )
-            continue
-        assert volatility20 is not None and volatility63 is not None and drawdown is not None
-        assert beta_correlation is not None
-        returns_by_instrument[position.instrument_id] = published_interval_returns(
-            session_closes, market.trading_sessions
-        )
-        market_refs = combine_refs(price_evidence.refs, benchmark_evidence.refs)
-        items.extend(
-            (
-                item(
-                    f"VOLATILITY_20:{position.instrument_id}",
-                    volatility20,
-                    "annualized_ratio",
-                    None,
-                    scope,
-                    "info",
-                    "monitor",
-                    None,
-                    market,
-                    evidence_refs=price_evidence.refs,
-                ),
-                item(
-                    f"VOLATILITY_63:{position.instrument_id}",
-                    volatility63,
-                    "annualized_ratio",
-                    None,
-                    scope,
-                    "info",
-                    "monitor",
-                    None,
-                    market,
-                    evidence_refs=price_evidence.refs,
-                ),
-                upper_threshold_item(
-                    f"DRAWDOWN_252:{position.instrument_id}",
-                    drawdown,
-                    policy.drawdown_warning,
-                    policy.drawdown_critical,
-                    scope,
-                    market,
-                    inclusive=True,
-                    evidence_refs=price_evidence.refs,
-                ),
-                item(
-                    f"BETA_126:{position.instrument_id}",
-                    beta_correlation[0],
-                    "ratio",
-                    None,
-                    scope,
-                    "info",
-                    "monitor",
-                    None,
-                    market,
-                    evidence_refs=market_refs,
-                ),
-                item(
-                    f"CORRELATION_126:{position.instrument_id}",
-                    beta_correlation[1],
-                    "ratio",
-                    None,
-                    scope,
-                    "info",
-                    "monitor",
-                    None,
-                    market,
-                    evidence_refs=market_refs,
-                ),
-            )
-        )
     _append_correlation_clusters(
         items, values, returns_by_instrument, scope, market, policy, resolver
     )
     return items
+
+
+def _unknown_metrics(
+    instrument_id: UUID,
+    reason: str,
+    scope: str,
+    market: MarketEvidence,
+    refs: tuple[EvidenceRef, ...],
+) -> tuple[DiagnosticItem, ...]:
+    return tuple(
+        unknown_item(
+            f"{family}:{instrument_id}",
+            unit,
+            reason,
+            scope,
+            market,
+            evidence_refs=refs,
+        )
+        for family, unit in (
+            ("VOLATILITY_20", "annualized_ratio"),
+            ("VOLATILITY_63", "annualized_ratio"),
+            ("DRAWDOWN_252", "ratio"),
+            ("BETA_126", "ratio"),
+            ("CORRELATION_126", "ratio"),
+        )
+    )
+
+
+def _append_single_series_metrics(
+    items: list[DiagnosticItem],
+    instrument_id: UUID,
+    volatility20: Decimal | None,
+    volatility63: Decimal | None,
+    drawdown: Decimal | None,
+    scope: str,
+    market: MarketEvidence,
+    policy: RealAdvisoryPolicy,
+    refs: tuple[EvidenceRef, ...],
+) -> None:
+    for family, value in (
+        ("VOLATILITY_20", volatility20),
+        ("VOLATILITY_63", volatility63),
+    ):
+        if value is None:
+            items.append(
+                unknown_item(
+                    f"{family}:{instrument_id}",
+                    "annualized_ratio",
+                    f"{family}_COVERAGE_INSUFFICIENT",
+                    scope,
+                    market,
+                    evidence_refs=refs,
+                )
+            )
+        else:
+            items.append(
+                item(
+                    f"{family}:{instrument_id}",
+                    value,
+                    "annualized_ratio",
+                    None,
+                    scope,
+                    "info",
+                    "monitor",
+                    None,
+                    market,
+                    evidence_refs=refs,
+                )
+            )
+    if drawdown is None:
+        items.append(
+            unknown_item(
+                f"DRAWDOWN_252:{instrument_id}",
+                "ratio",
+                "DRAWDOWN_252_COVERAGE_INSUFFICIENT",
+                scope,
+                market,
+                evidence_refs=refs,
+            )
+        )
+    else:
+        items.append(
+            upper_threshold_item(
+                f"DRAWDOWN_252:{instrument_id}",
+                drawdown,
+                policy.drawdown_warning,
+                policy.drawdown_critical,
+                scope,
+                market,
+                inclusive=True,
+                evidence_refs=refs,
+            )
+        )
 
 
 def _append_correlation_clusters(

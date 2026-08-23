@@ -252,7 +252,10 @@ def test_market_risk_fails_closed_below_eighty_percent_sample_coverage() -> None
         snapshot, market, DiagnosticHistory.empty(), RealAdvisoryPolicy.v1()
     )
 
-    assert any(item.unknown_reason == "MARKET_RISK_COVERAGE_INSUFFICIENT" for item in report.items)
+    assert any(
+        item.unknown_reason == "DRAWDOWN_252_COVERAGE_INSUFFICIENT"
+        for item in report.items
+    )
     assert report.optimization_need == "RESEARCH_REQUIRED"
 
 
