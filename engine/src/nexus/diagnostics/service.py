@@ -328,5 +328,10 @@ def _blocked_item(market: MarketEvidence, source_conflict: bool) -> DiagnosticIt
 
 def _market_unknown_item(market: MarketEvidence) -> DiagnosticItem:
     return _unknown_item(
-        "MARKET_EVIDENCE", "status", "MARKET_EVIDENCE_UNAVAILABLE", "portfolio", market
+        "MARKET_EVIDENCE",
+        "status",
+        "MARKET_EVIDENCE_UNAVAILABLE",
+        "portfolio",
+        market,
+        evidence_refs=market.incomplete_refs,
     )

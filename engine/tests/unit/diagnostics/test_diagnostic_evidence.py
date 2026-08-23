@@ -192,6 +192,31 @@ def test_future_calendar_binding_is_research_required_not_source_conflict() -> N
     assert any(item.unknown_reason == "TRADING_CALENDAR_EVIDENCE_FUTURE" for item in report.items)
 
 
+def test_authoritative_partial_and_derived_unknowns_retain_relevant_refs() -> None:
+    snapshot = _snapshot()
+    market = _market(snapshot)
+    partial_ref = _ref("partial-series", "a")
+    partial = diagnose_portfolio(
+        snapshot,
+        market.model_copy(
+            update={"quality": "PARTIAL", "incomplete_refs": (partial_ref,)}
+        ),
+        DiagnosticHistory.empty(),
+        RealAdvisoryPolicy.v1(),
+    )
+    assert partial.items[0].evidence_refs == (partial_ref,)
+
+    derived = diagnose_portfolio(
+        snapshot,
+        market.model_copy(update={"adv20": {}, "risk_buckets": {}}),
+        DiagnosticHistory.empty(),
+        RealAdvisoryPolicy.v1(),
+    )
+    by_code = {item.diagnostic_code: item for item in derived.items}
+    assert by_code[f"LIQUIDITY_DAYS_TO_EXIT:{INSTRUMENT_ID}"].evidence_refs
+    assert by_code["RISK_BUCKET_EXPOSURE"].evidence_refs
+
+
 def _snapshot() -> PortfolioSnapshot:
     return PortfolioSnapshot(
         id=UUID("0198d500-1000-7000-8000-000000000011"),

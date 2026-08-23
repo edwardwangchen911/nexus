@@ -225,6 +225,7 @@ def _exposure_items(
                     evidence.reason or "RISK_BUCKET_MISSING",
                     scope,
                     market,
+                    evidence_refs=evidence.refs,
                 )
             ]
         risk_refs.append(evidence.refs)
@@ -268,6 +269,7 @@ def _liquidity_items(
                     reason,
                     scope,
                     market,
+                    evidence_refs=evidence.refs,
                 )
             )
         else:

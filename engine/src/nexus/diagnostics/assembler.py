@@ -97,11 +97,22 @@ async def assemble_diagnostic_evidence(
         )
     )
     conflict_refs: list[EvidenceRef] = []
+    incomplete_refs: list[EvidenceRef] = []
     benchmark_source_conflict = bool(
         benchmark_authority is not None and benchmark_authority.source_conflict
     )
     if benchmark_source_conflict and benchmark_authority is not None:
         conflict_refs.extend(
+            (
+                *benchmark_authority.relevant_refs,
+                *benchmark_identity_refs,
+                *calendar.binding.refs,
+            )
+        )
+    if benchmark_authority is None:
+        incomplete_refs.extend((*calendar.binding.refs, policy_ref))
+    elif benchmark_authority.selected is None:
+        incomplete_refs.extend(
             (
                 *benchmark_authority.relevant_refs,
                 *benchmark_identity_refs,
@@ -132,6 +143,14 @@ async def assemble_diagnostic_evidence(
                     *calendar.binding.refs,
                 )
             )
+        if authority.selected is None:
+            incomplete_refs.extend(
+                (
+                    *authority.relevant_refs,
+                    *identities[position.instrument_id].authority_refs,
+                    *calendar.binding.refs,
+                )
+            )
         if authority.selected is not None:
             series, binding = authority.selected
             selected[position.instrument_id] = (
@@ -150,9 +169,9 @@ async def assemble_diagnostic_evidence(
     adv_bindings: dict[UUID, EvidenceBinding] = {}
     for instrument_id, (series, binding) in selected.items():
         adv = _adv20(series, trading_sessions)
+        adv_bindings[instrument_id] = binding
         if adv is not None:
             adv20[instrument_id] = adv
-            adv_bindings[instrument_id] = binding
     quality: Literal["PASS", "PARTIAL", "FAIL"] = (
         "PASS" if benchmark is not None and len(selected) == len(snapshot.positions) else "PARTIAL"
     )
@@ -161,6 +180,11 @@ async def assemble_diagnostic_evidence(
         cash=cast(dict[str, EvidenceBinding], snapshot_bindings["cash"]),
         position_prices=cast(dict[UUID, EvidenceBinding], snapshot_bindings["position_prices"]),
         adv20=adv_bindings,
+        risk_buckets={
+            instrument_id: identity_binding
+            for instrument_id, identity in identities.items()
+            if (identity_binding := _identity_binding(identity)) is not None
+        },
         price_series={key: value[1] for key, value in selected.items()},
         benchmark=None if benchmark is None else benchmark[1],
         trading_calendar=calendar.binding,
@@ -177,6 +201,7 @@ async def assemble_diagnostic_evidence(
             source_conflict or benchmark_source_conflict or bool(invalid_benchmark_sessions)
         ),
         conflict_refs=combine_refs(tuple(conflict_refs)),
+        incomplete_refs=combine_refs(tuple(incomplete_refs)),
     )
     return DiagnosticAssembly(
         market=market,
@@ -404,6 +429,17 @@ def _identity_input(identity: InstrumentIdentity) -> dict[str, object]:
             for ref in identity.authority_refs
         ),
     }
+
+
+def _identity_binding(identity: InstrumentIdentity) -> EvidenceBinding | None:
+    if not identity.authority_refs:
+        return None
+    available_at = max(ref.available_at for ref in identity.authority_refs)
+    return EvidenceBinding(
+        available_at=available_at,
+        as_of=available_at,
+        refs=identity.authority_refs,
+    )
 
 
 def _db_identity_input(instrument: Instrument, alias: InstrumentAlias) -> dict[str, object]:
