@@ -212,6 +212,8 @@ async def _selected_series(
             .where(
                 PriceSeriesManifest.instrument == str(instrument_id),
                 PriceSeriesManifest.end_at <= as_of,
+                PriceSeriesManifest.created_at <= as_of,
+                DataArtifact.created_at <= as_of,
                 DataArtifact.available_at <= as_of,
                 DataArtifact.received_at <= as_of,
             )

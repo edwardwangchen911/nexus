@@ -193,6 +193,26 @@ async def test_assembler_executes_source_policy_and_excludes_future_revision(
             "future-fixture-revision",
             available_at=SNAPSHOT_AT + timedelta(seconds=1),
         )
+        await _add_series(
+            session,
+            payloads,
+            INSTRUMENT_ID,
+            "future-created-artifact",
+            source="alpaca",
+            feed="sip",
+            delivery_mode="delayed",
+            artifact_created_at=SNAPSHOT_AT + timedelta(seconds=1),
+        )
+        await _add_series(
+            session,
+            payloads,
+            INSTRUMENT_ID,
+            "future-created-manifest",
+            source="alpaca",
+            feed="sip",
+            delivery_mode="delayed",
+            manifest_created_at=SNAPSHOT_AT + timedelta(seconds=1),
+        )
         snapshot = await load_frozen_snapshot(
             session, portfolio_id=PORTFOLIOS[0], snapshot_id=SNAPSHOT_ID
         )
@@ -280,6 +300,8 @@ async def _add_series(
     delivery_mode: str = "fixture",
     available_at: datetime | None = None,
     invalid_session: date | None = None,
+    artifact_created_at: datetime | None = None,
+    manifest_created_at: datetime | None = None,
 ) -> None:
     bars = _bars(
         instrument_id,
@@ -300,6 +322,7 @@ async def _add_series(
         observed_at=SNAPSHOT_AT - timedelta(minutes=2),
         available_at=max(bar.available_at for bar in bars),
         received_at=max(bar.received_at for bar in bars if bar.received_at is not None),
+        created_at=artifact_created_at,
     )
     session.add(artifact)
     await session.flush()
@@ -314,6 +337,7 @@ async def _add_series(
             start_at=bars[0].observed_at,
             end_at=bars[-1].observed_at,
             row_count=len(bars),
+            created_at=manifest_created_at,
         )
     )
     await session.flush()
