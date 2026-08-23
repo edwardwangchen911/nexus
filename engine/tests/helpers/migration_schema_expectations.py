@@ -36,6 +36,10 @@ EXPECTED_TABLES = {
     "broker_cash_flow_watermarks",
     "broker_sync_requests",
     "account_external_id_envelopes",
+    "diagnostic_policies",
+    "portfolio_diagnostic_reports",
+    "portfolio_diagnostic_items",
+    "portfolio_diagnostic_evidence_refs",
 }
 
 EXPECTED_FOREIGN_KEYS = {
@@ -84,4 +88,11 @@ EXPECTED_FOREIGN_KEYS = {
         "fk_broker_sync_requests_account_id_accounts",
     },
     "account_external_id_envelopes": ("fk_account_external_id_envelopes_account_id_accounts"),
+    "portfolio_diagnostic_reports": {
+        "fk_portfolio_diagnostic_reports_portfolio_id_portfolios",
+        "fk_portfolio_diagnostic_reports_portfolio_snapshot_id_portfolio_snapshots",
+        "fk_portfolio_diagnostic_reports_policy_id_diagnostic_policies",
+    },
+    "portfolio_diagnostic_items": "fk_portfolio_diagnostic_items_report_id_portfolio_diagnostic_reports",
+    "portfolio_diagnostic_evidence_refs": "fk_portfolio_diagnostic_evidence_refs_item_id_portfolio_diagnostic_items",
 }

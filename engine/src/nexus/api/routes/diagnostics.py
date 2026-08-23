@@ -6,13 +6,18 @@ from fastapi import APIRouter, Depends
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
+from nexus.api.schemas.integrations import NexusErrorEnvelope
 from nexus.diagnostics.repository import latest_report
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
 
 
-@router.get("/internal/v1/portfolios/{portfolio_id}/diagnostics/latest")
+@router.get(
+    "/internal/v1/portfolios/{portfolio_id}/diagnostics/latest",
+    response_model=None,
+    responses={404: {"model": NexusErrorEnvelope}, 422: {"model": NexusErrorEnvelope}},
+)
 async def get_latest_diagnostic(
     portfolio_id: UUID,
     actor: VerifiedServiceActor = Depends(require_service_actor),

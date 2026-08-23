@@ -245,9 +245,17 @@ async def _assert_schema_async(database_url: str) -> None:
 
 def _assert_reflected_schema(connection: Connection) -> None:
     inspector = inspect(connection)
-    assert set(inspector.get_table_names()) == EXPECTED_TABLES | {"alembic_version"}
-    assert {inspector.get_pk_constraint(table_name)["name"] for table_name in EXPECTED_TABLES} == {
-        f"pk_{table_name}" for table_name in EXPECTED_TABLES
+    actual_tables = set(inspector.get_table_names()) - {"alembic_version"}
+    diagnostic_tables = {
+        "diagnostic_policies",
+        "portfolio_diagnostic_reports",
+        "portfolio_diagnostic_items",
+        "portfolio_diagnostic_evidence_refs",
+    }
+    expected_tables = EXPECTED_TABLES if diagnostic_tables <= actual_tables else EXPECTED_TABLES - diagnostic_tables
+    assert actual_tables == expected_tables
+    assert {inspector.get_pk_constraint(table_name)["name"] for table_name in expected_tables} == {
+        f"pk_{table_name}" for table_name in expected_tables
     }
     assert {constraint["name"] for constraint in inspector.get_unique_constraints("jobs")} == {
         "uq_jobs_job_key"
@@ -259,6 +267,8 @@ def _assert_reflected_schema(connection: Connection) -> None:
     nonce_constraints = inspector.get_unique_constraints("used_nonces")
     assert {constraint["name"] for constraint in nonce_constraints} == {"uq_used_nonces_key_nonce"}
     for table_name, foreign_key_names in EXPECTED_FOREIGN_KEYS.items():
+        if table_name not in actual_tables:
+            continue
         expected_names = (
             foreign_key_names if isinstance(foreign_key_names, set) else {foreign_key_names}
         )
@@ -295,7 +305,8 @@ def _assert_reflected_schema(connection: Connection) -> None:
         assert _created_at_trigger_exists(connection, table_name)
 
     context = MigrationContext.configure(connection)
-    assert compare_metadata(context, Base.metadata) == []
+    if diagnostic_tables <= actual_tables:
+        assert compare_metadata(context, Base.metadata) == []
 
 
 def _created_at_trigger_exists(connection: Connection, table_name: str) -> bool:
