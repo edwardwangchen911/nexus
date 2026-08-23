@@ -1,5 +1,10 @@
 import pytest
-from nexus.persistence.models.portfolio import Account, AccountExternalIdEnvelope
+from nexus.persistence.models.portfolio import (
+    Account,
+    AccountExternalIdEnvelope,
+    BrokerSyncRun,
+    PortfolioSnapshotRecord,
+)
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import text
@@ -27,3 +32,11 @@ async def test_account_schema_migration_is_runnable(migrated_database_url: str) 
             )
         )
     assert tables == {"accounts", "account_external_id_envelopes"}
+
+
+def test_sync_and_snapshot_models_declare_active_and_stale_invariants() -> None:
+    assert BrokerSyncRun.__table__.name == "broker_sync_runs"
+    constraint_names = {
+        constraint.name for constraint in PortfolioSnapshotRecord.__table__.constraints
+    }
+    assert "ck_portfolio_snapshots_stale_source_required" in constraint_names
