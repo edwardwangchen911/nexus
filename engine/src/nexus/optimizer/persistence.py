@@ -35,6 +35,7 @@ class ProposalPersistenceAuthority:
     cost_complete: bool
     authority_stale: bool = False
     portfolio_scope: str = "real_read_only"
+    selection_authority_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if len(self.diagnostic_input_hash) != 64:
@@ -117,6 +118,7 @@ async def persist_proposal_group(
         id=group.proposal_group_id,
         baseline_portfolio_snapshot_id=group.baseline_portfolio_snapshot_id,
         portfolio_scope=group.portfolio_scope,
+        selection_authority_id=authority.selection_authority_id,
         status=group.status,
         version=group.version,
         policy_id=authority.optimizer_policy_id,

@@ -17,6 +17,7 @@ from nexus.providers.broker.base import PortfolioSnapshot
 if TYPE_CHECKING:
     from nexus.optimizer.minimum_change import ReductionCandidate
     from nexus.optimizer.strategy_target import DeterministicSelectionAuthority
+    from nexus.strategy.intents import ResearchIntent
 
 ProposalVariant = Literal["hold_current", "minimum_change", "strategy_target"]
 ProposalGroupStatus = Literal["draft", "compared", "shadowing", "validated", "rejected", "expired"]
@@ -172,7 +173,7 @@ class OptimizationProposalGroup(_StrictModel):
 def build_proposal_group(
     snapshot: PortfolioSnapshot,
     report: PortfolioDiagnosticReport,
-    research: tuple[object, ...],
+    research: tuple["ResearchIntent", ...],
     policy: OptimizationPolicy,
     *,
     selection_authority: "DeterministicSelectionAuthority | None" = None,
@@ -181,7 +182,6 @@ def build_proposal_group(
     portfolio_scope: PortfolioScope = "real_read_only",
 ) -> OptimizationProposalGroup:
     """Compose three simultaneous deterministic variants without accepting Agent weights."""
-    del research
     if snapshot.status != "READY":
         raise ValueError("READY baseline is required")
     if report.portfolio_snapshot_id != snapshot.id:
@@ -231,6 +231,47 @@ def build_proposal_group(
     from nexus.optimizer.strategy_target import build_strategy_target
 
     strategy_result = build_strategy_target(current_weights, authority=selection_authority)
+    if research:
+        if selection_authority is None:
+            raise ValueError("research cannot create selection authority")
+        if snapshot.as_of is None:
+            raise ValueError("research requires a frozen valuation time")
+        by_instrument = {intent.instrument_id: intent for intent in research}
+        if len(by_instrument) != len(research):
+            raise ValueError("research intents must be unique per instrument")
+        if any(
+            intent.data_snapshot_id != selection_authority.data_snapshot_id
+            or intent.decision_time > snapshot.as_of
+            or intent.valid_until < snapshot.as_of
+            for intent in research
+        ):
+            raise ValueError("research intent does not bind the frozen authority")
+        if any(
+            intent.quality_status != "complete" or intent.evidence_audit != "complete"
+            for intent in research
+        ):
+            strategy_result = build_strategy_target(current_weights, authority=None)
+        else:
+            current_by_id = dict(current_weights)
+            controlled_targets = tuple(
+                (
+                    instrument_id,
+                    min(target, current_by_id.get(instrument_id, _ZERO))
+                    if (intent := by_instrument.get(instrument_id)) is not None
+                    and (
+                        intent.exposure_action != "eligible_for_increase"
+                        or intent.stance in {"reduce_candidate", "watch"}
+                    )
+                    else target,
+                )
+                for instrument_id, target in strategy_result.targets
+            )
+            strategy_result = strategy_result.__class__(
+                targets=controlled_targets,
+                cash_target_weight=_ONE
+                - sum((target for _, target in controlled_targets), _ZERO),
+                evidence_complete=True,
+            )
     if selection_authority is None:
         strategy_positions = current
         strategy_cash = cash_weight
@@ -241,7 +282,11 @@ def build_proposal_group(
                 current_weight=dict(current_weights).get(instrument_id, _ZERO),
                 target_weight=target_weight,
                 action=(
-                    "increase"
+                    "none"
+                    if target_weight
+                    == dict(current_weights).get(instrument_id, _ZERO)
+                    == _ZERO
+                    else "increase"
                     if target_weight > dict(current_weights).get(instrument_id, _ZERO)
                     else "reduce"
                     if target_weight < dict(current_weights).get(instrument_id, _ZERO)
