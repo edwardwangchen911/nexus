@@ -33,6 +33,8 @@ type PortfolioPanelProps = {
 const LOAD_TIMEOUT_MS = 10_000;
 const SYNC_CONFIRM_TIMEOUT_MS = 35_000;
 const MAX_PORTFOLIO_PAGES = 10;
+const MAX_PORTFOLIOS_PER_PAGE = 50;
+const MAX_PORTFOLIOS = MAX_PORTFOLIO_PAGES * MAX_PORTFOLIOS_PER_PAGE;
 const SYNC_POLL_MS = 5_000;
 const SYNC_LOOKUP_ERROR = "无法刷新同步详情。冻结组合快照保持不变。";
 
@@ -97,6 +99,7 @@ export default function PortfolioPage(): React.ReactElement {
         const envelope = await response.json() as { data?: { items?: PortfolioItem[]; next_cursor?: string | null } };
         if (version !== loadVersion.current) return;
         if (!envelope.data || !Array.isArray(envelope.data.items)) throw new Error("portfolio page invalid");
+        if (envelope.data.items.length > MAX_PORTFOLIOS_PER_PAGE || items.length + envelope.data.items.length > MAX_PORTFOLIOS) throw new Error("portfolio item bound exceeded");
         for (const item of envelope.data.items) {
           if (portfolioIds.has(item.portfolio_id)) throw new Error("duplicate portfolio");
           portfolioIds.add(item.portfolio_id); items.push(item);

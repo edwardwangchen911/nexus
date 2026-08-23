@@ -8,61 +8,7 @@ import PortfolioPage, {
 } from "../../../app/(protected)/portfolio/page";
 import { PortfolioSummary } from "../../../app/components/portfolio-summary";
 import type { DataStateKind } from "../../../app/components/data-state";
-
-const portfolioId = "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e701";
-const snapshotId = "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e702";
-
-const portfolio: PortfolioItem = {
-  portfolio_id: portfolioId,
-  name: "Fosun read-only",
-  kind: "real_read_only",
-  coverage_scope: "broker_account",
-  provider: "fosun",
-  latest_snapshot_status: "READY",
-  latest_snapshot_as_of: "2026-08-23T08:00:00Z",
-  original_currencies: ["HKD", "USD"],
-  last_sync_run_status: "READY",
-};
-
-const snapshot: PortfolioSnapshot = {
-  portfolio_snapshot_id: snapshotId,
-  portfolio_id: portfolioId,
-  coverage_scope: "broker_account",
-  status: "READY",
-  as_of: "2026-08-23T08:00:00Z",
-  cash: [
-    { currency: "HKD", cash_balance: "8000.00", available_cash: "7000.00", provider_as_of: "2026-08-23T08:00:00Z" },
-    { currency: "USD", cash_balance: "1000.00", available_cash: "900.00", provider_as_of: "2026-08-23T08:00:00Z" },
-  ],
-  positions: [{
-    instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e703",
-    symbol: "00656.HK",
-    exchange: "XHKG",
-    currency: "HKD",
-    quantity: "3000",
-    available_quantity: "2800",
-    frozen_quantity: "200",
-    avg_cost: "6.20",
-    diluted_cost: "5.75",
-    current_price: "6.50",
-    provider_as_of: "2026-08-23T08:00:00Z",
-    read_only: true,
-  }],
-  open_orders: [{
-    broker_order_snapshot_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e704",
-    instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e703",
-    symbol: "00656.HK",
-    currency: "HKD",
-    side: "BUY",
-    quantity: "100",
-    filled_quantity: "0",
-    price: "6.10",
-    status: "SUBMITTED",
-    updated_at: "2026-08-23T07:59:00Z",
-    read_only: true,
-  }],
-  converted_view: null,
-};
+import { portfolio, portfolioId, responseMeta, snapshot } from "./fixtures";
 
 const stateLabels: Array<[DataStateKind, string]> = [
   ["loading", "正在加载"], ["empty", "暂无数据"], ["ready", "数据已就绪"],
@@ -73,6 +19,7 @@ const stateLabels: Array<[DataStateKind, string]> = [
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("portfolio vertical slice", () => {
@@ -255,6 +202,70 @@ describe("portfolio vertical slice", () => {
     expect(new Set(keys).size).toBe(1);
   });
 
+  it("does not carry an unresolved portfolio A request into portfolio B", async () => {
+    const replacement = { ...portfolio, portfolio_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e799", name: "Replacement portfolio" };
+    const replacementSnapshot = { ...snapshot, portfolio_id: replacement.portfolio_id };
+    let syncCalls = 0;
+    const bodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("/api/v1/portfolios?")) return Response.json({ data: { items: [portfolio, replacement], next_cursor: null }, meta: responseMeta() });
+      if (url.includes(replacement.portfolio_id)) return Response.json({ data: replacementSnapshot, meta: responseMeta() });
+      if (url.endsWith("/snapshots/latest")) return Response.json({ data: snapshot, meta: responseMeta() });
+      if (url === "/api/v1/broker-sync-runs") {
+        syncCalls += 1; bodies.push(String(init?.body));
+        if (syncCalls <= 2) throw new TypeError("unknown result");
+        const runId = "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e709";
+        return Response.json({ data: { broker_sync_run_id: runId, portfolio_id: replacement.portfolio_id, status: "ACTIVE", trigger_kind: "MANUAL", accepted_at: "2026-08-23T08:03:00Z", completed_at: null, attempt_count: 0, cash_flow_quality: "NOT_RUN", failure_category: null }, meta: responseMeta() }, { status: 202, headers: { location: `/api/v1/broker-sync-runs/${runId}` } });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+
+    render(<PortfolioPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "同步复星只读事实" }));
+    expect(await screen.findByRole("button", { name: "使用同一幂等键继续确认" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /Replacement portfolio/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "同步复星只读事实" }));
+
+    expect(await screen.findByRole("heading", { name: "同步详情" })).toBeVisible();
+    expect(bodies.at(-1)).toBe(JSON.stringify({ portfolio_id: replacement.portfolio_id }));
+  });
+
+  it("retries an ACTIVE sync poll after a transient lookup failure", async () => {
+    vi.useFakeTimers();
+    const runId = "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e705";
+    const run = { broker_sync_run_id: runId, portfolio_id: portfolioId, status: "ACTIVE", trigger_kind: "MANUAL", accepted_at: "2026-08-23T08:01:00Z", completed_at: null, attempt_count: 0, cash_flow_quality: "NOT_RUN", failure_category: null };
+    let lookups = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/v1/portfolios?")) return Response.json({ data: { items: [portfolio], next_cursor: null }, meta: responseMeta() });
+      if (url.endsWith("/snapshots/latest")) return Response.json({ data: snapshot, meta: responseMeta() });
+      if (url === "/api/v1/broker-sync-runs") return Response.json({ data: run, meta: responseMeta() }, { status: 202, headers: { location: `/api/v1/broker-sync-runs/${runId}` } });
+      if (url === `/api/v1/broker-sync-runs/${runId}`) {
+        lookups += 1;
+        return lookups === 1
+          ? Response.json({ error: { code: "INTERNAL_ERROR" } }, { status: 500 })
+          : Response.json({ data: { ...run, status: "READY", completed_at: "2026-08-23T08:02:00Z", attempt_count: 1, cash_flow_quality: "PASS" }, meta: responseMeta() });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+
+    render(<PortfolioPage />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "同步复星只读事实" }));
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "刷新同步状态" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("无法刷新同步详情。冻结组合快照保持不变。")).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+
+    expect(screen.getByText("PASS")).toBeVisible();
+    expect(lookups).toBe(2);
+    expect(screen.queryByText("无法刷新同步详情。冻结组合快照保持不变。")).not.toBeInTheDocument();
+  });
+
   it("prevents double-clicked sync admissions and explains cooldown", async () => {
     let syncCalls = 0;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
@@ -414,7 +425,3 @@ describe("portfolio vertical slice", () => {
     expect(screen.getAllByRole("status")).toHaveLength(1);
   });
 });
-
-function responseMeta() {
-  return { request_id: "0198f7a0-1111-7777-8111-111111111114", schema_version: "1", as_of: "2026-08-23T08:00:00Z" };
-}
