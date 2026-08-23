@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
 from nexus.providers.broker.base import BrokerSyncResult
 from nexus.reconciliation.admission import AdmissionResult, TriggerKind, admit_broker_sync
+from nexus.reconciliation.cash_flows import CashFlowSyncResult
 from nexus.reconciliation.persistence_errors import (
     BrokerSyncPersistenceError,
     IdempotencyConflict,
@@ -62,11 +63,13 @@ class BrokerSyncRepository:
         result: BrokerSyncResult,
         *,
         completed_at: datetime,
+        cash_flow_result: CashFlowSyncResult | None = None,
     ) -> PortfolioSnapshotRecord:
         return await finalize_broker_sync(
             self._session,
             result,
             completed_at=completed_at,
+            cash_flow_result=cash_flow_result,
         )
 
     async def require_proposal_baseline(

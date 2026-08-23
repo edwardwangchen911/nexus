@@ -9,6 +9,7 @@ from nexus.domain.ids import new_uuid7
 from nexus.persistence.models.portfolio import BrokerCashFlow as BrokerCashFlowRecord
 from nexus.persistence.models.portfolio import BrokerSyncRun
 from nexus.reconciliation.cash_flow_validation import validate_cash_flow_result
+from nexus.reconciliation.cash_flow_watermarks import advance_cash_flow_watermark
 from nexus.reconciliation.cash_flows import CashFlowSyncResult, NormalizedCashFlow
 
 CashFlowQuality = Literal["PASS", "PARTIAL", "NOT_RUN"]
@@ -65,7 +66,10 @@ async def persist_cash_flows(
                 response_as_of=fact.response_as_of,
             )
         )
-    return "PARTIAL" if conflict else result.quality
+    if conflict:
+        return "PARTIAL"
+    await advance_cash_flow_watermark(session, run.account_id, result)
+    return result.quality
 
 
 def _same_body(prior: BrokerCashFlowRecord, account_id: object, fact: NormalizedCashFlow) -> bool:

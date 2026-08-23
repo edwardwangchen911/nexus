@@ -1,6 +1,7 @@
 """Persist one validated, inseparable broker synchronization result."""
 
 from datetime import datetime
+from typing import cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +18,8 @@ from nexus.persistence.models.portfolio import (
     PositionSnapshot,
 )
 from nexus.providers.broker.base import BrokerSyncResult
+from nexus.reconciliation.cash_flow_persistence import CashFlowQuality, persist_cash_flows
+from nexus.reconciliation.cash_flows import CashFlowSyncResult
 from nexus.reconciliation.facts import (
     ORDER_HASH_VERSION,
     POSITION_HASH_VERSION,
@@ -33,6 +36,7 @@ async def finalize_broker_sync(
     result: BrokerSyncResult,
     *,
     completed_at: datetime,
+    cash_flow_result: CashFlowSyncResult | None = None,
 ) -> PortfolioSnapshotRecord:
     completed_at = require_utc(completed_at)
     try:
@@ -47,6 +51,8 @@ async def finalize_broker_sync(
         raise BrokerSyncPersistenceError("broker sync run is not active")
     if snapshot.portfolio_id != run.portfolio_id:
         raise BrokerSyncPersistenceError("snapshot portfolio does not match sync run")
+    if cash_flow_result is not None and snapshot.status != "READY":
+        raise BrokerSyncPersistenceError("cash flows require a READY broker snapshot")
     if snapshot.status == "STALE":
         stale_source = await session.scalar(
             select(PortfolioSnapshotRecord.id).where(
@@ -124,11 +130,14 @@ async def finalize_broker_sync(
         )
     for index, trace in enumerate(result.attempt_traces, start=1):
         session.add(_attempt_record(run.id, index, trace))
+    quality: CashFlowQuality = "NOT_RUN"
+    if cash_flow_result is not None:
+        quality = await persist_cash_flows(session, run, provider, cash_flow_result)
     await session.flush()
     run.status = snapshot.status
     run.completed_at = completed_at
     run.attempt_count = result.attempt_count
-    run.cash_flow_quality = "NOT_RUN"
+    run.cash_flow_quality = cast(str, quality)
     await session.flush()
     return record
 
