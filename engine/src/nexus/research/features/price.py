@@ -25,7 +25,11 @@ def point_in_time_closes(
 ) -> tuple[Decimal, ...]:
     """Filter on available_at before using Polars only for deterministic ordering."""
     decision_time = require_utc(decision_time)
-    visible = [bar for bar in bars if bar.available_at <= decision_time]
+    visible = [
+        bar
+        for bar in bars
+        if bar.available_at <= decision_time and bar.session <= decision_time.date()
+    ]
     if not visible:
         return ()
     latest_by_session: dict[date, PriceBar] = {}

@@ -27,7 +27,7 @@ from nexus.diagnostics.models import (
     PortfolioDiagnosticReport,
 )
 from nexus.diagnostics.policy import RealAdvisoryPolicy, load_real_advisory_policy_v1
-from nexus.diagnostics.repository import persist_report
+from nexus.diagnostics.repository import load_frozen_snapshot, load_history, persist_report
 from nexus.diagnostics.scope import assert_fosun_read_only_scope as _assert_fosun_read_only_scope
 from nexus.domain.decimal import decimal_to_string
 from nexus.providers.base import PriceSeries
@@ -81,12 +81,15 @@ async def diagnose_and_persist(
     session: AsyncSession,
     *,
     portfolio_id: UUID,
-    snapshot: PortfolioSnapshot,
-    market: MarketEvidence,
-    history: DiagnosticHistory,
+    snapshot_id: UUID,
 ) -> PortfolioDiagnosticReport:
-    """Production entry point loads only the database-sealed advisory policy."""
+    """Production entry point accepts IDs only and fails closed without stored market evidence."""
     policy = await load_real_advisory_policy_v1(session)
+    snapshot = await load_frozen_snapshot(
+        session, portfolio_id=portfolio_id, snapshot_id=snapshot_id
+    )
+    history = await load_history(session, portfolio_id=portfolio_id)
+    market = MarketEvidence(quality="PARTIAL")
     report = diagnose_portfolio(snapshot, market, history, policy)
     await persist_report(session, portfolio_id=portfolio_id, report=report)
     return report
@@ -105,10 +108,10 @@ def _evaluate_currency_scopes(
     for currency in sorted(set(positions_by_currency) | set(cash_by_currency)):
         scope = f"currency:{currency}"
         values, value_unknown = _position_values(positions_by_currency[currency])
-        if value_unknown:
+        if value_unknown is not None:
             items.append(
                 _unknown_item(
-                    "POSITION_MARKET_VALUE", currency, "POSITION_PRICE_MISSING", scope, market
+                    "POSITION_MARKET_VALUE", currency, value_unknown, scope, market
                 )
             )
         if values:
@@ -135,12 +138,18 @@ def _evaluate_currency_scopes(
 
 def _position_values(
     positions: Iterable[BrokerPosition],
-) -> tuple[list[tuple[BrokerPosition, Decimal]], bool]:
+) -> tuple[list[tuple[BrokerPosition, Decimal]], str | None]:
     values: list[tuple[BrokerPosition, Decimal]] = []
-    unknown = False
+    unknown: str | None = None
     for position in positions:
-        if position.current_price is None or position.quantity < 0:
-            unknown = True
+        if position.current_price is None:
+            unknown = "POSITION_PRICE_MISSING"
+            continue
+        if position.current_price <= 0:
+            unknown = "POSITION_PRICE_INVALID"
+            continue
+        if position.quantity <= 0:
+            unknown = "POSITION_QUANTITY_INVALID"
             continue
         values.append((position, position.quantity * position.current_price))
     return values, unknown

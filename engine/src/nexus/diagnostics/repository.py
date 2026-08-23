@@ -7,7 +7,7 @@ from uuid import UUID
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.diagnostics.models import DiagnosticItem, PortfolioDiagnosticReport
+from nexus.diagnostics.models import DiagnosticHistory, DiagnosticItem, PortfolioDiagnosticReport
 from nexus.diagnostics.policy import (
     REAL_ADVISORY_POLICY_ID,
     load_real_advisory_policy_v1,
@@ -19,7 +19,18 @@ from nexus.persistence.models.diagnostics import (
     PortfolioDiagnosticItemRecord,
     PortfolioDiagnosticReportRecord,
 )
-from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
+from nexus.persistence.models.portfolio import (
+    BrokerOrderSnapshot,
+    CashSnapshot,
+    PortfolioSnapshotRecord,
+    PositionSnapshot,
+)
+from nexus.providers.broker.base import (
+    BrokerOrderFact,
+    BrokerPosition,
+    CashBalance,
+    PortfolioSnapshot,
+)
 
 
 async def persist_report(
@@ -35,6 +46,18 @@ async def persist_report(
     )
     if snapshot is None or report.policy_version != policy.version:
         raise ValueError("diagnostic report snapshot or policy authority is invalid")
+    if report.trading_day != (None if snapshot.as_of is None else snapshot.as_of.date()):
+        raise ValueError("diagnostic report trading day must match its frozen snapshot")
+    existing = await session.scalar(
+        select(PortfolioDiagnosticReportRecord).where(
+            PortfolioDiagnosticReportRecord.portfolio_snapshot_id == snapshot.id,
+            PortfolioDiagnosticReportRecord.policy_id == REAL_ADVISORY_POLICY_ID,
+        )
+    )
+    if existing is not None:
+        if await _read_report(session, existing) != report:
+            raise ValueError("diagnostic report replay conflicts with immutable report")
+        return existing.id
     stored = PortfolioDiagnosticReportRecord(
         portfolio_id=snapshot.portfolio_id,
         portfolio_snapshot_id=snapshot.id,
@@ -73,6 +96,134 @@ async def persist_report(
     return stored.id
 
 
+async def load_frozen_snapshot(
+    session: AsyncSession, *, portfolio_id: UUID, snapshot_id: UUID
+) -> PortfolioSnapshot:
+    """Load the only production diagnostic snapshot from immutable database records."""
+    record = await session.scalar(
+        select(PortfolioSnapshotRecord).where(
+            PortfolioSnapshotRecord.id == snapshot_id,
+            PortfolioSnapshotRecord.portfolio_id == portfolio_id,
+        )
+    )
+    if record is None:
+        raise ValueError("portfolio snapshot was not found")
+    cash = (
+        await session.execute(
+            select(CashSnapshot).where(CashSnapshot.portfolio_snapshot_id == record.id)
+        )
+    ).scalars()
+    positions = (
+        await session.execute(
+            select(PositionSnapshot).where(PositionSnapshot.portfolio_snapshot_id == record.id)
+        )
+    ).scalars()
+    orders = (
+        await session.execute(
+            select(BrokerOrderSnapshot).where(
+                BrokerOrderSnapshot.portfolio_snapshot_id == record.id
+            )
+        )
+    ).scalars()
+    return PortfolioSnapshot(
+        id=record.id,
+        portfolio_id=record.portfolio_id,
+        status=cast(Literal["READY", "PARTIAL", "STALE", "RECONCILIATION_REQUIRED"], record.status),
+        cash=tuple(
+            CashBalance(
+                currency=row.currency,
+                cash_balance=row.cash_balance,
+                available_cash=row.available_cash,
+                provider_as_of=row.provider_as_of,
+            )
+            for row in cash
+        ),
+        positions=tuple(
+            BrokerPosition(
+                instrument_id=row.instrument_id,
+                currency=row.currency,
+                quantity=row.quantity,
+                available_quantity=row.available_quantity,
+                frozen_quantity=row.frozen_quantity,
+                avg_cost=row.avg_cost,
+                diluted_cost=row.diluted_cost,
+                current_price=row.current_price,
+                provider_as_of=row.provider_as_of,
+            )
+            for row in positions
+        ),
+        open_orders=tuple(
+            BrokerOrderFact(
+                provider_order_id=row.provider_order_id,
+                instrument_id=row.instrument_id,
+                side=cast(Literal["buy", "sell"], row.side),
+                quantity=row.quantity,
+                filled_quantity=row.filled_quantity,
+                price=row.price,
+                status=cast(Literal["pending", "submitted", "partially_filled"], row.status),
+                updated_at=row.updated_at,
+            )
+            for row in orders
+        ),
+        as_of=record.as_of,
+        stale_from_snapshot_id=record.stale_from_snapshot_id,
+        source_request_ids=tuple(record.source_request_ids),
+    )
+
+
+async def load_history(
+    session: AsyncSession, *, portfolio_id: UUID
+) -> DiagnosticHistory:
+    """Load ordered prior reports from storage; Task 11 exposes no comparable authority."""
+    records = (
+        await session.execute(
+            select(PortfolioDiagnosticReportRecord)
+            .where(PortfolioDiagnosticReportRecord.portfolio_id == portfolio_id)
+            .order_by(
+                PortfolioDiagnosticReportRecord.trading_day,
+                PortfolioDiagnosticReportRecord.id,
+            )
+        )
+    ).scalars()
+    reports = []
+    for record in records:
+        rows = (
+            await session.execute(
+                select(PortfolioDiagnosticItemRecord).where(
+                    PortfolioDiagnosticItemRecord.report_id == record.id
+                )
+            )
+        ).scalars()
+        reports.append(
+            PortfolioDiagnosticReport(
+                portfolio_snapshot_id=record.portfolio_snapshot_id,
+                trading_day=record.trading_day,
+                policy_version=cast(Literal["real_advisory_policy_v1"], record.policy_version),
+                optimization_need=cast(
+                    Literal["BLOCKED", "RESEARCH_REQUIRED", "OPTIMIZATION_CANDIDATE", "NO_ACTION"],
+                    record.optimization_need,
+                ),
+                items=tuple(
+                    DiagnosticItem(
+                        diagnostic_code=row.diagnostic_code,
+                        metric_value=_string(row.metric_value),
+                        unit=row.unit,
+                        reference_limit=_string(row.reference_limit),
+                        policy_scope=row.policy_scope,
+                        severity=cast(Literal["info", "warning", "critical"], row.severity),
+                        actionability=cast(
+                            Literal["monitor", "research", "reduce_only", "blocked"],
+                            row.actionability,
+                        ),
+                        unknown_reason=row.unknown_reason,
+                    )
+                    for row in rows
+                ),
+            )
+        )
+    return DiagnosticHistory(prior_reports=tuple(reports), comparable_variants=())
+
+
 async def latest_report(
     session: AsyncSession, *, portfolio_id: UUID
 ) -> PortfolioDiagnosticReport | None:
@@ -90,6 +241,12 @@ async def latest_report(
         return None
     if record.policy_id != REAL_ADVISORY_POLICY_ID or record.policy_version != policy.version:
         raise ValueError("diagnostic report policy authority is invalid")
+    return await _read_report(session, record)
+
+
+async def _read_report(
+    session: AsyncSession, record: PortfolioDiagnosticReportRecord
+) -> PortfolioDiagnosticReport:
     rows = (
         (
             await session.execute(

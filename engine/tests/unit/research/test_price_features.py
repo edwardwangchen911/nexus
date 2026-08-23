@@ -45,6 +45,23 @@ def test_point_in_time_closes_excludes_rows_not_yet_available() -> None:
     assert closes == (Decimal("19"), Decimal("20"))
 
 
+def test_point_in_time_closes_excludes_future_session_even_if_early_available() -> None:
+    decision_time = datetime(2026, 8, 21, 22, tzinfo=UTC)
+    instrument_id = UUID("29e18e7a-78fb-5fc1-a65a-6641fbc1cc64")
+    future = PriceBar(
+        instrument_id=instrument_id,
+        session=date(2026, 8, 22),
+        open=Decimal("999"),
+        high=Decimal("999"),
+        low=Decimal("999"),
+        close=Decimal("999"),
+        volume=Decimal("1"),
+        available_at=decision_time - timedelta(days=1),
+    )
+
+    assert point_in_time_closes((future,), decision_time) == ()
+
+
 def test_point_in_time_closes_uses_latest_available_revision_per_session() -> None:
     decision_time = datetime(2026, 8, 21, 22, tzinfo=UTC)
     instrument_id = UUID("29e18e7a-78fb-5fc1-a65a-6641fbc1cc64")

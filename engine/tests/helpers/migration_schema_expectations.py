@@ -91,6 +91,7 @@ EXPECTED_FOREIGN_KEYS = {
     "portfolio_diagnostic_reports": {
         "fk_diag_reports_portfolio",
         "fk_diag_reports_snapshot",
+        "fk_diag_reports_snapshot_same_portfolio",
         "fk_diag_reports_policy",
     },
     "portfolio_diagnostic_items": "fk_diag_items_report",

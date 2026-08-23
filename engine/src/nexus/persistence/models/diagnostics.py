@@ -4,7 +4,14 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, Date, ForeignKey, String, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    ForeignKey,
+    ForeignKeyConstraint,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,6 +39,16 @@ class PortfolioDiagnosticReportRecord(ImmutableCreatedAt, Base):
             "optimization_need IN ("
             "'BLOCKED', 'RESEARCH_REQUIRED', 'OPTIMIZATION_CANDIDATE', 'NO_ACTION')",
             name="optimization_need_allowed",
+        ),
+        UniqueConstraint(
+            "portfolio_snapshot_id",
+            "policy_id",
+            name="uq_diag_reports_snapshot_policy",
+        ),
+        ForeignKeyConstraint(
+            ["portfolio_snapshot_id", "portfolio_id"],
+            ["portfolio_snapshots.id", "portfolio_snapshots.portfolio_id"],
+            name="fk_diag_reports_snapshot_same_portfolio",
         ),
     )
 

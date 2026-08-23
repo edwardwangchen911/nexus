@@ -242,6 +242,33 @@ def test_market_evidence_rejects_risk_bucket_weights_that_do_not_sum_to_one() ->
         )
 
 
+def test_market_evidence_rejects_nested_binary_float_inputs() -> None:
+    instrument_id = UUID("0198d500-1000-7000-8000-000000000013")
+
+    with pytest.raises(TypeError, match="binary floats"):
+        MarketEvidence(quality="PASS", adv20={instrument_id: 0.1})
+    with pytest.raises(TypeError, match="binary floats"):
+        MarketEvidence(
+            quality="PASS",
+            risk_buckets={instrument_id: {"equity": 1.0}},
+        )
+
+
+def test_nonpositive_current_price_is_explicit_unknown_not_a_metric_exception() -> None:
+    base_snapshot = _ready_snapshot()
+    position = base_snapshot.positions[0].model_copy(update={"current_price": Decimal(0)})
+    snapshot = base_snapshot.model_copy(
+        update={"positions": (position,)}
+    )
+
+    report = diagnose_portfolio(
+        snapshot, _complete_market(snapshot), DiagnosticHistory.empty(), RealAdvisoryPolicy.v1()
+    )
+
+    assert report.optimization_need == "RESEARCH_REQUIRED"
+    assert any(item.unknown_reason == "POSITION_PRICE_INVALID" for item in report.items)
+
+
 def test_00656_hk_guard_rejects_any_future_fundamental_diagnostic() -> None:
     snapshot = _ready_snapshot()
     market = _complete_market(snapshot).model_copy(

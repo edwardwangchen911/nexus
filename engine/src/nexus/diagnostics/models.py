@@ -29,6 +29,23 @@ class _DiagnosticModel(BaseModel):
             raise TypeError("diagnostic values must not be binary floats")
         return value
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_nested_binary_floats(cls, value: object) -> object:
+        _assert_no_binary_float(value)
+        return value
+
+
+def _assert_no_binary_float(value: object) -> None:
+    if isinstance(value, float):
+        raise TypeError("diagnostic values must not be binary floats")
+    if isinstance(value, Mapping):
+        for nested in value.values():
+            _assert_no_binary_float(nested)
+    elif isinstance(value, list | tuple | set | frozenset):
+        for nested in value:
+            _assert_no_binary_float(nested)
+
 
 class MarketEvidence(_DiagnosticModel):
     prices: Mapping[UUID, PriceSeries] = {}

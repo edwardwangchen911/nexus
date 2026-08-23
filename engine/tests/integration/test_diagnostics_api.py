@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 import httpx
@@ -9,6 +9,7 @@ from nexus.api.routes.diagnostics import router as diagnostics_router
 from nexus.diagnostics.models import DiagnosticItem, PortfolioDiagnosticReport
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID, load_real_advisory_policy_v1
 from nexus.diagnostics.repository import persist_report
+from nexus.diagnostics.service import diagnose_and_persist
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.diagnostics import (
     PortfolioDiagnosticEvidenceRefRecord,
@@ -34,6 +35,7 @@ async def test_latest_diagnostic_is_redacted_and_returns_persisted_item_shape(
             portfolio_id=PORTFOLIOS[0],
             report=PortfolioDiagnosticReport(
                 portfolio_snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
+                trading_day=date(2026, 8, 24),
                 policy_version=policy.version,
                 optimization_need="RESEARCH_REQUIRED",
                 items=(
@@ -123,10 +125,28 @@ async def test_database_triggers_reject_update_and_delete_for_every_diagnostic_r
                             text(f"{operation} WHERE id = :id"), {"id": record_id}
                         )
 
+@pytest.mark.asyncio
+async def test_production_diagnosis_accepts_only_database_snapshot_authority(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        report = await diagnose_and_persist(
+            session,
+            portfolio_id=PORTFOLIOS[0],
+            snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
+        )
+
+    assert report.optimization_need == "RESEARCH_REQUIRED"
+    assert report.trading_day is not None
+    assert report.items[0].unknown_reason == "MARKET_EVIDENCE_UNAVAILABLE"
+
 
 def _report(policy_version: str) -> PortfolioDiagnosticReport:
     return PortfolioDiagnosticReport(
         portfolio_snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
+        trading_day=date(2026, 8, 24),
         policy_version=policy_version,  # type: ignore[arg-type]
         optimization_need="RESEARCH_REQUIRED",
         items=(
