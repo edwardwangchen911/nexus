@@ -4,30 +4,10 @@ import { RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
 import { PortfolioSummary } from "../../components/portfolio-summary";
+import type { components } from "../../lib/generated/schema";
 
-export type PortfolioItem = {
-  portfolio_id: string;
-  name: string;
-  kind: "real_read_only" | "internal_paper" | "shadow";
-  coverage_scope: "broker_account" | "internal_paper" | "shadow";
-  provider: string;
-  latest_snapshot_status: PortfolioSnapshot["status"] | null;
-  latest_snapshot_as_of: string | null;
-  original_currencies: string[];
-  last_sync_run_status: string | null;
-};
-
-export type PortfolioSnapshot = {
-  portfolio_snapshot_id: string;
-  portfolio_id: string;
-  coverage_scope: "broker_account" | "internal_paper" | "shadow";
-  status: "READY" | "PARTIAL" | "STALE" | "RECONCILIATION_REQUIRED";
-  cash: Array<{ currency: string; cash_balance: string; available_cash: string; provider_as_of: string | null }>;
-  positions: Array<{ instrument_id: string; symbol: string | null; exchange: string; currency: string; quantity: string; available_quantity: string; frozen_quantity: string; avg_cost: string | null; diluted_cost: string | null; current_price: string | null; provider_as_of: string | null; read_only: boolean }>;
-  open_orders: Array<{ broker_order_snapshot_id: string; instrument_id: string; symbol: string | null; currency: string; side: string; quantity: string; filled_quantity: string; price: string | null; status: string; updated_at: string | null; read_only: boolean }>;
-  converted_view: unknown | null;
-  as_of: string | null;
-};
+export type PortfolioItem = components["schemas"]["PortfolioListItemResponse"];
+export type PortfolioSnapshot = components["schemas"]["PortfolioSnapshotResponse"];
 
 type Notice = { kind: "error" | "success"; text: string } | null;
 type PendingSync = { portfolioId: string; idempotencyKey: string; body: string };
@@ -46,6 +26,7 @@ type PortfolioPanelProps = {
 };
 
 const LOAD_TIMEOUT_MS = 10_000;
+const SYNC_CONFIRM_TIMEOUT_MS = 35_000;
 
 export default function PortfolioPage(): React.ReactElement {
   const [state, setState] = useState<DataStateKind>("loading");
@@ -56,6 +37,7 @@ export default function PortfolioPage(): React.ReactElement {
   const [unresolvedSync, setUnresolvedSync] = useState<PendingSync | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const loadVersion = useRef(0);
+  const syncInFlight = useRef(false);
   const portfoliosRef = useRef<PortfolioItem[]>([]);
   const snapshotRef = useRef<PortfolioSnapshot | null>(null);
   const selectedPortfolioIdRef = useRef<string | null>(null);
@@ -71,6 +53,7 @@ export default function PortfolioPage(): React.ReactElement {
     }
     if (!response.ok) throw new Error("snapshot read failed");
     const envelope = await response.json() as { data: PortfolioSnapshot };
+    if (version !== loadVersion.current) return;
     if (envelope.data.portfolio_id !== portfolioId) throw new Error("snapshot portfolio mismatch");
     snapshotRef.current = envelope.data; setSnapshot(envelope.data);
     setState(snapshotState(envelope.data.status));
@@ -130,7 +113,7 @@ export default function PortfolioPage(): React.ReactElement {
   }
 
   async function syncSelected(): Promise<void> {
-    if (!selectedPortfolioId || syncing) return;
+    if (!selectedPortfolioId || syncing || syncInFlight.current || unresolvedSync) return;
     await confirmSync({
       portfolioId: selectedPortfolioId,
       idempotencyKey: crypto.randomUUID(),
@@ -139,6 +122,8 @@ export default function PortfolioPage(): React.ReactElement {
   }
 
   async function confirmSync(pending: PendingSync): Promise<void> {
+    if (syncInFlight.current) return;
+    syncInFlight.current = true;
     setSyncing(true); setNotice(null);
     try {
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -147,7 +132,7 @@ export default function PortfolioPage(): React.ReactElement {
           method: "POST",
           headers: { "content-type": "application/json", "idempotency-key": pending.idempotencyKey },
           body: pending.body,
-          signal: AbortSignal.timeout(30_000),
+          signal: AbortSignal.timeout(SYNC_CONFIRM_TIMEOUT_MS),
         });
         const payload = await response.json();
         if (!response.ok) {
@@ -158,7 +143,7 @@ export default function PortfolioPage(): React.ReactElement {
             return;
           }
           setUnresolvedSync(null);
-          setNotice({ kind: "error", text: syncErrorMessage(payload?.error?.code) });
+          setNotice({ kind: "error", text: syncErrorMessage(payload?.error?.code, response.status, response.headers.get("retry-after")) });
           return;
         }
         setUnresolvedSync(null);
@@ -173,6 +158,7 @@ export default function PortfolioPage(): React.ReactElement {
         }
       }
     } finally {
+      syncInFlight.current = false;
       setSyncing(false);
     }
   }
@@ -194,7 +180,9 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
         <div><p className="eyebrow">PORTFOLIO / FROZEN FACTS</p><h1>组合事实</h1><p>复星真实持仓与内部模拟盘分账展示。未有合格 FX 证据时，不合并资产净值。</p></div>
         <div className="portfolio-page__actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新快照</button>{unresolvedSync ? <button className="button button--primary" type="button" onClick={onResolveSync} disabled={syncing}><ShieldCheck aria-hidden="true" size={17} />{syncing ? "正在继续确认" : "使用同一幂等键继续确认"}</button> : selected?.kind === "real_read_only" ? <button className="button button--primary" type="button" onClick={onSync} disabled={syncing}><ShieldCheck aria-hidden="true" size={17} />{syncing ? "正在确认同步任务" : "同步复星只读事实"}</button> : null}</div>
       </header>
-      {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
+      <div role="status" aria-label="组合操作状态" aria-live="polite" aria-atomic="true">
+        {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
+      </div>
       {!hasData || !selected ? <DataState state={state} title="组合快照" detail={stateDetail(state)} announce={false} /> : (
         <div className="portfolio-workspace">
           <nav className="portfolio-rail" aria-label="组合选择"><ul>{portfolios.map((item) => <li key={item.portfolio_id}><button type="button" aria-pressed={item.portfolio_id === selectedPortfolioId} onClick={() => onSelect(item.portfolio_id)}><strong>{item.name}</strong><span>{kindLabel(item.kind)} · {item.coverage_scope}</span><span>{item.original_currencies.join(" / ") || "币种未知"}</span></button></li>)}</ul></nav>
@@ -213,5 +201,5 @@ async function fetchWithTimeout(path: string): Promise<Response> { return fetch(
 function snapshotState(status: PortfolioSnapshot["status"]): DataStateKind { return status === "READY" ? "ready" : status === "STALE" ? "stale" : "partial"; }
 function kindLabel(kind: PortfolioItem["kind"]): string { return ({ real_read_only: "真实只读", internal_paper: "内部模拟", shadow: "影子组合" })[kind]; }
 function formatTime(value: string | null): string { if (!value) return "Provider 时点缺失"; const date = new Date(value); return Number.isNaN(date.valueOf()) ? "无效时间" : date.toISOString().replace("T", " ").replace(".000Z", " UTC"); }
-function syncErrorMessage(code: unknown): string { if (code === "IDEMPOTENCY_CONFLICT") return "幂等键已被不同请求使用；未创建新任务。"; if (code === "VALIDATION_ERROR") return "60 秒同步冷却中，或请求不合法。"; return "同步任务未登记。当前快照保持不变。"; }
+function syncErrorMessage(code: unknown, status: number, retryAfter: string | null): string { if (code === "IDEMPOTENCY_CONFLICT") return "幂等键已被不同请求使用；未创建新任务。"; if (status === 429) return `只读同步冷却中${retryAfter && /^\d+$/.test(retryAfter) ? `，请等待 ${retryAfter} 秒` : ""}。当前快照保持不变。`; if (code === "VALIDATION_ERROR") return "同步请求不合法；未创建新任务。"; return "同步任务未登记。当前快照保持不变。"; }
 function stateDetail(state: DataStateKind): string { return ({ loading: "正在读取脱敏组合和冻结快照。", empty: "尚无可展示的冻结组合快照。", ready: "组合快照已就绪。", partial: "快照仅供研究，不可作为优化基线。", stale: "显示最后已知快照，不触发业务动作。", error: "读取失败；未开启任何交易能力。", forbidden: "当前身份无权读取组合事实。" })[state]; }

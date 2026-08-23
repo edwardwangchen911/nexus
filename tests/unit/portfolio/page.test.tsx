@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import PortfolioPage, {
@@ -37,7 +37,6 @@ const snapshot: PortfolioSnapshot = {
   positions: [{
     instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e703",
     symbol: "00656.HK",
-    currency: "HKD",
     exchange: "XHKG",
     currency: "HKD",
     quantity: "3000",
@@ -53,6 +52,7 @@ const snapshot: PortfolioSnapshot = {
     broker_order_snapshot_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e704",
     instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e703",
     symbol: "00656.HK",
+    currency: "HKD",
     side: "BUY",
     quantity: "100",
     filled_quantity: "0",
@@ -196,6 +196,27 @@ describe("portfolio vertical slice", () => {
     expect(new Set(keys).size).toBe(1);
   });
 
+  it("prevents double-clicked sync admissions and explains cooldown", async () => {
+    let syncCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/v1/portfolios?")) return Response.json({ data: { items: [portfolio], next_cursor: null }, meta: responseMeta() });
+      if (url.endsWith("/snapshots/latest")) return Response.json({ data: snapshot, meta: responseMeta() });
+      if (url === "/api/v1/broker-sync-runs") {
+        syncCalls += 1;
+        return Response.json({ error: { code: "VALIDATION_ERROR", message: "safe", request_id: responseMeta().request_id, details: {} } }, { status: 429, headers: { "retry-after": "30" } });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+    render(<PortfolioPage />);
+    const sync = await screen.findByRole("button", { name: "同步复星只读事实" });
+    fireEvent.click(sync);
+    fireEvent.click(sync);
+
+    expect(await screen.findByText("只读同步冷却中，请等待 30 秒。当前快照保持不变。")).toBeVisible();
+    expect(syncCalls).toBe(1);
+  });
+
   it("does not attach an old snapshot to a newly selected portfolio after refresh failure", async () => {
     const replacement = { ...portfolio, portfolio_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e799", name: "Replacement portfolio" };
     let listCalls = 0;
@@ -217,6 +238,46 @@ describe("portfolio vertical slice", () => {
     expect(await screen.findByText("无法读取组合事实。当前状态保持只读。")).toBeVisible();
     expect(screen.queryByRole("region", { name: "Replacement portfolio HKD 组合摘要" })).not.toBeInTheDocument();
     expect(screen.queryByText("HKD 8,000.00")).not.toBeInTheDocument();
+  });
+
+  it("discards a slow snapshot body after a newer portfolio generation wins", async () => {
+    const replacement = { ...portfolio, portfolio_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e798", name: "Replacement portfolio" };
+    const replacementSnapshot = { ...snapshot, portfolio_id: replacement.portfolio_id };
+    let listCalls = 0;
+    let releaseOldBody: ((value: { data: PortfolioSnapshot }) => void) | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/v1/portfolios?")) {
+        listCalls += 1;
+        return Response.json({ data: { items: [listCalls === 1 ? portfolio : replacement], next_cursor: null }, meta: responseMeta() });
+      }
+      if (url.includes(portfolioId)) {
+        const body = new Promise<{ data: PortfolioSnapshot }>((resolve) => { releaseOldBody = resolve; });
+        return { ok: true, status: 200, json: () => body } as Response;
+      }
+      if (url.includes(replacement.portfolio_id)) return Response.json({ data: replacementSnapshot, meta: responseMeta() });
+      throw new Error(`unexpected request: ${url}`);
+    }));
+
+    render(<PortfolioPage />);
+    await waitFor(() => expect(releaseOldBody).toBeTypeOf("function"));
+    fireEvent.click(screen.getByRole("button", { name: "刷新快照" }));
+    expect(await screen.findByRole("region", { name: "Replacement portfolio HKD 组合摘要" })).toBeVisible();
+    await act(async () => { releaseOldBody?.({ data: snapshot }); await Promise.resolve(); });
+
+    expect(screen.getByRole("region", { name: "Replacement portfolio HKD 组合摘要" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Fosun read-only HKD 组合摘要" })).not.toBeInTheDocument();
+  });
+
+  it("uses one atomic polite live region for async portfolio outcomes", () => {
+    render(<PortfolioPanel state="ready" portfolios={[portfolio]} snapshot={snapshot}
+      selectedPortfolioId={portfolioId} syncing={false} unresolvedSync={false}
+      notice={{ kind: "success", text: "同步任务已登记。" }} onSelect={vi.fn()}
+      onRefresh={vi.fn()} onSync={vi.fn()} onResolveSync={vi.fn()} />);
+    const live = screen.getByRole("status", { name: "组合操作状态" });
+    expect(live).toHaveAttribute("aria-live", "polite");
+    expect(live).toHaveAttribute("aria-atomic", "true");
+    expect(screen.getAllByRole("status")).toHaveLength(1);
   });
 });
 

@@ -33,7 +33,11 @@ const snapshot = {
 
 for (const viewport of [
   { name: "desktop", width: 1440, height: 1000 },
-  { name: "mobile", width: 390, height: 844 },
+  { name: "mobile-375", width: 375, height: 812 },
+  { name: "mobile-390", width: 390, height: 844 },
+  { name: "tablet-768", width: 768, height: 1024 },
+  { name: "desktop-1024", width: 1024, height: 768 },
+  { name: "mobile-landscape", width: 844, height: 390 },
 ]) {
   test(`${viewport.name} portfolio keeps currencies and evidence boundaries visible`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
