@@ -2,7 +2,7 @@
 
 import json
 from datetime import UTC, date, datetime
-from decimal import Decimal, localcontext
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from hashlib import sha256
 from typing import Literal, cast
 from uuid import UUID
@@ -346,7 +346,9 @@ def _stored_decimal(value: str | None) -> Decimal | None:
         return None
     with localcontext() as context:
         context.prec = 50
-        return Decimal(value).quantize(Decimal("0.000000000001"))
+        return Decimal(value).quantize(
+            Decimal("0.000000000001"), rounding=ROUND_HALF_UP
+        )
 
 
 def _string(value: Decimal | None) -> str | None:
