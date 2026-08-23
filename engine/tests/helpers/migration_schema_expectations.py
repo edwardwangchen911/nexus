@@ -40,6 +40,10 @@ EXPECTED_TABLES = {
     "portfolio_diagnostic_reports",
     "portfolio_diagnostic_items",
     "portfolio_diagnostic_evidence_refs",
+    "optimization_policies",
+    "optimization_proposal_groups",
+    "optimization_proposals",
+    "proposal_positions",
 }
 
 EXPECTED_FOREIGN_KEYS = {

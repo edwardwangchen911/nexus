@@ -9,7 +9,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from nexus.integrations.service import IntegrationStatusService
 from nexus.persistence.base import Base
-from nexus.persistence.models import data, market, portfolio, runtime  # noqa: F401
+from nexus.persistence.models import data, market, optimization, portfolio, runtime  # noqa: F401
 from nexus.persistence.session import session_factory
 from nexus.quality.source_policy import QUOTE_SOURCE_POLICY_ID
 from nexus.settings import EngineSettings
@@ -253,11 +253,17 @@ def _assert_reflected_schema(connection: Connection) -> None:
         "portfolio_diagnostic_items",
         "portfolio_diagnostic_evidence_refs",
     }
-    expected_tables = (
-        EXPECTED_TABLES
-        if diagnostic_tables <= actual_tables
-        else EXPECTED_TABLES - diagnostic_tables
-    )
+    optimization_tables = {
+        "optimization_policies",
+        "optimization_proposal_groups",
+        "optimization_proposals",
+        "proposal_positions",
+    }
+    expected_tables = set(EXPECTED_TABLES)
+    if not diagnostic_tables <= actual_tables:
+        expected_tables -= diagnostic_tables
+    if not optimization_tables <= actual_tables:
+        expected_tables -= optimization_tables
     assert actual_tables == expected_tables
     assert {inspector.get_pk_constraint(table_name)["name"] for table_name in expected_tables} == {
         f"pk_{table_name}" for table_name in expected_tables

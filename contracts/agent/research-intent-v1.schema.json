@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "nexus://contracts/agent/research-intent-v1.schema.json",
+  "title": "NEXUS ResearchIntent v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "decision_id", "instrument_id", "display_symbol", "decision_time", "data_snapshot_id", "horizon", "stance", "exposure_action", "theses", "counter_theses", "uncertainties", "invalidation_conditions", "entry_conditions", "exit_conditions", "valid_until", "quality_status", "evidence_audit", "role_votes", "disagreement", "strategy_version", "model_version", "prompt_version", "data_version", "evidence_refs"],
+  "properties": {
+    "schema_version": {"const": "research_intent_v1"},
+    "decision_id": {"type": "string", "format": "uuid"},
+    "instrument_id": {"type": "string", "format": "uuid"},
+    "display_symbol": {"type": "string", "pattern": "^[A-Z0-9.\\-]+$"},
+    "decision_time": {"type": "string", "format": "date-time"},
+    "data_snapshot_id": {"type": "string", "format": "uuid"},
+    "horizon": {"enum": ["short_term", "medium_term", "long_term"]},
+    "stance": {"enum": ["buy_candidate", "reduce_candidate", "hold", "watch"]},
+    "exposure_action": {"enum": ["none", "reduce", "maintain", "eligible_for_increase"]}
+  }
+}
