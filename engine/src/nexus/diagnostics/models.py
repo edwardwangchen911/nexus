@@ -52,6 +52,7 @@ class MarketEvidence(_DiagnosticModel):
     adv20: Mapping[UUID, Decimal] = {}
     quality: Literal["PASS", "PARTIAL", "FAIL"] = "PARTIAL"
     risk_buckets: Mapping[UUID, Mapping[str, Decimal]] = {}
+    trading_sessions: tuple[date, ...] = ()
     symbols: Mapping[UUID, str] = {}
     benchmark: PriceSeries | None = None
     evidence_refs: tuple[EvidenceRef, ...] = ()
@@ -59,6 +60,9 @@ class MarketEvidence(_DiagnosticModel):
 
     @model_validator(mode="after")
     def _bucket_weights_are_complete(self) -> "MarketEvidence":
+        sessions_are_unique = len(set(self.trading_sessions)) == len(self.trading_sessions)
+        if tuple(sorted(self.trading_sessions)) != self.trading_sessions or not sessions_are_unique:
+            raise ValueError("trading sessions must be strictly increasing")
         for weights in self.risk_buckets.values():
             if (
                 not weights

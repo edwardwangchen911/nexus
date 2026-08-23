@@ -177,7 +177,17 @@ def test_warning_persistence_requires_the_four_previous_trading_days_and_scope()
         comparable_variants=(_comparison_evidence(),),
     )
 
-    assert _optimization_need((item,), history, date(2026, 8, 25)) == "OPTIMIZATION_CANDIDATE"
+    sessions = (
+        date(2026, 8, 19),
+        date(2026, 8, 20),
+        date(2026, 8, 21),
+        date(2026, 8, 24),
+        date(2026, 8, 25),
+    )
+    assert (
+        _optimization_need((item,), history, date(2026, 8, 25), sessions)
+        == "OPTIMIZATION_CANDIDATE"
+    )
 
     wrong_scope = history.model_copy(
         update={
@@ -189,14 +199,14 @@ def test_warning_persistence_requires_the_four_previous_trading_days_and_scope()
             )
         }
     )
-    assert _optimization_need((item,), wrong_scope, date(2026, 8, 25)) == "NO_ACTION"
+    assert _optimization_need((item,), wrong_scope, date(2026, 8, 25), sessions) == "NO_ACTION"
 
     gap = history.model_copy(
         update={
             "prior_reports": history.prior_reports[:-1] + (_prior_report(item, date(2026, 8, 21)),)
         }
     )
-    assert _optimization_need((item,), gap, date(2026, 8, 25)) == "NO_ACTION"
+    assert _optimization_need((item,), gap, date(2026, 8, 25), sessions) == "NO_ACTION"
 
 
 def test_market_risk_fails_closed_below_eighty_percent_sample_coverage() -> None:

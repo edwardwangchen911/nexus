@@ -1,7 +1,7 @@
 """Deterministic report-level decision precedence and trading-day persistence."""
 
 from collections.abc import Iterable
-from datetime import date, timedelta
+from datetime import date
 
 from nexus.diagnostics.models import (
     DiagnosticHistory,
@@ -14,6 +14,7 @@ def optimization_need(
     items: Iterable[DiagnosticItem],
     history: DiagnosticHistory,
     current_trading_day: date | None,
+    trading_sessions: tuple[date, ...] = (),
 ) -> OptimizationNeed:
     """Apply the binding precedence after deterministic metric evaluation."""
     item_tuple = tuple(items)
@@ -23,7 +24,7 @@ def optimization_need(
     triggered = any(item.severity == "critical" for item in item_tuple)
     triggered = triggered or len({_risk_domain(item.diagnostic_code) for item in warnings}) >= 2
     triggered = triggered or any(
-        _warning_persists(item, history, current_trading_day) for item in warnings
+        _warning_persists(item, history, current_trading_day, trading_sessions) for item in warnings
     )
     if not triggered:
         return "NO_ACTION"
@@ -34,14 +35,22 @@ def _warning_persists(
     item: DiagnosticItem,
     history: DiagnosticHistory,
     current_trading_day: date | None,
+    trading_sessions: tuple[date, ...],
 ) -> bool:
-    if current_trading_day is None or len(history.prior_reports) < 4:
+    if (
+        current_trading_day is None
+        or len(history.prior_reports) < 4
+        or current_trading_day not in trading_sessions
+    ):
         return False
     reports = history.prior_reports[-4:]
     if any(report.trading_day is None for report in reports):
         return False
-    expected = _previous_trading_day(current_trading_day)
-    for report in reversed(reports):
+    current_index = trading_sessions.index(current_trading_day)
+    if current_index < 4:
+        return False
+    expected_sessions = tuple(reversed(trading_sessions[current_index - 4 : current_index]))
+    for report, expected in zip(reversed(reports), expected_sessions, strict=True):
         if report.trading_day != expected or not any(
             prior_item.diagnostic_code == item.diagnostic_code
             and prior_item.policy_scope == item.policy_scope
@@ -49,15 +58,7 @@ def _warning_persists(
             for prior_item in report.items
         ):
             return False
-        expected = _previous_trading_day(expected)
     return True
-
-
-def _previous_trading_day(day: date) -> date:
-    prior = day - timedelta(days=1)
-    while prior.weekday() >= 5:
-        prior -= timedelta(days=1)
-    return prior
 
 
 def _risk_domain(code: str) -> str:

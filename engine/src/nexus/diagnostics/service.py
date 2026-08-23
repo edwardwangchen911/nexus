@@ -80,7 +80,12 @@ def diagnose_portfolio(
         )
     _assert_fosun_read_only_scope(snapshot, market, items)
     trading_day = None if snapshot.as_of is None else snapshot.as_of.date()
-    return _report(snapshot, policy, _optimization_need(items, history, trading_day), tuple(items))
+    return _report(
+        snapshot,
+        policy,
+        _optimization_need(items, history, trading_day, market.trading_sessions),
+        tuple(items),
+    )
 
 
 async def diagnose_and_persist(
