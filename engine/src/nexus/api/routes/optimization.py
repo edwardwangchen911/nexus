@@ -16,8 +16,8 @@ from nexus.api.schemas.integrations import NexusErrorEnvelope
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.domain.decimal import DecimalString
 from nexus.optimizer.admission import admit_queued_job
+from nexus.optimizer.lifecycle import transition_group_idempotently
 from nexus.optimizer.persistence import ProposalPersistenceAuthority
-from nexus.optimizer.repository import transition_group
 from nexus.persistence.models.data import DataSnapshot, SourcePolicy
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import (
@@ -131,11 +131,15 @@ async def admit_optimization_proposal(
     try:
         body = _ProposalAdmissionRequest.model_validate(json.loads(raw_body))
     except (json.JSONDecodeError, ValueError) as error:
-        raise NexusError(ErrorCode.VALIDATION_ERROR, "Request is invalid.", status_code=422) from error
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "Request is invalid.", status_code=422
+        ) from error
     request_hash = hashlib.sha256(raw_body).hexdigest()
     idempotency_key = request.headers.get("Idempotency-Key")
     if not idempotency_key:
-        raise NexusError(ErrorCode.VALIDATION_ERROR, "Idempotency-Key is required.", status_code=422)
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "Idempotency-Key is required.", status_code=422
+        )
     authority = await _load_admission_authority(session, body)
     if authority is None:
         raise NexusError(
@@ -245,10 +249,10 @@ async def get_optimization_group(
     children = list(
         (
             await session.execute(
-            select(OptimizationProposalRecord)
-            .where(OptimizationProposalRecord.proposal_group_id == proposal_group_id)
-            .order_by(OptimizationProposalRecord.variant)
-        )
+                select(OptimizationProposalRecord)
+                .where(OptimizationProposalRecord.proposal_group_id == proposal_group_id)
+                .order_by(OptimizationProposalRecord.variant)
+            )
         )
         .scalars()
         .all()
@@ -268,7 +272,9 @@ async def get_optimization_group(
             select(ProposalComparisonRecord).where(ProposalComparisonRecord.proposal_id == child.id)
         )
         if comparison is None:
-            raise NexusError(ErrorCode.DATA_PARTIAL, "Proposal comparison is incomplete.", status_code=422)
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL, "Proposal comparison is incomplete.", status_code=422
+            )
         proposal_data.append(
             {
                 "proposal_id": str(child.id),
@@ -301,8 +307,12 @@ async def get_optimization_group(
             "version": group.version,
             "baseline_portfolio_snapshot_id": str(group.baseline_portfolio_snapshot_id),
             "diagnostic_input_hash": group.diagnostic_input_hash,
-            "data_snapshot_id": None if group.data_snapshot_id is None else str(group.data_snapshot_id),
-            "source_policy_id": None if group.source_policy_id is None else str(group.source_policy_id),
+            "data_snapshot_id": None
+            if group.data_snapshot_id is None
+            else str(group.data_snapshot_id),
+            "source_policy_id": None
+            if group.source_policy_id is None
+            else str(group.source_policy_id),
             "cost_model_version": group.cost_model_version,
             "proposals": proposal_data,
         },
@@ -311,34 +321,85 @@ async def get_optimization_group(
 
 
 async def _transition_endpoint(
-    group_id: UUID, target: str, request: Request, actor: VerifiedServiceActor, session: AsyncSession
+    group_id: UUID,
+    target: str,
+    request: Request,
+    actor: VerifiedServiceActor,
+    session: AsyncSession,
 ) -> dict[str, object]:
-    del actor
+    raw_body = await request.body()
+    idempotency_key = request.headers.get("Idempotency-Key")
+    if not idempotency_key:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "Idempotency-Key is required.", status_code=422
+        )
     try:
-        body = _LifecycleRequest.model_validate(json.loads(await request.body()))
-        group = await transition_group(session, group_id, target, expected_version=body.version)  # type: ignore[arg-type]
+        body = _LifecycleRequest.model_validate(json.loads(raw_body))
+        group = await transition_group_idempotently(
+            session,
+            actor_id=actor.actor_id,
+            idempotency_key=idempotency_key,
+            request_hash=hashlib.sha256(target.encode() + b"\0" + raw_body).hexdigest(),
+            group_id=group_id,
+            target=target,  # type: ignore[arg-type]
+            expected_version=body.version,
+        )
+    except IdempotencyConflict as error:
+        raise NexusError(
+            ErrorCode.IDEMPOTENCY_CONFLICT,
+            "Idempotency key has a different lifecycle request.",
+            status_code=409,
+        ) from error
     except ValueError as error:
-        code = ErrorCode.PROPOSAL_NOT_EXECUTABLE if str(error) == "PROPOSAL_NOT_EXECUTABLE" else ErrorCode.VERSION_CONFLICT if str(error) == "VERSION_CONFLICT" else ErrorCode.VALIDATION_ERROR
-        raise NexusError(code, "Proposal lifecycle transition was rejected.", status_code=409 if code == ErrorCode.VERSION_CONFLICT else 422) from error
-    return {"data": {"proposal_group_id": str(group.id), "status": group.status, "version": group.version}}
+        code = (
+            ErrorCode.PROPOSAL_NOT_EXECUTABLE
+            if str(error) == "PROPOSAL_NOT_EXECUTABLE"
+            else ErrorCode.VERSION_CONFLICT
+            if str(error) == "VERSION_CONFLICT"
+            else ErrorCode.VALIDATION_ERROR
+        )
+        raise NexusError(
+            code,
+            "Proposal lifecycle transition was rejected.",
+            status_code=409 if code == ErrorCode.VERSION_CONFLICT else 422,
+        ) from error
+    return {
+        "data": {
+            "proposal_group_id": str(group.group_id),
+            "status": group.status,
+            "version": group.version,
+        }
+    }
 
 
-@router.post(
-    "/internal/v1/optimization-proposals/{group_id}/shadow", responses=_ERROR_RESPONSES
-)
-async def shadow_optimization_group(group_id: str, request: Request, actor: VerifiedServiceActor = Depends(require_service_actor), session: AsyncSession = Depends(transactional_session)) -> dict[str, object]:
-    return await _transition_endpoint(_parse_group_id(group_id), "shadowing", request, actor, session)
+@router.post("/internal/v1/optimization-proposals/{group_id}/shadow", responses=_ERROR_RESPONSES)
+async def shadow_optimization_group(
+    group_id: str,
+    request: Request,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+) -> dict[str, object]:
+    return await _transition_endpoint(
+        _parse_group_id(group_id), "shadowing", request, actor, session
+    )
 
 
-@router.post(
-    "/internal/v1/optimization-proposals/{group_id}/reject", responses=_ERROR_RESPONSES
-)
-async def reject_optimization_group(group_id: str, request: Request, actor: VerifiedServiceActor = Depends(require_service_actor), session: AsyncSession = Depends(transactional_session)) -> dict[str, object]:
-    return await _transition_endpoint(_parse_group_id(group_id), "rejected", request, actor, session)
+@router.post("/internal/v1/optimization-proposals/{group_id}/reject", responses=_ERROR_RESPONSES)
+async def reject_optimization_group(
+    group_id: str,
+    request: Request,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+) -> dict[str, object]:
+    return await _transition_endpoint(
+        _parse_group_id(group_id), "rejected", request, actor, session
+    )
 
 
 def _parse_group_id(value: str) -> UUID:
     try:
         return UUID(value)
     except ValueError as error:
-        raise NexusError(ErrorCode.VALIDATION_ERROR, "Proposal group id is invalid.", status_code=422) from error
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "Proposal group id is invalid.", status_code=422
+        ) from error
