@@ -9,7 +9,7 @@ from uuid import UUID
 
 import httpx
 import pytest
-from helpers.portfolio_api import PORTFOLIOS, app, headers, seed_portfolio_list, settings
+from helpers.portfolio_api import INSTRUMENT_ID, PORTFOLIOS, app, headers, seed_portfolio_list, settings
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.optimizer.cost_policy import COST_POLICY_ID
 from nexus.optimizer.lifecycle import LifecycleTransition, transition_group_idempotently
@@ -17,6 +17,7 @@ from nexus.optimizer.repository import transition_group
 from nexus.persistence.models.data import DataSnapshot, SourcePolicy
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import (
+    BaselineSelectionAuthorityRecord,
     OptimizationProposalGroupRecord,
     ProposalComparisonRecord,
 )
@@ -242,6 +243,25 @@ async def test_raw_sql_shadow_cannot_bypass_non_executable_comparison(
 
 
 @pytest.mark.asyncio
+async def test_shadow_requires_the_frozen_selection_authority(
+    migrated_database_url: str,
+) -> None:
+    """A caller cannot mark strategy evidence complete while omitting its selection row."""
+    group_id = UUID("0198d500-1000-7000-8000-000000000844")
+    await _seed_complete_group(migrated_database_url, group_id, missing_selection=True)
+    factory = session_factory(settings(migrated_database_url))
+    with pytest.raises(ValueError, match="PROPOSAL_NOT_EXECUTABLE"):
+        async with factory() as session, session.begin():
+            await transition_group(session, group_id, "shadowing", expected_version=1)
+    with pytest.raises(IntegrityError, match="PROPOSAL_NOT_EXECUTABLE"):
+        async with factory() as session, session.begin():
+            await session.execute(
+                text("UPDATE optimization_proposal_groups SET status='shadowing', version=2 WHERE id=:id"),
+                {"id": group_id},
+            )
+
+
+@pytest.mark.asyncio
 async def test_raw_sql_shadow_cannot_bypass_stale_policy_authority(
     migrated_database_url: str,
 ) -> None:
@@ -325,6 +345,7 @@ async def _seed_complete_group(
     authority_stale: bool = False,
     noncanonical_source: bool = False,
     missing_cost_policy: bool = False,
+    missing_selection: bool = False,
 ) -> None:
     await seed_portfolio_list(database_url)
     factory = session_factory(settings(database_url))
@@ -336,6 +357,7 @@ async def _seed_complete_group(
         else SOURCE_POLICY_ID
     )
     report_id = UUID(f"0198d500-1000-7000-8000-000000000{int(suffix) + 20:03d}")
+    selection_id = UUID(f"0198d500-1000-7000-8000-000000000{int(suffix) + 24:03d}")
     async with factory() as session, session.begin():
         session.add_all(
             (
@@ -373,15 +395,30 @@ async def _seed_complete_group(
                     payload={},
                 )
             )
+        if not missing_selection:
+            session.add(
+                BaselineSelectionAuthorityRecord(
+                    id=selection_id,
+                    policy_version="baseline_v1",
+                    data_snapshot_id=data_id,
+                    decision_at=_CLOCK,
+                    available_at=_CLOCK,
+                    evidence_refs=["selection:lifecycle"],
+                    candidates=[{"instrument_id": str(INSTRUMENT_ID), "provenance_refs": ["candidate:lifecycle"]}],
+                    selected_instrument_ids=[str(INSTRUMENT_ID)],
+                    evidence_hash="a" * 64,
+                )
+            )
         await session.flush()
         await session.execute(
             text(
-                "INSERT INTO optimization_proposal_groups (id, baseline_portfolio_snapshot_id, status, version, policy_id, diagnostic_report_id, data_snapshot_id, source_policy_id, cost_policy_id, diagnostic_input_hash, valuation_time, baseline_ready, diagnostic_complete, source_conflict, partial, requires_fx, cost_complete, authority_stale) VALUES (:id, :baseline, 'compared', 1, :policy, :report, :data, :source, :cost_policy, :hash, :valuation, true, true, :source_conflict, false, false, true, :authority_stale)"
+                "INSERT INTO optimization_proposal_groups (id, baseline_portfolio_snapshot_id, status, version, policy_id, selection_authority_id, diagnostic_report_id, data_snapshot_id, source_policy_id, cost_policy_id, diagnostic_input_hash, valuation_time, baseline_ready, diagnostic_complete, source_conflict, partial, requires_fx, cost_complete, authority_stale) VALUES (:id, :baseline, 'compared', 1, :policy, :selection, :report, :data, :source, :cost_policy, :hash, :valuation, true, true, :source_conflict, false, false, true, :authority_stale)"
             ),
             {
                 "id": group_id,
                 "baseline": _BASELINE_ID,
                 "policy": _POLICY_ID,
+                "selection": None if missing_selection else selection_id,
                 "report": report_id,
                 "data": data_id,
                 "source": source_id,

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.optimizer.cost_policy import COST_POLICY_ID, load_cost_policy_v1
+from nexus.optimizer.selection_authority import load_selection_authority
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import (
@@ -101,10 +102,21 @@ async def _has_executable_shadow_authority(
     try:
         source_policy = await load_source_policy_v1(session, instrument_tick_size=None)
         cost_policy = await load_cost_policy_v1(session)
+        selection = (
+            None
+            if group.selection_authority_id is None
+            else await load_selection_authority(
+                session,
+                group.selection_authority_id,
+                data_snapshot_id=group.data_snapshot_id,
+                valuation_time=group.valuation_time,
+            )
+        )
     except ValueError:
         return False
     return bool(
         strategy is not None
+        and selection is not None
         and strategy.portfolio_scope == group.portfolio_scope
         and (
             group.portfolio_scope == "real_read_only" or not strategy.analysis_only
