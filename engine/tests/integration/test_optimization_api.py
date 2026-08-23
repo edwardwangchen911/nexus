@@ -80,7 +80,7 @@ async def test_what_if_has_one_redacted_audit_and_no_business_or_idempotency_wri
 ) -> None:
     """The synchronous endpoint may append one summary, but never retain request values elsewhere."""
     instrument_id = "0198d500-1000-7000-8000-000000000611"
-    exact_weight = "0.1250"
+    exact_weight = "0.10"
     body = json.dumps(
         {
             "policy_version": "optimizer_v1",
@@ -96,6 +96,10 @@ async def test_what_if_has_one_redacted_audit_and_no_business_or_idempotency_wri
     assert response.status_code == 200
     assert instrument_id not in response.text
     assert exact_weight not in response.text
+    result = response.json()["data"]["result"]
+    assert result["diagnostics"]["top1"]["value"] == 1000
+    assert result["constraints"]["single_name_critical"]["value"] == 0
+    assert result["constraints"]["violation_count"]["value"] == 0
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session:
         counts = []
