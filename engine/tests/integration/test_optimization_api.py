@@ -1,6 +1,7 @@
 # ruff: noqa: E501
 """Authenticated optimization what-if API contracts."""
 
+import asyncio
 import hashlib
 import json
 from datetime import UTC, date, datetime
@@ -160,10 +161,23 @@ async def test_proposal_admission_returns_one_queued_job_for_idempotent_replay(
         replay = await client.post(path, content=body, headers=replay_headers)
         changed = await client.post(
             path,
-            content=body.replace(b"cost_model_v1", b"cost_model_v2"),
-            headers={**headers("POST", path, body.replace(b"cost_model_v1", b"cost_model_v2")), "Idempotency-Key": "proposal-key-711"},
+            content=body + b" ",
+            headers={
+                **headers("POST", path, body + b" "),
+                "Idempotency-Key": "proposal-key-711",
+            },
+        )
+        concurrent_headers = []
+        for _ in range(2):
+            header = headers("POST", path, body)
+            header["Idempotency-Key"] = "proposal-key-concurrent-711"
+            concurrent_headers.append(header)
+        concurrent = await asyncio.gather(
+            *(client.post(path, content=body, headers=header) for header in concurrent_headers)
         )
     assert first.status_code == replay.status_code == 202
     assert first.json()["data"]["job_id"] == replay.json()["data"]["job_id"]
     assert changed.status_code == 409
     assert changed.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+    assert {response.status_code for response in concurrent} == {202}
+    assert len({response.json()["data"]["job_id"] for response in concurrent}) == 1

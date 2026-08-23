@@ -27,6 +27,35 @@ async def claim_or_replay(
     idempotency_key: str,
     request_hash: str,
 ) -> tuple[IdempotencyRecord, BrokerSyncRun | None]:
+    record, inserted = await claim_or_lock(
+        session, actor_id, route, idempotency_key, request_hash, _IDEMPOTENCY_SCHEMA_VERSION
+    )
+    if inserted:
+        return record, None
+    if record.request_hash != request_hash:
+        raise IdempotencyConflict("idempotency key body hash conflicts with prior request")
+    raw_run_id = record.response_payload.get("broker_sync_run_id")
+    if record.schema_version != _IDEMPOTENCY_SCHEMA_VERSION or not isinstance(raw_run_id, str):
+        raise BrokerSyncPersistenceError("broker idempotency record is invalid")
+    try:
+        run_id = UUID(raw_run_id)
+    except ValueError:
+        raise BrokerSyncPersistenceError("broker idempotency record is invalid") from None
+    run = cast(BrokerSyncRun | None, await session.get(BrokerSyncRun, run_id))
+    if run is None:
+        raise BrokerSyncPersistenceError("broker idempotency record is invalid")
+    return record, run
+
+
+async def claim_or_lock(
+    session: AsyncSession,
+    actor_id: str,
+    route: str,
+    idempotency_key: str,
+    request_hash: str,
+    schema_version: str,
+) -> tuple[IdempotencyRecord, bool]:
+    """Claim one idempotency row or lock the committed owner response for replay."""
     claim_id = new_uuid7()
     inserted = await session.scalar(
         insert(IdempotencyRecord)
@@ -36,7 +65,7 @@ async def claim_or_replay(
             route=route,
             idempotency_key=idempotency_key,
             request_hash=request_hash,
-            schema_version=_IDEMPOTENCY_SCHEMA_VERSION,
+            schema_version=schema_version,
             response_payload={},
         )
         .on_conflict_do_nothing(
@@ -59,21 +88,7 @@ async def claim_or_replay(
     )
     if record is None:
         raise BrokerSyncPersistenceError("broker idempotency claim failed")
-    if inserted is not None:
-        return record, None
-    if record.request_hash != request_hash:
-        raise IdempotencyConflict("idempotency key body hash conflicts with prior request")
-    raw_run_id = record.response_payload.get("broker_sync_run_id")
-    if record.schema_version != _IDEMPOTENCY_SCHEMA_VERSION or not isinstance(raw_run_id, str):
-        raise BrokerSyncPersistenceError("broker idempotency record is invalid")
-    try:
-        run_id = UUID(raw_run_id)
-    except ValueError:
-        raise BrokerSyncPersistenceError("broker idempotency record is invalid") from None
-    run = cast(BrokerSyncRun | None, await session.get(BrokerSyncRun, run_id))
-    if run is None:
-        raise BrokerSyncPersistenceError("broker idempotency record is invalid")
-    return record, run
+    return record, inserted is not None
 
 
 def validate_request_identity(

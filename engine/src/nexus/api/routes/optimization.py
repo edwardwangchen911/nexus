@@ -12,13 +12,14 @@ from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.domain.decimal import DecimalString
+from nexus.optimizer.admission import admit_queued_job
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
-from nexus.persistence.models.runtime import AuditEvent, IdempotencyRecord, Job
+from nexus.persistence.models.runtime import AuditEvent
+from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
@@ -113,21 +114,6 @@ async def admit_optimization_proposal(
     idempotency_key = request.headers.get("Idempotency-Key")
     if not idempotency_key:
         raise NexusError(ErrorCode.VALIDATION_ERROR, "Idempotency-Key is required.", status_code=422)
-    existing = await session.scalar(
-        select(IdempotencyRecord).where(
-            IdempotencyRecord.actor_id == actor.actor_id,
-            IdempotencyRecord.route == route,
-            IdempotencyRecord.idempotency_key == idempotency_key,
-        )
-    )
-    if existing is not None:
-        if existing.request_hash != request_hash:
-            raise NexusError(
-                ErrorCode.IDEMPOTENCY_CONFLICT,
-                "Idempotency key has a different request body.",
-                status_code=409,
-            )
-        return JSONResponse(status_code=202, content=existing.response_payload)
     snapshot = await session.scalar(
         select(PortfolioSnapshotRecord).where(PortfolioSnapshotRecord.id == body.portfolio_snapshot_id)
     )
@@ -154,36 +140,27 @@ async def admit_optimization_proposal(
             status_code=422,
             details={"reason": "OPTIMIZATION_AUTHORITY_MISSING"},
         )
-    job = Job(
-        job_key=f"optimization-proposal:{actor.actor_id}:{idempotency_key}",
-        input_hash=request_hash,
-        status="QUEUED",
-        schema_version="1",
-        payload={
-            "portfolio_snapshot_id": str(body.portfolio_snapshot_id),
-            "data_snapshot_id": str(body.data_snapshot_id),
-            "cost_model_version": body.cost_model_version,
-        },
-    )
-    session.add(job)
-    await session.flush()
-    payload = {
-        "data": {"job_id": str(job.id), "status": "QUEUED"},
-        "meta": {"request_id": str(actor.request_id), "schema_version": "1"},
-    }
-    inserted = await session.execute(
-        insert(IdempotencyRecord)
-        .values(
+    try:
+        job = await admit_queued_job(
+            session,
             actor_id=actor.actor_id,
             route=route,
             idempotency_key=idempotency_key,
             request_hash=request_hash,
-            schema_version="1",
-            response_payload=payload,
+            payload={
+                "portfolio_snapshot_id": str(body.portfolio_snapshot_id),
+                "data_snapshot_id": str(body.data_snapshot_id),
+                "cost_model_version": body.cost_model_version,
+            },
         )
-        .on_conflict_do_nothing(index_elements=("actor_id", "route", "idempotency_key"))
-        .returning(IdempotencyRecord.id)
-    )
-    if inserted.scalar_one_or_none() is None:
-        raise NexusError(ErrorCode.IDEMPOTENCY_CONFLICT, "Retry the request.", status_code=409)
+    except IdempotencyConflict as error:
+        raise NexusError(
+            ErrorCode.IDEMPOTENCY_CONFLICT,
+            "Idempotency key has a different request body.",
+            status_code=409,
+        ) from error
+    payload = {
+        "data": {"job_id": str(job.job_id), "status": "QUEUED"},
+        "meta": {"request_id": str(actor.request_id), "schema_version": "1"},
+    }
     return JSONResponse(status_code=202, content=payload)
