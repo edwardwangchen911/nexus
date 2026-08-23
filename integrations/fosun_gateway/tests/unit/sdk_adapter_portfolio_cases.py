@@ -12,6 +12,7 @@ from nexus_fosun_gateway.domain import GatewayError
 from sdk_adapter_helpers import NoopRateLimiter, RecordingMethod, _raw
 
 
+@pytest.mark.asyncio
 async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
     client: SimpleNamespace,
 ) -> None:
@@ -123,6 +124,7 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
             },
         )
     ]
+@pytest.mark.asyncio
 async def test_holdings_orders_and_cashflow_pages_bind_provider_ranges_to_request(
     client: SimpleNamespace,
 ) -> None:
