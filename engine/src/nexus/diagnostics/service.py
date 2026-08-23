@@ -1,7 +1,6 @@
 """Deterministic diagnosis entry point with fail-closed readiness precedence."""
 
 from collections import defaultdict
-from collections.abc import Iterable
 from decimal import Decimal
 from uuid import UUID
 
@@ -35,6 +34,7 @@ from nexus.diagnostics.scope import (
 from nexus.diagnostics.scope import (
     has_future_session_conflict as _has_future_session_conflict,
 )
+from nexus.diagnostics.valuation import position_values as _position_values
 from nexus.domain.decimal import decimal_to_string
 from nexus.providers.broker.base import BrokerPosition, PortfolioSnapshot
 
@@ -142,25 +142,6 @@ def _evaluate_currency_scopes(
                 )
             )
     return items
-
-
-def _position_values(
-    positions: Iterable[BrokerPosition],
-) -> tuple[list[tuple[BrokerPosition, Decimal]], str | None]:
-    values: list[tuple[BrokerPosition, Decimal]] = []
-    unknown: str | None = None
-    for position in positions:
-        if position.current_price is None:
-            unknown = "POSITION_PRICE_MISSING"
-            continue
-        if position.current_price <= 0:
-            unknown = "POSITION_PRICE_INVALID"
-            continue
-        if position.quantity <= 0:
-            unknown = "POSITION_QUANTITY_INVALID"
-            continue
-        values.append((position, position.quantity * position.current_price))
-    return values, unknown
 
 
 def _concentration_items(
