@@ -197,6 +197,7 @@ async def diagnose_and_persist(
         history=history,
         policy_version=policy.version,
     )
+
     async def write_authoritative_result() -> UUID:
         locked_snapshot = await session.scalar(
             select(PortfolioSnapshotRecord)
@@ -225,9 +226,7 @@ async def diagnose_and_persist(
             )
         )
         if existing is not None:
-            same_report = _reports_equivalent(
-                await _read_report(session, existing), report
-            )
+            same_report = _reports_equivalent(await _read_report(session, existing), report)
             if existing.diagnostic_input_hash != input_hash or not same_report:
                 raise ValueError("diagnostic report replay conflicts with immutable report")
             return existing.id
@@ -323,6 +322,7 @@ def _blocked_item(market: MarketEvidence, source_conflict: bool) -> DiagnosticIt
         "SOURCE_CONFLICT" if source_conflict else "SNAPSHOT_NOT_READY",
         "portfolio",
         market,
+        evidence_refs=market.conflict_refs,
     ).model_copy(update={"severity": "critical", "actionability": "blocked"})
 
 

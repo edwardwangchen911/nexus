@@ -92,7 +92,13 @@ def threshold_item(
 
 
 def unknown_item(
-    code: str, unit: str, reason: str, scope: str, market: MarketEvidence
+    code: str,
+    unit: str,
+    reason: str,
+    scope: str,
+    market: MarketEvidence,
+    *,
+    evidence_refs: tuple[EvidenceRef, ...] = (),
 ) -> DiagnosticItem:
     return DiagnosticItem(
         diagnostic_code=code,
@@ -103,7 +109,7 @@ def unknown_item(
         severity="info",
         actionability="research",
         unknown_reason=reason,
-        evidence_refs=(),
+        evidence_refs=evidence_refs,
     )
 
 

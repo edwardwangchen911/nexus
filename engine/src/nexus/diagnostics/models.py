@@ -146,6 +146,7 @@ class MarketEvidence(_DiagnosticModel):
     benchmark: PriceSeries | None = None
     evidence: DiagnosticEvidence = DiagnosticEvidence()
     source_conflict: bool = False
+    conflict_refs: tuple[EvidenceRef, ...] = ()
 
     @model_validator(mode="after")
     def _bucket_weights_are_complete(self) -> "MarketEvidence":

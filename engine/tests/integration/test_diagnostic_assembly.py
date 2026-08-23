@@ -15,11 +15,13 @@ from nexus.diagnostics.assembler import (
     DiagnosticEvidenceCapabilityUnavailable,
     assemble_diagnostic_evidence,
 )
+from nexus.diagnostics.calendar import completed_xnys_calendar
 from nexus.diagnostics.repository import (
     load_frozen_snapshot,
     load_instrument_identities,
 )
 from nexus.diagnostics.service import diagnose_and_persist
+from nexus.domain.evidence import EvidenceRef
 from nexus.market.ingestion import serialize_price_bars
 from nexus.market.universe import stable_instrument_id
 from nexus.persistence.models.data import DataArtifact, PriceSeriesManifest
@@ -91,8 +93,11 @@ async def test_production_service_assembles_real_diagnostics_from_hashed_parquet
     assert await _report_count_from_url(migrated_database_url) == 1
     assert len(stored.diagnostic_input_hash) == 64
     assert report.snapshot_as_of == SNAPSHOT_AT
+    assert assembly.market.trading_sessions[-1] == date(2026, 8, 21)
     assert HOLIDAY not in assembly.market.trading_sessions
     assert all(day.weekday() < 5 for day in assembly.market.trading_sessions)
+    assert assembly.market.evidence.trading_calendar is not None
+    assert assembly.market.evidence.trading_calendar.refs[0].source == "exchange_calendars"
     assert all(item.unknown_reason != "MARKET_EVIDENCE_UNAVAILABLE" for item in report.items)
     liquidity = next(
         item for item in report.items if item.diagnostic_code.startswith("LIQUIDITY_DAYS_TO_EXIT")
@@ -160,6 +165,7 @@ async def test_authoritative_service_serializes_same_input_replay(
     assert reports[0] == reports[1]
     assert await _report_count_from_url(migrated_database_url) == 1
 
+
 @pytest.mark.asyncio
 async def test_assembler_executes_source_policy_and_excludes_future_revision(
     migrated_database_url: str,
@@ -204,6 +210,42 @@ async def test_assembler_executes_source_policy_and_excludes_future_revision(
     assert selected.source == "fixture"
     assert selected.content_hash == sha256(payloads["memory://asset"]).hexdigest()
 
+
+@pytest.mark.asyncio
+async def test_hash_valid_holiday_benchmark_bar_is_blocked_with_artifact_evidence(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    payloads: dict[str, bytes] = {}
+    async with factory() as session, session.begin():
+        await _seed_spy(session)
+        await _add_series(session, payloads, INSTRUMENT_ID, "asset")
+        await _add_series(
+            session,
+            payloads,
+            SPY_ID,
+            "benchmark",
+            invalid_session=HOLIDAY,
+        )
+
+        report = await diagnose_and_persist(
+            session,
+            portfolio_id=PORTFOLIOS[0],
+            snapshot_id=SNAPSHOT_ID,
+            artifact_reader=FixtureArtifactReader(payloads),
+        )
+
+    assert report.optimization_need == "BLOCKED"
+    assert len(report.items) == 1
+    assert report.items[0].unknown_reason == "SOURCE_CONFLICT"
+    assert report.items[0].metric_value is None
+    assert any(
+        ref.content_hash == sha256(payloads["memory://benchmark"]).hexdigest()
+        for ref in report.items[0].evidence_refs
+    )
+
+
 async def _seed_spy(session: AsyncSession) -> None:
     session.add(
         Instrument(
@@ -237,8 +279,14 @@ async def _add_series(
     feed: str = "fixture",
     delivery_mode: str = "fixture",
     available_at: datetime | None = None,
+    invalid_session: date | None = None,
 ) -> None:
-    bars = _bars(instrument_id, available_at=available_at, revision=f"{name}-r1")
+    bars = _bars(
+        instrument_id,
+        available_at=available_at,
+        revision=f"{name}-r1",
+        invalid_session=invalid_session,
+    )
     payload = serialize_price_bars(bars)
     uri = f"memory://{name}"
     payloads[uri] = payload
@@ -276,9 +324,10 @@ def _bars(
     *,
     available_at: datetime | None = None,
     revision: str = "fixture-r1",
+    invalid_session: date | None = None,
 ) -> tuple[PriceBar, ...]:
     sessions = _published_sessions(253)
-    return tuple(
+    bars = tuple(
         PriceBar(
             instrument_id=instrument_id,
             session=published_session,
@@ -294,16 +343,23 @@ def _bars(
         )
         for index, published_session in enumerate(sessions)
     )
+    if invalid_session is None:
+        return bars
+    invalid = bars[-1].model_copy(
+        update={"session": invalid_session, "revision": f"{revision}-invalid-session"}
+    )
+    return tuple(sorted((*bars, invalid), key=lambda bar: bar.session))
 
 
 def _published_sessions(count: int) -> tuple[date, ...]:
-    result: list[date] = []
-    candidate = SNAPSHOT_AT.date()
-    while len(result) < count:
-        if candidate.weekday() < 5 and candidate != HOLIDAY:
-            result.append(candidate)
-        candidate -= timedelta(days=1)
-    return tuple(reversed(result))
+    policy_ref = EvidenceRef(
+        source="nexus_db",
+        object_id="source-policy:fixture:v1",
+        available_at=SNAPSHOT_AT - timedelta(days=365),
+        location="db://source-policies/fixture",
+        content_hash="a" * 64,
+    )
+    return completed_xnys_calendar(SNAPSHOT_AT, policy_ref, count=count).sessions
 
 
 async def _report_count(session: AsyncSession) -> int:

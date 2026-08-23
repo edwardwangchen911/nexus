@@ -22,6 +22,11 @@ class XnysCalendarAuthority:
     canonical_input: dict[str, object]
 
 
+def is_xnys_session(session: date) -> bool:
+    """Validate a session label against the adopted XNYS calendar package."""
+    return bool(xcals.get_calendar(_CALENDAR_NAME).is_session(session.isoformat()))
+
+
 def completed_xnys_calendar(
     snapshot_as_of: datetime,
     adoption_ref: EvidenceRef,
