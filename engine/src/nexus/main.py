@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from nexus.api.errors import ErrorCode, NexusError
+from nexus.api.routes.broker_sync import router as broker_sync_router
 from nexus.api.routes.integrations import router as integrations_router
 from nexus.api.routes.market import router as market_router
 from nexus.api.routes.portfolios import router as portfolios_router
@@ -65,6 +66,7 @@ def create_engine_app(settings: EngineSettings | None = None) -> FastAPI:
     app.include_router(integrations_router)
     app.include_router(market_router)
     app.include_router(portfolios_router)
+    app.include_router(broker_sync_router)
     return app
 
 

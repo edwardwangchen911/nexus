@@ -7,6 +7,7 @@ from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.portfolio import (
     Account,
     BrokerOrderSnapshot,
+    BrokerSyncAttempt,
     BrokerSyncRun,
     CashSnapshot,
     Portfolio,
@@ -15,6 +16,7 @@ from nexus.persistence.models.portfolio import (
 )
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
+from sqlalchemy import func, select
 from uuid6 import uuid7
 
 from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET, build_test_hmac_headers
@@ -43,9 +45,9 @@ def settings(database_url: str) -> EngineSettings:
     )
 
 
-def app(database_url: str):
+def app(database_url: str, *, now: datetime = CLOCK):
     engine_app = create_engine_app(settings(database_url))
-    engine_app.state.utc_clock = lambda: CLOCK
+    engine_app.state.utc_clock = lambda: now
     return engine_app
 
 
@@ -223,6 +225,40 @@ async def add_cash_bucket_overflow(database_url: str) -> None:
                     provider_as_of=CLOCK,
                 )
             )
+
+
+async def broker_sync_artifact_counts(database_url: str, run_id: UUID) -> tuple[int, int]:
+    factory = session_factory(settings(database_url))
+    async with factory() as session:
+        attempts = await session.scalar(
+            select(func.count())
+            .select_from(BrokerSyncAttempt)
+            .where(BrokerSyncAttempt.sync_run_id == run_id)
+        )
+        snapshots = await session.scalar(
+            select(func.count())
+            .select_from(PortfolioSnapshotRecord)
+            .where(PortfolioSnapshotRecord.sync_run_id == run_id)
+        )
+    return int(attempts or 0), int(snapshots or 0)
+
+
+async def terminalize_broker_sync(
+    database_url: str,
+    run_id: UUID,
+    *,
+    status: str,
+    completed_at: datetime,
+    failure_reason: str | None = None,
+) -> None:
+    factory = session_factory(settings(database_url))
+    async with factory() as session, session.begin():
+        run = await session.get(BrokerSyncRun, run_id)
+        assert run is not None
+        run.status = status
+        run.completed_at = completed_at
+        run.attempt_count = 1
+        run.failure_reason = failure_reason
 
 
 def snapshot_record(

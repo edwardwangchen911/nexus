@@ -1,8 +1,13 @@
 import json
+from datetime import timedelta
 from urllib.parse import urlencode
+from uuid import UUID
 
 import httpx
 import pytest
+from helpers.portfolio_api import (
+    CLOCK as _CLOCK,
+)
 from helpers.portfolio_api import (
     ORDER_ID as _ORDER_ID,
 )
@@ -19,11 +24,32 @@ from helpers.portfolio_api import (
     app as _app,
 )
 from helpers.portfolio_api import (
+    broker_sync_artifact_counts as _broker_sync_artifact_counts,
+)
+from helpers.portfolio_api import (
     headers as _headers,
 )
 from helpers.portfolio_api import (
     seed_portfolio_list as _seed_portfolio_list,
 )
+from helpers.portfolio_api import (
+    terminalize_broker_sync as _terminalize_broker_sync,
+)
+
+_SYNC_PATH = "/internal/v1/broker-sync-runs"
+
+
+def _sync_body(portfolio_id: UUID, *, padded: bool = False) -> bytes:
+    separators = None if padded else (",", ":")
+    return json.dumps({"portfolio_id": str(portfolio_id)}, separators=separators).encode()
+
+
+def _sync_headers(body: bytes, key: str) -> dict[str, str]:
+    return {
+        **_headers("POST", _SYNC_PATH, body),
+        "Content-Type": "application/json",
+        "Idempotency-Key": key,
+    }
 
 
 @pytest.mark.asyncio
@@ -188,3 +214,155 @@ async def test_latest_snapshot_fails_closed_before_serializing_oversized_collect
     assert response.json()["error"]["code"] == "DATA_PARTIAL"
     assert response.json()["error"]["details"] == {"collection": "cash", "maximum": 32}
     assert "data" not in response.json()
+
+
+@pytest.mark.asyncio
+async def test_sync_admission_requires_auth_idempotency_and_exact_body(
+    migrated_database_url: str,
+) -> None:
+    body = _sync_body(_PORTFOLIOS[0])
+    extra_body = json.dumps(
+        {"portfolio_id": str(_PORTFOLIOS[0]), "account_id": "external-canary"}
+    ).encode()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        unauthenticated = await client.post(
+            _SYNC_PATH,
+            content=body,
+            headers={"Content-Type": "application/json", "Idempotency-Key": "key-auth"},
+        )
+        missing_key = await client.post(
+            _SYNC_PATH,
+            content=body,
+            headers={**_headers("POST", _SYNC_PATH, body), "Content-Type": "application/json"},
+        )
+        extra = await client.post(
+            _SYNC_PATH, content=extra_body, headers=_sync_headers(extra_body, "key-extra")
+        )
+
+    assert unauthenticated.status_code == 401
+    assert missing_key.status_code == extra.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_sync_admission_replays_and_joins_without_executing_broker_work(
+    migrated_database_url: str,
+) -> None:
+    await _seed_portfolio_list(migrated_database_url)
+    body = _sync_body(_PORTFOLIOS[0])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        first = await client.post(_SYNC_PATH, content=body, headers=_sync_headers(body, "key-1"))
+        replay = await client.post(_SYNC_PATH, content=body, headers=_sync_headers(body, "key-1"))
+        joined = await client.post(_SYNC_PATH, content=body, headers=_sync_headers(body, "key-2"))
+
+    assert first.status_code == replay.status_code == joined.status_code == 202
+    run_id = UUID(first.json()["data"]["broker_sync_run_id"])
+    location = f"/api/v1/broker-sync-runs/{run_id}"
+    assert first.headers["location"] == replay.headers["location"] == joined.headers["location"]
+    assert first.headers["location"] == location
+    assert replay.json()["data"]["broker_sync_run_id"] == str(run_id)
+    assert joined.json()["data"]["broker_sync_run_id"] == str(run_id)
+    assert await _broker_sync_artifact_counts(migrated_database_url, run_id) == (0, 0)
+    encoded = json.dumps(first.json())
+    for forbidden in ("account_id", "actor_id", "idempotency_key", "request_hash"):
+        assert forbidden not in encoded
+
+
+@pytest.mark.asyncio
+async def test_sync_admission_rejects_same_key_when_exact_body_bytes_change(
+    migrated_database_url: str,
+) -> None:
+    await _seed_portfolio_list(migrated_database_url)
+    first_body = _sync_body(_PORTFOLIOS[0])
+    changed_body = _sync_body(_PORTFOLIOS[0], padded=True)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        first = await client.post(
+            _SYNC_PATH, content=first_body, headers=_sync_headers(first_body, "same-key")
+        )
+        conflict = await client.post(
+            _SYNC_PATH, content=changed_body, headers=_sync_headers(changed_body, "same-key")
+        )
+
+    assert first.status_code == 202
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_sync_admission_enforces_stable_successful_manual_cooldown(
+    migrated_database_url: str,
+) -> None:
+    await _seed_portfolio_list(migrated_database_url)
+    body = _sync_body(_PORTFOLIOS[0])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        first = await client.post(_SYNC_PATH, content=body, headers=_sync_headers(body, "first"))
+    run_id = UUID(first.json()["data"]["broker_sync_run_id"])
+    await _terminalize_broker_sync(
+        migrated_database_url, run_id, status="READY", completed_at=_CLOCK
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=_app(migrated_database_url, now=_CLOCK + timedelta(seconds=30))
+        ),
+        base_url="http://testserver",
+    ) as client:
+        cooldown = await client.post(
+            _SYNC_PATH, content=body, headers=_sync_headers(body, "second")
+        )
+
+    assert cooldown.status_code == 429
+    assert cooldown.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert cooldown.json()["error"]["details"] == {"cooldown_seconds": 60}
+    assert "provider" not in json.dumps(cooldown.json()).lower()
+
+
+@pytest.mark.asyncio
+async def test_sync_run_lookup_is_authenticated_redacted_and_safe_not_found(
+    migrated_database_url: str,
+) -> None:
+    await _seed_portfolio_list(migrated_database_url)
+    body = _sync_body(_PORTFOLIOS[0])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        admitted = await client.post(
+            _SYNC_PATH, content=body, headers=_sync_headers(body, "lookup")
+        )
+    run_id = UUID(admitted.json()["data"]["broker_sync_run_id"])
+    await _terminalize_broker_sync(
+        migrated_database_url,
+        run_id,
+        status="FAILED",
+        completed_at=_CLOCK,
+        failure_reason="provider-secret-canary",
+    )
+    path = f"{_SYNC_PATH}/{run_id}"
+    unknown = f"{_SYNC_PATH}/0198d500-1000-7000-8000-000000000099"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        unauthenticated = await client.get(path)
+        found = await client.get(path, headers=_headers("GET", path))
+        missing = await client.get(unknown, headers=_headers("GET", unknown))
+
+    assert unauthenticated.status_code == 401
+    assert found.status_code == 200
+    assert found.json()["data"]["failure_category"] == "SYNC_FAILED"
+    assert missing.status_code == 404
+    encoded = json.dumps(found.json())
+    for forbidden in ("provider-secret-canary", "account_id", "failure_reason", "request_hash"):
+        assert forbidden not in encoded
