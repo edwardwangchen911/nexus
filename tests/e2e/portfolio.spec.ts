@@ -80,7 +80,8 @@ test("manual sync is read-only, idempotent, and visibly asynchronous", async ({ 
 test("legacy Fosun holdings route permanently converges on the portfolio source view", async ({ page }) => {
   await installPortfolioFixtures(page);
   const response = await page.goto("/holdings/fosun");
-  expect(response?.request().redirectedFrom()?.response()?.status()).toBe(308);
+  const redirectedFrom = response?.request().redirectedFrom();
+  expect((await redirectedFrom?.response())?.status()).toBe(308);
   await expect(page).toHaveURL(/\/portfolio\?source=fosun$/);
   await expect(page.getByRole("region", { name: "组合事实页面" })).toBeVisible();
 });
