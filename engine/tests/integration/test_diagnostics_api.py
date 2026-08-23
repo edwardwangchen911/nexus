@@ -97,10 +97,11 @@ async def test_latest_diagnostic_is_redacted_and_returns_persisted_item_shape(
     assert item["evidence_refs"][0]["content_hash"] == "a" * 64
     assert item["evidence_refs"][0]["available_at"] == "2026-08-24T00:00:00Z"
     assert response.json()["data"]["policy_version"] == "real_advisory_policy_v1"
+    assert response.json()["data"]["snapshot_as_of"] == "2026-08-24T03:59:00Z"
     assert response.json()["meta"] == {
         "request_id": request_headers["X-Request-Id"],
         "schema_version": "1",
-        "as_of": "2026-08-24T00:00:00Z",
+        "as_of": "2026-08-24T03:59:00Z",
     }
     assert "account_id" not in json.dumps(response.json())
 

@@ -194,6 +194,7 @@ def _report(
 ) -> PortfolioDiagnosticReport:
     return PortfolioDiagnosticReport(
         portfolio_snapshot_id=snapshot.id,
+        snapshot_as_of=snapshot.as_of,
         trading_day=None if snapshot.as_of is None else snapshot.as_of.date(),
         policy_version=policy.version,
         optimization_need=optimization_need,

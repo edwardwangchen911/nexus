@@ -188,10 +188,16 @@ class DiagnosticItem(_DiagnosticModel):
 
 class PortfolioDiagnosticReport(_DiagnosticModel):
     portfolio_snapshot_id: UUID
+    snapshot_as_of: datetime | None = None
     trading_day: date | None = None
     policy_version: Literal["real_advisory_policy_v1"]
     optimization_need: OptimizationNeed
     items: tuple[DiagnosticItem, ...]
+
+    @field_validator("snapshot_as_of")
+    @classmethod
+    def _snapshot_as_of_utc(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else require_utc(value)
 
 
 class DiagnosticHistory(_DiagnosticModel):

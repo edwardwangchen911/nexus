@@ -54,8 +54,11 @@ async def persist_report(
         raise ValueError("diagnostic report snapshot or policy authority is invalid")
     if report.trading_day != (None if snapshot.as_of is None else snapshot.as_of.date()):
         raise ValueError("diagnostic report trading day must match its frozen snapshot")
+    if snapshot.as_of is None or report.snapshot_as_of not in {None, snapshot.as_of}:
+        raise ValueError("diagnostic report timestamp must match its frozen snapshot")
+    report = report.model_copy(update={"snapshot_as_of": snapshot.as_of})
     if any(
-        snapshot.as_of is None or ref.available_at > snapshot.as_of
+        ref.available_at > snapshot.as_of
         for item in report.items
         for ref in item.evidence_refs
     ):
@@ -73,6 +76,7 @@ async def persist_report(
     stored = PortfolioDiagnosticReportRecord(
         portfolio_id=snapshot.portfolio_id,
         portfolio_snapshot_id=snapshot.id,
+        snapshot_as_of=snapshot.as_of,
         trading_day=report.trading_day,
         policy_id=REAL_ADVISORY_POLICY_ID,
         policy_version=report.policy_version,
@@ -287,6 +291,7 @@ async def load_history(
         reports.append(
             PortfolioDiagnosticReport(
                 portfolio_snapshot_id=record.portfolio_snapshot_id,
+                snapshot_as_of=record.snapshot_as_of,
                 trading_day=record.trading_day,
                 policy_version=cast(Literal["real_advisory_policy_v1"], record.policy_version),
                 optimization_need=cast(
@@ -378,6 +383,7 @@ async def _read_report(
         )
     return PortfolioDiagnosticReport(
         portfolio_snapshot_id=record.portfolio_snapshot_id,
+        snapshot_as_of=record.snapshot_as_of,
         trading_day=record.trading_day,
         policy_version=cast(Literal["real_advisory_policy_v1"], record.policy_version),
         optimization_need=cast(
@@ -411,6 +417,7 @@ def _reports_equivalent(
 ) -> bool:
     if (
         stored.portfolio_snapshot_id != replay.portfolio_snapshot_id
+        or stored.snapshot_as_of != replay.snapshot_as_of
         or stored.trading_day != replay.trading_day
         or stored.policy_version != replay.policy_version
         or stored.optimization_need != replay.optimization_need

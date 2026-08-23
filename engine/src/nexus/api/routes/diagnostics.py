@@ -1,6 +1,4 @@
 """Read-only persisted portfolio diagnostic routes."""
-
-from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
@@ -43,15 +41,14 @@ async def get_latest_diagnostic(
             status_code=404,
             details={"portfolio_id": str(portfolio_id)},
         )
-    if report.trading_day is None:
+    if report.snapshot_as_of is None:
         raise NexusError(
             ErrorCode.DATA_PARTIAL,
             "The persisted diagnostic snapshot time is unavailable.",
             status_code=422,
             details={"portfolio_id": str(portfolio_id)},
         )
-    as_of = datetime.combine(report.trading_day, datetime.min.time(), tzinfo=UTC)
     return PortfolioDiagnosticEnvelope(
         data=PortfolioDiagnosticResponse.model_validate(report.model_dump()),
-        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=as_of),
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=report.snapshot_as_of),
     )

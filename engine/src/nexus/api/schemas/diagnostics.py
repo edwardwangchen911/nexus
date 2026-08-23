@@ -1,6 +1,6 @@
 """Stable public schemas for persisted deterministic diagnostics."""
 
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -28,6 +28,7 @@ class DiagnosticItemResponse(_StrictSchema):
 
 class PortfolioDiagnosticResponse(_StrictSchema):
     portfolio_snapshot_id: UUID
+    snapshot_as_of: datetime
     trading_day: date | None
     policy_version: Literal["real_advisory_policy_v1"]
     optimization_need: Literal[
