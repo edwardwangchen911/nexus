@@ -54,6 +54,10 @@ class ProposalComparisonInput:
     source_conflict: bool
     partial: bool
     cost_complete: bool
+    constraint_complete: bool = True
+    eligibility_complete: bool = True
+    evidence_complete: bool = True
+    stale: bool = False
 
     def __post_init__(self) -> None:
         if self.variant not in {"hold_current", "minimum_change", "strategy_target"}:
@@ -72,6 +76,10 @@ class ProposalComparisonInput:
             or self.source_conflict
             or self.partial
             or not self.cost_complete
+            or not self.constraint_complete
+            or not self.eligibility_complete
+            or not self.evidence_complete
+            or self.stale
         )
 
     def metrics_payload(self) -> dict[str, object]:
@@ -80,6 +88,11 @@ class ProposalComparisonInput:
             "turnover": str(self.turnover),
             "cost": None if self.cost is None else str(self.cost),
             "unknown_metrics": list(self.unknown_metrics),
+            "constraint_complete": self.constraint_complete,
+            "eligibility_complete": self.eligibility_complete,
+            "evidence_complete": self.evidence_complete,
+            "stale": self.stale,
+            "ranking_eligible": not self.non_executable,
         }
 
 
