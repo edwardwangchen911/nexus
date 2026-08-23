@@ -56,6 +56,7 @@ async def claim_or_lock(
     schema_version: str,
 ) -> tuple[IdempotencyRecord, bool]:
     """Claim one idempotency row or lock the committed owner response for replay."""
+    validate_request_identity(actor_id, route, idempotency_key, request_hash)
     claim_id = new_uuid7()
     inserted = await session.scalar(
         insert(IdempotencyRecord)
