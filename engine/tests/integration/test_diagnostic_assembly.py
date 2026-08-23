@@ -16,11 +16,14 @@ from nexus.diagnostics.assembler import (
     assemble_diagnostic_evidence,
 )
 from nexus.diagnostics.calendar import completed_xnys_calendar
+from nexus.diagnostics.input_hash import diagnostic_input_hash
+from nexus.diagnostics.models import DiagnosticHistory
+from nexus.diagnostics.policy import load_real_advisory_policy_v1
 from nexus.diagnostics.repository import (
     load_frozen_snapshot,
     load_instrument_identities,
 )
-from nexus.diagnostics.service import diagnose_and_persist
+from nexus.diagnostics.service import diagnose_and_persist, diagnose_portfolio
 from nexus.domain.evidence import EvidenceRef
 from nexus.market.ingestion import serialize_price_bars
 from nexus.market.universe import stable_instrument_id
@@ -283,6 +286,77 @@ async def test_hash_valid_holiday_benchmark_bar_is_blocked_with_artifact_evidenc
         ref.content_hash == sha256(payloads["memory://benchmark"]).hexdigest()
         for ref in report.items[0].evidence_refs
     )
+
+
+@pytest.mark.asyncio
+async def test_different_conflict_artifact_changes_input_hash_and_blocked_refs(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    payloads: dict[str, bytes] = {}
+    async with factory() as session, session.begin():
+        await _seed_spy(session)
+        await _add_series(session, payloads, INSTRUMENT_ID, "asset")
+        await _add_series(
+            session, payloads, SPY_ID, "benchmark", invalid_session=HOLIDAY
+        )
+        first = await diagnose_and_persist(
+            session,
+            portfolio_id=PORTFOLIOS[0],
+            snapshot_id=SNAPSHOT_ID,
+            artifact_reader=FixtureArtifactReader(payloads),
+        )
+        stored = await session.scalar(
+            select(PortfolioDiagnosticReportRecord).where(
+                PortfolioDiagnosticReportRecord.portfolio_snapshot_id == SNAPSHOT_ID
+            )
+        )
+        assert stored is not None
+        first_hash = stored.diagnostic_input_hash
+        first_refs = first.items[0].evidence_refs
+
+        await _add_series(
+            session,
+            payloads,
+            SPY_ID,
+            "benchmark-weekend",
+            invalid_session=date(2026, 7, 5),
+            artifact_created_at=SNAPSHOT_AT - timedelta(seconds=1),
+            manifest_created_at=SNAPSHOT_AT - timedelta(seconds=1),
+        )
+        snapshot = await load_frozen_snapshot(
+            session, portfolio_id=PORTFOLIOS[0], snapshot_id=SNAPSHOT_ID
+        )
+        identities = await load_instrument_identities(session, snapshot=snapshot)
+        assembly = await assemble_diagnostic_evidence(
+            session,
+            snapshot=snapshot,
+            identities=identities,
+            artifact_reader=FixtureArtifactReader(payloads),
+        )
+        policy = await load_real_advisory_policy_v1(session)
+        replay = diagnose_portfolio(snapshot, assembly.market, DiagnosticHistory.empty(), policy)
+        replay_hash = diagnostic_input_hash(
+            snapshot=snapshot,
+            assembly=assembly,
+            history=DiagnosticHistory.empty(),
+            policy_version=policy.version,
+        )
+
+        assert replay.items[0].unknown_reason == first.items[0].unknown_reason
+        assert replay.items[0].evidence_refs != first_refs
+        assert replay_hash != first_hash
+        assert sha256(payloads["memory://benchmark-weekend"]).hexdigest() in {
+            ref.content_hash for ref in replay.items[0].evidence_refs
+        }
+        with pytest.raises(ValueError, match="replay conflicts"):
+            await diagnose_and_persist(
+                session,
+                portfolio_id=PORTFOLIOS[0],
+                snapshot_id=SNAPSHOT_ID,
+                artifact_reader=FixtureArtifactReader(payloads),
+            )
 
 
 async def _seed_spy(session: AsyncSession) -> None:
