@@ -31,9 +31,15 @@ def upgrade() -> None:
     for table in ("diagnostic_policies", "portfolio_diagnostic_reports", "portfolio_diagnostic_items", "portfolio_diagnostic_evidence_refs"):
         op.execute(f"CREATE TRIGGER trg_{table}_created_at_immutable BEFORE UPDATE ON {table} FOR EACH ROW EXECUTE FUNCTION nexus_prevent_created_at_change()")
         op.execute(f"CREATE TRIGGER trg_{table}_immutable BEFORE UPDATE OR DELETE ON {table} FOR EACH ROW EXECUTE FUNCTION nexus_prevent_diagnostic_change()")
+    op.execute("CREATE FUNCTION nexus_prevent_diagnostic_authority_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'diagnostic authority record is immutable' USING ERRCODE = '23514'; END; $$")
+    for table in ("data_artifacts", "price_series_manifests", "instruments", "instrument_aliases"):
+        op.execute(f"CREATE TRIGGER trg_{table}_diagnostic_authority_immutable BEFORE UPDATE OR DELETE ON {table} FOR EACH ROW EXECUTE FUNCTION nexus_prevent_diagnostic_authority_change()")
 
 
 def downgrade() -> None:
+    for table in ("instrument_aliases", "instruments", "price_series_manifests", "data_artifacts"):
+        op.execute(f"DROP TRIGGER trg_{table}_diagnostic_authority_immutable ON {table}")
+    op.execute("DROP FUNCTION nexus_prevent_diagnostic_authority_change()")
     op.drop_constraint("fk_diag_reports_snapshot_same_portfolio", "portfolio_diagnostic_reports", type_="foreignkey")
     op.drop_constraint("uq_diag_reports_snapshot_policy", "portfolio_diagnostic_reports", type_="unique")
     for table in ("portfolio_diagnostic_evidence_refs", "portfolio_diagnostic_items", "portfolio_diagnostic_reports", "diagnostic_policies"):
