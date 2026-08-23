@@ -150,8 +150,9 @@ def test_days_to_exit_is_exact_and_monotone(position_value: int, adv20: int) -> 
 
 
 @given(st.dates(min_value=date(2020, 1, 1), max_value=date(2030, 12, 20)))
-def test_warning_persistence_uses_five_published_sessions(start: date) -> None:
-    sessions = tuple(start + timedelta(days=index) for index in range(5))
+def test_warning_persistence_uses_five_published_sessions_not_holiday(start: date) -> None:
+    holiday = start + timedelta(days=2)
+    sessions = _published_sessions(start, holiday)
     warning = _item(severity="warning")
     history = DiagnosticHistory(
         prior_reports=tuple(_report(warning, trading_day) for trading_day in sessions[:-1]),
@@ -161,6 +162,13 @@ def test_warning_persistence_uses_five_published_sessions(start: date) -> None:
     assert optimization_need((warning,), history, sessions[-1], sessions) == (
         "OPTIMIZATION_CANDIDATE"
     )
+    holiday_history = history.model_copy(
+        update={
+            "prior_reports": history.prior_reports[:-1]
+            + (_report(warning, holiday),)
+        }
+    )
+    assert optimization_need((warning,), holiday_history, sessions[-1], sessions) == "NO_ACTION"
 
 
 @given(
@@ -188,6 +196,7 @@ def _item(*, severity: str = "info", unknown_reason: str | None = None) -> Diagn
         severity=severity,  # type: ignore[arg-type]
         actionability="research",
         unknown_reason=unknown_reason,
+        evidence_refs=() if unknown_reason else (_item_ref(),),
     )
 
 
@@ -215,3 +224,23 @@ def _comparison() -> ComparableVariantEvidence:
             ),
         ),
     )
+
+
+def _item_ref() -> EvidenceRef:
+    return EvidenceRef(
+        source="fixture",
+        object_id="diagnostic-input",
+        available_at=datetime(2026, 8, 23, tzinfo=UTC),
+        location="fixture://diagnostic-input",
+        content_hash="b" * 64,
+    )
+
+
+def _published_sessions(start: date, holiday: date) -> tuple[date, ...]:
+    sessions: list[date] = []
+    candidate = start
+    while len(sessions) < 5:
+        if candidate.weekday() < 5 and candidate != holiday:
+            sessions.append(candidate)
+        candidate += timedelta(days=1)
+    return tuple(sessions)

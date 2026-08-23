@@ -124,6 +124,50 @@ async def test_missing_reader_or_tampered_artifact_never_consumes_report_slot(
         assert await _report_count(session) == 0
 
 
+@pytest.mark.asyncio
+async def test_assembler_executes_source_policy_and_excludes_future_revision(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    payloads: dict[str, bytes] = {}
+    async with factory() as session, session.begin():
+        await _seed_spy(session)
+        await _add_series(session, payloads, INSTRUMENT_ID, "asset")
+        await _add_series(session, payloads, SPY_ID, "benchmark")
+        await _add_series(
+            session,
+            payloads,
+            INSTRUMENT_ID,
+            "newer-ineligible-alpaca",
+            source="alpaca",
+            feed="iex",
+            delivery_mode="delayed",
+        )
+        await _add_series(
+            session,
+            payloads,
+            INSTRUMENT_ID,
+            "future-fixture-revision",
+            available_at=SNAPSHOT_AT + timedelta(seconds=1),
+        )
+        snapshot = await load_frozen_snapshot(
+            session, portfolio_id=PORTFOLIOS[0], snapshot_id=SNAPSHOT_ID
+        )
+        identities = await load_instrument_identities(session, snapshot=snapshot)
+
+        assembly = await assemble_diagnostic_evidence(
+            session,
+            snapshot=snapshot,
+            identities=identities,
+            artifact_reader=FixtureArtifactReader(payloads),
+        )
+
+    assert assembly.market.quality == "PASS"
+    selected = assembly.market.evidence.price_series[INSTRUMENT_ID].refs[0]
+    assert selected.source == "fixture"
+    assert selected.content_hash == sha256(payloads["memory://asset"]).hexdigest()
+
 async def _seed_spy(session: AsyncSession) -> None:
     session.add(
         Instrument(
@@ -152,8 +196,13 @@ async def _add_series(
     payloads: dict[str, bytes],
     instrument_id: UUID,
     name: str,
+    *,
+    source: str = "fixture",
+    feed: str = "fixture",
+    delivery_mode: str = "fixture",
+    available_at: datetime | None = None,
 ) -> None:
-    bars = _bars(instrument_id)
+    bars = _bars(instrument_id, available_at=available_at, revision=f"{name}-r1")
     payload = serialize_price_bars(bars)
     uri = f"memory://{name}"
     payloads[uri] = payload
@@ -163,7 +212,7 @@ async def _add_series(
         byte_size=len(payload),
         mime_type="application/vnd.apache.parquet",
         schema_version="price_bars_v1",
-        source="fixture",
+        source=source,
         observed_at=SNAPSHOT_AT - timedelta(minutes=2),
         available_at=max(bar.available_at for bar in bars),
         received_at=max(bar.received_at for bar in bars if bar.received_at is not None),
@@ -174,9 +223,9 @@ async def _add_series(
         PriceSeriesManifest(
             data_artifact_id=artifact.id,
             instrument=str(instrument_id),
-            source="fixture",
-            feed="fixture",
-            delivery_mode="fixture",
+            source=source,
+            feed=feed,
+            delivery_mode=delivery_mode,
             adjustment="all",
             start_at=bars[0].observed_at,
             end_at=bars[-1].observed_at,
@@ -186,7 +235,12 @@ async def _add_series(
     await session.flush()
 
 
-def _bars(instrument_id: UUID) -> tuple[PriceBar, ...]:
+def _bars(
+    instrument_id: UUID,
+    *,
+    available_at: datetime | None = None,
+    revision: str = "fixture-r1",
+) -> tuple[PriceBar, ...]:
     sessions = _published_sessions(253)
     return tuple(
         PriceBar(
@@ -198,9 +252,9 @@ def _bars(instrument_id: UUID) -> tuple[PriceBar, ...]:
             close=Decimal("100") + Decimal(index % 5),
             volume=Decimal("1000") + Decimal(index),
             observed_at=SNAPSHOT_AT - timedelta(minutes=2),
-            available_at=SNAPSHOT_AT - timedelta(minutes=1),
-            received_at=SNAPSHOT_AT - timedelta(minutes=1),
-            revision="fixture-r1",
+            available_at=available_at or SNAPSHOT_AT - timedelta(minutes=1),
+            received_at=available_at or SNAPSHOT_AT - timedelta(minutes=1),
+            revision=revision,
         )
         for index, published_session in enumerate(sessions)
     )
