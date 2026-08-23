@@ -14,6 +14,7 @@ from nexus.reconciliation.persistence_errors import (
     SnapshotNotProposalEligible,
     SyncCooldownActive,
 )
+from nexus.reconciliation.proposal_guard import require_proposal_baseline
 from nexus.reconciliation.snapshot_persistence import finalize_broker_sync
 
 __all__ = [
@@ -66,4 +67,18 @@ class BrokerSyncRepository:
             self._session,
             result,
             completed_at=completed_at,
+        )
+
+    async def require_proposal_baseline(
+        self,
+        *,
+        portfolio_id: UUID,
+        snapshot_id: UUID,
+        now: datetime,
+    ) -> UUID:
+        return await require_proposal_baseline(
+            self._session,
+            portfolio_id=portfolio_id,
+            snapshot_id=snapshot_id,
+            now=now,
         )

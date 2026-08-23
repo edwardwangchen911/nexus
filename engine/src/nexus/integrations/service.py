@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Literal, TypeVar, cast
 
 from pydantic import BaseModel
-from sqlalchemy import desc, select, update
+from sqlalchemy import desc, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +24,7 @@ _PROVIDERS: tuple[ProviderName, ...] = ("fosun", "alpaca", "sec", "fred", "opena
 _MODES: frozenset[str] = frozenset({"disabled", "fixture", "read_only"})
 _CONTRACT_HASH = re.compile(r"^[0-9a-f]{64}$")
 _FIXTURE_AS_OF = datetime(2026, 8, 22, tzinfo=UTC)
+_FOSUN_BROKER_OPERATIONS = ("fosun_list_orders", "fosun_sync_portfolio")
 _ResponseModel = TypeVar("_ResponseModel", bound=BaseModel)
 
 
@@ -195,6 +196,8 @@ class IntegrationStatusService:
         last_success_at: datetime | None,
         admitted_contract_hash: str | None,
     ) -> IntegrationStatus:
+        if provider == "fosun":
+            await _lock_fosun_broker_capability_scopes(self._session)
         invalidated_at = self._now if mode == "disabled" else None
         if expected_version == 0:
             insert_statement = (
@@ -399,6 +402,14 @@ def _is_valid_capability(capability: ProviderCapability, now: datetime) -> bool:
         _CONTRACT_HASH.fullmatch(capability.contract_hash) is not None
         and capability.expires_at > now
     )
+
+
+async def _lock_fosun_broker_capability_scopes(session: AsyncSession) -> None:
+    for operation in _FOSUN_BROKER_OPERATIONS:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+            {"scope": (f"provider-capability-scope:v1:fosun:READ_ONLY:{operation}:BROKER")},
+        )
 
 
 def _capability_is_after_invalidation(
