@@ -12,6 +12,7 @@ from nexus.persistence.models.diagnostics import DiagnosticPolicy, PortfolioDiag
 from nexus.persistence.session import session_factory
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import text
 
 from helpers.portfolio_api import settings
 
@@ -50,3 +51,12 @@ async def diagnostic_report_count_from_url(database_url: str) -> int:
     factory = session_factory(settings(database_url))
     async with factory() as session:
         return await diagnostic_report_count(session)
+
+
+async def diagnostic_items_without_refs(session: AsyncSession) -> int:
+    statement = text(
+        "SELECT count(*) FROM portfolio_diagnostic_items item "
+        "WHERE NOT EXISTS (SELECT 1 FROM portfolio_diagnostic_evidence_refs ref "
+        "WHERE ref.item_id = item.id)"
+    )
+    return int(await session.scalar(statement))

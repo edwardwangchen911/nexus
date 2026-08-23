@@ -7,6 +7,7 @@ from uuid import UUID
 import pytest
 from helpers.diagnostic_artifacts import (
     FixtureArtifactReader,
+    diagnostic_items_without_refs,
     diagnostic_report_count,
     diagnostic_report_count_from_url,
     fixture_xnys_calendar_adoption,
@@ -98,10 +99,13 @@ async def test_production_service_assembles_real_diagnostics_from_hashed_parquet
                 PortfolioDiagnosticReportRecord.portfolio_snapshot_id == SNAPSHOT_ID
             )
         )
+        items_without_refs = await diagnostic_items_without_refs(session)
 
     assert stored is not None
+    assert items_without_refs == 0
     assert await diagnostic_report_count_from_url(migrated_database_url) == 1
     assert len(stored.diagnostic_input_hash) == 64
+    assert all(item.evidence_refs for item in report.items)
     assert report.snapshot_as_of == SNAPSHOT_AT
     assert assembly.market.trading_sessions[-1] == date(2026, 8, 21)
     assert len(assembly.market.trading_sessions) == 253
@@ -115,6 +119,11 @@ async def test_production_service_assembles_real_diagnostics_from_hashed_parquet
     assert identity_input["instrument_record_id"] == str(INSTRUMENT_ID)
     assert identity_input["alias_record_id"]
     assert len(identity_input["refs"]) == 2
+    snapshot_input = assembly.canonical_inputs["snapshot"]["snapshot"]  # type: ignore[index]
+    assert snapshot_input["sync_run_id"]
+    assert snapshot_input["stale_from_snapshot_id"] is None
+    assert snapshot_input["source_request_ids"] == ("external-request-canary",)
+    assert snapshot_input["source_observations"] == ({"provider": "secret-canary"},)
     position_input = assembly.canonical_inputs["snapshot"]["positions"][0]  # type: ignore[index]
     assert position_input["available_quantity"] == "90000.000000000000"
     assert position_input["avg_cost"] == "5.250000000000"

@@ -58,9 +58,14 @@ def _ready_snapshot() -> PortfolioSnapshot:
 
 def test_unknown_required_metric_cannot_be_no_action() -> None:
     """Removing ADV unknown propagation must fail this readiness safeguard."""
+    snapshot = _ready_snapshot()
+    complete = _complete_market(snapshot)
+    market = complete.model_copy(
+        update={"adv20": {}, "evidence": complete.evidence.model_copy(update={"adv20": {}})}
+    )
     report = diagnose_portfolio(
-        _ready_snapshot(),
-        MarketEvidence.missing_adv(),
+        snapshot,
+        market,
         DiagnosticHistory.empty(),
         RealAdvisoryPolicy.v1(),
     )
@@ -103,7 +108,7 @@ def test_non_ready_snapshot_is_blocked_before_any_metric_evaluation() -> None:
     """Changing blocked precedence to research-required must fail this admission guard."""
     report = diagnose_portfolio(
         _ready_snapshot().model_copy(update={"status": "RECONCILIATION_REQUIRED"}),
-        MarketEvidence(quality="PASS"),
+        _minimal_market(),
         DiagnosticHistory.empty(),
         RealAdvisoryPolicy.v1(),
     )
@@ -116,7 +121,7 @@ def test_non_ready_snapshot_is_blocked_before_any_metric_evaluation() -> None:
 def test_source_conflict_is_blocked_even_for_a_ready_snapshot() -> None:
     report = diagnose_portfolio(
         _ready_snapshot(),
-        MarketEvidence(quality="PASS", source_conflict=True),
+        _minimal_market(source_conflict=True),
         DiagnosticHistory.empty(),
         RealAdvisoryPolicy.v1(),
     )
@@ -450,6 +455,17 @@ def _complete_market(snapshot: PortfolioSnapshot) -> MarketEvidence:
                 _evidence_ref("trading-calendar", "8"), session=last_session
             ),
         ),
+    )
+
+
+def _minimal_market(*, source_conflict: bool = False) -> MarketEvidence:
+    snapshot_ref = _evidence_ref("snapshot", "1")
+    return MarketEvidence(
+        quality="PASS",
+        source_conflict=source_conflict,
+        conflict_refs=(snapshot_ref,) if source_conflict else (),
+        incomplete_refs=(snapshot_ref,),
+        evidence=DiagnosticEvidence(snapshot=_binding(snapshot_ref)),
     )
 
 

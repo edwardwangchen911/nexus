@@ -201,13 +201,7 @@ class DiagnosticItem(_DiagnosticModel):
     severity: DiagnosticSeverity
     actionability: DiagnosticActionability
     unknown_reason: str | None
-    evidence_refs: tuple[EvidenceRef, ...] = ()
-
-    @model_validator(mode="after")
-    def _known_value_has_evidence(self) -> "DiagnosticItem":
-        if self.unknown_reason is None and not self.evidence_refs:
-            raise ValueError("known diagnostic item requires evidence")
-        return self
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
 
 
 class PortfolioDiagnosticReport(_DiagnosticModel):

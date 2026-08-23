@@ -1,6 +1,9 @@
 """Canonical, database-authoritative real-account advisory policy."""
 
+import json
+from datetime import UTC
 from decimal import Decimal
+from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
@@ -9,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.diagnostics.models import _DiagnosticModel
+from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.diagnostics import DiagnosticPolicy
 
 REAL_ADVISORY_POLICY_ID = UUID("801f00b8-f963-5164-a6e7-34c4d9955d31")
@@ -45,6 +49,7 @@ class RealAdvisoryPolicy(_DiagnosticModel):
     drawdown_critical: Decimal = Decimal("0.15")
     days_to_exit_warning: Decimal = Decimal("2")
     days_to_exit_critical: Decimal = Decimal("5")
+    authority_refs: tuple[EvidenceRef, ...] = ()
 
     @model_validator(mode="after")
     def _canonical_values(self) -> "RealAdvisoryPolicy":
@@ -54,8 +59,10 @@ class RealAdvisoryPolicy(_DiagnosticModel):
         return self
 
     @classmethod
-    def v1(cls) -> "RealAdvisoryPolicy":
-        return cls()
+    def v1(
+        cls, *, authority_refs: tuple[EvidenceRef, ...] = ()
+    ) -> "RealAdvisoryPolicy":
+        return cls(authority_refs=authority_refs)
 
 
 async def load_real_advisory_policy_v1(session: AsyncSession) -> RealAdvisoryPolicy:
@@ -72,4 +79,25 @@ async def load_real_advisory_policy_v1(session: AsyncSession) -> RealAdvisoryPol
         or record.payload != REAL_ADVISORY_POLICY_PAYLOAD
     ):
         raise ValueError("published real_advisory_policy_v1 is missing or invalid")
-    return RealAdvisoryPolicy.v1()
+    payload = {
+        "id": str(record.id),
+        "key": record.key,
+        "version": record.version,
+        "schema_version": record.schema_version,
+        "payload": record.payload,
+        "created_at": record.created_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+    }
+    content_hash = sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return RealAdvisoryPolicy.v1(
+        authority_refs=(
+            EvidenceRef(
+                source="nexus_db",
+                object_id=f"diagnostic-policy:{record.id}:{record.version}",
+                available_at=record.created_at,
+                location=f"db://diagnostic-policies/{record.id}",
+                content_hash=content_hash,
+            ),
+        )
+    )

@@ -235,7 +235,7 @@ def _item(*, severity: str = "info", unknown_reason: str | None = None) -> Diagn
         severity=severity,  # type: ignore[arg-type]
         actionability="research",
         unknown_reason=unknown_reason,
-        evidence_refs=() if unknown_reason else (_item_ref(),),
+        evidence_refs=(_item_ref(),),
     )
 
 

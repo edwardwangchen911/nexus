@@ -6,6 +6,7 @@ import pytest
 from nexus.diagnostics.market_risk import correlation_cluster_scope
 from nexus.diagnostics.models import DiagnosticItem, InstrumentIdentity, MarketEvidence
 from nexus.diagnostics.scope import assert_fosun_read_only_scope
+from nexus.domain.evidence import EvidenceRef
 from nexus.providers.broker.base import BrokerPosition, PortfolioSnapshot
 
 INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000000013")
@@ -95,4 +96,13 @@ def _item(code: str) -> DiagnosticItem:
         severity="info",
         actionability="monitor",
         unknown_reason="TEST_SCOPE_ONLY",
+        evidence_refs=(
+            EvidenceRef(
+                source="fixture",
+                object_id="scope",
+                available_at=datetime(2026, 8, 23, tzinfo=UTC),
+                location="fixture://scope",
+                content_hash="a" * 64,
+            ),
+        ),
     )

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.diagnostics.artifacts import ArtifactByteReader
 from nexus.diagnostics.assembler import assemble_diagnostic_evidence
 from nexus.diagnostics.decision import optimization_need as _optimization_need
-from nexus.diagnostics.evidence import EvidenceResolver, EvidenceResult
+from nexus.diagnostics.evidence import EvidenceResolver, EvidenceResult, combine_refs
 from nexus.diagnostics.input_hash import diagnostic_input_hash
 from nexus.diagnostics.items import item as _item
 from nexus.diagnostics.items import threshold_item as _threshold_item
@@ -106,6 +106,7 @@ def diagnose_portfolio(
                 "FX_QUALIFIED_VIEW_MISSING",
                 "portfolio:unqualified_fx",
                 market,
+                evidence_refs=combine_refs(snapshot_evidence.refs, policy.authority_refs),
             )
         )
     elif currencies:

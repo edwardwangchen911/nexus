@@ -1,13 +1,15 @@
 """Evidence-qualified portfolio-value diagnostic evaluation."""
 
 from collections import defaultdict
+from datetime import datetime
 from decimal import Decimal
+from uuid import UUID
 
-from nexus.diagnostics.evidence import EvidenceResolver, combine_refs
+from nexus.diagnostics.evidence import EvidenceResolver, EvidenceResult, combine_refs
 from nexus.diagnostics.items import item, threshold_item, unknown_item, upper_threshold_item
 from nexus.diagnostics.market_risk import market_risk_items
 from nexus.diagnostics.metrics import days_to_exit, security_hhi, top_weights
-from nexus.diagnostics.models import DiagnosticItem, MarketEvidence
+from nexus.diagnostics.models import DiagnosticItem, EvidenceBinding, MarketEvidence
 from nexus.diagnostics.policy import RealAdvisoryPolicy
 from nexus.diagnostics.valuation import position_values
 from nexus.domain.evidence import EvidenceRef
@@ -71,7 +73,16 @@ def _currency_items(
     values, value_unknown = position_values(positions)
     items: list[DiagnosticItem] = []
     if value_unknown is not None:
-        items.append(unknown_item("POSITION_MARKET_VALUE", currency, value_unknown, scope, market))
+        items.append(
+            unknown_item(
+                "POSITION_MARKET_VALUE",
+                currency,
+                value_unknown,
+                scope,
+                market,
+                evidence_refs=_all_position_refs(positions, results, market, snapshot_refs),
+            )
+        )
     for position, result in invalid:
         assert result.reason is not None
         items.append(
@@ -81,12 +92,12 @@ def _currency_items(
                 result.reason,
                 scope,
                 market,
+                evidence_refs=_position_refs(position, result.refs, market, snapshot_refs),
             )
         )
     if values and not invalid:
-        value_refs = combine_refs(
-            snapshot_refs,
-            *(results[position.instrument_id].refs for position, _ in values),
+        value_refs = _all_position_refs(
+            [position for position, _ in values], results, market, snapshot_refs
         )
         items.extend(_concentration_items(values, scope, market, policy, value_refs))
         if all(
@@ -110,6 +121,7 @@ def _currency_items(
                 policy,
                 resolver,
                 snapshot_refs,
+                _all_position_refs(positions, results, market, snapshot_refs),
             )
         )
     return items
@@ -125,13 +137,14 @@ def _cash_item(
     policy: RealAdvisoryPolicy,
     resolver: EvidenceResolver,
     snapshot_refs: tuple[EvidenceRef, ...],
+    position_refs: tuple[EvidenceRef, ...],
 ) -> DiagnosticItem:
     scope = f"currency:{currency}"
     rows = tuple(item for item in snapshot.cash if item.currency == currency)
     expected_as_of = rows[0].provider_as_of if len(rows) == 1 else None
-    evidence = resolver.resolve(
-        market.evidence.cash.get(currency), "CASH", expected_as_of=expected_as_of
-    )
+    cash_binding = market.evidence.cash.get(currency)
+    evidence = resolver.resolve(cash_binding, "CASH", expected_as_of=expected_as_of)
+    cash_refs = _safe_binding_refs(cash_binding, snapshot.as_of)
     if evidence.reason is not None or invalid_position:
         return unknown_item(
             "CASH_RATIO",
@@ -139,6 +152,7 @@ def _cash_item(
             evidence.reason or "POSITION_PRICE_EVIDENCE_MISSING",
             scope,
             market,
+            evidence_refs=combine_refs(snapshot_refs, position_refs, evidence.refs, cash_refs),
         )
     ratio = cash / total
     return threshold_item(
@@ -149,7 +163,7 @@ def _cash_item(
         scope,
         market,
         warning=ratio < policy.cash_minimum,
-        evidence_refs=combine_refs(snapshot_refs, evidence.refs),
+        evidence_refs=combine_refs(snapshot_refs, position_refs, evidence.refs, cash_refs),
     )
 
 
@@ -225,7 +239,7 @@ def _exposure_items(
                     evidence.reason or "RISK_BUCKET_MISSING",
                     scope,
                     market,
-                    evidence_refs=evidence.refs,
+                    evidence_refs=combine_refs(value_refs, evidence.refs),
                 )
             ]
         risk_refs.append(evidence.refs)
@@ -269,7 +283,7 @@ def _liquidity_items(
                     reason,
                     scope,
                     market,
-                    evidence_refs=evidence.refs,
+                    evidence_refs=combine_refs(value_refs, evidence.refs),
                 )
             )
         else:
@@ -286,3 +300,48 @@ def _liquidity_items(
                 )
             )
     return result
+
+
+def _all_position_refs(
+    positions: list[BrokerPosition],
+    results: dict[UUID, EvidenceResult],
+    market: MarketEvidence,
+    snapshot_refs: tuple[EvidenceRef, ...],
+) -> tuple[EvidenceRef, ...]:
+    return combine_refs(
+        *(
+            _position_refs(
+                position,
+                results[position.instrument_id].refs,
+                market,
+                snapshot_refs,
+            )
+            for position in positions
+        )
+    )
+
+
+def _position_refs(
+    position: BrokerPosition,
+    price_refs: tuple[EvidenceRef, ...],
+    market: MarketEvidence,
+    snapshot_refs: tuple[EvidenceRef, ...],
+) -> tuple[EvidenceRef, ...]:
+    identity = market.identities.get(position.instrument_id)
+    identity_refs = () if identity is None else identity.authority_refs
+    binding = market.evidence.position_prices.get(position.instrument_id)
+    snapshot_as_of = None if market.evidence.snapshot is None else market.evidence.snapshot.as_of
+    return combine_refs(
+        snapshot_refs,
+        price_refs,
+        _safe_binding_refs(binding, snapshot_as_of),
+        identity_refs,
+    )
+
+
+def _safe_binding_refs(
+    binding: EvidenceBinding | None, snapshot_as_of: datetime | None
+) -> tuple[EvidenceRef, ...]:
+    if binding is None or snapshot_as_of is None:
+        return ()
+    return tuple(ref for ref in binding.refs if ref.available_at <= snapshot_as_of)

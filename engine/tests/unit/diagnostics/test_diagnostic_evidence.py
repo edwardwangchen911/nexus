@@ -22,7 +22,7 @@ SNAPSHOT_AT = datetime(2026, 8, 23, tzinfo=UTC)
 
 
 def test_known_diagnostic_item_requires_immutable_evidence() -> None:
-    with pytest.raises(ValueError, match="known diagnostic item requires evidence"):
+    with pytest.raises(ValueError, match="evidence_refs"):
         DiagnosticItem(
             diagnostic_code="KNOWN",
             metric_value="1",
@@ -68,6 +68,9 @@ def test_known_diagnostics_retain_only_their_actual_input_evidence() -> None:
     assert items[f"BETA_126:{INSTRUMENT_ID}"].evidence_refs == (
         refs["prices"],
         refs["benchmark"],
+    )
+    assert items["CASH_RATIO"].evidence_refs == (
+        refs["snapshot"], refs["position"], refs["cash"]
     )
     assert items["DATA_COMPLETENESS_TRADING_CALENDAR"].evidence_refs == (refs["calendar"],)
     used_object_ids = {ref.object_id for item in report.items for ref in item.evidence_refs}
@@ -130,7 +133,7 @@ def test_adv_evidence_gaps_are_explicit_unknowns(
     )
     assert item.metric_value is None
     assert item.unknown_reason == expected_reason
-    assert item.evidence_refs == ()
+    assert tuple(ref.object_id for ref in item.evidence_refs) == ("snapshot", "position")
     assert report.optimization_need == "RESEARCH_REQUIRED"
 
 
@@ -279,6 +282,7 @@ def _market(
                 refs["calendar"], session=series.bars[-1].session
             ),
         ),
+        incomplete_refs=(refs["snapshot"],),
     )
 
 

@@ -100,6 +100,8 @@ def unknown_item(
     *,
     evidence_refs: tuple[EvidenceRef, ...] = (),
 ) -> DiagnosticItem:
+    snapshot_refs = () if market.evidence.snapshot is None else market.evidence.snapshot.refs
+    refs = evidence_refs or snapshot_refs or market.incomplete_refs or market.conflict_refs
     return DiagnosticItem(
         diagnostic_code=code,
         metric_value=None,
@@ -109,7 +111,7 @@ def unknown_item(
         severity="info",
         actionability="research",
         unknown_reason=reason,
-        evidence_refs=evidence_refs,
+        evidence_refs=refs,
     )
 
 

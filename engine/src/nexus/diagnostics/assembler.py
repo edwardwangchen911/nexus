@@ -315,12 +315,16 @@ async def _snapshot_bindings(
     snapshot_payload = {
         "id": str(record.id),
         "portfolio_id": str(record.portfolio_id),
+        "sync_run_id": str(record.sync_run_id),
+        "stale_from_snapshot_id": _canonical_value(record.stale_from_snapshot_id),
         "as_of": _canonical_value(record.as_of),
         "status": record.status,
         "position_hash_version": record.position_hash_version,
         "position_hash": record.position_hash,
         "order_hash_version": record.order_hash_version,
         "order_hash": record.order_hash,
+        "source_request_ids": tuple(record.source_request_ids),
+        "source_observations": tuple(record.source_observations),
         "created_at": _canonical_value(record.created_at),
     }
     snapshot_ref = _db_ref("portfolio-snapshot", record.id, snapshot.as_of, snapshot_payload)
