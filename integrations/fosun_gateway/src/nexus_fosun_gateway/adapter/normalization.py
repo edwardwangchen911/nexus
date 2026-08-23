@@ -36,21 +36,11 @@ def normalize_provider_response(
             return _page(items, request_id, received_at)
         if operation == "fosun_list_orders":
             items = tuple(_order(item) for item in _mappings(_list(data)))
-            return _list_page(items, data, request_id, received_at)
+            return _list_page(items, data, request_id, received_at, payload)
         if operation == "fosun_list_cash_flows":
             rows = _mappings(_list(data))
-            start = _context_cursor(payload)
-            limit = _context_limit(payload)
-            items = tuple(_cash_flow(item) for item in rows[start : start + limit])
-            total = _provider_total(data, len(rows))
-            next_cursor = str(start + len(items)) if start + len(items) < total else None
-            return GatewayPage[GatewayItem](
-                items=items,
-                source_request_id=request_id,
-                has_more=next_cursor is not None,
-                next_cursor=next_cursor,
-                as_of=received_at,
-            )
+            items = tuple(_cash_flow(item) for item in rows)
+            return _list_page(items, data, request_id, received_at, payload)
         if operation == "fosun_get_quotes":
             items = _quotes(data, received_at)
             quality: Literal["PASS", "PARTIAL"] = (
@@ -97,14 +87,13 @@ def normalize_holdings_response(
     *,
     account_id: str,
     received_at: datetime,
+    context: Mapping[str, object],
 ) -> GatewayPage[GatewayItem]:
     """Normalize exactly one holdings page with no hidden cash call."""
     holdings, request_id = _success_envelope(raw)
     try:
-        positions = tuple(
-            _position(item, account_id) for item in _mappings(_list(holdings))
-        )
-        start, count, total = _pagination(holdings)
+        positions = tuple(_position(item, account_id) for item in _mappings(_list(holdings)))
+        start, count, total = _pagination(holdings, context, len(positions))
         next_cursor = str(start + count) if start + count < total else None
         return GatewayPage[GatewayItem](
             items=positions,
@@ -200,9 +189,7 @@ def _order(item: Mapping[str, object]) -> OrderItem:
         raise ValueError
     return OrderItem(
         external_order_id=str(_required_value(item, "orderId")),
-        instrument_code=(
-            f"{_required_str(item, 'marketCode')}{_required_str(item, 'stockCode')}"
-        ),
+        instrument_code=(f"{_required_str(item, 'marketCode')}{_required_str(item, 'stockCode')}"),
         side=_side(_required_value(item, "direction")),
         quantity=_decimal(item, "quantity"),
         filled_quantity=_decimal(item, "filledQuantity"),
@@ -282,8 +269,9 @@ def _list_page(
     data: Mapping[str, object],
     request_id: str,
     received_at: datetime,
+    context: Mapping[str, object],
 ) -> GatewayPage[GatewayItem]:
-    start, count, total = _pagination(data)
+    start, count, total = _pagination(data, context, len(items))
     next_cursor = str(start + count) if start + count < total else None
     quality: Literal["PASS", "PARTIAL"] = (
         "PARTIAL" if items and isinstance(items[0], OrderItem) else "PASS"
@@ -298,16 +286,34 @@ def _list_page(
     )
 
 
-def _pagination(data: Mapping[str, object]) -> tuple[int, int, int]:
+def _pagination(
+    data: Mapping[str, object],
+    context: Mapping[str, object],
+    item_count: int,
+) -> tuple[int, int, int]:
     start = _required_value(data, "start")
     count = _required_value(data, "count")
     total = _required_value(data, "total")
     if not all(
-        isinstance(value, int) and not isinstance(value, bool)
-        for value in (start, count, total)
+        isinstance(value, int) and not isinstance(value, bool) for value in (start, count, total)
     ):
         raise ValueError
-    return cast("tuple[int, int, int]", (start, count, total))
+    start, count, total = cast("tuple[int, int, int]", (start, count, total))
+    expected_start = _context_cursor(context)
+    limit = _context_limit(context)
+    if (
+        start != expected_start
+        or start < 0
+        or count < 0
+        or total < 0
+        or count != item_count
+        or count > limit
+        or start > total
+        or start + count > total
+        or (count == 0 and start < total)
+    ):
+        raise ValueError
+    return start, count, total
 
 
 def _context_cursor(context: Mapping[str, object]) -> int:
@@ -323,13 +329,6 @@ def _context_limit(context: Mapping[str, object]) -> int:
     value = context.get("limit")
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ValueError
-    return value
-
-
-def _provider_total(data: Mapping[str, object], fallback: int) -> int:
-    value = data.get("total")
-    if not isinstance(value, int) or isinstance(value, bool) or value < fallback:
-        return fallback
     return value
 
 

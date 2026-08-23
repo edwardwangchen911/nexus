@@ -2,6 +2,7 @@ import asyncio
 import logging
 import threading
 import time
+from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -293,6 +294,53 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
 
 
 @pytest.mark.asyncio
+async def test_holdings_orders_and_cashflow_pages_bind_provider_ranges_to_request(
+    client: SimpleNamespace,
+) -> None:
+    holdings_response = deepcopy(client.portfolio.get_holdings.response)
+    holdings_response["data"]["start"] = 19
+    client.portfolio.get_holdings.response = holdings_response
+    adapter = SdkFosunTransport(client, rate_limiter=NoopRateLimiter())
+    with pytest.raises(GatewayError) as holdings_error:
+        await adapter.execute(
+            "fosun_sync_portfolio",
+            {
+                "account_id": "synthetic-account-001",
+                "read_kind": "holdings",
+                "cursor": "20",
+                "limit": 20,
+            },
+        )
+    assert holdings_error.value.code == "PROVIDER_MALFORMED_RESPONSE"
+
+    orders_response = deepcopy(client.trade.list_orders.response)
+    orders_response["data"]["count"] = 2
+    client.trade.list_orders.response = orders_response
+    with pytest.raises(GatewayError) as orders_error:
+        await adapter.execute(
+            "fosun_list_orders",
+            {"account_id": "synthetic-account-001", "cursor": "40", "limit": 20},
+        )
+    assert orders_error.value.code == "PROVIDER_MALFORMED_RESPONSE"
+
+    flows_response = deepcopy(client.trade.get_cash_flows.response)
+    flows_response["data"] = {"count": 0, "list": [], "start": 0, "total": 1}
+    client.trade.get_cash_flows.response = flows_response
+    with pytest.raises(GatewayError) as flows_error:
+        await adapter.execute(
+            "fosun_list_cash_flows",
+            {
+                "account_id": "synthetic-account-001",
+                "date_from": "2026-08-01",
+                "date_to": "2026-08-22",
+                "cursor": None,
+                "limit": 20,
+            },
+        )
+    assert flows_error.value.code == "PROVIDER_MALFORMED_RESPONSE"
+
+
+@pytest.mark.asyncio
 async def test_sdk_adapter_serializes_calls_with_concurrency_one() -> None:
     """Removing the semaphore could overlap provider SDK calls."""
     state = {"active": 0, "maximum": 0}
@@ -412,8 +460,8 @@ async def test_caller_cancellation_keeps_actual_provider_calls_at_concurrency_on
 
 
 @pytest.mark.asyncio
-async def test_cash_flow_cursor_and_limit_are_enforced_inside_gateway() -> None:
-    """The frozen cash-flow SDK method has no page args, so gateway paging must still be bounded."""
+async def test_cash_flow_provider_page_must_match_requested_cursor_and_limit() -> None:
+    """A non-pageable SDK response cannot be sliced into invented Provider pages."""
     response = _raw(
         {
             "count": 2,
@@ -439,28 +487,22 @@ async def test_cash_flow_cursor_and_limit_are_enforced_inside_gateway() -> None:
         "synthetic-request-flow-page",
     )
     adapter = SdkFosunTransport(
-        SimpleNamespace(
-            trade=SimpleNamespace(get_cash_flows=RecordingMethod(response))
-        ),
+        SimpleNamespace(trade=SimpleNamespace(get_cash_flows=RecordingMethod(response))),
         rate_limiter=NoopRateLimiter(),
     )
 
-    page = await adapter.execute(
-        "fosun_list_cash_flows",
-        {
-            "account_id": "synthetic-account-001",
-            "date_from": "2026-08-01",
-            "date_to": "2026-08-22",
-            "cursor": "1",
-            "limit": 1,
-        },
-    )
-
-    assert [item.external_cash_flow_id for item in page.items] == [
-        "synthetic-cash-flow-002"
-    ]
-    assert page.has_more is False
-    assert page.next_cursor is None
+    with pytest.raises(GatewayError) as error:
+        await adapter.execute(
+            "fosun_list_cash_flows",
+            {
+                "account_id": "synthetic-account-001",
+                "date_from": "2026-08-01",
+                "date_to": "2026-08-22",
+                "cursor": "1",
+                "limit": 1,
+            },
+        )
+    assert error.value.code == "PROVIDER_MALFORMED_RESPONSE"
 
 
 @pytest.mark.asyncio
@@ -491,9 +533,7 @@ async def test_sdk_adapter_normalizes_provider_epoch_seconds_and_milliseconds_to
         "synthetic-request-epoch-shapes",
     )
     adapter = SdkFosunTransport(
-        SimpleNamespace(
-            trade=SimpleNamespace(get_cash_flows=RecordingMethod(response))
-        ),
+        SimpleNamespace(trade=SimpleNamespace(get_cash_flows=RecordingMethod(response))),
         rate_limiter=NoopRateLimiter(),
     )
 

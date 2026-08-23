@@ -237,6 +237,7 @@ class SdkFosunTransport:
                 raw,
                 account_id=account_id,
                 received_at=datetime.now(UTC),
+                context=payload,
             )
         raise GatewayError(
             "VALIDATION_ERROR",

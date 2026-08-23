@@ -21,6 +21,7 @@ from nexus_fosun_gateway.domain import GatewayError, GatewayItem, GatewayPage
 from nexus_fosun_gateway.policy.operations import GatewayOperation
 
 router = APIRouter(prefix="/internal/v1/read-only")
+_MAX_REQUEST_BYTES = 64 * 1024
 Cursor = Annotated[
     str,
     StringConstraints(strict=True, pattern=r"^[0-9]+$", max_length=12),
@@ -61,9 +62,7 @@ class PortfolioReadRequest(RequestModel):
 
     @model_validator(mode="after")
     def holdings_pagination_is_bounded(self) -> "PortfolioReadRequest":
-        if self.read_kind == "holdings" and (
-            self.limit is None or not 1 <= self.limit <= 100
-        ):
+        if self.read_kind == "holdings" and (self.limit is None or not 1 <= self.limit <= 100):
             raise ValueError("holdings limit is outside the fixed range")
         return self
 
@@ -97,7 +96,28 @@ async def _execute(
     operation: GatewayOperation,
     request_type: type[RequestModel],
 ) -> GatewayPage[GatewayItem]:
-    body = await request.body()
+    if not _is_json_media_type(request.headers.get("content-type")):
+        raise GatewayError(
+            "UNSUPPORTED_MEDIA_TYPE",
+            "Request media type is invalid.",
+            status_code=415,
+            next_action="USE_JSON",
+        )
+    content_length = request.headers.get("content-length")
+    if content_length is not None and (
+        not content_length.isascii()
+        or not content_length.isdecimal()
+        or int(content_length) > _MAX_REQUEST_BYTES
+    ):
+        raise _request_too_large()
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > _MAX_REQUEST_BYTES:
+            raise _request_too_large()
+        chunks.append(chunk)
+    body = b"".join(chunks)
     actor = await request.app.state.hmac_verifier.verify(request, body)
     request.state.verified_gateway_actor = actor
     try:
@@ -114,6 +134,26 @@ async def _execute(
         ) from error
     transport = cast("FosunTransport", request.app.state.transport)
     return await transport.execute(operation, payload.model_dump(mode="json"))
+
+
+def _is_json_media_type(value: str | None) -> bool:
+    if value is None:
+        return False
+    parts = [part.strip().lower() for part in value.split(";")]
+    return (
+        parts[0] == "application/json"
+        and all(part == "charset=utf-8" for part in parts[1:])
+        and len(parts) <= 2
+    )
+
+
+def _request_too_large() -> GatewayError:
+    return GatewayError(
+        "REQUEST_TOO_LARGE",
+        "Request payload is too large.",
+        status_code=413,
+        next_action="REDUCE_REQUEST",
+    )
 
 
 async def fosun_capabilities(request: Request) -> GatewayPage[GatewayItem]:
@@ -145,19 +185,9 @@ async def fosun_get_bars(request: Request) -> GatewayPage[GatewayItem]:
 
 
 router.add_api_route("/fosun_capabilities", fosun_capabilities, methods=["POST"])
-router.add_api_route(
-    "/fosun_sync_accounts", fosun_sync_accounts, methods=["POST"]
-)
-router.add_api_route(
-    "/fosun_sync_portfolio", fosun_sync_portfolio, methods=["POST"]
-)
-router.add_api_route(
-    "/fosun_list_orders", fosun_list_orders, methods=["POST"]
-)
-router.add_api_route(
-    "/fosun_list_cash_flows", fosun_list_cash_flows, methods=["POST"]
-)
-router.add_api_route(
-    "/fosun_get_quotes", fosun_get_quotes, methods=["POST"]
-)
+router.add_api_route("/fosun_sync_accounts", fosun_sync_accounts, methods=["POST"])
+router.add_api_route("/fosun_sync_portfolio", fosun_sync_portfolio, methods=["POST"])
+router.add_api_route("/fosun_list_orders", fosun_list_orders, methods=["POST"])
+router.add_api_route("/fosun_list_cash_flows", fosun_list_cash_flows, methods=["POST"])
+router.add_api_route("/fosun_get_quotes", fosun_get_quotes, methods=["POST"])
 router.add_api_route("/fosun_get_bars", fosun_get_bars, methods=["POST"])

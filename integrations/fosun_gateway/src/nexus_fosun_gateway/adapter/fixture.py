@@ -59,6 +59,7 @@ class FixtureFosunTransport:
                         responses.get("holdings"),
                         account_id=account_id,
                         received_at=received_at,
+                        context=context,
                     )
                 raise ValueError("portfolio fixture read kind missing")
             return normalize_provider_response(

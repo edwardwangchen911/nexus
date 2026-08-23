@@ -153,6 +153,37 @@ def test_current_and_previous_gateway_key_domains_authenticate(
     assert current.json()["items"][0]["mode"] == "fixture"
 
 
+def test_read_only_routes_reject_non_json_before_authentication(
+    gateway_client: TestClient,
+) -> None:
+    path = "/internal/v1/read-only/fosun_capabilities"
+    body = b"{}"
+    headers = _signed_headers(path, body)
+    headers["Content-Type"] = "text/plain"
+
+    response = gateway_client.post(path, content=body, headers=headers)
+
+    assert response.status_code == 415
+    assert response.json()["error"]["code"] == "UNSUPPORTED_MEDIA_TYPE"
+
+
+def test_read_only_routes_stream_reject_oversized_body_before_json_parsing(
+    gateway_client: TestClient,
+) -> None:
+    path = "/internal/v1/read-only/fosun_capabilities"
+    body = b"x" * (64 * 1024 + 1)
+    headers = _signed_headers(
+        path,
+        body,
+        nonce="0198f7a0-2222-7777-8222-222222222224",
+    )
+
+    response = gateway_client.post(path, content=body, headers=headers)
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "REQUEST_TOO_LARGE"
+
+
 @pytest.mark.parametrize(
     ("current_secret", "previous_secret"),
     [
