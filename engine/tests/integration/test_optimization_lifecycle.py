@@ -23,6 +23,7 @@ from nexus.persistence.models.portfolio import BrokerOrderSnapshot
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.persistence.session import session_factory
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 
 _BASELINE_ID = UUID("0198d500-1000-7000-8000-000000000041")
 _POLICY_ID = UUID("e690b91d-1e24-5de3-b2b2-566a463fca25")
@@ -246,6 +247,25 @@ async def test_shadow_rejects_non_executable_persisted_comparison(
         )
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
+
+
+@pytest.mark.asyncio
+async def test_raw_sql_shadow_cannot_bypass_non_executable_comparison(
+    migrated_database_url: str,
+) -> None:
+    """The lifecycle trigger, not only the repository, must reject a direct SQL shadow write."""
+    group_id = UUID("0198d500-1000-7000-8000-000000000846")
+    await _seed_complete_group(migrated_database_url, group_id, comparison_non_executable=True)
+    factory = session_factory(settings(migrated_database_url))
+    with pytest.raises(IntegrityError, match="PROPOSAL_NOT_EXECUTABLE"):
+        async with factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "UPDATE optimization_proposal_groups SET status = 'shadowing', version = 2 "
+                    "WHERE id = :group_id"
+                ),
+                {"group_id": group_id},
+            )
 
 
 @pytest.mark.asyncio
