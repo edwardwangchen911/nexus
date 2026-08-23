@@ -1,5 +1,6 @@
 """Production composition from frozen PostgreSQL authority."""
 
+import asyncio
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -13,7 +14,7 @@ from helpers.portfolio_api import (
 )
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.optimizer.cost_policy import COST_POLICY_ID
-from nexus.optimizer.production import build_and_persist_proposal_group
+from nexus.optimizer.production import PersistedProposalGroup, build_and_persist_proposal_group
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import (
     PortfolioDiagnosticEvidenceRefRecord,
@@ -229,6 +230,37 @@ async def test_production_builder_absent_selection_is_only_strategy_noop(
     assert strategy_position is not None
     assert strategy_position.current_weight == strategy_position.target_weight
     assert comparison is not None and comparison.non_executable is True
+
+
+@pytest.mark.asyncio
+async def test_production_builder_race_commits_one_shared_authority_group(
+    migrated_database_url: str,
+) -> None:
+    """Two full builders racing one claim share the one complete committed identity."""
+    await _seed_authority(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    barrier = asyncio.Barrier(2)
+
+    async def build() -> PersistedProposalGroup:
+        async with factory() as session, session.begin():
+            await barrier.wait()
+            return await build_and_persist_proposal_group(
+                session,
+                actor_id="builder-race",
+                idempotency_key="builder-race",
+                request_hash="4" * 64,
+                admission_authority_id=_ADMISSION_ID,
+                research=(),
+            )
+
+    first, second = await asyncio.wait_for(asyncio.gather(build(), build()), timeout=5)
+    assert first.group_id == second.group_id
+    assert {first.replayed, second.replayed} == {False, True}
+    async with factory() as session:
+        groups = await session.scalar(
+            select(func.count()).select_from(OptimizationProposalGroupRecord)
+        )
+    assert groups == 1
 
 
 @pytest.mark.asyncio
