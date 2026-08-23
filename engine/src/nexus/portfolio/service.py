@@ -2,19 +2,28 @@
 
 from collections.abc import Sequence
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import and_, desc, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.portfolio import (
+    CashBucketResponse,
+    OpenOrderResponse,
     PortfolioKind,
     PortfolioListItemResponse,
     PortfolioPageResponse,
+    PortfolioSnapshotResponse,
+    PositionResponse,
 )
+from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
+from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.portfolio import (
     Account,
+    BrokerOrderSnapshot,
     BrokerSyncRun,
     CashSnapshot,
     Portfolio,
@@ -30,11 +39,11 @@ class PortfolioService:
         session: AsyncSession,
         request_time: datetime,
         *,
-        cursor_signing_secrets: Sequence[str],
+        cursor_signing_secrets: Sequence[str] = (),
     ) -> None:
         self._session = session
         self._request_time = require_utc(request_time)
-        self._cursor = PortfolioCursorCodec(cursor_signing_secrets, self._request_time)
+        self._cursor_secrets = tuple(cursor_signing_secrets)
 
     async def list_page(
         self,
@@ -43,7 +52,8 @@ class PortfolioService:
         cursor: str | None,
         limit: int,
     ) -> tuple[PortfolioPageResponse, datetime]:
-        state = self._cursor.decode(cursor, requested_kind=kind) if cursor else None
+        codec = PortfolioCursorCodec(self._cursor_secrets, self._request_time)
+        state = codec.decode(cursor, requested_kind=kind) if cursor else None
         decision_time = state.decision_time if state else self._request_time
         if kind in ("internal_paper", "shadow"):
             return PortfolioPageResponse(items=(), next_cursor=None), decision_time
@@ -123,7 +133,7 @@ class PortfolioService:
         next_cursor = None
         if has_more and page_rows:
             last = page_rows[-1]
-            next_cursor = self._cursor.encode(
+            next_cursor = codec.encode(
                 PortfolioCursorState(decision_time, last.name, last.portfolio_id, kind)
             )
         return PortfolioPageResponse(items=items, next_cursor=next_cursor), decision_time
@@ -144,3 +154,165 @@ class PortfolioService:
             snapshot_id: tuple(sorted(currencies))
             for snapshot_id, currencies in values.items()
         }
+
+    async def latest_snapshot(self, portfolio_id: UUID) -> PortfolioSnapshotResponse:
+        portfolio_exists = await self._session.scalar(
+            select(Portfolio.id).where(Portfolio.id == portfolio_id)
+        )
+        if portfolio_exists is None:
+            raise _snapshot_not_found(portfolio_id)
+        snapshot = (
+            await self._session.execute(
+                select(
+                    PortfolioSnapshotRecord.id.label("snapshot_id"),
+                    PortfolioSnapshotRecord.portfolio_id,
+                    PortfolioSnapshotRecord.status,
+                    PortfolioSnapshotRecord.as_of,
+                )
+                .where(PortfolioSnapshotRecord.portfolio_id == portfolio_id)
+                .order_by(
+                    desc(PortfolioSnapshotRecord.created_at),
+                    desc(PortfolioSnapshotRecord.id),
+                )
+                .limit(1)
+            )
+        ).first()
+        if snapshot is None:
+            raise _snapshot_not_found(portfolio_id)
+        cash_rows = (
+            await self._session.execute(
+                select(
+                    CashSnapshot.currency,
+                    CashSnapshot.cash_balance,
+                    CashSnapshot.available_cash,
+                    CashSnapshot.provider_as_of,
+                )
+                .where(CashSnapshot.portfolio_snapshot_id == snapshot.snapshot_id)
+                .order_by(CashSnapshot.currency, CashSnapshot.id)
+            )
+        ).all()
+        position_rows = (
+            await self._session.execute(
+                select(
+                    PositionSnapshot.instrument_id,
+                    Instrument.exchange,
+                    PositionSnapshot.currency,
+                    PositionSnapshot.quantity,
+                    PositionSnapshot.available_quantity,
+                    PositionSnapshot.frozen_quantity,
+                    PositionSnapshot.avg_cost,
+                    PositionSnapshot.diluted_cost,
+                    PositionSnapshot.current_price,
+                    PositionSnapshot.provider_as_of,
+                )
+                .join(Instrument, Instrument.id == PositionSnapshot.instrument_id)
+                .where(PositionSnapshot.portfolio_snapshot_id == snapshot.snapshot_id)
+                .order_by(PositionSnapshot.instrument_id)
+            )
+        ).all()
+        order_rows = (
+            await self._session.execute(
+                select(
+                    BrokerOrderSnapshot.id.label("snapshot_order_id"),
+                    BrokerOrderSnapshot.instrument_id,
+                    BrokerOrderSnapshot.side,
+                    BrokerOrderSnapshot.quantity,
+                    BrokerOrderSnapshot.filled_quantity,
+                    BrokerOrderSnapshot.price,
+                    BrokerOrderSnapshot.status,
+                    BrokerOrderSnapshot.updated_at,
+                )
+                .where(BrokerOrderSnapshot.portfolio_snapshot_id == snapshot.snapshot_id)
+                .order_by(BrokerOrderSnapshot.id)
+            )
+        ).all()
+        instrument_ids = {row.instrument_id for row in position_rows}
+        instrument_ids.update(row.instrument_id for row in order_rows)
+        symbols = await self._symbols(tuple(instrument_ids), snapshot.as_of)
+        return PortfolioSnapshotResponse(
+            portfolio_snapshot_id=snapshot.snapshot_id,
+            portfolio_id=snapshot.portfolio_id,
+            status=snapshot.status,
+            cash=tuple(
+                CashBucketResponse(
+                    currency=row.currency,
+                    cash_balance=decimal_to_string(row.cash_balance),
+                    available_cash=decimal_to_string(row.available_cash),
+                    provider_as_of=row.provider_as_of,
+                )
+                for row in cash_rows
+            ),
+            positions=tuple(
+                PositionResponse(
+                    instrument_id=row.instrument_id,
+                    symbol=symbols.get(row.instrument_id),
+                    exchange=row.exchange,
+                    currency=row.currency,
+                    quantity=decimal_to_string(row.quantity),
+                    available_quantity=decimal_to_string(row.available_quantity),
+                    frozen_quantity=decimal_to_string(row.frozen_quantity),
+                    avg_cost=_optional_decimal(row.avg_cost),
+                    diluted_cost=_optional_decimal(row.diluted_cost),
+                    current_price=_optional_decimal(row.current_price),
+                    provider_as_of=row.provider_as_of,
+                )
+                for row in position_rows
+            ),
+            open_orders=tuple(
+                OpenOrderResponse(
+                    broker_order_snapshot_id=row.snapshot_order_id,
+                    instrument_id=row.instrument_id,
+                    symbol=symbols.get(row.instrument_id),
+                    side=row.side,
+                    quantity=decimal_to_string(row.quantity),
+                    filled_quantity=decimal_to_string(row.filled_quantity),
+                    price=_optional_decimal(row.price),
+                    status=row.status,
+                    updated_at=row.updated_at,
+                )
+                for row in order_rows
+            ),
+            as_of=snapshot.as_of,
+        )
+
+    async def _symbols(
+        self,
+        instrument_ids: tuple[UUID, ...],
+        as_of: datetime | None,
+    ) -> dict[UUID, str]:
+        if not instrument_ids or as_of is None:
+            return {}
+        rows = await self._session.execute(
+            select(InstrumentAlias.instrument_id, InstrumentAlias.symbol)
+            .where(
+                InstrumentAlias.instrument_id.in_(instrument_ids),
+                InstrumentAlias.alias_type == "ticker",
+                InstrumentAlias.valid_from <= as_of.date(),
+                or_(
+                    InstrumentAlias.valid_to.is_(None),
+                    InstrumentAlias.valid_to >= as_of.date(),
+                ),
+            )
+            .order_by(
+                InstrumentAlias.instrument_id,
+                desc(InstrumentAlias.valid_from),
+                desc(InstrumentAlias.id),
+            )
+        )
+        symbols: dict[UUID, str] = {}
+        for instrument_id, symbol in rows:
+            symbols.setdefault(instrument_id, symbol)
+        return symbols
+
+
+def _optional_decimal(value: Decimal | None) -> str | None:
+    return decimal_to_string(value) if value is not None else None
+
+
+def _snapshot_not_found(portfolio_id: UUID) -> NexusError:
+    return NexusError(
+        ErrorCode.NOT_FOUND,
+        "The portfolio snapshot was not found.",
+        status_code=404,
+        details={"portfolio_id": str(portfolio_id)},
+    )
