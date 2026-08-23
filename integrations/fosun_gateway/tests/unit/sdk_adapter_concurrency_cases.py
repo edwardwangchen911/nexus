@@ -230,4 +230,3 @@ async def test_dual_token_bucket_applies_thirty_per_minute_budget() -> None:
     await limiter.acquire()
 
     assert clock.now == pytest.approx(60.0)
-

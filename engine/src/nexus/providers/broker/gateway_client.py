@@ -206,4 +206,3 @@ def _validated_origin(value: str) -> str:
     ):
         raise ValueError("gateway origin must be an absolute HTTPS origin")
     return str(url).rstrip("/")
-

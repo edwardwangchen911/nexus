@@ -232,4 +232,3 @@ async def test_only_reviewed_open_order_statuses_survive_and_missing_update_is_p
     assert result.items[0].status == "partially_filled"
     assert result.items[0].updated_at is None
     assert result.quality == "PARTIAL"
-

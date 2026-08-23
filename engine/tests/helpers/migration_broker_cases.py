@@ -29,4 +29,3 @@ def test_0007_round_trips_the_final_broker_schema(
     assert "accounts" not in _table_names(temporary_database_url)
     command.upgrade(config, "head")
     _assert_schema(temporary_database_url)
-
