@@ -46,7 +46,14 @@ async def test_what_if_writes_only_redacted_audit_summary(migrated_database_url:
     assert response.json()["data"]["result"]["diagnostics"]["top1"] == {
         "status": "known", "value": 10000, "unit": "basis_points", "reason": None,
     }
-    assert response.json()["data"]["result"]["constraints"]["violation_count"]["value"] == 0
+    result = response.json()["data"]["result"]
+    assert result["constraints"]["violation_count"]["value"] == 3
+    assert result["constraints"]["single_name_critical"]["value"] == 1
+    assert result["constraints"]["top3_warning"]["value"] == 1
+    assert result["constraints"]["cash_minimum"]["value"] == 1
+    assert result["diagnostics"]["sector_exposure"]["reason"] == (
+        "SECTOR_EXPOSURE_REQUIRES_IDENTITIES"
+    )
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session:
         rows = (
