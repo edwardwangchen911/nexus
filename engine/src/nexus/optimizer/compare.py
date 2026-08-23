@@ -1,8 +1,11 @@
 """Typed deterministic comparison with unknown-safe ranking."""
 
+from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal, cast
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
@@ -159,28 +162,34 @@ def evaluate_dimensions(
     proposal: OptimizationProposal,
     report: PortfolioDiagnosticReport,
     *,
-    hard_violations: int,
     cost: Decimal | None,
+    instrument_currencies: Mapping[UUID, str],
 ) -> ComparisonDimensions:
     """Evaluate proposal weights in memory and retain unavailable risk inputs as unknown."""
-    weights = sorted(
-        (position.target_weight for position in proposal.positions if position.target_weight > 0),
-        reverse=True,
+    positive = tuple(
+        position for position in proposal.positions if position.target_weight > 0
     )
+    security_total = sum((position.target_weight for position in positive), Decimal("0"))
+    normalized_by_id = {
+        position.instrument_id: position.target_weight / security_total
+        for position in positive
+    } if security_total > 0 else {}
+    weights = sorted(normalized_by_id.values(), reverse=True)
     top1 = weights[0] if weights else Decimal("0")
     top3 = sum(weights[:3], Decimal("0"))
     hhi = sum((weight * weight for weight in weights), Decimal("0"))
-    liquidity = _report_metric(report, "LIQUIDITY_DAYS_TO_EXIT", invert=True)
+    liquidity = _weighted_liquidity(report, normalized_by_id)
+    currency_exposure = _currency_exposure(normalized_by_id, instrument_currencies)
     return ComparisonDimensions(
-        hard_violations=hard_violations,
+        hard_violations=sum(weight > Decimal("0.30") for weight in weights),
         top1=TypedMetric.known(top1),
         top3=TypedMetric.known(top3),
         hhi=TypedMetric.known(hhi),
-        sector_exposure=_report_metric(report, "SECTOR_EXPOSURE"),
-        currency_exposure=_report_metric(report, "CURRENCY_EXPOSURE"),
-        volatility=_report_metric(report, "VOLATILITY"),
-        drawdown=_report_metric(report, "DRAWDOWN"),
-        correlation=_report_metric(report, "CORRELATION_CLUSTER"),
+        sector_exposure=TypedMetric.unknown("SECTOR_EXPOSURE_NOT_PROVEN"),
+        currency_exposure=currency_exposure,
+        volatility=TypedMetric.unknown("VOLATILITY_POST_PROPOSAL_NOT_PROVEN"),
+        drawdown=TypedMetric.unknown("DRAWDOWN_POST_PROPOSAL_NOT_PROVEN"),
+        correlation=TypedMetric.unknown("CORRELATION_POST_PROPOSAL_NOT_PROVEN"),
         liquidity=liquidity,
         turnover=TypedMetric.known(proposal.turnover),
         cost=TypedMetric.unknown("COST_NOT_PROVEN")
@@ -189,24 +198,34 @@ def evaluate_dimensions(
     )
 
 
-def _report_metric(
-    report: PortfolioDiagnosticReport,
-    prefix: str,
-    *,
-    invert: bool = False,
-    unknown_reason: str | None = None,
+def _currency_exposure(
+    weights: Mapping[UUID, Decimal], currencies: Mapping[UUID, str]
 ) -> TypedMetric:
-    values = tuple(
-        Decimal(item.metric_value)
-        for item in report.items
-        if item.diagnostic_code.startswith(prefix)
-        and item.metric_value is not None
-        and item.unknown_reason is None
-    )
-    if not values:
-        return TypedMetric.unknown(unknown_reason or f"{prefix}_NOT_PROVEN")
-    value = max(values)
-    return TypedMetric.known(Decimal("1") / (Decimal("1") + value) if invert else value)
+    if any(instrument_id not in currencies for instrument_id in weights):
+        return TypedMetric.unknown("CURRENCY_EXPOSURE_NOT_PROVEN")
+    totals: defaultdict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    for instrument_id, weight in weights.items():
+        totals[currencies[instrument_id]] += weight
+    return TypedMetric.known(max(totals.values(), default=Decimal("0")))
+
+
+def _weighted_liquidity(
+    report: PortfolioDiagnosticReport, weights: Mapping[UUID, Decimal]
+) -> TypedMetric:
+    weighted_days = Decimal("0")
+    for instrument_id, weight in weights.items():
+        matches = tuple(
+            item for item in report.items
+            if item.diagnostic_code == f"LIQUIDITY_DAYS_TO_EXIT:{instrument_id}"
+            and item.metric_value is not None
+            and item.unknown_reason is None
+        )
+        if len(matches) != 1:
+            return TypedMetric.unknown("LIQUIDITY_POST_PROPOSAL_NOT_PROVEN")
+        metric_value = matches[0].metric_value
+        assert metric_value is not None
+        weighted_days += weight * Decimal(metric_value)
+    return TypedMetric.known(Decimal("1") / (Decimal("1") + weighted_days))
 
 
 def _proves_safe_improvement(candidate: ComparableProposal, hold: ComparableProposal) -> bool:
@@ -217,6 +236,8 @@ def _proves_safe_improvement(candidate: ComparableProposal, hold: ComparableProp
         if _value(left, name) > _value(right, name):
             return False
     if _value(left, "liquidity") < _value(right, "liquidity"):
+        return False
+    if _value(left, "cost") > _value(right, "cost"):
         return False
     return (
         left.hard_violations < right.hard_violations

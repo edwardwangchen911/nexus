@@ -10,6 +10,7 @@ from nexus.diagnostics.models import PortfolioDiagnosticReport
 from nexus.diagnostics.repository import _read_report, load_frozen_snapshot
 from nexus.optimizer.authority import load_admission_authority
 from nexus.optimizer.compare import evaluate_dimensions
+from nexus.optimizer.cost_policy import load_cost_policy_v1
 from nexus.optimizer.minimum_change import ReductionCandidate
 from nexus.optimizer.models import (
     OptimizationPolicy,
@@ -82,6 +83,7 @@ async def build_and_persist_proposal_group(
     if report_record is None:
         raise ValueError("optimization diagnostic authority is missing")
     report = await _read_report(session, report_record)
+    cost_policy = await load_cost_policy_v1(session)
     selection = (
         None
         if loaded.persistence.selection_authority_id is None
@@ -110,7 +112,9 @@ async def build_and_persist_proposal_group(
             "cost_model_version": "cost_policy_v1",
         }
     )
-    comparisons = _comparison_inputs(group, report, minimum_inputs)
+    comparisons = _comparison_inputs(
+        group, report, minimum_inputs, snapshot, cost_policy.parameters
+    )
     return await create_proposal_group_idempotently(
         session,
         actor_id=actor_id,
@@ -204,10 +208,12 @@ def _comparison_inputs(
     group: OptimizationProposalGroup,
     report: PortfolioDiagnosticReport,
     minimum_inputs: MinimumChangeInputs,
+    snapshot: PortfolioSnapshot,
+    cost_parameters: dict[str, object],
 ) -> tuple[ProposalComparisonInput, ProposalComparisonInput, ProposalComparisonInput]:
-    violations = sum(
-        item.severity in {"warning", "critical"} for item in report.items
-    )
+    currencies = {position.instrument_id: position.currency for position in snapshot.positions}
+    commission = Decimal(str(cost_parameters["commission_bps"]))
+    slippage = Decimal(str(cost_parameters["slippage_bps"]))
     result = []
     for proposal in group.proposals:
         incomplete_strategy = (
@@ -217,23 +223,19 @@ def _comparison_inputs(
         incomplete_minimum = (
             proposal.variant == "minimum_change" and not minimum_inputs.evidence_complete
         )
-        violation_count = max(
-            0,
-            violations
-            - int(proposal.variant == "minimum_change" and minimum_inputs.excess_weight > 0),
-        )
+        cost = proposal.turnover * (commission + slippage) / Decimal("10000")
         dimensions = evaluate_dimensions(
             proposal,
             report,
-            hard_violations=violation_count,
-            cost=None if incomplete_strategy or incomplete_minimum else Decimal("0"),
+            cost=None if incomplete_strategy or incomplete_minimum else cost,
+            instrument_currencies=currencies,
         )
         result.append(
             ProposalComparisonInput(
                 variant=proposal.variant,
-                violation_count=violation_count,
+                violation_count=dimensions.hard_violations,
                 turnover=proposal.turnover,
-                cost=Decimal("0") if not incomplete_strategy and not incomplete_minimum else None,
+                cost=cost if not incomplete_strategy and not incomplete_minimum else None,
                 unknown_metrics=dimensions.unknown_ranked_dimensions
                 + (("strategy_evidence",) if incomplete_strategy else ())
                 + (("minimum_change_evidence",) if incomplete_minimum else ()),

@@ -1,13 +1,21 @@
 # ruff: noqa: E501
 """Unknown-safe deterministic proposal comparison."""
 
+from datetime import UTC, datetime
+from decimal import Decimal
+from uuid import UUID
+
 import pytest
+from nexus.diagnostics.models import DiagnosticItem, PortfolioDiagnosticReport
+from nexus.domain.evidence import EvidenceRef
 from nexus.optimizer.compare import (
     ComparableProposal,
     ComparisonDimensions,
     TypedMetric,
     compare_proposals,
+    evaluate_dimensions,
 )
+from nexus.optimizer.models import OptimizationProposal, ProposalPosition
 
 
 def test_typed_metric_rejects_binary_float() -> None:
@@ -47,7 +55,7 @@ def test_comparison_requires_every_typed_dimension_and_no_risk_deterioration() -
     result = compare_proposals(
         (
             ComparableProposal("hold_current", _dimensions(violations=1, top1="0.5", drawdown="0.2", cost="0")),
-            ComparableProposal("minimum_change", _dimensions(violations=0, top1="0.4", drawdown="0.2", cost="0.01")),
+            ComparableProposal("minimum_change", _dimensions(violations=0, top1="0.4", drawdown="0.2", cost="0")),
             ComparableProposal("strategy_target", _dimensions(violations=0, top1="0.3", drawdown="0.3", cost="0.02")),
         )
     )
@@ -115,3 +123,55 @@ def test_comparison_excludes_partial_stale_and_incomplete_evidence() -> None:
     assert result.recommendation == "hold_current"
     assert result.ranked_variants == ("hold_current",)
     assert result.excluded_variants == ("minimum_change", "strategy_target")
+
+
+def test_dimension_evaluator_uses_each_variants_normalized_post_weights() -> None:
+    first = UUID("0198d500-1000-7000-8000-000000000e01")
+    second = UUID("0198d500-1000-7000-8000-000000000e02")
+    baseline = UUID("0198d500-1000-7000-8000-000000000e03")
+    proposal = OptimizationProposal(
+        variant="minimum_change",
+        baseline_portfolio_snapshot_id=baseline,
+        positions=(
+            ProposalPosition(
+                instrument_id=first, current_weight="0.5", target_weight="0.4",
+                action="reduce", reason_code="TEST",
+            ),
+            ProposalPosition(
+                instrument_id=second, current_weight="0.3", target_weight="0.2",
+                action="reduce", reason_code="TEST",
+            ),
+        ),
+        cash_current_weight="0.2", cash_target_weight="0.4", analysis_only=True,
+        strategy_evidence_complete=False,
+    )
+    now = datetime(2026, 8, 24, tzinfo=UTC)
+    evidence = EvidenceRef(
+        source="fixture", object_id="liquidity", available_at=now,
+        location="fixture://liquidity", content_hash="a" * 64,
+    )
+    items = tuple(
+        DiagnosticItem(
+            diagnostic_code=f"LIQUIDITY_DAYS_TO_EXIT:{instrument_id}",
+            metric_value=value, unit="trading_days", reference_limit="2",
+            policy_scope="currency:USD", severity="info", actionability="monitor",
+            unknown_reason=None, evidence_refs=(evidence,),
+        )
+        for instrument_id, value in ((first, "1"), (second, "5"))
+    )
+    report = PortfolioDiagnosticReport(
+        portfolio_snapshot_id=baseline, snapshot_as_of=now,
+        policy_version="real_advisory_policy_v1", optimization_need="OPTIMIZATION_CANDIDATE",
+        items=items,
+    )
+    result = evaluate_dimensions(
+        proposal, report, cost=Decimal("0.001"),
+        instrument_currencies={first: "USD", second: "HKD"},
+    )
+    assert result.hard_violations == 2
+    assert result.top1.value == Decimal("2") / Decimal("3")
+    assert result.top3.value == Decimal("1")
+    assert result.hhi.value == Decimal("5") / Decimal("9")
+    assert result.currency_exposure.value == Decimal("2") / Decimal("3")
+    assert result.liquidity.value == Decimal("0.3")
+    assert result.volatility.status == result.drawdown.status == "unknown"

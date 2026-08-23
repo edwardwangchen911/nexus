@@ -222,7 +222,20 @@ async def test_production_builder_uses_frozen_diagnostics_selection_and_atomic_w
     assert tuple(child.strategy_evidence_complete for child in children) == (False, False, True)
     hold_metrics = comparisons["hold_current"].metrics["dimensions"]  # type: ignore[union-attr,index]
     minimum_metrics = comparisons["minimum_change"].metrics["dimensions"]  # type: ignore[union-attr,index]
-    assert Decimal(minimum_metrics["top1"]["value"]) < Decimal(hold_metrics["top1"]["value"])
+    assert minimum_metrics["top1"] == hold_metrics["top1"] == {
+        "status": "known", "value": "1", "reason": None,
+    }
+    assert minimum_metrics["top3"] == minimum_metrics["hhi"] == minimum_metrics["top1"]
+    assert minimum_metrics["currency_exposure"] == minimum_metrics["top1"]
+    assert minimum_metrics["liquidity"] == {
+        "status": "known", "value": "0.5", "reason": None,
+    }
+    assert Decimal(minimum_metrics["turnover"]["value"]) == Decimal("0.0001")
+    assert minimum_metrics["cost"]["status"] == "known"
+    assert Decimal(minimum_metrics["cost"]["value"]) == Decimal("0")
+    assert minimum_metrics["volatility"]["reason"] == "VOLATILITY_POST_PROPOSAL_NOT_PROVEN"
+    assert minimum_metrics["drawdown"]["reason"] == "DRAWDOWN_POST_PROPOSAL_NOT_PROVEN"
+    assert minimum_metrics["correlation"]["reason"] == "CORRELATION_POST_PROPOSAL_NOT_PROVEN"
     assert minimum_metrics["sector_exposure"] == {
         "status": "unknown",
         "value": None,
