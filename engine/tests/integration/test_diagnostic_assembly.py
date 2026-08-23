@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -132,6 +133,32 @@ async def test_missing_reader_or_tampered_artifact_never_consumes_report_slot(
             )
         assert await _report_count(session) == 0
 
+
+@pytest.mark.asyncio
+async def test_authoritative_service_serializes_same_input_replay(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    payloads: dict[str, bytes] = {}
+    async with factory() as session, session.begin():
+        await _seed_spy(session)
+        await _add_series(session, payloads, INSTRUMENT_ID, "asset")
+        await _add_series(session, payloads, SPY_ID, "benchmark")
+
+    async def diagnose():
+        async with factory() as session, session.begin():
+            return await diagnose_and_persist(
+                session,
+                portfolio_id=PORTFOLIOS[0],
+                snapshot_id=SNAPSHOT_ID,
+                artifact_reader=FixtureArtifactReader(payloads),
+            )
+
+    reports = await asyncio.gather(diagnose(), diagnose())
+
+    assert reports[0] == reports[1]
+    assert await _report_count_from_url(migrated_database_url) == 1
 
 @pytest.mark.asyncio
 async def test_assembler_executes_source_policy_and_excludes_future_revision(

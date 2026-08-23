@@ -2,7 +2,7 @@
 
 import json
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from hashlib import sha256
 from typing import Literal, cast
 from uuid import UUID
@@ -317,8 +317,12 @@ async def _read_report(
     )
 
 
-def _decimal(value: str | None) -> Decimal | None:
-    return None if value is None else Decimal(value)
+def _stored_decimal(value: str | None) -> Decimal | None:
+    if value is None:
+        return None
+    with localcontext() as context:
+        context.prec = 50
+        return Decimal(value).quantize(Decimal("0.000000000001"))
 
 
 def _string(value: Decimal | None) -> str | None:
@@ -350,9 +354,10 @@ def _reports_equivalent(
     for left, right in zip(stored.items, replay.items, strict=True):
         if (
             left.diagnostic_code != right.diagnostic_code
-            or _decimal(left.metric_value) != _decimal(right.metric_value)
+            or _stored_decimal(left.metric_value) != _stored_decimal(right.metric_value)
             or left.unit != right.unit
-            or _decimal(left.reference_limit) != _decimal(right.reference_limit)
+            or _stored_decimal(left.reference_limit)
+            != _stored_decimal(right.reference_limit)
             or left.policy_scope != right.policy_scope
             or left.severity != right.severity
             or left.actionability != right.actionability
