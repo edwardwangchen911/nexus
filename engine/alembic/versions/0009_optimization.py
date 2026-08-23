@@ -256,6 +256,12 @@ def upgrade() -> None:
     op.execute(
         "CREATE TRIGGER trg_optimization_groups_lifecycle BEFORE UPDATE ON optimization_proposal_groups FOR EACH ROW EXECUTE FUNCTION nexus_optimization_group_lifecycle()"
     )
+    op.execute(
+        "CREATE FUNCTION nexus_validate_strategy_position() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE proposal_variant text; evidence_complete boolean; selection_ref uuid; BEGIN SELECT p.variant, p.strategy_evidence_complete, g.selection_authority_id INTO proposal_variant, evidence_complete, selection_ref FROM optimization_proposals p JOIN optimization_proposal_groups g ON g.id = p.proposal_group_id WHERE p.id = NEW.proposal_id; IF proposal_variant = 'strategy_target' AND NOT evidence_complete AND NEW.target_weight IS DISTINCT FROM NEW.current_weight THEN RAISE EXCEPTION 'incomplete strategy must preserve baseline' USING ERRCODE = '23514'; END IF; IF proposal_variant = 'strategy_target' AND evidence_complete AND (selection_ref IS NULL OR NEW.target_weight > 0.125 OR (NEW.target_weight > 0 AND NOT EXISTS (SELECT 1 FROM baseline_selection_authorities b, jsonb_array_elements_text(b.selected_instrument_ids) selected WHERE b.id = selection_ref AND selected = NEW.instrument_id::text))) THEN RAISE EXCEPTION 'strategy target exceeds bound selection' USING ERRCODE = '23514'; END IF; RETURN NEW; END; $$"
+    )
+    op.execute(
+        "CREATE TRIGGER trg_proposal_positions_strategy_binding BEFORE INSERT ON proposal_positions FOR EACH ROW EXECUTE FUNCTION nexus_validate_strategy_position()"
+    )
     for table in (
         "optimization_policies",
         "cost_policies",
@@ -284,6 +290,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER trg_proposal_positions_strategy_binding ON proposal_positions")
+    op.execute("DROP FUNCTION nexus_validate_strategy_position()")
     op.execute(
         "DROP TRIGGER trg_baseline_selection_authorities_validate ON baseline_selection_authorities"
     )

@@ -1,6 +1,7 @@
 """Real PostgreSQL persistence contracts for complete proposal groups."""
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -9,6 +10,7 @@ import httpx
 import pytest
 from helpers.portfolio_api import (
     INSTRUMENT_ID,
+    ORDER_INSTRUMENT_ID,
     PORTFOLIOS,
     app,
     headers,
@@ -28,6 +30,7 @@ from nexus.optimizer.production import create_proposal_group_idempotently
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import (
+    BaselineSelectionAuthorityRecord,
     OptimizationProposalGroupRecord,
     OptimizationProposalRecord,
     ProposalComparisonRecord,
@@ -42,6 +45,7 @@ from sqlalchemy.exc import IntegrityError
 _SNAPSHOT_ID = UUID("0198d500-1000-7000-8000-000000000041")
 _OPTIMIZER_POLICY_ID = UUID("e690b91d-1e24-5de3-b2b2-566a463fca25")
 _CLOCK = datetime(2026, 8, 24, tzinfo=UTC)
+_SELECTION_ID = UUID("0198d500-1000-7000-8000-000000000904")
 
 
 def _known_dimensions() -> ComparisonDimensions:
@@ -59,7 +63,6 @@ def _known_dimensions() -> ComparisonDimensions:
 async def test_writer_commits_exact_group_children_positions_and_comparisons_atomically(
     migrated_database_url: str,
 ) -> None:
-    """A missing child/comparison or failed position insert must leave no partial group."""
     await seed_portfolio_list(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
     authority = await _seed_authority(factory)
@@ -141,10 +144,82 @@ async def test_writer_commits_exact_group_children_positions_and_comparisons_ato
 
 
 @pytest.mark.asyncio
+async def test_writer_rejects_strategy_without_bound_selection_atomically(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    authority = replace(await _seed_authority(factory), selection_authority_id=None)
+    invalid = _group().model_copy(
+        update={
+            "proposals": (
+                *_group().proposals[:2],
+                _group().proposals[2].model_copy(update={"strategy_evidence_complete": True}),
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="strategy target is not bound"):
+        async with factory() as session, session.begin():
+            await persist_proposal_group(session, invalid, authority, _comparisons())
+    async with factory() as session:
+        count = await session.scalar(
+            select(func.count()).select_from(OptimizationProposalGroupRecord)
+        )
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_writer_rejects_overweight_or_unselected_strategy_targets(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    authority = await _seed_authority(factory)
+    strategy = _group().proposals[2]
+    overweight = strategy.model_copy(
+        update={
+            "positions": (
+                strategy.positions[0].model_copy(
+                    update={"target_weight": Decimal("0.126")}
+                ),
+            ),
+            "cash_target_weight": Decimal("0.874"),
+        }
+    )
+    unrelated = strategy.model_copy(
+        update={
+            "positions": (
+                strategy.positions[0].model_copy(
+                    update={"target_weight": Decimal("0"), "action": "reduce"}
+                ),
+                ProposalPosition(
+                    instrument_id=ORDER_INSTRUMENT_ID,
+                    current_weight=Decimal("0"),
+                    target_weight=Decimal("0.125"),
+                    action="increase",
+                    reason_code="UNBOUND_TARGET",
+                ),
+            ),
+        }
+    )
+    for invalid in (overweight, unrelated):
+        group = _group().model_copy(
+            update={"proposals": (*_group().proposals[:2], invalid)}
+        )
+        with pytest.raises(ValueError, match="exceeds its bound selection"):
+            async with factory() as session, session.begin():
+                await persist_proposal_group(session, group, authority, _comparisons())
+    async with factory() as session:
+        count = await session.scalar(
+            select(func.count()).select_from(OptimizationProposalGroupRecord)
+        )
+    assert count == 0
+
+
+@pytest.mark.asyncio
 async def test_writer_rolls_back_every_row_when_a_late_position_is_invalid(
     migrated_database_url: str,
 ) -> None:
-    """An injected child failure must not leave a parent, child, position, or comparison behind."""
     await seed_portfolio_list(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
     authority = await _seed_authority(factory)
@@ -192,7 +267,6 @@ async def test_writer_rolls_back_every_row_when_a_late_position_is_invalid(
 async def test_idempotent_group_writer_has_one_concurrent_identity_and_conflicts_on_hash(
     migrated_database_url: str,
 ) -> None:
-    """Two sessions with one key/hash commit exactly one complete three-way group."""
     await seed_portfolio_list(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
     authority = await _seed_authority(factory)
@@ -318,6 +392,24 @@ async def _seed_authority(factory) -> ProposalPersistenceAuthority:
                 diagnostic_input_hash="d" * 64,
             )
         )
+        session.add(
+            BaselineSelectionAuthorityRecord(
+                id=_SELECTION_ID,
+                policy_version="baseline_v1",
+                data_snapshot_id=data_snapshot_id,
+                decision_at=_CLOCK,
+                available_at=_CLOCK,
+                evidence_refs=["selection:writer"],
+                candidates=[
+                    {
+                        "instrument_id": str(INSTRUMENT_ID),
+                        "provenance_refs": ["candidate:writer"],
+                    }
+                ],
+                selected_instrument_ids=[str(INSTRUMENT_ID)],
+                evidence_hash="a" * 64,
+            )
+        )
     return ProposalPersistenceAuthority(
         diagnostic_report_id=report_id,
         data_snapshot_id=data_snapshot_id,
@@ -333,6 +425,7 @@ async def _seed_authority(factory) -> ProposalPersistenceAuthority:
         requires_fx=False,
         cost_complete=True,
         portfolio_scope="internal_paper",
+        selection_authority_id=_SELECTION_ID,
     )
 
 
@@ -351,7 +444,7 @@ def _group() -> OptimizationProposalGroup:
         cash_current_weight=Decimal("0"),
         cash_target_weight=Decimal("0"),
         analysis_only=False,
-        strategy_evidence_complete=True,
+        strategy_evidence_complete=False,
         portfolio_scope="internal_paper",
     )
     return OptimizationProposalGroup(
@@ -370,6 +463,17 @@ def _group() -> OptimizationProposalGroup:
                 update={
                     "variant": "strategy_target",
                     "proposal_id": UUID("0198d500-1000-7000-8000-000000000912"),
+                    "positions": (
+                        position.model_copy(
+                            update={
+                                "target_weight": Decimal("0.125"),
+                                "action": "reduce",
+                                "reason_code": "BASELINE_SELECTION_AUTHORITY",
+                            }
+                        ),
+                    ),
+                    "cash_target_weight": Decimal("0.875"),
+                    "strategy_evidence_complete": True,
                 }
             ),
         ),

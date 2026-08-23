@@ -1,5 +1,6 @@
 """Database-enforced lifecycle for immutable optimization proposal children."""
 
+from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
@@ -17,6 +18,7 @@ from nexus.persistence.models.optimization import (
     OptimizationProposalGroupRecord,
     OptimizationProposalRecord,
     ProposalComparisonRecord,
+    ProposalPositionRecord,
 )
 from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
 from nexus.quality.source_policy import SOURCE_POLICY_ID, load_source_policy_v1
@@ -100,6 +102,13 @@ async def _has_executable_shadow_authority(
             .with_for_update()
         )
     )
+    strategy_positions = () if strategy is None else tuple(
+        await session.scalars(
+            select(ProposalPositionRecord).where(
+                ProposalPositionRecord.proposal_id == strategy.id
+            )
+        )
+    )
     try:
         source_policy = await load_source_policy_v1(session, instrument_tick_size=None)
         cost_policy = await load_cost_policy_v1(session)
@@ -123,6 +132,14 @@ async def _has_executable_shadow_authority(
             group.portfolio_scope == "real_read_only" or not strategy.analysis_only
         )
         and strategy.strategy_evidence_complete
+        and all(
+            position.target_weight <= Decimal("0.125")
+            and (
+                position.target_weight == Decimal("0")
+                or position.instrument_id in selection.selected_instrument_ids
+            )
+            for position in strategy_positions
+        )
         and snapshot is not None
         and snapshot.status == "READY"
         and report is not None

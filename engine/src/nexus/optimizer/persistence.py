@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.optimizer.compare import ComparisonDimensions
 from nexus.optimizer.models import OptimizationProposalGroup
+from nexus.optimizer.selection_authority import load_selection_authority
 from nexus.persistence.models.optimization import (
     OptimizationProposalGroupRecord,
     OptimizationProposalRecord,
@@ -124,6 +125,7 @@ async def persist_proposal_group(
         raise ValueError("group valuation time must match its authority")
     if group.portfolio_scope != authority.portfolio_scope:
         raise ValueError("group portfolio scope must match its authority")
+    await _validate_strategy_binding(session, group, authority)
     record = OptimizationProposalGroupRecord(
         id=group.proposal_group_id,
         baseline_portfolio_snapshot_id=group.baseline_portfolio_snapshot_id,
@@ -181,3 +183,37 @@ async def persist_proposal_group(
         )
     await session.flush()
     return record
+
+
+async def _validate_strategy_binding(
+    session: AsyncSession,
+    group: OptimizationProposalGroup,
+    authority: ProposalPersistenceAuthority,
+) -> None:
+    strategy = group.proposals[2]
+    if authority.selection_authority_id is None:
+        if strategy.strategy_evidence_complete or any(
+            position.target_weight != position.current_weight for position in strategy.positions
+        ):
+            raise ValueError("strategy target is not bound to selection authority")
+        return
+    selection = await load_selection_authority(
+        session,
+        authority.selection_authority_id,
+        data_snapshot_id=authority.data_snapshot_id,
+        valuation_time=authority.valuation_time,
+    )
+    if not strategy.strategy_evidence_complete:
+        if any(
+            position.target_weight != position.current_weight
+            for position in strategy.positions
+        ):
+            raise ValueError("incomplete strategy must preserve the baseline")
+        return
+    selected = set(selection.selected_instrument_ids)
+    if any(
+        position.target_weight > Decimal("0.125")
+        or (position.target_weight > 0 and position.instrument_id not in selected)
+        for position in strategy.positions
+    ):
+        raise ValueError("strategy target exceeds its bound selection")
