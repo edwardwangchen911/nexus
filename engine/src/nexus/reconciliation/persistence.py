@@ -5,6 +5,8 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
+from nexus.providers.broker.base import BrokerSyncResult
 from nexus.reconciliation.admission import AdmissionResult, TriggerKind, admit_broker_sync
 from nexus.reconciliation.persistence_errors import (
     BrokerSyncPersistenceError,
@@ -12,6 +14,7 @@ from nexus.reconciliation.persistence_errors import (
     SnapshotNotProposalEligible,
     SyncCooldownActive,
 )
+from nexus.reconciliation.snapshot_persistence import finalize_broker_sync
 
 __all__ = [
     "AdmissionResult",
@@ -51,4 +54,16 @@ class BrokerSyncRepository:
             idempotency_key=idempotency_key,
             request_hash=request_hash,
             accepted_at=accepted_at,
+        )
+
+    async def finalize(
+        self,
+        result: BrokerSyncResult,
+        *,
+        completed_at: datetime,
+    ) -> PortfolioSnapshotRecord:
+        return await finalize_broker_sync(
+            self._session,
+            result,
+            completed_at=completed_at,
         )
