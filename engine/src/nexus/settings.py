@@ -66,14 +66,6 @@ class EngineSettings(_SafeSettings):
         default=None,
         validation_alias="NEXUS_ENGINE_HMAC_PREVIOUS_SECRET",
     )
-    fosun_gateway_base_url: str | None = Field(
-        default=None,
-        validation_alias="FOSUN_GATEWAY_BASE_URL",
-    )
-    fosun_gateway_hmac_secret: SecretStr | None = Field(
-        default=None,
-        validation_alias="FOSUN_GATEWAY_HMAC_SECRET",
-    )
 
     @model_validator(mode="after")
     def apply_environment_policy(self) -> Self:
@@ -93,8 +85,6 @@ class EngineSettings(_SafeSettings):
             "object_store_secret_access_key": SecretStr("fixture-object-store-secret"),
             "engine_hmac_current_key_id": "fixture-current",
             "engine_hmac_current_secret": SecretStr("fixture-engine-hmac-secret"),
-            "fosun_gateway_base_url": "http://fosun-gateway:8081",
-            "fosun_gateway_hmac_secret": SecretStr("fixture-gateway-hmac-secret"),
         }
         for name, value in fixtures.items():
             if getattr(self, name) is None:
@@ -130,8 +120,6 @@ class EngineSettings(_SafeSettings):
             "OBJECT_STORE_SECRET_ACCESS_KEY": self.object_store_secret_access_key,
             "NEXUS_ENGINE_HMAC_CURRENT_KEY_ID": self.engine_hmac_current_key_id,
             "NEXUS_ENGINE_HMAC_CURRENT_SECRET": self.engine_hmac_current_secret,
-            "FOSUN_GATEWAY_BASE_URL": self.fosun_gateway_base_url,
-            "FOSUN_GATEWAY_HMAC_SECRET": self.fosun_gateway_hmac_secret,
         }
 
     @classmethod
