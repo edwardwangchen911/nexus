@@ -1,27 +1,15 @@
 """Deterministic diagnosis entry point with fail-closed readiness precedence."""
 
-from collections import defaultdict
-from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.diagnostics.decision import optimization_need as _optimization_need
+from nexus.diagnostics.evidence import EvidenceResolver, EvidenceResult
 from nexus.diagnostics.items import item as _item
 from nexus.diagnostics.items import threshold_item as _threshold_item
 from nexus.diagnostics.items import unknown_item as _unknown_item
-from nexus.diagnostics.items import upper_threshold_item as _upper_threshold_item
-from nexus.diagnostics.metrics import (
-    annualized_volatility,
-    beta_and_correlation_by_session,
-    correlation_components_by_session,
-    days_to_exit,
-    maximum_drawdown,
-    qualified_session_closes,
-    security_hhi,
-    top_weights,
-)
 from nexus.diagnostics.models import (
     DiagnosticHistory,
     DiagnosticItem,
@@ -30,6 +18,7 @@ from nexus.diagnostics.models import (
     PortfolioDiagnosticReport,
 )
 from nexus.diagnostics.policy import RealAdvisoryPolicy, load_real_advisory_policy_v1
+from nexus.diagnostics.portfolio_evaluator import evaluate_currency_scopes
 from nexus.diagnostics.repository import load_frozen_snapshot, load_history, persist_report
 from nexus.diagnostics.scope import (
     assert_fosun_read_only_scope as _assert_fosun_read_only_scope,
@@ -37,8 +26,7 @@ from nexus.diagnostics.scope import (
 from nexus.diagnostics.scope import (
     has_future_session_conflict as _has_future_session_conflict,
 )
-from nexus.diagnostics.valuation import position_values as _position_values
-from nexus.providers.broker.base import BrokerPosition, PortfolioSnapshot
+from nexus.providers.broker.base import PortfolioSnapshot
 
 
 def diagnose_portfolio(
@@ -53,7 +41,42 @@ def diagnose_portfolio(
         return _report(snapshot, policy, "BLOCKED", (_blocked_item(market, source_conflict),))
     if market.quality != "PASS":
         return _report(snapshot, policy, "RESEARCH_REQUIRED", (_market_unknown_item(market),))
-    items = _evaluate_currency_scopes(snapshot, market, policy)
+    resolver = EvidenceResolver(snapshot.as_of)
+    snapshot_evidence = resolver.resolve(
+        market.evidence.snapshot,
+        "SNAPSHOT",
+        expected_as_of=snapshot.as_of,
+    )
+    if snapshot_evidence.reason is not None:
+        missing_items = [
+            _unknown_item(
+                "SNAPSHOT_EVIDENCE",
+                "status",
+                snapshot_evidence.reason,
+                "portfolio",
+                market,
+            )
+        ]
+        missing_items.extend(
+            _unknown_item(
+                f"LIQUIDITY_DAYS_TO_EXIT:{position.instrument_id}",
+                "trading_days",
+                "ADV20_MISSING",
+                f"currency:{position.currency}",
+                market,
+            )
+            for position in snapshot.positions
+            if market.adv20.get(position.instrument_id) is None
+        )
+        return _report(
+            snapshot,
+            policy,
+            "RESEARCH_REQUIRED",
+            tuple(missing_items),
+        )
+    items = evaluate_currency_scopes(
+        snapshot, market, policy, resolver, snapshot_evidence.refs
+    )
     currencies = {item.currency for item in snapshot.cash} | {
         item.currency for item in snapshot.positions
     }
@@ -77,6 +100,33 @@ def diagnose_portfolio(
                 f"currency:{next(iter(currencies))}",
                 market,
                 warning=True,
+                evidence_refs=snapshot_evidence.refs,
+            )
+        )
+    calendar = _calendar_evidence(snapshot, market, resolver)
+    if calendar.reason is not None:
+        items.append(
+            _unknown_item(
+                "DATA_COMPLETENESS_TRADING_CALENDAR",
+                "sessions",
+                calendar.reason,
+                "portfolio",
+                market,
+            )
+        )
+    else:
+        items.append(
+            _item(
+                "DATA_COMPLETENESS_TRADING_CALENDAR",
+                Decimal(len(market.trading_sessions)),
+                "sessions",
+                None,
+                "portfolio",
+                "info",
+                "monitor",
+                None,
+                market,
+                evidence_refs=calendar.refs,
             )
         )
     _assert_fosun_read_only_scope(snapshot, market, items)
@@ -84,7 +134,12 @@ def diagnose_portfolio(
     return _report(
         snapshot,
         policy,
-        _optimization_need(items, history, trading_day, market.trading_sessions),
+        _optimization_need(
+            items,
+            history,
+            trading_day,
+            market.trading_sessions if calendar.reason is None else (),
+        ),
         tuple(items),
     )
 
@@ -107,272 +162,22 @@ async def diagnose_and_persist(
     return report
 
 
-def _evaluate_currency_scopes(
-    snapshot: PortfolioSnapshot, market: MarketEvidence, policy: RealAdvisoryPolicy
-) -> list[DiagnosticItem]:
-    positions_by_currency: dict[str, list[BrokerPosition]] = defaultdict(list)
-    cash_by_currency: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
-    for cash in snapshot.cash:
-        cash_by_currency[cash.currency] += cash.cash_balance
-    for position in snapshot.positions:
-        positions_by_currency[position.currency].append(position)
-    items: list[DiagnosticItem] = []
-    for currency in sorted(set(positions_by_currency) | set(cash_by_currency)):
-        scope = f"currency:{currency}"
-        values, value_unknown = _position_values(positions_by_currency[currency])
-        if value_unknown is not None:
-            items.append(
-                _unknown_item("POSITION_MARKET_VALUE", currency, value_unknown, scope, market)
-            )
-        if values:
-            items.extend(_concentration_items(values, scope, market, policy))
-            items.extend(_exposure_items(values, scope, market, policy))
-            items.extend(_liquidity_items(values, scope, market, policy, snapshot))
-            items.extend(_market_risk_items(values, scope, market, policy, snapshot))
-        total = cash_by_currency[currency] + sum((value for _, value in values), Decimal(0))
-        if total > 0:
-            cash_ratio = cash_by_currency[currency] / total
-            items.append(
-                _threshold_item(
-                    "CASH_RATIO",
-                    cash_ratio,
-                    "ratio",
-                    policy.cash_minimum,
-                    scope,
-                    market,
-                    warning=cash_ratio < policy.cash_minimum,
-                )
-            )
-    return items
-
-
-def _concentration_items(
-    values: list[tuple[BrokerPosition, Decimal]],
-    scope: str,
-    market: MarketEvidence,
-    policy: RealAdvisoryPolicy,
-) -> list[DiagnosticItem]:
-    amounts = tuple(value for _, value in values)
-    weights = top_weights(amounts)
-    hhi = security_hhi(amounts)
-    if weights is None or hhi is None:
-        return [_unknown_item("CONCENTRATION_HHI", "ratio", "NO_SECURITIES", scope, market)]
-    top3 = sum(weights[:3], Decimal(0))
-    return [
-        _upper_threshold_item(
-            "CONCENTRATION_TOP1",
-            weights[0],
-            policy.single_name_warning,
-            policy.single_name_critical,
-            scope,
-            market,
-        ),
-        _threshold_item(
-            "CONCENTRATION_TOP3",
-            top3,
-            "ratio",
-            policy.top3_warning,
-            scope,
-            market,
-            warning=top3 > policy.top3_warning,
-        ),
-        _item("CONCENTRATION_HHI", hhi, "ratio", None, scope, "info", "monitor", None, market),
-    ]
-
-
-def _exposure_items(
-    values: list[tuple[BrokerPosition, Decimal]],
-    scope: str,
-    market: MarketEvidence,
-    policy: RealAdvisoryPolicy,
-) -> list[DiagnosticItem]:
-    total = sum((value for _, value in values), Decimal(0))
-    buckets: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
-    for position, value in values:
-        definitions = market.risk_buckets.get(position.instrument_id)
-        if not definitions:
-            return [
-                _unknown_item("RISK_BUCKET_EXPOSURE", "ratio", "RISK_BUCKET_MISSING", scope, market)
-            ]
-        for bucket, bucket_weight in definitions.items():
-            buckets[bucket] += (value / total) * bucket_weight
-    return [
-        _upper_threshold_item(
-            f"RISK_BUCKET_EXPOSURE:{bucket}",
-            weight,
-            policy.sector_warning,
-            policy.sector_critical,
-            scope,
-            market,
-        )
-        for bucket, weight in sorted(buckets.items())
-    ]
-
-
-def _liquidity_items(
-    values: list[tuple[BrokerPosition, Decimal]],
-    scope: str,
-    market: MarketEvidence,
-    policy: RealAdvisoryPolicy,
-    snapshot: PortfolioSnapshot,
-) -> list[DiagnosticItem]:
-    result: list[DiagnosticItem] = []
-    for position, value in values:
-        refs = () if snapshot.as_of is None else market.refs_for(
-            f"adv20:{position.instrument_id}", as_of=snapshot.as_of
-        )
-        metric = days_to_exit(value, market.adv20.get(position.instrument_id))
-        code = f"LIQUIDITY_DAYS_TO_EXIT:{position.instrument_id}"
-        if metric is None or not refs:
-            result.append(_unknown_item(code, "trading_days", "ADV20_MISSING", scope, market))
-        else:
-            result.append(
-                _upper_threshold_item(
-                    code,
-                    metric,
-                    policy.days_to_exit_warning,
-                    policy.days_to_exit_critical,
-                    scope,
-                    market,
-                    unit="trading_days",
-                    evidence_refs=refs,
-                )
-            )
+def _calendar_evidence(
+    snapshot: PortfolioSnapshot, market: MarketEvidence, resolver: EvidenceResolver
+) -> EvidenceResult:
+    expected_session = market.trading_sessions[-1] if market.trading_sessions else None
+    result = resolver.resolve(
+        market.evidence.trading_calendar,
+        "TRADING_CALENDAR",
+        expected_session=expected_session,
+    )
+    if (
+        result.reason is None
+        and snapshot.as_of is not None
+        and any(session > snapshot.as_of.date() for session in market.trading_sessions)
+    ):
+        return EvidenceResult(reason="TRADING_CALENDAR_EVIDENCE_FUTURE")
     return result
-
-
-def _market_risk_items(
-    values: list[tuple[BrokerPosition, Decimal]],
-    scope: str,
-    market: MarketEvidence,
-    policy: RealAdvisoryPolicy,
-    snapshot: PortfolioSnapshot,
-) -> list[DiagnosticItem]:
-    if snapshot.as_of is None:
-        return [_unknown_item("MARKET_RISK", "ratio", "SNAPSHOT_AS_OF_MISSING", scope, market)]
-    benchmark = qualified_session_closes(market.benchmark, snapshot.as_of)
-    returns_by_instrument: dict[UUID, dict[date, Decimal]] = {}
-    items: list[DiagnosticItem] = []
-    for position, _ in values:
-        session_closes = qualified_session_closes(
-            market.prices.get(position.instrument_id), snapshot.as_of
-        )
-        if session_closes is None:
-            items.append(
-                _unknown_item(
-                    f"MARKET_RISK:{position.instrument_id}",
-                    "ratio",
-                    "PRICE_HISTORY_MISSING",
-                    scope,
-                    market,
-                )
-            )
-            continue
-        closes = tuple(session_closes[session] for session in sorted(session_closes))
-        volatility20, volatility63, drawdown = (
-            annualized_volatility(closes, 20),
-            annualized_volatility(closes, 63),
-            maximum_drawdown(closes),
-        )
-        beta_correlation = (
-            None
-            if benchmark is None
-            else beta_and_correlation_by_session(session_closes, benchmark)
-        )
-        if None in (volatility20, volatility63, drawdown, beta_correlation):
-            items.append(
-                _unknown_item(
-                    f"MARKET_RISK:{position.instrument_id}",
-                    "ratio",
-                    "MARKET_RISK_COVERAGE_INSUFFICIENT",
-                    scope,
-                    market,
-                )
-            )
-            continue
-        assert volatility20 is not None and volatility63 is not None and drawdown is not None
-        assert beta_correlation is not None
-        sessions = tuple(sorted(session_closes))
-        returns_by_instrument[position.instrument_id] = {
-            current: session_closes[current] / session_closes[prior] - Decimal(1)
-            for prior, current in zip(sessions, sessions[1:])
-            if session_closes[prior] > 0 and session_closes[current] > 0
-        }
-        items.extend(
-            (
-                _item(
-                    f"VOLATILITY_20:{position.instrument_id}",
-                    volatility20,
-                    "annualized_ratio",
-                    None,
-                    scope,
-                    "info",
-                    "monitor",
-                    None,
-                    market,
-                ),
-                _item(
-                    f"VOLATILITY_63:{position.instrument_id}",
-                    volatility63,
-                    "annualized_ratio",
-                    None,
-                    scope,
-                    "info",
-                    "monitor",
-                    None,
-                    market,
-                ),
-                _upper_threshold_item(
-                    f"DRAWDOWN_252:{position.instrument_id}",
-                    drawdown,
-                    policy.drawdown_warning,
-                    policy.drawdown_critical,
-                    scope,
-                    market,
-                    inclusive=True,
-                ),
-                _item(
-                    f"BETA_126:{position.instrument_id}",
-                    beta_correlation[0],
-                    "ratio",
-                    None,
-                    scope,
-                    "info",
-                    "monitor",
-                    None,
-                    market,
-                ),
-                _item(
-                    f"CORRELATION_126:{position.instrument_id}",
-                    beta_correlation[1],
-                    "ratio",
-                    None,
-                    scope,
-                    "info",
-                    "monitor",
-                    None,
-                    market,
-                ),
-            )
-        )
-    components = correlation_components_by_session(returns_by_instrument)
-    if components:
-        amounts = {position.instrument_id: value for position, value in values}
-        total = sum(amounts.values(), Decimal(0))
-        for component in components:
-            weight = sum((amounts[item] for item in component), Decimal(0)) / total
-            items.append(
-                _threshold_item(
-                    "CORRELATION_CLUSTER",
-                    weight,
-                    "ratio",
-                    policy.correlation_cluster_warning,
-                    scope,
-                    market,
-                    warning=weight > policy.correlation_cluster_warning,
-                )
-            )
-    return items
 
 
 def _report(

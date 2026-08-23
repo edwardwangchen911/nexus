@@ -129,5 +129,5 @@ def item(
         severity=severity,
         actionability=actionability,
         unknown_reason=reason,
-        evidence_refs=market.evidence_refs if evidence_refs is None else evidence_refs,
+        evidence_refs=() if evidence_refs is None else evidence_refs,
     )
