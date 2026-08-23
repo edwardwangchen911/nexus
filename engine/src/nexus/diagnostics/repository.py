@@ -54,6 +54,12 @@ async def persist_report(
         raise ValueError("diagnostic report snapshot or policy authority is invalid")
     if report.trading_day != (None if snapshot.as_of is None else snapshot.as_of.date()):
         raise ValueError("diagnostic report trading day must match its frozen snapshot")
+    if any(
+        snapshot.as_of is None or ref.available_at > snapshot.as_of
+        for item in report.items
+        for ref in item.evidence_refs
+    ):
+        raise ValueError("diagnostic evidence is unavailable at frozen snapshot")
     existing = await session.scalar(
         select(PortfolioDiagnosticReportRecord).where(
             PortfolioDiagnosticReportRecord.portfolio_snapshot_id == snapshot.id,
