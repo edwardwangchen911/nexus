@@ -282,7 +282,6 @@ async def test_shadow_rejects_comparison_from_different_authority(migrated_datab
         async with factory() as session, session.begin():
             await session.execute(text("UPDATE optimization_proposal_groups SET status='shadowing', version=2 WHERE id=:id"), {"id": group_id})
 
-
 @pytest.mark.asyncio
 async def test_raw_sql_shadow_cannot_bypass_stale_policy_authority(
     migrated_database_url: str,
