@@ -10,10 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.diagnostics.decision import optimization_need as _optimization_need
 from nexus.diagnostics.metrics import (
     annualized_volatility,
-    beta_and_correlation,
+    beta_and_correlation_by_session,
     correlation_components,
     days_to_exit,
     maximum_drawdown,
+    qualified_session_closes,
     security_hhi,
     top_weights,
 )
@@ -35,9 +36,7 @@ from nexus.diagnostics.scope import (
     has_future_session_conflict as _has_future_session_conflict,
 )
 from nexus.domain.decimal import decimal_to_string
-from nexus.providers.base import PriceSeries
 from nexus.providers.broker.base import BrokerPosition, PortfolioSnapshot
-from nexus.research.features.price import point_in_time_closes
 
 
 def diagnose_portfolio(
@@ -263,12 +262,14 @@ def _market_risk_items(
 ) -> list[DiagnosticItem]:
     if snapshot.as_of is None:
         return [_unknown_item("MARKET_RISK", "ratio", "SNAPSHOT_AS_OF_MISSING", scope, market)]
-    benchmark = _closes(market.benchmark, snapshot)
+    benchmark = qualified_session_closes(market.benchmark, snapshot.as_of)
     returns_by_instrument: dict[UUID, tuple[Decimal, ...]] = {}
     items: list[DiagnosticItem] = []
     for position, _ in values:
-        closes = _closes(market.prices.get(position.instrument_id), snapshot)
-        if closes is None:
+        session_closes = qualified_session_closes(
+            market.prices.get(position.instrument_id), snapshot.as_of
+        )
+        if session_closes is None:
             items.append(
                 _unknown_item(
                     f"MARKET_RISK:{position.instrument_id}",
@@ -279,12 +280,17 @@ def _market_risk_items(
                 )
             )
             continue
+        closes = tuple(session_closes[session] for session in sorted(session_closes))
         volatility20, volatility63, drawdown = (
             annualized_volatility(closes, 20),
             annualized_volatility(closes, 63),
             maximum_drawdown(closes),
         )
-        beta_correlation = None if benchmark is None else beta_and_correlation(closes, benchmark)
+        beta_correlation = (
+            None
+            if benchmark is None
+            else beta_and_correlation_by_session(session_closes, benchmark)
+        )
         if None in (volatility20, volatility63, drawdown, beta_correlation):
             items.append(
                 _unknown_item(
@@ -378,12 +384,6 @@ def _market_risk_items(
                 )
             )
     return items
-
-
-def _closes(series: PriceSeries | None, snapshot: PortfolioSnapshot) -> tuple[Decimal, ...] | None:
-    if series is None or snapshot.as_of is None or series.quality != "PASS":
-        return None
-    return point_in_time_closes(series.bars, snapshot.as_of)
 
 
 def _upper_threshold_item(

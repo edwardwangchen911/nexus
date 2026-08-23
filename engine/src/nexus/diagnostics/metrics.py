@@ -6,6 +6,8 @@ from decimal import Decimal
 from math import ceil
 from uuid import UUID
 
+from nexus.providers.base import PriceSeries
+
 
 def security_hhi(values: Sequence[Decimal]) -> Decimal | None:
     """Return normalized security-only HHI, excluding cash at the call boundary."""
@@ -99,6 +101,21 @@ def beta_and_correlation_by_session(
     return _beta_from_pairs(
         tuple((asset_returns[session], benchmark_returns[session]) for session in sessions)
     )
+
+
+def qualified_session_closes(
+    series: PriceSeries | None, as_of: object
+) -> dict[date, Decimal] | None:
+    """Return point-in-time session closes without admitting future sessions."""
+    from datetime import datetime
+
+    if series is None or not isinstance(as_of, datetime) or series.quality != "PASS":
+        return None
+    return {
+        bar.session: bar.close
+        for bar in series.bars
+        if bar.available_at <= as_of and bar.session <= as_of.date()
+    }
 
 
 def correlation_components(
