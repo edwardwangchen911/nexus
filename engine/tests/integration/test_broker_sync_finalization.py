@@ -62,9 +62,15 @@ def test_multi_page_phase_uses_its_last_response_as_fact_time_bound() -> None:
     trace["raw_facts"]["positions_a"][0]["provider_as_of"] = (
         NOW + timedelta(microseconds=1)
     ).isoformat()
+    trace["raw_facts"]["_derived_nav"]["read_a"][0]["provider_as_of"] = (
+        NOW + timedelta(microseconds=1)
+    ).isoformat()
 
     validate_broker_sync_result(result.model_copy(update={"attempt_traces": (trace,)}))
     trace["raw_facts"]["positions_a"][0]["provider_as_of"] = (
+        NOW + timedelta(microseconds=3)
+    ).isoformat()
+    trace["raw_facts"]["_derived_nav"]["read_a"][0]["provider_as_of"] = (
         NOW + timedelta(microseconds=3)
     ).isoformat()
     with pytest.raises(InvalidBrokerSyncResult, match="response time"):
@@ -103,6 +109,10 @@ def test_fact_time_cannot_exceed_its_phase_response(phase: str, field: str) -> N
                 )
             }
         )
+    if phase.startswith(("cash_", "positions_")):
+        trace["raw_facts"]["_derived_nav"][f"read_{phase[-1]}"][0][
+            "provider_as_of"
+        ] = future_time.isoformat()
 
     with pytest.raises(InvalidBrokerSyncResult, match="response time"):
         validate_broker_sync_result(result.model_copy(update={"attempt_traces": (trace,)}))
@@ -116,3 +126,26 @@ def test_snapshot_as_of_is_recomputed_from_read_b_fact_times() -> None:
 
     with pytest.raises(InvalidBrokerSyncResult, match="snapshot as-of"):
         validate_broker_sync_result(result.model_copy(update={"portfolio_snapshot": future}))
+
+
+def test_finalization_rebuilds_both_typed_reads_before_accepting_ready() -> None:
+    result = _ready_result()
+    trace = deepcopy(result.attempt_traces[0])
+    trace["raw_facts"]["positions_a"][0]["diluted_cost"] = "98"
+
+    with pytest.raises(InvalidBrokerSyncResult, match="deterministic reconciliation"):
+        validate_broker_sync_result(result.model_copy(update={"attempt_traces": (trace,)}))
+
+
+def test_finalization_rejects_raw_key_reordering_and_nav_tamper() -> None:
+    result = _ready_result()
+    reordered = deepcopy(result.attempt_traces[0])
+    raw = reordered["raw_facts"]
+    reordered["raw_facts"] = {"positions_a": raw["positions_a"], **raw}
+    with pytest.raises(InvalidBrokerSyncResult, match="phase order"):
+        validate_broker_sync_result(result.model_copy(update={"attempt_traces": (reordered,)}))
+
+    nav_tamper = deepcopy(result.attempt_traces[0])
+    nav_tamper["raw_facts"]["_derived_nav"]["read_b"][0]["value"] = "2201"
+    with pytest.raises(InvalidBrokerSyncResult, match="NAV value"):
+        validate_broker_sync_result(result.model_copy(update={"attempt_traces": (nav_tamper,)}))

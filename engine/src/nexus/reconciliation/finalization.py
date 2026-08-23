@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
+from nexus.domain.time import require_utc
 from nexus.providers.broker.base import (
     BrokerOrderFact,
     BrokerPosition,
     BrokerSyncResult,
     CashBalance,
     SourceObservation,
+)
+from nexus.reconciliation.facts import (
+    BrokerReadSet,
+    DerivedCurrencyNav,
+    compare_read_sets,
 )
 
 _PHASES = (
@@ -56,7 +63,9 @@ def validate_broker_sync_result(result: BrokerSyncResult) -> None:
         raise InvalidBrokerSyncResult("final attempt raw phase order is invalid")
     _validate_raw_snapshot(raw, result)
     observations = _validate_observations(trace, result)
+    _validate_nav(raw, trace)
     _validate_fact_times(raw, observations, result)
+    _validate_reconciliation(raw, observations)
 
 
 def _validate_raw_snapshot(raw: dict[object, object], result: BrokerSyncResult) -> None:
@@ -189,8 +198,169 @@ def _order_rows(raw: dict[object, object], suffix: str) -> tuple[BrokerOrderFact
     )
 
 
+def _validate_reconciliation(
+    raw: dict[object, object],
+    observations: tuple[tuple[str, SourceObservation], ...],
+) -> None:
+    try:
+        read_a = _rebuild_read_set(raw, observations, "a")
+        read_b = _rebuild_read_set(raw, observations, "b")
+        reconciled = compare_read_sets(read_a, read_b)
+    except (KeyError, TypeError, ValueError):
+        raise InvalidBrokerSyncResult("six-phase typed facts are invalid") from None
+    if not reconciled.consistent:
+        raise InvalidBrokerSyncResult("six-phase deterministic reconciliation failed")
+
+
+def _rebuild_read_set(
+    raw: dict[object, object],
+    observations: tuple[tuple[str, SourceObservation], ...],
+    suffix: str,
+) -> BrokerReadSet:
+    cash = tuple(CashBalance.model_validate(row) for row in _raw_rows(raw, f"cash_{suffix}"))
+    positions = tuple(
+        BrokerPosition.model_validate(row) for row in _raw_rows(raw, f"positions_{suffix}")
+    )
+    orders = tuple(
+        BrokerOrderFact.model_validate(row) for row in _raw_rows(raw, f"orders_{suffix}")
+    )
+    read_observations = tuple(
+        observation
+        for phase, observation in observations
+        if phase in {f"cash_{suffix}", f"positions_{suffix}", f"orders_{suffix}"}
+    )
+    return BrokerReadSet(
+        cash=cash,
+        positions=positions,
+        open_orders=orders,
+        completed_at=max(item.response_as_of for item in read_observations),
+        source_request_ids=tuple(item.source_request_id for item in read_observations),
+        source_observations=read_observations,
+        nav_by_currency=_typed_nav(raw, "read_a" if suffix == "a" else "read_b"),
+    )
+
+
 def _raw_rows(raw: dict[object, object], phase: str) -> tuple[object, ...]:
     rows = raw.get(phase)
     if not isinstance(rows, tuple | list):
         raise ValueError("broker phase rows are absent")
     return tuple(rows)
+
+
+def _typed_nav(raw: dict[object, object], label: str) -> tuple[DerivedCurrencyNav, ...]:
+    derived = raw.get("_derived_nav")
+    if not isinstance(derived, dict):
+        raise ValueError("derived NAV rows are absent")
+    rows = derived.get(label)
+    if not isinstance(rows, tuple | list):
+        raise ValueError("derived NAV rows are absent")
+    result: list[DerivedCurrencyNav] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("derived NAV row is invalid")
+        currency = row.get("currency")
+        value = row.get("value")
+        provider_as_of = row.get("provider_as_of")
+        source_request_ids = row.get("source_request_ids")
+        if (
+            not isinstance(currency, str)
+            or len(currency) != 3
+            or not currency.isascii()
+            or not currency.isalpha()
+            or currency != currency.upper()
+            or not isinstance(value, str)
+            or not isinstance(provider_as_of, str)
+            or not isinstance(source_request_ids, tuple | list)
+        ):
+            raise ValueError("derived NAV row is invalid")
+        result.append(
+            DerivedCurrencyNav(
+                currency=currency,
+                value=Decimal(value),
+                provider_as_of=require_utc(datetime.fromisoformat(provider_as_of)),
+                source_request_ids=tuple(source_request_ids),
+            )
+        )
+    return tuple(result)
+
+
+def _validate_nav(raw: dict[object, object], trace: dict[str, object]) -> None:
+    derived = raw.get("_derived_nav")
+    if not isinstance(derived, dict) or set(derived) != {"read_a", "read_b"}:
+        raise InvalidBrokerSyncResult("derived NAV evidence is absent")
+    observations = trace.get("source_observations")
+    if not isinstance(observations, tuple | list):
+        raise InvalidBrokerSyncResult("derived NAV source observations are absent")
+    for label, suffix in (("read_a", "a"), ("read_b", "b")):
+        rows = derived[label]
+        if not isinstance(rows, tuple | list) or not rows:
+            raise InvalidBrokerSyncResult("derived NAV evidence is empty")
+        expected = _recompute_nav(raw, suffix)
+        seen: set[str] = set()
+        phase_source_ids = {
+            observation.get("source_request_id")
+            for observation in observations
+            if isinstance(observation, dict)
+            and observation.get("phase") in {f"cash_{suffix}", f"positions_{suffix}"}
+        }
+        for row in rows:
+            if not isinstance(row, dict):
+                raise InvalidBrokerSyncResult("derived NAV evidence is invalid")
+            currency = row.get("currency")
+            request_ids = row.get("source_request_ids")
+            if (
+                not isinstance(currency, str)
+                or len(currency) != 3
+                or currency != currency.upper()
+                or not isinstance(request_ids, tuple | list)
+                or not request_ids
+                or not all(isinstance(item, str) and item for item in request_ids)
+            ):
+                raise InvalidBrokerSyncResult("derived NAV provenance is invalid")
+            try:
+                value = row["value"]
+                as_of = row["provider_as_of"]
+                if not isinstance(value, str) or not isinstance(as_of, str):
+                    raise ValueError
+                decimal_value = Decimal(value)
+                parsed_as_of = require_utc(datetime.fromisoformat(as_of))
+                expected_value = expected.get(currency)
+                if (
+                    not decimal_value.is_finite()
+                    or expected_value is None
+                    or decimal_value != expected_value[0]
+                    or parsed_as_of != expected_value[1]
+                    or not set(request_ids).issubset(phase_source_ids)
+                ):
+                    raise ValueError
+                seen.add(currency)
+            except (KeyError, ValueError):
+                raise InvalidBrokerSyncResult("derived NAV value or time is invalid") from None
+        if seen != set(expected):
+            raise InvalidBrokerSyncResult("derived NAV currency coverage is invalid")
+
+
+def _recompute_nav(raw: dict[object, object], suffix: str) -> dict[str, tuple[Decimal, datetime]]:
+    cash_rows = raw.get(f"cash_{suffix}")
+    position_rows = raw.get(f"positions_{suffix}")
+    if not isinstance(cash_rows, tuple | list) or not isinstance(position_rows, tuple | list):
+        raise InvalidBrokerSyncResult("derived NAV inputs are absent")
+    try:
+        cash = tuple(CashBalance.model_validate(row) for row in cash_rows)
+        positions = tuple(BrokerPosition.model_validate(row) for row in position_rows)
+    except ValueError:
+        raise InvalidBrokerSyncResult("derived NAV inputs are invalid") from None
+    values: dict[str, tuple[Decimal, datetime]] = {}
+    for item in cash:
+        if item.currency in values or item.provider_as_of is None:
+            raise InvalidBrokerSyncResult("derived NAV cash inputs are ambiguous")
+        values[item.currency] = (item.cash_balance, item.provider_as_of)
+    for position in positions:
+        prior = values.get(position.currency)
+        if prior is None or position.current_price is None or position.provider_as_of is None:
+            raise InvalidBrokerSyncResult("derived NAV position inputs are incomplete")
+        values[position.currency] = (
+            prior[0] + position.quantity * position.current_price,
+            max(prior[1], position.provider_as_of),
+        )
+    return values
