@@ -5,6 +5,11 @@ from hashlib import sha256
 from uuid import UUID
 
 import pytest
+from helpers.diagnostic_artifacts import (
+    FixtureArtifactReader,
+    diagnostic_report_count,
+    diagnostic_report_count_from_url,
+)
 from helpers.portfolio_api import (
     INSTRUMENT_ID,
     PORTFOLIOS,
@@ -32,21 +37,13 @@ from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.session import session_factory
 from nexus.providers.base import PriceBar
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 SNAPSHOT_ID = UUID("0198d500-1000-7000-8000-000000000041")
 SNAPSHOT_AT = datetime(2026, 8, 24, 3, 59, tzinfo=UTC)
 SPY_ID = UUID(str(stable_instrument_id("SPY")))
 HOLIDAY = date(2026, 7, 3)
-
-
-class FixtureArtifactReader:
-    def __init__(self, payloads: dict[str, bytes]) -> None:
-        self.payloads = payloads
-
-    async def __call__(self, uri: str) -> bytes:
-        return self.payloads[uri]
 
 
 @pytest.mark.asyncio
@@ -59,7 +56,13 @@ async def test_production_service_assembles_real_diagnostics_from_hashed_parquet
     async with factory() as session, session.begin():
         await _seed_spy(session)
         await _add_series(session, payloads, INSTRUMENT_ID, "asset")
-        await _add_series(session, payloads, SPY_ID, "benchmark")
+        await _add_series(
+            session,
+            payloads,
+            SPY_ID,
+            "benchmark",
+            omitted_session=date(2026, 8, 10),
+        )
         snapshot = await load_frozen_snapshot(
             session, portfolio_id=PORTFOLIOS[0], snapshot_id=SNAPSHOT_ID
         )
@@ -97,10 +100,13 @@ async def test_production_service_assembles_real_diagnostics_from_hashed_parquet
         )
 
     assert stored is not None
-    assert await _report_count_from_url(migrated_database_url) == 1
+    assert await diagnostic_report_count_from_url(migrated_database_url) == 1
     assert len(stored.diagnostic_input_hash) == 64
     assert report.snapshot_as_of == SNAPSHOT_AT
     assert assembly.market.trading_sessions[-1] == date(2026, 8, 21)
+    assert len(assembly.market.trading_sessions) == 253
+    assert assembly.market.benchmark is not None
+    assert len(assembly.market.benchmark.bars) == 252
     assert HOLIDAY not in assembly.market.trading_sessions
     assert all(day.weekday() < 5 for day in assembly.market.trading_sessions)
     assert assembly.market.evidence.trading_calendar is not None
@@ -141,7 +147,7 @@ async def test_missing_reader_or_tampered_artifact_never_consumes_report_slot(
                 portfolio_id=PORTFOLIOS[0],
                 snapshot_id=SNAPSHOT_ID,
             )
-        assert await _report_count(session) == 0
+        assert await diagnostic_report_count(session) == 0
 
         payloads["memory://asset"] += b"tampered"
         with pytest.raises(ValueError, match="artifact hash"):
@@ -151,7 +157,7 @@ async def test_missing_reader_or_tampered_artifact_never_consumes_report_slot(
                 snapshot_id=SNAPSHOT_ID,
                 artifact_reader=FixtureArtifactReader(payloads),
             )
-        assert await _report_count(session) == 0
+        assert await diagnostic_report_count(session) == 0
 
 
 @pytest.mark.asyncio
@@ -178,7 +184,7 @@ async def test_authoritative_service_serializes_same_input_replay(
     reports = await asyncio.gather(diagnose(), diagnose())
 
     assert reports[0] == reports[1]
-    assert await _report_count_from_url(migrated_database_url) == 1
+    assert await diagnostic_report_count_from_url(migrated_database_url) == 1
 
 
 @pytest.mark.asyncio
@@ -399,12 +405,14 @@ async def _add_series(
     invalid_session: date | None = None,
     artifact_created_at: datetime | None = None,
     manifest_created_at: datetime | None = None,
+    omitted_session: date | None = None,
 ) -> None:
     bars = _bars(
         instrument_id,
         available_at=available_at,
         revision=f"{name}-r1",
         invalid_session=invalid_session,
+        omitted_session=omitted_session,
     )
     payload = serialize_price_bars(bars)
     uri = f"memory://{name}"
@@ -446,8 +454,11 @@ def _bars(
     available_at: datetime | None = None,
     revision: str = "fixture-r1",
     invalid_session: date | None = None,
+    omitted_session: date | None = None,
 ) -> tuple[PriceBar, ...]:
-    sessions = _published_sessions(253)
+    sessions = tuple(
+        session for session in _published_sessions(253) if session != omitted_session
+    )
     bars = tuple(
         PriceBar(
             instrument_id=instrument_id,
@@ -481,15 +492,3 @@ def _published_sessions(count: int) -> tuple[date, ...]:
         content_hash="a" * 64,
     )
     return completed_xnys_calendar(SNAPSHOT_AT, policy_ref, count=count).sessions
-
-
-async def _report_count(session: AsyncSession) -> int:
-    return int(
-        await session.scalar(select(func.count()).select_from(PortfolioDiagnosticReportRecord))
-    )
-
-
-async def _report_count_from_url(database_url: str) -> int:
-    factory = session_factory(settings(database_url))
-    async with factory() as session:
-        return await _report_count(session)
