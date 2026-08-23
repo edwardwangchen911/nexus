@@ -7,7 +7,7 @@ import pytest
 from helpers.portfolio_api import ACCOUNTS, PORTFOLIOS, seed_portfolio_list, settings
 from nexus.diagnostics.models import DiagnosticItem, PortfolioDiagnosticReport
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID, load_real_advisory_policy_v1
-from nexus.diagnostics.repository import load_history, persist_report
+from nexus.diagnostics.repository import _persist_report, load_history
 from nexus.diagnostics.service import diagnose_and_persist
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
@@ -17,12 +17,19 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 SNAPSHOT_ID = UUID("0198d500-1000-7000-8000-000000000041")
+INPUT_HASH = "f" * 64
 
 
 def test_production_diagnosis_has_no_caller_snapshot_history_or_comparable_parameters() -> None:
     parameters = tuple(inspect.signature(diagnose_and_persist).parameters)
 
     assert parameters == ("session", "portfolio_id", "snapshot_id", "artifact_reader")
+
+
+def test_repository_has_no_public_ready_report_writer() -> None:
+    from nexus.diagnostics import repository
+
+    assert not hasattr(repository, "persist_report")
 
 
 @pytest.mark.asyncio
@@ -35,10 +42,11 @@ async def test_same_snapshot_policy_concurrent_replay_returns_one_existing_repor
     async def write() -> UUID:
         async with factory() as session, session.begin():
             policy = await load_real_advisory_policy_v1(session)
-            return await persist_report(
+            return await _persist_report(
                 session,
                 portfolio_id=PORTFOLIOS[0],
                 report=_report(policy.version),
+                diagnostic_input_hash=INPUT_HASH,
             )
 
     report_ids = await asyncio.gather(write(), write())
@@ -54,18 +62,25 @@ async def test_same_snapshot_policy_replay_rejects_different_content(
     async with factory() as session, session.begin():
         policy = await load_real_advisory_policy_v1(session)
         report = _report(policy.version)
-        original_id = await persist_report(
-            session, portfolio_id=PORTFOLIOS[0], report=report
+        original_id = await _persist_report(
+            session,
+            portfolio_id=PORTFOLIOS[0],
+            report=report,
+            diagnostic_input_hash=INPUT_HASH,
         )
-        replay_id = await persist_report(
-            session, portfolio_id=PORTFOLIOS[0], report=report
+        replay_id = await _persist_report(
+            session,
+            portfolio_id=PORTFOLIOS[0],
+            report=report,
+            diagnostic_input_hash=INPUT_HASH,
         )
         assert replay_id == original_id
         with pytest.raises(ValueError, match="replay conflicts"):
-            await persist_report(
+            await _persist_report(
                 session,
                 portfolio_id=PORTFOLIOS[0],
                 report=report.model_copy(update={"optimization_need": "BLOCKED"}),
+                diagnostic_input_hash=INPUT_HASH,
             )
 
 
@@ -78,10 +93,11 @@ async def test_cross_portfolio_report_is_rejected_by_repository_and_composite_fk
     async with factory() as session, session.begin():
         policy = await load_real_advisory_policy_v1(session)
         with pytest.raises(ValueError, match="snapshot or policy authority"):
-            await persist_report(
+            await _persist_report(
                 session,
                 portfolio_id=PORTFOLIOS[2],
                 report=_report(policy.version),
+                diagnostic_input_hash=INPUT_HASH,
             )
 
     async with factory() as session:
@@ -115,10 +131,11 @@ async def test_report_rejects_evidence_unavailable_at_frozen_snapshot(
         future_item = report.items[0].model_copy(update={"evidence_refs": (future_ref,)})
 
         with pytest.raises(ValueError, match="evidence is unavailable"):
-            await persist_report(
+            await _persist_report(
                 session,
                 portfolio_id=PORTFOLIOS[0],
                 report=report.model_copy(update={"items": (future_item,)}),
+                diagnostic_input_hash=INPUT_HASH,
             )
 
 
@@ -148,7 +165,7 @@ async def test_history_excludes_current_and_future_snapshots(
                     )
                 }
             )
-            await persist_report(
+            await _persist_report(
                 session,
                 portfolio_id=PORTFOLIOS[0],
                 report=report.model_copy(
@@ -160,6 +177,7 @@ async def test_history_excludes_current_and_future_snapshots(
                         ),
                     }
                 ),
+                diagnostic_input_hash=INPUT_HASH,
             )
 
         history = await load_history(

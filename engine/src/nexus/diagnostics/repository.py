@@ -40,12 +40,12 @@ from nexus.providers.broker.base import (
 )
 
 
-async def persist_report(
+async def _persist_report(
     session: AsyncSession,
     *,
     portfolio_id: UUID,
     report: PortfolioDiagnosticReport,
-    diagnostic_input_hash: str = "0" * 64,
+    diagnostic_input_hash: str,
 ) -> UUID:
     """Insert one report graph atomically after deriving snapshot ownership from the database."""
     policy = await load_real_advisory_policy_v1(session)

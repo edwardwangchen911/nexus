@@ -10,9 +10,9 @@ from nexus.diagnostics.assembler import DiagnosticEvidenceCapabilityUnavailable
 from nexus.diagnostics.models import DiagnosticItem, PortfolioDiagnosticReport
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID, load_real_advisory_policy_v1
 from nexus.diagnostics.repository import (
+    _persist_report,
     load_frozen_snapshot,
     load_instrument_identities,
-    persist_report,
 )
 from nexus.diagnostics.service import diagnose_and_persist
 from nexus.domain.evidence import EvidenceRef
@@ -23,6 +23,8 @@ from nexus.persistence.models.diagnostics import (
 from nexus.persistence.session import session_factory
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
+
+INPUT_HASH = "e" * 64
 
 
 @pytest.mark.asyncio
@@ -35,7 +37,7 @@ async def test_latest_diagnostic_is_redacted_and_returns_persisted_item_shape(
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session, session.begin():
         policy = await load_real_advisory_policy_v1(session)
-        await persist_report(
+        await _persist_report(
             session,
             portfolio_id=PORTFOLIOS[0],
             report=PortfolioDiagnosticReport(
@@ -65,6 +67,7 @@ async def test_latest_diagnostic_is_redacted_and_returns_persisted_item_shape(
                     ),
                 ),
             ),
+            diagnostic_input_hash=INPUT_HASH,
         )
     path = f"/internal/v1/portfolios/{PORTFOLIOS[0]}/diagnostics/latest"
     engine_app = app(migrated_database_url)
@@ -115,10 +118,11 @@ async def test_database_triggers_reject_update_and_delete_for_every_diagnostic_r
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session, session.begin():
         policy = await load_real_advisory_policy_v1(session)
-        report_id = await persist_report(
+        report_id = await _persist_report(
             session,
             portfolio_id=PORTFOLIOS[0],
             report=_report(policy.version),
+            diagnostic_input_hash=INPUT_HASH,
         )
         item_id = await session.scalar(
             select(PortfolioDiagnosticItemRecord.id).where(

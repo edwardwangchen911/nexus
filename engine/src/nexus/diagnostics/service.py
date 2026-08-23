@@ -23,10 +23,10 @@ from nexus.diagnostics.models import (
 from nexus.diagnostics.policy import RealAdvisoryPolicy, load_real_advisory_policy_v1
 from nexus.diagnostics.portfolio_evaluator import evaluate_currency_scopes
 from nexus.diagnostics.repository import (
+    _persist_report,
     load_frozen_snapshot,
     load_history,
     load_instrument_identities,
-    persist_report,
 )
 from nexus.diagnostics.scope import (
     assert_fosun_read_only_scope as _assert_fosun_read_only_scope,
@@ -185,7 +185,7 @@ async def diagnose_and_persist(
         history=history,
         policy_version=policy.version,
     )
-    await persist_report(
+    await _persist_report(
         session,
         portfolio_id=portfolio_id,
         report=report,
