@@ -5,8 +5,15 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
+import pytest
 from nexus.diagnostics.models import PortfolioDiagnosticReport
-from nexus.optimizer.models import OptimizationPolicy, build_proposal_group
+from nexus.optimizer.models import (
+    OptimizationPolicy,
+    OptimizationProposal,
+    OptimizationProposalGroup,
+    ProposalPosition,
+    build_proposal_group,
+)
 from nexus.providers.broker.base import BrokerPosition, CashBalance, PortfolioSnapshot
 
 
@@ -53,3 +60,33 @@ def test_group_is_atomic_and_incomplete_strategy_target_is_a_noop() -> None:
     assert group.proposals[0].turnover == Decimal("0")
     assert group.proposals[2].analysis_only is True
     assert group.proposals[2].positions[0].target_weight == Decimal("1")
+
+
+def test_group_rejects_reused_child_identifier() -> None:
+    """Three variant labels do not make a group immutable if they point at one child row."""
+    baseline = UUID("0198d500-1000-7000-8000-000000000121")
+    position = ProposalPosition(
+        instrument_id=UUID("0198d500-1000-7000-8000-000000000122"),
+        current_weight="1",
+        target_weight="1",
+        action="maintain",
+        reason_code="BASELINE_WEIGHT",
+    )
+    proposal = OptimizationProposal(
+        variant="hold_current",
+        baseline_portfolio_snapshot_id=baseline,
+        positions=(position,),
+        cash_current_weight="0",
+        cash_target_weight="0",
+        analysis_only=True,
+        strategy_evidence_complete=False,
+    )
+    with pytest.raises(ValueError, match="unique child identifiers"):
+        OptimizationProposalGroup(
+            baseline_portfolio_snapshot_id=baseline,
+            proposals=(
+                proposal,
+                proposal.model_copy(update={"variant": "minimum_change"}),
+                proposal.model_copy(update={"variant": "strategy_target"}),
+            ),
+        )
