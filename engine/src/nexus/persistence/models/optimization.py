@@ -51,6 +51,14 @@ class BaselineSelectionAuthorityRecord(ImmutableCreatedAt, Base):
     """Frozen baseline_v1 candidates and selection, independent of research prose."""
 
     __tablename__ = "baseline_selection_authorities"
+    __table_args__ = (
+        UniqueConstraint("id", "data_snapshot_id", name="uq_selection_authorities_id_data"),
+        CheckConstraint("policy_version = 'baseline_v1'", name="policy_version_allowed"),
+        CheckConstraint("available_at <= decision_at", name="available_before_decision"),
+        CheckConstraint(
+            "evidence_hash ~ '^[0-9a-f]{64}$'", name="evidence_hash_canonical"
+        ),
+    )
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     policy_version: Mapped[str] = mapped_column(String(32))
     data_snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("data_snapshots.id"))
@@ -76,6 +84,14 @@ class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
         CheckConstraint(
             "portfolio_scope IN ('real_read_only','internal_paper','fosun_simulation')",
             name="portfolio_scope_allowed",
+        ),
+        ForeignKeyConstraint(
+            ["selection_authority_id", "data_snapshot_id"],
+            [
+                "baseline_selection_authorities.id",
+                "baseline_selection_authorities.data_snapshot_id",
+            ],
+            name="fk_admission_selection_same_data",
         ),
     )
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
@@ -112,6 +128,14 @@ class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
             name="portfolio_scope_allowed",
         ),
         UniqueConstraint("id", "baseline_portfolio_snapshot_id", name="uq_optimization_groups_id_baseline"),
+        ForeignKeyConstraint(
+            ["selection_authority_id", "data_snapshot_id"],
+            [
+                "baseline_selection_authorities.id",
+                "baseline_selection_authorities.data_snapshot_id",
+            ],
+            name="fk_group_selection_same_data",
+        ),
     )
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     baseline_portfolio_snapshot_id: Mapped[UUID] = mapped_column(
