@@ -9,15 +9,17 @@ import { createEngineHmacHeaders } from "./hmac";
 
 const MAX_ENGINE_RESPONSE_BYTES = 64 * 1024;
 const MAX_MARKET_RESPONSE_BYTES = 256 * 1024;
+const MAX_PORTFOLIO_RESPONSE_BYTES = 4 * 1024 * 1024;
 type InternalPath = Extract<keyof paths, `/internal/v1/${string}`>;
 type DynamicInternalPath = Extract<InternalPath, `${string}{${string}}${string}`>;
+type QueryInternalPath = Extract<InternalPath, "/internal/v1/market" | "/internal/v1/portfolios">;
 type EngineBody = string | Uint8Array | ArrayBuffer;
 type MethodFor<Path extends InternalPath> =
   | (Exclude<paths[Path]["get"], undefined> extends never ? never : "GET")
   | (Exclude<paths[Path]["post"], undefined> extends never ? never : "POST")
   | (Exclude<paths[Path]["put"], undefined> extends never ? never : "PUT")
   | (Exclude<paths[Path]["delete"], undefined> extends never ? never : "DELETE");
-export type EngineTarget<Path extends InternalPath> = Path extends "/internal/v1/market"
+export type EngineTarget<Path extends InternalPath> = Path extends QueryInternalPath
   ? Path | { template: Path; path: Path; query?: string }
   : Path extends DynamicInternalPath
     ? { template: Path; path: string }
@@ -37,7 +39,7 @@ export async function engineFetch<Path extends InternalPath>(target: EngineTarge
   for (const [name, value] of Object.entries(protectedHeaders)) headers.set(name, value);
   try {
     const response = await fetch(resolved.url, { ...init, method, headers, body: body.byteLength ? body as unknown as BodyInit : undefined, signal: AbortSignal.any([init.signal, AbortSignal.timeout(timeoutForMethod(method))].filter(Boolean) as AbortSignal[]) });
-    return await sanitizeEngineResponse<Path>(response, undefined, resolved.url.pathname);
+    return await sanitizeEngineResponse<Path>(response, resolved.url.toString(), resolved.url.pathname);
   } catch { return internalFailure<Path>(); }
 }
 
@@ -50,11 +52,17 @@ export async function sanitizeEngineResponse<Path extends InternalPath>(response
 
 function responseLimit(requestUrl?: string, schemaPath?: string): number {
   if (schemaPath === "/internal/v1/market") return MAX_MARKET_RESPONSE_BYTES;
+  if (schemaPath === "/internal/v1/portfolios" || schemaPath?.includes("/snapshots/latest")) {
+    return MAX_PORTFOLIO_RESPONSE_BYTES;
+  }
   if (requestUrl) {
     try {
       const pathname = new URL(requestUrl).pathname;
       if (pathname === "/api/v1/market" || pathname === "/internal/v1/market") {
         return MAX_MARKET_RESPONSE_BYTES;
+      }
+      if (pathname === "/api/v1/portfolios" || pathname === "/internal/v1/portfolios" || pathname.includes("/snapshots/latest")) {
+        return MAX_PORTFOLIO_RESPONSE_BYTES;
       }
     } catch {
       return MAX_ENGINE_RESPONSE_BYTES;
@@ -81,10 +89,12 @@ function allowedTarget<Path extends InternalPath>(target: EngineTarget<Path>, ba
   if (!matchesTemplate(template, path)) return null;
 
   const query = dynamic?.query;
-  if (query !== undefined && template !== "/internal/v1/market") return null;
+  if (query !== undefined && template !== "/internal/v1/market" && template !== "/internal/v1/portfolios") return null;
   const canonicalQuery = template === "/internal/v1/market"
     ? canonicalMarketQuery(query ?? "")
-    : "";
+    : template === "/internal/v1/portfolios"
+      ? canonicalPortfolioQuery(query ?? "")
+      : "";
   if (canonicalQuery === null) return null;
 
   try {
@@ -99,7 +109,7 @@ function allowedTarget<Path extends InternalPath>(target: EngineTarget<Path>, ba
 }
 
 function matchesTemplate(template: InternalPath, path: string): boolean {
-  if (template === "/internal/v1/system-status" || template === "/internal/v1/integrations" || template === "/internal/v1/market") {
+  if (["/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs"].includes(template)) {
     return path === template;
   }
   const integration = /^\/internal\/v1\/integrations\/([^/]+)\/(test|mode)$/.exec(path);
@@ -107,11 +117,17 @@ function matchesTemplate(template: InternalPath, path: string): boolean {
     return template === `/internal/v1/integrations/{provider}/${integration[2]}`;
   }
   const watchlist = /^\/internal\/v1\/watchlist\/([^/]+)$/.exec(path);
-  return Boolean(
+  if (
     watchlist
       && validateUuid(watchlist[1])
-      && template === "/internal/v1/watchlist/{instrument_id}",
-  );
+      && template === "/internal/v1/watchlist/{instrument_id}"
+  ) return true;
+  const snapshot = /^\/internal\/v1\/portfolios\/([^/]+)\/snapshots\/latest$/.exec(path);
+  if (snapshot && validateUuid(snapshot[1])) {
+    return template === "/internal/v1/portfolios/{portfolio_id}/snapshots/latest";
+  }
+  const syncRun = /^\/internal\/v1\/broker-sync-runs\/([^/]+)$/.exec(path);
+  return Boolean(syncRun && validateUuid(syncRun[1]) && template === "/internal/v1/broker-sync-runs/{run_id}");
 }
 
 function canonicalMarketQuery(query: string): string | null {
@@ -121,6 +137,24 @@ function canonicalMarketQuery(query: string): string | null {
   const pairs: Array<[string, string]> = [];
   for (const [key, value] of new URLSearchParams(query)) {
     if (!allowedKeys.has(key) || seen.has(key) || !isValidMarketQueryValue(key, value)) return null;
+    seen.add(key);
+    pairs.push([strictPercentEncode(key), strictPercentEncode(value)]);
+  }
+  pairs.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  return pairs.map(([key, value]) => `${key}=${value}`).join("&");
+}
+
+function canonicalPortfolioQuery(query: string): string | null {
+  if (query.includes("?") || query.includes("#") || !hasValidPercentEscapes(query)) return null;
+  const allowedKeys = new Set(["cursor", "kind", "limit"]);
+  const kinds = new Set(["real_read_only", "internal_paper", "shadow"]);
+  const seen = new Set<string>();
+  const pairs: Array<[string, string]> = [];
+  for (const [key, value] of new URLSearchParams(query)) {
+    if (!allowedKeys.has(key) || seen.has(key)) return null;
+    if (key === "limit" && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 50)) return null;
+    if (key === "kind" && !kinds.has(value)) return null;
+    if (key === "cursor" && (value.length < 1 || value.length > 2048)) return null;
     seen.add(key);
     pairs.push([strictPercentEncode(key), strictPercentEncode(value)]);
   }

@@ -20,11 +20,21 @@ export const POST = withNexusBff(async (request, actor) => {
   if (!idempotencyKey || idempotencyKey.length > 255 || /[^\x21-\x7E]/.test(idempotencyKey)) {
     throw new NexusBffError(400, "VALIDATION_ERROR", "The idempotency key is invalid.");
   }
-  return engineFetch("/internal/v1/broker-sync-runs", {
+  const upstream = await engineFetch("/internal/v1/broker-sync-runs", {
     method: "POST",
     actor,
     body: bytes,
     headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+  });
+  if (upstream.status !== 202) return upstream;
+  const envelope = await upstream.json() as { data?: { broker_sync_run_id?: unknown } };
+  const runId = envelope.data?.broker_sync_run_id;
+  if (typeof runId !== "string" || !validateUuid(runId)) {
+    throw new NexusBffError(500, "INTERNAL_ERROR", "The request could not be completed.");
+  }
+  return Response.json(envelope, {
+    status: 202,
+    headers: { location: `/api/v1/broker-sync-runs/${runId}` },
   });
 });
 

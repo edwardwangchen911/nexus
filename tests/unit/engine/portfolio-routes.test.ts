@@ -68,7 +68,11 @@ describe("portfolio BFF routes", () => {
   it("forwards exact sync bytes and only the idempotency key", async () => {
     const { POST } = await import("../../../app/api/v1/broker-sync-runs/route");
     const body = JSON.stringify({ portfolio_id: portfolioId });
-    await POST(new Request("https://nexus.test/api/v1/broker-sync-runs", {
+    engineFetch.mockResolvedValue(Response.json({
+      data: { broker_sync_run_id: runId },
+      meta: { request_id: actor.requestId, schema_version: "1", as_of: "2026-08-23T08:00:00Z" },
+    }, { status: 202 }));
+    const response = await POST(new Request("https://nexus.test/api/v1/broker-sync-runs", {
       method: "POST",
       headers: {
         origin: "https://nexus.test",
@@ -88,6 +92,8 @@ describe("portfolio BFF routes", () => {
       "content-type": "application/json",
       "idempotency-key": "sync-key-1",
     }));
+    expect(response.status).toBe(202);
+    expect(response.headers.get("location")).toBe(`/api/v1/broker-sync-runs/${runId}`);
   });
 
   it("rejects missing idempotency, cross-origin writes, and malformed bodies", async () => {

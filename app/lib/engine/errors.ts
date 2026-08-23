@@ -3,7 +3,10 @@ import "server-only";
 import { v7 as uuidv7, validate as validateUuid, version as uuidVersion } from "uuid";
 import {
   integrationStatusRuntimeSchema,
+  brokerSyncRunRuntimeSchema,
   marketPageRuntimeSchema,
+  portfolioPageRuntimeSchema,
+  portfolioSnapshotRuntimeSchema,
   runtimeContractSchemas,
   watchlistMembershipRuntimeSchema,
 } from "../generated/runtime-contract";
@@ -11,7 +14,7 @@ import { integrationProviders } from "../integrations/providers";
 
 export type NexusErrorCode = "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "INTERNAL_ERROR";
 export const ERROR_STATUSES = {
-  UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], BUDGET_EXHAUSTED: [429], PROVIDER_UNAVAILABLE: [503], INTERNAL_ERROR: [500],
+  UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422, 429], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], BUDGET_EXHAUSTED: [429], PROVIDER_UNAVAILABLE: [503], INTERNAL_ERROR: [500],
 } as const;
 export type StableEngineErrorCode = keyof typeof ERROR_STATUSES;
 export const SAFE_ENGINE_ERROR_MESSAGES: Record<StableEngineErrorCode, string> = {
@@ -99,6 +102,22 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     const selected = data.selected_series;
     if (selected !== null && (!isPlain(selected) || !Array.isArray(selected.bars) || selected.bars.length > 500)) return INVALID_DATA;
     return data;
+  }
+  if (pathname === "/internal/v1/portfolios") {
+    if (!matchesRuntimeSchema(data, portfolioPageRuntimeSchema) || !isPlain(data)) return INVALID_DATA;
+    return Array.isArray(data.items) && data.items.length <= 50 ? data : INVALID_DATA;
+  }
+  const portfolioSnapshot = /^\/internal\/v1\/portfolios\/([^/]+)\/snapshots\/latest$/.exec(pathname);
+  if (portfolioSnapshot && validateUuid(portfolioSnapshot[1])) {
+    return matchesRuntimeSchema(data, portfolioSnapshotRuntimeSchema) && isPlain(data)
+      ? data
+      : INVALID_DATA;
+  }
+  const brokerSyncRun = /^\/internal\/v1\/broker-sync-runs(?:\/([^/]+))?$/.exec(pathname);
+  if (brokerSyncRun && (!brokerSyncRun[1] || validateUuid(brokerSyncRun[1]))) {
+    return matchesRuntimeSchema(data, brokerSyncRunRuntimeSchema) && isPlain(data)
+      ? data
+      : INVALID_DATA;
   }
   const watchlistAction = /^\/internal\/v1\/watchlist\/([^/]+)$/.exec(pathname);
   if (watchlistAction && validateUuid(watchlistAction[1])) {
