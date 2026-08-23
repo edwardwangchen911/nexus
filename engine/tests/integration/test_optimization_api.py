@@ -43,6 +43,10 @@ async def test_what_if_writes_only_redacted_audit_summary(migrated_database_url:
         response = await client.post(path, content=body, headers=headers("POST", path, body))
     assert response.status_code == 200
     assert response.json()["data"]["policy_version"] == "optimizer_v1"
+    assert response.json()["data"]["result"]["diagnostics"]["top1"] == {
+        "status": "known", "value": 10000, "unit": "basis_points", "reason": None,
+    }
+    assert response.json()["data"]["result"]["constraints"]["violation_count"]["value"] == 0
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session:
         rows = (

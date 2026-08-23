@@ -17,6 +17,7 @@ from nexus.domain.decimal import DecimalString
 from nexus.optimizer.admission import admit_queued_job
 from nexus.optimizer.authority import load_admission_authority
 from nexus.optimizer.lifecycle import transition_group_idempotently
+from nexus.optimizer.what_if import evaluate_what_if as evaluate_what_if_weights
 from nexus.persistence.models.optimization import (
     OptimizationProposalGroupRecord,
     OptimizationProposalRecord,
@@ -108,6 +109,9 @@ async def evaluate_what_if(
         "data": {
             "policy_version": payload.policy_version,
             "instrument_count": len(payload.positions),
+            "result": evaluate_what_if_weights(
+                tuple(Decimal(position.weight) for position in payload.positions)
+            ).model_dump(mode="json"),
         },
         "meta": {"request_id": str(actor.request_id), "schema_version": "1"},
     }
