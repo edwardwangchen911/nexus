@@ -24,7 +24,7 @@ from nexus.persistence.models.optimization import (
 from nexus.persistence.models.runtime import AuditEvent, IdempotencyRecord, Job
 from nexus.persistence.session import session_factory
 from nexus.quality.source_policy import SOURCE_POLICY_ID
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 
 @pytest.mark.asyncio
@@ -180,6 +180,7 @@ async def test_proposal_admission_fails_closed_without_persisted_authority(
         ("partial_authority", {"partial": True}),
         ("unresolved_fx", {"requires_fx": True}),
         ("stale_authority", {"authority_stale": True}),
+        ("future_source_policy", {"future_source_policy": True}),
         ("noncanonical_source", {"noncanonical_source": True}),
         ("incomplete_cost", {"cost_complete": False}),
         ("cost_policy_conflict", {"request_cost_policy": "0198d500-1000-7000-8000-000000000799"}),
@@ -207,6 +208,13 @@ async def test_proposal_admission_rejects_every_unproven_authority_without_write
     report_hash = "d" * 64
     report_policy_id = REAL_ADVISORY_POLICY_ID
     async with factory() as session, session.begin():
+        if changes.get("future_source_policy"):
+            await session.execute(text("ALTER TABLE source_policies DISABLE TRIGGER USER"))
+            await session.execute(
+                text("UPDATE source_policies SET created_at = :future WHERE id = :id"),
+                {"future": baseline_time.replace(day=25), "id": SOURCE_POLICY_ID},
+            )
+            await session.execute(text("ALTER TABLE source_policies ENABLE TRIGGER USER"))
         if changes.get("alternate_diagnostic_policy"):
             report_policy_id = UUID("0198d500-1000-7000-8000-000000000723")
             session.add(

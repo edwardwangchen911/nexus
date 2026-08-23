@@ -61,6 +61,7 @@ class SourcePolicy(BaseModel):
     key: Literal["market_price"]
     version: Literal["source_policy_v1"] = "source_policy_v1"
     schema_version: Literal["1"]
+    available_at: datetime
     instrument_tick_size: Decimal | None
 
     @field_validator("record_id")
@@ -69,6 +70,11 @@ class SourcePolicy(BaseModel):
         if value != SOURCE_POLICY_ID:
             raise ValueError("source policy must be bound to the published v1 record")
         return value
+
+    @field_validator("available_at")
+    @classmethod
+    def _available_at_utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
 
 
 class QuoteSourcePolicy(BaseModel):
@@ -143,6 +149,7 @@ async def load_source_policy_v1(
         key=cast(Literal["market_price"], record.key),
         version=cast(Literal["source_policy_v1"], record.version),
         schema_version=cast(Literal["1"], record.schema_version),
+        available_at=record.created_at,
         instrument_tick_size=instrument_tick_size,
     )
     return policy

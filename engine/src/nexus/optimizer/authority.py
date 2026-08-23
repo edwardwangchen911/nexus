@@ -83,6 +83,7 @@ async def load_admission_authority(
         or authority.authority_stale
         or source_policy.record_id != SOURCE_POLICY_ID
         or authority.source_policy_id != SOURCE_POLICY_ID
+        or source_policy.available_at > snapshot.as_of
         or cost_policy.id != COST_POLICY_ID
         or authority.cost_policy_id != COST_POLICY_ID
         or cost_policy.available_at > snapshot.as_of

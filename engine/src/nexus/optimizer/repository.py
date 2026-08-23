@@ -137,6 +137,7 @@ async def _has_executable_shadow_authority(
         and data_snapshot.available_at <= group.valuation_time
         and data_snapshot.received_at <= group.valuation_time
         and source_policy.record_id == SOURCE_POLICY_ID == group.source_policy_id
+        and source_policy.available_at <= group.valuation_time
         and cost_policy.id == COST_POLICY_ID == group.cost_policy_id
         and cost_policy.available_at <= group.valuation_time
         and optimizer_policy is not None

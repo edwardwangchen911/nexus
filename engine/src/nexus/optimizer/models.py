@@ -118,6 +118,7 @@ class ShadowAuthority(_StrictModel):
     partial: bool
     requires_fx: bool
     cost_complete: bool
+    authority_stale: bool = False
 
     @property
     def executable(self) -> bool:
@@ -128,6 +129,7 @@ class ShadowAuthority(_StrictModel):
             and not self.partial
             and not self.requires_fx
             and self.cost_complete
+            and not self.authority_stale
         )
 
 

@@ -242,13 +242,7 @@ async def test_raw_sql_shadow_cannot_bypass_non_executable_comparison(
     factory = session_factory(settings(migrated_database_url))
     with pytest.raises(IntegrityError, match="PROPOSAL_NOT_EXECUTABLE"):
         async with factory() as session, session.begin():
-            await session.execute(
-                text(
-                    "UPDATE optimization_proposal_groups SET status = 'shadowing', version = 2 "
-                    "WHERE id = :group_id"
-                ),
-                {"group_id": group_id},
-            )
+            await session.execute(text("UPDATE optimization_proposal_groups SET status='shadowing', version=2 WHERE id=:id"), {"id": group_id})
 
 
 @pytest.mark.asyncio
@@ -283,22 +277,20 @@ async def test_shadow_rejects_comparison_from_different_authority(migrated_datab
             await session.execute(text("UPDATE optimization_proposal_groups SET status='shadowing', version=2 WHERE id=:id"), {"id": group_id})
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("group_id", "changes"),
+    ((UUID("0198d500-1000-7000-8000-000000000847"), {"authority_stale": True}),
+     (UUID("0198d500-1000-7000-8000-000000000857"), {"future_source_policy": True})),
+)
 async def test_raw_sql_shadow_cannot_bypass_stale_policy_authority(
-    migrated_database_url: str,
+    migrated_database_url: str, group_id: UUID, changes: dict[str, bool],
 ) -> None:
-    """A stale persisted authority must block raw SQL, not just the repository path."""
-    group_id = UUID("0198d500-1000-7000-8000-000000000847")
-    await _seed_complete_group(migrated_database_url, group_id, authority_stale=True)
+    """Stale or future policy authority must block raw SQL."""
+    await _seed_complete_group(migrated_database_url, group_id, **changes)
     factory = session_factory(settings(migrated_database_url))
     with pytest.raises(IntegrityError, match="PROPOSAL_NOT_EXECUTABLE"):
         async with factory() as session, session.begin():
-            await session.execute(
-                text(
-                    "UPDATE optimization_proposal_groups SET status = 'shadowing', version = 2 "
-                    "WHERE id = :group_id"
-                ),
-                {"group_id": group_id},
-            )
+            await session.execute(text("UPDATE optimization_proposal_groups SET status='shadowing', version=2 WHERE id=:id"), {"id": group_id})
 
 
 @pytest.mark.asyncio
@@ -311,13 +303,7 @@ async def test_raw_sql_shadow_cannot_bypass_noncanonical_source_policy(
     factory = session_factory(settings(migrated_database_url))
     with pytest.raises(IntegrityError, match="PROPOSAL_NOT_EXECUTABLE"):
         async with factory() as session, session.begin():
-            await session.execute(
-                text(
-                    "UPDATE optimization_proposal_groups SET status = 'shadowing', version = 2 "
-                    "WHERE id = :group_id"
-                ),
-                {"group_id": group_id},
-            )
+            await session.execute(text("UPDATE optimization_proposal_groups SET status='shadowing', version=2 WHERE id=:id"), {"id": group_id})
 
 
 @pytest.mark.asyncio
@@ -368,6 +354,7 @@ async def _seed_complete_group(
     missing_cost_policy: bool = False,
     missing_selection: bool = False,
     comparison_authority_conflict: bool = False,
+    future_source_policy: bool = False,
 ) -> None:
     await seed_portfolio_list(database_url)
     factory = session_factory(settings(database_url))
@@ -381,6 +368,10 @@ async def _seed_complete_group(
     report_id = UUID(f"0198d500-1000-7000-8000-000000000{int(suffix) + 20:03d}")
     selection_id = UUID(f"0198d500-1000-7000-8000-000000000{int(suffix) + 24:03d}")
     async with factory() as session, session.begin():
+        if future_source_policy:
+            await session.execute(text("ALTER TABLE source_policies DISABLE TRIGGER USER"))
+            await session.execute(text("UPDATE source_policies SET created_at=:future WHERE id=:id"), {"future": _CLOCK.replace(day=25), "id": SOURCE_POLICY_ID})
+            await session.execute(text("ALTER TABLE source_policies ENABLE TRIGGER USER"))
         session.add_all(
             (
                 DataSnapshot(
