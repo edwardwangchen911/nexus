@@ -4,6 +4,7 @@
 import hashlib
 import json
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
@@ -32,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
 _MAX_WHAT_IF_BYTES = 64 * 1024
-_ERROR_RESPONSES = {
+_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     status: {"model": NexusErrorEnvelope, "description": "Stable NEXUS error envelope."}
     for status in (401, 404, 409, 422)
 }
