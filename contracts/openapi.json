@@ -1298,7 +1298,6 @@
             "items": {
               "$ref": "#/components/schemas/OptimizationProposalPositionResponse"
             },
-            "maxItems": 30,
             "title": "Positions",
             "type": "array"
           },
@@ -3161,6 +3160,19 @@
       "post": {
         "description": "Fail closed until one persisted authority binds baseline, diagnosis, data, source, and cost.",
         "operationId": "admit_optimization_proposal_internal_v1_optimization_proposals_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -3172,7 +3184,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
@@ -3180,9 +3192,6 @@
                 }
               }
             },
-            "description": "Successful Response"
-          },
-          "202": {
             "description": "Optimization job accepted or replayed.",
             "headers": {
               "Location": {
@@ -3246,6 +3255,7 @@
             "name": "group_id",
             "required": true,
             "schema": {
+              "format": "uuid",
               "title": "Group Id",
               "type": "string"
             }
@@ -3315,24 +3325,31 @@
             "name": "group_id",
             "required": true,
             "schema": {
+              "format": "uuid",
               "title": "Group Id",
               "type": "string"
             }
           },
           {
             "in": "header",
-            "name": "If-Match",
-            "required": false,
+            "name": "Idempotency-Key",
+            "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "If-Match"
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "If-Match",
+              "type": "string"
             }
           }
         ],
@@ -3410,24 +3427,31 @@
             "name": "group_id",
             "required": true,
             "schema": {
+              "format": "uuid",
               "title": "Group Id",
               "type": "string"
             }
           },
           {
             "in": "header",
-            "name": "If-Match",
-            "required": false,
+            "name": "Idempotency-Key",
+            "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "If-Match"
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "If-Match",
+              "type": "string"
             }
           }
         ],
@@ -3556,6 +3580,16 @@
               }
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "422": {
             "content": {
@@ -3713,6 +3747,16 @@
               }
             },
             "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "422": {
             "content": {
@@ -3943,6 +3987,19 @@
       "post": {
         "description": "Return deterministic analysis and append only a non-sensitive audit summary.",
         "operationId": "evaluate_what_if_internal_v1_what_if_evaluate_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {

@@ -1708,7 +1708,9 @@ export interface operations {
     admit_optimization_proposal_internal_v1_optimization_proposals_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
             path?: never;
             cookie?: never;
         };
@@ -1718,22 +1720,15 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OptimizationJobEnvelope"];
-                };
-            };
             /** @description Optimization job accepted or replayed. */
             202: {
                 headers: {
                     Location?: string;
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["OptimizationJobEnvelope"];
+                };
             };
             /** @description Stable NEXUS error envelope. */
             401: {
@@ -1834,8 +1829,9 @@ export interface operations {
     reject_optimization_group_internal_v1_optimization_proposals__group_id__reject_post: {
         parameters: {
             query?: never;
-            header?: {
-                "If-Match"?: string | null;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
             };
             path: {
                 group_id: string;
@@ -1898,8 +1894,9 @@ export interface operations {
     shadow_optimization_group_internal_v1_optimization_proposals__group_id__shadow_post: {
         parameters: {
             query?: never;
-            header?: {
-                "If-Match"?: string | null;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
             };
             path: {
                 group_id: string;
@@ -1982,6 +1979,15 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2082,6 +2088,15 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2281,7 +2296,9 @@ export interface operations {
     evaluate_what_if_internal_v1_what_if_evaluate_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
             path?: never;
             cookie?: never;
         };

@@ -1026,7 +1026,6 @@ export const runtimeContractSchemas = {
         "items": {
           "$ref": "#/components/schemas/OptimizationProposalPositionResponse"
         },
-        "maxItems": 30,
         "title": "Positions",
         "type": "array"
       },
