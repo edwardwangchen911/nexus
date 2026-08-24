@@ -9,7 +9,14 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from nexus.integrations.service import IntegrationStatusService
 from nexus.persistence.base import Base
-from nexus.persistence.models import data, market, optimization, portfolio, runtime  # noqa: F401
+from nexus.persistence.models import (  # noqa: F401
+    data,
+    market,
+    optimization,
+    portfolio,
+    research,
+    runtime,
+)
 from nexus.persistence.session import session_factory
 from nexus.quality.source_policy import QUOTE_SOURCE_POLICY_ID
 from nexus.settings import EngineSettings
@@ -321,6 +328,7 @@ def _assert_reflected_schema(connection: Connection) -> None:
     context = MigrationContext.configure(connection)
     if diagnostic_tables <= actual_tables:
         assert compare_metadata(context, Base.metadata) == []
+
 
 def _table_names(database_url: str) -> set[str]:
     return asyncio.run(_table_names_async(database_url))

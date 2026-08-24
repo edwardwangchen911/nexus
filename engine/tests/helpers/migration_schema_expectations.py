@@ -48,18 +48,41 @@ EXPECTED_TABLES = {
     "optimization_proposals",
     "proposal_positions",
     "proposal_comparisons",
+    "research_evidence_refs",
+    "filings",
+    "financial_facts",
+    "corporate_actions",
 }
 
 OPTIONAL_MIGRATION_TABLE_GROUPS = (
-    frozenset({
-        "diagnostic_policies", "portfolio_diagnostic_reports",
-        "portfolio_diagnostic_items", "portfolio_diagnostic_evidence_refs",
-    }),
-    frozenset({
-        "optimization_policies", "cost_policies", "baseline_selection_authorities",
-        "optimization_admission_authorities", "optimization_proposal_groups",
-        "optimization_proposals", "proposal_positions", "proposal_comparisons",
-    }),
+    frozenset(
+        {
+            "diagnostic_policies",
+            "portfolio_diagnostic_reports",
+            "portfolio_diagnostic_items",
+            "portfolio_diagnostic_evidence_refs",
+        }
+    ),
+    frozenset(
+        {
+            "optimization_policies",
+            "cost_policies",
+            "baseline_selection_authorities",
+            "optimization_admission_authorities",
+            "optimization_proposal_groups",
+            "optimization_proposals",
+            "proposal_positions",
+            "proposal_comparisons",
+        }
+    ),
+    frozenset(
+        {
+            "research_evidence_refs",
+            "filings",
+            "financial_facts",
+            "corporate_actions",
+        }
+    ),
 )
 
 EXPECTED_FOREIGN_KEYS = {
@@ -116,4 +139,17 @@ EXPECTED_FOREIGN_KEYS = {
     },
     "portfolio_diagnostic_items": "fk_diag_items_report",
     "portfolio_diagnostic_evidence_refs": "fk_diag_evidence_item",
+    "filings": {
+        "fk_filings_instrument_id_instruments",
+        "fk_filings_evidence_ref",
+    },
+    "financial_facts": {
+        "fk_financial_facts_filing_id_filings",
+        "fk_financial_facts_evidence_ref",
+        "fk_financial_facts_instrument_id_instruments",
+    },
+    "corporate_actions": {
+        "fk_corporate_actions_evidence_ref",
+        "fk_corporate_actions_instrument_id_instruments",
+    },
 }

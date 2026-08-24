@@ -1,12 +1,14 @@
 """Versioned data-source, evidence, and analytics metadata mappings."""
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
+    Date,
     ForeignKey,
     Index,
     String,
@@ -162,6 +164,20 @@ class MacroObservation(ImmutableCreatedAt, Base):
         UniqueConstraint(
             "source", "series", "observed_at", "revision", name="uq_macro_observations_revision"
         ),
+        CheckConstraint(
+            "series IN ('DFF', 'DGS2', 'DGS10', 'CPIAUCSL', "
+            "'UNRATE', 'INDPRO', 'VIXCLS', 'DEXHKUS')",
+            name="series_allowed",
+        ),
+        CheckConstraint(
+            "real_time_end IS NULL OR real_time_start IS NOT NULL AND "
+            "real_time_end >= real_time_start",
+            name="real_time_period_allowed",
+        ),
+        CheckConstraint(
+            "(series = 'DEXHKUS') = display_sanity_only",
+            name="dexhkus_display_sanity_only",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
@@ -172,3 +188,13 @@ class MacroObservation(ImmutableCreatedAt, Base):
     revision: Mapped[str] = mapped_column(String(255))
     value: Mapped[Decimal]
     unit: Mapped[str] = mapped_column(String(100))
+    provider_object_id: Mapped[str | None] = mapped_column(String(255))
+    real_time_start: Mapped[date | None] = mapped_column(Date)
+    real_time_end: Mapped[date | None] = mapped_column(Date)
+    evidence_ref_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("research_evidence_refs.id", name="fk_macro_observations_evidence_ref")
+    )
+    calendar_evidence_ref_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("research_evidence_refs.id", name="fk_macro_observations_calendar_evidence_ref")
+    )
+    display_sanity_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
