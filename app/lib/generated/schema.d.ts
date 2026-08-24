@@ -21,6 +21,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/briefs/{session_date}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Daily Brief
+         * @description Return bounded typed summaries; never include role/tool payloads or invoke a model.
+         */
+        get: operations["getDailyBrief"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/broker-sync-runs": {
         parameters: {
             query?: never;
@@ -47,6 +67,26 @@ export interface paths {
         };
         /** Get Broker Sync Run */
         get: operations["getBrokerSyncRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/instruments/{instrument_id}/research": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Instrument Research
+         * @description Select the latest immutable research record by stable timestamp/id ordering.
+         */
+        get: operations["getInstrumentResearch"];
         put?: never;
         post?: never;
         delete?: never;
@@ -283,6 +323,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/research-runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Research Run
+         * @description Append a prepared local run only when immutable prompt/model pricing authority exists.
+         */
+        post: operations["createResearchRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/research-runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Research Run
+         * @description Return one persisted run and its latest schema-validated immutable output.
+         */
+        get: operations["getResearchRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/system-status": {
         parameters: {
             query?: never;
@@ -351,6 +431,8 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @enum {string} */
+        AgentRunStatus: "prepared" | "running" | "validated" | "audited" | "synthesized" | "completed" | "failed" | "abstained";
         /**
          * AggregateMetric
          * @description Bounded integer aggregate with an explicit known/unknown state.
@@ -370,6 +452,36 @@ export interface components {
             unit: "basis_points" | "parts_per_million" | "count";
             /** Value */
             value?: number | null;
+        };
+        /** BriefDisagreementSummary */
+        BriefDisagreementSummary: {
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Summary */
+            summary: string;
+        };
+        /** BriefInvalidationSummary */
+        BriefInvalidationSummary: {
+            /** Conditions */
+            conditions: components["schemas"]["ResearchCondition"][];
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
         };
         /** BrokerSyncCreateRequest */
         BrokerSyncCreateRequest: {
@@ -442,6 +554,57 @@ export interface components {
             value: string | null;
         };
         CurrencyCode: string;
+        /** DailyBriefEnvelope */
+        DailyBriefEnvelope: {
+            data: components["schemas"]["DailyBriefResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** DailyBriefItem */
+        DailyBriefItem: {
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Reason */
+            reason?: string | null;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Stance */
+            stance: ("buy_candidate" | "reduce_candidate" | "hold" | "watch") | null;
+            status: components["schemas"]["AgentRunStatus"];
+        };
+        /** DailyBriefResponse */
+        DailyBriefResponse: {
+            /** Budget Exhausted Watch */
+            budget_exhausted_watch: components["schemas"]["DailyBriefItem"][];
+            /** Candidates */
+            candidates: components["schemas"]["DailyBriefItem"][];
+            /** Disagreements */
+            disagreements: components["schemas"]["BriefDisagreementSummary"][];
+            evidence_completeness: components["schemas"]["EvidenceCompletenessSummary"];
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            /** Holding Risks */
+            holding_risks: components["schemas"]["DailyBriefItem"][];
+            /** Invalidations */
+            invalidations: components["schemas"]["BriefInvalidationSummary"][];
+            /** Rejected */
+            rejected: components["schemas"]["DailyBriefItem"][];
+            /**
+             * Session Date
+             * Format: date
+             */
+            session_date: string;
+            /** Truncated */
+            truncated: boolean;
+        };
         /** DiagnosticItemResponse */
         DiagnosticItemResponse: {
             /**
@@ -479,6 +642,17 @@ export interface components {
          * @enum {string}
          */
         ErrorCode: "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "DATA_PARTIAL" | "DATA_STALE" | "BROKER_STALE" | "SOURCE_CONFLICT" | "CAPABILITY_EXPIRED" | "PROPOSAL_NOT_EXECUTABLE" | "ACCOUNT_TYPE_MISMATCH" | "APPROVAL_REQUIRED" | "RISK_REJECTED" | "DRAWDOWN_LOCKED" | "RECONCILIATION_REQUIRED" | "BUDGET_EXHAUSTED" | "PROVIDER_UNAVAILABLE" | "INTERNAL_ERROR";
+        /** EvidenceCompletenessSummary */
+        EvidenceCompletenessSummary: {
+            /** Complete */
+            complete: number;
+            /** Failed */
+            failed: number;
+            /** Partial */
+            partial: number;
+            /** Total Runs */
+            total_runs: number;
+        };
         /**
          * EvidenceRef
          * @description A point-in-time reference to immutable source content.
@@ -1148,6 +1322,202 @@ export interface components {
              */
             tax_impact: "unknown";
         };
+        /** ResearchClaim */
+        ResearchClaim: {
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            /** Text */
+            text: string;
+        };
+        /**
+         * ResearchCondition
+         * @description A deterministic signal predicate, never an executable expression.
+         */
+        ResearchCondition: {
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            /**
+             * Operator
+             * @enum {string}
+             */
+            operator: "lt" | "lte" | "eq" | "gte" | "gt" | "is_true" | "is_false";
+            /** Signal */
+            signal: string;
+            /** Threshold */
+            threshold: string | boolean;
+            /**
+             * Unit
+             * @enum {string}
+             */
+            unit: "ratio" | "basis_points" | "days" | "currency" | "boolean" | "count" | "state";
+        };
+        /** ResearchIntent */
+        ResearchIntent: {
+            /** Counter Theses */
+            counter_theses: components["schemas"]["ResearchClaim"][];
+            /**
+             * Data Snapshot Id
+             * Format: uuid
+             */
+            data_snapshot_id: string;
+            /** Data Version */
+            data_version: string;
+            /**
+             * Decision Id
+             * Format: uuid
+             */
+            decision_id: string;
+            /**
+             * Decision Time
+             * Format: date-time
+             */
+            decision_time: string;
+            /** Disagreement */
+            disagreement: string;
+            /** Display Symbol */
+            display_symbol: string;
+            /** Entry Conditions */
+            entry_conditions: components["schemas"]["ResearchCondition"][];
+            /**
+             * Evidence Audit
+             * @enum {string}
+             */
+            evidence_audit: "complete" | "partial" | "failed";
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            /** Exit Conditions */
+            exit_conditions: components["schemas"]["ResearchCondition"][];
+            /**
+             * Exposure Action
+             * @enum {string}
+             */
+            exposure_action: "none" | "reduce" | "maintain" | "eligible_for_increase";
+            /**
+             * Horizon
+             * @enum {string}
+             */
+            horizon: "short_term" | "medium_term" | "long_term";
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Invalidation Conditions */
+            invalidation_conditions: components["schemas"]["ResearchCondition"][];
+            /** Model Version */
+            model_version: string;
+            /** Prompt Version */
+            prompt_version: string;
+            /**
+             * Quality Status
+             * @enum {string}
+             */
+            quality_status: "complete" | "partial";
+            /** Role Votes */
+            role_votes: components["schemas"]["RoleVote"][];
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "research_intent_v1";
+            /**
+             * Stance
+             * @enum {string}
+             */
+            stance: "buy_candidate" | "reduce_candidate" | "hold" | "watch";
+            /** Strategy Version */
+            strategy_version: string;
+            /** Theses */
+            theses: components["schemas"]["ResearchClaim"][];
+            /** Uncertainties */
+            uncertainties: string[];
+            /**
+             * Valid Until
+             * Format: date-time
+             */
+            valid_until: string;
+        };
+        /** ResearchRunCreateRequest */
+        ResearchRunCreateRequest: {
+            /**
+             * Data Snapshot Id
+             * Format: uuid
+             */
+            data_snapshot_id: string;
+            /**
+             * Decision Time
+             * Format: date-time
+             */
+            decision_time: string;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+        };
+        /** ResearchRunEnvelope */
+        ResearchRunEnvelope: {
+            data: components["schemas"]["ResearchRunResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** ResearchRunResponse */
+        ResearchRunResponse: {
+            /** Abstention Reason */
+            abstention_reason?: string | null;
+            /** Budget Reason */
+            budget_reason: "budget_exhausted" | null;
+            /**
+             * Data Snapshot Id
+             * Format: uuid
+             */
+            data_snapshot_id: string;
+            /**
+             * Decision Time
+             * Format: date-time
+             */
+            decision_time: string;
+            /** Disagreement */
+            disagreement?: string | null;
+            /** Evidence */
+            evidence: components["schemas"]["EvidenceRef"][];
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            intent: components["schemas"]["ResearchIntent"] | null;
+            /** Invalidation Conditions */
+            invalidation_conditions: components["schemas"]["ResearchCondition"][];
+            /** Quality Status */
+            quality_status: ("complete" | "partial") | null;
+            /** Reserved Cost Usd */
+            reserved_cost_usd: string;
+            /** Retry Count */
+            retry_count: number;
+            /** Role Votes */
+            role_votes: components["schemas"]["RoleVote"][];
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Settled Cost Usd */
+            settled_cost_usd: string | null;
+            status: components["schemas"]["AgentRunStatus"];
+        };
+        /** RoleVote */
+        RoleVote: {
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "orchestrator" | "fundamental" | "market_state" | "macro_sector" | "bull" | "bear" | "evidence_audit" | "portfolio";
+            /**
+             * Vote
+             * @enum {string}
+             */
+            vote: "support" | "oppose" | "abstain";
+        };
         /**
          * SelectedMarketSeriesResponse
          * @description At most one repository-selected historical series in a market page.
@@ -1343,6 +1713,46 @@ export interface operations {
             };
         };
     };
+    getDailyBrief: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_date: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyBriefEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
     createBrokerSyncRun: {
         parameters: {
             query?: never;
@@ -1455,6 +1865,57 @@ export interface operations {
                 };
             };
             /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getInstrumentResearch: {
+        parameters: {
+            query: {
+                as_of: string;
+            };
+            header?: never;
+            path: {
+                instrument_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResearchRunEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2163,6 +2624,108 @@ export interface operations {
                 };
             };
             /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    createResearchRun: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResearchRunCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResearchRunEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getResearchRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResearchRunEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;

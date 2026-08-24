@@ -1,6 +1,19 @@
 {
   "components": {
     "schemas": {
+      "AgentRunStatus": {
+        "enum": [
+          "prepared",
+          "running",
+          "validated",
+          "audited",
+          "synthesized",
+          "completed",
+          "failed",
+          "abstained"
+        ],
+        "type": "string"
+      },
       "AggregateMetric": {
         "additionalProperties": false,
         "description": "Bounded integer aggregate with an explicit known/unknown state.",
@@ -51,6 +64,65 @@
           "unit"
         ],
         "title": "AggregateMetric",
+        "type": "object"
+      },
+      "BriefDisagreementSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "instrument_id",
+          "summary"
+        ],
+        "title": "BriefDisagreementSummary",
+        "type": "object"
+      },
+      "BriefInvalidationSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "conditions": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchCondition"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Conditions",
+            "type": "array"
+          },
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "instrument_id",
+          "conditions"
+        ],
+        "title": "BriefInvalidationSummary",
         "type": "object"
       },
       "BrokerSyncCreateRequest": {
@@ -255,6 +327,162 @@
         "pattern": "^[A-Z]{3}$",
         "type": "string"
       },
+      "DailyBriefEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/DailyBriefResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "DailyBriefEnvelope",
+        "type": "object"
+      },
+      "DailyBriefItem": {
+        "additionalProperties": false,
+        "properties": {
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "stance": {
+            "anyOf": [
+              {
+                "enum": [
+                  "buy_candidate",
+                  "reduce_candidate",
+                  "hold",
+                  "watch"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stance"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AgentRunStatus"
+          }
+        },
+        "required": [
+          "run_id",
+          "instrument_id",
+          "status",
+          "stance"
+        ],
+        "title": "DailyBriefItem",
+        "type": "object"
+      },
+      "DailyBriefResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "budget_exhausted_watch": {
+            "items": {
+              "$ref": "#/components/schemas/DailyBriefItem"
+            },
+            "maxItems": 20,
+            "title": "Budget Exhausted Watch",
+            "type": "array"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/DailyBriefItem"
+            },
+            "maxItems": 20,
+            "title": "Candidates",
+            "type": "array"
+          },
+          "disagreements": {
+            "items": {
+              "$ref": "#/components/schemas/BriefDisagreementSummary"
+            },
+            "maxItems": 20,
+            "title": "Disagreements",
+            "type": "array"
+          },
+          "evidence_completeness": {
+            "$ref": "#/components/schemas/EvidenceCompletenessSummary"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "holding_risks": {
+            "items": {
+              "$ref": "#/components/schemas/DailyBriefItem"
+            },
+            "maxItems": 20,
+            "title": "Holding Risks",
+            "type": "array"
+          },
+          "invalidations": {
+            "items": {
+              "$ref": "#/components/schemas/BriefInvalidationSummary"
+            },
+            "maxItems": 50,
+            "title": "Invalidations",
+            "type": "array"
+          },
+          "rejected": {
+            "items": {
+              "$ref": "#/components/schemas/DailyBriefItem"
+            },
+            "maxItems": 20,
+            "title": "Rejected",
+            "type": "array"
+          },
+          "session_date": {
+            "format": "date",
+            "title": "Session Date",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session_date",
+          "generated_at",
+          "candidates",
+          "holding_risks",
+          "rejected",
+          "budget_exhausted_watch",
+          "evidence_completeness",
+          "disagreements",
+          "invalidations",
+          "truncated"
+        ],
+        "title": "DailyBriefResponse",
+        "type": "object"
+      },
       "DiagnosticItemResponse": {
         "additionalProperties": false,
         "properties": {
@@ -400,6 +628,43 @@
         ],
         "title": "ErrorCode",
         "type": "string"
+      },
+      "EvidenceCompletenessSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "complete": {
+            "maximum": 100,
+            "minimum": 0,
+            "title": "Complete",
+            "type": "integer"
+          },
+          "failed": {
+            "maximum": 100,
+            "minimum": 0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "partial": {
+            "maximum": 100,
+            "minimum": 0,
+            "title": "Partial",
+            "type": "integer"
+          },
+          "total_runs": {
+            "maximum": 100,
+            "minimum": 0,
+            "title": "Total Runs",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_runs",
+          "complete",
+          "partial",
+          "failed"
+        ],
+        "title": "EvidenceCompletenessSummary",
+        "type": "object"
       },
       "EvidenceRef": {
         "additionalProperties": false,
@@ -2133,6 +2398,545 @@
         "title": "ProposalComparisonResponse",
         "type": "object"
       },
+      "ResearchClaim": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_refs": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceRef"
+            },
+            "minItems": 1,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "text": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "evidence_refs"
+        ],
+        "title": "ResearchClaim",
+        "type": "object"
+      },
+      "ResearchCondition": {
+        "additionalProperties": false,
+        "description": "A deterministic signal predicate, never an executable expression.",
+        "properties": {
+          "evidence_refs": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceRef"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "operator": {
+            "enum": [
+              "lt",
+              "lte",
+              "eq",
+              "gte",
+              "gt",
+              "is_true",
+              "is_false"
+            ],
+            "title": "Operator",
+            "type": "string"
+          },
+          "signal": {
+            "maxLength": 100,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_.:-]*$",
+            "title": "Signal",
+            "type": "string"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Threshold"
+          },
+          "unit": {
+            "enum": [
+              "ratio",
+              "basis_points",
+              "days",
+              "currency",
+              "boolean",
+              "count",
+              "state"
+            ],
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "signal",
+          "operator",
+          "threshold",
+          "unit",
+          "evidence_refs"
+        ],
+        "title": "ResearchCondition",
+        "type": "object"
+      },
+      "ResearchIntent": {
+        "additionalProperties": false,
+        "properties": {
+          "counter_theses": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchClaim"
+            },
+            "maxItems": 5,
+            "title": "Counter Theses",
+            "type": "array"
+          },
+          "data_snapshot_id": {
+            "format": "uuid",
+            "title": "Data Snapshot Id",
+            "type": "string"
+          },
+          "data_version": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Data Version",
+            "type": "string"
+          },
+          "decision_id": {
+            "format": "uuid",
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "decision_time": {
+            "format": "date-time",
+            "title": "Decision Time",
+            "type": "string"
+          },
+          "disagreement": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Disagreement",
+            "type": "string"
+          },
+          "display_symbol": {
+            "maxLength": 32,
+            "minLength": 1,
+            "pattern": "^[A-Z0-9.\\-]+$",
+            "title": "Display Symbol",
+            "type": "string"
+          },
+          "entry_conditions": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchCondition"
+            },
+            "maxItems": 10,
+            "title": "Entry Conditions",
+            "type": "array"
+          },
+          "evidence_audit": {
+            "enum": [
+              "complete",
+              "partial",
+              "failed"
+            ],
+            "title": "Evidence Audit",
+            "type": "string"
+          },
+          "evidence_refs": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceRef"
+            },
+            "minItems": 1,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "exit_conditions": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchCondition"
+            },
+            "maxItems": 10,
+            "title": "Exit Conditions",
+            "type": "array"
+          },
+          "exposure_action": {
+            "enum": [
+              "none",
+              "reduce",
+              "maintain",
+              "eligible_for_increase"
+            ],
+            "title": "Exposure Action",
+            "type": "string"
+          },
+          "horizon": {
+            "enum": [
+              "short_term",
+              "medium_term",
+              "long_term"
+            ],
+            "title": "Horizon",
+            "type": "string"
+          },
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "invalidation_conditions": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchCondition"
+            },
+            "maxItems": 10,
+            "title": "Invalidation Conditions",
+            "type": "array"
+          },
+          "model_version": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Model Version",
+            "type": "string"
+          },
+          "prompt_version": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Prompt Version",
+            "type": "string"
+          },
+          "quality_status": {
+            "enum": [
+              "complete",
+              "partial"
+            ],
+            "title": "Quality Status",
+            "type": "string"
+          },
+          "role_votes": {
+            "items": {
+              "$ref": "#/components/schemas/RoleVote"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Role Votes",
+            "type": "array"
+          },
+          "schema_version": {
+            "const": "research_intent_v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "stance": {
+            "enum": [
+              "buy_candidate",
+              "reduce_candidate",
+              "hold",
+              "watch"
+            ],
+            "title": "Stance",
+            "type": "string"
+          },
+          "strategy_version": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Strategy Version",
+            "type": "string"
+          },
+          "theses": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchClaim"
+            },
+            "maxItems": 5,
+            "title": "Theses",
+            "type": "array"
+          },
+          "uncertainties": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Uncertainties",
+            "type": "array"
+          },
+          "valid_until": {
+            "format": "date-time",
+            "title": "Valid Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "decision_id",
+          "instrument_id",
+          "display_symbol",
+          "decision_time",
+          "data_snapshot_id",
+          "horizon",
+          "stance",
+          "exposure_action",
+          "theses",
+          "counter_theses",
+          "uncertainties",
+          "invalidation_conditions",
+          "entry_conditions",
+          "exit_conditions",
+          "valid_until",
+          "quality_status",
+          "evidence_audit",
+          "role_votes",
+          "disagreement",
+          "strategy_version",
+          "model_version",
+          "prompt_version",
+          "data_version",
+          "evidence_refs"
+        ],
+        "title": "ResearchIntent",
+        "type": "object"
+      },
+      "ResearchRunCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "data_snapshot_id": {
+            "format": "uuid",
+            "title": "Data Snapshot Id",
+            "type": "string"
+          },
+          "decision_time": {
+            "format": "date-time",
+            "title": "Decision Time",
+            "type": "string"
+          },
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instrument_id",
+          "data_snapshot_id",
+          "decision_time"
+        ],
+        "title": "ResearchRunCreateRequest",
+        "type": "object"
+      },
+      "ResearchRunEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ResearchRunResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "ResearchRunEnvelope",
+        "type": "object"
+      },
+      "ResearchRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "abstention_reason": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Abstention Reason"
+          },
+          "budget_reason": {
+            "anyOf": [
+              {
+                "const": "budget_exhausted",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Reason"
+          },
+          "data_snapshot_id": {
+            "format": "uuid",
+            "title": "Data Snapshot Id",
+            "type": "string"
+          },
+          "decision_time": {
+            "format": "date-time",
+            "title": "Decision Time",
+            "type": "string"
+          },
+          "disagreement": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disagreement"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceRef"
+            },
+            "maxItems": 100,
+            "title": "Evidence",
+            "type": "array"
+          },
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "intent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResearchIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "invalidation_conditions": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchCondition"
+            },
+            "maxItems": 10,
+            "title": "Invalidation Conditions",
+            "type": "array"
+          },
+          "quality_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "complete",
+                  "partial"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality Status"
+          },
+          "reserved_cost_usd": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Reserved Cost Usd",
+            "type": "string"
+          },
+          "retry_count": {
+            "title": "Retry Count",
+            "type": "integer"
+          },
+          "role_votes": {
+            "items": {
+              "$ref": "#/components/schemas/RoleVote"
+            },
+            "maxItems": 8,
+            "title": "Role Votes",
+            "type": "array"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "settled_cost_usd": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Settled Cost Usd"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AgentRunStatus"
+          }
+        },
+        "required": [
+          "run_id",
+          "instrument_id",
+          "data_snapshot_id",
+          "decision_time",
+          "status",
+          "retry_count",
+          "reserved_cost_usd",
+          "settled_cost_usd",
+          "intent",
+          "evidence",
+          "role_votes",
+          "invalidation_conditions",
+          "quality_status",
+          "budget_reason"
+        ],
+        "title": "ResearchRunResponse",
+        "type": "object"
+      },
+      "RoleVote": {
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "enum": [
+              "orchestrator",
+              "fundamental",
+              "market_state",
+              "macro_sector",
+              "bull",
+              "bear",
+              "evidence_audit",
+              "portfolio"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "vote": {
+            "enum": [
+              "support",
+              "oppose",
+              "abstain"
+            ],
+            "title": "Vote",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "vote"
+        ],
+        "title": "RoleVote",
+        "type": "object"
+      },
       "SelectedMarketSeriesResponse": {
         "additionalProperties": false,
         "description": "At most one repository-selected historical series in a market page.",
@@ -2593,6 +3397,57 @@
         "summary": "Liveness"
       }
     },
+    "/internal/v1/briefs/{session_date}": {
+      "get": {
+        "description": "Return bounded typed summaries; never include role/tool payloads or invoke a model.",
+        "operationId": "getDailyBrief",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_date",
+            "required": true,
+            "schema": {
+              "format": "date",
+              "title": "Session Date",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyBriefEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "Get Daily Brief"
+      }
+    },
     "/internal/v1/broker-sync-runs": {
       "post": {
         "operationId": "createBrokerSyncRun",
@@ -2750,6 +3605,77 @@
           }
         },
         "summary": "Get Broker Sync Run"
+      }
+    },
+    "/internal/v1/instruments/{instrument_id}/research": {
+      "get": {
+        "description": "Select the latest immutable research record by stable timestamp/id ordering.",
+        "operationId": "getInstrumentResearch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instrument_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Instrument Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "as_of",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "As Of",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchRunEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "Get Instrument Research"
       }
     },
     "/internal/v1/integrations": {
@@ -3840,6 +4766,139 @@
           }
         },
         "summary": "Get Latest Portfolio Snapshot"
+      }
+    },
+    "/internal/v1/research-runs": {
+      "post": {
+        "description": "Append a prepared local run only when immutable prompt/model pricing authority exists.",
+        "operationId": "createResearchRun",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResearchRunCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchRunEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "Create Research Run"
+      }
+    },
+    "/internal/v1/research-runs/{run_id}": {
+      "get": {
+        "description": "Return one persisted run and its latest schema-validated immutable output.",
+        "operationId": "getResearchRun",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchRunEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "Get Research Run"
       }
     },
     "/internal/v1/system-status": {

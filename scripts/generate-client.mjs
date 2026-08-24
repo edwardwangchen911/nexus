@@ -81,6 +81,8 @@ function generateRuntimeContract(openapi) {
     "OptimizationLifecycleData",
     "OptimizationProposalGroupResponse",
     "WhatIfResponse",
+    "ResearchRunResponse",
+    "DailyBriefResponse",
   ];
   const schemas = openapi?.components?.schemas;
   if (!schemas || typeof schemas !== "object") {
@@ -108,6 +110,8 @@ function generateRuntimeContract(openapi) {
     "export const optimizationLifecycleRuntimeSchema = runtimeContractSchemas.OptimizationLifecycleData;",
     "export const optimizationProposalGroupRuntimeSchema = runtimeContractSchemas.OptimizationProposalGroupResponse;",
     "export const whatIfRuntimeSchema = runtimeContractSchemas.WhatIfResponse;",
+    "export const researchRunRuntimeSchema = runtimeContractSchemas.ResearchRunResponse;",
+    "export const dailyBriefRuntimeSchema = runtimeContractSchemas.DailyBriefResponse;",
   ].join("\n\n"));
 }
 
