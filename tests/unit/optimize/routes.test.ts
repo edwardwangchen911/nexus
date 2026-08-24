@@ -38,6 +38,10 @@ describe("optimization BFF routes", () => {
     const invalid = await GET(new Request("https://nexus.test/api/v1/overview?session_date=08%2F24%2F2026&redirect=bad"));
     expect(invalid.status).toBe(400);
     expect(engineFetch).not.toHaveBeenCalled();
+
+    const impossibleDate = await GET(new Request("https://nexus.test/api/v1/overview?session_date=2026-99-99"));
+    expect(impossibleDate.status).toBe(400);
+    expect(engineFetch).not.toHaveBeenCalled();
   });
 
   it("validates the diagnostic and proposal lookup identities", async () => {
@@ -129,7 +133,52 @@ describe("optimization BFF routes", () => {
     expect(engineFetch).not.toHaveBeenCalled();
   });
 
+  it("accepts the persisted draft version zero while rejecting invalid lifecycle versions", async () => {
+    const route = await import("../../../app/api/v1/optimization-proposals/[proposalGroupId]/reject/route");
+    const accepted = await route.POST(new Request(`https://nexus.test/api/v1/optimization-proposals/${groupId}/reject`, {
+      method: "POST",
+      headers: {
+        origin: "https://nexus.test",
+        "content-type": "application/json",
+        "idempotency-key": "reject-draft-13",
+        "if-match": '"0"',
+      },
+      body: JSON.stringify({ version: 0 }),
+    }));
+    expect(accepted.status).toBe(200);
+    expect(engineFetch).toHaveBeenCalledTimes(1);
+
+    for (const version of [-1, 0.5, "0"]) {
+      engineFetch.mockClear();
+      const rejected = await route.POST(new Request(`https://nexus.test/api/v1/optimization-proposals/${groupId}/reject`, {
+        method: "POST",
+        headers: {
+          origin: "https://nexus.test",
+          "content-type": "application/json",
+          "idempotency-key": "invalid-version-13",
+          "if-match": `"${version}"`,
+        },
+        body: JSON.stringify({ version }),
+      }));
+      expect(rejected.status).toBe(400);
+      expect(engineFetch).not.toHaveBeenCalled();
+    }
+  });
+
   it("forwards a proposal-anchored what-if body without adding identities or weights", async () => {
+    engineFetch.mockResolvedValueOnce(Response.json({
+      data: {
+        proposal_group_id: groupId,
+        proposal_id: proposalIds.minimum_change,
+        policy_version: "optimizer_v1",
+        instrument_count: 1,
+        result: {
+          diagnostics: {},
+          constraints: { violation_count: { status: "known", value: 0, unit: "count", reason: null } },
+        },
+      },
+      meta: { request_id: actor.requestId, schema_version: "1", as_of: "2026-08-24T00:00:00Z" },
+    }));
     const { POST } = await import("../../../app/api/v1/what-if/evaluate/route");
     const body = JSON.stringify({
       proposal_group_id: groupId,
@@ -147,6 +196,36 @@ describe("optimization BFF routes", () => {
     expect(target).toBe("/internal/v1/what-if/evaluate");
     expect(new TextDecoder().decode(init.body)).toBe(body);
     expect(init.headers).toEqual({ "content-type": "application/json", "idempotency-key": "what-if-13" });
+  });
+
+  it("fails closed when a what-if response is bound to another proposal", async () => {
+    engineFetch.mockResolvedValueOnce(Response.json({
+      data: {
+        proposal_group_id: groupId,
+        proposal_id: proposalIds.hold_current,
+        policy_version: "optimizer_v1",
+        instrument_count: 1,
+        result: {
+          diagnostics: {},
+          constraints: { violation_count: { status: "known", value: 0, unit: "count", reason: null } },
+        },
+      },
+      meta: { request_id: actor.requestId, schema_version: "1", as_of: "2026-08-24T00:00:00Z" },
+    }));
+    const { POST } = await import("../../../app/api/v1/what-if/evaluate/route");
+    const response = await POST(new Request("https://nexus.test/api/v1/what-if/evaluate", {
+      method: "POST",
+      headers: { origin: "https://nexus.test", "content-type": "application/json", "idempotency-key": "mismatch-13" },
+      body: JSON.stringify({
+        proposal_group_id: groupId,
+        proposal_id: proposalIds.minimum_change,
+        policy_version: "optimizer_v1",
+        positions: [{ instrument_id: "0198d500-1000-7000-8000-000000001307", weight: "0.14" }],
+      }),
+    }));
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ error: { code: "INTERNAL_ERROR" } });
   });
 
   it("rejects duplicate or non-decimal what-if positions before Engine", async () => {

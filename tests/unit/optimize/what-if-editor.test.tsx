@@ -49,4 +49,30 @@ describe("what-if analysis", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("请输入 0 到 1 之间的十进制权重");
     expect(onEvaluate).not.toHaveBeenCalled();
   });
+
+  it("uses the same eighteen-decimal limit as the BFF", () => {
+    const onEvaluate = vi.fn();
+    render(<WhatIfEditor group={proposalGroup()} proposalId={proposalIds.minimum_change} actionsEnabled onEvaluate={onEvaluate} />);
+
+    fireEvent.change(screen.getAllByRole("textbox", { name: /目标权重/ })[0], { target: { value: "0.1234567890123456789" } });
+    fireEvent.click(screen.getByRole("button", { name: "评估情景" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("最多 18 位小数");
+    expect(onEvaluate).not.toHaveBeenCalled();
+  });
+
+  it("keeps a proposal with more than thirty positions readable but disables what-if", () => {
+    const group = proposalGroup();
+    const minimumChange = group.proposals[1];
+    minimumChange.positions = Array.from({ length: 31 }, (_, index) => ({
+      ...minimumChange.positions[0],
+      instrument_id: `0198d500-1000-7000-8000-${String(index + 1).padStart(12, "0")}`,
+    }));
+
+    render(<WhatIfEditor group={group} proposalId={proposalIds.minimum_change} actionsEnabled onEvaluate={vi.fn()} />);
+
+    expect(screen.getByText(/试算最多支持 30 个标的/)).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: /目标权重/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "评估情景" })).not.toBeInTheDocument();
+  });
 });

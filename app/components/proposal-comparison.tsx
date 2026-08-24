@@ -10,6 +10,7 @@ type Variant = Proposal["variant"];
 
 type Props = {
   group: ProposalGroup;
+  actionsEnabled?: boolean;
   onStartShadow: (groupId: string, version: number) => Promise<void>;
   onReject: (groupId: string, version: number) => Promise<void>;
 };
@@ -36,7 +37,7 @@ const metricRows = [
   ["tax_impact", "税务影响", "state"],
 ] as const;
 
-export function ProposalComparison({ group, onStartShadow, onReject }: Props): React.ReactElement {
+export function ProposalComparison({ group, actionsEnabled = true, onStartShadow, onReject }: Props): React.ReactElement {
   const [confirming, setConfirming] = useState(false);
   const [pending, setPending] = useState<"shadow" | "reject" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -46,6 +47,13 @@ export function ProposalComparison({ group, onStartShadow, onReject }: Props): R
     ? null
     : group.shadow_eligibility.reasons.join("、") || "服务器未授予影子验证资格。";
   const terminal = ["expired", "rejected", "validated"].includes(group.status);
+  const canShadow = actionsEnabled && group.status === "compared" && shadowReason === null;
+  const canReject = actionsEnabled && ["draft", "compared"].includes(group.status);
+  const blockedReason = !actionsEnabled
+    ? "当前数据状态不允许发起操作；请先重新读取方案。"
+    : group.status !== "compared"
+      ? `当前状态 ${group.status} 不允许新的生命周期动作。`
+      : shadowReason;
 
   async function startShadow(): Promise<void> {
     setPending("shadow"); setNotice(null);
@@ -136,14 +144,14 @@ export function ProposalComparison({ group, onStartShadow, onReject }: Props): R
       ) : null}
 
       <div className="proposal-comparison__actions">
-        {!terminal && shadowReason === null ? (
+        {canShadow ? (
           <button className="button button--primary" type="button" disabled={pending !== null} onClick={() => setConfirming(true)}>
             <FlaskConical aria-hidden="true" size={17} />启动影子验证
           </button>
         ) : (
-          <p className="proposal-comparison__blocked"><AlertTriangle aria-hidden="true" size={17} />{terminal ? `当前状态 ${group.status} 不允许新的生命周期动作。` : shadowReason}</p>
+          <p className="proposal-comparison__blocked"><AlertTriangle aria-hidden="true" size={17} />{blockedReason}</p>
         )}
-        {!terminal ? (
+        {canReject ? (
           <div className="proposal-comparison__reject">
             <p>拒绝后只能通过创建新方案组恢复。</p>
             <button className="button button--danger" type="button" disabled={pending !== null} onClick={() => void reject()}>

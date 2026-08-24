@@ -56,12 +56,14 @@ export default function ProposalGroupPage(): React.ReactElement {
 
 export function ProposalGroupPanel({ state, group, onRefresh, onStartShadow, onReject }: Props): React.ReactElement {
   const hasData = group !== null && ["ready", "partial", "stale"].includes(state);
+  const actionsEnabled = state === "ready";
   const minimumChange = group?.proposals.find((proposal) => proposal.variant === "minimum_change");
   return <section className="page-stack proposal-page" aria-label="三方案比较页面" data-state={state}>
     <header className="page-heading"><div><p className="eyebrow">PROPOSAL / SAME BASELINE</p><h1>三方案比较</h1><p>固定顺序展示保持现状、最小调整与策略目标；未知值不参与优劣排序。</p></div><div className="page-actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />重新加载方案</button></div></header>
     {!hasData ? <DataState state={state} title={state === "empty" ? "方案组不存在" : "方案组暂时不可用"} detail="不会从 URL 或浏览器状态构造方案。" /> : <>
-      <ProposalComparison group={group} onStartShadow={onStartShadow} onReject={onReject} />
-      {minimumChange ? <nav className="proposal-context-links" aria-label="方案上下文动作"><a className="button button--quiet" href={`/what-if?proposal_group_id=${group.proposal_group_id}&proposal_id=${minimumChange.proposal_id}`}>试算最小调整权重</a></nav> : null}
+      <ProposalComparison group={group} actionsEnabled={actionsEnabled} onStartShadow={onStartShadow} onReject={onReject} />
+      {actionsEnabled && minimumChange && minimumChange.positions.length <= 30 ? <nav className="proposal-context-links" aria-label="方案上下文动作"><a className="button button--quiet" href={`/what-if?proposal_group_id=${group.proposal_group_id}&proposal_id=${minimumChange.proposal_id}`}>试算最小调整权重</a></nav> : null}
+      {actionsEnabled && minimumChange && minimumChange.positions.length > 30 ? <p className="inline-notice">方案可继续只读比较；情景试算最多支持 30 个标的。</p> : null}
     </>}
   </section>;
 }

@@ -37,7 +37,7 @@ export function requireProposalAdmission(value: Record<string, unknown>): void {
 export function requireLifecycleVersion(request: Request, value: Record<string, unknown>): number {
   requireExactKeys(value, ["version"]);
   const version = value.version;
-  if (!Number.isSafeInteger(version) || (version as number) < 1) {
+  if (!Number.isSafeInteger(version) || (version as number) < 0) {
     throw invalid("The proposal version is invalid.");
   }
   if (request.headers.get("if-match") !== `"${version}"`) {

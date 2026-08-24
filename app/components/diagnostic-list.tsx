@@ -92,7 +92,7 @@ export function DiagnosticList({ report }: { report: DiagnosticReport }): React.
               </header>
               <dl className="diagnostic-item__thresholds numeric-data">
                 <Threshold label="当前值" value={item.metric_value} unit={item.unit} />
-                <Threshold label="上限" value={item.reference_limit} unit={item.unit} />
+                <Threshold label="阈值" value={item.reference_limit} unit={item.unit} />
                 <Threshold label="余量" value={item.headroom} unit={item.unit} />
               </dl>
               {unknownReasons(item).length > 0 ? (

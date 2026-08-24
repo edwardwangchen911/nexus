@@ -153,7 +153,8 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     if (!matchesRuntimeSchema(data, optimizationProposalGroupRuntimeSchema) || !isPlain(data) || !Array.isArray(data.proposals)) return INVALID_DATA;
     const variants = data.proposals.map((proposal) => isPlain(proposal) ? proposal.variant : null);
     const ids = data.proposals.map((proposal) => isPlain(proposal) ? proposal.proposal_id : null);
-    return variants.join(":") === "hold_current:minimum_change:strategy_target"
+    return data.proposal_group_id === proposalGroup[1]
+      && variants.join(":") === "hold_current:minimum_change:strategy_target"
       && ids.every((id) => typeof id === "string") && new Set(ids).size === 3
       ? data
       : INVALID_DATA;

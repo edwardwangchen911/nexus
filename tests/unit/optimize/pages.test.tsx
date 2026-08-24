@@ -74,6 +74,15 @@ describe("optimization pages", () => {
     expect(screen.queryByRole("button", { name: /下单|交易|买入|卖出/ })).not.toBeInTheDocument();
   });
 
+  it.each(["partial", "stale"] as const)("keeps cached %s proposal facts visible but disables every action", (state) => {
+    render(<ProposalGroupPanel state={state} group={proposalGroup()} onRefresh={vi.fn()} onStartShadow={vi.fn()} onReject={vi.fn()} />);
+
+    expect(screen.getAllByRole("columnheader", { name: /保持现状|最小调整|策略目标/ })).toHaveLength(3);
+    expect(screen.getByText(/当前数据状态不允许发起操作/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /启动影子验证|拒绝方案组/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "试算最小调整权重" })).not.toBeInTheDocument();
+  });
+
   it("requires a persisted proposal context before rendering what-if inputs", () => {
     const { rerender } = render(<WhatIfPagePanel state="empty" group={null} proposalId={null} onRefresh={vi.fn()} onEvaluate={vi.fn()} />);
     expect(screen.getByText(/必须从已持久化的方案进入/)).toBeVisible();
@@ -81,5 +90,13 @@ describe("optimization pages", () => {
     rerender(<WhatIfPagePanel state="ready" group={proposalGroup()} proposalId={proposalIds.minimum_change} onRefresh={vi.fn()} onEvaluate={vi.fn()} />);
     expect(screen.getAllByRole("textbox", { name: /目标权重/ })).toHaveLength(2);
     expect(screen.getAllByText(/仅分析，不持久化/).length).toBeGreaterThan(0);
+  });
+
+  it.each(["partial", "stale"] as const)("shows cached %s what-if context without enabling evaluation", (state) => {
+    render(<WhatIfPagePanel state={state} group={proposalGroup()} proposalId={proposalIds.minimum_change} onRefresh={vi.fn()} onEvaluate={vi.fn()} />);
+
+    expect(screen.getByText(/当前数据状态不允许试算/)).toBeVisible();
+    for (const input of screen.getAllByRole("textbox", { name: /目标权重/ })) expect(input).toBeDisabled();
+    expect(screen.getByRole("button", { name: "评估情景" })).toBeDisabled();
   });
 });

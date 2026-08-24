@@ -53,7 +53,7 @@ export function WhatIfPagePanel({ state, group, proposalId, onRefresh, onEvaluat
   const hasData = group !== null && proposalId !== null && ["ready", "partial", "stale"].includes(state);
   return <section className="page-stack what-if-page" aria-label="无副作用情景试算页面" data-state={state}>
     <header className="page-heading"><div><p className="eyebrow">WHAT-IF / EPHEMERAL</p><h1>无副作用情景试算</h1><p>从已有方案复制允许的标的集，只编辑 Decimal 权重字符串；风险由后端评估。</p></div><div className="page-actions"><span className="mode-badge">仅分析，不持久化</span><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />重新读取方案</button></div></header>
-    {!hasData ? <DataState state={state} title={state === "empty" ? "缺少方案上下文" : "情景试算暂时不可用"} detail="必须从已持久化的方案进入；页面不接受任意标的或本地构造的基准。" /> : <WhatIfEditor group={group} proposalId={proposalId} onEvaluate={onEvaluate} />}
+    {!hasData ? <DataState state={state} title={state === "empty" ? "缺少方案上下文" : "情景试算暂时不可用"} detail="必须从已持久化的方案进入；页面不接受任意标的或本地构造的基准。" /> : <WhatIfEditor group={group} proposalId={proposalId} actionsEnabled={state === "ready"} onEvaluate={onEvaluate} />}
   </section>;
 }
 

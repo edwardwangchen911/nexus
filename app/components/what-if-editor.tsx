@@ -11,10 +11,11 @@ type WhatIfResponse = components["schemas"]["WhatIfResponse"];
 type Props = {
   group: ProposalGroup;
   proposalId: string;
+  actionsEnabled?: boolean;
   onEvaluate: (request: WhatIfRequest) => Promise<WhatIfResponse>;
 };
 
-export function WhatIfEditor({ group, proposalId, onEvaluate }: Props): React.ReactElement {
+export function WhatIfEditor({ group, proposalId, actionsEnabled = true, onEvaluate }: Props): React.ReactElement {
   const proposal = useMemo(
     () => group.proposals.find((candidate) => candidate.proposal_id === proposalId) ?? null,
     [group.proposals, proposalId],
@@ -22,11 +23,14 @@ export function WhatIfEditor({ group, proposalId, onEvaluate }: Props): React.Re
   if (!proposal) {
     return <section className="what-if-editor"><p role="alert">URL 中的方案不存在，无法开始情景试算。</p></section>;
   }
+  if (proposal.positions.length > 30) {
+    return <section className="what-if-editor"><p role="alert">方案仍可只读比较；情景试算最多支持 30 个标的。</p></section>;
+  }
 
-  return <WhatIfProposalEditor key={proposal.proposal_id} group={group} proposal={proposal} onEvaluate={onEvaluate} />;
+  return <WhatIfProposalEditor key={proposal.proposal_id} group={group} proposal={proposal} actionsEnabled={actionsEnabled} onEvaluate={onEvaluate} />;
 }
 
-function WhatIfProposalEditor({ group, proposal, onEvaluate }: { group: ProposalGroup; proposal: ProposalGroup["proposals"][number]; onEvaluate: Props["onEvaluate"] }): React.ReactElement {
+function WhatIfProposalEditor({ group, proposal, actionsEnabled, onEvaluate }: { group: ProposalGroup; proposal: ProposalGroup["proposals"][number]; actionsEnabled: boolean; onEvaluate: Props["onEvaluate"] }): React.ReactElement {
   const [weights, setWeights] = useState<Record<string, string>>(() => Object.fromEntries(proposal.positions.map((position) => [position.instrument_id, position.target_weight])));
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,8 +41,9 @@ function WhatIfProposalEditor({ group, proposal, onEvaluate }: { group: Proposal
       instrument_id: position.instrument_id,
       weight: weights[position.instrument_id] ?? "",
     }));
+    if (!actionsEnabled) return;
     if (positions.some((position) => !isDecimalWeight(position.weight))) {
-      setError("请输入 0 到 1 之间的十进制权重；不支持指数、NaN 或二进制浮点格式。");
+      setError("请输入 0 到 1 之间的十进制权重（最多 18 位小数）；不支持指数或 NaN。");
       setResult(null);
       return;
     }
@@ -79,6 +84,8 @@ function WhatIfProposalEditor({ group, proposal, onEvaluate }: { group: Proposal
                 id={inputId}
                 type="text"
                 inputMode="decimal"
+                maxLength={20}
+                disabled={!actionsEnabled}
                 value={weights[position.instrument_id] ?? ""}
                 aria-describedby={`${inputId}-help`}
                 onChange={(event) => {
@@ -86,14 +93,15 @@ function WhatIfProposalEditor({ group, proposal, onEvaluate }: { group: Proposal
                   setError(null); setResult(null);
                 }}
               />
-              <small id={`${inputId}-help`}>当前 {position.current_weight} · 方案 {position.target_weight}</small>
+              <small id={`${inputId}-help`}>当前 {position.current_weight} · 方案 {position.target_weight} · 最多 18 位小数</small>
             </div>
           );
         })}
       </div>
+      {!actionsEnabled ? <p className="inline-notice" role="status">当前数据状态不允许试算；已缓存权重仅供查看，请先重新读取方案。</p> : null}
       {error ? <p className="inline-notice inline-notice--error" role="alert"><TriangleAlert aria-hidden="true" size={17} />{error}</p> : null}
       {result ? <WhatIfResult result={result} /> : null}
-      <button className="button button--primary" type="button" disabled={pending} onClick={() => void evaluate()}>
+      <button className="button button--primary" type="button" disabled={pending || !actionsEnabled} onClick={() => void evaluate()}>
         <Calculator aria-hidden="true" size={17} />{pending ? "正在评估" : "评估情景"}
       </button>
     </section>
@@ -129,5 +137,5 @@ function WhatIfResult({ result }: { result: WhatIfResponse }): React.ReactElemen
 }
 
 function isDecimalWeight(value: string): boolean {
-  return /^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(value);
+  return /^(?:0(?:\.\d{1,18})?|1(?:\.0{1,18})?)$/.test(value);
 }

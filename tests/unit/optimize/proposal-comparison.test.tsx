@@ -60,6 +60,14 @@ describe("three-way proposal comparison", () => {
     },
   );
 
+  it("does not re-offer shadow validation after the group enters shadowing", () => {
+    render(<ProposalComparison group={proposalGroup({ status: "shadowing", shadow_eligibility: { eligible: true, reasons: [] } })} actionsEnabled onStartShadow={vi.fn()} onReject={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: "启动影子验证" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "拒绝方案组" })).not.toBeInTheDocument();
+    expect(screen.getByText(/当前状态 shadowing/)).toBeVisible();
+  });
+
   it("shows version-conflict recovery without discarding the comparison", async () => {
     const onStartShadow = vi.fn().mockRejectedValue(new Error("VERSION_CONFLICT"));
     const group = proposalGroup({
