@@ -5,7 +5,8 @@ from uuid import UUID
 
 import pytest
 from nexus.market.ingestion import ingest_price_page, serialize_price_bars
-from nexus.persistence.models.data import DataArtifact, PriceSeriesManifest
+from nexus.persistence.models.data import DataArtifact, PriceBarRecord, PriceSeriesManifest
+from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.session import session_factory
 from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
 from nexus.settings import EngineSettings
@@ -118,9 +119,24 @@ async def test_ingestion_archives_raw_then_promotes_parquet_before_metadata_comm
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 1
         assert await session.scalar(select(func.count()).select_from(PriceSeriesManifest)) == 1
+        assert await session.scalar(select(func.count()).select_from(PriceBarRecord)) == 1
+        assert await session.scalar(select(func.count()).select_from(ResearchEvidenceRef)) == 1
         persisted = await session.scalar(select(PriceSeriesManifest))
         assert persisted is not None
         assert persisted.delivery_mode == "fixture"
+        evidence = await session.get(ResearchEvidenceRef, persisted.evidence_ref_id)
+        assert evidence is not None
+        assert (
+            evidence.provider_object_id,
+            evidence.revision,
+            evidence.location,
+            evidence.content_hash,
+        ) == (
+            f"price-series-manifest:{persisted.id}",
+            result.artifact.sha256,
+            result.artifact.uri,
+            result.artifact.sha256,
+        )
 
 
 @pytest.mark.asyncio

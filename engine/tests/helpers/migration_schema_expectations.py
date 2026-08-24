@@ -8,6 +8,7 @@ EXPECTED_TABLES = {
     "quality_reports",
     "data_artifacts",
     "price_series_manifests",
+    "price_bar_records",
     "macro_observations",
     "integration_status",
     "jobs",
@@ -101,13 +102,18 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
             "agent_research_output_evidence",
             "agent_data_snapshot_evidence",
             "agent_daily_budget_reservations",
+            "price_bar_records",
         }
     ),
 )
 
 EXPECTED_FOREIGN_KEYS = {
     "quality_reports": "fk_quality_reports_data_snapshot_id_data_snapshots",
-    "price_series_manifests": "fk_price_series_manifests_data_artifact_id_data_artifacts",
+    "price_series_manifests": {
+        "fk_price_series_manifests_data_artifact_id_data_artifacts",
+        "fk_price_series_evidence_ref",
+    },
+    "price_bar_records": "fk_price_bar_records_manifest",
     "job_leases": "fk_job_leases_job_id_jobs",
     "instrument_aliases": "fk_instrument_aliases_instrument_id_instruments",
     "universe_members": {

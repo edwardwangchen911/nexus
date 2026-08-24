@@ -8,10 +8,12 @@ from sqlalchemy import (
     CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -144,11 +146,25 @@ class AgentDataSnapshotEvidenceRecord(ImmutableCreatedAt, Base):
             name="fk_agent_snapshot_evidence_authority",
         ),
         CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
+        CheckConstraint(
+            "(authority_kind = 'research' AND selected_at IS NULL) OR "
+            "(authority_kind = 'price' AND selected_at IS NOT NULL)",
+            name="authority_kind_valid",
+        ),
+        Index(
+            "uq_agent_snapshot_price_authority",
+            "data_snapshot_id",
+            "instrument_id",
+            unique=True,
+            postgresql_where=text("authority_kind = 'price'"),
+        ),
     )
 
     data_snapshot_id: Mapped[UUID] = mapped_column(primary_key=True)
     instrument_id: Mapped[UUID] = mapped_column(primary_key=True)
     evidence_ref_id: Mapped[UUID] = mapped_column(primary_key=True)
+    authority_kind: Mapped[str] = mapped_column(String(16), default="research")
+    selected_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     source: Mapped[str] = mapped_column(String(100))
     provider_object_id: Mapped[str] = mapped_column(String(255))
     revision: Mapped[str] = mapped_column(String(255))

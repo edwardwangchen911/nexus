@@ -285,6 +285,8 @@ def _assert_reflected_schema(connection: Connection) -> None:
         expected_names = (
             foreign_key_names if isinstance(foreign_key_names, set) else {foreign_key_names}
         )
+        if table_name == "price_series_manifests" and "price_bar_records" not in actual_tables:
+            expected_names = expected_names - {"fk_price_series_evidence_ref"}
         assert {
             foreign_key["name"] for foreign_key in inspector.get_foreign_keys(table_name)
         } == expected_names

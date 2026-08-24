@@ -140,9 +140,14 @@ class PriceSeriesManifest(ImmutableCreatedAt, Base):
             "source <> 'fosun' OR delivery_mode <> 'fixture'",
             name="fosun_delivery_mode",
         ),
+        CheckConstraint("interval IN ('1Min', '1Day')", name="interval_allowed"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    evidence_ref_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("research_evidence_refs.id", name="fk_price_series_evidence_ref"),
+        unique=True,
+    )
     data_artifact_id: Mapped[UUID] = mapped_column(
         ForeignKey(
             "data_artifacts.id",
@@ -154,9 +159,47 @@ class PriceSeriesManifest(ImmutableCreatedAt, Base):
     feed: Mapped[str] = mapped_column(String(100))
     delivery_mode: Mapped[str] = mapped_column(String(20))
     adjustment: Mapped[str] = mapped_column(String(100))
+    interval: Mapped[str] = mapped_column(String(8), default="1Day")
     start_at: Mapped[datetime] = mapped_column(UTCDateTime())
     end_at: Mapped[datetime] = mapped_column(UTCDateTime())
     row_count: Mapped[int] = mapped_column(BigInteger)
+
+
+class PriceBarRecord(ImmutableCreatedAt, Base):
+    """Database-resident normalized bars for zero-network frozen research features."""
+
+    __tablename__ = "price_bar_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "price_series_manifest_id",
+            "observed_at",
+            "revision",
+            name="uq_price_bar_records_manifest_observation_revision",
+        ),
+        CheckConstraint("high >= open AND high >= close AND high >= low", name="high_valid"),
+        CheckConstraint("low <= open AND low <= close AND low <= high", name="low_valid"),
+        CheckConstraint("open > 0 AND high > 0 AND low > 0 AND close > 0", name="price_positive"),
+        CheckConstraint("volume >= 0", name="volume_nonnegative"),
+        CheckConstraint("available_at >= observed_at", name="available_after_observed"),
+        CheckConstraint("received_at >= available_at", name="received_after_available"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    price_series_manifest_id: Mapped[UUID] = mapped_column(
+        ForeignKey("price_series_manifests.id", name="fk_price_bar_records_manifest")
+    )
+    instrument_id: Mapped[UUID]
+    session: Mapped[date] = mapped_column(Date)
+    open: Mapped[Decimal]
+    high: Mapped[Decimal]
+    low: Mapped[Decimal]
+    close: Mapped[Decimal]
+    volume: Mapped[Decimal]
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    received_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    revision: Mapped[str] = mapped_column(String(255))
+    quality_flags: Mapped[list[str]] = mapped_column(JSONB)
 
 
 class MacroObservation(ImmutableCreatedAt, Base):

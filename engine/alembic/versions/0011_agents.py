@@ -14,6 +14,7 @@ depends_on: str | Sequence[str] | None = None
 _UUID = postgresql.UUID(as_uuid=True)
 _NUMERIC = sa.Numeric(38, 12)
 _IMMUTABLE_TABLES = (
+    "price_bar_records",
     "agent_prompt_versions",
     "agent_model_configs",
     "agent_research_events",
@@ -24,6 +25,84 @@ _IMMUTABLE_TABLES = (
 
 
 def upgrade() -> None:
+    op.drop_constraint(
+        op.f("ck_research_evidence_refs_location_content_addressed"),
+        "research_evidence_refs",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "location_content_addressed",
+        "research_evidence_refs",
+        "(location LIKE 'memory://sha256/' || content_hash || '%') OR "
+        "(location LIKE 'memory://normalized/market/%/' || content_hash || '.parquet') OR "
+        "(location LIKE 'package://%' AND location LIKE '%@sha256:' || content_hash || '%') OR "
+        "(location LIKE 's3://%' AND (location LIKE '%/sha256/' || content_hash || '%' "
+        "OR location ~ '[?&]versionId=[^&#]+'))",
+    )
+    op.add_column(
+        "price_series_manifests",
+        sa.Column("evidence_ref_id", _UUID, nullable=True),
+    )
+    op.add_column(
+        "price_series_manifests",
+        sa.Column("interval", sa.String(8), nullable=False, server_default="1Day"),
+    )
+    op.create_foreign_key(
+        op.f("fk_price_series_evidence_ref"),
+        "price_series_manifests",
+        "research_evidence_refs",
+        ["evidence_ref_id"],
+        ["id"],
+    )
+    op.create_unique_constraint(
+        op.f("uq_price_series_manifests_evidence_ref_id"),
+        "price_series_manifests",
+        ["evidence_ref_id"],
+    )
+    op.create_check_constraint(
+        "interval_allowed",
+        "price_series_manifests",
+        "interval IN ('1Min', '1Day')",
+    )
+    op.create_table(
+        "price_bar_records",
+        sa.Column("id", _UUID, primary_key=True),
+        sa.Column("price_series_manifest_id", _UUID, nullable=False),
+        sa.Column("instrument_id", _UUID, nullable=False),
+        sa.Column("session", sa.Date(), nullable=False),
+        sa.Column("open", _NUMERIC, nullable=False),
+        sa.Column("high", _NUMERIC, nullable=False),
+        sa.Column("low", _NUMERIC, nullable=False),
+        sa.Column("close", _NUMERIC, nullable=False),
+        sa.Column("volume", _NUMERIC, nullable=False),
+        sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("available_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("received_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("revision", sa.String(255), nullable=False),
+        sa.Column("quality_flags", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.ForeignKeyConstraint(
+            ["price_series_manifest_id"],
+            ["price_series_manifests.id"],
+            name="fk_price_bar_records_manifest",
+        ),
+        sa.UniqueConstraint(
+            "price_series_manifest_id",
+            "observed_at",
+            "revision",
+            name="uq_price_bar_records_manifest_observation_revision",
+        ),
+        sa.CheckConstraint("high >= open AND high >= close AND high >= low", name="high_valid"),
+        sa.CheckConstraint("low <= open AND low <= close AND low <= high", name="low_valid"),
+        sa.CheckConstraint(
+            "open > 0 AND high > 0 AND low > 0 AND close > 0", name="price_positive"
+        ),
+        sa.CheckConstraint("volume >= 0", name="volume_nonnegative"),
+        sa.CheckConstraint("available_at >= observed_at", name="available_after_observed"),
+        sa.CheckConstraint("received_at >= available_at", name="received_after_available"),
+    )
     op.create_table(
         "agent_prompt_versions",
         sa.Column("id", _UUID, primary_key=True),
@@ -141,6 +220,8 @@ def upgrade() -> None:
         sa.Column("data_snapshot_id", _UUID, primary_key=True),
         sa.Column("instrument_id", _UUID, primary_key=True),
         sa.Column("evidence_ref_id", _UUID, primary_key=True),
+        sa.Column("authority_kind", sa.String(16), nullable=False, server_default="research"),
+        sa.Column("selected_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("source", sa.String(100), nullable=False),
         sa.Column("provider_object_id", sa.String(255), nullable=False),
         sa.Column("revision", sa.String(255), nullable=False),
@@ -164,6 +245,18 @@ def upgrade() -> None:
             name="fk_agent_snapshot_evidence_authority",
         ),
         sa.CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
+        sa.CheckConstraint(
+            "(authority_kind = 'research' AND selected_at IS NULL) OR "
+            "(authority_kind = 'price' AND selected_at IS NOT NULL)",
+            name="authority_kind_valid",
+        ),
+    )
+    op.create_index(
+        "uq_agent_snapshot_price_authority",
+        "agent_data_snapshot_evidence",
+        ["data_snapshot_id", "instrument_id"],
+        unique=True,
+        postgresql_where=sa.text("authority_kind = 'price'"),
     )
     op.create_table(
         "agent_research_events",
@@ -276,6 +369,7 @@ def upgrade() -> None:
         "BEGIN RAISE EXCEPTION 'agent audit records are append-only' USING ERRCODE = '23514'; END; $$"
     )
     for table in (
+        "price_bar_records",
         "agent_prompt_versions",
         "agent_model_configs",
         "agent_research_runs",
@@ -293,6 +387,39 @@ def upgrade() -> None:
         op.execute(
             f"CREATE TRIGGER trg_{table}_immutable BEFORE UPDATE OR DELETE ON {table} "
             "FOR EACH ROW EXECUTE FUNCTION nexus_prevent_agent_immutable_change()"
+        )
+    op.execute(
+        "CREATE FUNCTION nexus_prevent_frozen_price_bar_insert() RETURNS trigger "
+        "LANGUAGE plpgsql AS $$ BEGIN "
+        "IF EXISTS (SELECT 1 FROM price_series_manifests manifest "
+        "JOIN agent_data_snapshot_evidence authority "
+        "ON authority.evidence_ref_id = manifest.evidence_ref_id "
+        "WHERE manifest.id = NEW.price_series_manifest_id "
+        "AND authority.authority_kind = 'price') THEN "
+        "RAISE EXCEPTION 'frozen price series cannot grow' USING ERRCODE = '23514'; "
+        "END IF; RETURN NEW; END; $$"
+    )
+    op.execute(
+        "CREATE TRIGGER trg_price_bar_records_frozen_insert BEFORE INSERT "
+        "ON price_bar_records FOR EACH ROW "
+        "EXECUTE FUNCTION nexus_prevent_frozen_price_bar_insert()"
+    )
+    op.execute(
+        "CREATE FUNCTION nexus_prevent_frozen_price_authority_change() RETURNS trigger "
+        "LANGUAGE plpgsql AS $$ BEGIN "
+        "IF EXISTS (SELECT 1 FROM price_series_manifests manifest "
+        "JOIN agent_data_snapshot_evidence authority "
+        "ON authority.evidence_ref_id = manifest.evidence_ref_id "
+        "WHERE authority.authority_kind = 'price' AND "
+        "((TG_TABLE_NAME = 'price_series_manifests' AND manifest.id = OLD.id) OR "
+        "(TG_TABLE_NAME = 'data_artifacts' AND manifest.data_artifact_id = OLD.id))) THEN "
+        "RAISE EXCEPTION 'frozen price authority is immutable' USING ERRCODE = '23514'; "
+        "END IF; IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END; $$"
+    )
+    for table in ("price_series_manifests", "data_artifacts"):
+        op.execute(
+            f"CREATE TRIGGER trg_{table}_frozen_authority BEFORE UPDATE OR DELETE ON {table} "
+            "FOR EACH ROW EXECUTE FUNCTION nexus_prevent_frozen_price_authority_change()"
         )
     op.execute(
         "CREATE FUNCTION nexus_validate_agent_run_transition() RETURNS trigger LANGUAGE plpgsql AS $$ "
@@ -328,6 +455,38 @@ def upgrade() -> None:
         "OR authority.revision <> NEW.revision OR authority.available_at <> NEW.available_at "
         "OR authority.location <> NEW.location OR authority.content_hash <> NEW.content_hash THEN "
         "RAISE EXCEPTION 'Agent snapshot evidence authority mismatch' USING ERRCODE = '23514'; END IF; "
+        "SELECT available_at INTO snapshot_time FROM data_snapshots WHERE id = NEW.data_snapshot_id; "
+        "IF snapshot_time IS NULL THEN RAISE EXCEPTION 'Agent snapshot authority is missing' USING ERRCODE = '23503'; END IF; "
+        "IF NEW.authority_kind = 'price' THEN "
+        "IF NEW.selected_at > snapshot_time OR NOT EXISTS ("
+        "SELECT 1 FROM price_series_manifests manifest "
+        "JOIN data_artifacts artifact ON artifact.id = manifest.data_artifact_id "
+        "WHERE manifest.evidence_ref_id = NEW.evidence_ref_id "
+        "AND manifest.instrument = NEW.instrument_id::text AND manifest.interval = '1Day' "
+        "AND manifest.source = NEW.source AND artifact.source = NEW.source "
+        "AND NEW.provider_object_id = 'price-series-manifest:' || manifest.id::text "
+        "AND NEW.revision = artifact.sha256 AND NEW.location = artifact.uri "
+        "AND NEW.content_hash = artifact.sha256 AND authority.byte_length = artifact.byte_size "
+        "AND artifact.mime_type = 'application/vnd.apache.parquet' "
+        "AND artifact.schema_version = 'price_bars_v1' "
+        "AND artifact.observed_at = manifest.start_at AND manifest.end_at <= NEW.selected_at "
+        "AND artifact.available_at = NEW.available_at AND artifact.available_at <= NEW.selected_at "
+        "AND artifact.received_at <= NEW.selected_at "
+        "AND (SELECT count(*) FROM price_bar_records bar "
+        "WHERE bar.price_series_manifest_id = manifest.id) = manifest.row_count "
+        "AND (SELECT min(bar.observed_at) FROM price_bar_records bar "
+        "WHERE bar.price_series_manifest_id = manifest.id) = manifest.start_at "
+        "AND (SELECT max(bar.observed_at) FROM price_bar_records bar "
+        "WHERE bar.price_series_manifest_id = manifest.id) = manifest.end_at "
+        "AND NOT EXISTS (SELECT 1 FROM price_bar_records bar "
+        "WHERE bar.price_series_manifest_id = manifest.id AND ("
+        "bar.instrument_id <> NEW.instrument_id OR bar.observed_at > NEW.selected_at "
+        "OR bar.available_at > NEW.selected_at OR bar.received_at > NEW.selected_at))) THEN "
+        "RAISE EXCEPTION 'Agent price evidence authority is invalid' USING ERRCODE = '23514'; END IF; "
+        "ELSIF NEW.authority_kind = 'research' THEN "
+        "IF EXISTS (SELECT 1 FROM price_series_manifests "
+        "WHERE evidence_ref_id = NEW.evidence_ref_id) THEN "
+        "RAISE EXCEPTION 'Agent price evidence requires price authority' USING ERRCODE = '23514'; END IF; "
         "IF NEW.source <> 'fixture' AND NOT ("
         "EXISTS (SELECT 1 FROM filings WHERE evidence_ref_id = NEW.evidence_ref_id AND instrument_id = NEW.instrument_id) OR "
         "EXISTS (SELECT 1 FROM financial_facts WHERE evidence_ref_id = NEW.evidence_ref_id AND instrument_id = NEW.instrument_id) OR "
@@ -335,8 +494,7 @@ def upgrade() -> None:
         "EXISTS (SELECT 1 FROM macro_observations WHERE authority_version = 'research_macro_v1' AND "
         "(evidence_ref_id = NEW.evidence_ref_id OR calendar_evidence_ref_id = NEW.evidence_ref_id))) THEN "
         "RAISE EXCEPTION 'Agent snapshot evidence is not owned by the instrument' USING ERRCODE = '23514'; END IF; "
-        "SELECT available_at INTO snapshot_time FROM data_snapshots WHERE id = NEW.data_snapshot_id; "
-        "IF snapshot_time IS NULL THEN RAISE EXCEPTION 'Agent snapshot authority is missing' USING ERRCODE = '23503'; END IF; "
+        "ELSE RAISE EXCEPTION 'Agent snapshot evidence kind is invalid' USING ERRCODE = '23514'; END IF; "
         "IF NEW.available_at > snapshot_time THEN RAISE EXCEPTION 'future evidence cannot bind Agent snapshot' USING ERRCODE = '23514'; END IF; "
         "RETURN NEW; END; $$"
     )
@@ -416,6 +574,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("DROP TRIGGER trg_agent_jobs_change ON jobs")
+    op.execute(
+        "DROP TRIGGER trg_price_series_manifests_frozen_authority "
+        "ON price_series_manifests"
+    )
+    op.execute("DROP TRIGGER trg_data_artifacts_frozen_authority ON data_artifacts")
+    op.execute("DROP TRIGGER trg_price_bar_records_frozen_insert ON price_bar_records")
     op.execute("DROP TRIGGER trg_agent_budget_delete ON agent_daily_budget_reservations")
     op.execute("DROP TRIGGER trg_agent_budget_transition ON agent_daily_budget_reservations")
     op.execute("DROP TRIGGER trg_agent_output_evidence_validate ON agent_research_output_evidence")
@@ -429,6 +593,7 @@ def downgrade() -> None:
         "agent_research_runs",
         "agent_model_configs",
         "agent_prompt_versions",
+        "price_bar_records",
     ):
         op.execute(f"DROP TRIGGER trg_{table}_created_at_immutable ON {table}")
     op.drop_table("agent_daily_budget_reservations")
@@ -439,7 +604,40 @@ def downgrade() -> None:
     op.drop_table("agent_research_runs")
     op.drop_table("agent_model_configs")
     op.drop_table("agent_prompt_versions")
+    op.drop_table("price_bar_records")
+    op.drop_constraint(
+        op.f("ck_price_series_manifests_interval_allowed"),
+        "price_series_manifests",
+        type_="check",
+    )
+    op.drop_constraint(
+        op.f("uq_price_series_manifests_evidence_ref_id"),
+        "price_series_manifests",
+        type_="unique",
+    )
+    op.drop_constraint(
+        op.f("fk_price_series_evidence_ref"),
+        "price_series_manifests",
+        type_="foreignkey",
+    )
+    op.drop_column("price_series_manifests", "interval")
+    op.drop_column("price_series_manifests", "evidence_ref_id")
+    op.drop_constraint(
+        op.f("ck_research_evidence_refs_location_content_addressed"),
+        "research_evidence_refs",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "location_content_addressed",
+        "research_evidence_refs",
+        "(location LIKE 'memory://sha256/' || content_hash || '%') OR "
+        "(location LIKE 'package://%' AND location LIKE '%@sha256:' || content_hash || '%') OR "
+        "(location LIKE 's3://%' AND (location LIKE '%/sha256/' || content_hash || '%' "
+        "OR location ~ '[?&]versionId=[^&#]+'))",
+    )
     op.execute("DROP FUNCTION nexus_validate_agent_run_transition()")
+    op.execute("DROP FUNCTION nexus_prevent_frozen_price_authority_change()")
+    op.execute("DROP FUNCTION nexus_prevent_frozen_price_bar_insert()")
     op.execute("DROP FUNCTION nexus_validate_agent_budget_transition()")
     op.execute("DROP FUNCTION nexus_prevent_agent_budget_delete()")
     op.execute("DROP FUNCTION nexus_validate_agent_job_change()")

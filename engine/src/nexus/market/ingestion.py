@@ -12,7 +12,9 @@ import pyarrow as pa  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.persistence.models.data import DataArtifact, PriceSeriesManifest
+from nexus.domain.ids import new_uuid7
+from nexus.persistence.models.data import DataArtifact, PriceBarRecord, PriceSeriesManifest
+from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
 
 
@@ -35,6 +37,7 @@ class MarketIngestionResult:
     raw_uri: str
     artifact: DataArtifact
     manifest: PriceSeriesManifest
+    evidence_ref: ResearchEvidenceRef
     provenance: MarketDataProvenance
 
 
@@ -85,23 +88,58 @@ async def ingest_price_page(
         )
         session.add(artifact)
         await session.flush()
+        manifest_id = new_uuid7()
+        evidence_ref = ResearchEvidenceRef(
+            source=artifact.source,
+            provider_object_id=f"price-series-manifest:{manifest_id}",
+            revision=artifact.sha256,
+            available_at=artifact.available_at,
+            location=artifact.uri,
+            content_hash=artifact.sha256,
+            byte_length=artifact.byte_size,
+        )
+        session.add(evidence_ref)
+        await session.flush()
         manifest = PriceSeriesManifest(
+            id=manifest_id,
+            evidence_ref_id=evidence_ref.id,
             data_artifact_id=artifact.id,
             instrument=str(instrument_id),
             source=page.provenance.source,
             feed=page.provenance.feed,
             delivery_mode=page.provenance.delivery_mode,
             adjustment=page.provenance.adjustment,
+            interval=page.provenance.interval,
             start_at=min(observed),
             end_at=max(observed),
             row_count=len(page.items),
         )
         session.add(manifest)
+        await session.flush()
+        session.add_all(
+            PriceBarRecord(
+                price_series_manifest_id=manifest.id,
+                instrument_id=bar.instrument_id,
+                session=bar.session,
+                open=bar.open,
+                high=bar.high,
+                low=bar.low,
+                close=bar.close,
+                volume=bar.volume,
+                observed_at=bar.observed_at or bar.available_at,
+                available_at=bar.available_at,
+                received_at=bar.received_at or bar.available_at,
+                revision=bar.revision,
+                quality_flags=list(bar.quality_flags),
+            )
+            for bar in page.items
+        )
         await session.commit()
         return MarketIngestionResult(
             raw_uri=raw_uri,
             artifact=artifact,
             manifest=manifest,
+            evidence_ref=evidence_ref,
             provenance=page.provenance,
         )
     except Exception:

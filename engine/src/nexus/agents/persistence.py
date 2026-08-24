@@ -17,6 +17,7 @@ from nexus.agents.budget import BudgetExhausted
 from nexus.agents.committee import ROLE_ORDER, AgentRole
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
 from nexus.agents.models import ResearchRequest
+from nexus.agents.price_authority import freeze_price_authority
 from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
@@ -85,6 +86,7 @@ async def select_authoritative_snapshot(
             )
             .where(
                 AgentDataSnapshotEvidenceRecord.instrument_id == instrument_id,
+                AgentDataSnapshotEvidenceRecord.authority_kind == "research",
                 AgentDataSnapshotEvidenceRecord.available_at <= as_of,
                 DataSnapshot.available_at <= as_of,
                 DataSnapshot.received_at <= as_of,
@@ -269,6 +271,13 @@ async def admit_research_run(
             .limit(1)
         )
     )
+    if instrument is not None and snapshot is not None:
+        await freeze_price_authority(
+            session,
+            snapshot=snapshot,
+            instrument_id=request.instrument_id,
+            decision_time=request.decision_time,
+        )
     evidence_records = list(
         await session.scalars(
             select(AgentDataSnapshotEvidenceRecord)
@@ -293,6 +302,7 @@ async def admit_research_run(
         or snapshot.received_at > request.decision_time
         or prompts is None
         or not evidence_records
+        or not any(record.authority_kind == "research" for record in evidence_records)
         or model is None
         or model.pricing_available_at > now
         or model.pricing_expires_at <= now

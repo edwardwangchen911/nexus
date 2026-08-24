@@ -39,6 +39,7 @@ class ResearchEvidenceRef(ImmutableCreatedAt, Base):
         CheckConstraint("byte_length >= 0", name="byte_length_nonnegative"),
         CheckConstraint(
             "(location LIKE 'memory://sha256/' || content_hash || '%') OR "
+            "(location LIKE 'memory://normalized/market/%/' || content_hash || '.parquet') OR "
             "(location LIKE 'package://%' AND location LIKE '%@sha256:' || content_hash || '%') OR "
             "(location LIKE 's3://%' AND (location LIKE '%/sha256/' || content_hash || '%' "
             "OR location ~ '[?&]versionId=[^&#]+'))",
