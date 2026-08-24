@@ -5,10 +5,16 @@ import {
   integrationStatusRuntimeSchema,
   brokerSyncRunRuntimeSchema,
   marketPageRuntimeSchema,
+  optimizationJobRuntimeSchema,
+  optimizationLifecycleRuntimeSchema,
+  optimizationProposalGroupRuntimeSchema,
+  overviewRuntimeSchema,
   portfolioPageRuntimeSchema,
+  portfolioDiagnosticRuntimeSchema,
   portfolioSnapshotRuntimeSchema,
   runtimeContractSchemas,
   watchlistMembershipRuntimeSchema,
+  whatIfRuntimeSchema,
 } from "../generated/runtime-contract";
 import { integrationProviders } from "../integrations/providers";
 
@@ -107,6 +113,18 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     if (!matchesRuntimeSchema(data, portfolioPageRuntimeSchema) || !isPlain(data)) return INVALID_DATA;
     return Array.isArray(data.items) && data.items.length <= 50 ? data : INVALID_DATA;
   }
+  if (pathname === "/internal/v1/overview") {
+    if (!matchesRuntimeSchema(data, overviewRuntimeSchema) || !isPlain(data) || !isPlain(data.diagnostic_report)) return INVALID_DATA;
+    if (data.portfolio_snapshot_id !== data.diagnostic_report.portfolio_snapshot_id) return INVALID_DATA;
+    if (data.proposal_admission !== null && (!isPlain(data.proposal_admission) || data.proposal_admission.portfolio_snapshot_id !== data.portfolio_snapshot_id)) return INVALID_DATA;
+    return data;
+  }
+  const portfolioDiagnostic = /^\/internal\/v1\/portfolios\/([^/]+)\/diagnostics\/latest$/.exec(pathname);
+  if (portfolioDiagnostic && validateUuid(portfolioDiagnostic[1])) {
+    return matchesRuntimeSchema(data, portfolioDiagnosticRuntimeSchema) && isPlain(data)
+      ? data
+      : INVALID_DATA;
+  }
   const portfolioSnapshot = /^\/internal\/v1\/portfolios\/([^/]+)\/snapshots\/latest$/.exec(pathname);
   if (portfolioSnapshot && validateUuid(portfolioSnapshot[1])) {
     return matchesRuntimeSchema(data, portfolioSnapshotRuntimeSchema) && isPlain(data)
@@ -122,6 +140,33 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
   const watchlistAction = /^\/internal\/v1\/watchlist\/([^/]+)$/.exec(pathname);
   if (watchlistAction && validateUuid(watchlistAction[1])) {
     return matchesRuntimeSchema(data, watchlistMembershipRuntimeSchema) && isPlain(data)
+      ? data
+      : INVALID_DATA;
+  }
+  if (pathname === "/internal/v1/optimization-proposals") {
+    return matchesRuntimeSchema(data, optimizationJobRuntimeSchema) && isPlain(data)
+      ? data
+      : INVALID_DATA;
+  }
+  const proposalGroup = /^\/internal\/v1\/optimization-proposals\/([^/]+)$/.exec(pathname);
+  if (proposalGroup && validateUuid(proposalGroup[1])) {
+    if (!matchesRuntimeSchema(data, optimizationProposalGroupRuntimeSchema) || !isPlain(data) || !Array.isArray(data.proposals)) return INVALID_DATA;
+    const variants = data.proposals.map((proposal) => isPlain(proposal) ? proposal.variant : null);
+    const ids = data.proposals.map((proposal) => isPlain(proposal) ? proposal.proposal_id : null);
+    return variants.join(":") === "hold_current:minimum_change:strategy_target"
+      && ids.every((id) => typeof id === "string") && new Set(ids).size === 3
+      ? data
+      : INVALID_DATA;
+  }
+  const proposalLifecycle = /^\/internal\/v1\/optimization-proposals\/([^/]+)\/(shadow|reject)$/.exec(pathname);
+  if (proposalLifecycle && validateUuid(proposalLifecycle[1])) {
+    return matchesRuntimeSchema(data, optimizationLifecycleRuntimeSchema) && isPlain(data)
+      && data.proposal_group_id === proposalLifecycle[1]
+      ? data
+      : INVALID_DATA;
+  }
+  if (pathname === "/internal/v1/what-if/evaluate") {
+    return matchesRuntimeSchema(data, whatIfRuntimeSchema) && isPlain(data)
       ? data
       : INVALID_DATA;
   }
@@ -160,11 +205,17 @@ function matchesRuntimeSchema(value: unknown, schema: unknown): boolean {
       && (typeof schema.maximum !== "number" || value <= schema.maximum);
   }
   if (schema.type === "array") {
-    return Array.isArray(value)
-      && (typeof schema.minItems !== "number" || value.length >= schema.minItems)
-      && (typeof schema.maxItems !== "number" || value.length <= schema.maxItems)
-      && isPlain(schema.items)
-      && value.every((item) => matchesRuntimeSchema(item, schema.items));
+    if (!Array.isArray(value)
+      || (typeof schema.minItems === "number" && value.length < schema.minItems)
+      || (typeof schema.maxItems === "number" && value.length > schema.maxItems)) return false;
+    const prefixItems = schema.prefixItems;
+    if (Array.isArray(prefixItems)) {
+      if (schema.items === false && value.length > prefixItems.length) return false;
+      return value.every((item, index) => index < prefixItems.length
+        ? matchesRuntimeSchema(item, prefixItems[index])
+        : isPlain(schema.items) && matchesRuntimeSchema(item, schema.items));
+    }
+    return isPlain(schema.items) && value.every((item) => matchesRuntimeSchema(item, schema.items));
   }
   if (schema.type !== "object" || !isPlain(value) || !isPlain(schema.properties)) return false;
   const properties = schema.properties;

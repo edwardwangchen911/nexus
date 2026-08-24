@@ -337,6 +337,48 @@ describe("engineFetch runtime boundary", () => {
     expect(sentHeaders.get("x-nexus-signature")).toBe(expected["X-Nexus-Signature"]);
   });
 
+  it("canonicalizes overview filters and accepts only allowlisted optimization paths", async () => {
+    setEngineEnvironment();
+    const sent: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      sent.push(String(input));
+      return jsonResponse({
+        error: {
+          code: "NOT_FOUND",
+          message: "must be redacted",
+          request_id: engineRequestId,
+          details: {},
+        },
+      }, 404);
+    });
+
+    await engineFetch({
+      template: "/internal/v1/overview",
+      path: "/internal/v1/overview",
+      query: "session_date=2026-08-24&portfolio_id=0198d500-1000-7000-8000-000000001301",
+    } as never, { method: "GET", actor } as never);
+    await engineFetch({
+      template: "/internal/v1/optimization-proposals/{group_id}/shadow",
+      path: "/internal/v1/optimization-proposals/0198d500-1000-7000-8000-000000001303/shadow",
+    } as never, { method: "POST", actor, body: new Uint8Array() } as never);
+
+    expect(sent).toEqual([
+      "http://127.0.0.1:8000/internal/v1/overview?portfolio_id=0198d500-1000-7000-8000-000000001301&session_date=2026-08-24",
+      "http://127.0.0.1:8000/internal/v1/optimization-proposals/0198d500-1000-7000-8000-000000001303/shadow",
+    ]);
+
+    await engineFetch({
+      template: "/internal/v1/optimization-proposals/{group_id}/reject",
+      path: "/internal/v1/optimization-proposals/not-a-uuid/reject",
+    } as never, { method: "POST", actor } as never);
+    await engineFetch({
+      template: "/internal/v1/overview",
+      path: "/internal/v1/overview",
+      query: "session_date=2026-02-30",
+    } as never, { method: "GET", actor } as never);
+    expect(sent).toHaveLength(2);
+  });
+
   it.each([
     { template: "/internal/v1/market", path: "/internal/v1/market", query: "limit=10&limit=20" },
     { template: "/internal/v1/market", path: "/internal/v1/market", query: "limit=101" },

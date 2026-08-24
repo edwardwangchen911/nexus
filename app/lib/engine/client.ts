@@ -10,9 +10,10 @@ import { createEngineHmacHeaders } from "./hmac";
 const MAX_ENGINE_RESPONSE_BYTES = 64 * 1024;
 const MAX_MARKET_RESPONSE_BYTES = 256 * 1024;
 const MAX_PORTFOLIO_RESPONSE_BYTES = 4 * 1024 * 1024;
+const MAX_ANALYSIS_RESPONSE_BYTES = 1024 * 1024;
 type InternalPath = Extract<keyof paths, `/internal/v1/${string}`>;
 type DynamicInternalPath = Extract<InternalPath, `${string}{${string}}${string}`>;
-type QueryInternalPath = Extract<InternalPath, "/internal/v1/market" | "/internal/v1/portfolios">;
+type QueryInternalPath = Extract<InternalPath, "/internal/v1/market" | "/internal/v1/overview" | "/internal/v1/portfolios">;
 type EngineBody = string | Uint8Array | ArrayBuffer;
 type MethodFor<Path extends InternalPath> =
   | (Exclude<paths[Path]["get"], undefined> extends never ? never : "GET")
@@ -55,6 +56,7 @@ function responseLimit(requestUrl?: string, schemaPath?: string): number {
   if (schemaPath === "/internal/v1/portfolios" || schemaPath?.includes("/snapshots/latest")) {
     return MAX_PORTFOLIO_RESPONSE_BYTES;
   }
+  if (schemaPath && isAnalysisPath(schemaPath)) return MAX_ANALYSIS_RESPONSE_BYTES;
   if (requestUrl) {
     try {
       const pathname = new URL(requestUrl).pathname;
@@ -64,6 +66,7 @@ function responseLimit(requestUrl?: string, schemaPath?: string): number {
       if (pathname === "/api/v1/portfolios" || pathname === "/internal/v1/portfolios" || pathname.includes("/snapshots/latest")) {
         return MAX_PORTFOLIO_RESPONSE_BYTES;
       }
+      if (isAnalysisPath(pathname)) return MAX_ANALYSIS_RESPONSE_BYTES;
     } catch {
       return MAX_ENGINE_RESPONSE_BYTES;
     }
@@ -89,9 +92,11 @@ function allowedTarget<Path extends InternalPath>(target: EngineTarget<Path>, ba
   if (!matchesTemplate(template, path)) return null;
 
   const query = dynamic?.query;
-  if (query !== undefined && template !== "/internal/v1/market" && template !== "/internal/v1/portfolios") return null;
+  if (query !== undefined && template !== "/internal/v1/market" && template !== "/internal/v1/overview" && template !== "/internal/v1/portfolios") return null;
   const canonicalQuery = template === "/internal/v1/market"
     ? canonicalMarketQuery(query ?? "")
+    : template === "/internal/v1/overview"
+      ? canonicalOverviewQuery(query ?? "")
     : template === "/internal/v1/portfolios"
       ? canonicalPortfolioQuery(query ?? "")
       : "";
@@ -109,7 +114,7 @@ function allowedTarget<Path extends InternalPath>(target: EngineTarget<Path>, ba
 }
 
 function matchesTemplate(template: InternalPath, path: string): boolean {
-  if (["/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs"].includes(template)) {
+  if (["/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/optimization-proposals", "/internal/v1/what-if/evaluate"].includes(template)) {
     return path === template;
   }
   const integration = /^\/internal\/v1\/integrations\/([^/]+)\/(test|mode)$/.exec(path);
@@ -126,8 +131,35 @@ function matchesTemplate(template: InternalPath, path: string): boolean {
   if (snapshot && validateUuid(snapshot[1])) {
     return template === "/internal/v1/portfolios/{portfolio_id}/snapshots/latest";
   }
+  const diagnostics = /^\/internal\/v1\/portfolios\/([^/]+)\/diagnostics\/latest$/.exec(path);
+  if (diagnostics && validateUuid(diagnostics[1])) {
+    return template === "/internal/v1/portfolios/{portfolio_id}/diagnostics/latest";
+  }
+  const proposal = /^\/internal\/v1\/optimization-proposals\/([^/]+)(?:\/(shadow|reject))?$/.exec(path);
+  if (proposal && validateUuid(proposal[1])) {
+    const expected = proposal[2]
+      ? `/internal/v1/optimization-proposals/{group_id}/${proposal[2]}`
+      : "/internal/v1/optimization-proposals/{group_id}";
+    return template === expected;
+  }
   const syncRun = /^\/internal\/v1\/broker-sync-runs\/([^/]+)$/.exec(path);
   return Boolean(syncRun && validateUuid(syncRun[1]) && template === "/internal/v1/broker-sync-runs/{run_id}");
+}
+
+function canonicalOverviewQuery(query: string): string | null {
+  if (query.includes("?") || query.includes("#") || !hasValidPercentEscapes(query)) return null;
+  const allowedKeys = new Set(["portfolio_id", "session_date"]);
+  const seen = new Set<string>();
+  const pairs: Array<[string, string]> = [];
+  for (const [key, value] of new URLSearchParams(query)) {
+    if (!allowedKeys.has(key) || seen.has(key)) return null;
+    if (key === "portfolio_id" && !validateUuid(value)) return null;
+    if (key === "session_date" && !isIsoDate(value)) return null;
+    seen.add(key);
+    pairs.push([strictPercentEncode(key), strictPercentEncode(value)]);
+  }
+  pairs.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  return pairs.map(([key, value]) => `${key}=${value}`).join("&");
 }
 
 function canonicalMarketQuery(query: string): string | null {
@@ -184,6 +216,17 @@ function strictPercentEncode(value: string): string {
   return encodeURIComponent(value).replace(/[!'()*]/g, (character) =>
     `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
   );
+}
+function isIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
+}
+function isAnalysisPath(pathname: string): boolean {
+  return pathname === "/api/v1/overview" || pathname === "/internal/v1/overview"
+    || pathname.includes("/diagnostics/latest")
+    || pathname.includes("/optimization-proposals")
+    || pathname.endsWith("/what-if/evaluate");
 }
 function engineConfig(): { baseUrl: string; keyId: string; secret: string } { const baseUrl = process.env.NEXUS_ENGINE_BASE_URL; const keyId = process.env.NEXUS_ENGINE_HMAC_CURRENT_KEY_ID ?? "current"; const secret = process.env.NEXUS_ENGINE_HMAC_CURRENT_SECRET ?? process.env.NEXUS_ENGINE_HMAC_SECRET; if (!baseUrl || !secret) throw new Error("NEXUS engine service configuration is incomplete"); return { baseUrl, keyId, secret }; }
 function exactBodyBytes(body: EngineBody | undefined): Uint8Array { if (body === undefined) return new Uint8Array(); if (typeof body === "string") return new TextEncoder().encode(body); if (body instanceof Uint8Array) return body; if (body instanceof ArrayBuffer) return new Uint8Array(body); throw new TypeError("engine request bodies must have exact byte representation"); }

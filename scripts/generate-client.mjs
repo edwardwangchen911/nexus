@@ -75,6 +75,12 @@ function generateRuntimeContract(openapi) {
     "PortfolioSnapshotResponse",
     "BrokerSyncRunResponse",
     "WatchlistMembershipResponse",
+    "OverviewResponse",
+    "PortfolioDiagnosticResponse",
+    "OptimizationJobData",
+    "OptimizationLifecycleData",
+    "OptimizationProposalGroupResponse",
+    "WhatIfResponse",
   ];
   const schemas = openapi?.components?.schemas;
   if (!schemas || typeof schemas !== "object") {
@@ -96,6 +102,12 @@ function generateRuntimeContract(openapi) {
     "export const portfolioSnapshotRuntimeSchema = runtimeContractSchemas.PortfolioSnapshotResponse;",
     "export const brokerSyncRunRuntimeSchema = runtimeContractSchemas.BrokerSyncRunResponse;",
     "export const watchlistMembershipRuntimeSchema = runtimeContractSchemas.WatchlistMembershipResponse;",
+    "export const overviewRuntimeSchema = runtimeContractSchemas.OverviewResponse;",
+    "export const portfolioDiagnosticRuntimeSchema = runtimeContractSchemas.PortfolioDiagnosticResponse;",
+    "export const optimizationJobRuntimeSchema = runtimeContractSchemas.OptimizationJobData;",
+    "export const optimizationLifecycleRuntimeSchema = runtimeContractSchemas.OptimizationLifecycleData;",
+    "export const optimizationProposalGroupRuntimeSchema = runtimeContractSchemas.OptimizationProposalGroupResponse;",
+    "export const whatIfRuntimeSchema = runtimeContractSchemas.WhatIfResponse;",
   ].join("\n\n"));
 }
 

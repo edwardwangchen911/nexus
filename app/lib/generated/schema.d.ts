@@ -135,6 +135,100 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/optimization-proposals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Admit Optimization Proposal
+         * @description Fail closed until one persisted authority binds baseline, diagnosis, data, source, and cost.
+         */
+        post: operations["admit_optimization_proposal_internal_v1_optimization_proposals_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/optimization-proposals/{group_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Optimization Group
+         * @description Return immutable children and the sole mutable lifecycle state.
+         */
+        get: operations["get_optimization_group_internal_v1_optimization_proposals__group_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/optimization-proposals/{group_id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reject Optimization Group */
+        post: operations["reject_optimization_group_internal_v1_optimization_proposals__group_id__reject_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/optimization-proposals/{group_id}/shadow": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Shadow Optimization Group */
+        post: operations["shadow_optimization_group_internal_v1_optimization_proposals__group_id__shadow_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Overview
+         * @description Select one latest persisted diagnostic by a total order without recalculation.
+         */
+        get: operations["getOverview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/portfolios": {
         parameters: {
             query?: never;
@@ -144,6 +238,26 @@ export interface paths {
         };
         /** List Portfolios */
         get: operations["listPortfolios"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/portfolios/{portfolio_id}/diagnostics/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Latest Diagnostic
+         * @description Return the latest immutable server-computed projection, never a browser recalculation.
+         */
+        get: operations["getLatestPortfolioDiagnostic"];
         put?: never;
         post?: never;
         delete?: never;
@@ -213,10 +327,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/what-if/evaluate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Evaluate What If
+         * @description Return deterministic analysis and append only a non-sensitive audit summary.
+         */
+        post: operations["evaluate_what_if_internal_v1_what_if_evaluate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AggregateMetric
+         * @description Bounded integer aggregate with an explicit known/unknown state.
+         */
+        AggregateMetric: {
+            /** Reason */
+            reason?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "known" | "unknown";
+            /**
+             * Unit
+             * @enum {string}
+             */
+            unit: "basis_points" | "parts_per_million" | "count";
+            /** Value */
+            value?: number | null;
+        };
         /** BrokerSyncCreateRequest */
         BrokerSyncCreateRequest: {
             /**
@@ -275,13 +429,75 @@ export interface components {
             /** Provider As Of */
             provider_as_of: string | null;
         };
+        /** ComparisonMetricResponse */
+        ComparisonMetricResponse: {
+            /** Reason */
+            reason: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "known" | "unknown";
+            /** Value */
+            value: string | null;
+        };
         CurrencyCode: string;
+        /** DiagnosticItemResponse */
+        DiagnosticItemResponse: {
+            /**
+             * Actionability
+             * @enum {string}
+             */
+            actionability: "monitor" | "research" | "reduce_only" | "blocked";
+            /** Diagnostic Code */
+            diagnostic_code: string;
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            /** Headroom */
+            headroom: string | null;
+            /** Headroom Reason */
+            headroom_reason: string | null;
+            /** Metric Value */
+            metric_value: string | null;
+            /** Policy Scope */
+            policy_scope: string;
+            /** Reference Limit */
+            reference_limit: string | null;
+            /**
+             * Severity
+             * @enum {string}
+             */
+            severity: "info" | "warning" | "critical";
+            /** Unit */
+            unit: string;
+            /** Unknown Reason */
+            unknown_reason: string | null;
+        };
         /**
          * ErrorCode
          * @description Client-visible error codes defined by the API contract.
          * @enum {string}
          */
         ErrorCode: "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "DATA_PARTIAL" | "DATA_STALE" | "BROKER_STALE" | "SOURCE_CONFLICT" | "CAPABILITY_EXPIRED" | "PROPOSAL_NOT_EXECUTABLE" | "ACCOUNT_TYPE_MISMATCH" | "APPROVAL_REQUIRED" | "RISK_REJECTED" | "DRAWDOWN_LOCKED" | "RECONCILIATION_REQUIRED" | "BUDGET_EXHAUSTED" | "PROVIDER_UNAVAILABLE" | "INTERNAL_ERROR";
+        /**
+         * EvidenceRef
+         * @description A point-in-time reference to immutable source content.
+         */
+        EvidenceRef: {
+            /**
+             * Available At
+             * Format: date-time
+             */
+            available_at: string;
+            /** Content Hash */
+            content_hash: string;
+            /** Location */
+            location: string;
+            /** Object Id */
+            object_id: string;
+            /** Source */
+            source: string;
+        };
         /**
          * IntegrationConnectivityTestRequest
          * @description A deliberately empty non-trading fixture connectivity request.
@@ -493,6 +709,224 @@ export interface components {
             /** Updated At */
             updated_at: string | null;
         };
+        /** OptimizationJobData */
+        OptimizationJobData: {
+            /**
+             * Job Id
+             * Format: uuid
+             */
+            job_id: string;
+            /**
+             * Status
+             * @constant
+             */
+            status: "QUEUED";
+        };
+        /** OptimizationJobEnvelope */
+        OptimizationJobEnvelope: {
+            data: components["schemas"]["OptimizationJobData"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** OptimizationLifecycleData */
+        OptimizationLifecycleData: {
+            /**
+             * Proposal Group Id
+             * Format: uuid
+             */
+            proposal_group_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "draft" | "compared" | "shadowing" | "validated" | "rejected" | "expired";
+            /** Version */
+            version: number;
+        };
+        /** OptimizationLifecycleEnvelope */
+        OptimizationLifecycleEnvelope: {
+            data: components["schemas"]["OptimizationLifecycleData"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** OptimizationLifecycleRequest */
+        OptimizationLifecycleRequest: {
+            /** Version */
+            version: number;
+        };
+        /** OptimizationProposalGroupEnvelope */
+        OptimizationProposalGroupEnvelope: {
+            data: components["schemas"]["OptimizationProposalGroupResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** OptimizationProposalGroupResponse */
+        OptimizationProposalGroupResponse: {
+            /**
+             * Baseline Portfolio Snapshot Id
+             * Format: uuid
+             */
+            baseline_portfolio_snapshot_id: string;
+            /**
+             * Cost Policy Id
+             * Format: uuid
+             */
+            cost_policy_id: string;
+            /**
+             * Data Snapshot Id
+             * Format: uuid
+             */
+            data_snapshot_id: string;
+            /** Diagnostic Input Hash */
+            diagnostic_input_hash: string;
+            /**
+             * Portfolio Scope
+             * @enum {string}
+             */
+            portfolio_scope: "real_read_only" | "internal_paper" | "fosun_simulation";
+            /**
+             * Proposal Group Id
+             * Format: uuid
+             */
+            proposal_group_id: string;
+            /** Proposals */
+            proposals: [
+                components["schemas"]["OptimizationProposalResponse"],
+                components["schemas"]["OptimizationProposalResponse"],
+                components["schemas"]["OptimizationProposalResponse"]
+            ];
+            shadow_eligibility: components["schemas"]["ShadowEligibilityResponse"];
+            /**
+             * Source Policy Id
+             * Format: uuid
+             */
+            source_policy_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "draft" | "compared" | "shadowing" | "validated" | "rejected" | "expired";
+            /** Version */
+            version: number;
+        };
+        /** OptimizationProposalPositionResponse */
+        OptimizationProposalPositionResponse: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "none" | "reduce" | "maintain" | "increase";
+            /** Current Weight */
+            current_weight: string;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Target Weight */
+            target_weight: string;
+        };
+        /** OptimizationProposalResponse */
+        OptimizationProposalResponse: {
+            /** Analysis Only */
+            analysis_only: boolean;
+            comparison: components["schemas"]["ProposalComparisonResponse"];
+            /**
+             * Portfolio Scope
+             * @enum {string}
+             */
+            portfolio_scope: "real_read_only" | "internal_paper" | "fosun_simulation";
+            /** Positions */
+            positions: components["schemas"]["OptimizationProposalPositionResponse"][];
+            /**
+             * Proposal Id
+             * Format: uuid
+             */
+            proposal_id: string;
+            /** Strategy Evidence Complete */
+            strategy_evidence_complete: boolean;
+            /**
+             * Variant
+             * @enum {string}
+             */
+            variant: "hold_current" | "minimum_change" | "strategy_target";
+        };
+        /** OverviewEnvelope */
+        OverviewEnvelope: {
+            data: components["schemas"]["OverviewResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** OverviewProposalGroupSummaryResponse */
+        OverviewProposalGroupSummaryResponse: {
+            /**
+             * Proposal Group Id
+             * Format: uuid
+             */
+            proposal_group_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "draft" | "compared" | "shadowing" | "validated" | "rejected" | "expired";
+            /** Version */
+            version: number;
+        };
+        /** OverviewResponse */
+        OverviewResponse: {
+            diagnostic_report: components["schemas"]["PortfolioDiagnosticResponse"];
+            /**
+             * Portfolio Id
+             * Format: uuid
+             */
+            portfolio_id: string;
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+            proposal_admission: components["schemas"]["ProposalAdmissionResponse"] | null;
+            /** Proposal Admission Reason */
+            proposal_admission_reason: "OPTIMIZATION_AUTHORITY_MISSING" | null;
+            proposal_group: components["schemas"]["OverviewProposalGroupSummaryResponse"] | null;
+            /**
+             * Snapshot As Of
+             * Format: date-time
+             */
+            snapshot_as_of: string;
+            /** Trading Day */
+            trading_day: string | null;
+        };
+        /** PortfolioDiagnosticEnvelope */
+        PortfolioDiagnosticEnvelope: {
+            data: components["schemas"]["PortfolioDiagnosticResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** PortfolioDiagnosticResponse */
+        PortfolioDiagnosticResponse: {
+            /** Items */
+            items: components["schemas"]["DiagnosticItemResponse"][];
+            /**
+             * Optimization Need
+             * @enum {string}
+             */
+            optimization_need: "BLOCKED" | "RESEARCH_REQUIRED" | "OPTIMIZATION_CANDIDATE" | "NO_ACTION";
+            /**
+             * Policy Version
+             * @constant
+             */
+            policy_version: "real_advisory_policy_v1";
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+            /**
+             * Snapshot As Of
+             * Format: date-time
+             */
+            snapshot_as_of: string;
+            /** Trading Day */
+            trading_day: string | null;
+        };
         /** @enum {string} */
         PortfolioKind: "real_read_only" | "internal_paper" | "shadow";
         /** PortfolioListItemResponse */
@@ -601,6 +1035,119 @@ export interface components {
             /** Symbol */
             symbol: string | null;
         };
+        /** ProposalAdmissionRequest */
+        ProposalAdmissionRequest: {
+            /**
+             * Cost Policy Id
+             * Format: uuid
+             */
+            cost_policy_id: string;
+            /**
+             * Data Snapshot Id
+             * Format: uuid
+             */
+            data_snapshot_id: string;
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+        };
+        /** ProposalAdmissionResponse */
+        ProposalAdmissionResponse: {
+            /**
+             * Cost Policy Id
+             * Format: uuid
+             */
+            cost_policy_id: string;
+            /**
+             * Data Snapshot Id
+             * Format: uuid
+             */
+            data_snapshot_id: string;
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+        };
+        /** ProposalComparisonAuthorityResponse */
+        ProposalComparisonAuthorityResponse: {
+            /**
+             * Cost Policy Id
+             * Format: uuid
+             */
+            cost_policy_id: string;
+            /**
+             * Data Snapshot Id
+             * Format: uuid
+             */
+            data_snapshot_id: string;
+            /**
+             * Diagnostic Report Id
+             * Format: uuid
+             */
+            diagnostic_report_id: string;
+            /**
+             * Optimizer Policy Id
+             * Format: uuid
+             */
+            optimizer_policy_id: string;
+            /**
+             * Source Policy Id
+             * Format: uuid
+             */
+            source_policy_id: string;
+        };
+        /** ProposalComparisonDimensionsResponse */
+        ProposalComparisonDimensionsResponse: {
+            correlation: components["schemas"]["ComparisonMetricResponse"];
+            cost: components["schemas"]["ComparisonMetricResponse"];
+            currency_exposure: components["schemas"]["ComparisonMetricResponse"];
+            drawdown: components["schemas"]["ComparisonMetricResponse"];
+            /** Hard Violations */
+            hard_violations: number;
+            hhi: components["schemas"]["ComparisonMetricResponse"];
+            liquidity: components["schemas"]["ComparisonMetricResponse"];
+            sector_exposure: components["schemas"]["ComparisonMetricResponse"];
+            tax_impact: components["schemas"]["ComparisonMetricResponse"];
+            top1: components["schemas"]["ComparisonMetricResponse"];
+            top3: components["schemas"]["ComparisonMetricResponse"];
+            turnover: components["schemas"]["ComparisonMetricResponse"];
+            volatility: components["schemas"]["ComparisonMetricResponse"];
+        };
+        /** ProposalComparisonMetricsResponse */
+        ProposalComparisonMetricsResponse: {
+            authority: components["schemas"]["ProposalComparisonAuthorityResponse"];
+            /** Constraint Complete */
+            constraint_complete: boolean;
+            dimensions: components["schemas"]["ProposalComparisonDimensionsResponse"];
+            /** Eligibility Complete */
+            eligibility_complete: boolean;
+            /** Evidence Complete */
+            evidence_complete: boolean;
+            /** Ranking Eligible */
+            ranking_eligible: boolean;
+            /** Stale */
+            stale: boolean;
+            /** Unknown Metrics */
+            unknown_metrics: string[];
+        };
+        /** ProposalComparisonResponse */
+        ProposalComparisonResponse: {
+            /** Cost Complete */
+            cost_complete: boolean;
+            metrics: components["schemas"]["ProposalComparisonMetricsResponse"];
+            /** Non Executable */
+            non_executable: boolean;
+            /** Requires Fx */
+            requires_fx: boolean;
+            /**
+             * Tax Impact
+             * @constant
+             */
+            tax_impact: "unknown";
+        };
         /**
          * SelectedMarketSeriesResponse
          * @description At most one repository-selected historical series in a market page.
@@ -630,6 +1177,13 @@ export interface components {
             quality_reasons: string[];
             /** Source */
             source: string | null;
+        };
+        /** ShadowEligibilityResponse */
+        ShadowEligibilityResponse: {
+            /** Eligible */
+            eligible: boolean;
+            /** Reasons */
+            reasons: string[];
         };
         /** @enum {string} */
         SnapshotStatus: "READY" | "PARTIAL" | "STALE" | "RECONCILIATION_REQUIRED";
@@ -674,6 +1228,89 @@ export interface components {
             instrument_id: string;
             /** Watchlisted */
             watchlisted: boolean;
+        };
+        /** WhatIfConstraints */
+        WhatIfConstraints: {
+            cash_minimum: components["schemas"]["AggregateMetric"];
+            single_name_critical: components["schemas"]["AggregateMetric"];
+            single_name_warning: components["schemas"]["AggregateMetric"];
+            top3_warning: components["schemas"]["AggregateMetric"];
+            total_weight: components["schemas"]["AggregateMetric"];
+            unallocated_cash: components["schemas"]["AggregateMetric"];
+            violation_count: components["schemas"]["AggregateMetric"];
+        };
+        /** WhatIfDiagnostics */
+        WhatIfDiagnostics: {
+            correlation: components["schemas"]["AggregateMetric"];
+            currency_exposure: components["schemas"]["AggregateMetric"];
+            drawdown: components["schemas"]["AggregateMetric"];
+            hhi: components["schemas"]["AggregateMetric"];
+            liquidity: components["schemas"]["AggregateMetric"];
+            sector_exposure: components["schemas"]["AggregateMetric"];
+            top1: components["schemas"]["AggregateMetric"];
+            top3: components["schemas"]["AggregateMetric"];
+            volatility: components["schemas"]["AggregateMetric"];
+        };
+        /** WhatIfEnvelope */
+        WhatIfEnvelope: {
+            data: components["schemas"]["WhatIfResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** WhatIfEvaluation */
+        WhatIfEvaluation: {
+            constraints: components["schemas"]["WhatIfConstraints"];
+            diagnostics: components["schemas"]["WhatIfDiagnostics"];
+        };
+        /** WhatIfPositionRequest */
+        WhatIfPositionRequest: {
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Weight */
+            weight: string;
+        };
+        /** WhatIfRequest */
+        WhatIfRequest: {
+            /**
+             * Policy Version
+             * @constant
+             */
+            policy_version: "optimizer_v1";
+            /** Positions */
+            positions: components["schemas"]["WhatIfPositionRequest"][];
+            /**
+             * Proposal Group Id
+             * Format: uuid
+             */
+            proposal_group_id: string;
+            /**
+             * Proposal Id
+             * Format: uuid
+             */
+            proposal_id: string;
+        };
+        /** WhatIfResponse */
+        WhatIfResponse: {
+            /** Instrument Count */
+            instrument_count: number;
+            /**
+             * Policy Version
+             * @constant
+             */
+            policy_version: "optimizer_v1";
+            /**
+             * Proposal Group Id
+             * Format: uuid
+             */
+            proposal_group_id: string;
+            /**
+             * Proposal Id
+             * Format: uuid
+             */
+            proposal_id: string;
+            result: components["schemas"]["WhatIfEvaluation"];
         };
     };
     responses: never;
@@ -1068,6 +1705,301 @@ export interface operations {
             };
         };
     };
+    admit_optimization_proposal_internal_v1_optimization_proposals_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProposalAdmissionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptimizationJobEnvelope"];
+                };
+            };
+            /** @description Optimization job accepted or replayed. */
+            202: {
+                headers: {
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_optimization_group_internal_v1_optimization_proposals__group_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptimizationProposalGroupEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    reject_optimization_group_internal_v1_optimization_proposals__group_id__reject_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "If-Match"?: string | null;
+            };
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OptimizationLifecycleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptimizationLifecycleEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    shadow_optimization_group_internal_v1_optimization_proposals__group_id__shadow_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "If-Match"?: string | null;
+            };
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OptimizationLifecycleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptimizationLifecycleEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getOverview: {
+        parameters: {
+            query?: {
+                portfolio_id?: string | null;
+                session_date?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OverviewEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
     listPortfolios: {
         parameters: {
             query?: {
@@ -1118,6 +2050,46 @@ export interface operations {
                 };
             };
             /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getLatestPortfolioDiagnostic: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                portfolio_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortfolioDiagnosticEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Entity */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -1288,6 +2260,66 @@ export interface operations {
             };
             /** @description Stable NEXUS error envelope. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    evaluate_what_if_internal_v1_what_if_evaluate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WhatIfRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WhatIfEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
