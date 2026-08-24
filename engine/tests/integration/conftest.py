@@ -6,6 +6,7 @@ import re
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 _TEMPORARY_DATABASE_NAME = re.compile(r"^nexus_test_[0-9a-f]{32}$")
 _FORCE_DROP_ATTEMPTS = 20
 _FORCE_DROP_RETRY_SECONDS = 0.05
+_POST_MIGRATION_TEST_CLOCK = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 @dataclass(frozen=True)
@@ -91,7 +93,33 @@ def migrated_database_url(
     engine_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     monkeypatch.setenv("DATABASE_URL", temporary_database_url)
     command.upgrade(Config(os.path.join(engine_root, "alembic.ini")), "head")
+    _freeze_post_migration_created_at_defaults(temporary_database_url)
     yield temporary_database_url
+
+
+def _freeze_post_migration_created_at_defaults(database_url: str) -> None:
+    """Keep test-created immutable rows available to the suite's fixed decision clocks."""
+    asyncio.run(_freeze_post_migration_created_at_defaults_async(database_url))
+
+
+async def _freeze_post_migration_created_at_defaults_async(database_url: str) -> None:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "DO $$ DECLARE table_record record; BEGIN "
+                    "FOR table_record IN "
+                    "SELECT table_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND column_name = 'created_at' "
+                    "LOOP EXECUTE format("
+                    "'ALTER TABLE %I ALTER COLUMN created_at SET DEFAULT "
+                    f"''{_POST_MIGRATION_TEST_CLOCK.isoformat()}''::timestamptz', "
+                    "table_record.table_name); END LOOP; END $$"
+                )
+            )
+    finally:
+        await engine.dispose()
 
 
 async def _create_database(admin_url: URL, database_name: str) -> None:
