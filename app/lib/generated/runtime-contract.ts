@@ -2006,6 +2006,64 @@ export const runtimeContractSchemas = {
     "title": "ProposalComparisonResponse",
     "type": "object"
   },
+  "ResearchAdmissionResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "data_snapshot_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Data Snapshot Id"
+      },
+      "decision_time": {
+        "format": "date-time",
+        "title": "Decision Time",
+        "type": "string"
+      },
+      "eligible": {
+        "title": "Eligible",
+        "type": "boolean"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "enum": [
+              "instrument_not_found",
+              "decision_time_in_future",
+              "data_snapshot_unavailable",
+              "prompt_authority_unavailable",
+              "model_pricing_unavailable"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      }
+    },
+    "required": [
+      "eligible",
+      "reason",
+      "instrument_id",
+      "data_snapshot_id",
+      "decision_time"
+    ],
+    "title": "ResearchAdmissionResponse",
+    "type": "object"
+  },
   "ResearchClaim": {
     "additionalProperties": false,
     "properties": {
@@ -2835,6 +2893,8 @@ export const optimizationLifecycleRuntimeSchema = runtimeContractSchemas.Optimiz
 export const optimizationProposalGroupRuntimeSchema = runtimeContractSchemas.OptimizationProposalGroupResponse;
 
 export const whatIfRuntimeSchema = runtimeContractSchemas.WhatIfResponse;
+
+export const researchAdmissionRuntimeSchema = runtimeContractSchemas.ResearchAdmissionResponse;
 
 export const researchRunRuntimeSchema = runtimeContractSchemas.ResearchRunResponse;
 

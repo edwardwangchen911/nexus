@@ -2398,6 +2398,81 @@
         "title": "ProposalComparisonResponse",
         "type": "object"
       },
+      "ResearchAdmissionEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ResearchAdmissionResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "ResearchAdmissionEnvelope",
+        "type": "object"
+      },
+      "ResearchAdmissionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "data_snapshot_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Snapshot Id"
+          },
+          "decision_time": {
+            "format": "date-time",
+            "title": "Decision Time",
+            "type": "string"
+          },
+          "eligible": {
+            "title": "Eligible",
+            "type": "boolean"
+          },
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "instrument_not_found",
+                  "decision_time_in_future",
+                  "data_snapshot_unavailable",
+                  "prompt_authority_unavailable",
+                  "model_pricing_unavailable"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "eligible",
+          "reason",
+          "instrument_id",
+          "data_snapshot_id",
+          "decision_time"
+        ],
+        "title": "ResearchAdmissionResponse",
+        "type": "object"
+      },
       "ResearchClaim": {
         "additionalProperties": false,
         "properties": {
@@ -3676,6 +3751,67 @@
           }
         },
         "summary": "Get Instrument Research"
+      }
+    },
+    "/internal/v1/instruments/{instrument_id}/research-admission": {
+      "get": {
+        "description": "Select the frozen first-run body exclusively from point-in-time database authority.",
+        "operationId": "getResearchAdmission",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instrument_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Instrument Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "as_of",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "As Of",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchAdmissionEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "Get Research Admission"
       }
     },
     "/internal/v1/integrations": {

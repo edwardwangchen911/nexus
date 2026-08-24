@@ -95,6 +95,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/instruments/{instrument_id}/research-admission": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Research Admission
+         * @description Select the frozen first-run body exclusively from point-in-time database authority.
+         */
+        get: operations["getResearchAdmission"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/integrations": {
         parameters: {
             query?: never;
@@ -1322,6 +1342,30 @@ export interface components {
              */
             tax_impact: "unknown";
         };
+        /** ResearchAdmissionEnvelope */
+        ResearchAdmissionEnvelope: {
+            data: components["schemas"]["ResearchAdmissionResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** ResearchAdmissionResponse */
+        ResearchAdmissionResponse: {
+            /** Data Snapshot Id */
+            data_snapshot_id: string | null;
+            /**
+             * Decision Time
+             * Format: date-time
+             */
+            decision_time: string;
+            /** Eligible */
+            eligible: boolean;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Reason */
+            reason: ("instrument_not_found" | "decision_time_in_future" | "data_snapshot_unavailable" | "prompt_authority_unavailable" | "model_pricing_unavailable") | null;
+        };
         /** ResearchClaim */
         ResearchClaim: {
             /** Evidence Refs */
@@ -1908,6 +1952,48 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getResearchAdmission: {
+        parameters: {
+            query: {
+                as_of: string;
+            };
+            header?: never;
+            path: {
+                instrument_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResearchAdmissionEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
