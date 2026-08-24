@@ -75,15 +75,32 @@ async def test_shadow_and_reject_api_require_idempotency_and_replay_stably(
         missing = await client.post(
             shadow_path, content=body, headers=headers("POST", shadow_path, body)
         )
+        mismatched = await client.post(
+            shadow_path,
+            content=body,
+            headers={
+                **headers("POST", shadow_path, body),
+                "Idempotency-Key": "mismatched-if-match",
+                "If-Match": '"2"',
+            },
+        )
         first = await client.post(
             shadow_path,
             content=body,
-            headers={**headers("POST", shadow_path, body), "Idempotency-Key": "shadow-key"},
+            headers={
+                **headers("POST", shadow_path, body),
+                "Idempotency-Key": "shadow-key",
+                "If-Match": '"1"',
+            },
         )
         replay = await client.post(
             shadow_path,
             content=body,
-            headers={**headers("POST", shadow_path, body), "Idempotency-Key": "shadow-key"},
+            headers={
+                **headers("POST", shadow_path, body),
+                "Idempotency-Key": "shadow-key",
+                "If-Match": '"1"',
+            },
         )
         changed_body = await client.post(
             shadow_path,
@@ -91,15 +108,22 @@ async def test_shadow_and_reject_api_require_idempotency_and_replay_stably(
             headers={
                 **headers("POST", shadow_path, b'{"version":2}'),
                 "Idempotency-Key": "shadow-key",
+                "If-Match": '"2"',
             },
         )
         changed_target = await client.post(
             reject_path,
             content=body,
-            headers={**headers("POST", reject_path, body), "Idempotency-Key": "shadow-key"},
+            headers={
+                **headers("POST", reject_path, body),
+                "Idempotency-Key": "shadow-key",
+                "If-Match": '"1"',
+            },
         )
     assert missing.status_code == 422
     assert missing.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert mismatched.status_code == 422
+    assert mismatched.json()["error"]["code"] == "VALIDATION_ERROR"
     assert first.status_code == replay.status_code == 200
     assert set(first.json()["meta"]) == {"request_id", "schema_version", "as_of"}
     assert (
@@ -198,7 +222,11 @@ async def test_shadow_incomplete_persisted_authority_rolls_back_its_claim(
         response = await client.post(
             path,
             content=body,
-            headers={**headers("POST", path, body), "Idempotency-Key": "bad-authority"},
+            headers={
+                **headers("POST", path, body),
+                "Idempotency-Key": "bad-authority",
+                "If-Match": '"1"',
+            },
         )
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
@@ -226,7 +254,11 @@ async def test_shadow_rejects_non_executable_persisted_comparison(
         response = await client.post(
             path,
             content=body,
-            headers={**headers("POST", path, body), "Idempotency-Key": "non-executable-comparison"},
+            headers={
+                **headers("POST", path, body),
+                "Idempotency-Key": "non-executable-comparison",
+                "If-Match": '"1"',
+            },
         )
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"

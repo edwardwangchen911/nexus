@@ -9,6 +9,7 @@ from uuid import UUID
 
 import httpx
 import pytest
+from helpers.optimization_api import seed_readable_group
 from helpers.portfolio_api import PORTFOLIOS, app, headers, seed_portfolio_list, settings
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.optimizer.cost_policy import COST_POLICY_ID
@@ -30,17 +31,25 @@ from sqlalchemy import func, select, text
 @pytest.mark.asyncio
 async def test_what_if_writes_only_redacted_audit_summary(migrated_database_url: str) -> None:
     """Persisting requested weights or proposal rows would leak and mutate business state."""
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        group_id, proposal_id = await seed_readable_group(session)
     payload = {
+        "proposal_group_id": str(group_id),
+        "proposal_id": str(proposal_id),
         "policy_version": "optimizer_v1",
-        "positions": [{"instrument_id": "0198d500-1000-7000-8000-000000000601", "weight": "1"}],
+        "positions": [{"instrument_id": "0198d500-1000-7000-8000-000000000001", "weight": "1"}],
     }
     body = json.dumps(payload, separators=(",", ":")).encode()
     path = "/internal/v1/what-if/evaluate"
     engine_app = app(migrated_database_url)
+    request_headers = headers("POST", path, body)
+    request_headers["Idempotency-Key"] = "what-if-redacted-summary"
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=engine_app), base_url="http://testserver"
     ) as client:
-        response = await client.post(path, content=body, headers=headers("POST", path, body))
+        response = await client.post(path, content=body, headers=request_headers)
     assert response.status_code == 200
     assert response.json()["data"]["policy_version"] == "optimizer_v1"
     assert response.json()["data"]["result"]["diagnostics"]["top1"] == {
@@ -54,7 +63,6 @@ async def test_what_if_writes_only_redacted_audit_summary(migrated_database_url:
     assert result["diagnostics"]["sector_exposure"]["reason"] == (
         "SECTOR_EXPOSURE_REQUIRES_IDENTITIES"
     )
-    factory = session_factory(settings(migrated_database_url))
     async with factory() as session:
         rows = (
             (
@@ -79,20 +87,28 @@ async def test_what_if_has_one_redacted_audit_and_no_business_or_idempotency_wri
     migrated_database_url: str,
 ) -> None:
     """The synchronous endpoint may append one summary, but never retain request values elsewhere."""
-    instrument_id = "0198d500-1000-7000-8000-000000000611"
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        group_id, proposal_id = await seed_readable_group(session)
+    instrument_id = "0198d500-1000-7000-8000-000000000001"
     exact_weight = "0.10"
     body = json.dumps(
         {
+            "proposal_group_id": str(group_id),
+            "proposal_id": str(proposal_id),
             "policy_version": "optimizer_v1",
             "positions": [{"instrument_id": instrument_id, "weight": exact_weight}],
         },
         separators=(",", ":"),
     ).encode()
     path = "/internal/v1/what-if/evaluate"
+    request_headers = headers("POST", path, body)
+    request_headers["Idempotency-Key"] = "what-if-no-business-write"
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
     ) as client:
-        response = await client.post(path, content=body, headers=headers("POST", path, body))
+        response = await client.post(path, content=body, headers=request_headers)
     assert response.status_code == 200
     assert instrument_id not in response.text
     assert exact_weight not in response.text
@@ -100,7 +116,6 @@ async def test_what_if_has_one_redacted_audit_and_no_business_or_idempotency_wri
     assert result["diagnostics"]["top1"]["value"] == 1000
     assert result["constraints"]["single_name_critical"]["value"] == 0
     assert result["constraints"]["violation_count"]["value"] == 0
-    factory = session_factory(settings(migrated_database_url))
     async with factory() as session:
         counts = []
         for table in (
@@ -117,7 +132,7 @@ async def test_what_if_has_one_redacted_audit_and_no_business_or_idempotency_wri
                 select(AuditEvent).where(AuditEvent.action == "what_if_evaluated")
             )
         )
-    assert tuple(counts) == (0, 0, 0, 0, 0, 0)
+    assert tuple(counts) == (0, 1, 1, 3, 2, 3)
     assert len(audit) == 1
     assert exact_weight not in json.dumps(audit[0].payload)
     assert instrument_id not in json.dumps(audit[0].payload)

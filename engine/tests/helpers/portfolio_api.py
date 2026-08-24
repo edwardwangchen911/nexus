@@ -55,7 +55,10 @@ def app(database_url: str, *, now: datetime = CLOCK):
 
 
 def headers(method: str, path: str, body: bytes = b"") -> dict[str, str]:
-    return build_test_hmac_headers(method, path, body, nonce=str(uuid7()))
+    signed = build_test_hmac_headers(method, path, body, nonce=str(uuid7()))
+    if body:
+        signed["Content-Type"] = "application/json"
+    return signed
 
 
 async def seed_portfolio_list(database_url: str) -> None:
