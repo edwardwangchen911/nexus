@@ -108,28 +108,46 @@ _LIFECYCLE_REQUEST_BODY = {
 
 async def _bounded_what_if_request(request: Request) -> WhatIfRequest:
     """Read and cache at most 64 KiB before JSON parsing or HMAC verification."""
+    if not _is_json_media_type(request.headers.get("Content-Type")):
+        raise NexusError(ErrorCode.VALIDATION_ERROR, "Content-Type must be application/json.", status_code=422)
     content_length = request.headers.get("Content-Length")
     if content_length is not None:
-        try:
-            if int(content_length) > _MAX_WHAT_IF_BYTES:
-                raise NexusError(
-                    ErrorCode.VALIDATION_ERROR, "Request is too large.", status_code=422
-                )
-        except ValueError as error:
+        if not _is_canonical_content_length(content_length):
             raise NexusError(
                 ErrorCode.VALIDATION_ERROR, "Content-Length is invalid.", status_code=422
-            ) from error
+            )
+        if int(content_length) > _MAX_WHAT_IF_BYTES:
+            raise NexusError(ErrorCode.VALIDATION_ERROR, "Request is too large.", status_code=422)
     body = bytearray()
     async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > _MAX_WHAT_IF_BYTES:
+        if len(chunk) > _MAX_WHAT_IF_BYTES - len(body):
             raise NexusError(ErrorCode.VALIDATION_ERROR, "Request is too large.", status_code=422)
+        body.extend(chunk)
     raw_body = bytes(body)
     setattr(request, "_body", raw_body)
     try:
         return WhatIfRequest.model_validate_json(raw_body)
     except ValueError as error:
         raise NexusError(ErrorCode.VALIDATION_ERROR, "Request is invalid.", status_code=422) from error
+
+
+def _is_canonical_content_length(value: str) -> bool:
+    return value == "0" or (
+        value.isascii() and value.isdecimal() and value[0] in "123456789"
+    )
+
+
+def _is_json_media_type(value: str | None) -> bool:
+    if value is None:
+        return False
+    parts = [part.strip() for part in value.split(";")]
+    if not parts or parts[0].lower() != "application/json":
+        return False
+    return all(
+        name.strip().lower() == "charset" and separator == "=" and raw_value.strip()
+        for parameter in parts[1:]
+        for name, separator, raw_value in (parameter.partition("="),)
+    )
 
 
 @router.post(
