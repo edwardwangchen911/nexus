@@ -250,7 +250,7 @@ async def load_history(
         .scalars()
         .all()
     )
-    reports = [await _read_report(session, record) for record in records]
+    reports = [await read_report(session, record) for record in records]
     refs = tuple(
         EvidenceRef(
             source="nexus_db",
@@ -283,10 +283,10 @@ async def latest_report(
         return None
     if record.policy_id != REAL_ADVISORY_POLICY_ID or record.policy_version != policy.version:
         raise ValueError("diagnostic report policy authority is invalid")
-    return await _read_report(session, record)
+    return await read_report(session, record)
 
 
-async def _read_report(
+async def read_report(
     session: AsyncSession, record: PortfolioDiagnosticReportRecord
 ) -> PortfolioDiagnosticReport:
     rows = (
@@ -339,6 +339,9 @@ async def _read_report(
         ),
         items=tuple(items),
     )
+
+
+_read_report = read_report
 
 
 def _stored_decimal(value: str | None) -> Decimal | None:

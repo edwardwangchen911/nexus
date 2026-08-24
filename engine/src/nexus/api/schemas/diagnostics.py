@@ -1,17 +1,19 @@
 """Stable public schemas for persisted deterministic diagnostics."""
 
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
 from nexus.api.schemas.integrations import SuccessMetaResponse
-from nexus.domain.decimal import DecimalString
+from nexus.diagnostics.models import DiagnosticItem, PortfolioDiagnosticReport
+from nexus.domain.decimal import DecimalString, decimal_to_string
 from nexus.domain.evidence import EvidenceRef
 from pydantic import BaseModel, ConfigDict
 
 
 class _StrictSchema(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
 
 class DiagnosticItemResponse(_StrictSchema):
@@ -19,11 +21,20 @@ class DiagnosticItemResponse(_StrictSchema):
     metric_value: DecimalString | None
     unit: str
     reference_limit: DecimalString | None
+    headroom: DecimalString | None
+    headroom_reason: str | None
     policy_scope: str
     severity: Literal["info", "warning", "critical"]
     actionability: Literal["monitor", "research", "reduce_only", "blocked"]
     unknown_reason: str | None
     evidence_refs: tuple[EvidenceRef, ...]
+
+    @classmethod
+    def from_item(cls, item: DiagnosticItem) -> "DiagnosticItemResponse":
+        headroom, headroom_reason = _headroom(item)
+        return cls(
+            **item.model_dump(), headroom=headroom, headroom_reason=headroom_reason
+        )
 
 
 class PortfolioDiagnosticResponse(_StrictSchema):
@@ -36,7 +47,43 @@ class PortfolioDiagnosticResponse(_StrictSchema):
     ]
     items: tuple[DiagnosticItemResponse, ...]
 
+    @classmethod
+    def from_report(cls, report: PortfolioDiagnosticReport) -> "PortfolioDiagnosticResponse":
+        if report.snapshot_as_of is None:
+            raise ValueError("persisted diagnostic snapshot time is unavailable")
+        return cls(
+            portfolio_snapshot_id=report.portfolio_snapshot_id,
+            snapshot_as_of=report.snapshot_as_of,
+            trading_day=report.trading_day,
+            policy_version=report.policy_version,
+            optimization_need=report.optimization_need,
+            items=tuple(DiagnosticItemResponse.from_item(item) for item in report.items),
+        )
+
 
 class PortfolioDiagnosticEnvelope(_StrictSchema):
     data: PortfolioDiagnosticResponse
     meta: SuccessMetaResponse
+
+
+_UPPER_LIMIT_CODES = (
+    "CONCENTRATION_TOP1",
+    "CONCENTRATION_TOP3",
+    "CORRELATION_CLUSTER",
+    "CURRENCY_EXPOSURE",
+    "RISK_BUCKET_EXPOSURE:",
+    "LIQUIDITY_DAYS_TO_EXIT:",
+    "DRAWDOWN_252:",
+)
+
+
+def _headroom(item: DiagnosticItem) -> tuple[DecimalString | None, str | None]:
+    if item.metric_value is None or item.reference_limit is None:
+        return None, item.unknown_reason or "HEADROOM_UNAVAILABLE"
+    value = Decimal(item.metric_value)
+    limit = Decimal(item.reference_limit)
+    if item.diagnostic_code == "CASH_RATIO":
+        return decimal_to_string(value - limit), None
+    if item.diagnostic_code.startswith(_UPPER_LIMIT_CODES):
+        return decimal_to_string(limit - value), None
+    return None, "HEADROOM_DIRECTION_UNKNOWN"

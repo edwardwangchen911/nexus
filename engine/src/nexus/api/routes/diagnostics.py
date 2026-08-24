@@ -49,6 +49,6 @@ async def get_latest_diagnostic(
             details={"portfolio_id": str(portfolio_id)},
         )
     return PortfolioDiagnosticEnvelope(
-        data=PortfolioDiagnosticResponse.model_validate(report.model_dump()),
+        data=PortfolioDiagnosticResponse.from_report(report),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=report.snapshot_as_of),
     )
