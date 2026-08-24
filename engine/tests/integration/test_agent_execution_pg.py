@@ -8,7 +8,15 @@ from uuid import UUID
 import httpx
 import pytest
 from helpers.portfolio_api import app, headers
-from nexus.agents.committee import ROLE_ORDER, FixtureCommittee, load_prompt_assets
+from nexus.agents.committee import (
+    ROLE_ORDER,
+    AgentRole,
+    CommitteeRoleOutput,
+    FixtureCommittee,
+    PromptAsset,
+    load_prompt_assets,
+)
+from nexus.domain.evidence import EvidenceRef
 from nexus.agents.execution import LIFECYCLE, execute_research_run
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import admit_research_run
@@ -205,6 +213,57 @@ async def test_conflicting_fixture_roles_abstain_before_synthesis(
             )
         )
     assert events == ("prepared", "running", "validated", "audited", "abstained")
+
+
+@pytest.mark.asyncio
+async def test_worker_persists_failed_terminal_and_releases_budget_on_model_error(
+    migrated_database_url: str,
+) -> None:
+    """A model exception must not strand a run in running with reserved budget."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admission = await admit_research_run(
+            session,
+            actor_id="fixture-worker",
+            route="/internal/v1/research-runs",
+            idempotency_key="model-error",
+            request_hash="f" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID,
+                data_snapshot_id=_SNAPSHOT_ID,
+                decision_time=_NOW,
+            ),
+            prompt_version_id=prompt_ids["orchestrator"],
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("3.00"),
+            now=_NOW,
+        )
+    async with factory() as session, session.begin():
+        result = await execute_research_run(
+            session,
+            run_id=admission.run_id,
+            committee=_FailingCommittee(),
+            evidence_ref_ids=(_EVIDENCE_ID,),
+        )
+    assert result.status == "failed"
+    async with factory() as session:
+        run = await session.get(AgentResearchRunRecord, admission.run_id)
+        reservation = await session.scalar(
+            select(AgentDailyBudgetReservationRecord).where(
+                AgentDailyBudgetReservationRecord.run_id == admission.run_id
+            )
+        )
+        events = tuple(
+            await session.scalars(
+                select(AgentResearchEventRecord.state)
+                .where(AgentResearchEventRecord.run_id == admission.run_id)
+                .order_by(AgentResearchEventRecord.sequence)
+            )
+        )
+    assert run is not None and run.status == "failed"
+    assert reservation is not None and reservation.state == "released"
+    assert events == ("prepared", "running", "failed")
 
 
 @pytest.mark.asyncio
@@ -450,3 +509,15 @@ async def _seed_authority(factory, *, symbol: str = "ABC") -> dict[str, UUID]:
             for role in ROLE_ORDER
         )
     return prompt_ids
+
+
+class _FailingCommittee:
+    async def analyze(
+        self,
+        role: AgentRole,
+        request: ResearchRequest,
+        evidence_refs: tuple[EvidenceRef, ...],
+        prompt: PromptAsset,
+    ) -> CommitteeRoleOutput:
+        del role, request, evidence_refs, prompt
+        raise RuntimeError("deterministic fixture failure")

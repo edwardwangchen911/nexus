@@ -55,7 +55,9 @@ EXPECTED_TABLES = {
     "agent_prompt_versions",
     "agent_model_configs",
     "agent_research_runs",
+    "agent_research_events",
     "agent_research_outputs",
+    "agent_research_output_evidence",
     "agent_daily_budget_reservations",
 }
 
@@ -93,7 +95,9 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
             "agent_prompt_versions",
             "agent_model_configs",
             "agent_research_runs",
+            "agent_research_events",
             "agent_research_outputs",
+            "agent_research_output_evidence",
             "agent_daily_budget_reservations",
         }
     ),
@@ -175,5 +179,10 @@ EXPECTED_FOREIGN_KEYS = {
         "fk_agent_runs_model_config",
     },
     "agent_research_outputs": "fk_agent_outputs_run",
+    "agent_research_events": "fk_agent_events_run",
+    "agent_research_output_evidence": {
+        "fk_agent_output_evidence_output",
+        "fk_agent_output_evidence_authority",
+    },
     "agent_daily_budget_reservations": "fk_agent_budget_run",
 }

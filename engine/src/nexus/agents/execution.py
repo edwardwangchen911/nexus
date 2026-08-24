@@ -113,7 +113,17 @@ async def execute_research_run(
             content=persisted.content,
             content_hash=persisted.content_hash,
         )
-        output = await committee.analyze(role, request, evidence_refs, prompt)
+        try:
+            output = await committee.analyze(role, request, evidence_refs, prompt)
+        except Exception:
+            return await _terminal_without_usage(
+                session,
+                run,
+                output_sequence=output_sequence,
+                event_sequence=event_sequence + 1,
+                status="failed",
+                reason="model_execution_failed",
+            )
         if output.role != role or output.prompt_hash != prompt.content_hash:
             return await _terminal_without_usage(
                 session,
