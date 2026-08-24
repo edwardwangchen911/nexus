@@ -16,10 +16,10 @@ from nexus.agents.committee import (
     PromptAsset,
     load_prompt_assets,
 )
-from nexus.domain.evidence import EvidenceRef
 from nexus.agents.execution import LIFECYCLE, execute_research_run
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import admit_research_run
+from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentModelConfigRecord,
