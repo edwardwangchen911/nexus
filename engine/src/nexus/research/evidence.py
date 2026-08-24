@@ -68,4 +68,7 @@ def _is_pinned_non_executable_location(location: str, digest: str) -> bool:
         return stored_object.startswith(f"sha256/{digest}")
     if scheme == "package":
         return f"@sha256:{digest}" in stored_object
-    return f"/sha256/{digest}" in stored_object or "versionId=" in stored_object
+    if f"/sha256/{digest}" in stored_object:
+        return True
+    _, marker, version_id = stored_object.partition("versionId=")
+    return marker == "versionId=" and bool(version_id.split("&", maxsplit=1)[0])

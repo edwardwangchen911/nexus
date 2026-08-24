@@ -121,6 +121,18 @@ async def test_research_evidence_location_and_owner_composites_fail_closed(
                     },
                 )
         async with engine.begin() as connection:
+            with pytest.raises(DBAPIError, match="location_content_addressed"):
+                await connection.execute(
+                    text(
+                        "INSERT INTO research_evidence_refs "
+                        "(id, source, provider_object_id, revision, available_at, location, "
+                        "content_hash, byte_length) VALUES "
+                        "(:id, 'sec', 'empty-version', '1', :available_at, "
+                        "'s3://evidence/object?versionId=', :digest, 7)"
+                    ),
+                    {"id": uuid4(), "available_at": NOW, "digest": "f" * 64},
+                )
+        async with engine.begin() as connection:
             instrument_id = await _insert_us_instrument(connection)
             await _insert_evidence(
                 connection,

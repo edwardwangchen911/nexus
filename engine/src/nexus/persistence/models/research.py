@@ -41,7 +41,7 @@ class ResearchEvidenceRef(ImmutableCreatedAt, Base):
             "(location LIKE 'memory://sha256/' || content_hash || '%') OR "
             "(location LIKE 'package://%' AND location LIKE '%@sha256:' || content_hash || '%') OR "
             "(location LIKE 's3://%' AND (location LIKE '%/sha256/' || content_hash || '%' "
-            "OR location LIKE '%versionId=%'))",
+            "OR location ~ '[?&]versionId=[^&#]+'))",
             name="location_content_addressed",
         ),
     )

@@ -52,6 +52,7 @@ def test_evidence_reference_hashes_exact_bytes_and_retains_non_executable_locati
         "javascript:alert(1)",
         "memory://evidence/mutable.json",
         "s3://evidence/filing.json",
+        "s3://evidence/filing.json?versionId=",
     ],
 )
 def test_evidence_reference_rejects_executable_or_remote_location(location: str) -> None:
