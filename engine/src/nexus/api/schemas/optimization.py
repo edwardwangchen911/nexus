@@ -146,7 +146,7 @@ class OptimizationProposalResponse(_StrictOptimizationSchema):
     analysis_only: bool
     strategy_evidence_complete: bool
     portfolio_scope: Literal["real_read_only", "internal_paper", "fosun_simulation"]
-    positions: tuple[OptimizationProposalPositionResponse, ...] = Field(max_length=30)
+    positions: tuple[OptimizationProposalPositionResponse, ...]
     comparison: ProposalComparisonResponse
 
 

@@ -152,7 +152,12 @@ async def test_what_if_rejects_oversized_and_more_than_thirty_instruments(
             ],
         }
     ).encode()
-    oversized = b" " * (64 * 1024 + 1)
+    oversized = b'{"padding":"' + b"x" * (64 * 1024) + b'"}'
+
+    async def chunked_body():
+        yield oversized[:1024]
+        yield oversized[1024:]
+
     engine_app = app(migrated_database_url)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=engine_app), base_url="http://testserver"
@@ -161,6 +166,11 @@ async def test_what_if_rejects_oversized_and_more_than_thirty_instruments(
             response = await client.post(path, content=body, headers=headers("POST", path, body))
             assert response.status_code == 422
             assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+        chunked = await client.post(
+            path, content=chunked_body(), headers=headers("POST", path, oversized)
+        )
+    assert chunked.status_code == 422
+    assert chunked.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio
@@ -184,7 +194,7 @@ async def test_proposal_admission_fails_closed_without_persisted_authority(
         transport=httpx.ASGITransport(app=engine_app), base_url="http://testserver"
     ) as client:
         response = await client.post(path, content=payload, headers=request_headers)
-    assert response.status_code == 422
+    assert response.status_code == 409
     assert response.json()["error"]["code"] == "DATA_PARTIAL"
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session:
@@ -323,7 +333,7 @@ async def test_proposal_admission_rejects_every_unproven_authority_without_write
         transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
     ) as client:
         response = await client.post(path, content=body, headers=request_headers)
-    assert response.status_code == 422
+    assert response.status_code == 409
     assert response.json()["error"] == {
         "code": "DATA_PARTIAL",
         "message": "Persisted optimization authority is incomplete.",

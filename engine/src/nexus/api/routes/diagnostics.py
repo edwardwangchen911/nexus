@@ -17,7 +17,11 @@ router = APIRouter()
     "/internal/v1/portfolios/{portfolio_id}/diagnostics/latest",
     response_model=PortfolioDiagnosticEnvelope,
     operation_id="getLatestPortfolioDiagnostic",
-    responses={404: {"model": NexusErrorEnvelope}, 422: {"model": NexusErrorEnvelope}},
+    responses={
+        404: {"model": NexusErrorEnvelope},
+        409: {"model": NexusErrorEnvelope},
+        422: {"model": NexusErrorEnvelope},
+    },
 )
 async def get_latest_diagnostic(
     portfolio_id: UUID,
@@ -31,7 +35,7 @@ async def get_latest_diagnostic(
         raise NexusError(
             ErrorCode.DATA_PARTIAL,
             "The persisted diagnostic policy authority is unavailable.",
-            status_code=422,
+            status_code=409,
             details={"portfolio_id": str(portfolio_id)},
         ) from error
     if report is None:
@@ -45,7 +49,7 @@ async def get_latest_diagnostic(
         raise NexusError(
             ErrorCode.DATA_PARTIAL,
             "The persisted diagnostic snapshot time is unavailable.",
-            status_code=422,
+            status_code=409,
             details={"portfolio_id": str(portfolio_id)},
         )
     return PortfolioDiagnosticEnvelope(

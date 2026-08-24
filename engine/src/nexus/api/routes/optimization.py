@@ -4,7 +4,7 @@
 import hashlib
 from collections.abc import Sequence
 from decimal import Decimal
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, Header, Request
@@ -69,10 +69,16 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 _CREATE_RESPONSES = {
     202: {
         "description": "Optimization job accepted or replayed.",
+        "model": OptimizationJobEnvelope,
         "headers": {"Location": {"schema": {"type": "string"}}},
     },
     **_ERROR_RESPONSES,
 }
+
+_IdempotencyKey = Annotated[
+    str, Header(alias="Idempotency-Key", min_length=1, max_length=255)
+]
+_IfMatch = Annotated[str, Header(alias="If-Match", min_length=1, max_length=64)]
 
 _WHAT_IF_REQUEST_BODY = {
     "requestBody": {
@@ -100,6 +106,32 @@ _LIFECYCLE_REQUEST_BODY = {
 }
 
 
+async def _bounded_what_if_request(request: Request) -> WhatIfRequest:
+    """Read and cache at most 64 KiB before JSON parsing or HMAC verification."""
+    content_length = request.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            if int(content_length) > _MAX_WHAT_IF_BYTES:
+                raise NexusError(
+                    ErrorCode.VALIDATION_ERROR, "Request is too large.", status_code=422
+                )
+        except ValueError as error:
+            raise NexusError(
+                ErrorCode.VALIDATION_ERROR, "Content-Length is invalid.", status_code=422
+            ) from error
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > _MAX_WHAT_IF_BYTES:
+            raise NexusError(ErrorCode.VALIDATION_ERROR, "Request is too large.", status_code=422)
+    raw_body = bytes(body)
+    setattr(request, "_body", raw_body)
+    try:
+        return WhatIfRequest.model_validate_json(raw_body)
+    except ValueError as error:
+        raise NexusError(ErrorCode.VALIDATION_ERROR, "Request is invalid.", status_code=422) from error
+
+
 @router.post(
     "/internal/v1/what-if/evaluate",
     response_model=WhatIfEnvelope,
@@ -108,14 +140,13 @@ _LIFECYCLE_REQUEST_BODY = {
 )
 async def evaluate_what_if(
     request: Request,
-    payload: WhatIfRequest = Body(),
+    idempotency_key: _IdempotencyKey,
+    payload: WhatIfRequest = Depends(_bounded_what_if_request),
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> WhatIfEnvelope:
     """Return deterministic analysis and append only a non-sensitive audit summary."""
     raw_body = await request.body()
-    if len(raw_body) > _MAX_WHAT_IF_BYTES:
-        raise NexusError(ErrorCode.VALIDATION_ERROR, "Request is too large.", status_code=422)
     group = await session.get(OptimizationProposalGroupRecord, payload.proposal_group_id)
     if group is None:
         raise NexusError(ErrorCode.NOT_FOUND, "Proposal group was not found.", status_code=404)
@@ -141,11 +172,6 @@ async def evaluate_what_if(
             status_code=422,
         )
     request_hash = hashlib.sha256(raw_body).hexdigest()
-    idempotency_key = request.headers.get("Idempotency-Key")
-    if not idempotency_key:
-        raise NexusError(
-            ErrorCode.VALIDATION_ERROR, "Idempotency-Key is required.", status_code=422
-        )
     _validate_claim(actor.actor_id, "/internal/v1/what-if/evaluate", idempotency_key, request_hash)
     try:
         record, owner = await claim_or_lock(
@@ -198,11 +224,13 @@ async def evaluate_what_if(
 @router.post(
     "/internal/v1/optimization-proposals",
     response_model=OptimizationJobEnvelope,
+    status_code=202,
     responses=_CREATE_RESPONSES,
     openapi_extra=_PROPOSAL_ADMISSION_REQUEST_BODY,
 )
 async def admit_optimization_proposal(
     request: Request,
+    idempotency_key: _IdempotencyKey,
     body: ProposalAdmissionRequest = Body(),
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
@@ -211,11 +239,6 @@ async def admit_optimization_proposal(
     route = "/internal/v1/optimization-proposals"
     raw_body = await request.body()
     request_hash = hashlib.sha256(raw_body).hexdigest()
-    idempotency_key = request.headers.get("Idempotency-Key")
-    if not idempotency_key:
-        raise NexusError(
-            ErrorCode.VALIDATION_ERROR, "Idempotency-Key is required.", status_code=422
-        )
     _validate_claim(actor.actor_id, route, idempotency_key, request_hash)
     loaded = await load_admission_authority(
         session,
@@ -227,7 +250,7 @@ async def admit_optimization_proposal(
         raise NexusError(
             ErrorCode.DATA_PARTIAL,
             "Persisted optimization authority is incomplete.",
-            status_code=422,
+            status_code=409,
             details={"reason": "OPTIMIZATION_AUTHORITY_MISSING"},
         )
     try:
@@ -267,12 +290,12 @@ async def admit_optimization_proposal(
     responses=_ERROR_RESPONSES,
 )
 async def get_optimization_group(
-    group_id: str,
+    group_id: UUID,
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> OptimizationProposalGroupEnvelope:
     """Return immutable children and the sole mutable lifecycle state."""
-    proposal_group_id = _parse_group_id(group_id)
+    proposal_group_id = group_id
     group = await session.get(OptimizationProposalGroupRecord, proposal_group_id)
     if group is None:
         raise NexusError(ErrorCode.NOT_FOUND, "Proposal group was not found.", status_code=404)
@@ -288,11 +311,11 @@ async def get_optimization_group(
         .all()
     )
     if len(children) != 3:
-        raise NexusError(ErrorCode.DATA_PARTIAL, "Proposal group is incomplete.", status_code=422)
+        raise NexusError(ErrorCode.DATA_PARTIAL, "Proposal group is incomplete.", status_code=409)
     by_variant = {child.variant: child for child in children}
     variants = ("hold_current", "minimum_change", "strategy_target")
     if tuple(by_variant) != variants:
-        raise NexusError(ErrorCode.DATA_PARTIAL, "Proposal group variants are invalid.", status_code=422)
+        raise NexusError(ErrorCode.DATA_PARTIAL, "Proposal group variants are invalid.", status_code=409)
     proposal_data: list[OptimizationProposalResponse] = []
     for child in children:
         positions = list(
@@ -307,7 +330,7 @@ async def get_optimization_group(
         )
         if comparison is None:
             raise NexusError(
-                ErrorCode.DATA_PARTIAL, "Proposal comparison is incomplete.", status_code=422
+                ErrorCode.DATA_PARTIAL, "Proposal comparison is incomplete.", status_code=409
             )
         try:
             metrics = comparison.metrics
@@ -352,7 +375,7 @@ async def get_optimization_group(
             )
         except (KeyError, TypeError, ValueError) as error:
             raise NexusError(
-                ErrorCode.DATA_PARTIAL, "Proposal comparison is invalid.", status_code=422
+                ErrorCode.DATA_PARTIAL, "Proposal comparison is invalid.", status_code=409
             ) from error
     reasons = _shadow_eligibility_reasons(group, proposal_data)
     if not reasons and not await _has_executable_shadow_authority(session, group):
@@ -382,15 +405,11 @@ async def _transition_endpoint(
     target: str,
     request: Request,
     body: OptimizationLifecycleRequest,
+    idempotency_key: str,
     actor: VerifiedServiceActor,
     session: AsyncSession,
 ) -> OptimizationLifecycleEnvelope:
     raw_body = await request.body()
-    idempotency_key = request.headers.get("Idempotency-Key")
-    if not idempotency_key:
-        raise NexusError(
-            ErrorCode.VALIDATION_ERROR, "Idempotency-Key is required.", status_code=422
-        )
     request_hash = hashlib.sha256(target.encode() + b"\0" + raw_body).hexdigest()
     _validate_claim(
         actor.actor_id,
@@ -425,7 +444,9 @@ async def _transition_endpoint(
         raise NexusError(
             code,
             "Proposal lifecycle transition was rejected.",
-            status_code=409 if code == ErrorCode.VERSION_CONFLICT else 422,
+            status_code=409
+            if code in (ErrorCode.VERSION_CONFLICT, ErrorCode.PROPOSAL_NOT_EXECUTABLE)
+            else 422,
         ) from error
     return OptimizationLifecycleEnvelope(
         data=OptimizationLifecycleData(
@@ -442,15 +463,18 @@ async def _transition_endpoint(
     openapi_extra=_LIFECYCLE_REQUEST_BODY,
 )
 async def shadow_optimization_group(
-    group_id: str,
+    group_id: UUID,
     request: Request,
+    idempotency_key: _IdempotencyKey,
+    if_match: _IfMatch,
     body: OptimizationLifecycleRequest = Body(),
-    if_match: str | None = Header(default=None, alias="If-Match"),
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> OptimizationLifecycleEnvelope:
     _validate_if_match(if_match, body.version)
-    return await _transition_endpoint(_parse_group_id(group_id), "shadowing", request, body, actor, session)
+    return await _transition_endpoint(
+        group_id, "shadowing", request, body, idempotency_key, actor, session
+    )
 
 
 @router.post(
@@ -460,27 +484,21 @@ async def shadow_optimization_group(
     openapi_extra=_LIFECYCLE_REQUEST_BODY,
 )
 async def reject_optimization_group(
-    group_id: str,
+    group_id: UUID,
     request: Request,
+    idempotency_key: _IdempotencyKey,
+    if_match: _IfMatch,
     body: OptimizationLifecycleRequest = Body(),
-    if_match: str | None = Header(default=None, alias="If-Match"),
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> OptimizationLifecycleEnvelope:
     _validate_if_match(if_match, body.version)
-    return await _transition_endpoint(_parse_group_id(group_id), "rejected", request, body, actor, session)
+    return await _transition_endpoint(
+        group_id, "rejected", request, body, idempotency_key, actor, session
+    )
 
 
-def _parse_group_id(value: str) -> UUID:
-    try:
-        return UUID(value)
-    except ValueError as error:
-        raise NexusError(
-            ErrorCode.VALIDATION_ERROR, "Proposal group id is invalid.", status_code=422
-        ) from error
-
-
-def _validate_if_match(value: str | None, version: int) -> None:
+def _validate_if_match(value: str, version: int) -> None:
     if value != f'"{version}"':
         raise NexusError(
             ErrorCode.VALIDATION_ERROR,

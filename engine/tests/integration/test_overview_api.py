@@ -48,6 +48,9 @@ async def test_overview_selects_latest_persisted_report_and_projects_headroom(
     assert operation["responses"]["404"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/NexusErrorEnvelope"
     }
+    assert operation["responses"]["409"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/NexusErrorEnvelope"
+    }
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=engine_app), base_url="http://testserver"
     ) as client:
@@ -92,8 +95,37 @@ async def test_overview_selects_latest_persisted_report_and_projects_headroom(
     assert missing.json()["error"]["code"] == "NOT_FOUND"
 
 
+@pytest.mark.asyncio
+async def test_overview_reports_persisted_policy_conflict_as_409(
+    migrated_database_url: str,
+) -> None:
+    """A stale diagnostic policy is a stable state conflict, not malformed input."""
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        await _seed_report(
+            session,
+            portfolio_id=PORTFOLIOS[0],
+            snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
+            as_of=datetime(2026, 8, 24, 3, 59, tzinfo=UTC),
+            policy_version="obsolete_policy",
+        )
+    path = "/internal/v1/overview"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "DATA_PARTIAL"
+
+
 async def _seed_report(
-    session: AsyncSession, *, portfolio_id: UUID, snapshot_id: UUID, as_of: datetime
+    session: AsyncSession,
+    *,
+    portfolio_id: UUID,
+    snapshot_id: UUID,
+    as_of: datetime,
+    policy_version: str = "real_advisory_policy_v1",
 ) -> PortfolioDiagnosticReportRecord:
     report = PortfolioDiagnosticReportRecord(
         portfolio_id=portfolio_id,
@@ -101,7 +133,7 @@ async def _seed_report(
         snapshot_as_of=as_of,
         trading_day=date(2026, 8, as_of.day),
         policy_id=REAL_ADVISORY_POLICY_ID,
-        policy_version="real_advisory_policy_v1",
+        policy_version=policy_version,
         optimization_need="OPTIMIZATION_CANDIDATE",
         diagnostic_input_hash=("a" if as_of.day == 23 else "b") * 64,
     )

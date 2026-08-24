@@ -15,6 +15,7 @@ from nexus.api.routes.optimization import router as optimization_router
 from nexus.api.routes.overview import router as overview_router
 from nexus.api.routes.portfolios import router as portfolios_router
 from nexus.api.routes.system import router as system_router
+from nexus.api.schemas.optimization import WhatIfRequest
 from nexus.domain.ids import new_uuid7
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
@@ -73,7 +74,27 @@ def create_engine_app(settings: EngineSettings | None = None) -> FastAPI:
     app.include_router(overview_router)
     app.include_router(optimization_router)
     app.include_router(broker_sync_router)
+    _install_what_if_request_schema(app)
     return app
+
+
+def _install_what_if_request_schema(app: FastAPI) -> None:
+    """Expose the bounded dependency payload as the same public OpenAPI component."""
+    original_openapi = app.openapi
+
+    def openapi() -> dict[str, object]:
+        document = original_openapi()
+        components = document.setdefault("components", {})
+        schemas = components.setdefault("schemas", {})
+        request_schema = WhatIfRequest.model_json_schema(
+            ref_template="#/components/schemas/{model}"
+        )
+        definitions = request_schema.pop("$defs", {})
+        schemas.update(definitions)
+        schemas["WhatIfRequest"] = request_schema
+        return document
+
+    app.openapi = openapi  # type: ignore[method-assign]
 
 
 def run() -> None:

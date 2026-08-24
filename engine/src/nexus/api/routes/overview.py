@@ -35,7 +35,11 @@ router = APIRouter()
     "/internal/v1/overview",
     response_model=OverviewEnvelope,
     operation_id="getOverview",
-    responses={404: {"model": NexusErrorEnvelope}, 422: {"model": NexusErrorEnvelope}},
+    responses={
+        404: {"model": NexusErrorEnvelope},
+        409: {"model": NexusErrorEnvelope},
+        422: {"model": NexusErrorEnvelope},
+    },
 )
 async def get_overview(
     portfolio_id: UUID | None = None,
@@ -50,7 +54,7 @@ async def get_overview(
         raise NexusError(
             ErrorCode.DATA_PARTIAL,
             "The persisted diagnostic policy authority is unavailable.",
-            status_code=422,
+            status_code=409,
         ) from error
     statement = select(PortfolioDiagnosticReportRecord)
     if portfolio_id is not None:
@@ -69,14 +73,14 @@ async def get_overview(
         raise NexusError(
             ErrorCode.DATA_PARTIAL,
             "The persisted diagnostic policy authority is unavailable.",
-            status_code=422,
+            status_code=409,
         )
     report = await read_report(session, record)
     if report.snapshot_as_of is None:
         raise NexusError(
             ErrorCode.DATA_PARTIAL,
             "The persisted diagnostic snapshot time is unavailable.",
-            status_code=422,
+            status_code=409,
         )
     group = await session.scalar(
         select(OptimizationProposalGroupRecord)

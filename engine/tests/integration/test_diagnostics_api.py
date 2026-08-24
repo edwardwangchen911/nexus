@@ -120,6 +120,24 @@ async def test_production_diagnosis_requires_artifact_transport_capability(
 
 
 @pytest.mark.asyncio
+async def test_latest_diagnostic_reports_policy_conflict_as_409(
+    migrated_database_url: str,
+) -> None:
+    """An invalid persisted policy is a stable authority conflict, not a 422 input error."""
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        await _seed_diagnostic_graph(session, policy_version="obsolete_policy")
+    path = f"/internal/v1/portfolios/{PORTFOLIOS[0]}/diagnostics/latest"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "DATA_PARTIAL"
+
+
+@pytest.mark.asyncio
 async def test_production_identity_is_minted_from_point_in_time_instrument_master(
     migrated_database_url: str,
 ) -> None:
@@ -140,14 +158,16 @@ async def test_production_identity_is_minted_from_point_in_time_instrument_maste
     assert identity.minted_by == "instrument_repository"
 
 
-async def _seed_diagnostic_graph(session: AsyncSession) -> tuple[UUID, UUID, UUID]:
+async def _seed_diagnostic_graph(
+    session: AsyncSession, *, policy_version: str = "real_advisory_policy_v1"
+) -> tuple[UUID, UUID, UUID]:
     report = PortfolioDiagnosticReportRecord(
         portfolio_id=PORTFOLIOS[0],
         portfolio_snapshot_id=UUID("0198d500-1000-7000-8000-000000000041"),
         snapshot_as_of=datetime(2026, 8, 24, 3, 59, tzinfo=UTC),
         trading_day=date(2026, 8, 24),
         policy_id=REAL_ADVISORY_POLICY_ID,
-        policy_version="real_advisory_policy_v1",
+        policy_version=policy_version,
         optimization_need="RESEARCH_REQUIRED",
         diagnostic_input_hash=INPUT_HASH,
     )

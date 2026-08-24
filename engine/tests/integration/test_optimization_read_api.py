@@ -84,9 +84,36 @@ async def test_group_get_is_closed_three_way_and_what_if_requires_its_allowed_un
     assert engine_app.openapi()["components"]["schemas"]["WhatIfRequest"]["properties"][
         "positions"
     ]["minItems"] == 1
-    assert engine_app.openapi()["components"]["schemas"]["OptimizationProposalResponse"][
-        "properties"
-    ]["positions"]["maxItems"] == 30
+    assert "maxItems" not in engine_app.openapi()["components"]["schemas"][
+        "OptimizationProposalResponse"
+    ]["properties"]["positions"]
+    for operation in (what_if_operation, admission_operation):
+        header = next(
+            parameter
+            for parameter in operation["parameters"]
+            if parameter["in"] == "header" and parameter["name"] == "Idempotency-Key"
+        )
+        assert header["required"] is True
+    lifecycle_headers = {
+        parameter["name"]: parameter
+        for parameter in lifecycle_operation["parameters"]
+        if parameter["in"] == "header"
+    }
+    assert lifecycle_headers["Idempotency-Key"]["required"] is True
+    assert lifecycle_headers["If-Match"]["required"] is True
+    group_parameter = next(
+        parameter
+        for parameter in lifecycle_operation["parameters"]
+        if parameter["in"] == "path" and parameter["name"] == "group_id"
+    )
+    assert group_parameter["schema"]["format"] == "uuid"
+    assert set(admission_operation["responses"]) == {"202", "401", "404", "409", "422"}
+    assert admission_operation["responses"]["202"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/OptimizationJobEnvelope"
+    }
+    assert admission_operation["responses"]["202"]["headers"]["Location"]["schema"] == {
+        "type": "string"
+    }
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=engine_app), base_url="http://testserver"
     ) as client:
@@ -156,3 +183,25 @@ async def test_group_get_is_closed_three_way_and_what_if_requires_its_allowed_un
         "instrument_count": 1,
         "request_hash": hashlib.sha256(body).hexdigest(),
     }
+
+
+@pytest.mark.asyncio
+async def test_group_get_keeps_a_persisted_31_position_solution_readable(
+    migrated_database_url: str,
+) -> None:
+    """The what-if input cap must not truncate or reject a persisted proposal read."""
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        group_id, _ = await seed_readable_group(session, position_count=31)
+    path = f"/internal/v1/optimization-proposals/{group_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.status_code == 200
+    assert [len(proposal["positions"]) for proposal in response.json()["data"]["proposals"]] == [
+        31,
+        31,
+        0,
+    ]

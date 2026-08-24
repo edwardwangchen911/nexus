@@ -7,6 +7,7 @@ from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.optimizer.cost_policy import COST_POLICY_ID
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
+from nexus.persistence.models.market import Instrument
 from nexus.persistence.models.optimization import (
     OptimizationProposalGroupRecord,
     OptimizationProposalRecord,
@@ -23,7 +24,9 @@ OPTIMIZER_POLICY_ID = UUID("e690b91d-1e24-5de3-b2b2-566a463fca25")
 SNAPSHOT_ID = UUID("0198d500-1000-7000-8000-000000000041")
 
 
-async def seed_readable_group(session: AsyncSession) -> tuple[UUID, UUID]:
+async def seed_readable_group(
+    session: AsyncSession, *, position_count: int = 1
+) -> tuple[UUID, UUID]:
     """Create one valid persisted three-way group and return its minimum-change proposal."""
     observed_at = datetime(2026, 8, 24, 3, 59, tzinfo=UTC)
     report = PortfolioDiagnosticReportRecord(
@@ -48,6 +51,20 @@ async def seed_readable_group(session: AsyncSession) -> tuple[UUID, UUID]:
         payload={},
     )
     session.add_all((report, data_snapshot))
+    instrument_ids = (INSTRUMENT_ID,) + tuple(
+        UUID(int=9000 + index) for index in range(position_count - 1)
+    )
+    session.add_all(
+        Instrument(
+            id=instrument_id,
+            asset_type="equity",
+            exchange="XNYS",
+            currency="USD",
+            tick_size="0.01",
+            risk_bucket="us_equity",
+        )
+        for instrument_id in instrument_ids[1:]
+    )
     await session.flush()
     group = OptimizationProposalGroupRecord(
         baseline_portfolio_snapshot_id=SNAPSHOT_ID,
@@ -83,11 +100,12 @@ async def seed_readable_group(session: AsyncSession) -> tuple[UUID, UUID]:
         )
         session.add(proposal)
         await session.flush()
-        if variant != "strategy_target":
+        proposal_instruments = instrument_ids if variant != "strategy_target" else ()
+        for instrument_id in proposal_instruments:
             session.add(
                 ProposalPositionRecord(
                     proposal_id=proposal.id,
-                    instrument_id=INSTRUMENT_ID,
+                    instrument_id=instrument_id,
                     current_weight="0.20",
                     target_weight="0.20",
                     action="maintain",

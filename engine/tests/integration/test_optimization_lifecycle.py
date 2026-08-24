@@ -228,7 +228,7 @@ async def test_shadow_incomplete_persisted_authority_rolls_back_its_claim(
                 "If-Match": '"1"',
             },
         )
-    assert response.status_code == 422
+    assert response.status_code == 409
     assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session:
@@ -260,7 +260,7 @@ async def test_shadow_rejects_non_executable_persisted_comparison(
                 "If-Match": '"1"',
             },
         )
-    assert response.status_code == 422
+    assert response.status_code == 409
     assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
 
 
