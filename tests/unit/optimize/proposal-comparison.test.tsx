@@ -60,11 +60,14 @@ describe("three-way proposal comparison", () => {
     },
   );
 
-  it("does not re-offer shadow validation after the group enters shadowing", () => {
-    render(<ProposalComparison group={proposalGroup({ status: "shadowing", shadow_eligibility: { eligible: true, reasons: [] } })} actionsEnabled onStartShadow={vi.fn()} onReject={vi.fn()} />);
+  it("does not re-offer shadow validation but still allows rejection while shadowing", async () => {
+    const onReject = vi.fn().mockResolvedValue(undefined);
+    const group = proposalGroup({ status: "shadowing", shadow_eligibility: { eligible: true, reasons: [] } });
+    render(<ProposalComparison group={group} actionsEnabled onStartShadow={vi.fn()} onReject={onReject} />);
 
     expect(screen.queryByRole("button", { name: "启动影子验证" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "拒绝方案组" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "拒绝方案组" }));
+    await waitFor(() => expect(onReject).toHaveBeenCalledWith(group.proposal_group_id, group.version));
     expect(screen.getByText(/当前状态 shadowing/)).toBeVisible();
   });
 

@@ -17,6 +17,7 @@ import {
   whatIfRuntimeSchema,
 } from "../generated/runtime-contract";
 import { integrationProviders } from "../integrations/providers";
+import { sameUuid } from "../optimization/uuid";
 
 export type NexusErrorCode = "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "INTERNAL_ERROR";
 export const ERROR_STATUSES = {
@@ -153,7 +154,7 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     if (!matchesRuntimeSchema(data, optimizationProposalGroupRuntimeSchema) || !isPlain(data) || !Array.isArray(data.proposals)) return INVALID_DATA;
     const variants = data.proposals.map((proposal) => isPlain(proposal) ? proposal.variant : null);
     const ids = data.proposals.map((proposal) => isPlain(proposal) ? proposal.proposal_id : null);
-    return data.proposal_group_id === proposalGroup[1]
+    return sameUuid(data.proposal_group_id, proposalGroup[1])
       && variants.join(":") === "hold_current:minimum_change:strategy_target"
       && ids.every((id) => typeof id === "string") && new Set(ids).size === 3
       ? data

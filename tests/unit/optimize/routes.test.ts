@@ -228,6 +228,35 @@ describe("optimization BFF routes", () => {
     expect(await response.json()).toMatchObject({ error: { code: "INTERNAL_ERROR" } });
   });
 
+  it("treats uppercase and canonical UUID representations as the same what-if identity", async () => {
+    engineFetch.mockResolvedValueOnce(Response.json({
+      data: {
+        proposal_group_id: groupId,
+        proposal_id: proposalIds.minimum_change,
+        policy_version: "optimizer_v1",
+        instrument_count: 1,
+        result: {
+          diagnostics: {},
+          constraints: { violation_count: { status: "known", value: 0, unit: "count", reason: null } },
+        },
+      },
+      meta: { request_id: actor.requestId, schema_version: "1", as_of: "2026-08-24T00:00:00Z" },
+    }));
+    const { POST } = await import("../../../app/api/v1/what-if/evaluate/route");
+    const response = await POST(new Request("https://nexus.test/api/v1/what-if/evaluate", {
+      method: "POST",
+      headers: { origin: "https://nexus.test", "content-type": "application/json", "idempotency-key": "uppercase-13" },
+      body: JSON.stringify({
+        proposal_group_id: groupId.toUpperCase(),
+        proposal_id: proposalIds.minimum_change.toUpperCase(),
+        policy_version: "optimizer_v1",
+        positions: [{ instrument_id: "0198d500-1000-7000-8000-000000001307", weight: "0.14" }],
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+  });
+
   it("rejects duplicate or non-decimal what-if positions before Engine", async () => {
     const { POST } = await import("../../../app/api/v1/what-if/evaluate/route");
     const invalidBodies = [

@@ -48,11 +48,11 @@ export function ProposalComparison({ group, actionsEnabled = true, onStartShadow
     : group.shadow_eligibility.reasons.join("、") || "服务器未授予影子验证资格。";
   const terminal = ["expired", "rejected", "validated"].includes(group.status);
   const canShadow = actionsEnabled && group.status === "compared" && shadowReason === null;
-  const canReject = actionsEnabled && ["draft", "compared"].includes(group.status);
+  const canReject = actionsEnabled && ["draft", "compared", "shadowing"].includes(group.status);
   const blockedReason = !actionsEnabled
     ? "当前数据状态不允许发起操作；请先重新读取方案。"
     : group.status !== "compared"
-      ? `当前状态 ${group.status} 不允许新的生命周期动作。`
+      ? `当前状态 ${group.status} 不允许再次启动影子验证。`
       : shadowReason;
 
   async function startShadow(): Promise<void> {

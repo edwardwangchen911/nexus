@@ -30,6 +30,9 @@ describe("optimization Engine response boundary", () => {
   it("binds a proposal response to the requested group identity", async () => {
     const mismatched = proposalGroup({ proposal_group_id: "0198d500-1000-7000-8000-000000001397" });
     expect((await sanitizeEngineResponse(json({ data: mismatched, meta }), undefined, `/internal/v1/optimization-proposals/${groupId}`)).status).toBe(500);
+
+    const uppercasePath = `/internal/v1/optimization-proposals/${groupId.toUpperCase()}`;
+    expect((await sanitizeEngineResponse(json({ data: proposalGroup(), meta }), undefined, uppercasePath)).status).toBe(200);
   });
 
   it("binds overview admission and diagnosis to the returned snapshot", async () => {

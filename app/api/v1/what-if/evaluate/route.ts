@@ -2,6 +2,7 @@ import { engineFetch } from "../../../../lib/engine/client";
 import { NexusBffError } from "../../../../lib/engine/errors";
 import { withNexusBff } from "../../../../lib/engine/with-nexus-bff";
 import { readExactJson, requireIdempotencyKey, requireWhatIf } from "../../../../lib/optimization/bff";
+import { sameUuid } from "../../../../lib/optimization/uuid";
 
 export const POST = withNexusBff(async (request, actor) => {
   const body = await readExactJson(request, "The what-if request is invalid.");
@@ -17,8 +18,8 @@ export const POST = withNexusBff(async (request, actor) => {
   });
   if (!response.ok) return response;
   const envelope = await response.clone().json() as { data?: { proposal_group_id?: unknown; proposal_id?: unknown } };
-  if (envelope.data?.proposal_group_id !== body.value.proposal_group_id
-    || envelope.data?.proposal_id !== body.value.proposal_id) {
+  if (!sameUuid(envelope.data?.proposal_group_id, body.value.proposal_group_id)
+    || !sameUuid(envelope.data?.proposal_id, body.value.proposal_id)) {
     throw new NexusBffError(500, "INTERNAL_ERROR", "The request could not be completed.");
   }
   return response;
