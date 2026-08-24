@@ -35,6 +35,15 @@ describe("optimization Engine response boundary", () => {
     expect((await sanitizeEngineResponse(json({ data: proposalGroup(), meta }), undefined, uppercasePath)).status).toBe(200);
   });
 
+  it("binds lifecycle success by UUID semantics after the write commits", async () => {
+    const data = { proposal_group_id: groupId, status: "shadowing", version: 5 };
+    const uppercasePath = `/internal/v1/optimization-proposals/${groupId.toUpperCase()}/shadow`;
+    expect((await sanitizeEngineResponse(json({ data, meta }), undefined, uppercasePath)).status).toBe(200);
+
+    const mismatched = { ...data, proposal_group_id: "0198d500-1000-7000-8000-000000001397" };
+    expect((await sanitizeEngineResponse(json({ data: mismatched, meta }), undefined, uppercasePath)).status).toBe(500);
+  });
+
   it("binds overview admission and diagnosis to the returned snapshot", async () => {
     const payload = { data: overviewData(), meta };
     expect((await sanitizeEngineResponse(json(payload), undefined, "/internal/v1/overview")).status).toBe(200);

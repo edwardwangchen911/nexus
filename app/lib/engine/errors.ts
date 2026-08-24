@@ -163,7 +163,7 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
   const proposalLifecycle = /^\/internal\/v1\/optimization-proposals\/([^/]+)\/(shadow|reject)$/.exec(pathname);
   if (proposalLifecycle && validateUuid(proposalLifecycle[1])) {
     return matchesRuntimeSchema(data, optimizationLifecycleRuntimeSchema) && isPlain(data)
-      && data.proposal_group_id === proposalLifecycle[1]
+      && sameUuid(data.proposal_group_id, proposalLifecycle[1])
       ? data
       : INVALID_DATA;
   }
