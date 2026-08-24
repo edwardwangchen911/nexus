@@ -16,6 +16,7 @@ _NUMERIC = sa.Numeric(38, 12)
 _IMMUTABLE_TABLES = (
     "agent_prompt_versions",
     "agent_model_configs",
+    "agent_research_events",
     "agent_research_outputs",
     "agent_research_output_evidence",
 )
@@ -126,12 +127,46 @@ def upgrade() -> None:
         sa.CheckConstraint("input_hash ~ '^[0-9a-f]{64}$'", name="input_hash_canonical"),
     )
     op.create_table(
+        "agent_research_events",
+        sa.Column("id", _UUID, primary_key=True),
+        sa.Column("run_id", _UUID, nullable=False),
+        sa.Column("sequence", sa.Integer(), nullable=False),
+        sa.Column("state", sa.String(16), nullable=False),
+        sa.Column("event_hash", sa.String(64), nullable=False),
+        sa.Column(
+            "details",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.ForeignKeyConstraint(["run_id"], ["agent_research_runs.id"], name="fk_agent_events_run"),
+        sa.UniqueConstraint("run_id", "sequence", name="uq_agent_research_events_run_sequence"),
+        sa.CheckConstraint("sequence >= 1", name="sequence_positive"),
+        sa.CheckConstraint(
+            "state IN ('prepared','running','validated','audited','synthesized','completed',"
+            "'failed','abstained')",
+            name="state_allowed",
+        ),
+        sa.CheckConstraint("event_hash ~ '^[0-9a-f]{64}$'", name="event_hash_canonical"),
+    )
+    op.create_table(
         "agent_research_outputs",
         sa.Column("id", _UUID, primary_key=True),
         sa.Column("run_id", _UUID, nullable=False),
         sa.Column("sequence", sa.Integer(), nullable=False),
         sa.Column("status", sa.String(16), nullable=False),
+        sa.Column("role", sa.String(32), nullable=True),
+        sa.Column("prompt_hash", sa.String(64), nullable=True),
         sa.Column("content_hash", sa.String(64), nullable=False),
+        sa.Column(
+            "payload",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
         sa.Column("intent", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
@@ -142,10 +177,17 @@ def upgrade() -> None:
         sa.UniqueConstraint("run_id", "sequence", name="uq_agent_research_outputs_run_sequence"),
         sa.CheckConstraint("sequence >= 1", name="sequence_positive"),
         sa.CheckConstraint(
-            "status IN ('validated','audited','synthesized','completed','failed','abstained')",
+            "status IN ('running','validated','audited','synthesized','completed','failed',"
+            "'abstained')",
             name="status_allowed",
         ),
         sa.CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
+        sa.CheckConstraint(
+            "(role IS NULL AND prompt_hash IS NULL) OR "
+            "(role IN ('orchestrator','fundamental','market_state','macro_sector','bull','bear',"
+            "'evidence_audit','portfolio') AND prompt_hash ~ '^[0-9a-f]{64}$')",
+            name="role_prompt_bound",
+        ),
     )
     op.create_table(
         "agent_daily_budget_reservations",
@@ -198,6 +240,7 @@ def upgrade() -> None:
         "agent_prompt_versions",
         "agent_model_configs",
         "agent_research_runs",
+        "agent_research_events",
         "agent_research_outputs",
         "agent_research_output_evidence",
         "agent_daily_budget_reservations",
@@ -278,6 +321,7 @@ def downgrade() -> None:
         "agent_daily_budget_reservations",
         "agent_research_output_evidence",
         "agent_research_outputs",
+        "agent_research_events",
         "agent_research_runs",
         "agent_model_configs",
         "agent_prompt_versions",
@@ -286,6 +330,7 @@ def downgrade() -> None:
     op.drop_table("agent_daily_budget_reservations")
     op.drop_table("agent_research_output_evidence")
     op.drop_table("agent_research_outputs")
+    op.drop_table("agent_research_events")
     op.drop_table("agent_research_runs")
     op.drop_table("agent_model_configs")
     op.drop_table("agent_prompt_versions")

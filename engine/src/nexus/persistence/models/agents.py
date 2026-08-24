@@ -116,23 +116,54 @@ class AgentResearchRunRecord(ImmutableCreatedAt, Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer)
 
 
+class AgentResearchEventRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "agent_research_events"
+    __table_args__ = (
+        UniqueConstraint("run_id", "sequence", name="uq_agent_research_events_run_sequence"),
+        CheckConstraint("sequence >= 1", name="sequence_positive"),
+        CheckConstraint(
+            "state IN ('prepared','running','validated','audited','synthesized','completed',"
+            "'failed','abstained')",
+            name="state_allowed",
+        ),
+        CheckConstraint("event_hash ~ '^[0-9a-f]{64}$'", name="event_hash_canonical"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_runs.id"))
+    sequence: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(16))
+    event_hash: Mapped[str] = mapped_column(String(64))
+    details: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+
+
 class AgentResearchOutputRecord(ImmutableCreatedAt, Base):
     __tablename__ = "agent_research_outputs"
     __table_args__ = (
         UniqueConstraint("run_id", "sequence", name="uq_agent_research_outputs_run_sequence"),
         CheckConstraint("sequence >= 1", name="sequence_positive"),
         CheckConstraint(
-            "status IN ('validated','audited','synthesized','completed','failed','abstained')",
+            "status IN ('running','validated','audited','synthesized','completed','failed',"
+            "'abstained')",
             name="status_allowed",
         ),
         CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
+        CheckConstraint(
+            "(role IS NULL AND prompt_hash IS NULL) OR "
+            "(role IN ('orchestrator','fundamental','market_state','macro_sector','bull','bear',"
+            "'evidence_audit','portfolio') AND prompt_hash ~ '^[0-9a-f]{64}$')",
+            name="role_prompt_bound",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_runs.id"))
     sequence: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16))
+    role: Mapped[str | None] = mapped_column(String(32))
+    prompt_hash: Mapped[str | None] = mapped_column(String(64))
     content_hash: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
     intent: Mapped[dict[str, object] | None] = mapped_column(JSONB)
 
 

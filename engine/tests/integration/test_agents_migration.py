@@ -42,6 +42,7 @@ def test_0011_round_trips_from_previous_release(temporary_database_url: str, mon
             "agent_prompt_versions",
             "agent_model_configs",
             "agent_research_runs",
+            "agent_research_events",
             "agent_research_outputs",
             "agent_research_output_evidence",
             "agent_daily_budget_reservations",
