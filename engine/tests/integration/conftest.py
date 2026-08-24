@@ -98,7 +98,7 @@ def migrated_database_url(
 
 
 def _freeze_post_migration_created_at_defaults(database_url: str) -> None:
-    """Keep test-created immutable rows available to the suite's fixed decision clocks."""
+    """Make migration-seeded and test-created immutable rows available to fixed clocks."""
     asyncio.run(_freeze_post_migration_created_at_defaults_async(database_url))
 
 
@@ -115,6 +115,20 @@ async def _freeze_post_migration_created_at_defaults_async(database_url: str) ->
                     "LOOP EXECUTE format("
                     "'ALTER TABLE %I ALTER COLUMN created_at SET DEFAULT "
                     f"''{_POST_MIGRATION_TEST_CLOCK.isoformat()}''::timestamptz', "
+                    "table_record.table_name); END LOOP; END $$"
+                )
+            )
+            await connection.execute(
+                text(
+                    "DO $$ DECLARE table_record record; BEGIN "
+                    "FOR table_record IN "
+                    "SELECT table_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND column_name = 'created_at' "
+                    "LOOP EXECUTE format('ALTER TABLE %I DISABLE TRIGGER USER', "
+                    "table_record.table_name); EXECUTE format('UPDATE %I SET created_at = "
+                    f"''{_POST_MIGRATION_TEST_CLOCK.isoformat()}''::timestamptz', "
+                    "table_record.table_name); EXECUTE format("
+                    "'ALTER TABLE %I ENABLE TRIGGER USER', "
                     "table_record.table_name); END LOOP; END $$"
                 )
             )
@@ -172,8 +186,7 @@ async def _database_exists(admin_url: URL, database_name: str) -> bool:
             return bool(
                 await connection.scalar(
                     text(
-                        "SELECT EXISTS (SELECT 1 FROM pg_database "
-                        "WHERE datname = :database_name)"
+                        "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = :database_name)"
                     ),
                     {"database_name": database_name},
                 )
