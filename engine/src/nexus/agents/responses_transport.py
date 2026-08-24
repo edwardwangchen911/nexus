@@ -8,6 +8,7 @@ from openai.types.responses.response import Response
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_text import ResponseOutputText
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 
 @dataclass(frozen=True)
@@ -47,8 +48,17 @@ def _normalize_typed(value: Response) -> NormalizedResponse:
     output: list[Mapping[str, object]] = []
     text_parts: list[str] = []
     for item in value.output:
+        if isinstance(item, ResponseReasoningItem):
+            if item.status not in (None, "completed"):
+                raise ResponseShapeError("Responses reasoning item is incomplete", usage=usage)
+            continue
         if isinstance(item, ResponseFunctionToolCall):
-            if not item.call_id or not item.name or not isinstance(item.arguments, str):
+            if (
+                item.status != "completed"
+                or not item.call_id
+                or not item.name
+                or not isinstance(item.arguments, str)
+            ):
                 raise ResponseShapeError("Responses function call is malformed", usage=usage)
             output.append(
                 {

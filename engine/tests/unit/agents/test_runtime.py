@@ -17,6 +17,7 @@ from nexus.settings import EngineSettings, Environment
 from nexus.worker import run_worker
 from openai.types.responses.response import Response
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from pydantic import ValidationError
 
 
@@ -164,7 +165,7 @@ async def test_responses_committee_returns_frozen_role_output_with_fake_transpor
 @pytest.mark.asyncio
 async def test_responses_committee_accepts_official_typed_sdk_response() -> None:
     evidence = _evidence()
-    client = _TypedCommitteeClient(evidence)
+    client = _TypedCommitteeClient(evidence, include_reasoning=True)
     output = await ResponsesCommittee(
         client=client,
         config=_config(max_tool_calls=0),
@@ -293,14 +294,33 @@ class _CommitteeClient:
 
 
 class _TypedCommitteeResponses(_CommitteeResponses):
+    def __init__(self, evidence: EvidenceRef, *, include_reasoning: bool = False) -> None:
+        super().__init__(evidence)
+        self.include_reasoning = include_reasoning
+
     async def create(self, **kwargs: object) -> Response:
         raw = await super().create(**kwargs)
-        return _official_response(raw)
+        response = _official_response(raw)
+        if self.include_reasoning:
+            response.output.insert(
+                0,
+                ResponseReasoningItem.model_validate(
+                    {
+                        "id": "reasoning_fixture",
+                        "summary": [],
+                        "type": "reasoning",
+                        "status": "completed",
+                    }
+                ),
+            )
+        return response
 
 
 class _TypedCommitteeClient:
-    def __init__(self, evidence: EvidenceRef) -> None:
-        self.responses = _TypedCommitteeResponses(evidence)
+    def __init__(self, evidence: EvidenceRef, *, include_reasoning: bool = False) -> None:
+        self.responses = _TypedCommitteeResponses(
+            evidence, include_reasoning=include_reasoning
+        )
 
 
 class _TypedToolCommitteeResponses(_TypedCommitteeResponses):
