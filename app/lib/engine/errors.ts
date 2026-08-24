@@ -4,6 +4,7 @@ import { v7 as uuidv7, validate as validateUuid, version as uuidVersion } from "
 import {
   integrationStatusRuntimeSchema,
   brokerSyncRunRuntimeSchema,
+  dailyBriefRuntimeSchema,
   marketPageRuntimeSchema,
   optimizationJobRuntimeSchema,
   optimizationLifecycleRuntimeSchema,
@@ -12,6 +13,7 @@ import {
   portfolioPageRuntimeSchema,
   portfolioDiagnosticRuntimeSchema,
   portfolioSnapshotRuntimeSchema,
+  researchRunRuntimeSchema,
   runtimeContractSchemas,
   watchlistMembershipRuntimeSchema,
   whatIfRuntimeSchema,
@@ -21,7 +23,7 @@ import { sameUuid } from "../optimization/uuid";
 
 export type NexusErrorCode = "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "INTERNAL_ERROR";
 export const ERROR_STATUSES = {
-  UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422, 429], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], BUDGET_EXHAUSTED: [429], PROVIDER_UNAVAILABLE: [503], INTERNAL_ERROR: [500],
+  UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422, 429], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], BUDGET_EXHAUSTED: [409, 429], PROVIDER_UNAVAILABLE: [503], INTERNAL_ERROR: [500],
 } as const;
 export type StableEngineErrorCode = keyof typeof ERROR_STATUSES;
 export const SAFE_ENGINE_ERROR_MESSAGES: Record<StableEngineErrorCode, string> = {
@@ -65,7 +67,8 @@ export function rebuildAllowedEngineResponse(status: number, value: unknown, ups
     const { data, meta } = value;
     const safeData = allowedSuccessData(data, requestUrl, schemaPath);
     if (safeData !== INVALID_DATA && isObject(meta, ["request_id", "schema_version", "as_of"])
-      && isV7(meta.request_id) && meta.schema_version === "1" && isUtcIso(meta.as_of)) {
+      && isV7(meta.request_id) && meta.schema_version === "1" && isUtcIso(meta.as_of)
+      && responseIdentityValid(safeData, meta, requestUrl, schemaPath)) {
       return Response.json({ data: safeData, meta }, { status, headers: safeHeaders(upstreamHeaders, requestUrl) });
     }
   }
@@ -172,6 +175,32 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       ? data
       : INVALID_DATA;
   }
+  if (pathname === "/internal/v1/research-runs") {
+    return matchesRuntimeSchema(data, researchRunRuntimeSchema) && isPlain(data)
+      ? data
+      : INVALID_DATA;
+  }
+  const researchRun = /^\/internal\/v1\/research-runs\/([^/]+)$/.exec(pathname);
+  if (researchRun && validateUuid(researchRun[1])) {
+    return matchesRuntimeSchema(data, researchRunRuntimeSchema) && isPlain(data)
+      && sameUuid(data.run_id, researchRun[1])
+      ? data
+      : INVALID_DATA;
+  }
+  const instrumentResearch = /^\/internal\/v1\/instruments\/([^/]+)\/research$/.exec(pathname);
+  if (instrumentResearch && validateUuid(instrumentResearch[1])) {
+    return matchesRuntimeSchema(data, researchRunRuntimeSchema) && isPlain(data)
+      && sameUuid(data.instrument_id, instrumentResearch[1])
+      ? data
+      : INVALID_DATA;
+  }
+  const brief = /^\/internal\/v1\/briefs\/(\d{4}-\d{2}-\d{2})$/.exec(pathname);
+  if (brief && isIsoDate(brief[1])) {
+    return matchesRuntimeSchema(data, dailyBriefRuntimeSchema) && isPlain(data)
+      && data.session_date === brief[1]
+      ? data
+      : INVALID_DATA;
+  }
   return schemaPath === undefined && isPlain(data) ? data : INVALID_DATA;
 }
 
@@ -249,6 +278,19 @@ function enginePathname(requestUrl?: string, schemaPath?: string): string {
     const pathname = new URL(requestUrl).pathname;
     return pathname.startsWith("/api/v1/") ? pathname.replace("/api/v1/", "/internal/v1/") : pathname;
   } catch { return ""; }
+}
+
+function responseIdentityValid(data: unknown, meta: Record<string, unknown>, requestUrl?: string, schemaPath?: string): boolean {
+  if (!requestUrl || schemaPath) return true;
+  try {
+    const url = new URL(requestUrl);
+    if (/^\/api\/v1\/instruments\/[^/]+\/research$/.test(url.pathname)) {
+      const values = url.searchParams.getAll("as_of");
+      return values.length === 1 && isUtcIso(values[0]) && meta.as_of === values[0]
+        && isPlain(data) && typeof data.decision_time === "string" && data.decision_time <= values[0];
+    }
+    return true;
+  } catch { return false; }
 }
 
 

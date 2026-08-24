@@ -354,16 +354,23 @@ export function MarketPanel({
                     <EvidenceFact term="实时性口径" value={deliveryModeLabel(selectedItem.delivery_mode)} />
                     <EvidenceFact term="报价质量" value={selectedItem.quality} />
                   </dl>
-                  <button
-                    className="button button--quiet"
-                    type="button"
-                    aria-label={selectedItem.watchlisted ? `将 ${selectedItem.symbol} 移出观察列表` : `将 ${selectedItem.symbol} 加入观察列表`}
-                    onClick={() => onToggleWatchlist(selectedItem)}
-                    disabled={pendingInstrumentId === selectedItem.instrument_id}
-                  >
-                    {selectedItem.watchlisted ? <StarOff aria-hidden="true" size={17} /> : <Star aria-hidden="true" size={17} />}
-                    {pendingInstrumentId === selectedItem.instrument_id ? "正在更新" : selectedItem.watchlisted ? "移出观察" : "加入观察"}
-                  </button>
+                  <div className="market-evidence-actions">
+                    {selectedItem.as_of ? <a
+                      className="button button--quiet"
+                      aria-label={`打开 ${selectedItem.symbol} 个股研究`}
+                      href={`/research/${selectedItem.instrument_id}?as_of=${encodeURIComponent(selectedItem.as_of)}`}
+                    >打开个股研究</a> : null}
+                    <button
+                      className="button button--quiet"
+                      type="button"
+                      aria-label={selectedItem.watchlisted ? `将 ${selectedItem.symbol} 移出观察列表` : `将 ${selectedItem.symbol} 加入观察列表`}
+                      onClick={() => onToggleWatchlist(selectedItem)}
+                      disabled={pendingInstrumentId === selectedItem.instrument_id}
+                    >
+                      {selectedItem.watchlisted ? <StarOff aria-hidden="true" size={17} /> : <Star aria-hidden="true" size={17} />}
+                      {pendingInstrumentId === selectedItem.instrument_id ? "正在更新" : selectedItem.watchlisted ? "移出观察" : "加入观察"}
+                    </button>
+                  </div>
                 </section>
 
                 {qualityReasons(selectedSeriesForItem, selectedItem).length > 0 ? (

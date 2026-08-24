@@ -13,17 +13,19 @@ const MAX_PORTFOLIO_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_ANALYSIS_RESPONSE_BYTES = 1024 * 1024;
 type InternalPath = Extract<keyof paths, `/internal/v1/${string}`>;
 type DynamicInternalPath = Extract<InternalPath, `${string}{${string}}${string}`>;
-type QueryInternalPath = Extract<InternalPath, "/internal/v1/market" | "/internal/v1/overview" | "/internal/v1/portfolios">;
+type QueryInternalPath = Extract<InternalPath, "/internal/v1/market" | "/internal/v1/overview" | "/internal/v1/portfolios" | "/internal/v1/instruments/{instrument_id}/research">;
 type EngineBody = string | Uint8Array | ArrayBuffer;
 type MethodFor<Path extends InternalPath> =
   | (Exclude<paths[Path]["get"], undefined> extends never ? never : "GET")
   | (Exclude<paths[Path]["post"], undefined> extends never ? never : "POST")
   | (Exclude<paths[Path]["put"], undefined> extends never ? never : "PUT")
   | (Exclude<paths[Path]["delete"], undefined> extends never ? never : "DELETE");
-export type EngineTarget<Path extends InternalPath> = Path extends QueryInternalPath
-  ? Path | { template: Path; path: Path; query?: string }
-  : Path extends DynamicInternalPath
-    ? { template: Path; path: string }
+export type EngineTarget<Path extends InternalPath> = Path extends DynamicInternalPath
+  ? Path extends QueryInternalPath
+    ? { template: Path; path: string; query?: string }
+    : { template: Path; path: string }
+  : Path extends QueryInternalPath
+    ? Path | { template: Path; path: Path; query?: string }
     : Path;
 export type EngineRequestInit<Path extends InternalPath> = Omit<RequestInit, "body" | "method"> & { actor: NexusActor; body?: EngineBody; method?: MethodFor<Path> };
 export type EngineResponse<Path extends InternalPath> = Response & { readonly nexusPath?: Path };
@@ -92,13 +94,15 @@ function allowedTarget<Path extends InternalPath>(target: EngineTarget<Path>, ba
   if (!matchesTemplate(template, path)) return null;
 
   const query = dynamic?.query;
-  if (query !== undefined && template !== "/internal/v1/market" && template !== "/internal/v1/overview" && template !== "/internal/v1/portfolios") return null;
+  if (query !== undefined && template !== "/internal/v1/market" && template !== "/internal/v1/overview" && template !== "/internal/v1/portfolios" && template !== "/internal/v1/instruments/{instrument_id}/research") return null;
   const canonicalQuery = template === "/internal/v1/market"
     ? canonicalMarketQuery(query ?? "")
     : template === "/internal/v1/overview"
       ? canonicalOverviewQuery(query ?? "")
     : template === "/internal/v1/portfolios"
       ? canonicalPortfolioQuery(query ?? "")
+      : template === "/internal/v1/instruments/{instrument_id}/research"
+        ? canonicalResearchQuery(query ?? "")
       : "";
   if (canonicalQuery === null) return null;
 
@@ -114,7 +118,7 @@ function allowedTarget<Path extends InternalPath>(target: EngineTarget<Path>, ba
 }
 
 function matchesTemplate(template: InternalPath, path: string): boolean {
-  if (["/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/optimization-proposals", "/internal/v1/what-if/evaluate"].includes(template)) {
+  if (["/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/optimization-proposals", "/internal/v1/what-if/evaluate", "/internal/v1/research-runs"].includes(template)) {
     return path === template;
   }
   const integration = /^\/internal\/v1\/integrations\/([^/]+)\/(test|mode)$/.exec(path);
@@ -141,6 +145,18 @@ function matchesTemplate(template: InternalPath, path: string): boolean {
       ? `/internal/v1/optimization-proposals/{group_id}/${proposal[2]}`
       : "/internal/v1/optimization-proposals/{group_id}";
     return template === expected;
+  }
+  const researchRun = /^\/internal\/v1\/research-runs\/([^/]+)$/.exec(path);
+  if (researchRun && validateUuid(researchRun[1])) {
+    return template === "/internal/v1/research-runs/{run_id}";
+  }
+  const instrumentResearch = /^\/internal\/v1\/instruments\/([^/]+)\/research$/.exec(path);
+  if (instrumentResearch && validateUuid(instrumentResearch[1])) {
+    return template === "/internal/v1/instruments/{instrument_id}/research";
+  }
+  const brief = /^\/internal\/v1\/briefs\/(\d{4}-\d{2}-\d{2})$/.exec(path);
+  if (brief && isIsoDate(brief[1])) {
+    return template === "/internal/v1/briefs/{session_date}";
   }
   const syncRun = /^\/internal\/v1\/broker-sync-runs\/([^/]+)$/.exec(path);
   return Boolean(syncRun && validateUuid(syncRun[1]) && template === "/internal/v1/broker-sync-runs/{run_id}");
@@ -194,6 +210,13 @@ function canonicalPortfolioQuery(query: string): string | null {
   return pairs.map(([key, value]) => `${key}=${value}`).join("&");
 }
 
+function canonicalResearchQuery(query: string): string | null {
+  if (query.includes("?") || query.includes("#") || !hasValidPercentEscapes(query)) return null;
+  const entries = [...new URLSearchParams(query).entries()];
+  if (entries.length !== 1 || entries[0][0] !== "as_of" || !isUtcIso(entries[0][1])) return null;
+  return `as_of=${strictPercentEncode(entries[0][1])}`;
+}
+
 function isValidMarketQueryValue(key: string, value: string): boolean {
   if (key === "limit") return /^\d+$/.test(value) && Number(value) >= 1 && Number(value) <= 100;
   if (key === "watchlist") return value === "true" || value === "false";
@@ -222,11 +245,19 @@ function isIsoDate(value: string): boolean {
   const date = new Date(`${value}T00:00:00Z`);
   return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
 }
+function isUtcIso(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value)) return false;
+  const date = new Date(value);
+  return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 19) === value.slice(0, 19);
+}
 function isAnalysisPath(pathname: string): boolean {
   return pathname === "/api/v1/overview" || pathname === "/internal/v1/overview"
     || pathname.includes("/diagnostics/latest")
     || pathname.includes("/optimization-proposals")
-    || pathname.endsWith("/what-if/evaluate");
+    || pathname.endsWith("/what-if/evaluate")
+    || pathname.includes("/research-runs")
+    || pathname.includes("/instruments/") && pathname.endsWith("/research")
+    || pathname.includes("/briefs/");
 }
 function engineConfig(): { baseUrl: string; keyId: string; secret: string } { const baseUrl = process.env.NEXUS_ENGINE_BASE_URL; const keyId = process.env.NEXUS_ENGINE_HMAC_CURRENT_KEY_ID ?? "current"; const secret = process.env.NEXUS_ENGINE_HMAC_CURRENT_SECRET ?? process.env.NEXUS_ENGINE_HMAC_SECRET; if (!baseUrl || !secret) throw new Error("NEXUS engine service configuration is incomplete"); return { baseUrl, keyId, secret }; }
 function exactBodyBytes(body: EngineBody | undefined): Uint8Array { if (body === undefined) return new Uint8Array(); if (typeof body === "string") return new TextEncoder().encode(body); if (body instanceof Uint8Array) return body; if (body instanceof ArrayBuffer) return new Uint8Array(body); throw new TypeError("engine request bodies must have exact byte representation"); }

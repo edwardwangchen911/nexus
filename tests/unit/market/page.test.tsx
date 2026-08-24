@@ -189,6 +189,10 @@ describe("market vertical slice", () => {
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("实时");
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("2026-08-22 00:01:00 UTC");
     expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent("2026-08-21 20:00:00 UTC");
+    expect(screen.getByRole("link", { name: "打开 AAPL 个股研究" })).toHaveAttribute(
+      "href",
+      `/research/${item.instrument_id}?as_of=${encodeURIComponent(item.as_of!)}`,
+    );
     fireEvent.click(screen.getByRole("button", { name: "将 AAPL 移出观察列表" }));
     expect(onToggleWatchlist).toHaveBeenCalledWith(item);
   });
