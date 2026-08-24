@@ -52,6 +52,10 @@ EXPECTED_TABLES = {
     "filings",
     "financial_facts",
     "corporate_actions",
+    "agent_prompt_versions",
+    "agent_model_configs",
+    "agent_research_runs",
+    "agent_research_outputs",
 }
 
 OPTIONAL_MIGRATION_TABLE_GROUPS = (
@@ -81,6 +85,14 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
             "filings",
             "financial_facts",
             "corporate_actions",
+        }
+    ),
+    frozenset(
+        {
+            "agent_prompt_versions",
+            "agent_model_configs",
+            "agent_research_runs",
+            "agent_research_outputs",
         }
     ),
 )
@@ -154,4 +166,11 @@ EXPECTED_FOREIGN_KEYS = {
         "fk_corporate_actions_evidence_owner",
         "fk_corporate_actions_instrument_id_instruments",
     },
+    "agent_research_runs": {
+        "fk_agent_runs_instrument",
+        "fk_agent_runs_data_snapshot",
+        "fk_agent_runs_prompt_version",
+        "fk_agent_runs_model_config",
+    },
+    "agent_research_outputs": "fk_agent_outputs_run",
 }

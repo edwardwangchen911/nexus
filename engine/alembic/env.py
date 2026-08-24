@@ -6,7 +6,14 @@ from logging.config import fileConfig
 
 from alembic import context
 from nexus.persistence.base import Base
-from nexus.persistence.models import data, diagnostics, market, portfolio, runtime  # noqa: F401
+from nexus.persistence.models import (  # noqa: F401
+    agents,
+    data,
+    diagnostics,
+    market,
+    portfolio,
+    runtime,
+)
 from nexus.settings import EngineSettings
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection

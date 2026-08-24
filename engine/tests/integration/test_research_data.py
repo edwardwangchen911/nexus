@@ -60,7 +60,7 @@ async def _insert_us_instrument(connection: AsyncConnection) -> UUID:
     return instrument_id
 
 
-def test_0010_research_data_round_trips_from_0009_with_one_head(
+def test_0010_research_data_round_trips_from_0009_with_the_current_single_head(
     monkeypatch: pytest.MonkeyPatch,
     temporary_database_url: str,
 ) -> None:
@@ -74,7 +74,7 @@ def test_0010_research_data_round_trips_from_0009_with_one_head(
         "corporate_actions",
     }
 
-    assert ScriptDirectory.from_config(config).get_heads() == ["0010_research_data"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["0011_agents"]
     command.upgrade(config, "0009_optimization")
     assert research_tables.isdisjoint(_table_names(temporary_database_url))
     command.upgrade(config, "0010_research_data")

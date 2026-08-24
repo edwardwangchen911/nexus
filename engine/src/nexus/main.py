@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from nexus.api.errors import ErrorCode, NexusError
+from nexus.api.routes.briefs import router as briefs_router
 from nexus.api.routes.broker_sync import router as broker_sync_router
 from nexus.api.routes.diagnostics import router as diagnostics_router
 from nexus.api.routes.integrations import router as integrations_router
@@ -14,6 +15,7 @@ from nexus.api.routes.market import router as market_router
 from nexus.api.routes.optimization import router as optimization_router
 from nexus.api.routes.overview import router as overview_router
 from nexus.api.routes.portfolios import router as portfolios_router
+from nexus.api.routes.research import router as research_router
 from nexus.api.routes.system import router as system_router
 from nexus.api.schemas.optimization import WhatIfRequest
 from nexus.domain.ids import new_uuid7
@@ -74,6 +76,8 @@ def create_engine_app(settings: EngineSettings | None = None) -> FastAPI:
     app.include_router(overview_router)
     app.include_router(optimization_router)
     app.include_router(broker_sync_router)
+    app.include_router(research_router)
+    app.include_router(briefs_router)
     _install_what_if_request_schema(app)
     return app
 
