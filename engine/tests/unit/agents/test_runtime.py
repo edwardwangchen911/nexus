@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from json import dumps
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -184,8 +185,9 @@ async def test_official_typed_function_call_completes_through_fixed_tool_loop() 
         observed.append(payload)
         return {"status": "ok"}
 
+    client = _TypedToolCommitteeClient(evidence)
     output = await ResponsesCommittee(
-        client=_TypedToolCommitteeClient(evidence),
+        client=client,
         config=_config(max_tool_calls=1),
         tools=ReadOnlyTools(executors={"get_security_snapshot": snapshot}),
     ).analyze("bull", _request(), (evidence,), load_prompt_assets()["bull"])
@@ -196,6 +198,18 @@ async def test_official_typed_function_call_completes_through_fixed_tool_loop() 
             "instrument_id": _request().instrument_id,
             "data_snapshot_id": _request().data_snapshot_id,
             "as_of": _request().decision_time,
+        }
+    ]
+    calls = cast(_TypedToolCommitteeResponses, client.responses).calls
+    assert isinstance(calls[0]["input"][0]["content"], str)
+    assert isinstance(calls[0]["input"][1]["content"], str)
+    assert "previous_response_id" not in calls[0]
+    assert calls[1]["previous_response_id"] == "resp_fixture"
+    assert calls[1]["input"] == [
+        {
+            "type": "function_call_output",
+            "call_id": "call_fixture",
+            "output": '{"status":"ok"}',
         }
     ]
 
@@ -324,6 +338,9 @@ class _TypedCommitteeClient:
 
 
 class _TypedToolCommitteeResponses(_TypedCommitteeResponses):
+    def __init__(self, evidence: EvidenceRef) -> None:
+        super().__init__(evidence, include_reasoning=True)
+
     async def create(self, **kwargs: object) -> Response:
         response = await super().create(**kwargs)
         if len(self.calls) == 1:

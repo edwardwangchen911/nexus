@@ -4,13 +4,14 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from typing import cast
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.tools import ReadOnlyTools, ToolExecutor, ToolInputError
 from nexus.persistence.models.agents import AgentResearchRunRecord
-from nexus.persistence.models.data import MacroObservation
+from nexus.persistence.models.data import DataArtifact, MacroObservation, PriceSeriesManifest
+from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.research import Filing, FinancialFactRecord, ResearchEvidenceRef
 
 
@@ -54,9 +55,9 @@ class _BoundDatabaseExecutors:
             "search_filing_evidence": self.filing_evidence,
             "get_price_features": self.price_features,
             "get_macro_snapshot": self.macro_snapshot,
-            "get_portfolio_exposure": self.portfolio_unavailable,
-            "get_portfolio_diagnostics": self.portfolio_unavailable,
-            "get_proposal_comparison": self.portfolio_unavailable,
+            "get_portfolio_exposure": self.portfolio_exposure,
+            "get_portfolio_diagnostics": self.portfolio_diagnostics,
+            "get_proposal_comparison": self.proposal_comparison,
         }
 
     async def security_snapshot(self, payload: Mapping[str, object]) -> Mapping[str, object]:
@@ -159,11 +160,55 @@ class _BoundDatabaseExecutors:
 
     async def price_features(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_snapshot_scope(payload)
+        symbols = tuple(
+            await self._session.scalars(
+                select(InstrumentAlias.symbol).where(
+                    InstrumentAlias.instrument_id == self._instrument_id,
+                    InstrumentAlias.valid_from <= self._decision_time.date(),
+                    (
+                        InstrumentAlias.valid_to.is_(None)
+                        | (InstrumentAlias.valid_to >= self._decision_time.date())
+                    ),
+                )
+            )
+        )
+        hashes = tuple(record.content_hash for record in self._evidence)
+        records = tuple(
+            await self._session.execute(
+                select(PriceSeriesManifest, DataArtifact)
+                .join(DataArtifact, DataArtifact.id == PriceSeriesManifest.data_artifact_id)
+                .where(
+                    PriceSeriesManifest.instrument.in_(symbols),
+                    PriceSeriesManifest.end_at <= self._decision_time,
+                    DataArtifact.sha256.in_(hashes),
+                    DataArtifact.available_at <= self._decision_time,
+                    DataArtifact.received_at <= self._decision_time,
+                )
+                .order_by(PriceSeriesManifest.end_at.desc(), PriceSeriesManifest.id)
+                .limit(20)
+            )
+        )
+        items: list[dict[str, object]] = [
+            {
+                "instrument": manifest.instrument,
+                "source": manifest.source,
+                "feed": manifest.feed,
+                "delivery_mode": manifest.delivery_mode,
+                "adjustment": manifest.adjustment,
+                "start_at": _timestamp(manifest.start_at),
+                "end_at": _timestamp(manifest.end_at),
+                "row_count": manifest.row_count,
+                "available_at": _timestamp(artifact.available_at),
+                "content_hash": artifact.sha256,
+                "requested_features": list(cast(tuple[str, ...], payload["features"])),
+            }
+            for manifest, artifact in records
+        ]
         return self._result(
             "get_price_features",
-            [],
-            status="unavailable",
-            reason="no frozen price-feature authority in this run",
+            items,
+            status="ok" if items else "unavailable",
+            reason=None if items else "no_frozen_price_context",
         )
 
     async def macro_snapshot(self, payload: Mapping[str, object]) -> Mapping[str, object]:
@@ -177,37 +222,53 @@ class _BoundDatabaseExecutors:
                 .where(
                     MacroObservation.available_at <= self._decision_time,
                     MacroObservation.observed_at <= self._decision_time,
+                    MacroObservation.authority_version == "research_macro_v1",
                     MacroObservation.series.in_(series),
-                    or_(
-                        MacroObservation.evidence_ref_id.in_(self._evidence_ids),
-                        MacroObservation.calendar_evidence_ref_id.in_(self._evidence_ids),
-                    ),
+                    MacroObservation.evidence_ref_id.in_(self._evidence_ids),
+                    MacroObservation.calendar_evidence_ref_id.in_(self._evidence_ids),
                 )
                 .order_by(MacroObservation.series, MacroObservation.observed_at.desc())
                 .limit(50)
             )
         )
+        items: list[dict[str, object]] = [
+            {
+                "series": record.series,
+                "value": format(record.value, "f"),
+                "unit": record.unit,
+                "observed_at": _timestamp(record.observed_at),
+                "available_at": _timestamp(record.available_at),
+                "revision": record.revision,
+                "evidence_ref_id": (
+                    None if record.evidence_ref_id is None else str(record.evidence_ref_id)
+                ),
+            }
+            for record in records
+        ]
         return self._result(
             "get_macro_snapshot",
-            [
-                {
-                    "series": record.series,
-                    "value": format(record.value, "f"),
-                    "unit": record.unit,
-                    "observed_at": _timestamp(record.observed_at),
-                    "available_at": _timestamp(record.available_at),
-                    "revision": record.revision,
-                    "evidence_ref_id": (
-                        None if record.evidence_ref_id is None else str(record.evidence_ref_id)
-                    ),
-                }
-                for record in records
-            ],
+            items,
+            status="ok" if items else "unavailable",
+            reason=None if items else "no_frozen_macro_authority",
         )
 
-    async def portfolio_unavailable(self, payload: Mapping[str, object]) -> Mapping[str, object]:
+    async def portfolio_exposure(
+        self, payload: Mapping[str, object]
+    ) -> Mapping[str, object]:
         await self._require_common_scope(payload)
-        raise ToolInputError("portfolio authority is not frozen in an instrument research run")
+        return self._capability_unavailable("get_portfolio_exposure")
+
+    async def portfolio_diagnostics(
+        self, payload: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        await self._require_common_scope(payload)
+        return self._capability_unavailable("get_portfolio_diagnostics")
+
+    async def proposal_comparison(
+        self, payload: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        await self._require_common_scope(payload)
+        return self._capability_unavailable("get_proposal_comparison")
 
     async def _require_snapshot_scope(self, payload: Mapping[str, object]) -> None:
         await self._require_common_scope(payload)
@@ -220,15 +281,25 @@ class _BoundDatabaseExecutors:
     async def _require_common_scope(self, payload: Mapping[str, object]) -> None:
         if payload["as_of"] != self._decision_time:
             raise ToolInputError("tool request exceeds frozen decision-time authority")
-        current = await self._session.get(AgentResearchRunRecord, self._run_id)
-        if (
-            current is None
-            or current.instrument_id != self._instrument_id
-            or current.data_snapshot_id != self._snapshot_id
-            or current.decision_time != self._decision_time
-            or current.evidence_hash != self._evidence_hash
-        ):
+        current_id = await self._session.scalar(
+            select(AgentResearchRunRecord.id).where(
+                AgentResearchRunRecord.id == self._run_id,
+                AgentResearchRunRecord.instrument_id == self._instrument_id,
+                AgentResearchRunRecord.data_snapshot_id == self._snapshot_id,
+                AgentResearchRunRecord.decision_time == self._decision_time,
+                AgentResearchRunRecord.evidence_hash == self._evidence_hash,
+            )
+        )
+        if current_id is None:
             raise ToolInputError("frozen run authority is unavailable")
+
+    def _capability_unavailable(self, tool: str) -> Mapping[str, object]:
+        return self._result(
+            tool,
+            [],
+            status="unavailable",
+            reason="authority_not_frozen_for_research_run",
+        )
 
     def _result(
         self,

@@ -96,8 +96,9 @@ class ResponsesResearchModel:
         responses = getattr(self._client, "responses")
         create = getattr(responses, "create")
         input_items: list[Mapping[str, object]] = [
-            {"role": "user", "content": request.model_dump(mode="json")}
+            {"role": "user", "content": _wire_json(request.model_dump(mode="json"))}
         ]
+        previous_response_id: str | None = None
         allowance_ledger = RunUsageAllowance(
             max_input_tokens=self._config.max_input_tokens,
             max_output_tokens=self._config.max_output_tokens,
@@ -124,8 +125,10 @@ class ResponsesResearchModel:
                         }
                     },
                 }
+                if previous_response_id is not None:
+                    request_payload["previous_response_id"] = previous_response_id
                 call_allowance = allowance_ledger.authorize(request_payload)
-                result = await create(
+                create_kwargs = dict(
                     model=self._config.model_id,
                     timeout=remaining,
                     max_output_tokens=call_allowance.max_output_tokens,
@@ -134,6 +137,9 @@ class ResponsesResearchModel:
                     tool_choice="auto",
                     text=request_payload["text"],
                 )
+                if previous_response_id is not None:
+                    create_kwargs["previous_response_id"] = previous_response_id
+                result = await create(**create_kwargs)
                 try:
                     normalized = normalize_response(result)
                 except ResponseShapeError as error:
@@ -146,7 +152,7 @@ class ResponsesResearchModel:
                 )
                 if calls:
                     allowance_ledger.record_tool_calls(len(calls))
-                    input_items.extend(normalized.output)
+                    continuation: list[Mapping[str, object]] = []
                     for call in calls:
                         name = call.get("name")
                         arguments = call.get("arguments")
@@ -164,7 +170,7 @@ class ResponsesResearchModel:
                         if not isinstance(raw_payload, Mapping):
                             raise ValueError("Responses function arguments must be an object")
                         tool_result = await tools.execute(name, raw_payload)
-                        input_items.append(
+                        continuation.append(
                             {
                                 "type": "function_call_output",
                                 "call_id": call_id,
@@ -173,6 +179,12 @@ class ResponsesResearchModel:
                                 ),
                             }
                         )
+                    if normalized.response_id is None:
+                        input_items.extend(normalized.output)
+                        input_items.extend(continuation)
+                    else:
+                        previous_response_id = normalized.response_id
+                        input_items = continuation
                     continue
                 raw_text = normalized.output_text
                 if not isinstance(raw_text, str):
@@ -253,13 +265,18 @@ class ResponsesCommittee:
             {"role": "system", "content": prompt.content},
             {
                 "role": "user",
-                "content": {
-                    "role": role,
-                    "request": request.model_dump(mode="json"),
-                    "evidence_refs": [item.model_dump(mode="json") for item in evidence_refs],
-                },
+                "content": _wire_json(
+                    {
+                        "role": role,
+                        "request": request.model_dump(mode="json"),
+                        "evidence_refs": [
+                            item.model_dump(mode="json") for item in evidence_refs
+                        ],
+                    }
+                ),
             },
         ]
+        previous_response_id: str | None = None
         usage_before = self.usage
         loop = asyncio.get_running_loop()
         deadline = loop.time() + float(self._config.absolute_timeout_seconds)
@@ -282,8 +299,10 @@ class ResponsesCommittee:
                         }
                     },
                 }
+                if previous_response_id is not None:
+                    request_payload["previous_response_id"] = previous_response_id
                 allowance = self._allowance.authorize(request_payload)
-                result = await create(
+                create_kwargs = dict(
                     model=self._config.model_id,
                     timeout=remaining,
                     max_output_tokens=allowance.max_output_tokens,
@@ -292,6 +311,9 @@ class ResponsesCommittee:
                     tool_choice="auto",
                     text=request_payload["text"],
                 )
+                if previous_response_id is not None:
+                    create_kwargs["previous_response_id"] = previous_response_id
+                result = await create(**create_kwargs)
                 try:
                     normalized = normalize_response(result)
                 except ResponseShapeError as error:
@@ -304,7 +326,7 @@ class ResponsesCommittee:
                 )
                 if calls:
                     self._allowance.record_tool_calls(len(calls))
-                    input_items.extend(normalized.output)
+                    continuation: list[Mapping[str, object]] = []
                     for call in calls:
                         name = call.get("name")
                         arguments = call.get("arguments")
@@ -322,7 +344,7 @@ class ResponsesCommittee:
                         if not isinstance(payload, Mapping):
                             raise ValueError("Responses function arguments must be an object")
                         tool_result = await self._tools.execute(name, payload)
-                        input_items.append(
+                        continuation.append(
                             {
                                 "type": "function_call_output",
                                 "call_id": call_id,
@@ -331,6 +353,12 @@ class ResponsesCommittee:
                                 ),
                             }
                         )
+                    if normalized.response_id is None:
+                        input_items.extend(normalized.output)
+                        input_items.extend(continuation)
+                    else:
+                        previous_response_id = normalized.response_id
+                        input_items = continuation
                     continue
                 raw_text = normalized.output_text
                 if not isinstance(raw_text, str):
@@ -361,3 +389,7 @@ def _intent_schema() -> Mapping[str, object]:
             ).read_text(encoding="utf-8")
         ),
     )
+
+
+def _wire_json(value: Mapping[str, object]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)

@@ -128,6 +128,11 @@ def upgrade() -> None:
         sa.CheckConstraint("model_hash ~ '^[0-9a-f]{64}$'", name="model_hash_canonical"),
         sa.CheckConstraint("prompt_hash ~ '^[0-9a-f]{64}$'", name="prompt_hash_canonical"),
         sa.CheckConstraint("evidence_hash ~ '^[0-9a-f]{64}$'", name="evidence_hash_canonical"),
+        sa.CheckConstraint(
+            "jsonb_typeof(evidence_manifest) = 'array' AND "
+            "jsonb_array_length(evidence_manifest) BETWEEN 1 AND 100",
+            name="evidence_manifest_bounded",
+        ),
         sa.CheckConstraint("tool_hash ~ '^[0-9a-f]{64}$'", name="tool_hash_canonical"),
         sa.CheckConstraint("input_hash ~ '^[0-9a-f]{64}$'", name="input_hash_canonical"),
     )

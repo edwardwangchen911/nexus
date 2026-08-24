@@ -20,7 +20,7 @@ from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution import TERMINAL, execute_research_run
 from nexus.agents.models import ResearchRequest
 from nexus.agents.responses import ResponsesClient, ResponsesCommittee, ResponsesModelConfig
-from nexus.agents.tools import ReadOnlyToolRegistry
+from nexus.agents.tools import ReadOnlyToolRegistry, ToolInputError
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
@@ -72,13 +72,16 @@ async def run_agent_worker_once(
         if run.status != "prepared":
             job.status = "FAILED"
             return True
-        committee = await _committee(
-            session,
-            settings,
-            run,
-            responses_client=responses_client,
-            tools=tools,
-        )
+        try:
+            committee = await _committee(
+                session,
+                settings,
+                run,
+                responses_client=responses_client,
+                tools=tools,
+            )
+        except ToolInputError:
+            committee = _UnavailableResponsesCommittee()
         result = await execute_research_run(
             session,
             run_id=run.id,

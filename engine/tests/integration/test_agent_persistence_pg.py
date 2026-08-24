@@ -194,6 +194,59 @@ async def test_atomic_admission_replays_same_body_and_conflicts_changed_body(
 
 
 @pytest.mark.asyncio
+async def test_admission_accepts_100_evidence_rows_and_rejects_101_before_enqueue(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    await _add_fixture_evidence_links(factory, start=0, count=99)
+    async with factory() as session, session.begin():
+        accepted = await admit_research_run(
+            session,
+            actor_id="fixture-actor",
+            route="/internal/v1/research-runs",
+            idempotency_key="evidence-bound-100",
+            request_hash="3" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID,
+                data_snapshot_id=_SNAPSHOT_ID,
+                decision_time=_NOW,
+            ),
+            prompt_version_id=_PROMPT_ID,
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("100.00"),
+            now=_NOW,
+        )
+    assert len(accepted.run.evidence_manifest) == 100
+
+    await _add_fixture_evidence_links(factory, start=99, count=1)
+    with pytest.raises(ValueError, match="evidence authority exceeds 100"):
+        async with factory() as session, session.begin():
+            await admit_research_run(
+                session,
+                actor_id="fixture-actor",
+                route="/internal/v1/research-runs",
+                idempotency_key="evidence-bound-101",
+                request_hash="4" * 64,
+                request=ResearchRequest(
+                    instrument_id=_INSTRUMENT_ID,
+                    data_snapshot_id=_SNAPSHOT_ID,
+                    decision_time=_NOW,
+                ),
+                prompt_version_id=_PROMPT_ID,
+                model_config_id=_MODEL_ID,
+                daily_limit_usd=Decimal("100.00"),
+                now=_NOW,
+            )
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Job)) == 1
+        reservations = await session.scalar(
+            select(func.count()).select_from(AgentDailyBudgetReservationRecord)
+        )
+    assert reservations == 1
+
+
+@pytest.mark.asyncio
 async def test_admission_rejects_future_snapshot_and_rolls_back_claim_and_budget(
     migrated_database_url: str,
 ) -> None:
@@ -639,6 +692,39 @@ async def _seed_authority(factory, *, snapshot_available_at: datetime = _NOW) ->
                 location=f"memory://sha256/{'a' * 64}",
                 content_hash="a" * 64,
             )
+        )
+
+
+async def _add_fixture_evidence_links(factory, *, start: int, count: int) -> None:
+    async with factory() as session, session.begin():
+        records = [
+            ResearchEvidenceRef(
+                id=UUID(f"0198d500-1000-7000-8000-{2000 + index:012d}"),
+                source="fixture",
+                provider_object_id=f"bounded-evidence-{index}",
+                revision="v1",
+                available_at=_NOW - timedelta(minutes=1),
+                location=f"memory://sha256/{index:064x}",
+                content_hash=f"{index:064x}",
+                byte_length=1,
+            )
+            for index in range(start, start + count)
+        ]
+        session.add_all(records)
+        await session.flush()
+        session.add_all(
+            AgentDataSnapshotEvidenceRecord(
+                data_snapshot_id=_SNAPSHOT_ID,
+                instrument_id=_INSTRUMENT_ID,
+                evidence_ref_id=record.id,
+                source=record.source,
+                provider_object_id=record.provider_object_id,
+                revision=record.revision,
+                available_at=record.available_at,
+                location=record.location,
+                content_hash=record.content_hash,
+            )
+            for record in records
         )
 
 

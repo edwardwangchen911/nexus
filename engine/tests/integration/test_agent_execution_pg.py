@@ -33,12 +33,17 @@ from nexus.persistence.models.agents import (
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
-from nexus.persistence.models.data import DataSnapshot
+from nexus.persistence.models.data import (
+    DataArtifact,
+    DataSnapshot,
+    MacroObservation,
+    PriceSeriesManifest,
+)
 from nexus.persistence.models.market import Instrument, InstrumentAlias
-from nexus.persistence.models.research import ResearchEvidenceRef
+from nexus.persistence.models.research import Filing, FinancialFactRecord, ResearchEvidenceRef
 from nexus.persistence.models.runtime import Job
 from nexus.persistence.session import session_factory
-from nexus.settings import EngineSettings
+from nexus.settings import EngineSettings, Environment
 from nexus.worker import run_agent_worker_once
 from sqlalchemy import func, select
 
@@ -660,8 +665,77 @@ async def test_responses_worker_reaches_terminal_with_injected_zero_network_tran
     assert run.status == "completed"
     assert len(fake.responses.calls) == len(ROLE_ORDER)
     assert all(
-        len(call["input"][1]["content"]["evidence_refs"]) == 1 for call in fake.responses.calls
+        len(json.loads(call["input"][1]["content"])["evidence_refs"]) == 1
+        for call in fake.responses.calls
     )
+
+
+@pytest.mark.asyncio
+async def test_production_fixture_authority_terminalizes_and_worker_continues_next_job(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    run_ids: list[UUID] = []
+    for index in range(2):
+        async with factory() as session, session.begin():
+            admission = await admit_research_run(
+                session,
+                actor_id="production-worker",
+                route="/internal/v1/research-runs",
+                idempotency_key=f"production-fixture-authority-{index}",
+                request_hash=str(index + 6) * 64,
+                request=ResearchRequest(
+                    instrument_id=_INSTRUMENT_ID,
+                    data_snapshot_id=_SNAPSHOT_ID,
+                    decision_time=_NOW,
+                ),
+                prompt_version_id=prompt_ids["orchestrator"],
+                model_config_id=_MODEL_ID,
+                daily_limit_usd=Decimal("3.00"),
+                now=_NOW,
+            )
+            run_ids.append(admission.run_id)
+    settings = EngineSettings(
+        environment=Environment.PRODUCTION,
+        database_url=migrated_database_url,
+        object_store_endpoint="https://object-store.invalid",
+        object_store_region="us-east-1",
+        object_store_bucket="fixture",
+        object_store_access_key_id="fixture-access",
+        object_store_secret_access_key="fixture-secret",
+        engine_hmac_current_key_id="fixture-current",
+        engine_hmac_current_secret="fixture-hmac",
+        agent_runtime_mode="responses",
+        openai_api_key="fixture-key",
+        openai_extraction_model="fixture-extraction",
+        openai_reasoning_model="fixture-model",
+    )
+    fake = _DurableResponsesClient()
+    assert await run_agent_worker_once(settings, responses_client=fake) is True
+    assert await run_agent_worker_once(settings, responses_client=fake) is True
+    async with factory() as session:
+        runs = tuple(
+            await session.scalars(
+                select(AgentResearchRunRecord).where(AgentResearchRunRecord.id.in_(run_ids))
+            )
+        )
+        jobs = tuple(
+            await session.scalars(
+                select(Job).where(Job.payload["run_id"].as_string().in_(map(str, run_ids)))
+            )
+        )
+        reservations = tuple(
+            await session.scalars(
+                select(AgentDailyBudgetReservationRecord).where(
+                    AgentDailyBudgetReservationRecord.run_id.in_(run_ids)
+                )
+            )
+        )
+    assert {run.status for run in runs} == {"abstained"}
+    assert {job.status for job in jobs} == {"ABSTAINED"}
+    assert {reservation.state for reservation in reservations} == {"released"}
+    assert fake.responses.calls == []
 
 
 @pytest.mark.asyncio
@@ -670,6 +744,7 @@ async def test_database_tools_are_complete_and_reject_authority_escape(
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(factory)
     async with factory() as session, session.begin():
         admission = await admit_research_run(
             session,
@@ -697,7 +772,71 @@ async def test_database_tools_are_complete_and_reject_authority_escape(
                 "as_of": "2026-08-24T12:00:00Z",
             },
         )
-        assert [item["evidence_ref_id"] for item in result["items"]] == [str(_EVIDENCE_ID)]
+        assert {item["evidence_ref_id"] for item in result["items"]} == {
+            str(_EVIDENCE_ID),
+            "0198d500-1000-7000-8000-000000001701",
+            "0198d500-1000-7000-8000-000000001702",
+            "0198d500-1000-7000-8000-000000001703",
+        }
+        financial = await tools.execute(
+            "get_financial_facts",
+            {
+                "instrument_id": str(_INSTRUMENT_ID),
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "as_of": "2026-08-24T12:00:00Z",
+                "fields": ["revenue"],
+            },
+        )
+        assert [(item["fact"], item["value"]) for item in financial["items"]] == [
+            ("revenue", "100.000000000000")
+        ]
+        filings = await tools.execute(
+            "search_filing_evidence",
+            {
+                "instrument_id": str(_INSTRUMENT_ID),
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "as_of": "2026-08-24T12:00:00Z",
+                "forms": ["10-Q"],
+                "filed_from": "2026-01-01",
+                "filed_to": "2026-08-24",
+            },
+        )
+        assert [item["accession_number"] for item in filings["items"]] == [
+            "0000000001-26-000001"
+        ]
+        price = await tools.execute(
+            "get_price_features",
+            {
+                "instrument_id": str(_INSTRUMENT_ID),
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "as_of": "2026-08-24T12:00:00Z",
+                "features": ["close", "sma_20"],
+            },
+        )
+        assert price["status"] == "ok"
+        assert [(item["instrument"], item["content_hash"]) for item in price["items"]] == [
+            ("ABC", "e" * 64)
+        ]
+        macro = await tools.execute(
+            "get_macro_snapshot",
+            {
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "as_of": "2026-08-24T12:00:00Z",
+                "series": ["DGS10"],
+            },
+        )
+        assert [(item["series"], item["value"]) for item in macro["items"]] == [
+            ("DGS10", "4.250000000000")
+        ]
+        unfrozen_macro = await tools.execute(
+            "get_macro_snapshot",
+            {
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "as_of": "2026-08-24T12:00:00Z",
+                "series": ["DFF"],
+            },
+        )
+        assert (unfrozen_macro["status"], unfrozen_macro["items"]) == ("unavailable", [])
         with pytest.raises(ToolInputError, match="exceeds frozen"):
             await tools.execute(
                 "get_security_snapshot",
@@ -707,15 +846,43 @@ async def test_database_tools_are_complete_and_reject_authority_escape(
                     "as_of": "2026-08-24T12:00:00Z",
                 },
             )
-        with pytest.raises(ToolInputError, match="portfolio authority"):
+        with pytest.raises(ToolInputError, match="decision-time"):
             await tools.execute(
-                "get_portfolio_exposure",
+                "get_security_snapshot",
                 {
-                    "portfolio_snapshot_id": "0198d500-1000-7000-8000-000000001699",
                     "instrument_id": str(_INSTRUMENT_ID),
-                    "as_of": "2026-08-24T12:00:00Z",
+                    "data_snapshot_id": str(_SNAPSHOT_ID),
+                    "as_of": "2026-08-24T12:00:01Z",
                 },
             )
+        portfolio = await tools.execute(
+            "get_portfolio_exposure",
+            {
+                "portfolio_snapshot_id": "0198d500-1000-7000-8000-000000001699",
+                "instrument_id": str(_INSTRUMENT_ID),
+                "as_of": "2026-08-24T12:00:00Z",
+            },
+        )
+        diagnostics = await tools.execute(
+            "get_portfolio_diagnostics",
+            {
+                "portfolio_snapshot_id": "0198d500-1000-7000-8000-000000001699",
+                "diagnostic_run_id": "0198d500-1000-7000-8000-000000001698",
+                "as_of": "2026-08-24T12:00:00Z",
+            },
+        )
+        comparison = await tools.execute(
+            "get_proposal_comparison",
+            {
+                "proposal_group_id": "0198d500-1000-7000-8000-000000001697",
+                "as_of": "2026-08-24T12:00:00Z",
+            },
+        )
+        assert {
+            (portfolio["status"], portfolio["reason"]),
+            (diagnostics["status"], diagnostics["reason"]),
+            (comparison["status"], comparison["reason"]),
+        } == {("unavailable", "authority_not_frozen_for_research_run")}
 
 
 @pytest.mark.asyncio
@@ -1091,6 +1258,183 @@ async def _seed_authority(
             if role != omitted_role
         )
     return prompt_ids
+
+
+async def _seed_database_tool_authority(factory) -> None:
+    sec_evidence_id = UUID("0198d500-1000-7000-8000-000000001701")
+    macro_value_id = UUID("0198d500-1000-7000-8000-000000001702")
+    macro_calendar_id = UUID("0198d500-1000-7000-8000-000000001703")
+    unfrozen_value_id = UUID("0198d500-1000-7000-8000-000000001704")
+    filing_id = UUID("0198d500-1000-7000-8000-000000001705")
+    async with factory() as session, session.begin():
+        evidence = (
+            ResearchEvidenceRef(
+                id=sec_evidence_id,
+                source="sec",
+                provider_object_id="0000000001-26-000001",
+                revision="v1",
+                available_at=_NOW - timedelta(minutes=4),
+                location=f"memory://sha256/{'1' * 64}",
+                content_hash="1" * 64,
+                byte_length=10,
+            ),
+            ResearchEvidenceRef(
+                id=macro_value_id,
+                source="fred",
+                provider_object_id="DGS10:2026-08-23",
+                revision="2026-08-24",
+                available_at=_NOW - timedelta(minutes=3),
+                location=f"memory://sha256/{'2' * 64}",
+                content_hash="2" * 64,
+                byte_length=10,
+            ),
+            ResearchEvidenceRef(
+                id=macro_calendar_id,
+                source="fred",
+                provider_object_id="calendar:2026-08-24",
+                revision="2026-08-24",
+                available_at=_NOW - timedelta(minutes=2),
+                location=f"memory://sha256/{'3' * 64}",
+                content_hash="3" * 64,
+                byte_length=10,
+            ),
+            ResearchEvidenceRef(
+                id=unfrozen_value_id,
+                source="fred",
+                provider_object_id="DFF:2026-08-23",
+                revision="2026-08-24",
+                available_at=_NOW - timedelta(minutes=2),
+                location=f"memory://sha256/{'4' * 64}",
+                content_hash="4" * 64,
+                byte_length=10,
+            ),
+        )
+        session.add_all(evidence)
+        await session.flush()
+        filing = Filing(
+            id=filing_id,
+            instrument_id=_INSTRUMENT_ID,
+            evidence_ref_id=sec_evidence_id,
+            source="sec",
+            provider_object_id="0000000001-26-000001",
+            accession_number="0000000001-26-000001",
+            form="10-Q",
+            filed_at=_NOW - timedelta(days=2),
+            accepted_at=_NOW - timedelta(days=2),
+            revision="v1",
+        )
+        session.add(filing)
+        await session.flush()
+        session.add(
+            FinancialFactRecord(
+                filing_id=filing_id,
+                evidence_ref_id=sec_evidence_id,
+                instrument_id=_INSTRUMENT_ID,
+                canonical_fact="revenue",
+                raw_taxonomy="us-gaap",
+                raw_tag="RevenueFromContractWithCustomerExcludingAssessedTax",
+                unit="USD",
+                value=Decimal("100"),
+                period_kind="duration",
+                period_start=date(2026, 4, 1),
+                period_end=date(2026, 6, 30),
+                fiscal_year=2026,
+                fiscal_period="Q2",
+                form="10-Q",
+                filed_at=_NOW - timedelta(days=2),
+                accepted_at=_NOW - timedelta(days=2),
+                accession_number="0000000001-26-000001",
+                frame=None,
+                revision="v1",
+            )
+        )
+        session.add_all(
+            (
+                MacroObservation(
+                    source="fred",
+                    series="DGS10",
+                    observed_at=_NOW - timedelta(days=1),
+                    available_at=_NOW - timedelta(minutes=3),
+                    revision="2026-08-24",
+                    value=Decimal("4.25"),
+                    unit="percent",
+                    provider_object_id="DGS10:2026-08-23",
+                    authority_version="research_macro_v1",
+                    real_time_start=date(2026, 8, 24),
+                    real_time_end=date(9999, 12, 31),
+                    evidence_ref_id=macro_value_id,
+                    calendar_evidence_ref_id=macro_calendar_id,
+                    calendar_source="fred",
+                    calendar_provider_object_id="calendar:2026-08-24",
+                    calendar_revision="2026-08-24",
+                    display_sanity_only=False,
+                ),
+                MacroObservation(
+                    source="fred",
+                    series="DFF",
+                    observed_at=_NOW - timedelta(days=1),
+                    available_at=_NOW - timedelta(minutes=2),
+                    revision="2026-08-24",
+                    value=Decimal("5.00"),
+                    unit="percent",
+                    provider_object_id="DFF:2026-08-23",
+                    authority_version="research_macro_v1",
+                    real_time_start=date(2026, 8, 24),
+                    real_time_end=date(9999, 12, 31),
+                    evidence_ref_id=unfrozen_value_id,
+                    calendar_evidence_ref_id=macro_calendar_id,
+                    calendar_source="fred",
+                    calendar_provider_object_id="calendar:2026-08-24",
+                    calendar_revision="2026-08-24",
+                    display_sanity_only=False,
+                ),
+            )
+        )
+        session.add(
+            DataArtifact(
+                id=UUID("0198d500-1000-7000-8000-000000001706"),
+                uri=f"memory://sha256/{'e' * 64}",
+                sha256="e" * 64,
+                byte_size=10,
+                mime_type="application/x-parquet",
+                schema_version="price-bars-v1",
+                source="fixture",
+                observed_at=_NOW - timedelta(days=30),
+                available_at=_NOW - timedelta(minutes=1),
+                received_at=_NOW - timedelta(minutes=1),
+            )
+        )
+        await session.flush()
+        session.add(
+            PriceSeriesManifest(
+                id=UUID("0198d500-1000-7000-8000-000000001707"),
+                data_artifact_id=UUID("0198d500-1000-7000-8000-000000001706"),
+                instrument="ABC",
+                source="fixture",
+                feed="adjusted-daily",
+                delivery_mode="fixture",
+                adjustment="split_dividend",
+                start_at=_NOW - timedelta(days=30),
+                end_at=_NOW - timedelta(days=1),
+                row_count=21,
+            )
+        )
+        await session.flush()
+        linked = (evidence[0], evidence[1], evidence[2])
+        session.add_all(
+            AgentDataSnapshotEvidenceRecord(
+                data_snapshot_id=_SNAPSHOT_ID,
+                instrument_id=_INSTRUMENT_ID,
+                evidence_ref_id=record.id,
+                source=record.source,
+                provider_object_id=record.provider_object_id,
+                revision=record.revision,
+                available_at=record.available_at,
+                location=record.location,
+                content_hash=record.content_hash,
+            )
+            for record in linked
+        )
 
 
 class _FailingCommittee:

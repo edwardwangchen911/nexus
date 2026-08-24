@@ -1,5 +1,6 @@
 """Strict normalization for official Responses SDK objects and the test seam."""
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
@@ -19,6 +20,7 @@ class NormalizedUsage:
 
 @dataclass(frozen=True)
 class NormalizedResponse:
+    response_id: str | None
     output: tuple[Mapping[str, object], ...]
     output_text: str | None
     usage: NormalizedUsage
@@ -43,6 +45,8 @@ def normalize_response(value: object) -> NormalizedResponse:
 
 def _normalize_typed(value: Response) -> NormalizedResponse:
     usage = _typed_usage(value)
+    if re.fullmatch(r"resp_[A-Za-z0-9_-]{1,240}", value.id) is None:
+        raise ResponseShapeError("Responses id is not canonical", usage=usage)
     if value.error is not None or value.status != "completed":
         raise ResponseShapeError("Responses result is not completed", usage=usage)
     output: list[Mapping[str, object]] = []
@@ -77,6 +81,7 @@ def _normalize_typed(value: Response) -> NormalizedResponse:
                 raise ResponseShapeError("Responses message content is not text", usage=usage)
             text_parts.append(content.text)
     return NormalizedResponse(
+        response_id=value.id,
         output=tuple(output),
         output_text="".join(text_parts) if text_parts else None,
         usage=usage,
@@ -136,7 +141,9 @@ def _normalize_mapping(value: Mapping[object, object]) -> NormalizedResponse:
     raw_text = value.get("output_text")
     if raw_text is not None and not isinstance(raw_text, str):
         raise ResponseShapeError("Responses structured output text is malformed", usage=usage)
-    return NormalizedResponse(output=tuple(output), output_text=raw_text, usage=usage)
+    return NormalizedResponse(
+        response_id=None, output=tuple(output), output_text=raw_text, usage=usage
+    )
 
 
 def _token_count(value: object) -> int:

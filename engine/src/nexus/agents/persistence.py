@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.committee import ROLE_ORDER, AgentRole
+from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
 from nexus.agents.models import ResearchRequest
 from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES
 from nexus.persistence.models.agents import (
@@ -280,8 +281,11 @@ async def admit_research_run(
                 AgentDataSnapshotEvidenceRecord.available_at,
                 AgentDataSnapshotEvidenceRecord.evidence_ref_id,
             )
+            .limit(MAX_FROZEN_EVIDENCE + 1)
         )
     )
+    if len(evidence_records) > MAX_FROZEN_EVIDENCE:
+        raise ValueError("evidence authority exceeds 100 rows")
     if (
         instrument is None
         or snapshot is None

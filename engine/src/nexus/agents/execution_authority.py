@@ -14,6 +14,8 @@ from nexus.persistence.models.agents import AgentPromptVersionRecord, AgentResea
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.research import ResearchEvidenceRef
 
+MAX_FROZEN_EVIDENCE = 100
+
 
 async def load_frozen_evidence(
     session: AsyncSession,
@@ -22,7 +24,11 @@ async def load_frozen_evidence(
     allow_fixture_evidence: bool,
 ) -> tuple[ResearchEvidenceRef, ...]:
     manifest = run.evidence_manifest
-    if not isinstance(manifest, list) or not manifest:
+    if (
+        not isinstance(manifest, list)
+        or not manifest
+        or len(manifest) > MAX_FROZEN_EVIDENCE
+    ):
         return ()
     canonical_hash = hashlib.sha256(
         json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
