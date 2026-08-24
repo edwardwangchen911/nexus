@@ -16,17 +16,16 @@ from nexus.agents.committee import (
     FixtureCommittee,
     PromptAsset,
 )
+from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution import TERMINAL, execute_research_run
 from nexus.agents.models import ResearchRequest
 from nexus.agents.responses import ResponsesClient, ResponsesCommittee, ResponsesModelConfig
-from nexus.agents.tools import ReadOnlyToolRegistry, ReadOnlyTools
+from nexus.agents.tools import ReadOnlyToolRegistry
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import (
-    AgentDataSnapshotEvidenceRecord,
     AgentModelConfigRecord,
     AgentResearchRunRecord,
 )
-from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.models.runtime import Job
 from nexus.persistence.session import session_factory
 from nexus.settings import AgentRuntimeMode, EngineSettings, Environment
@@ -73,11 +72,6 @@ async def run_agent_worker_once(
         if run.status != "prepared":
             job.status = "FAILED"
             return True
-        evidence_ids = await _evidence_ids(
-            session,
-            run,
-            allow_fixture=settings.environment is not Environment.PRODUCTION,
-        )
         committee = await _committee(
             session,
             settings,
@@ -89,7 +83,7 @@ async def run_agent_worker_once(
             session,
             run_id=run.id,
             committee=committee,
-            evidence_ref_ids=evidence_ids,
+            allow_fixture_evidence=settings.environment is not Environment.PRODUCTION,
         )
         job.status = result.status.upper()
         return True
@@ -106,33 +100,6 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
         worked = await run_agent_worker_once(configured)
         if not worked:
             await asyncio.sleep(0.5)
-
-
-async def _evidence_ids(
-    session: AsyncSession,
-    run: AgentResearchRunRecord,
-    *,
-    allow_fixture: bool,
-) -> tuple[UUID, ...]:
-    conditions = [
-        AgentDataSnapshotEvidenceRecord.data_snapshot_id == run.data_snapshot_id,
-        AgentDataSnapshotEvidenceRecord.instrument_id == run.instrument_id,
-        ResearchEvidenceRef.available_at <= run.decision_time,
-    ]
-    if not allow_fixture:
-        conditions.append(ResearchEvidenceRef.source != "fixture")
-    return tuple(
-        await session.scalars(
-            select(ResearchEvidenceRef.id)
-            .join(
-                AgentDataSnapshotEvidenceRecord,
-                AgentDataSnapshotEvidenceRecord.evidence_ref_id == ResearchEvidenceRef.id,
-            )
-            .where(*conditions)
-            .order_by(ResearchEvidenceRef.available_at.desc(), ResearchEvidenceRef.id)
-            .limit(100)
-        )
-    )
 
 
 async def _committee(
@@ -155,6 +122,11 @@ async def _committee(
     client = responses_client
     if client is None:
         client = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+    configured_tools = tools or await database_read_only_tools(
+        session,
+        run,
+        allow_fixture_evidence=settings.environment is not Environment.PRODUCTION,
+    )
     return ResponsesCommittee(
         client=cast(ResponsesClient, client),
         config=ResponsesModelConfig(
@@ -167,7 +139,7 @@ async def _committee(
             input_usd_per_million=model.input_usd_per_million,
             output_usd_per_million=model.output_usd_per_million,
         ),
-        tools=tools or ReadOnlyTools(),
+        tools=configured_tools,
     )
 
 

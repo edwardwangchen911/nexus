@@ -304,6 +304,15 @@ async def test_prompt_manifest_and_snapshot_evidence_are_database_immutable(
                 ),
                 {"run_id": admission.run_id},
             )
+    with pytest.raises(IntegrityError, match="run authority is immutable"):
+        async with factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "UPDATE agent_research_runs SET status='running', "
+                    "evidence_hash=:hash, evidence_manifest='[]'::jsonb WHERE id=:run_id"
+                ),
+                {"hash": "0" * 64, "run_id": admission.run_id},
+            )
 
 
 @pytest.mark.asyncio
@@ -641,6 +650,20 @@ async def _seed_runs(factory, run_ids: tuple[UUID, ...]) -> None:
     prompt_hash = hashlib.sha256(
         json.dumps(prompt_manifest, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+    evidence_manifest = [
+        {
+            "id": str(_EVIDENCE_ID),
+            "source": "fixture",
+            "provider_object_id": "admission-evidence",
+            "revision": "v1",
+            "available_at": (_NOW - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            "location": f"memory://sha256/{'a' * 64}",
+            "content_hash": "a" * 64,
+        }
+    ]
+    evidence_hash = hashlib.sha256(
+        json.dumps(evidence_manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     async with factory() as session, session.begin():
         session.add_all(
             AgentResearchRunRecord(
@@ -658,6 +681,8 @@ async def _seed_runs(factory, run_ids: tuple[UUID, ...]) -> None:
                 model_hash="2" * 64,
                 prompt_hash=prompt_hash,
                 prompt_manifest=prompt_manifest,
+                evidence_hash=evidence_hash,
+                evidence_manifest=evidence_manifest,
                 tool_hash=hashlib.sha256(b"tools").hexdigest(),
                 input_hash=hashlib.sha256(str(run_id).encode()).hexdigest(),
                 reserved_cost_usd=Decimal("2.00"),

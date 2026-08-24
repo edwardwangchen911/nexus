@@ -15,6 +15,8 @@ from nexus.agents.tools import ReadOnlyTools
 from nexus.domain.evidence import EvidenceRef
 from nexus.settings import EngineSettings, Environment
 from nexus.worker import run_worker
+from openai.types.responses.response import Response
+from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from pydantic import ValidationError
 
 
@@ -159,16 +161,114 @@ async def test_responses_committee_returns_frozen_role_output_with_fake_transpor
     assert {tool["type"] for tool in call["tools"]} == {"function"}
 
 
+@pytest.mark.asyncio
+async def test_responses_committee_accepts_official_typed_sdk_response() -> None:
+    evidence = _evidence()
+    client = _TypedCommitteeClient(evidence)
+    output = await ResponsesCommittee(
+        client=client,
+        config=_config(max_tool_calls=0),
+        tools=ReadOnlyTools(),
+    ).analyze("bull", _request(), (evidence,), load_prompt_assets()["bull"])
+
+    assert (output.vote, output.input_tokens, output.output_tokens) == ("support", 12, 7)
+
+
+@pytest.mark.asyncio
+async def test_official_typed_function_call_completes_through_fixed_tool_loop() -> None:
+    evidence = _evidence()
+    observed: list[Mapping[str, object]] = []
+
+    async def snapshot(payload: Mapping[str, object]) -> Mapping[str, object]:
+        observed.append(payload)
+        return {"status": "ok"}
+
+    output = await ResponsesCommittee(
+        client=_TypedToolCommitteeClient(evidence),
+        config=_config(max_tool_calls=1),
+        tools=ReadOnlyTools(executors={"get_security_snapshot": snapshot}),
+    ).analyze("bull", _request(), (evidence,), load_prompt_assets()["bull"])
+
+    assert output.vote == "support"
+    assert observed == [
+        {
+            "instrument_id": _request().instrument_id,
+            "data_snapshot_id": _request().data_snapshot_id,
+            "as_of": _request().decision_time,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_committee_shrinks_run_allowance_and_blocks_before_second_call() -> None:
+    evidence = _evidence()
+    client = _CommitteeClient(evidence)
+    committee = ResponsesCommittee(
+        client=client,
+        config=_config(max_tool_calls=0, max_output_tokens=7),
+        tools=ReadOnlyTools(),
+    )
+    await committee.analyze("bull", _request(), (evidence,), load_prompt_assets()["bull"])
+    with pytest.raises(ValueError, match="output allowance exhausted"):
+        await committee.analyze("bear", _request(), (evidence,), load_prompt_assets()["bear"])
+
+    assert len(client.responses.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_responses_committee_bounds_eight_roles_plus_retry_to_one_run_allowance() -> None:
+    evidence = _evidence()
+    client = _CommitteeClient(evidence, input_tokens=1, output_tokens=1)
+    committee = ResponsesCommittee(
+        client=client,
+        config=_config(max_tool_calls=0, max_output_tokens=9),
+        tools=ReadOnlyTools(),
+    )
+    roles = (*load_prompt_assets(), "orchestrator")
+    for role in roles:
+        await committee.analyze(role, _request(), (evidence,), load_prompt_assets()[role])
+
+    assert [call["max_output_tokens"] for call in client.responses.calls] == list(range(9, 0, -1))
+    assert committee.usage.output_tokens == 9
+
+
+@pytest.mark.asyncio
+async def test_responses_committee_retains_usage_when_structured_output_is_invalid() -> None:
+    evidence = _evidence()
+    client = _CommitteeClient(evidence, invalid_json=True)
+    committee = ResponsesCommittee(
+        client=client,
+        config=_config(max_tool_calls=0),
+        tools=ReadOnlyTools(),
+    )
+    with pytest.raises(ValueError, match="structured output"):
+        await committee.analyze("bull", _request(), (evidence,), load_prompt_assets()["bull"])
+
+    assert (committee.usage.input_tokens, committee.usage.output_tokens) == (12, 7)
+
+
 class _CommitteeResponses:
-    def __init__(self, evidence: EvidenceRef) -> None:
+    def __init__(
+        self,
+        evidence: EvidenceRef,
+        *,
+        input_tokens: int = 12,
+        output_tokens: int = 7,
+        invalid_json: bool = False,
+    ) -> None:
         self.evidence = evidence
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.invalid_json = invalid_json
         self.calls: list[dict[str, object]] = []
 
     async def create(self, **kwargs: object) -> Mapping[str, object]:
         self.calls.append(kwargs)
         return {
             "output": [{"type": "message"}],
-            "output_text": dumps(
+            "output_text": "{"
+            if self.invalid_json
+            else dumps(
                 {
                     "vote": "support",
                     "claims": [
@@ -180,13 +280,61 @@ class _CommitteeResponses:
                     "conflicting_facts": False,
                 }
             ),
-            "usage": {"input_tokens": 12, "output_tokens": 7},
+            "usage": {
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+            },
         }
 
 
 class _CommitteeClient:
+    def __init__(self, evidence: EvidenceRef, **kwargs: object) -> None:
+        self.responses = _CommitteeResponses(evidence, **kwargs)
+
+
+class _TypedCommitteeResponses(_CommitteeResponses):
+    async def create(self, **kwargs: object) -> Response:
+        raw = await super().create(**kwargs)
+        return _official_response(raw)
+
+
+class _TypedCommitteeClient:
     def __init__(self, evidence: EvidenceRef) -> None:
-        self.responses = _CommitteeResponses(evidence)
+        self.responses = _TypedCommitteeResponses(evidence)
+
+
+class _TypedToolCommitteeResponses(_TypedCommitteeResponses):
+    async def create(self, **kwargs: object) -> Response:
+        response = await super().create(**kwargs)
+        if len(self.calls) == 1:
+            return response.model_copy(
+                update={
+                    "output": [
+                        ResponseFunctionToolCall.model_validate(
+                            {
+                                "id": "fc_fixture",
+                                "call_id": "call_fixture",
+                                "name": "get_security_snapshot",
+                                "arguments": dumps(
+                                    {
+                                        "instrument_id": str(_request().instrument_id),
+                                        "data_snapshot_id": str(_request().data_snapshot_id),
+                                        "as_of": "2026-08-24T00:00:00Z",
+                                    }
+                                ),
+                                "status": "completed",
+                                "type": "function_call",
+                            }
+                        )
+                    ]
+                }
+            )
+        return response
+
+
+class _TypedToolCommitteeClient:
+    def __init__(self, evidence: EvidenceRef) -> None:
+        self.responses = _TypedToolCommitteeResponses(evidence)
 
 
 class _FakeResponses:
@@ -261,12 +409,83 @@ def _config(*, max_tool_calls: int = 2, max_output_tokens: int = 400) -> Respons
     return ResponsesModelConfig(
         model_id="configured-reasoning",
         pricing_version="fixture-pricing-v1",
-        max_input_tokens=1000,
+        max_input_tokens=100_000,
         max_output_tokens=max_output_tokens,
         max_tool_calls=max_tool_calls,
         absolute_timeout_seconds=Decimal("12"),
         input_usd_per_million=Decimal("1"),
         output_usd_per_million=Decimal("2"),
+    )
+
+
+def _evidence() -> EvidenceRef:
+    return EvidenceRef(
+        source="fixture",
+        object_id="e1",
+        available_at=datetime(2026, 8, 23, tzinfo=UTC),
+        location="fixture:e1",
+        content_hash="a" * 64,
+    )
+
+
+def _official_response(raw: Mapping[str, object]) -> Response:
+    output_text = raw.get("output_text")
+    usage = raw["usage"]
+    assert isinstance(output_text, str) and isinstance(usage, Mapping)
+    return Response.model_validate(
+        {
+            "id": "resp_fixture",
+            "created_at": 0.0,
+            "error": None,
+            "incomplete_details": None,
+            "instructions": None,
+            "metadata": None,
+            "model": "configured-reasoning",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg_fixture",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": output_text,
+                            "type": "output_text",
+                            "logprobs": [],
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            "parallel_tool_calls": False,
+            "temperature": None,
+            "tool_choice": "auto",
+            "tools": [],
+            "top_p": None,
+            "background": False,
+            "conversation": None,
+            "max_output_tokens": 400,
+            "max_tool_calls": None,
+            "previous_response_id": None,
+            "prompt": None,
+            "prompt_cache_key": None,
+            "reasoning": None,
+            "safety_identifier": None,
+            "service_tier": "default",
+            "status": "completed",
+            "text": None,
+            "top_logprobs": 0,
+            "truncation": "disabled",
+            "usage": {
+                "input_tokens": usage["input_tokens"],
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": usage["output_tokens"],
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": int(usage["input_tokens"]) + int(usage["output_tokens"]),
+            },
+            "user": None,
+        }
     )
 
 

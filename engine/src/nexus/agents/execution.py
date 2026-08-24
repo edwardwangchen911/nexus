@@ -3,10 +3,9 @@
 import hashlib
 import json
 from collections.abc import Mapping
-from typing import Final, Literal, cast
+from typing import Final, Literal
 from uuid import UUID
 
-from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.budget import BudgetExhausted
@@ -17,8 +16,18 @@ from nexus.agents.committee import (
     CommitteeRoleOutput,
     PromptAsset,
 )
+from nexus.agents.execution_authority import (
+    load_frozen_evidence,
+    load_frozen_prompts,
+    load_frozen_symbol,
+)
 from nexus.agents.models import ResearchRequest, ResearchRunResult
-from nexus.agents.persistence import release_daily_budget_if_reserved, settle_daily_budget
+from nexus.agents.persistence import (
+    release_daily_budget_if_reserved,
+    require_reserved_daily_budget,
+    settle_daily_budget,
+)
+from nexus.agents.responses_budget import UsageSnapshot
 from nexus.agents.synthesis import (
     citations_bound,
     domain_evidence,
@@ -28,14 +37,12 @@ from nexus.agents.synthesis import (
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
-    AgentPromptVersionRecord,
     AgentResearchEventRecord,
     AgentResearchOutputEvidenceRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
 from nexus.persistence.models.data import DataSnapshot
-from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.research import ResearchEvidenceRef
 
 LIFECYCLE: Final[tuple[str, ...]] = (
@@ -54,7 +61,7 @@ async def execute_research_run(
     *,
     run_id: UUID,
     committee: CommitteeModel,
-    evidence_ref_ids: tuple[UUID, ...],
+    allow_fixture_evidence: bool = True,
 ) -> ResearchRunResult:
     """Advance one prepared run through every durable state or a fail-closed terminal."""
     run = await session.get(AgentResearchRunRecord, run_id, with_for_update=True)
@@ -65,7 +72,9 @@ async def execute_research_run(
     event_sequence = 1
     output_sequence = 1
     await _append_event(session, run, event_sequence, "prepared", {})
-    evidence_records = await _load_evidence(session, run, evidence_ref_ids)
+    evidence_records = await load_frozen_evidence(
+        session, run, allow_fixture_evidence=allow_fixture_evidence
+    )
     if not evidence_records:
         return await _terminal_without_usage(
             session,
@@ -75,7 +84,7 @@ async def execute_research_run(
             status="abstained",
             reason="evidence_authority_missing",
         )
-    prompts = await _load_persisted_prompts(session, run)
+    prompts = await load_frozen_prompts(session, run)
     if prompts is None:
         return await _terminal_without_usage(
             session,
@@ -87,7 +96,7 @@ async def execute_research_run(
         )
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
     snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
-    symbol = await _load_symbol(session, run)
+    symbol = await load_frozen_symbol(session, run)
     if model is None or snapshot is None or symbol is None:
         return await _terminal_without_usage(
             session,
@@ -103,6 +112,17 @@ async def execute_research_run(
         data_snapshot_id=run.data_snapshot_id,
         decision_time=run.decision_time,
     )
+    try:
+        await require_reserved_daily_budget(session, run_id=run.id)
+    except BudgetExhausted:
+        return await _terminal_without_usage(
+            session,
+            run,
+            output_sequence=output_sequence,
+            event_sequence=event_sequence + 1,
+            status="failed",
+            reason="budget_reservation_unavailable",
+        )
     await _advance(session, run, "running")
     event_sequence += 1
     await _append_event(session, run, event_sequence, "running", {})
@@ -125,27 +145,36 @@ async def execute_research_run(
             prompt=prompt,
         )
         if output is None:
-            return await _terminal_without_usage(
+            return await _terminal_after_committee(
                 session,
                 run,
+                model=model,
+                committee=committee,
+                role_outputs=role_outputs,
                 output_sequence=output_sequence,
                 event_sequence=event_sequence + 1,
                 status="failed",
                 reason="model_execution_failed",
             )
         if output.role != role or output.prompt_hash != prompt.content_hash:
-            return await _terminal_without_usage(
+            return await _terminal_after_committee(
                 session,
                 run,
+                model=model,
+                committee=committee,
+                role_outputs=role_outputs,
                 output_sequence=output_sequence,
                 event_sequence=event_sequence + 1,
                 status="failed",
                 reason="role_output_identity_invalid",
             )
         if not citations_bound(output.claims, evidence_refs):
-            return await _terminal_without_usage(
+            return await _terminal_after_committee(
                 session,
                 run,
+                model=model,
+                committee=committee,
+                role_outputs=role_outputs,
                 output_sequence=output_sequence,
                 event_sequence=event_sequence + 1,
                 status="abstained",
@@ -175,19 +204,9 @@ async def execute_research_run(
         "audited",
         {"evidence_count": len(evidence_records)},
     )
-    input_tokens = sum(output.input_tokens for output in role_outputs)
-    output_tokens = sum(output.output_tokens for output in role_outputs)
-    try:
-        actual_usd = usage_cost(model, input_tokens, output_tokens)
-        await settle_daily_budget(
-            session,
-            run_id=run.id,
-            actual_usd=actual_usd,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-        )
-    except (BudgetExhausted, ValueError):
-        return await _terminal_without_usage(
+    usage = _committee_usage(committee, role_outputs)
+    if not await _settle_or_hold_usage(session, run, model=model, usage=usage):
+        return await _persist_terminal(
             session,
             run,
             output_sequence=output_sequence,
@@ -237,25 +256,6 @@ async def execute_research_run(
     return ResearchRunResult(status="completed", intent=intent)
 
 
-async def _load_evidence(
-    session: AsyncSession,
-    run: AgentResearchRunRecord,
-    evidence_ref_ids: tuple[UUID, ...],
-) -> tuple[ResearchEvidenceRef, ...]:
-    if not evidence_ref_ids or len(set(evidence_ref_ids)) != len(evidence_ref_ids):
-        return ()
-    records = list(
-        await session.scalars(
-            select(ResearchEvidenceRef).where(ResearchEvidenceRef.id.in_(evidence_ref_ids))
-        )
-    )
-    by_id = {record.id: record for record in records}
-    if set(by_id) != set(evidence_ref_ids):
-        return ()
-    ordered = tuple(by_id[evidence_id] for evidence_id in evidence_ref_ids)
-    return () if any(record.available_at > run.decision_time for record in ordered) else ordered
-
-
 async def _analyze_with_one_retry(
     session: AsyncSession,
     run: AgentResearchRunRecord,
@@ -275,64 +275,6 @@ async def _analyze_with_one_retry(
             run.retry_count += 1
             await session.flush()
     return None
-
-
-async def _load_persisted_prompts(
-    session: AsyncSession,
-    run: AgentResearchRunRecord,
-) -> Mapping[AgentRole, AgentPromptVersionRecord] | None:
-    manifest = run.prompt_manifest
-    if not isinstance(manifest, dict) or set(manifest) != set(ROLE_ORDER):
-        return None
-    if _hash(cast(Mapping[str, object], manifest)) != run.prompt_hash:
-        return None
-    prompt_ids: list[UUID] = []
-    try:
-        for role in ROLE_ORDER:
-            item = manifest[role]
-            if not isinstance(item, dict):
-                return None
-            prompt_ids.append(UUID(cast(str, item.get("id"))))
-    except (TypeError, ValueError, AttributeError):
-        return None
-    records = list(
-        await session.scalars(
-            select(AgentPromptVersionRecord).where(AgentPromptVersionRecord.id.in_(prompt_ids))
-        )
-    )
-    by_id = {record.id: record for record in records}
-    prompts: dict[AgentRole, AgentPromptVersionRecord] = {}
-    for role, prompt_id in zip(ROLE_ORDER, prompt_ids, strict=True):
-        record = by_id.get(prompt_id)
-        item = manifest[role]
-        if (
-            record is None
-            or record.role != role
-            or not isinstance(item, dict)
-            or item.get("version") != record.version
-            or item.get("content_hash") != record.content_hash
-            or hashlib.sha256(record.content.encode()).hexdigest() != record.content_hash
-        ):
-            return None
-        prompts[role] = record
-    return prompts
-
-
-async def _load_symbol(session: AsyncSession, run: AgentResearchRunRecord) -> str | None:
-    value = await session.scalar(
-        select(InstrumentAlias.symbol)
-        .where(
-            InstrumentAlias.instrument_id == run.instrument_id,
-            InstrumentAlias.valid_from <= run.decision_time.date(),
-            or_(
-                InstrumentAlias.valid_to.is_(None),
-                InstrumentAlias.valid_to >= run.decision_time.date(),
-            ),
-        )
-        .order_by(InstrumentAlias.valid_from.desc(), InstrumentAlias.symbol)
-        .limit(1)
-    )
-    return cast(str | None, value)
 
 
 def _bind_final_evidence(
@@ -425,6 +367,73 @@ async def _terminal_without_usage(
         status=status,
         reason=reason,
     )
+
+
+async def _terminal_after_committee(
+    session: AsyncSession,
+    run: AgentResearchRunRecord,
+    *,
+    model: AgentModelConfigRecord,
+    committee: CommitteeModel,
+    role_outputs: list[CommitteeRoleOutput],
+    output_sequence: int,
+    event_sequence: int,
+    status: Literal["failed", "abstained"],
+    reason: str,
+) -> ResearchRunResult:
+    usage = _committee_usage(committee, role_outputs)
+    if usage.input_tokens or usage.output_tokens:
+        accounted = await _settle_or_hold_usage(session, run, model=model, usage=usage)
+        if not accounted:
+            reason = "usage_accounting_failed"
+    else:
+        await release_daily_budget_if_reserved(session, run_id=run.id)
+    return await _persist_terminal(
+        session,
+        run,
+        output_sequence=output_sequence,
+        event_sequence=event_sequence,
+        status=status,
+        reason=reason,
+    )
+
+
+def _committee_usage(
+    committee: CommitteeModel, role_outputs: list[CommitteeRoleOutput]
+) -> UsageSnapshot:
+    reported = getattr(committee, "usage", None)
+    if isinstance(reported, UsageSnapshot):
+        return reported
+    return UsageSnapshot(
+        input_tokens=sum(output.input_tokens for output in role_outputs),
+        output_tokens=sum(output.output_tokens for output in role_outputs),
+    )
+
+
+async def _settle_or_hold_usage(
+    session: AsyncSession,
+    run: AgentResearchRunRecord,
+    *,
+    model: AgentModelConfigRecord,
+    usage: UsageSnapshot,
+) -> bool:
+    """Settle known usage, retaining the full reservation if exact settlement rejects."""
+    try:
+        async with session.begin_nested():
+            actual_usd = usage_cost(model, usage.input_tokens, usage.output_tokens)
+            await settle_daily_budget(
+                session,
+                run_id=run.id,
+                actual_usd=actual_usd,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+            )
+    except Exception:
+        run.input_tokens = usage.input_tokens
+        run.output_tokens = usage.output_tokens
+        await session.flush()
+        return False
+    return True
 
 
 async def _persist_terminal(

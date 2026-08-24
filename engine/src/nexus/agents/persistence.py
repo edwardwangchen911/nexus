@@ -177,6 +177,17 @@ async def settle_daily_budget(
     return reservation
 
 
+async def require_reserved_daily_budget(
+    session: AsyncSession, *, run_id: UUID
+) -> AgentDailyBudgetReservationRecord:
+    """Lock and require the exact open reservation before any provider work starts."""
+    reservation = await _locked_reservation(session, run_id)
+    await _lock_budget_day(session, reservation.business_date.isoformat())
+    if reservation.state != "reserved":
+        raise BudgetExhausted("research run has no open budget reservation")
+    return reservation
+
+
 async def release_daily_budget(
     session: AsyncSession, *, run_id: UUID
 ) -> AgentDailyBudgetReservationRecord:
@@ -257,21 +268,27 @@ async def admit_research_run(
             .limit(1)
         )
     )
+    evidence_records = list(
+        await session.scalars(
+            select(AgentDataSnapshotEvidenceRecord)
+            .where(
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id == request.data_snapshot_id,
+                AgentDataSnapshotEvidenceRecord.instrument_id == request.instrument_id,
+                AgentDataSnapshotEvidenceRecord.available_at <= request.decision_time,
+            )
+            .order_by(
+                AgentDataSnapshotEvidenceRecord.available_at,
+                AgentDataSnapshotEvidenceRecord.evidence_ref_id,
+            )
+        )
+    )
     if (
         instrument is None
         or snapshot is None
         or snapshot.available_at > request.decision_time
         or snapshot.received_at > request.decision_time
         or prompts is None
-        or not await session.scalar(
-            select(AgentDataSnapshotEvidenceRecord.evidence_ref_id)
-            .where(
-                AgentDataSnapshotEvidenceRecord.data_snapshot_id == request.data_snapshot_id,
-                AgentDataSnapshotEvidenceRecord.instrument_id == request.instrument_id,
-                AgentDataSnapshotEvidenceRecord.available_at <= request.decision_time,
-            )
-            .limit(1)
-        )
+        or not evidence_records
         or model is None
         or model.pricing_available_at > now
         or model.pricing_expires_at <= now
@@ -287,6 +304,21 @@ async def admit_research_run(
     }
     prompt_manifest_hash = hashlib.sha256(
         json.dumps(prompt_manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    evidence_manifest = [
+        {
+            "id": str(record.evidence_ref_id),
+            "source": record.source,
+            "provider_object_id": record.provider_object_id,
+            "revision": record.revision,
+            "available_at": record.available_at.isoformat().replace("+00:00", "Z"),
+            "location": record.location,
+            "content_hash": record.content_hash,
+        }
+        for record in evidence_records
+    ]
+    evidence_manifest_hash = hashlib.sha256(
+        json.dumps(evidence_manifest, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     prompt = prompts["orchestrator"]
     worst_case = model.worst_case_cost_usd
@@ -304,6 +336,8 @@ async def admit_research_run(
         model_hash=model.config_hash,
         prompt_hash=prompt_manifest_hash,
         prompt_manifest=prompt_manifest,
+        evidence_hash=evidence_manifest_hash,
+        evidence_manifest=evidence_manifest,
         tool_hash=_tool_hash(),
         input_hash=request_hash,
         reserved_cost_usd=worst_case,

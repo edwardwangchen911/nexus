@@ -17,9 +17,11 @@ from nexus.agents.committee import (
     PromptAsset,
     load_prompt_assets,
 )
+from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution import LIFECYCLE, execute_research_run
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import admit_research_run, release_daily_budget
+from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES, ToolInputError
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
@@ -76,7 +78,6 @@ async def test_fixture_worker_persists_exact_lifecycle_roles_evidence_and_usage(
             session,
             run_id=admission.run_id,
             committee=FixtureCommittee(),
-            evidence_ref_ids=(_EVIDENCE_ID,),
         )
     assert result.status == "completed"
     assert result.intent is not None
@@ -134,10 +135,10 @@ async def test_fixture_worker_persists_exact_lifecycle_roles_evidence_and_usage(
 
 
 @pytest.mark.asyncio
-async def test_fixture_worker_abstains_and_releases_budget_without_authority(
+async def test_worker_abstains_and_releases_budget_when_fixture_evidence_is_disallowed(
     migrated_database_url: str,
 ) -> None:
-    """Missing evidence cannot support synthesis and must release the unused reservation."""
+    """Production composition cannot treat fixture evidence as executable authority."""
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     prompt_ids = await _seed_authority(factory)
     async with factory() as session, session.begin():
@@ -162,7 +163,7 @@ async def test_fixture_worker_abstains_and_releases_budget_without_authority(
             session,
             run_id=admission.run_id,
             committee=FixtureCommittee(),
-            evidence_ref_ids=(),
+            allow_fixture_evidence=False,
         )
     assert result.status == "abstained" and result.intent is None
     async with factory() as session:
@@ -213,7 +214,6 @@ async def test_conflicting_fixture_roles_abstain_before_synthesis(
             session,
             run_id=admission.run_id,
             committee=FixtureCommittee(conflicting_facts=True),
-            evidence_ref_ids=(_EVIDENCE_ID,),
         )
     assert result.status == "abstained"
     async with factory() as session:
@@ -257,7 +257,6 @@ async def test_worker_persists_failed_terminal_and_releases_budget_on_model_erro
             session,
             run_id=admission.run_id,
             committee=committee,
-            evidence_ref_ids=(_EVIDENCE_ID,),
         )
     assert result.status == "failed"
     async with factory() as session:
@@ -321,7 +320,6 @@ async def test_worker_retries_once_with_the_identical_frozen_input_then_complete
             session,
             run_id=admission.run_id,
             committee=committee,
-            evidence_ref_ids=(_EVIDENCE_ID,),
         )
     async with factory() as session:
         run = await session.get(AgentResearchRunRecord, admission.run_id)
@@ -373,7 +371,6 @@ async def test_worker_terminalizes_usage_limit_and_settlement_failures(
                     session,
                     run_id=admission.run_id,
                     committee=committee,
-                    evidence_ref_ids=(_EVIDENCE_ID,),
                 )
             )
     assert tuple(result.status for result in results) == ("failed", "failed")
@@ -395,7 +392,62 @@ async def test_worker_terminalizes_usage_limit_and_settlement_failures(
             )
         )
     assert {run.status for run in runs} == {"failed"}
-    assert {reservation.state for reservation in reservations} == {"released"}
+    states = {reservation.run_id: reservation.state for reservation in reservations}
+    assert states[admissions[0].run_id] == "reserved"
+    assert states[admissions[1].run_id] == "released"
+    oversized = next(run for run in runs if run.id == admissions[0].run_id)
+    assert oversized.input_tokens == 8_000_008
+
+
+@pytest.mark.asyncio
+async def test_responses_parser_failure_settles_all_known_provider_usage(
+    migrated_database_url: str,
+) -> None:
+    """A response billed before strict parsing fails must never release its reservation."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admission = await admit_research_run(
+            session,
+            actor_id="responses-worker",
+            route="/internal/v1/research-runs",
+            idempotency_key="responses-parser-usage",
+            request_hash="4" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID,
+                data_snapshot_id=_SNAPSHOT_ID,
+                decision_time=_NOW,
+            ),
+            prompt_version_id=prompt_ids["orchestrator"],
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("3.00"),
+            now=_NOW,
+        )
+    settings = EngineSettings(
+        database_url=migrated_database_url,
+        agent_runtime_mode="responses",
+        openai_api_key="fixture-key",
+        openai_extraction_model="fixture-extraction",
+        openai_reasoning_model="fixture-model",
+    )
+    fake = _InvalidDurableResponsesClient()
+    assert await run_agent_worker_once(settings, responses_client=fake) is True
+    async with factory() as session:
+        run = await session.get(AgentResearchRunRecord, admission.run_id)
+        reservation = await session.scalar(
+            select(AgentDailyBudgetReservationRecord).where(
+                AgentDailyBudgetReservationRecord.run_id == admission.run_id
+            )
+        )
+    assert run is not None and reservation is not None
+    assert (run.status, run.retry_count) == ("failed", 1)
+    assert (run.input_tokens, run.output_tokens) == (24, 14)
+    assert run.settled_cost_usd == Decimal("0.000052000000")
+    assert (reservation.state, reservation.settled_usd) == (
+        "settled",
+        Decimal("0.000052000000"),
+    )
+    assert len(fake.responses.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -427,7 +479,6 @@ async def test_research_and_brief_apis_bind_as_of_url_and_authority_only(
             session,
             run_id=admission.run_id,
             committee=FixtureCommittee(),
-            evidence_ref_ids=(_EVIDENCE_ID,),
         )
     instrument_path = (
         f"/internal/v1/instruments/{_INSTRUMENT_ID}/research?as_of=2026-08-24T12%3A00%3A00Z"
@@ -614,6 +665,215 @@ async def test_responses_worker_reaches_terminal_with_injected_zero_network_tran
 
 
 @pytest.mark.asyncio
+async def test_database_tools_are_complete_and_reject_authority_escape(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admission = await admit_research_run(
+            session,
+            actor_id="database-tools",
+            route="/internal/v1/research-runs",
+            idempotency_key="database-tools",
+            request_hash="3" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID,
+                data_snapshot_id=_SNAPSHOT_ID,
+                decision_time=_NOW,
+            ),
+            prompt_version_id=prompt_ids["orchestrator"],
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("3.00"),
+            now=_NOW,
+        )
+        tools = await database_read_only_tools(session, admission.run, allow_fixture_evidence=True)
+        assert tools.configured_names == EXPECTED_READ_ONLY_TOOL_NAMES
+        result = await tools.execute(
+            "get_security_snapshot",
+            {
+                "instrument_id": str(_INSTRUMENT_ID),
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "as_of": "2026-08-24T12:00:00Z",
+            },
+        )
+        assert [item["evidence_ref_id"] for item in result["items"]] == [str(_EVIDENCE_ID)]
+        with pytest.raises(ToolInputError, match="exceeds frozen"):
+            await tools.execute(
+                "get_security_snapshot",
+                {
+                    "instrument_id": "0198d500-1000-7000-8000-000000001699",
+                    "data_snapshot_id": str(_SNAPSHOT_ID),
+                    "as_of": "2026-08-24T12:00:00Z",
+                },
+            )
+        with pytest.raises(ToolInputError, match="portfolio authority"):
+            await tools.execute(
+                "get_portfolio_exposure",
+                {
+                    "portfolio_snapshot_id": "0198d500-1000-7000-8000-000000001699",
+                    "instrument_id": str(_INSTRUMENT_ID),
+                    "as_of": "2026-08-24T12:00:00Z",
+                },
+            )
+
+
+@pytest.mark.asyncio
+async def test_responses_function_loop_uses_default_frozen_database_executor(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admission = await admit_research_run(
+            session,
+            actor_id="responses-worker",
+            route="/internal/v1/research-runs",
+            idempotency_key="responses-tool-loop",
+            request_hash="2" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID,
+                data_snapshot_id=_SNAPSHOT_ID,
+                decision_time=_NOW,
+            ),
+            prompt_version_id=prompt_ids["orchestrator"],
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("3.00"),
+            now=_NOW,
+        )
+    fake = _ToolLoopResponsesClient()
+    settings = EngineSettings(
+        database_url=migrated_database_url,
+        agent_runtime_mode="responses",
+        openai_api_key="fixture-key",
+        openai_extraction_model="fixture-extraction",
+        openai_reasoning_model="fixture-model",
+    )
+    assert await run_agent_worker_once(settings, responses_client=fake) is True
+    async with factory() as session:
+        run = await session.get(AgentResearchRunRecord, admission.run_id)
+    assert run is not None and run.status == "completed"
+    assert len(fake.responses.calls) == 16
+    tool_outputs = [
+        item
+        for call in fake.responses.calls
+        for item in call["input"]
+        if item.get("type") == "function_call_output"
+    ]
+    assert len({item["call_id"] for item in tool_outputs}) == 8
+    assert all(str(_EVIDENCE_ID) in item["output"] for item in tool_outputs)
+
+
+@pytest.mark.asyncio
+async def test_admission_freezes_exact_evidence_manifest_and_hash(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admission = await admit_research_run(
+            session,
+            actor_id="evidence-manifest",
+            route="/internal/v1/research-runs",
+            idempotency_key="freeze-evidence",
+            request_hash="6" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID,
+                data_snapshot_id=_SNAPSHOT_ID,
+                decision_time=_NOW,
+            ),
+            prompt_version_id=prompt_ids["orchestrator"],
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("3.00"),
+            now=_NOW,
+        )
+    manifest = admission.run.evidence_manifest
+    assert manifest == [
+        {
+            "id": str(_EVIDENCE_ID),
+            "source": "fixture",
+            "provider_object_id": "execution-evidence",
+            "revision": "v1",
+            "available_at": "2026-08-24T11:59:00Z",
+            "location": f"memory://sha256/{'e' * 64}",
+            "content_hash": "e" * 64,
+        }
+    ]
+    assert (
+        admission.run.evidence_hash
+        == hashlib.sha256(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_admission_snapshot_link_cannot_change_worker_evidence_membership(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admission = await admit_research_run(
+            session,
+            actor_id="evidence-manifest",
+            route="/internal/v1/research-runs",
+            idempotency_key="ignore-late-link",
+            request_hash="5" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID,
+                data_snapshot_id=_SNAPSHOT_ID,
+                decision_time=_NOW,
+            ),
+            prompt_version_id=prompt_ids["orchestrator"],
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("3.00"),
+            now=_NOW,
+        )
+    late_id = UUID("0198d500-1000-7000-8000-000000001697")
+    async with factory() as session, session.begin():
+        session.add(
+            ResearchEvidenceRef(
+                id=late_id,
+                source="fixture",
+                provider_object_id="late-evidence",
+                revision="v1",
+                available_at=_NOW - timedelta(seconds=30),
+                location=f"memory://sha256/{'4' * 64}",
+                content_hash="4" * 64,
+                byte_length=42,
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentDataSnapshotEvidenceRecord(
+                data_snapshot_id=_SNAPSHOT_ID,
+                instrument_id=_INSTRUMENT_ID,
+                evidence_ref_id=late_id,
+                source="fixture",
+                provider_object_id="late-evidence",
+                revision="v1",
+                available_at=_NOW - timedelta(seconds=30),
+                location=f"memory://sha256/{'4' * 64}",
+                content_hash="4" * 64,
+            )
+        )
+    assert await run_agent_worker_once(EngineSettings(database_url=migrated_database_url)) is True
+    async with factory() as session:
+        bound_ids = set(
+            await session.scalars(
+                select(AgentResearchOutputEvidenceRecord.evidence_ref_id)
+                .join(
+                    AgentResearchOutputRecord,
+                    AgentResearchOutputRecord.id == AgentResearchOutputEvidenceRecord.output_id,
+                )
+                .where(AgentResearchOutputRecord.run_id == admission.run_id)
+            )
+        )
+    assert bound_ids == {_EVIDENCE_ID}
+
+
+@pytest.mark.asyncio
 async def test_server_authoritative_first_run_admission_selects_frozen_snapshot_and_time(
     migrated_database_url: str,
 ) -> None:
@@ -734,7 +994,6 @@ async def test_00656_hk_worker_suppresses_fundamental_stance_and_records_missing
             session,
             run_id=admission.run_id,
             committee=FixtureCommittee(),
-            evidence_ref_ids=(_EVIDENCE_ID,),
         )
     assert result.intent is not None
     assert (result.intent.stance, result.intent.exposure_action) == ("watch", "none")
@@ -884,6 +1143,72 @@ class _DurableResponses:
 class _DurableResponsesClient:
     def __init__(self) -> None:
         self.responses = _DurableResponses()
+
+
+class _InvalidDurableResponses(_DurableResponses):
+    async def create(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(dict(kwargs))
+        return {
+            "output": [{"type": "message"}],
+            "output_text": "{}",
+            "usage": {"input_tokens": 12, "output_tokens": 7},
+        }
+
+
+class _InvalidDurableResponsesClient:
+    def __init__(self) -> None:
+        self.responses = _InvalidDurableResponses()
+
+
+class _ToolLoopResponses(_DurableResponses):
+    async def create(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(dict(kwargs))
+        if len(self.calls) % 2:
+            return {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{len(self.calls)}",
+                        "name": "get_security_snapshot",
+                        "arguments": json.dumps(
+                            {
+                                "instrument_id": str(_INSTRUMENT_ID),
+                                "data_snapshot_id": str(_SNAPSHOT_ID),
+                                "as_of": "2026-08-24T12:00:00Z",
+                            }
+                        ),
+                    }
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }
+        evidence = {
+            "source": "fixture",
+            "object_id": "execution-evidence",
+            "available_at": "2026-08-24T11:59:00Z",
+            "location": f"memory://sha256/{'e' * 64}",
+            "content_hash": "e" * 64,
+        }
+        return {
+            "output": [{"type": "message"}],
+            "output_text": json.dumps(
+                {
+                    "vote": "support",
+                    "claims": [
+                        {
+                            "text": "Frozen evidence supports review.",
+                            "evidence_refs": [evidence],
+                        }
+                    ],
+                    "conflicting_facts": False,
+                }
+            ),
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+
+
+class _ToolLoopResponsesClient:
+    def __init__(self) -> None:
+        self.responses = _ToolLoopResponses()
 
 
 class _FailOnceCommittee:

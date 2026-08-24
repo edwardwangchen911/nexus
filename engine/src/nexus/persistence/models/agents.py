@@ -89,6 +89,7 @@ class AgentResearchRunRecord(ImmutableCreatedAt, Base):
         CheckConstraint("schema_hash ~ '^[0-9a-f]{64}$'", name="schema_hash_canonical"),
         CheckConstraint("model_hash ~ '^[0-9a-f]{64}$'", name="model_hash_canonical"),
         CheckConstraint("prompt_hash ~ '^[0-9a-f]{64}$'", name="prompt_hash_canonical"),
+        CheckConstraint("evidence_hash ~ '^[0-9a-f]{64}$'", name="evidence_hash_canonical"),
         CheckConstraint("tool_hash ~ '^[0-9a-f]{64}$'", name="tool_hash_canonical"),
         CheckConstraint("input_hash ~ '^[0-9a-f]{64}$'", name="input_hash_canonical"),
         UniqueConstraint("actor_id", "idempotency_key", name="uq_agent_runs_actor_idempotency"),
@@ -108,6 +109,8 @@ class AgentResearchRunRecord(ImmutableCreatedAt, Base):
     model_hash: Mapped[str] = mapped_column(String(64))
     prompt_hash: Mapped[str] = mapped_column(String(64))
     prompt_manifest: Mapped[dict[str, object]] = mapped_column(JSONB)
+    evidence_hash: Mapped[str] = mapped_column(String(64))
+    evidence_manifest: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
     tool_hash: Mapped[str] = mapped_column(String(64))
     input_hash: Mapped[str] = mapped_column(String(64))
     reserved_cost_usd: Mapped[Decimal]

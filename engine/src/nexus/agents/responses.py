@@ -8,10 +8,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from nexus.agents.committee import AgentRole, CommitteeRoleOutput, PromptAsset
 from nexus.agents.models import ResearchRequest
+from nexus.agents.responses_budget import RunUsageAllowance, UsageSnapshot
+from nexus.agents.responses_transport import ResponseShapeError, normalize_response
 from nexus.agents.tools import ReadOnlyToolRegistry, response_function_tools
 from nexus.domain.evidence import EvidenceRef
 from nexus.strategy.intents import ResearchClaim
@@ -96,9 +98,11 @@ class ResponsesResearchModel:
         input_items: list[Mapping[str, object]] = [
             {"role": "user", "content": request.model_dump(mode="json")}
         ]
-        input_tokens = 0
-        output_tokens = 0
-        tool_calls = 0
+        allowance_ledger = RunUsageAllowance(
+            max_input_tokens=self._config.max_input_tokens,
+            max_output_tokens=self._config.max_output_tokens,
+            max_tool_calls=self._config.max_tool_calls,
+        )
         loop = asyncio.get_running_loop()
         deadline = loop.time() + float(self._config.absolute_timeout_seconds)
         async with asyncio.timeout_at(deadline):
@@ -106,14 +110,12 @@ class ResponsesResearchModel:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     raise TimeoutError("Responses absolute deadline exceeded")
-                result = await create(
-                    model=self._config.model_id,
-                    timeout=remaining,
-                    max_output_tokens=self._config.max_output_tokens,
-                    input=input_items,
-                    tools=list(definitions.values()),
-                    tool_choice="auto",
-                    text={
+                request_payload: dict[str, object] = {
+                    "model": self._config.model_id,
+                    "input": input_items,
+                    "tools": list(definitions.values()),
+                    "tool_choice": "auto",
+                    "text": {
                         "format": {
                             "type": "json_schema",
                             "name": "research_intent_v1",
@@ -121,26 +123,30 @@ class ResponsesResearchModel:
                             "schema": _intent_schema(),
                         }
                     },
+                }
+                call_allowance = allowance_ledger.authorize(request_payload)
+                result = await create(
+                    model=self._config.model_id,
+                    timeout=remaining,
+                    max_output_tokens=call_allowance.max_output_tokens,
+                    input=input_items,
+                    tools=list(definitions.values()),
+                    tool_choice="auto",
+                    text=request_payload["text"],
                 )
-                if not isinstance(result, Mapping):
-                    raise ValueError("Responses result must be a mapping at the transport seam")
-                usage = result.get("usage")
-                if not isinstance(usage, Mapping):
-                    raise ValueError("Responses usage is required")
-                input_tokens += _token_count(usage.get("input_tokens"))
-                output_tokens += _token_count(usage.get("output_tokens"))
-                if input_tokens > self._config.max_input_tokens:
-                    raise ValueError("aggregate input token limit exceeded")
-                if output_tokens > self._config.max_output_tokens:
-                    raise ValueError("aggregate output token limit exceeded")
-                calls = _function_calls(result.get("output"))
+                try:
+                    normalized = normalize_response(result)
+                except ResponseShapeError as error:
+                    if error.usage is not None:
+                        allowance_ledger.record_usage(call_allowance, error.usage)
+                    raise ValueError(str(error)) from error
+                allowance_ledger.record_usage(call_allowance, normalized.usage)
+                calls = tuple(
+                    item for item in normalized.output if item.get("type") == "function_call"
+                )
                 if calls:
-                    tool_calls += len(calls)
-                    if tool_calls > self._config.max_tool_calls:
-                        raise ValueError("aggregate tool call limit exceeded")
-                    output = result.get("output")
-                    assert isinstance(output, list)
-                    input_items.extend(cast(list[Mapping[str, object]], output))
+                    allowance_ledger.record_tool_calls(len(calls))
+                    input_items.extend(normalized.output)
                     for call in calls:
                         name = call.get("name")
                         arguments = call.get("arguments")
@@ -168,7 +174,7 @@ class ResponsesResearchModel:
                             }
                         )
                     continue
-                raw_text = result.get("output_text")
+                raw_text = normalized.output_text
                 if not isinstance(raw_text, str):
                     raise ValueError("Responses structured output text is required")
                 try:
@@ -177,15 +183,16 @@ class ResponsesResearchModel:
                     raise ValueError("Responses structured output is invalid JSON") from error
                 if not isinstance(intent, Mapping):
                     raise ValueError("Responses structured output must be an object")
+                usage = allowance_ledger.usage
                 cost = (
-                    Decimal(input_tokens) * self._config.input_usd_per_million
-                    + Decimal(output_tokens) * self._config.output_usd_per_million
+                    Decimal(usage.input_tokens) * self._config.input_usd_per_million
+                    + Decimal(usage.output_tokens) * self._config.output_usd_per_million
                 ) / Decimal(1_000_000)
                 return {
                     "intent": dict(intent),
                     "cost_usd": format(cost, "f"),
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
                     "pricing_version": self._config.pricing_version,
                     "model_hash": hashlib.sha256(
                         json.dumps(
@@ -222,9 +229,15 @@ class ResponsesCommittee:
         self._client = client
         self._config = config
         self._tools = tools
-        self._aggregate_input_tokens = 0
-        self._aggregate_output_tokens = 0
-        self._aggregate_tool_calls = 0
+        self._allowance = RunUsageAllowance(
+            max_input_tokens=config.max_input_tokens,
+            max_output_tokens=config.max_output_tokens,
+            max_tool_calls=config.max_tool_calls,
+        )
+
+    @property
+    def usage(self) -> UsageSnapshot:
+        return self._allowance.usage
 
     async def analyze(
         self,
@@ -247,8 +260,7 @@ class ResponsesCommittee:
                 },
             },
         ]
-        input_tokens = 0
-        output_tokens = 0
+        usage_before = self.usage
         loop = asyncio.get_running_loop()
         deadline = loop.time() + float(self._config.absolute_timeout_seconds)
         async with asyncio.timeout_at(deadline):
@@ -256,14 +268,12 @@ class ResponsesCommittee:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     raise TimeoutError("Responses absolute deadline exceeded")
-                result = await create(
-                    model=self._config.model_id,
-                    timeout=remaining,
-                    max_output_tokens=self._config.max_output_tokens,
-                    input=input_items,
-                    tools=list(definitions.values()),
-                    tool_choice="auto",
-                    text={
+                request_payload: dict[str, object] = {
+                    "model": self._config.model_id,
+                    "input": input_items,
+                    "tools": list(definitions.values()),
+                    "tool_choice": "auto",
+                    "text": {
                         "format": {
                             "type": "json_schema",
                             "name": "committee_role_output_v1",
@@ -271,28 +281,30 @@ class ResponsesCommittee:
                             "schema": _CommitteePayload.model_json_schema(),
                         }
                     },
+                }
+                allowance = self._allowance.authorize(request_payload)
+                result = await create(
+                    model=self._config.model_id,
+                    timeout=remaining,
+                    max_output_tokens=allowance.max_output_tokens,
+                    input=input_items,
+                    tools=list(definitions.values()),
+                    tool_choice="auto",
+                    text=request_payload["text"],
                 )
-                if not isinstance(result, Mapping):
-                    raise ValueError("Responses result must be a mapping at the transport seam")
-                usage = result.get("usage")
-                if not isinstance(usage, Mapping):
-                    raise ValueError("Responses usage is required")
-                input_tokens += _token_count(usage.get("input_tokens"))
-                output_tokens += _token_count(usage.get("output_tokens"))
-                self._aggregate_input_tokens += _token_count(usage.get("input_tokens"))
-                self._aggregate_output_tokens += _token_count(usage.get("output_tokens"))
-                if self._aggregate_input_tokens > self._config.max_input_tokens:
-                    raise ValueError("aggregate input token limit exceeded")
-                if self._aggregate_output_tokens > self._config.max_output_tokens:
-                    raise ValueError("aggregate output token limit exceeded")
-                calls = _function_calls(result.get("output"))
+                try:
+                    normalized = normalize_response(result)
+                except ResponseShapeError as error:
+                    if error.usage is not None:
+                        self._allowance.record_usage(allowance, error.usage)
+                    raise ValueError(str(error)) from error
+                self._allowance.record_usage(allowance, normalized.usage)
+                calls = tuple(
+                    item for item in normalized.output if item.get("type") == "function_call"
+                )
                 if calls:
-                    self._aggregate_tool_calls += len(calls)
-                    if self._aggregate_tool_calls > self._config.max_tool_calls:
-                        raise ValueError("aggregate tool call limit exceeded")
-                    output = result.get("output")
-                    assert isinstance(output, list)
-                    input_items.extend(cast(list[Mapping[str, object]], output))
+                    self._allowance.record_tool_calls(len(calls))
+                    input_items.extend(normalized.output)
                     for call in calls:
                         name = call.get("name")
                         arguments = call.get("arguments")
@@ -320,33 +332,23 @@ class ResponsesCommittee:
                             }
                         )
                     continue
-                raw_text = result.get("output_text")
+                raw_text = normalized.output_text
                 if not isinstance(raw_text, str):
                     raise ValueError("Responses structured output text is required")
-                payload = _CommitteePayload.model_validate_json(raw_text)
+                try:
+                    payload = _CommitteePayload.model_validate_json(raw_text)
+                except ValidationError as error:
+                    raise ValueError("Responses structured output is invalid") from error
+                current_usage = self.usage
                 return CommitteeRoleOutput(
                     role=role,
                     vote=payload.vote,
                     claims=payload.claims,
                     prompt_hash=prompt.content_hash,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
+                    input_tokens=current_usage.input_tokens - usage_before.input_tokens,
+                    output_tokens=current_usage.output_tokens - usage_before.output_tokens,
                     conflicting_facts=payload.conflicting_facts,
                 )
-
-
-def _function_calls(value: object) -> tuple[Mapping[str, object], ...]:
-    if not isinstance(value, list):
-        raise ValueError("Responses output items are required")
-    if not all(isinstance(item, Mapping) for item in value):
-        raise ValueError("Responses output item is malformed")
-    return tuple(item for item in value if item.get("type") == "function_call")
-
-
-def _token_count(value: object) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError("Responses token usage must be a non-negative integer")
-    return value
 
 
 def _intent_schema() -> Mapping[str, object]:

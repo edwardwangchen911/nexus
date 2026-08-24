@@ -149,6 +149,10 @@ class ReadOnlyTools:
             raise ToolInputError("executor is not in the fixed read-only catalogue")
         self._executors = dict(executors or {})
 
+    @property
+    def configured_names(self) -> tuple[str, ...]:
+        return tuple(name for name in self.names if name in self._executors)
+
     def validate(self, name: str, payload: Mapping[str, object]) -> dict[str, object]:
         """Return typed, JSON-safe fields or reject unknown/sensitive input before any lookup."""
         schema = _TOOL_INPUTS.get(name)

@@ -89,6 +89,8 @@ def upgrade() -> None:
         sa.Column("model_hash", sa.String(64), nullable=False),
         sa.Column("prompt_hash", sa.String(64), nullable=False),
         sa.Column("prompt_manifest", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("evidence_hash", sa.String(64), nullable=False),
+        sa.Column("evidence_manifest", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("tool_hash", sa.String(64), nullable=False),
         sa.Column("input_hash", sa.String(64), nullable=False),
         sa.Column("reserved_cost_usd", _NUMERIC, nullable=False),
@@ -125,6 +127,7 @@ def upgrade() -> None:
         sa.CheckConstraint("schema_hash ~ '^[0-9a-f]{64}$'", name="schema_hash_canonical"),
         sa.CheckConstraint("model_hash ~ '^[0-9a-f]{64}$'", name="model_hash_canonical"),
         sa.CheckConstraint("prompt_hash ~ '^[0-9a-f]{64}$'", name="prompt_hash_canonical"),
+        sa.CheckConstraint("evidence_hash ~ '^[0-9a-f]{64}$'", name="evidence_hash_canonical"),
         sa.CheckConstraint("tool_hash ~ '^[0-9a-f]{64}$'", name="tool_hash_canonical"),
         sa.CheckConstraint("input_hash ~ '^[0-9a-f]{64}$'", name="input_hash_canonical"),
     )
