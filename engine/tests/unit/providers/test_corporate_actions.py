@@ -1,5 +1,7 @@
+import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from nexus.domain.evidence import EvidenceRef
@@ -7,6 +9,8 @@ from nexus.providers.corporate_actions.alpaca import (
     CorporateActionValidationError,
     normalize_alpaca_corporate_action,
 )
+
+FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "corporate_actions" / "alpaca.json"
 
 
 def _evidence(object_id: str = "ca-001") -> EvidenceRef:
@@ -22,17 +26,7 @@ def _evidence(object_id: str = "ca-001") -> EvidenceRef:
 
 def test_complete_alpaca_action_is_ledger_eligible_without_mutating_a_ledger() -> None:
     action = normalize_alpaca_corporate_action(
-        {
-            "id": "ca-001",
-            "type": "cash_dividend",
-            "status": "complete",
-            "process_date": "2026-08-24",
-            "ex_date": "2026-08-20",
-            "record_date": "2026-08-21",
-            "payable_date": "2026-08-28",
-            "rate": "0.25",
-            "revision": "2",
-        },
+        json.loads(FIXTURE.read_text())[0],
         evidence_ref=_evidence(),
     )
 

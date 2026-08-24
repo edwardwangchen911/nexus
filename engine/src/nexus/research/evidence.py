@@ -1,5 +1,6 @@
 """Byte-verified, non-executable evidence references."""
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -70,5 +71,4 @@ def _is_pinned_non_executable_location(location: str, digest: str) -> bool:
         return f"@sha256:{digest}" in stored_object
     if f"/sha256/{digest}" in stored_object:
         return True
-    _, marker, version_id = stored_object.partition("versionId=")
-    return marker == "versionId=" and bool(version_id.split("&", maxsplit=1)[0])
+    return re.search(r"[?&]versionId=[^&#]+", stored_object) is not None

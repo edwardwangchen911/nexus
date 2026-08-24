@@ -45,6 +45,7 @@ _SEC_TAG_TO_CANONICAL_FACT = {
     ("us-gaap", "WeightedAverageNumberOfDilutedSharesOutstanding"): "diluted_shares",
 }
 _US_EXCHANGES = frozenset({"AMEX", "ARCA", "NASDAQ", "NYSE", "NYSEARCA"})
+_MAX_BOOTSTRAP_CIKS = 100
 
 
 def canonical_fact_for_raw_tag(taxonomy: str, tag: str) -> str:
@@ -181,13 +182,15 @@ class SecCompanyFactsClient:
         return cik.zfill(10)
 
     async def _await_before_deadline(
-        self, awaitable: Awaitable[bytes] | Awaitable[None], deadline: float
+        self,
+        awaitable_factory: Callable[[], Awaitable[bytes] | Awaitable[None]],
+        deadline: float,
     ) -> bytes | None:
         remaining = deadline - self._monotonic()
         if remaining <= 0:
             raise SecProviderError("SEC request deadline exceeded")
         try:
-            return await asyncio.wait_for(awaitable, timeout=remaining)
+            return await asyncio.wait_for(awaitable_factory(), timeout=remaining)
         except TimeoutError as error:
             raise SecProviderError("SEC request deadline exceeded") from error
 
@@ -197,10 +200,10 @@ class SecCompanyFactsClient:
         for _ in range(self._max_attempts):
             try:
                 await self._await_before_deadline(
-                    self._limiter.acquire(deadline=deadline), deadline
+                    lambda: self._limiter.acquire(deadline=deadline), deadline
                 )
                 payload = await self._await_before_deadline(
-                    self._transport.get(path, headers), deadline
+                    lambda: self._transport.get(path, headers), deadline
                 )
                 if not payload:
                     raise SecProviderError("SEC response payload is empty")
@@ -226,23 +229,41 @@ class SecCompanyFactsClient:
     async def fetch_company_facts_and_submissions(
         self, cik: str
     ) -> tuple[SecRawDocument, SecRawDocument]:
-        """Fetch the two authoritative payloads under one bounded request budget."""
+        """Fetch the current pair while preserving the legacy narrow return shape."""
+        company_facts, history = await self.fetch_company_facts_and_submission_history(cik)
+        return company_facts, history[0]
+
+    async def fetch_company_facts_and_submission_history(
+        self, cik: str
+    ) -> tuple[SecRawDocument, tuple[SecRawDocument, ...]]:
+        """Fetch Company Facts plus current and archived submissions under one deadline."""
         padded_cik = self._validate_cik(cik)
         deadline = self._monotonic() + self._deadline_seconds
         company_facts = await self._fetch_path(
             f"/api/xbrl/companyfacts/CIK{padded_cik}.json", deadline
         )
         submissions = await self._fetch_path(f"/submissions/CIK{padded_cik}.json", deadline)
-        return company_facts, submissions
+        archived = tuple(
+            [
+                await self._fetch_path(f"/submissions/{name}", deadline)
+                for name in _submission_archive_names(submissions.raw_payload)
+            ]
+        )
+        return company_facts, (submissions, *archived)
 
-    async def bootstrap_company_facts(self, ciks: Iterable[str]) -> tuple[SecRawDocument, ...]:
-        """Explicit bulk-bootstrap seam; callers provide bounded CIK batches."""
-        return tuple([await self.fetch_company_facts(cik) for cik in ciks])
+    async def bootstrap_company_facts(
+        self, ciks: Iterable[str]
+    ) -> tuple[tuple[SecRawDocument, tuple[SecRawDocument, ...]], ...]:
+        """Explicit bounded bootstrap seam that keeps every submissions artifact."""
+        batch = tuple(ciks)
+        if len(batch) > _MAX_BOOTSTRAP_CIKS:
+            raise SecProviderError("SEC bootstrap batch exceeds limit")
+        return tuple([await self.fetch_company_facts_and_submission_history(cik) for cik in batch])
 
 
 def normalize_company_facts(
     company_facts_payload: bytes,
-    submissions_payload: bytes,
+    submissions_payload: bytes | Iterable[bytes],
     *,
     instrument: SecInstrumentIdentity,
     evidence_by_accession: Mapping[str, EvidenceRef],
@@ -328,7 +349,7 @@ def _normalize_company_fact_entry(
     period_end = _parse_date(_required_string(entry, "end", "MISSING_PERIOD_END"))
     raw_start = entry.get("start")
     period_start = _parse_date(raw_start) if isinstance(raw_start, str) else None
-    revision = _required_string(entry, "revision", "MISSING_REVISION")
+    revision = f"{accession}@{accepted_at.isoformat()}"
     value = entry.get("val")
     if isinstance(value, float) or not isinstance(value, Decimal | int | str):
         raise SecNormalizationError("VALUE_MUST_BE_DECIMAL")
@@ -371,24 +392,39 @@ def _normalize_company_fact_entry(
     )
 
 
-def _accepted_submission_metadata(payload: bytes) -> dict[str, tuple[datetime, str]]:
-    submissions = _load_object(payload, "INVALID_SUBMISSIONS_PAYLOAD")
-    filings = submissions.get("filings")
-    recent = filings.get("recent") if isinstance(filings, Mapping) else None
-    if not isinstance(recent, Mapping):
+def _accepted_submission_metadata(
+    payloads: bytes | Iterable[bytes],
+) -> dict[str, tuple[datetime, str]]:
+    documents = (payloads,) if isinstance(payloads, bytes) else tuple(payloads)
+    if not documents:
         raise SecNormalizationError("MISSING_ACCEPTANCE_TIME")
-    accessions = recent.get("accessionNumber")
-    accepted_times = recent.get("acceptanceDateTime")
-    forms = recent.get("form")
+    metadata: dict[str, tuple[datetime, str]] = {}
+    for payload in documents:
+        submissions = _load_object(payload, "INVALID_SUBMISSIONS_PAYLOAD")
+        filings = submissions.get("filings")
+        records = filings.get("recent") if isinstance(filings, Mapping) else submissions
+        if not isinstance(records, Mapping):
+            raise SecNormalizationError("MISSING_ACCEPTANCE_TIME")
+        for accession, accepted_at, form in _submission_records(records):
+            existing = metadata.get(accession)
+            if existing is not None and existing != (accepted_at, form):
+                raise SecNormalizationError("AMBIGUOUS_ACCEPTANCE_TIME")
+            metadata[accession] = (accepted_at, form)
+    return metadata
+
+
+def _submission_records(records: Mapping[str, object]) -> Iterable[tuple[str, datetime, str]]:
+    accessions = records.get("accessionNumber")
+    accepted_times = records.get("acceptanceDateTime")
+    forms = records.get("form")
     if (
         not isinstance(accessions, list)
         or not isinstance(accepted_times, list)
         or not isinstance(forms, list)
+        or len(accessions) != len(accepted_times)
+        or len(accessions) != len(forms)
     ):
         raise SecNormalizationError("MISSING_ACCEPTANCE_TIME")
-    if len(accessions) != len(accepted_times) or len(accessions) != len(forms):
-        raise SecNormalizationError("MISSING_ACCEPTANCE_TIME")
-    metadata: dict[str, tuple[datetime, str]] = {}
     for accession, accepted, form in zip(accessions, accepted_times, forms, strict=True):
         if (
             not isinstance(accession, str)
@@ -400,10 +436,32 @@ def _accepted_submission_metadata(payload: bytes) -> dict[str, tuple[datetime, s
             accepted_at = require_utc(datetime.fromisoformat(accepted.replace("Z", "+00:00")))
         except ValueError as error:
             raise SecNormalizationError("MISSING_ACCEPTANCE_TIME") from error
-        if accession in metadata:
-            raise SecNormalizationError("AMBIGUOUS_ACCEPTANCE_TIME")
-        metadata[accession] = (accepted_at, form)
-    return metadata
+        yield accession, accepted_at, form
+
+
+def _submission_archive_names(payload: bytes) -> tuple[str, ...]:
+    submissions = _load_object(payload, "INVALID_SUBMISSIONS_PAYLOAD")
+    filings = submissions.get("filings")
+    files = filings.get("files") if isinstance(filings, Mapping) else None
+    if files is None:
+        return ()
+    if not isinstance(files, list):
+        raise SecProviderError("SEC submissions archive metadata is invalid")
+    names: list[str] = []
+    for item in files:
+        name = item.get("name") if isinstance(item, Mapping) else None
+        if (
+            not isinstance(name, str)
+            or not name.endswith(".json")
+            or "/" in name
+            or "\\" in name
+            or len(name) > 255
+        ):
+            raise SecProviderError("SEC submissions archive metadata is invalid")
+        if name in names:
+            raise SecProviderError("SEC submissions archive metadata is invalid")
+        names.append(name)
+    return tuple(names)
 
 
 def _load_object(payload: bytes, error_code: str) -> Mapping[str, object]:

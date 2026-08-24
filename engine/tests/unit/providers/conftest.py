@@ -3,6 +3,7 @@
 import asyncio
 import socket
 
+import anyio
 import pytest
 
 
@@ -17,4 +18,8 @@ def deny_provider_network(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError("provider unit tests forbid network access")
 
     monkeypatch.setattr(socket, "create_connection", blocked)
+    monkeypatch.setattr(socket.socket, "connect", blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked)
     monkeypatch.setattr(asyncio, "open_connection", blocked_async)
+    monkeypatch.setattr(asyncio.BaseEventLoop, "create_connection", blocked_async)
+    monkeypatch.setattr(anyio, "connect_tcp", blocked_async)

@@ -53,6 +53,8 @@ def test_evidence_reference_hashes_exact_bytes_and_retains_non_executable_locati
         "memory://evidence/mutable.json",
         "s3://evidence/filing.json",
         "s3://evidence/filing.json?versionId=",
+        "s3://evidence/versionId=fake",
+        "s3://evidence/notversionId=fake",
     ],
 )
 def test_evidence_reference_rejects_executable_or_remote_location(location: str) -> None:
@@ -79,6 +81,30 @@ def test_evidence_reference_rejects_mismatched_payload_hash_before_ref_creation(
             expected_sha256="0" * 64,
             expected_byte_length=7,
         )
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "s3://evidence/filing.json?versionId=fixture",
+        "s3://evidence/filing.json?prefix=fixture&versionId=fixture",
+    ],
+)
+def test_evidence_reference_accepts_only_query_delimited_nonempty_s3_version_ids(
+    location: str,
+) -> None:
+    payload = b"fixture"
+    evidence = evidence_ref_from_payload(
+        payload,
+        source="sec",
+        object_id="filing",
+        available_at=AVAILABLE_AT,
+        location=location,
+        expected_sha256=sha256(payload).hexdigest(),
+        expected_byte_length=len(payload),
+    )
+
+    assert evidence.reference.location == location
 
 
 def test_fred_release_without_time_is_not_available_until_next_xnys_session_open() -> None:

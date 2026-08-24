@@ -1,10 +1,12 @@
 import asyncio
 import socket
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 from uuid import UUID
 
+import anyio
 import nexus.providers.sec as sec_provider
 import pytest
 from nexus.domain.evidence import EvidenceRef
@@ -21,6 +23,7 @@ from nexus.providers.sec import (
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "sec"
 INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000000014")
 ACCESSION = "0000320193-26-000001"
+ARCHIVED_ACCESSION = "0000320193-25-000123"
 
 
 class FixtureSecTransport:
@@ -33,8 +36,10 @@ class FixtureSecTransport:
         self.headers.append(headers)
         if "companyfacts" in path:
             return (FIXTURES / "companyfacts.json").read_bytes()
-        if "submissions" in path:
+        if path == "/submissions/CIK0000320193.json":
             return (FIXTURES / "submissions.json").read_bytes()
+        if path == "/submissions/CIK0000320193-submissions-001.json":
+            return (FIXTURES / "submissions-001.json").read_bytes()
         raise AssertionError(f"unexpected SEC path: {path}")
 
 
@@ -83,8 +88,10 @@ async def test_sec_client_uses_configured_contact_and_committed_fixture_payloads
     assert transport.paths == [
         "/api/xbrl/companyfacts/CIK0000320193.json",
         "/submissions/CIK0000320193.json",
+        "/submissions/CIK0000320193-submissions-001.json",
     ]
     assert transport.headers == [
+        {"User-Agent": "NEXUS research@example.test", "Accept-Encoding": "gzip, deflate"},
         {"User-Agent": "NEXUS research@example.test", "Accept-Encoding": "gzip, deflate"},
         {"User-Agent": "NEXUS research@example.test", "Accept-Encoding": "gzip, deflate"},
     ]
@@ -92,12 +99,56 @@ async def test_sec_client_uses_configured_contact_and_committed_fixture_payloads
     assert submissions.raw_payload == (FIXTURES / "submissions.json").read_bytes()
 
 
+@pytest.mark.asyncio
+async def test_sec_client_fetches_archived_submission_metadata_under_the_same_budget() -> None:
+    transport = FixtureSecTransport()
+    client = SecCompanyFactsClient(
+        transport,
+        contact="research@example.test",
+        limiter=SecRateLimiter(monotonic_clock=lambda: 0.0, sleeper=lambda _: None),
+        now=lambda: datetime(2026, 8, 24, tzinfo=UTC),
+    )
+
+    company_facts, submission_history = await client.fetch_company_facts_and_submission_history(
+        "320193"
+    )
+
+    assert company_facts.raw_payload == (FIXTURES / "companyfacts.json").read_bytes()
+    assert [document.raw_payload for document in submission_history] == [
+        (FIXTURES / "submissions.json").read_bytes(),
+        (FIXTURES / "submissions-001.json").read_bytes(),
+    ]
+    assert transport.paths == [
+        "/api/xbrl/companyfacts/CIK0000320193.json",
+        "/submissions/CIK0000320193.json",
+        "/submissions/CIK0000320193-submissions-001.json",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sec_bulk_bootstrap_rejects_an_unbounded_cik_batch() -> None:
+    client = SecCompanyFactsClient(
+        FixtureSecTransport(),
+        contact="research@example.test",
+        limiter=SecRateLimiter(monotonic_clock=lambda: 0.0, sleeper=lambda _: None),
+    )
+
+    with pytest.raises(SecProviderError, match="bootstrap batch exceeds limit"):
+        await client.bootstrap_company_facts(["320193"] * 101)
+
+
 def test_sec_normalization_joins_committed_submissions_acceptance_metadata_for_all_tags() -> None:
     facts = normalize_company_facts(
         (FIXTURES / "companyfacts.json").read_bytes(),
-        (FIXTURES / "submissions.json").read_bytes(),
+        (
+            (FIXTURES / "submissions.json").read_bytes(),
+            (FIXTURES / "submissions-001.json").read_bytes(),
+        ),
         instrument=_identity(),
-        evidence_by_accession={ACCESSION: _evidence()},
+        evidence_by_accession={
+            ACCESSION: _evidence(),
+            ARCHIVED_ACCESSION: _evidence(ARCHIVED_ACCESSION),
+        },
     )
 
     assert {fact.canonical_fact for fact in facts} == {
@@ -113,8 +164,13 @@ def test_sec_normalization_joins_committed_submissions_acceptance_metadata_for_a
         "diluted_eps",
         "diluted_shares",
     }
-    assert all(fact.accession_number == ACCESSION for fact in facts)
-    assert all(fact.accepted_at == datetime(2026, 8, 20, 20, tzinfo=UTC) for fact in facts)
+    current_facts = [fact for fact in facts if fact.accession_number == ACCESSION]
+    assert len(current_facts) == 11
+    assert all(fact.accepted_at == datetime(2026, 8, 20, 20, tzinfo=UTC) for fact in current_facts)
+    assert all(
+        fact.revision == "0000320193-26-000001@2026-08-20T20:00:00+00:00"
+        for fact in current_facts
+    )
     assert {fact.raw_tag for fact in facts} == {
         "Revenues",
         "GrossProfit",
@@ -128,6 +184,27 @@ def test_sec_normalization_joins_committed_submissions_acceptance_metadata_for_a
         "EarningsPerShareDiluted",
         "WeightedAverageNumberOfDilutedSharesOutstanding",
     }
+
+
+def test_sec_normalization_uses_archived_submission_acceptance_metadata_without_raw_revision(
+) -> None:
+    facts = normalize_company_facts(
+        (FIXTURES / "companyfacts.json").read_bytes(),
+        (
+            (FIXTURES / "submissions.json").read_bytes(),
+            (FIXTURES / "submissions-001.json").read_bytes(),
+        ),
+        instrument=_identity(),
+        evidence_by_accession={
+            ACCESSION: _evidence(ACCESSION),
+            ARCHIVED_ACCESSION: _evidence(ARCHIVED_ACCESSION),
+        },
+    )
+
+    archived = [fact for fact in facts if fact.accession_number == ARCHIVED_ACCESSION]
+    assert len(archived) == 1
+    assert archived[0].accepted_at == datetime(2025, 8, 20, 20, tzinfo=UTC)
+    assert archived[0].revision == "0000320193-25-000123@2025-08-20T20:00:00+00:00"
 
 
 @pytest.mark.parametrize(
@@ -170,9 +247,22 @@ def test_sec_raw_document_canonicalizes_an_aware_receipt_time_to_utc() -> None:
     assert document.received_at == datetime(2026, 8, 24, tzinfo=UTC)
 
 
-def test_provider_unit_network_entry_points_are_denied() -> None:
+@pytest.mark.asyncio
+async def test_provider_unit_network_entry_points_are_denied() -> None:
     with pytest.raises(AssertionError, match="forbid network"):
         socket.create_connection(("sec.example", 443))
+    network_socket = socket.socket()
+    try:
+        with pytest.raises(AssertionError, match="forbid network"):
+            network_socket.connect(("sec.example", 443))
+        with pytest.raises(AssertionError, match="forbid network"):
+            network_socket.connect_ex(("sec.example", 443))
+    finally:
+        network_socket.close()
+    with pytest.raises(AssertionError, match="forbid network"):
+        await asyncio.get_running_loop().create_connection(lambda: object(), "sec.example", 443)
+    with pytest.raises(AssertionError, match="forbid network"):
+        await anyio.connect_tcp("sec.example", 443)
 
 
 @pytest.mark.asyncio
@@ -235,3 +325,40 @@ async def test_sec_deadline_includes_a_reserved_limiter_wait() -> None:
 
     with pytest.raises(SecProviderError, match="deadline exceeded"):
         await client.fetch_company_facts("320193")
+
+
+@pytest.mark.asyncio
+async def test_sec_expired_deadline_does_not_create_an_unawaited_coroutine() -> None:
+    client = SecCompanyFactsClient(
+        FixtureSecTransport(),
+        contact="research@example.test",
+        monotonic_clock=lambda: 1.0,
+    )
+
+    async def unexpected_awaitable() -> bytes:
+        raise AssertionError("an expired deadline must not invoke the awaitable factory")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        with pytest.raises(SecProviderError, match="deadline exceeded"):
+            await client._await_before_deadline(unexpected_awaitable, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_sec_deadline_helper_receives_factories_before_creating_awaitables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SecCompanyFactsClient(
+        FixtureSecTransport(),
+        contact="research@example.test",
+        limiter=SecRateLimiter(monotonic_clock=lambda: 0.0, sleeper=lambda _: None),
+        monotonic_clock=lambda: 0.0,
+    )
+
+    async def assert_factory(awaitable_factory: object, deadline: float) -> bytes | None:
+        assert callable(awaitable_factory)
+        return await awaitable_factory()
+
+    monkeypatch.setattr(client, "_await_before_deadline", assert_factory)
+
+    await client.fetch_company_facts("320193")
