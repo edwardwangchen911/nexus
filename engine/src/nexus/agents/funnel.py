@@ -18,21 +18,28 @@ class Candidate:
 class ResearchFunnel:
     light_research: tuple[Candidate, ...]
     full_debate: tuple[Candidate, ...]
+    light_limit_watch: tuple[Candidate, ...]
     budget_exhausted_watch: tuple[Candidate, ...]
 
 
-def select_research_funnel(candidates: tuple[Candidate, ...]) -> ResearchFunnel:
+def select_research_funnel(
+    candidates: tuple[Candidate, ...], *, debate_capacity: int | None = None
+) -> ResearchFunnel:
     """Select deterministic 20-light/5-debate bounds before a model can be invoked."""
+    if debate_capacity is not None and debate_capacity < 0:
+        raise ValueError("debate_capacity must be non-negative")
     unique = {candidate.instrument_id: candidate for candidate in candidates}
     ranked = tuple(sorted(unique.values(), key=_priority))
     light = ranked[:20]
     normal = tuple(candidate for candidate in light if not candidate.reduce_risk)[:5]
-    reduce = tuple(candidate for candidate in light if candidate.reduce_risk)
-    debate = tuple(dict.fromkeys((*reduce, *normal)))[:6]
+    reduce = tuple(candidate for candidate in ranked if candidate.reduce_risk)
+    planned = tuple(dict.fromkeys((*reduce, *normal)))
+    debate = planned if debate_capacity is None else planned[:debate_capacity]
     return ResearchFunnel(
         light_research=light,
         full_debate=debate,
-        budget_exhausted_watch=ranked[20:],
+        light_limit_watch=ranked[20:],
+        budget_exhausted_watch=() if debate_capacity is None else planned[debate_capacity:],
     )
 
 

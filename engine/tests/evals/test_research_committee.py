@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Final
 from uuid import UUID
 
@@ -21,11 +22,18 @@ _REQUEST: Final = ResearchRequest(
 class FixtureResearchModel:
     """A local seam replacing any external model transport in CI."""
 
+    worst_case_cost_usd = Decimal("0.50")
+
     async def respond(
         self, request: ResearchRequest, tools: ReadOnlyToolRegistry
     ) -> Mapping[str, object]:
         del tools
-        return {"intent": _intent_payload(request), "cost_usd": "0.25"}
+        return {
+            "intent": _intent_payload(request),
+            "cost_usd": "0.25",
+            "input_tokens": 100,
+            "output_tokens": 50,
+        }
 
 
 class InjectionFixtureResearchModel(FixtureResearchModel):
@@ -75,6 +83,58 @@ async def test_fixture_committee_is_deterministic_and_rejects_invalid_intents(
     )
     assert first.status == "completed"
     assert first.model_dump(mode="json") == second.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_failed_and_abstained_work_release_unused_reservation(
+    read_only_tools: ReadOnlyToolRegistry,
+) -> None:
+    """A failed model or invalid intent must not reserve the whole remaining daily budget."""
+
+    class AlwaysFails(FixtureResearchModel):
+        async def respond(
+            self, request: ResearchRequest, tools: ReadOnlyToolRegistry
+        ) -> Mapping[str, object]:
+            raise RuntimeError("fixture failure")
+
+    failed_budget = DailyBudget.usd("3.00")
+    failed = await run_research(_REQUEST, read_only_tools, AlwaysFails(), failed_budget)
+    assert failed.status == "failed"
+    assert failed_budget.remaining_usd == Decimal("3.00")
+
+    abstained_budget = DailyBudget.usd("3.00")
+    abstained = await run_research(
+        _REQUEST, read_only_tools, InjectionFixtureResearchModel(), abstained_budget
+    )
+    assert abstained.status == "abstained"
+    assert abstained_budget.spent_usd == Decimal("0.25")
+    assert abstained_budget.remaining_usd == Decimal("2.75")
+
+
+@pytest.mark.asyncio
+async def test_only_retry_reuses_identical_frozen_request(
+    read_only_tools: ReadOnlyToolRegistry,
+) -> None:
+    """A retry cannot observe a mutable or recomputed input snapshot."""
+
+    class FailOnce(FixtureResearchModel):
+        def __init__(self) -> None:
+            self.requests: list[ResearchRequest] = []
+
+        async def respond(
+            self, request: ResearchRequest, tools: ReadOnlyToolRegistry
+        ) -> Mapping[str, object]:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                raise RuntimeError("retryable fixture failure")
+            return await super().respond(request, tools)
+
+    model = FailOnce()
+    result = await run_research(_REQUEST, read_only_tools, model, DailyBudget.usd("3.00"))
+    assert result.status == "completed"
+    assert len(model.requests) == 2
+    assert model.requests[0] is model.requests[1]
+    assert model.requests[0].model_dump(mode="json") == _REQUEST.model_dump(mode="json")
 
 
 def _intent_payload(request: ResearchRequest) -> dict[str, object]:

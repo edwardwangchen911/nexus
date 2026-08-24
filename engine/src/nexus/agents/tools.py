@@ -1,6 +1,7 @@
 """Fixed schemas for the committee's non-executable read-only data boundary."""
 
-from collections.abc import Mapping
+import inspect
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import date, datetime
 from typing import Final, Literal, Protocol
 from uuid import UUID
@@ -53,10 +54,20 @@ class _SnapshotInput(_ToolInput):
 
 
 class _FinancialFactsInput(_SnapshotInput):
-    fields: tuple[Literal[
-        "revenue", "gross_profit", "operating_income", "net_income", "operating_cash_flow",
-        "capital_expenditure", "stockholders_equity", "diluted_shares", "diluted_eps",
-    ], ...] = Field(min_length=1, max_length=len(_FINANCIAL_FIELDS))
+    fields: tuple[
+        Literal[
+            "revenue",
+            "gross_profit",
+            "operating_income",
+            "net_income",
+            "operating_cash_flow",
+            "capital_expenditure",
+            "stockholders_equity",
+            "diluted_shares",
+            "diluted_eps",
+        ],
+        ...,
+    ] = Field(min_length=1, max_length=len(_FINANCIAL_FIELDS))
 
 
 class _FilingEvidenceInput(_SnapshotInput):
@@ -82,9 +93,7 @@ class _MacroSnapshotInput(_ToolInput):
     as_of: datetime
     series: tuple[
         Literal["DFF", "DGS2", "DGS10", "CPIAUCSL", "UNRATE", "INDPRO", "VIXCLS"], ...
-    ] = Field(
-        min_length=1, max_length=7
-    )
+    ] = Field(min_length=1, max_length=7)
 
 
 class _PortfolioExposureInput(_ToolInput):
@@ -121,11 +130,24 @@ class ReadOnlyToolRegistry(Protocol):
 
     names: tuple[str, ...]
 
+    async def execute(self, name: str, payload: Mapping[str, object]) -> Mapping[str, object]: ...
+
+
+type ToolExecutor = Callable[
+    [Mapping[str, object]], Mapping[str, object] | Awaitable[Mapping[str, object]]
+]
+
 
 class ReadOnlyTools:
     """Validate a fixed tool request without executing I/O or retaining the payload."""
 
     names: tuple[str, ...] = EXPECTED_READ_ONLY_TOOL_NAMES
+
+    def __init__(self, *, executors: Mapping[str, ToolExecutor] | None = None) -> None:
+        unknown = set(executors or ()) - set(self.names)
+        if unknown:
+            raise ToolInputError("executor is not in the fixed read-only catalogue")
+        self._executors = dict(executors or {})
 
     def validate(self, name: str, payload: Mapping[str, object]) -> dict[str, object]:
         """Return typed, JSON-safe fields or reject unknown/sensitive input before any lookup."""
@@ -136,6 +158,19 @@ class ReadOnlyTools:
             return schema.model_validate(payload).model_dump(mode="python")
         except ValidationError as error:
             raise ToolInputError("tool payload is not an allowlisted typed request") from error
+
+    async def execute(self, name: str, payload: Mapping[str, object]) -> Mapping[str, object]:
+        """Execute only an injected local lookup after strict typed validation."""
+        validated = self.validate(name, payload)
+        executor = self._executors.get(name)
+        if executor is None:
+            raise ToolInputError("tool has no configured read-only executor")
+        result = executor(validated)
+        if inspect.isawaitable(result):
+            result = await result
+        if not isinstance(result, Mapping):
+            raise ToolInputError("tool result must be a mapping")
+        return result
 
 
 def response_function_tools() -> Mapping[str, dict[str, object]]:

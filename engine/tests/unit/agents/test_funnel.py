@@ -21,5 +21,32 @@ def test_funnel_prioritizes_real_hard_risk_then_bounds_light_and_debate_sets() -
     result = select_research_funnel(candidates)
     assert len(result.light_research) == 20
     assert result.light_research[0].instrument_id == candidates[0].instrument_id
-    assert len(result.full_debate) <= 6
+    assert len(tuple(item for item in result.full_debate if not item.reduce_risk)) <= 5
     assert result.full_debate[0].instrument_id == candidates[0].instrument_id
+
+
+def test_funnel_keeps_every_reduce_risk_holding_after_five_ordinary_opportunities() -> None:
+    """An arbitrary total cap must not discard explicitly admitted reduce-risk holdings."""
+    candidates = tuple(
+        Candidate(
+            instrument_id=UUID(f"0198d500-1000-7000-8000-{index:012d}"),
+            real_read_only=index <= 8,
+            hard_risk=index <= 8,
+            reduce_risk=index <= 8,
+        )
+        for index in range(1, 18)
+    )
+    result = select_research_funnel(candidates)
+    assert len(tuple(item for item in result.full_debate if item.reduce_risk)) == 8
+    assert len(tuple(item for item in result.full_debate if not item.reduce_risk)) == 5
+
+
+def test_funnel_labels_selected_but_unfunded_work_as_budget_exhausted_watch() -> None:
+    """Budget denial must be explicit even for candidates inside the light-research bound."""
+    candidates = tuple(
+        Candidate(instrument_id=UUID(f"0198d500-1000-7000-8000-{index:012d}"))
+        for index in range(1, 10)
+    )
+    result = select_research_funnel(candidates, debate_capacity=2)
+    assert result.full_debate == candidates[:2]
+    assert result.budget_exhausted_watch == candidates[2:5]

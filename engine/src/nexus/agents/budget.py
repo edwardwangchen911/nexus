@@ -65,6 +65,13 @@ class DailyBudget(BaseModel):
         self._reserved_usd -= reservation_usd
         self._spent_usd += actual_usd
 
+    def release(self, reservation_usd: Decimal) -> None:
+        """Return one still-open reservation without changing settled usage."""
+        self._require_cost(reservation_usd)
+        if reservation_usd > self._reserved_usd:
+            raise BudgetExhausted("reservation is not available")
+        self._reserved_usd -= reservation_usd
+
     @staticmethod
     def _require_cost(value: Decimal) -> None:
         if not isinstance(value, Decimal) or not value.is_finite() or value < 0:

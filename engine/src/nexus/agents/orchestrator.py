@@ -22,11 +22,15 @@ class ResearchModel(Protocol):
         self, request: ResearchRequest, tools: ReadOnlyToolRegistry
     ) -> Mapping[str, object]: ...
 
+    @property
+    def worst_case_cost_usd(self) -> Decimal: ...
+
 
 _SCHEMA = Draft202012Validator(
     loads(
-        (Path(__file__).resolve().parents[4] / "contracts/agent/research-intent-v1.schema.json")
-        .read_text(encoding="utf-8")
+        (
+            Path(__file__).resolve().parents[4] / "contracts/agent/research-intent-v1.schema.json"
+        ).read_text(encoding="utf-8")
     )
 )
 
@@ -41,8 +45,8 @@ async def run_research(
     if tools.names != EXPECTED_READ_ONLY_TOOL_NAMES:
         return _abstained()
     try:
-        reservation = budget.reserve(budget.remaining_usd, pricing_fresh=True)
-    except BudgetExhausted:
+        reservation = budget.reserve(model.worst_case_cost_usd, pricing_fresh=True)
+    except (AttributeError, BudgetExhausted, TypeError, ValueError):
         return _abstained()
 
     frozen_request = request.model_copy(deep=True)
@@ -54,12 +58,17 @@ async def run_research(
         except Exception:
             continue
     if response is None:
+        budget.release(reservation)
         return ResearchRunResult(status="failed")
+    settled = False
     try:
         cost = _decimal_cost(response.get("cost_usd"))
         budget.settle(reservation, cost)
+        settled = True
         intent = _validated_intent(response, request)
     except (BudgetExhausted, TypeError, ValueError, ValidationError):
+        if not settled:
+            budget.release(reservation)
         return _abstained()
     return ResearchRunResult(status="completed", intent=intent)
 

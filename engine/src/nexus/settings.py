@@ -77,11 +77,13 @@ class EngineSettings(_SafeSettings):
         validation_alias="AGENT_RUNTIME_MODE",
     )
     openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
-    agent_extraction_model_id: str | None = Field(
-        default=None, validation_alias="AGENT_EXTRACTION_MODEL_ID"
+    openai_extraction_model: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENAI_EXTRACTION_MODEL", "AGENT_EXTRACTION_MODEL_ID"),
     )
-    agent_reasoning_model_id: str | None = Field(
-        default=None, validation_alias="AGENT_REASONING_MODEL_ID"
+    openai_reasoning_model: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENAI_REASONING_MODEL", "AGENT_REASONING_MODEL_ID"),
     )
     agent_daily_budget_usd: Decimal = Field(
         default=Decimal("3.00"), validation_alias="AGENT_DAILY_BUDGET_USD", gt=0
@@ -117,12 +119,12 @@ class EngineSettings(_SafeSettings):
             return
         if (
             _nonempty_secret(self.openai_api_key) is None
-            or _nonempty(self.agent_extraction_model_id) is None
-            or _nonempty(self.agent_reasoning_model_id) is None
+            or _nonempty(self.openai_extraction_model) is None
+            or _nonempty(self.openai_reasoning_model) is None
         ):
             raise ValueError(
-                "Agent non-fixture mode requires OPENAI_API_KEY, AGENT_EXTRACTION_MODEL_ID, "
-                "and AGENT_REASONING_MODEL_ID"
+                "Agent non-fixture mode requires OPENAI_API_KEY, OPENAI_EXTRACTION_MODEL, "
+                "and OPENAI_REASONING_MODEL"
             )
 
     def _validate_hmac_key_pairs(self) -> None:
