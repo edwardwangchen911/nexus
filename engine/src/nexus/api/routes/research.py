@@ -2,14 +2,14 @@
 
 import hashlib
 import json
-from pathlib import Path
 from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
 from nexus.agents.budget import BudgetExhausted
-from nexus.agents.persistence import reserve_daily_budget
+from nexus.agents.models import ResearchRequest
+from nexus.agents.persistence import admit_research_run
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
@@ -22,12 +22,8 @@ from nexus.api.schemas.agents import (
 )
 from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
 from nexus.domain.decimal import decimal_to_string
-from nexus.persistence.models.agents import (
-    AgentModelConfigRecord,
-    AgentPromptVersionRecord,
-    AgentResearchOutputRecord,
-    AgentResearchRunRecord,
-)
+from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
+from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from nexus.settings import EngineSettings
 from nexus.strategy.intents import ResearchIntent
 from pydantic import ValidationError
@@ -56,92 +52,40 @@ async def create_research_run(
     session: AsyncSession = Depends(transactional_session),
 ) -> JSONResponse:
     """Append a prepared local run only when immutable prompt/model pricing authority exists."""
-    prompt = await session.scalar(
-        select(AgentPromptVersionRecord).order_by(desc(AgentPromptVersionRecord.created_at)).limit(1)
-    )
     now = utc_now()
-    model = await session.scalar(
-        select(AgentModelConfigRecord)
-        .where(
-            AgentModelConfigRecord.pricing_available_at <= now,
-            AgentModelConfigRecord.pricing_expires_at > now,
-        )
-        .order_by(desc(AgentModelConfigRecord.created_at))
-        .limit(1)
-    )
-    if prompt is None or model is None:
-        raise NexusError(
-            ErrorCode.DATA_PARTIAL,
-            "Immutable Agent prompt or current pricing authority is unavailable.",
-            status_code=409,
-        )
     input_hash = hashlib.sha256(
         json.dumps(body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    existing = await session.scalar(
-        select(AgentResearchRunRecord).where(
-            AgentResearchRunRecord.actor_id == actor.actor_id,
-            AgentResearchRunRecord.idempotency_key == idempotency_key,
-        )
-    )
-    if existing is not None:
-        if existing.input_hash != input_hash:
-            raise NexusError(
-                ErrorCode.IDEMPOTENCY_CONFLICT,
-                "Idempotency key has a different request body.",
-                status_code=409,
-            )
-        payload = ResearchRunEnvelope(
-            data=_response(existing, None),
-            meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
-        )
-        return JSONResponse(
-            status_code=202,
-            content=payload.model_dump(mode="json"),
-            headers={"Location": f"/api/v1/research-runs/{existing.id}"},
-        )
-    schema_hash = hashlib.sha256(
-        (Path(__file__).resolve().parents[5] / "contracts/agent/research-intent-v1.schema.json")
-        .read_bytes()
-    ).hexdigest()
-    tool_hash = hashlib.sha256(
-        b"get_security_snapshot|get_financial_facts|search_filing_evidence|get_price_features|"
-        b"get_macro_snapshot|get_portfolio_exposure|get_portfolio_diagnostics|get_proposal_comparison"
-    ).hexdigest()
-    run = AgentResearchRunRecord(
-        instrument_id=body.instrument_id,
-        data_snapshot_id=body.data_snapshot_id,
-        prompt_version_id=prompt.id,
-        model_config_id=model.id,
-        decision_time=body.decision_time,
-        actor_id=actor.actor_id,
-        idempotency_key=idempotency_key,
-        status="prepared",
-        retry_count=0,
-        schema_hash=schema_hash,
-        model_hash=model.config_hash,
-        prompt_hash=prompt.content_hash,
-        tool_hash=tool_hash,
-        input_hash=input_hash,
-        reserved_cost_usd=model.max_cost_usd,
-        settled_cost_usd=None,
-    )
-    session.add(run)
-    await session.flush()
     try:
-        await reserve_daily_budget(
+        admission = await admit_research_run(
             session,
-            run_id=run.id,
-            now=now,
+            actor_id=actor.actor_id,
+            route="/internal/v1/research-runs",
+            idempotency_key=idempotency_key,
+            request_hash=input_hash,
+            request=ResearchRequest.model_validate(body.model_dump()),
+            prompt_version_id=None,
+            model_config_id=None,
             daily_limit_usd=settings.agent_daily_budget_usd,
-            worst_case_usd=model.max_cost_usd,
-            pricing_version=model.version,
-            pricing_fresh=True,
+            now=now,
         )
     except BudgetExhausted as error:
         raise NexusError(
             ErrorCode.BUDGET_EXHAUSTED, "Research budget is exhausted.", status_code=409
         ) from error
+    except IdempotencyConflict as error:
+        raise NexusError(
+            ErrorCode.IDEMPOTENCY_CONFLICT,
+            "Idempotency key has a different request body.",
+            status_code=409,
+        ) from error
+    except ValueError as error:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL,
+            "Point-in-time Agent authority is unavailable.",
+            status_code=409,
+        ) from error
+    run = admission.run
     payload = ResearchRunEnvelope(
         data=_response(run, None),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),

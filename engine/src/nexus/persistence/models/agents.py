@@ -4,7 +4,15 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -15,11 +23,17 @@ from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
 class AgentPromptVersionRecord(ImmutableCreatedAt, Base):
     __tablename__ = "agent_prompt_versions"
     __table_args__ = (
-        UniqueConstraint("version", name="uq_agent_prompt_versions_version"),
+        UniqueConstraint("role", "version", name="uq_agent_prompt_versions_role_version"),
+        CheckConstraint(
+            "role IN ('orchestrator','fundamental','market_state','macro_sector','bull','bear',"
+            "'evidence_audit','portfolio')",
+            name="role_allowed",
+        ),
         CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    role: Mapped[str] = mapped_column(String(32))
     version: Mapped[str] = mapped_column(String(100))
     content_hash: Mapped[str] = mapped_column(String(64))
     content: Mapped[str] = mapped_column(Text)
@@ -30,9 +44,11 @@ class AgentModelConfigRecord(ImmutableCreatedAt, Base):
     __table_args__ = (
         UniqueConstraint("model_id", "version", name="uq_agent_model_configs_identity"),
         CheckConstraint("config_hash ~ '^[0-9a-f]{64}$'", name="config_hash_canonical"),
+        CheckConstraint("max_input_tokens BETWEEN 1 AND 1048576", name="max_input_tokens_bounded"),
         CheckConstraint("max_tool_calls BETWEEN 0 AND 8", name="max_tool_calls_bounded"),
         CheckConstraint("max_output_tokens BETWEEN 1 AND 16384", name="max_output_tokens_bounded"),
-        CheckConstraint("max_cost_usd >= 0", name="max_cost_nonnegative"),
+        CheckConstraint("input_usd_per_million >= 0", name="input_price_nonnegative"),
+        CheckConstraint("output_usd_per_million >= 0", name="output_price_nonnegative"),
         CheckConstraint("pricing_expires_at > pricing_available_at", name="pricing_time_ordered"),
     )
 
@@ -40,11 +56,20 @@ class AgentModelConfigRecord(ImmutableCreatedAt, Base):
     model_id: Mapped[str] = mapped_column(String(100))
     version: Mapped[str] = mapped_column(String(100))
     config_hash: Mapped[str] = mapped_column(String(64))
+    max_input_tokens: Mapped[int] = mapped_column(Integer)
     max_tool_calls: Mapped[int] = mapped_column(Integer)
     max_output_tokens: Mapped[int] = mapped_column(Integer)
-    max_cost_usd: Mapped[Decimal]
+    input_usd_per_million: Mapped[Decimal]
+    output_usd_per_million: Mapped[Decimal]
     pricing_available_at: Mapped[datetime] = mapped_column(UTCDateTime())
     pricing_expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+    @property
+    def worst_case_cost_usd(self) -> Decimal:
+        return (
+            Decimal(self.max_input_tokens) * self.input_usd_per_million
+            + Decimal(self.max_output_tokens) * self.output_usd_per_million
+        ) / Decimal(1_000_000)
 
 
 class AgentResearchRunRecord(ImmutableCreatedAt, Base):
@@ -109,6 +134,34 @@ class AgentResearchOutputRecord(ImmutableCreatedAt, Base):
     status: Mapped[str] = mapped_column(String(16))
     content_hash: Mapped[str] = mapped_column(String(64))
     intent: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+
+
+class AgentResearchOutputEvidenceRecord(ImmutableCreatedAt, Base):
+    """Exact Task 14 evidence authority bound to one immutable Agent output."""
+
+    __tablename__ = "agent_research_output_evidence"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["output_id"],
+            ["agent_research_outputs.id"],
+            name="fk_agent_output_evidence_output",
+        ),
+        ForeignKeyConstraint(
+            ["evidence_ref_id"],
+            ["research_evidence_refs.id"],
+            name="fk_agent_output_evidence_authority",
+        ),
+        CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
+    )
+
+    output_id: Mapped[UUID] = mapped_column(primary_key=True)
+    evidence_ref_id: Mapped[UUID] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(100))
+    provider_object_id: Mapped[str] = mapped_column(String(255))
+    revision: Mapped[str] = mapped_column(String(255))
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    location: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64))
 
 
 class AgentDailyBudgetReservationRecord(ImmutableCreatedAt, Base):
