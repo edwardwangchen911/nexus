@@ -1,6 +1,6 @@
-"""Offline-testable FRED/ALFRED macro evidence normalization."""
+"""Offline-testable FRED/ALFRED evidence normalization with conservative vintages."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -28,6 +28,9 @@ class FredValidationError(ValueError):
 class FredRawDocument:
     raw_payload: bytes
     received_at: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "received_at", require_utc(self.received_at))
 
 
 @dataclass(frozen=True)
@@ -61,7 +64,7 @@ class FredSeriesClient:
     async def fetch_alfred_series(
         self, series: str, real_time_start: str, real_time_end: str
     ) -> FredRawDocument:
-        """Retrieve one explicit ALFRED vintage interval through the same injected seam."""
+        """Retrieve one explicit ALFRED vintage interval through the injected seam."""
         if series not in FRED_SERIES:
             raise FredValidationError("UNAPPROVED_SERIES")
         try:
@@ -81,27 +84,35 @@ class FredSeriesClient:
 
 
 def conservative_next_xnys_availability(
-    observed_on: date,
     *,
-    release_time: datetime | None,
-    next_session_close: Callable[[date], datetime],
+    release_date: date | None,
+    real_time_start: date,
+    next_session_open: Callable[[date], datetime],
 ) -> datetime:
-    """Use reliable release time or wait through the next XNYS session close."""
-    if release_time is not None:
-        return require_utc(release_time)
-    return require_utc(next_session_close(observed_on))
+    """Move an unknown-time release past its release/vintage day to the next open.
+
+    The observation period is never an availability proxy: for an unknown release
+    time, a documented release date wins, otherwise the ALFRED vintage start date is
+    the only defensible bound.  ``next_session_open`` must return an actual XNYS
+    session strictly after the supplied base date.
+    """
+    base_date = release_date or real_time_start
+    available_at = require_utc(next_session_open(base_date))
+    if available_at.date() <= base_date:
+        raise FredValidationError("XNYS_OPEN_MUST_FOLLOW_RELEASE_DATE")
+    return available_at
 
 
 def normalize_alfred_observation(
-    raw: dict[str, object],
+    raw: Mapping[str, object],
     *,
     series: str,
     unit: str,
-    available_at: datetime,
     evidence_ref: EvidenceRef,
     calendar_evidence_ref: EvidenceRef,
+    next_session_open: Callable[[date], datetime],
 ) -> AlfredObservation:
-    """Preserve ALFRED real-time vintage boundaries without parsing binary floats."""
+    """Preserve ALFRED vintages and derive their conservative decision availability."""
     if series not in FRED_SERIES:
         raise FredValidationError("UNAPPROVED_SERIES")
     value = raw.get("value")
@@ -124,6 +135,13 @@ def normalize_alfred_observation(
     revision = raw.get("revision", real_time_start.isoformat())
     if not isinstance(revision, str) or not revision:
         raise FredValidationError("INVALID_REVISION")
+    release_date = _optional_date(raw, "release_date")
+    _validate_evidence_owners(
+        series=series,
+        revision=revision,
+        evidence_ref=evidence_ref,
+        calendar_evidence_ref=calendar_evidence_ref,
+    )
     return AlfredObservation(
         series=series,
         observed_on=observed_on,
@@ -132,15 +150,66 @@ def normalize_alfred_observation(
         revision=revision,
         value=decimal_value,
         unit=unit,
-        available_at=require_utc(available_at),
+        available_at=conservative_next_xnys_availability(
+            release_date=release_date,
+            real_time_start=real_time_start,
+            next_session_open=next_session_open,
+        ),
         evidence_ref=evidence_ref,
         calendar_evidence_ref=calendar_evidence_ref,
         display_sanity_only=series == "DEXHKUS",
     )
 
 
-def _required_string(raw: dict[str, object], key: str) -> str:
+def select_alfred_observation(
+    observations: Sequence[AlfredObservation], series: str, decision_time: datetime
+) -> AlfredObservation | None:
+    """Return only the latest ALFRED vintage available by ``decision_time``."""
+    decision_at = require_utc(decision_time)
+    visible = [
+        observation
+        for observation in observations
+        if observation.series == series and observation.available_at <= decision_at
+    ]
+    if not visible:
+        return None
+    latest_start = max(observation.real_time_start for observation in visible)
+    latest = [observation for observation in visible if observation.real_time_start == latest_start]
+    if len(latest) != 1:
+        raise FredValidationError("AMBIGUOUS_VINTAGE")
+    return latest[0]
+
+
+def _validate_evidence_owners(
+    *,
+    series: str,
+    revision: str,
+    evidence_ref: EvidenceRef,
+    calendar_evidence_ref: EvidenceRef,
+) -> None:
+    if evidence_ref.source != "fred" or evidence_ref.object_id != f"{series}:{revision}":
+        raise FredValidationError("EVIDENCE_OWNER_MISMATCH")
+    if (
+        calendar_evidence_ref.source != "exchange_calendars"
+        or not calendar_evidence_ref.object_id.startswith("calendar:XNYS:")
+    ):
+        raise FredValidationError("CALENDAR_EVIDENCE_OWNER_MISMATCH")
+
+
+def _required_string(raw: Mapping[str, object], key: str) -> str:
     value = raw.get(key)
     if not isinstance(value, str):
         raise FredValidationError(f"MISSING_{key.upper()}")
     return value
+
+
+def _optional_date(raw: Mapping[str, object], key: str) -> date | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise FredValidationError(f"INVALID_{key.upper()}")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise FredValidationError(f"INVALID_{key.upper()}") from error

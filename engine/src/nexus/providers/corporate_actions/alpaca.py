@@ -39,6 +39,8 @@ def normalize_alpaca_corporate_action(
     action_type = _required_string(raw, "type")
     status = _required_string(raw, "status")
     revision = _required_string(raw, "revision")
+    if evidence_ref.source != "alpaca" or evidence_ref.object_id != provider_event_id:
+        raise CorporateActionValidationError("EVIDENCE_OWNER_MISMATCH")
     rate_raw = raw.get("rate")
     if rate_raw is not None and not isinstance(rate_raw, str):
         raise CorporateActionValidationError("rate must be a decimal string")

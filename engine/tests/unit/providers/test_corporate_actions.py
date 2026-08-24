@@ -9,13 +9,14 @@ from nexus.providers.corporate_actions.alpaca import (
 )
 
 
-def _evidence() -> EvidenceRef:
+def _evidence(object_id: str = "ca-001") -> EvidenceRef:
+    digest = "b" * 64
     return EvidenceRef(
         source="alpaca",
-        object_id="ca-001",
+        object_id=object_id,
         available_at=datetime(2026, 8, 24, tzinfo=UTC),
-        location="memory://evidence/alpaca/ca-001.json",
-        content_hash="b" * 64,
+        location=f"memory://sha256/{digest}",
+        content_hash=digest,
     )
 
 
@@ -50,10 +51,30 @@ def test_non_complete_alpaca_action_is_not_ledger_eligible() -> None:
             "process_date": "2026-08-24",
             "revision": "1",
         },
-        evidence_ref=_evidence(),
+        evidence_ref=EvidenceRef(
+            source="alpaca",
+            object_id="ca-002",
+            available_at=datetime(2026, 8, 24, tzinfo=UTC),
+            location=f"memory://sha256/{'b' * 64}",
+            content_hash="b" * 64,
+        ),
     )
 
     assert action.ledger_eligible is False
+
+
+def test_alpaca_action_rejects_evidence_owned_by_a_different_event() -> None:
+    with pytest.raises(CorporateActionValidationError, match="EVIDENCE_OWNER_MISMATCH"):
+        normalize_alpaca_corporate_action(
+            {
+                "id": "ca-002",
+                "type": "split",
+                "status": "announced",
+                "process_date": "2026-08-24",
+                "revision": "1",
+            },
+            evidence_ref=_evidence(),
+        )
 
 
 def test_alpaca_action_rejects_binary_float_rate() -> None:
@@ -67,5 +88,5 @@ def test_alpaca_action_rejects_binary_float_rate() -> None:
                 "rate": 2.0,
                 "revision": "1",
             },
-            evidence_ref=_evidence(),
+            evidence_ref=_evidence("ca-003"),
         )

@@ -11,14 +11,14 @@ CALENDAR_REF = EvidenceRef(
     source="exchange_calendars",
     object_id="calendar:XNYS:fixture",
     available_at=AVAILABLE_AT,
-    location="package://exchange-calendars/fixture/XNYS",
+    location=f"package://exchange-calendars/XNYS@sha256:{'c' * 64}",
     content_hash="c" * 64,
 )
 RAW_REF = EvidenceRef(
     source="fred",
     object_id="DFF:2026-08-07",
     available_at=AVAILABLE_AT,
-    location="memory://evidence/fred/DFF-2026-08-07.json",
+    location=f"memory://sha256/{'d' * 64}",
     content_hash="d" * 64,
 )
 
@@ -31,7 +31,7 @@ def test_evidence_reference_hashes_exact_bytes_and_retains_non_executable_locati
         source="sec",
         object_id="0000320193-26-000001",
         available_at=AVAILABLE_AT,
-        location="memory://evidence/sec/0000320193-26-000001.json",
+        location=f"memory://sha256/{sha256(payload).hexdigest()}",
         expected_sha256=sha256(payload).hexdigest(),
         expected_byte_length=len(payload),
     )
@@ -41,11 +41,18 @@ def test_evidence_reference_hashes_exact_bytes_and_retains_non_executable_locati
         == "fd390eaeaab2fde622e50ea839554f74b8ab76c27f33f60878c43d462dc86f4a"
     )
     assert evidence.byte_length == len(payload)
-    assert evidence.reference.location.startswith("memory://evidence/")
+    assert evidence.reference.location.startswith("memory://sha256/")
 
 
 @pytest.mark.parametrize(
-    "location", ["https://sec.example/filing", "file:///tmp/filing", "javascript:alert(1)"]
+    "location",
+    [
+        "https://sec.example/filing",
+        "file:///tmp/filing",
+        "javascript:alert(1)",
+        "memory://evidence/mutable.json",
+        "s3://evidence/filing.json",
+    ],
 )
 def test_evidence_reference_rejects_executable_or_remote_location(location: str) -> None:
     with pytest.raises(EvidencePayloadError, match="NON_EXECUTABLE_LOCATION"):
@@ -67,20 +74,20 @@ def test_evidence_reference_rejects_mismatched_payload_hash_before_ref_creation(
             source="fred",
             object_id="DFF",
             available_at=AVAILABLE_AT,
-            location="memory://evidence/fred/DFF.json",
+            location=f"memory://sha256/{'0' * 64}",
             expected_sha256="0" * 64,
             expected_byte_length=7,
         )
 
 
-def test_fred_release_without_time_is_not_available_until_next_xnys_session_close() -> None:
+def test_fred_release_without_time_is_not_available_until_next_xnys_session_open() -> None:
     available_at = conservative_next_xnys_availability(
-        date(2026, 8, 28),
-        release_time=None,
-        next_session_close=lambda _: datetime(2026, 8, 31, 20, tzinfo=UTC),
+        release_date=None,
+        real_time_start=date(2026, 8, 28),
+        next_session_open=lambda _: datetime(2026, 8, 31, 13, 30, tzinfo=UTC),
     )
 
-    assert available_at == datetime(2026, 8, 31, 20, tzinfo=UTC)
+    assert available_at == datetime(2026, 8, 31, 13, 30, tzinfo=UTC)
 
 
 def test_alfred_observation_preserves_vintage_and_calendar_evidence() -> None:
@@ -94,9 +101,9 @@ def test_alfred_observation_preserves_vintage_and_calendar_evidence() -> None:
         },
         series="DFF",
         unit="percent",
-        available_at=datetime(2026, 8, 7, 20, tzinfo=UTC),
         evidence_ref=RAW_REF,
         calendar_evidence_ref=CALENDAR_REF,
+        next_session_open=lambda _: datetime(2026, 8, 10, 13, 30, tzinfo=UTC),
     )
 
     assert observation.real_time_start == date(2026, 8, 7)

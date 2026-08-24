@@ -91,6 +91,15 @@ def test_selection_chooses_latest_accepted_revision_only_after_acceptance() -> N
     )
 
 
+def test_selection_rejects_equal_acceptance_without_a_provider_ordering_key() -> None:
+    with pytest.raises(FinancialFactSelectionError, match="UNRESOLVED_ACCEPTANCE_TIE"):
+        select_financial_fact(
+            [_fact(revision="2"), _fact(value="110.00", revision="10")],
+            "revenue",
+            ACCEPTED,
+        )
+
+
 def test_selection_fails_closed_for_incompatible_units() -> None:
     with pytest.raises(FinancialFactSelectionError, match="INCOMPATIBLE_UNIT"):
         select_financial_fact(

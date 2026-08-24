@@ -108,10 +108,13 @@ def select_financial_fact(
         raise FinancialFactSelectionError("INCOMPATIBLE_PERIOD_KIND")
     if visible[0].period_kind == "duration":
         _reject_overlapping_duration_periods(visible)
-    return max(
-        visible,
-        key=lambda fact: (fact.period_end, fact.accepted_at, fact.revision, fact.accession_number),
-    )
+    latest_key = max((fact.period_end, fact.accepted_at) for fact in visible)
+    latest = [
+        fact for fact in visible if (fact.period_end, fact.accepted_at) == latest_key
+    ]
+    if len(latest) != 1:
+        raise FinancialFactSelectionError("UNRESOLVED_ACCEPTANCE_TIE")
+    return latest[0]
 
 
 def _reject_overlapping_duration_periods(facts: Sequence[FinancialFact]) -> None:
