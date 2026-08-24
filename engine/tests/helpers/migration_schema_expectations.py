@@ -141,15 +141,17 @@ EXPECTED_FOREIGN_KEYS = {
     "portfolio_diagnostic_evidence_refs": "fk_diag_evidence_item",
     "filings": {
         "fk_filings_instrument_id_instruments",
-        "fk_filings_evidence_ref",
+        "fk_filings_evidence_owner",
     },
     "financial_facts": {
         "fk_financial_facts_filing_id_filings",
+        "fk_financial_facts_filing_identity",
         "fk_financial_facts_evidence_ref",
         "fk_financial_facts_instrument_id_instruments",
     },
     "corporate_actions": {
         "fk_corporate_actions_evidence_ref",
+        "fk_corporate_actions_evidence_owner",
         "fk_corporate_actions_instrument_id_instruments",
     },
 }

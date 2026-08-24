@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     String,
     Text,
@@ -164,15 +165,67 @@ class MacroObservation(ImmutableCreatedAt, Base):
         UniqueConstraint(
             "source", "series", "observed_at", "revision", name="uq_macro_observations_revision"
         ),
+        UniqueConstraint(
+            "source",
+            "series",
+            "provider_object_id",
+            "real_time_start",
+            "revision",
+            name="uq_macro_observations_provider_vintage",
+            postgresql_nulls_not_distinct=True,
+        ),
+        ForeignKeyConstraint(
+            ["evidence_ref_id"],
+            ["research_evidence_refs.id"],
+            name="fk_macro_observations_evidence_ref",
+        ),
+        ForeignKeyConstraint(
+            ["evidence_ref_id", "source", "provider_object_id", "revision"],
+            [
+                "research_evidence_refs.id",
+                "research_evidence_refs.source",
+                "research_evidence_refs.provider_object_id",
+                "research_evidence_refs.revision",
+            ],
+            name="fk_macro_observations_evidence_owner",
+        ),
+        ForeignKeyConstraint(
+            ["calendar_evidence_ref_id"],
+            ["research_evidence_refs.id"],
+            name="fk_macro_observations_calendar_evidence_ref",
+        ),
+        ForeignKeyConstraint(
+            [
+                "calendar_evidence_ref_id",
+                "calendar_source",
+                "calendar_provider_object_id",
+                "calendar_revision",
+            ],
+            [
+                "research_evidence_refs.id",
+                "research_evidence_refs.source",
+                "research_evidence_refs.provider_object_id",
+                "research_evidence_refs.revision",
+            ],
+            name="fk_macro_observations_calendar_evidence_owner",
+        ),
         CheckConstraint(
             "series IN ('DFF', 'DGS2', 'DGS10', 'CPIAUCSL', "
             "'UNRATE', 'INDPRO', 'VIXCLS', 'DEXHKUS')",
             name="series_allowed",
         ),
         CheckConstraint(
-            "real_time_end IS NULL OR real_time_start IS NOT NULL AND "
+            "real_time_start IS NULL OR real_time_end IS NOT NULL AND "
             "real_time_end >= real_time_start",
             name="real_time_period_allowed",
+        ),
+        CheckConstraint(
+            "source <> 'fred' OR (provider_object_id IS NOT NULL AND "
+            "real_time_start IS NOT NULL AND real_time_end IS NOT NULL AND "
+            "evidence_ref_id IS NOT NULL AND calendar_evidence_ref_id IS NOT NULL AND "
+            "calendar_source IS NOT NULL AND calendar_provider_object_id IS NOT NULL AND "
+            "calendar_revision IS NOT NULL)",
+            name="macro_fred_authority_required",
         ),
         CheckConstraint(
             "(series = 'DEXHKUS') = display_sanity_only",
@@ -191,10 +244,9 @@ class MacroObservation(ImmutableCreatedAt, Base):
     provider_object_id: Mapped[str | None] = mapped_column(String(255))
     real_time_start: Mapped[date | None] = mapped_column(Date)
     real_time_end: Mapped[date | None] = mapped_column(Date)
-    evidence_ref_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("research_evidence_refs.id", name="fk_macro_observations_evidence_ref")
-    )
-    calendar_evidence_ref_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("research_evidence_refs.id", name="fk_macro_observations_calendar_evidence_ref")
-    )
+    evidence_ref_id: Mapped[UUID | None]
+    calendar_evidence_ref_id: Mapped[UUID | None]
+    calendar_source: Mapped[str | None] = mapped_column(String(100))
+    calendar_provider_object_id: Mapped[str | None] = mapped_column(String(255))
+    calendar_revision: Mapped[str | None] = mapped_column(String(255))
     display_sanity_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
