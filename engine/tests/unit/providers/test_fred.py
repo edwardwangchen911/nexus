@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -131,8 +132,65 @@ def test_later_alfred_vintage_is_invisible_until_its_derived_availability() -> N
     )
 
     assert select_alfred_observation(
-        normalized, "DFF", datetime(2026, 8, 21, 23, 59, tzinfo=UTC)
+        normalized, "DFF", date(2026, 8, 1), datetime(2026, 8, 21, 23, 59, tzinfo=UTC)
     ) == normalized[0]
     assert select_alfred_observation(
-        normalized, "DFF", datetime(2026, 8, 22, tzinfo=UTC)
+        normalized, "DFF", date(2026, 8, 1), datetime(2026, 8, 22, tzinfo=UTC)
     ) == normalized[1]
+
+
+def test_alfred_selection_keeps_each_observation_period_within_its_own_vintage_history() -> None:
+    raw_observations = [
+        *json.loads(FIXTURE.read_text())["observations"],
+        {
+            "date": "2026-07-01",
+            "realtime_start": "2026-08-21",
+            "realtime_end": "9999-12-31",
+            "value": "4.00",
+            "revision": "2026-08-21-july",
+        },
+    ]
+    normalized = tuple(
+        normalize_alfred_observation(
+            raw,
+            series="DFF",
+            unit="percent",
+            evidence_ref=_evidence(f"DFF:{raw['revision']}"),
+            calendar_evidence_ref=_evidence("calendar:XNYS:fixture", source="exchange_calendars"),
+            next_session_open=lambda base_date: datetime.combine(
+                base_date + timedelta(days=1), datetime.min.time(), UTC
+            ),
+        )
+        for raw in raw_observations
+    )
+
+    assert select_alfred_observation(
+        normalized, "DFF", date(2026, 8, 1), datetime(2026, 8, 22, tzinfo=UTC)
+    ) == normalized[1]
+    assert select_alfred_observation(
+        normalized, "DFF", date(2026, 7, 1), datetime(2026, 8, 22, tzinfo=UTC)
+    ) == normalized[2]
+
+
+def test_alfred_selection_excludes_quarantined_legacy_macro_authority() -> None:
+    raw = json.loads(FIXTURE.read_text())["observations"][0]
+    legacy = replace(
+        normalize_alfred_observation(
+            raw,
+            series="DFF",
+            unit="percent",
+            evidence_ref=_evidence(f"DFF:{raw['revision']}"),
+            calendar_evidence_ref=_evidence("calendar:XNYS:fixture", source="exchange_calendars"),
+            next_session_open=lambda base_date: datetime.combine(
+                base_date + timedelta(days=1), datetime.min.time(), UTC
+            ),
+        ),
+        authority_version="legacy_task3",
+    )
+
+    assert (
+        select_alfred_observation(
+            (legacy,), "DFF", date(2026, 8, 1), datetime(2026, 8, 20, tzinfo=UTC)
+        )
+        is None
+    )

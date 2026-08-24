@@ -85,6 +85,97 @@ def test_0010_research_data_round_trips_from_0009_with_one_head(
     assert research_tables.issubset(_table_names(temporary_database_url))
 
 
+def test_0010_quarantines_existing_case_insensitive_macro_rows_and_rejects_new_legacy_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> None:
+    engine_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = Config(str(engine_root / "alembic.ini"))
+
+    command.upgrade(config, "0009_optimization")
+
+    async def seed_legacy_rows() -> None:
+        engine = create_async_engine(temporary_database_url)
+        try:
+            async with engine.begin() as connection:
+                for source in ("FRED", "alfred"):
+                    await connection.execute(
+                        text(
+                            "INSERT INTO macro_observations "
+                            "(id, source, series, observed_at, available_at, revision, value, "
+                            "unit) "
+                            "VALUES (:id, :source, 'DFF', :now, :now, 'task3', 1, 'percent')"
+                        ),
+                        {"id": uuid4(), "source": source, "now": NOW},
+                    )
+        finally:
+            await engine.dispose()
+
+    async def assert_upgraded_authority() -> None:
+        engine = create_async_engine(temporary_database_url)
+        try:
+            async with engine.connect() as connection:
+                rows = (
+                    await connection.execute(
+                        text(
+                            "SELECT source, authority_version FROM macro_observations "
+                            "ORDER BY source"
+                        )
+                    )
+                ).all()
+                assert rows == [("alfred", "legacy_task3"), ("FRED", "legacy_task3")]
+
+            async with engine.begin() as connection:
+                with pytest.raises(DBAPIError, match="legacy macro authority is migration-only"):
+                    await connection.execute(
+                        text(
+                            "INSERT INTO macro_observations "
+                            "(id, source, series, observed_at, available_at, revision, value, "
+                            "unit, "
+                            "authority_version) VALUES "
+                            "(:id, 'fred', 'DFF', :now, :now, 'new', 1, 'percent', 'legacy_task3')"
+                        ),
+                        {"id": uuid4(), "now": NOW},
+                    )
+
+            async with engine.begin() as connection:
+                with pytest.raises(DBAPIError, match="legacy macro authority is migration-only"):
+                    await connection.execute(
+                        text(
+                            "INSERT INTO macro_observations "
+                            "(id, source, series, observed_at, available_at, revision, value, "
+                            "unit, authority_version) VALUES "
+                            "(:id, 'fixture', 'DFF', :now, :now, 'new', 1, 'percent', "
+                            "'legacy_task3')"
+                        ),
+                        {"id": uuid4(), "now": NOW},
+                    )
+
+            async with engine.begin() as connection:
+                with pytest.raises(DBAPIError, match="macro_research_v1_authority_required"):
+                    await connection.execute(
+                        text(
+                            "INSERT INTO macro_observations "
+                            "(id, source, series, observed_at, available_at, revision, value, "
+                            "unit, "
+                            "authority_version) VALUES "
+                            "(:id, 'FRED', 'DFF', :now, :now, 'new', 1, 'percent', "
+                            "'research_macro_v1')"
+                        ),
+                        {"id": uuid4(), "now": NOW},
+                    )
+        finally:
+            await engine.dispose()
+
+    import asyncio
+
+    asyncio.run(seed_legacy_rows())
+    command.upgrade(config, "0010_research_data")
+    asyncio.run(assert_upgraded_authority())
+    command.downgrade(config, "0009_optimization")
+
+
 @pytest.mark.asyncio
 async def test_research_evidence_location_and_owner_composites_fail_closed(
     migrated_database_url: str,
@@ -403,7 +494,7 @@ async def test_task14_macro_authority_and_all_research_rows_are_append_only(
                 {"id": action_id, "evidence_id": action_evidence_id},
             )
         async with engine.begin() as connection:
-            with pytest.raises(DBAPIError, match="macro_fred_authority_required"):
+            with pytest.raises(DBAPIError, match="macro_research_v1_authority_required"):
                 await connection.execute(
                     text(
                         "INSERT INTO macro_observations "
@@ -420,10 +511,11 @@ async def test_task14_macro_authority_and_all_research_rows_are_append_only(
                     "(id, source, series, observed_at, available_at, revision, value, unit, "
                     "provider_object_id, real_time_start, real_time_end, evidence_ref_id, "
                     "calendar_evidence_ref_id, calendar_source, calendar_provider_object_id, "
-                    "calendar_revision, display_sanity_only) VALUES "
+                    "calendar_revision, display_sanity_only, authority_version) VALUES "
                     "(:id, 'fred', 'DFF', :now, :now, '2026-08-07', 1, 'percent', "
                     "'DFF:2026-08-07', '2026-08-07', '2026-08-20', :evidence_id, :calendar_id, "
-                    "'exchange_calendars', 'calendar:XNYS:fixture', '1', false)"
+                    "'exchange_calendars', 'calendar:XNYS:fixture', '1', false, "
+                    "'research_macro_v1')"
                 ),
                 {
                     "id": macro_id,

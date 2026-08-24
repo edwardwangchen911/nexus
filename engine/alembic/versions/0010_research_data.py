@@ -212,6 +212,9 @@ def upgrade() -> None:
     op.add_column(
         "macro_observations", sa.Column("provider_object_id", sa.String(255), nullable=True)
     )
+    op.add_column(
+        "macro_observations", sa.Column("authority_version", sa.String(32), nullable=True)
+    )
     op.add_column("macro_observations", sa.Column("real_time_start", sa.Date(), nullable=True))
     op.add_column("macro_observations", sa.Column("real_time_end", sa.Date(), nullable=True))
     op.add_column("macro_observations", sa.Column("evidence_ref_id", _UUID, nullable=True))
@@ -224,6 +227,10 @@ def upgrade() -> None:
     op.add_column(
         "macro_observations",
         sa.Column("display_sanity_only", sa.Boolean(), nullable=False, server_default=sa.false()),
+    )
+    op.execute(
+        "UPDATE macro_observations SET authority_version = 'legacy_task3' "
+        "WHERE lower(source) IN ('fred', 'alfred')"
     )
     op.create_foreign_key(
         "fk_macro_observations_evidence_ref",
@@ -275,12 +282,20 @@ def upgrade() -> None:
         "real_time_start IS NULL OR real_time_end IS NOT NULL AND real_time_end >= real_time_start",
     )
     op.create_check_constraint(
-        "macro_fred_authority_required",
+        "macro_authority_version_allowed",
         "macro_observations",
-        "source <> 'fred' OR (provider_object_id IS NOT NULL AND real_time_start IS NOT NULL "
+        "authority_version IS NULL OR authority_version IN ('legacy_task3', 'research_macro_v1')",
+    )
+    op.create_check_constraint(
+        "macro_research_v1_authority_required",
+        "macro_observations",
+        "COALESCE(lower(source) NOT IN ('fred', 'alfred') "
+        "OR authority_version = 'legacy_task3' OR "
+        "(source = lower(source) AND authority_version = 'research_macro_v1' "
+        "AND provider_object_id IS NOT NULL AND real_time_start IS NOT NULL "
         "AND real_time_end IS NOT NULL AND evidence_ref_id IS NOT NULL "
         "AND calendar_evidence_ref_id IS NOT NULL AND calendar_source IS NOT NULL "
-        "AND calendar_provider_object_id IS NOT NULL AND calendar_revision IS NOT NULL)",
+        "AND calendar_provider_object_id IS NOT NULL AND calendar_revision IS NOT NULL), FALSE)",
     )
     op.create_check_constraint(
         "dexhkus_display_sanity_only",
@@ -290,6 +305,16 @@ def upgrade() -> None:
     op.execute(
         "CREATE FUNCTION nexus_prevent_research_change() RETURNS trigger LANGUAGE plpgsql AS $$ "
         "BEGIN RAISE EXCEPTION 'research evidence is append-only' USING ERRCODE = '23514'; END; $$"
+    )
+    op.execute(
+        "CREATE FUNCTION nexus_prevent_legacy_macro_insert() RETURNS trigger LANGUAGE plpgsql AS $$ "
+        "BEGIN IF NEW.authority_version = 'legacy_task3' THEN "
+        "RAISE EXCEPTION 'legacy macro authority is migration-only' USING ERRCODE = '23514'; "
+        "END IF; RETURN NEW; END; $$"
+    )
+    op.execute(
+        "CREATE TRIGGER trg_macro_observations_authority_insert BEFORE INSERT ON macro_observations "
+        "FOR EACH ROW EXECUTE FUNCTION nexus_prevent_legacy_macro_insert()"
     )
     for table in _RESEARCH_TABLES:
         op.execute(
@@ -308,9 +333,12 @@ def downgrade() -> None:
         op.execute(f"DROP TRIGGER trg_{table}_created_at_immutable ON {table}")
     for table in _RESEARCH_TABLES:
         op.execute(f"DROP TRIGGER trg_{table}_immutable ON {table}")
+    op.execute("DROP TRIGGER trg_macro_observations_authority_insert ON macro_observations")
+    op.execute("DROP FUNCTION nexus_prevent_legacy_macro_insert()")
     op.execute("DROP FUNCTION nexus_prevent_research_change()")
     op.drop_constraint("dexhkus_display_sanity_only", "macro_observations", type_="check")
-    op.drop_constraint("macro_fred_authority_required", "macro_observations", type_="check")
+    op.drop_constraint("macro_research_v1_authority_required", "macro_observations", type_="check")
+    op.drop_constraint("macro_authority_version_allowed", "macro_observations", type_="check")
     op.drop_constraint("real_time_period_allowed", "macro_observations", type_="check")
     op.drop_constraint("series_allowed", "macro_observations", type_="check")
     op.drop_constraint(
@@ -337,6 +365,7 @@ def downgrade() -> None:
     op.drop_column("macro_observations", "real_time_end")
     op.drop_column("macro_observations", "real_time_start")
     op.drop_column("macro_observations", "provider_object_id")
+    op.drop_column("macro_observations", "authority_version")
     op.drop_table("corporate_actions")
     op.drop_table("financial_facts")
     op.drop_table("filings")

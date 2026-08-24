@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Literal, Protocol
 
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
@@ -46,6 +46,7 @@ class AlfredObservation:
     evidence_ref: EvidenceRef
     calendar_evidence_ref: EvidenceRef
     display_sanity_only: bool
+    authority_version: Literal["research_macro_v1", "legacy_task3"] = "research_macro_v1"
 
 
 class FredSeriesClient:
@@ -162,14 +163,22 @@ def normalize_alfred_observation(
 
 
 def select_alfred_observation(
-    observations: Sequence[AlfredObservation], series: str, decision_time: datetime
+    observations: Sequence[AlfredObservation],
+    series: str,
+    observed_on: date,
+    decision_time: datetime,
 ) -> AlfredObservation | None:
-    """Return only the latest ALFRED vintage available by ``decision_time``."""
+    """Select the latest v1 vintage within one series and economic observation period."""
     decision_at = require_utc(decision_time)
     visible = [
         observation
         for observation in observations
-        if observation.series == series and observation.available_at <= decision_at
+        if (
+            observation.series == series
+            and observation.observed_on == observed_on
+            and observation.authority_version == "research_macro_v1"
+            and observation.available_at <= decision_at
+        )
     ]
     if not visible:
         return None

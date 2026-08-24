@@ -220,12 +220,20 @@ class MacroObservation(ImmutableCreatedAt, Base):
             name="real_time_period_allowed",
         ),
         CheckConstraint(
-            "source <> 'fred' OR (provider_object_id IS NOT NULL AND "
-            "real_time_start IS NOT NULL AND real_time_end IS NOT NULL AND "
-            "evidence_ref_id IS NOT NULL AND calendar_evidence_ref_id IS NOT NULL AND "
-            "calendar_source IS NOT NULL AND calendar_provider_object_id IS NOT NULL AND "
-            "calendar_revision IS NOT NULL)",
-            name="macro_fred_authority_required",
+            "authority_version IS NULL OR authority_version IN "
+            "('legacy_task3', 'research_macro_v1')",
+            name="macro_authority_version_allowed",
+        ),
+        CheckConstraint(
+            "COALESCE(lower(source) NOT IN ('fred', 'alfred') "
+            "OR authority_version = 'legacy_task3' OR "
+            "(source = lower(source) AND authority_version = 'research_macro_v1' "
+            "AND provider_object_id IS NOT NULL AND real_time_start IS NOT NULL "
+            "AND real_time_end IS NOT NULL AND evidence_ref_id IS NOT NULL "
+            "AND calendar_evidence_ref_id IS NOT NULL AND calendar_source IS NOT NULL "
+            "AND calendar_provider_object_id IS NOT NULL "
+            "AND calendar_revision IS NOT NULL), FALSE)",
+            name="macro_research_v1_authority_required",
         ),
         CheckConstraint(
             "(series = 'DEXHKUS') = display_sanity_only",
@@ -242,6 +250,7 @@ class MacroObservation(ImmutableCreatedAt, Base):
     value: Mapped[Decimal]
     unit: Mapped[str] = mapped_column(String(100))
     provider_object_id: Mapped[str | None] = mapped_column(String(255))
+    authority_version: Mapped[str | None] = mapped_column(String(32))
     real_time_start: Mapped[date | None] = mapped_column(Date)
     real_time_end: Mapped[date | None] = mapped_column(Date)
     evidence_ref_id: Mapped[UUID | None]
