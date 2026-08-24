@@ -1,0 +1,90 @@
+import { validate as validateUuid } from "uuid";
+
+import { NexusBffError } from "../engine/errors";
+
+const DECIMAL = /^(?:0(?:\.\d{1,18})?|1(?:\.0{1,18})?)$/;
+
+export type ExactJson = { bytes: Uint8Array; value: Record<string, unknown> };
+
+export async function readExactJson(request: Request, message: string): Promise<ExactJson> {
+  if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+    throw invalid(message);
+  }
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  let value: unknown;
+  try { value = JSON.parse(new TextDecoder().decode(bytes)); } catch { throw invalid(message); }
+  if (!isPlain(value)) throw invalid(message);
+  return { bytes, value };
+}
+
+export function requireIdempotencyKey(request: Request): string {
+  const value = request.headers.get("idempotency-key");
+  if (!value || value.length > 255 || /[^\x21-\x7E]/.test(value)) {
+    throw invalid("The idempotency key is invalid.");
+  }
+  return value;
+}
+
+export function requireProposalAdmission(value: Record<string, unknown>): void {
+  requireExactKeys(value, ["portfolio_snapshot_id", "data_snapshot_id", "cost_policy_id"]);
+  for (const key of ["portfolio_snapshot_id", "data_snapshot_id", "cost_policy_id"] as const) {
+    if (typeof value[key] !== "string" || !validateUuid(value[key])) {
+      throw invalid("The proposal request is invalid.");
+    }
+  }
+}
+
+export function requireLifecycleVersion(request: Request, value: Record<string, unknown>): number {
+  requireExactKeys(value, ["version"]);
+  const version = value.version;
+  if (!Number.isSafeInteger(version) || (version as number) < 1) {
+    throw invalid("The proposal version is invalid.");
+  }
+  if (request.headers.get("if-match") !== `"${version}"`) {
+    throw invalid("If-Match must match the proposal version.");
+  }
+  return version as number;
+}
+
+export function requireWhatIf(value: Record<string, unknown>): void {
+  requireExactKeys(value, ["proposal_group_id", "proposal_id", "policy_version", "positions"]);
+  if (typeof value.proposal_group_id !== "string" || !validateUuid(value.proposal_group_id)
+    || typeof value.proposal_id !== "string" || !validateUuid(value.proposal_id)
+    || value.policy_version !== "optimizer_v1"
+    || !Array.isArray(value.positions) || value.positions.length < 1 || value.positions.length > 30) {
+    throw invalid("The what-if request is invalid.");
+  }
+  const seen = new Set<string>();
+  for (const position of value.positions) {
+    if (!isPlain(position)) throw invalid("The what-if request is invalid.");
+    requireExactKeys(position, ["instrument_id", "weight"]);
+    if (typeof position.instrument_id !== "string" || !validateUuid(position.instrument_id)
+      || seen.has(position.instrument_id)
+      || typeof position.weight !== "string" || !DECIMAL.test(position.weight)) {
+      throw invalid("The what-if request is invalid.");
+    }
+    seen.add(position.instrument_id);
+  }
+}
+
+export function proposalGroupId(request: Request, action?: "shadow" | "reject"): string {
+  const suffix = action ? `/${action}` : "";
+  const match = new RegExp(`^/api/v1/optimization-proposals/([^/]+)${suffix}$`).exec(new URL(request.url).pathname);
+  const value = match?.[1];
+  if (!value || !validateUuid(value)) throw invalid("The proposal group is invalid.");
+  return value;
+}
+
+function requireExactKeys(value: Record<string, unknown>, keys: string[]): void {
+  if (Object.keys(value).length !== keys.length || !keys.every((key) => key in value)) {
+    throw invalid("The request body is invalid.");
+  }
+}
+
+function invalid(message: string): NexusBffError {
+  return new NexusBffError(400, "VALIDATION_ERROR", message);
+}
+
+function isPlain(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
