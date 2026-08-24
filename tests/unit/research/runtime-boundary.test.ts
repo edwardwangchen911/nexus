@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { sanitizeEngineResponse } from "../../../app/lib/engine/client";
-import { briefEnvelope, instrumentId, researchData, researchEnvelope, runId, sessionDate } from "./fixtures";
+import { briefEnvelope, decisionTime, instrumentId, researchAdmissionData, researchAdmissionEnvelope, researchData, researchEnvelope, runId, sessionDate } from "./fixtures";
 
 describe("research Engine response boundary", () => {
   it("accepts closed research and brief contracts", async () => {
@@ -10,6 +10,29 @@ describe("research Engine response boundary", () => {
 
     const brief = await sanitizeEngineResponse(json(briefEnvelope()), undefined, `/internal/v1/briefs/${sessionDate}`);
     expect(brief.status).toBe(200);
+  });
+
+  it("accepts a closed server-authoritative research admission", async () => {
+    const response = await sanitizeEngineResponse(
+      json(researchAdmissionEnvelope()),
+      `https://nexus.test/api/v1/instruments/${instrumentId}/research-admission?as_of=${encodeURIComponent(decisionTime)}`,
+    );
+    expect(response.status).toBe(200);
+  });
+
+  it.each([
+    researchAdmissionData({ instrument_id: "0198d600-1000-7000-8000-000000001598" }),
+    researchAdmissionData({ decision_time: "2026-08-24T20:00:00.001Z" }),
+    researchAdmissionData({ eligible: true, reason: "data_snapshot_unavailable", data_snapshot_id: null }),
+    researchAdmissionData({ eligible: false, reason: null, data_snapshot_id: null }),
+    researchAdmissionData({ eligible: false, reason: "data_snapshot_unavailable", data_snapshot_id: "0198d600-1000-7000-8000-000000001598" }),
+    researchAdmissionData({ credential: "must-not-escape" }),
+  ])("rejects a mismatched or unsafe research admission %#", async (admission) => {
+    const response = await sanitizeEngineResponse(
+      json(researchAdmissionEnvelope(admission)),
+      `https://nexus.test/api/v1/instruments/${instrumentId}/research-admission?as_of=${encodeURIComponent(decisionTime)}`,
+    );
+    expect(response.status).toBe(500);
   });
 
   it.each([

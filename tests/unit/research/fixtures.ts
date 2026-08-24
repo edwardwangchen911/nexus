@@ -1,6 +1,7 @@
 import type { components } from "../../../app/lib/generated/schema";
 
 type Research = components["schemas"]["ResearchRunResponse"];
+type ResearchAdmission = components["schemas"]["ResearchAdmissionResponse"];
 type Brief = components["schemas"]["DailyBriefResponse"];
 
 export const instrumentId = "0198d600-1000-7000-8000-000000001501";
@@ -93,6 +94,24 @@ export function researchData(overrides: Record<string, unknown> = {}): Research 
 }
 
 export function researchEnvelope(data = researchData()) {
+  return {
+    data,
+    meta: { request_id: requestId, schema_version: "1", as_of: decisionTime },
+  };
+}
+
+export function researchAdmissionData(overrides: Record<string, unknown> = {}): ResearchAdmission {
+  return {
+    eligible: true,
+    reason: null,
+    instrument_id: instrumentId,
+    data_snapshot_id: dataSnapshotId,
+    decision_time: decisionTime,
+    ...overrides,
+  } as ResearchAdmission;
+}
+
+export function researchAdmissionEnvelope(data = researchAdmissionData()) {
   return {
     data,
     meta: { request_id: requestId, schema_version: "1", as_of: decisionTime },

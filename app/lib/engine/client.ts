@@ -13,7 +13,7 @@ const MAX_PORTFOLIO_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_ANALYSIS_RESPONSE_BYTES = 1024 * 1024;
 type InternalPath = Extract<keyof paths, `/internal/v1/${string}`>;
 type DynamicInternalPath = Extract<InternalPath, `${string}{${string}}${string}`>;
-type QueryInternalPath = Extract<InternalPath, "/internal/v1/market" | "/internal/v1/overview" | "/internal/v1/portfolios" | "/internal/v1/instruments/{instrument_id}/research">;
+type QueryInternalPath = Extract<InternalPath, "/internal/v1/market" | "/internal/v1/overview" | "/internal/v1/portfolios" | "/internal/v1/instruments/{instrument_id}/research" | "/internal/v1/instruments/{instrument_id}/research-admission">;
 type EngineBody = string | Uint8Array | ArrayBuffer;
 type MethodFor<Path extends InternalPath> =
   | (Exclude<paths[Path]["get"], undefined> extends never ? never : "GET")
@@ -94,14 +94,14 @@ function allowedTarget<Path extends InternalPath>(target: EngineTarget<Path>, ba
   if (!matchesTemplate(template, path)) return null;
 
   const query = dynamic?.query;
-  if (query !== undefined && template !== "/internal/v1/market" && template !== "/internal/v1/overview" && template !== "/internal/v1/portfolios" && template !== "/internal/v1/instruments/{instrument_id}/research") return null;
+  if (query !== undefined && template !== "/internal/v1/market" && template !== "/internal/v1/overview" && template !== "/internal/v1/portfolios" && template !== "/internal/v1/instruments/{instrument_id}/research" && template !== "/internal/v1/instruments/{instrument_id}/research-admission") return null;
   const canonicalQuery = template === "/internal/v1/market"
     ? canonicalMarketQuery(query ?? "")
     : template === "/internal/v1/overview"
       ? canonicalOverviewQuery(query ?? "")
     : template === "/internal/v1/portfolios"
       ? canonicalPortfolioQuery(query ?? "")
-      : template === "/internal/v1/instruments/{instrument_id}/research"
+      : template === "/internal/v1/instruments/{instrument_id}/research" || template === "/internal/v1/instruments/{instrument_id}/research-admission"
         ? canonicalResearchQuery(query ?? "")
       : "";
   if (canonicalQuery === null) return null;
@@ -153,6 +153,10 @@ function matchesTemplate(template: InternalPath, path: string): boolean {
   const instrumentResearch = /^\/internal\/v1\/instruments\/([^/]+)\/research$/.exec(path);
   if (instrumentResearch && validateUuid(instrumentResearch[1])) {
     return template === "/internal/v1/instruments/{instrument_id}/research";
+  }
+  const researchAdmission = /^\/internal\/v1\/instruments\/([^/]+)\/research-admission$/.exec(path);
+  if (researchAdmission && validateUuid(researchAdmission[1])) {
+    return template === "/internal/v1/instruments/{instrument_id}/research-admission";
   }
   const brief = /^\/internal\/v1\/briefs\/(\d{4}-\d{2}-\d{2})$/.exec(path);
   if (brief && isIsoDate(brief[1])) {
@@ -256,7 +260,7 @@ function isAnalysisPath(pathname: string): boolean {
     || pathname.includes("/optimization-proposals")
     || pathname.endsWith("/what-if/evaluate")
     || pathname.includes("/research-runs")
-    || pathname.includes("/instruments/") && pathname.endsWith("/research")
+    || pathname.includes("/instruments/") && (pathname.endsWith("/research") || pathname.endsWith("/research-admission"))
     || pathname.includes("/briefs/");
 }
 function engineConfig(): { baseUrl: string; keyId: string; secret: string } { const baseUrl = process.env.NEXUS_ENGINE_BASE_URL; const keyId = process.env.NEXUS_ENGINE_HMAC_CURRENT_KEY_ID ?? "current"; const secret = process.env.NEXUS_ENGINE_HMAC_CURRENT_SECRET ?? process.env.NEXUS_ENGINE_HMAC_SECRET; if (!baseUrl || !secret) throw new Error("NEXUS engine service configuration is incomplete"); return { baseUrl, keyId, secret }; }

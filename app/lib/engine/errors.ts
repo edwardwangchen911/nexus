@@ -13,6 +13,7 @@ import {
   portfolioPageRuntimeSchema,
   portfolioDiagnosticRuntimeSchema,
   portfolioSnapshotRuntimeSchema,
+  researchAdmissionRuntimeSchema,
   researchRunRuntimeSchema,
   runtimeContractSchemas,
   watchlistMembershipRuntimeSchema,
@@ -194,6 +195,13 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       ? data
       : INVALID_DATA;
   }
+  const researchAdmission = /^\/internal\/v1\/instruments\/([^/]+)\/research-admission$/.exec(pathname);
+  if (researchAdmission && validateUuid(researchAdmission[1])) {
+    return matchesRuntimeSchema(data, researchAdmissionRuntimeSchema) && isPlain(data)
+      && sameUuid(data.instrument_id, researchAdmission[1]) && researchAdmissionValid(data)
+      ? data
+      : INVALID_DATA;
+  }
   const brief = /^\/internal\/v1\/briefs\/(\d{4}-\d{2}-\d{2})$/.exec(pathname);
   if (brief && isIsoDate(brief[1])) {
     return matchesRuntimeSchema(data, dailyBriefRuntimeSchema) && isPlain(data)
@@ -284,6 +292,11 @@ function responseIdentityValid(data: unknown, meta: Record<string, unknown>, req
   if (!requestUrl) return true;
   try {
     const url = new URL(requestUrl);
+    if (/^\/(?:api|internal)\/v1\/instruments\/[^/]+\/research-admission$/.test(url.pathname)) {
+      const values = url.searchParams.getAll("as_of");
+      return values.length === 1 && isUtcIso(values[0]) && meta.as_of === values[0]
+        && isPlain(data) && data.decision_time === values[0];
+    }
     if (/^\/(?:api|internal)\/v1\/instruments\/[^/]+\/research$/.test(url.pathname)) {
       const values = url.searchParams.getAll("as_of");
       return values.length === 1 && isUtcIso(values[0]) && meta.as_of === values[0]
@@ -292,6 +305,17 @@ function responseIdentityValid(data: unknown, meta: Record<string, unknown>, req
     }
     return true;
   } catch { return false; }
+}
+
+function researchAdmissionValid(data: Record<string, unknown>): boolean {
+  if (typeof data.eligible !== "boolean") return false;
+  const hasSnapshot = typeof data.data_snapshot_id === "string" && validateUuid(data.data_snapshot_id);
+  if (data.eligible) return data.reason === null && hasSnapshot;
+  if (data.reason === null) return false;
+  if (["instrument_not_found", "decision_time_in_future", "data_snapshot_unavailable"].includes(String(data.reason))) {
+    return data.data_snapshot_id === null;
+  }
+  return hasSnapshot;
 }
 
 function researchAuthorityValid(data: Record<string, unknown>): boolean {

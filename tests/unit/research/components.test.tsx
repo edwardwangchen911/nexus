@@ -7,7 +7,7 @@ import { ResearchPanel } from "../../../app/(protected)/research/[instrumentId]/
 import { DecisionCard } from "../../../app/components/decision-card";
 import { EvidenceDrawer } from "../../../app/components/evidence-drawer";
 import type { DataStateKind } from "../../../app/components/data-state";
-import { briefData, evidence, researchData } from "./fixtures";
+import { briefData, evidence, researchAdmissionData, researchData } from "./fixtures";
 
 const states: Array<[DataStateKind, string]> = [
   ["loading", "正在加载"], ["empty", "暂无数据"], ["ready", "数据已就绪"],
@@ -20,6 +20,7 @@ describe("research evidence docket", () => {
     render(<ResearchPanel
       state={state}
       research={["ready", "partial", "stale"].includes(state) ? researchData() : null}
+      admission={null}
       submitting={false}
       notice={null}
       onRefresh={vi.fn()}
@@ -51,11 +52,32 @@ describe("research evidence docket", () => {
 
   it("keeps cached partial/stale evidence visible and disables research creation", () => {
     for (const state of ["partial", "stale"] as const) {
-      const { unmount } = render(<ResearchPanel state={state} research={researchData()} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
+      const { unmount } = render(<ResearchPanel state={state} research={researchData()} admission={researchAdmissionData()} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
       expect(screen.getByRole("heading", { name: "委员会决策记录" })).toBeVisible();
       expect(screen.queryByRole("button", { name: "重新运行冻结研究" })).not.toBeInTheDocument();
       unmount();
     }
+  });
+
+  it("enables a first frozen research run only from an eligible admission", () => {
+    const onRun = vi.fn();
+    render(<ResearchPanel state="empty" research={null} admission={researchAdmissionData()} submitting={false} notice={null} onRefresh={vi.fn()} onRun={onRun} />);
+    fireEvent.click(screen.getByRole("button", { name: "运行冻结研究" }));
+    expect(onRun).toHaveBeenCalledOnce();
+  });
+
+  it("explains an ineligible admission and keeps research creation disabled", () => {
+    render(<ResearchPanel
+      state="empty"
+      research={null}
+      admission={researchAdmissionData({ eligible: false, reason: "data_snapshot_unavailable", data_snapshot_id: null })}
+      submitting={false}
+      notice={null}
+      onRefresh={vi.fn()}
+      onRun={vi.fn()}
+    />);
+    expect(screen.getByText(/该时点没有可冻结的数据快照/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /运行冻结研究/ })).not.toBeInTheDocument();
   });
 
   it("suppresses a fundamental stance for 00656.HK and explains the HKEX evidence gap", () => {
@@ -73,6 +95,7 @@ describe("research evidence docket", () => {
     render(<ResearchPanel
       state="partial"
       research={researchData({ status, intent: null, role_votes: [], disagreement: null, invalidation_conditions: [], quality_status: null, budget_reason: budgetReason, abstention_reason: reason })}
+      admission={researchAdmissionData()}
       submitting={false}
       notice={null}
       onRefresh={vi.fn()}

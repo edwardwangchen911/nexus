@@ -6,6 +6,7 @@ import {
   instrumentId,
   requestId,
   researchData,
+  researchAdmissionEnvelope,
   researchEnvelope,
   runId,
   sessionDate,
@@ -99,6 +100,33 @@ describe("research BFF routes", () => {
       template: "/internal/v1/briefs/{session_date}",
       path: `/internal/v1/briefs/${sessionDate}`,
     }, { method: "GET", actor });
+  });
+
+  it("binds research admission to the canonical instrument and as-of", async () => {
+    engineFetch.mockResolvedValueOnce(Response.json(researchAdmissionEnvelope()));
+    const admissionRoute = await import("../../../app/api/v1/instruments/[instrumentId]/research-admission/route");
+
+    const response = await admissionRoute.GET(new Request(
+      `https://nexus.test/api/v1/instruments/${instrumentId}/research-admission?as_of=${encodeURIComponent(decisionTime)}`,
+    ));
+
+    expect(response.status).toBe(200);
+    expect(engineFetch).toHaveBeenLastCalledWith({
+      template: "/internal/v1/instruments/{instrument_id}/research-admission",
+      path: `/internal/v1/instruments/${instrumentId}/research-admission`,
+      query: `as_of=${encodeURIComponent(decisionTime)}`,
+    }, { method: "GET", actor });
+  });
+
+  it.each([
+    `/api/v1/instruments/${instrumentId}/research-admission`,
+    `/api/v1/instruments/${instrumentId}/research-admission?as_of=${encodeURIComponent(decisionTime)}&as_of=${encodeURIComponent(decisionTime)}`,
+    `/api/v1/instruments/not-a-uuid/research-admission?as_of=${encodeURIComponent(decisionTime)}`,
+  ])("rejects invalid research admission route identity %s before Engine", async (path) => {
+    const admissionRoute = await import("../../../app/api/v1/instruments/[instrumentId]/research-admission/route");
+    const response = await admissionRoute.GET(new Request(`https://nexus.test${path}`));
+    expect(response.status).toBe(400);
+    expect(engineFetch).not.toHaveBeenCalled();
   });
 
   it.each([

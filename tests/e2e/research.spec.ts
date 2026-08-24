@@ -3,7 +3,10 @@ import { expect, test, type Page } from "@playwright/test";
 
 import {
   briefEnvelope,
+  dataSnapshotId,
+  decisionTime,
   instrumentId,
+  researchAdmissionEnvelope,
   researchEnvelope,
   sessionDate,
 } from "../unit/research/fixtures";
@@ -55,7 +58,45 @@ for (const viewport of [
   });
 }
 
+test("empty research uses only the server admission body for the first run", async ({ page }) => {
+  let postedBody: unknown = null;
+  await installShellFixture(page);
+  await page.route(`**/api/v1/instruments/${instrumentId}/research-admission?**`, async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(researchAdmissionEnvelope()),
+  }));
+  await page.route(`**/api/v1/instruments/${instrumentId}/research?**`, async (route) => route.fulfill({
+    status: 404,
+    contentType: "application/json",
+    body: JSON.stringify({ error: { code: "NOT_FOUND" } }),
+  }));
+  await page.route("**/api/v1/research-runs", async (route) => {
+    postedBody = route.request().postDataJSON();
+    expect(route.request().headers()["idempotency-key"]).toBeTruthy();
+    await route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify(researchEnvelope()) });
+  });
+
+  await page.goto(`/research/${instrumentId}?as_of=${encodeURIComponent(decisionTime)}`);
+  await page.getByRole("button", { name: "运行冻结研究" }).click();
+
+  await expect(page.getByText(/冻结研究已登记/)).toBeVisible();
+  expect(postedBody).toEqual({
+    instrument_id: instrumentId,
+    data_snapshot_id: dataSnapshotId,
+    decision_time: decisionTime,
+  });
+  await expect(page.getByRole("button", { name: /下单|交易|买入|卖出/ })).toHaveCount(0);
+});
+
 async function installFixtures(page: Page): Promise<void> {
+  await installShellFixture(page);
+  await page.route(`**/api/v1/briefs/${sessionDate}`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(briefEnvelope()) }));
+  await page.route(`**/api/v1/instruments/${instrumentId}/research-admission?**`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(researchAdmissionEnvelope()) }));
+  await page.route(`**/api/v1/instruments/${instrumentId}/research?**`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(researchEnvelope()) }));
+}
+
+async function installShellFixture(page: Page): Promise<void> {
   await page.route("**/api/v1/integrations", async (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
@@ -64,6 +105,4 @@ async function installFixtures(page: Page): Promise<void> {
       meta: { request_id: "0198d600-1000-7000-8000-000000001598", schema_version: "1", as_of: "2026-08-25T01:00:00Z" },
     }),
   }));
-  await page.route(`**/api/v1/briefs/${sessionDate}`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(briefEnvelope()) }));
-  await page.route(`**/api/v1/instruments/${instrumentId}/research?**`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(researchEnvelope()) }));
 }
