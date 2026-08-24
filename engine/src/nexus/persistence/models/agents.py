@@ -107,6 +107,7 @@ class AgentResearchRunRecord(ImmutableCreatedAt, Base):
     schema_hash: Mapped[str] = mapped_column(String(64))
     model_hash: Mapped[str] = mapped_column(String(64))
     prompt_hash: Mapped[str] = mapped_column(String(64))
+    prompt_manifest: Mapped[dict[str, object]] = mapped_column(JSONB)
     tool_hash: Mapped[str] = mapped_column(String(64))
     input_hash: Mapped[str] = mapped_column(String(64))
     reserved_cost_usd: Mapped[Decimal]
@@ -114,6 +115,38 @@ class AgentResearchRunRecord(ImmutableCreatedAt, Base):
     pricing_version: Mapped[str] = mapped_column(String(100), default="configured")
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
+
+
+class AgentDataSnapshotEvidenceRecord(ImmutableCreatedAt, Base):
+    """Exact Task 14 evidence authority covered by one instrument snapshot."""
+
+    __tablename__ = "agent_data_snapshot_evidence"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["data_snapshot_id"],
+            ["data_snapshots.id"],
+            name="fk_agent_snapshot_evidence_snapshot",
+        ),
+        ForeignKeyConstraint(
+            ["instrument_id"], ["instruments.id"], name="fk_agent_snapshot_evidence_instrument"
+        ),
+        ForeignKeyConstraint(
+            ["evidence_ref_id"],
+            ["research_evidence_refs.id"],
+            name="fk_agent_snapshot_evidence_authority",
+        ),
+        CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
+    )
+
+    data_snapshot_id: Mapped[UUID] = mapped_column(primary_key=True)
+    instrument_id: Mapped[UUID] = mapped_column(primary_key=True)
+    evidence_ref_id: Mapped[UUID] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(100))
+    provider_object_id: Mapped[str] = mapped_column(String(255))
+    revision: Mapped[str] = mapped_column(String(255))
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    location: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64))
 
 
 class AgentResearchEventRecord(ImmutableCreatedAt, Base):

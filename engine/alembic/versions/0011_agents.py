@@ -19,6 +19,7 @@ _IMMUTABLE_TABLES = (
     "agent_research_events",
     "agent_research_outputs",
     "agent_research_output_evidence",
+    "agent_data_snapshot_evidence",
 )
 
 
@@ -87,6 +88,7 @@ def upgrade() -> None:
         sa.Column("schema_hash", sa.String(64), nullable=False),
         sa.Column("model_hash", sa.String(64), nullable=False),
         sa.Column("prompt_hash", sa.String(64), nullable=False),
+        sa.Column("prompt_manifest", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("tool_hash", sa.String(64), nullable=False),
         sa.Column("input_hash", sa.String(64), nullable=False),
         sa.Column("reserved_cost_usd", _NUMERIC, nullable=False),
@@ -125,6 +127,35 @@ def upgrade() -> None:
         sa.CheckConstraint("prompt_hash ~ '^[0-9a-f]{64}$'", name="prompt_hash_canonical"),
         sa.CheckConstraint("tool_hash ~ '^[0-9a-f]{64}$'", name="tool_hash_canonical"),
         sa.CheckConstraint("input_hash ~ '^[0-9a-f]{64}$'", name="input_hash_canonical"),
+    )
+    op.create_table(
+        "agent_data_snapshot_evidence",
+        sa.Column("data_snapshot_id", _UUID, primary_key=True),
+        sa.Column("instrument_id", _UUID, primary_key=True),
+        sa.Column("evidence_ref_id", _UUID, primary_key=True),
+        sa.Column("source", sa.String(100), nullable=False),
+        sa.Column("provider_object_id", sa.String(255), nullable=False),
+        sa.Column("revision", sa.String(255), nullable=False),
+        sa.Column("available_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("location", sa.Text(), nullable=False),
+        sa.Column("content_hash", sa.String(64), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.ForeignKeyConstraint(
+            ["data_snapshot_id"],
+            ["data_snapshots.id"],
+            name="fk_agent_snapshot_evidence_snapshot",
+        ),
+        sa.ForeignKeyConstraint(
+            ["instrument_id"], ["instruments.id"], name="fk_agent_snapshot_evidence_instrument"
+        ),
+        sa.ForeignKeyConstraint(
+            ["evidence_ref_id"],
+            ["research_evidence_refs.id"],
+            name="fk_agent_snapshot_evidence_authority",
+        ),
+        sa.CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
     )
     op.create_table(
         "agent_research_events",
@@ -243,6 +274,7 @@ def upgrade() -> None:
         "agent_research_events",
         "agent_research_outputs",
         "agent_research_output_evidence",
+        "agent_data_snapshot_evidence",
         "agent_daily_budget_reservations",
     ):
         op.execute(
@@ -278,6 +310,32 @@ def upgrade() -> None:
     op.execute(
         "CREATE TRIGGER trg_agent_research_runs_transition BEFORE UPDATE ON agent_research_runs "
         "FOR EACH ROW EXECUTE FUNCTION nexus_validate_agent_run_transition()"
+    )
+    op.execute(
+        "CREATE FUNCTION nexus_validate_agent_snapshot_evidence() RETURNS trigger LANGUAGE plpgsql AS $$ "
+        "DECLARE authority research_evidence_refs%ROWTYPE; snapshot_time timestamptz; BEGIN "
+        "SELECT * INTO authority FROM research_evidence_refs WHERE id = NEW.evidence_ref_id; "
+        "IF NOT FOUND THEN RAISE EXCEPTION 'Agent snapshot evidence authority is missing' USING ERRCODE = '23503'; END IF; "
+        "IF authority.source <> NEW.source OR authority.provider_object_id <> NEW.provider_object_id "
+        "OR authority.revision <> NEW.revision OR authority.available_at <> NEW.available_at "
+        "OR authority.location <> NEW.location OR authority.content_hash <> NEW.content_hash THEN "
+        "RAISE EXCEPTION 'Agent snapshot evidence authority mismatch' USING ERRCODE = '23514'; END IF; "
+        "IF NEW.source <> 'fixture' AND NOT ("
+        "EXISTS (SELECT 1 FROM filings WHERE evidence_ref_id = NEW.evidence_ref_id AND instrument_id = NEW.instrument_id) OR "
+        "EXISTS (SELECT 1 FROM financial_facts WHERE evidence_ref_id = NEW.evidence_ref_id AND instrument_id = NEW.instrument_id) OR "
+        "EXISTS (SELECT 1 FROM corporate_actions WHERE evidence_ref_id = NEW.evidence_ref_id AND instrument_id = NEW.instrument_id) OR "
+        "EXISTS (SELECT 1 FROM macro_observations WHERE authority_version = 'research_macro_v1' AND "
+        "(evidence_ref_id = NEW.evidence_ref_id OR calendar_evidence_ref_id = NEW.evidence_ref_id))) THEN "
+        "RAISE EXCEPTION 'Agent snapshot evidence is not owned by the instrument' USING ERRCODE = '23514'; END IF; "
+        "SELECT available_at INTO snapshot_time FROM data_snapshots WHERE id = NEW.data_snapshot_id; "
+        "IF snapshot_time IS NULL THEN RAISE EXCEPTION 'Agent snapshot authority is missing' USING ERRCODE = '23503'; END IF; "
+        "IF NEW.available_at > snapshot_time THEN RAISE EXCEPTION 'future evidence cannot bind Agent snapshot' USING ERRCODE = '23514'; END IF; "
+        "RETURN NEW; END; $$"
+    )
+    op.execute(
+        "CREATE TRIGGER trg_agent_snapshot_evidence_validate BEFORE INSERT OR UPDATE "
+        "ON agent_data_snapshot_evidence FOR EACH ROW "
+        "EXECUTE FUNCTION nexus_validate_agent_snapshot_evidence()"
     )
     op.execute(
         "CREATE FUNCTION nexus_validate_agent_output_evidence() RETURNS trigger LANGUAGE plpgsql AS $$ "
@@ -353,9 +411,11 @@ def downgrade() -> None:
     op.execute("DROP TRIGGER trg_agent_budget_delete ON agent_daily_budget_reservations")
     op.execute("DROP TRIGGER trg_agent_budget_transition ON agent_daily_budget_reservations")
     op.execute("DROP TRIGGER trg_agent_output_evidence_validate ON agent_research_output_evidence")
+    op.execute("DROP TRIGGER trg_agent_snapshot_evidence_validate ON agent_data_snapshot_evidence")
     for table in (
         "agent_daily_budget_reservations",
         "agent_research_output_evidence",
+        "agent_data_snapshot_evidence",
         "agent_research_outputs",
         "agent_research_events",
         "agent_research_runs",
@@ -367,6 +427,7 @@ def downgrade() -> None:
     op.drop_table("agent_research_output_evidence")
     op.drop_table("agent_research_outputs")
     op.drop_table("agent_research_events")
+    op.drop_table("agent_data_snapshot_evidence")
     op.drop_table("agent_research_runs")
     op.drop_table("agent_model_configs")
     op.drop_table("agent_prompt_versions")
@@ -375,4 +436,5 @@ def downgrade() -> None:
     op.execute("DROP FUNCTION nexus_prevent_agent_budget_delete()")
     op.execute("DROP FUNCTION nexus_validate_agent_job_change()")
     op.execute("DROP FUNCTION nexus_validate_agent_output_evidence()")
+    op.execute("DROP FUNCTION nexus_validate_agent_snapshot_evidence()")
     op.execute("DROP FUNCTION nexus_prevent_agent_immutable_change()")

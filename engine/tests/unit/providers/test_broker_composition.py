@@ -41,6 +41,12 @@ def test_compose_profiles_keep_broker_capability_out_of_the_app_profile() -> Non
     assert _service_profiles(compose, "fosun-gateway") == {"broker"}
 
 
+def test_compose_worker_explicitly_selects_responses_runtime() -> None:
+    compose = (WORKTREE_ROOT / "infra/compose.yaml").read_text()
+
+    assert "- AGENT_RUNTIME_MODE=responses" in _service_block(compose, "worker")
+
+
 def _service_block(compose: str, service: str) -> str:
     match = re.search(
         rf"(?ms)^  {re.escape(service)}:\n(?P<body>.*?)(?=^  [a-z0-9-]+:\n|\Z)",
@@ -56,9 +62,6 @@ def _service_environment(compose: str, service: str) -> set[str]:
 
 def _service_profiles(compose: str, service: str) -> set[str]:
     block = _service_block(compose, service)
-    match = re.search(r'(?m)^    profiles: \[(?P<profiles>[^]]+)\]$', block)
+    match = re.search(r"(?m)^    profiles: \[(?P<profiles>[^]]+)\]$", block)
     assert match is not None
-    return {
-        profile.strip().strip('"')
-        for profile in match.group("profiles").split(",")
-    }
+    return {profile.strip().strip('"') for profile in match.group("profiles").split(",")}

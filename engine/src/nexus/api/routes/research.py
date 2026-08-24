@@ -10,7 +10,11 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.models import ResearchRequest
-from nexus.agents.persistence import admit_research_run
+from nexus.agents.persistence import (
+    admit_research_run,
+    load_complete_prompt_authority,
+    select_authoritative_snapshot,
+)
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
@@ -29,12 +33,10 @@ from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
-    AgentPromptVersionRecord,
     AgentResearchOutputEvidenceRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
-from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from nexus.settings import EngineSettings
@@ -68,40 +70,28 @@ async def get_research_admission(
         ) from error
     clock = getattr(request.app.state, "utc_clock", None)
     now = utc_now() if clock is None else require_utc(clock())
-    reason: Literal[
-        "instrument_not_found",
-        "decision_time_in_future",
-        "data_snapshot_unavailable",
-        "prompt_authority_unavailable",
-        "model_pricing_unavailable",
-    ] | None = None
+    reason: (
+        Literal[
+            "instrument_not_found",
+            "decision_time_in_future",
+            "data_snapshot_unavailable",
+            "prompt_authority_unavailable",
+            "model_pricing_unavailable",
+        ]
+        | None
+    ) = None
     snapshot = None
     if bounded_as_of > now:
         reason = "decision_time_in_future"
     elif await session.get(Instrument, instrument_id) is None:
         reason = "instrument_not_found"
     else:
-        snapshot = await session.scalar(
-            select(DataSnapshot)
-            .where(
-                DataSnapshot.available_at <= bounded_as_of,
-                DataSnapshot.received_at <= bounded_as_of,
-            )
-            .order_by(
-                desc(DataSnapshot.available_at),
-                desc(DataSnapshot.received_at),
-                desc(DataSnapshot.id),
-            )
-            .limit(1)
+        snapshot = await select_authoritative_snapshot(
+            session, instrument_id=instrument_id, as_of=bounded_as_of
         )
         if snapshot is None:
             reason = "data_snapshot_unavailable"
-        elif not await session.scalar(
-            select(AgentPromptVersionRecord.id)
-            .where(AgentPromptVersionRecord.role == "orchestrator")
-            .order_by(desc(AgentPromptVersionRecord.created_at))
-            .limit(1)
-        ):
+        elif await load_complete_prompt_authority(session) is None:
             reason = "prompt_authority_unavailable"
         elif not await session.scalar(
             select(AgentModelConfigRecord.id)

@@ -75,7 +75,7 @@ async def execute_research_run(
             status="abstained",
             reason="evidence_authority_missing",
         )
-    prompts = await _load_persisted_prompts(session)
+    prompts = await _load_persisted_prompts(session, run)
     if prompts is None:
         return await _terminal_without_usage(
             session,
@@ -279,25 +279,43 @@ async def _analyze_with_one_retry(
 
 async def _load_persisted_prompts(
     session: AsyncSession,
+    run: AgentResearchRunRecord,
 ) -> Mapping[AgentRole, AgentPromptVersionRecord] | None:
+    manifest = run.prompt_manifest
+    if not isinstance(manifest, dict) or set(manifest) != set(ROLE_ORDER):
+        return None
+    if _hash(cast(Mapping[str, object], manifest)) != run.prompt_hash:
+        return None
+    prompt_ids: list[UUID] = []
+    try:
+        for role in ROLE_ORDER:
+            item = manifest[role]
+            if not isinstance(item, dict):
+                return None
+            prompt_ids.append(UUID(cast(str, item.get("id"))))
+    except (TypeError, ValueError, AttributeError):
+        return None
     records = list(
         await session.scalars(
-            select(AgentPromptVersionRecord).order_by(
-                AgentPromptVersionRecord.role, AgentPromptVersionRecord.created_at.desc()
-            )
+            select(AgentPromptVersionRecord).where(AgentPromptVersionRecord.id.in_(prompt_ids))
         )
     )
+    by_id = {record.id: record for record in records}
     prompts: dict[AgentRole, AgentPromptVersionRecord] = {}
-    for record in records:
-        if record.role not in ROLE_ORDER or record.role in prompts:
-            continue
-        role = cast(AgentRole, record.role)
-        if hashlib.sha256(record.content.encode()).hexdigest() != record.content_hash:
+    for role, prompt_id in zip(ROLE_ORDER, prompt_ids, strict=True):
+        record = by_id.get(prompt_id)
+        item = manifest[role]
+        if (
+            record is None
+            or record.role != role
+            or not isinstance(item, dict)
+            or item.get("version") != record.version
+            or item.get("content_hash") != record.content_hash
+            or hashlib.sha256(record.content.encode()).hexdigest() != record.content_hash
+        ):
             return None
         prompts[role] = record
-    if set(prompts) != set(ROLE_ORDER):
-        return None
-    return {role: prompts[role] for role in ROLE_ORDER}
+    return prompts
 
 
 async def _load_symbol(session: AsyncSession, run: AgentResearchRunRecord) -> str | None:

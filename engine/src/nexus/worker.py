@@ -1,8 +1,11 @@
 """Bounded database-backed research worker composition root."""
 
 import asyncio
+from decimal import Decimal
+from typing import cast
 from uuid import UUID
 
+from openai import AsyncOpenAI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,19 +18,30 @@ from nexus.agents.committee import (
 )
 from nexus.agents.execution import TERMINAL, execute_research_run
 from nexus.agents.models import ResearchRequest
+from nexus.agents.responses import ResponsesClient, ResponsesCommittee, ResponsesModelConfig
+from nexus.agents.tools import ReadOnlyToolRegistry, ReadOnlyTools
 from nexus.domain.evidence import EvidenceRef
-from nexus.persistence.models.agents import AgentResearchRunRecord
-from nexus.persistence.models.data import MacroObservation
-from nexus.persistence.models.research import CorporateActionRecord, Filing, ResearchEvidenceRef
+from nexus.persistence.models.agents import (
+    AgentDataSnapshotEvidenceRecord,
+    AgentModelConfigRecord,
+    AgentResearchRunRecord,
+)
+from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.models.runtime import Job
 from nexus.persistence.session import session_factory
-from nexus.settings import AgentRuntimeMode, EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings, Environment
 
 _JOB_SCHEMA = "agent_research_job_v1"
 
 
-async def run_agent_worker_once(settings: EngineSettings) -> bool:
+async def run_agent_worker_once(
+    settings: EngineSettings,
+    *,
+    responses_client: object | None = None,
+    tools: ReadOnlyToolRegistry | None = None,
+) -> bool:
     """Claim and terminalize at most one queued Agent job outside any HTTP request."""
+    _require_worker_runtime(settings)
     factory = session_factory(settings)
     async with factory() as session, session.begin():
         job = await session.scalar(
@@ -59,22 +73,32 @@ async def run_agent_worker_once(settings: EngineSettings) -> bool:
         if run.status != "prepared":
             job.status = "FAILED"
             return True
-        evidence_ids = await _evidence_ids(session, run, settings.agent_runtime_mode)
+        evidence_ids = await _evidence_ids(
+            session,
+            run,
+            allow_fixture=settings.environment is not Environment.PRODUCTION,
+        )
+        committee = await _committee(
+            session,
+            settings,
+            run,
+            responses_client=responses_client,
+            tools=tools,
+        )
         result = await execute_research_run(
             session,
             run_id=run.id,
-            committee=_committee(settings.agent_runtime_mode),
+            committee=committee,
             evidence_ref_ids=evidence_ids,
         )
         job.status = result.status.upper()
         return True
 
 
-async def run_worker(
-    settings: EngineSettings | None = None, *, run_forever: bool = False
-) -> None:
+async def run_worker(settings: EngineSettings | None = None, *, run_forever: bool = False) -> None:
     """Validate fixture startup in tests, or poll durable jobs in the worker process."""
     configured = settings or EngineSettings()
+    _require_worker_runtime(configured)
     if not run_forever:
         await asyncio.sleep(0)
         return
@@ -87,69 +111,68 @@ async def run_worker(
 async def _evidence_ids(
     session: AsyncSession,
     run: AgentResearchRunRecord,
-    mode: AgentRuntimeMode,
+    *,
+    allow_fixture: bool,
 ) -> tuple[UUID, ...]:
-    if mode is AgentRuntimeMode.FIXTURE:
-        return tuple(
-            await session.scalars(
-                select(ResearchEvidenceRef.id)
-                .where(
-                    ResearchEvidenceRef.source == "fixture",
-                    ResearchEvidenceRef.available_at <= run.decision_time,
-                )
-                .order_by(ResearchEvidenceRef.available_at.desc(), ResearchEvidenceRef.id)
-                .limit(100)
-            )
-        )
-    owned: set[UUID] = set(
-        await session.scalars(
-            select(Filing.evidence_ref_id)
-            .where(Filing.instrument_id == run.instrument_id)
-            .limit(100)
-        )
-    )
-    owned.update(
-        await session.scalars(
-            select(CorporateActionRecord.evidence_ref_id)
-            .where(CorporateActionRecord.instrument_id == run.instrument_id)
-            .limit(100)
-        )
-    )
-    owned.update(
-        evidence_id
-        for evidence_id in await session.scalars(
-            select(MacroObservation.evidence_ref_id)
-            .where(
-                MacroObservation.authority_version == "research_macro_v1",
-                MacroObservation.evidence_ref_id.is_not(None),
-            )
-            .limit(100)
-        )
-        if evidence_id is not None
-    )
-    if not owned:
-        return ()
+    conditions = [
+        AgentDataSnapshotEvidenceRecord.data_snapshot_id == run.data_snapshot_id,
+        AgentDataSnapshotEvidenceRecord.instrument_id == run.instrument_id,
+        ResearchEvidenceRef.available_at <= run.decision_time,
+    ]
+    if not allow_fixture:
+        conditions.append(ResearchEvidenceRef.source != "fixture")
     return tuple(
         await session.scalars(
             select(ResearchEvidenceRef.id)
-            .where(
-                ResearchEvidenceRef.id.in_(owned),
-                ResearchEvidenceRef.available_at <= run.decision_time,
+            .join(
+                AgentDataSnapshotEvidenceRecord,
+                AgentDataSnapshotEvidenceRecord.evidence_ref_id == ResearchEvidenceRef.id,
             )
+            .where(*conditions)
             .order_by(ResearchEvidenceRef.available_at.desc(), ResearchEvidenceRef.id)
             .limit(100)
         )
     )
 
 
-def _committee(mode: AgentRuntimeMode) -> CommitteeModel:
-    if mode is AgentRuntimeMode.FIXTURE:
+async def _committee(
+    session: AsyncSession,
+    settings: EngineSettings,
+    run: AgentResearchRunRecord,
+    *,
+    responses_client: object | None,
+    tools: ReadOnlyToolRegistry | None,
+) -> CommitteeModel:
+    if settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE:
         return FixtureCommittee()
-    return _FailClosedResponsesCommittee()
+    model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    if (
+        model is None
+        or settings.openai_reasoning_model != model.model_id
+        or settings.openai_api_key is None
+    ):
+        return _UnavailableResponsesCommittee()
+    client = responses_client
+    if client is None:
+        client = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+    return ResponsesCommittee(
+        client=cast(ResponsesClient, client),
+        config=ResponsesModelConfig(
+            model_id=model.model_id,
+            pricing_version=model.version,
+            max_input_tokens=model.max_input_tokens,
+            max_output_tokens=model.max_output_tokens,
+            max_tool_calls=model.max_tool_calls,
+            absolute_timeout_seconds=Decimal("30"),
+            input_usd_per_million=model.input_usd_per_million,
+            output_usd_per_million=model.output_usd_per_million,
+        ),
+        tools=tools or ReadOnlyTools(),
+    )
 
 
-class _FailClosedResponsesCommittee:
-    """Keep configured non-fixture jobs terminal and closed without widening permissions."""
+class _UnavailableResponsesCommittee:
+    """Terminalize a job when its frozen model authority cannot be composed."""
 
     async def analyze(
         self,
@@ -165,3 +188,12 @@ class _FailClosedResponsesCommittee:
 def main() -> None:
     """Run the durable worker process entry point."""
     asyncio.run(run_worker(run_forever=True))
+
+
+def _require_worker_runtime(settings: EngineSettings) -> AgentRuntimeMode:
+    mode = settings.agent_runtime_mode
+    if mode is None or (
+        settings.environment is Environment.PRODUCTION and mode is not AgentRuntimeMode.RESPONSES
+    ):
+        raise RuntimeError("production Agent worker requires explicit responses runtime")
+    return mode

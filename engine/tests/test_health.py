@@ -43,6 +43,10 @@ def test_engine_reads_nexus_environment_alias_for_production() -> None:
         OBJECT_STORE_SECRET_ACCESS_KEY="placeholder-secret-key",
         NEXUS_ENGINE_HMAC_CURRENT_KEY_ID="current",
         NEXUS_ENGINE_HMAC_CURRENT_SECRET="placeholder-engine-secret",
+        AGENT_RUNTIME_MODE="responses",
+        OPENAI_API_KEY="placeholder-openai-key",
+        OPENAI_EXTRACTION_MODEL="configured-extraction",
+        OPENAI_REASONING_MODEL="configured-reasoning",
         FOSUN_GATEWAY_BASE_URL="https://gateway.invalid",
         FOSUN_GATEWAY_HMAC_SECRET="placeholder-gateway-secret",
     )
@@ -61,6 +65,10 @@ def test_engine_production_requires_a_current_hmac_key_pair() -> None:
             OBJECT_STORE_BUCKET="nexus",
             OBJECT_STORE_ACCESS_KEY_ID="placeholder-access-key",
             OBJECT_STORE_SECRET_ACCESS_KEY="placeholder-secret-key",
+            AGENT_RUNTIME_MODE="responses",
+            OPENAI_API_KEY="placeholder-openai-key",
+            OPENAI_EXTRACTION_MODEL="configured-extraction",
+            OPENAI_REASONING_MODEL="configured-reasoning",
             FOSUN_GATEWAY_BASE_URL="https://gateway.invalid",
             FOSUN_GATEWAY_HMAC_SECRET="placeholder-gateway-secret",
         )
@@ -80,6 +88,10 @@ def test_engine_production_rejects_an_incomplete_previous_hmac_key_pair() -> Non
             NEXUS_ENGINE_HMAC_CURRENT_KEY_ID="current",
             NEXUS_ENGINE_HMAC_CURRENT_SECRET="placeholder-engine-secret",
             NEXUS_ENGINE_HMAC_PREVIOUS_KEY_ID="previous",
+            AGENT_RUNTIME_MODE="responses",
+            OPENAI_API_KEY="placeholder-openai-key",
+            OPENAI_EXTRACTION_MODEL="configured-extraction",
+            OPENAI_REASONING_MODEL="configured-reasoning",
             FOSUN_GATEWAY_BASE_URL="https://gateway.invalid",
             FOSUN_GATEWAY_HMAC_SECRET="placeholder-gateway-secret",
         )

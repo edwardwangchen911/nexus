@@ -1,5 +1,6 @@
 """Real-PostgreSQL durable fixture committee lifecycle tests."""
 
+import hashlib
 import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -22,6 +23,7 @@ from nexus.agents.persistence import admit_research_run, release_daily_budget
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
+    AgentDataSnapshotEvidenceRecord,
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
     AgentResearchEventRecord,
@@ -302,6 +304,17 @@ async def test_worker_retries_once_with_the_identical_frozen_input_then_complete
             daily_limit_usd=Decimal("3.00"),
             now=_NOW,
         )
+    replacement_content = "new prompt that must not enter an admitted run"
+    async with factory() as session, session.begin():
+        session.add(
+            AgentPromptVersionRecord(
+                id=UUID("0198d500-1000-7000-8000-000000001698"),
+                role="bear",
+                version="fixture-v2",
+                content_hash=hashlib.sha256(replacement_content.encode()).hexdigest(),
+                content=replacement_content,
+            )
+        )
     committee = _FailOnceCommittee()
     async with factory() as session, session.begin():
         result = await execute_research_run(
@@ -317,6 +330,7 @@ async def test_worker_retries_once_with_the_identical_frozen_input_then_complete
     assert committee.calls[0][0] is committee.calls[1][0]
     assert committee.calls[0][1] is committee.calls[1][1]
     assert committee.calls[0][2] is committee.calls[1][2]
+    assert all(call[2].version == "fixture-v1" for call in committee.calls)
 
 
 @pytest.mark.asyncio
@@ -558,6 +572,48 @@ async def test_posted_fixture_run_reaches_terminal_through_worker_composition(
 
 
 @pytest.mark.asyncio
+async def test_responses_worker_reaches_terminal_with_injected_zero_network_transport(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admission = await admit_research_run(
+            session,
+            actor_id="responses-worker",
+            route="/internal/v1/research-runs",
+            idempotency_key="responses-durable",
+            request_hash="8" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID,
+                data_snapshot_id=_SNAPSHOT_ID,
+                decision_time=_NOW,
+            ),
+            prompt_version_id=prompt_ids["orchestrator"],
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("3.00"),
+            now=_NOW,
+        )
+    fake = _DurableResponsesClient()
+    settings = EngineSettings(
+        database_url=migrated_database_url,
+        agent_runtime_mode="responses",
+        openai_api_key="fixture-key",
+        openai_extraction_model="fixture-extraction",
+        openai_reasoning_model="fixture-model",
+    )
+    assert await run_agent_worker_once(settings, responses_client=fake) is True
+    async with factory() as session:
+        run = await session.get(AgentResearchRunRecord, admission.run_id)
+    assert run is not None
+    assert run.status == "completed"
+    assert len(fake.responses.calls) == len(ROLE_ORDER)
+    assert all(
+        len(call["input"][1]["content"]["evidence_refs"]) == 1 for call in fake.responses.calls
+    )
+
+
+@pytest.mark.asyncio
 async def test_server_authoritative_first_run_admission_selects_frozen_snapshot_and_time(
     migrated_database_url: str,
 ) -> None:
@@ -594,6 +650,59 @@ async def test_server_authoritative_first_run_admission_selects_frozen_snapshot_
         "data_snapshot_id": None,
         "decision_time": "2036-08-24T12:00:00Z",
     }
+
+
+@pytest.mark.asyncio
+async def test_admission_rejects_incomplete_eight_role_prompt_authority(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory, omitted_role="bear")
+    path = (
+        f"/internal/v1/instruments/{_INSTRUMENT_ID}/research-admission"
+        "?as_of=2026-08-24T12%3A00%3A00Z"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url, now=_NOW)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.json()["data"]["eligible"] is False
+    assert response.json()["data"]["reason"] == "prompt_authority_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_admission_ignores_newer_snapshot_without_instrument_evidence_authority(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    unrelated = UUID("0198d500-1000-7000-8000-000000001699")
+    async with factory() as session, session.begin():
+        session.add(
+            DataSnapshot(
+                id=unrelated,
+                source="fixture",
+                provider_object_id="unrelated-newer",
+                revision="v1",
+                observed_at=_NOW,
+                available_at=_NOW,
+                received_at=_NOW,
+                schema_version="1",
+                payload={},
+            )
+        )
+    path = (
+        f"/internal/v1/instruments/{_INSTRUMENT_ID}/research-admission"
+        "?as_of=2026-08-24T12%3A00%3A00Z"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url, now=_NOW)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.json()["data"]["eligible"] is True
+    assert response.json()["data"]["data_snapshot_id"] == str(_SNAPSHOT_ID)
 
 
 @pytest.mark.asyncio
@@ -635,7 +744,9 @@ async def test_00656_hk_worker_suppresses_fundamental_stance_and_records_missing
     assert "HKEX fundamental authority is unavailable." in result.intent.uncertainties
 
 
-async def _seed_authority(factory, *, symbol: str = "ABC") -> dict[str, UUID]:
+async def _seed_authority(
+    factory, *, symbol: str = "ABC", omitted_role: AgentRole | None = None
+) -> dict[str, UUID]:
     prompts = load_prompt_assets()
     prompt_ids = {
         role: UUID(f"0198d500-1000-7000-8000-0000000016{10 + index:02d}")
@@ -695,6 +806,20 @@ async def _seed_authority(factory, *, symbol: str = "ABC") -> dict[str, UUID]:
                 ),
             )
         )
+        await session.flush()
+        session.add(
+            AgentDataSnapshotEvidenceRecord(
+                data_snapshot_id=_SNAPSHOT_ID,
+                instrument_id=_INSTRUMENT_ID,
+                evidence_ref_id=_EVIDENCE_ID,
+                source="fixture",
+                provider_object_id="execution-evidence",
+                revision="v1",
+                available_at=_NOW - timedelta(minutes=1),
+                location=f"memory://sha256/{'e' * 64}",
+                content_hash="e" * 64,
+            )
+        )
         session.add_all(
             AgentPromptVersionRecord(
                 id=prompt_ids[role],
@@ -704,6 +829,7 @@ async def _seed_authority(factory, *, symbol: str = "ABC") -> dict[str, UUID]:
                 content=prompts[role].content,
             )
             for role in ROLE_ORDER
+            if role != omitted_role
         )
     return prompt_ids
 
@@ -722,6 +848,42 @@ class _FailingCommittee:
         del role, request, evidence_refs, prompt
         self.call_count += 1
         raise RuntimeError("deterministic fixture failure")
+
+
+class _DurableResponses:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def create(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(dict(kwargs))
+        evidence = {
+            "source": "fixture",
+            "object_id": "execution-evidence",
+            "available_at": "2026-08-24T11:59:00Z",
+            "location": f"memory://sha256/{'e' * 64}",
+            "content_hash": "e" * 64,
+        }
+        return {
+            "output": [{"type": "message"}],
+            "output_text": json.dumps(
+                {
+                    "vote": "support",
+                    "claims": [
+                        {
+                            "text": "Frozen evidence supports review.",
+                            "evidence_refs": [evidence],
+                        }
+                    ],
+                    "conflicting_facts": False,
+                }
+            ),
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+
+
+class _DurableResponsesClient:
+    def __init__(self) -> None:
+        self.responses = _DurableResponses()
 
 
 class _FailOnceCommittee:

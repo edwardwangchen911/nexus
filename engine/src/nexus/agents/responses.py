@@ -6,16 +6,20 @@ import json
 from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from nexus.agents.committee import AgentRole, CommitteeRoleOutput, PromptAsset
 from nexus.agents.models import ResearchRequest
 from nexus.agents.tools import ReadOnlyToolRegistry, response_function_tools
+from nexus.domain.evidence import EvidenceRef
+from nexus.strategy.intents import ResearchClaim
 
 
-class _ResponsesClient(Protocol):
-    responses: object
+class ResponsesClient(Protocol):
+    @property
+    def responses(self) -> object: ...
 
 
 class ResponsesModelConfig(BaseModel):
@@ -71,7 +75,7 @@ class ResponsesModelConfig(BaseModel):
 class ResponsesResearchModel:
     """Run strict custom functions and parse strict schema output within one deadline."""
 
-    def __init__(self, *, client: _ResponsesClient, config: ResponsesModelConfig) -> None:
+    def __init__(self, *, client: ResponsesClient, config: ResponsesModelConfig) -> None:
         if config.absolute_timeout_seconds <= 0:
             raise ValueError("absolute timeout must be positive")
         self._client = client
@@ -191,6 +195,144 @@ class ResponsesResearchModel:
                         ).encode()
                     ).hexdigest(),
                 }
+
+
+class _CommitteePayload(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    vote: Literal["support", "oppose", "abstain"]
+    claims: tuple[ResearchClaim, ...]
+    conflicting_facts: bool = False
+
+
+class ResponsesCommittee:
+    """Bounded eight-role adapter using only strict custom read-only functions."""
+
+    def __init__(
+        self,
+        *,
+        client: ResponsesClient,
+        config: ResponsesModelConfig,
+        tools: ReadOnlyToolRegistry,
+    ) -> None:
+        if config.absolute_timeout_seconds <= 0:
+            raise ValueError("absolute timeout must be positive")
+        if tuple(tools.names) != tuple(response_function_tools()):
+            raise ValueError("fixed tool registry required")
+        self._client = client
+        self._config = config
+        self._tools = tools
+        self._aggregate_input_tokens = 0
+        self._aggregate_output_tokens = 0
+        self._aggregate_tool_calls = 0
+
+    async def analyze(
+        self,
+        role: AgentRole,
+        request: ResearchRequest,
+        evidence_refs: tuple[EvidenceRef, ...],
+        prompt: PromptAsset,
+    ) -> CommitteeRoleOutput:
+        definitions = response_function_tools()
+        responses = getattr(self._client, "responses")
+        create = getattr(responses, "create")
+        input_items: list[Mapping[str, object]] = [
+            {"role": "system", "content": prompt.content},
+            {
+                "role": "user",
+                "content": {
+                    "role": role,
+                    "request": request.model_dump(mode="json"),
+                    "evidence_refs": [item.model_dump(mode="json") for item in evidence_refs],
+                },
+            },
+        ]
+        input_tokens = 0
+        output_tokens = 0
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + float(self._config.absolute_timeout_seconds)
+        async with asyncio.timeout_at(deadline):
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError("Responses absolute deadline exceeded")
+                result = await create(
+                    model=self._config.model_id,
+                    timeout=remaining,
+                    max_output_tokens=self._config.max_output_tokens,
+                    input=input_items,
+                    tools=list(definitions.values()),
+                    tool_choice="auto",
+                    text={
+                        "format": {
+                            "type": "json_schema",
+                            "name": "committee_role_output_v1",
+                            "strict": True,
+                            "schema": _CommitteePayload.model_json_schema(),
+                        }
+                    },
+                )
+                if not isinstance(result, Mapping):
+                    raise ValueError("Responses result must be a mapping at the transport seam")
+                usage = result.get("usage")
+                if not isinstance(usage, Mapping):
+                    raise ValueError("Responses usage is required")
+                input_tokens += _token_count(usage.get("input_tokens"))
+                output_tokens += _token_count(usage.get("output_tokens"))
+                self._aggregate_input_tokens += _token_count(usage.get("input_tokens"))
+                self._aggregate_output_tokens += _token_count(usage.get("output_tokens"))
+                if self._aggregate_input_tokens > self._config.max_input_tokens:
+                    raise ValueError("aggregate input token limit exceeded")
+                if self._aggregate_output_tokens > self._config.max_output_tokens:
+                    raise ValueError("aggregate output token limit exceeded")
+                calls = _function_calls(result.get("output"))
+                if calls:
+                    self._aggregate_tool_calls += len(calls)
+                    if self._aggregate_tool_calls > self._config.max_tool_calls:
+                        raise ValueError("aggregate tool call limit exceeded")
+                    output = result.get("output")
+                    assert isinstance(output, list)
+                    input_items.extend(cast(list[Mapping[str, object]], output))
+                    for call in calls:
+                        name = call.get("name")
+                        arguments = call.get("arguments")
+                        call_id = call.get("call_id")
+                        if not isinstance(name, str) or not isinstance(arguments, str):
+                            raise ValueError("Responses function call is malformed")
+                        if not isinstance(call_id, str) or not call_id:
+                            raise ValueError("Responses function call id is required")
+                        try:
+                            payload = json.loads(arguments)
+                        except json.JSONDecodeError as error:
+                            raise ValueError(
+                                "Responses function arguments are invalid JSON"
+                            ) from error
+                        if not isinstance(payload, Mapping):
+                            raise ValueError("Responses function arguments must be an object")
+                        tool_result = await self._tools.execute(name, payload)
+                        input_items.append(
+                            {
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": json.dumps(
+                                    tool_result, sort_keys=True, separators=(",", ":"), default=str
+                                ),
+                            }
+                        )
+                    continue
+                raw_text = result.get("output_text")
+                if not isinstance(raw_text, str):
+                    raise ValueError("Responses structured output text is required")
+                payload = _CommitteePayload.model_validate_json(raw_text)
+                return CommitteeRoleOutput(
+                    role=role,
+                    vote=payload.vote,
+                    claims=payload.claims,
+                    prompt_hash=prompt.content_hash,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    conflicting_facts=payload.conflicting_facts,
+                )
 
 
 def _function_calls(value: object) -> tuple[Mapping[str, object], ...]:

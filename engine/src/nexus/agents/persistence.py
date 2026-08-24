@@ -1,21 +1,25 @@
 """PostgreSQL-authoritative admission and daily budget accounting for Agent work."""
 
 import hashlib
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.budget import BudgetExhausted
+from nexus.agents.committee import ROLE_ORDER, AgentRole
 from nexus.agents.models import ResearchRequest
 from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
+    AgentDataSnapshotEvidenceRecord,
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
     AgentResearchRunRecord,
@@ -37,6 +41,61 @@ class ResearchAdmission:
     @property
     def run_id(self) -> UUID:
         return self.run.id
+
+
+async def load_complete_prompt_authority(
+    session: AsyncSession, *, orchestrator_id: UUID | None = None
+) -> dict[AgentRole, AgentPromptVersionRecord] | None:
+    """Select one hash-valid version for every role as a complete admission unit."""
+    records = list(
+        await session.scalars(
+            select(AgentPromptVersionRecord).order_by(
+                AgentPromptVersionRecord.role,
+                AgentPromptVersionRecord.created_at.desc(),
+                AgentPromptVersionRecord.id.desc(),
+            )
+        )
+    )
+    selected: dict[AgentRole, AgentPromptVersionRecord] = {}
+    for record in records:
+        if record.role not in ROLE_ORDER or record.role in selected:
+            continue
+        if hashlib.sha256(record.content.encode()).hexdigest() != record.content_hash:
+            return None
+        selected[cast(AgentRole, record.role)] = record
+    if set(selected) != set(ROLE_ORDER):
+        return None
+    if orchestrator_id is not None and selected["orchestrator"].id != orchestrator_id:
+        return None
+    return {role: selected[role] for role in ROLE_ORDER}
+
+
+async def select_authoritative_snapshot(
+    session: AsyncSession, *, instrument_id: UUID, as_of: datetime
+) -> DataSnapshot | None:
+    """Select only a frozen snapshot that covers Task 14 evidence for the instrument."""
+    return cast(
+        DataSnapshot | None,
+        await session.scalar(
+            select(DataSnapshot)
+            .join(
+                AgentDataSnapshotEvidenceRecord,
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id == DataSnapshot.id,
+            )
+            .where(
+                AgentDataSnapshotEvidenceRecord.instrument_id == instrument_id,
+                AgentDataSnapshotEvidenceRecord.available_at <= as_of,
+                DataSnapshot.available_at <= as_of,
+                DataSnapshot.received_at <= as_of,
+            )
+            .order_by(
+                DataSnapshot.available_at.desc(),
+                DataSnapshot.received_at.desc(),
+                DataSnapshot.id.desc(),
+            )
+            .limit(1)
+        ),
+    )
 
 
 async def reserve_daily_budget(
@@ -184,16 +243,7 @@ async def admit_research_run(
         return ResearchAdmission(run=run, replayed=True)
     instrument = await session.get(Instrument, request.instrument_id)
     snapshot = await session.get(DataSnapshot, request.data_snapshot_id)
-    prompt = (
-        await session.get(AgentPromptVersionRecord, prompt_version_id)
-        if prompt_version_id is not None
-        else await session.scalar(
-            select(AgentPromptVersionRecord)
-            .where(AgentPromptVersionRecord.role == "orchestrator")
-            .order_by(AgentPromptVersionRecord.created_at.desc())
-            .limit(1)
-        )
-    )
+    prompts = await load_complete_prompt_authority(session, orchestrator_id=prompt_version_id)
     model = (
         await session.get(AgentModelConfigRecord, model_config_id)
         if model_config_id is not None
@@ -212,13 +262,33 @@ async def admit_research_run(
         or snapshot is None
         or snapshot.available_at > request.decision_time
         or snapshot.received_at > request.decision_time
-        or prompt is None
-        or prompt.role != "orchestrator"
+        or prompts is None
+        or not await session.scalar(
+            select(AgentDataSnapshotEvidenceRecord.evidence_ref_id)
+            .where(
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id == request.data_snapshot_id,
+                AgentDataSnapshotEvidenceRecord.instrument_id == request.instrument_id,
+                AgentDataSnapshotEvidenceRecord.available_at <= request.decision_time,
+            )
+            .limit(1)
+        )
         or model is None
         or model.pricing_available_at > now
         or model.pricing_expires_at <= now
     ):
         raise ValueError("point-in-time data authority is invalid")
+    prompt_manifest = {
+        role: {
+            "id": str(prompts[role].id),
+            "version": prompts[role].version,
+            "content_hash": prompts[role].content_hash,
+        }
+        for role in ROLE_ORDER
+    }
+    prompt_manifest_hash = hashlib.sha256(
+        json.dumps(prompt_manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    prompt = prompts["orchestrator"]
     worst_case = model.worst_case_cost_usd
     run = AgentResearchRunRecord(
         instrument_id=request.instrument_id,
@@ -232,7 +302,8 @@ async def admit_research_run(
         retry_count=0,
         schema_hash=_schema_hash(),
         model_hash=model.config_hash,
-        prompt_hash=prompt.content_hash,
+        prompt_hash=prompt_manifest_hash,
+        prompt_manifest=prompt_manifest,
         tool_hash=_tool_hash(),
         input_hash=request_hash,
         reserved_cost_usd=worst_case,

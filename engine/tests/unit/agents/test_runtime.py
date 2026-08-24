@@ -8,10 +8,13 @@ from json import dumps
 from uuid import UUID
 
 import pytest
+from nexus.agents.committee import load_prompt_assets
 from nexus.agents.models import ResearchRequest
-from nexus.agents.responses import ResponsesModelConfig, ResponsesResearchModel
+from nexus.agents.responses import ResponsesCommittee, ResponsesModelConfig, ResponsesResearchModel
 from nexus.agents.tools import ReadOnlyTools
+from nexus.domain.evidence import EvidenceRef
 from nexus.settings import EngineSettings, Environment
+from nexus.worker import run_worker
 from pydantic import ValidationError
 
 
@@ -23,6 +26,26 @@ def test_non_fixture_runtime_requires_key_and_both_configured_model_ids() -> Non
             database_url="postgresql+asyncpg://fixture",
             agent_runtime_mode="responses",
         )
+
+
+@pytest.mark.asyncio
+async def test_production_worker_never_starts_with_implicit_or_explicit_fixture_runtime() -> None:
+    """Production must not silently select the deterministic CI committee."""
+    for kwargs in ({}, {"agent_runtime_mode": "fixture"}):
+        settings = EngineSettings(
+            environment=Environment.PRODUCTION,
+            database_url="postgresql+asyncpg://fixture",
+            object_store_endpoint="https://object-store.invalid",
+            object_store_region="us-east-1",
+            object_store_bucket="fixture",
+            object_store_access_key_id="fixture-access",
+            object_store_secret_access_key="fixture-secret",
+            engine_hmac_current_key_id="fixture-current",
+            engine_hmac_current_secret="fixture-hmac",
+            **kwargs,
+        )
+        with pytest.raises(RuntimeError, match="requires explicit responses runtime"):
+            await run_worker(settings)
 
 
 def test_non_fixture_runtime_accepts_primary_openai_model_environment_names(
@@ -108,6 +131,62 @@ async def test_responses_adapter_uses_one_absolute_deadline_across_the_loop() ->
             request,
             ReadOnlyTools(executors={"get_security_snapshot": lambda payload: {"ok": True}}),
         )
+
+
+@pytest.mark.asyncio
+async def test_responses_committee_returns_frozen_role_output_with_fake_transport() -> None:
+    evidence = EvidenceRef(
+        source="fixture",
+        object_id="e1",
+        available_at=datetime(2026, 8, 23, tzinfo=UTC),
+        location="fixture:e1",
+        content_hash="a" * 64,
+    )
+    fake = _CommitteeClient(evidence)
+    output = await ResponsesCommittee(
+        client=fake,
+        config=_config(max_tool_calls=0),
+        tools=ReadOnlyTools(),
+    ).analyze("bull", _request(), (evidence,), load_prompt_assets()["bull"])
+
+    assert (output.role, output.vote) == ("bull", "support")
+    assert output.claims[0].evidence_refs == (evidence,)
+    assert output.prompt_hash == load_prompt_assets()["bull"].content_hash
+    assert (output.input_tokens, output.output_tokens) == (12, 7)
+    call = fake.responses.calls[0]
+    assert call["model"] == "configured-reasoning"
+    assert call["text"]["format"]["name"] == "committee_role_output_v1"
+    assert {tool["type"] for tool in call["tools"]} == {"function"}
+
+
+class _CommitteeResponses:
+    def __init__(self, evidence: EvidenceRef) -> None:
+        self.evidence = evidence
+        self.calls: list[dict[str, object]] = []
+
+    async def create(self, **kwargs: object) -> Mapping[str, object]:
+        self.calls.append(kwargs)
+        return {
+            "output": [{"type": "message"}],
+            "output_text": dumps(
+                {
+                    "vote": "support",
+                    "claims": [
+                        {
+                            "text": "Bounded evidence supports the role vote.",
+                            "evidence_refs": [self.evidence.model_dump(mode="json")],
+                        }
+                    ],
+                    "conflicting_facts": False,
+                }
+            ),
+            "usage": {"input_tokens": 12, "output_tokens": 7},
+        }
+
+
+class _CommitteeClient:
+    def __init__(self, evidence: EvidenceRef) -> None:
+        self.responses = _CommitteeResponses(evidence)
 
 
 class _FakeResponses:

@@ -2,12 +2,14 @@
 
 import asyncio
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
 import pytest
 from nexus.agents.budget import BudgetExhausted
+from nexus.agents.committee import ROLE_ORDER, load_prompt_assets
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import (
     admit_research_run,
@@ -17,6 +19,7 @@ from nexus.agents.persistence import (
 )
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
+    AgentDataSnapshotEvidenceRecord,
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
     AgentResearchOutputEvidenceRecord,
@@ -38,6 +41,7 @@ _INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000001501")
 _SNAPSHOT_ID = UUID("0198d500-1000-7000-8000-000000001502")
 _PROMPT_ID = UUID("0198d500-1000-7000-8000-000000001503")
 _MODEL_ID = UUID("0198d500-1000-7000-8000-000000001504")
+_EVIDENCE_ID = UUID("0198d500-1000-7000-8000-000000001505")
 _RUN_IDS = tuple(UUID(f"0198d500-1000-7000-8000-0000000015{index:02d}") for index in range(10, 20))
 
 
@@ -269,6 +273,85 @@ async def test_run_authority_cannot_change_during_a_legal_state_transition(
 
 
 @pytest.mark.asyncio
+async def test_prompt_manifest_and_snapshot_evidence_are_database_immutable(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admission = await admit_research_run(
+            session,
+            actor_id="fixture-actor",
+            route="/internal/v1/research-runs",
+            idempotency_key="frozen-prompt-manifest",
+            request_hash="7" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID,
+                data_snapshot_id=_SNAPSHOT_ID,
+                decision_time=_NOW,
+            ),
+            prompt_version_id=_PROMPT_ID,
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("3.00"),
+            now=_NOW,
+        )
+    with pytest.raises(IntegrityError, match="run authority is immutable"):
+        async with factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "UPDATE agent_research_runs SET status='running', "
+                    "prompt_manifest='{}'::jsonb WHERE id=:run_id"
+                ),
+                {"run_id": admission.run_id},
+            )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_evidence_rejects_nonfixture_task14_authority_without_instrument_owner(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    unowned_id = UUID("0198d500-1000-7000-8000-000000001599")
+    async with factory() as session, session.begin():
+        session.add(
+            ResearchEvidenceRef(
+                id=unowned_id,
+                source="sec",
+                provider_object_id="unowned-evidence",
+                revision="v1",
+                available_at=_NOW - timedelta(minutes=1),
+                location=f"memory://sha256/{'9' * 64}",
+                content_hash="9" * 64,
+                byte_length=42,
+            )
+        )
+    with pytest.raises(IntegrityError, match="not owned by the instrument"):
+        async with factory() as session, session.begin():
+            session.add(
+                AgentDataSnapshotEvidenceRecord(
+                    data_snapshot_id=_SNAPSHOT_ID,
+                    instrument_id=_INSTRUMENT_ID,
+                    evidence_ref_id=unowned_id,
+                    source="sec",
+                    provider_object_id="unowned-evidence",
+                    revision="v1",
+                    available_at=_NOW - timedelta(minutes=1),
+                    location=f"memory://sha256/{'9' * 64}",
+                    content_hash="9" * 64,
+                )
+            )
+    with pytest.raises(IntegrityError, match="append-only"):
+        async with factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "DELETE FROM agent_data_snapshot_evidence WHERE data_snapshot_id=:snapshot_id"
+                ),
+                {"snapshot_id": _SNAPSHOT_ID},
+            )
+
+
+@pytest.mark.asyncio
 async def test_budget_rows_reject_delete_and_preserve_settled_spend(
     migrated_database_url: str,
 ) -> None:
@@ -353,10 +436,7 @@ async def test_agent_job_payload_is_frozen_and_job_cannot_be_deleted(
     with pytest.raises(IntegrityError, match="job authority is immutable"):
         async with factory() as session, session.begin():
             await session.execute(
-                text(
-                    "UPDATE jobs SET status='RUNNING', payload=:payload "
-                    "WHERE job_key=:job_key"
-                ),
+                text("UPDATE jobs SET status='RUNNING', payload=:payload WHERE job_key=:job_key"),
                 {
                     "payload": '{"run_id":"00000000-0000-0000-0000-000000000000"}',
                     "job_key": job_key,
@@ -473,6 +553,13 @@ async def test_output_evidence_requires_exact_task14_owner_and_point_in_time(
 
 
 async def _seed_authority(factory, *, snapshot_available_at: datetime = _NOW) -> None:
+    prompts = load_prompt_assets()
+    prompt_ids = {
+        role: _PROMPT_ID
+        if role == "orchestrator"
+        else UUID(f"0198d500-1000-7000-8000-0000000016{20 + index:02d}")
+        for index, role in enumerate(ROLE_ORDER)
+    }
     async with factory() as session, session.begin():
         session.add_all(
             (
@@ -495,13 +582,6 @@ async def _seed_authority(factory, *, snapshot_available_at: datetime = _NOW) ->
                     schema_version="1",
                     payload={},
                 ),
-                AgentPromptVersionRecord(
-                    id=_PROMPT_ID,
-                    role="orchestrator",
-                    version="fixture-v1",
-                    content_hash="1" * 64,
-                    content="fixture prompt",
-                ),
                 AgentModelConfigRecord(
                     id=_MODEL_ID,
                     model_id="fixture-model",
@@ -515,11 +595,52 @@ async def _seed_authority(factory, *, snapshot_available_at: datetime = _NOW) ->
                     pricing_available_at=_NOW - timedelta(days=1),
                     pricing_expires_at=_NOW + timedelta(days=1),
                 ),
+                ResearchEvidenceRef(
+                    id=_EVIDENCE_ID,
+                    source="fixture",
+                    provider_object_id="admission-evidence",
+                    revision="v1",
+                    available_at=_NOW - timedelta(minutes=1),
+                    location=f"memory://sha256/{'a' * 64}",
+                    content_hash="a" * 64,
+                    byte_length=42,
+                ),
+            )
+        )
+        session.add_all(
+            AgentPromptVersionRecord(
+                id=prompt_ids[role],
+                role=role,
+                version=prompts[role].version,
+                content_hash=prompts[role].content_hash,
+                content=prompts[role].content,
+            )
+            for role in ROLE_ORDER
+        )
+        await session.flush()
+        session.add(
+            AgentDataSnapshotEvidenceRecord(
+                data_snapshot_id=_SNAPSHOT_ID,
+                instrument_id=_INSTRUMENT_ID,
+                evidence_ref_id=_EVIDENCE_ID,
+                source="fixture",
+                provider_object_id="admission-evidence",
+                revision="v1",
+                available_at=_NOW - timedelta(minutes=1),
+                location=f"memory://sha256/{'a' * 64}",
+                content_hash="a" * 64,
             )
         )
 
 
 async def _seed_runs(factory, run_ids: tuple[UUID, ...]) -> None:
+    prompt_manifest = {
+        role: {"id": str(_PROMPT_ID), "version": "fixture-v1", "content_hash": "1" * 64}
+        for role in ROLE_ORDER
+    }
+    prompt_hash = hashlib.sha256(
+        json.dumps(prompt_manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     async with factory() as session, session.begin():
         session.add_all(
             AgentResearchRunRecord(
@@ -535,7 +656,8 @@ async def _seed_runs(factory, run_ids: tuple[UUID, ...]) -> None:
                 retry_count=0,
                 schema_hash=hashlib.sha256(b"schema").hexdigest(),
                 model_hash="2" * 64,
-                prompt_hash="1" * 64,
+                prompt_hash=prompt_hash,
+                prompt_manifest=prompt_manifest,
                 tool_hash=hashlib.sha256(b"tools").hexdigest(),
                 input_hash=hashlib.sha256(str(run_id).encode()).hexdigest(),
                 reserved_cost_usd=Decimal("2.00"),

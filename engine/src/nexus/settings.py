@@ -72,8 +72,8 @@ class EngineSettings(_SafeSettings):
         default=None,
         validation_alias="NEXUS_ENGINE_HMAC_PREVIOUS_SECRET",
     )
-    agent_runtime_mode: AgentRuntimeMode = Field(
-        default=AgentRuntimeMode.FIXTURE,
+    agent_runtime_mode: AgentRuntimeMode | None = Field(
+        default=None,
         validation_alias="AGENT_RUNTIME_MODE",
     )
     openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
@@ -91,6 +91,8 @@ class EngineSettings(_SafeSettings):
 
     @model_validator(mode="after")
     def apply_environment_policy(self) -> Self:
+        if self.environment is not Environment.PRODUCTION and self.agent_runtime_mode is None:
+            self.agent_runtime_mode = AgentRuntimeMode.FIXTURE
         self._validate_agent_runtime()
         if self.environment is Environment.PRODUCTION:
             self._validate_hmac_key_pairs()
@@ -115,7 +117,7 @@ class EngineSettings(_SafeSettings):
         return self
 
     def _validate_agent_runtime(self) -> None:
-        if self.agent_runtime_mode is AgentRuntimeMode.FIXTURE:
+        if self.agent_runtime_mode in {None, AgentRuntimeMode.FIXTURE}:
             return
         if (
             _nonempty_secret(self.openai_api_key) is None

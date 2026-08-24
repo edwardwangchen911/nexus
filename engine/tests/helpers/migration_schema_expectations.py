@@ -58,6 +58,7 @@ EXPECTED_TABLES = {
     "agent_research_events",
     "agent_research_outputs",
     "agent_research_output_evidence",
+    "agent_data_snapshot_evidence",
     "agent_daily_budget_reservations",
 }
 
@@ -98,6 +99,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
             "agent_research_events",
             "agent_research_outputs",
             "agent_research_output_evidence",
+            "agent_data_snapshot_evidence",
             "agent_daily_budget_reservations",
         }
     ),
@@ -183,6 +185,11 @@ EXPECTED_FOREIGN_KEYS = {
     "agent_research_output_evidence": {
         "fk_agent_output_evidence_output",
         "fk_agent_output_evidence_authority",
+    },
+    "agent_data_snapshot_evidence": {
+        "fk_agent_snapshot_evidence_snapshot",
+        "fk_agent_snapshot_evidence_instrument",
+        "fk_agent_snapshot_evidence_authority",
     },
     "agent_daily_budget_reservations": "fk_agent_budget_run",
 }
