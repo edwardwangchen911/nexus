@@ -16,6 +16,7 @@ from nexus.agents.persistence import (
     settle_daily_budget,
 )
 from nexus.persistence.models.agents import (
+    AgentDailyBudgetReservationRecord,
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
     AgentResearchOutputEvidenceRecord,
@@ -25,7 +26,7 @@ from nexus.persistence.models.agents import (
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument
 from nexus.persistence.models.research import ResearchEvidenceRef
-from nexus.persistence.models.runtime import IdempotencyRecord
+from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.persistence.session import session_factory
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from nexus.settings import EngineSettings
@@ -175,9 +176,16 @@ async def test_atomic_admission_replays_same_body_and_conflicts_changed_body(
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(AgentResearchRunRecord)) == 1
         assert await session.scalar(select(func.count()).select_from(IdempotencyRecord)) == 1
+        job = await session.scalar(select(Job))
         reservations = await session.scalar(
             select(func.count()).select_from(text("agent_daily_budget_reservations"))
         )
+    assert job is not None
+    assert (job.status, job.schema_version, job.payload) == (
+        "QUEUED",
+        "agent_research_job_v1",
+        {"run_id": str(same[0].run_id)},
+    )
     assert reservations == 1
 
 
@@ -215,6 +223,151 @@ async def test_admission_rejects_future_snapshot_and_rolls_back_claim_and_budget
             ),
         )
     assert counts == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_run_authority_cannot_change_during_a_legal_state_transition(
+    migrated_database_url: str,
+) -> None:
+    """A legal prepared-to-running edge must not authorize actor/hash/authority mutation."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admission = await admit_research_run(
+            session,
+            actor_id="fixture-actor",
+            route="/internal/v1/research-runs",
+            idempotency_key="frozen-authority",
+            request_hash="d" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID,
+                data_snapshot_id=_SNAPSHOT_ID,
+                decision_time=_NOW,
+            ),
+            prompt_version_id=_PROMPT_ID,
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("3.00"),
+            now=_NOW,
+        )
+    with pytest.raises(IntegrityError, match="authority is immutable"):
+        async with factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "UPDATE agent_research_runs SET status='running', "
+                    "actor_id='mutated-actor', input_hash=:hash WHERE id=:run_id"
+                ),
+                {"hash": "e" * 64, "run_id": admission.run_id},
+            )
+    async with factory() as session:
+        run = await session.get(AgentResearchRunRecord, admission.run_id)
+    assert run is not None
+    assert (run.status, run.actor_id, run.input_hash) == (
+        "prepared",
+        "fixture-actor",
+        "d" * 64,
+    )
+
+
+@pytest.mark.asyncio
+async def test_budget_rows_reject_delete_and_preserve_settled_spend(
+    migrated_database_url: str,
+) -> None:
+    """Deleting a reserved or settled row must never reopen the daily USD cap."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admission = await admit_research_run(
+            session,
+            actor_id="fixture-actor",
+            route="/internal/v1/research-runs",
+            idempotency_key="durable-spend",
+            request_hash="f" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID,
+                data_snapshot_id=_SNAPSHOT_ID,
+                decision_time=_NOW,
+            ),
+            prompt_version_id=_PROMPT_ID,
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("3.00"),
+            now=_NOW,
+        )
+    with pytest.raises(IntegrityError, match="budget reservation is durable"):
+        async with factory() as session, session.begin():
+            await session.execute(
+                text("DELETE FROM agent_daily_budget_reservations WHERE run_id=:run_id"),
+                {"run_id": admission.run_id},
+            )
+    async with factory() as session, session.begin():
+        await settle_daily_budget(
+            session,
+            run_id=admission.run_id,
+            actual_usd=Decimal("0.50"),
+            input_tokens=100,
+            output_tokens=50,
+        )
+    with pytest.raises(IntegrityError, match="budget reservation is durable"):
+        async with factory() as session, session.begin():
+            await session.execute(
+                text("DELETE FROM agent_daily_budget_reservations WHERE run_id=:run_id"),
+                {"run_id": admission.run_id},
+            )
+    async with factory() as session:
+        reservation = await session.scalar(
+            select(AgentDailyBudgetReservationRecord).where(
+                AgentDailyBudgetReservationRecord.run_id == admission.run_id
+            )
+        )
+    assert reservation is not None
+    assert (reservation.state, reservation.settled_usd) == (
+        "settled",
+        Decimal("0.500000000000"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_job_payload_is_frozen_and_job_cannot_be_deleted(
+    migrated_database_url: str,
+) -> None:
+    """Queue mutation must not redirect an admitted run or erase its durable dispatch."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admission = await admit_research_run(
+            session,
+            actor_id="fixture-actor",
+            route="/internal/v1/research-runs",
+            idempotency_key="frozen-job",
+            request_hash="9" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID,
+                data_snapshot_id=_SNAPSHOT_ID,
+                decision_time=_NOW,
+            ),
+            prompt_version_id=_PROMPT_ID,
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("3.00"),
+            now=_NOW,
+        )
+    job_key = f"agent-research:{admission.run_id}"
+    with pytest.raises(IntegrityError, match="job authority is immutable"):
+        async with factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "UPDATE jobs SET status='RUNNING', payload=:payload "
+                    "WHERE job_key=:job_key"
+                ),
+                {
+                    "payload": '{"run_id":"00000000-0000-0000-0000-000000000000"}',
+                    "job_key": job_key,
+                },
+            )
+    with pytest.raises(IntegrityError, match="job is durable"):
+        async with factory() as session, session.begin():
+            await session.execute(
+                text("DELETE FROM jobs WHERE job_key=:job_key"),
+                {"job_key": job_key},
+            )
 
 
 @pytest.mark.asyncio

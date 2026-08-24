@@ -4,6 +4,7 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from decimal import Decimal
+from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
 from nexus.agents.committee import AgentRole, CommitteeRoleOutput
@@ -15,7 +16,7 @@ from nexus.persistence.models.agents import (
 )
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.research import ResearchEvidenceRef
-from nexus.strategy.intents import ResearchClaim, ResearchIntent, RoleVote
+from nexus.strategy.intents import ResearchClaim, ResearchCondition, ResearchIntent, RoleVote
 
 
 def domain_evidence(record: ResearchEvidenceRef) -> EvidenceRef:
@@ -70,7 +71,29 @@ def synthesize_intent(
         for output in role_outputs
     )
     vote_values = {vote.vote for vote in votes}
-    orchestrator_claim = next(output for output in role_outputs if output.role == "orchestrator")
+    support_count = sum(vote.vote == "support" for vote in votes)
+    oppose_count = sum(vote.vote == "oppose" for vote in votes)
+    stance, exposure_action = _decision(
+        support_count=support_count,
+        oppose_count=oppose_count,
+        fundamental_missing=fundamental_missing,
+    )
+    support_claims = tuple(
+        claim
+        for output, vote in zip(role_outputs, votes, strict=True)
+        if vote.vote == "support"
+        for claim in output.claims
+    )[:5]
+    oppose_claims = tuple(
+        claim
+        for output, vote in zip(role_outputs, votes, strict=True)
+        if vote.vote == "oppose"
+        for claim in output.claims
+    )[:5]
+    by_role = {output.role: output for output in role_outputs}
+    theses = support_claims or by_role["orchestrator"].claims[:5]
+    counter_theses = oppose_claims or by_role["bear"].claims[:5]
+    condition_evidence = (evidence_refs[0],)
     return ResearchIntent(
         schema_version="research_intent_v1",
         decision_id=uuid5(NAMESPACE_URL, f"nexus-research:{run.id}"),
@@ -79,18 +102,42 @@ def synthesize_intent(
         decision_time=run.decision_time,
         data_snapshot_id=run.data_snapshot_id,
         horizon="medium_term",
-        stance="watch",
-        exposure_action="none",
-        theses=orchestrator_claim.claims,
-        counter_theses=(),
+        stance=stance,
+        exposure_action=exposure_action,
+        theses=theses,
+        counter_theses=counter_theses,
         uncertainties=(
             ("HKEX fundamental authority is unavailable.",)
             if fundamental_missing
             else ("Research remains subject to point-in-time evidence quality.",)
         ),
-        invalidation_conditions=(),
-        entry_conditions=(),
-        exit_conditions=(),
+        invalidation_conditions=(
+            ResearchCondition(
+                signal="committee.evidence_valid",
+                operator="is_false",
+                threshold=True,
+                unit="boolean",
+                evidence_refs=condition_evidence,
+            ),
+        ),
+        entry_conditions=(
+            ResearchCondition(
+                signal="committee.support_ready",
+                operator="is_true",
+                threshold=True,
+                unit="boolean",
+                evidence_refs=condition_evidence,
+            ),
+        ),
+        exit_conditions=(
+            ResearchCondition(
+                signal="committee.risk_triggered",
+                operator="is_true",
+                threshold=True,
+                unit="boolean",
+                evidence_refs=condition_evidence,
+            ),
+        ),
         valid_until=run.decision_time + timedelta(days=7),
         quality_status="partial" if fundamental_missing else "complete",
         evidence_audit="complete",
@@ -104,3 +151,20 @@ def synthesize_intent(
         data_version=snapshot.revision,
         evidence_refs=evidence_refs,
     )
+
+
+def _decision(
+    *, support_count: int, oppose_count: int, fundamental_missing: bool
+) -> tuple[
+    Literal["buy_candidate", "reduce_candidate", "hold", "watch"],
+    Literal["none", "reduce", "maintain", "eligible_for_increase"],
+]:
+    if fundamental_missing:
+        return ("watch", "none")
+    if oppose_count > support_count:
+        return ("reduce_candidate", "reduce")
+    if support_count >= oppose_count + 2:
+        return ("buy_candidate", "eligible_for_increase")
+    if support_count or oppose_count:
+        return ("hold", "maintain")
+    return ("watch", "none")

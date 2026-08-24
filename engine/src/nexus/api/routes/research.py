@@ -3,10 +3,10 @@
 import hashlib
 import json
 from datetime import datetime
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.models import ResearchRequest
@@ -16,6 +16,8 @@ from nexus.api.dependencies import get_settings, require_service_actor, transact
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.agents import (
     AgentRunStatus,
+    ResearchAdmissionEnvelope,
+    ResearchAdmissionResponse,
     ResearchRunCreateRequest,
     ResearchRunEnvelope,
     ResearchRunResponse,
@@ -26,10 +28,14 @@ from nexus.domain.decimal import decimal_to_string
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
 from nexus.persistence.models.agents import (
+    AgentModelConfigRecord,
+    AgentPromptVersionRecord,
     AgentResearchOutputEvidenceRecord,
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
+from nexus.persistence.models.data import DataSnapshot
+from nexus.persistence.models.market import Instrument
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from nexus.settings import EngineSettings
 from nexus.strategy.intents import ResearchIntent
@@ -38,6 +44,86 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
+
+
+@router.get(
+    "/internal/v1/instruments/{instrument_id}/research-admission",
+    response_model=ResearchAdmissionEnvelope,
+    operation_id="getResearchAdmission",
+    responses={401: {"model": NexusErrorEnvelope}, 422: {"model": NexusErrorEnvelope}},
+)
+async def get_research_admission(
+    request: Request,
+    instrument_id: UUID,
+    as_of: Annotated[datetime, Query()],
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+) -> ResearchAdmissionEnvelope:
+    """Select the frozen first-run body exclusively from point-in-time database authority."""
+    try:
+        bounded_as_of = require_utc(as_of)
+    except ValueError as error:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "as_of must be canonical UTC.", status_code=422
+        ) from error
+    clock = getattr(request.app.state, "utc_clock", None)
+    now = utc_now() if clock is None else require_utc(clock())
+    reason: Literal[
+        "instrument_not_found",
+        "decision_time_in_future",
+        "data_snapshot_unavailable",
+        "prompt_authority_unavailable",
+        "model_pricing_unavailable",
+    ] | None = None
+    snapshot = None
+    if bounded_as_of > now:
+        reason = "decision_time_in_future"
+    elif await session.get(Instrument, instrument_id) is None:
+        reason = "instrument_not_found"
+    else:
+        snapshot = await session.scalar(
+            select(DataSnapshot)
+            .where(
+                DataSnapshot.available_at <= bounded_as_of,
+                DataSnapshot.received_at <= bounded_as_of,
+            )
+            .order_by(
+                desc(DataSnapshot.available_at),
+                desc(DataSnapshot.received_at),
+                desc(DataSnapshot.id),
+            )
+            .limit(1)
+        )
+        if snapshot is None:
+            reason = "data_snapshot_unavailable"
+        elif not await session.scalar(
+            select(AgentPromptVersionRecord.id)
+            .where(AgentPromptVersionRecord.role == "orchestrator")
+            .order_by(desc(AgentPromptVersionRecord.created_at))
+            .limit(1)
+        ):
+            reason = "prompt_authority_unavailable"
+        elif not await session.scalar(
+            select(AgentModelConfigRecord.id)
+            .where(
+                AgentModelConfigRecord.pricing_available_at <= now,
+                AgentModelConfigRecord.pricing_expires_at > now,
+            )
+            .order_by(desc(AgentModelConfigRecord.created_at))
+            .limit(1)
+        ):
+            reason = "model_pricing_unavailable"
+    response = ResearchAdmissionResponse(
+        eligible=reason is None,
+        reason=reason,
+        instrument_id=instrument_id,
+        data_snapshot_id=None if snapshot is None else snapshot.id,
+        decision_time=bounded_as_of,
+    )
+    return ResearchAdmissionEnvelope(
+        data=response,
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=bounded_as_of),
+    )
 
 
 @router.post(

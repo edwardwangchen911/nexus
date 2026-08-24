@@ -63,6 +63,30 @@ class ResearchRunEnvelope(_StrictAgentSchema):
     meta: SuccessMetaResponse
 
 
+class ResearchAdmissionResponse(_StrictAgentSchema):
+    eligible: bool
+    reason: Literal[
+        "instrument_not_found",
+        "decision_time_in_future",
+        "data_snapshot_unavailable",
+        "prompt_authority_unavailable",
+        "model_pricing_unavailable",
+    ] | None
+    instrument_id: UUID
+    data_snapshot_id: UUID | None
+    decision_time: datetime
+
+    @field_validator("decision_time")
+    @classmethod
+    def require_decision_utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+
+class ResearchAdmissionEnvelope(_StrictAgentSchema):
+    data: ResearchAdmissionResponse
+    meta: SuccessMetaResponse
+
+
 class DailyBriefItem(_StrictAgentSchema):
     run_id: UUID
     instrument_id: UUID

@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.budget import BudgetExhausted
 from nexus.agents.committee import (
     ROLE_ORDER,
     AgentRole,
@@ -17,13 +18,14 @@ from nexus.agents.committee import (
     PromptAsset,
 )
 from nexus.agents.models import ResearchRequest, ResearchRunResult
-from nexus.agents.persistence import release_daily_budget, settle_daily_budget
+from nexus.agents.persistence import release_daily_budget_if_reserved, settle_daily_budget
 from nexus.agents.synthesis import (
     citations_bound,
     domain_evidence,
     synthesize_intent,
     usage_cost,
 )
+from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentPromptVersionRecord,
@@ -113,9 +115,16 @@ async def execute_research_run(
             content=persisted.content,
             content_hash=persisted.content_hash,
         )
-        try:
-            output = await committee.analyze(role, request, evidence_refs, prompt)
-        except Exception:
+        output = await _analyze_with_one_retry(
+            session,
+            run,
+            committee=committee,
+            role=role,
+            request=request,
+            evidence_refs=evidence_refs,
+            prompt=prompt,
+        )
+        if output is None:
             return await _terminal_without_usage(
                 session,
                 run,
@@ -168,13 +177,24 @@ async def execute_research_run(
     )
     input_tokens = sum(output.input_tokens for output in role_outputs)
     output_tokens = sum(output.output_tokens for output in role_outputs)
-    await settle_daily_budget(
-        session,
-        run_id=run.id,
-        actual_usd=usage_cost(model, input_tokens, output_tokens),
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-    )
+    try:
+        actual_usd = usage_cost(model, input_tokens, output_tokens)
+        await settle_daily_budget(
+            session,
+            run_id=run.id,
+            actual_usd=actual_usd,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+    except (BudgetExhausted, ValueError):
+        return await _terminal_without_usage(
+            session,
+            run,
+            output_sequence=output_sequence,
+            event_sequence=event_sequence + 1,
+            status="failed",
+            reason="usage_accounting_failed",
+        )
     if any(output.conflicting_facts for output in role_outputs):
         return await _persist_terminal(
             session,
@@ -234,6 +254,27 @@ async def _load_evidence(
         return ()
     ordered = tuple(by_id[evidence_id] for evidence_id in evidence_ref_ids)
     return () if any(record.available_at > run.decision_time for record in ordered) else ordered
+
+
+async def _analyze_with_one_retry(
+    session: AsyncSession,
+    run: AgentResearchRunRecord,
+    *,
+    committee: CommitteeModel,
+    role: AgentRole,
+    request: ResearchRequest,
+    evidence_refs: tuple[EvidenceRef, ...],
+    prompt: PromptAsset,
+) -> CommitteeRoleOutput | None:
+    for _attempt in range(2):
+        try:
+            return await committee.analyze(role, request, evidence_refs, prompt)
+        except Exception:
+            if run.retry_count >= 1:
+                return None
+            run.retry_count += 1
+            await session.flush()
+    return None
 
 
 async def _load_persisted_prompts(
@@ -357,7 +398,7 @@ async def _terminal_without_usage(
     status: Literal["failed", "abstained"],
     reason: str,
 ) -> ResearchRunResult:
-    await release_daily_budget(session, run_id=run.id)
+    await release_daily_budget_if_reserved(session, run_id=run.id)
     return await _persist_terminal(
         session,
         run,

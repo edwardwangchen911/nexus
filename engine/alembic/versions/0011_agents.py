@@ -257,10 +257,16 @@ def upgrade() -> None:
     op.execute(
         "CREATE FUNCTION nexus_validate_agent_run_transition() RETURNS trigger LANGUAGE plpgsql AS $$ "
         "BEGIN "
+        "IF (to_jsonb(NEW) - ARRAY['status','retry_count','settled_cost_usd','input_tokens','output_tokens']) "
+        "IS DISTINCT FROM "
+        "(to_jsonb(OLD) - ARRAY['status','retry_count','settled_cost_usd','input_tokens','output_tokens']) "
+        "THEN RAISE EXCEPTION 'agent run authority is immutable' USING ERRCODE = '23514'; END IF; "
         "IF OLD.status IN ('completed','failed','abstained') THEN RAISE EXCEPTION 'terminal agent run is immutable' USING ERRCODE = '23514'; END IF; "
         "IF NEW.status = OLD.status AND "
-        "(to_jsonb(NEW) - ARRAY['settled_cost_usd','input_tokens','output_tokens']) = "
-        "(to_jsonb(OLD) - ARRAY['settled_cost_usd','input_tokens','output_tokens']) THEN RETURN NEW; END IF; "
+        "(NEW.retry_count,NEW.settled_cost_usd,NEW.input_tokens,NEW.output_tokens) "
+        "IS DISTINCT FROM "
+        "(OLD.retry_count,OLD.settled_cost_usd,OLD.input_tokens,OLD.output_tokens) "
+        "THEN RETURN NEW; END IF; "
         "IF NEW.status IN ('failed','abstained') THEN RETURN NEW; END IF; "
         "IF (OLD.status = 'prepared' AND NEW.status = 'running') OR "
         "(OLD.status = 'running' AND NEW.status = 'validated') OR "
@@ -312,9 +318,39 @@ def upgrade() -> None:
         "ON agent_daily_budget_reservations FOR EACH ROW "
         "EXECUTE FUNCTION nexus_validate_agent_budget_transition()"
     )
+    op.execute(
+        "CREATE FUNCTION nexus_prevent_agent_budget_delete() RETURNS trigger LANGUAGE plpgsql "
+        "AS $$ BEGIN RAISE EXCEPTION 'agent budget reservation is durable' "
+        "USING ERRCODE = '23514'; END; $$"
+    )
+    op.execute(
+        "CREATE TRIGGER trg_agent_budget_delete BEFORE DELETE "
+        "ON agent_daily_budget_reservations FOR EACH ROW "
+        "EXECUTE FUNCTION nexus_prevent_agent_budget_delete()"
+    )
+    op.execute(
+        "CREATE FUNCTION nexus_validate_agent_job_change() RETURNS trigger LANGUAGE plpgsql "
+        "AS $$ BEGIN "
+        "IF OLD.schema_version <> 'agent_research_job_v1' THEN "
+        "IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF; END IF; "
+        "IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'agent job is durable' "
+        "USING ERRCODE = '23514'; END IF; "
+        "IF (to_jsonb(NEW) - 'status') IS DISTINCT FROM (to_jsonb(OLD) - 'status') THEN "
+        "RAISE EXCEPTION 'agent job authority is immutable' USING ERRCODE = '23514'; END IF; "
+        "IF (OLD.status = 'QUEUED' AND NEW.status = 'RUNNING') OR "
+        "(OLD.status = 'RUNNING' AND NEW.status IN ('COMPLETED','FAILED','ABSTAINED')) "
+        "THEN RETURN NEW; END IF; "
+        "RAISE EXCEPTION 'invalid agent job transition' USING ERRCODE = '23514'; END; $$"
+    )
+    op.execute(
+        "CREATE TRIGGER trg_agent_jobs_change BEFORE UPDATE OR DELETE ON jobs "
+        "FOR EACH ROW EXECUTE FUNCTION nexus_validate_agent_job_change()"
+    )
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER trg_agent_jobs_change ON jobs")
+    op.execute("DROP TRIGGER trg_agent_budget_delete ON agent_daily_budget_reservations")
     op.execute("DROP TRIGGER trg_agent_budget_transition ON agent_daily_budget_reservations")
     op.execute("DROP TRIGGER trg_agent_output_evidence_validate ON agent_research_output_evidence")
     for table in (
@@ -336,5 +372,7 @@ def downgrade() -> None:
     op.drop_table("agent_prompt_versions")
     op.execute("DROP FUNCTION nexus_validate_agent_run_transition()")
     op.execute("DROP FUNCTION nexus_validate_agent_budget_transition()")
+    op.execute("DROP FUNCTION nexus_prevent_agent_budget_delete()")
+    op.execute("DROP FUNCTION nexus_validate_agent_job_change()")
     op.execute("DROP FUNCTION nexus_validate_agent_output_evidence()")
     op.execute("DROP FUNCTION nexus_prevent_agent_immutable_change()")

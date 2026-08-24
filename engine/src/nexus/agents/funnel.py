@@ -28,7 +28,21 @@ def select_research_funnel(
     """Select deterministic 20-light/5-debate bounds before a model can be invoked."""
     if debate_capacity is not None and debate_capacity < 0:
         raise ValueError("debate_capacity must be non-negative")
-    unique = {candidate.instrument_id: candidate for candidate in candidates}
+    unique: dict[UUID, Candidate] = {}
+    for candidate in candidates:
+        prior = unique.get(candidate.instrument_id)
+        unique[candidate.instrument_id] = (
+            candidate
+            if prior is None
+            else Candidate(
+                instrument_id=candidate.instrument_id,
+                real_read_only=prior.real_read_only or candidate.real_read_only,
+                hard_risk=prior.hard_risk or candidate.hard_risk,
+                data_exception=prior.data_exception or candidate.data_exception,
+                paper_holding=prior.paper_holding or candidate.paper_holding,
+                reduce_risk=prior.reduce_risk or candidate.reduce_risk,
+            )
+        )
     ranked = tuple(sorted(unique.values(), key=_priority))
     light = ranked[:20]
     normal = tuple(candidate for candidate in light if not candidate.reduce_risk)[:5]

@@ -22,6 +22,7 @@ from nexus.persistence.models.agents import (
 )
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument
+from nexus.persistence.models.runtime import Job
 from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
 
@@ -131,6 +132,19 @@ async def release_daily_budget(
     return reservation
 
 
+async def release_daily_budget_if_reserved(
+    session: AsyncSession, *, run_id: UUID
+) -> AgentDailyBudgetReservationRecord:
+    """Release open capacity while preserving already terminal accounting."""
+    reservation = await _locked_reservation(session, run_id)
+    await _lock_budget_day(session, reservation.business_date.isoformat())
+    if reservation.state == "reserved":
+        reservation.state = "released"
+        reservation.settled_usd = None
+        await session.flush()
+    return reservation
+
+
 async def admit_research_run(
     session: AsyncSession,
     *,
@@ -228,6 +242,16 @@ async def admit_research_run(
         output_tokens=None,
     )
     session.add(run)
+    await session.flush()
+    session.add(
+        Job(
+            job_key=f"agent-research:{run.id}",
+            input_hash=request_hash,
+            status="QUEUED",
+            schema_version="agent_research_job_v1",
+            payload={"run_id": str(run.id)},
+        )
+    )
     await session.flush()
     await reserve_daily_budget(
         session,

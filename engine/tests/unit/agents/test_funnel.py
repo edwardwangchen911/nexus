@@ -50,3 +50,26 @@ def test_funnel_labels_selected_but_unfunded_work_as_budget_exhausted_watch() ->
     result = select_research_funnel(candidates, debate_capacity=2)
     assert result.full_debate == candidates[:2]
     assert result.budget_exhausted_watch == candidates[2:5]
+
+
+def test_funnel_conservatively_merges_duplicate_authority_flags() -> None:
+    """Last-write-wins dedupe must not erase a real holding, risk, anomaly, or reduction."""
+    instrument_id = UUID("0198d500-1000-7000-8000-000000000321")
+    result = select_research_funnel(
+        (
+            Candidate(instrument_id=instrument_id, real_read_only=True, hard_risk=True),
+            Candidate(instrument_id=instrument_id, data_exception=True, paper_holding=True),
+            Candidate(instrument_id=instrument_id, reduce_risk=True),
+        )
+    )
+    assert result.light_research == (
+        Candidate(
+            instrument_id=instrument_id,
+            real_read_only=True,
+            hard_risk=True,
+            data_exception=True,
+            paper_holding=True,
+            reduce_risk=True,
+        ),
+    )
+    assert result.full_debate == result.light_research
