@@ -1,6 +1,6 @@
 """Append-only persistence mappings for bounded, read-only Agent research."""
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -66,6 +66,7 @@ class AgentResearchRunRecord(ImmutableCreatedAt, Base):
         CheckConstraint("prompt_hash ~ '^[0-9a-f]{64}$'", name="prompt_hash_canonical"),
         CheckConstraint("tool_hash ~ '^[0-9a-f]{64}$'", name="tool_hash_canonical"),
         CheckConstraint("input_hash ~ '^[0-9a-f]{64}$'", name="input_hash_canonical"),
+        UniqueConstraint("actor_id", "idempotency_key", name="uq_agent_runs_actor_idempotency"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
@@ -74,6 +75,8 @@ class AgentResearchRunRecord(ImmutableCreatedAt, Base):
     prompt_version_id: Mapped[UUID] = mapped_column(ForeignKey("agent_prompt_versions.id"))
     model_config_id: Mapped[UUID] = mapped_column(ForeignKey("agent_model_configs.id"))
     decision_time: Mapped[datetime] = mapped_column(UTCDateTime())
+    actor_id: Mapped[str] = mapped_column(String(100), default="service")
+    idempotency_key: Mapped[str] = mapped_column(String(255), default="")
     status: Mapped[str] = mapped_column(String(16), default="prepared")
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     schema_hash: Mapped[str] = mapped_column(String(64))
@@ -83,6 +86,9 @@ class AgentResearchRunRecord(ImmutableCreatedAt, Base):
     input_hash: Mapped[str] = mapped_column(String(64))
     reserved_cost_usd: Mapped[Decimal]
     settled_cost_usd: Mapped[Decimal | None]
+    pricing_version: Mapped[str] = mapped_column(String(100), default="configured")
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
 
 
 class AgentResearchOutputRecord(ImmutableCreatedAt, Base):
@@ -103,3 +109,24 @@ class AgentResearchOutputRecord(ImmutableCreatedAt, Base):
     status: Mapped[str] = mapped_column(String(16))
     content_hash: Mapped[str] = mapped_column(String(64))
     intent: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+
+
+class AgentDailyBudgetReservationRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "agent_daily_budget_reservations"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_agent_budget_reservations_run"),
+        CheckConstraint("reserved_usd >= 0", name="reserved_nonnegative"),
+        CheckConstraint(
+            "settled_usd IS NULL OR settled_usd BETWEEN 0 AND reserved_usd",
+            name="settled_bounded",
+        ),
+        CheckConstraint("state IN ('reserved','settled','released')", name="state_allowed"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    business_date: Mapped[date]
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_research_runs.id"))
+    pricing_version: Mapped[str] = mapped_column(String(100))
+    reserved_usd: Mapped[Decimal]
+    settled_usd: Mapped[Decimal | None]
+    state: Mapped[str] = mapped_column(String(16), default="reserved")

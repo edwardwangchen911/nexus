@@ -136,3 +136,17 @@ class ReadOnlyTools:
             return schema.model_validate(payload).model_dump(mode="python")
         except ValidationError as error:
             raise ToolInputError("tool payload is not an allowlisted typed request") from error
+
+
+def response_function_tools() -> Mapping[str, dict[str, object]]:
+    """Expose fixed custom-function schemas; no built-in or dynamically named tool is possible."""
+    return {
+        name: {
+            "type": "function",
+            "name": name,
+            "description": "Read-only typed research lookup.",
+            "parameters": schema.model_json_schema(),
+            "strict": True,
+        }
+        for name, schema in _TOOL_INPUTS.items()
+    }

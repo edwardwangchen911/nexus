@@ -56,6 +56,7 @@ EXPECTED_TABLES = {
     "agent_model_configs",
     "agent_research_runs",
     "agent_research_outputs",
+    "agent_daily_budget_reservations",
 }
 
 OPTIONAL_MIGRATION_TABLE_GROUPS = (
@@ -93,6 +94,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
             "agent_model_configs",
             "agent_research_runs",
             "agent_research_outputs",
+            "agent_daily_budget_reservations",
         }
     ),
 )
@@ -173,4 +175,5 @@ EXPECTED_FOREIGN_KEYS = {
         "fk_agent_runs_model_config",
     },
     "agent_research_outputs": "fk_agent_outputs_run",
+    "agent_daily_budget_reservations": "fk_agent_budget_run",
 }

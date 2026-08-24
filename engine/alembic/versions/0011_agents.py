@@ -58,6 +58,8 @@ def upgrade() -> None:
         sa.Column("prompt_version_id", _UUID, nullable=False),
         sa.Column("model_config_id", _UUID, nullable=False),
         sa.Column("decision_time", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("actor_id", sa.String(100), nullable=False),
+        sa.Column("idempotency_key", sa.String(255), nullable=False),
         sa.Column("status", sa.String(16), nullable=False, server_default="prepared"),
         sa.Column("retry_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("schema_hash", sa.String(64), nullable=False),
@@ -67,11 +69,15 @@ def upgrade() -> None:
         sa.Column("input_hash", sa.String(64), nullable=False),
         sa.Column("reserved_cost_usd", _NUMERIC, nullable=False),
         sa.Column("settled_cost_usd", _NUMERIC, nullable=True),
+        sa.Column("pricing_version", sa.String(100), nullable=False, server_default="configured"),
+        sa.Column("input_tokens", sa.Integer(), nullable=True),
+        sa.Column("output_tokens", sa.Integer(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.ForeignKeyConstraint(["instrument_id"], ["instruments.id"], name="fk_agent_runs_instrument"),
         sa.ForeignKeyConstraint(["data_snapshot_id"], ["data_snapshots.id"], name="fk_agent_runs_data_snapshot"),
         sa.ForeignKeyConstraint(["prompt_version_id"], ["agent_prompt_versions.id"], name="fk_agent_runs_prompt_version"),
         sa.ForeignKeyConstraint(["model_config_id"], ["agent_model_configs.id"], name="fk_agent_runs_model_config"),
+        sa.UniqueConstraint("actor_id", "idempotency_key", name="uq_agent_runs_actor_idempotency"),
         sa.CheckConstraint("status IN ('prepared','running','validated','audited','synthesized','completed','failed','abstained')", name="status_allowed"),
         sa.CheckConstraint("retry_count BETWEEN 0 AND 1", name="retry_count_bounded"),
         sa.CheckConstraint("reserved_cost_usd >= 0", name="reserved_cost_nonnegative"),
@@ -97,6 +103,22 @@ def upgrade() -> None:
         sa.CheckConstraint("status IN ('validated','audited','synthesized','completed','failed','abstained')", name="status_allowed"),
         sa.CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
     )
+    op.create_table(
+        "agent_daily_budget_reservations",
+        sa.Column("id", _UUID, primary_key=True),
+        sa.Column("business_date", sa.Date(), nullable=False),
+        sa.Column("run_id", _UUID, nullable=False),
+        sa.Column("pricing_version", sa.String(100), nullable=False),
+        sa.Column("reserved_usd", _NUMERIC, nullable=False),
+        sa.Column("settled_usd", _NUMERIC, nullable=True),
+        sa.Column("state", sa.String(16), nullable=False, server_default="reserved"),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.ForeignKeyConstraint(["run_id"], ["agent_research_runs.id"], name="fk_agent_budget_run"),
+        sa.UniqueConstraint("run_id", name="uq_agent_budget_reservations_run"),
+        sa.CheckConstraint("reserved_usd >= 0", name="reserved_nonnegative"),
+        sa.CheckConstraint("settled_usd IS NULL OR settled_usd BETWEEN 0 AND reserved_usd", name="settled_bounded"),
+        sa.CheckConstraint("state IN ('reserved','settled','released')", name="state_allowed"),
+    )
     op.execute(
         "CREATE FUNCTION nexus_prevent_agent_immutable_change() RETURNS trigger LANGUAGE plpgsql AS $$ "
         "BEGIN RAISE EXCEPTION 'agent audit records are append-only' USING ERRCODE = '23514'; END; $$"
@@ -106,6 +128,7 @@ def upgrade() -> None:
         "agent_model_configs",
         "agent_research_runs",
         "agent_research_outputs",
+        "agent_daily_budget_reservations",
     ):
         op.execute(
             f"CREATE TRIGGER trg_{table}_created_at_immutable BEFORE UPDATE ON {table} "
@@ -136,12 +159,14 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     for table in (
+        "agent_daily_budget_reservations",
         "agent_research_outputs",
         "agent_research_runs",
         "agent_model_configs",
         "agent_prompt_versions",
     ):
         op.execute(f"DROP TRIGGER trg_{table}_created_at_immutable ON {table}")
+    op.drop_table("agent_daily_budget_reservations")
     op.drop_table("agent_research_outputs")
     op.drop_table("agent_research_runs")
     op.drop_table("agent_model_configs")

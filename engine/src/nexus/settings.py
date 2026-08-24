@@ -1,5 +1,6 @@
 """Runtime settings with safe development fixtures and redacted representations."""
 
+from decimal import Decimal
 from enum import StrEnum
 from typing import Self
 
@@ -11,6 +12,11 @@ class Environment(StrEnum):
     DEVELOPMENT = "development"
     TEST = "test"
     PRODUCTION = "production"
+
+
+class AgentRuntimeMode(StrEnum):
+    FIXTURE = "fixture"
+    RESPONSES = "responses"
 
 
 class _SafeSettings(BaseSettings):
@@ -66,9 +72,24 @@ class EngineSettings(_SafeSettings):
         default=None,
         validation_alias="NEXUS_ENGINE_HMAC_PREVIOUS_SECRET",
     )
+    agent_runtime_mode: AgentRuntimeMode = Field(
+        default=AgentRuntimeMode.FIXTURE,
+        validation_alias="AGENT_RUNTIME_MODE",
+    )
+    openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    agent_extraction_model_id: str | None = Field(
+        default=None, validation_alias="AGENT_EXTRACTION_MODEL_ID"
+    )
+    agent_reasoning_model_id: str | None = Field(
+        default=None, validation_alias="AGENT_REASONING_MODEL_ID"
+    )
+    agent_daily_budget_usd: Decimal = Field(
+        default=Decimal("3.00"), validation_alias="AGENT_DAILY_BUDGET_USD", gt=0
+    )
 
     @model_validator(mode="after")
     def apply_environment_policy(self) -> Self:
+        self._validate_agent_runtime()
         if self.environment is Environment.PRODUCTION:
             self._validate_hmac_key_pairs()
             missing = [name for name, value in self._required_values().items() if value is None]
@@ -90,6 +111,19 @@ class EngineSettings(_SafeSettings):
             if getattr(self, name) is None:
                 setattr(self, name, value)
         return self
+
+    def _validate_agent_runtime(self) -> None:
+        if self.agent_runtime_mode is AgentRuntimeMode.FIXTURE:
+            return
+        if (
+            _nonempty_secret(self.openai_api_key) is None
+            or _nonempty(self.agent_extraction_model_id) is None
+            or _nonempty(self.agent_reasoning_model_id) is None
+        ):
+            raise ValueError(
+                "Agent non-fixture mode requires OPENAI_API_KEY, AGENT_EXTRACTION_MODEL_ID, "
+                "and AGENT_REASONING_MODEL_ID"
+            )
 
     def _validate_hmac_key_pairs(self) -> None:
         current_key_id = _nonempty(self.engine_hmac_current_key_id)

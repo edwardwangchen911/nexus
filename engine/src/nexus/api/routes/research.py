@@ -3,13 +3,15 @@
 import hashlib
 import json
 from pathlib import Path
-from typing import cast
+from typing import Annotated, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
+from nexus.agents.budget import BudgetExhausted
+from nexus.agents.persistence import reserve_daily_budget
 from nexus.api.auth import VerifiedServiceActor
-from nexus.api.dependencies import require_service_actor, transactional_session
+from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.agents import (
     AgentRunStatus,
@@ -26,6 +28,7 @@ from nexus.persistence.models.agents import (
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
+from nexus.settings import EngineSettings
 from nexus.strategy.intents import ResearchIntent
 from pydantic import ValidationError
 from sqlalchemy import desc, select
@@ -47,7 +50,9 @@ router = APIRouter()
 )
 async def create_research_run(
     body: ResearchRunCreateRequest,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=255)],
     actor: VerifiedServiceActor = Depends(require_service_actor),
+    settings: EngineSettings = Depends(get_settings),
     session: AsyncSession = Depends(transactional_session),
 ) -> JSONResponse:
     """Append a prepared local run only when immutable prompt/model pricing authority exists."""
@@ -73,6 +78,28 @@ async def create_research_run(
     input_hash = hashlib.sha256(
         json.dumps(body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+    existing = await session.scalar(
+        select(AgentResearchRunRecord).where(
+            AgentResearchRunRecord.actor_id == actor.actor_id,
+            AgentResearchRunRecord.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        if existing.input_hash != input_hash:
+            raise NexusError(
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                "Idempotency key has a different request body.",
+                status_code=409,
+            )
+        payload = ResearchRunEnvelope(
+            data=_response(existing, None),
+            meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
+        )
+        return JSONResponse(
+            status_code=202,
+            content=payload.model_dump(mode="json"),
+            headers={"Location": f"/api/v1/research-runs/{existing.id}"},
+        )
     schema_hash = hashlib.sha256(
         (Path(__file__).resolve().parents[5] / "contracts/agent/research-intent-v1.schema.json")
         .read_bytes()
@@ -87,6 +114,8 @@ async def create_research_run(
         prompt_version_id=prompt.id,
         model_config_id=model.id,
         decision_time=body.decision_time,
+        actor_id=actor.actor_id,
+        idempotency_key=idempotency_key,
         status="prepared",
         retry_count=0,
         schema_hash=schema_hash,
@@ -99,6 +128,20 @@ async def create_research_run(
     )
     session.add(run)
     await session.flush()
+    try:
+        await reserve_daily_budget(
+            session,
+            run_id=run.id,
+            now=now,
+            daily_limit_usd=settings.agent_daily_budget_usd,
+            worst_case_usd=model.max_cost_usd,
+            pricing_version=model.version,
+            pricing_fresh=True,
+        )
+    except BudgetExhausted as error:
+        raise NexusError(
+            ErrorCode.BUDGET_EXHAUSTED, "Research budget is exhausted.", status_code=409
+        ) from error
     payload = ResearchRunEnvelope(
         data=_response(run, None),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
