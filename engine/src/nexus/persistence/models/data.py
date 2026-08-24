@@ -225,14 +225,15 @@ class MacroObservation(ImmutableCreatedAt, Base):
             name="macro_authority_version_allowed",
         ),
         CheckConstraint(
-            "COALESCE(lower(source) NOT IN ('fred', 'alfred') "
-            "OR authority_version = 'legacy_task3' OR "
-            "(source = lower(source) AND authority_version = 'research_macro_v1' "
+            "COALESCE((authority_version = 'legacy_task3' "
+            "AND lower(source) IN ('fred', 'alfred')) OR "
+            "(authority_version = 'research_macro_v1' AND source IN ('fred', 'alfred') "
             "AND provider_object_id IS NOT NULL AND real_time_start IS NOT NULL "
             "AND real_time_end IS NOT NULL AND evidence_ref_id IS NOT NULL "
             "AND calendar_evidence_ref_id IS NOT NULL AND calendar_source IS NOT NULL "
             "AND calendar_provider_object_id IS NOT NULL "
-            "AND calendar_revision IS NOT NULL), FALSE)",
+            "AND calendar_revision IS NOT NULL) OR "
+            "(authority_version IS NULL AND lower(source) NOT IN ('fred', 'alfred')), FALSE)",
             name="macro_research_v1_authority_required",
         ),
         CheckConstraint(

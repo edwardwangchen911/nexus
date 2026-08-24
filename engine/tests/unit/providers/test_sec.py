@@ -88,10 +88,8 @@ async def test_sec_client_uses_configured_contact_and_committed_fixture_payloads
     assert transport.paths == [
         "/api/xbrl/companyfacts/CIK0000320193.json",
         "/submissions/CIK0000320193.json",
-        "/submissions/CIK0000320193-submissions-001.json",
     ]
     assert transport.headers == [
-        {"User-Agent": "NEXUS research@example.test", "Accept-Encoding": "gzip, deflate"},
         {"User-Agent": "NEXUS research@example.test", "Accept-Encoding": "gzip, deflate"},
         {"User-Agent": "NEXUS research@example.test", "Accept-Encoding": "gzip, deflate"},
     ]

@@ -126,6 +126,35 @@ def test_0010_quarantines_existing_case_insensitive_macro_rows_and_rejects_new_l
                 ).all()
                 assert rows == [("alfred", "legacy_task3"), ("FRED", "legacy_task3")]
 
+            calendar_evidence_id = uuid4()
+            fixture_evidence_id = uuid4()
+            case_variant_evidence_id = uuid4()
+            async with engine.begin() as connection:
+                await _insert_evidence(
+                    connection,
+                    evidence_id=calendar_evidence_id,
+                    source="exchange_calendars",
+                    object_id="calendar:XNYS:fixture",
+                    revision="1",
+                    digest="c" * 64,
+                )
+                await _insert_evidence(
+                    connection,
+                    evidence_id=fixture_evidence_id,
+                    source="fixture",
+                    object_id="DFF:fixture-v1",
+                    revision="fixture-v1",
+                    digest="d" * 64,
+                )
+                await _insert_evidence(
+                    connection,
+                    evidence_id=case_variant_evidence_id,
+                    source="FRED",
+                    object_id="DFF:case-v1",
+                    revision="case-v1",
+                    digest="e" * 64,
+                )
+
             async with engine.begin() as connection:
                 with pytest.raises(DBAPIError, match="legacy macro authority is migration-only"):
                     await connection.execute(
@@ -158,13 +187,56 @@ def test_0010_quarantines_existing_case_insensitive_macro_rows_and_rejects_new_l
                         text(
                             "INSERT INTO macro_observations "
                             "(id, source, series, observed_at, available_at, revision, value, "
-                            "unit, "
+                            "unit, provider_object_id, real_time_start, real_time_end, "
+                            "evidence_ref_id, calendar_evidence_ref_id, calendar_source, "
+                            "calendar_provider_object_id, calendar_revision, display_sanity_only, "
                             "authority_version) VALUES "
-                            "(:id, 'FRED', 'DFF', :now, :now, 'new', 1, 'percent', "
-                            "'research_macro_v1')"
+                            "(:id, 'fixture', 'DFF', :now, :now, 'fixture-v1', 1, 'percent', "
+                            "'DFF:fixture-v1', '2026-08-07', '2026-08-20', :evidence_id, "
+                            ":calendar_id, 'exchange_calendars', 'calendar:XNYS:fixture', '1', "
+                            "false, 'research_macro_v1')"
                         ),
-                        {"id": uuid4(), "now": NOW},
+                        {
+                            "id": uuid4(),
+                            "now": NOW,
+                            "evidence_id": fixture_evidence_id,
+                            "calendar_id": calendar_evidence_id,
+                        },
                     )
+
+            async with engine.begin() as connection:
+                with pytest.raises(DBAPIError, match="macro_research_v1_authority_required"):
+                    await connection.execute(
+                        text(
+                            "INSERT INTO macro_observations "
+                            "(id, source, series, observed_at, available_at, revision, value, "
+                            "unit, provider_object_id, real_time_start, real_time_end, "
+                            "evidence_ref_id, calendar_evidence_ref_id, calendar_source, "
+                            "calendar_provider_object_id, calendar_revision, display_sanity_only, "
+                            "authority_version) VALUES "
+                            "(:id, 'FRED', 'DFF', :now, :now, 'case-v1', 1, 'percent', "
+                            "'DFF:case-v1', '2026-08-07', '2026-08-20', :evidence_id, "
+                            ":calendar_id, 'exchange_calendars', 'calendar:XNYS:fixture', '1', "
+                            "false, 'research_macro_v1')"
+                        ),
+                        {
+                            "id": uuid4(),
+                            "now": NOW,
+                            "evidence_id": case_variant_evidence_id,
+                            "calendar_id": calendar_evidence_id,
+                        },
+                    )
+
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "INSERT INTO macro_observations "
+                        "(id, source, series, observed_at, available_at, revision, value, unit, "
+                        "display_sanity_only) VALUES "
+                        "(:id, 'fixture', 'DFF', :now, :now, 'plain-fixture', 1, 'percent', false)"
+                    ),
+                    {"id": uuid4(), "now": NOW},
+                )
         finally:
             await engine.dispose()
 

@@ -229,9 +229,14 @@ class SecCompanyFactsClient:
     async def fetch_company_facts_and_submissions(
         self, cik: str
     ) -> tuple[SecRawDocument, SecRawDocument]:
-        """Fetch the current pair while preserving the legacy narrow return shape."""
-        company_facts, history = await self.fetch_company_facts_and_submission_history(cik)
-        return company_facts, history[0]
+        """Fetch only the current Company Facts/submissions pair under one deadline."""
+        padded_cik = self._validate_cik(cik)
+        deadline = self._monotonic() + self._deadline_seconds
+        company_facts = await self._fetch_path(
+            f"/api/xbrl/companyfacts/CIK{padded_cik}.json", deadline
+        )
+        submissions = await self._fetch_path(f"/submissions/CIK{padded_cik}.json", deadline)
+        return company_facts, submissions
 
     async def fetch_company_facts_and_submission_history(
         self, cik: str
