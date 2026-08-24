@@ -1,5 +1,6 @@
 """Fail-closed Agent runtime mode and official Responses transport tests."""
 
+import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -87,6 +88,26 @@ async def test_responses_adapter_enforces_aggregate_tool_and_token_caps() -> Non
             client=_FakeClient(_intent_payload(request), excess_output=True),
             config=_config(max_output_tokens=40),
         ).respond(request, tools)
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_uses_one_absolute_deadline_across_the_loop() -> None:
+    """A provider cannot reset the timeout after each custom-function result."""
+
+    class SlowResponses(_FakeResponses):
+        async def create(self, **kwargs: object) -> Mapping[str, object]:
+            await asyncio.sleep(0.02)
+            return await super().create(**kwargs)
+
+    request = _request()
+    fake = _FakeClient(_intent_payload(request))
+    fake.responses = SlowResponses(_intent_payload(request))
+    config = _config().model_copy(update={"absolute_timeout_seconds": Decimal("0.03")})
+    with pytest.raises(TimeoutError):
+        await ResponsesResearchModel(client=fake, config=config).respond(
+            request,
+            ReadOnlyTools(executors={"get_security_snapshot": lambda payload: {"ok": True}}),
+        )
 
 
 class _FakeResponses:

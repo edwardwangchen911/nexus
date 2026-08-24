@@ -137,6 +137,70 @@ async def test_only_retry_reuses_identical_frozen_request(
     assert model.requests[0].model_dump(mode="json") == _REQUEST.model_dump(mode="json")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    ("invalid_schema", "numeric_target", "missing_evidence", "future_evidence", "tool_mutation"),
+)
+async def test_unsafe_or_unsupported_committee_output_abstains(
+    read_only_tools: ReadOnlyToolRegistry, mutation: str
+) -> None:
+    """Schema, evidence, and permission mutations cannot become strategy-supporting intent."""
+
+    class MutatingModel(FixtureResearchModel):
+        async def respond(
+            self, request: ResearchRequest, tools: ReadOnlyToolRegistry
+        ) -> Mapping[str, object]:
+            result = dict(await super().respond(request, tools))
+            intent = dict(result["intent"])
+            if mutation == "invalid_schema":
+                intent.pop("stance")
+            elif mutation == "numeric_target":
+                intent["target_weight"] = "0.25"
+            elif mutation == "missing_evidence":
+                intent["evidence_refs"] = []
+            elif mutation == "future_evidence":
+                future = dict(intent["evidence_refs"][0])
+                future["available_at"] = "2026-08-25T00:00:00Z"
+                intent["evidence_refs"] = [future]
+            else:
+                intent["requested_tools"] = ["add_permission"]
+            result["intent"] = intent
+            return result
+
+    result = await run_research(_REQUEST, read_only_tools, MutatingModel(), DailyBudget.usd("3.00"))
+    assert result.status == "abstained"
+    assert result.intent is None
+    assert read_only_tools.names == EXPECTED_READ_ONLY_TOOL_NAMES
+
+
+@pytest.mark.asyncio
+async def test_conflicting_facts_and_over_budget_resolve_to_abstention(
+    read_only_tools: ReadOnlyToolRegistry,
+) -> None:
+    """Contradiction and an unaffordable immutable worst case both fail closed before intent use."""
+
+    class ConflictModel(FixtureResearchModel):
+        async def respond(
+            self, request: ResearchRequest, tools: ReadOnlyToolRegistry
+        ) -> Mapping[str, object]:
+            result = dict(await super().respond(request, tools))
+            result["conflicting_facts"] = True
+            return result
+
+    class OverBudgetModel(FixtureResearchModel):
+        worst_case_cost_usd = Decimal("3.01")
+
+    conflict = await run_research(
+        _REQUEST, read_only_tools, ConflictModel(), DailyBudget.usd("3.00")
+    )
+    over_budget = await run_research(
+        _REQUEST, read_only_tools, OverBudgetModel(), DailyBudget.usd("3.00")
+    )
+    assert conflict.status == over_budget.status == "abstained"
+    assert conflict.intent is over_budget.intent is None
+
+
 def _intent_payload(request: ResearchRequest) -> dict[str, object]:
     evidence = {
         "source": "fixture",

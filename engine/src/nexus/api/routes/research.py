@@ -2,10 +2,11 @@
 
 import hashlib
 import json
+from datetime import datetime
 from typing import Annotated, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Query
 from fastapi.responses import JSONResponse
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.models import ResearchRequest
@@ -22,7 +23,13 @@ from nexus.api.schemas.agents import (
 )
 from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
 from nexus.domain.decimal import decimal_to_string
-from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
+from nexus.domain.evidence import EvidenceRef
+from nexus.domain.time import require_utc
+from nexus.persistence.models.agents import (
+    AgentResearchOutputEvidenceRecord,
+    AgentResearchOutputRecord,
+    AgentResearchRunRecord,
+)
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from nexus.settings import EngineSettings
 from nexus.strategy.intents import ResearchIntent
@@ -118,7 +125,7 @@ async def get_research_run(
         raise NexusError(ErrorCode.NOT_FOUND, "Research run was not found.", status_code=404)
     output = await _latest_output(session, run.id)
     return ResearchRunEnvelope(
-        data=_response(run, output),
+        data=await _hydrate_response(session, run, output),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=run.decision_time),
     )
 
@@ -135,13 +142,23 @@ async def get_research_run(
 )
 async def get_instrument_research(
     instrument_id: UUID,
+    as_of: Annotated[datetime, Query()],
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> ResearchRunEnvelope:
     """Select the latest immutable research record by stable timestamp/id ordering."""
+    try:
+        bounded_as_of = require_utc(as_of)
+    except ValueError as error:
+        raise NexusError(
+            ErrorCode.VALIDATION_ERROR, "as_of must be canonical UTC.", status_code=422
+        ) from error
     run = await session.scalar(
         select(AgentResearchRunRecord)
-        .where(AgentResearchRunRecord.instrument_id == instrument_id)
+        .where(
+            AgentResearchRunRecord.instrument_id == instrument_id,
+            AgentResearchRunRecord.decision_time <= bounded_as_of,
+        )
         .order_by(desc(AgentResearchRunRecord.decision_time), desc(AgentResearchRunRecord.id))
         .limit(1)
     )
@@ -149,8 +166,8 @@ async def get_instrument_research(
         raise NexusError(ErrorCode.NOT_FOUND, "Instrument research was not found.", status_code=404)
     output = await _latest_output(session, run.id)
     return ResearchRunEnvelope(
-        data=_response(run, output),
-        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=run.decision_time),
+        data=await _hydrate_response(session, run, output),
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=bounded_as_of),
     )
 
 
@@ -166,25 +183,96 @@ async def _latest_output(session: AsyncSession, run_id: UUID) -> AgentResearchOu
     )
 
 
+async def _hydrate_response(
+    session: AsyncSession,
+    run: AgentResearchRunRecord,
+    output: AgentResearchOutputRecord | None,
+) -> ResearchRunResponse:
+    evidence_records: tuple[AgentResearchOutputEvidenceRecord, ...] = ()
+    if output is not None:
+        evidence_records = tuple(
+            await session.scalars(
+                select(AgentResearchOutputEvidenceRecord)
+                .where(AgentResearchOutputEvidenceRecord.output_id == output.id)
+                .order_by(AgentResearchOutputEvidenceRecord.evidence_ref_id)
+            )
+        )
+    return _response(run, output, evidence_records)
+
+
 def _response(
-    run: AgentResearchRunRecord, output: AgentResearchOutputRecord | None
+    run: AgentResearchRunRecord,
+    output: AgentResearchOutputRecord | None,
+    evidence_records: tuple[AgentResearchOutputEvidenceRecord, ...] = (),
 ) -> ResearchRunResponse:
     intent = None
+    abstention_reason = None
     if output is not None and output.intent is not None:
         try:
             intent = ResearchIntent.model_validate(output.intent)
         except ValidationError:
-            intent = None
+            abstention_reason = "invalid_intent_schema"
+    evidence = tuple(
+        EvidenceRef(
+            source=record.source,
+            object_id=record.provider_object_id,
+            available_at=record.available_at,
+            location=record.location,
+            content_hash=record.content_hash,
+        )
+        for record in evidence_records
+    )
+    if intent is not None and not _intent_is_authority_bound(intent, evidence):
+        intent = None
+        evidence = ()
+        abstention_reason = "evidence_authority_invalid"
+    if output is not None and output.intent is None:
+        raw_reason = output.payload.get("reason")
+        if isinstance(raw_reason, str) and len(raw_reason) <= 100:
+            abstention_reason = raw_reason
+    status = run.status
+    if abstention_reason is not None and status == "completed":
+        status = "abstained"
     return ResearchRunResponse(
         run_id=run.id,
         instrument_id=run.instrument_id,
         data_snapshot_id=run.data_snapshot_id,
         decision_time=run.decision_time,
-        status=cast(AgentRunStatus, run.status),
+        status=cast(AgentRunStatus, status),
         retry_count=run.retry_count,
         reserved_cost_usd=decimal_to_string(run.reserved_cost_usd),
         settled_cost_usd=None
         if run.settled_cost_usd is None
         else decimal_to_string(run.settled_cost_usd),
         intent=intent,
+        evidence=evidence,
+        role_votes=() if intent is None else intent.role_votes,
+        disagreement=None if intent is None else intent.disagreement,
+        invalidation_conditions=() if intent is None else intent.invalidation_conditions,
+        quality_status=None if intent is None else intent.quality_status,
+        budget_reason="budget_exhausted" if abstention_reason == "budget_exhausted" else None,
+        abstention_reason=abstention_reason,
     )
+
+
+def _intent_is_authority_bound(intent: ResearchIntent, evidence: tuple[EvidenceRef, ...]) -> bool:
+    authority = {_evidence_identity(ref) for ref in evidence}
+    if not authority or {_evidence_identity(ref) for ref in intent.evidence_refs} != authority:
+        return False
+    nested = (
+        ref
+        for collection in (
+            intent.theses,
+            intent.counter_theses,
+            intent.invalidation_conditions,
+            intent.entry_conditions,
+            intent.exit_conditions,
+        )
+        for item in collection
+        for ref in item.evidence_refs
+    )
+    return all(_evidence_identity(ref) in authority for ref in nested)
+
+
+def _evidence_identity(ref: EvidenceRef) -> tuple[str, str, datetime, str, str]:
+    return (ref.source, ref.object_id, ref.available_at, ref.location, ref.content_hash)

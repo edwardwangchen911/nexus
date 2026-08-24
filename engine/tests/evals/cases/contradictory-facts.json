@@ -1,0 +1,5 @@
+{
+  "case": "contradictory_facts",
+  "expected_status": "abstained",
+  "conflicting_facts": true
+}
