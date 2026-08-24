@@ -56,6 +56,7 @@ export function ProposalComparison({ group, actionsEnabled = true, onStartShadow
       : shadowReason;
 
   async function startShadow(): Promise<void> {
+    if (!canShadow) return;
     setPending("shadow"); setNotice(null);
     try {
       await onStartShadow(group.proposal_group_id, group.version);
@@ -72,6 +73,7 @@ export function ProposalComparison({ group, actionsEnabled = true, onStartShadow
   }
 
   async function reject(): Promise<void> {
+    if (!canReject) return;
     setPending("reject"); setNotice(null);
     try {
       await onReject(group.proposal_group_id, group.version);
@@ -161,7 +163,7 @@ export function ProposalComparison({ group, actionsEnabled = true, onStartShadow
         ) : null}
       </div>
 
-      {confirming ? (
+      {confirming && canShadow ? (
         <div className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="shadow-confirm-title">
           <div>
             <h3 id="shadow-confirm-title">确认启动影子验证</h3>

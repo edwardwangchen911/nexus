@@ -68,6 +68,19 @@ describe("three-way proposal comparison", () => {
     expect(screen.getByText(/当前状态 shadowing/)).toBeVisible();
   });
 
+  it("closes an outstanding confirmation when the data becomes stale", () => {
+    const onStartShadow = vi.fn();
+    const eligible = proposalGroup({ shadow_eligibility: { eligible: true, reasons: [] } });
+    const { rerender } = render(<ProposalComparison group={eligible} actionsEnabled onStartShadow={onStartShadow} onReject={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "启动影子验证" }));
+    expect(screen.getByRole("dialog", { name: "确认启动影子验证" })).toBeVisible();
+    rerender(<ProposalComparison group={eligible} actionsEnabled={false} onStartShadow={onStartShadow} onReject={vi.fn()} />);
+
+    expect(screen.queryByRole("dialog", { name: "确认启动影子验证" })).not.toBeInTheDocument();
+    expect(onStartShadow).not.toHaveBeenCalled();
+  });
+
   it("shows version-conflict recovery without discarding the comparison", async () => {
     const onStartShadow = vi.fn().mockRejectedValue(new Error("VERSION_CONFLICT"));
     const group = proposalGroup({
