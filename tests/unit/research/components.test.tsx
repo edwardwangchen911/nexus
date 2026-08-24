@@ -105,4 +105,18 @@ describe("research evidence docket", () => {
     fireEvent.keyDown(dialog, { key: "Escape" });
     await waitFor(() => expect(trigger).toHaveFocus());
   });
+
+  it("exposes every evidence reference attached to one claim", () => {
+    const secondEvidence = { ...evidence, object_id: "0000320193-26-000002", content_hash: "b".repeat(64), location: `memory://sha256/${"b".repeat(64)}#item-8` };
+    const current = researchData();
+    render(<DecisionCard research={researchData({
+      evidence: [evidence, secondEvidence],
+      intent: {
+        ...current.intent!,
+        evidence_refs: [evidence, secondEvidence],
+        theses: [{ ...current.intent!.theses[0], evidence_refs: [evidence, secondEvidence] }],
+      },
+    })} />);
+    expect(screen.getByRole("button", { name: "查看证据定位 2" })).toBeVisible();
+  });
 });

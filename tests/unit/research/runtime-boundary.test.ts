@@ -35,6 +35,22 @@ describe("research Engine response boundary", () => {
     expect((await sanitizeEngineResponse(json(mismatchedBrief), undefined, `/internal/v1/briefs/${sessionDate}`)).status).toBe(500);
   });
 
+  it("rejects a sub-second decision that is later than the requested as-of", async () => {
+    const late = researchEnvelope(researchData({ decision_time: "2026-08-24T20:00:00.900Z" }));
+    const response = await sanitizeEngineResponse(
+      json(late),
+      `https://nexus.test/api/v1/instruments/${instrumentId}/research?as_of=${encodeURIComponent("2026-08-24T20:00:00Z")}`,
+    );
+    expect(response.status).toBe(500);
+  });
+
+  it("rejects an intent whose frozen identity differs from its run", async () => {
+    const current = researchData();
+    const mismatched = researchData({ intent: { ...current.intent!, data_snapshot_id: "0198d600-1000-7000-8000-000000001598" } });
+    const response = await sanitizeEngineResponse(json(researchEnvelope(mismatched)), undefined, `/internal/v1/research-runs/${runId}`);
+    expect(response.status).toBe(500);
+  });
+
   it("rejects oversized evidence, role-vote and brief collections", async () => {
     expect((await sanitizeEngineResponse(json(researchEnvelope(researchData({ evidence: Array.from({ length: 101 }, () => researchData().evidence[0]) }))), undefined, `/internal/v1/research-runs/${runId}`)).status).toBe(500);
     expect((await sanitizeEngineResponse(json(researchEnvelope(researchData({ role_votes: Array.from({ length: 9 }, () => researchData().role_votes[0]) }))), undefined, `/internal/v1/research-runs/${runId}`)).status).toBe(500);

@@ -85,7 +85,7 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
                   <li key={`${condition.signal}:${index}`}>
                     <code>{condition.signal}</code>
                     <span>{condition.operator} {String(condition.threshold)} · {condition.unit}</span>
-                    {condition.evidence_refs[0] ? <EvidenceButton evidence={condition.evidence_refs[0]} excerpt={`${condition.signal} ${condition.operator} ${String(condition.threshold)}`} onOpen={openEvidence} /> : null}
+                    <EvidenceButtons evidenceRefs={condition.evidence_refs} excerpt={`${condition.signal} ${condition.operator} ${String(condition.threshold)}`} onOpen={openEvidence} />
                   </li>
                 ))}
               </ul>
@@ -121,17 +121,17 @@ function ClaimList({ title, claims, onOpen }: {
   return (
     <section aria-label={title}>
       <h3>{title}</h3>
-      {claims.length ? <ol>{claims.map((claim, index) => <li key={`${title}:${index}`}><p>{claim.text}</p>{claim.evidence_refs[0] ? <EvidenceButton evidence={claim.evidence_refs[0]} excerpt={claim.text} onOpen={onOpen} /> : null}</li>)}</ol> : <p>未形成带证据的论点。</p>}
+      {claims.length ? <ol>{claims.map((claim, index) => <li key={`${title}:${index}`}><p>{claim.text}</p><EvidenceButtons evidenceRefs={claim.evidence_refs} excerpt={claim.text} onOpen={onOpen} /></li>)}</ol> : <p>未形成带证据的论点。</p>}
     </section>
   );
 }
 
-function EvidenceButton({ evidence, excerpt, onOpen }: {
-  evidence: Evidence;
+function EvidenceButtons({ evidenceRefs, excerpt, onOpen }: {
+  evidenceRefs: Evidence[];
   excerpt: string | null;
   onOpen: (evidence: Evidence, excerpt: string | null, opener: HTMLButtonElement) => void;
 }): React.ReactElement {
-  return <button className="evidence-link" type="button" onClick={(event) => onOpen(evidence, excerpt, event.currentTarget)}><FileSearch aria-hidden="true" size={16} />查看证据定位</button>;
+  return <div className="evidence-links">{evidenceRefs.map((evidence, index) => <button key={`${evidence.source}:${evidence.object_id}:${evidence.content_hash}`} className="evidence-link" type="button" onClick={(event) => onOpen(evidence, excerpt, event.currentTarget)}><FileSearch aria-hidden="true" size={16} />{index === 0 ? "查看证据定位" : `查看证据定位 ${index + 1}`}</button>)}</div>;
 }
 
 function roleLabel(role: components["schemas"]["RoleVote"]["role"]): string {

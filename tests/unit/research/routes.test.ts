@@ -5,6 +5,7 @@ import {
   decisionTime,
   instrumentId,
   requestId,
+  researchData,
   researchEnvelope,
   runId,
   sessionDate,
@@ -45,6 +46,19 @@ describe("research BFF routes", () => {
     expect(new TextDecoder().decode(init.body)).toBe(body);
     expect(response.status).toBe(202);
     expect(response.headers.get("location")).toBe(`/api/v1/research-runs/${runId}`);
+  });
+
+  it("rejects a research admission bound to different frozen authority", async () => {
+    engineFetch.mockResolvedValueOnce(Response.json(researchEnvelope(researchData({
+      data_snapshot_id: "0198d600-1000-7000-8000-000000001598",
+    })), { status: 202 }));
+    const { POST } = await import("../../../app/api/v1/research-runs/route");
+    const response = await POST(new Request("https://nexus.test/api/v1/research-runs", {
+      method: "POST",
+      headers: { origin: "https://nexus.test", "content-type": "application/json", "idempotency-key": "mismatch-15" },
+      body: JSON.stringify({ instrument_id: instrumentId, data_snapshot_id: dataSnapshotId, decision_time: decisionTime }),
+    }));
+    expect(response.status).toBe(500);
   });
 
   it.each([

@@ -261,6 +261,7 @@ main { min-block-size: 100vh; margin-inline-start: 16rem; padding: var(--space-6
 .decision-card__conditions li { display: grid; grid-template-columns: minmax(10rem, 1fr) minmax(10rem, 1fr) auto; gap: var(--space-3); align-items: center; border-block-end: 1px solid var(--color-border); padding-block: var(--space-2); }
 .evidence-link { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-block-size: 44px; border: 1px solid var(--color-border); background: var(--color-surface); padding: var(--space-2) var(--space-3); color: var(--color-action); font: inherit; font-weight: 700; cursor: pointer; }
 .evidence-link:hover { border-color: var(--color-action); }
+.evidence-links { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .evidence-drawer { position: fixed; z-index: 5; inset: 0; display: grid; justify-items: end; background: color-mix(in srgb, var(--color-text) 24%, transparent); }
 .evidence-drawer__panel { position: static; display: grid; align-content: start; gap: var(--space-4); inline-size: min(100%, 38rem); max-inline-size: none; block-size: 100%; max-block-size: none; overflow-y: auto; margin: 0; border: 0; border-inline-start: 1px solid var(--color-border); background: var(--color-surface); padding: var(--space-5); color: var(--color-text); }
 .evidence-drawer__panel > header { display: flex; align-items: start; justify-content: space-between; gap: var(--space-4); }

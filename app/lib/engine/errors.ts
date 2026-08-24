@@ -68,7 +68,7 @@ export function rebuildAllowedEngineResponse(status: number, value: unknown, ups
     const safeData = allowedSuccessData(data, requestUrl, schemaPath);
     if (safeData !== INVALID_DATA && isObject(meta, ["request_id", "schema_version", "as_of"])
       && isV7(meta.request_id) && meta.schema_version === "1" && isUtcIso(meta.as_of)
-      && responseIdentityValid(safeData, meta, requestUrl, schemaPath)) {
+      && responseIdentityValid(safeData, meta, requestUrl)) {
       return Response.json({ data: safeData, meta }, { status, headers: safeHeaders(upstreamHeaders, requestUrl) });
     }
   }
@@ -176,20 +176,20 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       : INVALID_DATA;
   }
   if (pathname === "/internal/v1/research-runs") {
-    return matchesRuntimeSchema(data, researchRunRuntimeSchema) && isPlain(data)
+    return matchesRuntimeSchema(data, researchRunRuntimeSchema) && isPlain(data) && researchAuthorityValid(data)
       ? data
       : INVALID_DATA;
   }
   const researchRun = /^\/internal\/v1\/research-runs\/([^/]+)$/.exec(pathname);
   if (researchRun && validateUuid(researchRun[1])) {
-    return matchesRuntimeSchema(data, researchRunRuntimeSchema) && isPlain(data)
+    return matchesRuntimeSchema(data, researchRunRuntimeSchema) && isPlain(data) && researchAuthorityValid(data)
       && sameUuid(data.run_id, researchRun[1])
       ? data
       : INVALID_DATA;
   }
   const instrumentResearch = /^\/internal\/v1\/instruments\/([^/]+)\/research$/.exec(pathname);
   if (instrumentResearch && validateUuid(instrumentResearch[1])) {
-    return matchesRuntimeSchema(data, researchRunRuntimeSchema) && isPlain(data)
+    return matchesRuntimeSchema(data, researchRunRuntimeSchema) && isPlain(data) && researchAuthorityValid(data)
       && sameUuid(data.instrument_id, instrumentResearch[1])
       ? data
       : INVALID_DATA;
@@ -280,17 +280,28 @@ function enginePathname(requestUrl?: string, schemaPath?: string): string {
   } catch { return ""; }
 }
 
-function responseIdentityValid(data: unknown, meta: Record<string, unknown>, requestUrl?: string, schemaPath?: string): boolean {
-  if (!requestUrl || schemaPath) return true;
+function responseIdentityValid(data: unknown, meta: Record<string, unknown>, requestUrl?: string): boolean {
+  if (!requestUrl) return true;
   try {
     const url = new URL(requestUrl);
-    if (/^\/api\/v1\/instruments\/[^/]+\/research$/.test(url.pathname)) {
+    if (/^\/(?:api|internal)\/v1\/instruments\/[^/]+\/research$/.test(url.pathname)) {
       const values = url.searchParams.getAll("as_of");
       return values.length === 1 && isUtcIso(values[0]) && meta.as_of === values[0]
-        && isPlain(data) && typeof data.decision_time === "string" && data.decision_time <= values[0];
+        && isPlain(data) && typeof data.decision_time === "string"
+        && Date.parse(data.decision_time) <= Date.parse(values[0]);
     }
     return true;
   } catch { return false; }
+}
+
+function researchAuthorityValid(data: Record<string, unknown>): boolean {
+  if (data.intent === null) return true;
+  if (!isPlain(data.intent)) return false;
+  return sameUuid(data.intent.instrument_id, data.instrument_id)
+    && sameUuid(data.intent.data_snapshot_id, data.data_snapshot_id)
+    && typeof data.intent.decision_time === "string"
+    && typeof data.decision_time === "string"
+    && Date.parse(data.intent.decision_time) === Date.parse(data.decision_time);
 }
 
 
