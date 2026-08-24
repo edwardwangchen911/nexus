@@ -70,7 +70,7 @@ export function rebuildAllowedEngineResponse(status: number, value: unknown, ups
     if (safeData !== INVALID_DATA && isObject(meta, ["request_id", "schema_version", "as_of"])
       && isV7(meta.request_id) && meta.schema_version === "1" && isUtcIso(meta.as_of)
       && responseIdentityValid(safeData, meta, requestUrl)) {
-      return Response.json({ data: safeData, meta }, { status, headers: safeHeaders(upstreamHeaders, requestUrl) });
+      return Response.json({ data: safeData, meta }, { status, headers: safeHeaders(upstreamHeaders, schemaPath ? undefined : requestUrl) });
     }
   }
   if ([400, 401, 403, 404, 409, 422, 429, 500, 502, 503, 504].includes(status) && isObject(value, ["error"])) {
@@ -83,7 +83,7 @@ export function rebuildAllowedEngineResponse(status: number, value: unknown, ups
           request_id: error.request_id,
           details: {},
         },
-      }, { status, headers: safeHeaders(upstreamHeaders, requestUrl) });
+      }, { status, headers: safeHeaders(upstreamHeaders, schemaPath ? undefined : requestUrl) });
     }
   }
   return null;
