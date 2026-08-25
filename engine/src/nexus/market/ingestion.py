@@ -13,7 +13,13 @@ import pyarrow.parquet as pq  # type: ignore[import-untyped]
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.ids import new_uuid7
-from nexus.persistence.models.data import DataArtifact, PriceBarRecord, PriceSeriesManifest
+from nexus.market.price_bar_authority import finalize_price_bar_set
+from nexus.persistence.models.data import (
+    DataArtifact,
+    PriceBarRecord,
+    PriceBarSetAuthority,
+    PriceSeriesManifest,
+)
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
 
@@ -39,6 +45,8 @@ class MarketIngestionResult:
     manifest: PriceSeriesManifest
     evidence_ref: ResearchEvidenceRef
     provenance: MarketDataProvenance
+    price_authority: PriceBarSetAuthority | None
+    price_evidence_ref: ResearchEvidenceRef | None
 
 
 async def ingest_price_page(
@@ -134,6 +142,8 @@ async def ingest_price_page(
             )
             for bar in page.items
         )
+        await session.flush()
+        finalized = await finalize_price_bar_set(session, manifest)
         await session.commit()
         return MarketIngestionResult(
             raw_uri=raw_uri,
@@ -141,6 +151,8 @@ async def ingest_price_page(
             manifest=manifest,
             evidence_ref=evidence_ref,
             provenance=page.provenance,
+            price_authority=None if finalized is None else finalized[0],
+            price_evidence_ref=None if finalized is None else finalized[1],
         )
     except Exception:
         await session.rollback()

@@ -4,8 +4,14 @@ from itertools import permutations
 from uuid import UUID
 
 import pytest
+from nexus.market import price_bar_authority
 from nexus.market.ingestion import ingest_price_page, serialize_price_bars
-from nexus.persistence.models.data import DataArtifact, PriceBarRecord, PriceSeriesManifest
+from nexus.persistence.models.data import (
+    DataArtifact,
+    PriceBarRecord,
+    PriceBarSetAuthority,
+    PriceSeriesManifest,
+)
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.session import session_factory
 from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
@@ -54,6 +60,11 @@ def _page() -> ProviderPage[PriceBar]:
             delivery_mode="fixture",
         ),
     )
+
+
+def _clean_page() -> ProviderPage[PriceBar]:
+    clean_bar = _bars()[0].model_copy(update={"quality_flags": ()})
+    return _page().model_copy(update={"items": (clean_bar,)})
 
 
 class FakeObjectStore:
@@ -113,6 +124,8 @@ async def test_ingestion_archives_raw_then_promotes_parquet_before_metadata_comm
     assert result.raw_uri.startswith("memory://raw/market/")
     assert result.artifact.uri.startswith("memory://normalized/market/")
     assert result.manifest.delivery_mode == "fixture"
+    assert result.price_authority is None
+    assert result.price_evidence_ref is None
     assert store.objects[result.artifact.uri.removeprefix("memory://")].startswith(b"PAR1")
     assert store.temporary == {}
 
@@ -137,6 +150,57 @@ async def test_ingestion_archives_raw_then_promotes_parquet_before_metadata_comm
             result.artifact.uri,
             result.artifact.sha256,
         )
+
+
+@pytest.mark.asyncio
+async def test_clean_ingestion_atomically_finalizes_db_bar_set_evidence(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        result = await ingest_price_page(session, FakeObjectStore(), _clean_page())
+
+    assert result.price_authority is not None
+    assert result.price_evidence_ref is not None
+    assert result.evidence_ref.content_hash == result.artifact.sha256
+    assert result.price_evidence_ref.content_hash == result.price_authority.content_hash
+    assert result.price_evidence_ref.location == (
+        f"db://price-bar-set/{result.manifest.id}"
+        f"@sha256:{result.price_authority.content_hash}"
+    )
+    assert result.price_evidence_ref.content_hash != result.artifact.sha256
+
+
+@pytest.mark.asyncio
+async def test_flagged_ingestion_remains_diagnostic_only(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        result = await ingest_price_page(session, FakeObjectStore(), _page())
+
+    assert result.price_authority is None
+    assert result.price_evidence_ref is None
+
+
+@pytest.mark.asyncio
+async def test_authority_constraint_failure_rolls_back_ingestion_metadata(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected authority cannot leave archive metadata or Bars committed."""
+    monkeypatch.setattr(price_bar_authority, "HASH_VERSION", "not-a-valid-hash-version")
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        with pytest.raises(IntegrityError):
+            await ingest_price_page(session, FakeObjectStore(), _clean_page())
+
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 0
+        assert await session.scalar(select(func.count()).select_from(ResearchEvidenceRef)) == 0
+        assert await session.scalar(select(func.count()).select_from(PriceSeriesManifest)) == 0
+        assert await session.scalar(select(func.count()).select_from(PriceBarRecord)) == 0
+        assert await session.scalar(select(func.count()).select_from(PriceBarSetAuthority)) == 0
 
 
 @pytest.mark.asyncio
