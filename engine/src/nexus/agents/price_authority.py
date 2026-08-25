@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import and_, case, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 
 from nexus.market.price_bar_authority import (
     HASH_VERSION,
@@ -51,7 +52,14 @@ def _authority_statement(
     instrument_id: UUID,
     selected_at: datetime,
     allow_fixture: bool | None,
-):
+) -> Select[
+    tuple[
+        PriceBarSetAuthority,
+        ResearchEvidenceRef,
+        PriceSeriesManifest,
+        SourcePolicyRecord,
+    ]
+]:
     production = and_(
         PriceSeriesManifest.source == "alpaca",
         PriceSeriesManifest.feed == "sip",
