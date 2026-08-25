@@ -86,6 +86,7 @@ class _BoundDatabaseExecutors:
         self._decision_time = run.decision_time
         self._evidence_hash = run.evidence_hash
         self._frozen_evidence = frozen_evidence
+        self._current_evidence_valid = bool(evidence)
         self._evidence_ids = tuple(record.id for record in evidence)
         self._evidence = evidence
 
@@ -104,6 +105,8 @@ class _BoundDatabaseExecutors:
 
     async def security_snapshot(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_snapshot_scope(payload)
+        if not await self._current_evidence_authority_valid():
+            return self._invalid_frozen_evidence_authority("get_security_snapshot")
         return self._result(
             "get_security_snapshot",
             [
@@ -121,6 +124,8 @@ class _BoundDatabaseExecutors:
 
     async def financial_facts(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_snapshot_scope(payload)
+        if not await self._current_evidence_authority_valid():
+            return self._invalid_frozen_evidence_authority("get_financial_facts")
         fields = cast(tuple[str, ...], payload["fields"])
         records = tuple(
             await self._session.scalars(
@@ -157,6 +162,8 @@ class _BoundDatabaseExecutors:
 
     async def filing_evidence(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_snapshot_scope(payload)
+        if not await self._current_evidence_authority_valid():
+            return self._invalid_frozen_evidence_authority("search_filing_evidence")
         forms = cast(tuple[str, ...], payload["forms"])
         filed_from = payload["filed_from"]
         filed_to = payload["filed_to"]
@@ -458,6 +465,8 @@ class _BoundDatabaseExecutors:
         await self._require_common_scope(payload)
         if payload["data_snapshot_id"] != self._snapshot_id:
             raise ToolInputError("tool request exceeds frozen snapshot authority")
+        if not await self._current_evidence_authority_valid():
+            return self._invalid_frozen_evidence_authority("get_macro_snapshot")
         series = cast(tuple[str, ...], payload["series"])
         records = tuple(
             await self._session.scalars(
@@ -542,6 +551,50 @@ class _BoundDatabaseExecutors:
             [],
             status="unavailable",
             reason="authority_not_frozen_for_research_run",
+        )
+
+    async def _current_evidence_authority_valid(self) -> bool:
+        if not self._current_evidence_valid:
+            return False
+        rows = (
+            await self._session.execute(
+                select(
+                    ResearchEvidenceRef.id,
+                    ResearchEvidenceRef.source,
+                    ResearchEvidenceRef.provider_object_id,
+                    ResearchEvidenceRef.revision,
+                    ResearchEvidenceRef.available_at,
+                    ResearchEvidenceRef.location,
+                    ResearchEvidenceRef.content_hash,
+                ).where(
+                    ResearchEvidenceRef.id.in_(
+                        tuple(record.id for record in self._frozen_evidence)
+                    )
+                )
+            )
+        ).all()
+        current = {row.id: row for row in rows}
+        self._current_evidence_valid = len(current) == len(self._frozen_evidence) and all(
+            (row := current.get(expected.id)) is not None
+            and row.source == expected.source
+            and row.provider_object_id == expected.provider_object_id
+            and row.revision == expected.revision
+            and row.available_at == expected.available_at
+            and row.location == expected.location
+            and row.content_hash == expected.content_hash
+            for expected in self._frozen_evidence
+        )
+        if not self._current_evidence_valid:
+            self._evidence_ids = ()
+            self._evidence = ()
+        return self._current_evidence_valid
+
+    def _invalid_frozen_evidence_authority(self, tool: str) -> Mapping[str, object]:
+        return self._result(
+            tool,
+            [],
+            status="unavailable",
+            reason="invalid_frozen_evidence_authority",
         )
 
     def _result(

@@ -1032,6 +1032,116 @@ async def test_price_tool_refreshes_evidence_changed_after_tool_construction(
 
 
 @pytest.mark.asyncio
+async def test_evidence_backed_tools_fail_closed_when_current_evidence_drifts(
+    migrated_database_url: str,
+) -> None:
+    factory, run = await _prepared_price_run(migrated_database_url)
+    async with factory() as session:
+        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        await _corrupt_price_evidence_content(factory)
+        results = (
+            await tools.execute(
+                "get_security_snapshot",
+                {
+                    "instrument_id": str(_INSTRUMENT_ID),
+                    "data_snapshot_id": str(_SNAPSHOT_ID),
+                    "as_of": _NOW,
+                },
+            ),
+            await tools.execute(
+                "get_financial_facts",
+                {
+                    "instrument_id": str(_INSTRUMENT_ID),
+                    "data_snapshot_id": str(_SNAPSHOT_ID),
+                    "as_of": _NOW,
+                    "fields": ["revenue"],
+                },
+            ),
+            await tools.execute(
+                "search_filing_evidence",
+                {
+                    "instrument_id": str(_INSTRUMENT_ID),
+                    "data_snapshot_id": str(_SNAPSHOT_ID),
+                    "as_of": _NOW,
+                    "forms": ["10-Q"],
+                    "filed_from": "2026-01-01",
+                    "filed_to": "2026-08-24",
+                },
+            ),
+            await tools.execute(
+                "get_macro_snapshot",
+                {
+                    "data_snapshot_id": str(_SNAPSHOT_ID),
+                    "as_of": _NOW,
+                    "series": ["DGS10"],
+                },
+            ),
+        )
+        price = await tools.execute("get_price_features", _price_tool_payload())
+    assert {
+        (result["status"], result["reason"], tuple(result["items"]))
+        for result in results
+    } == {("unavailable", "invalid_frozen_evidence_authority", ())}
+    assert (price["status"], price["reason"], price["items"]) == (
+        "unavailable",
+        "invalid_price_bar_set_authority",
+        [],
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_evidence_queries_retain_noncorruption_statuses(
+    migrated_database_url: str,
+) -> None:
+    factory, run = await _prepared_price_run(migrated_database_url)
+    async with factory() as session:
+        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        financial = await tools.execute(
+            "get_financial_facts",
+            {
+                "instrument_id": str(_INSTRUMENT_ID),
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "as_of": _NOW,
+                "fields": ["net_income"],
+            },
+        )
+        filing = await tools.execute(
+            "search_filing_evidence",
+            {
+                "instrument_id": str(_INSTRUMENT_ID),
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "as_of": _NOW,
+                "forms": ["8-K"],
+                "filed_from": "2026-01-01",
+                "filed_to": "2026-08-24",
+            },
+        )
+        macro = await tools.execute(
+            "get_macro_snapshot",
+            {
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "as_of": _NOW,
+                "series": ["DFF"],
+            },
+        )
+    assert (financial["status"], financial["reason"], financial["items"]) == (
+        "ok",
+        None,
+        [],
+    )
+    assert (filing["status"], filing["reason"], filing["items"]) == (
+        "ok",
+        None,
+        [],
+    )
+    assert (macro["status"], macro["reason"], macro["items"]) == (
+        "unavailable",
+        "no_frozen_macro_authority",
+        [],
+    )
+
+
+@pytest.mark.asyncio
 async def test_price_tool_degrades_when_evidence_is_corrupt_before_construction(
     migrated_database_url: str,
 ) -> None:
@@ -1054,7 +1164,11 @@ async def test_price_tool_degrades_when_evidence_is_corrupt_before_construction(
         "invalid_price_bar_set_authority",
         [],
     )
-    assert financial["items"] == []
+    assert (financial["status"], financial["reason"], financial["items"]) == (
+        "unavailable",
+        "invalid_frozen_evidence_authority",
+        [],
+    )
 
 
 @pytest.mark.parametrize(
