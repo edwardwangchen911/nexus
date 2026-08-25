@@ -428,6 +428,242 @@ def upgrade() -> None:
         sa.CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
     )
     op.execute(
+        """
+        CREATE FUNCTION nexus_price_bar_set_canonical_v1(p_manifest_id uuid)
+        RETURNS text
+        LANGUAGE sql
+        STABLE
+        AS $$
+          SELECT jsonb_build_object(
+            'schema', 'price_bar_set_sha256_v1',
+            'manifest', jsonb_build_object(
+              'instrument', manifest.instrument,
+              'source', manifest.source,
+              'feed', manifest.feed,
+              'delivery_mode', manifest.delivery_mode,
+              'adjustment', manifest.adjustment,
+              'interval', manifest.interval
+            ),
+            'bars', COALESCE((
+              SELECT jsonb_agg(
+                jsonb_build_array(
+                  bar.instrument_id::text,
+                  to_char(bar.session, 'YYYY-MM-DD'),
+                  bar.open, bar.high, bar.low, bar.close, bar.volume,
+                  to_char(
+                    bar.observed_at AT TIME ZONE 'UTC',
+                    'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                  ),
+                  to_char(
+                    bar.available_at AT TIME ZONE 'UTC',
+                    'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                  ),
+                  to_char(
+                    bar.received_at AT TIME ZONE 'UTC',
+                    'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                  ),
+                  bar.revision,
+                  COALESCE((
+                    SELECT jsonb_agg(flag.value ORDER BY flag.value)
+                    FROM jsonb_array_elements_text(bar.quality_flags) AS flag(value)
+                  ), '[]'::jsonb)
+                ) ORDER BY bar.session, bar.observed_at, bar.revision, bar.instrument_id
+              )
+              FROM price_bar_records AS bar
+              WHERE bar.price_series_manifest_id = manifest.id
+            ), '[]'::jsonb)
+          )::text
+          FROM price_series_manifests AS manifest
+          WHERE manifest.id = p_manifest_id
+        $$
+        """
+    )
+    op.execute(
+        """
+        CREATE FUNCTION nexus_prepare_price_bar_set(p_manifest_id uuid)
+        RETURNS TABLE (
+          content_hash text,
+          byte_length bigint,
+          bar_count integer,
+          first_session date,
+          last_session date,
+          available_at timestamptz
+        )
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          manifest price_series_manifests%ROWTYPE;
+          actual_count bigint;
+          first_observed timestamptz;
+          last_observed timestamptz;
+          distinct_session_count bigint;
+          prepared_first_session date;
+          prepared_last_session date;
+          max_received timestamptz;
+          canonical_text text;
+        BEGIN
+          PERFORM pg_advisory_xact_lock(
+            hashtextextended('price-series-manifest:' || p_manifest_id::text, 0)
+          );
+
+          SELECT * INTO manifest
+          FROM price_series_manifests
+          WHERE id = p_manifest_id;
+          IF NOT FOUND THEN
+            RETURN;
+          END IF;
+
+          SELECT
+            count(*),
+            min(bar.observed_at),
+            max(bar.observed_at),
+            count(DISTINCT bar.session),
+            min(bar.session),
+            max(bar.session),
+            max(bar.received_at)
+          INTO
+            actual_count,
+            first_observed,
+            last_observed,
+            distinct_session_count,
+            prepared_first_session,
+            prepared_last_session,
+            max_received
+          FROM price_bar_records AS bar
+          WHERE bar.price_series_manifest_id = manifest.id;
+
+          IF NOT (
+            manifest.interval = '1Day'
+            AND (
+              (
+                manifest.source = 'alpaca'
+                AND manifest.feed = 'sip'
+                AND manifest.delivery_mode = 'delayed'
+              )
+              OR (
+                manifest.source = 'fixture'
+                AND manifest.feed <> ''
+                AND manifest.delivery_mode = 'fixture'
+              )
+            )
+            AND actual_count BETWEEN 1 AND 10000
+            AND actual_count = manifest.row_count
+            AND first_observed = manifest.start_at
+            AND last_observed = manifest.end_at
+            AND actual_count = distinct_session_count
+            AND NOT EXISTS (
+              SELECT 1
+              FROM price_bar_records AS bar
+              WHERE bar.price_series_manifest_id = manifest.id
+                AND (
+                  bar.instrument_id::text <> manifest.instrument
+                  OR bar.observed_at > bar.available_at
+                  OR bar.available_at > bar.received_at
+                  OR jsonb_typeof(bar.quality_flags) <> 'array'
+                  OR bar.quality_flags <> '[]'::jsonb
+                )
+            )
+            AND EXISTS (
+              SELECT 1
+              FROM source_policies AS policy
+              WHERE policy.id = '3c60888d-e92d-5e04-913c-7d427004cfef'::uuid
+                AND policy.key = 'market_price'
+                AND policy.version = 'source_policy_v1'
+                AND policy.schema_version = '1'
+                AND policy.payload = '{
+                  "priority":["fosun","alpaca","fixture"],
+                  "fosun":{"mode":"read_only","operation":"fosun_get_bars","market_scope":"US"},
+                  "alpaca":{"feed":"sip","modes":["delayed","fixture"]},
+                  "fixture":{"mode":"fixture"}
+                }'::jsonb
+            )
+          ) THEN
+            RETURN;
+          END IF;
+
+          canonical_text := nexus_price_bar_set_canonical_v1(p_manifest_id);
+          IF canonical_text IS NULL THEN
+            RETURN;
+          END IF;
+
+          RETURN QUERY SELECT
+            encode(digest(convert_to(canonical_text, 'UTF8'), 'sha256'), 'hex'),
+            octet_length(convert_to(canonical_text, 'UTF8'))::bigint,
+            actual_count::integer,
+            prepared_first_session,
+            prepared_last_session,
+            max_received;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        """
+        CREATE FUNCTION nexus_validate_price_bar_set_authority()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          prepared record;
+          manifest price_series_manifests%ROWTYPE;
+          evidence research_evidence_refs%ROWTYPE;
+        BEGIN
+          SELECT * INTO prepared
+          FROM nexus_prepare_price_bar_set(NEW.price_series_manifest_id);
+          IF NOT FOUND THEN
+            RAISE EXCEPTION 'price bar set authority is invalid' USING ERRCODE = '23514';
+          END IF;
+
+          SELECT * INTO manifest
+          FROM price_series_manifests
+          WHERE id = NEW.price_series_manifest_id;
+          IF NOT FOUND THEN
+            RAISE EXCEPTION 'price bar set authority is invalid' USING ERRCODE = '23514';
+          END IF;
+
+          SELECT * INTO evidence
+          FROM research_evidence_refs
+          WHERE id = NEW.evidence_ref_id;
+          IF NOT FOUND THEN
+            RAISE EXCEPTION 'price bar set authority is invalid' USING ERRCODE = '23514';
+          END IF;
+
+          IF (
+            NEW.source_policy_id = '3c60888d-e92d-5e04-913c-7d427004cfef'::uuid
+            AND NEW.hash_version = 'price_bar_set_sha256_v1'
+            AND NEW.policy_version = 'agent_price_authority_v1'
+            AND NEW.source = manifest.source
+            AND NEW.provider_object_id = 'price-bar-set:' || manifest.id::text
+            AND NEW.revision = prepared.content_hash
+            AND NEW.content_hash = prepared.content_hash
+            AND NEW.byte_length = prepared.byte_length
+            AND NEW.bar_count = prepared.bar_count
+            AND NEW.first_session = prepared.first_session
+            AND NEW.last_session = prepared.last_session
+            AND NEW.available_at = prepared.available_at
+            AND evidence.source = NEW.source
+            AND evidence.provider_object_id = NEW.provider_object_id
+            AND evidence.revision = NEW.revision
+            AND evidence.available_at = NEW.available_at
+            AND evidence.content_hash = prepared.content_hash
+            AND evidence.byte_length = prepared.byte_length
+            AND evidence.location = 'db://price-bar-set/' || manifest.id::text
+              || '@sha256:' || prepared.content_hash
+          ) IS NOT TRUE THEN
+            RAISE EXCEPTION 'price bar set authority is invalid' USING ERRCODE = '23514';
+          END IF;
+
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        "CREATE TRIGGER trg_price_bar_set_authorities_validate BEFORE INSERT "
+        "ON price_bar_set_authorities FOR EACH ROW "
+        "EXECUTE FUNCTION nexus_validate_price_bar_set_authority()"
+    )
+    op.execute(
         "CREATE FUNCTION nexus_prevent_agent_immutable_change() RETURNS trigger LANGUAGE plpgsql AS $$ "
         "BEGIN RAISE EXCEPTION 'agent audit records are append-only' USING ERRCODE = '23514'; END; $$"
     )
@@ -453,20 +689,40 @@ def upgrade() -> None:
             "FOR EACH ROW EXECUTE FUNCTION nexus_prevent_agent_immutable_change()"
         )
     op.execute(
-        "CREATE FUNCTION nexus_prevent_frozen_price_bar_insert() RETURNS trigger "
-        "LANGUAGE plpgsql AS $$ BEGIN "
-        "IF EXISTS (SELECT 1 FROM price_series_manifests manifest "
-        "JOIN agent_data_snapshot_evidence authority "
-        "ON authority.evidence_ref_id = manifest.evidence_ref_id "
-        "WHERE manifest.id = NEW.price_series_manifest_id "
-        "AND authority.authority_kind = 'price') THEN "
-        "RAISE EXCEPTION 'frozen price series cannot grow' USING ERRCODE = '23514'; "
-        "END IF; RETURN NEW; END; $$"
+        """
+        CREATE FUNCTION nexus_guard_price_bar_set_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          manifest_id uuid;
+        BEGIN
+          manifest_id := CASE
+            WHEN TG_OP = 'INSERT' THEN NEW.price_series_manifest_id
+            ELSE OLD.price_series_manifest_id
+          END;
+          PERFORM pg_advisory_xact_lock(
+            hashtextextended('price-series-manifest:' || manifest_id::text, 0)
+          );
+          IF TG_OP = 'INSERT' AND EXISTS (
+            SELECT 1
+            FROM price_bar_set_authorities AS authority
+            WHERE authority.price_series_manifest_id = manifest_id
+          ) THEN
+            RAISE EXCEPTION 'frozen price series cannot grow' USING ERRCODE = '23514';
+          END IF;
+          IF TG_OP = 'DELETE' THEN
+            RETURN OLD;
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
     )
     op.execute(
-        "CREATE TRIGGER trg_price_bar_records_frozen_insert BEFORE INSERT "
-        "ON price_bar_records FOR EACH ROW "
-        "EXECUTE FUNCTION nexus_prevent_frozen_price_bar_insert()"
+        "CREATE TRIGGER trg_00_price_bar_records_authority_guard "
+        "BEFORE INSERT OR UPDATE OR DELETE ON price_bar_records FOR EACH ROW "
+        "EXECUTE FUNCTION nexus_guard_price_bar_set_mutation()"
     )
     op.execute(
         "CREATE FUNCTION nexus_prevent_frozen_price_authority_change() RETURNS trigger "
@@ -638,12 +894,10 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("DROP TRIGGER trg_agent_jobs_change ON jobs")
-    op.execute(
-        "DROP TRIGGER trg_price_series_manifests_frozen_authority "
-        "ON price_series_manifests"
-    )
+    op.execute("DROP TRIGGER trg_price_series_manifests_frozen_authority ON price_series_manifests")
     op.execute("DROP TRIGGER trg_data_artifacts_frozen_authority ON data_artifacts")
-    op.execute("DROP TRIGGER trg_price_bar_records_frozen_insert ON price_bar_records")
+    op.execute("DROP TRIGGER trg_00_price_bar_records_authority_guard ON price_bar_records")
+    op.execute("DROP TRIGGER trg_price_bar_set_authorities_validate ON price_bar_set_authorities")
     op.execute("DROP TRIGGER trg_price_bar_set_authorities_immutable ON price_bar_set_authorities")
     op.execute("DROP TRIGGER trg_agent_budget_delete ON agent_daily_budget_reservations")
     op.execute("DROP TRIGGER trg_agent_budget_transition ON agent_daily_budget_reservations")
@@ -662,6 +916,10 @@ def downgrade() -> None:
         "price_bar_records",
     ):
         op.execute(f"DROP TRIGGER trg_{table}_created_at_immutable ON {table}")
+    op.execute("DROP FUNCTION nexus_validate_price_bar_set_authority()")
+    op.execute("DROP FUNCTION nexus_guard_price_bar_set_mutation()")
+    op.execute("DROP FUNCTION nexus_prepare_price_bar_set(uuid)")
+    op.execute("DROP FUNCTION nexus_price_bar_set_canonical_v1(uuid)")
     op.drop_table("agent_daily_budget_reservations")
     op.drop_table("agent_research_output_evidence")
     op.drop_table("agent_research_outputs")
@@ -704,7 +962,6 @@ def downgrade() -> None:
     )
     op.execute("DROP FUNCTION nexus_validate_agent_run_transition()")
     op.execute("DROP FUNCTION nexus_prevent_frozen_price_authority_change()")
-    op.execute("DROP FUNCTION nexus_prevent_frozen_price_bar_insert()")
     op.execute("DROP FUNCTION nexus_validate_agent_budget_transition()")
     op.execute("DROP FUNCTION nexus_prevent_agent_budget_delete()")
     op.execute("DROP FUNCTION nexus_validate_agent_job_change()")

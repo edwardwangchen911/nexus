@@ -28,15 +28,33 @@ def test_0011_round_trips_from_previous_release(temporary_database_url: str, mon
     monkeypatch.setenv("DATABASE_URL", temporary_database_url)
     command.upgrade(config, "0010_research_data")
     assert _task_15a_tables(temporary_database_url) == set()
+    assert _task_15a_functions(temporary_database_url) == set()
+    assert _task_15a_triggers(temporary_database_url) == set()
     before = _agent_tables(temporary_database_url)
     command.upgrade(config, "0011_agents")
     assert _task_15a_tables(temporary_database_url) == {"price_bar_set_authorities"}
+    expected_functions = {
+        "nexus_guard_price_bar_set_mutation",
+        "nexus_prepare_price_bar_set",
+        "nexus_price_bar_set_canonical_v1",
+        "nexus_validate_price_bar_set_authority",
+    }
+    expected_triggers = {
+        "trg_00_price_bar_records_authority_guard",
+        "trg_price_bar_set_authorities_validate",
+    }
+    assert _task_15a_functions(temporary_database_url) == expected_functions
+    assert _task_15a_triggers(temporary_database_url) == expected_triggers
     first = _agent_tables(temporary_database_url)
     command.downgrade(config, "0010_research_data")
     assert _task_15a_tables(temporary_database_url) == set()
+    assert _task_15a_functions(temporary_database_url) == set()
+    assert _task_15a_triggers(temporary_database_url) == set()
     downgraded = _agent_tables(temporary_database_url)
     command.upgrade(config, "0011_agents")
     assert _task_15a_tables(temporary_database_url) == {"price_bar_set_authorities"}
+    assert _task_15a_functions(temporary_database_url) == expected_functions
+    assert _task_15a_triggers(temporary_database_url) == expected_triggers
     second = _agent_tables(temporary_database_url)
     assert before == downgraded == set()
     assert (
@@ -85,6 +103,46 @@ def _task_15a_tables(database_url: str) -> set[str]:
             await engine.dispose()
 
     return asyncio.run(inspect_tables())
+
+
+def _task_15a_functions(database_url: str) -> set[str]:
+    async def inspect_functions() -> set[str]:
+        engine = create_async_engine(database_url)
+        try:
+            async with engine.connect() as connection:
+                rows = await connection.exec_driver_sql(
+                    "SELECT routine_name FROM information_schema.routines "
+                    "WHERE routine_schema = current_schema() "
+                    "AND routine_name IN ("
+                    "'nexus_guard_price_bar_set_mutation',"
+                    "'nexus_prepare_price_bar_set',"
+                    "'nexus_price_bar_set_canonical_v1',"
+                    "'nexus_validate_price_bar_set_authority')"
+                )
+                return {str(name) for name in rows.scalars()}
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(inspect_functions())
+
+
+def _task_15a_triggers(database_url: str) -> set[str]:
+    async def inspect_triggers() -> set[str]:
+        engine = create_async_engine(database_url)
+        try:
+            async with engine.connect() as connection:
+                rows = await connection.exec_driver_sql(
+                    "SELECT trigger_name FROM information_schema.triggers "
+                    "WHERE trigger_schema = current_schema() "
+                    "AND trigger_name IN ("
+                    "'trg_00_price_bar_records_authority_guard',"
+                    "'trg_price_bar_set_authorities_validate')"
+                )
+                return {str(name) for name in rows.scalars()}
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(inspect_triggers())
 
 
 async def _agent_tables_async(database_url: str) -> set[str]:
