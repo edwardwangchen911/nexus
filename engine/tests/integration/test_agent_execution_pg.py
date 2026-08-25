@@ -1898,6 +1898,133 @@ async def test_price_binding_drift_before_final_synthesis_cannot_create_positive
 
 
 @pytest.mark.asyncio
+async def test_retained_price_binding_drift_abstains_without_emitting_positive_intent(
+    migrated_database_url: str,
+) -> None:
+    """A retained stale price binding must not survive current-state revalidation."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(
+        factory,
+        link_price=False,
+        price_source="alpaca",
+    )
+    async with factory() as session, session.begin():
+        admission = await _admit_price_run(
+            session,
+            prompt_ids,
+            allow_fixture_price_authority=False,
+        )
+
+    async with factory() as session, session.begin():
+        held_binding = await session.scalar(
+            select(AgentDataSnapshotEvidenceRecord).where(
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id
+                == admission.run.data_snapshot_id,
+                AgentDataSnapshotEvidenceRecord.instrument_id
+                == admission.run.instrument_id,
+                AgentDataSnapshotEvidenceRecord.authority_kind == "price",
+            )
+        )
+        assert held_binding is not None
+        assert held_binding.authority_kind == "price"
+        assert held_binding.selected_at is not None
+
+        class _RetainedBindingTamperingCommittee:
+            def __init__(self) -> None:
+                self._fixture = FixtureCommittee()
+                self._held_binding = held_binding
+                self._tampered = False
+
+            async def analyze(
+                self,
+                role: AgentRole,
+                request: ResearchRequest,
+                evidence_refs: tuple[EvidenceRef, ...],
+                prompt: PromptAsset,
+            ) -> CommitteeRoleOutput:
+                if not self._tampered:
+                    await session.execute(
+                        text(
+                            "ALTER TABLE agent_data_snapshot_evidence "
+                            "DISABLE TRIGGER USER"
+                        )
+                    )
+                    try:
+                        await session.execute(
+                            text(
+                                "UPDATE agent_data_snapshot_evidence "
+                                "SET authority_kind='research', selected_at=NULL "
+                                "WHERE data_snapshot_id=:snapshot_id "
+                                "AND instrument_id=:instrument_id "
+                                "AND evidence_ref_id=:evidence_id"
+                            ),
+                            {
+                                "snapshot_id": self._held_binding.data_snapshot_id,
+                                "instrument_id": self._held_binding.instrument_id,
+                                "evidence_id": self._held_binding.evidence_ref_id,
+                            },
+                        )
+                        raw_binding = (
+                            (
+                                await session.execute(
+                                    text(
+                                        "SELECT authority_kind, selected_at "
+                                        "FROM agent_data_snapshot_evidence "
+                                        "WHERE data_snapshot_id=:snapshot_id "
+                                        "AND instrument_id=:instrument_id "
+                                        "AND evidence_ref_id=:evidence_id"
+                                    ),
+                                    {
+                                        "snapshot_id": self._held_binding.data_snapshot_id,
+                                        "instrument_id": self._held_binding.instrument_id,
+                                        "evidence_id": self._held_binding.evidence_ref_id,
+                                    },
+                                )
+                            )
+                            .mappings()
+                            .one()
+                        )
+                        assert (raw_binding["authority_kind"], raw_binding["selected_at"]) == (
+                            "research",
+                            None,
+                        )
+                        assert self._held_binding.authority_kind == "price"
+                        assert self._held_binding.selected_at is not None
+                    finally:
+                        await session.execute(
+                            text(
+                                "ALTER TABLE agent_data_snapshot_evidence "
+                                "ENABLE TRIGGER USER"
+                            )
+                        )
+                    self._tampered = True
+                return await self._fixture.analyze(
+                    role,
+                    request,
+                    evidence_refs,
+                    prompt,
+                )
+
+        result = await execute_research_run(
+            session,
+            run_id=admission.run_id,
+            committee=_RetainedBindingTamperingCommittee(),
+        )
+        persisted_intents = tuple(
+            await session.scalars(
+                select(AgentResearchOutputRecord.intent).where(
+                    AgentResearchOutputRecord.run_id == admission.run_id,
+                )
+            )
+        )
+
+    assert result.status == "abstained"
+    assert result.intent is None
+    assert all(intent is None for intent in persisted_intents)
+
+
+@pytest.mark.asyncio
 async def test_development_responses_rejects_fixture_price_before_client_creation(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,

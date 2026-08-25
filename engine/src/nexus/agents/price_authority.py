@@ -206,13 +206,20 @@ async def revalidate_frozen_price_authority(
         and evidence.location.startswith("db://price-bar-set/")
     ):
         return FrozenPriceAuthorityStatus.INVALID
-    snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+    snapshot = await session.get(
+        DataSnapshot,
+        run.data_snapshot_id,
+        populate_existing=True,
+    )
     binding = await session.scalar(
         select(AgentDataSnapshotEvidenceRecord).where(
             AgentDataSnapshotEvidenceRecord.data_snapshot_id == run.data_snapshot_id,
             AgentDataSnapshotEvidenceRecord.instrument_id == run.instrument_id,
             AgentDataSnapshotEvidenceRecord.evidence_ref_id == evidence.id,
-        )
+            AgentDataSnapshotEvidenceRecord.authority_kind == "price",
+            AgentDataSnapshotEvidenceRecord.selected_at.is_not(None),
+            AgentDataSnapshotEvidenceRecord.selected_at <= run.decision_time,
+        ).execution_options(populate_existing=True)
     )
     if (
         snapshot is None
