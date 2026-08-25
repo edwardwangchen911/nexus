@@ -104,6 +104,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
             "agent_data_snapshot_evidence",
             "agent_daily_budget_reservations",
             "price_bar_records",
+            "price_bar_set_authorities",
         }
     ),
 )
