@@ -63,10 +63,20 @@ def synthesize_intent(
 ) -> ResearchIntent:
     """Reuse role claims verbatim so synthesis cannot introduce an uncited fact."""
     fundamental_missing = symbol == "00656.HK"
+    price_missing = not any(
+        evidence.object_id.startswith("price-bar-set:")
+        and evidence.location.startswith("db://price-bar-set/")
+        for evidence in evidence_refs
+    )
     votes = tuple(
         RoleVote(
             role=output.role,
-            vote="abstain" if fundamental_missing and output.role == "fundamental" else output.vote,
+            vote=(
+                "abstain"
+                if (fundamental_missing and output.role == "fundamental")
+                or (price_missing and output.role == "market_state")
+                else output.vote
+            ),
         )
         for output in role_outputs
     )
@@ -77,6 +87,7 @@ def synthesize_intent(
         support_count=support_count,
         oppose_count=oppose_count,
         fundamental_missing=fundamental_missing,
+        price_missing=price_missing,
     )
     support_claims = tuple(
         claim
@@ -106,11 +117,15 @@ def synthesize_intent(
         exposure_action=exposure_action,
         theses=theses,
         counter_theses=counter_theses,
-        uncertainties=(
-            ("HKEX fundamental authority is unavailable.",)
-            if fundamental_missing
-            else ("Research remains subject to point-in-time evidence quality.",)
-        ),
+        uncertainties=tuple(
+            message
+            for condition, message in (
+                (fundamental_missing, "HKEX fundamental authority is unavailable."),
+                (price_missing, "Price authority is unavailable."),
+            )
+            if condition
+        )
+        or ("Research remains subject to point-in-time evidence quality.",),
         invalidation_conditions=(
             ResearchCondition(
                 signal="committee.evidence_valid",
@@ -139,7 +154,7 @@ def synthesize_intent(
             ),
         ),
         valid_until=run.decision_time + timedelta(days=7),
-        quality_status="partial" if fundamental_missing else "complete",
+        quality_status="partial" if fundamental_missing or price_missing else "complete",
         evidence_audit="complete",
         role_votes=votes,
         disagreement="support and opposition are both present"
@@ -154,12 +169,16 @@ def synthesize_intent(
 
 
 def _decision(
-    *, support_count: int, oppose_count: int, fundamental_missing: bool
+    *,
+    support_count: int,
+    oppose_count: int,
+    fundamental_missing: bool,
+    price_missing: bool,
 ) -> tuple[
     Literal["buy_candidate", "reduce_candidate", "hold", "watch"],
     Literal["none", "reduce", "maintain", "eligible_for_increase"],
 ]:
-    if fundamental_missing:
+    if fundamental_missing or price_missing:
         return ("watch", "none")
     if oppose_count > support_count:
         return ("reduce_candidate", "reduce")

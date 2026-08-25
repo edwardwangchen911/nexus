@@ -62,6 +62,8 @@ _INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000001601")
 _SNAPSHOT_ID = UUID("0198d500-1000-7000-8000-000000001602")
 _MODEL_ID = UUID("0198d500-1000-7000-8000-000000001603")
 _EVIDENCE_ID = UUID("0198d500-1000-7000-8000-000000001604")
+_PRICE_MANIFEST_ID = UUID("0198d500-1000-7000-8000-000000001707")
+_PARQUET_PRICE_EVIDENCE_ID = UUID("0198d500-1000-7000-8000-000000001708")
 
 
 @pytest.mark.asyncio
@@ -96,10 +98,12 @@ async def test_fixture_worker_persists_exact_lifecycle_roles_evidence_and_usage(
         )
     assert result.status == "completed"
     assert result.intent is not None
-    assert (result.intent.stance, result.intent.exposure_action) == (
-        "buy_candidate",
-        "eligible_for_increase",
-    )
+    assert (result.intent.stance, result.intent.exposure_action) == ("watch", "none")
+    assert result.intent.quality_status == "partial"
+    assert "Price authority is unavailable." in result.intent.uncertainties
+    assert next(
+        vote.vote for vote in result.intent.role_votes if vote.role == "market_state"
+    ) == "abstain"
     assert result.intent.counter_theses
     assert result.intent.invalidation_conditions
     assert result.intent.entry_conditions
@@ -541,8 +545,8 @@ async def test_research_and_brief_apis_bind_as_of_url_and_authority_only(
     }
     assert brief_data["evidence_completeness"] == {
         "total_runs": 1,
-        "complete": 1,
-        "partial": 0,
+        "complete": 0,
+        "partial": 1,
         "failed": 0,
     }
     assert len(brief_data["disagreements"]) == 1
@@ -773,6 +777,8 @@ async def test_database_tools_are_complete_and_reject_authority_escape(
             now=_NOW,
             allow_fixture_price_authority=True,
         )
+        price_authority = await session.scalar(select(PriceBarSetAuthority))
+        assert price_authority is not None
         tools = await database_read_only_tools(session, admission.run, allow_fixture_evidence=True)
         assert tools.configured_names == EXPECTED_READ_ONLY_TOOL_NAMES
         result = await tools.execute(
@@ -788,7 +794,7 @@ async def test_database_tools_are_complete_and_reject_authority_escape(
             "0198d500-1000-7000-8000-000000001701",
             "0198d500-1000-7000-8000-000000001702",
             "0198d500-1000-7000-8000-000000001703",
-            "0198d500-1000-7000-8000-000000001708",
+            str(price_authority.evidence_ref_id),
         }
         financial = await tools.execute(
             "get_financial_facts",
@@ -828,7 +834,7 @@ async def test_database_tools_are_complete_and_reject_authority_escape(
         assert price["status"] == "ok"
         assert price["items"] == [
             {
-                "evidence_ref_id": "0198d500-1000-7000-8000-000000001708",
+                "evidence_ref_id": str(price_authority.evidence_ref_id),
                 "source": "fixture",
                 "feed": "adjusted-daily",
                 "adjustment": "split_dividend",
@@ -842,6 +848,9 @@ async def test_database_tools_are_complete_and_reject_authority_escape(
                 },
             }
         ]
+        assert price["items"][0]["evidence_ref_id"] != str(
+            _PARQUET_PRICE_EVIDENCE_ID
+        )
         macro = await tools.execute(
             "get_macro_snapshot",
             {
@@ -955,6 +964,130 @@ async def _admit_price_run(
         daily_limit_usd=Decimal("3.00"),
         now=_NOW,
         allow_fixture_price_authority=allow_fixture_price_authority,
+    )
+
+
+def _price_tool_payload() -> dict[str, object]:
+    return {
+        "instrument_id": str(_INSTRUMENT_ID),
+        "data_snapshot_id": str(_SNAPSHOT_ID),
+        "as_of": _NOW,
+        "features": ["close", "sma_20", "rsi_14", "volatility_20"],
+    }
+
+
+async def _prepared_price_run(database_url: str):
+    factory = session_factory(EngineSettings(database_url=database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(factory, link_price=False, bar_count=200)
+    async with factory() as session, session.begin():
+        admission = await _admit_price_run(
+            session,
+            prompt_ids,
+            allow_fixture_price_authority=True,
+        )
+    return factory, admission.run
+
+
+@pytest.mark.asyncio
+async def test_price_tool_never_returns_ok_for_flagged_stored_bars(
+    migrated_database_url: str,
+) -> None:
+    factory, run = await _prepared_price_run(migrated_database_url)
+    async with factory() as session, session.begin():
+        await session.execute(text("ALTER TABLE price_bar_records DISABLE TRIGGER USER"))
+        try:
+            await session.execute(
+                text(
+                    "UPDATE price_bar_records SET quality_flags='[\"suspect\"]'::jsonb "
+                    "WHERE price_series_manifest_id=:manifest_id"
+                ),
+                {"manifest_id": _PRICE_MANIFEST_ID},
+            )
+        finally:
+            await session.execute(text("ALTER TABLE price_bar_records ENABLE TRIGGER USER"))
+    async with factory() as session:
+        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        result = await tools.execute("get_price_features", _price_tool_payload())
+    assert (result["status"], result["reason"]) == (
+        "unavailable",
+        "flagged_price_bars",
+    )
+    assert result["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_price_tool_degrades_when_stored_bar_set_hash_is_corrupted(
+    migrated_database_url: str,
+) -> None:
+    factory, run = await _prepared_price_run(migrated_database_url)
+    async with factory() as session, session.begin():
+        await session.execute(text("ALTER TABLE price_bar_records DISABLE TRIGGER USER"))
+        try:
+            await session.execute(
+                text(
+                    "UPDATE price_bar_records "
+                    "SET close = close + 0.010000000000 "
+                    "WHERE id = ("
+                    "SELECT id FROM price_bar_records "
+                    "WHERE price_series_manifest_id = :manifest_id "
+                    "ORDER BY session DESC LIMIT 1)"
+                ),
+                {"manifest_id": _PRICE_MANIFEST_ID},
+            )
+        finally:
+            await session.execute(text("ALTER TABLE price_bar_records ENABLE TRIGGER USER"))
+    async with factory() as session:
+        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        result = await tools.execute("get_price_features", _price_tool_payload())
+    assert (result["status"], result["reason"]) == (
+        "unavailable",
+        "invalid_price_bar_set_authority",
+    )
+    assert result["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_price_tool_retains_input_errors_for_caller_scope_violations(
+    migrated_database_url: str,
+) -> None:
+    factory, run = await _prepared_price_run(migrated_database_url)
+    invalid_payloads = []
+    for key, value in (
+        ("instrument_id", UUID("0198d500-1000-7000-8000-000000009999")),
+        ("data_snapshot_id", UUID("0198d500-1000-7000-8000-000000009998")),
+        ("as_of", _NOW + timedelta(seconds=1)),
+    ):
+        payload = _price_tool_payload()
+        payload[key] = value
+        invalid_payloads.append(payload)
+    async with factory() as session:
+        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        for payload in invalid_payloads:
+            with pytest.raises(ToolInputError, match="exceeds frozen"):
+                await tools.execute("get_price_features", payload)
+
+
+@pytest.mark.asyncio
+async def test_price_features_report_unavailable_without_frozen_authority(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admission = await _admit_price_run(
+            session,
+            prompt_ids,
+            allow_fixture_price_authority=True,
+        )
+        tools = await database_read_only_tools(
+            session, admission.run, allow_fixture_evidence=True
+        )
+        result = await tools.execute("get_price_features", _price_tool_payload())
+    assert (result["status"], result["reason"], result["items"]) == (
+        "unavailable",
+        "no_frozen_price_authority",
+        [],
     )
 
 

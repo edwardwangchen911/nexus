@@ -118,16 +118,30 @@ def test_synthesis_uses_all_role_votes_for_nonnumeric_stance_and_paired_evidence
         assert intent.exit_conditions
 
 
-def _synthesize(votes: tuple[str, ...]):
+def _synthesize(
+    votes: tuple[str, ...], *, include_price_authority: bool = True
+):
     now = datetime(2026, 8, 24, tzinfo=UTC)
+    content_hash = "a" * 64
+    object_id = (
+        "price-bar-set:018f75b4-4d86-7c36-bc4c-cd71f2f64521"
+        if include_price_authority
+        else "filing:0000000001-26-000001"
+    )
+    location = (
+        "db://price-bar-set/018f75b4-4d86-7c36-bc4c-cd71f2f64521"
+        f"@sha256:{content_hash}"
+        if include_price_authority
+        else f"memory://sha256/{content_hash}"
+    )
     instrument_id = UUID("0198d500-1000-7000-8000-000000000112")
     snapshot_id = UUID("0198d500-1000-7000-8000-000000000113")
     evidence = EvidenceRef(
-        source="fixture",
-        object_id="evidence-1",
+        source="fixture" if include_price_authority else "sec",
+        object_id=object_id,
         available_at=now,
-        location="memory://sha256/" + "a" * 64,
-        content_hash="a" * 64,
+        location=location,
+        content_hash=content_hash,
     )
     outputs = tuple(
         CommitteeRoleOutput(
@@ -166,3 +180,24 @@ def _synthesize(votes: tuple[str, ...]):
         (evidence,),
         outputs,
     )
+
+
+def test_missing_price_authority_forces_market_abstention_and_watch() -> None:
+    intent = _synthesize(
+        (
+            "support",
+            "support",
+            "support",
+            "support",
+            "support",
+            "oppose",
+            "abstain",
+            "abstain",
+        ),
+        include_price_authority=False,
+    )
+    market_vote = next(vote for vote in intent.role_votes if vote.role == "market_state")
+    assert market_vote.vote == "abstain"
+    assert (intent.stance, intent.exposure_action) == ("watch", "none")
+    assert intent.quality_status == "partial"
+    assert "Price authority is unavailable." in intent.uncertainties

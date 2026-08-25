@@ -4,23 +4,37 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.price_features import compute_price_features
 from nexus.agents.tools import ReadOnlyTools, ToolExecutor, ToolInputError
+from nexus.market.price_bar_authority import (
+    HASH_VERSION,
+    POLICY_VERSION,
+    SOURCE_POLICY_ID,
+    prepare_price_bar_set,
+)
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
     AgentResearchRunRecord,
 )
 from nexus.persistence.models.data import (
-    DataArtifact,
     MacroObservation,
     PriceBarRecord,
+    PriceBarSetAuthority,
     PriceSeriesManifest,
 )
+from nexus.persistence.models.data import (
+    SourcePolicy as SourcePolicyRecord,
+)
 from nexus.persistence.models.research import Filing, FinancialFactRecord, ResearchEvidenceRef
+from nexus.quality.source_policy import (
+    SOURCE_POLICY_KEY,
+    SOURCE_POLICY_PAYLOAD,
+    SOURCE_POLICY_VERSION,
+)
 
 
 async def database_read_only_tools(
@@ -168,73 +182,148 @@ class _BoundDatabaseExecutors:
 
     async def price_features(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_snapshot_scope(payload)
-        authority = (
-            await self._session.execute(
-                select(
-                    AgentDataSnapshotEvidenceRecord,
-                    ResearchEvidenceRef,
-                    PriceSeriesManifest,
-                    DataArtifact,
-                )
-                .join(
-                    ResearchEvidenceRef,
-                    ResearchEvidenceRef.id
-                    == AgentDataSnapshotEvidenceRecord.evidence_ref_id,
-                )
-                .join(
-                    PriceSeriesManifest,
-                    PriceSeriesManifest.evidence_ref_id == ResearchEvidenceRef.id,
-                )
-                .join(DataArtifact, DataArtifact.id == PriceSeriesManifest.data_artifact_id)
+        bindings = tuple(
+            await self._session.scalars(
+                select(AgentDataSnapshotEvidenceRecord)
                 .where(
                     AgentDataSnapshotEvidenceRecord.data_snapshot_id == self._snapshot_id,
                     AgentDataSnapshotEvidenceRecord.instrument_id == self._instrument_id,
-                    AgentDataSnapshotEvidenceRecord.evidence_ref_id.in_(self._evidence_ids),
                     AgentDataSnapshotEvidenceRecord.authority_kind == "price",
-                    AgentDataSnapshotEvidenceRecord.selected_at <= self._decision_time,
-                    PriceSeriesManifest.instrument == str(self._instrument_id),
-                    PriceSeriesManifest.interval == "1Day",
-                    PriceSeriesManifest.end_at <= self._decision_time,
-                    DataArtifact.available_at <= self._decision_time,
-                    DataArtifact.received_at <= self._decision_time,
                 )
-                .limit(1)
+                .limit(2)
             )
-        ).one_or_none()
-        if authority is None:
+        )
+        if not bindings:
             return self._result(
                 "get_price_features",
                 [],
                 status="unavailable",
                 reason="no_frozen_price_authority",
             )
-        binding, evidence, manifest, artifact = authority
-        if self._price_evidence(manifest, artifact) != evidence or binding.selected_at is None:
-            raise ToolInputError("frozen price evidence authority is invalid")
-        bars = tuple(
-            await self._session.scalars(
-                select(PriceBarRecord)
-                .where(
-                    PriceBarRecord.price_series_manifest_id == manifest.id,
-                    PriceBarRecord.instrument_id == self._instrument_id,
-                    PriceBarRecord.observed_at <= self._decision_time,
-                    PriceBarRecord.available_at <= self._decision_time,
-                    PriceBarRecord.received_at <= self._decision_time,
-                    PriceBarRecord.observed_at <= binding.selected_at,
-                    PriceBarRecord.available_at <= binding.selected_at,
-                    PriceBarRecord.received_at <= binding.selected_at,
-                )
-                .order_by(PriceBarRecord.observed_at.desc(), PriceBarRecord.id.desc())
-                .limit(200)
-            )
+        if len(bindings) != 1:
+            return self._invalid_price_authority()
+        binding = bindings[0]
+        if binding.selected_at is None or binding.selected_at > self._decision_time:
+            return self._invalid_price_authority()
+
+        runtime_source = or_(
+            and_(
+                PriceSeriesManifest.source == "alpaca",
+                PriceSeriesManifest.feed == "sip",
+                PriceSeriesManifest.delivery_mode == "delayed",
+                PriceSeriesManifest.interval == "1Day",
+            ),
+            and_(
+                PriceSeriesManifest.source == "fixture",
+                PriceSeriesManifest.feed != "",
+                PriceSeriesManifest.delivery_mode == "fixture",
+                PriceSeriesManifest.interval == "1Day",
+            ),
         )
-        if not bars:
+        authority_rows = tuple(
+            (
+                await self._session.execute(
+                    select(
+                        PriceBarSetAuthority,
+                        ResearchEvidenceRef,
+                        PriceSeriesManifest,
+                    )
+                    .join(
+                        ResearchEvidenceRef,
+                        ResearchEvidenceRef.id == PriceBarSetAuthority.evidence_ref_id,
+                    )
+                    .join(
+                        PriceSeriesManifest,
+                        PriceSeriesManifest.id
+                        == PriceBarSetAuthority.price_series_manifest_id,
+                    )
+                    .join(
+                        SourcePolicyRecord,
+                        SourcePolicyRecord.id == PriceBarSetAuthority.source_policy_id,
+                    )
+                    .where(
+                        PriceBarSetAuthority.evidence_ref_id == binding.evidence_ref_id,
+                        PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
+                        PriceBarSetAuthority.hash_version == HASH_VERSION,
+                        PriceBarSetAuthority.policy_version == POLICY_VERSION,
+                        SourcePolicyRecord.id == SOURCE_POLICY_ID,
+                        SourcePolicyRecord.key == SOURCE_POLICY_KEY,
+                        SourcePolicyRecord.version == SOURCE_POLICY_VERSION,
+                        SourcePolicyRecord.schema_version == "1",
+                        SourcePolicyRecord.payload == SOURCE_POLICY_PAYLOAD,
+                        PriceSeriesManifest.instrument == str(self._instrument_id),
+                        PriceBarSetAuthority.available_at <= binding.selected_at,
+                        ResearchEvidenceRef.available_at <= binding.selected_at,
+                        PriceSeriesManifest.end_at <= binding.selected_at,
+                        runtime_source,
+                    )
+                    .limit(2)
+                )
+            ).all()
+        )
+        if len(authority_rows) != 1:
+            return self._invalid_price_authority()
+        authority, evidence, manifest = authority_rows[0]
+        if (
+            self._price_evidence(authority, manifest) != evidence
+            or binding.evidence_ref_id not in self._evidence_ids
+            or binding.source != evidence.source
+            or binding.provider_object_id != evidence.provider_object_id
+            or binding.revision != evidence.revision
+            or binding.available_at != evidence.available_at
+            or binding.location != evidence.location
+            or binding.content_hash != evidence.content_hash
+        ):
+            return self._invalid_price_authority()
+
+        flagged_bar = await self._session.scalar(
+            select(PriceBarRecord.id)
+            .where(
+                PriceBarRecord.price_series_manifest_id == manifest.id,
+                PriceBarRecord.quality_flags != [],
+            )
+            .limit(1)
+        )
+        if flagged_bar is not None:
             return self._result(
                 "get_price_features",
                 [],
                 status="unavailable",
-                reason="no_visible_price_bars",
+                reason="flagged_price_bars",
             )
+
+        prepared = await prepare_price_bar_set(self._session, manifest.id)
+        if prepared is None or (
+            prepared.content_hash,
+            prepared.byte_length,
+            prepared.bar_count,
+            prepared.first_session,
+            prepared.last_session,
+            prepared.available_at,
+        ) != (
+            authority.content_hash,
+            authority.byte_length,
+            authority.bar_count,
+            authority.first_session,
+            authority.last_session,
+            authority.available_at,
+        ):
+            return self._invalid_price_authority()
+
+        descending_bars = tuple(
+            await self._session.scalars(
+                select(PriceBarRecord)
+                .where(PriceBarRecord.price_series_manifest_id == manifest.id)
+                .order_by(
+                    PriceBarRecord.session.desc(),
+                    PriceBarRecord.observed_at.desc(),
+                )
+                .limit(200)
+            )
+        )
+        if not descending_bars:
+            return self._invalid_price_authority()
+        bars = tuple(reversed(descending_bars))
         features = compute_price_features(
             bars, cast(tuple[str, ...], payload["features"])
         )
@@ -256,21 +345,35 @@ class _BoundDatabaseExecutors:
         )
 
     def _price_evidence(
-        self, manifest: PriceSeriesManifest, artifact: DataArtifact
+        self,
+        authority: PriceBarSetAuthority,
+        manifest: PriceSeriesManifest,
     ) -> ResearchEvidenceRef | None:
         return next(
             (
                 record
                 for record in self._evidence
-                if record.source == manifest.source == artifact.source
-                and record.provider_object_id == f"price-series-manifest:{manifest.id}"
-                and record.revision == artifact.sha256
-                and record.available_at == artifact.available_at
-                and record.location == artifact.uri
-                and record.content_hash == artifact.sha256
-                and record.byte_length == artifact.byte_size
+                if record.id == authority.evidence_ref_id
+                and record.source == authority.source == manifest.source
+                and record.provider_object_id
+                == authority.provider_object_id
+                == f"price-bar-set:{manifest.id}"
+                and record.revision == authority.revision == authority.content_hash
+                and record.available_at == authority.available_at
+                and record.location
+                == f"db://price-bar-set/{manifest.id}@sha256:{authority.content_hash}"
+                and record.content_hash == authority.content_hash
+                and record.byte_length == authority.byte_length
             ),
             None,
+        )
+
+    def _invalid_price_authority(self) -> Mapping[str, object]:
+        return self._result(
+            "get_price_features",
+            [],
+            status="unavailable",
+            reason="invalid_price_bar_set_authority",
         )
 
     async def macro_snapshot(self, payload: Mapping[str, object]) -> Mapping[str, object]:
