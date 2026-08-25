@@ -245,6 +245,8 @@ async def revalidate_frozen_price_authority(
     )
     if (
         snapshot is None
+        or snapshot.available_at > current_decision_time
+        or snapshot.received_at > current_decision_time
         or binding is None
         or binding.authority_kind != "price"
         or binding.selected_at is None
@@ -317,28 +319,66 @@ async def freeze_price_authority(
     allow_fixture: bool = False,
 ) -> None:
     """Attach one runtime-eligible finalized Bar-set authority, if available."""
-    existing = await session.scalar(
-        select(AgentDataSnapshotEvidenceRecord).where(
-            AgentDataSnapshotEvidenceRecord.data_snapshot_id == snapshot.id,
-            AgentDataSnapshotEvidenceRecord.instrument_id == instrument_id,
-            AgentDataSnapshotEvidenceRecord.authority_kind == "price",
+    current_snapshot = await session.get(
+        DataSnapshot,
+        snapshot.id,
+        populate_existing=True,
+    )
+    snapshot_is_current = (
+        current_snapshot is not None
+        and current_snapshot.available_at <= decision_time
+        and current_snapshot.received_at <= decision_time
+    )
+    existing_records = tuple(
+        await session.scalars(
+            select(AgentDataSnapshotEvidenceRecord)
+            .outerjoin(
+                PriceBarSetAuthority,
+                PriceBarSetAuthority.evidence_ref_id
+                == AgentDataSnapshotEvidenceRecord.evidence_ref_id,
+            )
+            .where(
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id == snapshot.id,
+                AgentDataSnapshotEvidenceRecord.instrument_id == instrument_id,
+                or_(
+                    AgentDataSnapshotEvidenceRecord.authority_kind == "price",
+                    PriceBarSetAuthority.evidence_ref_id.is_not(None),
+                ),
+            )
+            .limit(2)
+            .execution_options(populate_existing=True)
         )
     )
-    if existing is not None:
-        if existing.selected_at is None:
+    if existing_records:
+        if len(existing_records) != 1:
             raise ValueError("existing price authority is invalid")
-        loaded = (
-            await session.execute(
-                _authority_statement(
-                    instrument_id=instrument_id,
-                    selected_at=existing.selected_at,
-                    allow_fixture=None,
-                ).where(PriceBarSetAuthority.evidence_ref_id == existing.evidence_ref_id)
-            )
-        ).one_or_none()
-        if loaded is None:
+        existing = existing_records[0]
+        if (
+            not snapshot_is_current
+            or existing.authority_kind != "price"
+            or existing.selected_at is None
+        ):
             raise ValueError("existing price authority is invalid")
-        authority, evidence, manifest, policy = loaded
+        loaded = tuple(
+            (
+                await session.execute(
+                    _authority_statement(
+                        instrument_id=instrument_id,
+                        selected_at=existing.selected_at,
+                        allow_fixture=None,
+                    )
+                    .where(
+                        PriceBarSetAuthority.evidence_ref_id
+                        == existing.evidence_ref_id
+                    )
+                    .limit(2)
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        )
+        if len(loaded) != 1 or current_snapshot is None:
+            raise ValueError("existing price authority is invalid")
+        authority, evidence, manifest, policy = loaded[0]
         if not (
             _valid_owner(
                 authority,
@@ -349,13 +389,17 @@ async def freeze_price_authority(
                 selected_at=existing.selected_at,
                 allow_fixture=allow_fixture,
             )
-            and _valid_existing_link(existing, evidence, snapshot=snapshot)
+            and _valid_existing_link(
+                existing,
+                evidence,
+                snapshot=current_snapshot,
+            )
         ):
             raise ValueError("existing price authority is invalid")
         return
-    selected_at = snapshot.available_at
-    if snapshot.received_at > decision_time or selected_at > decision_time:
+    if not snapshot_is_current or current_snapshot is None:
         return
+    selected_at = current_snapshot.available_at
     selected = (
         await session.execute(
             _authority_statement(
@@ -407,7 +451,7 @@ async def freeze_price_authority(
     await session.execute(
         pg_insert(AgentDataSnapshotEvidenceRecord)
         .values(
-            data_snapshot_id=snapshot.id,
+            data_snapshot_id=current_snapshot.id,
             instrument_id=instrument_id,
             evidence_ref_id=evidence.id,
             authority_kind="price",

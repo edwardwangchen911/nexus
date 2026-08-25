@@ -49,7 +49,7 @@ from nexus.persistence.models.data import (
 )
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.research import Filing, FinancialFactRecord, ResearchEvidenceRef
-from nexus.persistence.models.runtime import Job
+from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings, Environment
 from nexus.worker import run_agent_worker_once
@@ -973,6 +973,75 @@ async def _admit_price_run(
     )
 
 
+async def _admit_scoped_price_run(
+    session: AsyncSession,
+    prompt_ids: Mapping[AgentRole, UUID],
+    *,
+    scope: str,
+    request_hash: str,
+) -> ResearchAdmission:
+    return await admit_research_run(
+        session,
+        actor_id=scope,
+        route="/internal/v1/research-runs",
+        idempotency_key=scope,
+        request_hash=request_hash,
+        request=ResearchRequest(
+            instrument_id=_INSTRUMENT_ID,
+            data_snapshot_id=_SNAPSHOT_ID,
+            decision_time=_NOW,
+        ),
+        prompt_version_id=prompt_ids["orchestrator"],
+        model_config_id=_MODEL_ID,
+        daily_limit_usd=Decimal("3.00"),
+        now=_NOW,
+        allow_fixture_price_authority=False,
+    )
+
+
+async def _assert_empty_admission_scope(
+    factory,
+    *,
+    scope: str,
+    request_hash: str,
+) -> None:
+    run_ids = select(AgentResearchRunRecord.id).where(
+        AgentResearchRunRecord.actor_id == scope,
+        AgentResearchRunRecord.idempotency_key == scope,
+    )
+    async with factory() as session:
+        counts = (
+            await session.scalar(
+                select(func.count())
+                .select_from(AgentResearchRunRecord)
+                .where(
+                    AgentResearchRunRecord.actor_id == scope,
+                    AgentResearchRunRecord.idempotency_key == scope,
+                )
+            ),
+            await session.scalar(
+                select(func.count()).select_from(Job).where(
+                    Job.input_hash == request_hash
+                )
+            ),
+            await session.scalar(
+                select(func.count())
+                .select_from(AgentDailyBudgetReservationRecord)
+                .where(AgentDailyBudgetReservationRecord.run_id.in_(run_ids))
+            ),
+            await session.scalar(
+                select(func.count())
+                .select_from(IdempotencyRecord)
+                .where(
+                    IdempotencyRecord.actor_id == scope,
+                    IdempotencyRecord.route == "/internal/v1/research-runs",
+                    IdempotencyRecord.idempotency_key == scope,
+                )
+            ),
+        )
+    assert counts == (0, 0, 0, 0)
+
+
 def _price_tool_payload() -> dict[str, object]:
     return {
         "instrument_id": str(_INSTRUMENT_ID),
@@ -1677,6 +1746,326 @@ async def test_existing_price_link_rejects_copied_owner_tamper(
             )
 
 
+@pytest.mark.asyncio
+async def test_admission_rejects_retained_price_binding_copied_field_drift(
+    migrated_database_url: str,
+) -> None:
+    """Admission must compare a retained binding with its current copied fields."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(
+        factory,
+        link_price=True,
+        price_source="alpaca",
+    )
+    scope = "retained-price-binding-admission"
+    request_hash = "a" * 64
+    with pytest.raises(ValueError, match="existing price authority is invalid"):
+        async with factory() as session, session.begin():
+            held_binding = await session.scalar(
+                select(AgentDataSnapshotEvidenceRecord).where(
+                    AgentDataSnapshotEvidenceRecord.data_snapshot_id == _SNAPSHOT_ID,
+                    AgentDataSnapshotEvidenceRecord.instrument_id == _INSTRUMENT_ID,
+                    AgentDataSnapshotEvidenceRecord.authority_kind == "price",
+                )
+            )
+            assert held_binding is not None
+            original_hash = held_binding.content_hash
+            drifted_hash = "0" * 64
+            assert original_hash != drifted_hash
+            await session.execute(
+                text(
+                    "ALTER TABLE agent_data_snapshot_evidence "
+                    "DISABLE TRIGGER USER"
+                )
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE agent_data_snapshot_evidence "
+                        "SET content_hash=:content_hash "
+                        "WHERE data_snapshot_id=:snapshot_id "
+                        "AND instrument_id=:instrument_id "
+                        "AND evidence_ref_id=:evidence_id"
+                    ),
+                    {
+                        "content_hash": drifted_hash,
+                        "snapshot_id": held_binding.data_snapshot_id,
+                        "instrument_id": held_binding.instrument_id,
+                        "evidence_id": held_binding.evidence_ref_id,
+                    },
+                )
+                raw_hash = await session.scalar(
+                    text(
+                        "SELECT content_hash FROM agent_data_snapshot_evidence "
+                        "WHERE data_snapshot_id=:snapshot_id "
+                        "AND instrument_id=:instrument_id "
+                        "AND evidence_ref_id=:evidence_id"
+                    ),
+                    {
+                        "snapshot_id": held_binding.data_snapshot_id,
+                        "instrument_id": held_binding.instrument_id,
+                        "evidence_id": held_binding.evidence_ref_id,
+                    },
+                )
+                assert raw_hash == drifted_hash
+                assert held_binding.content_hash == original_hash
+            finally:
+                await session.execute(
+                    text(
+                        "ALTER TABLE agent_data_snapshot_evidence "
+                        "ENABLE TRIGGER USER"
+                    )
+                )
+            await _admit_scoped_price_run(
+                session,
+                prompt_ids,
+                scope=scope,
+                request_hash=request_hash,
+            )
+    await _assert_empty_admission_scope(
+        factory,
+        scope=scope,
+        request_hash=request_hash,
+    )
+
+
+@pytest.mark.parametrize("timestamp_column", ("available_at", "received_at"))
+@pytest.mark.asyncio
+async def test_admission_rejects_retained_snapshot_pit_drift(
+    migrated_database_url: str,
+    timestamp_column: str,
+) -> None:
+    """Admission must reject a retained snapshot whose current PIT is later."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(
+        factory,
+        link_price=True,
+        price_source="alpaca",
+    )
+    scope = f"retained-{timestamp_column}-admission"
+    request_hash = ("b" if timestamp_column == "available_at" else "c") * 64
+    with pytest.raises(ValueError, match="existing price authority is invalid"):
+        async with factory() as session, session.begin():
+            held_snapshot = await session.get(DataSnapshot, _SNAPSHOT_ID)
+            assert held_snapshot is not None
+            original_timestamp = getattr(held_snapshot, timestamp_column)
+            drifted_timestamp = _NOW + timedelta(seconds=1)
+            assert original_timestamp <= _NOW < drifted_timestamp
+            await session.execute(
+                text(
+                    f"UPDATE data_snapshots SET {timestamp_column}=:timestamp "
+                    "WHERE id=:snapshot_id"
+                ),
+                {
+                    "timestamp": drifted_timestamp,
+                    "snapshot_id": held_snapshot.id,
+                },
+            )
+            raw_timestamp = await session.scalar(
+                text(
+                    f"SELECT {timestamp_column} FROM data_snapshots "
+                    "WHERE id=:snapshot_id"
+                ),
+                {"snapshot_id": held_snapshot.id},
+            )
+            assert raw_timestamp == drifted_timestamp
+            assert getattr(held_snapshot, timestamp_column) == original_timestamp
+            await _admit_scoped_price_run(
+                session,
+                prompt_ids,
+                scope=scope,
+                request_hash=request_hash,
+            )
+    await _assert_empty_admission_scope(
+        factory,
+        scope=scope,
+        request_hash=request_hash,
+    )
+
+
+@pytest.mark.asyncio
+async def test_admission_rejects_retained_price_owner_copied_field_drift(
+    migrated_database_url: str,
+) -> None:
+    """Admission must refresh retained evidence from the existing owner chain."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(
+        factory,
+        link_price=True,
+        price_source="alpaca",
+    )
+    scope = "retained-price-owner-admission"
+    request_hash = "d" * 64
+    with pytest.raises(ValueError, match="existing price authority is invalid"):
+        async with factory() as session, session.begin():
+            held_evidence = await session.scalar(
+                select(ResearchEvidenceRef)
+                .join(
+                    PriceBarSetAuthority,
+                    PriceBarSetAuthority.evidence_ref_id == ResearchEvidenceRef.id,
+                )
+                .where(PriceBarSetAuthority.price_series_manifest_id == _PRICE_MANIFEST_ID)
+            )
+            assert held_evidence is not None
+            original_hash = held_evidence.content_hash
+            original_location = held_evidence.location
+            drifted_hash = "0" * 64
+            drifted_location = (
+                f"db://price-bar-set/{_PRICE_MANIFEST_ID}@sha256:{drifted_hash}"
+            )
+            assert (original_hash, original_location) != (
+                drifted_hash,
+                drifted_location,
+            )
+            await session.execute(
+                text("ALTER TABLE research_evidence_refs DISABLE TRIGGER USER")
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE research_evidence_refs "
+                        "SET content_hash=:content_hash, location=:location "
+                        "WHERE id=:evidence_id"
+                    ),
+                    {
+                        "content_hash": drifted_hash,
+                        "location": drifted_location,
+                        "evidence_id": held_evidence.id,
+                    },
+                )
+                raw_evidence = (
+                    (
+                        await session.execute(
+                            text(
+                                "SELECT content_hash, location "
+                                "FROM research_evidence_refs WHERE id=:evidence_id"
+                            ),
+                            {"evidence_id": held_evidence.id},
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                assert (raw_evidence["content_hash"], raw_evidence["location"]) == (
+                    drifted_hash,
+                    drifted_location,
+                )
+                assert (held_evidence.content_hash, held_evidence.location) == (
+                    original_hash,
+                    original_location,
+                )
+            finally:
+                await session.execute(
+                    text("ALTER TABLE research_evidence_refs ENABLE TRIGGER USER")
+                )
+            await _admit_scoped_price_run(
+                session,
+                prompt_ids,
+                scope=scope,
+                request_hash=request_hash,
+            )
+    await _assert_empty_admission_scope(
+        factory,
+        scope=scope,
+        request_hash=request_hash,
+    )
+
+
+@pytest.mark.asyncio
+async def test_admission_rejects_research_shaped_existing_price_binding(
+    migrated_database_url: str,
+) -> None:
+    """A corrupted price binding must not be mistaken for no existing link."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(
+        factory,
+        link_price=True,
+        price_source="alpaca",
+    )
+    scope = "research-shaped-price-binding-admission"
+    request_hash = "f" * 64
+    with pytest.raises(ValueError, match="existing price authority is invalid"):
+        async with factory() as session, session.begin():
+            held_binding = await session.scalar(
+                select(AgentDataSnapshotEvidenceRecord).where(
+                    AgentDataSnapshotEvidenceRecord.data_snapshot_id == _SNAPSHOT_ID,
+                    AgentDataSnapshotEvidenceRecord.instrument_id == _INSTRUMENT_ID,
+                    AgentDataSnapshotEvidenceRecord.authority_kind == "price",
+                )
+            )
+            assert held_binding is not None
+            assert held_binding.selected_at is not None
+            await session.execute(
+                text(
+                    "ALTER TABLE agent_data_snapshot_evidence "
+                    "DISABLE TRIGGER USER"
+                )
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE agent_data_snapshot_evidence "
+                        "SET authority_kind='research', selected_at=NULL "
+                        "WHERE data_snapshot_id=:snapshot_id "
+                        "AND instrument_id=:instrument_id "
+                        "AND evidence_ref_id=:evidence_id"
+                    ),
+                    {
+                        "snapshot_id": held_binding.data_snapshot_id,
+                        "instrument_id": held_binding.instrument_id,
+                        "evidence_id": held_binding.evidence_ref_id,
+                    },
+                )
+                raw_binding = (
+                    (
+                        await session.execute(
+                            text(
+                                "SELECT authority_kind, selected_at "
+                                "FROM agent_data_snapshot_evidence "
+                                "WHERE data_snapshot_id=:snapshot_id "
+                                "AND instrument_id=:instrument_id "
+                                "AND evidence_ref_id=:evidence_id"
+                            ),
+                            {
+                                "snapshot_id": held_binding.data_snapshot_id,
+                                "instrument_id": held_binding.instrument_id,
+                                "evidence_id": held_binding.evidence_ref_id,
+                            },
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                assert (raw_binding["authority_kind"], raw_binding["selected_at"]) == (
+                    "research",
+                    None,
+                )
+                assert held_binding.authority_kind == "price"
+                assert held_binding.selected_at is not None
+            finally:
+                await session.execute(
+                    text(
+                        "ALTER TABLE agent_data_snapshot_evidence "
+                        "ENABLE TRIGGER USER"
+                    )
+                )
+            await _admit_scoped_price_run(
+                session,
+                prompt_ids,
+                scope=scope,
+                request_hash=request_hash,
+            )
+    await _assert_empty_admission_scope(
+        factory,
+        scope=scope,
+        request_hash=request_hash,
+    )
+
+
 @pytest.mark.parametrize(
     ("provider_object_id", "location"),
     (
@@ -2240,6 +2629,74 @@ async def test_retained_snapshot_drift_abstains_without_emitting_positive_intent
 
     assert committee.tampered is True
     assert result.status == "abstained"
+    assert result.intent is None
+    assert persisted_intents
+    assert all(intent is None for intent in persisted_intents)
+
+
+@pytest.mark.parametrize("timestamp_column", ("available_at", "received_at"))
+@pytest.mark.asyncio
+async def test_current_snapshot_pit_drift_abstains_without_emitting_positive_intent(
+    migrated_database_url: str,
+    timestamp_column: str,
+) -> None:
+    """A current snapshot later than decision time must invalidate final execution."""
+    factory, admission = await _prepared_production_price_admission(
+        migrated_database_url
+    )
+    async with factory() as session, session.begin():
+        held_snapshot = await session.get(DataSnapshot, admission.run.data_snapshot_id)
+        assert held_snapshot is not None
+        original_timestamp = getattr(held_snapshot, timestamp_column)
+        drifted_timestamp = admission.run.decision_time + timedelta(seconds=1)
+        assert original_timestamp <= admission.run.decision_time < drifted_timestamp
+
+        async def tamper() -> None:
+            await session.execute(
+                text(
+                    f"UPDATE data_snapshots SET {timestamp_column}=:timestamp "
+                    "WHERE id=:snapshot_id"
+                ),
+                {
+                    "timestamp": drifted_timestamp,
+                    "snapshot_id": held_snapshot.id,
+                },
+            )
+            raw_timestamp = await session.scalar(
+                text(
+                    f"SELECT {timestamp_column} FROM data_snapshots "
+                    "WHERE id=:snapshot_id"
+                ),
+                {"snapshot_id": held_snapshot.id},
+            )
+            assert raw_timestamp == drifted_timestamp
+            assert getattr(held_snapshot, timestamp_column) == original_timestamp
+
+        committee = _SingleTamperingCommittee(tamper)
+        result = await execute_research_run(
+            session,
+            run_id=admission.run_id,
+            committee=committee,
+        )
+        persisted_intents = await _persisted_run_intents(session, admission.run_id)
+
+    positive_summary = None
+    if result.intent is not None:
+        positive_summary = (
+            result.intent.stance,
+            result.intent.exposure_action,
+            next(
+                vote.vote
+                for vote in result.intent.role_votes
+                if vote.role == "market_state"
+            ),
+            result.intent.quality_status,
+        )
+    assert committee.tampered is True
+    assert result.status == "abstained", (
+        f"timestamp_column={timestamp_column}, status={result.status}, "
+        f"positive_summary={positive_summary}"
+    )
     assert result.intent is None
     assert persisted_intents
     assert all(intent is None for intent in persisted_intents)
