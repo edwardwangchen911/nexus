@@ -989,6 +989,110 @@ async def _prepared_price_run(database_url: str):
     return factory, admission.run
 
 
+async def _corrupt_price_evidence_content(factory) -> None:
+    corrupted_hash = "f" * 64
+    async with factory() as session, session.begin():
+        await session.execute(text("ALTER TABLE research_evidence_refs DISABLE TRIGGER USER"))
+        try:
+            await session.execute(
+                text(
+                    "UPDATE research_evidence_refs "
+                    "SET content_hash=:content_hash, location=:location "
+                    "WHERE id = ("
+                    "SELECT evidence_ref_id FROM price_bar_set_authorities "
+                    "WHERE price_series_manifest_id=:manifest_id)"
+                ),
+                {
+                    "content_hash": corrupted_hash,
+                    "location": (
+                        f"db://price-bar-set/{_PRICE_MANIFEST_ID}"
+                        f"@sha256:{corrupted_hash}"
+                    ),
+                    "manifest_id": _PRICE_MANIFEST_ID,
+                },
+            )
+        finally:
+            await session.execute(text("ALTER TABLE research_evidence_refs ENABLE TRIGGER USER"))
+
+
+@pytest.mark.asyncio
+async def test_price_tool_refreshes_evidence_changed_after_tool_construction(
+    migrated_database_url: str,
+) -> None:
+    factory, run = await _prepared_price_run(migrated_database_url)
+    async with factory() as session:
+        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        await _corrupt_price_evidence_content(factory)
+        result = await tools.execute("get_price_features", _price_tool_payload())
+    assert (result["status"], result["reason"], result["items"]) == (
+        "unavailable",
+        "invalid_price_bar_set_authority",
+        [],
+    )
+
+
+@pytest.mark.asyncio
+async def test_price_tool_degrades_when_evidence_is_corrupt_before_construction(
+    migrated_database_url: str,
+) -> None:
+    factory, run = await _prepared_price_run(migrated_database_url)
+    await _corrupt_price_evidence_content(factory)
+    async with factory() as session:
+        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        result = await tools.execute("get_price_features", _price_tool_payload())
+        financial = await tools.execute(
+            "get_financial_facts",
+            {
+                "instrument_id": str(_INSTRUMENT_ID),
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "as_of": _NOW,
+                "fields": ["revenue"],
+            },
+        )
+    assert (result["status"], result["reason"], result["items"]) == (
+        "unavailable",
+        "invalid_price_bar_set_authority",
+        [],
+    )
+    assert financial["items"] == []
+
+
+@pytest.mark.parametrize(
+    "damage_statement",
+    (
+        "DELETE FROM agent_data_snapshot_evidence WHERE authority_kind='price'",
+        "UPDATE agent_data_snapshot_evidence "
+        "SET authority_kind='research', selected_at=NULL "
+        "WHERE authority_kind='price'",
+    ),
+    ids=("deleted", "retagged"),
+)
+@pytest.mark.asyncio
+async def test_price_tool_treats_missing_expected_binding_as_corruption(
+    migrated_database_url: str,
+    damage_statement: str,
+) -> None:
+    factory, run = await _prepared_price_run(migrated_database_url)
+    async with factory() as session, session.begin():
+        await session.execute(
+            text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER")
+        )
+        try:
+            await session.execute(text(damage_statement))
+        finally:
+            await session.execute(
+                text("ALTER TABLE agent_data_snapshot_evidence ENABLE TRIGGER USER")
+            )
+    async with factory() as session:
+        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        result = await tools.execute("get_price_features", _price_tool_payload())
+    assert (result["status"], result["reason"], result["items"]) == (
+        "unavailable",
+        "invalid_price_bar_set_authority",
+        [],
+    )
+
+
 @pytest.mark.asyncio
 async def test_price_tool_never_returns_ok_for_flagged_stored_bars(
     migrated_database_url: str,

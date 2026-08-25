@@ -1,13 +1,17 @@
 """Strict database-backed tools bound to one frozen Agent research run."""
 
+import hashlib
+import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import cast
+from uuid import UUID
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.agents.execution_authority import load_frozen_evidence
+from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE, load_frozen_evidence
 from nexus.agents.price_features import compute_price_features
 from nexus.agents.tools import ReadOnlyTools, ToolExecutor, ToolInputError
 from nexus.market.price_bar_authority import (
@@ -44,13 +48,27 @@ async def database_read_only_tools(
     allow_fixture_evidence: bool,
 ) -> ReadOnlyTools:
     """Build all fixed executors from immutable run authority, never caller authority."""
+    frozen_evidence = _frozen_evidence_authority(
+        run, allow_fixture_evidence=allow_fixture_evidence
+    )
+    if frozen_evidence is None:
+        raise ToolInputError("frozen evidence authority is unavailable")
     evidence = await load_frozen_evidence(
         session, run, allow_fixture_evidence=allow_fixture_evidence
     )
-    if not evidence:
-        raise ToolInputError("frozen evidence authority is unavailable")
-    bound = _BoundDatabaseExecutors(session, run, evidence)
+    bound = _BoundDatabaseExecutors(session, run, frozen_evidence, evidence)
     return ReadOnlyTools(executors=bound.executors)
+
+
+@dataclass(frozen=True)
+class _FrozenEvidenceAuthority:
+    id: UUID
+    source: str
+    provider_object_id: str
+    revision: str
+    available_at: datetime
+    location: str
+    content_hash: str
 
 
 class _BoundDatabaseExecutors:
@@ -58,6 +76,7 @@ class _BoundDatabaseExecutors:
         self,
         session: AsyncSession,
         run: AgentResearchRunRecord,
+        frozen_evidence: tuple[_FrozenEvidenceAuthority, ...],
         evidence: tuple[ResearchEvidenceRef, ...],
     ) -> None:
         self._session = session
@@ -66,6 +85,7 @@ class _BoundDatabaseExecutors:
         self._snapshot_id = run.data_snapshot_id
         self._decision_time = run.decision_time
         self._evidence_hash = run.evidence_hash
+        self._frozen_evidence = frozen_evidence
         self._evidence_ids = tuple(record.id for record in evidence)
         self._evidence = evidence
 
@@ -182,29 +202,22 @@ class _BoundDatabaseExecutors:
 
     async def price_features(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_snapshot_scope(payload)
-        bindings = tuple(
-            await self._session.scalars(
-                select(AgentDataSnapshotEvidenceRecord)
-                .where(
-                    AgentDataSnapshotEvidenceRecord.data_snapshot_id == self._snapshot_id,
-                    AgentDataSnapshotEvidenceRecord.instrument_id == self._instrument_id,
-                    AgentDataSnapshotEvidenceRecord.authority_kind == "price",
-                )
-                .limit(2)
-            )
+        expected_price_evidence = tuple(
+            record
+            for record in self._frozen_evidence
+            if record.provider_object_id.startswith("price-bar-set:")
+            and record.location.startswith("db://price-bar-set/")
         )
-        if not bindings:
+        if not expected_price_evidence:
             return self._result(
                 "get_price_features",
                 [],
                 status="unavailable",
                 reason="no_frozen_price_authority",
             )
-        if len(bindings) != 1:
+        if len(expected_price_evidence) != 1:
             return self._invalid_price_authority()
-        binding = bindings[0]
-        if binding.selected_at is None or binding.selected_at > self._decision_time:
-            return self._invalid_price_authority()
+        expected = expected_price_evidence[0]
 
         runtime_source = or_(
             and_(
@@ -227,10 +240,16 @@ class _BoundDatabaseExecutors:
                         PriceBarSetAuthority,
                         ResearchEvidenceRef,
                         PriceSeriesManifest,
+                        AgentDataSnapshotEvidenceRecord,
                     )
                     .join(
                         ResearchEvidenceRef,
-                        ResearchEvidenceRef.id == PriceBarSetAuthority.evidence_ref_id,
+                        ResearchEvidenceRef.id
+                        == AgentDataSnapshotEvidenceRecord.evidence_ref_id,
+                    )
+                    .join(
+                        PriceBarSetAuthority,
+                        PriceBarSetAuthority.evidence_ref_id == ResearchEvidenceRef.id,
                     )
                     .join(
                         PriceSeriesManifest,
@@ -242,31 +261,86 @@ class _BoundDatabaseExecutors:
                         SourcePolicyRecord.id == PriceBarSetAuthority.source_policy_id,
                     )
                     .where(
-                        PriceBarSetAuthority.evidence_ref_id == binding.evidence_ref_id,
+                        AgentDataSnapshotEvidenceRecord.data_snapshot_id
+                        == self._snapshot_id,
+                        AgentDataSnapshotEvidenceRecord.instrument_id
+                        == self._instrument_id,
+                        AgentDataSnapshotEvidenceRecord.authority_kind == "price",
+                        AgentDataSnapshotEvidenceRecord.evidence_ref_id == expected.id,
+                        AgentDataSnapshotEvidenceRecord.selected_at.is_not(None),
+                        AgentDataSnapshotEvidenceRecord.selected_at
+                        <= self._decision_time,
+                        AgentDataSnapshotEvidenceRecord.source == expected.source,
+                        AgentDataSnapshotEvidenceRecord.provider_object_id
+                        == expected.provider_object_id,
+                        AgentDataSnapshotEvidenceRecord.revision == expected.revision,
+                        AgentDataSnapshotEvidenceRecord.available_at
+                        == expected.available_at,
+                        AgentDataSnapshotEvidenceRecord.location == expected.location,
+                        AgentDataSnapshotEvidenceRecord.content_hash
+                        == expected.content_hash,
+                        AgentDataSnapshotEvidenceRecord.source
+                        == ResearchEvidenceRef.source,
+                        AgentDataSnapshotEvidenceRecord.provider_object_id
+                        == ResearchEvidenceRef.provider_object_id,
+                        AgentDataSnapshotEvidenceRecord.revision
+                        == ResearchEvidenceRef.revision,
+                        AgentDataSnapshotEvidenceRecord.available_at
+                        == ResearchEvidenceRef.available_at,
+                        AgentDataSnapshotEvidenceRecord.location
+                        == ResearchEvidenceRef.location,
+                        AgentDataSnapshotEvidenceRecord.content_hash
+                        == ResearchEvidenceRef.content_hash,
+                        ResearchEvidenceRef.id == expected.id,
+                        ResearchEvidenceRef.source == expected.source,
+                        ResearchEvidenceRef.provider_object_id
+                        == expected.provider_object_id,
+                        ResearchEvidenceRef.revision == expected.revision,
+                        ResearchEvidenceRef.available_at == expected.available_at,
+                        ResearchEvidenceRef.location == expected.location,
+                        ResearchEvidenceRef.content_hash == expected.content_hash,
                         PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
                         PriceBarSetAuthority.hash_version == HASH_VERSION,
                         PriceBarSetAuthority.policy_version == POLICY_VERSION,
+                        PriceBarSetAuthority.source == ResearchEvidenceRef.source,
+                        PriceBarSetAuthority.provider_object_id
+                        == ResearchEvidenceRef.provider_object_id,
+                        PriceBarSetAuthority.revision == ResearchEvidenceRef.revision,
+                        PriceBarSetAuthority.revision
+                        == PriceBarSetAuthority.content_hash,
+                        PriceBarSetAuthority.available_at
+                        == ResearchEvidenceRef.available_at,
+                        PriceBarSetAuthority.content_hash
+                        == ResearchEvidenceRef.content_hash,
+                        PriceBarSetAuthority.byte_length
+                        == ResearchEvidenceRef.byte_length,
                         SourcePolicyRecord.id == SOURCE_POLICY_ID,
                         SourcePolicyRecord.key == SOURCE_POLICY_KEY,
                         SourcePolicyRecord.version == SOURCE_POLICY_VERSION,
                         SourcePolicyRecord.schema_version == "1",
                         SourcePolicyRecord.payload == SOURCE_POLICY_PAYLOAD,
                         PriceSeriesManifest.instrument == str(self._instrument_id),
-                        PriceBarSetAuthority.available_at <= binding.selected_at,
-                        ResearchEvidenceRef.available_at <= binding.selected_at,
-                        PriceSeriesManifest.end_at <= binding.selected_at,
+                        PriceSeriesManifest.source == PriceBarSetAuthority.source,
+                        PriceSeriesManifest.row_count == PriceBarSetAuthority.bar_count,
+                        PriceBarSetAuthority.available_at
+                        <= AgentDataSnapshotEvidenceRecord.selected_at,
+                        ResearchEvidenceRef.available_at
+                        <= AgentDataSnapshotEvidenceRecord.selected_at,
+                        PriceSeriesManifest.end_at
+                        <= AgentDataSnapshotEvidenceRecord.selected_at,
                         runtime_source,
                     )
                     .limit(2)
+                    .execution_options(populate_existing=True)
                 )
             ).all()
         )
         if len(authority_rows) != 1:
             return self._invalid_price_authority()
-        authority, evidence, manifest = authority_rows[0]
+        authority, evidence, manifest, binding = authority_rows[0]
         if (
-            self._price_evidence(authority, manifest) != evidence
-            or binding.evidence_ref_id not in self._evidence_ids
+            self._price_evidence(authority, evidence, manifest, expected) is None
+            or binding.selected_at is None
             or binding.source != evidence.source
             or binding.provider_object_id != evidence.provider_object_id
             or binding.revision != evidence.revision
@@ -347,25 +421,29 @@ class _BoundDatabaseExecutors:
     def _price_evidence(
         self,
         authority: PriceBarSetAuthority,
+        evidence: ResearchEvidenceRef,
         manifest: PriceSeriesManifest,
+        expected: _FrozenEvidenceAuthority,
     ) -> ResearchEvidenceRef | None:
-        return next(
-            (
-                record
-                for record in self._evidence
-                if record.id == authority.evidence_ref_id
-                and record.source == authority.source == manifest.source
-                and record.provider_object_id
-                == authority.provider_object_id
-                == f"price-bar-set:{manifest.id}"
-                and record.revision == authority.revision == authority.content_hash
-                and record.available_at == authority.available_at
-                and record.location
-                == f"db://price-bar-set/{manifest.id}@sha256:{authority.content_hash}"
-                and record.content_hash == authority.content_hash
-                and record.byte_length == authority.byte_length
-            ),
-            None,
+        return (
+            evidence
+            if evidence.id == expected.id == authority.evidence_ref_id
+            and evidence.source == expected.source == authority.source == manifest.source
+            and evidence.provider_object_id
+            == expected.provider_object_id
+            == authority.provider_object_id
+            == f"price-bar-set:{manifest.id}"
+            and evidence.revision
+            == expected.revision
+            == authority.revision
+            == authority.content_hash
+            and evidence.available_at == expected.available_at == authority.available_at
+            and evidence.location
+            == expected.location
+            == f"db://price-bar-set/{manifest.id}@sha256:{authority.content_hash}"
+            and evidence.content_hash == expected.content_hash == authority.content_hash
+            and evidence.byte_length == authority.byte_length
+            else None
         )
 
     def _invalid_price_authority(self) -> Mapping[str, object]:
@@ -489,3 +567,64 @@ class _BoundDatabaseExecutors:
 
 def _timestamp(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
+
+
+def _frozen_evidence_authority(
+    run: AgentResearchRunRecord,
+    *,
+    allow_fixture_evidence: bool,
+) -> tuple[_FrozenEvidenceAuthority, ...] | None:
+    manifest = run.evidence_manifest
+    if (
+        not isinstance(manifest, list)
+        or not manifest
+        or len(manifest) > MAX_FROZEN_EVIDENCE
+        or hashlib.sha256(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        != run.evidence_hash
+    ):
+        return None
+    records: list[_FrozenEvidenceAuthority] = []
+    required_fields = {
+        "id",
+        "source",
+        "provider_object_id",
+        "revision",
+        "available_at",
+        "location",
+        "content_hash",
+    }
+    try:
+        for item in manifest:
+            if not isinstance(item, dict) or set(item) != required_fields:
+                return None
+            string_values = tuple(item[field] for field in required_fields - {"id"})
+            if not all(isinstance(value, str) for value in string_values):
+                return None
+            available_at = datetime.fromisoformat(
+                cast(str, item["available_at"]).replace("Z", "+00:00")
+            )
+            record = _FrozenEvidenceAuthority(
+                id=UUID(cast(str, item["id"])),
+                source=cast(str, item["source"]),
+                provider_object_id=cast(str, item["provider_object_id"]),
+                revision=cast(str, item["revision"]),
+                available_at=available_at,
+                location=cast(str, item["location"]),
+                content_hash=cast(str, item["content_hash"]),
+            )
+            if (
+                record.available_at.tzinfo is None
+                or record.available_at > run.decision_time
+                or (record.source == "fixture" and not allow_fixture_evidence)
+                or len(record.content_hash) != 64
+                or any(character not in "0123456789abcdef" for character in record.content_hash)
+            ):
+                return None
+            records.append(record)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if len({record.id for record in records}) != len(records):
+        return None
+    return tuple(records)
