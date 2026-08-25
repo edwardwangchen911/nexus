@@ -39,7 +39,7 @@ from nexus.persistence.models.agents import (
 )
 from nexus.persistence.models.market import Instrument
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 from nexus.strategy.intents import ResearchIntent
 from pydantic import ValidationError
 from sqlalchemy import desc, select
@@ -151,6 +151,9 @@ async def create_research_run(
             model_config_id=None,
             daily_limit_usd=settings.agent_daily_budget_usd,
             now=now,
+            allow_fixture_price_authority=(
+                settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE
+            ),
         )
     except BudgetExhausted as error:
         raise NexusError(

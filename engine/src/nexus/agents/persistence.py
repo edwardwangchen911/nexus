@@ -230,6 +230,7 @@ async def admit_research_run(
     model_config_id: UUID | None,
     daily_limit_usd: Decimal,
     now: datetime,
+    allow_fixture_price_authority: bool = False,
     after_authority: Callable[[], Awaitable[None]] | None = None,
 ) -> ResearchAdmission:
     """Atomically claim, validate point-in-time authority, reserve, and append one run."""
@@ -277,6 +278,7 @@ async def admit_research_run(
             snapshot=snapshot,
             instrument_id=request.instrument_id,
             decision_time=request.decision_time,
+            allow_fixture=allow_fixture_price_authority,
         )
     evidence_records = list(
         await session.scalars(

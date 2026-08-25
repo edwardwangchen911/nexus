@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -20,9 +21,14 @@ from nexus.agents.committee import (
 from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution import LIFECYCLE, execute_research_run
 from nexus.agents.models import ResearchRequest
-from nexus.agents.persistence import admit_research_run, release_daily_budget
+from nexus.agents.persistence import (
+    ResearchAdmission,
+    admit_research_run,
+    release_daily_budget,
+)
 from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES, ToolInputError
 from nexus.domain.evidence import EvidenceRef
+from nexus.market.price_bar_authority import finalize_price_bar_set
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentDataSnapshotEvidenceRecord,
@@ -38,6 +44,7 @@ from nexus.persistence.models.data import (
     DataSnapshot,
     MacroObservation,
     PriceBarRecord,
+    PriceBarSetAuthority,
     PriceSeriesManifest,
 )
 from nexus.persistence.models.market import Instrument, InstrumentAlias
@@ -48,6 +55,7 @@ from nexus.settings import EngineSettings, Environment
 from nexus.worker import run_agent_worker_once
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 _NOW = datetime(2026, 8, 24, 12, tzinfo=UTC)
 _INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000001601")
@@ -763,6 +771,7 @@ async def test_database_tools_are_complete_and_reject_authority_escape(
             model_config_id=_MODEL_ID,
             daily_limit_usd=Decimal("3.00"),
             now=_NOW,
+            allow_fixture_price_authority=True,
         )
         tools = await database_read_only_tools(session, admission.run, allow_fixture_evidence=True)
         assert tools.configured_names == EXPECTED_READ_ONLY_TOOL_NAMES
@@ -909,27 +918,116 @@ async def test_admission_selects_and_freezes_db_resident_price_authority(
     prompt_ids = await _seed_authority(factory)
     await _seed_database_tool_authority(factory, link_price=False)
     async with factory() as session, session.begin():
-        admission = await admit_research_run(
+        admission = await _admit_price_run(
             session,
-            actor_id="price-authority-admission",
-            route="/internal/v1/research-runs",
-            idempotency_key="price-authority-admission",
-            request_hash="9" * 64,
-            request=ResearchRequest(
-                instrument_id=_INSTRUMENT_ID,
-                data_snapshot_id=_SNAPSHOT_ID,
-                decision_time=_NOW,
-            ),
-            prompt_version_id=prompt_ids["orchestrator"],
-            model_config_id=_MODEL_ID,
-            daily_limit_usd=Decimal("3.00"),
-            now=_NOW,
+            prompt_ids,
+            allow_fixture_price_authority=True,
         )
-    assert {
-        item["id"]
+    price_items = [
+        item
         for item in admission.run.evidence_manifest
-        if item["provider_object_id"].startswith("price-series-manifest:")
-    } == {"0198d500-1000-7000-8000-000000001708"}
+        if item["provider_object_id"].startswith("price-bar-set:")
+    ]
+    assert len(price_items) == 1
+    assert price_items[0]["location"].startswith("db://price-bar-set/")
+    assert "@sha256:" in price_items[0]["location"]
+
+
+async def _admit_price_run(
+    session: AsyncSession,
+    prompt_ids: Mapping[AgentRole, UUID],
+    *,
+    allow_fixture_price_authority: bool,
+) -> ResearchAdmission:
+    return await admit_research_run(
+        session,
+        actor_id=f"price-authority-{allow_fixture_price_authority}",
+        route="/internal/v1/research-runs",
+        idempotency_key=f"price-authority-{allow_fixture_price_authority}",
+        request_hash=("8" if allow_fixture_price_authority else "9") * 64,
+        request=ResearchRequest(
+            instrument_id=_INSTRUMENT_ID,
+            data_snapshot_id=_SNAPSHOT_ID,
+            decision_time=_NOW,
+        ),
+        prompt_version_id=prompt_ids["orchestrator"],
+        model_config_id=_MODEL_ID,
+        daily_limit_usd=Decimal("3.00"),
+        now=_NOW,
+        allow_fixture_price_authority=allow_fixture_price_authority,
+    )
+
+
+@pytest.mark.asyncio
+async def test_fixture_price_authority_requires_explicit_fixture_admission(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(factory, link_price=False, price_source="fixture")
+    with pytest.raises(ValueError, match="price authority"):
+        async with factory() as session, session.begin():
+            await _admit_price_run(
+                session, prompt_ids, allow_fixture_price_authority=False
+            )
+    async with factory() as session, session.begin():
+        admission = await _admit_price_run(
+            session, prompt_ids, allow_fixture_price_authority=True
+        )
+    assert any(
+        item["provider_object_id"].startswith("price-bar-set:")
+        for item in admission.run.evidence_manifest
+    )
+
+
+@pytest.mark.asyncio
+async def test_existing_fixture_price_authority_is_revalidated_for_runtime(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(factory, price_source="fixture")
+    with pytest.raises(ValueError, match="existing price authority is invalid"):
+        async with factory() as session, session.begin():
+            await _admit_price_run(
+                session, prompt_ids, allow_fixture_price_authority=False
+            )
+    async with factory() as session:
+        assert (
+            await session.scalar(select(func.count()).select_from(AgentResearchRunRecord))
+            == 0
+        )
+        assert await session.scalar(select(func.count()).select_from(Job)) == 0
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(AgentDailyBudgetReservationRecord)
+            )
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_flagged_price_bars_leave_admission_without_price_authority(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(
+        factory,
+        link_price=False,
+        price_source="fixture",
+        price_quality_flags=("suspect",),
+    )
+    async with factory() as session, session.begin():
+        admission = await _admit_price_run(
+            session,
+            prompt_ids,
+            allow_fixture_price_authority=True,
+        )
+    assert not any(
+        item["provider_object_id"].startswith("price-bar-set:")
+        for item in admission.run.evidence_manifest
+    )
 
 
 @pytest.mark.asyncio
@@ -955,6 +1053,7 @@ async def test_price_features_report_partial_when_history_warmup_is_insufficient
             model_config_id=_MODEL_ID,
             daily_limit_usd=Decimal("3.00"),
             now=_NOW,
+            allow_fixture_price_authority=True,
         )
         tools = await database_read_only_tools(
             session, admission.run, allow_fixture_evidence=True
@@ -987,6 +1086,10 @@ async def test_price_owner_trigger_rejects_nonprice_cross_scope_and_future_autho
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     await _seed_authority(factory)
     await _seed_database_tool_authority(factory, link_price=False)
+    async with factory() as session:
+        price_authority = await session.scalar(select(PriceBarSetAuthority))
+        assert price_authority is not None
+        price_evidence_id = price_authority.evidence_ref_id
     other_instrument = UUID("0198d500-1000-7000-8000-000000001709")
     async with factory() as session, session.begin():
         session.add(
@@ -1002,19 +1105,19 @@ async def test_price_owner_trigger_rejects_nonprice_cross_scope_and_future_autho
     cases = (
         (_EVIDENCE_ID, _INSTRUMENT_ID, "fixture", _NOW),
         (
-            UUID("0198d500-1000-7000-8000-000000001708"),
+            price_evidence_id,
             _INSTRUMENT_ID,
             "alpaca",
             _NOW,
         ),
         (
-            UUID("0198d500-1000-7000-8000-000000001708"),
+            price_evidence_id,
             _INSTRUMENT_ID,
             "fixture",
             _NOW + timedelta(seconds=1),
         ),
         (
-            UUID("0198d500-1000-7000-8000-000000001708"),
+            price_evidence_id,
             other_instrument,
             "fixture",
             _NOW,
@@ -1044,6 +1147,40 @@ async def test_price_owner_trigger_rejects_nonprice_cross_scope_and_future_autho
 
 
 @pytest.mark.asyncio
+async def test_price_owner_trigger_rejects_parquet_evidence_as_price_authority(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    await _seed_database_tool_authority(factory, link_price=False)
+    with pytest.raises(DBAPIError):
+        async with factory() as session, session.begin():
+            manifest = await session.get(
+                PriceSeriesManifest,
+                UUID("0198d500-1000-7000-8000-000000001707"),
+            )
+            assert manifest is not None and manifest.evidence_ref_id is not None
+            evidence = await session.get(ResearchEvidenceRef, manifest.evidence_ref_id)
+            assert evidence is not None
+            session.add(
+                AgentDataSnapshotEvidenceRecord(
+                    data_snapshot_id=_SNAPSHOT_ID,
+                    instrument_id=_INSTRUMENT_ID,
+                    evidence_ref_id=evidence.id,
+                    authority_kind="price",
+                    selected_at=_NOW,
+                    source=evidence.source,
+                    provider_object_id=evidence.provider_object_id,
+                    revision=evidence.revision,
+                    available_at=evidence.available_at,
+                    location=evidence.location,
+                    content_hash=evidence.content_hash,
+                )
+            )
+            await session.flush()
+
+
+@pytest.mark.asyncio
 async def test_price_owner_trigger_rejects_a_future_bar(
     migrated_database_url: str,
 ) -> None:
@@ -1053,10 +1190,9 @@ async def test_price_owner_trigger_rejects_a_future_bar(
         factory, link_price=False, future_last_bar=True
     )
     async with factory() as session:
-        evidence = await session.get(
-            ResearchEvidenceRef,
-            UUID("0198d500-1000-7000-8000-000000001708"),
-        )
+        price_authority = await session.scalar(select(PriceBarSetAuthority))
+        assert price_authority is not None
+        evidence = await session.get(ResearchEvidenceRef, price_authority.evidence_ref_id)
         assert evidence is not None
         session.add(
             AgentDataSnapshotEvidenceRecord(
@@ -1146,6 +1282,7 @@ async def test_frozen_price_series_rejects_late_bar_growth(
             model_config_id=_MODEL_ID,
             daily_limit_usd=Decimal("3.00"),
             now=_NOW,
+            allow_fixture_price_authority=True,
         )
     observed_at = _NOW - timedelta(hours=12)
     with pytest.raises(DBAPIError, match="frozen price series"):
@@ -1575,6 +1712,7 @@ async def _seed_database_tool_authority(
     bar_count: int = 200,
     price_source: str = "fixture",
     future_last_bar: bool = False,
+    price_quality_flags: tuple[str, ...] = (),
 ) -> None:
     sec_evidence_id = UUID("0198d500-1000-7000-8000-000000001701")
     macro_value_id = UUID("0198d500-1000-7000-8000-000000001702")
@@ -1739,22 +1877,21 @@ async def _seed_database_tool_authority(
             )
         )
         await session.flush()
-        session.add(
-            PriceSeriesManifest(
-                id=UUID("0198d500-1000-7000-8000-000000001707"),
-                evidence_ref_id=price_evidence_id,
-                data_artifact_id=UUID("0198d500-1000-7000-8000-000000001706"),
-                instrument=str(_INSTRUMENT_ID),
-                source=price_source,
-                feed=("sip" if price_source == "alpaca" else "adjusted-daily"),
-                delivery_mode=("delayed" if price_source == "alpaca" else "fixture"),
-                adjustment="split_dividend",
-                interval="1Day",
-                start_at=_NOW - timedelta(days=bar_count),
-                end_at=bar_time(bar_count - 1),
-                row_count=bar_count,
-            )
+        manifest = PriceSeriesManifest(
+            id=UUID("0198d500-1000-7000-8000-000000001707"),
+            evidence_ref_id=price_evidence_id,
+            data_artifact_id=UUID("0198d500-1000-7000-8000-000000001706"),
+            instrument=str(_INSTRUMENT_ID),
+            source=price_source,
+            feed=("sip" if price_source == "alpaca" else "adjusted-daily"),
+            delivery_mode=("delayed" if price_source == "alpaca" else "fixture"),
+            adjustment="split_dividend",
+            interval="1Day",
+            start_at=_NOW - timedelta(days=bar_count),
+            end_at=bar_time(bar_count - 1),
+            row_count=bar_count,
         )
+        session.add(manifest)
         await session.flush()
         session.add_all(
             PriceBarRecord(
@@ -1772,23 +1909,23 @@ async def _seed_database_tool_authority(
                 available_at=bar_time(index) + timedelta(minutes=1),
                 received_at=bar_time(index) + timedelta(minutes=2),
                 revision="fixture-r1",
-                quality_flags=[],
+                quality_flags=list(price_quality_flags),
             )
             for index in range(bar_count)
         )
         await session.flush()
-        linked = (
-            (evidence[0], evidence[1], evidence[2], evidence[4])
-            if link_price
-            else (evidence[0], evidence[1], evidence[2])
-        )
+        finalized = await finalize_price_bar_set(session, manifest)
+        price_evidence = None if finalized is None else finalized[1]
+        linked = [evidence[0], evidence[1], evidence[2]]
+        if link_price and price_evidence is not None:
+            linked.append(price_evidence)
         session.add_all(
             AgentDataSnapshotEvidenceRecord(
                 data_snapshot_id=_SNAPSHOT_ID,
                 instrument_id=_INSTRUMENT_ID,
                 evidence_ref_id=record.id,
-                authority_kind=("price" if record.id == price_evidence_id else "research"),
-                selected_at=(_NOW if record.id == price_evidence_id else None),
+                authority_kind=("price" if record is price_evidence else "research"),
+                selected_at=(_NOW if record is price_evidence else None),
                 source=record.source,
                 provider_object_id=record.provider_object_id,
                 revision=record.revision,
