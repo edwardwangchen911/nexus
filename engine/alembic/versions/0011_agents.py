@@ -727,10 +727,12 @@ def upgrade() -> None:
     op.execute(
         "CREATE FUNCTION nexus_prevent_frozen_price_authority_change() RETURNS trigger "
         "LANGUAGE plpgsql AS $$ BEGIN "
-        "IF EXISTS (SELECT 1 FROM price_series_manifests manifest "
-        "JOIN agent_data_snapshot_evidence authority "
-        "ON authority.evidence_ref_id = manifest.evidence_ref_id "
-        "WHERE authority.authority_kind = 'price' AND "
+        "IF EXISTS (SELECT 1 FROM agent_data_snapshot_evidence snapshot_authority "
+        "JOIN price_bar_set_authorities bar_set "
+        "ON bar_set.evidence_ref_id = snapshot_authority.evidence_ref_id "
+        "JOIN price_series_manifests manifest "
+        "ON manifest.id = bar_set.price_series_manifest_id "
+        "WHERE snapshot_authority.authority_kind = 'price' AND "
         "((TG_TABLE_NAME = 'price_series_manifests' AND manifest.id = OLD.id) OR "
         "(TG_TABLE_NAME = 'data_artifacts' AND manifest.data_artifact_id = OLD.id))) THEN "
         "RAISE EXCEPTION 'frozen price authority is immutable' USING ERRCODE = '23514'; "
@@ -914,6 +916,8 @@ def downgrade() -> None:
     op.execute("DROP TRIGGER trg_agent_budget_transition ON agent_daily_budget_reservations")
     op.execute("DROP TRIGGER trg_agent_output_evidence_validate ON agent_research_output_evidence")
     op.execute("DROP TRIGGER trg_agent_snapshot_evidence_validate ON agent_data_snapshot_evidence")
+    op.execute("DROP FUNCTION nexus_prevent_frozen_price_authority_change()")
+    op.execute("DROP FUNCTION nexus_validate_agent_snapshot_evidence()")
     for table in (
         "agent_daily_budget_reservations",
         "agent_research_output_evidence",
@@ -972,10 +976,8 @@ def downgrade() -> None:
         "OR location ~ '[?&]versionId=[^&#]+'))",
     )
     op.execute("DROP FUNCTION nexus_validate_agent_run_transition()")
-    op.execute("DROP FUNCTION nexus_prevent_frozen_price_authority_change()")
     op.execute("DROP FUNCTION nexus_validate_agent_budget_transition()")
     op.execute("DROP FUNCTION nexus_prevent_agent_budget_delete()")
     op.execute("DROP FUNCTION nexus_validate_agent_job_change()")
     op.execute("DROP FUNCTION nexus_validate_agent_output_evidence()")
-    op.execute("DROP FUNCTION nexus_validate_agent_snapshot_evidence()")
     op.execute("DROP FUNCTION nexus_prevent_agent_immutable_change()")

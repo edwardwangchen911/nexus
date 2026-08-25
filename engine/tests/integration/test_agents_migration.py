@@ -10,6 +10,18 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import create_async_engine
 
+EXPECTED_TASK_15A_FUNCTIONS = {
+    "nexus_price_bar_set_canonical_v1",
+    "nexus_prepare_price_bar_set",
+    "nexus_validate_price_bar_set_authority",
+    "nexus_guard_price_bar_set_mutation",
+}
+EXPECTED_TASK_15A_TRIGGERS = {
+    "trg_price_bar_set_authorities_validate",
+    "trg_price_bar_set_authorities_immutable",
+    "trg_00_price_bar_records_authority_guard",
+}
+
 
 def test_0011_agents_is_the_single_head_with_the_research_data_parent() -> None:
     """A split head or wrong parent could silently omit immutable Agent audit records."""
@@ -33,28 +45,21 @@ def test_0011_round_trips_from_previous_release(temporary_database_url: str, mon
     before = _agent_tables(temporary_database_url)
     command.upgrade(config, "0011_agents")
     assert _task_15a_tables(temporary_database_url) == {"price_bar_set_authorities"}
-    expected_functions = {
-        "nexus_guard_price_bar_set_mutation",
-        "nexus_prepare_price_bar_set",
-        "nexus_price_bar_set_canonical_v1",
-        "nexus_validate_price_bar_set_authority",
-    }
-    expected_triggers = {
-        "trg_00_price_bar_records_authority_guard",
-        "trg_price_bar_set_authorities_validate",
-    }
-    assert _task_15a_functions(temporary_database_url) == expected_functions
-    assert _task_15a_triggers(temporary_database_url) == expected_triggers
+    assert _task_15a_functions(temporary_database_url) == EXPECTED_TASK_15A_FUNCTIONS
+    assert _task_15a_triggers(temporary_database_url) == EXPECTED_TASK_15A_TRIGGERS
+    assert _extensions(temporary_database_url) >= {"pgcrypto"}
     first = _agent_tables(temporary_database_url)
     command.downgrade(config, "0010_research_data")
     assert _task_15a_tables(temporary_database_url) == set()
     assert _task_15a_functions(temporary_database_url) == set()
     assert _task_15a_triggers(temporary_database_url) == set()
+    assert _extensions(temporary_database_url) >= {"pgcrypto"}
     downgraded = _agent_tables(temporary_database_url)
     command.upgrade(config, "0011_agents")
     assert _task_15a_tables(temporary_database_url) == {"price_bar_set_authorities"}
-    assert _task_15a_functions(temporary_database_url) == expected_functions
-    assert _task_15a_triggers(temporary_database_url) == expected_triggers
+    assert _task_15a_functions(temporary_database_url) == EXPECTED_TASK_15A_FUNCTIONS
+    assert _task_15a_triggers(temporary_database_url) == EXPECTED_TASK_15A_TRIGGERS
+    assert _extensions(temporary_database_url) >= {"pgcrypto"}
     second = _agent_tables(temporary_database_url)
     assert before == downgraded == set()
     assert (
@@ -111,9 +116,9 @@ def _task_15a_functions(database_url: str) -> set[str]:
         try:
             async with engine.connect() as connection:
                 rows = await connection.exec_driver_sql(
-                    "SELECT routine_name FROM information_schema.routines "
-                    "WHERE routine_schema = current_schema() "
-                    "AND routine_name IN ("
+                    "SELECT proname FROM pg_proc "
+                    "WHERE pronamespace = current_schema()::regnamespace "
+                    "AND proname IN ("
                     "'nexus_guard_price_bar_set_mutation',"
                     "'nexus_prepare_price_bar_set',"
                     "'nexus_price_bar_set_canonical_v1',"
@@ -132,17 +137,33 @@ def _task_15a_triggers(database_url: str) -> set[str]:
         try:
             async with engine.connect() as connection:
                 rows = await connection.exec_driver_sql(
-                    "SELECT trigger_name FROM information_schema.triggers "
-                    "WHERE trigger_schema = current_schema() "
-                    "AND trigger_name IN ("
+                    "SELECT trigger.tgname FROM pg_trigger AS trigger "
+                    "JOIN pg_class AS relation ON relation.oid = trigger.tgrelid "
+                    "WHERE NOT trigger.tgisinternal "
+                    "AND relation.relnamespace = current_schema()::regnamespace "
+                    "AND trigger.tgname IN ("
                     "'trg_00_price_bar_records_authority_guard',"
-                    "'trg_price_bar_set_authorities_validate')"
+                    "'trg_price_bar_set_authorities_validate',"
+                    "'trg_price_bar_set_authorities_immutable')"
                 )
                 return {str(name) for name in rows.scalars()}
         finally:
             await engine.dispose()
 
     return asyncio.run(inspect_triggers())
+
+
+def _extensions(database_url: str) -> set[str]:
+    async def inspect_extensions() -> set[str]:
+        engine = create_async_engine(database_url)
+        try:
+            async with engine.connect() as connection:
+                rows = await connection.exec_driver_sql("SELECT extname FROM pg_extension")
+                return {str(name) for name in rows.scalars()}
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(inspect_extensions())
 
 
 async def _agent_tables_async(database_url: str) -> set[str]:

@@ -1,5 +1,6 @@
 """Real-PostgreSQL tests for canonical price-Bar set authority."""
 
+import asyncio
 from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -16,6 +17,7 @@ from helpers.price_bar_authority import (
     seed_price_candidate_in_reverse,
 )
 from nexus.domain.ids import new_uuid7
+from nexus.market.price_bar_authority import finalize_price_bar_set
 from nexus.persistence.models.data import PriceBarSetAuthority, PriceSeriesManifest
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
@@ -58,6 +60,24 @@ CANONICAL_MUTATIONS = (
     ({}, {"revision": "2"}),
     ({}, {"quality_flags": ["suspect"]}),
 )
+
+
+async def _wait_for_advisory_wait(
+    factory: async_sessionmaker[AsyncSession], backend_pid: int
+) -> None:
+    async with asyncio.timeout(2):
+        while True:
+            async with factory() as observer:
+                wait_event = await observer.scalar(
+                    text(
+                        "SELECT wait_event FROM pg_stat_activity "
+                        "WHERE pid=:backend_pid"
+                    ),
+                    {"backend_pid": backend_pid},
+                )
+            if wait_event == "advisory":
+                return
+            await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
@@ -340,6 +360,114 @@ async def test_finalized_price_bar_set_cannot_grow_or_change(
             assert authority is not None
             await session.delete(authority)
             await session.flush()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_writer_first_serializes_finalizer_after_the_new_bar(
+    migrated_database_url: str,
+) -> None:
+    """Removing the shared lock lets finalization miss a writer's uncommitted Bar."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await seed_price_candidate(
+        factory,
+        manifest_overrides={
+            "row_count": 2,
+            "end_at": OBSERVED_AT + timedelta(days=1),
+        },
+    )
+    writer_locked = asyncio.Event()
+    release_writer = asyncio.Event()
+    finalizer_pid = asyncio.get_running_loop().create_future()
+
+    async def writer_first() -> int:
+        async with factory() as session:
+            async with session.begin():
+                session.add(
+                    clean_bar(manifest_id=MANIFEST_ID, session=date(2026, 8, 25))
+                )
+                await session.flush()
+                writer_locked.set()
+                await release_writer.wait()
+            return int(await session.scalar(text("SELECT 1")))
+
+    async def finalizer_second() -> tuple[PriceBarSetAuthority, int]:
+        await writer_locked.wait()
+        async with factory() as session:
+            async with session.begin():
+                finalizer_pid.set_result(
+                    int(await session.scalar(text("SELECT pg_backend_pid()")))
+                )
+                manifest = await session.get(PriceSeriesManifest, MANIFEST_ID)
+                assert manifest is not None
+                finalized = await finalize_price_bar_set(session, manifest)
+                assert finalized is not None
+                authority = finalized[0]
+            return authority, int(await session.scalar(text("SELECT 1")))
+
+    writer_task = asyncio.create_task(writer_first())
+    finalizer_task = asyncio.create_task(finalizer_second())
+    try:
+        await _wait_for_advisory_wait(factory, await finalizer_pid)
+    finally:
+        release_writer.set()
+    writer_probe = await writer_task
+    authority, finalizer_probe = await finalizer_task
+
+    async with factory() as session:
+        prepared = (
+            (
+                await session.execute(
+                    text("SELECT * FROM nexus_prepare_price_bar_set(:manifest_id)"),
+                    {"manifest_id": MANIFEST_ID},
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert authority.bar_count == 2
+    assert authority.content_hash == prepared["content_hash"]
+    assert writer_probe == finalizer_probe == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_authority_first_serializes_and_rejects_the_late_writer(
+    migrated_database_url: str,
+) -> None:
+    """Removing the Bar guard lock lets a late INSERT grow an already-frozen set."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await seed_price_candidate(factory)
+    authority_locked = asyncio.Event()
+    writer_pid = asyncio.get_running_loop().create_future()
+
+    async def late_writer() -> None:
+        await authority_locked.wait()
+        async with factory() as session:
+            try:
+                async with session.begin():
+                    writer_pid.set_result(
+                        int(await session.scalar(text("SELECT pg_backend_pid()")))
+                    )
+                    session.add(
+                        clean_bar(manifest_id=MANIFEST_ID, session=date(2026, 8, 25))
+                    )
+                    await session.flush()
+            except DBAPIError:
+                assert await session.scalar(text("SELECT 1")) == 1
+                raise
+
+    async with factory() as finalizer:
+        async with finalizer.begin():
+            manifest = await finalizer.get(PriceSeriesManifest, MANIFEST_ID)
+            assert manifest is not None
+            finalized = await finalize_price_bar_set(finalizer, manifest)
+            assert finalized is not None
+            authority_locked.set()
+            writer_task = asyncio.create_task(late_writer())
+            await _wait_for_advisory_wait(factory, await writer_pid)
+        assert await finalizer.scalar(text("SELECT 1")) == 1
+
+    with pytest.raises(DBAPIError, match="frozen price series cannot grow"):
+        await writer_task
 
 
 async def _insert_direct_authority(
