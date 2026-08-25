@@ -16,6 +16,7 @@ import {
   researchAdmissionRuntimeSchema,
   researchRunRuntimeSchema,
   runtimeContractSchemas,
+  strategySummaryRuntimeSchema,
   watchlistMembershipRuntimeSchema,
   whatIfRuntimeSchema,
 } from "../generated/runtime-contract";
@@ -181,6 +182,20 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       ? data
       : INVALID_DATA;
   }
+  if (pathname === "/internal/v1/strategies") {
+    if (!Array.isArray(data) || data.length > 100) return INVALID_DATA;
+    const strategies = data.filter((strategy) =>
+      matchesRuntimeSchema(strategy, strategySummaryRuntimeSchema) && isPlain(strategy));
+    if (strategies.length !== data.length) return INVALID_DATA;
+    const champions = strategies.filter((strategy) => strategy.champion === true);
+    return strategies.every(strategyEvidenceValid)
+      && champions.length === 1
+      && champions[0].strategy_version === "baseline_v1"
+      && champions[0].historical_agent_overlay === false
+      && champions[0].live_execution_enabled === false
+      ? data
+      : INVALID_DATA;
+  }
   const researchRun = /^\/internal\/v1\/research-runs\/([^/]+)$/.exec(pathname);
   if (researchRun && validateUuid(researchRun[1])) {
     return matchesRuntimeSchema(data, researchRunRuntimeSchema) && isPlain(data) && researchAuthorityValid(data)
@@ -326,6 +341,46 @@ function researchAuthorityValid(data: Record<string, unknown>): boolean {
     && typeof data.intent.decision_time === "string"
     && typeof data.decision_time === "string"
     && Date.parse(data.intent.decision_time) === Date.parse(data.decision_time);
+}
+
+function strategyEvidenceValid(data: Record<string, unknown>): boolean {
+  if (data.latest_backtest === null) return true;
+  if (!isPlain(data.latest_backtest)) return false;
+  const evidence = data.latest_backtest;
+  const hashes = [evidence.result_hash, evidence.data_hash, evidence.code_hash];
+  if (!hashes.every((value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value))) return false;
+  if (!isIsoDate(evidence.start_session) || !isIsoDate(evidence.end_session)
+    || String(evidence.start_session) > String(evidence.end_session)) return false;
+  if (!Number.isInteger(evidence.oos_window_count) || Number(evidence.oos_window_count) < 0) return false;
+  if (!isUtcIso(evidence.completed_at) || !Array.isArray(evidence.comparison_keys)) return false;
+  const keys = evidence.comparison_keys;
+  if (keys.length !== new Set(keys).size
+    || !keys.every((key) => ["spy", "equal_weight", "champion"].includes(String(key)))) return false;
+  const complete = keys.length === 3
+    && ["spy", "equal_weight", "champion"].every((key) => keys.includes(key));
+  if (typeof evidence.benchmark_comparison_complete !== "boolean"
+    || evidence.benchmark_comparison_complete !== complete
+    || !Array.isArray(evidence.data_sources)
+    || !evidence.data_sources.every((source) => typeof source === "string" && source.length > 0)
+    || evidence.data_sources.length === 0
+    || evidence.data_sources.length !== new Set(evidence.data_sources).size) return false;
+  const sources = evidence.data_sources as string[];
+  const domains = ["price", "universe", "sector", "corporate_action", "calendar"];
+  const byDomain = Object.fromEntries(domains.map((domain) => [
+    domain,
+    sources.filter((source) => source.startsWith(`${domain}:`)),
+  ])) as Record<string, string[]>;
+  if (domains.some((domain) => byDomain[domain].length === 0)) return false;
+  const marketSources = ["price", "universe", "sector", "corporate_action"]
+    .flatMap((domain) => byDomain[domain]);
+  const fixtureFlags = marketSources.map((source) => source.split(":").includes("fixture"));
+  const priceModes = new Set(byDomain.price.map((source) => source.split(":").at(-1)));
+  if (evidence.data_mode === "fixture") return fixtureFlags.every(Boolean);
+  if (evidence.data_mode === "delayed" || evidence.data_mode === "real_time") {
+    return !fixtureFlags.some(Boolean) && priceModes.size === 1 && priceModes.has(evidence.data_mode);
+  }
+  return evidence.data_mode === "mixed"
+    && ((fixtureFlags.some(Boolean) && !fixtureFlags.every(Boolean)) || priceModes.size > 1);
 }
 
 

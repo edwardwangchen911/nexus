@@ -383,6 +383,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/strategies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Strategies
+         * @description Expose the only Phase 0-1 champion without implying live execution authority.
+         */
+        get: operations["listStrategies"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/system-status": {
         parameters: {
             query?: never;
@@ -472,6 +492,43 @@ export interface components {
             unit: "basis_points" | "parts_per_million" | "count";
             /** Value */
             value?: number | null;
+        };
+        /** BacktestEvidenceSummaryResponse */
+        BacktestEvidenceSummaryResponse: {
+            /** Benchmark Comparison Complete */
+            benchmark_comparison_complete: boolean;
+            /** Code Hash */
+            code_hash: string;
+            /** Comparison Keys */
+            comparison_keys: ("spy" | "equal_weight" | "champion")[];
+            /**
+             * Completed At
+             * Format: date-time
+             */
+            completed_at: string;
+            /** Data Hash */
+            data_hash: string;
+            /**
+             * Data Mode
+             * @enum {string}
+             */
+            data_mode: "fixture" | "delayed" | "real_time" | "mixed";
+            /** Data Sources */
+            data_sources: string[];
+            /**
+             * End Session
+             * Format: date
+             */
+            end_session: string;
+            /** Oos Window Count */
+            oos_window_count: number;
+            /** Result Hash */
+            result_hash: string;
+            /**
+             * Start Session
+             * Format: date
+             */
+            start_session: string;
         };
         /** BriefDisagreementSummary */
         BriefDisagreementSummary: {
@@ -1601,6 +1658,46 @@ export interface components {
         };
         /** @enum {string} */
         SnapshotStatus: "READY" | "PARTIAL" | "STALE" | "RECONCILIATION_REQUIRED";
+        /** StrategyListEnvelope */
+        StrategyListEnvelope: {
+            /** Data */
+            data: components["schemas"]["StrategySummaryResponse"][];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** StrategySummaryResponse */
+        StrategySummaryResponse: {
+            /**
+             * Champion
+             * @constant
+             */
+            champion: true;
+            /**
+             * Evolution Status
+             * @constant
+             */
+            evolution_status: "locked";
+            /**
+             * Historical Agent Overlay
+             * @constant
+             */
+            historical_agent_overlay: false;
+            latest_backtest?: components["schemas"]["BacktestEvidenceSummaryResponse"] | null;
+            /**
+             * Live Execution Enabled
+             * @constant
+             */
+            live_execution_enabled: false;
+            /**
+             * Rebalance Frequency
+             * @constant
+             */
+            rebalance_frequency: "weekly";
+            /**
+             * Strategy Version
+             * @constant
+             */
+            strategy_version: "baseline_v1";
+        };
         /**
          * SuccessMetaResponse
          * @description The stable public success metadata shape.
@@ -2813,6 +2910,35 @@ export interface operations {
             };
             /** @description Unprocessable Entity */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    listStrategies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StrategyListEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

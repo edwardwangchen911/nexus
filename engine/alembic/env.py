@@ -5,7 +5,7 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
-from nexus.persistence.base import Base
+from nexus.persistence.base import Base, UTCDateTime
 from nexus.persistence.models import (  # noqa: F401
     agents,
     data,
@@ -27,6 +27,14 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+def render_item(type_: str, obj: object, autogen_context: object) -> str | bool:
+    """Render the UTC decorator as portable native PostgreSQL timestamp DDL."""
+    del autogen_context
+    if type_ == "type" and isinstance(obj, UTCDateTime):
+        return "sa.DateTime(timezone=True)"
+    return False
+
+
 def database_url() -> str:
     """Use a process-injected test/production URL or safe non-production settings."""
     return os.environ.get("DATABASE_URL") or EngineSettings().database_url or ""
@@ -39,6 +47,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        render_item=render_item,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -46,7 +55,11 @@ def run_migrations_offline() -> None:
 
 def do_run_migrations(connection: Connection) -> None:
     """Run migrations against a synchronous facade over an async connection."""
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        render_item=render_item,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

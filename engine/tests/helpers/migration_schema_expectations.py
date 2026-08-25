@@ -63,6 +63,25 @@ EXPECTED_TABLES = {
     "agent_daily_budget_reservations",
 }
 EXPECTED_TABLES = EXPECTED_TABLES | {"price_bar_set_authorities"}
+EXPECTED_TABLES = EXPECTED_TABLES | {
+    "backtest_authority_publication_marks",
+    "exchange_calendar_authorities",
+    "exchange_calendar_sessions",
+    "backtest_authority_collections",
+    "backtest_authority_bundles",
+    "backtest_universe_authority_members",
+    "backtest_sector_authority_members",
+    "backtest_corporate_action_authority_members",
+    "backtest_price_authority_members",
+    "backtest_instrument_authority_members",
+    "strategy_definitions",
+    "backtest_runs",
+    "backtest_windows",
+    "backtest_nav_points",
+    "backtest_fills",
+    "backtest_order_outcomes",
+    "backtest_metrics",
+}
 
 OPTIONAL_MIGRATION_TABLE_GROUPS = (
     frozenset(
@@ -105,6 +124,27 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
             "agent_daily_budget_reservations",
             "price_bar_records",
             "price_bar_set_authorities",
+        }
+    ),
+    frozenset(
+        {
+            "backtest_authority_publication_marks",
+            "exchange_calendar_authorities",
+            "exchange_calendar_sessions",
+            "backtest_authority_collections",
+            "backtest_authority_bundles",
+            "backtest_universe_authority_members",
+            "backtest_sector_authority_members",
+            "backtest_corporate_action_authority_members",
+            "backtest_price_authority_members",
+            "backtest_instrument_authority_members",
+            "strategy_definitions",
+            "backtest_runs",
+            "backtest_windows",
+            "backtest_nav_points",
+            "backtest_fills",
+            "backtest_order_outcomes",
+            "backtest_metrics",
         }
     ),
 )
@@ -200,6 +240,55 @@ EXPECTED_FOREIGN_KEYS = {
         "fk_agent_snapshot_evidence_authority",
     },
     "agent_daily_budget_reservations": "fk_agent_budget_run",
+    "backtest_runs": {
+        "fk_backtest_runs_authority_bundle_id_backtest_authority_bundles",
+        "fk_backtest_runs_strategy_definition_id_strategy_definitions",
+        "fk_backtest_runs_data_snapshot_id_data_snapshots",
+        "fk_backtest_runs_source_policy_id_source_policies",
+        "fk_backtest_runs_cost_policy_id_cost_policies",
+    },
+    "backtest_windows": "fk_backtest_windows_backtest_run_id_backtest_runs",
+    "backtest_nav_points": "fk_backtest_nav_points_backtest_run_id_backtest_runs",
+    "backtest_fills": {
+        "fk_backtest_fills_backtest_run_id_backtest_runs",
+        "fk_backtest_fills_instrument_id_instruments",
+    },
+    "backtest_order_outcomes": {
+        "fk_backtest_order_outcomes_backtest_run_id_backtest_runs",
+        "fk_backtest_order_outcomes_instrument_id_instruments",
+    },
+    "backtest_metrics": "fk_backtest_metrics_backtest_run_id_backtest_runs",
+    "exchange_calendar_sessions": ("fk_exchange_calendar_sessions_calendar_authority_id_exc_0f74"),
+    "backtest_authority_bundles": {
+        "fk_backtest_authority_bundles_data_snapshot_id_data_snapshots",
+        "fk_backtest_authority_bundles_source_policy_id_source_policies",
+        "fk_backtest_authority_bundles_cost_policy_id_cost_policies",
+        "fk_backtest_authority_bundles_calendar_authority_id_exc_41b5",
+        "fk_backtest_authority_bundles_universe_collection_id_ba_5771",
+        "fk_backtest_authority_bundles_sector_collection_id_back_d55c",
+        "fk_backtest_authority_bundles_corporate_action_collecti_cda7",
+        "fk_backtest_authority_bundles_spy_instrument_alias_id_i_8425",
+    },
+    "backtest_universe_authority_members": {
+        "fk_backtest_universe_authority_members_collection_id_ba_b554",
+        "fk_backtest_universe_authority_members_universe_snapsho_c0e3",
+    },
+    "backtest_sector_authority_members": {
+        "fk_backtest_sector_authority_members_collection_id_back_41dd",
+        "fk_backtest_sector_authority_members_sector_exposure_id_9448",
+    },
+    "backtest_corporate_action_authority_members": {
+        "fk_backtest_corporate_action_authority_members_collecti_090c",
+        "fk_backtest_corporate_action_authority_members_corporat_4f5e",
+    },
+    "backtest_price_authority_members": {
+        "fk_backtest_price_authority_members_bundle_id_backtest__2617",
+        "fk_backtest_price_authority_members_price_bar_set_autho_0662",
+    },
+    "backtest_instrument_authority_members": {
+        "fk_backtest_instrument_authority_members_bundle_id_back_1caf",
+        "fk_backtest_instrument_authority_members_instrument_id__d662",
+    },
 }
 EXPECTED_FOREIGN_KEYS["price_bar_set_authorities"] = {
     "fk_price_bar_set_authorities_manifest",

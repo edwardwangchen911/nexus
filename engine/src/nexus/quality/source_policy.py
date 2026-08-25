@@ -52,6 +52,27 @@ QUOTE_SOURCE_POLICY_PAYLOAD: dict[str, object] = {
 _PRIORITY = ("fosun", "alpaca", "fixture")
 
 
+def price_manifest_admissible_under_source_policy_v1(
+    *,
+    source: str,
+    feed: str,
+    delivery_mode: str,
+    fosun_admission_frozen: bool = False,
+) -> bool:
+    """Validate persisted bar provenance against the published v1 policy.
+
+    A historical Fosun manifest is intentionally rejected until its exact Task 5
+    capability/status admission is frozen into the backtest authority bundle.
+    """
+    if source == "alpaca":
+        return feed == "sip" and delivery_mode in {"delayed", "fixture"}
+    if source == "fixture":
+        return delivery_mode == "fixture"
+    if source == "fosun":
+        return fosun_admission_frozen
+    return False
+
+
 class SourcePolicy(BaseModel):
     """Runtime projection of the sole published source-policy record."""
 
@@ -250,7 +271,7 @@ async def select_price_series(
             operation="fosun_get_bars",
             market_scope="US",
         )
-    return _apply_source_policy_v1(
+    return apply_source_policy_v1(
         candidates,
         policy,
         decision_time,
@@ -258,7 +279,7 @@ async def select_price_series(
     )
 
 
-def _apply_source_policy_v1(
+def apply_source_policy_v1(
     candidates: Sequence[PriceSeries],
     policy: SourcePolicy,
     decision_time: datetime,
@@ -273,16 +294,18 @@ def _apply_source_policy_v1(
             continue
         if not delivery_mode_matches_provider_mode(candidate.mode, candidate.delivery_mode):
             continue
-        if candidate.source == "alpaca" and (
-            candidate.feed != "sip" or candidate.mode not in {"fixture", "delayed"}
-        ):
-            continue
-        if candidate.source == "fixture" and candidate.mode != "fixture":
-            continue
-        if candidate.source == "fosun" and not _valid_fosun_candidate(
+        fosun_admitted = candidate.source == "fosun" and _valid_fosun_candidate(
             candidate, fosun_admission, decision_time
-        ):
+        )
+        if candidate.source == "fosun" and not fosun_admitted:
             reasons.add("FOSUN_CAPABILITY_EXPIRED")
+            continue
+        if not price_manifest_admissible_under_source_policy_v1(
+            source=candidate.source,
+            feed=candidate.feed,
+            delivery_mode=candidate.delivery_mode,
+            fosun_admission_frozen=fosun_admitted,
+        ):
             continue
         point_in_time_candidate_seen = True
         visible = tuple(bar for bar in candidate.bars if bar.available_at <= decision_time)

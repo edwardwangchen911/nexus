@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/contracts/strategy/strategy-dsl.schema.json",
+  "title": "NEXUS restricted strategy DSL",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "universe", "root", "ranking", "rebalance", "holding_period", "portfolio", "exits", "parameters", "target_weight"],
+  "properties": {
+    "version": { "$ref": "#/$defs/identifier" },
+    "universe": { "$ref": "#/$defs/universe" },
+    "root": { "$ref": "#/$defs/expression" },
+    "ranking": { "$ref": "#/$defs/ranking" },
+    "rebalance": { "$ref": "#/$defs/rebalance" },
+    "holding_period": { "$ref": "#/$defs/holdingPeriod" },
+    "portfolio": { "$ref": "#/$defs/portfolio" },
+    "exits": { "$ref": "#/$defs/exits" },
+    "parameters": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/parameter" } },
+    "target_weight": { "$ref": "#/$defs/targetWeight" }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$" },
+    "featureName": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[a-z][a-z0-9_]*$" },
+    "decimal": {
+      "oneOf": [
+        { "type": "integer" },
+        { "type": "string", "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$" }
+      ]
+    },
+    "universe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "snapshot_selection", "eligibility_status", "asset_types", "etf_sector_exposure_required"],
+      "properties": {
+        "key": { "const": "us_liquid" },
+        "snapshot_selection": { "const": "latest_published_effective" },
+        "eligibility_status": { "const": "PASS" },
+        "asset_types": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["stock", "etf"] } },
+        "etf_sector_exposure_required": { "type": "boolean" }
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "feature"],
+      "properties": {
+        "op": { "enum": ["gt", "gte", "lt", "lte", "eq"] },
+        "feature": { "$ref": "#/$defs/featureName" },
+        "value": { "$ref": "#/$defs/decimal" },
+        "right_feature": { "$ref": "#/$defs/featureName" },
+        "offset": { "type": "integer", "minimum": -10000, "maximum": 0 }
+      },
+      "oneOf": [
+        { "required": ["value"], "not": { "required": ["right_feature"] } },
+        { "required": ["right_feature"], "not": { "required": ["value"] } }
+      ]
+    },
+    "allOrAny": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "args"],
+      "properties": {
+        "op": { "enum": ["all", "any"] },
+        "args": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/expression" } }
+      }
+    },
+    "negation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "arg"],
+      "properties": { "op": { "const": "not" }, "arg": { "$ref": "#/$defs/expression" } }
+    },
+    "expression": { "oneOf": [{ "$ref": "#/$defs/comparison" }, { "$ref": "#/$defs/allOrAny" }, { "$ref": "#/$defs/negation" }] },
+    "ranking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feature", "direction", "select_count", "exit_buffer_rank", "exit_after_consecutive_evaluations"],
+      "properties": {
+        "feature": { "$ref": "#/$defs/featureName" },
+        "direction": { "enum": ["asc", "desc"] },
+        "select_count": { "type": "integer", "minimum": 1, "maximum": 50 },
+        "exit_buffer_rank": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "exit_after_consecutive_evaluations": { "type": "integer", "minimum": 1, "maximum": 52 }
+      }
+    },
+    "rebalance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frequency", "decision_session", "fill_timing"],
+      "properties": {
+        "frequency": { "enum": ["daily", "weekly", "monthly"] },
+        "decision_session": { "enum": ["last_exchange_session_of_iso_week", "last_exchange_session_of_month"] },
+        "fill_timing": { "enum": ["next_exchange_session_open"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "frequency": { "const": "weekly" } }, "required": ["frequency"] },
+          "then": { "properties": { "decision_session": { "const": "last_exchange_session_of_iso_week" } } }
+        },
+        {
+          "if": { "properties": { "frequency": { "const": "monthly" } }, "required": ["frequency"] },
+          "then": { "properties": { "decision_session": { "const": "last_exchange_session_of_month" } } }
+        },
+        { "not": { "properties": { "frequency": { "const": "daily" } }, "required": ["frequency"] } }
+      ]
+    },
+    "holdingPeriod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum_sessions", "maximum_sessions", "exit_evaluation"],
+      "properties": {
+        "minimum_sessions": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "maximum_sessions": { "oneOf": [{ "type": "integer", "minimum": 1, "maximum": 10000 }, { "type": "null" }] },
+        "exit_evaluation": { "enum": ["scheduled_and_event_driven"] }
+      }
+    },
+    "portfolio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_positions", "max_etfs", "max_stocks_per_sector", "sector_taxonomy", "max_sector_weight", "min_cash_weight"],
+      "properties": {
+        "max_positions": { "type": "integer", "minimum": 1, "maximum": 50 },
+        "max_etfs": { "type": "integer", "minimum": 0, "maximum": 50 },
+        "max_stocks_per_sector": { "type": "integer", "minimum": 1, "maximum": 50 },
+        "sector_taxonomy": { "$ref": "#/$defs/identifier" },
+        "max_sector_weight": { "$ref": "#/$defs/decimal" },
+        "min_cash_weight": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "exits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trend_rule", "ranking_buffer_enabled", "hard_risk_exit"],
+      "properties": {
+        "trend_rule": { "$ref": "#/$defs/expression" },
+        "ranking_buffer_enabled": { "type": "boolean" },
+        "hard_risk_exit": { "enum": ["forward_only"] }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "policy_ref", "value", "minimum", "maximum"],
+      "properties": {
+        "name": { "$ref": "#/$defs/featureName" },
+        "policy_ref": { "type": "string", "minLength": 3, "maxLength": 255, "pattern": "^\\$((\\.[a-z][a-z0-9_]*)|(\\[[0-9]+\\]))+$" },
+        "value": { "$ref": "#/$defs/decimal" },
+        "minimum": { "$ref": "#/$defs/decimal" },
+        "maximum": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "targetWeight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "weight"],
+      "properties": { "method": { "enum": ["fixed_equal_weight"] }, "weight": { "$ref": "#/$defs/decimal" } }
+    }
+  }
+}

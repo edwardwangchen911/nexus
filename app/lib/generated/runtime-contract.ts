@@ -66,6 +66,95 @@ export const runtimeContractSchemas = {
     "title": "AggregateMetric",
     "type": "object"
   },
+  "BacktestEvidenceSummaryResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "benchmark_comparison_complete": {
+        "title": "Benchmark Comparison Complete",
+        "type": "boolean"
+      },
+      "code_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Code Hash",
+        "type": "string"
+      },
+      "comparison_keys": {
+        "items": {
+          "enum": [
+            "spy",
+            "equal_weight",
+            "champion"
+          ],
+          "type": "string"
+        },
+        "title": "Comparison Keys",
+        "type": "array"
+      },
+      "completed_at": {
+        "format": "date-time",
+        "title": "Completed At",
+        "type": "string"
+      },
+      "data_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Data Hash",
+        "type": "string"
+      },
+      "data_mode": {
+        "enum": [
+          "fixture",
+          "delayed",
+          "real_time",
+          "mixed"
+        ],
+        "title": "Data Mode",
+        "type": "string"
+      },
+      "data_sources": {
+        "items": {
+          "type": "string"
+        },
+        "minItems": 1,
+        "title": "Data Sources",
+        "type": "array"
+      },
+      "end_session": {
+        "format": "date",
+        "title": "End Session",
+        "type": "string"
+      },
+      "oos_window_count": {
+        "minimum": 0,
+        "title": "Oos Window Count",
+        "type": "integer"
+      },
+      "result_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Result Hash",
+        "type": "string"
+      },
+      "start_session": {
+        "format": "date",
+        "title": "Start Session",
+        "type": "string"
+      }
+    },
+    "required": [
+      "result_hash",
+      "data_hash",
+      "code_hash",
+      "start_session",
+      "end_session",
+      "oos_window_count",
+      "comparison_keys",
+      "benchmark_comparison_complete",
+      "data_mode",
+      "data_sources",
+      "completed_at"
+    ],
+    "title": "BacktestEvidenceSummaryResponse",
+    "type": "object"
+  },
   "BriefDisagreementSummary": {
     "additionalProperties": false,
     "properties": {
@@ -2699,6 +2788,61 @@ export const runtimeContractSchemas = {
     ],
     "type": "string"
   },
+  "StrategySummaryResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "champion": {
+        "const": true,
+        "title": "Champion",
+        "type": "boolean"
+      },
+      "evolution_status": {
+        "const": "locked",
+        "title": "Evolution Status",
+        "type": "string"
+      },
+      "historical_agent_overlay": {
+        "const": false,
+        "title": "Historical Agent Overlay",
+        "type": "boolean"
+      },
+      "latest_backtest": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/BacktestEvidenceSummaryResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "live_execution_enabled": {
+        "const": false,
+        "title": "Live Execution Enabled",
+        "type": "boolean"
+      },
+      "rebalance_frequency": {
+        "const": "weekly",
+        "title": "Rebalance Frequency",
+        "type": "string"
+      },
+      "strategy_version": {
+        "const": "baseline_v1",
+        "title": "Strategy Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "strategy_version",
+      "champion",
+      "evolution_status",
+      "rebalance_frequency",
+      "historical_agent_overlay",
+      "live_execution_enabled"
+    ],
+    "title": "StrategySummaryResponse",
+    "type": "object"
+  },
   "SyncRunStatus": {
     "enum": [
       "ACTIVE",
@@ -2899,3 +3043,5 @@ export const researchAdmissionRuntimeSchema = runtimeContractSchemas.ResearchAdm
 export const researchRunRuntimeSchema = runtimeContractSchemas.ResearchRunResponse;
 
 export const dailyBriefRuntimeSchema = runtimeContractSchemas.DailyBriefResponse;
+
+export const strategySummaryRuntimeSchema = runtimeContractSchemas.StrategySummaryResponse;

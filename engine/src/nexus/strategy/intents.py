@@ -91,7 +91,9 @@ class ResearchCondition(_IntentModel):
     def _operator_matches_threshold(self) -> "ResearchCondition":
         boolean_operator = self.operator in {"is_true", "is_false"}
         if boolean_operator != isinstance(self.threshold, bool):
-            raise ValueError("boolean operators require booleans; comparison operators require decimals")
+            raise ValueError(
+                "boolean operators require booleans; comparison operators require decimals"
+            )
         if boolean_operator != (self.unit == "boolean"):
             raise ValueError("boolean predicates require boolean units")
         return self
@@ -99,8 +101,14 @@ class ResearchCondition(_IntentModel):
 
 class RoleVote(_IntentModel):
     role: Literal[
-        "orchestrator", "fundamental", "market_state", "macro_sector",
-        "bull", "bear", "evidence_audit", "portfolio",
+        "orchestrator",
+        "fundamental",
+        "market_state",
+        "macro_sector",
+        "bull",
+        "bear",
+        "evidence_audit",
+        "portfolio",
     ]
     vote: Literal["support", "oppose", "abstain"]
 
@@ -154,7 +162,9 @@ class ResearchIntent(_IntentModel):
         if any(
             ref.available_at > self.decision_time
             for condition in (
-                *self.invalidation_conditions, *self.entry_conditions, *self.exit_conditions
+                *self.invalidation_conditions,
+                *self.entry_conditions,
+                *self.exit_conditions,
             )
             for ref in condition.evidence_refs
         ):

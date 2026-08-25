@@ -2,6 +2,7 @@
 
 from nexus.persistence.models import (
     agents,
+    backtest,
     data,
     diagnostics,
     market,
@@ -13,6 +14,7 @@ from nexus.persistence.models import (
 
 __all__ = [
     "agents",
+    "backtest",
     "data",
     "diagnostics",
     "market",

@@ -27,7 +27,7 @@ def test_0009_round_trips_from_0008_with_one_head(
         "proposal_positions",
     }
 
-    assert ScriptDirectory.from_config(config).get_heads() == ["0011_agents"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["0012_backtests"]
     command.upgrade(config, "0008_diagnostics")
     assert optimization_tables.isdisjoint(_table_names(temporary_database_url))
     command.upgrade(config, "0009_optimization")

@@ -23,14 +23,17 @@ EXPECTED_TASK_15A_TRIGGERS = {
 }
 
 
-def test_0011_agents_is_the_single_head_with_the_research_data_parent() -> None:
-    """A split head or wrong parent could silently omit immutable Agent audit records."""
+def test_0012_backtests_is_the_single_head_after_agents() -> None:
+    """A split head or wrong parent could omit Agent authority or immutable backtests."""
     engine_root = Path(__file__).resolve().parents[2]
     scripts = ScriptDirectory.from_config(Config(str(engine_root / "alembic.ini")))
-    revision = scripts.get_revision("0011_agents")
-    assert scripts.get_heads() == ["0011_agents"]
-    assert revision is not None
-    assert revision.down_revision == "0010_research_data"
+    agents = scripts.get_revision("0011_agents")
+    backtests = scripts.get_revision("0012_backtests")
+    assert scripts.get_heads() == ["0012_backtests"]
+    assert agents is not None
+    assert agents.down_revision == "0010_research_data"
+    assert backtests is not None
+    assert backtests.down_revision == "0011_agents"
 
 
 def test_0011_round_trips_from_previous_release(temporary_database_url: str, monkeypatch) -> None:
@@ -79,11 +82,11 @@ def test_0011_round_trips_from_previous_release(temporary_database_url: str, mon
 
 
 def test_migrations_0001_through_0010_match_rescue_base() -> None:
-    """Task 15 may edit only its unreleased 0011 migration."""
+    """Tasks 15–16 may add 0011/0012 but cannot rewrite the 0001–0010 rescue base."""
     root = Path(__file__).resolve().parents[3]
     migration_dir = root / "engine/alembic/versions"
     for path in sorted(migration_dir.glob("00*.py")):
-        if path.name.startswith("0011_"):
+        if path.name.startswith(("0011_", "0012_")):
             continue
         relative = path.relative_to(root)
         base_bytes = subprocess.check_output(
