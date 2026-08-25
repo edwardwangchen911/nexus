@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -200,6 +201,52 @@ class PriceBarRecord(ImmutableCreatedAt, Base):
     received_at: Mapped[datetime] = mapped_column(UTCDateTime())
     revision: Mapped[str] = mapped_column(String(255))
     quality_flags: Mapped[list[str]] = mapped_column(JSONB)
+
+
+class PriceBarSetAuthority(ImmutableCreatedAt, Base):
+    """Immutable content authority for one complete normalized Bar manifest."""
+
+    __tablename__ = "price_bar_set_authorities"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["evidence_ref_id", "source", "provider_object_id", "revision"],
+            [
+                "research_evidence_refs.id",
+                "research_evidence_refs.source",
+                "research_evidence_refs.provider_object_id",
+                "research_evidence_refs.revision",
+            ],
+            name="fk_price_bar_set_authorities_evidence_owner",
+        ),
+        UniqueConstraint("price_series_manifest_id", name="uq_price_bar_set_authority_manifest"),
+        UniqueConstraint("evidence_ref_id", name="uq_price_bar_set_authority_evidence"),
+        CheckConstraint("hash_version = 'price_bar_set_sha256_v1'", name="hash_version_v1"),
+        CheckConstraint("policy_version = 'agent_price_authority_v1'", name="policy_version_v1"),
+        CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
+        CheckConstraint("byte_length > 0", name="byte_length_positive"),
+        CheckConstraint("bar_count BETWEEN 1 AND 10000", name="bar_count_bounded"),
+        CheckConstraint("first_session <= last_session", name="session_ordered"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    price_series_manifest_id: Mapped[UUID] = mapped_column(
+        ForeignKey("price_series_manifests.id", name="fk_price_bar_set_authorities_manifest")
+    )
+    evidence_ref_id: Mapped[UUID]
+    source_policy_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_policies.id", name="fk_price_bar_set_authorities_source_policy")
+    )
+    source: Mapped[str] = mapped_column(String(100))
+    provider_object_id: Mapped[str] = mapped_column(String(255))
+    revision: Mapped[str] = mapped_column(String(255))
+    hash_version: Mapped[str] = mapped_column(String(64), default="price_bar_set_sha256_v1")
+    policy_version: Mapped[str] = mapped_column(String(64), default="agent_price_authority_v1")
+    content_hash: Mapped[str] = mapped_column(String(64))
+    byte_length: Mapped[int] = mapped_column(BigInteger)
+    bar_count: Mapped[int] = mapped_column(Integer)
+    first_session: Mapped[date] = mapped_column(Date)
+    last_session: Mapped[date] = mapped_column(Date)
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
 class MacroObservation(ImmutableCreatedAt, Base):

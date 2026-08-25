@@ -27,12 +27,16 @@ def test_0011_round_trips_from_previous_release(temporary_database_url: str, mon
     config = Config(str(engine_root / "alembic.ini"))
     monkeypatch.setenv("DATABASE_URL", temporary_database_url)
     command.upgrade(config, "0010_research_data")
+    assert _task_15a_tables(temporary_database_url) == set()
     before = _agent_tables(temporary_database_url)
     command.upgrade(config, "0011_agents")
+    assert _task_15a_tables(temporary_database_url) == {"price_bar_set_authorities"}
     first = _agent_tables(temporary_database_url)
     command.downgrade(config, "0010_research_data")
+    assert _task_15a_tables(temporary_database_url) == set()
     downgraded = _agent_tables(temporary_database_url)
     command.upgrade(config, "0011_agents")
+    assert _task_15a_tables(temporary_database_url) == {"price_bar_set_authorities"}
     second = _agent_tables(temporary_database_url)
     assert before == downgraded == set()
     assert (
@@ -68,6 +72,19 @@ def test_migrations_0001_through_0010_match_rescue_base() -> None:
 
 def _agent_tables(database_url: str) -> set[str]:
     return asyncio.run(_agent_tables_async(database_url))
+
+
+def _task_15a_tables(database_url: str) -> set[str]:
+    async def inspect_tables() -> set[str]:
+        engine = create_async_engine(database_url)
+        try:
+            async with engine.connect() as connection:
+                names = await connection.run_sync(lambda sync: inspect(sync).get_table_names())
+            return {name for name in names if name == "price_bar_set_authorities"}
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(inspect_tables())
 
 
 async def _agent_tables_async(database_url: str) -> set[str]:

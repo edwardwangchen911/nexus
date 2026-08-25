@@ -15,6 +15,7 @@ _UUID = postgresql.UUID(as_uuid=True)
 _NUMERIC = sa.Numeric(38, 12)
 _IMMUTABLE_TABLES = (
     "price_bar_records",
+    "price_bar_set_authorities",
     "agent_prompt_versions",
     "agent_model_configs",
     "agent_research_events",
@@ -25,6 +26,7 @@ _IMMUTABLE_TABLES = (
 
 
 def upgrade() -> None:
+    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
     op.drop_constraint(
         op.f("ck_research_evidence_refs_location_content_addressed"),
         "research_evidence_refs",
@@ -37,7 +39,9 @@ def upgrade() -> None:
         "(location LIKE 'memory://normalized/market/%/' || content_hash || '.parquet') OR "
         "(location LIKE 'package://%' AND location LIKE '%@sha256:' || content_hash || '%') OR "
         "(location LIKE 's3://%' AND (location LIKE '%/sha256/' || content_hash || '%' "
-        "OR location ~ '[?&]versionId=[^&#]+'))",
+        "OR location ~ '[?&]versionId=[^&#]+')) OR "
+        "(location ~ ('^db://price-bar-set/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+        "[0-9a-f]{4}-[0-9a-f]{12}@sha256:' || content_hash || '$'))",
     )
     op.add_column(
         "price_series_manifests",
@@ -102,6 +106,65 @@ def upgrade() -> None:
         sa.CheckConstraint("volume >= 0", name="volume_nonnegative"),
         sa.CheckConstraint("available_at >= observed_at", name="available_after_observed"),
         sa.CheckConstraint("received_at >= available_at", name="received_after_available"),
+    )
+    op.create_table(
+        "price_bar_set_authorities",
+        sa.Column("id", _UUID, primary_key=True),
+        sa.Column("price_series_manifest_id", _UUID, nullable=False),
+        sa.Column("evidence_ref_id", _UUID, nullable=False),
+        sa.Column("source_policy_id", _UUID, nullable=False),
+        sa.Column("source", sa.String(100), nullable=False),
+        sa.Column("provider_object_id", sa.String(255), nullable=False),
+        sa.Column("revision", sa.String(255), nullable=False),
+        sa.Column(
+            "hash_version",
+            sa.String(64),
+            nullable=False,
+            server_default="price_bar_set_sha256_v1",
+        ),
+        sa.Column(
+            "policy_version",
+            sa.String(64),
+            nullable=False,
+            server_default="agent_price_authority_v1",
+        ),
+        sa.Column("content_hash", sa.String(64), nullable=False),
+        sa.Column("byte_length", sa.BigInteger(), nullable=False),
+        sa.Column("bar_count", sa.Integer(), nullable=False),
+        sa.Column("first_session", sa.Date(), nullable=False),
+        sa.Column("last_session", sa.Date(), nullable=False),
+        sa.Column("available_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.ForeignKeyConstraint(
+            ["price_series_manifest_id"],
+            ["price_series_manifests.id"],
+            name="fk_price_bar_set_authorities_manifest",
+        ),
+        sa.ForeignKeyConstraint(
+            ["evidence_ref_id", "source", "provider_object_id", "revision"],
+            [
+                "research_evidence_refs.id",
+                "research_evidence_refs.source",
+                "research_evidence_refs.provider_object_id",
+                "research_evidence_refs.revision",
+            ],
+            name="fk_price_bar_set_authorities_evidence_owner",
+        ),
+        sa.ForeignKeyConstraint(
+            ["source_policy_id"],
+            ["source_policies.id"],
+            name="fk_price_bar_set_authorities_source_policy",
+        ),
+        sa.UniqueConstraint("price_series_manifest_id", name="uq_price_bar_set_authority_manifest"),
+        sa.UniqueConstraint("evidence_ref_id", name="uq_price_bar_set_authority_evidence"),
+        sa.CheckConstraint("hash_version = 'price_bar_set_sha256_v1'", name="hash_version_v1"),
+        sa.CheckConstraint("policy_version = 'agent_price_authority_v1'", name="policy_version_v1"),
+        sa.CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
+        sa.CheckConstraint("byte_length > 0", name="byte_length_positive"),
+        sa.CheckConstraint("bar_count BETWEEN 1 AND 10000", name="bar_count_bounded"),
+        sa.CheckConstraint("first_session <= last_session", name="session_ordered"),
     )
     op.create_table(
         "agent_prompt_versions",
@@ -370,6 +433,7 @@ def upgrade() -> None:
     )
     for table in (
         "price_bar_records",
+        "price_bar_set_authorities",
         "agent_prompt_versions",
         "agent_model_configs",
         "agent_research_runs",
@@ -580,6 +644,7 @@ def downgrade() -> None:
     )
     op.execute("DROP TRIGGER trg_data_artifacts_frozen_authority ON data_artifacts")
     op.execute("DROP TRIGGER trg_price_bar_records_frozen_insert ON price_bar_records")
+    op.execute("DROP TRIGGER trg_price_bar_set_authorities_immutable ON price_bar_set_authorities")
     op.execute("DROP TRIGGER trg_agent_budget_delete ON agent_daily_budget_reservations")
     op.execute("DROP TRIGGER trg_agent_budget_transition ON agent_daily_budget_reservations")
     op.execute("DROP TRIGGER trg_agent_output_evidence_validate ON agent_research_output_evidence")
@@ -593,6 +658,7 @@ def downgrade() -> None:
         "agent_research_runs",
         "agent_model_configs",
         "agent_prompt_versions",
+        "price_bar_set_authorities",
         "price_bar_records",
     ):
         op.execute(f"DROP TRIGGER trg_{table}_created_at_immutable ON {table}")
@@ -604,6 +670,7 @@ def downgrade() -> None:
     op.drop_table("agent_research_runs")
     op.drop_table("agent_model_configs")
     op.drop_table("agent_prompt_versions")
+    op.drop_table("price_bar_set_authorities")
     op.drop_table("price_bar_records")
     op.drop_constraint(
         op.f("ck_price_series_manifests_interval_allowed"),

@@ -62,6 +62,7 @@ EXPECTED_TABLES = {
     "agent_data_snapshot_evidence",
     "agent_daily_budget_reservations",
 }
+EXPECTED_TABLES = EXPECTED_TABLES | {"price_bar_set_authorities"}
 
 OPTIONAL_MIGRATION_TABLE_GROUPS = (
     frozenset(
@@ -198,4 +199,9 @@ EXPECTED_FOREIGN_KEYS = {
         "fk_agent_snapshot_evidence_authority",
     },
     "agent_daily_budget_reservations": "fk_agent_budget_run",
+}
+EXPECTED_FOREIGN_KEYS["price_bar_set_authorities"] = {
+    "fk_price_bar_set_authorities_manifest",
+    "fk_price_bar_set_authorities_evidence_owner",
+    "fk_price_bar_set_authorities_source_policy",
 }

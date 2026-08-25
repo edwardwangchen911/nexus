@@ -42,7 +42,9 @@ class ResearchEvidenceRef(ImmutableCreatedAt, Base):
             "(location LIKE 'memory://normalized/market/%/' || content_hash || '.parquet') OR "
             "(location LIKE 'package://%' AND location LIKE '%@sha256:' || content_hash || '%') OR "
             "(location LIKE 's3://%' AND (location LIKE '%/sha256/' || content_hash || '%' "
-            "OR location ~ '[?&]versionId=[^&#]+'))",
+            "OR location ~ '[?&]versionId=[^&#]+')) OR "
+            "(location ~ ('^db://price-bar-set/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            "[0-9a-f]{4}-[0-9a-f]{12}@sha256:' || content_hash || '$'))",
             name="location_content_addressed",
         ),
     )
