@@ -390,7 +390,7 @@ async def test_concurrent_writer_first_serializes_finalizer_after_the_new_bar(
                 await release_writer.wait()
             return int(await session.scalar(text("SELECT 1")))
 
-    async def finalizer_second() -> tuple[PriceBarSetAuthority, int]:
+    async def finalizer_second() -> int:
         await writer_locked.wait()
         async with factory() as session:
             async with session.begin():
@@ -401,32 +401,50 @@ async def test_concurrent_writer_first_serializes_finalizer_after_the_new_bar(
                 assert manifest is not None
                 finalized = await finalize_price_bar_set(session, manifest)
                 assert finalized is not None
-                authority = finalized[0]
-            return authority, int(await session.scalar(text("SELECT 1")))
+            return int(await session.scalar(text("SELECT 1")))
 
     writer_task = asyncio.create_task(writer_first())
     finalizer_task = asyncio.create_task(finalizer_second())
-    try:
-        await _wait_for_advisory_wait(factory, await finalizer_pid)
-    finally:
-        release_writer.set()
-    writer_probe = await writer_task
-    authority, finalizer_probe = await finalizer_task
+    tasks = (writer_task, finalizer_task)
+    async with asyncio.timeout(5):
+        try:
+            await _wait_for_advisory_wait(factory, await finalizer_pid)
+            release_writer.set()
+            writer_probe, finalizer_probe = await asyncio.gather(*tasks)
 
-    async with factory() as session:
-        prepared = (
-            (
-                await session.execute(
-                    text("SELECT * FROM nexus_prepare_price_bar_set(:manifest_id)"),
-                    {"manifest_id": MANIFEST_ID},
+            async with factory() as session:
+                fresh_authority = await session.scalar(
+                    select(PriceBarSetAuthority).where(
+                        PriceBarSetAuthority.price_series_manifest_id == MANIFEST_ID
+                    )
                 )
-            )
-            .mappings()
-            .one()
-        )
-    assert authority.bar_count == 2
-    assert authority.content_hash == prepared["content_hash"]
-    assert writer_probe == finalizer_probe == 1
+                assert fresh_authority is not None
+                fresh_prepared = (
+                    (
+                        await session.execute(
+                            text(
+                                "SELECT * FROM "
+                                "nexus_prepare_price_bar_set(:manifest_id)"
+                            ),
+                            {"manifest_id": MANIFEST_ID},
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                assert fresh_authority.bar_count == fresh_prepared["bar_count"] == 2
+                assert fresh_authority.content_hash == fresh_prepared["content_hash"]
+                assert fresh_authority.byte_length == fresh_prepared["byte_length"]
+                assert fresh_authority.first_session == fresh_prepared["first_session"]
+                assert fresh_authority.last_session == fresh_prepared["last_session"]
+                assert fresh_authority.available_at == fresh_prepared["available_at"]
+            assert writer_probe == finalizer_probe == 1
+        finally:
+            release_writer.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -455,19 +473,27 @@ async def test_concurrent_authority_first_serializes_and_rejects_the_late_writer
                 assert await session.scalar(text("SELECT 1")) == 1
                 raise
 
-    async with factory() as finalizer:
-        async with finalizer.begin():
-            manifest = await finalizer.get(PriceSeriesManifest, MANIFEST_ID)
-            assert manifest is not None
-            finalized = await finalize_price_bar_set(finalizer, manifest)
-            assert finalized is not None
-            authority_locked.set()
-            writer_task = asyncio.create_task(late_writer())
-            await _wait_for_advisory_wait(factory, await writer_pid)
-        assert await finalizer.scalar(text("SELECT 1")) == 1
+    writer_task: asyncio.Task[None] | None = None
+    async with asyncio.timeout(5):
+        try:
+            async with factory() as finalizer:
+                async with finalizer.begin():
+                    manifest = await finalizer.get(PriceSeriesManifest, MANIFEST_ID)
+                    assert manifest is not None
+                    finalized = await finalize_price_bar_set(finalizer, manifest)
+                    assert finalized is not None
+                    authority_locked.set()
+                    writer_task = asyncio.create_task(late_writer())
+                    await _wait_for_advisory_wait(factory, await writer_pid)
+                assert await finalizer.scalar(text("SELECT 1")) == 1
 
-    with pytest.raises(DBAPIError, match="frozen price series cannot grow"):
-        await writer_task
+            with pytest.raises(DBAPIError, match="frozen price series cannot grow"):
+                await writer_task
+        finally:
+            if writer_task is not None:
+                if not writer_task.done():
+                    writer_task.cancel()
+                await asyncio.gather(writer_task, return_exceptions=True)
 
 
 async def _insert_direct_authority(
