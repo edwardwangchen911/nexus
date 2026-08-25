@@ -1,7 +1,7 @@
 # Task 15A：Agent 行情 Bar 集合证据设计规格
 
 - 日期：2026-08-25
-- 状态：待用户书面审阅
+- 状态：已获用户书面批准，待实施
 - 适用范围：Task 15 只读 Agent 的 `get_price_features` 与行情证据冻结
 - 前置提交：`42a8610 fix(engine): freeze auditable price features`
 - 后续门禁：本规格实现并通过独立审查前，不启动 Task 16
@@ -336,7 +336,7 @@ AgentDataSnapshotEvidenceRecord
   -> PriceBarRecord
 ```
 
-工具必须验证快照冻结字段与当前 authority/evidence 完全一致。任何 owner、hash、location、source、policy、instrument 或时点不一致都抛出受控 `ToolInputError`，由现有 durable executor 终止为 fail-closed 状态。
+工具必须验证快照冻结字段与当前 authority/evidence 完全一致。请求中的 instrument、snapshot、as-of 或 feature 字段越过冻结调用范围时抛出受控 `ToolInputError`；数据库中 owner、hash、location、source、policy、instrument、数量、边界或时点损坏时返回 `status=unavailable`、`reason=invalid_price_bar_set_authority`，由上层按观望处理。两类错误都不能继续计算或返回 `ok`。
 
 ### 10.2 计算集合
 
@@ -452,12 +452,14 @@ npm test
 预期只修改或新增以下职责明确的文件；实施 Plan 必须逐一核对实际行号：
 
 - `engine/src/nexus/persistence/models/data.py`：`PriceBarSetAuthority` ORM。
+- `engine/src/nexus/persistence/models/research.py`：同步 BarSet `db://...@sha256:` 内容寻址约束。
 - `engine/alembic/versions/0011_agents.py`：表、函数、触发器、扩展和降级。
 - `engine/src/nexus/market/price_bar_authority.py`：调用数据库 prepare、构建 EvidenceRef/authority 的小型服务。
 - `engine/src/nexus/market/ingestion.py`：在 Bar flush 后调用最终化服务并扩展返回值。
 - `engine/src/nexus/agents/price_authority.py`：只选择合法 BarSetAuthority，重验 existing link，执行 runtime fixture 门禁。
 - `engine/src/nexus/agents/persistence.py` 与 `engine/src/nexus/api/routes/research.py`：显式传递 fixture 使用权限。
 - `engine/src/nexus/agents/database_tools.py`：从 BarSetAuthority 读取并防御性降级。
+- `engine/src/nexus/agents/synthesis.py`：缺少合法 BarSet evidence 时强制 market-state abstain、`watch/none` 和 partial。
 - 对应 migration、market ingestion、Agent PostgreSQL integration 与 unit tests。
 
 不进行无关重构，不修改 Web、复星网关、交易、回测或部署配置。
