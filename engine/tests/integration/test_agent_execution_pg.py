@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -64,6 +64,7 @@ _MODEL_ID = UUID("0198d500-1000-7000-8000-000000001603")
 _EVIDENCE_ID = UUID("0198d500-1000-7000-8000-000000001604")
 _PRICE_MANIFEST_ID = UUID("0198d500-1000-7000-8000-000000001707")
 _PARQUET_PRICE_EVIDENCE_ID = UUID("0198d500-1000-7000-8000-000000001708")
+_DRIFT_INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000001712")
 
 
 @pytest.mark.asyncio
@@ -994,6 +995,33 @@ async def _prepared_price_run(database_url: str):
     return factory, admission.run
 
 
+async def _prepared_production_price_admission(database_url: str):
+    factory = session_factory(EngineSettings(database_url=database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(
+        factory,
+        link_price=False,
+        price_source="alpaca",
+    )
+    async with factory() as session, session.begin():
+        admission = await _admit_price_run(
+            session,
+            prompt_ids,
+            allow_fixture_price_authority=False,
+        )
+    return factory, admission
+
+
+async def _persisted_run_intents(session: AsyncSession, run_id: UUID):
+    return tuple(
+        await session.scalars(
+            select(AgentResearchOutputRecord.intent).where(
+                AgentResearchOutputRecord.run_id == run_id,
+            )
+        )
+    )
+
+
 async def _corrupt_price_evidence_content(factory) -> None:
     corrupted_hash = "f" * 64
     async with factory() as session, session.begin():
@@ -1902,20 +1930,9 @@ async def test_retained_price_binding_drift_abstains_without_emitting_positive_i
     migrated_database_url: str,
 ) -> None:
     """A retained stale price binding must not survive current-state revalidation."""
-    factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    prompt_ids = await _seed_authority(factory)
-    await _seed_database_tool_authority(
-        factory,
-        link_price=False,
-        price_source="alpaca",
+    factory, admission = await _prepared_production_price_admission(
+        migrated_database_url
     )
-    async with factory() as session, session.begin():
-        admission = await _admit_price_run(
-            session,
-            prompt_ids,
-            allow_fixture_price_authority=False,
-        )
-
     async with factory() as session, session.begin():
         held_binding = await session.scalar(
             select(AgentDataSnapshotEvidenceRecord).where(
@@ -1930,97 +1947,301 @@ async def test_retained_price_binding_drift_abstains_without_emitting_positive_i
         assert held_binding.authority_kind == "price"
         assert held_binding.selected_at is not None
 
-        class _RetainedBindingTamperingCommittee:
-            def __init__(self) -> None:
-                self._fixture = FixtureCommittee()
-                self._held_binding = held_binding
-                self._tampered = False
-
-            async def analyze(
-                self,
-                role: AgentRole,
-                request: ResearchRequest,
-                evidence_refs: tuple[EvidenceRef, ...],
-                prompt: PromptAsset,
-            ) -> CommitteeRoleOutput:
-                if not self._tampered:
-                    await session.execute(
-                        text(
-                            "ALTER TABLE agent_data_snapshot_evidence "
-                            "DISABLE TRIGGER USER"
-                        )
-                    )
-                    try:
+        async def tamper() -> None:
+            await session.execute(
+                text(
+                    "ALTER TABLE agent_data_snapshot_evidence "
+                    "DISABLE TRIGGER USER"
+                )
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE agent_data_snapshot_evidence "
+                        "SET authority_kind='research', selected_at=NULL "
+                        "WHERE data_snapshot_id=:snapshot_id "
+                        "AND instrument_id=:instrument_id "
+                        "AND evidence_ref_id=:evidence_id"
+                    ),
+                    {
+                        "snapshot_id": held_binding.data_snapshot_id,
+                        "instrument_id": held_binding.instrument_id,
+                        "evidence_id": held_binding.evidence_ref_id,
+                    },
+                )
+                raw_binding = (
+                    (
                         await session.execute(
                             text(
-                                "UPDATE agent_data_snapshot_evidence "
-                                "SET authority_kind='research', selected_at=NULL "
+                                "SELECT authority_kind, selected_at "
+                                "FROM agent_data_snapshot_evidence "
                                 "WHERE data_snapshot_id=:snapshot_id "
                                 "AND instrument_id=:instrument_id "
                                 "AND evidence_ref_id=:evidence_id"
                             ),
                             {
-                                "snapshot_id": self._held_binding.data_snapshot_id,
-                                "instrument_id": self._held_binding.instrument_id,
-                                "evidence_id": self._held_binding.evidence_ref_id,
+                                "snapshot_id": held_binding.data_snapshot_id,
+                                "instrument_id": held_binding.instrument_id,
+                                "evidence_id": held_binding.evidence_ref_id,
                             },
                         )
-                        raw_binding = (
-                            (
-                                await session.execute(
-                                    text(
-                                        "SELECT authority_kind, selected_at "
-                                        "FROM agent_data_snapshot_evidence "
-                                        "WHERE data_snapshot_id=:snapshot_id "
-                                        "AND instrument_id=:instrument_id "
-                                        "AND evidence_ref_id=:evidence_id"
-                                    ),
-                                    {
-                                        "snapshot_id": self._held_binding.data_snapshot_id,
-                                        "instrument_id": self._held_binding.instrument_id,
-                                        "evidence_id": self._held_binding.evidence_ref_id,
-                                    },
-                                )
-                            )
-                            .mappings()
-                            .one()
-                        )
-                        assert (raw_binding["authority_kind"], raw_binding["selected_at"]) == (
-                            "research",
-                            None,
-                        )
-                        assert self._held_binding.authority_kind == "price"
-                        assert self._held_binding.selected_at is not None
-                    finally:
-                        await session.execute(
-                            text(
-                                "ALTER TABLE agent_data_snapshot_evidence "
-                                "ENABLE TRIGGER USER"
-                            )
-                        )
-                    self._tampered = True
-                return await self._fixture.analyze(
-                    role,
-                    request,
-                    evidence_refs,
-                    prompt,
+                    )
+                    .mappings()
+                    .one()
+                )
+                assert (raw_binding["authority_kind"], raw_binding["selected_at"]) == (
+                    "research",
+                    None,
+                )
+                assert held_binding.authority_kind == "price"
+                assert held_binding.selected_at is not None
+            finally:
+                await session.execute(
+                    text(
+                        "ALTER TABLE agent_data_snapshot_evidence "
+                        "ENABLE TRIGGER USER"
+                    )
                 )
 
+        committee = _SingleTamperingCommittee(tamper)
         result = await execute_research_run(
             session,
             run_id=admission.run_id,
-            committee=_RetainedBindingTamperingCommittee(),
+            committee=committee,
         )
-        persisted_intents = tuple(
-            await session.scalars(
-                select(AgentResearchOutputRecord.intent).where(
-                    AgentResearchOutputRecord.run_id == admission.run_id,
-                )
+        persisted_intents = await _persisted_run_intents(session, admission.run_id)
+
+    assert committee.tampered is True
+    assert result.status == "abstained"
+    assert result.intent is None
+    assert persisted_intents
+    assert all(intent is None for intent in persisted_intents)
+
+
+@pytest.mark.asyncio
+async def test_retained_run_identity_drift_abstains_without_emitting_positive_intent(
+    migrated_database_url: str,
+) -> None:
+    """A retained stale run must not redefine the current persisted execution scope."""
+    factory, admission = await _prepared_production_price_admission(
+        migrated_database_url
+    )
+    async with factory() as session, session.begin():
+        session.add(
+            Instrument(
+                id=_DRIFT_INSTRUMENT_ID,
+                asset_type="equity",
+                exchange="NASDAQ",
+                currency="USD",
+                tick_size=Decimal("0.01"),
+                risk_bucket="equity",
             )
         )
 
+    async with factory() as session, session.begin():
+        held_run = await session.get(AgentResearchRunRecord, admission.run_id)
+        assert held_run is not None
+        assert held_run.instrument_id == _INSTRUMENT_ID
+
+        async def tamper() -> None:
+            await session.execute(
+                text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER")
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE agent_research_runs SET instrument_id=:instrument_id "
+                        "WHERE id=:run_id"
+                    ),
+                    {
+                        "instrument_id": _DRIFT_INSTRUMENT_ID,
+                        "run_id": held_run.id,
+                    },
+                )
+                raw_run = (
+                    (
+                        await session.execute(
+                            text(
+                                "SELECT instrument_id FROM agent_research_runs "
+                                "WHERE id=:run_id"
+                            ),
+                            {"run_id": held_run.id},
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                assert raw_run["instrument_id"] == _DRIFT_INSTRUMENT_ID
+                assert held_run.instrument_id == _INSTRUMENT_ID
+            finally:
+                await session.execute(
+                    text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER")
+                )
+
+        committee = _SingleTamperingCommittee(tamper)
+        result = await execute_research_run(
+            session,
+            run_id=admission.run_id,
+            committee=committee,
+        )
+        persisted_intents = await _persisted_run_intents(session, admission.run_id)
+
+    positive_summary = None
+    if result.intent is not None:
+        positive_summary = (
+            result.intent.stance,
+            result.intent.exposure_action,
+            next(
+                vote.vote
+                for vote in result.intent.role_votes
+                if vote.role == "market_state"
+            ),
+        )
+    assert committee.tampered is True
+    assert result.status == "abstained", (
+        f"status={result.status}, positive_summary={positive_summary}"
+    )
+    assert result.intent is None
+    assert persisted_intents
+    assert all(intent is None for intent in persisted_intents)
+
+
+@pytest.mark.asyncio
+async def test_retained_price_binding_copied_field_drift_abstains_without_intent(
+    migrated_database_url: str,
+) -> None:
+    """Refreshing the retained binding must expose drift in copied evidence fields."""
+    factory, admission = await _prepared_production_price_admission(
+        migrated_database_url
+    )
+    async with factory() as session, session.begin():
+        held_binding = await session.scalar(
+            select(AgentDataSnapshotEvidenceRecord).where(
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id
+                == admission.run.data_snapshot_id,
+                AgentDataSnapshotEvidenceRecord.instrument_id
+                == admission.run.instrument_id,
+                AgentDataSnapshotEvidenceRecord.authority_kind == "price",
+            )
+        )
+        assert held_binding is not None
+        original_hash = held_binding.content_hash
+        drifted_hash = "0" * 64
+        assert original_hash != drifted_hash
+
+        async def tamper() -> None:
+            await session.execute(
+                text(
+                    "ALTER TABLE agent_data_snapshot_evidence "
+                    "DISABLE TRIGGER USER"
+                )
+            )
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE agent_data_snapshot_evidence "
+                        "SET content_hash=:content_hash "
+                        "WHERE data_snapshot_id=:snapshot_id "
+                        "AND instrument_id=:instrument_id "
+                        "AND evidence_ref_id=:evidence_id"
+                    ),
+                    {
+                        "content_hash": drifted_hash,
+                        "snapshot_id": held_binding.data_snapshot_id,
+                        "instrument_id": held_binding.instrument_id,
+                        "evidence_id": held_binding.evidence_ref_id,
+                    },
+                )
+                raw_hash = await session.scalar(
+                    text(
+                        "SELECT content_hash FROM agent_data_snapshot_evidence "
+                        "WHERE data_snapshot_id=:snapshot_id "
+                        "AND instrument_id=:instrument_id "
+                        "AND evidence_ref_id=:evidence_id"
+                    ),
+                    {
+                        "snapshot_id": held_binding.data_snapshot_id,
+                        "instrument_id": held_binding.instrument_id,
+                        "evidence_id": held_binding.evidence_ref_id,
+                    },
+                )
+                assert raw_hash == drifted_hash
+                assert held_binding.content_hash == original_hash
+                assert held_binding.authority_kind == "price"
+                assert held_binding.selected_at is not None
+            finally:
+                await session.execute(
+                    text(
+                        "ALTER TABLE agent_data_snapshot_evidence "
+                        "ENABLE TRIGGER USER"
+                    )
+                )
+
+        committee = _SingleTamperingCommittee(tamper)
+        result = await execute_research_run(
+            session,
+            run_id=admission.run_id,
+            committee=committee,
+        )
+        persisted_intents = await _persisted_run_intents(session, admission.run_id)
+
+    assert committee.tampered is True
     assert result.status == "abstained"
     assert result.intent is None
+    assert persisted_intents
+    assert all(intent is None for intent in persisted_intents)
+
+
+@pytest.mark.asyncio
+async def test_retained_snapshot_drift_abstains_without_emitting_positive_intent(
+    migrated_database_url: str,
+) -> None:
+    """Refreshing the retained snapshot must expose invalid selection-time drift."""
+    factory, admission = await _prepared_production_price_admission(
+        migrated_database_url
+    )
+    async with factory() as session, session.begin():
+        held_snapshot = await session.get(DataSnapshot, admission.run.data_snapshot_id)
+        assert held_snapshot is not None
+        original_available_at = held_snapshot.available_at
+        drifted_available_at = original_available_at - timedelta(seconds=1)
+
+        async def tamper() -> None:
+            await session.execute(text("ALTER TABLE data_snapshots DISABLE TRIGGER USER"))
+            try:
+                await session.execute(
+                    text(
+                        "UPDATE data_snapshots SET available_at=:available_at "
+                        "WHERE id=:snapshot_id"
+                    ),
+                    {
+                        "available_at": drifted_available_at,
+                        "snapshot_id": held_snapshot.id,
+                    },
+                )
+                raw_available_at = await session.scalar(
+                    text("SELECT available_at FROM data_snapshots WHERE id=:snapshot_id"),
+                    {"snapshot_id": held_snapshot.id},
+                )
+                assert raw_available_at == drifted_available_at
+                assert held_snapshot.available_at == original_available_at
+            finally:
+                await session.execute(
+                    text("ALTER TABLE data_snapshots ENABLE TRIGGER USER")
+                )
+
+        committee = _SingleTamperingCommittee(tamper)
+        result = await execute_research_run(
+            session,
+            run_id=admission.run_id,
+            committee=committee,
+        )
+        persisted_intents = await _persisted_run_intents(session, admission.run_id)
+
+    assert committee.tampered is True
+    assert result.status == "abstained"
+    assert result.intent is None
+    assert persisted_intents
     assert all(intent is None for intent in persisted_intents)
 
 
@@ -2828,6 +3049,25 @@ async def _seed_database_tool_authority(
             )
             for record in linked
         )
+
+
+class _SingleTamperingCommittee:
+    def __init__(self, tamper: Callable[[], Awaitable[None]]) -> None:
+        self._tamper = tamper
+        self._fixture = FixtureCommittee()
+        self.tampered = False
+
+    async def analyze(
+        self,
+        role: AgentRole,
+        request: ResearchRequest,
+        evidence_refs: tuple[EvidenceRef, ...],
+        prompt: PromptAsset,
+    ) -> CommitteeRoleOutput:
+        if not self.tampered:
+            await self._tamper()
+            self.tampered = True
+        return await self._fixture.analyze(role, request, evidence_refs, prompt)
 
 
 class _FailingCommittee:

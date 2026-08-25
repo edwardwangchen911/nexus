@@ -190,6 +190,28 @@ async def revalidate_frozen_price_authority(
     allow_fixture: bool,
 ) -> FrozenPriceAuthorityStatus:
     """Revalidate one frozen BarSet owner and its current canonical database rows."""
+    persisted_run_identity = (
+        await session.execute(
+            select(
+                AgentResearchRunRecord.id,
+                AgentResearchRunRecord.data_snapshot_id,
+                AgentResearchRunRecord.instrument_id,
+                AgentResearchRunRecord.decision_time,
+            ).where(AgentResearchRunRecord.id == run.id)
+        )
+    ).one_or_none()
+    if persisted_run_identity is None:
+        return FrozenPriceAuthorityStatus.INVALID
+    current_run_id, current_snapshot_id, current_instrument_id, current_decision_time = (
+        persisted_run_identity
+    )
+    if (
+        current_run_id,
+        current_snapshot_id,
+        current_instrument_id,
+        current_decision_time,
+    ) != (run.id, run.data_snapshot_id, run.instrument_id, run.decision_time):
+        return FrozenPriceAuthorityStatus.INVALID
     shaped_evidence = tuple(
         evidence
         for evidence in evidence_records
