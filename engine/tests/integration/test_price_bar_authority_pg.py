@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 from helpers.price_bar_authority import (
     AVAILABLE_AT,
+    INSTRUMENT_ID,
     MANIFEST_ID,
     OBSERVED_AT,
     RECEIVED_AT,
@@ -16,9 +17,15 @@ from helpers.price_bar_authority import (
     seed_price_candidate,
     seed_price_candidate_in_reverse,
 )
+from nexus.agents.price_authority import freeze_price_authority
 from nexus.domain.ids import new_uuid7
 from nexus.market.price_bar_authority import finalize_price_bar_set
-from nexus.persistence.models.data import PriceBarSetAuthority, PriceSeriesManifest
+from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
+from nexus.persistence.models.data import (
+    DataSnapshot,
+    PriceBarSetAuthority,
+    PriceSeriesManifest,
+)
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import select, text
@@ -41,6 +48,7 @@ SECOND_MUTATED_MANIFEST_ID = UUID("018f75b4-4d86-7c36-bc4c-cd71f2f64523")
 OTHER_INSTRUMENT_ID = UUID("018f75b4-4d86-7c36-bc4c-cd71f2f64524")
 FORGED_POLICY_ID = UUID("018f75b4-4d86-7c36-bc4c-cd71f2f64525")
 SOURCE_POLICY_ID = UUID("3c60888d-e92d-5e04-913c-7d427004cfef")
+SELECTION_SNAPSHOT_ID = UUID("018f75b4-4d86-7c36-bc4c-cd71f2f64526")
 
 CANONICAL_MUTATIONS = (
     ({"source": "fosun", "feed": "sip", "delivery_mode": "delayed"}, {}),
@@ -78,6 +86,50 @@ async def _wait_for_advisory_wait(
             if wait_event == "advisory":
                 return
             await asyncio.sleep(0)
+
+
+async def _selected_price_manifest(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    allow_fixture: bool,
+) -> UUID:
+    selected_at = RECEIVED_AT + timedelta(days=2)
+    async with factory() as session, session.begin():
+        snapshot = DataSnapshot(
+            id=SELECTION_SNAPSHOT_ID,
+            source="fixture",
+            provider_object_id="price-selection-snapshot",
+            revision="v1",
+            observed_at=selected_at,
+            available_at=selected_at,
+            received_at=selected_at,
+            schema_version="1",
+            payload={},
+        )
+        session.add(snapshot)
+        await session.flush()
+        await freeze_price_authority(
+            session,
+            snapshot=snapshot,
+            instrument_id=INSTRUMENT_ID,
+            decision_time=selected_at,
+            allow_fixture=allow_fixture,
+        )
+        binding = await session.scalar(
+            select(AgentDataSnapshotEvidenceRecord).where(
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id == snapshot.id,
+                AgentDataSnapshotEvidenceRecord.instrument_id == INSTRUMENT_ID,
+                AgentDataSnapshotEvidenceRecord.authority_kind == "price",
+            )
+        )
+        assert binding is not None
+        manifest_id = await session.scalar(
+            select(PriceBarSetAuthority.price_series_manifest_id).where(
+                PriceBarSetAuthority.evidence_ref_id == binding.evidence_ref_id
+            )
+        )
+        assert manifest_id is not None
+        return manifest_id
 
 
 @pytest.mark.asyncio
@@ -291,6 +343,65 @@ async def test_fixture_price_bars_are_database_eligible_for_explicit_test_runtim
     )
     authority = await insert_valid_authority_from_prepare(factory, MANIFEST_ID)
     assert authority.source == "fixture"
+
+
+@pytest.mark.asyncio
+async def test_price_authority_selection_prefers_production_over_newer_fixture(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await seed_price_candidate(factory, manifest_id=MANIFEST_ID)
+    await insert_valid_authority_from_prepare(factory, MANIFEST_ID)
+    await seed_price_candidate(
+        factory,
+        manifest_id=MUTATED_MANIFEST_ID,
+        source="fixture",
+        feed="fixture-feed",
+        delivery_mode="fixture",
+        bar_overrides={
+            "available_at": AVAILABLE_AT + timedelta(hours=1),
+            "received_at": RECEIVED_AT + timedelta(hours=1),
+        },
+    )
+    await insert_valid_authority_from_prepare(factory, MUTATED_MANIFEST_ID)
+    assert await _selected_price_manifest(factory, allow_fixture=True) == MANIFEST_ID
+
+
+@pytest.mark.asyncio
+async def test_price_authority_selection_uses_available_at_desc_before_manifest_id(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await seed_price_candidate(factory, manifest_id=SECOND_MUTATED_MANIFEST_ID)
+    await insert_valid_authority_from_prepare(factory, SECOND_MUTATED_MANIFEST_ID)
+    await seed_price_candidate(
+        factory,
+        manifest_id=MUTATED_MANIFEST_ID,
+        bar_overrides={
+            "available_at": AVAILABLE_AT + timedelta(hours=1),
+            "received_at": RECEIVED_AT + timedelta(hours=1),
+        },
+    )
+    await insert_valid_authority_from_prepare(factory, MUTATED_MANIFEST_ID)
+    assert (
+        await _selected_price_manifest(factory, allow_fixture=False)
+        == MUTATED_MANIFEST_ID
+    )
+
+
+@pytest.mark.asyncio
+async def test_price_authority_selection_uses_manifest_id_desc_as_final_tie_break(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await seed_price_candidate(factory, manifest_id=MANIFEST_ID)
+    await insert_valid_authority_from_prepare(factory, MANIFEST_ID)
+    await seed_price_candidate(factory, manifest_id=MUTATED_MANIFEST_ID)
+    await insert_valid_authority_from_prepare(factory, MUTATED_MANIFEST_ID)
+    assert (
+        await _selected_price_manifest(factory, allow_fixture=False)
+        == MUTATED_MANIFEST_ID
+    )
 
 
 @pytest.mark.asyncio

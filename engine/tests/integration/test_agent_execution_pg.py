@@ -779,7 +779,12 @@ async def test_database_tools_are_complete_and_reject_authority_escape(
         )
         price_authority = await session.scalar(select(PriceBarSetAuthority))
         assert price_authority is not None
-        tools = await database_read_only_tools(session, admission.run, allow_fixture_evidence=True)
+        tools = await database_read_only_tools(
+            session,
+            admission.run,
+            allow_fixture_evidence=True,
+            allow_fixture_price_evidence=True,
+        )
         assert tools.configured_names == EXPECTED_READ_ONLY_TOOL_NAMES
         result = await tools.execute(
             "get_security_snapshot",
@@ -1021,7 +1026,12 @@ async def test_price_tool_refreshes_evidence_changed_after_tool_construction(
 ) -> None:
     factory, run = await _prepared_price_run(migrated_database_url)
     async with factory() as session:
-        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        tools = await database_read_only_tools(
+            session,
+            run,
+            allow_fixture_evidence=True,
+            allow_fixture_price_evidence=True,
+        )
         await _corrupt_price_evidence_content(factory)
         result = await tools.execute("get_price_features", _price_tool_payload())
     assert (result["status"], result["reason"], result["items"]) == (
@@ -1037,7 +1047,12 @@ async def test_evidence_backed_tools_fail_closed_when_current_evidence_drifts(
 ) -> None:
     factory, run = await _prepared_price_run(migrated_database_url)
     async with factory() as session:
-        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        tools = await database_read_only_tools(
+            session,
+            run,
+            allow_fixture_evidence=True,
+            allow_fixture_price_evidence=True,
+        )
         await _corrupt_price_evidence_content(factory)
         results = (
             await tools.execute(
@@ -1095,7 +1110,12 @@ async def test_empty_evidence_queries_retain_noncorruption_statuses(
 ) -> None:
     factory, run = await _prepared_price_run(migrated_database_url)
     async with factory() as session:
-        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        tools = await database_read_only_tools(
+            session,
+            run,
+            allow_fixture_evidence=True,
+            allow_fixture_price_evidence=True,
+        )
         financial = await tools.execute(
             "get_financial_facts",
             {
@@ -1148,7 +1168,12 @@ async def test_price_tool_degrades_when_evidence_is_corrupt_before_construction(
     factory, run = await _prepared_price_run(migrated_database_url)
     await _corrupt_price_evidence_content(factory)
     async with factory() as session:
-        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        tools = await database_read_only_tools(
+            session,
+            run,
+            allow_fixture_evidence=True,
+            allow_fixture_price_evidence=True,
+        )
         result = await tools.execute("get_price_features", _price_tool_payload())
         financial = await tools.execute(
             "get_financial_facts",
@@ -1198,7 +1223,12 @@ async def test_price_tool_treats_missing_expected_binding_as_corruption(
                 text("ALTER TABLE agent_data_snapshot_evidence ENABLE TRIGGER USER")
             )
     async with factory() as session:
-        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        tools = await database_read_only_tools(
+            session,
+            run,
+            allow_fixture_evidence=True,
+            allow_fixture_price_evidence=True,
+        )
         result = await tools.execute("get_price_features", _price_tool_payload())
     assert (result["status"], result["reason"], result["items"]) == (
         "unavailable",
@@ -1225,7 +1255,12 @@ async def test_price_tool_never_returns_ok_for_flagged_stored_bars(
         finally:
             await session.execute(text("ALTER TABLE price_bar_records ENABLE TRIGGER USER"))
     async with factory() as session:
-        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        tools = await database_read_only_tools(
+            session,
+            run,
+            allow_fixture_evidence=True,
+            allow_fixture_price_evidence=True,
+        )
         result = await tools.execute("get_price_features", _price_tool_payload())
     assert (result["status"], result["reason"]) == (
         "unavailable",
@@ -1256,7 +1291,12 @@ async def test_price_tool_degrades_when_stored_bar_set_hash_is_corrupted(
         finally:
             await session.execute(text("ALTER TABLE price_bar_records ENABLE TRIGGER USER"))
     async with factory() as session:
-        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        tools = await database_read_only_tools(
+            session,
+            run,
+            allow_fixture_evidence=True,
+            allow_fixture_price_evidence=True,
+        )
         result = await tools.execute("get_price_features", _price_tool_payload())
     assert (result["status"], result["reason"]) == (
         "unavailable",
@@ -1280,7 +1320,12 @@ async def test_price_tool_retains_input_errors_for_caller_scope_violations(
         payload[key] = value
         invalid_payloads.append(payload)
     async with factory() as session:
-        tools = await database_read_only_tools(session, run, allow_fixture_evidence=True)
+        tools = await database_read_only_tools(
+            session,
+            run,
+            allow_fixture_evidence=True,
+            allow_fixture_price_evidence=True,
+        )
         for payload in invalid_payloads:
             with pytest.raises(ToolInputError, match="exceeds frozen"):
                 await tools.execute("get_price_features", payload)
@@ -1299,12 +1344,33 @@ async def test_price_features_report_unavailable_without_frozen_authority(
             allow_fixture_price_authority=True,
         )
         tools = await database_read_only_tools(
-            session, admission.run, allow_fixture_evidence=True
+            session,
+            admission.run,
+            allow_fixture_evidence=True,
         )
         result = await tools.execute("get_price_features", _price_tool_payload())
     assert (result["status"], result["reason"], result["items"]) == (
         "unavailable",
         "no_frozen_price_authority",
+        [],
+    )
+
+
+@pytest.mark.asyncio
+async def test_generic_fixture_permission_does_not_enable_fixture_price_tool(
+    migrated_database_url: str,
+) -> None:
+    factory, run = await _prepared_price_run(migrated_database_url)
+    async with factory() as session:
+        tools = await database_read_only_tools(
+            session,
+            run,
+            allow_fixture_evidence=True,
+        )
+        result = await tools.execute("get_price_features", _price_tool_payload())
+    assert (result["status"], result["reason"], result["items"]) == (
+        "unavailable",
+        "invalid_price_bar_set_authority",
         [],
     )
 
@@ -1407,7 +1473,10 @@ async def test_price_features_report_partial_when_history_warmup_is_insufficient
             allow_fixture_price_authority=True,
         )
         tools = await database_read_only_tools(
-            session, admission.run, allow_fixture_evidence=True
+            session,
+            admission.run,
+            allow_fixture_evidence=True,
+            allow_fixture_price_evidence=True,
         )
         price = await tools.execute(
             "get_price_features",
@@ -1529,6 +1598,352 @@ async def test_price_owner_trigger_rejects_parquet_evidence_as_price_authority(
                 )
             )
             await session.flush()
+
+
+@pytest.mark.asyncio
+async def test_existing_price_link_rejects_copied_owner_tamper(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(factory, link_price=True)
+    async with factory() as session, session.begin():
+        copied_owner_id = UUID("0198d500-1000-7000-8000-000000001711")
+        session.add(
+            ResearchEvidenceRef(
+                id=copied_owner_id,
+                source="fixture",
+                provider_object_id="copied-owner-target",
+                revision="c" * 64,
+                available_at=_NOW - timedelta(minutes=1),
+                location=f"memory://sha256/{'c' * 64}",
+                content_hash="c" * 64,
+                byte_length=10,
+            )
+        )
+        await session.flush()
+        price_binding = await session.scalar(
+            select(AgentDataSnapshotEvidenceRecord).where(
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id == _SNAPSHOT_ID,
+                AgentDataSnapshotEvidenceRecord.instrument_id == _INSTRUMENT_ID,
+                AgentDataSnapshotEvidenceRecord.authority_kind == "price",
+            )
+        )
+        assert price_binding is not None
+        await session.execute(
+            text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER")
+        )
+        try:
+            price_binding.evidence_ref_id = copied_owner_id
+            await session.flush()
+        finally:
+            await session.execute(
+                text("ALTER TABLE agent_data_snapshot_evidence ENABLE TRIGGER USER")
+            )
+    with pytest.raises(ValueError, match="existing price authority is invalid"):
+        async with factory() as session, session.begin():
+            await _admit_price_run(
+                session,
+                prompt_ids,
+                allow_fixture_price_authority=True,
+            )
+
+
+@pytest.mark.parametrize(
+    ("provider_object_id", "location"),
+    (
+        (
+            f"price-bar-set:{_PRICE_MANIFEST_ID}",
+            f"memory://sha256/{'d' * 64}",
+        ),
+        (
+            "shape-only-research",
+            f"db://price-bar-set/{_PRICE_MANIFEST_ID}@sha256:{'d' * 64}",
+        ),
+    ),
+    ids=("reserved-object-id", "reserved-location"),
+)
+@pytest.mark.asyncio
+async def test_research_owner_trigger_reserves_price_bar_identity_and_location(
+    migrated_database_url: str,
+    provider_object_id: str,
+    location: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory)
+    with pytest.raises(DBAPIError, match="price evidence requires price authority"):
+        async with factory() as session, session.begin():
+            evidence = ResearchEvidenceRef(
+                id=UUID("0198d500-1000-7000-8000-000000001709"),
+                source="fixture",
+                provider_object_id=provider_object_id,
+                revision="d" * 64,
+                available_at=_NOW - timedelta(minutes=1),
+                location=location,
+                content_hash="d" * 64,
+                byte_length=10,
+            )
+            session.add(evidence)
+            await session.flush()
+            session.add(
+                AgentDataSnapshotEvidenceRecord(
+                    data_snapshot_id=_SNAPSHOT_ID,
+                    instrument_id=_INSTRUMENT_ID,
+                    evidence_ref_id=evidence.id,
+                    authority_kind="research",
+                    selected_at=None,
+                    source=evidence.source,
+                    provider_object_id=evidence.provider_object_id,
+                    revision=evidence.revision,
+                    available_at=evidence.available_at,
+                    location=evidence.location,
+                    content_hash=evidence.content_hash,
+                )
+            )
+            await session.flush()
+
+
+@pytest.mark.asyncio
+async def test_disguised_research_price_link_cannot_create_positive_intent(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    evidence_id = UUID("0198d500-1000-7000-8000-000000001710")
+    digest = "d" * 64
+    async with factory() as session, session.begin():
+        evidence = ResearchEvidenceRef(
+            id=evidence_id,
+            source="fixture",
+            provider_object_id=f"price-bar-set:{_PRICE_MANIFEST_ID}",
+            revision=digest,
+            available_at=_NOW - timedelta(minutes=1),
+            location=f"db://price-bar-set/{_PRICE_MANIFEST_ID}@sha256:{digest}",
+            content_hash=digest,
+            byte_length=10,
+        )
+        session.add(evidence)
+        await session.flush()
+        await session.execute(
+            text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER")
+        )
+        try:
+            session.add(
+                AgentDataSnapshotEvidenceRecord(
+                    data_snapshot_id=_SNAPSHOT_ID,
+                    instrument_id=_INSTRUMENT_ID,
+                    evidence_ref_id=evidence.id,
+                    authority_kind="research",
+                    selected_at=None,
+                    source=evidence.source,
+                    provider_object_id=evidence.provider_object_id,
+                    revision=evidence.revision,
+                    available_at=evidence.available_at,
+                    location=evidence.location,
+                    content_hash=evidence.content_hash,
+                )
+            )
+            await session.flush()
+        finally:
+            await session.execute(
+                text("ALTER TABLE agent_data_snapshot_evidence ENABLE TRIGGER USER")
+            )
+    async with factory() as session, session.begin():
+        admission = await _admit_price_run(
+            session,
+            prompt_ids,
+            allow_fixture_price_authority=True,
+        )
+    async with factory() as session, session.begin():
+        result = await execute_research_run(
+            session,
+            run_id=admission.run_id,
+            committee=FixtureCommittee(),
+        )
+    assert result.intent is None or (
+        result.intent.stance,
+        result.intent.exposure_action,
+        next(
+            vote.vote
+            for vote in result.intent.role_votes
+            if vote.role == "market_state"
+        ),
+        result.intent.quality_status,
+    ) == ("watch", "none", "abstain", "partial")
+
+
+@pytest.mark.asyncio
+async def test_corrupted_frozen_price_bar_set_cannot_create_positive_intent(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(
+        factory,
+        link_price=False,
+        price_source="alpaca",
+    )
+    async with factory() as session, session.begin():
+        admission = await _admit_price_run(
+            session,
+            prompt_ids,
+            allow_fixture_price_authority=False,
+        )
+    async with factory() as session, session.begin():
+        await session.execute(text("ALTER TABLE price_bar_records DISABLE TRIGGER USER"))
+        try:
+            await session.execute(
+                text(
+                    "UPDATE price_bar_records SET close = close + 0.010000000000 "
+                    "WHERE price_series_manifest_id = :manifest_id"
+                ),
+                {"manifest_id": _PRICE_MANIFEST_ID},
+            )
+        finally:
+            await session.execute(
+                text("ALTER TABLE price_bar_records ENABLE TRIGGER USER")
+            )
+    async with factory() as session, session.begin():
+        result = await execute_research_run(
+            session,
+            run_id=admission.run_id,
+            committee=FixtureCommittee(),
+        )
+    assert result.intent is None or (
+        result.intent.stance,
+        result.intent.exposure_action,
+        next(
+            vote.vote
+            for vote in result.intent.role_votes
+            if vote.role == "market_state"
+        ),
+        result.intent.quality_status,
+    ) == ("watch", "none", "abstain", "partial")
+
+
+@pytest.mark.asyncio
+async def test_price_binding_drift_before_final_synthesis_cannot_create_positive_intent(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(
+        factory,
+        link_price=False,
+        price_source="alpaca",
+    )
+    async with factory() as session, session.begin():
+        admission = await _admit_price_run(
+            session,
+            prompt_ids,
+            allow_fixture_price_authority=False,
+        )
+
+    class _BindingTamperingCommittee:
+        def __init__(self, session: AsyncSession) -> None:
+            self._session = session
+            self._fixture = FixtureCommittee()
+            self._tampered = False
+
+        async def analyze(
+            self,
+            role: AgentRole,
+            request: ResearchRequest,
+            evidence_refs: tuple[EvidenceRef, ...],
+            prompt: PromptAsset,
+        ) -> CommitteeRoleOutput:
+            if not self._tampered:
+                await self._session.execute(
+                    text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER")
+                )
+                try:
+                    await self._session.execute(
+                        text(
+                            "UPDATE agent_data_snapshot_evidence "
+                            "SET authority_kind='research', selected_at=NULL "
+                            "WHERE authority_kind='price'"
+                        )
+                    )
+                finally:
+                    await self._session.execute(
+                        text(
+                            "ALTER TABLE agent_data_snapshot_evidence "
+                            "ENABLE TRIGGER USER"
+                        )
+                    )
+                self._tampered = True
+            return await self._fixture.analyze(
+                role,
+                request,
+                evidence_refs,
+                prompt,
+            )
+
+    async with factory() as session, session.begin():
+        result = await execute_research_run(
+            session,
+            run_id=admission.run_id,
+            committee=_BindingTamperingCommittee(session),
+        )
+    assert result.intent is None or (
+        result.intent.stance,
+        result.intent.exposure_action,
+        next(
+            vote.vote
+            for vote in result.intent.role_votes
+            if vote.role == "market_state"
+        ),
+        result.intent.quality_status,
+    ) == ("watch", "none", "abstain", "partial")
+
+
+@pytest.mark.asyncio
+async def test_development_responses_rejects_fixture_price_before_client_creation(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(
+        factory,
+        link_price=False,
+        price_source="fixture",
+    )
+    async with factory() as session, session.begin():
+        admission = await _admit_price_run(
+            session,
+            prompt_ids,
+            allow_fixture_price_authority=True,
+        )
+    fake = _ToolLoopResponsesClient()
+    constructor_calls: list[str] = []
+
+    def fake_openai_client(*, api_key: str) -> _ToolLoopResponsesClient:
+        del api_key
+        constructor_calls.append("constructed")
+        return fake
+
+    monkeypatch.setattr("nexus.worker.AsyncOpenAI", fake_openai_client)
+    settings = EngineSettings(
+        environment=Environment.DEVELOPMENT,
+        database_url=migrated_database_url,
+        agent_runtime_mode="responses",
+        openai_api_key="fixture-key",
+        openai_extraction_model="fixture-extraction",
+        openai_reasoning_model="fixture-model",
+    )
+    assert await run_agent_worker_once(settings) is True
+    async with factory() as session:
+        run = await session.get(AgentResearchRunRecord, admission.run_id)
+    assert run is not None
+    assert (constructor_calls, len(fake.responses.calls), run.status) == (
+        [],
+        0,
+        "abstained",
+    ), (
+        f"constructor_count={len(constructor_calls)}, "
+        f"responses_calls={len(fake.responses.calls)}, status={run.status}"
+    )
 
 
 @pytest.mark.asyncio

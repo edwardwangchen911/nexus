@@ -27,6 +27,10 @@ from nexus.agents.persistence import (
     require_reserved_daily_budget,
     settle_daily_budget,
 )
+from nexus.agents.price_authority import (
+    FrozenPriceAuthorityStatus,
+    revalidate_frozen_price_authority,
+)
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.agents.synthesis import (
     citations_bound,
@@ -62,6 +66,7 @@ async def execute_research_run(
     run_id: UUID,
     committee: CommitteeModel,
     allow_fixture_evidence: bool = True,
+    allow_fixture_price_authority: bool = False,
 ) -> ResearchRunResult:
     """Advance one prepared run through every durable state or a fail-closed terminal."""
     run = await session.get(AgentResearchRunRecord, run_id, with_for_update=True)
@@ -83,6 +88,21 @@ async def execute_research_run(
             event_sequence=event_sequence + 1,
             status="abstained",
             reason="evidence_authority_missing",
+        )
+    price_authority_status = await revalidate_frozen_price_authority(
+        session,
+        run=run,
+        evidence_records=evidence_records,
+        allow_fixture=allow_fixture_price_authority,
+    )
+    if price_authority_status is FrozenPriceAuthorityStatus.INVALID:
+        return await _terminal_without_usage(
+            session,
+            run,
+            output_sequence=output_sequence,
+            event_sequence=event_sequence + 1,
+            status="abstained",
+            reason="price_authority_invalid",
         )
     prompts = await load_frozen_prompts(session, run)
     if prompts is None:
@@ -204,6 +224,27 @@ async def execute_research_run(
         "audited",
         {"evidence_count": len(evidence_records)},
     )
+    final_price_authority_status = await revalidate_frozen_price_authority(
+        session,
+        run=run,
+        evidence_records=evidence_records,
+        allow_fixture=allow_fixture_price_authority,
+    )
+    if (
+        final_price_authority_status is FrozenPriceAuthorityStatus.INVALID
+        or final_price_authority_status is not price_authority_status
+    ):
+        return await _terminal_after_committee(
+            session,
+            run,
+            model=model,
+            committee=committee,
+            role_outputs=role_outputs,
+            output_sequence=output_sequence,
+            event_sequence=event_sequence + 1,
+            status="abstained",
+            reason="price_authority_invalid",
+        )
     usage = _committee_usage(committee, role_outputs)
     if not await _settle_or_hold_usage(session, run, model=model, usage=usage):
         return await _persist_terminal(
@@ -223,7 +264,18 @@ async def execute_research_run(
             status="abstained",
             reason="conflicting_facts",
         )
-    intent = synthesize_intent(run, symbol, snapshot, prompts, model, evidence_refs, role_outputs)
+    intent = synthesize_intent(
+        run,
+        symbol,
+        snapshot,
+        prompts,
+        model,
+        evidence_refs,
+        role_outputs,
+        price_authority_valid=(
+            final_price_authority_status is FrozenPriceAuthorityStatus.VALID
+        ),
+    )
     await _append_output(
         session,
         run,

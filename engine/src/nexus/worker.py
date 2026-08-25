@@ -18,7 +18,12 @@ from nexus.agents.committee import (
 )
 from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution import TERMINAL, execute_research_run
+from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.models import ResearchRequest
+from nexus.agents.price_authority import (
+    FrozenPriceAuthorityStatus,
+    revalidate_frozen_price_authority,
+)
 from nexus.agents.responses import ResponsesClient, ResponsesCommittee, ResponsesModelConfig
 from nexus.agents.tools import ReadOnlyToolRegistry, ToolInputError
 from nexus.domain.evidence import EvidenceRef
@@ -40,7 +45,9 @@ async def run_agent_worker_once(
     tools: ReadOnlyToolRegistry | None = None,
 ) -> bool:
     """Claim and terminalize at most one queued Agent job outside any HTTP request."""
-    _require_worker_runtime(settings)
+    runtime_mode = _require_worker_runtime(settings)
+    allow_fixture_evidence = settings.environment is not Environment.PRODUCTION
+    allow_fixture_price_authority = runtime_mode is AgentRuntimeMode.FIXTURE
     factory = session_factory(settings)
     async with factory() as session, session.begin():
         job = await session.scalar(
@@ -86,7 +93,8 @@ async def run_agent_worker_once(
             session,
             run_id=run.id,
             committee=committee,
-            allow_fixture_evidence=settings.environment is not Environment.PRODUCTION,
+            allow_fixture_evidence=allow_fixture_evidence,
+            allow_fixture_price_authority=allow_fixture_price_authority,
         )
         job.status = result.status.upper()
         return True
@@ -115,6 +123,22 @@ async def _committee(
 ) -> CommitteeModel:
     if settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE:
         return FixtureCommittee()
+    allow_fixture_evidence = settings.environment is not Environment.PRODUCTION
+    evidence_records = await load_frozen_evidence(
+        session,
+        run,
+        allow_fixture_evidence=allow_fixture_evidence,
+    )
+    if not evidence_records:
+        return _UnavailableResponsesCommittee()
+    price_authority_status = await revalidate_frozen_price_authority(
+        session,
+        run=run,
+        evidence_records=evidence_records,
+        allow_fixture=False,
+    )
+    if price_authority_status is FrozenPriceAuthorityStatus.INVALID:
+        raise ToolInputError("frozen price authority is unavailable")
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
     if (
         model is None
@@ -128,7 +152,10 @@ async def _committee(
     configured_tools = tools or await database_read_only_tools(
         session,
         run,
-        allow_fixture_evidence=settings.environment is not Environment.PRODUCTION,
+        allow_fixture_evidence=allow_fixture_evidence,
+        allow_fixture_price_evidence=(
+            settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE
+        ),
     )
     return ResponsesCommittee(
         client=cast(ResponsesClient, client),

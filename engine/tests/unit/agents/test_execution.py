@@ -119,7 +119,10 @@ def test_synthesis_uses_all_role_votes_for_nonnumeric_stance_and_paired_evidence
 
 
 def _synthesize(
-    votes: tuple[str, ...], *, include_price_authority: bool = True
+    votes: tuple[str, ...],
+    *,
+    include_price_authority: bool = True,
+    price_authority_valid: bool | None = None,
 ):
     now = datetime(2026, 8, 24, tzinfo=UTC)
     content_hash = "a" * 64
@@ -179,6 +182,11 @@ def _synthesize(
         model,
         (evidence,),
         outputs,
+        price_authority_valid=(
+            include_price_authority
+            if price_authority_valid is None
+            else price_authority_valid
+        ),
     )
 
 
@@ -201,3 +209,24 @@ def test_missing_price_authority_forces_market_abstention_and_watch() -> None:
     assert (intent.stance, intent.exposure_action) == ("watch", "none")
     assert intent.quality_status == "partial"
     assert "Price authority is unavailable." in intent.uncertainties
+
+
+def test_price_shaped_strings_do_not_establish_revalidated_authority() -> None:
+    intent = _synthesize(
+        (
+            "support",
+            "support",
+            "support",
+            "support",
+            "support",
+            "oppose",
+            "abstain",
+            "abstain",
+        ),
+        include_price_authority=True,
+        price_authority_valid=False,
+    )
+    market_vote = next(vote for vote in intent.role_votes if vote.role == "market_state")
+    assert market_vote.vote == "abstain"
+    assert (intent.stance, intent.exposure_action) == ("watch", "none")
+    assert intent.quality_status == "partial"

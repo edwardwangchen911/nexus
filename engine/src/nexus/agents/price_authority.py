@@ -1,6 +1,7 @@
 """Point-in-time selection of one database-resident price authority."""
 
 from datetime import datetime
+from enum import StrEnum
 from uuid import UUID
 
 from sqlalchemy import and_, case, or_, select
@@ -12,8 +13,12 @@ from nexus.market.price_bar_authority import (
     HASH_VERSION,
     POLICY_VERSION,
     SOURCE_POLICY_ID,
+    prepare_price_bar_set,
 )
-from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
+from nexus.persistence.models.agents import (
+    AgentDataSnapshotEvidenceRecord,
+    AgentResearchRunRecord,
+)
 from nexus.persistence.models.data import (
     DataSnapshot,
     PriceBarSetAuthority,
@@ -167,6 +172,111 @@ def _valid_existing_link(
         and record.location == evidence.location
         and record.content_hash == evidence.content_hash
     )
+
+
+class FrozenPriceAuthorityStatus(StrEnum):
+    """Current database verdict for the price authority frozen into one run."""
+
+    MISSING = "missing"
+    VALID = "valid"
+    INVALID = "invalid"
+
+
+async def revalidate_frozen_price_authority(
+    session: AsyncSession,
+    *,
+    run: AgentResearchRunRecord,
+    evidence_records: tuple[ResearchEvidenceRef, ...],
+    allow_fixture: bool,
+) -> FrozenPriceAuthorityStatus:
+    """Revalidate one frozen BarSet owner and its current canonical database rows."""
+    shaped_evidence = tuple(
+        evidence
+        for evidence in evidence_records
+        if evidence.provider_object_id.startswith("price-bar-set:")
+        or evidence.location.startswith("db://price-bar-set/")
+    )
+    if not shaped_evidence:
+        return FrozenPriceAuthorityStatus.MISSING
+    if len(shaped_evidence) != 1:
+        return FrozenPriceAuthorityStatus.INVALID
+    evidence = shaped_evidence[0]
+    if not (
+        evidence.provider_object_id.startswith("price-bar-set:")
+        and evidence.location.startswith("db://price-bar-set/")
+    ):
+        return FrozenPriceAuthorityStatus.INVALID
+    snapshot = await session.get(DataSnapshot, run.data_snapshot_id)
+    binding = await session.scalar(
+        select(AgentDataSnapshotEvidenceRecord).where(
+            AgentDataSnapshotEvidenceRecord.data_snapshot_id == run.data_snapshot_id,
+            AgentDataSnapshotEvidenceRecord.instrument_id == run.instrument_id,
+            AgentDataSnapshotEvidenceRecord.evidence_ref_id == evidence.id,
+        )
+    )
+    if (
+        snapshot is None
+        or binding is None
+        or binding.authority_kind != "price"
+        or binding.selected_at is None
+        or binding.selected_at > run.decision_time
+    ):
+        return FrozenPriceAuthorityStatus.INVALID
+    loaded = tuple(
+        (
+            await session.execute(
+                _authority_statement(
+                    instrument_id=run.instrument_id,
+                    selected_at=binding.selected_at,
+                    allow_fixture=None,
+                )
+                .where(PriceBarSetAuthority.evidence_ref_id == evidence.id)
+                .limit(2)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+    )
+    if len(loaded) != 1:
+        return FrozenPriceAuthorityStatus.INVALID
+    authority, current_evidence, manifest, policy = loaded[0]
+    if not (
+        _valid_owner(
+            authority,
+            current_evidence,
+            manifest,
+            policy,
+            instrument_id=run.instrument_id,
+            selected_at=binding.selected_at,
+            allow_fixture=allow_fixture,
+        )
+        and _valid_existing_link(binding, current_evidence, snapshot=snapshot)
+        and evidence.id == current_evidence.id
+        and evidence.source == current_evidence.source
+        and evidence.provider_object_id == current_evidence.provider_object_id
+        and evidence.revision == current_evidence.revision
+        and evidence.available_at == current_evidence.available_at
+        and evidence.location == current_evidence.location
+        and evidence.content_hash == current_evidence.content_hash
+    ):
+        return FrozenPriceAuthorityStatus.INVALID
+    prepared = await prepare_price_bar_set(session, manifest.id)
+    if prepared is None or (
+        prepared.content_hash,
+        prepared.byte_length,
+        prepared.bar_count,
+        prepared.first_session,
+        prepared.last_session,
+        prepared.available_at,
+    ) != (
+        authority.content_hash,
+        authority.byte_length,
+        authority.bar_count,
+        authority.first_session,
+        authority.last_session,
+        authority.available_at,
+    ):
+        return FrozenPriceAuthorityStatus.INVALID
+    return FrozenPriceAuthorityStatus.VALID
 
 
 async def freeze_price_authority(

@@ -60,14 +60,12 @@ def synthesize_intent(
     model: AgentModelConfigRecord,
     evidence_refs: tuple[EvidenceRef, ...],
     role_outputs: Sequence[CommitteeRoleOutput],
+    *,
+    price_authority_valid: bool,
 ) -> ResearchIntent:
     """Reuse role claims verbatim so synthesis cannot introduce an uncited fact."""
     fundamental_missing = symbol == "00656.HK"
-    price_missing = not any(
-        evidence.object_id.startswith("price-bar-set:")
-        and evidence.location.startswith("db://price-bar-set/")
-        for evidence in evidence_refs
-    )
+    price_missing = not price_authority_valid
     votes = tuple(
         RoleVote(
             role=output.role,

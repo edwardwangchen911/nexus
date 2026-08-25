@@ -46,6 +46,7 @@ async def database_read_only_tools(
     run: AgentResearchRunRecord,
     *,
     allow_fixture_evidence: bool,
+    allow_fixture_price_evidence: bool = False,
 ) -> ReadOnlyTools:
     """Build all fixed executors from immutable run authority, never caller authority."""
     frozen_evidence = _frozen_evidence_authority(
@@ -56,7 +57,13 @@ async def database_read_only_tools(
     evidence = await load_frozen_evidence(
         session, run, allow_fixture_evidence=allow_fixture_evidence
     )
-    bound = _BoundDatabaseExecutors(session, run, frozen_evidence, evidence)
+    bound = _BoundDatabaseExecutors(
+        session,
+        run,
+        frozen_evidence,
+        evidence,
+        allow_fixture_price_evidence=allow_fixture_price_evidence,
+    )
     return ReadOnlyTools(executors=bound.executors)
 
 
@@ -78,6 +85,8 @@ class _BoundDatabaseExecutors:
         run: AgentResearchRunRecord,
         frozen_evidence: tuple[_FrozenEvidenceAuthority, ...],
         evidence: tuple[ResearchEvidenceRef, ...],
+        *,
+        allow_fixture_price_evidence: bool,
     ) -> None:
         self._session = session
         self._run_id = run.id
@@ -89,6 +98,7 @@ class _BoundDatabaseExecutors:
         self._current_evidence_valid = bool(evidence)
         self._evidence_ids = tuple(record.id for record in evidence)
         self._evidence = evidence
+        self._allow_fixture_price_evidence = allow_fixture_price_evidence
 
     @property
     def executors(self) -> Mapping[str, ToolExecutor]:
@@ -226,19 +236,22 @@ class _BoundDatabaseExecutors:
             return self._invalid_price_authority()
         expected = expected_price_evidence[0]
 
-        runtime_source = or_(
-            and_(
-                PriceSeriesManifest.source == "alpaca",
-                PriceSeriesManifest.feed == "sip",
-                PriceSeriesManifest.delivery_mode == "delayed",
-                PriceSeriesManifest.interval == "1Day",
-            ),
-            and_(
-                PriceSeriesManifest.source == "fixture",
-                PriceSeriesManifest.feed != "",
-                PriceSeriesManifest.delivery_mode == "fixture",
-                PriceSeriesManifest.interval == "1Day",
-            ),
+        production_source = and_(
+            PriceSeriesManifest.source == "alpaca",
+            PriceSeriesManifest.feed == "sip",
+            PriceSeriesManifest.delivery_mode == "delayed",
+            PriceSeriesManifest.interval == "1Day",
+        )
+        fixture_source = and_(
+            PriceSeriesManifest.source == "fixture",
+            PriceSeriesManifest.feed != "",
+            PriceSeriesManifest.delivery_mode == "fixture",
+            PriceSeriesManifest.interval == "1Day",
+        )
+        runtime_source = (
+            or_(production_source, fixture_source)
+            if self._allow_fixture_price_evidence
+            else production_source
         )
         authority_rows = tuple(
             (
