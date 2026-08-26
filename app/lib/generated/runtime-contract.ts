@@ -642,6 +642,69 @@ export const runtimeContractSchemas = {
     "title": "DiagnosticItemResponse",
     "type": "object"
   },
+  "DrawdownAcknowledgeResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "event_seq": {
+        "minimum": 2,
+        "title": "Event Seq",
+        "type": "integer"
+      },
+      "replayed": {
+        "title": "Replayed",
+        "type": "boolean"
+      },
+      "state": {
+        "const": "unlocked",
+        "title": "State",
+        "type": "string"
+      }
+    },
+    "required": [
+      "state",
+      "event_seq",
+      "replayed"
+    ],
+    "title": "DrawdownAcknowledgeResponse",
+    "type": "object"
+  },
+  "DrawdownLockSummary": {
+    "additionalProperties": false,
+    "properties": {
+      "acknowledge_allowed": {
+        "title": "Acknowledge Allowed",
+        "type": "boolean"
+      },
+      "event_seq": {
+        "anyOf": [
+          {
+            "minimum": 1,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Event Seq"
+      },
+      "state": {
+        "enum": [
+          "unlocked",
+          "locked",
+          "recovery_eligible",
+          "unknown"
+        ],
+        "title": "State",
+        "type": "string"
+      }
+    },
+    "required": [
+      "state",
+      "acknowledge_allowed"
+    ],
+    "title": "DrawdownLockSummary",
+    "type": "object"
+  },
   "EvidenceCompletenessSummary": {
     "additionalProperties": false,
     "properties": {
@@ -720,6 +783,29 @@ export const runtimeContractSchemas = {
       "content_hash"
     ],
     "title": "EvidenceRef",
+    "type": "object"
+  },
+  "FailedJobSummary": {
+    "additionalProperties": false,
+    "properties": {
+      "count": {
+        "minimum": 0,
+        "title": "Count",
+        "type": "integer"
+      },
+      "retryable": {
+        "items": {
+          "$ref": "#/components/schemas/RetryableJobSummary"
+        },
+        "title": "Retryable",
+        "type": "array"
+      }
+    },
+    "required": [
+      "count",
+      "retryable"
+    ],
+    "title": "FailedJobSummary",
     "type": "object"
   },
   "IntegrationStatusResponse": {
@@ -953,6 +1039,45 @@ export const runtimeContractSchemas = {
       "as_of"
     ],
     "title": "InternalPaperPortfolioListItemResponse",
+    "type": "object"
+  },
+  "JobRetryResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "job_id": {
+        "format": "uuid",
+        "title": "Job Id",
+        "type": "string"
+      },
+      "manual_retry_count": {
+        "maximum": 2,
+        "minimum": 1,
+        "title": "Manual Retry Count",
+        "type": "integer"
+      },
+      "replayed": {
+        "title": "Replayed",
+        "type": "boolean"
+      },
+      "status": {
+        "const": "queued",
+        "title": "Status",
+        "type": "string"
+      },
+      "version": {
+        "minimum": 1,
+        "title": "Version",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "job_id",
+      "status",
+      "version",
+      "manual_retry_count",
+      "replayed"
+    ],
+    "title": "JobRetryResponse",
     "type": "object"
   },
   "MarketBarResponse": {
@@ -3001,6 +3126,81 @@ export const runtimeContractSchemas = {
     "title": "ProposalComparisonResponse",
     "type": "object"
   },
+  "ReadinessComponents": {
+    "additionalProperties": false,
+    "properties": {
+      "database": {
+        "enum": [
+          "ready",
+          "unavailable",
+          "incompatible",
+          "stale"
+        ],
+        "title": "Database",
+        "type": "string"
+      },
+      "migration": {
+        "enum": [
+          "ready",
+          "unavailable",
+          "incompatible",
+          "stale"
+        ],
+        "title": "Migration",
+        "type": "string"
+      },
+      "object_store": {
+        "enum": [
+          "ready",
+          "unavailable",
+          "incompatible",
+          "stale"
+        ],
+        "title": "Object Store",
+        "type": "string"
+      },
+      "worker": {
+        "enum": [
+          "ready",
+          "unavailable",
+          "incompatible",
+          "stale"
+        ],
+        "title": "Worker",
+        "type": "string"
+      }
+    },
+    "required": [
+      "database",
+      "migration",
+      "object_store",
+      "worker"
+    ],
+    "title": "ReadinessComponents",
+    "type": "object"
+  },
+  "ReadinessResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "components": {
+        "$ref": "#/components/schemas/ReadinessComponents"
+      },
+      "status": {
+        "enum": [
+          "ready",
+          "unready"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "status",
+      "components"
+    ],
+    "title": "ReadinessResponse",
+    "type": "object"
+  },
   "ResearchAdmissionResponse": {
     "additionalProperties": false,
     "properties": {
@@ -3518,6 +3718,217 @@ export const runtimeContractSchemas = {
       "budget_reason"
     ],
     "title": "ResearchRunResponse",
+    "type": "object"
+  },
+  "RetryableJobSummary": {
+    "additionalProperties": false,
+    "properties": {
+      "finished_at": {
+        "format": "date-time",
+        "title": "Finished At",
+        "type": "string"
+      },
+      "job_id": {
+        "format": "uuid",
+        "title": "Job Id",
+        "type": "string"
+      },
+      "job_type": {
+        "maxLength": 50,
+        "minLength": 1,
+        "title": "Job Type",
+        "type": "string"
+      },
+      "last_error_code": {
+        "anyOf": [
+          {
+            "maxLength": 100,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Last Error Code"
+      },
+      "manual_retry_count": {
+        "maximum": 2,
+        "minimum": 0,
+        "title": "Manual Retry Count",
+        "type": "integer"
+      },
+      "status": {
+        "enum": [
+          "failed",
+          "dead_letter"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "version": {
+        "minimum": 1,
+        "title": "Version",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "job_id",
+      "job_type",
+      "status",
+      "version",
+      "manual_retry_count",
+      "finished_at"
+    ],
+    "title": "RetryableJobSummary",
+    "type": "object"
+  },
+  "RiskAuditEventResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "maxLength": 255,
+        "minLength": 1,
+        "title": "Action",
+        "type": "string"
+      },
+      "actor_kind": {
+        "enum": [
+          "user",
+          "system",
+          "service"
+        ],
+        "title": "Actor Kind",
+        "type": "string"
+      },
+      "event_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Event Hash",
+        "type": "string"
+      },
+      "event_seq": {
+        "minimum": 1,
+        "title": "Event Seq",
+        "type": "integer"
+      },
+      "kind": {
+        "enum": [
+          "quality",
+          "risk",
+          "agent_cost",
+          "job",
+          "reconciliation",
+          "audit"
+        ],
+        "title": "Kind",
+        "type": "string"
+      },
+      "occurred_at": {
+        "format": "date-time",
+        "title": "Occurred At",
+        "type": "string"
+      },
+      "outcome": {
+        "additionalProperties": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer"
+            }
+          ]
+        },
+        "title": "Outcome",
+        "type": "object"
+      },
+      "previous_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Previous Hash",
+        "type": "string"
+      },
+      "schema_version": {
+        "maxLength": 32,
+        "minLength": 1,
+        "title": "Schema Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "event_seq",
+      "occurred_at",
+      "kind",
+      "actor_kind",
+      "action",
+      "schema_version",
+      "outcome",
+      "previous_hash",
+      "event_hash"
+    ],
+    "title": "RiskAuditEventResponse",
+    "type": "object"
+  },
+  "RiskAuditPageResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "items": {
+        "items": {
+          "$ref": "#/components/schemas/RiskAuditEventResponse"
+        },
+        "title": "Items",
+        "type": "array"
+      },
+      "next_cursor": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Next Cursor"
+      },
+      "summary": {
+        "$ref": "#/components/schemas/RiskAuditSummary"
+      }
+    },
+    "required": [
+      "summary",
+      "items",
+      "next_cursor"
+    ],
+    "title": "RiskAuditPageResponse",
+    "type": "object"
+  },
+  "RiskAuditSummary": {
+    "additionalProperties": false,
+    "properties": {
+      "data_quality": {
+        "enum": [
+          "PASS",
+          "PARTIAL",
+          "FAIL",
+          "UNKNOWN"
+        ],
+        "title": "Data Quality",
+        "type": "string"
+      },
+      "drawdown_lock": {
+        "$ref": "#/components/schemas/DrawdownLockSummary"
+      },
+      "failed_jobs": {
+        "$ref": "#/components/schemas/FailedJobSummary"
+      }
+    },
+    "required": [
+      "data_quality",
+      "drawdown_lock",
+      "failed_jobs"
+    ],
+    "title": "RiskAuditSummary",
     "type": "object"
   },
   "RoleVote": {
@@ -4780,3 +5191,11 @@ export const paperPortfolioRuntimeSchema = runtimeContractSchemas.PaperPortfolio
 export const paperOrderPageRuntimeSchema = runtimeContractSchemas.PaperOrderPageResponse;
 
 export const paperCancelRuntimeSchema = runtimeContractSchemas.PaperCancelResponse;
+
+export const readinessRuntimeSchema = runtimeContractSchemas.ReadinessResponse;
+
+export const riskAuditPageRuntimeSchema = runtimeContractSchemas.RiskAuditPageResponse;
+
+export const jobRetryRuntimeSchema = runtimeContractSchemas.JobRetryResponse;
+
+export const drawdownAcknowledgeRuntimeSchema = runtimeContractSchemas.DrawdownAcknowledgeResponse;

@@ -21,6 +21,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/health/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Readiness
+         * @description Return only closed component states; provider health is deliberately excluded.
+         */
+        get: operations["getEngineReadiness"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/briefs/{session_date}": {
         parameters: {
             query?: never;
@@ -169,6 +189,23 @@ export interface paths {
          * @description Refresh only the Fosun fixture through replay and version controls.
          */
         post: operations["testIntegrationConnectivity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/jobs/{job_id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry Job */
+        post: operations["retryManualSafeJob"];
         delete?: never;
         options?: never;
         head?: never;
@@ -429,6 +466,57 @@ export interface paths {
         get: operations["getResearchRun"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/risk-audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Risk Audit */
+        get: operations["listRiskAuditEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/risk-audit/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Export Risk Audit */
+        get: operations["exportRiskAuditEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/risk/drawdown-lock/acknowledge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Acknowledge Drawdown */
+        post: operations["acknowledgeDrawdownLock"];
         delete?: never;
         options?: never;
         head?: never;
@@ -765,6 +853,45 @@ export interface components {
             /** Unknown Reason */
             unknown_reason: string | null;
         };
+        /** DrawdownAcknowledgeEnvelope */
+        DrawdownAcknowledgeEnvelope: {
+            data: components["schemas"]["DrawdownAcknowledgeResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** DrawdownAcknowledgeRequest */
+        DrawdownAcknowledgeRequest: {
+            /** Expected Event Seq */
+            expected_event_seq: number;
+        };
+        /** DrawdownAcknowledgeResponse */
+        DrawdownAcknowledgeResponse: {
+            /** Event Seq */
+            event_seq: number;
+            /** Replayed */
+            replayed: boolean;
+            /**
+             * State
+             * @constant
+             */
+            state: "unlocked";
+        };
+        /** DrawdownLockSummary */
+        DrawdownLockSummary: {
+            /** Acknowledge Allowed */
+            acknowledge_allowed: boolean;
+            /** Event Seq */
+            event_seq?: number | null;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "unlocked" | "locked" | "recovery_eligible" | "unknown";
+        };
+        /**
+         * EmptyActionRequest
+         * @description Reject accidental mutable payloads on Job retry.
+         */
+        EmptyActionRequest: Record<string, never>;
         /**
          * ErrorCode
          * @description Client-visible error codes defined by the API contract.
@@ -800,6 +927,13 @@ export interface components {
             object_id: string;
             /** Source */
             source: string;
+        };
+        /** FailedJobSummary */
+        FailedJobSummary: {
+            /** Count */
+            count: number;
+            /** Retryable */
+            retryable: components["schemas"]["RetryableJobSummary"][];
         };
         /**
          * IntegrationConnectivityTestRequest
@@ -927,6 +1061,30 @@ export interface components {
              * @constant
              */
             source: "internal_ledger";
+        };
+        /** JobRetryEnvelope */
+        JobRetryEnvelope: {
+            data: components["schemas"]["JobRetryResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** JobRetryResponse */
+        JobRetryResponse: {
+            /**
+             * Job Id
+             * Format: uuid
+             */
+            job_id: string;
+            /** Manual Retry Count */
+            manual_retry_count: number;
+            /** Replayed */
+            replayed: boolean;
+            /**
+             * Status
+             * @constant
+             */
+            status: "queued";
+            /** Version */
+            version: number;
         };
         /**
          * MarketBarResponse
@@ -1800,6 +1958,43 @@ export interface components {
              */
             tax_impact: "unknown";
         };
+        /** ReadinessComponents */
+        ReadinessComponents: {
+            /**
+             * Database
+             * @enum {string}
+             */
+            database: "ready" | "unavailable" | "incompatible" | "stale";
+            /**
+             * Migration
+             * @enum {string}
+             */
+            migration: "ready" | "unavailable" | "incompatible" | "stale";
+            /**
+             * Object Store
+             * @enum {string}
+             */
+            object_store: "ready" | "unavailable" | "incompatible" | "stale";
+            /**
+             * Worker
+             * @enum {string}
+             */
+            worker: "ready" | "unavailable" | "incompatible" | "stale";
+        };
+        /** ReadinessEnvelope */
+        ReadinessEnvelope: {
+            data: components["schemas"]["ReadinessResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** ReadinessResponse */
+        ReadinessResponse: {
+            components: components["schemas"]["ReadinessComponents"];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ready" | "unready";
+        };
         /** ResearchAdmissionEnvelope */
         ResearchAdmissionEnvelope: {
             data: components["schemas"]["ResearchAdmissionResponse"];
@@ -2006,6 +2201,87 @@ export interface components {
             /** Settled Cost Usd */
             settled_cost_usd: string | null;
             status: components["schemas"]["AgentRunStatus"];
+        };
+        /** RetryableJobSummary */
+        RetryableJobSummary: {
+            /**
+             * Finished At
+             * Format: date-time
+             */
+            finished_at: string;
+            /**
+             * Job Id
+             * Format: uuid
+             */
+            job_id: string;
+            /** Job Type */
+            job_type: string;
+            /** Last Error Code */
+            last_error_code?: string | null;
+            /** Manual Retry Count */
+            manual_retry_count: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "failed" | "dead_letter";
+            /** Version */
+            version: number;
+        };
+        /** RiskAuditEventResponse */
+        RiskAuditEventResponse: {
+            /** Action */
+            action: string;
+            /**
+             * Actor Kind
+             * @enum {string}
+             */
+            actor_kind: "user" | "system" | "service";
+            /** Event Hash */
+            event_hash: string;
+            /** Event Seq */
+            event_seq: number;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "quality" | "risk" | "agent_cost" | "job" | "reconciliation" | "audit";
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Outcome */
+            outcome: {
+                [key: string]: string | boolean | number;
+            };
+            /** Previous Hash */
+            previous_hash: string;
+            /** Schema Version */
+            schema_version: string;
+        };
+        /** RiskAuditPageEnvelope */
+        RiskAuditPageEnvelope: {
+            data: components["schemas"]["RiskAuditPageResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** RiskAuditPageResponse */
+        RiskAuditPageResponse: {
+            /** Items */
+            items: components["schemas"]["RiskAuditEventResponse"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+            summary: components["schemas"]["RiskAuditSummary"];
+        };
+        /** RiskAuditSummary */
+        RiskAuditSummary: {
+            /**
+             * Data Quality
+             * @enum {string}
+             */
+            data_quality: "PASS" | "PARTIAL" | "FAIL" | "UNKNOWN";
+            drawdown_lock: components["schemas"]["DrawdownLockSummary"];
+            failed_jobs: components["schemas"]["FailedJobSummary"];
         };
         /** RoleVote */
         RoleVote: {
@@ -2591,6 +2867,44 @@ export interface operations {
             };
         };
     };
+    getEngineReadiness: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadinessEnvelope"];
+                };
+            };
+            /** @description Service authentication failed. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description A required component is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadinessEnvelope"];
+                };
+            };
+        };
+    };
     getDailyBrief: {
         parameters: {
             query?: never;
@@ -2998,6 +3312,89 @@ export interface operations {
             };
             /** @description Stable NEXUS error envelope. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    retryManualSafeJob: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
+            };
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["EmptyActionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobRetryEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3885,6 +4282,245 @@ export interface operations {
             };
             /** @description Unprocessable Entity */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    listRiskAuditEvents: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                from?: string | null;
+                kind?: ("quality" | "risk" | "agent_cost" | "job" | "reconciliation" | "audit") | null;
+                limit?: number;
+                to?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RiskAuditPageEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    exportRiskAuditEvents: {
+        parameters: {
+            query: {
+                from: string;
+                kind?: ("quality" | "risk" | "agent_cost" | "job" | "reconciliation" | "audit") | null;
+                to: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deterministic redacted gzip NDJSON export. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-ndjson": string;
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    acknowledgeDrawdownLock: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DrawdownAcknowledgeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DrawdownAcknowledgeEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

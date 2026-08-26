@@ -2,11 +2,15 @@ import "server-only";
 
 import { NexusApiAuthError, requireNexusApiActor, type NexusActor } from "../auth/nexus-user";
 import { NexusBffError, safeBffErrorResponse } from "./errors";
-import { sanitizeEngineResponse } from "./client";
+import { sanitizeAuditExportResponse, sanitizeEngineResponse } from "./client";
 
 const BFF_ROUTE = Symbol("nexus-bff-route");
 const MAX_REQUEST_BYTES = 64 * 1024;
-export type NexusBffOptions = { requireIdempotencyKey?: boolean; requireVersion?: boolean };
+export type NexusBffOptions = {
+  requireIdempotencyKey?: boolean;
+  requireVersion?: boolean;
+  responseKind?: "json" | "audit-export";
+};
 type NexusBffHandler = (request: Request, actor: NexusActor) => Promise<Response>;
 type MarkedRoute = ((request: Request) => Promise<Response>) & { [BFF_ROUTE]?: true };
 
@@ -15,12 +19,10 @@ export function withNexusBff(handler: NexusBffHandler, options: NexusBffOptions 
     try {
       const actor = await requireNexusApiActor(request);
       const safeRequest = await boundedRequest(request, options);
-      return await sanitizeEngineResponse(
-        await handler(safeRequest, actor),
-        safeRequest.url,
-        undefined,
-        safeRequest.method,
-      );
+      const response = await handler(safeRequest, actor);
+      return options.responseKind === "audit-export"
+        ? await sanitizeAuditExportResponse(response, safeRequest.url, undefined, safeRequest.method)
+        : await sanitizeEngineResponse(response, safeRequest.url, undefined, safeRequest.method);
     } catch (error) {
       if (error instanceof NexusApiAuthError) return safeBffErrorResponse(new NexusBffError(error.status, error.status === 401 ? "UNAUTHENTICATED" : "FORBIDDEN", error.message));
       return safeBffErrorResponse(error);

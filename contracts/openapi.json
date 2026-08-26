@@ -691,6 +691,108 @@
         "title": "DiagnosticItemResponse",
         "type": "object"
       },
+      "DrawdownAcknowledgeEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/DrawdownAcknowledgeResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "DrawdownAcknowledgeEnvelope",
+        "type": "object"
+      },
+      "DrawdownAcknowledgeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_event_seq": {
+            "minimum": 1,
+            "title": "Expected Event Seq",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_event_seq"
+        ],
+        "title": "DrawdownAcknowledgeRequest",
+        "type": "object"
+      },
+      "DrawdownAcknowledgeResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "event_seq": {
+            "minimum": 2,
+            "title": "Event Seq",
+            "type": "integer"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "state": {
+            "const": "unlocked",
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "event_seq",
+          "replayed"
+        ],
+        "title": "DrawdownAcknowledgeResponse",
+        "type": "object"
+      },
+      "DrawdownLockSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledge_allowed": {
+            "title": "Acknowledge Allowed",
+            "type": "boolean"
+          },
+          "event_seq": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Seq"
+          },
+          "state": {
+            "enum": [
+              "unlocked",
+              "locked",
+              "recovery_eligible",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "acknowledge_allowed"
+        ],
+        "title": "DrawdownLockSummary",
+        "type": "object"
+      },
+      "EmptyActionRequest": {
+        "additionalProperties": false,
+        "description": "Reject accidental mutable payloads on Job retry.",
+        "properties": {},
+        "title": "EmptyActionRequest",
+        "type": "object"
+      },
       "ErrorCode": {
         "description": "Client-visible error codes defined by the API contract.",
         "enum": [
@@ -796,6 +898,29 @@
           "content_hash"
         ],
         "title": "EvidenceRef",
+        "type": "object"
+      },
+      "FailedJobSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "minimum": 0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "retryable": {
+            "items": {
+              "$ref": "#/components/schemas/RetryableJobSummary"
+            },
+            "title": "Retryable",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "retryable"
+        ],
+        "title": "FailedJobSummary",
         "type": "object"
       },
       "IntegrationConnectivityTestRequest": {
@@ -1114,6 +1239,62 @@
           "as_of"
         ],
         "title": "InternalPaperPortfolioListItemResponse",
+        "type": "object"
+      },
+      "JobRetryEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/JobRetryResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "JobRetryEnvelope",
+        "type": "object"
+      },
+      "JobRetryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "format": "uuid",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "manual_retry_count": {
+            "maximum": 2,
+            "minimum": 1,
+            "title": "Manual Retry Count",
+            "type": "integer"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "status": {
+            "const": "queued",
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "status",
+          "version",
+          "manual_retry_count",
+          "replayed"
+        ],
+        "title": "JobRetryResponse",
         "type": "object"
       },
       "MarketBarResponse": {
@@ -3459,6 +3640,98 @@
         "title": "ProposalComparisonResponse",
         "type": "object"
       },
+      "ReadinessComponents": {
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "enum": [
+              "ready",
+              "unavailable",
+              "incompatible",
+              "stale"
+            ],
+            "title": "Database",
+            "type": "string"
+          },
+          "migration": {
+            "enum": [
+              "ready",
+              "unavailable",
+              "incompatible",
+              "stale"
+            ],
+            "title": "Migration",
+            "type": "string"
+          },
+          "object_store": {
+            "enum": [
+              "ready",
+              "unavailable",
+              "incompatible",
+              "stale"
+            ],
+            "title": "Object Store",
+            "type": "string"
+          },
+          "worker": {
+            "enum": [
+              "ready",
+              "unavailable",
+              "incompatible",
+              "stale"
+            ],
+            "title": "Worker",
+            "type": "string"
+          }
+        },
+        "required": [
+          "database",
+          "migration",
+          "object_store",
+          "worker"
+        ],
+        "title": "ReadinessComponents",
+        "type": "object"
+      },
+      "ReadinessEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ReadinessResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "ReadinessEnvelope",
+        "type": "object"
+      },
+      "ReadinessResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "components": {
+            "$ref": "#/components/schemas/ReadinessComponents"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "unready"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "components"
+        ],
+        "title": "ReadinessResponse",
+        "type": "object"
+      },
       "ResearchAdmissionEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -4037,6 +4310,234 @@
           "budget_reason"
         ],
         "title": "ResearchRunResponse",
+        "type": "object"
+      },
+      "RetryableJobSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "finished_at": {
+            "format": "date-time",
+            "title": "Finished At",
+            "type": "string"
+          },
+          "job_id": {
+            "format": "uuid",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "job_type": {
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Job Type",
+            "type": "string"
+          },
+          "last_error_code": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error Code"
+          },
+          "manual_retry_count": {
+            "maximum": 2,
+            "minimum": 0,
+            "title": "Manual Retry Count",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "failed",
+              "dead_letter"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "job_type",
+          "status",
+          "version",
+          "manual_retry_count",
+          "finished_at"
+        ],
+        "title": "RetryableJobSummary",
+        "type": "object"
+      },
+      "RiskAuditEventResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Action",
+            "type": "string"
+          },
+          "actor_kind": {
+            "enum": [
+              "user",
+              "system",
+              "service"
+            ],
+            "title": "Actor Kind",
+            "type": "string"
+          },
+          "event_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Event Hash",
+            "type": "string"
+          },
+          "event_seq": {
+            "minimum": 1,
+            "title": "Event Seq",
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "quality",
+              "risk",
+              "agent_cost",
+              "job",
+              "reconciliation",
+              "audit"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "outcome": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Outcome",
+            "type": "object"
+          },
+          "previous_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Previous Hash",
+            "type": "string"
+          },
+          "schema_version": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_seq",
+          "occurred_at",
+          "kind",
+          "actor_kind",
+          "action",
+          "schema_version",
+          "outcome",
+          "previous_hash",
+          "event_hash"
+        ],
+        "title": "RiskAuditEventResponse",
+        "type": "object"
+      },
+      "RiskAuditPageEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RiskAuditPageResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/SuccessMetaResponse"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "RiskAuditPageEnvelope",
+        "type": "object"
+      },
+      "RiskAuditPageResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RiskAuditEventResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/RiskAuditSummary"
+          }
+        },
+        "required": [
+          "summary",
+          "items",
+          "next_cursor"
+        ],
+        "title": "RiskAuditPageResponse",
+        "type": "object"
+      },
+      "RiskAuditSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "data_quality": {
+            "enum": [
+              "PASS",
+              "PARTIAL",
+              "FAIL",
+              "UNKNOWN"
+            ],
+            "title": "Data Quality",
+            "type": "string"
+          },
+          "drawdown_lock": {
+            "$ref": "#/components/schemas/DrawdownLockSummary"
+          },
+          "failed_jobs": {
+            "$ref": "#/components/schemas/FailedJobSummary"
+          }
+        },
+        "required": [
+          "data_quality",
+          "drawdown_lock",
+          "failed_jobs"
+        ],
+        "title": "RiskAuditSummary",
         "type": "object"
       },
       "RoleVote": {
@@ -5462,6 +5963,45 @@
         "summary": "Liveness"
       }
     },
+    "/health/ready": {
+      "get": {
+        "description": "Return only closed component states; provider health is deliberately excluded.",
+        "operationId": "getEngineReadiness",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Service authentication failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessEnvelope"
+                }
+              }
+            },
+            "description": "A required component is unavailable."
+          }
+        },
+        "summary": "Readiness"
+      }
+    },
     "/internal/v1/briefs/{session_date}": {
       "get": {
         "description": "Return bounded typed summaries; never include role/tool payloads or invoke a model.",
@@ -6092,6 +6632,127 @@
           }
         },
         "summary": "Test Integration Connectivity"
+      }
+    },
+    "/internal/v1/jobs/{job_id}/retry": {
+      "post": {
+        "operationId": "retryManualSafeJob",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 3,
+              "title": "If-Match",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyActionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobRetryEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Retry Job"
       }
     },
     "/internal/v1/market": {
@@ -7360,6 +8021,411 @@
           }
         },
         "summary": "Get Research Run"
+      }
+    },
+    "/internal/v1/risk-audit": {
+      "get": {
+        "operationId": "listRiskAuditEvents",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "quality",
+                    "risk",
+                    "agent_cost",
+                    "job",
+                    "reconciliation",
+                    "audit"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RiskAuditPageEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "List Risk Audit"
+      }
+    },
+    "/internal/v1/risk-audit/export": {
+      "get": {
+        "operationId": "exportRiskAuditEvents",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "From",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "To",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "quality",
+                    "risk",
+                    "agent_cost",
+                    "job",
+                    "reconciliation",
+                    "audit"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Deterministic redacted gzip NDJSON export."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Export Risk Audit"
+      }
+    },
+    "/internal/v1/risk/drawdown-lock/acknowledge": {
+      "post": {
+        "operationId": "acknowledgeDrawdownLock",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 3,
+              "title": "If-Match",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DrawdownAcknowledgeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DrawdownAcknowledgeEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Acknowledge Drawdown"
       }
     },
     "/internal/v1/strategies": {

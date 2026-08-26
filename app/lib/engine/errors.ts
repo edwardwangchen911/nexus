@@ -16,14 +16,18 @@ import {
   portfolioPageRuntimeSchema,
   portfolioDiagnosticRuntimeSchema,
   portfolioSnapshotRuntimeSchema,
+  readinessRuntimeSchema,
   researchAdmissionRuntimeSchema,
   researchRunRuntimeSchema,
+  riskAuditPageRuntimeSchema,
   runtimeContractSchemas,
   strategySummaryRuntimeSchema,
   shadowGroupRuntimeSchema,
   shadowStartRuntimeSchema,
   watchlistMembershipRuntimeSchema,
   whatIfRuntimeSchema,
+  jobRetryRuntimeSchema,
+  drawdownAcknowledgeRuntimeSchema,
 } from "../generated/runtime-contract";
 import { integrationProviders } from "../integrations/providers";
 import { sameUuid } from "../optimization/uuid";
@@ -70,7 +74,9 @@ export function safeBffErrorResponse(error: unknown): Response {
 }
 
 export function rebuildAllowedEngineResponse(status: number, value: unknown, upstreamHeaders = new Headers(), requestUrl?: string, schemaPath?: string, requestMethod?: string): Response | null {
-  if ([200, 201, 202].includes(status) && isObject(value, ["data", "meta"])) {
+  const pathname = enginePathname(requestUrl, schemaPath);
+  const readinessStatus = status === 503 && ["/health/ready", "/internal/v1/readiness"].includes(pathname);
+  if (([200, 201, 202].includes(status) || readinessStatus) && isObject(value, ["data", "meta"])) {
     const { data, meta } = value;
     const safeData = allowedSuccessData(data, requestUrl, schemaPath, requestMethod);
     if (safeData !== INVALID_DATA && isObject(meta, ["request_id", "schema_version", "as_of"])
@@ -99,6 +105,38 @@ const INVALID_DATA = Symbol("invalid engine data");
 
 function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: string, requestMethod?: string): unknown | typeof INVALID_DATA {
   const pathname = enginePathname(requestUrl, schemaPath);
+  if (["/health/ready", "/internal/v1/readiness"].includes(pathname)) {
+    return requestMethod?.toUpperCase() === "GET"
+      && matchesRuntimeSchema(data, readinessRuntimeSchema) && isPlain(data)
+      ? data
+      : INVALID_DATA;
+  }
+  if (pathname === "/internal/v1/risk-audit") {
+    if (requestMethod?.toUpperCase() !== "GET"
+      || !matchesRuntimeSchema(data, riskAuditPageRuntimeSchema) || !isPlain(data)
+      || !Array.isArray(data.items) || data.items.length > 100
+      || !isPlain(data.summary) || !isPlain(data.summary.failed_jobs)
+      || !Array.isArray(data.summary.failed_jobs.retryable)
+      || data.summary.failed_jobs.retryable.length > 20
+      || data.next_cursor !== null && (typeof data.next_cursor !== "string" || data.next_cursor.length > 2048)) {
+      return INVALID_DATA;
+    }
+    return data;
+  }
+  const jobRetry = /^\/internal\/v1\/jobs\/([^/]+)\/retry$/.exec(pathname);
+  if (jobRetry && validateUuid(jobRetry[1])) {
+    return requestMethod?.toUpperCase() === "POST"
+      && matchesRuntimeSchema(data, jobRetryRuntimeSchema) && isPlain(data)
+      && sameUuid(data.job_id, jobRetry[1])
+      ? data
+      : INVALID_DATA;
+  }
+  if (pathname === "/internal/v1/risk/drawdown-lock/acknowledge") {
+    return requestMethod?.toUpperCase() === "POST"
+      && matchesRuntimeSchema(data, drawdownAcknowledgeRuntimeSchema) && isPlain(data)
+      ? data
+      : INVALID_DATA;
+  }
   if (pathname === "/internal/v1/system-status") {
     return isObject(data, ["status"]) && data.status === "ok" ? { status: "ok" } : INVALID_DATA;
   }
@@ -521,14 +559,21 @@ function matchesRuntimeSchema(value: unknown, schema: unknown): boolean {
     }
     return isPlain(schema.items) && value.every((item) => matchesRuntimeSchema(item, schema.items));
   }
-  if (schema.type !== "object" || !isPlain(value) || !isPlain(schema.properties)) return false;
-  const properties = schema.properties;
+  if (schema.type !== "object" || !isPlain(value)) return false;
+  if (!isPlain(schema.properties)
+    && !isPlain(schema.additionalProperties)
+    && schema.additionalProperties !== false) return false;
+  const properties = isPlain(schema.properties) ? schema.properties : {};
   const required = Array.isArray(schema.required) && schema.required.every((key) => typeof key === "string")
     ? schema.required as string[]
     : [];
   if (!required.every((key) => key in value)) return false;
   if (schema.additionalProperties === false && Object.keys(value).some((key) => !(key in properties))) return false;
-  return Object.entries(value).every(([key, item]) => key in properties && matchesRuntimeSchema(item, properties[key]));
+  return Object.entries(value).every(([key, item]) => {
+    if (key in properties) return matchesRuntimeSchema(item, properties[key]);
+    return isPlain(schema.additionalProperties)
+      && matchesRuntimeSchema(item, schema.additionalProperties);
+  });
 }
 
 function matchesRuntimeString(value: unknown, schema: Record<string, unknown>): boolean {
