@@ -133,7 +133,8 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
   if (pathname === "/internal/v1/paper/portfolio") {
     if (!matchesRuntimeSchema(data, paperPortfolioRuntimeSchema) || !isPlain(data)
       || !Array.isArray(data.positions) || data.positions.length > 500
-      || !Array.isArray(data.attributions) || data.attributions.length > 500) return INVALID_DATA;
+      || !Array.isArray(data.attributions) || data.attributions.length > 500
+      || !paperPortfolioValid(data)) return INVALID_DATA;
     return data;
   }
   if (pathname === "/internal/v1/paper/orders") {
@@ -300,6 +301,32 @@ function paperOrderValid(value: unknown): boolean {
     );
 }
 
+function paperPortfolioValid(value: Record<string, unknown>): boolean {
+  const positions = value.positions as unknown[];
+  if (value.performance === null) {
+    return value.data_state === "EMPTY" && positions.length === 0
+      && (value.attributions as unknown[]).length === 0;
+  }
+  if (value.data_state === "EMPTY" || !isPlain(value.performance)) return false;
+  const performance = value.performance;
+  if (!decimalNonnegative(performance.available_cash)
+    || !decimalNonnegative(performance.reserved_cash)
+    || !decimalSumEquals(performance.available_cash, performance.reserved_cash, performance.cash)
+    || !decimalSumEquals(performance.cash, performance.market_value, performance.nav)
+    || decimalCompare(performance.peak_nav, performance.nav) < 0) return false;
+  if (!positions.every((position) => isPlain(position)
+      && decimalNonnegative(position.quantity)
+      && decimalNonnegative(position.reserved_quantity)
+      && decimalNonnegative(position.available_quantity)
+      && decimalSumEquals(position.available_quantity, position.reserved_quantity, position.quantity)
+      && decimalProductEquals(position.quantity, position.reference_close, position.market_value)
+      && decimalSumEquals(position.cost_basis, position.unrealized_pnl, position.market_value))) return false;
+  return decimalListSumEquals(
+    positions.map((position) => (position as Record<string, unknown>).market_value),
+    performance.market_value,
+  );
+}
+
 type ExactDecimal = { coefficient: bigint; scale: number };
 
 function parseExactDecimal(value: unknown): ExactDecimal | null {
@@ -341,6 +368,28 @@ function decimalListSumEquals(values: unknown[], expected: unknown): boolean {
     BigInt(0),
   );
   return sum === target.coefficient * BigInt(10) ** BigInt(scale - target.scale);
+}
+
+function decimalProductEquals(left: unknown, right: unknown, expected: unknown): boolean {
+  const multiplicand = parseExactDecimal(left);
+  const multiplier = parseExactDecimal(right);
+  const target = parseExactDecimal(expected);
+  if (multiplicand === null || multiplier === null || target === null) return false;
+  const product = multiplicand.coefficient * multiplier.coefficient;
+  const productScale = multiplicand.scale + multiplier.scale;
+  const scale = Math.max(productScale, target.scale);
+  return product * BigInt(10) ** BigInt(scale - productScale)
+    === target.coefficient * BigInt(10) ** BigInt(scale - target.scale);
+}
+
+function decimalCompare(left: unknown, right: unknown): number {
+  const first = parseExactDecimal(left);
+  const second = parseExactDecimal(right);
+  if (first === null || second === null) return Number.NaN;
+  const scale = Math.max(first.scale, second.scale);
+  const leftValue = first.coefficient * BigInt(10) ** BigInt(scale - first.scale);
+  const rightValue = second.coefficient * BigInt(10) ** BigInt(scale - second.scale);
+  return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
 }
 
 function shadowGroupValid(data: unknown, groupId: string): data is Record<string, unknown> {

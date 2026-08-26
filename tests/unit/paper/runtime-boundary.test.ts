@@ -25,6 +25,10 @@ describe("internal-paper Engine response boundary", () => {
     const leaked = structuredClone(data);
     Object.assign(leaked.positions[0], { account_id: "must-not-escape" });
     expect((await sanitizeEngineResponse(json({ data: leaked, meta }), undefined, "/internal/v1/paper/portfolio")).status).toBe(500);
+
+    const inconsistentCash = structuredClone(data);
+    inconsistentCash.performance.reserved_cash = "501.000000000000";
+    expect((await sanitizeEngineResponse(json({ data: inconsistentCash, meta }), undefined, "/internal/v1/paper/portfolio")).status).toBe(500);
   });
 
   it("uses the bounded paper response budget for a legal projection above the default cap", async () => {
@@ -142,6 +146,8 @@ function portfolio() {
     performance: {
       as_of: "2026-08-26T20:00:00Z",
       cash: "90000.000000000000",
+      available_cash: "89500.000000000000",
+      reserved_cash: "500.000000000000",
       market_value: "10500.000000000000",
       nav: "100500.000000000000",
       peak_nav: "101000.000000000000",

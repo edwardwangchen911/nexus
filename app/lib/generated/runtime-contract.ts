@@ -2125,6 +2125,12 @@ export const runtimeContractSchemas = {
         "title": "As Of",
         "type": "string"
       },
+      "available_cash": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Available Cash",
+        "type": "string"
+      },
       "cash": {
         "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
@@ -2167,6 +2173,12 @@ export const runtimeContractSchemas = {
         "title": "Realized Pnl",
         "type": "string"
       },
+      "reserved_cash": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Reserved Cash",
+        "type": "string"
+      },
       "unrealized_pnl": {
         "maxLength": 40,
         "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
@@ -2177,6 +2189,8 @@ export const runtimeContractSchemas = {
     "required": [
       "as_of",
       "cash",
+      "available_cash",
+      "reserved_cash",
       "market_value",
       "nav",
       "peak_nav",

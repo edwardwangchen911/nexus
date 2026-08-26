@@ -1448,6 +1448,8 @@ export interface components {
              * Format: date-time
              */
             as_of: string;
+            /** Available Cash */
+            available_cash: string;
             /** Cash */
             cash: string;
             /** Drawdown Ratio */
@@ -1462,6 +1464,8 @@ export interface components {
             peak_nav: string;
             /** Realized Pnl */
             realized_pnl: string;
+            /** Reserved Cash */
+            reserved_cash: string;
             /** Unrealized Pnl */
             unrealized_pnl: string;
         };

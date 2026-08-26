@@ -33,6 +33,10 @@ def test_paper_read_contracts_are_bounded_and_do_not_expose_account_or_trade_cre
 
     assert portfolio_schema["properties"]["positions"]["maxItems"] == 500
     assert portfolio_schema["properties"]["attributions"]["maxItems"] == 500
+    performance = portfolio_schema["$defs"]["PaperPerformanceResponse"]
+    assert {"cash", "available_cash", "reserved_cash"} <= set(
+        performance["required"]
+    )
     assert page_schema["properties"]["items"]["maxItems"] == 50
     wire = str({"portfolio": portfolio_schema, "orders": page_schema}).lower()
     assert "account_id" not in wire

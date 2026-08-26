@@ -26,6 +26,7 @@ from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
 from nexus.paper.cursor import PaperOrderCursorCodec, PaperOrderCursorState
 from nexus.paper.models import InternalOrderStatus
+from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.data import PriceBarSetAuthority, PriceSeriesManifest
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.paper import (
@@ -104,6 +105,18 @@ class PaperReadService:
                 performance=None,
                 positions=(),
                 attributions=(),
+            )
+
+        projection = await load_paper_projection(
+            self._session,
+            account_id=account.id,
+            as_of=snapshot.as_of,
+        )
+        if projection.portfolio_id != portfolio.id:
+            raise NexusError(
+                ErrorCode.DATA_PARTIAL,
+                "The internal paper projection is unavailable.",
+                status_code=409,
             )
 
         position_rows = (
@@ -208,6 +221,8 @@ class PaperReadService:
             performance=PaperPerformanceResponse(
                 as_of=snapshot.as_of,
                 cash=decimal_to_string(snapshot.cash),
+                available_cash=decimal_to_string(projection.available_cash),
+                reserved_cash=decimal_to_string(projection.reserved_cash),
                 market_value=decimal_to_string(market_value),
                 nav=decimal_to_string(snapshot.nav),
                 peak_nav=decimal_to_string(snapshot.peak_nav),

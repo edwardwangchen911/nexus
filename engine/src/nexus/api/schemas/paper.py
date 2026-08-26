@@ -18,6 +18,8 @@ class _StrictSchema(BaseModel):
 class PaperPerformanceResponse(_StrictSchema):
     as_of: AwareDatetime
     cash: DecimalString
+    available_cash: DecimalString
+    reserved_cash: DecimalString
     market_value: DecimalString
     nav: DecimalString
     peak_nav: DecimalString

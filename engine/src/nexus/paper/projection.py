@@ -285,21 +285,27 @@ def _open_orders(
         status_by_id[order.order_id] = current_order_status(order)
 
     reservation_by_order: dict[UUID, tuple[Reservation, Decimal]] = {}
+    seen_reservation_orders: set[UUID] = set()
     for reservation in reservations:
-        if reservation.order_id in reservation_by_order:
+        if reservation.order_id in seen_reservation_orders:
             raise ValueError("paper order has duplicate reservations")
+        seen_reservation_orders.add(reservation.order_id)
         if reservation.account_id != account_id:
             raise ValueError("reservation belongs to another account")
         matching_order = order_by_id.get(reservation.order_id)
         status = status_by_id.get(reservation.order_id)
-        if matching_order is None or status not in {
+        if matching_order is None:
+            raise ValueError("reservation has no matching open order")
+        outstanding = fold_reservation_events(reservation)
+        if status not in {
             "risk_approved",
             "submitted",
             "partially_filled",
             "reconciling",
         }:
-            raise ValueError("reservation has no matching open order")
-        outstanding = fold_reservation_events(reservation)
+            if outstanding != 0:
+                raise ValueError("closed order reservation must be fully consumed or released")
+            continue
         if outstanding <= 0:
             raise ValueError("open order reservation must remain positive")
         if matching_order.side == "buy" and reservation.reservation_type != "cash":

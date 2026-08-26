@@ -166,6 +166,44 @@ def _reservation() -> Reservation:
     )
 
 
+def _cancelled_buy() -> PaperOrder:
+    return _submitted_buy().model_copy(
+        update={
+            "events": (
+                *_submitted_buy().events,
+                OrderEventInput(
+                    event_id=UUID(int=304),
+                    event_seq=4,
+                    occurred_at=NOW,
+                    from_status="submitted",
+                    to_status="cancelled",
+                    actor_kind="task19",
+                    reason_code="CANCELLED",
+                    payload_hash="2" * 64,
+                ),
+            )
+        }
+    )
+
+
+def _released_reservation() -> Reservation:
+    return _reservation().model_copy(
+        update={
+            "events": (
+                *_reservation().events,
+                ReservationEvent(
+                    event_id=UUID(int=402),
+                    event_seq=2,
+                    event_type="released",
+                    amount=Decimal("1010"),
+                    occurred_at=NOW,
+                    payload_hash="3" * 64,
+                ),
+            )
+        }
+    )
+
+
 def _build(**overrides: object):
     values: dict[str, object] = {
         "account_id": ACCOUNT_ID,
@@ -249,6 +287,21 @@ def test_projection_rejects_hash_mismatch_invalid_event_chain_and_orphan_reserva
 def test_projection_rejects_ledger_reservation_mismatch() -> None:
     with pytest.raises(ValueError, match="reserved cash does not reconcile"):
         _build(orders=(_submitted_buy(),), reservations=(_reservation(),))
+
+
+def test_closed_order_accepts_only_a_fully_released_reservation() -> None:
+    projection = _build(
+        orders=(_cancelled_buy(),),
+        reservations=(_released_reservation(),),
+    )
+
+    assert projection.open_orders == ()
+
+    with pytest.raises(
+        ValueError,
+        match="closed order reservation must be fully consumed or released",
+    ):
+        _build(orders=(_cancelled_buy(),), reservations=(_reservation(),))
 
 
 def test_drawdown_chain_requires_thresholds_and_user_acknowledgement() -> None:

@@ -56,6 +56,10 @@ async def test_paper_portfolio_returns_redacted_authoritative_performance(
     cost = quantity * Decimal("100.25")
     cash = Decimal("10000") - cost
     assert Decimal(data["performance"]["cash"]) == cash
+    available_cash = Decimal(data["performance"]["available_cash"])
+    reserved_cash = Decimal(data["performance"]["reserved_cash"])
+    assert available_cash + reserved_cash == cash
+    assert reserved_cash > 0
     assert len(data["positions"]) == 1
     position = data["positions"][0]
     assert position["instrument_id"] == str(seed.execution.instrument_id)
