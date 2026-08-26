@@ -11,6 +11,7 @@ from nexus.paper.models import (
     LedgerAccount,
     LedgerEntry,
     LedgerTransaction,
+    exact_decimal,
 )
 from nexus.risk.canonical import canonical_paper_ledger_transaction_hash
 
@@ -24,6 +25,27 @@ _EXPECTED_NORMAL_SIDES = {
     "expense.fees.usd": "debit",
 }
 _SIGNED_BALANCE_ACCOUNTS = frozenset({"income.realized_pnl.usd"})
+
+
+def _amount(value: Decimal, *, field: str, positive: bool = False) -> Decimal:
+    result = exact_decimal(value, field=field)
+    if positive and result <= 0:
+        raise ValueError(f"{field} must be positive")
+    if not positive and result < 0:
+        raise ValueError(f"{field} must be nonnegative")
+    return result
+
+
+def _entry_ids(value: tuple[UUID, ...], *, count: int) -> tuple[UUID, ...]:
+    if len(value) != count or len(set(value)) != count:
+        raise ValueError(f"fill transaction requires {count} unique entry ids")
+    return value
+
+
+def _hashed_transaction(draft: LedgerTransaction) -> LedgerTransaction:
+    return draft.model_copy(
+        update={"transaction_hash": canonical_paper_ledger_transaction_hash(draft)}
+    )
 
 
 def _validate_catalog(ledger: Ledger) -> dict[str, LedgerAccount]:
@@ -112,8 +134,7 @@ def post_ledger_transaction(
     updated = ledger.model_copy(update={"transactions": (*ledger.transactions, transaction)})
     balances = balance_ledger(updated)
     if any(
-        balance < 0 and code not in _SIGNED_BALANCE_ACCOUNTS
-        for code, balance in balances.items()
+        balance < 0 and code not in _SIGNED_BALANCE_ACCOUNTS for code, balance in balances.items()
     ):
         raise ValueError("ledger posting would create a negative ledger balance")
     return updated
@@ -156,6 +177,190 @@ def make_buy_reservation_transaction(
         ),
         transaction_hash="0" * 64,
     )
-    return draft.model_copy(
-        update={"transaction_hash": canonical_paper_ledger_transaction_hash(draft)}
+    return _hashed_transaction(draft)
+
+
+def make_buy_fill_transaction(
+    *,
+    transaction_id: UUID,
+    entry_ids: tuple[UUID, UUID, UUID],
+    paper_account_id: UUID,
+    reference_hash: str,
+    principal: Decimal,
+    fee: Decimal,
+    occurred_at: datetime,
+) -> LedgerTransaction:
+    """Move one buy fill from reserved cash into cost basis and fee expense."""
+    checked_ids = _entry_ids(entry_ids, count=3)
+    checked_principal = _amount(principal, field="principal", positive=True)
+    checked_fee = _amount(fee, field="fee")
+    entries = [
+        LedgerEntry(
+            entry_id=checked_ids[0],
+            entry_seq=1,
+            account_code="asset.position_cost.usd",
+            currency="USD",
+            debit_amount=checked_principal,
+            credit_amount=Decimal(0),
+        )
+    ]
+    if checked_fee > 0:
+        entries.append(
+            LedgerEntry(
+                entry_id=checked_ids[1],
+                entry_seq=len(entries) + 1,
+                account_code="expense.fees.usd",
+                currency="USD",
+                debit_amount=checked_fee,
+                credit_amount=Decimal(0),
+            )
+        )
+    entries.append(
+        LedgerEntry(
+            entry_id=checked_ids[2],
+            entry_seq=len(entries) + 1,
+            account_code="asset.cash.reserved.usd",
+            currency="USD",
+            debit_amount=Decimal(0),
+            credit_amount=checked_principal + checked_fee,
+        )
     )
+    draft = LedgerTransaction(
+        transaction_id=transaction_id,
+        account_id=paper_account_id,
+        transaction_type="fill",
+        reference_type="fill",
+        reference_hash=reference_hash,
+        occurred_at=occurred_at,
+        entries=tuple(entries),
+        transaction_hash="0" * 64,
+    )
+    return _hashed_transaction(draft)
+
+
+def make_cash_release_transaction(
+    *,
+    transaction_id: UUID,
+    debit_entry_id: UUID,
+    credit_entry_id: UUID,
+    paper_account_id: UUID,
+    reference_hash: str,
+    amount: Decimal,
+    occurred_at: datetime,
+) -> LedgerTransaction:
+    """Return unused buy-side cash from the reservation to available cash."""
+    checked_amount = _amount(amount, field="release amount", positive=True)
+    draft = LedgerTransaction(
+        transaction_id=transaction_id,
+        account_id=paper_account_id,
+        transaction_type="release",
+        reference_type="release",
+        reference_hash=reference_hash,
+        occurred_at=occurred_at,
+        entries=(
+            LedgerEntry(
+                entry_id=debit_entry_id,
+                entry_seq=1,
+                account_code="asset.cash.available.usd",
+                currency="USD",
+                debit_amount=checked_amount,
+                credit_amount=Decimal(0),
+            ),
+            LedgerEntry(
+                entry_id=credit_entry_id,
+                entry_seq=2,
+                account_code="asset.cash.reserved.usd",
+                currency="USD",
+                debit_amount=Decimal(0),
+                credit_amount=checked_amount,
+            ),
+        ),
+        transaction_hash="0" * 64,
+    )
+    return _hashed_transaction(draft)
+
+
+def make_sell_fill_transaction(
+    *,
+    transaction_id: UUID,
+    entry_ids: tuple[UUID, UUID, UUID, UUID],
+    paper_account_id: UUID,
+    reference_hash: str,
+    proceeds: Decimal,
+    allocated_cost: Decimal,
+    fee: Decimal,
+    occurred_at: datetime,
+) -> LedgerTransaction:
+    """Post sell proceeds, gross realized P&L, released cost basis, and fees."""
+    checked_ids = _entry_ids(entry_ids, count=4)
+    checked_proceeds = _amount(proceeds, field="proceeds", positive=True)
+    checked_cost = _amount(allocated_cost, field="allocated cost", positive=True)
+    checked_fee = _amount(fee, field="fee")
+    if checked_fee >= checked_proceeds:
+        raise ValueError("fee must not equal or exceed proceeds")
+
+    realized = checked_proceeds - checked_cost
+    entries: list[LedgerEntry] = [
+        LedgerEntry(
+            entry_id=checked_ids[0],
+            entry_seq=1,
+            account_code="asset.cash.available.usd",
+            currency="USD",
+            debit_amount=checked_proceeds - checked_fee,
+            credit_amount=Decimal(0),
+        )
+    ]
+    if checked_fee > 0:
+        entries.append(
+            LedgerEntry(
+                entry_id=checked_ids[len(entries)],
+                entry_seq=len(entries) + 1,
+                account_code="expense.fees.usd",
+                currency="USD",
+                debit_amount=checked_fee,
+                credit_amount=Decimal(0),
+            )
+        )
+    if realized < 0:
+        entries.append(
+            LedgerEntry(
+                entry_id=checked_ids[len(entries)],
+                entry_seq=len(entries) + 1,
+                account_code="income.realized_pnl.usd",
+                currency="USD",
+                debit_amount=-realized,
+                credit_amount=Decimal(0),
+            )
+        )
+    entries.append(
+        LedgerEntry(
+            entry_id=checked_ids[len(entries)],
+            entry_seq=len(entries) + 1,
+            account_code="asset.position_cost.usd",
+            currency="USD",
+            debit_amount=Decimal(0),
+            credit_amount=checked_cost,
+        )
+    )
+    if realized > 0:
+        entries.append(
+            LedgerEntry(
+                entry_id=checked_ids[len(entries)],
+                entry_seq=len(entries) + 1,
+                account_code="income.realized_pnl.usd",
+                currency="USD",
+                debit_amount=Decimal(0),
+                credit_amount=realized,
+            )
+        )
+    draft = LedgerTransaction(
+        transaction_id=transaction_id,
+        account_id=paper_account_id,
+        transaction_type="fill",
+        reference_type="fill",
+        reference_hash=reference_hash,
+        occurred_at=occurred_at,
+        entries=tuple(entries),
+        transaction_hash="0" * 64,
+    )
+    return _hashed_transaction(draft)

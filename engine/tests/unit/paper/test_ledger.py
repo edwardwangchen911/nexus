@@ -5,7 +5,10 @@ from uuid import UUID
 import pytest
 from nexus.paper.ledger import (
     balance_ledger,
+    make_buy_fill_transaction,
     make_buy_reservation_transaction,
+    make_cash_release_transaction,
+    make_sell_fill_transaction,
     post_ledger_transaction,
 )
 from nexus.paper.models import Ledger, LedgerAccount, LedgerEntry, LedgerTransaction
@@ -241,3 +244,134 @@ def test_ledger_catalog_rejects_wrong_normal_side() -> None:
 
     with pytest.raises(ValueError, match="normal side"):
         post_ledger_transaction(invalid, _funding())
+
+
+def test_buy_fill_consumes_reserved_cash_into_position_cost_and_fees() -> None:
+    ledger = post_ledger_transaction(_ledger(), _funding())
+    ledger = post_ledger_transaction(
+        ledger,
+        make_buy_reservation_transaction(
+            transaction_id=UUID(int=200),
+            debit_entry_id=UUID(int=201),
+            credit_entry_id=UUID(int=202),
+            paper_account_id=PAPER_ACCOUNT_ID,
+            reference_hash="1" * 64,
+            amount=Decimal("1100"),
+            occurred_at=NOW,
+        ),
+    )
+    fill = make_buy_fill_transaction(
+        transaction_id=UUID(int=300),
+        entry_ids=(UUID(int=301), UUID(int=302), UUID(int=303)),
+        paper_account_id=PAPER_ACCOUNT_ID,
+        reference_hash="2" * 64,
+        principal=Decimal("1000"),
+        fee=Decimal("2"),
+        occurred_at=NOW,
+    )
+    ledger = post_ledger_transaction(ledger, fill)
+    release = make_cash_release_transaction(
+        transaction_id=UUID(int=400),
+        debit_entry_id=UUID(int=401),
+        credit_entry_id=UUID(int=402),
+        paper_account_id=PAPER_ACCOUNT_ID,
+        reference_hash="3" * 64,
+        amount=Decimal("98"),
+        occurred_at=NOW,
+    )
+    balances = balance_ledger(post_ledger_transaction(ledger, release))
+
+    assert balances["asset.cash.available.usd"] == Decimal("8998")
+    assert balances["asset.cash.reserved.usd"] == Decimal("0")
+    assert balances["asset.position_cost.usd"] == Decimal("1000")
+    assert balances["expense.fees.usd"] == Decimal("2")
+    assert len(fill.entries) == 3
+
+
+@pytest.mark.parametrize(
+    ("proceeds", "allocated_cost", "expected_realized"),
+    (
+        (Decimal("1200"), Decimal("1000"), Decimal("200")),
+        (Decimal("800"), Decimal("1000"), Decimal("-200")),
+        (Decimal("1000"), Decimal("1000"), Decimal("0")),
+    ),
+)
+def test_sell_fill_posts_gain_loss_or_flat_without_unbalancing(
+    proceeds: Decimal,
+    allocated_cost: Decimal,
+    expected_realized: Decimal,
+) -> None:
+    ledger = post_ledger_transaction(_ledger(), _funding(amount=Decimal("10000")))
+    seed_position = LedgerTransaction(
+        transaction_id=UUID(int=500),
+        account_id=PAPER_ACCOUNT_ID,
+        transaction_type="adjustment",
+        reference_type="adjustment",
+        reference_hash="4" * 64,
+        occurred_at=NOW,
+        entries=(
+            LedgerEntry(
+                entry_id=UUID(int=501),
+                entry_seq=1,
+                account_code="asset.position_cost.usd",
+                currency="USD",
+                debit_amount=allocated_cost,
+                credit_amount=Decimal(0),
+            ),
+            LedgerEntry(
+                entry_id=UUID(int=502),
+                entry_seq=2,
+                account_code="asset.cash.available.usd",
+                currency="USD",
+                debit_amount=Decimal(0),
+                credit_amount=allocated_cost,
+            ),
+        ),
+        transaction_hash="0" * 64,
+    )
+    seed_position = seed_position.model_copy(
+        update={"transaction_hash": canonical_paper_ledger_transaction_hash(seed_position)}
+    )
+    ledger = post_ledger_transaction(ledger, seed_position)
+    sell = make_sell_fill_transaction(
+        transaction_id=UUID(int=600),
+        entry_ids=(UUID(int=601), UUID(int=602), UUID(int=603), UUID(int=604)),
+        paper_account_id=PAPER_ACCOUNT_ID,
+        reference_hash="5" * 64,
+        proceeds=proceeds,
+        allocated_cost=allocated_cost,
+        fee=Decimal("2"),
+        occurred_at=NOW,
+    )
+    balances = balance_ledger(post_ledger_transaction(ledger, sell))
+
+    assert balances["asset.position_cost.usd"] == 0
+    assert balances["asset.cash.available.usd"] == (
+        Decimal("10000") - allocated_cost + proceeds - 2
+    )
+    assert balances["expense.fees.usd"] == 2
+    assert balances["income.realized_pnl.usd"] == expected_realized
+
+
+def test_fill_factories_reject_zero_negative_or_unfundable_values() -> None:
+    with pytest.raises(ValueError, match="principal"):
+        make_buy_fill_transaction(
+            transaction_id=UUID(int=700),
+            entry_ids=(UUID(int=701), UUID(int=702), UUID(int=703)),
+            paper_account_id=PAPER_ACCOUNT_ID,
+            reference_hash="6" * 64,
+            principal=Decimal(0),
+            fee=Decimal(0),
+            occurred_at=NOW,
+        )
+    with pytest.raises(ValueError, match="exceed proceeds"):
+        make_sell_fill_transaction(
+            transaction_id=UUID(int=710),
+            entry_ids=(UUID(int=711), UUID(int=712), UUID(int=713), UUID(int=714)),
+            paper_account_id=PAPER_ACCOUNT_ID,
+            reference_hash="7" * 64,
+            proceeds=Decimal("1"),
+            allocated_cost=Decimal("1"),
+            fee=Decimal("1"),
+            occurred_at=NOW,
+        )

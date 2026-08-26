@@ -22,13 +22,13 @@
 
 ## Slice 3：买卖成交记账与持仓投影
 
-- [ ] 扩展 `engine/tests/unit/paper/test_ledger.py`，先覆盖买入消耗/释放、卖出盈利/亏损/费用和所有账户平衡。
-- [ ] 新增 `engine/tests/unit/paper/test_performance.py`，先覆盖平均成本、连续买入、部分卖出、不足持仓、修正事件和规范哈希。
-- [ ] 在 `engine/src/nexus/paper/ledger.py` 实现买/卖 fill 和 release 事务工厂。
-- [ ] 在 `engine/src/nexus/paper/performance.py` 实现持仓调整投影、已实现/未实现损益、NAV、峰值/回撤和归因纯函数。
-- [ ] 扩展属性测试，验证任意有效输入下不超限、不为负和借贷平衡。
-- [ ] 运行 paper 领域单测/属性测试、Ruff 和 Mypy。
-- [ ] 提交：`feat(engine): post paper fills and performance`
+- [x] 扩展 `engine/tests/unit/paper/test_ledger.py`，先覆盖买入消耗/释放、卖出盈利/亏损/费用和所有账户平衡。
+- [x] 新增 `engine/tests/unit/paper/test_performance.py`，先覆盖平均成本、连续买入、部分卖出、不足持仓、修正事件和规范哈希。
+- [x] 在 `engine/src/nexus/paper/ledger.py` 实现买/卖 fill 和 release 事务工厂。
+- [x] 在 `engine/src/nexus/paper/performance.py` 实现持仓调整、已实现/未实现损益、NAV、峰值/回撤纯函数；instrument/sector 归因聚合随 Slice 5 的权威读取和原子发布实现，避免在无数据库源事实时构造不完整归因。
+- [x] 扩展属性测试，验证任意有效输入下不超限、不为负和借贷平衡。
+- [x] 运行 paper 领域单测/属性测试、Ruff 和 Mypy（70 passed；Ruff/Mypy 通过）。
+- [x] 提交：`feat(engine): post paper fills and performance`
 
 ## Slice 4：原子 worker 服务
 
