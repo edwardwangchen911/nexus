@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Annotated, Literal
 from uuid import UUID
@@ -15,10 +17,35 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from nexus.domain.ids import new_uuid7
+from nexus.persistence.models.backtest import (
+    ExchangeCalendarAuthorityRecord,
+    ExchangeCalendarSessionRecord,
+)
+from nexus.persistence.models.data import DataSnapshot, QualityReport, SourcePolicy
+from nexus.persistence.models.market import UniverseMember, UniverseSnapshot
+from nexus.persistence.models.paper import (
+    PaperAccountRecord,
+    StrategyDecisionRecord,
+    StrategyDecisionTargetRecord,
+)
 
 Hash64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 _QUANTUM = Decimal("0.000000000001")
 _MAX_ABSOLUTE = Decimal("1e26")
+
+
+class ForwardDecisionConflictError(ValueError):
+    """The immutable decision key already exists with different content."""
+
+
+@dataclass(frozen=True)
+class PersistedForwardStrategyDecision:
+    decision_id: UUID
+    decision: ForwardStrategyDecision
 
 
 def _exact_decimal(value: object, *, field: str) -> Decimal:
@@ -97,6 +124,8 @@ class ForwardStrategyDecision(_FrozenModel):
     def _decision_time_is_aware(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("decision time must be timezone-aware")
+        if value.utcoffset() != UTC.utcoffset(value):
+            raise ValueError("decision time must use UTC")
         return value
 
     @model_validator(mode="after")
@@ -113,3 +142,318 @@ class ForwardStrategyDecision(_FrozenModel):
         if total_weight != Decimal(1):
             raise ValueError("target and cash weights must equal one")
         return self
+
+
+def build_forward_strategy_decision(
+    decision: object,
+    *,
+    account_id: UUID,
+    portfolio_id: UUID,
+    current_positions: Sequence[UUID],
+    whitelisted_instrument_ids: Sequence[UUID],
+    decision_time: datetime,
+    execution_session: date | None,
+    source_policy_id: UUID,
+    calendar_authority_id: UUID,
+    universe_snapshot_id: UUID,
+    quality_report_id: UUID,
+    portfolio_projection_hash: str,
+    authority_hash: str,
+    strategy_parameters_hash: str,
+) -> ForwardStrategyDecision | None:
+    """Adapt the pure ``baseline_v1`` result without accepting caller targets."""
+    from nexus.risk.canonical import canonical_forward_strategy_decision_hash
+    from nexus.strategy.baseline import StrategyDecision
+
+    if not isinstance(decision, StrategyDecision):
+        raise TypeError("decision must be a baseline StrategyDecision")
+    if decision.strategy_version != "baseline_v1":
+        raise ValueError("forward decision requires baseline_v1")
+    if decision.reason == "NOT_WEEK_END":
+        if decision.targets or decision.exits or decision.cash_weight is not None:
+            raise ValueError("NOT_WEEK_END must not contain consumable targets")
+        return None
+    if execution_session is None:
+        raise ValueError("execution session is required")
+    if decision_time.tzinfo is None or decision_time.utcoffset() is None:
+        raise ValueError("decision time must be timezone-aware")
+    if decision.cash_weight is None:
+        raise ValueError("weekly decision requires cash weight")
+
+    current = tuple(current_positions)
+    if len(current) != len(set(current)):
+        raise ValueError("current positions must be unique")
+    whitelist = tuple(whitelisted_instrument_ids)
+    if len(whitelist) != len(set(whitelist)):
+        raise ValueError("whitelisted instruments must be unique")
+
+    target_ids = [target.instrument_id for target in decision.targets]
+    exit_ids = list(decision.exits)
+    if len(target_ids) != len(set(target_ids)):
+        raise ValueError("target instruments must be unique")
+    if len(exit_ids) != len(set(exit_ids)):
+        raise ValueError("exit instruments must be unique")
+    if set(target_ids) & set(exit_ids):
+        raise ValueError("target and exit instruments must not overlap")
+    if not set(exit_ids) <= set(current):
+        raise ValueError("exit instruments must be current positions")
+    if not (set(target_ids) | set(exit_ids)) <= set(whitelist):
+        raise ValueError("forward instruments must be whitelisted")
+
+    current_set = set(current)
+    mapped_targets = [
+        ForwardStrategyTarget(
+            instrument_id=target.instrument_id,
+            target_weight=target.weight,
+            exit=False,
+            strategy_priority=1 if target.instrument_id in current_set else 2,
+            reason=(
+                "BASELINE_CURRENT_TARGET"
+                if target.instrument_id in current_set
+                else "BASELINE_NEW_TARGET"
+            ),
+        )
+        for target in decision.targets
+    ]
+    mapped_targets.extend(
+        ForwardStrategyTarget(
+            instrument_id=instrument_id,
+            target_weight=Decimal(0),
+            exit=True,
+            strategy_priority=0,
+            reason="BASELINE_EXIT",
+        )
+        for instrument_id in decision.exits
+    )
+    draft = ForwardStrategyDecision(
+        account_id=account_id,
+        portfolio_id=portfolio_id,
+        strategy_id="baseline",
+        strategy_version="baseline_v1",
+        decision_session=decision.decision_session,
+        decision_time=decision_time.astimezone(UTC),
+        execution_session=execution_session,
+        source_policy_id=source_policy_id,
+        calendar_authority_id=calendar_authority_id,
+        universe_snapshot_id=universe_snapshot_id,
+        quality_report_id=quality_report_id,
+        portfolio_projection_hash=portfolio_projection_hash,
+        authority_hash=authority_hash,
+        strategy_parameters_hash=strategy_parameters_hash,
+        decision_hash="0" * 64,
+        cash_weight=decision.cash_weight,
+        reason="WEEKLY_REBALANCE",
+        targets=tuple(sorted(mapped_targets, key=lambda target: target.instrument_id.int)),
+    )
+    return draft.model_copy(
+        update={"decision_hash": canonical_forward_strategy_decision_hash(draft)}
+    )
+
+
+async def _authority_is_valid(
+    session: AsyncSession,
+    decision: ForwardStrategyDecision,
+) -> None:
+    account = await session.get(PaperAccountRecord, decision.account_id)
+    if account is None or account.portfolio_id != decision.portfolio_id:
+        raise ValueError("paper account does not match forward decision")
+
+    source_policy = await session.get(SourcePolicy, decision.source_policy_id)
+    calendar = await session.get(ExchangeCalendarAuthorityRecord, decision.calendar_authority_id)
+    universe = await session.get(UniverseSnapshot, decision.universe_snapshot_id)
+    quality = await session.get(QualityReport, decision.quality_report_id)
+    if source_policy is None or calendar is None or universe is None or quality is None:
+        raise ValueError("forward decision authority is incomplete")
+    quality_snapshot = await session.get(DataSnapshot, quality.data_snapshot_id)
+    if quality_snapshot is None or quality.status != "PASS":
+        raise ValueError("forward decision quality authority is incomplete")
+
+    available_times = (
+        source_policy.created_at,
+        calendar.published_at,
+        universe.published_at,
+        quality.created_at,
+        quality_snapshot.available_at,
+    )
+    if any(
+        available_at is None or available_at > decision.decision_time
+        for available_at in available_times
+    ):
+        raise ValueError("forward decision authority was available after decision time")
+
+    calendar_sessions = tuple(
+        (
+            await session.scalars(
+                select(ExchangeCalendarSessionRecord)
+                .where(
+                    ExchangeCalendarSessionRecord.calendar_authority_id
+                    == decision.calendar_authority_id
+                )
+                .order_by(ExchangeCalendarSessionRecord.session)
+            )
+        ).all()
+    )
+    matching_indexes = [
+        index
+        for index, row in enumerate(calendar_sessions)
+        if row.session == decision.decision_session
+    ]
+    if len(matching_indexes) != 1:
+        raise ValueError("decision session is missing from calendar authority")
+    decision_index = matching_indexes[0]
+    if (
+        calendar_sessions[decision_index].decision_at != decision.decision_time
+        or decision_index + 1 >= len(calendar_sessions)
+        or calendar_sessions[decision_index + 1].session != decision.execution_session
+    ):
+        raise ValueError("execution session is not the next authority session")
+
+    target_ids = {target.instrument_id for target in decision.targets}
+    member_ids = set(
+        (
+            await session.scalars(
+                select(UniverseMember.instrument_id).where(
+                    UniverseMember.universe_snapshot_id == decision.universe_snapshot_id,
+                    UniverseMember.instrument_id.in_(target_ids),
+                )
+            )
+        ).all()
+    )
+    if member_ids != target_ids:
+        raise ValueError("forward decision contains a non-whitelist instrument")
+
+
+def _domain_from_records(
+    record: StrategyDecisionRecord,
+    targets: Sequence[StrategyDecisionTargetRecord],
+) -> ForwardStrategyDecision:
+    decision = ForwardStrategyDecision(
+        account_id=record.account_id,
+        portfolio_id=record.portfolio_id,
+        strategy_id="baseline",
+        strategy_version="baseline_v1",
+        decision_session=record.decision_session,
+        decision_time=record.decision_time,
+        execution_session=record.execution_session,
+        source_policy_id=record.source_policy_id,
+        calendar_authority_id=record.calendar_authority_id,
+        universe_snapshot_id=record.universe_snapshot_id,
+        quality_report_id=record.quality_report_id,
+        portfolio_projection_hash=record.portfolio_projection_hash,
+        authority_hash=record.authority_hash,
+        strategy_parameters_hash=record.strategy_parameters_hash,
+        decision_hash=record.decision_hash,
+        cash_weight=record.cash_weight,
+        reason="WEEKLY_REBALANCE",
+        targets=tuple(
+            ForwardStrategyTarget(
+                instrument_id=target.instrument_id,
+                target_weight=target.target_weight,
+                exit=target.exit,
+                strategy_priority=target.strategy_priority,
+                reason=target.reason,
+            )
+            for target in sorted(targets, key=lambda item: item.instrument_id.int)
+        ),
+    )
+    from nexus.risk.canonical import canonical_forward_strategy_decision_hash
+
+    if canonical_forward_strategy_decision_hash(decision) != decision.decision_hash:
+        raise ValueError("stored forward decision hash does not match content")
+    return decision
+
+
+async def load_forward_strategy_decision(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    strategy_version: str,
+    decision_session: date,
+) -> PersistedForwardStrategyDecision | None:
+    """Load and revalidate one immutable consumable decision."""
+    record = await session.scalar(
+        select(StrategyDecisionRecord).where(
+            StrategyDecisionRecord.account_id == account_id,
+            StrategyDecisionRecord.strategy_version == strategy_version,
+            StrategyDecisionRecord.decision_session == decision_session,
+        )
+    )
+    if record is None:
+        return None
+    targets = tuple(
+        (
+            await session.scalars(
+                select(StrategyDecisionTargetRecord).where(
+                    StrategyDecisionTargetRecord.strategy_decision_id == record.id
+                )
+            )
+        ).all()
+    )
+    return PersistedForwardStrategyDecision(
+        decision_id=record.id,
+        decision=_domain_from_records(record, targets),
+    )
+
+
+async def persist_forward_strategy_decision(
+    session: AsyncSession,
+    decision: ForwardStrategyDecision,
+) -> PersistedForwardStrategyDecision:
+    """Insert an immutable forward decision or return its identical prior fact."""
+    from nexus.risk.canonical import canonical_forward_strategy_decision_hash
+
+    if canonical_forward_strategy_decision_hash(decision) != decision.decision_hash:
+        raise ValueError("forward decision hash does not match content")
+    existing = await load_forward_strategy_decision(
+        session,
+        account_id=decision.account_id,
+        strategy_version=decision.strategy_version,
+        decision_session=decision.decision_session,
+    )
+    if existing is not None:
+        if existing.decision.decision_hash != decision.decision_hash:
+            raise ForwardDecisionConflictError("forward decision content conflict")
+        return existing
+
+    await _authority_is_valid(session, decision)
+    decision_id = new_uuid7()
+    session.add(
+        StrategyDecisionRecord(
+            id=decision_id,
+            account_id=decision.account_id,
+            portfolio_id=decision.portfolio_id,
+            strategy_id=decision.strategy_id,
+            strategy_version=decision.strategy_version,
+            decision_session=decision.decision_session,
+            decision_time=decision.decision_time,
+            execution_session=decision.execution_session,
+            source_policy_id=decision.source_policy_id,
+            calendar_authority_id=decision.calendar_authority_id,
+            universe_snapshot_id=decision.universe_snapshot_id,
+            quality_report_id=decision.quality_report_id,
+            portfolio_projection_hash=decision.portfolio_projection_hash,
+            authority_hash=decision.authority_hash,
+            strategy_parameters_hash=decision.strategy_parameters_hash,
+            decision_hash=decision.decision_hash,
+            cash_weight=decision.cash_weight,
+            reason=decision.reason,
+        )
+    )
+    session.add_all(
+        StrategyDecisionTargetRecord(
+            id=new_uuid7(),
+            strategy_decision_id=decision_id,
+            account_id=decision.account_id,
+            instrument_id=target.instrument_id,
+            target_weight=target.target_weight,
+            exit=target.exit,
+            strategy_priority=target.strategy_priority,
+            reason=target.reason,
+        )
+        for target in decision.targets
+    )
+    await session.flush()
+    return PersistedForwardStrategyDecision(
+        decision_id=decision_id,
+        decision=decision,
+    )

@@ -29,6 +29,7 @@ def _sector(instrument_id: UUID, sector: str) -> RiskSectorExposure:
         authority_id=UUID(int=instrument_id.int + 1000),
         sector=sector,
         weight=Decimal("1"),
+        content_hash="a" * 64,
     )
 
 
@@ -52,6 +53,7 @@ def _market(items: tuple[tuple[UUID, Decimal, str], ...]) -> RiskMarketSnapshot:
                 source="fixture",
                 delivery_mode="fixture",
                 available_at=AT,
+                content_hash="b" * 64,
             )
             for instrument_id, close, _ in items
         ),
@@ -99,6 +101,7 @@ def _projection(
         nav=nav,
         peak_nav=nav,
         drawdown_state="unlocked",
+        source_facts_hash="f" * 64,
         projection_hash="e" * 64,
     )
 

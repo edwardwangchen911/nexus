@@ -84,6 +84,7 @@ def _sector() -> RiskSectorExposure:
         authority_id=UUID(int=30),
         sector="technology",
         weight=Decimal("1"),
+        content_hash="a" * 64,
     )
 
 
@@ -106,6 +107,7 @@ def _market() -> RiskMarketSnapshot:
                 source="fosun",
                 delivery_mode="delayed",
                 available_at=AT,
+                content_hash="b" * 64,
             ),
         ),
         sector_exposures=(_sector(),),
@@ -154,6 +156,7 @@ def _projection(*, order_id: UUID = UUID(int=50)) -> PaperPortfolioProjection:
         nav=Decimal("10000"),
         peak_nav=Decimal("10000"),
         drawdown_state="unlocked",
+        source_facts_hash="3" * 64,
         projection_hash="2" * 64,
     )
 
@@ -281,6 +284,7 @@ def test_risk_input_hash_is_independent_of_candidate_input_order() -> None:
         authority_id=UUID(int=31),
         sector="health_care",
         weight=Decimal("1"),
+        content_hash="c" * 64,
     )
     second = OrderCandidate(
         instrument_id=UUID(int=8),
@@ -366,7 +370,7 @@ def test_batch_hash_is_stable_and_binds_every_upstream_hash() -> None:
 
 def test_all_v1_hashes_match_reviewed_golden_vectors() -> None:
     assert canonical_paper_projection_hash(_projection()) == (
-        "e59f2a41980d6509642a78e34cac35c347a9f11090b02a9488da035b5b5ef920"
+        "9796faf0063504eb905307e8c6a2cb14224a3d59cc3af4d72049802810cdb315"
     )
     assert (
         canonical_risk_batch_input_hash(
@@ -376,7 +380,7 @@ def test_all_v1_hashes_match_reviewed_golden_vectors() -> None:
             policy_version="risk_policy_v1",
             policy_hash="5" * 64,
         )
-        == "c8c3179d3d22e0c8b3e3afea99cb20ef938eaaa7cd865f9692a4eae2db03f188"
+        == "25d1ee99b3126b99822f582739a4188603f13b9f6f7b7697f6a08a1cde15a871"
     )
     assert canonical_risk_evaluation_result_hash((_evaluation(),)) == (
         "c394b59e8c38829912d0f70f11f172e67808d23938976f72c915c6baf0172c83"

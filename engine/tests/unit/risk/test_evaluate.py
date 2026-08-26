@@ -39,6 +39,7 @@ def _sector(
         authority_id=UUID(int=instrument_id.int + 1000),
         sector=sector,
         weight=weight,
+        content_hash="a" * 64,
     )
 
 
@@ -100,6 +101,7 @@ def _market(
                 source="fosun",
                 delivery_mode="delayed",
                 available_at=AT,
+                content_hash="b" * 64,
             )
             for instrument_id, close, _ in instruments
         ),
@@ -152,6 +154,7 @@ def _projection(
         nav=nav,
         peak_nav=nav if drawdown_state == "unlocked" else Decimal("11000"),
         drawdown_state=drawdown_state,
+        source_facts_hash="d" * 64,
         projection_hash="c" * 64,
     )
 

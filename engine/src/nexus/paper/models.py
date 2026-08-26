@@ -91,12 +91,15 @@ class PaperOrder(FrozenPaperModel):
     instrument_id: UUID
     side: OrderSide
     quantity: Decimal
+    worst_price: Decimal | None = None
     events: tuple[OrderEventInput, ...]
 
-    @field_validator("quantity", mode="before")
+    @field_validator("quantity", "worst_price", mode="before")
     @classmethod
-    def _quantity_is_exact(cls, value: object) -> Decimal:
-        return exact_decimal(value, field="quantity")
+    def _quantity_is_exact(cls, value: object, info: ValidationInfo) -> Decimal | None:
+        if value is None:
+            return None
+        return exact_decimal(value, field=info.field_name or "value")
 
     @model_validator(mode="after")
     def _valid_order(self) -> PaperOrder:
@@ -104,6 +107,8 @@ class PaperOrder(FrozenPaperModel):
             raise ValueError("order quantity must be positive")
         if self.quantity != self.quantity.to_integral_value():
             raise ValueError("order quantity must be whole shares")
+        if self.worst_price is not None and self.worst_price <= 0:
+            raise ValueError("order worst price must be positive")
         event_ids = [event.event_id for event in self.events]
         if len(event_ids) != len(set(event_ids)):
             raise ValueError("order event ids must be unique")

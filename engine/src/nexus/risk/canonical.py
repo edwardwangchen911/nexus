@@ -159,6 +159,7 @@ def canonical_paper_projection_hash(projection: PaperPortfolioProjection) -> str
             "nav": _decimal(projection.nav),
             "peak_nav": _decimal(projection.peak_nav),
             "drawdown_state": projection.drawdown_state,
+            "source_facts_hash": _hash(projection.source_facts_hash),
             "positions": _position_payload(projection),
             "open_orders": _open_order_payload(projection),
         }
@@ -240,6 +241,38 @@ def _market_payload(market: RiskMarketSnapshot) -> dict[str, Any]:
             _uuid(instrument_id) for instrument_id in market.whitelisted_instrument_ids
         ),
     }
+
+
+def canonical_risk_market_authority_hash(market: RiskMarketSnapshot) -> str:
+    """Hash exact market authority facts without trusting their stored digest."""
+    payload = _market_payload(market)
+    payload.pop("authority_hash")
+    price_hashes = {
+        _uuid(price.instrument_id): _hash(price.content_hash) for price in market.prices
+    }
+    for price_payload in payload["prices"]:
+        price_payload["content_hash"] = price_hashes[price_payload["instrument_id"]]
+    sector_hashes = {
+        (
+            _uuid(exposure.instrument_id),
+            exposure.sector,
+            _uuid(exposure.authority_id),
+        ): _hash(exposure.content_hash)
+        for exposure in market.sector_exposures
+    }
+    for sector_payload in payload["sector_exposures"]:
+        key = (
+            sector_payload["instrument_id"],
+            sector_payload["sector"],
+            sector_payload["authority_id"],
+        )
+        sector_payload["content_hash"] = sector_hashes[key]
+    return _digest(
+        {
+            "schema": "risk_market_authority_sha256_v1",
+            "market": payload,
+        }
+    )
 
 
 def _candidate_sort_key(candidate: OrderCandidate) -> tuple[int, Decimal, int]:

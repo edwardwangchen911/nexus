@@ -64,6 +64,7 @@ class RiskPrice(FrozenRiskModel):
     source: str = Field(min_length=1, max_length=100)
     delivery_mode: str = Field(min_length=1, max_length=50)
     available_at: datetime
+    content_hash: Hash64
 
     @field_validator("close", mode="before")
     @classmethod
@@ -84,6 +85,7 @@ class RiskSectorExposure(FrozenRiskModel):
     authority_id: UUID
     sector: str = Field(min_length=1, max_length=100)
     weight: Decimal
+    content_hash: Hash64
 
     @field_validator("weight", mode="before")
     @classmethod
@@ -250,6 +252,7 @@ class PaperPortfolioProjection(FrozenRiskModel):
     nav: Decimal
     peak_nav: Decimal
     drawdown_state: DrawdownState
+    source_facts_hash: Hash64
     projection_hash: Hash64
 
     @field_validator("as_of")

@@ -30,6 +30,7 @@ def _price(instrument_id: UUID = INSTRUMENT_ID) -> RiskPrice:
         source="fosun",
         delivery_mode="delayed",
         available_at=DECISION_TIME,
+        content_hash="a" * 64,
     )
 
 
@@ -39,6 +40,7 @@ def _sector(instrument_id: UUID = INSTRUMENT_ID) -> RiskSectorExposure:
         authority_id=UUID(int=instrument_id.int + 200),
         sector="technology",
         weight=Decimal("1"),
+        content_hash="b" * 64,
     )
 
 
@@ -95,6 +97,7 @@ def test_market_snapshot_requires_full_sector_weight() -> None:
                     authority_id=UUID(int=203),
                     sector="technology",
                     weight=Decimal("0.9"),
+                    content_hash="b" * 64,
                 ),
             )
         )
@@ -111,6 +114,7 @@ def test_market_snapshot_rejects_late_authority() -> None:
                     source="fosun",
                     delivery_mode="delayed",
                     available_at=datetime(2026, 8, 21, 20, 0, 1, tzinfo=UTC),
+                    content_hash="a" * 64,
                 ),
             )
         )
@@ -150,6 +154,7 @@ def test_projection_rejects_non_usd_account() -> None:
             nav=Decimal("10000"),
             peak_nav=Decimal("10000"),
             drawdown_state="unlocked",
+            source_facts_hash="d" * 64,
             projection_hash="c" * 64,
         )
 
@@ -177,6 +182,7 @@ def test_projection_rejects_duplicate_positions() -> None:
             nav=Decimal("10000"),
             peak_nav=Decimal("10000"),
             drawdown_state="unlocked",
+            source_facts_hash="d" * 64,
             projection_hash="c" * 64,
         )
 
@@ -218,6 +224,7 @@ def test_projection_rejects_duplicate_open_orders() -> None:
             nav=Decimal("10000"),
             peak_nav=Decimal("10000"),
             drawdown_state="unlocked",
+            source_facts_hash="d" * 64,
             projection_hash="c" * 64,
         )
 
