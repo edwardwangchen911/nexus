@@ -93,6 +93,14 @@ class SectorExposure(ImmutableCreatedAt, Base):
             "content_hash",
             name="uq_sector_exposures_instrument_sector_as_of_hash",
         ),
+        UniqueConstraint(
+            "id",
+            "instrument_id",
+            "sector_code",
+            "weight",
+            "content_hash",
+            name="uq_sector_exposures_id_instrument_sector_weight_hash",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)

@@ -69,7 +69,10 @@ class AccountExternalIdEnvelope(ImmutableCreatedAt, Base):
 
 class Portfolio(ImmutableCreatedAt, Base):
     __tablename__ = "portfolios"
-    __table_args__ = (UniqueConstraint("account_id", name="uq_portfolios_account_id"),)
+    __table_args__ = (
+        UniqueConstraint("account_id", name="uq_portfolios_account_id"),
+        UniqueConstraint("id", "account_id", name="uq_portfolios_id_account"),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     account_id: Mapped[UUID] = mapped_column(

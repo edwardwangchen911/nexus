@@ -35,7 +35,9 @@ class PaperAccountRecord(ImmutableCreatedAt, Base):
         UniqueConstraint("id", "portfolio_id", name="uq_paper_accounts_id_portfolio"),
         ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_paper_accounts_account"),
         ForeignKeyConstraint(
-            ["portfolio_id"], ["portfolios.id"], name="fk_paper_accounts_portfolio"
+            ["portfolio_id", "account_id"],
+            ["portfolios.id", "portfolios.account_id"],
+            name="fk_paper_accounts_portfolio",
         ),
         CheckConstraint("currency = 'USD'", name="currency_usd"),
         CheckConstraint(
@@ -270,6 +272,12 @@ class PaperOrderBatchRecord(ImmutableCreatedAt, Base):
             "strategy_decision_id",
             name="uq_paper_order_batches_id_account_decision",
         ),
+        UniqueConstraint(
+            "id",
+            "account_id",
+            "risk_policy_id",
+            name="uq_paper_order_batches_id_account_policy",
+        ),
         ForeignKeyConstraint(
             ["strategy_decision_id", "account_id"],
             ["strategy_decisions.id", "strategy_decisions.account_id"],
@@ -377,6 +385,15 @@ class PaperOrderRecord(ImmutableCreatedAt, Base):
     __table_args__ = (
         UniqueConstraint("account_id", "client_order_id", name="uq_paper_orders_account_client"),
         UniqueConstraint("id", "account_id", name="uq_paper_orders_id_account"),
+        UniqueConstraint(
+            "id", "batch_id", "account_id", name="uq_paper_orders_id_batch_account"
+        ),
+        UniqueConstraint(
+            "id",
+            "account_id",
+            "instrument_id",
+            name="uq_paper_orders_id_account_instrument",
+        ),
         ForeignKeyConstraint(
             ["batch_id", "account_id", "strategy_decision_id"],
             [
@@ -461,19 +478,18 @@ class RiskEvaluationRecord(ImmutableCreatedAt, Base):
         UniqueConstraint("order_id", name="uq_risk_evaluations_order"),
         UniqueConstraint("id", "account_id", name="uq_risk_evaluations_id_account"),
         ForeignKeyConstraint(
-            ["order_id", "account_id"],
-            ["paper_orders.id", "paper_orders.account_id"],
+            ["order_id", "batch_id", "account_id"],
+            ["paper_orders.id", "paper_orders.batch_id", "paper_orders.account_id"],
             name="fk_risk_evaluations_order",
         ),
         ForeignKeyConstraint(
-            ["batch_id"],
-            ["paper_order_batches.id"],
+            ["batch_id", "account_id", "risk_policy_id"],
+            [
+                "paper_order_batches.id",
+                "paper_order_batches.account_id",
+                "paper_order_batches.risk_policy_id",
+            ],
             name="fk_risk_evaluations_batch",
-        ),
-        ForeignKeyConstraint(
-            ["risk_policy_id"],
-            ["risk_policies.id"],
-            name="fk_risk_evaluations_policy",
         ),
         CheckConstraint("outcome IN ('approved','reduced','rejected')", name="outcome_allowed"),
         CheckConstraint(
@@ -482,6 +498,13 @@ class RiskEvaluationRecord(ImmutableCreatedAt, Base):
             "AND trunc(approved_quantity) = approved_quantity "
             "AND approved_quantity <= desired_quantity",
             name="quantities",
+        ),
+        CheckConstraint(
+            "(outcome = 'approved' AND approved_quantity = desired_quantity) "
+            "OR (outcome = 'reduced' AND approved_quantity > 0 "
+            "AND approved_quantity < desired_quantity) "
+            "OR (outcome = 'rejected' AND approved_quantity = 0)",
+            name="outcome_quantity_binding",
         ),
         CheckConstraint(
             "reference_close > 0 AND worst_price > 0 "
@@ -571,8 +594,12 @@ class RiskEvaluationPriceInputRecord(ImmutableCreatedAt, Base):
             name="fk_risk_price_inputs_instrument",
         ),
         ForeignKeyConstraint(
-            ["price_authority_id"],
-            ["price_bar_set_authorities.id"],
+            ["price_authority_id", "source", "content_hash"],
+            [
+                "price_bar_set_authorities.id",
+                "price_bar_set_authorities.source",
+                "price_bar_set_authorities.content_hash",
+            ],
             name="fk_risk_price_inputs_authority",
         ),
         CheckConstraint("close > 0", name="close_positive"),
@@ -619,8 +646,14 @@ class RiskEvaluationSectorInputRecord(ImmutableCreatedAt, Base):
             name="fk_risk_sector_inputs_instrument",
         ),
         ForeignKeyConstraint(
-            ["sector_exposure_id"],
-            ["sector_exposures.id"],
+            ["sector_exposure_id", "instrument_id", "sector", "weight", "content_hash"],
+            [
+                "sector_exposures.id",
+                "sector_exposures.instrument_id",
+                "sector_exposures.sector_code",
+                "sector_exposures.weight",
+                "sector_exposures.content_hash",
+            ],
             name="fk_risk_sector_inputs_exposure",
         ),
         CheckConstraint("weight > 0 AND weight <= 1", name="weight"),
@@ -646,6 +679,14 @@ class RiskQueryAuthorityRecord(ImmutableCreatedAt, Base):
             "decision_session",
             "kind",
             name="uq_risk_query_authorities_scope",
+        ),
+        UniqueConstraint(
+            "id",
+            "kind",
+            "complete",
+            "available_at",
+            "content_hash",
+            name="uq_risk_query_authorities_proof_binding",
         ),
         ForeignKeyConstraint(
             ["source_policy_id"],
@@ -704,8 +745,14 @@ class RiskEvaluationQueryProofRecord(ImmutableCreatedAt, Base):
             name="fk_risk_query_proofs_evaluation",
         ),
         ForeignKeyConstraint(
-            ["authority_id"],
-            ["risk_query_authorities.id"],
+            ["authority_id", "kind", "complete", "available_at", "content_hash"],
+            [
+                "risk_query_authorities.id",
+                "risk_query_authorities.kind",
+                "risk_query_authorities.complete",
+                "risk_query_authorities.available_at",
+                "risk_query_authorities.content_hash",
+            ],
             name="fk_risk_query_proofs_authority",
         ),
         CheckConstraint(
@@ -763,6 +810,12 @@ class PaperLedgerTransactionRecord(ImmutableCreatedAt, Base):
             name="uq_paper_ledger_transactions_account_hash",
         ),
         UniqueConstraint("id", "account_id", name="uq_paper_ledger_transactions_id_account"),
+        UniqueConstraint(
+            "id",
+            "account_id",
+            "order_id",
+            name="uq_paper_ledger_transactions_id_account_order",
+        ),
         ForeignKeyConstraint(
             ["account_id"],
             ["paper_accounts.id"],
@@ -860,8 +913,12 @@ class PaperReservationRecord(ImmutableCreatedAt, Base):
             name="fk_paper_reservations_order",
         ),
         ForeignKeyConstraint(
-            ["ledger_transaction_id", "account_id"],
-            ["paper_ledger_transactions.id", "paper_ledger_transactions.account_id"],
+            ["ledger_transaction_id", "account_id", "order_id"],
+            [
+                "paper_ledger_transactions.id",
+                "paper_ledger_transactions.account_id",
+                "paper_ledger_transactions.order_id",
+            ],
             name="fk_paper_reservations_ledger_transaction",
         ),
         ForeignKeyConstraint(
@@ -924,18 +981,33 @@ class PaperFillRecord(ImmutableCreatedAt, Base):
     __table_args__ = (
         UniqueConstraint("order_id", "fill_seq", name="uq_paper_fills_order_seq"),
         UniqueConstraint("id", "account_id", name="uq_paper_fills_id_account"),
+        UniqueConstraint(
+            "id",
+            "account_id",
+            "instrument_id",
+            name="uq_paper_fills_id_account_instrument",
+        ),
         ForeignKeyConstraint(
-            ["order_id", "account_id"],
-            ["paper_orders.id", "paper_orders.account_id"],
+            ["order_id", "account_id", "instrument_id"],
+            [
+                "paper_orders.id",
+                "paper_orders.account_id",
+                "paper_orders.instrument_id",
+            ],
             name="fk_paper_fills_order",
         ),
         ForeignKeyConstraint(
             ["instrument_id"], ["instruments.id"], name="fk_paper_fills_instrument"
         ),
+        ForeignKeyConstraint(
+            ["source_authority_id"],
+            ["price_bar_set_authorities.id"],
+            name="fk_paper_fills_source_authority",
+        ),
         CheckConstraint("fill_seq >= 1", name="seq_positive"),
         CheckConstraint(
             "quantity > 0 AND trunc(quantity) = quantity "
-            "AND price > 0 AND notional > 0 AND fee >= 0",
+            "AND price > 0 AND notional > 0 AND notional = quantity * price AND fee >= 0",
             name="values_positive",
         ),
         CheckConstraint(
@@ -979,14 +1051,25 @@ class PaperPositionAdjustmentEventRecord(ImmutableCreatedAt, Base):
             name="fk_paper_position_events_instrument",
         ),
         ForeignKeyConstraint(
-            ["source_fill_id", "account_id"],
-            ["paper_fills.id", "paper_fills.account_id"],
+            ["source_fill_id", "account_id", "instrument_id"],
+            [
+                "paper_fills.id",
+                "paper_fills.account_id",
+                "paper_fills.instrument_id",
+            ],
             name="fk_paper_position_events_fill",
         ),
         CheckConstraint("event_seq >= 1", name="seq_positive"),
         CheckConstraint(
             "event_type IN ('fill','split','dividend','delisting','correction')",
             name="type_allowed",
+        ),
+        CheckConstraint(
+            "(event_type = 'fill' AND source_fill_id IS NOT NULL) "
+            "OR (event_type IN ('split','dividend','delisting') "
+            "AND source_fill_id IS NULL) "
+            "OR event_type = 'correction'",
+            name="fill_source_binding",
         ),
         CheckConstraint("trunc(quantity_delta) = quantity_delta", name="quantity_whole"),
         CheckConstraint("payload_hash ~ '^[0-9a-f]{64}$'", name="hash_canonical"),

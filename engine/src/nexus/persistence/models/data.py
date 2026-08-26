@@ -220,6 +220,12 @@ class PriceBarSetAuthority(ImmutableCreatedAt, Base):
         ),
         UniqueConstraint("price_series_manifest_id", name="uq_price_bar_set_authority_manifest"),
         UniqueConstraint("evidence_ref_id", name="uq_price_bar_set_authority_evidence"),
+        UniqueConstraint(
+            "id",
+            "source",
+            "content_hash",
+            name="uq_price_bar_set_authorities_id_source_hash",
+        ),
         CheckConstraint("hash_version = 'price_bar_set_sha256_v1'", name="hash_version_v1"),
         CheckConstraint("policy_version = 'agent_price_authority_v1'", name="policy_version_v1"),
         CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),

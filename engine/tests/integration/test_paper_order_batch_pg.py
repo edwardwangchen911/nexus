@@ -1,5 +1,7 @@
 import asyncio
 from collections import defaultdict
+from datetime import UTC, date, datetime
+from uuid import UUID
 
 import pytest
 from helpers.paper_batch import NO_CHANGE_INSTRUMENT, seed_paper_batch
@@ -14,6 +16,7 @@ from nexus.persistence.models.paper import (
     PaperReservationRecord,
     RiskEvaluationRecord,
     RiskEvaluationRuleRecord,
+    StrategyDecisionRecord,
 )
 from nexus.persistence.models.runtime import AuditEvent, OutboxEvent
 from nexus.risk.canonical import (
@@ -276,3 +279,60 @@ def test_missing_exact_query_authority_fails_closed_before_any_order(
 
     assert code == "RISK_AUTHORITY_INCOMPLETE"
     assert counts == (0, 0, 0)
+
+
+async def _attempt_superseded_decision(database_url: str):
+    seed = await seed_paper_batch(database_url)
+    engine = create_async_engine(database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            original = await session.get(StrategyDecisionRecord, seed.decision_id)
+            assert original is not None
+            session.add(
+                StrategyDecisionRecord(
+                    id=UUID("52000000-0000-0000-0000-000000000001"),
+                    account_id=seed.account_id,
+                    portfolio_id=seed.portfolio_id,
+                    strategy_id="baseline",
+                    strategy_version="baseline_v1",
+                    decision_session=date(2026, 8, 27),
+                    decision_time=datetime(2026, 8, 27, 21, tzinfo=UTC),
+                    execution_session=date(2026, 8, 28),
+                    source_policy_id=original.source_policy_id,
+                    calendar_authority_id=original.calendar_authority_id,
+                    universe_snapshot_id=original.universe_snapshot_id,
+                    quality_report_id=original.quality_report_id,
+                    portfolio_projection_hash="6" * 64,
+                    authority_hash="7" * 64,
+                    strategy_parameters_hash="8" * 64,
+                    decision_hash="9" * 64,
+                    cash_weight=1,
+                    reason="WEEKLY_REBALANCE",
+                )
+            )
+        with pytest.raises(PaperBatchError) as captured:
+            async with sessions.begin() as session:
+                await create_paper_order_batch(
+                    session,
+                    account_id=seed.account_id,
+                    strategy_decision_id=seed.decision_id,
+                    idempotency_key="paper-superseded-decision",
+                    request_time=seed.request_time,
+                )
+        async with sessions() as session:
+            order_count = int(
+                await session.scalar(select(func.count()).select_from(PaperOrderRecord)) or 0
+            )
+        return captured.value.code, order_count
+    finally:
+        await engine.dispose()
+
+
+def test_superseded_strategy_decision_fails_closed_before_creating_orders(
+    migrated_database_url: str,
+) -> None:
+    code, order_count = asyncio.run(_attempt_superseded_decision(migrated_database_url))
+
+    assert code == "PAPER_BATCH_CONFLICT"
+    assert order_count == 0

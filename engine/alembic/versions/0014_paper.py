@@ -42,6 +42,24 @@ _PAPER_TABLES = (
 )
 
 
+def _create_parent_bindings() -> None:
+    op.create_unique_constraint(
+        "uq_portfolios_id_account",
+        "portfolios",
+        ["id", "account_id"],
+    )
+    op.create_unique_constraint(
+        "uq_price_bar_set_authorities_id_source_hash",
+        "price_bar_set_authorities",
+        ["id", "source", "content_hash"],
+    )
+    op.create_unique_constraint(
+        "uq_sector_exposures_id_instrument_sector_weight_hash",
+        "sector_exposures",
+        ["id", "instrument_id", "sector_code", "weight", "content_hash"],
+    )
+
+
 def _create_identity_policy_and_decisions() -> None:
     op.execute(
         """
@@ -64,8 +82,8 @@ def _create_identity_policy_and_decisions() -> None:
           CONSTRAINT uq_paper_accounts_id_portfolio UNIQUE (id, portfolio_id),
           CONSTRAINT fk_paper_accounts_account FOREIGN KEY (account_id)
             REFERENCES accounts(id),
-          CONSTRAINT fk_paper_accounts_portfolio FOREIGN KEY (portfolio_id)
-            REFERENCES portfolios(id),
+          CONSTRAINT fk_paper_accounts_portfolio FOREIGN KEY (portfolio_id, account_id)
+            REFERENCES portfolios(id, account_id),
           CONSTRAINT ck_paper_accounts_currency_usd CHECK (currency = 'USD'),
           CONSTRAINT ck_paper_accounts_model_fixed
             CHECK (account_model = 'cash' AND position_model = 'long_only'),
@@ -266,6 +284,8 @@ def _create_orders_and_risk() -> None:
           CONSTRAINT uq_paper_order_batches_hash UNIQUE (batch_hash),
           CONSTRAINT uq_paper_order_batches_id_account_decision
             UNIQUE (id, account_id, strategy_decision_id),
+          CONSTRAINT uq_paper_order_batches_id_account_policy
+            UNIQUE (id, account_id, risk_policy_id),
           CONSTRAINT fk_paper_order_batches_decision
             FOREIGN KEY (strategy_decision_id, account_id)
             REFERENCES strategy_decisions(id, account_id),
@@ -353,6 +373,9 @@ def _create_orders_and_risk() -> None:
           CONSTRAINT pk_paper_orders PRIMARY KEY (id),
           CONSTRAINT uq_paper_orders_account_client UNIQUE (account_id, client_order_id),
           CONSTRAINT uq_paper_orders_id_account UNIQUE (id, account_id),
+          CONSTRAINT uq_paper_orders_id_batch_account UNIQUE (id, batch_id, account_id),
+          CONSTRAINT uq_paper_orders_id_account_instrument
+            UNIQUE (id, account_id, instrument_id),
           CONSTRAINT fk_paper_orders_batch
             FOREIGN KEY (batch_id, account_id, strategy_decision_id)
             REFERENCES paper_order_batches(id, account_id, strategy_decision_id),
@@ -432,17 +455,23 @@ def _create_orders_and_risk() -> None:
           CONSTRAINT uq_risk_evaluations_order UNIQUE (order_id),
           CONSTRAINT uq_risk_evaluations_id_account UNIQUE (id, account_id),
           CONSTRAINT fk_risk_evaluations_order
-            FOREIGN KEY (order_id, account_id) REFERENCES paper_orders(id, account_id),
-          CONSTRAINT fk_risk_evaluations_batch FOREIGN KEY (batch_id)
-            REFERENCES paper_order_batches(id),
-          CONSTRAINT fk_risk_evaluations_policy FOREIGN KEY (risk_policy_id)
-            REFERENCES risk_policies(id),
+            FOREIGN KEY (order_id, batch_id, account_id)
+            REFERENCES paper_orders(id, batch_id, account_id),
+          CONSTRAINT fk_risk_evaluations_batch
+            FOREIGN KEY (batch_id, account_id, risk_policy_id)
+            REFERENCES paper_order_batches(id, account_id, risk_policy_id),
           CONSTRAINT ck_risk_evaluations_outcome_allowed
             CHECK (outcome IN ('approved','reduced','rejected')),
           CONSTRAINT ck_risk_evaluations_quantities CHECK (
             desired_quantity > 0 AND trunc(desired_quantity) = desired_quantity
             AND approved_quantity >= 0 AND trunc(approved_quantity) = approved_quantity
             AND approved_quantity <= desired_quantity
+          ),
+          CONSTRAINT ck_risk_evaluations_outcome_quantity_binding CHECK (
+            (outcome = 'approved' AND approved_quantity = desired_quantity)
+            OR (outcome = 'reduced' AND approved_quantity > 0
+              AND approved_quantity < desired_quantity)
+            OR (outcome = 'rejected' AND approved_quantity = 0)
           ),
           CONSTRAINT ck_risk_evaluations_amounts CHECK (
             reference_close > 0 AND worst_price > 0
@@ -508,8 +537,9 @@ def _create_orders_and_risk() -> None:
             REFERENCES risk_evaluations(id, account_id),
           CONSTRAINT fk_risk_price_inputs_instrument FOREIGN KEY (instrument_id)
             REFERENCES instruments(id),
-          CONSTRAINT fk_risk_price_inputs_authority FOREIGN KEY (price_authority_id)
-            REFERENCES price_bar_set_authorities(id),
+          CONSTRAINT fk_risk_price_inputs_authority
+            FOREIGN KEY (price_authority_id, source, content_hash)
+            REFERENCES price_bar_set_authorities(id, source, content_hash),
           CONSTRAINT ck_risk_evaluation_price_inputs_close_positive CHECK (close > 0),
           CONSTRAINT ck_risk_evaluation_price_inputs_instrument_scope CHECK (
             market = 'US' AND currency = 'USD'
@@ -540,8 +570,11 @@ def _create_orders_and_risk() -> None:
             REFERENCES risk_evaluations(id, account_id),
           CONSTRAINT fk_risk_sector_inputs_instrument FOREIGN KEY (instrument_id)
             REFERENCES instruments(id),
-          CONSTRAINT fk_risk_sector_inputs_exposure FOREIGN KEY (sector_exposure_id)
-            REFERENCES sector_exposures(id),
+          CONSTRAINT fk_risk_sector_inputs_exposure
+            FOREIGN KEY (sector_exposure_id, instrument_id, sector, weight, content_hash)
+            REFERENCES sector_exposures(
+              id, instrument_id, sector_code, weight, content_hash
+            ),
           CONSTRAINT ck_risk_evaluation_sector_inputs_weight
             CHECK (weight > 0 AND weight <= 1),
           CONSTRAINT ck_risk_evaluation_sector_inputs_hash_canonical
@@ -567,6 +600,8 @@ def _create_orders_and_risk() -> None:
           CONSTRAINT pk_risk_query_authorities PRIMARY KEY (id),
           CONSTRAINT uq_risk_query_authorities_scope
             UNIQUE (source_policy_id, universe_snapshot_id, decision_session, kind),
+          CONSTRAINT uq_risk_query_authorities_proof_binding
+            UNIQUE (id, kind, complete, available_at, content_hash),
           CONSTRAINT fk_risk_query_authorities_source_policy
             FOREIGN KEY (source_policy_id) REFERENCES source_policies(id),
           CONSTRAINT fk_risk_query_authorities_universe
@@ -609,7 +644,10 @@ def _create_orders_and_risk() -> None:
             FOREIGN KEY (risk_evaluation_id, account_id)
             REFERENCES risk_evaluations(id, account_id),
           CONSTRAINT fk_risk_query_proofs_authority
-            FOREIGN KEY (authority_id) REFERENCES risk_query_authorities(id),
+            FOREIGN KEY (authority_id, kind, complete, available_at, content_hash)
+            REFERENCES risk_query_authorities(
+              id, kind, complete, available_at, content_hash
+            ),
           CONSTRAINT ck_risk_evaluation_query_proofs_kind_allowed
             CHECK (kind IN ('corporate_action','suspension','delisting')),
           CONSTRAINT ck_risk_evaluation_query_proofs_complete CHECK (complete),
@@ -661,6 +699,8 @@ def _create_ledger_and_reservations() -> None:
             UNIQUE (account_id, transaction_hash),
           CONSTRAINT uq_paper_ledger_transactions_id_account
             UNIQUE (id, account_id),
+          CONSTRAINT uq_paper_ledger_transactions_id_account_order
+            UNIQUE (id, account_id, order_id),
           CONSTRAINT fk_paper_ledger_transactions_account FOREIGN KEY (account_id)
             REFERENCES paper_accounts(id),
           CONSTRAINT fk_paper_ledger_transactions_order
@@ -732,8 +772,8 @@ def _create_ledger_and_reservations() -> None:
           CONSTRAINT fk_paper_reservations_order
             FOREIGN KEY (order_id, account_id) REFERENCES paper_orders(id, account_id),
           CONSTRAINT fk_paper_reservations_ledger_transaction
-            FOREIGN KEY (ledger_transaction_id, account_id)
-            REFERENCES paper_ledger_transactions(id, account_id),
+            FOREIGN KEY (ledger_transaction_id, account_id, order_id)
+            REFERENCES paper_ledger_transactions(id, account_id, order_id),
           CONSTRAINT fk_paper_reservations_instrument FOREIGN KEY (instrument_id)
             REFERENCES instruments(id),
           CONSTRAINT ck_paper_reservations_amount_positive CHECK (amount > 0),
@@ -797,14 +837,19 @@ def _create_task19_contract_tables() -> None:
           CONSTRAINT pk_paper_fills PRIMARY KEY (id),
           CONSTRAINT uq_paper_fills_order_seq UNIQUE (order_id, fill_seq),
           CONSTRAINT uq_paper_fills_id_account UNIQUE (id, account_id),
+          CONSTRAINT uq_paper_fills_id_account_instrument
+            UNIQUE (id, account_id, instrument_id),
           CONSTRAINT fk_paper_fills_order
-            FOREIGN KEY (order_id, account_id) REFERENCES paper_orders(id, account_id),
+            FOREIGN KEY (order_id, account_id, instrument_id)
+            REFERENCES paper_orders(id, account_id, instrument_id),
           CONSTRAINT fk_paper_fills_instrument FOREIGN KEY (instrument_id)
             REFERENCES instruments(id),
+          CONSTRAINT fk_paper_fills_source_authority FOREIGN KEY (source_authority_id)
+            REFERENCES price_bar_set_authorities(id),
           CONSTRAINT ck_paper_fills_seq_positive CHECK (fill_seq >= 1),
           CONSTRAINT ck_paper_fills_values_positive CHECK (
             quantity > 0 AND trunc(quantity) = quantity
-            AND price > 0 AND notional > 0 AND fee >= 0
+            AND price > 0 AND notional > 0 AND notional = quantity * price AND fee >= 0
           ),
           CONSTRAINT ck_paper_fills_hashes_canonical CHECK (
             execution_model_hash ~ '^[0-9a-f]{64}$'
@@ -835,11 +880,18 @@ def _create_task19_contract_tables() -> None:
           CONSTRAINT fk_paper_position_events_instrument FOREIGN KEY (instrument_id)
             REFERENCES instruments(id),
           CONSTRAINT fk_paper_position_events_fill
-            FOREIGN KEY (source_fill_id, account_id) REFERENCES paper_fills(id, account_id),
+            FOREIGN KEY (source_fill_id, account_id, instrument_id)
+            REFERENCES paper_fills(id, account_id, instrument_id),
           CONSTRAINT ck_paper_position_adjustment_events_seq_positive CHECK (event_seq >= 1),
           CONSTRAINT ck_paper_position_adjustment_events_type_allowed
             CHECK (event_type IN
               ('fill','split','dividend','delisting','correction')),
+          CONSTRAINT ck_paper_position_adjustment_events_fill_source_binding CHECK (
+            (event_type = 'fill' AND source_fill_id IS NOT NULL)
+            OR (event_type IN ('split','dividend','delisting')
+              AND source_fill_id IS NULL)
+            OR event_type = 'correction'
+          ),
           CONSTRAINT ck_paper_position_adjustment_events_quantity_whole
             CHECK (trunc(quantity_delta) = quantity_delta),
           CONSTRAINT ck_paper_position_adjustment_events_hash_canonical
@@ -936,6 +988,121 @@ def _create_database_guards() -> None:
             f"BEFORE UPDATE OR DELETE ON {table_name} FOR EACH ROW "
             "EXECUTE FUNCTION nexus_reject_paper_fact_mutation()"
         )
+
+    op.execute(
+        """
+        CREATE FUNCTION nexus_risk_evaluation_root_valid()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          order_fact paper_orders%ROWTYPE;
+        BEGIN
+          SELECT * INTO order_fact FROM paper_orders WHERE id = NEW.order_id;
+          IF order_fact.risk_outcome IS DISTINCT FROM NEW.outcome
+             OR order_fact.target_weight IS DISTINCT FROM NEW.target_weight
+             OR order_fact.reference_close IS DISTINCT FROM NEW.reference_close
+             OR order_fact.worst_price IS DISTINCT FROM NEW.worst_price
+             OR order_fact.quantity IS DISTINCT FROM (CASE
+               WHEN NEW.outcome = 'rejected' THEN NEW.desired_quantity
+               ELSE NEW.approved_quantity
+             END) THEN
+            RAISE EXCEPTION 'risk evaluation does not match its paper order'
+              USING ERRCODE = '23514';
+          END IF;
+          RETURN NULL;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        "CREATE CONSTRAINT TRIGGER trg_risk_evaluations_root "
+        "AFTER INSERT ON risk_evaluations DEFERRABLE INITIALLY DEFERRED "
+        "FOR EACH ROW EXECUTE FUNCTION nexus_risk_evaluation_root_valid()"
+    )
+
+    op.execute(
+        """
+        CREATE FUNCTION nexus_risk_query_proof_root_valid()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          expected_blocked boolean;
+        BEGIN
+          SELECT cardinality(blocked_instrument_ids) > 0 INTO expected_blocked
+          FROM risk_query_authorities WHERE id = NEW.authority_id;
+          IF expected_blocked IS NULL OR NEW.blocked IS DISTINCT FROM expected_blocked THEN
+            RAISE EXCEPTION 'risk query proof does not match its authority'
+              USING ERRCODE = '23514';
+          END IF;
+          RETURN NULL;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        "CREATE CONSTRAINT TRIGGER trg_risk_query_proofs_root "
+        "AFTER INSERT ON risk_evaluation_query_proofs DEFERRABLE INITIALLY DEFERRED "
+        "FOR EACH ROW EXECUTE FUNCTION nexus_risk_query_proof_root_valid()"
+    )
+
+    op.execute(
+        """
+        CREATE FUNCTION nexus_paper_reservation_root_valid()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          order_side varchar(10);
+          order_instrument uuid;
+          transaction_type_value varchar(30);
+          reference_type_value varchar(30);
+          entry_count integer;
+          reserved_debit numeric(38,12);
+          available_credit numeric(38,12);
+        BEGIN
+          SELECT side, instrument_id INTO order_side, order_instrument
+          FROM paper_orders WHERE id = NEW.order_id;
+          IF NEW.reservation_type = 'position' THEN
+            IF order_side IS DISTINCT FROM 'sell'
+               OR order_instrument IS DISTINCT FROM NEW.instrument_id THEN
+              RAISE EXCEPTION 'paper position reservation does not match its sell order'
+                USING ERRCODE = '23514';
+            END IF;
+          ELSE
+            SELECT transaction_type, reference_type
+              INTO transaction_type_value, reference_type_value
+            FROM paper_ledger_transactions WHERE id = NEW.ledger_transaction_id;
+            SELECT count(*),
+                   COALESCE(sum(debit_amount) FILTER (
+                     WHERE account_code = 'asset.cash.reserved.usd'
+                   ), 0),
+                   COALESCE(sum(credit_amount) FILTER (
+                     WHERE account_code = 'asset.cash.available.usd'
+                   ), 0)
+              INTO entry_count, reserved_debit, available_credit
+            FROM paper_ledger_entries WHERE transaction_id = NEW.ledger_transaction_id;
+            IF order_side IS DISTINCT FROM 'buy'
+               OR transaction_type_value IS DISTINCT FROM 'cash_reservation'
+               OR reference_type_value IS DISTINCT FROM 'cash_reservation'
+               OR entry_count <> 2
+               OR reserved_debit IS DISTINCT FROM NEW.amount
+               OR available_credit IS DISTINCT FROM NEW.amount THEN
+              RAISE EXCEPTION 'paper cash reservation does not match its buy order ledger'
+                USING ERRCODE = '23514';
+            END IF;
+          END IF;
+          RETURN NULL;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        "CREATE CONSTRAINT TRIGGER trg_paper_reservations_root "
+        "AFTER INSERT ON paper_reservations DEFERRABLE INITIALLY DEFERRED "
+        "FOR EACH ROW EXECUTE FUNCTION nexus_paper_reservation_root_valid()"
+    )
 
     op.execute(
         """
@@ -1089,6 +1256,7 @@ def _create_database_guards() -> None:
             LEFT JOIN paper_ledger_entries entry
               ON entry.ledger_account_id = account.id
             WHERE account.paper_account_id = account_ref
+              AND account.code <> 'income.realized_pnl.usd'
             GROUP BY account.id, account.normal_side
             HAVING CASE account.normal_side
               WHEN 'debit' THEN
@@ -1372,6 +1540,7 @@ def _seed_internal_paper_account() -> None:
 
 def upgrade() -> None:
     """Upgrade schema."""
+    _create_parent_bindings()
     _create_identity_policy_and_decisions()
     _create_orders_and_risk()
     _create_ledger_and_reservations()
@@ -1382,6 +1551,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema without mutating pre-existing account or portfolio roots."""
+    op.execute("DROP TRIGGER trg_paper_reservations_root ON paper_reservations")
+    op.execute("DROP FUNCTION nexus_paper_reservation_root_valid()")
+    op.execute("DROP TRIGGER trg_risk_query_proofs_root ON risk_evaluation_query_proofs")
+    op.execute("DROP FUNCTION nexus_risk_query_proof_root_valid()")
+    op.execute("DROP TRIGGER trg_risk_evaluations_root ON risk_evaluations")
+    op.execute("DROP FUNCTION nexus_risk_evaluation_root_valid()")
     op.execute("DROP TRIGGER trg_strategy_decision_targets_weights ON strategy_decision_targets")
     op.execute("DROP TRIGGER trg_strategy_decisions_weights ON strategy_decisions")
     op.execute("DROP FUNCTION nexus_strategy_decision_weights_complete()")
@@ -1400,3 +1575,18 @@ def downgrade() -> None:
     op.execute("DROP FUNCTION nexus_reject_paper_fact_mutation()")
     for table_name in reversed(_PAPER_TABLES):
         op.drop_table(table_name)
+    op.drop_constraint(
+        "uq_sector_exposures_id_instrument_sector_weight_hash",
+        "sector_exposures",
+        type_="unique",
+    )
+    op.drop_constraint(
+        "uq_price_bar_set_authorities_id_source_hash",
+        "price_bar_set_authorities",
+        type_="unique",
+    )
+    op.drop_constraint(
+        "uq_portfolios_id_account",
+        "portfolios",
+        type_="unique",
+    )

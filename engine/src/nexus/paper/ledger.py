@@ -23,6 +23,7 @@ _EXPECTED_NORMAL_SIDES = {
     "income.dividend.usd": "credit",
     "expense.fees.usd": "debit",
 }
+_SIGNED_BALANCE_ACCOUNTS = frozenset({"income.realized_pnl.usd"})
 
 
 def _validate_catalog(ledger: Ledger) -> dict[str, LedgerAccount]:
@@ -110,7 +111,10 @@ def post_ledger_transaction(
     _validate_transaction(transaction, ledger=ledger, accounts=accounts)
     updated = ledger.model_copy(update={"transactions": (*ledger.transactions, transaction)})
     balances = balance_ledger(updated)
-    if any(balance < 0 for balance in balances.values()):
+    if any(
+        balance < 0 and code not in _SIGNED_BALANCE_ACCOUNTS
+        for code, balance in balances.items()
+    ):
         raise ValueError("ledger posting would create a negative ledger balance")
     return updated
 

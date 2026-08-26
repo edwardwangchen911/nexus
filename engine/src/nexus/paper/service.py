@@ -1051,6 +1051,17 @@ async def create_paper_order_batch(
     decision_record = await session.get(StrategyDecisionRecord, strategy_decision_id)
     if decision_record is None or decision_record.account_id != account_id:
         raise PaperBatchError("STRATEGY_DECISION_INVALID")
+    newer_decision_id = await session.scalar(
+        select(StrategyDecisionRecord.id)
+        .where(
+            StrategyDecisionRecord.account_id == account_id,
+            StrategyDecisionRecord.strategy_version == decision_record.strategy_version,
+            StrategyDecisionRecord.decision_session > decision_record.decision_session,
+        )
+        .limit(1)
+    )
+    if newer_decision_id is not None:
+        raise PaperBatchError("PAPER_BATCH_CONFLICT")
     persisted = await load_forward_strategy_decision(
         session,
         account_id=account_id,

@@ -66,6 +66,7 @@ Task 18 实现一个与复星只读账户完全隔离的、初始资金为 USD 1
 10. 同一 account_id 与 strategy_decision_id 最多产生一个 order batch。
 11. 任意异常都不能产生未审计 submitted 订单，也不能留下孤立预留或不平衡记账。
 12. Task 18 验收时 paper_fills、position adjustment、position snapshot 和 performance snapshot 均为零行。
+13. 同一账户和策略版本已有更晚 decision_session 时，未建立批次的旧决策视为已被替代，不能追溯创建新订单；已存在批次仍可按原幂等结果重放。
 
 ## 4. 信任边界与模块
 
@@ -321,6 +322,8 @@ Task 18 仅写 reserved：
 
 paper_ledger_transactions 与 entries 都是 append-only。每个 entry 只允许 debit_amount 或 credit_amount 之一大于零，另一个为零；币种和科目必须匹配。deferred trigger 在事务末校验每笔 transaction 借贷相等且总额大于零。数据库触发器防止 UPDATE 和 DELETE，测试必须证明绕过 ORM 仍失败；本任务不新增角色、GRANT 或 REVOKE。
 
+除 `income.realized_pnl.usd` 外，所有科目按 normal side 折叠后的余额不得为负。已实现盈亏是唯一允许有符号余额的科目：盈利为 credit 正余额，亏损为 debit 后的负余额；放宽该科目不能放宽现金、预留、持仓成本、投入资本、股息或费用的非负约束。
+
 纯函数接口固定为：
 
 ~~~python
@@ -366,6 +369,8 @@ def post_ledger_transaction(
 
 所有金额、权重、价格和数量使用 NUMERIC(38,12)，所有时间使用 UTC timestamptz，业务 ID 使用 UUID。hash 使用 64 字符小写十六进制。每个事件表都有业务唯一键、连续 seq 约束、created_at 和 payload_hash。
 
+凡子表重复 account、portfolio、decision、batch、order、instrument、policy 或 authority 的身份/内容字段，使用组合父键绑定或 deferred root trigger 证明这些字段来自同一父事实。现金预留必须绑定同一买单的两条精确预留分录，仓位预留必须绑定同一卖单标的；成交必须绑定同一订单标的和真实价格 authority，风险评估复制的订单字段也必须一致。
+
 关键唯一约束至少包括：
 
 - strategy_decisions(account_id, strategy_version, decision_session)
@@ -378,7 +383,7 @@ def post_ledger_transaction(
 - reservation events(reservation_id, event_seq)
 - ledger entries(transaction_id, entry_seq)
 
-旧迁移不修改。downgrade 只按依赖逆序删除 0014 自有表和触发器；不会删除或改写已有账户、组合、行情、策略、Shadow、审计或 outbox 数据。
+旧迁移文件不修改。0014 只在已有 Portfolio、PriceBarSetAuthority 和 SectorExposure 上增加供组合外键引用的冗余唯一约束，不改写任何既有行；downgrade 在删除 0014 自有表和触发器后移除这三个约束，不会删除或改写已有账户、组合、行情、策略、Shadow、审计或 outbox 数据。
 
 ## 16. 原子服务、幂等与并发
 

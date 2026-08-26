@@ -189,6 +189,46 @@ def test_post_rejects_negative_account_balance() -> None:
         post_ledger_transaction(funded, reserve)
 
 
+def test_post_allows_signed_realized_pnl_for_a_loss() -> None:
+    funded = post_ledger_transaction(_ledger(), _funding(amount=Decimal("100")))
+    draft = LedgerTransaction(
+        transaction_id=UUID(int=300),
+        account_id=PAPER_ACCOUNT_ID,
+        transaction_type="adjustment",
+        reference_type="adjustment",
+        reference_hash="3" * 64,
+        occurred_at=NOW,
+        entries=(
+            LedgerEntry(
+                entry_id=UUID(int=301),
+                entry_seq=1,
+                account_code="income.realized_pnl.usd",
+                currency="USD",
+                debit_amount=Decimal("25"),
+                credit_amount=Decimal("0"),
+            ),
+            LedgerEntry(
+                entry_id=UUID(int=302),
+                entry_seq=2,
+                account_code="asset.cash.available.usd",
+                currency="USD",
+                debit_amount=Decimal("0"),
+                credit_amount=Decimal("25"),
+            ),
+        ),
+        transaction_hash="0" * 64,
+    )
+    loss = draft.model_copy(
+        update={"transaction_hash": canonical_paper_ledger_transaction_hash(draft)}
+    )
+
+    posted = post_ledger_transaction(funded, loss)
+
+    balances = balance_ledger(posted)
+    assert balances["income.realized_pnl.usd"] == Decimal("-25")
+    assert balances["asset.cash.available.usd"] == Decimal("75")
+
+
 def test_ledger_catalog_rejects_wrong_normal_side() -> None:
     invalid = _ledger().model_copy(
         update={
