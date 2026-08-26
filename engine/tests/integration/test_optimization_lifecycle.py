@@ -131,15 +131,23 @@ async def test_shadow_and_reject_api_require_idempotency_and_replay_stably(
     assert mismatched.json()["error"]["code"] == "VALIDATION_ERROR"
     assert first.status_code == replay.status_code == 200
     assert set(first.json()["meta"]) == {"request_id", "schema_version", "as_of"}
-    assert (
-        first.json()["data"]
-        == replay.json()["data"]
-        == {
-            "proposal_group_id": str(group_id),
-            "status": "shadowing",
-            "version": 2,
-        }
-    )
+    first_data = first.json()["data"]
+    assert first_data == replay.json()["data"]
+    assert set(first_data) == {
+        "proposal_group_id",
+        "shadow_group_id",
+        "status",
+        "version",
+        "start_session",
+        "evaluation_end_session",
+        "grace_end_session",
+    }
+    assert first_data["proposal_group_id"] == str(group_id)
+    assert UUID(first_data["shadow_group_id"]) != group_id
+    assert (first_data["status"], first_data["version"]) == ("shadowing", 2)
+    assert first_data["start_session"] == seed.calendar_sessions[0].isoformat()
+    assert first_data["evaluation_end_session"] == seed.calendar_sessions[62].isoformat()
+    assert first_data["grace_end_session"] == seed.calendar_sessions[67].isoformat()
     assert changed_body.status_code == changed_target.status_code == 409
     assert changed_body.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
     assert changed_target.json()["error"]["code"] == "VERSION_CONFLICT"

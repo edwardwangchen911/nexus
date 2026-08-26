@@ -1,4 +1,4 @@
-"""Canonical content-addressing for append-only Proposal Shadow facts."""
+"""Canonical content-addressing tests for append-only Proposal Shadow facts."""
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
