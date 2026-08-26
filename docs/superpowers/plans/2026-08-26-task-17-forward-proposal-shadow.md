@@ -299,15 +299,15 @@ def decide_terminal_action(
 
 **Steps**
 
-- [ ] Add metric tests for `[100, nav_1, ..., nav_n]`, sample standard deviation `(n-1) * sqrt(252)`, max drawdown, positive improvement semantics, worst-session tie-break `(return asc, session asc)`, cumulative turnover, fee index points, and fewer-than-two-return volatility = 0.
-- [ ] Add unknown tests proving incomplete input returns `value=None` with a stable non-empty reason and never converts missing data to zero.
-- [ ] Add canonical-hash tests that insertion order does not matter, changing any authority revision/available time/negative evidence changes the hash, and IDs/creation timestamps excluded by schema do not change it.
-- [ ] Add state-machine tests for observation at 5/21, validation only at complete 63, immediate expiration for permanent first-session execution blockers, grace-only data completion, and expiration at grace exhaustion.
-- [ ] Add Hypothesis properties for fixed variant order, hash determinism, metric bounds (`drawdown in [-1,0]`, nonnegative turnover/fees/volatility), and no terminal result before the specified gates.
-- [ ] Run `uv run --package nexus-engine pytest engine/tests/unit/shadow engine/tests/property/test_shadow_properties.py -q`; confirm failure before the package exists.
-- [ ] Implement the models, validators, canonicalizers, metric formulas, and pure terminal decision. Do not import optimizer, SQLAlchemy, Agent, paper, broker, or API modules.
-- [ ] Rerun focused tests, Ruff, and Mypy for `nexus.shadow`; expect exit 0.
-- [ ] Commit with `feat(engine): add proposal shadow domain model`.
+- [x] Add metric tests for `[100, nav_1, ..., nav_n]`, sample standard deviation `(n-1) * sqrt(252)`, max drawdown, positive improvement semantics, worst-session tie-break `(return asc, session asc)`, cumulative turnover, fee index points, and fewer-than-two-return volatility = 0.
+- [x] Add unknown tests proving incomplete input returns `value=None` with a stable non-empty reason and never converts missing data to zero.
+- [x] Add canonical-hash tests that insertion order does not matter, changing any authority revision/available time/negative evidence changes the hash, and IDs/creation timestamps excluded by schema do not change it.
+- [x] Add state-machine tests for observation at 5/21, validation only at complete 63, immediate expiration for permanent first-session execution blockers, grace-only data completion, and expiration at grace exhaustion.
+- [x] Add Hypothesis properties for fixed variant order, hash determinism, metric bounds (`drawdown in [-1,0]`, nonnegative turnover/fees/volatility), and no terminal result before the specified gates.
+- [x] Run `uv run --package nexus-engine pytest engine/tests/unit/shadow engine/tests/property/test_shadow_properties.py -q`; confirm failure before the package exists.
+- [x] Implement the models, validators, canonicalizers, metric formulas, and pure terminal decision. Do not import optimizer, SQLAlchemy, Agent, paper, broker, or API modules.
+- [x] Rerun focused tests, Ruff, and Mypy for `nexus.shadow`; expect exit 0.
+- [x] Commit with `feat(engine): add proposal shadow domain model`.
 
 ---
 
