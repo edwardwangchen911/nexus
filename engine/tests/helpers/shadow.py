@@ -3,18 +3,25 @@
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import exchange_calendars
 from nexus.backtest.engine import exchange_calendar_content_hash
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
+from nexus.market.price_bar_authority import finalize_price_bar_set
 from nexus.optimizer.cost_policy import COST_POLICY_ID
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
 )
-from nexus.persistence.models.data import DataSnapshot
+from nexus.persistence.models.data import (
+    DataArtifact,
+    DataSnapshot,
+    PriceBarRecord,
+    PriceSeriesManifest,
+)
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.market import Instrument
 from nexus.persistence.models.optimization import (
@@ -24,8 +31,11 @@ from nexus.persistence.models.optimization import (
     ProposalComparisonRecord,
     ProposalPositionRecord,
 )
+from nexus.persistence.models.research import CorporateActionRecord, ResearchEvidenceRef
 from nexus.persistence.session import session_factory
 from nexus.quality.source_policy import SOURCE_POLICY_ID
+from nexus.shadow.canonical import shadow_source_query_content_hash
+from nexus.shadow.start import ShadowStartResult, start_proposal_shadow
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,6 +63,25 @@ class ShadowEligibleSeed:
 class ShadowCalendarSeed:
     calendar_id: UUID
     sessions: tuple[date, ...]
+
+
+@dataclass(frozen=True)
+class ShadowStartedSeed:
+    eligible: ShadowEligibleSeed
+    start: ShadowStartResult
+
+
+@dataclass(frozen=True)
+class SeededShadowPriceAuthority:
+    bar_id: UUID
+    authority_id: UUID
+    manifest_id: UUID
+
+
+@dataclass(frozen=True)
+class SeededShadowEvent:
+    event_id: UUID
+    evidence_hash: str
 
 
 async def seed_shadow_calendar(
@@ -104,6 +133,218 @@ async def seed_shadow_calendar(
         for session_date in calendar_sessions
     )
     return ShadowCalendarSeed(calendar_id=calendar.id, sessions=calendar_sessions)
+
+
+async def seed_started_shadow(database_url: str) -> ShadowStartedSeed:
+    """Create and atomically start one executable Shadow root."""
+    eligible = await seed_shadow_eligible_group(database_url)
+    factory = session_factory(settings(database_url))
+    async with factory() as session, session.begin():
+        started = await start_proposal_shadow(
+            session,
+            actor_id="shadow-authority-fixture",
+            idempotency_key=f"start-{uuid4()}",
+            request_hash="9" * 64,
+            group_id=eligible.group_id,
+            expected_version=1,
+        )
+    return ShadowStartedSeed(eligible=eligible, start=started)
+
+
+async def seed_shadow_price_authority(
+    session: AsyncSession,
+    *,
+    instrument_id: UUID,
+    session_date: date,
+    available_at: datetime,
+    source: str = "alpaca",
+    delivery_mode: str = "delayed",
+    adjustment: str = "raw",
+    revision: str = "1",
+    open_price: str = "100",
+    close_price: str = "101",
+) -> SeededShadowPriceAuthority:
+    """Insert one database-finalized one-session Bar authority."""
+    manifest_id = uuid4()
+    artifact_id = uuid4()
+    artifact_hash = sha256(str(artifact_id).encode()).hexdigest()
+    observed_at = available_at - timedelta(minutes=15)
+    received_at = available_at + timedelta(seconds=1)
+    feed = "sip" if source == "alpaca" else "fixture-feed"
+    manifest = PriceSeriesManifest(
+        id=manifest_id,
+        evidence_ref_id=None,
+        data_artifact_id=artifact_id,
+        instrument=str(instrument_id),
+        source=source,
+        feed=feed,
+        delivery_mode=delivery_mode,
+        adjustment=adjustment,
+        interval="1Day",
+        start_at=observed_at,
+        end_at=observed_at,
+        row_count=1,
+    )
+    open_value = Decimal(open_price)
+    close_value = Decimal(close_price)
+    bar = PriceBarRecord(
+        id=uuid4(),
+        price_series_manifest_id=manifest_id,
+        instrument_id=instrument_id,
+        session=session_date,
+        open=open_value,
+        high=max(open_value, close_value) + Decimal("1"),
+        low=min(open_value, close_value) - Decimal("1"),
+        close=close_value,
+        volume=Decimal("1000000"),
+        observed_at=observed_at,
+        available_at=available_at,
+        received_at=received_at,
+        revision=revision,
+        quality_flags=[],
+    )
+    session.add(
+        DataArtifact(
+            id=artifact_id,
+            uri=f"memory://sha256/{artifact_hash}",
+            sha256=artifact_hash,
+            byte_size=512,
+            mime_type="application/vnd.apache.parquet",
+            schema_version="price_bars_v1",
+            source=source,
+            observed_at=observed_at,
+            available_at=available_at,
+            received_at=received_at,
+        )
+    )
+    session.add(manifest)
+    await session.flush()
+    session.add(bar)
+    await session.flush()
+    finalized = await finalize_price_bar_set(session, manifest)
+    if finalized is None:
+        raise RuntimeError("Shadow Bar fixture did not produce an authority")
+    authority, _ = finalized
+    return SeededShadowPriceAuthority(
+        bar_id=bar.id,
+        authority_id=authority.id,
+        manifest_id=manifest_id,
+    )
+
+
+async def seed_shadow_query_proof(
+    session: AsyncSession,
+    *,
+    shadow_group_id: UUID,
+    session_date: date,
+    kind: str,
+    source: str,
+    delivery_mode: str,
+    instrument_ids: tuple[UUID, ...],
+    complete: bool,
+    available_at: datetime,
+    member_ids: tuple[UUID, ...] = (),
+    negative_instrument_ids: tuple[UUID, ...] = (),
+) -> UUID:
+    """Insert a sanitized query proof; no provider payload is retained."""
+    query_hash = shadow_source_query_content_hash(
+        shadow_group_id=shadow_group_id,
+        session=session_date,
+        kind=kind,
+        source=source,
+        delivery_mode=delivery_mode,
+        instrument_ids=instrument_ids,
+        complete=complete,
+        member_ids=member_ids,
+        negative_instrument_ids=negative_instrument_ids,
+    )
+    proof = DataSnapshot(
+        id=uuid4(),
+        source=source,
+        provider_object_id=f"shadow-query:{uuid4()}",
+        revision=query_hash,
+        observed_at=available_at - timedelta(seconds=1),
+        available_at=available_at,
+        received_at=available_at + timedelta(microseconds=1),
+        schema_version="shadow_source_query_v1",
+        payload={
+            "schema": "shadow_source_query_v1",
+            "shadow_group_id": str(shadow_group_id),
+            "session": session_date.isoformat(),
+            "kind": kind,
+            "source": source,
+            "delivery_mode": delivery_mode,
+            "instrument_ids": [
+                str(value)
+                for value in sorted(instrument_ids, key=lambda item: item.int)
+            ],
+            "complete": complete,
+            "member_ids": [
+                str(value) for value in sorted(member_ids, key=lambda item: item.int)
+            ],
+            "negative_instrument_ids": [
+                str(value)
+                for value in sorted(
+                    negative_instrument_ids, key=lambda item: item.int
+                )
+            ],
+            "query_hash": query_hash,
+        },
+    )
+    session.add(proof)
+    await session.flush()
+    return proof.id
+
+
+async def seed_shadow_event(
+    session: AsyncSession,
+    *,
+    instrument_id: UUID,
+    source: str,
+    provider_event_id: str,
+    action_type: str,
+    process_date: date,
+    available_at: datetime,
+    ex_date: date | None = None,
+    record_date: date | None = None,
+    payable_date: date | None = None,
+    rate: str | None = None,
+    revision: str = "1",
+) -> SeededShadowEvent:
+    """Insert one content-addressed corporate-action event authority."""
+    evidence_hash = sha256(
+        f"{source}:{provider_event_id}:{revision}".encode()
+    ).hexdigest()
+    evidence = ResearchEvidenceRef(
+        id=uuid4(),
+        source=source,
+        provider_object_id=provider_event_id,
+        revision=revision,
+        available_at=available_at,
+        location=f"memory://sha256/{evidence_hash}",
+        content_hash=evidence_hash,
+        byte_length=256,
+    )
+    session.add(evidence)
+    await session.flush()
+    event = CorporateActionRecord(
+        id=uuid4(),
+        evidence_ref_id=evidence.id,
+        instrument_id=instrument_id,
+        source=source,
+        provider_event_id=provider_event_id,
+        action_type=action_type,
+        status="complete",
+        process_date=process_date,
+        ex_date=ex_date,
+        record_date=record_date,
+        payable_date=payable_date,
+        rate=None if rate is None else Decimal(rate),
+        revision=revision,
+    )
+    session.add(event)
+    await session.flush()
+    return SeededShadowEvent(event_id=event.id, evidence_hash=evidence_hash)
 
 
 async def seed_shadow_eligible_group(

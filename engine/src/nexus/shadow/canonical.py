@@ -82,6 +82,62 @@ def shadow_session_content_hash(value: ShadowSessionHashInput) -> str:
     )
 
 
+def shadow_source_query_content_hash(
+    *,
+    shadow_group_id: UUID,
+    session: date,
+    kind: str,
+    source: str,
+    delivery_mode: str,
+    instrument_ids: tuple[UUID, ...],
+    complete: bool,
+    member_ids: tuple[UUID, ...],
+    negative_instrument_ids: tuple[UUID, ...],
+) -> str:
+    """Hash one sanitized, exact provider/source query proof."""
+    if kind not in {"price_bars", "corporate_actions"}:
+        raise ValueError("shadow query kind is unsupported")
+    if not source or not delivery_mode:
+        raise ValueError("shadow query source and delivery mode are required")
+    ordered_instruments = tuple(sorted(instrument_ids, key=lambda item: item.int))
+    ordered_members = tuple(sorted(member_ids, key=lambda item: item.int))
+    ordered_negative = tuple(
+        sorted(negative_instrument_ids, key=lambda item: item.int)
+    )
+    if (
+        len(ordered_instruments) != len(set(ordered_instruments))
+        or len(ordered_members) != len(set(ordered_members))
+        or len(ordered_negative) != len(set(ordered_negative))
+        or not set(ordered_negative) <= set(ordered_instruments)
+        or (not complete and (ordered_members or ordered_negative))
+    ):
+        raise ValueError("shadow query proof members are invalid")
+    return _content_hash(
+        {
+            "schema": "shadow_source_query_sha256_v1",
+            "shadow_group_id": shadow_group_id,
+            "session": session,
+            "kind": kind,
+            "source": source,
+            "delivery_mode": delivery_mode,
+            "instrument_ids": ordered_instruments,
+            "complete": complete,
+            "member_ids": ordered_members,
+            "negative_instrument_ids": ordered_negative,
+        }
+    )
+
+
+def shadow_query_bundle_content_hash(values: tuple[object, ...]) -> str:
+    """Hash already-canonical source summaries without provider payloads."""
+    return _content_hash(
+        {
+            "schema": "shadow_query_bundle_sha256_v1",
+            "source_queries": values,
+        }
+    )
+
+
 def target_weights_content_hash(
     targets: tuple[TargetWeight, ...],
     cash_weight: Decimal,

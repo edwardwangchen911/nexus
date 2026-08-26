@@ -575,17 +575,24 @@ For initial execution, a complete source query with no eligible Bar creates a ca
 
 Event order passed to the shared kernel is fixed: split, dividend entitlement/settlement, resolved delisting, then initial execution outside the event function, then close mark. An action announced after its effective-session decision boundary is not eligible merely because a grace-period `observed_at` is later.
 
+The existing `price_bar_set_sha256_v1` database finalizer admits only Alpaca delayed
+and fixture manifests; it deliberately cannot mint a positive Fosun Bar authority
+without a frozen capability/status binding. Task 17 therefore keeps Fosun first in
+query-proof priority but fails closed on an incomplete Fosun proof and never treats a
+raw Fosun manifest as authority. Positive Fosun Bar admission requires a future
+versioned authority schema carrying that binding; it must not weaken v1 in place.
+
 **Steps**
 
-- [ ] Add fixtures for production/delayed/fixture sources, two revisions with different `available_at`, incomplete query proof, complete negative proof, split/dividend/delisting events, unresolved delisting, and conflicting sources.
-- [ ] Add red integration tests proving exact eligible row selection, no adjusted close, no mixed open/close sources, no `available_at > observed_at`, and stable canonical source/delivery summaries.
-- [ ] Add separate tests proving incomplete query produces no authority, complete negative proof can produce first-session `missing_bar`, and a late revision cannot replace a previously frozen negative input.
-- [ ] Add gap tests: a missing later close prevents authority/NAV; a future session cannot skip it; resolved cash/zero-recovery delisting removes subsequent close requirements; unresolved delisting remains partial.
-- [ ] Add Hypothesis tests varying record insertion order/revisions and prove selected IDs/hash are stable and no future-available row is ever selected.
-- [ ] Run `uv run --package nexus-engine pytest engine/tests/integration/test_shadow_authority_pg.py engine/tests/property/test_shadow_no_lookahead.py -q`; confirm failure before the loader exists.
-- [ ] Implement exact-set selection and canonical `shadow_session_sha256_v1`; keep provider payloads/credentials out of returned reasons and persisted summaries.
-- [ ] Rerun focused tests, Ruff, and Mypy; expect exit 0.
-- [ ] Commit with `feat(engine): freeze proposal shadow session authority`.
+- [x] Add fixtures for production/delayed/fixture sources, two revisions with different `available_at`, incomplete query proof, complete negative proof, split/dividend/delisting events, unresolved delisting, and conflicting sources.
+- [x] Add red integration tests proving exact eligible row selection, no adjusted close, no mixed open/close sources, no `available_at > observed_at`, and stable canonical source/delivery summaries.
+- [x] Add separate tests proving incomplete query produces no authority, complete negative proof can produce first-session `missing_bar`, and a late revision cannot replace a previously frozen negative input.
+- [x] Add gap tests: a missing later close prevents authority/NAV; a future session cannot skip it; resolved cash/zero-recovery delisting removes subsequent close requirements; unresolved delisting remains partial.
+- [x] Add Hypothesis tests varying record insertion order/revisions and prove selected IDs/hash are stable and no future-available row is ever selected.
+- [x] Run `uv run --package nexus-engine pytest engine/tests/integration/test_shadow_authority_pg.py engine/tests/property/test_shadow_no_lookahead.py -q`; confirm failure before the loader exists.
+- [x] Implement exact-set selection and canonical `shadow_session_sha256_v1`; keep provider payloads/credentials out of returned reasons and persisted summaries.
+- [x] Rerun focused tests, Ruff, and Mypy; expect exit 0.
+- [x] Commit with `feat(engine): freeze proposal shadow session authority`.
 
 ---
 
