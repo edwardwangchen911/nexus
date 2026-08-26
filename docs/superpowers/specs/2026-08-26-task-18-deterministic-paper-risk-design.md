@@ -251,7 +251,7 @@ proposed -> risk_rejected
 proposed -> risk_approved -> submitted
 ~~~
 
-awaiting_approval 只属于未来复星模拟盘或实盘；internal_paper 在领域层和数据库触发器都拒绝它。Task 18 也不能写 partially_filled、filled、cancelled、rejected 或 reconciling；这些由 Task 19 或未来外部执行域按权限写入。
+awaiting_approval 只属于未来复星模拟盘或实盘；internal_paper 在领域层和数据库触发器都拒绝它。Task 18 也不能写 partially_filled、filled、cancelled、rejected 或 reconciling；这些由 Task 19 或未来外部执行域的专用应用服务写入。
 
 每个 paper_order_events 使用 order_id 内连续 event_seq，从 1 开始。事件保存 from_status、to_status、occurred_at、actor_kind、reason_code、payload_hash。当前状态由事件折叠得出，paper_orders 不保存可覆盖的 current_status 真相。
 
@@ -314,7 +314,7 @@ Task 18 仅写 reserved：
 
 卖单只冻结数量，不提前产生现金记账。风险拒绝不记账。
 
-paper_ledger_transactions 与 entries 都是 append-only。每个 entry 只允许 debit_amount 或 credit_amount 之一大于零，另一个为零；币种和科目必须匹配。deferred trigger 在事务末校验每笔 transaction 借贷相等且总额大于零。DB role 的 revoke/trigger 防止 UPDATE 和 DELETE，测试必须证明绕过 ORM 仍失败。
+paper_ledger_transactions 与 entries 都是 append-only。每个 entry 只允许 debit_amount 或 credit_amount 之一大于零，另一个为零；币种和科目必须匹配。deferred trigger 在事务末校验每笔 transaction 借贷相等且总额大于零。数据库触发器防止 UPDATE 和 DELETE，测试必须证明绕过 ORM 仍失败；本任务不新增角色、GRANT 或 REVOKE。
 
 纯函数接口固定为：
 
