@@ -21,6 +21,7 @@ _PAPER_TABLES = (
     "strategy_decision_targets",
     "paper_drawdown_lock_events",
     "paper_order_batches",
+    "risk_no_change_evaluations",
     "paper_orders",
     "paper_order_events",
     "risk_evaluations",
@@ -284,6 +285,57 @@ def _create_orders_and_risk() -> None:
     )
     op.execute(
         """
+        CREATE TABLE risk_no_change_evaluations (
+          id uuid NOT NULL,
+          batch_id uuid NOT NULL,
+          account_id uuid NOT NULL,
+          strategy_decision_id uuid NOT NULL,
+          instrument_id uuid NOT NULL,
+          current_quantity numeric(38,12) NOT NULL,
+          target_quantity numeric(38,12) NOT NULL,
+          target_weight numeric(38,12) NOT NULL,
+          strategy_priority integer NOT NULL,
+          reference_close numeric(38,12) NOT NULL,
+          price_authority_id uuid NOT NULL,
+          authority_ids uuid[] NOT NULL,
+          reason_code varchar(100) NOT NULL,
+          input_hash varchar(64) NOT NULL,
+          evidence_hash varchar(64) NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT pk_risk_no_change_evaluations PRIMARY KEY (id),
+          CONSTRAINT uq_risk_no_change_batch_instrument
+            UNIQUE (batch_id, instrument_id),
+          CONSTRAINT fk_risk_no_change_batch
+            FOREIGN KEY (batch_id, account_id, strategy_decision_id)
+            REFERENCES paper_order_batches(id, account_id, strategy_decision_id),
+          CONSTRAINT fk_risk_no_change_instrument FOREIGN KEY (instrument_id)
+            REFERENCES instruments(id),
+          CONSTRAINT fk_risk_no_change_price_authority FOREIGN KEY (price_authority_id)
+            REFERENCES price_bar_set_authorities(id),
+          CONSTRAINT ck_risk_no_change_evaluations_quantity_equal_whole CHECK (
+            current_quantity >= 0 AND trunc(current_quantity) = current_quantity
+            AND target_quantity = current_quantity
+          ),
+          CONSTRAINT ck_risk_no_change_evaluations_weight
+            CHECK (target_weight >= 0 AND target_weight <= 1),
+          CONSTRAINT ck_risk_no_change_evaluations_priority
+            CHECK (strategy_priority BETWEEN 0 AND 2),
+          CONSTRAINT ck_risk_no_change_evaluations_price_positive
+            CHECK (reference_close > 0),
+          CONSTRAINT ck_risk_no_change_evaluations_reason_fixed
+            CHECK (reason_code = 'NO_CHANGE'),
+          CONSTRAINT ck_risk_no_change_evaluations_authorities_nonempty CHECK (
+            cardinality(authority_ids) > 0 AND array_position(authority_ids, NULL) IS NULL
+          ),
+          CONSTRAINT ck_risk_no_change_evaluations_hashes_canonical CHECK (
+            input_hash ~ '^[0-9a-f]{64}$'
+            AND evidence_hash ~ '^[0-9a-f]{64}$'
+          )
+        )
+        """
+    )
+    op.execute(
+        """
         CREATE TABLE paper_orders (
           id uuid NOT NULL,
           batch_id uuid NOT NULL,
@@ -372,6 +424,7 @@ def _create_orders_and_risk() -> None:
           projected_available_cash numeric(38,12) NOT NULL,
           projected_cash_ratio numeric(38,12) NOT NULL,
           projected_name_ratio numeric(38,12) NOT NULL,
+          projected_sector_ratios jsonb NOT NULL,
           input_hash varchar(64) NOT NULL,
           result_hash varchar(64) NOT NULL,
           created_at timestamptz NOT NULL DEFAULT now(),
@@ -395,6 +448,8 @@ def _create_orders_and_risk() -> None:
             reference_close > 0 AND worst_price > 0
             AND reserve_amount >= 0 AND projected_available_cash >= 0
           ),
+          CONSTRAINT ck_risk_evaluations_sector_ratios_object
+            CHECK (jsonb_typeof(projected_sector_ratios) = 'object'),
           CONSTRAINT ck_risk_evaluations_hashes_canonical CHECK (
             input_hash ~ '^[0-9a-f]{64}$' AND result_hash ~ '^[0-9a-f]{64}$'
           )
@@ -436,6 +491,9 @@ def _create_orders_and_risk() -> None:
           account_id uuid NOT NULL,
           instrument_id uuid NOT NULL,
           price_authority_id uuid NOT NULL,
+          market varchar(10) NOT NULL,
+          currency varchar(3) NOT NULL,
+          asset_type varchar(30) NOT NULL,
           close numeric(38,12) NOT NULL,
           source varchar(100) NOT NULL,
           delivery_mode varchar(50) NOT NULL,
@@ -453,6 +511,10 @@ def _create_orders_and_risk() -> None:
           CONSTRAINT fk_risk_price_inputs_authority FOREIGN KEY (price_authority_id)
             REFERENCES price_bar_set_authorities(id),
           CONSTRAINT ck_risk_evaluation_price_inputs_close_positive CHECK (close > 0),
+          CONSTRAINT ck_risk_evaluation_price_inputs_instrument_scope CHECK (
+            market = 'US' AND currency = 'USD'
+            AND asset_type IN ('ETF','common_stock')
+          ),
           CONSTRAINT ck_risk_evaluation_price_inputs_hash_canonical
             CHECK (content_hash ~ '^[0-9a-f]{64}$')
         )

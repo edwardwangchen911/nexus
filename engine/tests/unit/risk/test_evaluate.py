@@ -254,7 +254,11 @@ def test_candidate_derivation_omits_no_change() -> None:
         positions=(_position(TECH_ID, quantity=Decimal("10"), close=Decimal("100")),)
     )
 
-    assert derive_order_candidates(decision, portfolio, _market()) == ()
+    market = _market()
+    candidates = derive_order_candidates(decision, portfolio, market)
+
+    assert candidates == ()
+    assert evaluate_order_batch(candidates, portfolio, market, RiskPolicy.v1()) == ()
 
 
 def test_evaluation_is_independent_of_candidate_input_order() -> None:

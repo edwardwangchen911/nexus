@@ -369,6 +369,7 @@ Use explicit named constraints and ForeignKeyConstraint bindings for root identi
 
 - one-to-one account_id and portfolio_id on paper_accounts;
 - composite parent bindings where a child repeats account_id/order_id/decision_id;
+- a dedicated append-only risk_no_change_evaluations fact for zero deltas, with no paper order;
 - NUMERIC(38,12), UTC timestamptz, canonical hash checks, currency checks, integer quantity checks;
 - all unique constraints from the design;
 - immutable risk_query_authorities roots and a mandatory proof-to-authority foreign key;

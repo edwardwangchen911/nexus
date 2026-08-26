@@ -106,6 +106,7 @@ PAPER_TABLES = {
     "paper_accounts",
     "paper_drawdown_lock_events",
     "paper_order_batches",
+    "risk_no_change_evaluations",
     "paper_orders",
     "paper_order_events",
     "risk_evaluations",

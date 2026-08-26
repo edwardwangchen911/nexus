@@ -342,6 +342,7 @@ def post_ledger_transaction(
 - paper_accounts
 - paper_drawdown_lock_events
 - paper_order_batches
+- risk_no_change_evaluations
 - paper_orders
 - paper_order_events
 - risk_evaluations
@@ -369,6 +370,7 @@ def post_ledger_transaction(
 
 - strategy_decisions(account_id, strategy_version, decision_session)
 - paper_order_batches(account_id, strategy_decision_id)
+- risk_no_change_evaluations(batch_id, instrument_id)
 - paper_orders(account_id, client_order_id)
 - paper_order_events(order_id, event_seq)
 - risk_evaluations(order_id)

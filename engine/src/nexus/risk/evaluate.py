@@ -96,7 +96,10 @@ def _preflight(
         *(position.instrument_id for position in portfolio.positions),
         *(order.instrument_id for order in portfolio.open_orders),
     }
-    if participating != required:
+    # ``required`` can also contain decision targets whose desired delta is zero.
+    # They still need complete point-in-time authority, but correctly produce no
+    # order candidate.
+    if not participating.issubset(required):
         raise RiskBatchRejected("RISK_AUTHORITY_INCOMPLETE")
     prices, sectors = _market_maps(market)
     price_authority = {price.instrument_id: price for price in market.prices}

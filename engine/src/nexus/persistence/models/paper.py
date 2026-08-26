@@ -17,6 +17,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -307,6 +308,70 @@ class PaperOrderBatchRecord(ImmutableCreatedAt, Base):
     evaluated_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
+class RiskNoChangeEvaluationRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "risk_no_change_evaluations"
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_id",
+            "instrument_id",
+            name="uq_risk_no_change_batch_instrument",
+        ),
+        ForeignKeyConstraint(
+            ["batch_id", "account_id", "strategy_decision_id"],
+            [
+                "paper_order_batches.id",
+                "paper_order_batches.account_id",
+                "paper_order_batches.strategy_decision_id",
+            ],
+            name="fk_risk_no_change_batch",
+        ),
+        ForeignKeyConstraint(
+            ["instrument_id"],
+            ["instruments.id"],
+            name="fk_risk_no_change_instrument",
+        ),
+        ForeignKeyConstraint(
+            ["price_authority_id"],
+            ["price_bar_set_authorities.id"],
+            name="fk_risk_no_change_price_authority",
+        ),
+        CheckConstraint(
+            "current_quantity >= 0 AND trunc(current_quantity) = current_quantity "
+            "AND target_quantity = current_quantity",
+            name="quantity_equal_whole",
+        ),
+        CheckConstraint("target_weight >= 0 AND target_weight <= 1", name="weight"),
+        CheckConstraint("strategy_priority BETWEEN 0 AND 2", name="priority"),
+        CheckConstraint("reference_close > 0", name="price_positive"),
+        CheckConstraint("reason_code = 'NO_CHANGE'", name="reason_fixed"),
+        CheckConstraint(
+            "cardinality(authority_ids) > 0 AND array_position(authority_ids, NULL) IS NULL",
+            name="authorities_nonempty",
+        ),
+        CheckConstraint(
+            "input_hash ~ '^[0-9a-f]{64}$' "
+            "AND evidence_hash ~ '^[0-9a-f]{64}$'",
+            name="hashes_canonical",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    batch_id: Mapped[UUID]
+    account_id: Mapped[UUID]
+    strategy_decision_id: Mapped[UUID]
+    instrument_id: Mapped[UUID]
+    current_quantity: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    target_quantity: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    target_weight: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    strategy_priority: Mapped[int] = mapped_column(Integer)
+    reference_close: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    price_authority_id: Mapped[UUID]
+    authority_ids: Mapped[list[UUID]] = mapped_column(ARRAY(PostgreSQLUUID(as_uuid=True)))
+    reason_code: Mapped[str] = mapped_column(String(100))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    evidence_hash: Mapped[str] = mapped_column(String(64))
+
+
 class PaperOrderRecord(ImmutableCreatedAt, Base):
     __tablename__ = "paper_orders"
     __table_args__ = (
@@ -424,6 +489,10 @@ class RiskEvaluationRecord(ImmutableCreatedAt, Base):
             name="amounts",
         ),
         CheckConstraint(
+            "jsonb_typeof(projected_sector_ratios) = 'object'",
+            name="sector_ratios_object",
+        ),
+        CheckConstraint(
             "input_hash ~ '^[0-9a-f]{64}$' AND result_hash ~ '^[0-9a-f]{64}$'",
             name="hashes_canonical",
         ),
@@ -445,6 +514,7 @@ class RiskEvaluationRecord(ImmutableCreatedAt, Base):
     projected_available_cash: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
     projected_cash_ratio: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
     projected_name_ratio: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    projected_sector_ratios: Mapped[dict[str, str]] = mapped_column(JSONB)
     input_hash: Mapped[str] = mapped_column(String(64))
     result_hash: Mapped[str] = mapped_column(String(64))
 
@@ -506,6 +576,11 @@ class RiskEvaluationPriceInputRecord(ImmutableCreatedAt, Base):
             name="fk_risk_price_inputs_authority",
         ),
         CheckConstraint("close > 0", name="close_positive"),
+        CheckConstraint(
+            "market = 'US' AND currency = 'USD' "
+            "AND asset_type IN ('ETF','common_stock')",
+            name="instrument_scope",
+        ),
         CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="hash_canonical"),
     )
 
@@ -514,6 +589,9 @@ class RiskEvaluationPriceInputRecord(ImmutableCreatedAt, Base):
     account_id: Mapped[UUID]
     instrument_id: Mapped[UUID]
     price_authority_id: Mapped[UUID]
+    market: Mapped[str] = mapped_column(String(10))
+    currency: Mapped[str] = mapped_column(String(3))
+    asset_type: Mapped[str] = mapped_column(String(30))
     close: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
     source: Mapped[str] = mapped_column(String(100))
     delivery_mode: Mapped[str] = mapped_column(String(50))

@@ -45,6 +45,7 @@ PAPER_TABLES = {
     "strategy_decision_targets",
     "paper_drawdown_lock_events",
     "paper_order_batches",
+    "risk_no_change_evaluations",
     "paper_orders",
     "paper_order_events",
     "risk_evaluations",
@@ -147,10 +148,12 @@ async def _seed_order_graph(database_url: str) -> None:
                     f"(id, order_id, batch_id, account_id, risk_policy_id, outcome, "
                     f"desired_quantity, approved_quantity, target_weight, strategy_priority, "
                     f"reference_close, worst_price, reserve_amount, projected_available_cash, "
-                    f"projected_cash_ratio, projected_name_ratio, input_hash, result_hash) VALUES "
+                    f"projected_cash_ratio, projected_name_ratio, projected_sector_ratios, "
+                    f"input_hash, result_hash) VALUES "
                     f"('{EVALUATION_ID}', '{ORDER_ID}', '{BATCH_ID}', '{PAPER_ACCOUNT_ID}', "
                     f"'{RISK_POLICY_ID}', 'approved', 1, 1, 0.1, 2, 100, 101, 102, "
-                    f"9898, 0.9898, 0.01, '{HASH_E}', '{HASH_F}')",
+                    f"9898, 0.9898, 0.01, '{{\"technology\":\"0.01\"}}'::jsonb, "
+                    f"'{HASH_E}', '{HASH_F}')",
                     f"INSERT INTO risk_evaluation_rules "
                     f"(id, risk_evaluation_id, account_id, rule_seq, rule_code, passed, "
                     f"limit_value, observed_value, remaining_value, authority_ids) VALUES "
