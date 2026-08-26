@@ -23,7 +23,7 @@ EXPECTED_TASK_15A_TRIGGERS = {
 }
 
 
-def test_0018_performance_chain_is_the_single_head_after_paper_execution() -> None:
+def test_0019_performance_root_is_the_single_head_after_paper_execution() -> None:
     """A split head or wrong parent could omit an authority-bearing release."""
     engine_root = Path(__file__).resolve().parents[2]
     scripts = ScriptDirectory.from_config(Config(str(engine_root / "alembic.ini")))
@@ -35,6 +35,7 @@ def test_0018_performance_chain_is_the_single_head_after_paper_execution() -> No
     atomic_execution = scripts.get_revision("0016_paper_execution_atomic")
     time_order = scripts.get_revision("0017_paper_execution_time_order")
     performance_chain = scripts.get_revision("0018_paper_performance_chain")
+    performance_root = scripts.get_revision("0019_paper_performance_root")
     assert execution is not None
     assert execution.down_revision == "0014_paper"
     assert atomic_execution is not None
@@ -43,7 +44,9 @@ def test_0018_performance_chain_is_the_single_head_after_paper_execution() -> No
     assert time_order.down_revision == "0016_paper_execution_atomic"
     assert performance_chain is not None
     assert performance_chain.down_revision == "0017_paper_execution_time_order"
-    assert scripts.get_heads() == ["0018_paper_performance_chain"]
+    assert performance_root is not None
+    assert performance_root.down_revision == "0018_paper_performance_chain"
+    assert scripts.get_heads() == ["0019_paper_performance_root"]
     assert agents is not None
     assert agents.down_revision == "0010_research_data"
     assert backtests is not None

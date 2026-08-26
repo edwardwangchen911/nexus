@@ -415,3 +415,65 @@ async def test_published_performance_facts_are_database_immutable(
                     await session.execute(text(f"UPDATE {table_name} SET created_at = created_at"))
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_standalone_performance_snapshot(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_performance(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    try:
+        with pytest.raises(DBAPIError, match="paper performance root is inconsistent"):
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "INSERT INTO paper_performance_snapshots "
+                        "(id, account_id, as_of, nav, peak_nav, cash, realized_pnl, "
+                        "unrealized_pnl, fees, drawdown_ratio, content_hash) VALUES "
+                        "('66300000-0000-0000-0000-000000000001', :account_id, "
+                        ":as_of, 10000, 10000, 10000, 0, 0, 0, 0, :content_hash)"
+                    ),
+                    {
+                        "account_id": seed.execution.account_id,
+                        "as_of": seed.as_of,
+                        "content_hash": "b" * 64,
+                    },
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_zero_value_forged_instrument_attribution(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_performance(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        with pytest.raises(DBAPIError, match="paper performance root is inconsistent"):
+            async with sessions.begin() as session:
+                publication = await publish_paper_performance_snapshot(
+                    session,
+                    account_id=seed.execution.account_id,
+                    as_of=seed.as_of,
+                )
+                session.add(
+                    PaperPerformanceAttributionRecord(
+                        id=UUID("66300000-0000-0000-0000-000000000002"),
+                        performance_snapshot_id=publication.snapshot_id,
+                        account_id=seed.execution.account_id,
+                        dimension="instrument",
+                        dimension_key="66300000-0000-0000-0000-000000000003",
+                        market_value=Decimal(0),
+                        realized_pnl=Decimal(0),
+                        unrealized_pnl=Decimal(0),
+                        fees=Decimal(0),
+                        slippage=Decimal(0),
+                        completeness="FULL",
+                        content_hash="c" * 64,
+                    )
+                )
+    finally:
+        await engine.dispose()
