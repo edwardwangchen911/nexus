@@ -810,6 +810,7 @@ async def _build_attributions(
                     .where(
                         SectorExposure.instrument_id == instrument_id,
                         SectorExposure.as_of == session_date,
+                        SectorExposure.created_at <= as_of,
                         SectorExposure.reviewed.is_(True),
                         SectorExposure.synthetic.is_(False),
                     )

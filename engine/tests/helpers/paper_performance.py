@@ -37,6 +37,7 @@ async def seed_paper_performance(
     feed: str = "fixture",
     delivery_mode: str = "fixture",
     exact_sector: bool = True,
+    sector_created_at: datetime = MARKET_CLOSE,
 ) -> PaperPerformanceSeed:
     """Fill one buy order and optionally freeze its exact daily close and sector."""
     execution = await seed_paper_execution(database_url)
@@ -116,6 +117,7 @@ async def seed_paper_performance(
                         content_hash="e" * 64,
                         synthetic=False,
                         reviewed=True,
+                        created_at=sector_created_at,
                     )
                 )
         return PaperPerformanceSeed(execution=execution, as_of=MARKET_CLOSE, close=close)
@@ -204,6 +206,7 @@ async def seed_second_paper_close(
                     content_hash="b" * 64,
                     synthetic=False,
                     reviewed=True,
+                    created_at=SECOND_MARKET_CLOSE,
                 )
             )
             await session.flush()

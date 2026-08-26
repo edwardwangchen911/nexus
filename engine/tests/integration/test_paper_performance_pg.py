@@ -227,6 +227,31 @@ async def test_publish_performance_marks_missing_exact_sector_as_partial(
 
 
 @pytest.mark.asyncio
+async def test_publish_performance_does_not_use_late_sector_authority(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_performance(
+        migrated_database_url,
+        sector_created_at=MARKET_CLOSE + timedelta(microseconds=1),
+    )
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            publication = await publish_paper_performance_snapshot(
+                session,
+                account_id=seed.execution.account_id,
+                as_of=seed.as_of,
+            )
+
+        sector = next(item for item in publication.attributions if item.dimension == "sector")
+        assert sector.dimension_key == "unclassified"
+        assert sector.completeness == "PARTIAL"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_two_performance_publishers_converge_on_one_snapshot(
     migrated_database_url: str,
 ) -> None:
