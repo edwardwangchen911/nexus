@@ -369,6 +369,22 @@ def test_cash_floor_uses_worst_price_and_rejects_below_minimum_remainder() -> No
     assert {"CASH_FLOOR", "BELOW_MINIMUM_ORDER"} <= _rule_codes(result)
 
 
+def test_worst_price_rounds_up_instead_of_under_reserving() -> None:
+    close = Decimal("123.456789123401")
+
+    result = evaluate_order_batch(
+        (_candidate(quantity=Decimal("1"), close=close),),
+        _projection(),
+        _market(((TECH_ID, close, "technology"),)),
+        RiskPolicy.v1(),
+    )[0]
+
+    assert result.outcome == "approved"
+    assert result.worst_price == Decimal("124.691357014636")
+    assert result.worst_price >= close * Decimal("1.01")
+    assert result.reserve_amount == result.worst_price
+
+
 def test_sell_is_exempt_from_minimum_and_never_creates_short() -> None:
     candidate = _candidate(
         side="sell",

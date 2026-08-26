@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from uuid import UUID
 
 from nexus.risk.canonical import canonical_risk_evaluation_result_hash
@@ -37,6 +37,10 @@ class RiskBatchRejected(ValueError):
 
 def _q(value: Decimal) -> Decimal:
     return value.quantize(_QUANTUM, rounding=ROUND_HALF_EVEN)
+
+
+def _q_up(value: Decimal) -> Decimal:
+    return value.quantize(_QUANTUM, rounding=ROUND_CEILING)
 
 
 def _floor_shares(value: Decimal) -> Decimal:
@@ -326,7 +330,7 @@ def _evaluate_buy(
     sector_exposure: dict[str, Decimal],
     policy: RiskPolicy,
 ) -> tuple[RiskEvaluation, Decimal]:
-    worst_price = _q(candidate.reference_close * (Decimal(1) + policy.buy_reserve_markup))
+    worst_price = _q_up(candidate.reference_close * (Decimal(1) + policy.buy_reserve_markup))
     drawdown_allowed = drawdown_allows_candidate(
         portfolio.drawdown_state,
         side="buy",
