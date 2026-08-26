@@ -163,6 +163,20 @@ async def test_atomic_admission_replays_same_body_and_conflicts_changed_body(
     same = await asyncio.wait_for(asyncio.gather(admit("a" * 64), admit("a" * 64)), timeout=5)
     assert same[0].run_id == same[1].run_id
     assert {same[0].replayed, same[1].replayed} == {False, True}
+    async with factory() as session, session.begin():
+        alternate_key = await admit_research_run(
+            session,
+            actor_id="fixture-actor",
+            route="/internal/v1/research-runs",
+            idempotency_key="same-authority-another-key",
+            request_hash="a" * 64,
+            request=request,
+            prompt_version_id=_PROMPT_ID,
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("3.00"),
+            now=_NOW,
+        )
+    assert (alternate_key.run_id, alternate_key.replayed) == (same[0].run_id, True)
     with pytest.raises(IdempotencyConflict):
         async with factory() as session, session.begin():
             await admit_research_run(
@@ -179,7 +193,7 @@ async def test_atomic_admission_replays_same_body_and_conflicts_changed_body(
             )
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(AgentResearchRunRecord)) == 1
-        assert await session.scalar(select(func.count()).select_from(IdempotencyRecord)) == 1
+        assert await session.scalar(select(func.count()).select_from(IdempotencyRecord)) == 2
         job = await session.scalar(select(Job))
         reservations = await session.scalar(
             select(func.count()).select_from(text("agent_daily_budget_reservations"))

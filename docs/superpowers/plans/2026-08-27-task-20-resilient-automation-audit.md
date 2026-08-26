@@ -28,11 +28,11 @@
 
 ## Slice 4：通用 worker 与现有 Agent 适配
 
-- [ ] 新增 `engine/tests/integration/test_job_worker.py`，覆盖严格 registry、未知 handler、timeout、automatic/manual/never retry、dead letter 和空闲 heartbeat。
-- [ ] 实现 `engine/src/nexus/jobs/registry.py`、`engine/src/nexus/jobs/worker.py`；handler 只能得到 typed payload、job/fence context 和 session factory。
-- [ ] 把 `engine/src/nexus/worker.py` 的 Agent 路径改为 `agent.research` adapter；更新 admission/测试为小写状态，不改变冻结输入或模型预算。
-- [ ] 保持 broker composition root 与 general worker 隔离；不注册可执行的真实 broker handler。
-- [ ] 运行 Agent/worker 回归；提交 `refactor(engine): run agents through fenced jobs`。
+- [x] 新增 `engine/tests/integration/test_job_worker.py`，覆盖严格 registry、未知 handler、timeout、automatic/manual/never retry、dead letter 和空闲 heartbeat。
+- [x] 实现 `engine/src/nexus/jobs/registry.py`、`engine/src/nexus/jobs/worker.py`；handler 只能得到 typed payload、job/fence context 和 session factory。
+- [x] 把 `engine/src/nexus/worker.py` 的 Agent 路径改为 `agent.research` adapter；admission 使用完整冻结权威哈希并跨幂等键复用同一 Job/Run，不改变模型预算。
+- [x] 保持 broker composition root 与 general worker 隔离；Agent-only root 只领取已注册类型，未注册真实 broker handler。
+- [x] 运行 Agent/worker 回归（106 passed）、Ruff、Mypy；待本切片提交。
 
 ## Slice 5：通用事务 Outbox
 

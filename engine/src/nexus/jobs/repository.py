@@ -35,7 +35,9 @@ from nexus.persistence.models.runtime import (
 
 RequiredOutcome = Literal["succeeded", "succeeded_or_skipped"]
 TerminalOutcome = Literal["succeeded", "skipped"]
+ExecutionOutcome = Literal["succeeded", "skipped", "failed"]
 JobApply = Callable[[AsyncSession], Awaitable[None]]
+JobExecution = Callable[[AsyncSession], Awaitable["JobCompletion"]]
 
 _ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,99}$")
 _BROKER_TYPES = frozenset({JobType.BROKER_SYNC, JobType.BROKER_RECONCILE})
@@ -63,12 +65,22 @@ class ClaimedJob:
     payload: dict[str, object]
     queue: str
     priority: int
+    retry_policy: str
+    max_attempts: int
     attempt_no: int
     worker_id: str
     lease_token: UUID
     fence_token: int
     expires_at: datetime
     version: int
+
+
+@dataclass(frozen=True)
+class JobCompletion:
+    outcome: ExecutionOutcome
+    result_code: str | None
+    finished_at: datetime
+    error_code: str | None = None
 
 
 def _utc(value: datetime, *, field: str) -> datetime:
@@ -230,12 +242,15 @@ async def claim_next_job(
     worker_id: str,
     now: datetime,
     lease_seconds: int = 30,
+    job_types: Sequence[str] | None = None,
 ) -> ClaimedJob | None:
     """Claim the highest-priority ready Job without blocking another worker."""
     now = _utc(now, field="now")
     worker_id = _worker_id(worker_id)
     if not 1 <= lease_seconds <= 60:
         raise ValueError("lease_seconds must be between 1 and 60")
+    if job_types is not None and not job_types:
+        return None
     dependency = aliased(JobDependency)
     parent = aliased(Job)
     unsatisfied = exists(
@@ -258,15 +273,18 @@ async def claim_next_job(
             ),
         )
     )
+    conditions = [
+        Job.queue == queue.value,
+        Job.status == JobStatus.QUEUED.value,
+        Job.available_at <= now,
+        Job.attempt_count < Job.max_attempts,
+        ~unsatisfied,
+    ]
+    if job_types is not None:
+        conditions.append(Job.job_type.in_(tuple(job_types)))
     job = await session.scalar(
         select(Job)
-        .where(
-            Job.queue == queue.value,
-            Job.status == JobStatus.QUEUED.value,
-            Job.available_at <= now,
-            Job.attempt_count < Job.max_attempts,
-            ~unsatisfied,
-        )
+        .where(*conditions)
         .order_by(
             Job.priority.desc(),
             Job.available_at,
@@ -333,6 +351,8 @@ async def claim_next_job(
         payload=dict(job.payload),
         queue=job.queue,
         priority=job.priority,
+        retry_policy=job.retry_policy,
+        max_attempts=job.max_attempts,
         attempt_no=job.attempt_count,
         worker_id=worker_id,
         lease_token=lease_token,
@@ -417,18 +437,62 @@ async def finalize_job(
 ) -> Job:
     """Validate fencing, apply business facts, and terminalize in one transaction."""
     now = _utc(now, field="now")
-    if not 1 <= len(result_code) <= 100:
+
+    async def execute(target_session: AsyncSession) -> JobCompletion:
+        if apply is not None:
+            await apply(target_session)
+        return JobCompletion(
+            outcome=outcome,
+            result_code=result_code,
+            finished_at=now,
+        )
+
+    return await execute_and_finalize_job(
+        session,
+        claim=claim,
+        checked_at=now,
+        execute=execute,
+    )
+
+
+async def execute_and_finalize_job(
+    session: AsyncSession,
+    *,
+    claim: ClaimedJob,
+    checked_at: datetime,
+    execute: JobExecution,
+) -> Job:
+    """Run one fenced transactional handler and persist only its safe result."""
+    checked_at = _utc(checked_at, field="checked_at")
+    job, lease, attempt = await _lock_active_claim(
+        session, claim=claim, now=checked_at
+    )
+    completion = await execute(session)
+    finished_at = _utc(completion.finished_at, field="finished_at")
+    if finished_at < checked_at:
+        raise ValueError("finished_at precedes the fenced execution check")
+    if completion.result_code is not None and not 1 <= len(completion.result_code) <= 100:
         raise ValueError("result_code is invalid")
-    job, _, attempt = await _lock_active_claim(session, claim=claim, now=now)
-    if apply is not None:
-        await apply(session)
-    attempt.outcome = outcome
-    attempt.finished_at = now
-    attempt.error_code = None
-    job.status = outcome
-    job.finished_at = now
-    job.last_error_code = None
-    job.result_code = result_code
+    if completion.outcome == JobStatus.FAILED.value:
+        if completion.error_code is None:
+            raise ValueError("failed completion requires error_code")
+        _error_code(completion.error_code)
+    elif completion.error_code is not None:
+        raise ValueError("successful completion cannot include error_code")
+    if (
+        lease.lease_token != claim.lease_token
+        or lease.fence_token != claim.fence_token
+        or finished_at >= lease.expires_at
+        or attempt.outcome != "running"
+    ):
+        raise LeaseLostError("job lease expired during handler execution")
+    attempt.outcome = completion.outcome
+    attempt.finished_at = finished_at
+    attempt.error_code = completion.error_code
+    job.status = completion.outcome
+    job.finished_at = finished_at
+    job.last_error_code = completion.error_code
+    job.result_code = completion.result_code
     job.version += 1
     await session.flush()
     return job
@@ -471,6 +535,29 @@ async def fail_job(
     job.version += 1
     await session.flush()
     return status
+
+
+async def dead_letter_job(
+    session: AsyncSession,
+    *,
+    claim: ClaimedJob,
+    now: datetime,
+    error_code: str,
+) -> Job:
+    """Terminalize an unsafe or unregistered claim without running its payload."""
+    now = _utc(now, field="now")
+    error_code = _error_code(error_code)
+    job, _, attempt = await _lock_active_claim(session, claim=claim, now=now)
+    attempt.outcome = "failed"
+    attempt.finished_at = now
+    attempt.error_code = error_code
+    job.status = JobStatus.DEAD_LETTER.value
+    job.finished_at = now
+    job.last_error_code = error_code
+    job.result_code = None
+    job.version += 1
+    await session.flush()
+    return job
 
 
 async def reclaim_expired_jobs(

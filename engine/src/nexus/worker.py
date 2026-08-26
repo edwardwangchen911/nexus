@@ -7,7 +7,7 @@ from typing import cast
 from uuid import UUID
 
 from openai import AsyncOpenAI
-from sqlalchemy import func, select
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.committee import (
@@ -28,11 +28,19 @@ from nexus.agents.price_authority import (
 from nexus.agents.responses import ResponsesClient, ResponsesCommittee, ResponsesModelConfig
 from nexus.agents.tools import ReadOnlyToolRegistry, ToolInputError
 from nexus.domain.evidence import EvidenceRef
+from nexus.domain.ids import new_uuid7
+from nexus.jobs.models import JobType, QueueName, RetryPolicy
+from nexus.jobs.registry import (
+    JobHandlerContext,
+    JobHandlerResult,
+    JobHandlerSpec,
+    JobRegistry,
+)
+from nexus.jobs.worker import UnsafeJobError, run_job_worker_once
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentResearchRunRecord,
 )
-from nexus.persistence.models.runtime import Job
 from nexus.persistence.session import session_factory
 from nexus.settings import AgentRuntimeMode, EngineSettings, Environment
 
@@ -42,6 +50,21 @@ _RUN_TO_JOB_STATUS = {
     "abstained": "skipped",
     "failed": "failed",
 }
+_PROCESS_VERSION = "nexus-engine-task20"
+_MIGRATION_HEAD = "0020_resilient_automation_audit"
+_ONCE_WORKER_ID = f"agent-once-{new_uuid7()}"
+_ONCE_STARTED_AT = datetime.now(UTC)
+
+
+class _AgentResearchJobPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str = Field(
+        pattern=(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}$"
+        )
+    )
 
 
 async def run_agent_worker_once(
@@ -51,92 +74,23 @@ async def run_agent_worker_once(
     tools: ReadOnlyToolRegistry | None = None,
 ) -> bool:
     """Claim and terminalize at most one queued Agent job outside any HTTP request."""
-    runtime_mode = _require_worker_runtime(settings)
-    allow_fixture_evidence = settings.environment is not Environment.PRODUCTION
-    allow_fixture_price_authority = runtime_mode is AgentRuntimeMode.FIXTURE
+    _require_worker_runtime(settings)
     factory = session_factory(settings)
-    async with factory() as session, session.begin():
-        job = await session.scalar(
-            select(Job)
-            .where(Job.schema_version == _JOB_SCHEMA, Job.status == "queued")
-            .order_by(Job.created_at, Job.id)
-            .with_for_update(skip_locked=True)
-            .limit(1)
-        )
-        if job is None:
-            return False
-        transaction_time = await session.scalar(select(func.transaction_timestamp()))
-        if not isinstance(transaction_time, datetime):
-            raise RuntimeError("database transaction time is unavailable")
-        transaction_time = transaction_time.astimezone(UTC)
-        job.status = "running"
-        job.started_at = transaction_time
-        job.attempt_count += 1
-        job.version += 1
-        await session.flush()
-        raw_run_id = job.payload.get("run_id")
-        if not isinstance(raw_run_id, str):
-            _finish_job(job, status="failed", at=transaction_time, error_code="JOB_INPUT_INVALID")
-            return True
-        try:
-            run_id = UUID(raw_run_id)
-        except ValueError:
-            _finish_job(job, status="failed", at=transaction_time, error_code="JOB_INPUT_INVALID")
-            return True
-        run = await session.get(AgentResearchRunRecord, run_id, with_for_update=True)
-        if run is None:
-            _finish_job(job, status="failed", at=transaction_time, error_code="RUN_NOT_FOUND")
-            return True
-        if run.status in TERMINAL:
-            _finish_job(
-                job,
-                status=_RUN_TO_JOB_STATUS[run.status],
-                at=transaction_time,
-                result_code=run.status,
-            )
-            return True
-        if run.status != "prepared":
-            _finish_job(job, status="failed", at=transaction_time, error_code="RUN_STATE_INVALID")
-            return True
-        try:
-            committee = await _committee(
-                session,
-                settings,
-                run,
-                responses_client=responses_client,
-                tools=tools,
-            )
-        except ToolInputError:
-            committee = _UnavailableResponsesCommittee()
-        result = await execute_research_run(
-            session,
-            run_id=run.id,
-            committee=committee,
-            allow_fixture_evidence=allow_fixture_evidence,
-            allow_fixture_price_authority=allow_fixture_price_authority,
-        )
-        _finish_job(
-            job,
-            status=_RUN_TO_JOB_STATUS[result.status],
-            at=transaction_time,
-            result_code=result.status,
-        )
-        return True
-
-
-def _finish_job(
-    job: Job,
-    *,
-    status: str,
-    at: datetime,
-    error_code: str | None = None,
-    result_code: str | None = None,
-) -> None:
-    job.status = status
-    job.finished_at = at
-    job.last_error_code = error_code
-    job.result_code = result_code
-    job.version += 1
+    return await run_job_worker_once(
+        factory,
+        registry=_agent_registry(
+            settings,
+            responses_client=responses_client,
+            tools=tools,
+        ),
+        queue=QueueName.GENERAL,
+        worker_id=_ONCE_WORKER_ID,
+        worker_started_at=_ONCE_STARTED_AT,
+        process_version=_PROCESS_VERSION,
+        migration_head=_MIGRATION_HEAD,
+        clock=lambda: datetime.now(UTC),
+        claim_registered_only=True,
+    )
 
 
 async def run_worker(settings: EngineSettings | None = None, *, run_forever: bool = False) -> None:
@@ -146,10 +100,98 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
     if not run_forever:
         await asyncio.sleep(0)
         return
+    factory = session_factory(configured)
+    registry = _agent_registry(configured, responses_client=None, tools=None)
+    worker_id = f"agent-general-{new_uuid7()}"
+    started_at = datetime.now(UTC)
     while True:
-        worked = await run_agent_worker_once(configured)
+        worked = await run_job_worker_once(
+            factory,
+            registry=registry,
+            queue=QueueName.GENERAL,
+            worker_id=worker_id,
+            worker_started_at=started_at,
+            process_version=_PROCESS_VERSION,
+            migration_head=_MIGRATION_HEAD,
+            clock=lambda: datetime.now(UTC),
+            claim_registered_only=True,
+        )
         if not worked:
             await asyncio.sleep(0.5)
+
+
+def _agent_registry(
+    settings: EngineSettings,
+    *,
+    responses_client: object | None,
+    tools: ReadOnlyToolRegistry | None,
+) -> JobRegistry:
+    runtime_mode = _require_worker_runtime(settings)
+    allow_fixture_evidence = settings.environment is not Environment.PRODUCTION
+    allow_fixture_price_authority = runtime_mode is AgentRuntimeMode.FIXTURE
+
+    async def handle(context: JobHandlerContext) -> JobHandlerResult:
+        payload = cast(_AgentResearchJobPayload, context.payload)
+        run = await context.session.get(
+            AgentResearchRunRecord,
+            UUID(payload.run_id),
+            with_for_update=True,
+        )
+        if run is None:
+            raise UnsafeJobError("RUN_NOT_FOUND")
+        if run.status in TERMINAL:
+            return _agent_result(run.status)
+        if run.status != "prepared":
+            raise UnsafeJobError("RUN_STATE_INVALID")
+        try:
+            committee = await _committee(
+                context.session,
+                settings,
+                run,
+                responses_client=responses_client,
+                tools=tools,
+            )
+        except ToolInputError:
+            committee = _UnavailableResponsesCommittee()
+        result = await execute_research_run(
+            context.session,
+            run_id=run.id,
+            committee=committee,
+            allow_fixture_evidence=allow_fixture_evidence,
+            allow_fixture_price_authority=allow_fixture_price_authority,
+        )
+        return _agent_result(result.status)
+
+    return JobRegistry(
+        (
+            JobHandlerSpec(
+                job_type=JobType.AGENT_RESEARCH,
+                schema_version=_JOB_SCHEMA,
+                payload_model=_AgentResearchJobPayload,
+                queue=QueueName.GENERAL,
+                timeout_seconds=45,
+                retry_policy=RetryPolicy.AUTOMATIC_SAFE,
+                max_attempts=3,
+                idempotency_namespace="agent.research",
+                handler=handle,
+            ),
+        )
+    )
+
+
+def _agent_result(status: str) -> JobHandlerResult:
+    mapped = _RUN_TO_JOB_STATUS.get(status)
+    if mapped == "succeeded":
+        return JobHandlerResult(outcome="succeeded", result_code="AGENT_COMPLETED")
+    if mapped == "skipped":
+        return JobHandlerResult(outcome="skipped", result_code="AGENT_ABSTAINED")
+    if mapped == "failed":
+        return JobHandlerResult(
+            outcome="failed",
+            result_code="AGENT_FAILED",
+            error_code="AGENT_FAILED",
+        )
+    raise UnsafeJobError("RUN_STATE_INVALID")
 
 
 async def _committee(

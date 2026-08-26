@@ -19,7 +19,15 @@ from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
 from nexus.agents.models import ResearchRequest
 from nexus.agents.price_authority import freeze_price_authority
 from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES
-from nexus.jobs.models import JobKeyV1, JobType, canonical_job_key
+from nexus.jobs.models import (
+    JobKeyV1,
+    JobType,
+    QueueName,
+    RetryPolicy,
+    canonical_job_key,
+    job_input_hash,
+)
+from nexus.jobs.repository import enqueue_job
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentDataSnapshotEvidenceRecord,
@@ -339,6 +347,49 @@ async def admit_research_run(
     ).hexdigest()
     prompt = prompts["orchestrator"]
     worst_case = model.worst_case_cost_usd
+    durable_input_hash = job_input_hash(
+        {
+            "instrument_id": str(request.instrument_id),
+            "data_snapshot_id": str(request.data_snapshot_id),
+            "decision_time": request.decision_time.strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            ),
+            "request_hash": request_hash,
+            "schema_hash": _schema_hash(),
+            "model_hash": model.config_hash,
+            "prompt_hash": prompt_manifest_hash,
+            "evidence_hash": evidence_manifest_hash,
+            "tool_hash": _tool_hash(),
+            "pricing_version": model.version,
+        }
+    )
+    job_key = canonical_job_key(
+        JobKeyV1(
+            job_type=JobType.AGENT_RESEARCH,
+            scope_kind="instrument",
+            scope_id=str(request.instrument_id),
+            effective_at=request.decision_time,
+            input_hash=durable_input_hash,
+        )
+    )
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:job_key, 1414))"),
+        {"job_key": job_key},
+    )
+    existing_job = await session.scalar(select(Job).where(Job.job_key == job_key))
+    if existing_job is not None:
+        raw_run_id = existing_job.payload.get("run_id")
+        if not isinstance(raw_run_id, str):
+            raise RuntimeError("Agent durable Job payload is incomplete")
+        existing_run = await session.get(AgentResearchRunRecord, UUID(raw_run_id))
+        if existing_run is None:
+            raise RuntimeError("Agent durable Job run is missing")
+        claim.response_payload = {
+            "run_id": str(existing_run.id),
+            "status": existing_run.status,
+        }
+        await session.flush()
+        return ResearchAdmission(run=existing_run, replayed=True)
     run = AgentResearchRunRecord(
         instrument_id=request.instrument_id,
         data_snapshot_id=request.data_snapshot_id,
@@ -365,39 +416,21 @@ async def admit_research_run(
     )
     session.add(run)
     await session.flush()
-    job_type = JobType.AGENT_RESEARCH
-    session.add(
-        Job(
-            job_key=canonical_job_key(
-                JobKeyV1(
-                    job_type=job_type,
-                    scope_kind="instrument",
-                    scope_id=str(request.instrument_id),
-                    effective_at=request.decision_time,
-                    input_hash=request_hash,
-                )
-            ),
-            input_hash=request_hash,
-            status="queued",
-            schema_version="agent_research_job_v1",
-            payload={"run_id": str(run.id)},
-            job_type=job_type.value,
-            queue="general",
+    await enqueue_job(
+        session,
+        key=JobKeyV1(
+            job_type=JobType.AGENT_RESEARCH,
             scope_kind="instrument",
             scope_id=str(request.instrument_id),
             effective_at=request.decision_time,
-            priority=180,
-            retry_policy="automatic_safe",
-            max_attempts=3,
-            attempt_count=0,
-            manual_retry_count=0,
-            available_at=now,
-            started_at=None,
-            finished_at=None,
-            last_error_code=None,
-            result_code=None,
-            version=1,
-        )
+            input_hash=durable_input_hash,
+        ),
+        schema_version="agent_research_job_v1",
+        payload={"run_id": str(run.id)},
+        queue=QueueName.GENERAL,
+        retry_policy=RetryPolicy.AUTOMATIC_SAFE,
+        max_attempts=3,
+        available_at=now,
     )
     await session.flush()
     await reserve_daily_budget(
