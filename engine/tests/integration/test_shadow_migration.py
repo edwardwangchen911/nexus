@@ -753,6 +753,34 @@ async def test_seal_matches_lifecycle_and_blocks_later_children(
 
 
 @pytest.mark.asyncio
+async def test_data_incomplete_seal_cannot_precede_frozen_grace_deadline(
+    migrated_database_url: str,
+) -> None:
+    shadow = await _seed_valid_shadow(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+
+    with pytest.raises(DBAPIError, match="shadow data-incomplete seal precedes grace deadline"):
+        async with factory() as session, session.begin():
+            session.add(
+                ShadowSealRecord(
+                    id=uuid4(),
+                    shadow_group_id=shadow.shadow_group_id,
+                    reason="expired",
+                    reason_code="SHADOW_DATA_INCOMPLETE",
+                    sealed_at=_OBSERVED_AT,
+                    final_coverage=0,
+                    final_authority_hash="a" * 64,
+                )
+            )
+            group = await session.get(
+                OptimizationProposalGroupRecord, shadow.proposal.group_id
+            )
+            assert group is not None
+            group.status = "expired"
+            group.version = 3
+
+
+@pytest.mark.asyncio
 async def test_direct_validated_transition_requires_complete_shadow_authority(
     migrated_database_url: str,
 ) -> None:

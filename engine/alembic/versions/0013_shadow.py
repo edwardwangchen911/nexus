@@ -618,6 +618,12 @@ def _create_tables() -> None:
             REFERENCES shadow_groups(id),
           CONSTRAINT ck_shadow_seals_reason_allowed
             CHECK (reason IN ('validated','rejected','expired')),
+          CONSTRAINT ck_shadow_seals_reason_code_binding CHECK (
+            (reason = 'validated' AND reason_code = 'SHADOW_VALIDATED')
+            OR (reason = 'rejected' AND reason_code = 'USER_REJECTED')
+            OR (reason = 'expired' AND reason_code IN
+              ('SHADOW_DATA_INCOMPLETE','SHADOW_INITIAL_EXECUTION_INCOMPLETE'))
+          ),
           CONSTRAINT ck_shadow_seals_reason_code_nonempty CHECK (btrim(reason_code) <> ''),
           CONSTRAINT ck_shadow_seals_coverage_bounded CHECK (final_coverage BETWEEN 0 AND 63),
           CONSTRAINT ck_shadow_seals_final_authority_hash_canonical
@@ -882,6 +888,8 @@ def _create_database_guards() -> None:
         AS $$
         DECLARE
           proposal_status text;
+          actual_coverage integer;
+          grace_decision_at timestamptz;
         BEGIN
           SELECT pg.status INTO proposal_status
           FROM shadow_groups g
@@ -891,9 +899,34 @@ def _create_database_guards() -> None:
             RAISE EXCEPTION 'shadow seal does not match proposal lifecycle'
               USING ERRCODE = '23514';
           END IF;
+          SELECT count(*) INTO actual_coverage
+          FROM shadow_session_authorities
+          WHERE shadow_group_id = NEW.shadow_group_id;
+          IF NEW.final_coverage <> actual_coverage THEN
+            RAISE EXCEPTION 'shadow seal coverage does not match authorities'
+              USING ERRCODE = '23514';
+          END IF;
           IF NEW.reason = 'validated' AND NEW.final_coverage <> 63 THEN
             RAISE EXCEPTION 'validated shadow seal requires full coverage'
               USING ERRCODE = '23514';
+          END IF;
+          IF NEW.reason = 'expired'
+             AND NEW.reason_code = 'SHADOW_INITIAL_EXECUTION_INCOMPLETE'
+             AND NEW.final_coverage <> 63 THEN
+            RAISE EXCEPTION 'initial-execution seal requires full coverage'
+              USING ERRCODE = '23514';
+          END IF;
+          IF NEW.reason = 'expired' AND NEW.reason_code = 'SHADOW_DATA_INCOMPLETE' THEN
+            SELECT cs.decision_at INTO grace_decision_at
+            FROM shadow_groups g
+            JOIN exchange_calendar_sessions cs
+              ON cs.calendar_authority_id = g.calendar_authority_id
+             AND cs.session = g.grace_end_session
+            WHERE g.id = NEW.shadow_group_id;
+            IF grace_decision_at IS NULL OR NEW.sealed_at < grace_decision_at THEN
+              RAISE EXCEPTION 'shadow data-incomplete seal precedes grace deadline'
+                USING ERRCODE = '23514';
+            END IF;
           END IF;
           RETURN NULL;
         END;

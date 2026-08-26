@@ -766,6 +766,13 @@ class ShadowSealRecord(ImmutableCreatedAt, Base):
         CheckConstraint(
             "reason IN ('validated','rejected','expired')", name="reason_allowed"
         ),
+        CheckConstraint(
+            "(reason = 'validated' AND reason_code = 'SHADOW_VALIDATED') "
+            "OR (reason = 'rejected' AND reason_code = 'USER_REJECTED') "
+            "OR (reason = 'expired' AND reason_code IN "
+            "('SHADOW_DATA_INCOMPLETE','SHADOW_INITIAL_EXECUTION_INCOMPLETE'))",
+            name="reason_code_binding",
+        ),
         CheckConstraint("btrim(reason_code) <> ''", name="reason_code_nonempty"),
         CheckConstraint("final_coverage BETWEEN 0 AND 63", name="coverage_bounded"),
         CheckConstraint(

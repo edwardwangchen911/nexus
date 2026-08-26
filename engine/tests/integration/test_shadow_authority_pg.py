@@ -271,6 +271,120 @@ async def test_query_proof_rejects_member_without_visible_database_row(
 
 
 @pytest.mark.asyncio
+async def test_query_proof_cannot_claim_same_instrument_present_and_missing(
+    migrated_database_url: str,
+) -> None:
+    root, decision, raw_instruments = await _root_and_decision(migrated_database_url)
+    instrument = raw_instruments[0]
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        bar = await seed_shadow_price_authority(
+            session,
+            instrument_id=instrument,
+            session_date=root.evaluation_sessions[0],
+            available_at=decision - timedelta(minutes=2),
+        )
+        await seed_shadow_query_proof(
+            session,
+            shadow_group_id=root.shadow_group_id,
+            session_date=root.evaluation_sessions[0],
+            kind="price_bars",
+            source="alpaca",
+            delivery_mode="delayed",
+            instrument_ids=(instrument,),
+            complete=True,
+            member_ids=(bar.bar_id,),
+            negative_instrument_ids=(instrument,),
+            available_at=decision - timedelta(seconds=1),
+        )
+        await seed_shadow_query_proof(
+            session,
+            shadow_group_id=root.shadow_group_id,
+            session_date=root.evaluation_sessions[0],
+            kind="corporate_actions",
+            source="fixture",
+            delivery_mode="unknown",
+            instrument_ids=(instrument,),
+            complete=True,
+            available_at=decision - timedelta(seconds=1),
+        )
+
+    async with factory() as session:
+        result = await load_shadow_session_input(
+            session,
+            root=root,
+            session_date=root.evaluation_sessions[0],
+            ordinal=1,
+            observed_at=decision,
+            required_instruments=(instrument,),
+            initial_execution_instruments=(instrument,),
+        )
+
+    assert (result.status, result.reason, result.authority_hash) == (
+        "data_partial",
+        "SOURCE_QUERY_SET_MISMATCH",
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_cannot_advance_before_frozen_calendar_decision_time(
+    migrated_database_url: str,
+) -> None:
+    root, decision, raw_instruments = await _root_and_decision(migrated_database_url)
+    instrument = raw_instruments[0]
+    observed_at = decision - timedelta(minutes=1)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        bar = await seed_shadow_price_authority(
+            session,
+            instrument_id=instrument,
+            session_date=root.evaluation_sessions[0],
+            available_at=observed_at - timedelta(minutes=1),
+        )
+        await seed_shadow_query_proof(
+            session,
+            shadow_group_id=root.shadow_group_id,
+            session_date=root.evaluation_sessions[0],
+            kind="price_bars",
+            source="alpaca",
+            delivery_mode="delayed",
+            instrument_ids=(instrument,),
+            complete=True,
+            member_ids=(bar.bar_id,),
+            available_at=observed_at - timedelta(seconds=1),
+        )
+        await seed_shadow_query_proof(
+            session,
+            shadow_group_id=root.shadow_group_id,
+            session_date=root.evaluation_sessions[0],
+            kind="corporate_actions",
+            source="fixture",
+            delivery_mode="unknown",
+            instrument_ids=(instrument,),
+            complete=True,
+            available_at=observed_at - timedelta(seconds=1),
+        )
+
+    async with factory() as session:
+        result = await load_shadow_session_input(
+            session,
+            root=root,
+            session_date=root.evaluation_sessions[0],
+            ordinal=1,
+            observed_at=observed_at,
+            required_instruments=(instrument,),
+            initial_execution_instruments=(instrument,),
+        )
+
+    assert (result.status, result.reason, result.authority_hash) == (
+        "data_stale",
+        "SESSION_NOT_DUE",
+        None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_complete_negative_freezes_missing_bar_against_late_revision(
     migrated_database_url: str,
 ) -> None:

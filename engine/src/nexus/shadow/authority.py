@@ -434,6 +434,16 @@ async def load_shadow_session_input(
         raise ValueError("SHADOW_CALENDAR_AUTHORITY_INVALID")
     decision_at = _require_utc(calendar_member.decision_at, "calendar decision_at")
     late_backfill = observed_at > decision_at
+    if observed_at < decision_at:
+        return _failure(
+            root,
+            session_date,
+            ordinal,
+            observed_at,
+            late_backfill,
+            "data_stale",
+            "SESSION_NOT_DUE",
+        )
 
     try:
         source_policy = await load_source_policy_v1(
@@ -535,6 +545,7 @@ async def load_shadow_session_input(
     )
     proof_by_source = {proof.source: proof for proof in price_proofs}
     visible_member_ids: dict[str, set[UUID]] = {}
+    visible_instrument_ids: dict[str, set[UUID]] = {}
     raw_candidates: dict[UUID, list[ShadowBarCandidate]] = {
         instrument_id: [] for instrument_id in instruments
     }
@@ -549,6 +560,9 @@ async def load_shadow_session_input(
                 future_raw_ids.add(row.bar.instrument_id)
             continue
         visible_member_ids.setdefault(row.manifest.source, set()).add(row.bar.id)
+        visible_instrument_ids.setdefault(row.manifest.source, set()).add(
+            row.bar.instrument_id
+        )
         if row.manifest.adjustment != "raw":
             continue
         if not await _price_authority_matches_database(session, row):
@@ -582,7 +596,10 @@ async def load_shadow_session_input(
                 summaries=summaries,
                 maximum_available_at=maximum_proof_time,
             )
-        if set(proof.member_ids) != member_ids:
+        if set(proof.member_ids) != member_ids or (
+            set(proof.negative_instrument_ids)
+            & visible_instrument_ids.get(source, set())
+        ):
             return _failure(
                 root,
                 session_date,

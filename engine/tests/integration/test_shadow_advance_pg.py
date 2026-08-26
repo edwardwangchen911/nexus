@@ -510,6 +510,26 @@ async def test_grace_exhaustion_seals_incomplete_checkpoints(
 
 
 @pytest.mark.asyncio
+async def test_grace_end_request_cannot_expire_shadow_before_deadline(
+    migrated_database_url: str,
+) -> None:
+    started = await seed_started_shadow(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        result = await advance_shadow_session(
+            session,
+            group_id=started.eligible.group_id,
+            session_date=started.start.grace_end_session,
+            observed_at=started.eligible.database_time.astimezone(UTC),
+        )
+
+    assert (result.result, result.proposal_status) == ("session_gap", "shadowing")
+    async with factory() as session:
+        seal = await session.scalar(select(ShadowSealRecord))
+    assert seal is None
+
+
+@pytest.mark.asyncio
 async def test_late_backfill_applies_only_the_original_missing_session(
     migrated_database_url: str,
 ) -> None:

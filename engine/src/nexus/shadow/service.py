@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.ids import new_uuid7
 from nexus.optimizer.models import ProposalGroupStatus
+from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.optimization import (
     CostPolicyRecord,
     OptimizationProposalGroupRecord,
@@ -204,13 +205,23 @@ async def advance_shadow_session(
             authority_hash=None,
         )
         if session_date == shadow.grace_end_session:
-            await _expire_for_data_gap(
-                session,
-                group=group,
-                shadow=shadow,
-                coverage=coverage,
-                sealed_at=observed_at,
+            grace_member = await session.get(
+                ExchangeCalendarSessionRecord,
+                {
+                    "calendar_authority_id": shadow.calendar_authority_id,
+                    "session": shadow.grace_end_session,
+                },
             )
+            if grace_member is None:
+                raise ValueError("SHADOW_CALENDAR_AUTHORITY_INVALID")
+            if observed_at >= grace_member.decision_at.astimezone(UTC):
+                await _expire_for_data_gap(
+                    session,
+                    group=group,
+                    shadow=shadow,
+                    coverage=coverage,
+                    sealed_at=observed_at,
+                )
         return _advance_result(
             group=group,
             shadow=shadow,
