@@ -21,10 +21,10 @@
 
 ## Slice 3：Job repository、lease 与 fencing
 
-- [ ] 新增 `engine/tests/integration/test_job_leases.py`，覆盖幂等入队、优先级、依赖、并发 SKIP LOCKED、heartbeat、过期重领、token/fence 拒绝和终态。
-- [ ] 实现 `engine/src/nexus/jobs/repository.py`：enqueue/claim/heartbeat/finalize/fail/reclaim，所有时间由调用方注入 UTC。
-- [ ] 新增故障注入，证明 handler 业务事实与 Job/attempt/audit/outbox 同事务，旧 worker 不可在被 fence 后提交。
-- [ ] 运行 Job 定向集、Ruff、Mypy；提交 `feat(engine): claim fenced database jobs`。
+- [x] 新增 `engine/tests/integration/test_job_leases.py`，覆盖幂等入队、优先级、依赖、并发 SKIP LOCKED、heartbeat、过期重领、token/fence 拒绝和终态。
+- [x] 实现 `engine/src/nexus/jobs/repository.py`：enqueue/claim/heartbeat/finalize/fail/reclaim，所有时间由调用方注入 UTC。
+- [x] 新增故障注入，证明 handler 业务事实与 Job/attempt/audit/outbox 同事务，旧 worker 不可在被 fence 后提交。
+- [x] 运行 Job 定向集、Ruff、Mypy；待本切片提交。
 
 ## Slice 4：通用 worker 与现有 Agent 适配
 

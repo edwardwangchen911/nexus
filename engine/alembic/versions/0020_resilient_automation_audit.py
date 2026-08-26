@@ -701,8 +701,6 @@ def _create_runtime_guards() -> None:
           IF TG_OP = 'DELETE'
              OR NEW.queue IS DISTINCT FROM OLD.queue
              OR NEW.worker_id IS DISTINCT FROM OLD.worker_id
-             OR NEW.process_version IS DISTINCT FROM OLD.process_version
-             OR NEW.migration_head IS DISTINCT FROM OLD.migration_head
              OR NEW.started_at IS DISTINCT FROM OLD.started_at
              OR NEW.created_at IS DISTINCT FROM OLD.created_at
              OR NEW.seen_at < OLD.seen_at THEN
