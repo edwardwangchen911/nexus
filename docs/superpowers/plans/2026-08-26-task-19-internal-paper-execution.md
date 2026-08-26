@@ -50,11 +50,11 @@
 
 ## Slice 6：Engine API 和生成合约
 
-- [ ] 新增 `engine/tests/unit/api/test_paper_contracts.py` 和 `engine/tests/integration/test_paper_api.py`，先覆盖严格输入/输出、Decimal 字符串、脱敏、有界游标、status 过滤、时间线与取消竞争。
-- [ ] 新增 `engine/src/nexus/api/schemas/paper.py`、`engine/src/nexus/api/routes/paper.py` 和只读 service，并在 `main.py` 注册。
-- [ ] 实现签名 keyset cursor、账户与页大小上限、只由服务端判定 `cancellable`。
-- [ ] 运行 API/contract/OpenAPI 测试，然后 `npm run generate:client`。
-- [ ] 提交：`feat(api): expose internal paper console`
+- [x] 新增 `engine/tests/unit/api/test_paper_contracts.py`、`test_paper_cursor.py` 和 `engine/tests/integration/test_paper_api.py`，先覆盖严格输入/输出、Decimal 字符串、脱敏、有界游标、status 过滤、时间线与取消竞争。
+- [x] 新增 `engine/src/nexus/api/schemas/paper.py`、`engine/src/nexus/api/routes/paper.py` 和只读 service，并在 `main.py` 注册；仅开放 portfolio/orders 读取和用户取消，无 fill/advance/create-order 路由。
+- [x] 实现签名 keyset cursor、账户与页大小上限、只由服务端折叠预留和终态后判定 `cancellable`。
+- [x] 运行 paper API/contract 测试（12 passed）与全局 OpenAPI 合约（7 passed），然后运行 `npm run generate:client`、`check:generated` 和 TypeScript typecheck。
+- [x] 提交：`feat(api): expose internal paper console`
 
 ## Slice 7：Web BFF 安全边界
 

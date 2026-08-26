@@ -1645,6 +1645,746 @@ export const runtimeContractSchemas = {
     "title": "OverviewResponse",
     "type": "object"
   },
+  "PaperAttributionResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "completeness": {
+        "enum": [
+          "FULL",
+          "PARTIAL"
+        ],
+        "title": "Completeness",
+        "type": "string"
+      },
+      "dimension": {
+        "enum": [
+          "cash",
+          "instrument",
+          "sector"
+        ],
+        "title": "Dimension",
+        "type": "string"
+      },
+      "dimension_key": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Dimension Key",
+        "type": "string"
+      },
+      "fees": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Fees",
+        "type": "string"
+      },
+      "market_value": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Market Value",
+        "type": "string"
+      },
+      "realized_pnl": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Realized Pnl",
+        "type": "string"
+      },
+      "slippage": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Slippage",
+        "type": "string"
+      },
+      "unrealized_pnl": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Unrealized Pnl",
+        "type": "string"
+      }
+    },
+    "required": [
+      "dimension",
+      "dimension_key",
+      "market_value",
+      "realized_pnl",
+      "unrealized_pnl",
+      "fees",
+      "slippage",
+      "completeness"
+    ],
+    "title": "PaperAttributionResponse",
+    "type": "object"
+  },
+  "PaperCancelResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "filled_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Filled Quantity",
+        "type": "string"
+      },
+      "order_id": {
+        "format": "uuid",
+        "title": "Order Id",
+        "type": "string"
+      },
+      "remaining_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Remaining Quantity",
+        "type": "string"
+      },
+      "replayed": {
+        "title": "Replayed",
+        "type": "boolean"
+      },
+      "result_event_seq": {
+        "minimum": 1,
+        "title": "Result Event Seq",
+        "type": "integer"
+      },
+      "status": {
+        "const": "cancelled",
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "order_id",
+      "status",
+      "filled_quantity",
+      "remaining_quantity",
+      "result_event_seq",
+      "replayed"
+    ],
+    "title": "PaperCancelResponse",
+    "type": "object"
+  },
+  "PaperFillResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "delivery_mode": {
+        "enum": [
+          "real_time",
+          "delayed",
+          "fixture",
+          "unknown"
+        ],
+        "title": "Delivery Mode",
+        "type": "string"
+      },
+      "execution_model_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Execution Model Hash",
+        "type": "string"
+      },
+      "fee": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Fee",
+        "type": "string"
+      },
+      "feed": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Feed",
+        "type": "string"
+      },
+      "fill_id": {
+        "format": "uuid",
+        "title": "Fill Id",
+        "type": "string"
+      },
+      "fill_seq": {
+        "minimum": 1,
+        "title": "Fill Seq",
+        "type": "integer"
+      },
+      "notional": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Notional",
+        "type": "string"
+      },
+      "occurred_at": {
+        "format": "date-time",
+        "title": "Occurred At",
+        "type": "string"
+      },
+      "price": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Price",
+        "type": "string"
+      },
+      "quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Quantity",
+        "type": "string"
+      },
+      "slippage": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Slippage",
+        "type": "string"
+      },
+      "slippage_bps": {
+        "enum": [
+          10,
+          25
+        ],
+        "title": "Slippage Bps",
+        "type": "integer"
+      },
+      "source": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Source",
+        "type": "string"
+      },
+      "source_as_of": {
+        "format": "date-time",
+        "title": "Source As Of",
+        "type": "string"
+      }
+    },
+    "required": [
+      "fill_id",
+      "fill_seq",
+      "quantity",
+      "price",
+      "notional",
+      "fee",
+      "occurred_at",
+      "source",
+      "feed",
+      "delivery_mode",
+      "source_as_of",
+      "execution_model_hash",
+      "slippage_bps",
+      "slippage"
+    ],
+    "title": "PaperFillResponse",
+    "type": "object"
+  },
+  "PaperOrderEventResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "actor_kind": {
+        "enum": [
+          "task18",
+          "task19",
+          "user",
+          "reconciliation"
+        ],
+        "title": "Actor Kind",
+        "type": "string"
+      },
+      "event_seq": {
+        "minimum": 1,
+        "title": "Event Seq",
+        "type": "integer"
+      },
+      "from_status": {
+        "anyOf": [
+          {
+            "enum": [
+              "proposed",
+              "risk_rejected",
+              "risk_approved",
+              "awaiting_approval",
+              "submitted",
+              "partially_filled",
+              "filled",
+              "cancelled",
+              "rejected",
+              "reconciling"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "From Status"
+      },
+      "occurred_at": {
+        "format": "date-time",
+        "title": "Occurred At",
+        "type": "string"
+      },
+      "reason_code": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Reason Code",
+        "type": "string"
+      },
+      "to_status": {
+        "enum": [
+          "proposed",
+          "risk_rejected",
+          "risk_approved",
+          "awaiting_approval",
+          "submitted",
+          "partially_filled",
+          "filled",
+          "cancelled",
+          "rejected",
+          "reconciling"
+        ],
+        "title": "To Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "event_seq",
+      "from_status",
+      "to_status",
+      "actor_kind",
+      "reason_code",
+      "occurred_at"
+    ],
+    "title": "PaperOrderEventResponse",
+    "type": "object"
+  },
+  "PaperOrderPageResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "items": {
+        "items": {
+          "$ref": "#/components/schemas/PaperOrderResponse"
+        },
+        "maxItems": 50,
+        "title": "Items",
+        "type": "array"
+      },
+      "next_cursor": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Next Cursor"
+      }
+    },
+    "required": [
+      "items",
+      "next_cursor"
+    ],
+    "title": "PaperOrderPageResponse",
+    "type": "object"
+  },
+  "PaperOrderResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "cancellable": {
+        "title": "Cancellable",
+        "type": "boolean"
+      },
+      "current_event_seq": {
+        "minimum": 1,
+        "title": "Current Event Seq",
+        "type": "integer"
+      },
+      "events": {
+        "items": {
+          "$ref": "#/components/schemas/PaperOrderEventResponse"
+        },
+        "maxItems": 128,
+        "title": "Events",
+        "type": "array"
+      },
+      "filled_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Filled Quantity",
+        "type": "string"
+      },
+      "fills": {
+        "items": {
+          "$ref": "#/components/schemas/PaperFillResponse"
+        },
+        "maxItems": 128,
+        "title": "Fills",
+        "type": "array"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "order_id": {
+        "format": "uuid",
+        "title": "Order Id",
+        "type": "string"
+      },
+      "quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Quantity",
+        "type": "string"
+      },
+      "remaining_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Remaining Quantity",
+        "type": "string"
+      },
+      "risk_policy_version": {
+        "maxLength": 50,
+        "minLength": 1,
+        "title": "Risk Policy Version",
+        "type": "string"
+      },
+      "side": {
+        "enum": [
+          "buy",
+          "sell"
+        ],
+        "title": "Side",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "proposed",
+          "risk_rejected",
+          "risk_approved",
+          "awaiting_approval",
+          "submitted",
+          "partially_filled",
+          "filled",
+          "cancelled",
+          "rejected",
+          "reconciling"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "strategy_version": {
+        "maxLength": 50,
+        "minLength": 1,
+        "title": "Strategy Version",
+        "type": "string"
+      },
+      "submitted_at": {
+        "format": "date-time",
+        "title": "Submitted At",
+        "type": "string"
+      },
+      "symbol": {
+        "anyOf": [
+          {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Symbol"
+      },
+      "worst_price": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Worst Price",
+        "type": "string"
+      }
+    },
+    "required": [
+      "order_id",
+      "instrument_id",
+      "symbol",
+      "side",
+      "quantity",
+      "filled_quantity",
+      "remaining_quantity",
+      "worst_price",
+      "status",
+      "cancellable",
+      "current_event_seq",
+      "submitted_at",
+      "strategy_version",
+      "risk_policy_version",
+      "events",
+      "fills"
+    ],
+    "title": "PaperOrderResponse",
+    "type": "object"
+  },
+  "PaperPerformanceResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "as_of": {
+        "format": "date-time",
+        "title": "As Of",
+        "type": "string"
+      },
+      "cash": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Cash",
+        "type": "string"
+      },
+      "drawdown_ratio": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Drawdown Ratio",
+        "type": "string"
+      },
+      "fees": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Fees",
+        "type": "string"
+      },
+      "market_value": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Market Value",
+        "type": "string"
+      },
+      "nav": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Nav",
+        "type": "string"
+      },
+      "peak_nav": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Peak Nav",
+        "type": "string"
+      },
+      "realized_pnl": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Realized Pnl",
+        "type": "string"
+      },
+      "unrealized_pnl": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Unrealized Pnl",
+        "type": "string"
+      }
+    },
+    "required": [
+      "as_of",
+      "cash",
+      "market_value",
+      "nav",
+      "peak_nav",
+      "realized_pnl",
+      "unrealized_pnl",
+      "fees",
+      "drawdown_ratio"
+    ],
+    "title": "PaperPerformanceResponse",
+    "type": "object"
+  },
+  "PaperPortfolioResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "attributions": {
+        "items": {
+          "$ref": "#/components/schemas/PaperAttributionResponse"
+        },
+        "maxItems": 500,
+        "title": "Attributions",
+        "type": "array"
+      },
+      "currency": {
+        "const": "USD",
+        "title": "Currency",
+        "type": "string"
+      },
+      "data_state": {
+        "enum": [
+          "EMPTY",
+          "READY",
+          "PARTIAL",
+          "STALE"
+        ],
+        "title": "Data State",
+        "type": "string"
+      },
+      "initial_capital": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Initial Capital",
+        "type": "string"
+      },
+      "mode": {
+        "const": "internal_paper",
+        "title": "Mode",
+        "type": "string"
+      },
+      "name": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Name",
+        "type": "string"
+      },
+      "performance": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PaperPerformanceResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "portfolio_id": {
+        "format": "uuid",
+        "title": "Portfolio Id",
+        "type": "string"
+      },
+      "positions": {
+        "items": {
+          "$ref": "#/components/schemas/PaperPositionResponse"
+        },
+        "maxItems": 500,
+        "title": "Positions",
+        "type": "array"
+      }
+    },
+    "required": [
+      "portfolio_id",
+      "name",
+      "mode",
+      "currency",
+      "initial_capital",
+      "data_state",
+      "performance",
+      "positions",
+      "attributions"
+    ],
+    "title": "PaperPortfolioResponse",
+    "type": "object"
+  },
+  "PaperPositionResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "available_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Available Quantity",
+        "type": "string"
+      },
+      "average_cost": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Average Cost",
+        "type": "string"
+      },
+      "cost_basis": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Cost Basis",
+        "type": "string"
+      },
+      "delivery_mode": {
+        "enum": [
+          "real_time",
+          "delayed",
+          "fixture",
+          "unknown"
+        ],
+        "title": "Delivery Mode",
+        "type": "string"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "market_value": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Market Value",
+        "type": "string"
+      },
+      "price_as_of": {
+        "format": "date-time",
+        "title": "Price As Of",
+        "type": "string"
+      },
+      "price_feed": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Price Feed",
+        "type": "string"
+      },
+      "price_source": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Price Source",
+        "type": "string"
+      },
+      "quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Quantity",
+        "type": "string"
+      },
+      "reference_close": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Reference Close",
+        "type": "string"
+      },
+      "reserved_quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Reserved Quantity",
+        "type": "string"
+      },
+      "symbol": {
+        "anyOf": [
+          {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Symbol"
+      },
+      "unrealized_pnl": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Unrealized Pnl",
+        "type": "string"
+      }
+    },
+    "required": [
+      "instrument_id",
+      "symbol",
+      "quantity",
+      "reserved_quantity",
+      "available_quantity",
+      "cost_basis",
+      "average_cost",
+      "reference_close",
+      "market_value",
+      "unrealized_pnl",
+      "price_source",
+      "price_feed",
+      "delivery_mode",
+      "price_as_of"
+    ],
+    "title": "PaperPositionResponse",
+    "type": "object"
+  },
   "PortfolioDiagnosticResponse": {
     "additionalProperties": false,
     "properties": {
@@ -4020,3 +4760,9 @@ export const researchRunRuntimeSchema = runtimeContractSchemas.ResearchRunRespon
 export const dailyBriefRuntimeSchema = runtimeContractSchemas.DailyBriefResponse;
 
 export const strategySummaryRuntimeSchema = runtimeContractSchemas.StrategySummaryResponse;
+
+export const paperPortfolioRuntimeSchema = runtimeContractSchemas.PaperPortfolioResponse;
+
+export const paperOrderPageRuntimeSchema = runtimeContractSchemas.PaperOrderPageResponse;
+
+export const paperCancelRuntimeSchema = runtimeContractSchemas.PaperCancelResponse;

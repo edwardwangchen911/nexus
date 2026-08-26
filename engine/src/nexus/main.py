@@ -14,6 +14,7 @@ from nexus.api.routes.integrations import router as integrations_router
 from nexus.api.routes.market import router as market_router
 from nexus.api.routes.optimization import router as optimization_router
 from nexus.api.routes.overview import router as overview_router
+from nexus.api.routes.paper import router as paper_router
 from nexus.api.routes.portfolios import router as portfolios_router
 from nexus.api.routes.research import router as research_router
 from nexus.api.routes.strategies import router as strategies_router
@@ -76,6 +77,7 @@ def create_engine_app(settings: EngineSettings | None = None) -> FastAPI:
     app.include_router(diagnostics_router)
     app.include_router(overview_router)
     app.include_router(optimization_router)
+    app.include_router(paper_router)
     app.include_router(broker_sync_router)
     app.include_router(research_router)
     app.include_router(briefs_router)

@@ -290,6 +290,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/paper/orders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Paper Orders */
+        get: operations["listInternalPaperOrders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/paper/orders/{order_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Paper Order */
+        post: operations["cancelInternalPaperOrder"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/paper/portfolio": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Paper Portfolio */
+        get: operations["getInternalPaperPortfolio"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/portfolios": {
         parameters: {
             query?: never;
@@ -1201,6 +1252,295 @@ export interface components {
             snapshot_as_of: string;
             /** Trading Day */
             trading_day: string | null;
+        };
+        /** PaperAttributionResponse */
+        PaperAttributionResponse: {
+            /**
+             * Completeness
+             * @enum {string}
+             */
+            completeness: "FULL" | "PARTIAL";
+            /**
+             * Dimension
+             * @enum {string}
+             */
+            dimension: "cash" | "instrument" | "sector";
+            /** Dimension Key */
+            dimension_key: string;
+            /** Fees */
+            fees: string;
+            /** Market Value */
+            market_value: string;
+            /** Realized Pnl */
+            realized_pnl: string;
+            /** Slippage */
+            slippage: string;
+            /** Unrealized Pnl */
+            unrealized_pnl: string;
+        };
+        /** PaperCancelEnvelope */
+        PaperCancelEnvelope: {
+            data: components["schemas"]["PaperCancelResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** PaperCancelRequest */
+        PaperCancelRequest: {
+            /** Expected Event Seq */
+            expected_event_seq: number;
+        };
+        /** PaperCancelResponse */
+        PaperCancelResponse: {
+            /** Filled Quantity */
+            filled_quantity: string;
+            /**
+             * Order Id
+             * Format: uuid
+             */
+            order_id: string;
+            /** Remaining Quantity */
+            remaining_quantity: string;
+            /** Replayed */
+            replayed: boolean;
+            /** Result Event Seq */
+            result_event_seq: number;
+            /**
+             * Status
+             * @constant
+             */
+            status: "cancelled";
+        };
+        /** PaperFillResponse */
+        PaperFillResponse: {
+            /**
+             * Delivery Mode
+             * @enum {string}
+             */
+            delivery_mode: "real_time" | "delayed" | "fixture" | "unknown";
+            /** Execution Model Hash */
+            execution_model_hash: string;
+            /** Fee */
+            fee: string;
+            /** Feed */
+            feed: string;
+            /**
+             * Fill Id
+             * Format: uuid
+             */
+            fill_id: string;
+            /** Fill Seq */
+            fill_seq: number;
+            /** Notional */
+            notional: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Price */
+            price: string;
+            /** Quantity */
+            quantity: string;
+            /** Slippage */
+            slippage: string;
+            /**
+             * Slippage Bps
+             * @enum {integer}
+             */
+            slippage_bps: 10 | 25;
+            /** Source */
+            source: string;
+            /**
+             * Source As Of
+             * Format: date-time
+             */
+            source_as_of: string;
+        };
+        /** PaperOrderEventResponse */
+        PaperOrderEventResponse: {
+            /**
+             * Actor Kind
+             * @enum {string}
+             */
+            actor_kind: "task18" | "task19" | "user" | "reconciliation";
+            /** Event Seq */
+            event_seq: number;
+            /** From Status */
+            from_status: ("proposed" | "risk_rejected" | "risk_approved" | "awaiting_approval" | "submitted" | "partially_filled" | "filled" | "cancelled" | "rejected" | "reconciling") | null;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * To Status
+             * @enum {string}
+             */
+            to_status: "proposed" | "risk_rejected" | "risk_approved" | "awaiting_approval" | "submitted" | "partially_filled" | "filled" | "cancelled" | "rejected" | "reconciling";
+        };
+        /** PaperOrderPageEnvelope */
+        PaperOrderPageEnvelope: {
+            data: components["schemas"]["PaperOrderPageResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** PaperOrderPageResponse */
+        PaperOrderPageResponse: {
+            /** Items */
+            items: components["schemas"]["PaperOrderResponse"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
+        /** PaperOrderResponse */
+        PaperOrderResponse: {
+            /** Cancellable */
+            cancellable: boolean;
+            /** Current Event Seq */
+            current_event_seq: number;
+            /** Events */
+            events: components["schemas"]["PaperOrderEventResponse"][];
+            /** Filled Quantity */
+            filled_quantity: string;
+            /** Fills */
+            fills: components["schemas"]["PaperFillResponse"][];
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /**
+             * Order Id
+             * Format: uuid
+             */
+            order_id: string;
+            /** Quantity */
+            quantity: string;
+            /** Remaining Quantity */
+            remaining_quantity: string;
+            /** Risk Policy Version */
+            risk_policy_version: string;
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "buy" | "sell";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "proposed" | "risk_rejected" | "risk_approved" | "awaiting_approval" | "submitted" | "partially_filled" | "filled" | "cancelled" | "rejected" | "reconciling";
+            /** Strategy Version */
+            strategy_version: string;
+            /**
+             * Submitted At
+             * Format: date-time
+             */
+            submitted_at: string;
+            /** Symbol */
+            symbol: string | null;
+            /** Worst Price */
+            worst_price: string;
+        };
+        /** PaperPerformanceResponse */
+        PaperPerformanceResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Cash */
+            cash: string;
+            /** Drawdown Ratio */
+            drawdown_ratio: string;
+            /** Fees */
+            fees: string;
+            /** Market Value */
+            market_value: string;
+            /** Nav */
+            nav: string;
+            /** Peak Nav */
+            peak_nav: string;
+            /** Realized Pnl */
+            realized_pnl: string;
+            /** Unrealized Pnl */
+            unrealized_pnl: string;
+        };
+        /** PaperPortfolioEnvelope */
+        PaperPortfolioEnvelope: {
+            data: components["schemas"]["PaperPortfolioResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** PaperPortfolioResponse */
+        PaperPortfolioResponse: {
+            /** Attributions */
+            attributions: components["schemas"]["PaperAttributionResponse"][];
+            /**
+             * Currency
+             * @constant
+             */
+            currency: "USD";
+            /**
+             * Data State
+             * @enum {string}
+             */
+            data_state: "EMPTY" | "READY" | "PARTIAL" | "STALE";
+            /** Initial Capital */
+            initial_capital: string;
+            /**
+             * Mode
+             * @constant
+             */
+            mode: "internal_paper";
+            /** Name */
+            name: string;
+            performance: components["schemas"]["PaperPerformanceResponse"] | null;
+            /**
+             * Portfolio Id
+             * Format: uuid
+             */
+            portfolio_id: string;
+            /** Positions */
+            positions: components["schemas"]["PaperPositionResponse"][];
+        };
+        /** PaperPositionResponse */
+        PaperPositionResponse: {
+            /** Available Quantity */
+            available_quantity: string;
+            /** Average Cost */
+            average_cost: string;
+            /** Cost Basis */
+            cost_basis: string;
+            /**
+             * Delivery Mode
+             * @enum {string}
+             */
+            delivery_mode: "real_time" | "delayed" | "fixture" | "unknown";
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Market Value */
+            market_value: string;
+            /**
+             * Price As Of
+             * Format: date-time
+             */
+            price_as_of: string;
+            /** Price Feed */
+            price_feed: string;
+            /** Price Source */
+            price_source: string;
+            /** Quantity */
+            quantity: string;
+            /** Reference Close */
+            reference_close: string;
+            /** Reserved Quantity */
+            reserved_quantity: string;
+            /** Symbol */
+            symbol: string | null;
+            /** Unrealized Pnl */
+            unrealized_pnl: string;
         };
         /** PortfolioDiagnosticEnvelope */
         PortfolioDiagnosticEnvelope: {
@@ -3091,6 +3431,186 @@ export interface operations {
                 };
             };
             /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    listInternalPaperOrders: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                limit?: number;
+                status?: ("proposed" | "risk_rejected" | "risk_approved" | "awaiting_approval" | "submitted" | "partially_filled" | "filled" | "cancelled" | "rejected" | "reconciling") | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperOrderPageEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    cancelInternalPaperOrder: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                order_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PaperCancelRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperCancelEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getInternalPaperPortfolio: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperPortfolioEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
             422: {
                 headers: {
                     [name: string]: unknown;

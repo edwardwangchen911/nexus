@@ -87,6 +87,9 @@ function generateRuntimeContract(openapi) {
     "ResearchRunResponse",
     "DailyBriefResponse",
     "StrategySummaryResponse",
+    "PaperPortfolioResponse",
+    "PaperOrderPageResponse",
+    "PaperCancelResponse",
   ];
   const schemas = openapi?.components?.schemas;
   if (!schemas || typeof schemas !== "object") {
@@ -120,6 +123,9 @@ function generateRuntimeContract(openapi) {
     "export const researchRunRuntimeSchema = runtimeContractSchemas.ResearchRunResponse;",
     "export const dailyBriefRuntimeSchema = runtimeContractSchemas.DailyBriefResponse;",
     "export const strategySummaryRuntimeSchema = runtimeContractSchemas.StrategySummaryResponse;",
+    "export const paperPortfolioRuntimeSchema = runtimeContractSchemas.PaperPortfolioResponse;",
+    "export const paperOrderPageRuntimeSchema = runtimeContractSchemas.PaperOrderPageResponse;",
+    "export const paperCancelRuntimeSchema = runtimeContractSchemas.PaperCancelResponse;",
   ].join("\n\n"));
 }
 
