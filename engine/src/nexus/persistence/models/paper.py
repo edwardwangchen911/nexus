@@ -1277,6 +1277,10 @@ class PaperPositionAdjustmentEventRecord(ImmutableCreatedAt, Base):
             "event_seq",
             name="uq_paper_position_events_account_instrument_seq",
         ),
+        UniqueConstraint(
+            "source_fill_id",
+            name="uq_paper_position_adjustments_source_fill",
+        ),
         ForeignKeyConstraint(
             ["account_id"],
             ["paper_accounts.id"],
