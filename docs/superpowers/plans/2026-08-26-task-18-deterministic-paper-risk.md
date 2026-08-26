@@ -10,6 +10,20 @@
 
 **Spec:** docs/superpowers/specs/2026-08-26-task-18-deterministic-paper-risk-design.md
 
+## Execution Status
+
+- [x] Task 1: immutable paper/risk domain models and six canonical hashes.
+- [x] Task 2: fixed `risk_policy_v1` and deterministic drawdown transitions.
+- [x] Task 3: Decimal-only batch evaluator with conservative worst-price rounding and Hypothesis invariants.
+- [x] Task 4: append-only order, reservation, and double-entry ledger folds.
+- [x] Task 5: reversible `0014_paper` migration, isolated seed, composite bindings, and raw-SQL guards.
+- [x] Task 6: immutable forward decisions, exact point-in-time authorities, and fail-closed projection.
+- [x] Task 7: atomic/idempotent/concurrency-safe internal order-batch service with audit/outbox.
+- [x] Task 8: subtype-aware portfolio identity without mixing broker, Shadow, HKD, or USD totals.
+- [x] Task 9: final acceptance and single-executor separated review recorded in `docs/superpowers/reviews/2026-08-26-task-18-deterministic-paper-risk-review.md`.
+
+Final implementation head: `20f0e01`. Final gates: Engine `1220/1220`, affected Task 18 acceptance `36/36`, Web unit `347/347`, Ruff/Mypy/typecheck/lint/generated/build all exit 0, and temporary PostgreSQL database/role/connection residuals `0/0/0`. Task 18 changed no rendered route, so Task 19 owns paper-page E2E.
+
 ## Global Constraints
 
 - Work only in /Users/wangchen/Documents/ChatGPT/投资/.worktrees/nexus-phase-0-1 on branch codex/nexus-phase-0-1.
