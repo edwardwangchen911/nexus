@@ -112,6 +112,7 @@ PAPER_TABLES = {
     "risk_evaluation_rules",
     "risk_evaluation_price_inputs",
     "risk_evaluation_sector_inputs",
+    "risk_query_authorities",
     "risk_evaluation_query_proofs",
     "paper_ledger_accounts",
     "paper_ledger_transactions",

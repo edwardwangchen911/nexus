@@ -371,6 +371,7 @@ Use explicit named constraints and ForeignKeyConstraint bindings for root identi
 - composite parent bindings where a child repeats account_id/order_id/decision_id;
 - NUMERIC(38,12), UTC timestamptz, canonical hash checks, currency checks, integer quantity checks;
 - all unique constraints from the design;
+- immutable risk_query_authorities roots and a mandatory proof-to-authority foreign key;
 - fixed UUIDv5 constants calculated outside the migration and written as literals;
 - idempotent insert-on-conflict seed statements for Account, Portfolio, paper account, policy, ledger accounts, funding, and genesis drawdown event.
 

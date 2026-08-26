@@ -139,6 +139,11 @@ Task 16 的 StrategyDecision 目前是纯函数结果。Task 18 增加不可变 
 
 风险评估保存所用 price、sector 和 query proof 行，不只保存外键。这样历史评估在来源修订后仍能重算原哈希。来源实际 delivery_mode 和 available_at 进入风险输入摘要，不得宣称实时。
 
+每个 query proof 必须外键引用不可变的 `risk_query_authorities` 根。该根固定
+source policy、universe、decision session、查询种类、完整 required instrument
+集合、blocked instrument 集合、来源水位哈希、available_at 和 content hash；空结果
+也必须通过该权威根证明查询范围和数据水位，不能只保存一个无来源的随机 UUID。
+
 ## 8. 组合投影
 
 PaperPortfolioProjection 是风险内核唯一接受的账户状态，字段至少包含：
@@ -344,6 +349,7 @@ def post_ledger_transaction(
 - risk_evaluation_price_inputs
 - risk_evaluation_sector_inputs
 - risk_evaluation_query_proofs
+- risk_query_authorities
 - paper_ledger_accounts
 - paper_ledger_transactions
 - paper_ledger_entries

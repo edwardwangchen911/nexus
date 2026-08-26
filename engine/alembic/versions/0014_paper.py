@@ -27,6 +27,7 @@ _PAPER_TABLES = (
     "risk_evaluation_rules",
     "risk_evaluation_price_inputs",
     "risk_evaluation_sector_inputs",
+    "risk_query_authorities",
     "risk_evaluation_query_proofs",
     "paper_ledger_accounts",
     "paper_ledger_transactions",
@@ -118,8 +119,7 @@ def _create_identity_policy_and_decisions() -> None:
         """
     )
     op.execute(
-        "CREATE UNIQUE INDEX uq_risk_policies_active "
-        "ON risk_policies ((active)) WHERE active"
+        "CREATE UNIQUE INDEX uq_risk_policies_active ON risk_policies ((active)) WHERE active"
     )
     op.execute(
         """
@@ -489,6 +489,46 @@ def _create_orders_and_risk() -> None:
     )
     op.execute(
         """
+        CREATE TABLE risk_query_authorities (
+          id uuid NOT NULL,
+          source_policy_id uuid NOT NULL,
+          universe_snapshot_id uuid NOT NULL,
+          decision_session date NOT NULL,
+          kind varchar(30) NOT NULL,
+          required_instrument_ids uuid[] NOT NULL,
+          blocked_instrument_ids uuid[] NOT NULL,
+          complete boolean NOT NULL,
+          source_watermark_hash varchar(64) NOT NULL,
+          available_at timestamptz NOT NULL,
+          content_hash varchar(64) NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT pk_risk_query_authorities PRIMARY KEY (id),
+          CONSTRAINT uq_risk_query_authorities_scope
+            UNIQUE (source_policy_id, universe_snapshot_id, decision_session, kind),
+          CONSTRAINT fk_risk_query_authorities_source_policy
+            FOREIGN KEY (source_policy_id) REFERENCES source_policies(id),
+          CONSTRAINT fk_risk_query_authorities_universe
+            FOREIGN KEY (universe_snapshot_id) REFERENCES universe_snapshots(id),
+          CONSTRAINT ck_risk_query_authorities_kind_allowed
+            CHECK (kind IN ('corporate_action','suspension','delisting')),
+          CONSTRAINT ck_risk_query_authorities_required_nonempty
+            CHECK (cardinality(required_instrument_ids) > 0),
+          CONSTRAINT ck_risk_query_authorities_arrays_nonnull CHECK (
+            array_position(required_instrument_ids, NULL) IS NULL
+            AND array_position(blocked_instrument_ids, NULL) IS NULL
+          ),
+          CONSTRAINT ck_risk_query_authorities_blocked_subset
+            CHECK (blocked_instrument_ids <@ required_instrument_ids),
+          CONSTRAINT ck_risk_query_authorities_complete CHECK (complete),
+          CONSTRAINT ck_risk_query_authorities_hashes_canonical CHECK (
+            source_watermark_hash ~ '^[0-9a-f]{64}$'
+            AND content_hash ~ '^[0-9a-f]{64}$'
+          )
+        )
+        """
+    )
+    op.execute(
+        """
         CREATE TABLE risk_evaluation_query_proofs (
           id uuid NOT NULL,
           risk_evaluation_id uuid NOT NULL,
@@ -506,6 +546,8 @@ def _create_orders_and_risk() -> None:
           CONSTRAINT fk_risk_query_proofs_evaluation
             FOREIGN KEY (risk_evaluation_id, account_id)
             REFERENCES risk_evaluations(id, account_id),
+          CONSTRAINT fk_risk_query_proofs_authority
+            FOREIGN KEY (authority_id) REFERENCES risk_query_authorities(id),
           CONSTRAINT ck_risk_evaluation_query_proofs_kind_allowed
             CHECK (kind IN ('corporate_action','suspension','delisting')),
           CONSTRAINT ck_risk_evaluation_query_proofs_complete CHECK (complete),
@@ -1278,29 +1320,15 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema without mutating pre-existing account or portfolio roots."""
-    op.execute(
-        "DROP TRIGGER trg_strategy_decision_targets_weights "
-        "ON strategy_decision_targets"
-    )
+    op.execute("DROP TRIGGER trg_strategy_decision_targets_weights ON strategy_decision_targets")
     op.execute("DROP TRIGGER trg_strategy_decisions_weights ON strategy_decisions")
     op.execute("DROP FUNCTION nexus_strategy_decision_weights_complete()")
-    op.execute(
-        "DROP TRIGGER trg_paper_drawdown_events_chain "
-        "ON paper_drawdown_lock_events"
-    )
+    op.execute("DROP TRIGGER trg_paper_drawdown_events_chain ON paper_drawdown_lock_events")
     op.execute("DROP FUNCTION nexus_paper_drawdown_chain_valid()")
-    op.execute(
-        "DROP TRIGGER trg_paper_ledger_entries_balanced ON paper_ledger_entries"
-    )
-    op.execute(
-        "DROP TRIGGER trg_paper_ledger_transactions_balanced "
-        "ON paper_ledger_transactions"
-    )
+    op.execute("DROP TRIGGER trg_paper_ledger_entries_balanced ON paper_ledger_entries")
+    op.execute("DROP TRIGGER trg_paper_ledger_transactions_balanced ON paper_ledger_transactions")
     op.execute("DROP FUNCTION nexus_paper_ledger_transaction_balanced()")
-    op.execute(
-        "DROP TRIGGER trg_paper_reservation_events_chain "
-        "ON paper_reservation_events"
-    )
+    op.execute("DROP TRIGGER trg_paper_reservation_events_chain ON paper_reservation_events")
     op.execute("DROP FUNCTION nexus_paper_reservation_event_chain_valid()")
     op.execute("DROP TRIGGER trg_paper_order_events_chain ON paper_order_events")
     op.execute("DROP FUNCTION nexus_paper_order_event_chain_valid()")

@@ -559,6 +559,63 @@ class RiskEvaluationSectorInputRecord(ImmutableCreatedAt, Base):
     content_hash: Mapped[str] = mapped_column(String(64))
 
 
+class RiskQueryAuthorityRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "risk_query_authorities"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_policy_id",
+            "universe_snapshot_id",
+            "decision_session",
+            "kind",
+            name="uq_risk_query_authorities_scope",
+        ),
+        ForeignKeyConstraint(
+            ["source_policy_id"],
+            ["source_policies.id"],
+            name="fk_risk_query_authorities_source_policy",
+        ),
+        ForeignKeyConstraint(
+            ["universe_snapshot_id"],
+            ["universe_snapshots.id"],
+            name="fk_risk_query_authorities_universe",
+        ),
+        CheckConstraint(
+            "kind IN ('corporate_action','suspension','delisting')",
+            name="kind_allowed",
+        ),
+        CheckConstraint(
+            "cardinality(required_instrument_ids) > 0",
+            name="required_nonempty",
+        ),
+        CheckConstraint(
+            "array_position(required_instrument_ids, NULL) IS NULL "
+            "AND array_position(blocked_instrument_ids, NULL) IS NULL",
+            name="arrays_nonnull",
+        ),
+        CheckConstraint(
+            "blocked_instrument_ids <@ required_instrument_ids",
+            name="blocked_subset",
+        ),
+        CheckConstraint("complete", name="complete"),
+        CheckConstraint(
+            "source_watermark_hash ~ '^[0-9a-f]{64}$' AND content_hash ~ '^[0-9a-f]{64}$'",
+            name="hashes_canonical",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    source_policy_id: Mapped[UUID]
+    universe_snapshot_id: Mapped[UUID]
+    decision_session: Mapped[date] = mapped_column(Date)
+    kind: Mapped[str] = mapped_column(String(30))
+    required_instrument_ids: Mapped[list[UUID]] = mapped_column(ARRAY(PostgreSQLUUID(as_uuid=True)))
+    blocked_instrument_ids: Mapped[list[UUID]] = mapped_column(ARRAY(PostgreSQLUUID(as_uuid=True)))
+    complete: Mapped[bool] = mapped_column(Boolean)
+    source_watermark_hash: Mapped[str] = mapped_column(String(64))
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    content_hash: Mapped[str] = mapped_column(String(64))
+
+
 class RiskEvaluationQueryProofRecord(ImmutableCreatedAt, Base):
     __tablename__ = "risk_evaluation_query_proofs"
     __table_args__ = (
@@ -567,6 +624,11 @@ class RiskEvaluationQueryProofRecord(ImmutableCreatedAt, Base):
             ["risk_evaluation_id", "account_id"],
             ["risk_evaluations.id", "risk_evaluations.account_id"],
             name="fk_risk_query_proofs_evaluation",
+        ),
+        ForeignKeyConstraint(
+            ["authority_id"],
+            ["risk_query_authorities.id"],
+            name="fk_risk_query_proofs_authority",
         ),
         CheckConstraint(
             "kind IN ('corporate_action','suspension','delisting')",
