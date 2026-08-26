@@ -15,10 +15,12 @@
 
 ## Slice 2：全局可访问性与视觉门禁
 
-- [ ] 建立共用 Playwright 可访问性 helper，覆盖六档视口、Axe critical/serious、页面溢出、44px/8px、200% zoom 和 reduced motion。
-- [ ] 测试 skip link、路由切换 main 焦点、表格/图表键盘、局部滚动标签、sticky 焦点可见和错误摘要焦点。
-- [ ] 仅修复失败的通用 AppShell/token/组件，重跑所有 Web 单测和 E2E；保存 390/1440 视觉快照。
-- [ ] 提交 `fix(web): enforce final accessibility gates`。
+- [x] 建立共用 Playwright 可访问性 helper，覆盖六档视口、Axe critical/serious、页面溢出、44px/8px、200% zoom 和 reduced motion。
+- [x] 测试 skip link、路由切换 main 焦点、表格/图表键盘、局部滚动标签、sticky 焦点可见和错误摘要焦点。
+- [x] 仅修复失败的通用 AppShell/token/组件，重跑所有 Web 单测和 E2E；保存 390/1440 视觉快照。
+- [x] 提交 `fix(web): enforce final accessibility gates`。
+
+验收记录（2026-08-27）：首个红灯暴露路由链接整页导航后 `main` 不聚焦，且 error `DataState` 无可聚焦 `alert`。改为受控的同源导航，并为 `main:focus` 和 error summary 提供可见焦点。定向可访问性 E2E `10 passed`，全量 E2E `64 passed`，Web 单测 `424 passed`，lint/typecheck/generated/build 通过；390/1440 截图由 Playwright 保存于本地 `test-results`。
 
 ## Slice 3：本地 Compose 启动与运维文档
 

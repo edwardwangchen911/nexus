@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { usePathname } from "next/navigation";
+import { useEffect, useRef, type MouseEvent } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { SkipLink } from "./skip-link";
 
 const primaryNavigation = [
@@ -24,7 +24,7 @@ function PrimaryNavigation({ mobile = false }: { mobile?: boolean }) {
       <ul className="app-shell__nav-list">
         {primaryNavigation.map(([label, href]) => (
           <li key={href}>
-            <a className="app-shell__navigation-control" href={href}>{label}</a>
+            <NavigationLink href={href}>{label}</NavigationLink>
           </li>
         ))}
       </ul>
@@ -40,13 +40,23 @@ function NavigationGroups({ mobile = false }: { mobile?: boolean }) {
         <ul className="app-shell__system-list">
           {systemNavigation.map(([label, href]) => (
             <li key={href}>
-              <a className="app-shell__navigation-control" href={href}>{label}</a>
+              <NavigationLink href={href}>{label}</NavigationLink>
             </li>
           ))}
         </ul>
       </nav>
     </div>
   );
+}
+
+function NavigationLink({ href, children }: { href: string; children: React.ReactNode }): React.ReactElement {
+  const router = useRouter();
+  function navigate(event: MouseEvent<HTMLAnchorElement>): void {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    router.push(href);
+  }
+  return <a className="app-shell__navigation-control" href={href} onClick={navigate}>{children}</a>;
 }
 
 export function AppShell({ children }: { children: React.ReactNode }): React.ReactElement {

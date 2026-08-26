@@ -16,7 +16,8 @@ describe("DataState", () => {
   it.each(cases)("renders a visible %s status label", (state, label) => {
     render(<DataState state={state} title="组合快照" detail="说明" />);
 
-    expect(screen.getByRole("status", { name: label })).toBeVisible();
+    if (state === "error") expect(screen.getByRole("alert")).toHaveTextContent(label);
+    else expect(screen.getByRole("status", { name: label })).toBeVisible();
     expect(screen.getByText("组合快照")).toBeVisible();
     expect(screen.getByText("说明")).toBeVisible();
   });
@@ -35,5 +36,13 @@ describe("DataState", () => {
     expect(headings.map((heading) => heading.id)).toEqual(expect.not.arrayContaining([""]));
     expect(new Set(headings.map((heading) => heading.id)).size).toBe(2);
     expect(sections.map((section) => section.getAttribute("aria-labelledby"))).toEqual(headings.map((heading) => heading.id));
+  });
+
+  it("moves focus to a newly rendered error summary", () => {
+    render(<DataState state="error" title="市场快照" detail="读取失败" />);
+
+    const summary = screen.getByRole("alert");
+    expect(summary).toHaveFocus();
+    expect(summary).toHaveAttribute("tabindex", "-1");
   });
 });

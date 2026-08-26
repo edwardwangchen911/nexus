@@ -1,12 +1,14 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import "../../../app/styles/tokens.css";
 import { AppShell } from "../../../app/components/app-shell";
 
 const route = vi.hoisted(() => ({ pathname: "/overview" }));
+const navigation = vi.hoisted(() => ({ push: vi.fn() }));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => route.pathname,
+  useRouter: () => navigation,
 }));
 
 const primaryHrefs = [
@@ -20,6 +22,8 @@ const primaryHrefs = [
 const systemHrefs = ["/strategies", "/integrations"];
 
 describe("AppShell", () => {
+  beforeEach(() => { navigation.push.mockClear(); });
+
   it("provides ordered primary and secondary navigation in desktop and mobile views", () => {
     const { container } = render(
       <AppShell>
@@ -63,5 +67,13 @@ describe("AppShell", () => {
     );
 
     expect(document.activeElement).toBe(main);
+  });
+
+  it("keeps unmodified navigation inside the client router", () => {
+    render(<AppShell><p>内容</p></AppShell>);
+
+    fireEvent.click(screen.getByRole("navigation", { name: "主导航" }).querySelector('a[href="/market"]')!);
+
+    expect(navigation.push).toHaveBeenCalledWith("/market");
   });
 });

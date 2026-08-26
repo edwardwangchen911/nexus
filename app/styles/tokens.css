@@ -47,7 +47,7 @@
 html { background: var(--color-canvas); }
 body { margin: 0; color: var(--color-text); background: var(--color-canvas); font-family: var(--font-geist-sans), system-ui, sans-serif; font-size: 16px; line-height: 1.5; }
 a { color: var(--component-nav-text); }
-a:focus-visible, button:focus-visible, select:focus-visible, summary:focus-visible, main:focus-visible { outline: 3px solid var(--color-focus); outline-offset: 3px; }
+a:focus-visible, button:focus-visible, select:focus-visible, summary:focus-visible, main:focus { outline: 3px solid var(--color-focus); outline-offset: 3px; }
 button { font: inherit; }
 .app-shell { min-block-size: 100vh; }
 .skip-link { position: fixed; inset-block-start: var(--space-2); inset-inline-start: var(--space-2); z-index: 2; transform: translateY(-200%); background: var(--color-action); color: var(--color-action-text); padding: var(--space-2) var(--space-3); }

@@ -114,9 +114,7 @@ describe("strategy governance page", () => {
     expect(await screen.findByRole("status", { name: "无权访问" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "刷新策略" }));
 
-    await waitFor(() =>
-      expect(screen.getByRole("status", { name: "加载失败" })).toBeVisible(),
-    );
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("加载失败"));
     expect(screen.queryByRole("heading", { name: "baseline_v1" })).not.toBeInTheDocument();
   });
 });
