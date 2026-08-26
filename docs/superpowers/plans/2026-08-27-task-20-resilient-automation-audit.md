@@ -5,11 +5,11 @@
 
 ## Slice 1：规范 Job、重试与审计纯函数
 
-- [ ] 新增 `engine/tests/unit/jobs/test_models.py`，覆盖 JobKey UTC/字符边界、canonical key/hash、状态转换、队列优先级、retry policy 和 fencing 值对象。
-- [ ] 新增 `engine/tests/unit/audit/test_chain.py`，覆盖严格 JCS 子集、Unicode golden vector、全局 previous/event hash 和非法 float/Decimal/大整数拒绝。
-- [ ] 新增 `engine/tests/unit/audit/test_redaction.py`，覆盖 action 分类、actor 降级、字段 allowlist 和敏感键/精确金额不可导出。
-- [ ] 实现 `engine/src/nexus/jobs/models.py`、`engine/src/nexus/audit/canonical.py`、`engine/src/nexus/audit/redaction.py`。
-- [ ] 运行三组单测、Ruff、Mypy；提交 `feat(engine): define resilient job and audit domains`。
+- [x] 新增 `engine/tests/unit/jobs/test_models.py`，覆盖 JobKey UTC/字符边界、canonical key/hash、状态转换、队列优先级、retry policy 和 fencing 值对象。
+- [x] 新增 `engine/tests/unit/audit/test_chain.py`，覆盖严格 JCS 子集、Unicode golden vector、全局 previous/event hash 和非法 float/Decimal/大整数拒绝。
+- [x] 新增 `engine/tests/unit/audit/test_redaction.py`，覆盖 action 分类、actor 降级、字段 allowlist 和敏感键/精确金额不可导出。
+- [x] 实现 `engine/src/nexus/jobs/models.py`、`engine/src/nexus/audit/canonical.py`、`engine/src/nexus/audit/redaction.py`。
+- [x] 运行三组单测（37 passed）、Ruff、Mypy；提交 `feat(engine): define resilient job and audit domains`。
 
 ## Slice 2：0020 运行权威迁移
 
