@@ -36,14 +36,14 @@ from nexus.api.schemas.optimization import (
 )
 from nexus.optimizer.admission import admit_queued_job
 from nexus.optimizer.authority import load_admission_authority
-from nexus.optimizer.lifecycle import transition_group_idempotently
+from nexus.optimizer.lifecycle import reject_group_idempotently
 from nexus.optimizer.models import (
     PortfolioScope,
     ProposalAction,
     ProposalGroupStatus,
     ProposalVariant,
 )
-from nexus.optimizer.repository import _has_executable_shadow_authority
+from nexus.optimizer.repository import has_executable_shadow_authority
 from nexus.optimizer.what_if import evaluate_what_if as evaluate_what_if_weights
 from nexus.persistence.models.optimization import (
     OptimizationProposalGroupRecord,
@@ -57,6 +57,7 @@ from nexus.reconciliation.persistence_errors import (
     BrokerSyncPersistenceError,
     IdempotencyConflict,
 )
+from nexus.shadow.start import start_proposal_shadow
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -396,7 +397,7 @@ async def get_optimization_group(
                 ErrorCode.DATA_PARTIAL, "Proposal comparison is invalid.", status_code=409
             ) from error
     reasons = _shadow_eligibility_reasons(group, proposal_data)
-    if not reasons and not await _has_executable_shadow_authority(session, group):
+    if not reasons and not await has_executable_shadow_authority(session, group):
         reasons.append("PERSISTED_SHADOW_AUTHORITY_INCOMPLETE")
     return OptimizationProposalGroupEnvelope(
         data=OptimizationProposalGroupResponse(
@@ -420,7 +421,6 @@ async def get_optimization_group(
 
 async def _transition_endpoint(
     group_id: UUID,
-    target: str,
     request: Request,
     body: OptimizationLifecycleRequest,
     idempotency_key: str,
@@ -428,7 +428,7 @@ async def _transition_endpoint(
     session: AsyncSession,
 ) -> OptimizationLifecycleEnvelope:
     raw_body = await request.body()
-    request_hash = hashlib.sha256(target.encode() + b"\0" + raw_body).hexdigest()
+    request_hash = hashlib.sha256(b"rejected\0" + raw_body).hexdigest()
     _validate_claim(
         actor.actor_id,
         f"optimization-proposal-lifecycle:{group_id}",
@@ -436,13 +436,12 @@ async def _transition_endpoint(
         request_hash,
     )
     try:
-        group = await transition_group_idempotently(
+        group = await reject_group_idempotently(
             session,
             actor_id=actor.actor_id,
             idempotency_key=idempotency_key,
             request_hash=request_hash,
             group_id=group_id,
-            target=target,  # type: ignore[arg-type]
             expected_version=body.version,
         )
     except IdempotencyConflict as error:
@@ -490,8 +489,52 @@ async def shadow_optimization_group(
     session: AsyncSession = Depends(transactional_session),
 ) -> OptimizationLifecycleEnvelope:
     _validate_if_match(if_match, body.version)
-    return await _transition_endpoint(
-        group_id, "shadowing", request, body, idempotency_key, actor, session
+    raw_body = await request.body()
+    request_hash = hashlib.sha256(b"shadowing\0" + raw_body).hexdigest()
+    _validate_claim(
+        actor.actor_id,
+        f"optimization-proposal-shadow:{group_id}",
+        idempotency_key,
+        request_hash,
+    )
+    try:
+        result = await start_proposal_shadow(
+            session,
+            actor_id=actor.actor_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            group_id=group_id,
+            expected_version=body.version,
+        )
+    except IdempotencyConflict as error:
+        raise NexusError(
+            ErrorCode.IDEMPOTENCY_CONFLICT,
+            "Idempotency key has a different lifecycle request.",
+            status_code=409,
+        ) from error
+    except ValueError as error:
+        reason = str(error)
+        code = (
+            ErrorCode.PROPOSAL_NOT_EXECUTABLE
+            if reason in {"PROPOSAL_NOT_EXECUTABLE", "SHADOW_CALENDAR_INCOMPLETE"}
+            else ErrorCode.VERSION_CONFLICT
+            if reason == "VERSION_CONFLICT"
+            else ErrorCode.VALIDATION_ERROR
+        )
+        raise NexusError(
+            code,
+            "Proposal Shadow startup was rejected.",
+            status_code=409
+            if code in (ErrorCode.VERSION_CONFLICT, ErrorCode.PROPOSAL_NOT_EXECUTABLE)
+            else 422,
+        ) from error
+    return OptimizationLifecycleEnvelope(
+        data=OptimizationLifecycleData(
+            proposal_group_id=result.proposal_group_id,
+            status=result.status,
+            version=result.version,
+        ),
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=_utc_now(request)),
     )
 
 
@@ -512,7 +555,7 @@ async def reject_optimization_group(
 ) -> OptimizationLifecycleEnvelope:
     _validate_if_match(if_match, body.version)
     return await _transition_endpoint(
-        group_id, "rejected", request, body, idempotency_key, actor, session
+        group_id, request, body, idempotency_key, actor, session
     )
 
 

@@ -47,7 +47,7 @@ async def transition_group(
         raise ValueError("VERSION_CONFLICT")
     if target not in _ALLOWED[group.status]:
         raise ValueError("VALIDATION_ERROR")
-    if target == "shadowing" and not await _has_executable_shadow_authority(session, group):
+    if target == "shadowing" and not await has_executable_shadow_authority(session, group):
         raise ValueError("PROPOSAL_NOT_EXECUTABLE")
     result = await session.execute(
         update(OptimizationProposalGroupRecord)
@@ -64,7 +64,7 @@ async def transition_group(
     return updated
 
 
-async def _has_executable_shadow_authority(
+async def has_executable_shadow_authority(
     session: AsyncSession, group: OptimizationProposalGroupRecord
 ) -> bool:
     """Re-read all frozen authority rows before a non-executable shadow transition."""

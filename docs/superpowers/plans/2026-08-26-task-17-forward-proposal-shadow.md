@@ -465,7 +465,7 @@ Adapt the frozen cost policy with an explicit versioned function; never read cos
 
 ```python
 def cost_model_from_policy(policy: CostPolicyRecord) -> CostModel:
-    if policy.key != "transaction_cost" or policy.version != "cost_policy_v1":
+    if policy.key != "cost_model" or policy.version != "cost_policy_v1":
         raise ValueError("COST_POLICY_UNSUPPORTED")
     return CostModel(
         commission_bps=Decimal(str(policy.parameters["commission_bps"])),
@@ -473,6 +473,10 @@ def cost_model_from_policy(policy: CostPolicyRecord) -> CostModel:
         slippage_bps=Decimal(str(policy.parameters["slippage_bps"])),
     )
 ```
+
+`cost_model` is the existing immutable Task 12 policy key and is also required by the
+database lifecycle predicate; `transaction_cost` in the pre-implementation draft was
+an unseeded name and must not create a second authority identity.
 
 The adapter validates the exact committed `cost_policy_v1` parameter-key set, schema version, finite Decimal values, evidence refs, and `available_at <= started_at`; the snippet shows the fixed spread behavior, not permission to ignore extra/missing keys.
 
@@ -497,18 +501,18 @@ Start audit/outbox names are `shadow.started`; Shadow-aware rejection uses `shad
 
 **Steps**
 
-- [ ] Build `seed_shadow_eligible_group()` and `seed_shadow_calendar()` helpers that insert exactly three proposals/comparisons, eligible authorities, and 68 future XNYS sessions without inserting any Shadow row.
-- [ ] Add red tests for successful start, exact three variants/NAV=100, hold-current weight mapping, proposal/hash binding, database-time session boundary, weekend/holiday behavior, stale/partial/source-conflict/cost/FX/evidence rejection, and rollback after each injected failure point.
-- [ ] Add cost-policy unit tests for exact `cost_policy_v1` adaptation, explicit spread=0, binary-float/unknown-key rejection, unsupported version, missing evidence, and future `available_at`.
-- [ ] Add idempotency tests: same actor/key/body returns the same Shadow ID and no extra facts; same key/different body returns `IDEMPOTENCY_BODY_MISMATCH`; different actors may use the same textual key independently.
-- [ ] Add concurrency tests: two distinct keys on the same version converge to one success and one stable version/state conflict; no partial variant rows remain.
-- [ ] Add rejection tests for `draft|compared` without Shadow, `shadowing` with atomic rejected seal, rejected start replay, and a direct status write rejected by the database guard.
-- [ ] Run `uv run --package nexus-engine pytest engine/tests/integration/test_shadow_start_pg.py engine/tests/integration/test_optimization_lifecycle.py -q`; confirm failures before the services exist.
-- [ ] Implement canonical proposal/target hashes, calendar freezing, persisted eligibility revalidation, idempotency response persistence, CAS, audit, and outbox in `start.py`/`repository.py`.
-- [ ] Modify rejection to use the same proposal-first lock order and create the matching seal in the same transaction only when current status is `shadowing`.
-- [ ] Rerun focused tests plus `engine/tests/integration/test_optimization_api.py`; expect exit 0.
-- [ ] Run Ruff/Mypy for Shadow start/repository and optimizer lifecycle files; expect exit 0.
-- [ ] Commit with `feat(engine): start and reject proposal shadows atomically`.
+- [x] Build `seed_shadow_eligible_group()` and `seed_shadow_calendar()` helpers that insert exactly three proposals/comparisons, eligible authorities, and 68 future XNYS sessions without inserting any Shadow row.
+- [x] Add red tests for successful start, exact three variants/NAV=100, hold-current weight mapping, proposal/hash binding, database-time session boundary, weekend/holiday behavior, stale/partial/source-conflict/cost/FX/evidence rejection, and rollback after each injected failure point.
+- [x] Add cost-policy unit tests for exact `cost_policy_v1` adaptation, explicit spread=0, binary-float/unknown-key rejection, unsupported version, missing evidence, and future `available_at`.
+- [x] Add idempotency tests: same actor/key/body returns the same Shadow ID and no extra facts; same key/different body returns `IDEMPOTENCY_BODY_MISMATCH`; different actors may use the same textual key independently.
+- [x] Add concurrency tests: two distinct keys on the same version converge to one success and one stable version/state conflict; no partial variant rows remain.
+- [x] Add rejection tests for `draft|compared` without Shadow, `shadowing` with atomic rejected seal, rejected start replay, and a direct status write rejected by the database guard.
+- [x] Run `uv run --package nexus-engine pytest engine/tests/integration/test_shadow_start_pg.py engine/tests/integration/test_optimization_lifecycle.py -q`; confirm failures before the services exist.
+- [x] Implement canonical proposal/target hashes, calendar freezing, persisted eligibility revalidation, idempotency response persistence, CAS, audit, and outbox in `start.py`/`repository.py`.
+- [x] Modify rejection to use the same proposal-first lock order and create the matching seal in the same transaction only when current status is `shadowing`.
+- [x] Rerun focused tests plus `engine/tests/integration/test_optimization_api.py`; expect exit 0.
+- [x] Run Ruff/Mypy for Shadow start/repository and optimizer lifecycle files; expect exit 0.
+- [x] Commit with `feat(engine): start and reject proposal shadows atomically`.
 
 ---
 

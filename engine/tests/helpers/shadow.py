@@ -1,0 +1,287 @@
+"""Persisted executable proposal and calendar fixtures for Shadow tests."""
+
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
+
+import exchange_calendars
+from nexus.backtest.engine import exchange_calendar_content_hash
+from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
+from nexus.optimizer.cost_policy import COST_POLICY_ID
+from nexus.persistence.models.backtest import (
+    ExchangeCalendarAuthorityRecord,
+    ExchangeCalendarSessionRecord,
+)
+from nexus.persistence.models.data import DataSnapshot
+from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
+from nexus.persistence.models.market import Instrument
+from nexus.persistence.models.optimization import (
+    BaselineSelectionAuthorityRecord,
+    OptimizationProposalGroupRecord,
+    OptimizationProposalRecord,
+    ProposalComparisonRecord,
+    ProposalPositionRecord,
+)
+from nexus.persistence.session import session_factory
+from nexus.quality.source_policy import SOURCE_POLICY_ID
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from helpers.optimization import complete_comparison_metrics
+from helpers.portfolio_api import INSTRUMENT_ID, PORTFOLIOS, seed_portfolio_list, settings
+
+_BASELINE_ID = UUID("0198d500-1000-7000-8000-000000000041")
+_OPTIMIZER_POLICY_ID = UUID("e690b91d-1e24-5de3-b2b2-566a463fca25")
+_SECOND_INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000009999")
+_VALUATION_TIME = datetime(2026, 8, 24, 3, 59, tzinfo=UTC)
+_NEW_YORK = ZoneInfo("America/New_York")
+
+
+@dataclass(frozen=True)
+class ShadowEligibleSeed:
+    group_id: UUID
+    proposal_ids: dict[str, UUID]
+    instrument_ids: tuple[UUID, UUID]
+    calendar_id: UUID
+    calendar_sessions: tuple[date, ...]
+    database_time: datetime
+
+
+@dataclass(frozen=True)
+class ShadowCalendarSeed:
+    calendar_id: UUID
+    sessions: tuple[date, ...]
+
+
+async def seed_shadow_calendar(
+    session: AsyncSession,
+    *,
+    database_time: datetime,
+    market_date: date,
+    session_count: int = 68,
+    content_hash_override: str | None = None,
+) -> ShadowCalendarSeed:
+    """Insert one complete, content-addressed XNYS calendar authority."""
+    official_calendar = exchange_calendars.get_calendar("XNYS")
+    candidates = tuple(
+        value.date()
+        for value in official_calendar.sessions_in_range(
+            market_date + timedelta(days=1),
+            market_date + timedelta(days=180),
+        )
+    )
+    calendar_sessions = candidates[:session_count]
+    if len(calendar_sessions) != session_count:
+        raise RuntimeError("Shadow fixture calendar range is too short")
+    decision_times = {
+        session_date: official_calendar.session_close(session_date).to_pydatetime()
+        + timedelta(minutes=30)
+        for session_date in calendar_sessions
+    }
+    calendar = ExchangeCalendarAuthorityRecord(
+        id=uuid4(),
+        exchange="XNYS",
+        version=f"shadow-start-{uuid4()}",
+        source="fixture",
+        range_start=calendar_sessions[0],
+        range_end=calendar_sessions[-1],
+        query_parameters={"fixture": "shadow-start"},
+        completeness_status="complete",
+        content_hash=content_hash_override
+        or exchange_calendar_content_hash(calendar_sessions, decision_times),
+        published_at=database_time - timedelta(seconds=1),
+    )
+    session.add(calendar)
+    await session.flush()
+    session.add_all(
+        ExchangeCalendarSessionRecord(
+            calendar_authority_id=calendar.id,
+            session=session_date,
+            decision_at=decision_times[session_date],
+        )
+        for session_date in calendar_sessions
+    )
+    return ShadowCalendarSeed(calendar_id=calendar.id, sessions=calendar_sessions)
+
+
+async def seed_shadow_eligible_group(
+    database_url: str,
+    *,
+    calendar_session_count: int = 68,
+    calendar_content_hash_override: str | None = None,
+    status: str = "compared",
+    source_conflict: bool = False,
+    partial: bool = False,
+    requires_fx: bool = False,
+    cost_complete: bool = True,
+    authority_stale: bool = False,
+    baseline_ready: bool = True,
+    diagnostic_complete: bool = True,
+    strategy_evidence_complete: bool = True,
+    comparison_non_executable: bool = False,
+) -> ShadowEligibleSeed:
+    """Create exactly one compared group and one published future XNYS calendar."""
+    await seed_portfolio_list(database_url)
+    factory = session_factory(settings(database_url))
+    async with factory() as session, session.begin():
+        database_time = await session.scalar(select(func.transaction_timestamp()))
+        assert isinstance(database_time, datetime)
+        database_time = database_time.astimezone(UTC)
+        market_date = database_time.astimezone(_NEW_YORK).date()
+
+        second_instrument = Instrument(
+            id=_SECOND_INSTRUMENT_ID,
+            asset_type="equity",
+            exchange="XNYS",
+            currency="USD",
+            tick_size=Decimal("0.01"),
+            risk_bucket="us_equity",
+        )
+        data_snapshot = DataSnapshot(
+            id=uuid4(),
+            source="fixture",
+            provider_object_id=f"shadow-start-{uuid4()}",
+            revision="1",
+            observed_at=_VALUATION_TIME,
+            available_at=_VALUATION_TIME,
+            received_at=_VALUATION_TIME,
+            schema_version="1",
+            payload={},
+        )
+        report = PortfolioDiagnosticReportRecord(
+            id=uuid4(),
+            portfolio_id=PORTFOLIOS[0],
+            portfolio_snapshot_id=_BASELINE_ID,
+            snapshot_as_of=_VALUATION_TIME,
+            trading_day=_VALUATION_TIME.date(),
+            policy_id=REAL_ADVISORY_POLICY_ID,
+            policy_version="real_advisory_policy_v1",
+            optimization_need="OPTIMIZATION_CANDIDATE",
+            diagnostic_input_hash="d" * 64,
+        )
+        selection = BaselineSelectionAuthorityRecord(
+            id=uuid4(),
+            policy_version="baseline_v1",
+            data_snapshot_id=data_snapshot.id,
+            decision_at=_VALUATION_TIME,
+            available_at=_VALUATION_TIME,
+            evidence_refs=["selection:shadow-start"],
+            candidates=[
+                {
+                    "instrument_id": str(instrument_id),
+                    "provenance_refs": ["candidate:shadow-start"],
+                }
+                for instrument_id in (INSTRUMENT_ID, _SECOND_INSTRUMENT_ID)
+            ],
+            selected_instrument_ids=[str(INSTRUMENT_ID), str(_SECOND_INSTRUMENT_ID)],
+            evidence_hash="a" * 64,
+        )
+        session.add_all((second_instrument, data_snapshot, report, selection))
+        await session.flush()
+
+        group = OptimizationProposalGroupRecord(
+            id=uuid4(),
+            baseline_portfolio_snapshot_id=_BASELINE_ID,
+            portfolio_scope="internal_paper",
+            selection_authority_id=selection.id,
+            selection_evidence_hash=selection.evidence_hash,
+            status=status,
+            version=1,
+            policy_id=_OPTIMIZER_POLICY_ID,
+            diagnostic_report_id=report.id,
+            data_snapshot_id=data_snapshot.id,
+            source_policy_id=SOURCE_POLICY_ID,
+            cost_policy_id=COST_POLICY_ID,
+            diagnostic_input_hash=report.diagnostic_input_hash,
+            valuation_time=_VALUATION_TIME,
+            baseline_ready=baseline_ready,
+            diagnostic_complete=diagnostic_complete,
+            source_conflict=source_conflict,
+            partial=partial,
+            requires_fx=requires_fx,
+            cost_complete=cost_complete,
+            authority_stale=authority_stale,
+        )
+        session.add(group)
+        await session.flush()
+
+        weights = {
+            "hold_current": (("0.20", "0.25"), ("0.10", "0.05")),
+            "minimum_change": (("0.20", "0.15"), ("0.10", "0.15")),
+            "strategy_target": (("0.20", "0.125"), ("0.10", "0.125")),
+        }
+        proposal_ids: dict[str, UUID] = {}
+        for variant in ("hold_current", "minimum_change", "strategy_target"):
+            variant_strategy_evidence_complete = (
+                strategy_evidence_complete
+                if variant == "strategy_target"
+                else True
+            )
+            proposal = OptimizationProposalRecord(
+                id=uuid4(),
+                proposal_group_id=group.id,
+                variant=variant,
+                baseline_portfolio_snapshot_id=_BASELINE_ID,
+                analysis_only=False,
+                strategy_evidence_complete=variant_strategy_evidence_complete,
+                portfolio_scope="internal_paper",
+            )
+            session.add(proposal)
+            await session.flush()
+            proposal_ids[variant] = proposal.id
+            for instrument_id, (current_weight, target_weight) in zip(
+                (INSTRUMENT_ID, _SECOND_INSTRUMENT_ID),
+                weights[variant],
+                strict=True,
+            ):
+                persisted_target = (
+                    current_weight
+                    if not variant_strategy_evidence_complete
+                    else target_weight
+                )
+                session.add(
+                    ProposalPositionRecord(
+                        id=uuid4(),
+                        proposal_id=proposal.id,
+                        instrument_id=instrument_id,
+                        current_weight=Decimal(current_weight),
+                        target_weight=Decimal(persisted_target),
+                        action="maintain",
+                        reason_code="shadow_fixture",
+                    )
+                )
+            session.add(
+                ProposalComparisonRecord(
+                    id=uuid4(),
+                    proposal_id=proposal.id,
+                    metrics=complete_comparison_metrics(
+                        report_id=report.id,
+                        data_id=data_snapshot.id,
+                        source_id=SOURCE_POLICY_ID,
+                        optimizer_id=_OPTIMIZER_POLICY_ID,
+                        cost_id=COST_POLICY_ID,
+                    ),
+                    tax_impact="unknown",
+                    requires_fx=False,
+                    non_executable=comparison_non_executable,
+                    cost_complete=True,
+                )
+            )
+
+        calendar = await seed_shadow_calendar(
+            session,
+            database_time=database_time,
+            market_date=market_date,
+            session_count=calendar_session_count,
+            content_hash_override=calendar_content_hash_override,
+        )
+        return ShadowEligibleSeed(
+            group_id=group.id,
+            proposal_ids=proposal_ids,
+            instrument_ids=(INSTRUMENT_ID, _SECOND_INSTRUMENT_ID),
+            calendar_id=calendar.calendar_id,
+            calendar_sessions=calendar.sessions,
+            database_time=database_time,
+        )

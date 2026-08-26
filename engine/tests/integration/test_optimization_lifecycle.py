@@ -18,9 +18,13 @@ from helpers.portfolio_api import (
     seed_portfolio_list,
     settings,
 )
+from helpers.shadow import seed_shadow_eligible_group
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.optimizer.cost_policy import COST_POLICY_ID
-from nexus.optimizer.lifecycle import LifecycleTransition, transition_group_idempotently
+from nexus.optimizer.lifecycle import (
+    LifecycleTransition,
+    reject_group_idempotently,
+)
 from nexus.optimizer.repository import transition_group
 from nexus.persistence.models.data import DataSnapshot, SourcePolicy
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
@@ -33,6 +37,7 @@ from nexus.persistence.models.portfolio import BrokerOrderSnapshot
 from nexus.persistence.models.runtime import IdempotencyRecord, Job
 from nexus.persistence.session import session_factory
 from nexus.quality.source_policy import SOURCE_POLICY_ID
+from nexus.shadow.start import ShadowStartResult, start_proposal_shadow
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -63,8 +68,8 @@ async def test_shadow_and_reject_api_require_idempotency_and_replay_stably(
     migrated_database_url: str,
 ) -> None:
     """A lifecycle key binds both target and version, and never writes execution objects."""
-    group_id = UUID("0198d500-1000-7000-8000-000000000821")
-    await _seed_complete_group(migrated_database_url, group_id)
+    seed = await seed_shadow_eligible_group(migrated_database_url)
+    group_id = seed.group_id
     body = b'{"version":1}'
     shadow_path = f"/internal/v1/optimization-proposals/{group_id}/shadow"
     reject_path = f"/internal/v1/optimization-proposals/{group_id}/reject"
@@ -137,7 +142,7 @@ async def test_shadow_and_reject_api_require_idempotency_and_replay_stably(
     )
     assert changed_body.status_code == changed_target.status_code == 409
     assert changed_body.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
-    assert changed_target.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+    assert changed_target.json()["error"]["code"] == "VERSION_CONFLICT"
     assert await _artifact_counts(migrated_database_url) == (1, 0, 1)
 
 
@@ -146,33 +151,44 @@ async def test_concurrent_shadow_reject_has_one_cas_winner_and_terminal_is_immut
     migrated_database_url: str,
 ) -> None:
     """Two independent PostgreSQL transactions cannot both advance one version."""
-    group_id = UUID("0198d500-1000-7000-8000-000000000831")
-    await _seed_complete_group(migrated_database_url, group_id)
+    seed = await seed_shadow_eligible_group(migrated_database_url)
+    group_id = seed.group_id
     factory = session_factory(settings(migrated_database_url))
     barrier = asyncio.Barrier(2)
 
-    async def transition(target: str, key: str) -> LifecycleTransition:
+    async def start() -> ShadowStartResult:
         async with factory() as session, session.begin():
             await barrier.wait()
-            return await transition_group_idempotently(
+            return await start_proposal_shadow(
                 session,
                 actor_id="lifecycle-race",
-                idempotency_key=key,
-                request_hash=hashlib.sha256(f"{target}:1".encode()).hexdigest(),
+                idempotency_key="race-shadow",
+                request_hash=hashlib.sha256(b"shadowing:1").hexdigest(),
                 group_id=group_id,
-                target=target,  # type: ignore[arg-type]
+                expected_version=1,
+            )
+
+    async def reject() -> LifecycleTransition:
+        async with factory() as session, session.begin():
+            await barrier.wait()
+            return await reject_group_idempotently(
+                session,
+                actor_id="lifecycle-race",
+                idempotency_key="race-reject",
+                request_hash=hashlib.sha256(b"rejected:1").hexdigest(),
+                group_id=group_id,
                 expected_version=1,
             )
 
     results = await asyncio.wait_for(
         asyncio.gather(
-            transition("shadowing", "race-shadow"),
-            transition("rejected", "race-reject"),
+            start(),
+            reject(),
             return_exceptions=True,
         ),
         timeout=5,
     )
-    assert sum(isinstance(result, LifecycleTransition) for result in results) == 1
+    assert sum(isinstance(result, LifecycleTransition | ShadowStartResult) for result in results) == 1
     assert (
         sum(
             isinstance(result, ValueError) and str(result) == "VERSION_CONFLICT"
@@ -186,18 +202,17 @@ async def test_concurrent_shadow_reject_has_one_cas_winner_and_terminal_is_immut
     assert (group.status, group.version) in {("shadowing", 2), ("rejected", 2)}
     if group.status == "shadowing":
         async with factory() as session, session.begin():
-            validated = await transition_group_idempotently(
+            rejected = await reject_group_idempotently(
                 session,
                 actor_id="lifecycle-race",
-                idempotency_key="validate-key",
-                request_hash=hashlib.sha256(b"validated:2").hexdigest(),
+                idempotency_key="terminal-reject-key",
+                request_hash=hashlib.sha256(b"rejected:2").hexdigest(),
                 group_id=group_id,
-                target="validated",
                 expected_version=2,
             )
             with pytest.raises(ValueError, match="VALIDATION_ERROR"):
                 await transition_group(session, group_id, "rejected", expected_version=3)
-        assert validated.status == "validated"
+        assert rejected.status == "rejected"
     else:
         async with factory() as session, session.begin():
             with pytest.raises(ValueError, match="VALIDATION_ERROR"):
@@ -354,7 +369,7 @@ async def test_raw_sql_shadow_cannot_bypass_missing_cost_policy(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("terminal", ("validated", "rejected", "expired"))
+@pytest.mark.parametrize("terminal", ("rejected", "expired"))
 async def test_every_terminal_lifecycle_state_is_immutable(
     migrated_database_url: str, terminal: str
 ) -> None:
@@ -366,9 +381,6 @@ async def test_every_terminal_lifecycle_state_is_immutable(
     factory = session_factory(settings(migrated_database_url))
     async with factory() as session, session.begin():
         version = 1
-        if terminal == "validated":
-            await transition_group(session, group_id, "shadowing", expected_version=version)
-            version += 1
         await transition_group(session, group_id, terminal, expected_version=version)  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="VALIDATION_ERROR"):
             await transition_group(session, group_id, "rejected", expected_version=version + 1)
