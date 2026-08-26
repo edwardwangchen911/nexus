@@ -33,10 +33,12 @@
 
 ## Slice 4：备份/恢复演练
 
-- [ ] 新增操作测试，先断言精确随机库/前缀、`pg_dump/pg_restore` 参数、校验集和任意失败的 finally 清理。
-- [ ] 实现 fixture-only drill runner，备份/恢复 PostgreSQL 和 MinIO 前缀，校验迁移 head、行数、ledger 平衡、最新绩效/READY 根和 object hash。
-- [ ] 在一次性本地 PostgreSQL/MinIO 执行真实演练，记录本次 fixture 的 backup/restore/verify 耗时、字节数、RPO/RTO 和残留 0 证据。
-- [ ] 新增 `docs/runbooks/backup-restore.md`；提交 `test(ops): prove backup and restore recovery`。
+- [x] 新增操作测试，先断言精确随机库/前缀、`pg_dump/pg_restore` 参数、校验集和任意失败的 finally 清理。
+- [x] 实现 fixture-only drill runner，备份/恢复 PostgreSQL 和 MinIO 前缀，校验迁移 head、行数、ledger 平衡、最新绩效/READY 根和 object hash。
+- [x] 在一次性本地 PostgreSQL/MinIO 执行真实演练，记录本次 fixture 的 backup/restore/verify 耗时、字节数、RPO/RTO 和残留 0 证据。
+- [x] 新增 `docs/runbooks/backup-restore.md`；提交 `test(ops): prove backup and restore recovery`。
+
+验收记录（2026-08-27）：先保留 missing module 红灯，最终 14 项安全测试覆盖随机目标、精确命令、动态回环端口、`noexec,nosuid` tmpfs、8 表校验集、数据库 manifest 与对象的精确绑定、六阶段任意失败 cleanup、主失败与 cleanup 双错误保留、production 早期拒绝和 CLI 错误脱敏。首次真实演练暴露 ORM 无 relationship 时复合 FK 父子 flush 顺序，保留数据库约束并改为先 flush 父根。收紧隔离后重跑：PostgreSQL custom dump 736,456 bytes，1 个对象/244 bytes；backup 0.237s、restore 0.428s、verify 0.091s，本次 fixture RPO 0.132s/RTO 0.520s。migration head、8 表计数、平衡账本、最新绩效/READY/审计根、数据库 manifest 绑定和三前缀对象哈希全部一致；演练前后随机容器数均为 0，database/object/container residue 均为 0。这些数字只是本次 fixture 实测，不代表生产承诺。
 
 ## Slice 5：CI、离线网络和供应链门禁
 
