@@ -20,6 +20,36 @@ from nexus.backtest.costs import CostModel
 from nexus.backtest.metrics import BacktestMetrics, calculate_metrics
 from nexus.domain.time import require_utc
 from nexus.market.universe import EQUITY_SECTOR_CODES
+from nexus.simulation.engine import (
+    apply_session_events as apply_simulation_events,
+)
+from nexus.simulation.engine import (
+    execute_target_weights,
+)
+from nexus.simulation.engine import (
+    mark_to_market as mark_simulation_to_market,
+)
+from nexus.simulation.models import (
+    DelistingEvent as SimulationDelistingEvent,
+)
+from nexus.simulation.models import (
+    DividendEvent as SimulationDividendEvent,
+)
+from nexus.simulation.models import (
+    DividendReceivable,
+    SimulationBar,
+    SimulationInstrumentState,
+    SimulationMark,
+    SimulationState,
+    TargetWeight,
+    TargetWeightCommand,
+)
+from nexus.simulation.models import (
+    SessionEvents as SimulationSessionEvents,
+)
+from nexus.simulation.models import (
+    SplitEvent as SimulationSplitEvent,
+)
 from nexus.strategy.baseline import (
     BaselineInstrumentSnapshot,
     BaselineSectorExposure,
@@ -988,7 +1018,7 @@ class _Ledger:
     cost_basis: dict[UUID, Decimal] = field(default_factory=dict)
     realized: dict[UUID, Decimal] = field(default_factory=dict)
     costs: dict[UUID, Decimal] = field(default_factory=dict)
-    dividend_receivables: dict[UUID, tuple[UUID, Decimal]] = field(default_factory=dict)
+    dividend_receivables: dict[UUID, tuple[UUID, Decimal, date]] = field(default_factory=dict)
     untradable: set[UUID] = field(default_factory=set)
 
 
@@ -1267,10 +1297,12 @@ def _run_simulation(
         session_outcomes: list[BacktestOrderOutcome] = []
         session_bars = bars_by_session.get(session, {})
         adjusted_session_bars = adjusted_bars_by_session.get(session, {})
-        _apply_corporate_actions(ledger, action_by_session.get(session, ()))
-        _settle_dividends(ledger, data.corporate_actions, session)
-        delisting_count += _apply_delistings(
-            ledger, delisting_by_session.get(session, ()), last_closes
+        delisting_count += _apply_session_events_to_ledger(
+            ledger,
+            session=session,
+            actions=action_by_session.get(session, ()),
+            delistings=delisting_by_session.get(session, ()),
+            last_closes=last_closes,
         )
         for event in unresolved_delisting_by_session.get(session, ()):
             ledger.untradable.add(event.instrument_id)
@@ -1773,229 +1805,177 @@ def _rebalance(
     fallback_prices: Mapping[UUID, Decimal],
     execution_price: Literal["open", "close"],
 ) -> tuple[list[BacktestFill], list[BacktestOrderOutcome], Decimal]:
-    nav = (
-        ledger.cash
-        + sum(amount for _, amount in ledger.dividend_receivables.values())
-        + sum(
-            quantity
-            * (
-                getattr(bars[instrument_id], execution_price)
-                if instrument_id in bars
-                else fallback_prices[instrument_id]
-            )
-            for instrument_id, quantity in ledger.holdings.items()
-            if instrument_id in bars or instrument_id in fallback_prices
-        )
-    )
-    fills: list[BacktestFill] = []
-    outcomes: list[BacktestOrderOutcome] = []
-    turnover = Decimal(0)
-    actionable = {
-        instrument_id
-        for instrument_id in set(ledger.holdings) | set(target_weights)
-        if instrument_id not in ledger.untradable and instrument_id in bars
-    }
-    current_values = {
-        instrument_id: ledger.holdings.get(instrument_id, Decimal(0))
-        * getattr(bars[instrument_id], execution_price)
-        for instrument_id in actionable
-    }
-    target_nav = _solve_post_cost_target_nav(
-        pre_cost_nav=nav,
-        current_values=current_values,
-        target_weights=target_weights,
-        actionable=actionable,
-        cost_model=cost_model,
-    )
-    for instrument_id in sorted(
-        set(ledger.holdings) | set(target_weights), key=lambda item: item.int
-    ):
-        target_weight = target_weights.get(instrument_id, Decimal(0))
-        if instrument_id in ledger.untradable:
-            outcomes.append(
-                BacktestOrderOutcome(
-                    instrument_id=instrument_id,
-                    signal_session=signal_session,
-                    target_session=session,
-                    side=_missing_side(
-                        ledger.holdings.get(instrument_id, Decimal(0)), target_weight
-                    ),
-                    status="untradable",
-                    reason="instrument delisted before target-session execution",
-                )
-            )
-            continue
-        bar = bars.get(instrument_id)
-        if bar is None:
-            outcomes.append(
-                BacktestOrderOutcome(
-                    instrument_id=instrument_id,
-                    signal_session=signal_session,
-                    target_session=session,
-                    side=_missing_side(
-                        ledger.holdings.get(instrument_id, Decimal(0)), target_weight
-                    ),
-                    status="missing_bar",
-                    reason="target-session execution bar unavailable; intent terminated",
-                )
-            )
-            continue
-        price = getattr(bar, execution_price)
-        target_notional = target_nav * target_weight
-        current_quantity = ledger.holdings.get(instrument_id, Decimal(0))
-        delta = target_notional - current_quantity * price
-        if delta == 0:
-            continue
-        cost = cost_model.estimate(delta)
-        quantity_delta = delta / price
-        if delta > 0:
-            ledger.cost_basis[instrument_id] = (
-                ledger.cost_basis.get(instrument_id, Decimal(0)) + delta
-            )
-        else:
-            sold_quantity = -quantity_delta
-            current_basis = ledger.cost_basis.get(instrument_id, Decimal(0))
-            removed_basis = (
-                current_basis * sold_quantity / current_quantity
-                if current_quantity > 0
-                else Decimal(0)
-            )
-            ledger.cost_basis[instrument_id] = current_basis - removed_basis
-            ledger.realized[instrument_id] = (
-                ledger.realized.get(instrument_id, Decimal(0)) + (-delta) - removed_basis
-            )
-        new_quantity = current_quantity + quantity_delta
-        if abs(new_quantity) <= RESULT_QUANTUM:
-            ledger.holdings.pop(instrument_id, None)
-            ledger.cost_basis.pop(instrument_id, None)
-        else:
-            ledger.holdings[instrument_id] = new_quantity
-        ledger.costs[instrument_id] = ledger.costs.get(instrument_id, Decimal(0)) + cost
-        ledger.cash -= delta + cost
-        turnover += abs(delta)
-        fill = BacktestFill(
-            instrument_id=instrument_id,
+    result = execute_target_weights(
+        _ledger_to_simulation_state(ledger, fallback_prices),
+        TargetWeightCommand(
             signal_session=signal_session,
-            fill_session=session,
-            side="buy" if delta > 0 else "sell",
-            quantity=abs(quantity_delta),
-            price=price,
-            notional=abs(delta),
-            cost=cost,
-        )
-        fills.append(fill)
-        outcomes.append(
-            BacktestOrderOutcome(
-                instrument_id=instrument_id,
-                signal_session=signal_session,
-                target_session=session,
-                side=fill.side,
-                status="filled",
-                reason=f"filled at target-session {execution_price}",
-            )
-        )
-    return fills, outcomes, turnover
-
-
-def _solve_post_cost_target_nav(
-    *,
-    pre_cost_nav: Decimal,
-    current_values: Mapping[UUID, Decimal],
-    target_weights: Mapping[UUID, Decimal],
-    actionable: set[UUID],
-    cost_model: CostModel,
-) -> Decimal:
-    """Solve NAV after costs so target weights are post-cost weights."""
-    cost_rate = cost_model.estimate(Decimal(1))
-    if cost_rate == 0 or not actionable:
-        return pre_cost_nav
-    candidate = pre_cost_nav
-    for _ in range(32):
-        turnover = sum(
-            (
-                abs(
-                    candidate * target_weights.get(instrument_id, Decimal(0))
-                    - current_values[instrument_id]
-                )
-                for instrument_id in actionable
+            target_session=session,
+            targets=tuple(
+                TargetWeight(instrument_id=instrument_id, weight=weight)
+                for instrument_id, weight in target_weights.items()
             ),
-            start=Decimal(0),
-        )
-        updated = pre_cost_nav - cost_rate * turnover
-        if abs(updated - candidate) <= RESULT_QUANTUM:
-            return updated
-        candidate = updated
-    return candidate
-
-
-def _missing_side(quantity: Decimal, target_weight: Decimal) -> Literal["buy", "sell", "rebalance"]:
-    if quantity == 0 and target_weight > 0:
-        return "buy"
-    if quantity > 0 and target_weight == 0:
-        return "sell"
-    return "rebalance"
-
-
-def _apply_corporate_actions(
-    ledger: _Ledger, actions: tuple[CorporateActionEvent, ...] | list[CorporateActionEvent]
-) -> None:
-    for action in sorted(
-        actions,
-        key=lambda item: (
-            0 if item.action_type == "split" else 1,
-            item.instrument_id.int,
-            item.source,
-            item.provider_event_id,
-            item.revision,
-            item.authority_id.int,
+            bars=tuple(
+                SimulationBar(
+                    instrument_id=instrument_id,
+                    open=bar.open,
+                    close=bar.close,
+                )
+                for instrument_id, bar in bars.items()
+            ),
+            fallback_marks=tuple(
+                SimulationMark(instrument_id=instrument_id, price=price)
+                for instrument_id, price in fallback_prices.items()
+            ),
+            cost_model=cost_model,
+            execution_price=execution_price,
         ),
-    ):
-        entitled_quantity = ledger.holdings.get(action.instrument_id, Decimal(0))
-        if entitled_quantity == 0:
-            continue
-        if action.action_type == "split":
-            ledger.holdings[action.instrument_id] = entitled_quantity * action.value
-        else:
-            dividend = entitled_quantity * action.value
-            ledger.dividend_receivables[action.authority_id] = (
-                action.instrument_id,
-                dividend,
+    )
+    _replace_ledger_from_simulation_state(ledger, result.state)
+    return (
+        [
+            BacktestFill(
+                instrument_id=fill.instrument_id,
+                signal_session=fill.signal_session,
+                fill_session=fill.fill_session,
+                side=fill.side,
+                quantity=fill.quantity,
+                price=fill.price,
+                notional=fill.notional,
+                cost=fill.cost,
             )
+            for fill in result.fills
+        ],
+        [
+            BacktestOrderOutcome(
+                instrument_id=outcome.instrument_id,
+                signal_session=outcome.signal_session,
+                target_session=outcome.target_session,
+                side=outcome.side,
+                status=outcome.status,
+                reason=outcome.reason,
+            )
+            for outcome in result.outcomes
+        ],
+        result.turnover_notional,
+    )
 
 
-def _settle_dividends(
-    ledger: _Ledger, actions: tuple[CorporateActionEvent, ...], session: date
-) -> None:
-    for action in sorted(actions, key=lambda item: item.authority_id.int):
-        if action.action_type != "dividend" or action.payable_session != session:
-            continue
-        receivable = ledger.dividend_receivables.pop(action.authority_id, None)
-        if receivable is None:
-            continue
-        instrument_id, amount = receivable
-        ledger.cash += amount
-        ledger.realized[instrument_id] = ledger.realized.get(instrument_id, Decimal(0)) + amount
-
-
-def _apply_delistings(
+def _apply_session_events_to_ledger(
     ledger: _Ledger,
-    events: tuple[DelistingEvent, ...] | list[DelistingEvent],
+    *,
+    session: date,
+    actions: tuple[CorporateActionEvent, ...] | list[CorporateActionEvent],
+    delistings: tuple[DelistingEvent, ...] | list[DelistingEvent],
     last_closes: dict[UUID, Decimal],
 ) -> int:
-    count = 0
-    for event in sorted(events, key=lambda item: item.instrument_id.int):
-        quantity = ledger.holdings.pop(event.instrument_id, Decimal(0))
-        basis = ledger.cost_basis.pop(event.instrument_id, Decimal(0))
-        if quantity:
-            recovery = quantity * event.recovery_price
-            ledger.cash += recovery
-            ledger.realized[event.instrument_id] = (
-                ledger.realized.get(event.instrument_id, Decimal(0)) + recovery - basis
-            )
-            count += 1
-        ledger.untradable.add(event.instrument_id)
+    result = apply_simulation_events(
+        _ledger_to_simulation_state(ledger, last_closes),
+        SimulationSessionEvents(
+            session=session,
+            splits=tuple(
+                SimulationSplitEvent(
+                    authority_id=action.authority_id,
+                    instrument_id=action.instrument_id,
+                    ratio=action.value,
+                )
+                for action in actions
+                if action.action_type == "split"
+            ),
+            dividends=tuple(
+                SimulationDividendEvent(
+                    authority_id=action.authority_id,
+                    instrument_id=action.instrument_id,
+                    amount_per_share=action.value,
+                    entitlement_session=action.session,
+                    payable_session=action.payable_session or date.max,
+                )
+                for action in actions
+                if action.action_type == "dividend"
+            ),
+            delistings=tuple(
+                SimulationDelistingEvent(
+                    authority_id=event.authority_id,
+                    instrument_id=event.instrument_id,
+                    recovery_price=event.recovery_price,
+                )
+                for event in delistings
+            ),
+        ),
+    )
+    _replace_ledger_from_simulation_state(ledger, result.state)
+    for event in delistings:
         last_closes.pop(event.instrument_id, None)
-    return count
+    return result.delisting_count
+
+
+def _ledger_to_simulation_state(
+    ledger: _Ledger,
+    last_closes: Mapping[UUID, Decimal],
+) -> SimulationState:
+    instrument_ids = (
+        set(ledger.holdings)
+        | set(ledger.cost_basis)
+        | set(ledger.realized)
+        | set(ledger.costs)
+        | set(ledger.untradable)
+        | {instrument_id for instrument_id, _, _ in ledger.dividend_receivables.values()}
+    )
+    return SimulationState(
+        cash=ledger.cash,
+        instruments=tuple(
+            SimulationInstrumentState(
+                instrument_id=instrument_id,
+                quantity=ledger.holdings.get(instrument_id, Decimal(0)),
+                cost_basis=ledger.cost_basis.get(instrument_id, Decimal(0)),
+                realized_pnl=ledger.realized.get(instrument_id, Decimal(0)),
+                cumulative_cost=ledger.costs.get(instrument_id, Decimal(0)),
+                last_close=last_closes.get(instrument_id),
+                untradable=instrument_id in ledger.untradable,
+            )
+            for instrument_id in instrument_ids
+        ),
+        receivables=tuple(
+            DividendReceivable(
+                authority_id=authority_id,
+                instrument_id=instrument_id,
+                amount=amount,
+                payable_session=payable_session,
+            )
+            for authority_id, (
+                instrument_id,
+                amount,
+                payable_session,
+            ) in ledger.dividend_receivables.items()
+        ),
+    )
+
+
+def _replace_ledger_from_simulation_state(
+    ledger: _Ledger,
+    state: SimulationState,
+) -> None:
+    ledger.cash = state.cash
+    ledger.holdings = {
+        item.instrument_id: item.quantity for item in state.instruments if item.quantity != 0
+    }
+    ledger.cost_basis = {
+        item.instrument_id: item.cost_basis for item in state.instruments if item.cost_basis != 0
+    }
+    ledger.realized = {
+        item.instrument_id: item.realized_pnl
+        for item in state.instruments
+        if item.realized_pnl != 0
+    }
+    ledger.costs = {
+        item.instrument_id: item.cumulative_cost
+        for item in state.instruments
+        if item.cumulative_cost != 0
+    }
+    ledger.dividend_receivables = {
+        item.authority_id: (item.instrument_id, item.amount, item.payable_session)
+        for item in state.receivables
+    }
+    ledger.untradable = {item.instrument_id for item in state.instruments if item.untradable}
 
 
 def _performance_attribution(
@@ -2015,7 +1995,7 @@ def _performance_attribution(
             unrealized[instrument_id] = quantity * last_closes[
                 instrument_id
             ] - ledger.cost_basis.get(instrument_id, Decimal(0))
-    for instrument_id, amount in ledger.dividend_receivables.values():
+    for instrument_id, amount, _ in ledger.dividend_receivables.values():
         unrealized[instrument_id] = unrealized.get(instrument_id, Decimal(0)) + amount
     instruments = set(ledger.realized) | set(unrealized) | set(ledger.costs)
     net_by_instrument = {
@@ -2056,7 +2036,7 @@ def _cumulative_pnl_by_instrument(
     prior: Mapping[UUID, Decimal],
 ) -> dict[UUID, Decimal]:
     receivables: dict[UUID, Decimal] = {}
-    for instrument_id, amount in ledger.dividend_receivables.values():
+    for instrument_id, amount, _ in ledger.dividend_receivables.values():
         receivables[instrument_id] = receivables.get(instrument_id, Decimal(0)) + amount
     instrument_ids = (
         set(prior)
@@ -2087,17 +2067,42 @@ def _mark_to_market(
     holdings: Mapping[UUID, Decimal],
     prices: Mapping[UUID, Decimal],
     *,
-    receivables: Mapping[UUID, tuple[UUID, Decimal]],
+    receivables: Mapping[UUID, tuple[UUID, Decimal, date]],
 ) -> Decimal:
-    return (
-        cash
-        + sum(amount for _, amount in receivables.values())
-        + sum(
-            quantity * prices[instrument_id]
-            for instrument_id, quantity in holdings.items()
-            if instrument_id in prices
-        )
-    )
+    return mark_simulation_to_market(
+        SimulationState(
+            cash=cash,
+            instruments=tuple(
+                SimulationInstrumentState(
+                    instrument_id=instrument_id,
+                    quantity=quantity,
+                    cost_basis=Decimal(0),
+                    realized_pnl=Decimal(0),
+                    cumulative_cost=Decimal(0),
+                    last_close=None,
+                    untradable=False,
+                )
+                for instrument_id, quantity in holdings.items()
+            ),
+            receivables=tuple(
+                DividendReceivable(
+                    authority_id=authority_id,
+                    instrument_id=instrument_id,
+                    amount=amount,
+                    payable_session=payable_session,
+                )
+                for authority_id, (
+                    instrument_id,
+                    amount,
+                    payable_session,
+                ) in receivables.items()
+            ),
+        ),
+        tuple(
+            SimulationMark(instrument_id=instrument_id, price=price)
+            for instrument_id, price in prices.items()
+        ),
+    ).nav
 
 
 def _next_session(sessions: tuple[date, ...] | list[date], current: date) -> date | None:
@@ -2282,9 +2287,13 @@ def _run_passive_benchmark(
     target_weight = Decimal(1) / Decimal(len(instrument_ids))
     for session in sessions:
         session_bars = bars_by_session.get(session, {})
-        _apply_corporate_actions(ledger, actions.get(session, ()))
-        _settle_dividends(ledger, data.corporate_actions, session)
-        _apply_delistings(ledger, delistings.get(session, ()), last_closes)
+        _apply_session_events_to_ledger(
+            ledger,
+            session=session,
+            actions=actions.get(session, ()),
+            delistings=delistings.get(session, ()),
+            last_closes=last_closes,
+        )
         for event in unresolved_delistings.get(session, ()):
             ledger.untradable.add(event.instrument_id)
             last_closes.pop(event.instrument_id, None)
@@ -2532,17 +2541,19 @@ def _engine_code_hash(code_version: str) -> str:
     root = Path(__file__).resolve().parents[1]
     files = (
         Path(__file__).resolve(),
-        root / "backtest" / "canonical.py",
         root / "backtest" / "cost_policy.py",
-        root / "backtest" / "costs.py",
         root / "backtest" / "metrics.py",
+        root / "simulation" / "canonical.py",
+        root / "simulation" / "costs.py",
+        root / "simulation" / "engine.py",
+        root / "simulation" / "models.py",
         root / "strategy" / "baseline.py",
         root / "strategy" / "dsl.py",
     )
     digest = hashlib.sha256()
     digest.update(code_version.encode())
-    for path in sorted(files, key=lambda item: item.name):
-        digest.update(path.name.encode())
+    for path in sorted(files, key=lambda item: (item.parent.name, item.name)):
+        digest.update(f"{path.parent.name}/{path.name}".encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
 

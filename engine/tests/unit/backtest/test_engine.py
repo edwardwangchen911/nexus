@@ -1,9 +1,11 @@
 """Deterministic point-in-time backtest engine behavior."""
 
 import hashlib
+import json
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
+from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -28,6 +30,7 @@ from nexus.backtest.engine import (
     SectorClassification,
     UniverseSnapshot,
     UnresolvedDelistingEvent,
+    _engine_code_hash,
     _window_metrics,
     authority_collection_content_hash,
     exchange_calendar_content_hash,
@@ -351,6 +354,14 @@ def test_backtest_fills_on_next_calendar_session_and_applies_exact_decimal_costs
     assert result.nav[-1].nav == Decimal("9999.375039060059")
     assert result.order_outcomes[0].status == "filled"
     assert result.strategy_data_complete is True
+    semantic_payload = result.model_dump(
+        mode="json",
+        exclude={"code_hash", "result_hash"},
+    )
+    semantic_hash = hashlib.sha256(
+        json.dumps(semantic_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert semantic_hash == "5ca5672ab8d5e6413d0155464dce28ebe1b5e130ea4d5a8cb070fbcfb3cdd370"
 
 
 def test_nonzero_cost_rebalance_preserves_post_cost_target_weights_and_cash_floor() -> None:
@@ -983,6 +994,30 @@ def test_dense_seven_year_history_can_produce_eight_valid_oos_windows_but_stays_
     assert first.oos_window_count_sufficient is True
     assert first.promotable is False
     assert first.result_hash == second.result_hash
+
+
+def test_engine_code_hash_covers_shared_simulation_kernel() -> None:
+    import nexus.backtest.engine as engine_module
+
+    root = Path(engine_module.__file__).resolve().parents[1]
+    files = (
+        Path(engine_module.__file__).resolve(),
+        root / "backtest" / "cost_policy.py",
+        root / "backtest" / "metrics.py",
+        root / "simulation" / "canonical.py",
+        root / "simulation" / "costs.py",
+        root / "simulation" / "engine.py",
+        root / "simulation" / "models.py",
+        root / "strategy" / "baseline.py",
+        root / "strategy" / "dsl.py",
+    )
+    digest = hashlib.sha256()
+    digest.update(b"nexus_backtest_engine_v1")
+    for path in sorted(files, key=lambda item: (item.parent.name, item.name)):
+        digest.update(f"{path.parent.name}/{path.name}".encode())
+        digest.update(path.read_bytes())
+
+    assert _engine_code_hash("nexus_backtest_engine_v1") == digest.hexdigest()
 
 
 def test_seven_year_fifty_instrument_backtest_uses_shared_weekly_feature_indexes(

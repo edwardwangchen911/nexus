@@ -133,7 +133,7 @@ def mark_to_market(
 - 内部始终按 UUID 数值顺序处理标的和事件，结果量化到 `NUMERIC(38,12)` 的现有 `RESULT_QUANTUM`。
 - `execute_target_weights` 返回新的不可变 `SimulationState`，不原地修改调用方状态。
 - 成本后目标 NAV 求解、下一会话 open 成交、`missing_bar`、`untradable` 和成交费用语义与 Task 16 完全相同。
-- 历史回测通过适配器把共享 `SimulationFill/SimulationOutcome` 映射为现有 `BacktestFill/BacktestOrderOutcome`；Task 16 的结果哈希和固定 fixture 输出不得改变。
+- 历史回测通过适配器把共享 `SimulationFill/SimulationOutcome` 映射为现有 `BacktestFill/BacktestOrderOutcome`；Task 16 的固定 fixture **语义结果**（NAV、fill、outcome、指标、归因、数据/协议/权威哈希）不得改变。`code_hash` 必须改为覆盖新增的 `nexus.simulation` 实现文件，因此包含 `code_hash` 的派生 `result_hash` 必须随实现权威一起改变；若二者保持旧值反而构成审计缺口。
 - Shadow 不复制另一套成交公式。
 
 ## 5. 时间与前向语义
@@ -584,7 +584,7 @@ BFF 继续只返回稳定安全消息，details 不透传 Provider 内容、表�
 
 ### 14.1 共享内核单元测试
 
-- 在同一固定数据上比较抽取前 Task 16 黄金结果与抽取后历史回测结果：NAV、fill、outcome、turnover、cost、attribution 和 result hash 必须逐值相同。
+- 在同一固定数据上比较抽取前 Task 16 黄金结果与抽取后历史回测结果：NAV、fill、outcome、turnover、cost、metrics、attribution 以及除 `code_hash/result_hash` 外的完整语义 payload 必须逐值相同；新的 `code_hash` 必须覆盖共享 simulation 文件，`result_hash` 必须由包含新 `code_hash` 的完整结果重新派生且可重现。
 - Decimal、成本后目标 NAV、fractional quantity、missing bar、untradable、split、dividend、cash recovery、zero recovery 和 unresolved delisting。
 - Shadow 首日只调仓一次，后续 session 即使权重偏离也不得产生 fill。
 - 5/21/63 指标公式、tie-break、unknown 和 NAV index-point fee 单位。
@@ -647,7 +647,7 @@ npm run test:e2e
 
 本规格足以生成一个直接编码的 Task 17 Plan，但实现应按以下依赖顺序拆成可独立验证的切片：
 
-1. 共享 simulation 纯内核抽取并证明 Task 16 结果零漂移；
+1. 共享 simulation 纯内核抽取并证明 Task 16 语义结果零漂移、实现哈希正确更新；
 2. Shadow 领域模型、指标和会话状态机；
 3. `0013` append-only persistence 与事务服务；
 4. start/reject/advance 并发和自动最终化；

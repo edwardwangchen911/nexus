@@ -16,7 +16,7 @@
 - Task 17 is static Proposal Shadow only: one initial rebalance, no recurring optimizer/Agent calls, no 20-fill gate, no champion/challenger promotion, and no strategy self-modification.
 - Do not create Task 18 paper orders/fills, broker orders, execution intents, trade approvals, live routes, credentials, or Fosun API calls. Every success response must keep `creates_orders=false` and `trading_approval=false`.
 - `nexus.simulation` is pure: no SQLAlchemy, HTTP, LLM, network, environment reads, mutable globals, or system clock. It consumes frozen values and returns immutable values.
-- Preserve Task 16 behavior exactly: next-session execution, `missing_bar`, `untradable`, post-cost target-NAV solving, split/dividend/delisting order, Decimal quantization, fill/outcome order, metrics, attribution, and result hashes.
+- Preserve Task 16 semantic behavior exactly: next-session execution, `missing_bar`, `untradable`, post-cost target-NAV solving, split/dividend/delisting order, Decimal boundary quantization, fill/outcome order, metrics, attribution, and data/protocol/authority hashes. The implementation `code_hash` must expand to the shared simulation files, so the derived `result_hash` must update reproducibly instead of retaining a stale implementation identity.
 - All prices, quantities, cash, weights, NAV, costs, PnL, and metrics use finite `Decimal` and canonical `NUMERIC(38,12)` strings. Reject binary float at every domain/API boundary.
 - All Shadow roots and children are append-only. PostgreSQL must reject UPDATE/DELETE and must reject lifecycle transitions that do not have the required complete Shadow facts and matching seal in the same transaction.
 - `started_at`, GET freshness time, and seal time come from PostgreSQL UTC time. Browser time is never an authority input.
@@ -104,7 +104,7 @@ async def load_shadow_view(
 
 ---
 
-## Task 1: Extract the pure simulation kernel with zero Task 16 drift
+## Task 1: Extract the pure simulation kernel with zero Task 16 semantic drift
 
 **Files**
 
@@ -189,16 +189,16 @@ Backtest adapters convert `_Ledger` inputs to a `SimulationState`, invoke the sh
 
 **Steps**
 
-- [ ] Add `test_execution.py` cases for exact post-cost target NAV, fractional quantity, stable UUID ordering, `missing_bar`, `untradable`, and immutability of the input state. Assert Decimal strings rather than approximate floats.
-- [ ] Add `test_events.py` cases for split before dividend, dividend settlement, cash/zero-recovery delisting, unresolved delisting refusal, and complete close-set marking.
-- [ ] Add a backtest adapter equivalence test that runs the existing fixed two-instrument fixture twice, compares the entire `model_dump(mode="json")`, and proves `result_hash`, NAV, fills, outcomes, turnover, costs, attribution, and delisting count are identical.
-- [ ] Run `uv run --package nexus-engine pytest engine/tests/unit/simulation engine/tests/unit/backtest/test_engine.py engine/tests/unit/backtest/test_backtest_metrics.py engine/tests/property/test_no_lookahead.py -q`; confirm the new imports/tests fail before `nexus.simulation` exists.
-- [ ] Move the canonical Decimal and `CostModel` implementation into `nexus.simulation`; leave the compatibility re-exports above so existing imports and OpenAPI types do not drift.
-- [ ] Implement the frozen state/event/execution models and pure functions by moving the existing formulas, not re-deriving them. Preserve the 32-iteration post-cost solver and `RESULT_QUANTUM` convergence condition.
-- [ ] Adapt `_run_simulation()` and `_run_passive_benchmark()` to the new kernel. Keep strategy timing, feature preparation, attribution, and Backtest result assembly inside `nexus.backtest`.
-- [ ] Run the focused command again; expect exit 0 and identical existing result hashes.
-- [ ] Run `uv run --package nexus-engine ruff check engine/src/nexus/simulation engine/src/nexus/backtest engine/tests/unit/simulation engine/tests/unit/backtest && uv run --package nexus-engine mypy engine/src/nexus/simulation engine/src/nexus/backtest`; expect exit 0.
-- [ ] Commit only Task 1 files with `refactor(engine): extract deterministic simulation kernel`.
+- [x] Add `test_execution.py` cases for exact post-cost target NAV, fractional quantity, stable UUID ordering, `missing_bar`, `untradable`, and immutability of the input state. Assert Decimal strings rather than approximate floats.
+- [x] Add `test_events.py` cases for split before dividend, dividend settlement, cash/zero-recovery delisting, unresolved delisting refusal, and complete close-set marking.
+- [x] Compare the fixed pre-extraction Task 16 fixture with the post-extraction result and prove NAV, fills, outcomes, turnover, costs, metrics, attribution, delisting count, and the complete payload excluding `code_hash/result_hash` are identical. Add a test proving `_engine_code_hash()` covers every shared simulation implementation file and the derived result hash is reproducible.
+- [x] Run `uv run --package nexus-engine pytest engine/tests/unit/simulation engine/tests/unit/backtest/test_engine.py engine/tests/unit/backtest/test_backtest_metrics.py engine/tests/property/test_no_lookahead.py -q`; confirm the new imports/tests fail before `nexus.simulation` exists.
+- [x] Move the canonical Decimal and `CostModel` implementation into `nexus.simulation`; leave the compatibility re-exports above so existing imports and OpenAPI types do not drift.
+- [x] Implement the frozen state/event/execution models and pure functions by moving the existing formulas, not re-deriving them. Preserve the 32-iteration post-cost solver and `RESULT_QUANTUM` convergence condition.
+- [x] Adapt `_run_simulation()` and `_run_passive_benchmark()` to the new kernel. Keep strategy timing, feature preparation, attribution, and Backtest result assembly inside `nexus.backtest`.
+- [x] Run the focused command again; expect exit 0, identical semantic payload, a deliberately updated implementation `code_hash`, and a reproducible derived `result_hash`.
+- [x] Run `uv run --package nexus-engine ruff check engine/src/nexus/simulation engine/src/nexus/backtest engine/tests/unit/simulation engine/tests/unit/backtest && uv run --package nexus-engine mypy engine/src/nexus/simulation engine/src/nexus/backtest`; expect exit 0.
+- [x] Commit only Task 1 files with `refactor(engine): extract deterministic simulation kernel`.
 
 ---
 
@@ -883,7 +883,7 @@ npm run test:e2e
 | Spec requirement | Implemented/tested in |
 | --- | --- |
 | Static three-way NAV=100, one initial rebalance | Tasks 2, 4, 6 |
-| Shared deterministic kernel and zero Task 16 drift | Task 1 |
+| Shared deterministic kernel, zero Task 16 semantic drift, correct implementation hash | Task 1 |
 | 63 XNYS sessions + 5-session grace | Tasks 2, 4, 6 |
 | PIT raw Bar/event exact-set authority | Task 5 |
 | Negative evidence versus incomplete query | Tasks 5, 6 |
