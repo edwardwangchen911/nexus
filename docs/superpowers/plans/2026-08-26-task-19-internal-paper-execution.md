@@ -74,8 +74,8 @@
 
 ## Slice 9：E2E、全量门禁和验收
 
-- [ ] 新增 `tests/e2e/paper.spec.ts`，使用真实 Engine fixture 覆盖 ready/partial/stale/error、游标分页、时间线与取消；不 mock 网络内部业务规则。
-- [ ] 对 `/paper` 运行 axe，修复所有 critical/serious 问题。
+- [x] 新增 `tests/e2e/paper.spec.ts`，使用真实 Engine fixture 覆盖 ready/partial/stale/error、游标分页、时间线与取消；不 mock 网络内部业务规则。
+- [x] 对 `/paper` 运行 axe，修复所有 critical/serious 问题。
 - [ ] 运行 Engine 全量 Pytest、Ruff、Mypy；Web 全量 Vitest、ESLint、TypeScript、生成合约、build 和全量 E2E。
 - [ ] 运行安全审查，重点检查订单取消越权、幂等绕过、数据前视、跨账户关联、响应泄密和账本不平。
 - [ ] 完成独立审查，修复所有 Critical/Important，重跑受影响门禁。

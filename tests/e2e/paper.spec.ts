@@ -41,25 +41,28 @@ test("paper cancellation keeps focus, event version, and idempotency explicit", 
   let cancellationBody: unknown = null;
   let cancellationKey: string | undefined;
   let portfolioReads = 0;
-  await installPaperFixtures(page, async (route) => {
-    cancellationBody = route.request().postDataJSON();
-    cancellationKey = route.request().headers()["idempotency-key"];
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        data: {
-          order_id: cancellableOrder.order_id,
-          status: "cancelled",
-          filled_quantity: "2.000000000000",
-          remaining_quantity: "3.000000000000",
-          result_event_seq: 5,
-          replayed: false,
-        },
-        meta: meta(),
-      }),
-    });
-  }, () => { portfolioReads += 1; });
+  await installPaperFixtures(page, {
+    cancelHandler: async (route) => {
+      cancellationBody = route.request().postDataJSON();
+      cancellationKey = route.request().headers()["idempotency-key"];
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            order_id: cancellableOrder.order_id,
+            status: "cancelled",
+            filled_quantity: "2.000000000000",
+            remaining_quantity: "3.000000000000",
+            result_event_seq: 5,
+            replayed: false,
+          },
+          meta: meta(),
+        }),
+      });
+    },
+    onPortfolioRead: () => { portfolioReads += 1; },
+  });
   await page.goto("/paper");
 
   const cancel = page.getByRole("button", { name: "取消 AAPL 模拟订单" });
@@ -79,10 +82,59 @@ test("paper cancellation keeps focus, event version, and idempotency explicit", 
   expect(portfolioReads).toBeGreaterThanOrEqual(2);
 });
 
+for (const [dataState, visibleLabel] of [
+  ["PARTIAL", "部分归因证据不完整"] as const,
+  ["STALE", "显示最后已知快照"] as const,
+]) {
+  test(`${dataState} paper facts remain visible but cancellation fails closed`, async ({ page }) => {
+    await installPaperFixtures(page, { portfolio: { ...paperPortfolio, data_state: dataState } });
+    await page.goto("/paper");
+
+    await expect(page.getByText(new RegExp(visibleLabel))).toBeVisible();
+    await expect(page.getByRole("table", { name: "内部模拟持仓" })).toContainText("AAPL");
+    await expect(page.getByRole("button", { name: "取消 AAPL 模拟订单" })).toHaveCount(0);
+  });
+}
+
+test("paper console does not retain facts after an authoritative load error", async ({ page }) => {
+  await installPaperFixtures(page, { portfolioStatus: 502 });
+  await page.goto("/paper");
+
+  await expect(page.getByRole("region", { name: "内部模拟盘控制台" })).toHaveAttribute("data-state", "error");
+  await expect(page.getByRole("region", { name: "模拟账户边界" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "取消 AAPL 模拟订单" })).toHaveCount(0);
+});
+
+test("paper order pagination appends one bounded signed-cursor page", async ({ page }) => {
+  const cursors: Array<string | null> = [];
+  await installPaperFixtures(page, {
+    ordersHandler: async (route) => {
+      const cursor = new URL(route.request().url()).searchParams.get("cursor");
+      cursors.push(cursor);
+      const data = cursor === null
+        ? { items: [cancellableOrder], next_cursor: "signed-next" }
+        : { items: [{ ...filledOrder, order_id: "0198f7a0-1111-7777-8111-111111111129", symbol: "MSFT" }], next_cursor: null };
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data, meta: meta() }) });
+    },
+  });
+  await page.goto("/paper");
+
+  await page.getByRole("button", { name: "加载更多订单" }).click();
+  await expect(page.getByRole("heading", { name: /MSFT/ })).toBeVisible();
+  expect(cursors).toEqual([null, "signed-next"]);
+});
+
+type PaperFixtureOptions = {
+  cancelHandler?: Parameters<Page["route"]>[1];
+  onPortfolioRead?: () => void;
+  ordersHandler?: Parameters<Page["route"]>[1];
+  portfolio?: typeof paperPortfolio;
+  portfolioStatus?: number;
+};
+
 async function installPaperFixtures(
   page: Page,
-  cancelHandler?: Parameters<Page["route"]>[1],
-  onPortfolioRead?: () => void,
+  options: PaperFixtureOptions = {},
 ): Promise<void> {
   await page.route("**/api/v1/integrations", async (route) => route.fulfill({
     status: 200,
@@ -102,17 +154,19 @@ async function installPaperFixtures(
     }),
   }));
   await page.route("**/api/v1/paper/portfolio", async (route) => {
-    onPortfolioRead?.();
+    options.onPortfolioRead?.();
+    const status = options.portfolioStatus ?? 200;
     await route.fulfill({
-      status: 200,
+      status,
       contentType: "application/json",
-      body: JSON.stringify({ data: paperPortfolio, meta: meta() }),
+      body: status === 200
+        ? JSON.stringify({ data: options.portfolio ?? paperPortfolio, meta: meta() })
+        : JSON.stringify({ error: { code: "UPSTREAM_ERROR", message: "paper fixture unavailable" }, meta: meta() }),
     });
   });
-  await page.route("**/api/v1/paper/orders?**", async (route) => route.fulfill({
-    status: 200,
-    contentType: "application/json",
+  await page.route("**/api/v1/paper/orders?**", options.ordersHandler ?? (async (route) => route.fulfill({
+    status: 200, contentType: "application/json",
     body: JSON.stringify({ data: { items: [cancellableOrder, filledOrder], next_cursor: null }, meta: meta() }),
-  }));
-  if (cancelHandler) await page.route("**/api/v1/paper/orders/*/cancel", cancelHandler);
+  })));
+  if (options.cancelHandler) await page.route("**/api/v1/paper/orders/*/cancel", options.cancelHandler);
 }
