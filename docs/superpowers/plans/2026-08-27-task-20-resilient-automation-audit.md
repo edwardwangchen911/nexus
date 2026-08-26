@@ -51,11 +51,11 @@
 
 ## Slice 7：链式审计、manifest 与 gzip 导出
 
-- [ ] 新增 `engine/tests/integration/test_audit_chain.py`，覆盖迁移后 append、并发全局序列、断链、不可变和所有现有业务生产点。
-- [ ] 实现 `engine/src/nexus/audit/service.py`；逐一替换生产代码中的直接 `AuditEvent(...)`。
-- [ ] 新增 `engine/tests/integration/test_audit_export.py`，覆盖 31 天/100k 上限、kind/date、脱敏、稳定排序、gzip mtime=0、字节一致和无敏感字段。
-- [ ] 实现 `engine/src/nexus/audit/export.py` 与内容寻址 manifest writer protocol；测试只用内存 object store。
-- [ ] 运行审计/既有事务回归；提交 `feat(engine): seal and export redacted audit chain`。
+- [x] 扩展 `test_audit_service.py`，覆盖迁移后 append、并发全局序列、断链与 UPDATE/DELETE 不可变反例。
+- [x] 实现 `engine/src/nexus/audit/service.py`；生产代码中的 audit 写入已统一委托该服务。
+- [x] 新增 `engine/tests/integration/test_audit_export.py`，覆盖 31 天/100k 上限、kind/date、脱敏、稳定排序、gzip mtime=0、字节一致和无敏感字段。
+- [x] 实现 `engine/src/nexus/audit/export.py` 与内容寻址 manifest writer protocol；并发/幂等验收只用内存 object store。
+- [x] 运行审计、manifest、daily handler 和静态门禁；提交 `feat(engine): seal and export redacted audit chain`。
 
 ## Slice 8：Readiness、风险审计与动作 API
 

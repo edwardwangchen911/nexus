@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy import and_, any_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.audit.manifest import AuditManifestObjectStore, publish_audit_chain_manifest
 from nexus.jobs.daily_payloads import (
     STAGE_SCHEMA,
     DailyPipelinePayload,
@@ -46,12 +47,40 @@ _LOCAL_SAFE_STAGES = frozenset(
 )
 
 
-def build_local_daily_pipeline_registry() -> JobRegistry:
-    """Compose local paper-only adapters without broker or Agent capabilities."""
+def build_local_daily_pipeline_registry(
+    *,
+    audit_object_store: AuditManifestObjectStore | None = None,
+) -> JobRegistry:
+    """Compose local paper adapters and optional audit storage, never broker or Agent."""
+    enabled = (
+        _LOCAL_SAFE_STAGES
+        if audit_object_store is None
+        else _LOCAL_SAFE_STAGES | {JobType.AUDIT_MANIFEST}
+    )
+
+    async def execute(
+        job_type: JobType,
+        context: JobHandlerContext,
+        payload: DailyStagePayload,
+    ) -> JobHandlerResult:
+        if job_type is JobType.AUDIT_MANIFEST:
+            if audit_object_store is None:
+                raise ValueError("audit manifest object store is unavailable")
+            await publish_audit_chain_manifest(
+                context.session,
+                session_date=date.fromisoformat(payload.session),
+                object_store=audit_object_store,
+            )
+            return JobHandlerResult(
+                outcome="succeeded",
+                result_code="AUDIT_MANIFEST_PUBLISHED",
+            )
+        return await _execute_local_daily_stage(job_type, context, payload)
+
     return build_daily_pipeline_registry(
         profile_id=LOCAL_SAFE_DAILY_PROFILE,
-        stage_executor=_execute_local_daily_stage,
-        enabled_stage_types=_LOCAL_SAFE_STAGES,
+        stage_executor=execute,
+        enabled_stage_types=frozenset(enabled),
         target_resolver=_resolve_local_targets,
     )
 

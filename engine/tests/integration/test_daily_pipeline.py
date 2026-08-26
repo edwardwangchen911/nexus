@@ -1,5 +1,6 @@
 """PostgreSQL contracts for the deterministic daily automation DAG."""
 
+import gzip
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -7,6 +8,7 @@ from uuid import UUID
 
 import pytest
 from helpers.paper_execution import FIRST_EVALUATION, seed_paper_execution
+from nexus.audit.service import append_audit_event
 from nexus.jobs.daily_local import (
     LOCAL_SAFE_DAILY_PROFILE,
     build_local_daily_pipeline_registry,
@@ -42,6 +44,15 @@ StageExecutor = Callable[
     [JobType, JobHandlerContext, DailyStagePayload],
     Awaitable[JobHandlerResult],
 ]
+
+
+class _AuditStore:
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+
+    async def put_if_absent(self, *, key: str, content: bytes) -> str:
+        self.objects.setdefault(key, content)
+        return f"memory://daily-audit/{key}"
 
 
 async def _seed_calendar(factory: async_sessionmaker[AsyncSession]) -> None:
@@ -395,6 +406,55 @@ async def test_local_safe_profile_never_claims_broker_or_placeholder_agent_jobs(
     assert results[JobType.AGENT_RESEARCH.value] == "SKIPPED_CAPABILITY"
     assert results[JobType.PAPER_EXECUTE_DUE.value] == "SKIPPED_NO_DUE_TARGETS"
     assert results[JobType.PAPER_PERFORMANCE.value] == "PERFORMANCE_PUBLISHED"
+
+
+@pytest.mark.asyncio
+async def test_local_audit_manifest_runs_only_with_injected_object_store(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_calendar(factory)
+    now = _FRIDAY_CLOSE + timedelta(minutes=31)
+    async with factory() as session, session.begin():
+        await append_audit_event(
+            session,
+            actor_id="system:daily-test",
+            action="audit.daily.test",
+            schema_version="audit_test_v1",
+            payload={"status": "ok", "account_id": "must-not-export"},
+            occurred_at=now,
+        )
+        assert await schedule_due_daily_pipeline(
+            session,
+            now=now,
+            profile_id=LOCAL_SAFE_DAILY_PROFILE,
+        )
+    store = _AuditStore()
+    registry = build_local_daily_pipeline_registry(audit_object_store=store)
+    for _ in range(4):
+        await run_job_worker_once(
+            factory,
+            registry=registry,
+            queue=QueueName.GENERAL,
+            worker_id="daily-audit-worker",
+            worker_started_at=now,
+            process_version="test-v1",
+            migration_head="0020_resilient_automation_audit",
+            clock=lambda: now,
+            claim_registered_only=True,
+        )
+    async with factory() as session:
+        manifest_job = await session.scalar(
+            select(Job).where(Job.job_type == JobType.AUDIT_MANIFEST.value)
+        )
+    assert manifest_job is not None
+    assert (manifest_job.status, manifest_job.result_code) == (
+        "succeeded",
+        "AUDIT_MANIFEST_PUBLISHED",
+    )
+    assert len(store.objects) == 1
+    content = gzip.decompress(next(iter(store.objects.values())))
+    assert b"must-not-export" not in content
 
 
 @pytest.mark.asyncio
