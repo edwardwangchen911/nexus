@@ -565,7 +565,10 @@ async def load_shadow_session_input(
             )
         raw_candidates[row.bar.instrument_id].append(_candidate_from_row(row))
 
-    for source, member_ids in visible_member_ids.items():
+    for source in _SOURCE_PRIORITY:
+        if source not in visible_member_ids and source not in proof_by_source:
+            continue
+        member_ids = visible_member_ids.get(source, set())
         proof = proof_by_source.get(source)
         if proof is None or not proof.complete:
             return _failure(
