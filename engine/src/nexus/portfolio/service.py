@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.portfolio import (
     CashBucketResponse,
+    InternalPaperPortfolioListItemResponse,
     OpenOrderResponse,
     PortfolioKind,
     PortfolioListItemResponse,
@@ -20,7 +21,9 @@ from nexus.api.schemas.portfolio import (
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
+from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.market import Instrument, InstrumentAlias
+from nexus.persistence.models.paper import PaperAccountRecord
 from nexus.persistence.models.portfolio import (
     Account,
     BrokerOrderSnapshot,
@@ -60,7 +63,7 @@ class PortfolioService:
         codec = PortfolioCursorCodec(self._cursor_secrets, self._request_time)
         state = codec.decode(cursor, requested_kind=kind) if cursor else None
         decision_time = state.decision_time if state else self._request_time
-        if kind in ("internal_paper", "shadow"):
+        if kind == "shadow":
             return PortfolioPageResponse(items=(), next_cursor=None), decision_time
 
         latest_snapshot = (
@@ -95,18 +98,30 @@ class PortfolioService:
                 Portfolio.id.label("portfolio_id"),
                 Portfolio.name,
                 Account.provider,
+                PaperAccountRecord.id.label("paper_account_id"),
+                PaperAccountRecord.currency.label("paper_currency"),
+                PaperAccountRecord.account_model,
+                PaperAccountRecord.position_model,
                 latest_snapshot.c.snapshot_id,
                 latest_snapshot.c.snapshot_status,
                 latest_snapshot.c.snapshot_as_of,
                 latest_run.c.run_status,
             )
             .join(Account, Account.id == Portfolio.account_id)
+            .outerjoin(
+                PaperAccountRecord,
+                PaperAccountRecord.portfolio_id == Portfolio.id,
+            )
             .outerjoin(latest_snapshot, true())
             .outerjoin(latest_run, true())
             .where(Portfolio.created_at <= decision_time)
             .order_by(Portfolio.name, Portfolio.id)
             .limit(limit + 1)
         )
+        if kind == "real_read_only":
+            statement = statement.where(PaperAccountRecord.id.is_(None))
+        elif kind == "internal_paper":
+            statement = statement.where(PaperAccountRecord.id.is_not(None))
         if state is not None:
             statement = statement.where(
                 or_(
@@ -121,29 +136,80 @@ class PortfolioService:
         has_more = len(rows) > limit
         page_rows = rows[:limit]
         currencies = await self._currencies(
-            tuple(row.snapshot_id for row in page_rows if row.snapshot_id is not None)
-        )
-        items = tuple(
-            PortfolioListItemResponse(
-                portfolio_id=row.portfolio_id,
-                name=row.name,
-                kind="real_read_only",
-                coverage_scope="broker_account",
-                provider=row.provider,
-                latest_snapshot_status=row.snapshot_status,
-                latest_snapshot_as_of=row.snapshot_as_of,
-                original_currencies=currencies.get(row.snapshot_id, ()),
-                last_sync_run_status=row.run_status,
+            tuple(
+                row.snapshot_id
+                for row in page_rows
+                if row.paper_account_id is None and row.snapshot_id is not None
             )
-            for row in page_rows
         )
+        items: list[PortfolioListItemResponse | InternalPaperPortfolioListItemResponse] = []
+        for row in page_rows:
+            if row.paper_account_id is None:
+                items.append(
+                    PortfolioListItemResponse(
+                        portfolio_id=row.portfolio_id,
+                        name=row.name,
+                        kind="real_read_only",
+                        coverage_scope="broker_account",
+                        provider=row.provider,
+                        latest_snapshot_status=row.snapshot_status,
+                        latest_snapshot_as_of=row.snapshot_as_of,
+                        original_currencies=currencies.get(row.snapshot_id, ()),
+                        last_sync_run_status=row.run_status,
+                    )
+                )
+                continue
+            try:
+                projection = await load_paper_projection(
+                    self._session,
+                    account_id=row.paper_account_id,
+                    as_of=decision_time,
+                )
+            except ValueError:
+                items.append(
+                    InternalPaperPortfolioListItemResponse(
+                        portfolio_id=row.portfolio_id,
+                        name=row.name,
+                        kind="internal_paper",
+                        coverage_scope="internal_paper_account",
+                        source="internal_ledger",
+                        currency="USD",
+                        account_model="cash",
+                        position_model="long_only",
+                        data_state="ERROR",
+                        projection_error_code="PAPER_PROJECTION_INVALID",
+                        nav=None,
+                        available_cash=None,
+                        reserved_cash=None,
+                        as_of=None,
+                    )
+                )
+                continue
+            items.append(
+                InternalPaperPortfolioListItemResponse(
+                    portfolio_id=row.portfolio_id,
+                    name=row.name,
+                    kind="internal_paper",
+                    coverage_scope="internal_paper_account",
+                    source="internal_ledger",
+                    currency="USD",
+                    account_model="cash",
+                    position_model="long_only",
+                    data_state="READY",
+                    projection_error_code=None,
+                    nav=decimal_to_string(projection.nav),
+                    available_cash=decimal_to_string(projection.available_cash),
+                    reserved_cash=decimal_to_string(projection.reserved_cash),
+                    as_of=projection.as_of,
+                )
+            )
         next_cursor = None
         if has_more and page_rows:
             last = page_rows[-1]
             next_cursor = codec.encode(
                 PortfolioCursorState(decision_time, last.name, last.portfolio_id, kind)
             )
-        return PortfolioPageResponse(items=items, next_cursor=next_cursor), decision_time
+        return PortfolioPageResponse(items=tuple(items), next_cursor=next_cursor), decision_time
 
     async def _currencies(self, snapshot_ids: tuple[UUID, ...]) -> dict[UUID, tuple[str, ...]]:
         if not snapshot_ids:

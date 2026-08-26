@@ -3,6 +3,7 @@ from uuid import UUID
 import pytest
 from nexus.api.schemas.portfolio import (
     BrokerSyncCreateRequest,
+    InternalPaperPortfolioListItemResponse,
     PortfolioListItemResponse,
     PortfolioPageResponse,
     PortfolioSnapshotEnvelope,
@@ -87,6 +88,37 @@ def test_safety_discriminators_and_nullable_symbols_are_required() -> None:
     assert {"coverage_scope", "converted_view"} <= snapshot_required
     assert {"symbol", "read_only"} <= set(position_schema["required"])
     assert position_schema["properties"]["quantity"]["maxLength"] == 40
+
+
+def test_internal_paper_list_contract_is_ledger_only_and_advertises_no_write_surface() -> None:
+    item = InternalPaperPortfolioListItemResponse.model_validate(
+        {
+            "portfolio_id": str(_PORTFOLIO_ID),
+            "name": "NEXUS Internal USD Paper",
+            "kind": "internal_paper",
+            "coverage_scope": "internal_paper_account",
+            "source": "internal_ledger",
+            "currency": "USD",
+            "account_model": "cash",
+            "position_model": "long_only",
+            "data_state": "READY",
+            "projection_error_code": None,
+            "nav": "10000.000000000000",
+            "available_cash": "10000.000000000000",
+            "reserved_cash": "0.000000000000",
+            "as_of": "2026-08-27T00:00:00Z",
+        }
+    )
+
+    assert item.source == "internal_ledger"
+    schema = InternalPaperPortfolioListItemResponse.model_json_schema()
+    assert "provider" not in schema["properties"]
+    assert "broker_capabilities" not in schema["properties"]
+    assert "order_create_action" not in schema["properties"]
+    with pytest.raises(ValidationError):
+        InternalPaperPortfolioListItemResponse.model_validate(
+            {**item.model_dump(), "order_create_action": "/paper/orders"}
+        )
 
 
 def test_maximum_legal_snapshot_envelope_fits_the_bff_four_mebibyte_limit() -> None:

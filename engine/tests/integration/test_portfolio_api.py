@@ -1,5 +1,5 @@
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -38,8 +38,11 @@ from helpers.portfolio_api import (
 from helpers.portfolio_api import (
     terminalize_broker_sync as _terminalize_broker_sync,
 )
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 _SYNC_PATH = "/internal/v1/broker-sync-runs"
+_PAPER_NOW = datetime(2026, 8, 27, 1, tzinfo=UTC)
 
 
 def _sync_body(portfolio_id: UUID, *, padded: bool = False) -> bytes:
@@ -78,11 +81,121 @@ async def test_portfolio_filters_and_limits_are_bounded(migrated_database_url: s
             response = await client.get(path, headers=_headers("GET", path))
             assert response.status_code == 422
             assert response.json()["error"]["code"] == "VALIDATION_ERROR"
-        for kind in ("internal_paper", "shadow"):
-            path = f"/internal/v1/portfolios?kind={kind}"
-            response = await client.get(path, headers=_headers("GET", path))
-            assert response.status_code == 200
-            assert response.json()["data"] == {"items": [], "next_cursor": None}
+        shadow_path = "/internal/v1/portfolios?kind=shadow"
+        shadow = await client.get(shadow_path, headers=_headers("GET", shadow_path))
+        assert shadow.status_code == 200
+        assert shadow.json()["data"] == {"items": [], "next_cursor": None}
+
+
+@pytest.mark.asyncio
+async def test_internal_paper_filter_returns_seeded_isolated_ledger_projection(
+    migrated_database_url: str,
+) -> None:
+    path = "/internal/v1/portfolios?kind=internal_paper"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(migrated_database_url, now=_PAPER_NOW)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert len(items) == 1
+    paper = items[0]
+    assert paper == {
+        "portfolio_id": "ee2ff673-eaf6-5076-bbab-f4c9cedfc74e",
+        "name": "NEXUS Internal USD Paper",
+        "kind": "internal_paper",
+        "coverage_scope": "internal_paper_account",
+        "source": "internal_ledger",
+        "currency": "USD",
+        "account_model": "cash",
+        "position_model": "long_only",
+        "data_state": "READY",
+        "projection_error_code": None,
+        "nav": "10000.000000000000",
+        "available_cash": "10000.000000000000",
+        "reserved_cash": "0",
+        "as_of": "2026-08-27T01:00:00Z",
+    }
+    assert not {"provider", "broker_capabilities", "order_create_action"} & set(paper)
+
+
+@pytest.mark.asyncio
+async def test_unfiltered_list_labels_subtypes_without_combining_paper_and_broker_values(
+    migrated_database_url: str,
+) -> None:
+    await _seed_portfolio_list(migrated_database_url)
+    path = "/internal/v1/portfolios"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(migrated_database_url, now=_PAPER_NOW)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    paper = [item for item in items if item["kind"] == "internal_paper"]
+    broker = [item for item in items if item["kind"] == "real_read_only"]
+    assert len(paper) == 1
+    assert len(broker) == 3
+    assert paper[0]["currency"] == "USD"
+    assert "original_currencies" not in paper[0]
+    assert all("nav" not in item for item in broker)
+    assert all("combined_total" not in item for item in items)
+
+
+async def _seed_invalid_paper_identity(database_url: str) -> None:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO accounts (id, provider, status) VALUES "
+                    "('61000000-0000-0000-0000-000000000001', 'internal', 'ACTIVE')"
+                )
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO portfolios (id, account_id, name) VALUES "
+                    "('61000000-0000-0000-0000-000000000002', "
+                    "'61000000-0000-0000-0000-000000000001', 'Broken Paper')"
+                )
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO paper_accounts "
+                    "(id, account_id, portfolio_id, code, currency, account_model, "
+                    "position_model, initial_capital, capability) VALUES "
+                    "('61000000-0000-0000-0000-000000000003', "
+                    "'61000000-0000-0000-0000-000000000001', "
+                    "'61000000-0000-0000-0000-000000000002', 'broken_test', "
+                    "'USD', 'cash', 'long_only', 10000, 'simulation_write_internal')"
+                )
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_invalid_paper_projection_returns_error_metadata_without_invented_balance(
+    migrated_database_url: str,
+) -> None:
+    await _seed_invalid_paper_identity(migrated_database_url)
+    path = "/internal/v1/portfolios?kind=internal_paper"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(migrated_database_url, now=_PAPER_NOW)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    assert response.status_code == 200
+    broken = next(
+        item for item in response.json()["data"]["items"] if item["name"] == "Broken Paper"
+    )
+    assert broken["data_state"] == "ERROR"
+    assert broken["projection_error_code"] == "PAPER_PROJECTION_INVALID"
+    assert broken["nav"] is broken["available_cash"] is broken["reserved_cash"] is None
 
 
 @pytest.mark.asyncio

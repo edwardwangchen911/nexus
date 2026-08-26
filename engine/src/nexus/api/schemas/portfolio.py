@@ -35,8 +35,31 @@ class PortfolioListItemResponse(_StrictSchema):
     last_sync_run_status: SyncRunStatus | None
 
 
+class InternalPaperPortfolioListItemResponse(_StrictSchema):
+    portfolio_id: UUID
+    name: str = Field(min_length=1, max_length=100)
+    kind: Literal["internal_paper"]
+    coverage_scope: Literal["internal_paper_account"]
+    source: Literal["internal_ledger"]
+    currency: Literal["USD"]
+    account_model: Literal["cash"]
+    position_model: Literal["long_only"]
+    data_state: Literal["READY", "ERROR"]
+    projection_error_code: Literal["PAPER_PROJECTION_INVALID"] | None
+    nav: DecimalString | None
+    available_cash: DecimalString | None
+    reserved_cash: DecimalString | None
+    as_of: AwareDatetime | None
+
+
+type PortfolioListItem = Annotated[
+    PortfolioListItemResponse | InternalPaperPortfolioListItemResponse,
+    Field(discriminator="kind"),
+]
+
+
 class PortfolioPageResponse(_StrictSchema):
-    items: tuple[PortfolioListItemResponse, ...] = Field(max_length=50)
+    items: tuple[PortfolioListItem, ...] = Field(max_length=50)
     next_cursor: str | None
 
 
