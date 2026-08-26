@@ -690,7 +690,7 @@ The main developer database must not be destructively downgraded. Prefer the pro
 Run:
 
 ~~~bash
-uv run --package nexus-engine pytest engine/tests -q
+uv run --package nexus-engine pytest --import-mode=importlib engine/tests -q
 uv run --package nexus-engine ruff check engine
 uv run --package nexus-engine mypy engine/src
 ~~~
