@@ -3,17 +3,22 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
-import conftest as integration_conftest
 import pytest
-from conftest import (
-    _FORCE_DROP_ATTEMPTS,
-    TemporaryDatabase,
-    TemporaryDatabaseFactory,
-    _create_database,
-    _drop_database,
-)
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import ProgrammingError
+
+try:
+    from engine.tests.integration import conftest as integration_conftest
+except ModuleNotFoundError as error:
+    if error.name != "engine":
+        raise
+    import conftest as integration_conftest
+
+_FORCE_DROP_ATTEMPTS = integration_conftest._FORCE_DROP_ATTEMPTS
+TemporaryDatabase = integration_conftest.TemporaryDatabase
+TemporaryDatabaseFactory = integration_conftest.TemporaryDatabaseFactory
+_create_database = integration_conftest._create_database
+_drop_database = integration_conftest._drop_database
 
 
 class _InjectedSetupFailure(RuntimeError):
