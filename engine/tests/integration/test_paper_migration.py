@@ -52,56 +52,70 @@ async def _paper_seed(database_url: str) -> dict[str, object]:
     try:
         async with engine.connect() as connection:
             account = (
-                await connection.execute(
-                    text(
-                        "SELECT pa.id, pa.account_id, pa.portfolio_id, pa.code, "
-                        "pa.currency, pa.account_model, pa.position_model, "
-                        "pa.initial_capital, a.provider, p.name "
-                        "FROM paper_accounts pa "
-                        "JOIN accounts a ON a.id = pa.account_id "
-                        "JOIN portfolios p ON p.id = pa.portfolio_id"
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT pa.id, pa.account_id, pa.portfolio_id, pa.code, "
+                            "pa.currency, pa.account_model, pa.position_model, "
+                            "pa.initial_capital, a.provider, p.name "
+                            "FROM paper_accounts pa "
+                            "JOIN accounts a ON a.id = pa.account_id "
+                            "JOIN portfolios p ON p.id = pa.portfolio_id"
+                        )
                     )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             policy = (
-                await connection.execute(
-                    text(
-                        "SELECT version, active, content_hash "
-                        "FROM risk_policies"
+                (
+                    await connection.execute(
+                        text("SELECT version, active, content_hash FROM risk_policies")
                     )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             ledger_accounts = (
-                await connection.execute(
-                    text(
-                        "SELECT code, normal_side, currency "
-                        "FROM paper_ledger_accounts ORDER BY code"
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT code, normal_side, currency "
+                            "FROM paper_ledger_accounts ORDER BY code"
+                        )
                     )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             funding = (
-                await connection.execute(
-                    text(
-                        "SELECT count(*) AS entry_count, "
-                        "sum(debit_amount) AS debits, "
-                        "sum(credit_amount) AS credits "
-                        "FROM paper_ledger_entries"
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT count(*) AS entry_count, "
+                            "sum(debit_amount) AS debits, "
+                            "sum(credit_amount) AS credits "
+                            "FROM paper_ledger_entries"
+                        )
                     )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             drawdown = (
-                await connection.execute(
-                    text(
-                        "SELECT event_seq, from_state, to_state, drawdown_ratio, "
-                        "reason_code FROM paper_drawdown_lock_events"
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT event_seq, from_state, to_state, drawdown_ratio, "
+                            "reason_code FROM paper_drawdown_lock_events"
+                        )
                     )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             task19_counts = {
-                table: int(
-                    await connection.scalar(text(f"SELECT count(*) FROM {table}"))
-                    or 0
-                )
+                table: int(await connection.scalar(text(f"SELECT count(*) FROM {table}")) or 0)
                 for table in TASK19_TABLES
             }
             return {
@@ -122,8 +136,7 @@ async def _table_names(database_url: str) -> set[str]:
         async with engine.connect() as connection:
             rows = await connection.execute(
                 text(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = 'public'"
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
                 )
             )
             return {str(row.table_name) for row in rows}
@@ -134,7 +147,7 @@ async def _table_names(database_url: str) -> set[str]:
 def test_paper_revision_precedes_the_execution_release_head() -> None:
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0015_paper_execution"]
+    assert script.get_heads() == ["0016_paper_execution_atomic"]
     revision = script.get_revision("0014_paper")
     assert revision is not None
     assert revision.down_revision == "0013_shadow"

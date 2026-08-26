@@ -357,8 +357,7 @@ class RiskNoChangeEvaluationRecord(ImmutableCreatedAt, Base):
             name="authorities_nonempty",
         ),
         CheckConstraint(
-            "input_hash ~ '^[0-9a-f]{64}$' "
-            "AND evidence_hash ~ '^[0-9a-f]{64}$'",
+            "input_hash ~ '^[0-9a-f]{64}$' AND evidence_hash ~ '^[0-9a-f]{64}$'",
             name="hashes_canonical",
         ),
     )
@@ -385,9 +384,7 @@ class PaperOrderRecord(ImmutableCreatedAt, Base):
     __table_args__ = (
         UniqueConstraint("account_id", "client_order_id", name="uq_paper_orders_account_client"),
         UniqueConstraint("id", "account_id", name="uq_paper_orders_id_account"),
-        UniqueConstraint(
-            "id", "batch_id", "account_id", name="uq_paper_orders_id_batch_account"
-        ),
+        UniqueConstraint("id", "batch_id", "account_id", name="uq_paper_orders_id_batch_account"),
         UniqueConstraint(
             "id",
             "account_id",
@@ -458,6 +455,19 @@ class PaperOrderEventRecord(ImmutableCreatedAt, Base):
         ),
         CheckConstraint("btrim(reason_code) <> ''", name="reason_nonempty"),
         CheckConstraint("payload_hash ~ '^[0-9a-f]{64}$'", name="hash_canonical"),
+        UniqueConstraint("source_fill_id", name="uq_paper_order_events_source_fill"),
+        ForeignKeyConstraint(
+            ["source_fill_id", "account_id"],
+            ["paper_fills.id", "paper_fills.account_id"],
+            name="fk_paper_order_events_source_fill",
+        ),
+        CheckConstraint(
+            "(actor_kind = 'task19' AND to_status IN ('partially_filled','filled') "
+            "AND source_fill_id IS NOT NULL) OR "
+            "(NOT (actor_kind = 'task19' AND "
+            "to_status IN ('partially_filled','filled')) AND source_fill_id IS NULL)",
+            name="fill_binding",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
@@ -470,6 +480,7 @@ class PaperOrderEventRecord(ImmutableCreatedAt, Base):
     reason_code: Mapped[str] = mapped_column(String(100))
     occurred_at: Mapped[datetime] = mapped_column(UTCDateTime())
     payload_hash: Mapped[str] = mapped_column(String(64))
+    source_fill_id: Mapped[UUID | None]
 
 
 class RiskEvaluationRecord(ImmutableCreatedAt, Base):
@@ -604,8 +615,7 @@ class RiskEvaluationPriceInputRecord(ImmutableCreatedAt, Base):
         ),
         CheckConstraint("close > 0", name="close_positive"),
         CheckConstraint(
-            "market = 'US' AND currency = 'USD' "
-            "AND asset_type IN ('ETF','common_stock')",
+            "market = 'US' AND currency = 'USD' AND asset_type IN ('ETF','common_stock')",
             name="instrument_scope",
         ),
         CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="hash_canonical"),
@@ -1066,8 +1076,7 @@ class PaperExecutionWindowAuthorityRecord(ImmutableCreatedAt, Base):
             name="quote_copy",
         ),
         CheckConstraint(
-            "source_content_hash ~ '^[0-9a-f]{64}$' "
-            "AND content_hash ~ '^[0-9a-f]{64}$'",
+            "source_content_hash ~ '^[0-9a-f]{64}$' AND content_hash ~ '^[0-9a-f]{64}$'",
             name="hashes",
         ),
     )
@@ -1159,9 +1168,7 @@ class PaperFillRecord(ImmutableCreatedAt, Base):
     __table_args__ = (
         UniqueConstraint("order_id", "fill_seq", name="uq_paper_fills_order_seq"),
         UniqueConstraint("id", "account_id", name="uq_paper_fills_id_account"),
-        UniqueConstraint(
-            "execution_window_authority_id", name="uq_paper_fills_execution_window"
-        ),
+        UniqueConstraint("execution_window_authority_id", name="uq_paper_fills_execution_window"),
         UniqueConstraint("ledger_transaction_id", name="uq_paper_fills_ledger_transaction"),
         UniqueConstraint(
             "id",
@@ -1377,9 +1384,7 @@ class PaperPerformanceSnapshotRecord(ImmutableCreatedAt, Base):
             ["paper_accounts.id"],
             name="fk_paper_performance_snapshots_account",
         ),
-        UniqueConstraint(
-            "id", "account_id", name="uq_paper_performance_snapshots_id_account"
-        ),
+        UniqueConstraint("id", "account_id", name="uq_paper_performance_snapshots_id_account"),
         CheckConstraint(
             "nav > 0 AND peak_nav >= nav AND cash >= 0 AND fees >= 0 "
             "AND drawdown_ratio >= 0 AND drawdown_ratio <= 1",

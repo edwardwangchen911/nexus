@@ -358,9 +358,7 @@ def _assert_shadow_schema(connection: Connection) -> None:
         "shadow_seals": {"uq_shadow_seals_group"},
     }
     for table_name, required_names in expected_uniques.items():
-        actual_names = {
-            item["name"] for item in inspector.get_unique_constraints(table_name)
-        }
+        actual_names = {item["name"] for item in inspector.get_unique_constraints(table_name)}
         assert required_names <= actual_names
 
     expected_checks = {
@@ -405,7 +403,7 @@ def test_0013_is_single_head_and_round_trips_from_0012(
 ) -> None:
     """The Shadow release is one reversible successor of deterministic backtests."""
     config = _config(monkeypatch, temporary_database_url)
-    assert ScriptDirectory.from_config(config).get_heads() == ["0015_paper_execution"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["0016_paper_execution_atomic"]
 
     command.upgrade(config, "0012_backtests")
     assert SHADOW_TABLES.isdisjoint(_table_names(temporary_database_url))
@@ -446,25 +444,19 @@ def test_0013_downgrade_restores_exact_pre_shadow_lifecycle(
     config = _config(monkeypatch, temporary_database_url)
     command.upgrade(config, "0012_backtests")
     before = asyncio.run(
-        _function_definition(
-            temporary_database_url, "nexus_optimization_group_lifecycle()"
-        )
+        _function_definition(temporary_database_url, "nexus_optimization_group_lifecycle()")
     )
 
     command.upgrade(config, "0013_shadow")
     during = asyncio.run(
-        _function_definition(
-            temporary_database_url, "nexus_optimization_group_lifecycle()"
-        )
+        _function_definition(temporary_database_url, "nexus_optimization_group_lifecycle()")
     )
     assert "shadow_groups" in during
     assert "shadow_seals" in during
 
     command.downgrade(config, "0012_backtests")
     after = asyncio.run(
-        _function_definition(
-            temporary_database_url, "nexus_optimization_group_lifecycle()"
-        )
+        _function_definition(temporary_database_url, "nexus_optimization_group_lifecycle()")
     )
     assert after == before
 
@@ -727,9 +719,7 @@ async def test_seal_matches_lifecycle_and_blocks_later_children(
                 final_authority_hash="a" * 64,
             )
         )
-        group = await session.get(
-            OptimizationProposalGroupRecord, shadow.proposal.group_id
-        )
+        group = await session.get(OptimizationProposalGroupRecord, shadow.proposal.group_id)
         assert group is not None
         group.status = "rejected"
         group.version = 3
@@ -772,9 +762,7 @@ async def test_data_incomplete_seal_cannot_precede_frozen_grace_deadline(
                     final_authority_hash="a" * 64,
                 )
             )
-            group = await session.get(
-                OptimizationProposalGroupRecord, shadow.proposal.group_id
-            )
+            group = await session.get(OptimizationProposalGroupRecord, shadow.proposal.group_id)
             assert group is not None
             group.status = "expired"
             group.version = 3
@@ -787,9 +775,7 @@ async def test_direct_validated_transition_requires_complete_shadow_authority(
     """A forged validated seal cannot bypass 63/189/3/9 and first-fill gates."""
     shadow = await _seed_valid_shadow(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
-    with pytest.raises(
-        DBAPIError, match="PROPOSAL_SHADOW_VALIDATION_INCOMPLETE"
-    ):
+    with pytest.raises(DBAPIError, match="PROPOSAL_SHADOW_VALIDATION_INCOMPLETE"):
         async with factory() as session, session.begin():
             session.add(
                 ShadowSealRecord(
@@ -803,9 +789,7 @@ async def test_direct_validated_transition_requires_complete_shadow_authority(
                 )
             )
             await session.flush()
-            group = await session.get(
-                OptimizationProposalGroupRecord, shadow.proposal.group_id
-            )
+            group = await session.get(OptimizationProposalGroupRecord, shadow.proposal.group_id)
             assert group is not None
             group.status = "validated"
             group.version = 3

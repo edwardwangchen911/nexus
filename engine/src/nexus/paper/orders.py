@@ -18,7 +18,9 @@ _GENERIC_TRANSITIONS: dict[InternalOrderStatus, frozenset[InternalOrderStatus]] 
     "risk_approved": frozenset(("submitted", "awaiting_approval")),
     "awaiting_approval": frozenset(("submitted", "cancelled", "rejected")),
     "submitted": frozenset(("partially_filled", "filled", "cancelled", "rejected", "reconciling")),
-    "partially_filled": frozenset(("filled", "cancelled", "rejected", "reconciling")),
+    "partially_filled": frozenset(
+        ("partially_filled", "filled", "cancelled", "rejected", "reconciling")
+    ),
     "filled": frozenset(),
     "cancelled": frozenset(),
     "rejected": frozenset(),

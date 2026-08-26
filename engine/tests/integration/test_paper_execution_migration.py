@@ -96,13 +96,16 @@ async def _mutation_is_rejected(database_url: str) -> bool:
         await engine.dispose()
 
 
-def test_0015_is_the_single_head_after_task18() -> None:
+def test_0016_is_the_single_head_after_task18() -> None:
     scripts = ScriptDirectory.from_config(_config())
 
-    assert scripts.get_heads() == ["0015_paper_execution"]
+    assert scripts.get_heads() == ["0016_paper_execution_atomic"]
     revision = scripts.get_revision("0015_paper_execution")
     assert revision is not None
     assert revision.down_revision == "0014_paper"
+    atomic_revision = scripts.get_revision("0016_paper_execution_atomic")
+    assert atomic_revision is not None
+    assert atomic_revision.down_revision == "0015_paper_execution"
 
 
 def test_execution_migration_seeds_authority_backfills_calendar_and_round_trips(
@@ -118,8 +121,7 @@ def test_execution_migration_seeds_authority_backfills_calendar_and_round_trips(
         for row in asyncio.run(
             _rows(
                 temporary_database_url,
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'public'",
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
             )
         )
     }
@@ -135,6 +137,36 @@ def test_execution_migration_seeds_authority_backfills_calendar_and_round_trips(
         )
     }
     assert FILL_COLUMNS <= fill_columns
+    order_event_columns = {
+        str(row[0])
+        for row in asyncio.run(
+            _rows(
+                temporary_database_url,
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'paper_order_events'",
+            )
+        )
+    }
+    assert "source_fill_id" in order_event_columns
+    atomic_constraints = {
+        str(row[0])
+        for row in asyncio.run(
+            _rows(
+                temporary_database_url,
+                "SELECT conname FROM pg_constraint WHERE conname IN ("
+                "'uq_paper_order_events_source_fill',"
+                "'fk_paper_order_events_source_fill',"
+                "'ck_paper_order_events_fill_binding',"
+                "'uq_paper_position_adjustments_source_fill')",
+            )
+        )
+    }
+    assert atomic_constraints == {
+        "uq_paper_order_events_source_fill",
+        "fk_paper_order_events_source_fill",
+        "ck_paper_order_events_fill_binding",
+        "uq_paper_position_adjustments_source_fill",
+    }
     calendar_columns = {
         str(row[0]): str(row[1])
         for row in asyncio.run(
@@ -166,9 +198,7 @@ def test_execution_migration_seeds_authority_backfills_calendar_and_round_trips(
             "close_volume_vwap_v1",
         )
     ]
-    market_open, market_close = asyncio.run(
-        _insert_fixture_calendar(temporary_database_url)
-    )
+    market_open, market_close = asyncio.run(_insert_fixture_calendar(temporary_database_url))
     assert market_open.isoformat() == "2026-08-27T13:30:00+00:00"
     assert market_close.isoformat() == "2026-08-27T20:00:00+00:00"
     assert asyncio.run(_mutation_is_rejected(temporary_database_url))
@@ -179,8 +209,7 @@ def test_execution_migration_seeds_authority_backfills_calendar_and_round_trips(
         for row in asyncio.run(
             _rows(
                 temporary_database_url,
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'public'",
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
             )
         )
     }
@@ -196,6 +225,17 @@ def test_execution_migration_seeds_authority_backfills_calendar_and_round_trips(
         )
     }
     assert FILL_COLUMNS.isdisjoint(downgraded_fill_columns)
+    downgraded_order_event_columns = {
+        str(row[0])
+        for row in asyncio.run(
+            _rows(
+                temporary_database_url,
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'paper_order_events'",
+            )
+        )
+    }
+    assert "source_fill_id" not in downgraded_order_event_columns
 
     command.upgrade(config, "head")
     replayed = asyncio.run(

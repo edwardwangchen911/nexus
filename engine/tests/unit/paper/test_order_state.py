@@ -142,6 +142,35 @@ def test_task19_can_append_a_valid_fill_transition() -> None:
     assert current_order_status(filled) == "filled"
 
 
+def test_task19_can_record_more_than_one_partial_fill_without_fake_state() -> None:
+    first_partial = _order(
+        (
+            _event(1, source=None, target="proposed"),
+            _event(2, source="proposed", target="risk_approved"),
+            _event(3, source="risk_approved", target="submitted"),
+            _event(
+                4,
+                source="submitted",
+                target="partially_filled",
+                actor="task19",
+            ),
+        )
+    )
+
+    second_partial = transition_order(
+        first_partial,
+        "partially_filled",
+        _event(
+            5,
+            source="partially_filled",
+            target="partially_filled",
+            actor="task19",
+        ),
+    )
+
+    assert current_order_status(second_partial) == "partially_filled"
+
+
 @pytest.mark.parametrize(
     "event",
     (
