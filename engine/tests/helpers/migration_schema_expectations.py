@@ -131,6 +131,14 @@ PAPER_TABLES = {
     "paper_performance_attributions",
 }
 EXPECTED_TABLES = EXPECTED_TABLES | PAPER_TABLES
+AUTOMATION_TABLES = {
+    "job_attempts",
+    "job_dependencies",
+    "worker_heartbeats",
+    "outbox_delivery_attempts",
+    "audit_chain_manifests",
+}
+EXPECTED_TABLES = EXPECTED_TABLES | AUTOMATION_TABLES
 
 OPTIONAL_MIGRATION_TABLE_GROUPS = (
     frozenset(
@@ -198,6 +206,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
     ),
     frozenset(SHADOW_TABLES),
     frozenset(PAPER_TABLES),
+    frozenset(AUTOMATION_TABLES),
 )
 
 EXPECTED_FOREIGN_KEYS = {
@@ -208,6 +217,12 @@ EXPECTED_FOREIGN_KEYS = {
     },
     "price_bar_records": "fk_price_bar_records_manifest",
     "job_leases": "fk_job_leases_job_id_jobs",
+    "job_attempts": "fk_job_attempts_job",
+    "job_dependencies": {
+        "fk_job_dependencies_job",
+        "fk_job_dependencies_parent",
+    },
+    "outbox_delivery_attempts": "fk_outbox_delivery_attempts_event",
     "instrument_aliases": "fk_instrument_aliases_instrument_id_instruments",
     "universe_members": {
         "fk_universe_members_instrument_id_instruments",
