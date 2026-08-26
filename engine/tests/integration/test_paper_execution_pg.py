@@ -610,7 +610,10 @@ async def test_user_cancel_replays_and_releases_the_whole_reservation(
                 .order_by(PaperOrderEventRecord.event_seq.desc())
                 .limit(1)
             )
-        assert replay == first
+        assert first.replayed is False
+        assert replay.replayed is True
+        assert replay.result_hash == first.result_hash
+        assert replay.result_event_seq == first.result_event_seq
         assert first.status == "cancelled"
         assert first.filled_quantity == 0
         assert first.unfilled_quantity == seed.quantity
@@ -621,6 +624,50 @@ async def test_user_cancel_replays_and_releases_the_whole_reservation(
         assert last_event is not None
         assert last_event.actor_kind == "user"
         assert last_event.reason_code == "paper_user_cancelled"
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_duplicate_user_cancel_reports_one_locked_replay(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_execution(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+
+    async def invoke():
+        async with factory.begin() as session:
+            return await cancel_internal_paper_order(
+                session,
+                order_id=seed.order_id,
+                expected_event_seq=3,
+                requested_at=FIRST_EVALUATION - timedelta(minutes=1),
+                idempotency_key="cancel-concurrent-idempotent",
+            )
+
+    try:
+        results = await asyncio.gather(invoke(), invoke())
+        async with factory() as session:
+            request_count = await session.scalar(
+                select(func.count())
+                .select_from(PaperRequestIdempotencyRecord)
+                .where(
+                    PaperRequestIdempotencyRecord.order_id == seed.order_id,
+                    PaperRequestIdempotencyRecord.operation == "cancel",
+                )
+            )
+            cancelled_event_count = await session.scalar(
+                select(func.count())
+                .select_from(PaperOrderEventRecord)
+                .where(
+                    PaperOrderEventRecord.order_id == seed.order_id,
+                    PaperOrderEventRecord.to_status == "cancelled",
+                )
+            )
+        assert sorted(result.replayed for result in results) == [False, True]
+        assert len({result.result_hash for result in results}) == 1
+        assert len({result.result_event_seq for result in results}) == 1
+        assert request_count == cancelled_event_count == 1
     finally:
         await factory.kw["bind"].dispose()
 

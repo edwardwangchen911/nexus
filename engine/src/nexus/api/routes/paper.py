@@ -24,9 +24,7 @@ from nexus.paper.errors import PaperExecutionError
 from nexus.paper.execution_service import cancel_internal_paper_order
 from nexus.paper.models import InternalOrderStatus
 from nexus.paper.read_service import PaperReadService
-from nexus.persistence.models.paper import PaperRequestIdempotencyRecord
 from nexus.settings import EngineSettings
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
@@ -116,17 +114,6 @@ async def cancel_paper_order(
             "The internal paper order was not found.",
             status_code=404,
         )
-    account, _ = await reader.account()
-    replayed = (
-        await session.scalar(
-            select(PaperRequestIdempotencyRecord.id).where(
-                PaperRequestIdempotencyRecord.account_id == account.id,
-                PaperRequestIdempotencyRecord.operation == "cancel",
-                PaperRequestIdempotencyRecord.idempotency_key == idempotency_key,
-            )
-        )
-        is not None
-    )
     try:
         result = await cancel_internal_paper_order(
             session,
@@ -154,7 +141,7 @@ async def cancel_paper_order(
             filled_quantity=decimal_to_string(result.filled_quantity),
             remaining_quantity=decimal_to_string(result.unfilled_quantity),
             result_event_seq=result.result_event_seq,
-            replayed=replayed,
+            replayed=result.replayed,
         ),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=now),
     )

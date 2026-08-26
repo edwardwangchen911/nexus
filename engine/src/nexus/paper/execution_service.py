@@ -136,6 +136,7 @@ class PaperCancelResult(BaseModel):
     unfilled_quantity: Decimal
     result_event_seq: int = Field(ge=1)
     result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    replayed: bool = False
 
     @field_validator("filled_quantity", "unfilled_quantity", mode="before")
     @classmethod
@@ -241,6 +242,7 @@ def _cancel_result(
     order: PaperOrderRecord,
     filled_quantity: Decimal,
     result_event_seq: int,
+    replayed: bool = False,
 ) -> PaperCancelResult:
     unfilled = order.quantity - filled_quantity
     payload = {
@@ -259,6 +261,7 @@ def _cancel_result(
         unfilled_quantity=unfilled,
         result_event_seq=result_event_seq,
         result_hash=_digest("paper_cancel_result_sha256_v1", payload),
+        replayed=replayed,
     )
 
 
@@ -1720,6 +1723,7 @@ async def cancel_internal_paper_order(
                 start=Decimal(0),
             ),
             result_event_seq=event.event_seq,
+            replayed=True,
         )
         if replay.result_hash != existing_request.result_hash:
             raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
