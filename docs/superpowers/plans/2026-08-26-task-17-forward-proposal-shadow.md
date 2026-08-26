@@ -842,16 +842,25 @@ Shadow stale/partial state disables any future risk-increasing Shadow action, bu
 
 **Steps**
 
-- [ ] Add fixture builders for not-started, active, grace, partial, stale, validated, rejected, and expired Shadow responses with exactly ordered variants and known/unknown metrics.
-- [ ] Add component red tests for line semantics, reference line, direct labels, all-session table, metric signs/units, unknown reasons, source/delivery disclosure, safety notice, initial outcomes, keyboard navigation, and no trading controls.
-- [ ] Add page red tests for parallel fetch, Shadow 404, retained stale data, POST start response/refetch, separate reject response, latest-version rejection during shadowing, error retry/request ID, and group failure precedence.
-- [ ] Run `npm run test:unit -- tests/unit/optimize/shadow-performance.test.tsx tests/unit/optimize/proposal-comparison.test.tsx tests/unit/optimize/pages.test.tsx`; confirm intended failures before the component/state split exists.
-- [ ] Implement `ShadowPerformance` using the existing dynamic `lightweight-charts` pattern and design tokens; add no dependency.
-- [ ] Split page fetch/action types and render the component below `ProposalComparison` only after successful Shadow GET. Render skeleton/not-started/error states without an empty chart.
-- [ ] Add responsive CSS for 375, 390, 768, 1024, 1440 px and 390x844 landscape; tables may scroll horizontally but must retain all variants/data.
-- [ ] Extend Playwright route fixtures and assertions for all viewports, keyboard selection, reduced motion, zero serious/high axe failures, line-style legend, semantic table, and absence of trade/approval/evolution actions.
-- [ ] Run focused unit tests, `npm run typecheck`, `npm run lint`, `npm run build`, and `npm run test:e2e -- tests/e2e/optimize.spec.ts`; expect exit 0.
-- [ ] Commit with `feat(web): visualize proposal shadow performance`.
+- [x] Add fixture builders for not-started, active, grace, partial, stale, validated, rejected, and expired Shadow responses with exactly ordered variants and known/unknown metrics.
+- [x] Add component red tests for line semantics, reference line, direct labels, all-session table, metric signs/units, unknown reasons, source/delivery disclosure, safety notice, initial outcomes, keyboard navigation, and no trading controls.
+- [x] Add page red tests for parallel fetch, Shadow 404, retained stale data, POST start response/refetch, separate reject response, latest-version rejection during shadowing, error retry/request ID, and group failure precedence.
+- [x] Run `npm run test:unit -- tests/unit/optimize/shadow-performance.test.tsx tests/unit/optimize/proposal-comparison.test.tsx tests/unit/optimize/pages.test.tsx`; confirm intended failures before the component/state split exists.
+- [x] Implement `ShadowPerformance` using the existing dynamic `lightweight-charts` pattern and design tokens; add no dependency.
+- [x] Split page fetch/action types and render the component below `ProposalComparison` only after successful Shadow GET. Render skeleton/not-started/error states without an empty chart.
+- [x] Add responsive CSS for 375, 390, 768, 1024, 1440 px and 390x844 landscape; tables may scroll horizontally but must retain all variants/data.
+- [x] Extend Playwright route fixtures and assertions for all viewports, keyboard selection, reduced motion, zero serious/high axe failures, line-style legend, semantic table, and absence of trade/approval/evolution actions.
+- [x] Run focused unit tests, `npm run typecheck`, `npm run lint`, `npm run build`, and `npm run test:e2e -- tests/e2e/optimize.spec.ts`; expect exit 0.
+- [x] Commit with `feat(web): visualize proposal shadow performance`.
+
+**Implementation evidence (2026-08-26):** The initial focused run failed because
+`ShadowPerformance` and the independent page-state contract did not yet exist.
+After implementation, the focused suite passed 35/35 tests; TypeScript, ESLint,
+`git diff --check`, and the vinext production build exited 0. Playwright passed
+6/6 viewports with reduced motion, keyboard session navigation, no document-level
+horizontal overflow, zero serious/critical axe findings, and no trade, approval,
+validation, promotion, or self-evolution control. Web fixtures use Fosun delayed
+price bars first and exchange-valid XNYS sessions for the observed interval.
 
 ---
 

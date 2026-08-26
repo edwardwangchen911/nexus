@@ -10,7 +10,8 @@ type Variant = Proposal["variant"];
 
 type Props = {
   group: ProposalGroup;
-  actionsEnabled?: boolean;
+  startShadowEnabled?: boolean;
+  rejectEnabled?: boolean;
   onStartShadow: (groupId: string, version: number) => Promise<void>;
   onReject: (groupId: string, version: number) => Promise<void>;
 };
@@ -37,7 +38,7 @@ const metricRows = [
   ["tax_impact", "税务影响", "state"],
 ] as const;
 
-export function ProposalComparison({ group, actionsEnabled = true, onStartShadow, onReject }: Props): React.ReactElement {
+export function ProposalComparison({ group, startShadowEnabled = true, rejectEnabled = true, onStartShadow, onReject }: Props): React.ReactElement {
   const [confirming, setConfirming] = useState(false);
   const [pending, setPending] = useState<"shadow" | "reject" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -47,9 +48,9 @@ export function ProposalComparison({ group, actionsEnabled = true, onStartShadow
     ? null
     : group.shadow_eligibility.reasons.join("、") || "服务器未授予影子验证资格。";
   const terminal = ["expired", "rejected", "validated"].includes(group.status);
-  const canShadow = actionsEnabled && group.status === "compared" && shadowReason === null;
-  const canReject = actionsEnabled && ["draft", "compared", "shadowing"].includes(group.status);
-  const blockedReason = !actionsEnabled
+  const canShadow = startShadowEnabled && group.status === "compared" && shadowReason === null;
+  const canReject = rejectEnabled && ["draft", "compared", "shadowing"].includes(group.status);
+  const blockedReason = !startShadowEnabled
     ? "当前数据状态不允许发起操作；请先重新读取方案。"
     : group.status !== "compared"
       ? `当前状态 ${group.status} 不允许再次启动影子验证。`

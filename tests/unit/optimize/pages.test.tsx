@@ -1,12 +1,16 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("next/navigation", () => ({
+  useParams: () => ({ proposalGroupId: "0198d500-1000-7000-8000-000000001303" }),
+}));
+
 import { OverviewPanel } from "../../../app/(protected)/overview/page";
 import OptimizePage, { OptimizePanel } from "../../../app/(protected)/optimize/page";
-import { ProposalGroupPanel } from "../../../app/(protected)/optimize/[proposalGroupId]/page";
+import ProposalGroupPage, { ProposalGroupPanel } from "../../../app/(protected)/optimize/[proposalGroupId]/page";
 import { WhatIfPagePanel } from "../../../app/(protected)/what-if/page";
 import type { DataStateKind } from "../../../app/components/data-state";
-import { groupId, overviewData, proposalGroup, proposalIds } from "./fixtures";
+import { eligibleProposalGroup, groupId, overviewData, proposalGroup, proposalIds, shadowActive, shadowStale } from "./fixtures";
 
 const states: Array<[DataStateKind, string]> = [
   ["loading", "正在加载"], ["empty", "暂无数据"], ["ready", "数据已就绪"],
@@ -67,7 +71,7 @@ describe("optimization pages", () => {
   });
 
   it("keeps group lifecycle limited to shadow validation and rejection", () => {
-    render(<ProposalGroupPanel state="ready" group={proposalGroup()} onRefresh={vi.fn()} onStartShadow={vi.fn()} onReject={vi.fn()} />);
+    render(<ProposalGroupPanel groupState="ready" shadowState="not-started" group={proposalGroup()} shadow={null} shadowRequestId={null} onRefresh={vi.fn()} onStartShadow={vi.fn()} onReject={vi.fn()} />);
 
     expect(screen.getAllByRole("columnheader", { name: /保持现状|最小调整|策略目标/ })).toHaveLength(3);
     expect(screen.getByRole("link", { name: "试算最小调整权重" })).toHaveAttribute("href", expect.stringContaining(proposalIds.minimum_change));
@@ -75,12 +79,150 @@ describe("optimization pages", () => {
   });
 
   it.each(["partial", "stale"] as const)("keeps cached %s proposal facts visible but disables every action", (state) => {
-    render(<ProposalGroupPanel state={state} group={proposalGroup()} onRefresh={vi.fn()} onStartShadow={vi.fn()} onReject={vi.fn()} />);
+    render(<ProposalGroupPanel groupState={state} shadowState="not-started" group={proposalGroup()} shadow={null} shadowRequestId={null} onRefresh={vi.fn()} onStartShadow={vi.fn()} onReject={vi.fn()} />);
 
     expect(screen.getAllByRole("columnheader", { name: /保持现状|最小调整|策略目标/ })).toHaveLength(3);
     expect(screen.getByText(/当前数据状态不允许发起操作/)).toBeVisible();
     expect(screen.queryByRole("button", { name: /启动影子验证|拒绝方案组/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "试算最小调整权重" })).not.toBeInTheDocument();
+  });
+
+  it("keeps latest-version rejection available when only Shadow data is stale", async () => {
+    const onReject = vi.fn().mockResolvedValue(undefined);
+    const group = proposalGroup({ status: "shadowing", version: 5 });
+    render(<ProposalGroupPanel groupState="ready" shadowState="stale" group={group} shadow={shadowStale()} shadowRequestId={null} onRefresh={vi.fn()} onStartShadow={vi.fn()} onReject={onReject} />);
+
+    expect(screen.getByText(/保留最近一次已验证曲线/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "拒绝方案组" }));
+    await waitFor(() => expect(onReject).toHaveBeenCalledWith(group.proposal_group_id, 5));
+    expect(screen.queryByRole("button", { name: "启动影子验证" })).not.toBeInTheDocument();
+  });
+
+  it("fetches group and Shadow in parallel and renders independently verified data", async () => {
+    setProposalLocation();
+    let resolveGroup!: (value: Response) => void;
+    let resolveShadow!: (value: Response) => void;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => new Promise<Response>((resolve) => {
+      if (String(input).endsWith("/shadow")) resolveShadow = resolve;
+      else resolveGroup = resolve;
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ProposalGroupPage />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      `/api/v1/optimization-proposals/${groupId}`,
+      `/api/v1/optimization-proposals/${groupId}/shadow`,
+    ]);
+    resolveGroup(successEnvelope(proposalGroup({ status: "shadowing", version: 5 })));
+    resolveShadow(successEnvelope(shadowActive()));
+
+    expect(await screen.findByRole("heading", { name: "前向影子绩效" })).toBeVisible();
+    expect(screen.getAllByRole("columnheader", { name: /保持现状|最小调整|策略目标/ }).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("maps Shadow 404 to not-started without treating the proposal group as empty", async () => {
+    setProposalLocation();
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+      String(input).endsWith("/shadow")
+        ? errorEnvelope(404, "NOT_FOUND", "0198d500-1000-7000-8000-000000001399")
+        : successEnvelope(eligibleProposalGroup())));
+
+    render(<ProposalGroupPage />);
+    expect(await screen.findByText(/尚未启动影子验证/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "启动影子验证" })).toBeVisible();
+  });
+
+  it("retains the last verified Shadow curve when refresh fails", async () => {
+    setProposalLocation();
+    let shadowCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (!String(input).endsWith("/shadow")) return successEnvelope(proposalGroup({ status: "shadowing", version: 5 }));
+      shadowCalls += 1;
+      if (shadowCalls === 1) return successEnvelope(shadowActive());
+      throw new Error("network unavailable");
+    }));
+
+    render(<ProposalGroupPage />);
+    expect(await screen.findByRole("heading", { name: "前向影子绩效" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "重新加载方案" }));
+    expect(await screen.findByText(/保留最近一次已验证曲线/)).toBeVisible();
+    expect(screen.getByRole("table", { name: "三方案逐会话精确 NAV" })).toBeVisible();
+  });
+
+  it("consumes ShadowStartEnvelope then refetches the read projection", async () => {
+    setProposalLocation();
+    const group = eligibleProposalGroup();
+    let shadowGets = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (!url.endsWith("/shadow")) return successEnvelope(group);
+      if (init?.method === "POST") return successEnvelope({
+        proposal_group_id: groupId,
+        shadow_group_id: shadowActive().shadow_group_id,
+        status: "shadowing",
+        version: 5,
+        start_session: shadowActive().start_session,
+        evaluation_end_session: shadowActive().evaluation_end_session,
+        grace_end_session: shadowActive().grace_end_session,
+      });
+      shadowGets += 1;
+      return shadowGets === 1
+        ? errorEnvelope(404, "NOT_FOUND", "0198d500-1000-7000-8000-000000001399")
+        : successEnvelope(shadowActive());
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ProposalGroupPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "启动影子验证" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认启动影子验证" }));
+
+    expect(await screen.findByRole("heading", { name: "前向影子绩效" })).toBeVisible();
+    const post = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(post?.[0]).toBe(`/api/v1/optimization-proposals/${groupId}/shadow`);
+    expect(shadowGets).toBe(2);
+  });
+
+  it("keeps rejection on its distinct lifecycle envelope and endpoint", async () => {
+    setProposalLocation();
+    const group = proposalGroup({ status: "shadowing", version: 5 });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "POST") {
+        return successEnvelope({ proposal_group_id: groupId, status: "rejected", version: 6 });
+      }
+      return url.endsWith("/shadow") ? successEnvelope(shadowActive()) : successEnvelope(group);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ProposalGroupPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "拒绝方案组" }));
+
+    expect(await screen.findByText(/方案组已拒绝/)).toBeVisible();
+    expect(screen.getByText("rejected")).toBeVisible();
+    const post = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(post?.[0]).toBe(`/api/v1/optimization-proposals/${groupId}/reject`);
+    expect(new Headers(post?.[1]?.headers).get("if-match")).toBe('"5"');
+  });
+
+  it("shows the safe Shadow request id on failure and gives group failure precedence", async () => {
+    setProposalLocation();
+    const requestId = "0198d500-1000-7000-8000-000000001399";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+      String(input).endsWith("/shadow")
+        ? errorEnvelope(500, "INTERNAL_ERROR", requestId)
+        : successEnvelope(proposalGroup())));
+    const { unmount } = render(<ProposalGroupPage />);
+    expect(await screen.findByText(new RegExp(requestId))).toBeVisible();
+    unmount();
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+      String(input).endsWith("/shadow")
+        ? successEnvelope(shadowActive())
+        : errorEnvelope(404, "NOT_FOUND", requestId)));
+    render(<ProposalGroupPage />);
+    expect(await screen.findByText("方案组不存在")).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "前向影子绩效" })).not.toBeInTheDocument();
   });
 
   it("requires a persisted proposal context before rendering what-if inputs", () => {
@@ -100,3 +242,18 @@ describe("optimization pages", () => {
     expect(screen.getByRole("button", { name: "评估情景" })).toBeDisabled();
   });
 });
+
+function successEnvelope(data: unknown): Response {
+  return Response.json({
+    data,
+    meta: { request_id: "0198d500-1000-7000-8000-000000001399", schema_version: "1", as_of: "2026-08-24T00:00:00Z" },
+  });
+}
+
+function errorEnvelope(status: number, code: string, requestId: string): Response {
+  return Response.json({ error: { code, message: "safe", request_id: requestId, details: {} } }, { status });
+}
+
+function setProposalLocation(): void {
+  globalThis.history.replaceState({}, "", `/optimize/${groupId}`);
+}

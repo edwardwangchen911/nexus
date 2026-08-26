@@ -37,6 +37,7 @@ for (const viewport of [
 ]) {
   test(`${viewport.name} optimization center preserves evidence and proposal context`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.emulateMedia({ reducedMotion: "reduce" });
     await installFixtures(page);
     await page.goto("/overview");
 
@@ -46,8 +47,22 @@ for (const viewport of [
     await expect(page.getByRole("heading", { name: "组合诊断账簿" })).toBeVisible();
     await expect(page.getByRole("listitem", { name: /CONCENTRATION_TOP1/ })).toContainText("-0.05");
     await page.getByRole("link", { name: "打开已有三方案" }).click();
-    await expect(page.getByRole("columnheader", { name: /保持现状|最小调整|策略目标/ })).toHaveCount(3);
-    await expect(page.getByText(/STRATEGY_EVIDENCE_INCOMPLETE/)).toBeVisible();
+    const proposalTable = page.getByRole("table", { name: "保持现状、最小调整与策略目标的确定性比较" });
+    await expect(proposalTable.getByRole("columnheader", { name: /保持现状|最小调整|策略目标/ })).toHaveCount(3);
+    await expect(page.getByRole("heading", { name: "前向影子绩效" })).toBeVisible();
+    await expect(page.getByLabel("三方案线型图例")).toContainText("实线");
+    await expect(page.getByRole("table", { name: "三方案逐会话精确 NAV" })).toBeVisible();
+    await expect(page.getByRole("note")).toContainText("不会创建订单");
+    const sessionNavigator = page.getByRole("group", { name: "选择影子会话" });
+    await sessionNavigator.focus();
+    await sessionNavigator.press("Home");
+    await expect(page.getByRole("status", { name: "当前影子会话详情" })).toContainText("2026-08-25");
+    await sessionNavigator.press("End");
+    await expect(page.getByRole("status", { name: "当前影子会话详情" })).toContainText("2026-08-31");
+    await expect(page.getByRole("button", { name: /下单|交易|买入|卖出|审批|验证|晋级|自进化/ })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    const shadowSerious = (await new AxeBuilder({ page }).analyze()).violations.filter((violation) => violation.impact === "serious" || violation.impact === "critical");
+    expect(shadowSerious).toEqual([]);
     await page.getByRole("link", { name: "试算最小调整权重" }).click();
     await expect(page.getByRole("heading", { name: "有限权重情景" })).toBeVisible();
     await expect(page.getByRole("textbox", { name: "目标权重 1" })).toHaveValue("0.15");
@@ -60,21 +75,81 @@ for (const viewport of [
 
 async function installFixtures(page: Page): Promise<void> {
   await page.route("**/api/v1/integrations", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [{ provider: "fosun", mode: "fixture", quality: "PASS", as_of: meta.as_of, capability_expires_at: null, contract_hash: null, next_action: "只读研究模式。", version: 1 }], meta }) }));
-  await page.route("**/api/v1/overview**", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { portfolio_id: portfolioId, portfolio_snapshot_id: snapshotId, snapshot_as_of: meta.as_of, trading_day: "2026-08-24", diagnostic_report: diagnostic, proposal_group: { proposal_group_id: groupId, status: "compared", version: 4 }, proposal_admission: { portfolio_snapshot_id: snapshotId, data_snapshot_id: "0198d500-1000-7000-8000-000000001309", cost_policy_id: "0198d500-1000-7000-8000-000000001311" }, proposal_admission_reason: null }, meta }) }));
+  await page.route("**/api/v1/overview**", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { portfolio_id: portfolioId, portfolio_snapshot_id: snapshotId, snapshot_as_of: meta.as_of, trading_day: "2026-08-24", diagnostic_report: diagnostic, proposal_group: { proposal_group_id: groupId, status: "shadowing", version: 5 }, proposal_admission: { portfolio_snapshot_id: snapshotId, data_snapshot_id: "0198d500-1000-7000-8000-000000001309", cost_policy_id: "0198d500-1000-7000-8000-000000001311" }, proposal_admission_reason: null }, meta }) }));
+  await page.route(`**/api/v1/optimization-proposals/${groupId}/shadow`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: shadowGroup(), meta }) }));
   await page.route(`**/api/v1/optimization-proposals/${groupId}`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: proposalGroup(), meta }) }));
 }
 
 function proposalGroup() {
   const variants = ["hold_current", "minimum_change", "strategy_target"] as const;
   return {
-    proposal_group_id: groupId, status: "compared", version: 4, baseline_portfolio_snapshot_id: snapshotId,
+    proposal_group_id: groupId, status: "shadowing", version: 5, baseline_portfolio_snapshot_id: snapshotId,
     portfolio_scope: "real_read_only", diagnostic_input_hash: "b".repeat(64), data_snapshot_id: "0198d500-1000-7000-8000-000000001309", source_policy_id: "0198d500-1000-7000-8000-000000001310", cost_policy_id: "0198d500-1000-7000-8000-000000001311",
     proposals: variants.map((variant, index) => ({
-      proposal_id: proposalIds[index], variant, analysis_only: true, strategy_evidence_complete: variant !== "strategy_target", portfolio_scope: "real_read_only",
+      proposal_id: proposalIds[index], variant, analysis_only: true, strategy_evidence_complete: true, portfolio_scope: "real_read_only",
       positions: instrumentIds.map((instrument_id, positionIndex) => ({ instrument_id, current_weight: positionIndex === 0 ? "0.20" : "0.10", target_weight: positionIndex === 0 && variant !== "hold_current" ? "0.15" : positionIndex === 0 ? "0.20" : "0.10", action: positionIndex === 0 && variant !== "hold_current" ? "reduce" : "maintain", reason_code: positionIndex === 0 ? "CONCENTRATION_TOP1" : "BASELINE_HOLDING" })),
-      comparison: comparison(variant === "strategy_target"),
+      comparison: comparison(false),
     })),
-    shadow_eligibility: { eligible: false, reasons: ["STRATEGY_EVIDENCE_INCOMPLETE", "COST_NOT_PROVEN"] },
+    shadow_eligibility: { eligible: true, reasons: [] },
+  };
+}
+
+function shadowGroup() {
+  const sessions = ["2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31"];
+  const variants = ["hold_current", "minimum_change", "strategy_target"] as const;
+  const known = (value: string) => ({ status: "known", value, reason: null });
+  return {
+    proposal_group_id: groupId,
+    shadow_group_id: "0198d500-1000-7000-8000-000000001390",
+    proposal_status: "shadowing",
+    version: 5,
+    start_session: sessions[0],
+    evaluation_end_session: "2026-11-20",
+    grace_end_session: "2026-11-30",
+    coverage: { completed: 5, due: 5, required: 63, next_expected_session: "2026-09-01", missing_sessions: [] },
+    freshness: { status: "current", latest_session: sessions[4], available_at: "2026-08-31T20:30:00Z", last_attempt_at: "2026-08-31T20:31:00Z", database_time: "2026-08-31T20:31:01Z", reason: null },
+    sources: [
+      { source: "fosun", kind: "price_bars", delivery_mode: "delayed", latest_session: sessions[4], available_at: "2026-08-31T20:30:00Z" },
+      { source: "sec", kind: "corporate_actions", delivery_mode: "delayed", latest_session: sessions[4], available_at: "2026-08-31T20:29:00Z" },
+    ],
+    portfolios: variants.map((variant, variantIndex) => ({
+      shadow_portfolio_id: [
+        "0198d500-1000-7000-8000-000000001391",
+        "0198d500-1000-7000-8000-000000001392",
+        "0198d500-1000-7000-8000-000000001393",
+      ][variantIndex],
+      variant,
+      nav: sessions.map((session, index) => ({ session, nav: (100 + index * (variantIndex + 1) * 0.125).toFixed(12) })),
+      initial_outcomes: [{
+        instrument_id: instrumentIds[0], side: "buy", status: "filled", reason: "filled at target-session open",
+        fill: { side: "buy", quantity: "0.100000000000", price: "100.000000000000", notional: "10.000000000000", cost: "0.010000000000" },
+      }],
+    })),
+    checkpoints: [{
+      ordinal: 5,
+      session: sessions[4],
+      status: "complete",
+      coverage_count: 5,
+      reason: null,
+      metrics: variants.map((variant) => ({
+        variant,
+        metrics: {
+          net_cumulative_return: known("0.012000000000"),
+          return_delta_vs_hold: known(variant === "hold_current" ? "0.000000000000" : "0.006000000000"),
+          max_drawdown: known("-0.021000000000"),
+          drawdown_improvement: known("0.004000000000"),
+          annualized_volatility: known("0.143000000000"),
+          volatility_improvement: known("0.011000000000"),
+          worst_sessions: [{ session: "2026-08-27", return_value: "-0.012000000000" }],
+          cumulative_turnover: known("0.084000000000"),
+          fee_drag_index_points: known("0.014000000000"),
+        },
+      })),
+    }],
+    last_failed_attempt: null,
+    sealed: false,
+    seal_reason: null,
+    safety: { creates_orders: false, trading_approval: false },
   };
 }
 

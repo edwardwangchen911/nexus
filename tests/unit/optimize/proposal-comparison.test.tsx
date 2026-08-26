@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ProposalComparison } from "../../../app/components/proposal-comparison";
-import { proposalGroup } from "./fixtures";
+import { eligibleProposalGroup, proposalGroup } from "./fixtures";
 
 describe("three-way proposal comparison", () => {
   it("renders exactly three ordered semantic columns and no trading control", () => {
@@ -19,28 +19,7 @@ describe("three-way proposal comparison", () => {
 
   it("requires a separate explicit confirmation before starting shadow validation", async () => {
     const onStartShadow = vi.fn().mockResolvedValue(undefined);
-    const eligible = proposalGroup({
-      proposals: proposalGroup().proposals.map((item) => ({
-        ...item,
-        strategy_evidence_complete: true,
-        comparison: {
-          ...item.comparison,
-          non_executable: false,
-          cost_complete: true,
-          metrics: {
-            ...item.comparison.metrics,
-            unknown_metrics: [],
-            evidence_complete: true,
-            ranking_eligible: true,
-            dimensions: {
-              ...item.comparison.metrics.dimensions,
-              cost: { status: "known", value: "0.001", reason: null },
-            },
-          },
-        },
-      })) as unknown as ReturnType<typeof proposalGroup>["proposals"],
-      shadow_eligibility: { eligible: true, reasons: [] },
-    });
+    const eligible = eligibleProposalGroup();
     render(<ProposalComparison group={eligible} onStartShadow={onStartShadow} onReject={vi.fn()} />);
 
     fireEvent.click(screen.getByRole("button", { name: "启动影子验证" }));
@@ -63,7 +42,7 @@ describe("three-way proposal comparison", () => {
   it("does not re-offer shadow validation but still allows rejection while shadowing", async () => {
     const onReject = vi.fn().mockResolvedValue(undefined);
     const group = proposalGroup({ status: "shadowing", shadow_eligibility: { eligible: true, reasons: [] } });
-    render(<ProposalComparison group={group} actionsEnabled onStartShadow={vi.fn()} onReject={onReject} />);
+    render(<ProposalComparison group={group} startShadowEnabled rejectEnabled onStartShadow={vi.fn()} onReject={onReject} />);
 
     expect(screen.queryByRole("button", { name: "启动影子验证" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "拒绝方案组" }));
@@ -73,12 +52,12 @@ describe("three-way proposal comparison", () => {
 
   it("closes an outstanding confirmation when the data becomes stale", () => {
     const onStartShadow = vi.fn();
-    const eligible = proposalGroup({ shadow_eligibility: { eligible: true, reasons: [] } });
-    const { rerender } = render(<ProposalComparison group={eligible} actionsEnabled onStartShadow={onStartShadow} onReject={vi.fn()} />);
+    const eligible = eligibleProposalGroup();
+    const { rerender } = render(<ProposalComparison group={eligible} startShadowEnabled rejectEnabled onStartShadow={onStartShadow} onReject={vi.fn()} />);
 
     fireEvent.click(screen.getByRole("button", { name: "启动影子验证" }));
     expect(screen.getByRole("dialog", { name: "确认启动影子验证" })).toBeVisible();
-    rerender(<ProposalComparison group={eligible} actionsEnabled={false} onStartShadow={onStartShadow} onReject={vi.fn()} />);
+    rerender(<ProposalComparison group={eligible} startShadowEnabled={false} rejectEnabled={false} onStartShadow={onStartShadow} onReject={vi.fn()} />);
 
     expect(screen.queryByRole("dialog", { name: "确认启动影子验证" })).not.toBeInTheDocument();
     expect(onStartShadow).not.toHaveBeenCalled();
@@ -86,25 +65,7 @@ describe("three-way proposal comparison", () => {
 
   it("shows version-conflict recovery without discarding the comparison", async () => {
     const onStartShadow = vi.fn().mockRejectedValue(new Error("VERSION_CONFLICT"));
-    const group = proposalGroup({
-      proposals: proposalGroup().proposals.map((item) => ({
-        ...item,
-        strategy_evidence_complete: true,
-        comparison: {
-          ...item.comparison,
-          non_executable: false,
-          cost_complete: true,
-          metrics: {
-            ...item.comparison.metrics,
-            unknown_metrics: [],
-            evidence_complete: true,
-            ranking_eligible: true,
-            dimensions: { ...item.comparison.metrics.dimensions, cost: { status: "known", value: "0.001", reason: null } },
-          },
-        },
-      })) as unknown as ReturnType<typeof proposalGroup>["proposals"],
-      shadow_eligibility: { eligible: true, reasons: [] },
-    });
+    const group = eligibleProposalGroup();
     render(<ProposalComparison group={group} onStartShadow={onStartShadow} onReject={vi.fn()} />);
 
     fireEvent.click(screen.getByRole("button", { name: "启动影子验证" }));

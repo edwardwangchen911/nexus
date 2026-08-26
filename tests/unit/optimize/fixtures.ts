@@ -16,6 +16,8 @@ export const instrumentIds = {
 type DiagnosticReport = components["schemas"]["PortfolioDiagnosticResponse"];
 type ProposalGroup = components["schemas"]["OptimizationProposalGroupResponse"];
 type Overview = components["schemas"]["OverviewResponse"];
+export type Shadow = components["schemas"]["ShadowGroupResponse"];
+type ShadowCheckpoint = components["schemas"]["ShadowCheckpointResponse"];
 
 const evidence = {
   source: "nexus_db",
@@ -192,6 +194,40 @@ export function proposalGroup(
   } as ProposalGroup;
 }
 
+export function eligibleProposalGroup(
+  overrides: Partial<ProposalGroup> = {},
+): ProposalGroup {
+  const base = proposalGroup();
+  const makeEligible = (item: ProposalGroup["proposals"][number]) => ({
+    ...item,
+    strategy_evidence_complete: true,
+    comparison: {
+      ...item.comparison,
+      non_executable: false,
+      cost_complete: true,
+      metrics: {
+        ...item.comparison.metrics,
+        unknown_metrics: [],
+        evidence_complete: true,
+        ranking_eligible: true,
+        dimensions: {
+          ...item.comparison.metrics.dimensions,
+          cost: { status: "known" as const, value: "0.001", reason: null },
+        },
+      },
+    },
+  });
+  return proposalGroup({
+    proposals: [
+      makeEligible(base.proposals[0]),
+      makeEligible(base.proposals[1]),
+      makeEligible(base.proposals[2]),
+    ],
+    shadow_eligibility: { eligible: true, reasons: [] },
+    ...overrides,
+  });
+}
+
 export function overviewData(overrides: Partial<Overview> = {}): Overview {
   return {
     portfolio_id: portfolioId,
@@ -208,4 +244,192 @@ export function overviewData(overrides: Partial<Overview> = {}): Overview {
     proposal_admission_reason: null,
     ...overrides,
   } as Overview;
+}
+
+const shadowGroupId = "0198d500-1000-7000-8000-000000001390";
+const shadowPortfolioIds = [
+  "0198d500-1000-7000-8000-000000001391",
+  "0198d500-1000-7000-8000-000000001392",
+  "0198d500-1000-7000-8000-000000001393",
+] as const;
+const shadowVariants = ["hold_current", "minimum_change", "strategy_target"] as const;
+
+function shadowSessions(count: number): string[] {
+  const sessions: string[] = [];
+  const closed = new Set(["2026-09-07", "2026-11-26"]);
+  const cursor = new Date(Date.UTC(2026, 7, 25));
+  while (sessions.length < count) {
+    const value = cursor.toISOString().slice(0, 10);
+    if (cursor.getUTCDay() !== 0 && cursor.getUTCDay() !== 6 && !closed.has(value)) sessions.push(value);
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return sessions;
+}
+
+function shadowMetric(value: string) {
+  return { status: "known" as const, value, reason: null };
+}
+
+function shadowUnknown(reason: string) {
+  return { status: "unknown" as const, value: null, reason };
+}
+
+function checkpointMetrics(variant: typeof shadowVariants[number], unknownReason?: string) {
+  const metric = unknownReason ? () => shadowUnknown(unknownReason) : shadowMetric;
+  return {
+    variant,
+    metrics: {
+      net_cumulative_return: metric(variant === "hold_current" ? "0.012000000000" : "0.018000000000"),
+      return_delta_vs_hold: metric(variant === "hold_current" ? "0.000000000000" : "0.006000000000"),
+      max_drawdown: metric("-0.021000000000"),
+      drawdown_improvement: metric(variant === "hold_current" ? "0.000000000000" : "0.004000000000"),
+      annualized_volatility: metric("0.143000000000"),
+      volatility_improvement: metric(variant === "hold_current" ? "0.000000000000" : "0.011000000000"),
+      worst_sessions: unknownReason
+        ? []
+        : [{ session: "2026-08-27", return_value: "-0.012000000000" }],
+      cumulative_turnover: metric(variant === "hold_current" ? "0.000000000000" : "0.084000000000"),
+      fee_drag_index_points: metric(variant === "hold_current" ? "0.000000000000" : "0.014000000000"),
+    },
+  };
+}
+
+function shadowCheckpoint(
+  ordinal: 5 | 21 | 63,
+  sessions: string[],
+  status: "complete" | "incomplete" = "complete",
+  coverageCount: number = ordinal,
+): ShadowCheckpoint {
+  const reason = status === "incomplete" ? "SHADOW_DATA_INCOMPLETE" : undefined;
+  return {
+    ordinal,
+    session: sessions[ordinal - 1] ?? shadowSessions(63)[ordinal - 1],
+    status,
+    coverage_count: coverageCount,
+    reason: reason ?? null,
+    metrics: shadowVariants.map((variant) => checkpointMetrics(variant, reason)) as ShadowCheckpoint["metrics"],
+  };
+}
+
+export function shadowActive(overrides: Partial<Shadow> = {}): Shadow {
+  const sessions = shadowSessions(5);
+  const portfolios = shadowVariants.map((variant, variantIndex) => ({
+    shadow_portfolio_id: shadowPortfolioIds[variantIndex],
+    variant,
+    nav: sessions.map((session, index) => ({
+      session,
+      nav: (100 + index * (variantIndex + 1) * 0.125).toFixed(12),
+    })),
+    initial_outcomes: [{
+      instrument_id: instrumentIds.aapl,
+      side: "buy" as const,
+      status: "filled" as const,
+      reason: "filled at target-session open",
+      fill: {
+        side: "buy" as const,
+        quantity: "0.100000000000",
+        price: "100.000000000000",
+        notional: "10.000000000000",
+        cost: "0.010000000000",
+      },
+    }],
+  })) as Shadow["portfolios"];
+  return {
+    proposal_group_id: groupId,
+    shadow_group_id: shadowGroupId,
+    proposal_status: "shadowing",
+    version: 5,
+    start_session: sessions[0],
+    evaluation_end_session: shadowSessions(63)[62],
+    grace_end_session: shadowSessions(68)[67],
+    coverage: {
+      completed: 5,
+      due: 5,
+      required: 63,
+      next_expected_session: shadowSessions(6)[5],
+      missing_sessions: [],
+    },
+    freshness: {
+      status: "current",
+      latest_session: sessions[4],
+      available_at: "2026-08-31T20:30:00Z",
+      last_attempt_at: "2026-08-31T20:31:00Z",
+      database_time: "2026-08-31T20:31:01Z",
+      reason: null,
+    },
+    sources: [
+      { source: "fosun", kind: "price_bars", delivery_mode: "delayed", latest_session: sessions[4], available_at: "2026-08-31T20:30:00Z" },
+      { source: "sec", kind: "corporate_actions", delivery_mode: "unknown", latest_session: sessions[4], available_at: "2026-08-31T20:29:00Z" },
+    ],
+    portfolios,
+    checkpoints: [shadowCheckpoint(5, sessions)],
+    last_failed_attempt: null,
+    sealed: false,
+    seal_reason: null,
+    safety: { creates_orders: false, trading_approval: false },
+    ...overrides,
+  };
+}
+
+export function shadowNotStarted(): null {
+  return null;
+}
+
+export function shadowGrace(): Shadow {
+  const sessions = shadowSessions(61);
+  return shadowActive({
+    coverage: { completed: 61, due: 63, required: 63, next_expected_session: shadowSessions(62)[61], missing_sessions: shadowSessions(63).slice(61) },
+    freshness: { status: "stale", latest_session: sessions[60], available_at: "2026-11-18T20:30:00Z", last_attempt_at: "2026-11-19T20:31:00Z", database_time: "2026-11-19T20:31:01Z", reason: "SHADOW_SESSION_DUE" },
+    portfolios: shadowActive().portfolios.map((portfolio) => ({ ...portfolio, nav: sessions.map((session, index) => ({ session, nav: (100 + index * 0.05).toFixed(12) })) })) as Shadow["portfolios"],
+    checkpoints: [shadowCheckpoint(5, sessions), shadowCheckpoint(21, sessions)],
+  });
+}
+
+export function shadowPartial(): Shadow {
+  const sessions = shadowSessions(3);
+  return shadowActive({
+    coverage: { completed: 3, due: 5, required: 63, next_expected_session: shadowSessions(4)[3], missing_sessions: shadowSessions(5).slice(3) },
+    freshness: { status: "stale", latest_session: sessions[2], available_at: "2026-08-27T20:30:00Z", last_attempt_at: "2026-08-29T20:31:00Z", database_time: "2026-08-29T20:31:01Z", reason: "SHADOW_SESSION_DUE" },
+    portfolios: shadowActive().portfolios.map((portfolio) => ({ ...portfolio, nav: portfolio.nav.slice(0, 3) })) as Shadow["portfolios"],
+    checkpoints: [],
+    last_failed_attempt: { requested_session: shadowSessions(4)[3], expected_session: shadowSessions(4)[3], result: "data_partial", reason: "SHADOW_DATA_INCOMPLETE", observed_at: "2026-08-29T20:31:00Z", created_at: "2026-08-29T20:31:01Z" },
+  });
+}
+
+export function shadowStale(): Shadow {
+  return shadowActive({
+    freshness: { ...shadowActive().freshness, status: "stale", reason: "SHADOW_SESSION_DUE" },
+  });
+}
+
+export function shadowValidated(): Shadow {
+  const sessions = shadowSessions(63);
+  return shadowActive({
+    proposal_status: "validated",
+    version: 6,
+    coverage: { completed: 63, due: 63, required: 63, next_expected_session: null, missing_sessions: [] },
+    freshness: { status: "current", latest_session: sessions[62], available_at: "2026-11-20T20:30:00Z", last_attempt_at: "2026-11-20T20:31:00Z", database_time: "2026-11-20T20:31:01Z", reason: null },
+    portfolios: shadowActive().portfolios.map((portfolio, variantIndex) => ({ ...portfolio, nav: sessions.map((session, index) => ({ session, nav: (100 + index * (variantIndex + 1) * 0.05).toFixed(12) })) })) as Shadow["portfolios"],
+    checkpoints: [shadowCheckpoint(5, sessions), shadowCheckpoint(21, sessions), shadowCheckpoint(63, sessions)],
+    sealed: true,
+    seal_reason: "validated",
+  });
+}
+
+export function shadowRejected(): Shadow {
+  return shadowActive({ proposal_status: "rejected", version: 6, sealed: true, seal_reason: "rejected" });
+}
+
+export function shadowExpired(): Shadow {
+  const sessions = shadowSessions(3);
+  return shadowActive({
+    proposal_status: "expired",
+    version: 6,
+    coverage: { completed: 3, due: 63, required: 63, next_expected_session: shadowSessions(4)[3], missing_sessions: shadowSessions(63).slice(3) },
+    freshness: { status: "stale", latest_session: sessions[2], available_at: "2026-08-27T20:30:00Z", last_attempt_at: "2026-11-01T20:31:00Z", database_time: "2026-11-01T20:31:01Z", reason: "SHADOW_SESSION_DUE" },
+    portfolios: shadowActive().portfolios.map((portfolio) => ({ ...portfolio, nav: portfolio.nav.slice(0, 3) })) as Shadow["portfolios"],
+    checkpoints: [shadowCheckpoint(5, sessions, "incomplete", 3), shadowCheckpoint(21, sessions, "incomplete", 3), shadowCheckpoint(63, sessions, "incomplete", 3)],
+    sealed: true,
+    seal_reason: "expired",
+  });
 }
