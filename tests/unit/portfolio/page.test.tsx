@@ -73,6 +73,16 @@ describe("portfolio vertical slice", () => {
     expect(document.body).not.toHaveTextContent(/sub-account-must|provider-order-must|ciphertext-must/);
   });
 
+  it("labels a stale broker snapshot as last-known and non-actionable", () => {
+    render(<PortfolioPanel state="stale" portfolios={[{ ...portfolio, latest_snapshot_status: "STALE" }]}
+      snapshot={{ ...snapshot, status: "STALE" }} selectedPortfolioId={portfolioId} syncing={false}
+      unresolvedSync={false} notice={null} onSelect={vi.fn()} onRefresh={vi.fn()}
+      onSync={vi.fn()} onResolveSync={vi.fn()} />);
+
+    expect(screen.getByText("显示最后已知快照，不触发业务动作。", { exact: true })).toBeVisible();
+    expect(screen.queryByRole("link", { name: /优化|方案|下单|交易/ })).not.toBeInTheDocument();
+  });
+
   it("keeps an open order visible even when its instrument has no position", () => {
     const orderOnlySnapshot: PortfolioSnapshot = {
       ...snapshot,

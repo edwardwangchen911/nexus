@@ -38,6 +38,13 @@ describe("optimization pages", () => {
     expect(screen.queryByRole("button", { name: /下单|交易|买入|卖出/ })).not.toBeInTheDocument();
   });
 
+  it("routes an empty overview to the read-only market research journey", () => {
+    render(<OverviewPanel state="empty" overview={null} onRefresh={vi.fn()} />);
+
+    expect(screen.getByRole("link", { name: "研究美股证据" })).toHaveAttribute("href", "/market");
+    expect(screen.queryByRole("button", { name: /创建方案|下单|交易/ })).not.toBeInTheDocument();
+  });
+
   it("creates a comparison only from server-supplied admission authority", async () => {
     const onCreate = vi.fn().mockResolvedValue(undefined);
     render(<OptimizePanel state="ready" overview={overviewData({ proposal_group: null })} creating={false} notice={null} onCreate={onCreate} onRefresh={vi.fn()} />);

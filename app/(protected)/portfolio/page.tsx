@@ -312,6 +312,7 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
           <div className="portfolio-detail">
             {!hasData || !snapshot ? <DataState state={state} title={`${selected.name} 快照`} detail={stateDetail(state)} announce={false} /> : <>
               <div className="portfolio-snapshot-band"><div><p className="eyebrow">FROZEN SNAPSHOT</p><h2>{selected.name}</h2></div><dl><div><dt>状态</dt><dd>{snapshot.status}</dd></div><div><dt>覆盖范围</dt><dd>{snapshot.coverage_scope}</dd></div><div><dt>快照时点</dt><dd>{formatTime(snapshot.as_of)}</dd></div></dl></div>
+              {state === "stale" ? <p className="inline-notice inline-notice--error" role="status">{stateDetail(state)}</p> : null}
               {snapshot.status === "RECONCILIATION_REQUIRED" ? <p className="inline-notice inline-notice--error">双读对账未通过。快照仅供展示，不能用作优化基线。</p> : null}
               {currencies.map((currency) => <PortfolioSummary key={currency} portfolio={selected} snapshot={snapshot} currency={currency} />)}
             </>}

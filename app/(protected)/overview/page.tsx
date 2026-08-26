@@ -42,7 +42,9 @@ export function OverviewPanel({ state, overview, onRefresh }: Props): React.Reac
         <div><p className="eyebrow">OVERVIEW / EVIDENCE FIRST</p><h1>今日组合判断</h1><p>只回答“是否需要进一步优化”；结论来自冻结快照与确定性阈值，不是 Agent 评分。</p></div>
         <div className="page-actions"><span className="mode-badge">RESEARCH_ONLY</span><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新判断</button></div>
       </header>
-      {!hasData ? <DataState state={state} title={stateTitle(state)} detail={stateDetail(state)} /> : <>
+      {!hasData ? <DataState state={state} title={stateTitle(state)} detail={stateDetail(state)}>
+        {state === "empty" ? <a className="button button--primary" href="/market">研究美股证据<ArrowRight aria-hidden="true" size={17} /></a> : null}
+      </DataState> : <>
         {state === "stale" ? <p className="inline-notice inline-notice--error" role="status">显示最后已知结果；当前请求失败，不可用于新动作。</p> : null}
         <section className="overview-fact-band" aria-label="冻结组合事实"><div><p className="eyebrow">FROZEN SNAPSHOT</p><h2>只读事实快照</h2></div><dl className="numeric-data"><div><dt>截止</dt><dd>{formatUtc(overview.snapshot_as_of)}</dd></div><div><dt>交易日</dt><dd>{overview.trading_day ?? "未知"}</dd></div><div><dt>诊断策略</dt><dd>{overview.diagnostic_report.policy_version}</dd></div><div><dt>组合 ID</dt><dd>{overview.portfolio_id}</dd></div></dl></section>
         <OptimizationNeedPanel report={overview.diagnostic_report} />

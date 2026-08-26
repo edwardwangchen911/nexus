@@ -5,11 +5,13 @@
 
 ## Slice 1：最终边界与失败 E2E
 
-- [ ] 新增 `tests/e2e/locked-routes.spec.ts`，先证明 broker simulation/live approval 页无 form、无写按钮、无写 API 请求；覆盖移动/桌面和键盘。
-- [ ] 新增 `failure-modes.spec.ts`，覆盖 Agent abstention、source conflict、stale broker、reconciliation failure、partial fill、drawdown lock，并断言 fail-closed 操作面。
-- [ ] 新增 `overview.spec.ts`，覆盖无数据 -> 研究 -> READY -> 诊断 -> 三方案 -> Shadow 启动的离线跨页旅程。
-- [ ] 保存首个失败证据；只修复必需的焦点、文案、语义或容器问题，不重设已验收页面。
-- [ ] 运行三组定向 E2E 与既有 43 项回归；提交 `test(e2e): close offline investment journeys`。
+- [x] 新增 `tests/e2e/locked-routes.spec.ts`，先证明 broker simulation/live approval 页无 form、无写按钮、无写 API 请求；覆盖移动/桌面和键盘。
+- [x] 新增 `failure-modes.spec.ts`，覆盖 Agent abstention、source conflict、stale broker、reconciliation failure、partial fill、drawdown lock，并断言 fail-closed 操作面。
+- [x] 新增 `overview.spec.ts`，覆盖无数据 -> 研究 -> READY -> 诊断 -> 三方案 -> Shadow 启动的离线跨页旅程。
+- [x] 保存首个失败证据；只修复必需的焦点、文案、语义或容器问题，不重设已验收页面。
+- [x] 运行三组定向 E2E 与既有 43 项回归；提交 `test(e2e): close offline investment journeys`。
+
+验收记录（2026-08-27）：首个红灯是概览 empty 状态缺少“研究美股证据”入口；修复后定向 E2E `11 passed`，全量 E2E 在 3 workers 下 `54 passed`，Web 单测 `422 passed`，lint/typecheck/generated/build 通过。首次 4 workers 全量运行有 1 项在 `page` 初始化阶段超时，该市场测试单独重跑 `2 passed`，降为 3 workers 后全量稳定通过。
 
 ## Slice 2：全局可访问性与视觉门禁
 
