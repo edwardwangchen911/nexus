@@ -209,6 +209,8 @@ def _transaction(*, transaction_id: UUID = UUID(int=60)) -> LedgerTransaction:
         transaction_id=transaction_id,
         account_id=ACCOUNT_ID,
         transaction_type="cash_reservation",
+        reference_type="cash_reservation",
+        reference_hash="f" * 64,
         occurred_at=AT,
         entries=(
             LedgerEntry(
@@ -322,6 +324,8 @@ def test_ledger_hash_excludes_random_transaction_and_entry_ids() -> None:
         transaction_id=UUID(int=999),
         account_id=first.account_id,
         transaction_type=first.transaction_type,
+        reference_type=first.reference_type,
+        reference_hash=first.reference_hash,
         occurred_at=first.occurred_at,
         entries=tuple(
             entry.model_copy(update={"entry_id": UUID(int=900 + entry.entry_seq)})
@@ -378,7 +382,7 @@ def test_all_v1_hashes_match_reviewed_golden_vectors() -> None:
         "c394b59e8c38829912d0f70f11f172e67808d23938976f72c915c6baf0172c83"
     )
     assert canonical_paper_ledger_transaction_hash(_transaction()) == (
-        "5d72854640fa37180c6e7d7d30cc99d36a8742a069ab08ff4509244d703ef61b"
+        "3bded4107fa16459d4c14caf3289f3920baf15279deb5f36e8c9920baa0e2761"
     )
     assert (
         canonical_paper_order_batch_hash(

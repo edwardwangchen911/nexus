@@ -200,6 +200,14 @@ class LedgerTransaction(FrozenPaperModel):
     transaction_id: UUID
     account_id: UUID
     transaction_type: Literal["funding", "cash_reservation", "fill", "release", "adjustment"]
+    reference_type: Literal[
+        "initial_funding",
+        "cash_reservation",
+        "fill",
+        "release",
+        "adjustment",
+    ]
+    reference_hash: Hash64
     occurred_at: datetime
     entries: tuple[LedgerEntry, ...]
     transaction_hash: Hash64
@@ -217,4 +225,25 @@ class LedgerTransaction(FrozenPaperModel):
         entry_sequences = [entry.entry_seq for entry in self.entries]
         if len(entry_sequences) != len(set(entry_sequences)):
             raise ValueError("ledger entry sequences must be unique")
+        return self
+
+
+class Ledger(FrozenPaperModel):
+    paper_account_id: UUID
+    accounts: tuple[LedgerAccount, ...]
+    transactions: tuple[LedgerTransaction, ...]
+
+    @model_validator(mode="after")
+    def _unique_roots(self) -> Ledger:
+        account_ids = [account.account_id for account in self.accounts]
+        account_codes = [account.code for account in self.accounts]
+        if len(account_ids) != len(set(account_ids)):
+            raise ValueError("ledger account ids must be unique")
+        if len(account_codes) != len(set(account_codes)):
+            raise ValueError("ledger account codes must be unique")
+        if any(account.paper_account_id != self.paper_account_id for account in self.accounts):
+            raise ValueError("ledger accounts must belong to the ledger paper account")
+        transaction_ids = [transaction.transaction_id for transaction in self.transactions]
+        if len(transaction_ids) != len(set(transaction_ids)):
+            raise ValueError("ledger transaction ids must be unique")
         return self

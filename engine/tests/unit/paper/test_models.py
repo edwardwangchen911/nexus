@@ -128,6 +128,8 @@ def test_ledger_transaction_rejects_duplicate_entry_ids() -> None:
             transaction_id=UUID(int=10),
             account_id=UUID(int=11),
             transaction_type="funding",
+            reference_type="initial_funding",
+            reference_hash="b" * 64,
             occurred_at=NOW,
             entries=(entry, entry),
             transaction_hash="a" * 64,
