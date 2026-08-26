@@ -24,10 +24,12 @@
 
 ## Slice 3：本地 Compose 启动与运维文档
 
-- [ ] 为 `nexus-engine-object-store-init` 先写 development/create、existing replay、production missing fail-closed 单测，再实现最小 boto3 bucket init CLI。
-- [ ] 修改 `infra/compose.yaml` 增加 `object-store-init`，API/worker 依赖其成功；更新 `infra/env.example` 的分域和非空验证说明。
-- [ ] 新增 local-development/provider-outage/key-rotation 三份 runbook 和 PostgreSQL/Fosun gateway 两份 ADR；更新 README 入口。
-- [ ] 对一次性本地 Compose 执行 config、启动、bucket/readiness 验证和精确停止；提交 `docs(ops): make local runtime reproducible`。
+- [x] 为 `nexus-engine-object-store-init` 先写 development/create、existing replay、production missing fail-closed 单测，再实现最小 boto3 bucket init CLI。
+- [x] 修改 `infra/compose.yaml` 增加 `object-store-init`，API/worker 依赖其成功；更新 `infra/env.example` 的分域和非空验证说明。
+- [x] 新增 local-development/provider-outage/key-rotation 三份 runbook 和 PostgreSQL/Fosun gateway 两份 ADR；更新 README 入口。
+- [x] 对一次性本地 Compose 执行 config、启动、bucket/readiness 验证和精确停止；提交 `feat(ops): make local runtime reproducible`。
+
+验收记录（2026-08-27）：对象存储初始实现前首先保留了 missing module 红灯，空值/非绝对 endpoint、离线 worker 默认值、可覆盖回环端口和镜像迁移资产也分别以红灯锁定。定向单测 `16 passed`；Engine 单测 `686 passed`，readiness/outbox PostgreSQL 回归 `9 passed`，Ruff 全量和 Mypy `232 source files` 通过。一次全量预跑在 `436 passed` 后暴露 paper outbox 测试使用已过期的固定 dispatch 时间；最小复现稳定失败后，改为从持久化 `available_at` 推导测试时钟，单项回归通过，未修改生产 dispatcher。Docker 29.7.2/Compose v5.4.0 下 app/broker config 均通过。独立 `nexus-task21-slice3` project 实测 bucket `created -> existing`、空库迁移至 `0021_manual_job_retry_allowance`。首次 readiness 发现并发 heartbeat 与请求起始时间竞态，先增加失败单测，改为选出 heartbeat 后取生产观察时间；重建后 `/health/ready` 返回 200 且四组件全部 `ready`。精确 down 后 container/volume/network 残留为 0，所有 `nexus-task21-*` 临时容器残留为 0，其他现有 NEXUS 容器未受影响。
 
 ## Slice 4：备份/恢复演练
 

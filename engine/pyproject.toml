@@ -25,6 +25,7 @@ dependencies = [
 [project.scripts]
 nexus-engine-api = "nexus.main:run"
 nexus-engine-broker-worker = "nexus.broker_worker:main"
+nexus-engine-object-store-init = "nexus.object_store_init:main"
 nexus-engine-worker = "nexus.worker:main"
 
 [dependency-groups]

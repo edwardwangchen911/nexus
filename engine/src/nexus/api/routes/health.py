@@ -69,7 +69,11 @@ async def readiness(
             pass
         try:
             async with factory() as session, session.begin():
-                components["worker"] = await probe_general_worker(session, now=now)
+                injected_clock = getattr(request.app.state, "utc_clock", None)
+                components["worker"] = await probe_general_worker(
+                    session,
+                    now=now if callable(injected_clock) else None,
+                )
         except Exception:
             pass
     probe = getattr(request.app.state, "readiness_object_store", None)

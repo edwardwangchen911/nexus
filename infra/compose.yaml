@@ -6,7 +6,7 @@ services:
       - POSTGRES_USER
       - POSTGRES_PASSWORD
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${NEXUS_POSTGRES_HOST_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -20,13 +20,31 @@ services:
       - MINIO_ROOT_USER
       - MINIO_ROOT_PASSWORD
     ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:${NEXUS_MINIO_HOST_PORT:-9000}:9000"
+      - "127.0.0.1:${NEXUS_MINIO_CONSOLE_HOST_PORT:-9001}:9001"
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 5s
       timeout: 3s
       retries: 10
+
+  object-store-init:
+    profiles: ["app"]
+    build:
+      context: ..
+      dockerfile: infra/docker/engine.Dockerfile
+    command: ["nexus-engine-object-store-init"]
+    restart: "no"
+    environment:
+      - NEXUS_ENV
+      - OBJECT_STORE_ENDPOINT
+      - OBJECT_STORE_REGION
+      - OBJECT_STORE_BUCKET
+      - OBJECT_STORE_ACCESS_KEY_ID
+      - OBJECT_STORE_SECRET_ACCESS_KEY
+    depends_on:
+      minio:
+        condition: service_healthy
 
   api:
     profiles: ["app"]
@@ -50,10 +68,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
-        condition: service_healthy
+      object-store-init:
+        condition: service_completed_successfully
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${NEXUS_API_HOST_PORT:-8000}:8000"
 
   worker:
     profiles: ["app"]
@@ -74,15 +92,15 @@ services:
       - NEXUS_ENGINE_HMAC_CURRENT_SECRET
       - NEXUS_ENGINE_HMAC_PREVIOUS_KEY_ID
       - NEXUS_ENGINE_HMAC_PREVIOUS_SECRET
-      - AGENT_RUNTIME_MODE=responses
+      - AGENT_RUNTIME_MODE=${AGENT_RUNTIME_MODE:-fixture}
       - OPENAI_API_KEY
       - OPENAI_EXTRACTION_MODEL
       - OPENAI_REASONING_MODEL
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
-        condition: service_healthy
+      object-store-init:
+        condition: service_completed_successfully
 
   broker-worker:
     profiles: ["broker"]

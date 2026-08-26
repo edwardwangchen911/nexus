@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
@@ -89,11 +89,10 @@ async def probe_migration(session: AsyncSession) -> ComponentStatus:
 async def probe_general_worker(
     session: AsyncSession,
     *,
-    now: datetime,
+    now: datetime | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> ComponentStatus:
     """Require a compatible general worker heartbeat no older than 30 seconds."""
-    if now.tzinfo is None or now.utcoffset() != UTC.utcoffset(now):
-        raise ValueError("readiness time must use UTC")
     heartbeat = await session.scalar(
         select(WorkerHeartbeat)
         .where(
@@ -106,9 +105,19 @@ async def probe_general_worker(
     )
     if heartbeat is None:
         return "unavailable"
-    if heartbeat.seen_at > now or now - heartbeat.seen_at > timedelta(seconds=30):
+    observed_at = now if now is not None else (clock or _utc_now)()
+    if observed_at.tzinfo is None or observed_at.utcoffset() != UTC.utcoffset(observed_at):
+        raise ValueError("readiness time must use UTC")
+    if (
+        heartbeat.seen_at > observed_at
+        or observed_at - heartbeat.seen_at > timedelta(seconds=30)
+    ):
         return "stale"
     return "ready"
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 async def object_store_readiness(

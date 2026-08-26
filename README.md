@@ -12,6 +12,15 @@ npm run test:unit
 npm run build
 ```
 
+## 本地运行与运维
+
+- [本地开发与 Compose](docs/runbooks/local-development.md)：不强制 Docker Desktop，Docker Desktop、OrbStack 或 Colima 均可。
+- [Provider 故障处置](docs/runbooks/provider-outage.md)
+- [密钥与证书轮换](docs/runbooks/key-rotation.md)
+- [复星 SDK admission](docs/runbooks/fosun-sdk-admission.md)
+- [PostgreSQL 事务权威 ADR](docs/adr/0001-postgresql-owner.md)
+- [复星独立只读网关 ADR](docs/adr/0002-fosun-gateway-boundary.md)
+
 ## 安全边界
 
 - 首期仅支持研究、回测和模拟交易；实盘交易默认关闭，未来任何订单均须逐笔人工确认。

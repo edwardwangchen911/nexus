@@ -41,10 +41,59 @@ def test_compose_profiles_keep_broker_capability_out_of_the_app_profile() -> Non
     assert _service_profiles(compose, "fosun-gateway") == {"broker"}
 
 
-def test_compose_worker_explicitly_selects_responses_runtime() -> None:
+def test_compose_worker_defaults_to_offline_fixture_runtime_but_is_overridable() -> None:
     compose = (WORKTREE_ROOT / "infra/compose.yaml").read_text()
 
-    assert "- AGENT_RUNTIME_MODE=responses" in _service_block(compose, "worker")
+    assert (
+        "- AGENT_RUNTIME_MODE=${AGENT_RUNTIME_MODE:-fixture}"
+        in _service_block(compose, "worker")
+    )
+
+
+def test_compose_host_ports_are_loopback_only_and_overridable() -> None:
+    compose = (WORKTREE_ROOT / "infra/compose.yaml").read_text()
+
+    expected = {
+        "postgres": "127.0.0.1:${NEXUS_POSTGRES_HOST_PORT:-5432}:5432",
+        "minio": "127.0.0.1:${NEXUS_MINIO_HOST_PORT:-9000}:9000",
+        "api": "127.0.0.1:${NEXUS_API_HOST_PORT:-8000}:8000",
+    }
+    for service, binding in expected.items():
+        block = _service_block(compose, service)
+        assert f'      - "{binding}"' in block
+    assert (
+        '      - "127.0.0.1:${NEXUS_MINIO_CONSOLE_HOST_PORT:-9001}:9001"'
+        in _service_block(compose, "minio")
+    )
+
+
+def test_compose_initializes_only_the_object_store_before_app_processes() -> None:
+    compose = (WORKTREE_ROOT / "infra/compose.yaml").read_text()
+    init = _service_block(compose, "object-store-init")
+
+    assert 'command: ["nexus-engine-object-store-init"]' in init
+    assert _service_profiles(compose, "object-store-init") == {"app"}
+    assert _service_environment(compose, "object-store-init") == {
+        "NEXUS_ENV",
+        "OBJECT_STORE_ENDPOINT",
+        "OBJECT_STORE_REGION",
+        "OBJECT_STORE_BUCKET",
+        "OBJECT_STORE_ACCESS_KEY_ID",
+        "OBJECT_STORE_SECRET_ACCESS_KEY",
+    }
+    assert "condition: service_healthy" in init
+    for service in ("api", "worker"):
+        block = _service_block(compose, service)
+        assert "object-store-init:" in block
+        assert "condition: service_completed_successfully" in block
+
+
+def test_engine_image_contains_migrations_and_packaged_contract_assets() -> None:
+    dockerfile = (WORKTREE_ROOT / "infra/docker/engine.Dockerfile").read_text()
+
+    assert "COPY contracts/strategy contracts/strategy" in dockerfile
+    assert "COPY engine/alembic.ini engine/alembic.ini" in dockerfile
+    assert "COPY engine/alembic engine/alembic" in dockerfile
 
 
 def _service_block(compose: str, service: str) -> str:
