@@ -1,6 +1,6 @@
 # Task 19 内部模拟成交、绩效与模拟盘实施计划
 
-> 实施依据：`docs/superpowers/specs/2026-08-26-task-19-internal-paper-execution-design.md`  
+> 实施依据：`docs/superpowers/specs/2026-08-26-task-19-internal-paper-execution-design.md`
 > 方法：每个切片先写会失败的测试，再写最小实现，运行切片验证，然后本地提交。
 
 ## Slice 1：执行模型与时间窗口
@@ -76,11 +76,11 @@
 
 - [x] 新增 `tests/e2e/paper.spec.ts`，使用真实 Engine fixture 覆盖 ready/partial/stale/error、游标分页、时间线与取消；不 mock 网络内部业务规则。
 - [x] 对 `/paper` 运行 axe，修复所有 critical/serious 问题。
-- [ ] 运行 Engine 全量 Pytest、Ruff、Mypy；Web 全量 Vitest、ESLint、TypeScript、生成合约、build 和全量 E2E。
-- [ ] 运行安全审查，重点检查订单取消越权、幂等绕过、数据前视、跨账户关联、响应泄密和账本不平。
-- [ ] 完成独立审查，修复所有 Critical/Important，重跑受影响门禁。
-- [ ] 新增 `docs/superpowers/reviews/2026-08-26-task-19-internal-paper-execution-review.md`，记录命令、结果、已修复问题和未解决项。
-- [ ] 更新主计划和本地进度账簿，提交：`docs: record Task 19 paper execution acceptance`
+- [x] 运行 Engine 全量 Pytest、Ruff、Mypy；Web 全量 Vitest、ESLint、TypeScript、生成合约、build 和全量 E2E。
+- [x] 运行安全审查，重点检查订单取消越权、幂等绕过、数据前视、跨账户关联、响应泄密和账本不平。
+- [x] 完成独立审查，修复所有 Critical/Important，重跑受影响门禁。
+- [x] 新增 `docs/superpowers/reviews/2026-08-26-task-19-internal-paper-execution-review.md`，记录命令、结果、已修复问题和未解决项。
+- [x] 更新主计划和本地进度账簿，提交：`docs: record Task 19 paper execution acceptance`
 
 ## 中止条件
 
