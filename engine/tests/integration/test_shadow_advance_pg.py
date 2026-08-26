@@ -12,6 +12,7 @@ from helpers.shadow import (
     seed_shadow_query_proof,
     seed_started_shadow,
 )
+from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.shadow import (
     ShadowAdvanceAttemptRecord,
     ShadowCheckpointMetricRecord,
@@ -109,7 +110,16 @@ async def test_gap_and_incomplete_authority_write_only_sanitized_attempts(
 ) -> None:
     started = await seed_started_shadow(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
-    observed_at = started.eligible.database_time.astimezone(UTC)
+    async with factory() as session:
+        observed_at = await session.scalar(
+            select(ExchangeCalendarSessionRecord.decision_at).where(
+                ExchangeCalendarSessionRecord.calendar_authority_id
+                == started.eligible.calendar_id,
+                ExchangeCalendarSessionRecord.session == started.start.start_session,
+            )
+        )
+    assert observed_at is not None
+    observed_at = observed_at.astimezone(UTC)
     second_session = started.eligible.calendar_sessions[1]
 
     async with factory() as session, session.begin():
@@ -310,7 +320,16 @@ async def test_initial_missing_execution_expires_after_complete_window(
 
     started = await seed_started_shadow(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
-    first_decision = started.eligible.database_time.astimezone(UTC) + timedelta(days=1)
+    async with factory() as session:
+        first_decision = await session.scalar(
+            select(ExchangeCalendarSessionRecord.decision_at).where(
+                ExchangeCalendarSessionRecord.calendar_authority_id
+                == started.eligible.calendar_id,
+                ExchangeCalendarSessionRecord.session == started.start.start_session,
+            )
+        )
+    assert first_decision is not None
+    first_decision = first_decision.astimezone(UTC)
     async with factory() as session, session.begin():
         await seed_shadow_query_proof(
             session,
