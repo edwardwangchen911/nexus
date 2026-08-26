@@ -254,7 +254,6 @@ async def test_canonical_price_bars_ignore_row_ids_and_physical_insertion_order(
 PREPARE_REJECTIONS = (
     pytest.param({"feed": "iex"}, {}, 1, id="alpaca-non-sip"),
     pytest.param({"delivery_mode": "real_time"}, {}, 1, id="alpaca-not-delayed"),
-    pytest.param({"interval": "1Min"}, {}, 1, id="intraday"),
     pytest.param(
         {"source": "fosun", "feed": "sip", "delivery_mode": "delayed"},
         {},
@@ -309,6 +308,30 @@ async def test_prepare_price_bar_set_fails_closed_for_ineligible_candidates(
             .all()
         )
     assert prepared == []
+
+
+@pytest.mark.asyncio
+async def test_qualified_minute_price_bar_set_can_be_frozen_but_not_mutated(
+    migrated_database_url: str,
+) -> None:
+    """Paper execution needs governed 1Min evidence without weakening frozen-set guards."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    seeded = await seed_price_candidate(factory, interval="1Min")
+
+    authority = await insert_valid_authority_from_prepare(factory, seeded.manifest_id)
+
+    assert authority.price_series_manifest_id == seeded.manifest_id
+    assert authority.bar_count == 1
+    with pytest.raises(DBAPIError) as raised:
+        async with factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "UPDATE price_bar_records SET close = close + 1 "
+                    "WHERE id = :bar_id"
+                ),
+                {"bar_id": seeded.bar_ids[0]},
+            )
+    assert getattr(raised.value.orig, "sqlstate", None) == "23514"
 
 
 @pytest.mark.asyncio
