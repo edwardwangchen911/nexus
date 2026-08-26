@@ -589,6 +589,7 @@ async def _seed_data_snapshot(
             },
         )
         calendar = data.authority.exchange_calendar
+        exchange_calendar = exchange_calendars.get_calendar(calendar.exchange)
         await session.execute(
             text(
                 "INSERT INTO exchange_calendar_authorities "
@@ -612,14 +613,21 @@ async def _seed_data_snapshot(
         await session.execute(
             text(
                 "INSERT INTO exchange_calendar_sessions "
-                "(calendar_authority_id, session, decision_at) "
-                "VALUES (:calendar, :session, :decision_at)"
+                "(calendar_authority_id, session, decision_at, market_open_at, "
+                "market_close_at) VALUES "
+                "(:calendar, :session, :decision_at, :market_open_at, :market_close_at)"
             ),
             [
                 {
                     "calendar": calendar.authority_id,
                     "session": value,
                     "decision_at": calendar.decision_times[value],
+                    "market_open_at": exchange_calendar.session_open(
+                        value
+                    ).to_pydatetime(),
+                    "market_close_at": exchange_calendar.session_close(
+                        value
+                    ).to_pydatetime(),
                 }
                 for value in calendar.sessions
             ],
@@ -1231,12 +1239,15 @@ async def test_writer_serializes_publish_with_concurrent_authority_and_child_app
             asyncio.create_task(
                 append(
                     "INSERT INTO exchange_calendar_sessions "
-                    "(calendar_authority_id, session, decision_at) "
-                    "VALUES (:owner, :member, :decision_at)",
+                    "(calendar_authority_id, session, decision_at, market_open_at, "
+                    "market_close_at) VALUES "
+                    "(:owner, :member, :decision_at, :market_open_at, :market_close_at)",
                     {
                         "owner": CALENDAR_AUTHORITY_ID,
                         "member": protocol.end + timedelta(days=1),
                         "decision_at": COMPLETED_AT,
+                        "market_open_at": COMPLETED_AT - timedelta(hours=7),
+                        "market_close_at": COMPLETED_AT - timedelta(hours=1),
                     },
                 )
             ),
@@ -1718,12 +1729,15 @@ async def test_concurrent_writer_is_idempotent_and_round_trip_hash_is_reconstruc
     sealed_append_attempts = (
         (
             "INSERT INTO exchange_calendar_sessions "
-            "(calendar_authority_id, session, decision_at) "
-            "VALUES (:owner, :member, :decision_at)",
+            "(calendar_authority_id, session, decision_at, market_open_at, "
+            "market_close_at) VALUES "
+            "(:owner, :member, :decision_at, :market_open_at, :market_close_at)",
             {
                 "owner": CALENDAR_AUTHORITY_ID,
                 "member": protocol.end + timedelta(days=1),
                 "decision_at": COMPLETED_AT,
+                "market_open_at": COMPLETED_AT - timedelta(hours=7),
+                "market_close_at": COMPLETED_AT - timedelta(hours=1),
             },
         ),
         (
