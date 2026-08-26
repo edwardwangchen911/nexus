@@ -56,3 +56,29 @@ class PaperExecutionError(ValueError):
         self.code = code
         self.safe_message = _EXECUTION_SAFE_MESSAGES[code]
         super().__init__(code)
+
+
+PaperPerformanceErrorCode = Literal[
+    "PAPER_PERFORMANCE_INVALID",
+    "PAPER_PERFORMANCE_PRICE_INCOMPLETE",
+    "PAPER_PERFORMANCE_PROJECTION_INVALID",
+    "PAPER_PERFORMANCE_CONFLICT",
+]
+
+_PERFORMANCE_SAFE_MESSAGES: dict[PaperPerformanceErrorCode, str] = {
+    "PAPER_PERFORMANCE_INVALID": "The internal paper performance request is invalid.",
+    "PAPER_PERFORMANCE_PRICE_INCOMPLETE": ("The end-of-day price authority is incomplete."),
+    "PAPER_PERFORMANCE_PROJECTION_INVALID": (
+        "The internal paper performance projection is invalid."
+    ),
+    "PAPER_PERFORMANCE_CONFLICT": ("The internal paper performance conflicts with existing facts."),
+}
+
+
+class PaperPerformanceError(ValueError):
+    """Stable performance publication error without account or source details."""
+
+    def __init__(self, code: PaperPerformanceErrorCode) -> None:
+        self.code = code
+        self.safe_message = _PERFORMANCE_SAFE_MESSAGES[code]
+        super().__init__(code)

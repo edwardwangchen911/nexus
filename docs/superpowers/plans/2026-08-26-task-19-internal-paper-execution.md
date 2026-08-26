@@ -42,11 +42,11 @@
 
 ## Slice 5：日末绩效发布
 
-- [ ] 新增 `engine/tests/integration/test_paper_performance_pg.py`，先覆盖完整收盘权威、缺价拒绝、账本现金、持仓市值、已/未实现损益、费用/滑点、峰值/回撤、instrument/sector 归因和幂等发布。
-- [ ] 在 `performance.py` 增加仅从 PostgreSQL 权威读取和原子发布 snapshot/attribution 的服务。
-- [ ] 将 performance/position 快照加入源事实哈希验证和不可变守卫。
-- [ ] 运行绩效定向单测和 PostgreSQL 测试。
-- [ ] 提交：`feat(engine): publish paper performance snapshots`
+- [x] 新增 `engine/tests/integration/test_paper_performance_pg.py`，先覆盖完整收盘权威、缺价拒绝、账本现金、持仓市值、已/未实现损益、费用/滑点、峰值/回撤、instrument/sector 归因和幂等发布。
+- [x] 在 `performance.py` 增加仅从 PostgreSQL 冻结权威读取和同一事务发布 snapshot/attribution 的服务；不含 provider 网络或定时 worker。
+- [x] 将 performance/position 快照加入源事实哈希验证和不可变守卫，内容哈希覆盖账本、持仓、价格、执行模型、归因与行业权威。
+- [x] 运行绩效 PostgreSQL 定向测试（13 passed）、Ruff 和 Mypy；包含并发、故障回滚和数据库不可变反例。
+- [x] 提交：`feat(engine): publish paper performance snapshots`
 
 ## Slice 6：Engine API 和生成合约
 
