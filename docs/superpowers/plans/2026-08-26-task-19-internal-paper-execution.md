@@ -5,11 +5,11 @@
 
 ## Slice 1：执行模型与时间窗口
 
-- [ ] 新增 `engine/tests/unit/paper/test_fills.py`，覆盖严格模型、UTC/DST、窗口连续、`close_volume_vwap_v1`、零成交量、10/25 bps、tick 保守取整和 1% 上限。
-- [ ] 在 `engine/src/nexus/paper/fills.py` 实现冻结值对象、执行模型规范哈希、窗口准入和 fill 计算。
-- [ ] 扩展 `engine/src/nexus/paper/models.py` 仅放共用的 fill/持仓值对象，保持 `extra=forbid` 和精确 Decimal。
-- [ ] 运行 `pytest engine/tests/unit/paper/test_fills.py -q`、Ruff 和 Mypy 相关路径。
-- [ ] 提交：`feat(engine): define deterministic paper fills`
+- [x] 新增 `engine/tests/unit/paper/test_fills.py`，覆盖严格模型、UTC/DST、窗口连续、`close_volume_vwap_v1`、零成交量、10/25 bps、tick 保守取整和 1% 上限。
+- [x] 在 `engine/src/nexus/paper/fills.py` 实现冻结值对象、执行模型规范哈希、窗口准入和 fill 计算。
+- [x] 扩展 `engine/src/nexus/paper/models.py` 仅放共用的 fill/持仓值对象，保持 `extra=forbid` 和精确 Decimal。（本切片值对象仅被执行域使用，保留在 `fills.py` 以避免扩大共用模型。）
+- [x] 运行 `pytest engine/tests/unit/paper/test_fills.py -q`、Ruff 和 Mypy 相关路径。
+- [x] 提交：`feat(engine): define deterministic paper fills`
 
 ## Slice 2：执行证据迁移和数据库守卫
 
