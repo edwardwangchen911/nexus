@@ -28,3 +28,31 @@ class PaperBatchError(ValueError):
         self.code = code
         self.safe_message = _SAFE_MESSAGES[code]
         super().__init__(code)
+
+
+PaperExecutionErrorCode = Literal[
+    "PAPER_EXECUTION_INVALID",
+    "PAPER_EXECUTION_CONFLICT",
+    "PAPER_EXECUTION_AUTHORITY_INCOMPLETE",
+    "PAPER_EXECUTION_RESERVATION_INVALID",
+    "PAPER_EXECUTION_IDEMPOTENCY_CONFLICT",
+]
+
+_EXECUTION_SAFE_MESSAGES: dict[PaperExecutionErrorCode, str] = {
+    "PAPER_EXECUTION_INVALID": "The internal paper order cannot be executed.",
+    "PAPER_EXECUTION_CONFLICT": "The internal paper execution conflicts with existing facts.",
+    "PAPER_EXECUTION_AUTHORITY_INCOMPLETE": "The paper execution authority is incomplete.",
+    "PAPER_EXECUTION_RESERVATION_INVALID": "The paper order reservation is unavailable.",
+    "PAPER_EXECUTION_IDEMPOTENCY_CONFLICT": (
+        "The idempotency key was used for another paper execution request."
+    ),
+}
+
+
+class PaperExecutionError(ValueError):
+    """Stable Task 19 failure that does not expose SQL, provider, or account details."""
+
+    def __init__(self, code: PaperExecutionErrorCode) -> None:
+        self.code = code
+        self.safe_message = _EXECUTION_SAFE_MESSAGES[code]
+        super().__init__(code)

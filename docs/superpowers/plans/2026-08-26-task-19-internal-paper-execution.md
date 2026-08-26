@@ -32,13 +32,13 @@
 
 ## Slice 4：原子 worker 服务
 
-- [ ] 新增 `engine/tests/integration/test_paper_execution_pg.py`，先覆盖首窗口成交、多窗口部分成交、无报价 25 bps、合格报价 10 bps，10:15 缺数据取消、半日市余量取消、预留不足 fail closed。
-- [ ] 新增并发/幂等测试：两个 worker 同时推进、worker 与用户取消竞争、同键同/异请求、终态重试。
-- [ ] 新增故障注入：在 fill、账本、持仓事件、预留事件和 order event 之间抛错，确认全部回滚。
-- [ ] 在 `engine/src/nexus/paper/execution_service.py` 实现事务锁、权威加载、原子持久化、幂等和投影验证。
-- [ ] 添加足以支持测试的 Task 19 fixture helper，禁止任何 provider 网络调用。
-- [ ] 运行全部 Task 18–19 PostgreSQL 原子性/并发/数据库守卫测试。
-- [ ] 提交：`feat(engine): execute internal paper orders atomically`
+- [x] 新增 `engine/tests/integration/test_paper_execution_pg.py`，先覆盖首窗口成交、多窗口部分成交、无报价 25 bps、合格报价 10 bps，10:15 缺数据取消、半日市余量取消、预留不足 fail closed。
+- [x] 新增并发/幂等测试：两个 worker 同时推进、worker 与用户取消竞争、同键同/异请求、终态重试。
+- [x] 新增故障注入：在 fill、账本、持仓事件、预留事件和 order event 之间抛错，确认全部回滚。
+- [x] 在 `engine/src/nexus/paper/execution_service.py` 实现事务锁、权威加载、原子持久化、幂等和投影验证；新增 `0016_paper_execution_atomic` 前向迁移，在数据库层绑定 fill/order/reservation/position/ledger 根并强制终态预留归零。
+- [x] 添加足以支持测试的 Task 19 fixture helper，禁止任何 provider 网络调用。
+- [x] 运行全部 Task 18–19 PostgreSQL 原子性/并发/数据库守卫测试（74 passed），并运行执行迁移往返/元数据契约测试（27 passed）。
+- [x] 提交：`feat(engine): execute internal paper orders atomically`
 
 ## Slice 5：日末绩效发布
 

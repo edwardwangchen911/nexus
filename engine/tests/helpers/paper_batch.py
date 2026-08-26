@@ -91,6 +91,7 @@ async def seed_paper_batch(
     *,
     omit_persisted_query_kind: str | None = None,
     include_no_change: bool = False,
+    execution_market_close_at: datetime | None = None,
 ) -> PaperBatchSeed:
     engine = create_async_engine(database_url)
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -121,6 +122,14 @@ async def seed_paper_batch(
                         calendar_authority_id=CALENDAR_ID,
                         session=EXECUTION_SESSION,
                         decision_at=datetime(2026, 8, 27, 21, tzinfo=UTC),
+                        **(
+                            {
+                                "market_open_at": datetime(2026, 8, 27, 13, 30, tzinfo=UTC),
+                                "market_close_at": execution_market_close_at,
+                            }
+                            if execution_market_close_at is not None
+                            else {}
+                        ),
                     ),
                 )
             )
@@ -153,9 +162,7 @@ async def seed_paper_batch(
             price_inputs: list[RiskPrice] = []
             sector_inputs: list[RiskSectorExposure] = []
             instruments = (
-                INSTRUMENTS + (NO_CHANGE_INSTRUMENT,)
-                if include_no_change
-                else INSTRUMENTS
+                INSTRUMENTS + (NO_CHANGE_INSTRUMENT,) if include_no_change else INSTRUMENTS
             )
             for index, (instrument_id, close, _, sector) in enumerate(instruments, start=1):
                 artifact_id = UUID(int=0x51000000000000000000000000000100 + index)
@@ -289,9 +296,7 @@ async def seed_paper_batch(
                 )
             )
             proofs: list[AuthorityQueryProof] = []
-            for index, kind in enumerate(
-                ("corporate_action", "suspension", "delisting"), start=1
-            ):
+            for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
                 authority_id = UUID(int=0x51000000000000000000000000000600 + index)
                 content_hash = canonical_query_authority_hash(
                     source_policy_id=SOURCE_POLICY_ID,
