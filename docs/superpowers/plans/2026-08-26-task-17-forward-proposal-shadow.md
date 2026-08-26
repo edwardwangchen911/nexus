@@ -878,10 +878,10 @@ The review document records commit range, commands with exit status/counts, migr
 
 **Steps**
 
-- [ ] Inspect `git status --short`, `git diff --check`, and `git log --oneline --decorate -10`; resolve only Task 17 issues and preserve unrelated changes.
-- [ ] Start the project’s existing PostgreSQL/MinIO services with `docker compose -f infra/compose.yaml up -d postgres minio`; do not require or install Docker Desktop if another compatible runtime is already working.
-- [ ] Run `uv run --package nexus-engine alembic -c engine/alembic.ini downgrade 0012_backtests`, then `upgrade head`, then the migration suite; verify reversible lifecycle restoration and head reapplication.
-- [ ] Run the full engine gates:
+- [x] Inspect `git status --short`, `git diff --check`, and `git log --oneline --decorate -10`; resolve only Task 17 issues and preserve unrelated changes.
+- [x] Start the project’s existing PostgreSQL/MinIO services with `docker compose -f infra/compose.yaml up -d postgres minio`; do not require or install Docker Desktop if another compatible runtime is already working.
+- [x] Run `uv run --package nexus-engine alembic -c engine/alembic.ini downgrade 0012_backtests`, then `upgrade head`, then the migration suite; verify reversible lifecycle restoration and head reapplication.
+- [x] Run the full engine gates:
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/simulation engine/tests/unit/backtest engine/tests/unit/shadow engine/tests/property engine/tests/integration -q
@@ -889,7 +889,7 @@ uv run --package nexus-engine ruff check engine
 uv run --package nexus-engine mypy engine/src
 ```
 
-- [ ] Run the full Web gates:
+- [x] Run the full Web gates:
 
 ```bash
 npm test
@@ -900,14 +900,26 @@ npm run build
 npm run test:e2e
 ```
 
-- [ ] Query the acceptance database and record zero unexpected rows in Task 18 paper order/fill/ledger tables, broker/live order or execution-intent tables, and zero Shadow facts after a tested rollback transaction. Do not print account data or credentials.
-- [ ] Recompute at least one session state hash and one 63-session checkpoint metrics hash from append-only inputs in a test/verification command; compare exactly with persisted hashes.
-- [ ] Perform an independent review focused on look-ahead, authority exact sets, gap/carry-forward behavior, Decimal/unit correctness, first-session-only execution, idempotency, lock order, seal races, database bypasses, BFF method/schema confusion, error leakage, accessibility, and order boundary.
-- [ ] Fix every Critical/Important finding with a red test and rerun affected/full gates. Record unresolved Minor findings explicitly; do not declare acceptance with unresolved Critical or Important findings.
-- [ ] Write `docs/superpowers/reviews/2026-08-26-task-17-forward-proposal-shadow-review.md` with the exact evidence and finding counts.
-- [ ] Update the progress ledger and original Task 17 checkboxes only after all gates and review pass. Replace the obsolete 20-fill Task 17 line with a reference to the approved static Proposal Shadow spec; do not modify Phase 2’s separate 20-fill rule.
-- [ ] Commit acceptance-only documentation with `docs: record Task 17 shadow acceptance`.
-- [ ] Confirm `git status --short` is clean for Task 17-owned files and report the final commit range. Do not mark the overall goal complete; continue next with Task 18 only after the user chooses execution/continuation.
+- [x] Query the acceptance database and record zero unexpected rows in Task 18 paper order/fill/ledger tables, broker/live order or execution-intent tables, and zero Shadow facts after a tested rollback transaction. Do not print account data or credentials.
+- [x] Recompute at least one session state hash and one 63-session checkpoint metrics hash from append-only inputs in a test/verification command; compare exactly with persisted hashes.
+- [x] Perform a separated review pass focused on look-ahead, authority exact sets, gap/carry-forward behavior, Decimal/unit correctness, first-session-only execution, idempotency, lock order, seal races, database bypasses, BFF method/schema confusion, error leakage, accessibility, and order boundary. The review record states that this was a single-executor pass, not a second-person/model review.
+- [x] Fix every Critical/Important finding with a red test and rerun affected/full gates. Record unresolved Minor findings explicitly; do not declare acceptance with unresolved Critical or Important findings.
+- [x] Write `docs/superpowers/reviews/2026-08-26-task-17-forward-proposal-shadow-review.md` with the exact evidence and finding counts.
+- [x] Update the progress ledger and original Task 17 checkboxes only after all gates and review pass. Replace the obsolete 20-fill Task 17 line with a reference to the approved static Proposal Shadow spec; do not modify Phase 2’s separate 20-fill rule.
+- [x] Commit acceptance-only documentation with `docs: record Task 17 shadow acceptance`.
+- [x] Confirm `git status --short` is clean for Task 17-owned files and report the final commit range. Do not mark the overall goal complete; continue next with Task 18 only after the user chooses execution/continuation.
+
+**Acceptance evidence (2026-08-26):** PostgreSQL/MinIO remained healthy on the
+existing Docker-compatible runtime; Docker Desktop was not required. A temporary
+database completed `0013 -> 0012 -> 0013`, the final Engine run passed 649/649,
+Ruff passed, and Mypy passed 179 source files. Full Web gates passed 347/347 unit
+tests and 24/24 E2E tests with typecheck, lint, generated-client check, and build
+all at exit 0. The one-shot verifier matched session-63 state and checkpoint
+hashes, left zero rolled-back Shadow facts, and found no Task 18/paper/live
+execution tables. The separated review found three Important issues; all received
+red tests and fixes in `9194d88`/`1fd09e2`, leaving Critical 0, unresolved
+Important 0, and unresolved Minor 0. Exact evidence and the single-executor review
+limitation are recorded in the Task 17 review document.
 
 ---
 
