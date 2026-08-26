@@ -251,6 +251,14 @@ def canonical_risk_market_authority_hash(market: RiskMarketSnapshot) -> str:
         _uuid(price.instrument_id): _hash(price.content_hash) for price in market.prices
     }
     for price_payload in payload["prices"]:
+        price = next(
+            item
+            for item in market.prices
+            if _uuid(item.instrument_id) == price_payload["instrument_id"]
+        )
+        price_payload["market"] = price.market
+        price_payload["currency"] = price.currency
+        price_payload["asset_type"] = price.asset_type
         price_payload["content_hash"] = price_hashes[price_payload["instrument_id"]]
     sector_hashes = {
         (

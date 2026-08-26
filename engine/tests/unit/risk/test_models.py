@@ -26,6 +26,9 @@ def _price(instrument_id: UUID = INSTRUMENT_ID) -> RiskPrice:
     return RiskPrice(
         instrument_id=instrument_id,
         authority_id=UUID(int=instrument_id.int + 100),
+        market="US",
+        currency="USD",
+        asset_type="common_stock",
         close=Decimal("100"),
         source="fosun",
         delivery_mode="delayed",
@@ -110,6 +113,9 @@ def test_market_snapshot_rejects_late_authority() -> None:
                 RiskPrice(
                     instrument_id=INSTRUMENT_ID,
                     authority_id=UUID(int=103),
+                    market="US",
+                    currency="USD",
+                    asset_type="common_stock",
                     close=Decimal("100"),
                     source="fosun",
                     delivery_mode="delayed",

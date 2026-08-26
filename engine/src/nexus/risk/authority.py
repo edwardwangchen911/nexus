@@ -25,7 +25,12 @@ from nexus.persistence.models.data import (
     QualityReport,
     SourcePolicy,
 )
-from nexus.persistence.models.market import SectorExposure, UniverseMember, UniverseSnapshot
+from nexus.persistence.models.market import (
+    Instrument,
+    SectorExposure,
+    UniverseMember,
+    UniverseSnapshot,
+)
 from nexus.persistence.models.paper import RiskQueryAuthorityRecord
 from nexus.risk.canonical import canonical_risk_market_authority_hash
 from nexus.risk.models import (
@@ -37,6 +42,7 @@ from nexus.risk.models import (
 from nexus.strategy.forward import ForwardStrategyDecision
 
 _QUERY_KINDS = frozenset(("corporate_action", "suspension", "delisting"))
+_US_EXCHANGES = frozenset(("AMEX", "ARCX", "NASDAQ", "NYSE", "NYSE_ARCA", "XNAS", "XNYS"))
 
 
 def canonical_query_authority_hash(
@@ -200,7 +206,7 @@ async def _load_prices(
 ) -> tuple[RiskPrice, ...]:
     rows = (
         await session.execute(
-            select(PriceBarSetAuthority, PriceSeriesManifest, PriceBarRecord)
+            select(PriceBarSetAuthority, PriceSeriesManifest, PriceBarRecord, Instrument)
             .join(
                 PriceSeriesManifest,
                 PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
@@ -209,6 +215,7 @@ async def _load_prices(
                 PriceBarRecord,
                 PriceBarRecord.price_series_manifest_id == PriceSeriesManifest.id,
             )
+            .join(Instrument, Instrument.id == PriceBarRecord.instrument_id)
             .where(
                 PriceBarSetAuthority.source_policy_id == decision.source_policy_id,
                 PriceBarRecord.instrument_id.in_(required),
@@ -220,7 +227,7 @@ async def _load_prices(
         raise ValueError("risk prices do not exactly cover required instruments")
     prices: list[RiskPrice] = []
     observed_ids: set[UUID] = set()
-    for authority, manifest, bar in rows:
+    for authority, manifest, bar, instrument in rows:
         if bar.instrument_id in observed_ids:
             raise ValueError("risk prices contain duplicate instruments")
         observed_ids.add(bar.instrument_id)
@@ -238,6 +245,9 @@ async def _load_prices(
             or authority.source != manifest.source
             or manifest.adjustment != "raw"
             or manifest.interval != "1Day"
+            or instrument.currency != "USD"
+            or instrument.asset_type not in {"ETF", "common_stock"}
+            or instrument.exchange not in _US_EXCHANGES
             or authority.available_at > decision.decision_time
             or bar.available_at > decision.decision_time
         ):
@@ -246,6 +256,9 @@ async def _load_prices(
             RiskPrice(
                 instrument_id=bar.instrument_id,
                 authority_id=authority.id,
+                market="US",
+                currency="USD",
+                asset_type=cast(Literal["ETF", "common_stock"], instrument.asset_type),
                 close=bar.close,
                 source=manifest.source,
                 delivery_mode=manifest.delivery_mode,

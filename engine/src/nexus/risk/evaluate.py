@@ -99,10 +99,18 @@ def _preflight(
     if participating != required:
         raise RiskBatchRejected("RISK_AUTHORITY_INCOMPLETE")
     prices, sectors = _market_maps(market)
+    price_authority = {price.instrument_id: price for price in market.prices}
     for candidate in candidates:
         if candidate.asset_type not in verified.supported_asset_types:
             raise RiskBatchRejected("RISK_AUTHORITY_INCOMPLETE")
         if candidate.currency != verified.supported_currency:
+            raise RiskBatchRejected("RISK_AUTHORITY_INCOMPLETE")
+        trusted_price = price_authority[candidate.instrument_id]
+        if (
+            candidate.asset_type != trusted_price.asset_type
+            or candidate.currency != trusted_price.currency
+            or trusted_price.market != verified.supported_market
+        ):
             raise RiskBatchRejected("RISK_AUTHORITY_INCOMPLETE")
         if prices.get(candidate.instrument_id) != candidate.reference_close:
             raise RiskBatchRejected("RISK_AUTHORITY_INCOMPLETE")
@@ -143,6 +151,7 @@ def derive_order_candidates(
     ):
         raise RiskBatchRejected("STRATEGY_DECISION_INVALID")
     prices, sectors = _market_maps(market)
+    price_authority = {price.instrument_id: price for price in market.prices}
     positions = {position.instrument_id: position.quantity for position in portfolio.positions}
     candidates: list[OrderCandidate] = []
     for target in decision.targets:
@@ -162,8 +171,8 @@ def derive_order_candidates(
                 target_weight=target.target_weight,
                 strategy_priority=target.strategy_priority,
                 reference_close=price,
-                asset_type="common_stock",
-                currency="USD",
+                asset_type=price_authority[target.instrument_id].asset_type,
+                currency=price_authority[target.instrument_id].currency,
                 sector_exposures=sectors[target.instrument_id],
             )
         )

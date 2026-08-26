@@ -304,6 +304,9 @@ async def _seed_authority(
                     RiskPrice(
                         instrument_id=INSTRUMENT_ID,
                         authority_id=price_authority.id,
+                        market="US",
+                        currency="USD",
+                        asset_type="common_stock",
                         close=Decimal("100"),
                         source="fixture",
                         delivery_mode="fixture",

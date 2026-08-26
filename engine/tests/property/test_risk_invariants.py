@@ -49,6 +49,9 @@ def _market(items: tuple[tuple[UUID, Decimal, str], ...]) -> RiskMarketSnapshot:
             RiskPrice(
                 instrument_id=instrument_id,
                 authority_id=UUID(int=instrument_id.int + 500),
+                market="US",
+                currency="USD",
+                asset_type="common_stock",
                 close=close,
                 source="fixture",
                 delivery_mode="fixture",

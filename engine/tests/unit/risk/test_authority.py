@@ -55,6 +55,9 @@ def _price(instrument_id: UUID) -> RiskPrice:
     return RiskPrice(
         instrument_id=instrument_id,
         authority_id=UUID(int=100 + instrument_id.int),
+        market="US",
+        currency="USD",
+        asset_type="common_stock",
         close=Decimal("100"),
         source="fosun",
         delivery_mode="delayed",

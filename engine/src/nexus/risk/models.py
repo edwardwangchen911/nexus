@@ -60,6 +60,9 @@ class FrozenRiskModel(BaseModel):
 class RiskPrice(FrozenRiskModel):
     instrument_id: UUID
     authority_id: UUID
+    market: Literal["US"]
+    currency: Literal["USD"]
+    asset_type: AssetType
     close: Decimal
     source: str = Field(min_length=1, max_length=100)
     delivery_mode: str = Field(min_length=1, max_length=50)

@@ -103,6 +103,9 @@ def _market() -> RiskMarketSnapshot:
             RiskPrice(
                 instrument_id=INSTRUMENT_ID,
                 authority_id=UUID(int=20),
+                market="US",
+                currency="USD",
+                asset_type="common_stock",
                 close=Decimal("100"),
                 source="fosun",
                 delivery_mode="delayed",
