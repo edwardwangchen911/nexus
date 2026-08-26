@@ -822,6 +822,61 @@ export interface components {
             /** Version */
             version: number;
         };
+        /** InternalPaperPortfolioListItemResponse */
+        InternalPaperPortfolioListItemResponse: {
+            /**
+             * Account Model
+             * @constant
+             */
+            account_model: "cash";
+            /** As Of */
+            as_of: string | null;
+            /** Available Cash */
+            available_cash: string | null;
+            /**
+             * Coverage Scope
+             * @constant
+             */
+            coverage_scope: "internal_paper_account";
+            /**
+             * Currency
+             * @constant
+             */
+            currency: "USD";
+            /**
+             * Data State
+             * @enum {string}
+             */
+            data_state: "READY" | "ERROR";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "internal_paper";
+            /** Name */
+            name: string;
+            /** Nav */
+            nav: string | null;
+            /**
+             * Portfolio Id
+             * Format: uuid
+             */
+            portfolio_id: string;
+            /**
+             * Position Model
+             * @constant
+             */
+            position_model: "long_only";
+            /** Projection Error Code */
+            projection_error_code: "PAPER_PROJECTION_INVALID" | null;
+            /** Reserved Cash */
+            reserved_cash: string | null;
+            /**
+             * Source
+             * @constant
+             */
+            source: "internal_ledger";
+        };
         /**
          * MarketBarResponse
          * @description Exact selected-source OHLCV evidence for a semantic chart table.
@@ -1181,6 +1236,7 @@ export interface components {
         };
         /** @enum {string} */
         PortfolioKind: "real_read_only" | "internal_paper" | "shadow";
+        PortfolioListItem: components["schemas"]["PortfolioListItemResponse"] | components["schemas"]["InternalPaperPortfolioListItemResponse"];
         /** PortfolioListItemResponse */
         PortfolioListItemResponse: {
             /**
@@ -1189,8 +1245,8 @@ export interface components {
              */
             coverage_scope: "broker_account";
             /**
-             * Kind
-             * @constant
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
              */
             kind: "real_read_only";
             last_sync_run_status: components["schemas"]["SyncRunStatus"] | null;
@@ -1217,7 +1273,7 @@ export interface components {
         /** PortfolioPageResponse */
         PortfolioPageResponse: {
             /** Items */
-            items: components["schemas"]["PortfolioListItemResponse"][];
+            items: components["schemas"]["PortfolioListItem"][];
             /** Next Cursor */
             next_cursor: string | null;
         };

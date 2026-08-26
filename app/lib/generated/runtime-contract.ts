@@ -820,6 +820,141 @@ export const runtimeContractSchemas = {
     "title": "IntegrationStatusResponse",
     "type": "object"
   },
+  "InternalPaperPortfolioListItemResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "account_model": {
+        "const": "cash",
+        "title": "Account Model",
+        "type": "string"
+      },
+      "as_of": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "As Of"
+      },
+      "available_cash": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Available Cash"
+      },
+      "coverage_scope": {
+        "const": "internal_paper_account",
+        "title": "Coverage Scope",
+        "type": "string"
+      },
+      "currency": {
+        "const": "USD",
+        "title": "Currency",
+        "type": "string"
+      },
+      "data_state": {
+        "enum": [
+          "READY",
+          "ERROR"
+        ],
+        "title": "Data State",
+        "type": "string"
+      },
+      "kind": {
+        "const": "internal_paper",
+        "title": "Kind",
+        "type": "string"
+      },
+      "name": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Name",
+        "type": "string"
+      },
+      "nav": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Nav"
+      },
+      "portfolio_id": {
+        "format": "uuid",
+        "title": "Portfolio Id",
+        "type": "string"
+      },
+      "position_model": {
+        "const": "long_only",
+        "title": "Position Model",
+        "type": "string"
+      },
+      "projection_error_code": {
+        "anyOf": [
+          {
+            "const": "PAPER_PROJECTION_INVALID",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Projection Error Code"
+      },
+      "reserved_cash": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reserved Cash"
+      },
+      "source": {
+        "const": "internal_ledger",
+        "title": "Source",
+        "type": "string"
+      }
+    },
+    "required": [
+      "portfolio_id",
+      "name",
+      "kind",
+      "coverage_scope",
+      "source",
+      "currency",
+      "account_model",
+      "position_model",
+      "data_state",
+      "projection_error_code",
+      "nav",
+      "available_cash",
+      "reserved_cash",
+      "as_of"
+    ],
+    "title": "InternalPaperPortfolioListItemResponse",
+    "type": "object"
+  },
   "MarketBarResponse": {
     "additionalProperties": false,
     "description": "Exact selected-source OHLCV evidence for a semantic chart table.",
@@ -1569,6 +1704,23 @@ export const runtimeContractSchemas = {
     "title": "PortfolioDiagnosticResponse",
     "type": "object"
   },
+  "PortfolioListItem": {
+    "discriminator": {
+      "mapping": {
+        "internal_paper": "#/components/schemas/InternalPaperPortfolioListItemResponse",
+        "real_read_only": "#/components/schemas/PortfolioListItemResponse"
+      },
+      "propertyName": "kind"
+    },
+    "oneOf": [
+      {
+        "$ref": "#/components/schemas/PortfolioListItemResponse"
+      },
+      {
+        "$ref": "#/components/schemas/InternalPaperPortfolioListItemResponse"
+      }
+    ]
+  },
   "PortfolioListItemResponse": {
     "additionalProperties": false,
     "properties": {
@@ -1659,7 +1811,7 @@ export const runtimeContractSchemas = {
     "properties": {
       "items": {
         "items": {
-          "$ref": "#/components/schemas/PortfolioListItemResponse"
+          "$ref": "#/components/schemas/PortfolioListItem"
         },
         "maxItems": 50,
         "title": "Items",
