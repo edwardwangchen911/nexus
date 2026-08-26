@@ -1,30 +1,44 @@
-"""At-least-once dispatcher for internal-paper outbox events."""
+"""Compatibility wrapper over the recoverable generic outbox dispatcher."""
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from uuid import UUID
 
-from sqlalchemy import or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from nexus.persistence.models.runtime import OutboxEvent
+from nexus.domain.ids import new_uuid7
+from nexus.outbox.dispatcher import dispatch_outbox_once
+from nexus.outbox.models import OutboxMessage, PublisherSpec
+from nexus.outbox.registry import PublisherRegistry
 
-
-@dataclass(frozen=True)
-class PaperOutboxMessage:
-    """Stable delivery envelope; consumers deduplicate by ``event_id``."""
-
-    event_id: UUID
-    event_type: str
-    aggregate_id: UUID
-    schema_version: str
-    payload: Mapping[str, object]
-
-
+PaperOutboxMessage = OutboxMessage
 PaperOutboxPublisher = Callable[[PaperOutboxMessage], Awaitable[None]]
+
+_PAPER_EVENT_SCHEMAS = (
+    ("strategy_decision.persisted", "paper_event_v1"),
+    ("paper.order_batch.evaluated", "paper_event_v1"),
+    ("paper.order.risk_rejected", "paper_event_v1"),
+    ("paper.order.submitted", "paper_event_v1"),
+    ("paper.reservation.created", "paper_event_v1"),
+    ("paper.ledger_transaction.posted", "paper_event_v1"),
+    ("paper.execution.advance.partially_filled", "paper_execution_v1"),
+    ("paper.execution.advance.filled", "paper_execution_v1"),
+    ("paper.execution.advance.cancelled", "paper_execution_v1"),
+    ("paper.execution.cancelled", "paper_execution_v1"),
+)
+
+
+def _registry(publisher: PaperOutboxPublisher) -> PublisherRegistry:
+    return PublisherRegistry(
+        PublisherSpec(
+            event_type=event_type,
+            schema_version=schema_version,
+            consumer_idempotent=True,
+            publisher=publisher,
+        )
+        for event_type, schema_version in _PAPER_EVENT_SCHEMAS
+    )
 
 
 async def dispatch_paper_outbox(
@@ -34,45 +48,27 @@ async def dispatch_paper_outbox(
     published_at: datetime,
     limit: int = 100,
 ) -> int:
-    """Deliver one locked page and mark it published in the caller transaction.
-
-    Delivery is deliberately at-least-once: a crash after publication but before
-    commit can redeliver the same globally unique event ID.
-    """
+    """Deliver a bounded Paper page through recoverable short transactions."""
     if published_at.tzinfo is None or published_at.utcoffset() != UTC.utcoffset(published_at):
         raise ValueError("published_at must use UTC")
     if not 1 <= limit <= 1_000:
         raise ValueError("limit must be between 1 and 1000")
-    events = tuple(
-        (
-            await session.scalars(
-                select(OutboxEvent)
-                .where(
-                    or_(
-                        OutboxEvent.event_type.like("paper.%"),
-                        OutboxEvent.event_type == "strategy_decision.persisted",
-                    ),
-                    OutboxEvent.status == "queued",
-                    OutboxEvent.published_at.is_(None),
-                )
-                .order_by(OutboxEvent.created_at, OutboxEvent.id)
-                .limit(limit)
-                .with_for_update(skip_locked=True)
-            )
-        ).all()
-    )
-    for event in events:
-        await publisher(
-            PaperOutboxMessage(
-                event_id=event.id,
-                event_type=event.event_type,
-                aggregate_id=event.aggregate_id,
-                schema_version=event.schema_version,
-                payload=dict(event.payload),
-            )
+    if session.bind is None:
+        raise RuntimeError("Paper outbox session has no database bind")
+    factory = async_sessionmaker(session.bind, expire_on_commit=False)
+    registry = _registry(publisher)
+    worker_id = f"paper-outbox-{new_uuid7()}"
+    delivered = 0
+    while delivered < limit:
+        worked = await dispatch_outbox_once(
+            factory,
+            registry=registry,
+            worker_id=worker_id,
+            clock=lambda: published_at,
+            claim_registered_only=True,
+            raise_publisher_errors=True,
         )
-        event.status = "published"
-        event.attempt_count += 1
-        event.published_at = published_at
-    await session.flush()
-    return len(events)
+        if not worked:
+            break
+        delivered += 1
+    return delivered

@@ -1,0 +1,1 @@
+"""Recoverable transactional outbox delivery."""

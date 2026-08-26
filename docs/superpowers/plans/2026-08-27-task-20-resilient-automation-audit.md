@@ -36,10 +36,10 @@
 
 ## Slice 5：通用事务 Outbox
 
-- [ ] 新增 `engine/tests/integration/test_outbox.py`，覆盖并发领取、事件 schema registry、相同 event ID 重发、安全退避、unsafe 拒绝、dead letter 和 attempt 事实。
-- [ ] 实现 `engine/src/nexus/outbox/models.py`、`registry.py`、`dispatcher.py`；保留 `paper/outbox.py` 兼容委托。
-- [ ] 添加“业务事务已提交、dispatcher 前进程退出”和“publisher 成功、published 提交前退出”故障测试。
-- [ ] 运行 Paper/Shadow/Agent outbox 回归、Ruff、Mypy；提交 `feat(engine): recover transactional outbox delivery`。
+- [x] 新增 `engine/tests/integration/test_outbox.py`，覆盖并发领取、事件 schema registry、相同 event ID 重发、安全退避、unsafe 拒绝、dead letter 和 attempt 事实。
+- [x] 实现 `engine/src/nexus/outbox/models.py`、`registry.py`、`dispatcher.py`；保留 `paper/outbox.py` 兼容委托与既有异常语义。
+- [x] 添加“业务事务已提交、dispatcher 前进程退出”和“publisher 成功、published 提交前退出”故障测试。
+- [x] 运行 Outbox/Paper 定向回归（6 passed）、Ruff、Mypy；待本切片提交。
 
 ## Slice 6：每日 Pipeline 与日历调度
 
