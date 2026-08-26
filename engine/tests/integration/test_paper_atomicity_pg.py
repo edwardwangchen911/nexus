@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import timedelta
 from uuid import UUID
 
 import pytest
@@ -128,12 +128,22 @@ async def _publish_failure_then_replay(database_url: str):
                 request_time=seed.request_time,
             )
 
+        async with sessions() as session:
+            first_available_at = await session.scalar(
+                select(func.min(OutboxEvent.available_at)).where(
+                    OutboxEvent.schema_version == "paper_event_v1",
+                    OutboxEvent.published_at.is_(None),
+                )
+            )
+        assert first_available_at is not None
+        failure_at = first_available_at + timedelta(seconds=1)
+
         with pytest.raises(RuntimeError, match="publisher unavailable"):
             async with sessions.begin() as session:
                 await dispatch_paper_outbox(
                     session,
                     publisher=fail_publish,
-                    published_at=datetime(2026, 8, 26, 22, tzinfo=UTC),
+                    published_at=failure_at,
                 )
 
         async with sessions() as session:
@@ -157,13 +167,13 @@ async def _publish_failure_then_replay(database_url: str):
             first_count = await dispatch_paper_outbox(
                 session,
                 publisher=record_publish,
-                published_at=datetime(2026, 8, 26, 22, 1, tzinfo=UTC),
+                published_at=failure_at + timedelta(minutes=1),
             )
         async with sessions.begin() as session:
             replay_count = await dispatch_paper_outbox(
                 session,
                 publisher=record_publish,
-                published_at=datetime(2026, 8, 26, 22, 2, tzinfo=UTC),
+                published_at=failure_at + timedelta(minutes=2),
             )
         return (
             batch_count,
