@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import and_, exists, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -73,6 +73,8 @@ class ClaimedJob:
     fence_token: int
     expires_at: datetime
     version: int
+    dependencies_satisfied: bool
+    dependency_result_code: str | None
 
 
 @dataclass(frozen=True)
@@ -253,24 +255,13 @@ async def claim_next_job(
         return None
     dependency = aliased(JobDependency)
     parent = aliased(Job)
-    unsatisfied = exists(
+    nonterminal_dependency = exists(
         select(1)
         .select_from(dependency)
         .join(parent, parent.id == dependency.depends_on_job_id)
         .where(
             dependency.job_id == Job.id,
-            or_(
-                and_(
-                    dependency.required_outcome == "succeeded",
-                    parent.status != JobStatus.SUCCEEDED.value,
-                ),
-                and_(
-                    dependency.required_outcome == "succeeded_or_skipped",
-                    parent.status.not_in(
-                        (JobStatus.SUCCEEDED.value, JobStatus.SKIPPED.value)
-                    ),
-                ),
-            ),
+            parent.status.in_((JobStatus.QUEUED.value, JobStatus.RUNNING.value)),
         )
     )
     conditions = [
@@ -278,7 +269,7 @@ async def claim_next_job(
         Job.status == JobStatus.QUEUED.value,
         Job.available_at <= now,
         Job.attempt_count < Job.max_attempts,
-        ~unsatisfied,
+        ~nonterminal_dependency,
     ]
     if job_types is not None:
         conditions.append(Job.job_type.in_(tuple(job_types)))
@@ -296,6 +287,41 @@ async def claim_next_job(
     )
     if job is None:
         return None
+    dependency_rows = tuple(
+        (
+            await session.execute(
+                select(
+                    JobDependency.required_outcome,
+                    parent.status,
+                    parent.result_code,
+                )
+                .select_from(JobDependency)
+                .join(parent, parent.id == JobDependency.depends_on_job_id)
+                .where(JobDependency.job_id == job.id)
+            )
+        ).tuples()
+    )
+    dependency_mismatches = tuple(
+        row
+        for row in dependency_rows
+        if not (
+            row[1] == JobStatus.SUCCEEDED.value
+            or (
+                row[0] == "succeeded_or_skipped"
+                and row[1] == JobStatus.SKIPPED.value
+            )
+        )
+    )
+    dependency_result_code = (
+        None
+        if not dependency_mismatches
+        else "DEPENDENCY_DATA_QUALITY"
+        if any(
+            row[2] in {"SKIPPED_DATA_QUALITY", "DEPENDENCY_DATA_QUALITY"}
+            for row in dependency_mismatches
+        )
+        else "DEPENDENCY_NOT_SATISFIED"
+    )
     lease = await session.scalar(
         select(JobLease).where(JobLease.job_id == job.id).with_for_update()
     )
@@ -359,6 +385,8 @@ async def claim_next_job(
         fence_token=fence_token,
         expires_at=expires_at,
         version=job.version,
+        dependencies_satisfied=not dependency_mismatches,
+        dependency_result_code=dependency_result_code,
     )
 
 

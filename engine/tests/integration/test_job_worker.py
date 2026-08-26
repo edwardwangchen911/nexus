@@ -18,7 +18,12 @@ from nexus.jobs.registry import (
     JobHandlerSpec,
     JobRegistry,
 )
-from nexus.jobs.repository import enqueue_job
+from nexus.jobs.repository import (
+    JobDependencyInput,
+    claim_next_job,
+    enqueue_job,
+    finalize_job,
+)
 from nexus.jobs.worker import run_job_worker_once
 from nexus.persistence.models.runtime import IntegrationStatus, Job, WorkerHeartbeat
 from nexus.persistence.session import session_factory
@@ -49,6 +54,7 @@ async def _enqueue(
     retry_policy: RetryPolicy = RetryPolicy.AUTOMATIC_SAFE,
     max_attempts: int = 3,
     second: int = 0,
+    dependencies: tuple[JobDependencyInput, ...] = (),
 ) -> UUID:
     async with factory() as session, session.begin():
         job = await enqueue_job(
@@ -65,8 +71,72 @@ async def _enqueue(
             queue=QueueName.GENERAL,
             retry_policy=retry_policy,
             max_attempts=max_attempts,
+            dependencies=dependencies,
         )
     return job.id
+
+
+@pytest.mark.asyncio
+async def test_terminal_dependency_mismatch_skips_child_without_running_handler(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    parent_id = await _enqueue(
+        factory,
+        job_type=JobType.QUALITY_FREEZE,
+        payload={"value": "quality"},
+    )
+    async with factory() as session, session.begin():
+        parent_claim = await claim_next_job(
+            session,
+            queue=QueueName.GENERAL,
+            worker_id="worker-quality",
+            now=_NOW + timedelta(seconds=1),
+        )
+    assert parent_claim is not None and parent_claim.job_id == parent_id
+    async with factory() as session, session.begin():
+        await finalize_job(
+            session,
+            claim=parent_claim,
+            now=_NOW + timedelta(seconds=2),
+            outcome="skipped",
+            result_code="SKIPPED_DATA_QUALITY",
+        )
+    child_id = await _enqueue(
+        factory,
+        job_type=JobType.DIAGNOSTICS_RUN,
+        payload={"value": "must-not-run"},
+        second=3,
+        dependencies=(JobDependencyInput(depends_on_job_id=parent_id),),
+    )
+    executed = False
+
+    async def handler(context: JobHandlerContext) -> JobHandlerResult:
+        nonlocal executed
+        del context
+        executed = True
+        return JobHandlerResult(outcome="succeeded", result_code="UNREACHABLE")
+
+    assert await run_job_worker_once(
+        factory,
+        registry=JobRegistry((_spec(handler, job_type=JobType.DIAGNOSTICS_RUN),)),
+        queue=QueueName.GENERAL,
+        worker_id="worker-dependent",
+        worker_started_at=_NOW,
+        process_version="test-v1",
+        migration_head="0020_resilient_automation_audit",
+        clock=lambda: _NOW + timedelta(seconds=4),
+        claim_registered_only=True,
+    )
+    async with factory() as session:
+        child = await session.get(Job, child_id)
+    assert executed is False
+    assert child is not None
+    assert (child.status, child.result_code, child.attempt_count) == (
+        "skipped",
+        "DEPENDENCY_DATA_QUALITY",
+        1,
+    )
 
 
 def _spec(

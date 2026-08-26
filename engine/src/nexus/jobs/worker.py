@@ -133,6 +133,18 @@ async def run_job_worker_once(
         )
     if claim is None:
         return False
+    if not claim.dependencies_satisfied:
+        try:
+            async with factory() as session, session.begin():
+                await execute_and_finalize_job(
+                    session,
+                    claim=claim,
+                    checked_at=clock(),
+                    execute=lambda _: _dependency_skip(claim, clock),
+                )
+        except LeaseLostError:
+            pass
+        return True
     spec = registry.resolve(claim.job_type)
     if spec is None:
         await _dead_letter(
@@ -225,3 +237,11 @@ async def run_job_worker_once(
             error_code="HANDLER_FAILED",
         )
     return True
+
+
+async def _dependency_skip(claim: ClaimedJob, clock: Clock) -> JobCompletion:
+    return JobCompletion(
+        outcome="skipped",
+        result_code=claim.dependency_result_code or "DEPENDENCY_NOT_SATISFIED",
+        finished_at=clock(),
+    )

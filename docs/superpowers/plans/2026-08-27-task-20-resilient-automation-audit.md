@@ -43,11 +43,11 @@
 
 ## Slice 6：每日 Pipeline 与日历调度
 
-- [ ] 新增 `engine/tests/unit/jobs/test_daily_schedule.py`，覆盖正常日、半日市、DST、非 session、close+30、18:00 cutoff 和次日 09:55。
-- [ ] 新增 `engine/tests/integration/test_daily_pipeline.py`，覆盖严格 DAG、依赖领取、quality PASS、cutoff skip、周最后 session、低优先级 strategy R&D 和重复 scheduler tick。
-- [ ] 实现 `engine/src/nexus/jobs/daily_pipeline.py` 与 typed stage payloads；fixture registry 运行完整顺序，未注册/未激活 provider 明确 skipped。
-- [ ] 为 Task 17/19 安全本地 handler 接入 shadow advance、paper execute/performance；proposal/order 仍调用现有确定性 admission/硬风控。
-- [ ] 运行 pipeline 与受影响域回归；提交 `feat(engine): schedule deterministic daily pipeline`。
+- [x] 新增 `engine/tests/unit/jobs/test_daily_schedule.py`，覆盖正常日、半日市、DST、非 session、close+30、18:00 cutoff 和次日 09:55。
+- [x] 新增 `engine/tests/integration/test_daily_pipeline.py`，覆盖严格 DAG、依赖领取、quality PASS、cutoff skip、周最后 session、低优先级 strategy R&D 和重复 scheduler tick。
+- [x] 实现 strict payload、通用 DAG 与本地适配器模块；fixture registry 运行完整顺序，未注册/未激活 provider 明确 skipped。
+- [x] 为 Task 17/19 安全本地 handler 接入 shadow advance、paper execute/performance；未冻结齐全权威的 proposal/order 链路 fail closed，不绕过现有确定性 admission/硬风控。
+- [x] 运行 pipeline、Job、Task 17/19 与 Agent 定向回归，以及全量 Ruff/Mypy；提交 `feat(engine): schedule deterministic daily pipeline`。
 
 ## Slice 7：链式审计、manifest 与 gzip 导出
 

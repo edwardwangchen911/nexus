@@ -29,6 +29,11 @@ from nexus.agents.responses import ResponsesClient, ResponsesCommittee, Response
 from nexus.agents.tools import ReadOnlyToolRegistry, ToolInputError
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.ids import new_uuid7
+from nexus.jobs.daily_local import (
+    LOCAL_SAFE_DAILY_PROFILE,
+    build_local_daily_pipeline_registry,
+)
+from nexus.jobs.daily_pipeline import schedule_due_daily_pipeline
 from nexus.jobs.models import JobType, QueueName, RetryPolicy
 from nexus.jobs.registry import (
     JobHandlerContext,
@@ -101,10 +106,17 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
         await asyncio.sleep(0)
         return
     factory = session_factory(configured)
-    registry = _agent_registry(configured, responses_client=None, tools=None)
+    registry = _general_registry(configured, responses_client=None, tools=None)
     worker_id = f"agent-general-{new_uuid7()}"
     started_at = datetime.now(UTC)
     while True:
+        now = datetime.now(UTC)
+        async with factory() as session, session.begin():
+            await schedule_due_daily_pipeline(
+                session,
+                now=now,
+                profile_id=LOCAL_SAFE_DAILY_PROFILE,
+            )
         worked = await run_job_worker_once(
             factory,
             registry=registry,
@@ -118,6 +130,21 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
         )
         if not worked:
             await asyncio.sleep(0.5)
+
+
+def _general_registry(
+    settings: EngineSettings,
+    *,
+    responses_client: object | None,
+    tools: ReadOnlyToolRegistry | None,
+) -> JobRegistry:
+    agent = _agent_registry(
+        settings,
+        responses_client=responses_client,
+        tools=tools,
+    )
+    daily = build_local_daily_pipeline_registry()
+    return JobRegistry((*agent.specs, *daily.specs))
 
 
 def _agent_registry(

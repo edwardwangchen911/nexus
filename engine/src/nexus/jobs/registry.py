@@ -119,6 +119,11 @@ class JobRegistry:
     def job_types(self) -> frozenset[str]:
         return frozenset(self._specs)
 
+    @property
+    def specs(self) -> tuple[JobHandlerSpec, ...]:
+        """Expose the closed composition snapshot for explicit registry merging."""
+        return tuple(self._specs[key] for key in sorted(self._specs))
+
 
 def job_payload_is_safe(payload: dict[str, object]) -> bool:
     """Reject executable/location/provider-control shapes before model parsing."""
