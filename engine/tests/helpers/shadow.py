@@ -229,6 +229,12 @@ async def seed_shadow_calendar(
             calendar_authority_id=calendar.id,
             session=session_date,
             decision_at=decision_times[session_date],
+            market_open_at=official_calendar.session_open(
+                session_date
+            ).to_pydatetime(),
+            market_close_at=official_calendar.session_close(
+                session_date
+            ).to_pydatetime(),
         )
         for session_date in calendar_sessions
     )
