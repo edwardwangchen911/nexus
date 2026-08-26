@@ -964,6 +964,17 @@ class PaperReservationEventRecord(ImmutableCreatedAt, Base):
         CheckConstraint("event_type IN ('reserved','consumed','released')", name="type_allowed"),
         CheckConstraint("amount > 0", name="amount_positive"),
         CheckConstraint("payload_hash ~ '^[0-9a-f]{64}$'", name="hash_canonical"),
+        UniqueConstraint("source_fill_id", name="uq_paper_reservation_events_source_fill"),
+        ForeignKeyConstraint(
+            ["source_fill_id", "account_id"],
+            ["paper_fills.id", "paper_fills.account_id"],
+            name="fk_paper_reservation_events_source_fill",
+        ),
+        CheckConstraint(
+            "(event_type = 'consumed' AND source_fill_id IS NOT NULL) "
+            "OR (event_type IN ('reserved','released') AND source_fill_id IS NULL)",
+            name="fill_binding",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
@@ -974,6 +985,173 @@ class PaperReservationEventRecord(ImmutableCreatedAt, Base):
     amount: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
     occurred_at: Mapped[datetime] = mapped_column(UTCDateTime())
     payload_hash: Mapped[str] = mapped_column(String(64))
+    source_fill_id: Mapped[UUID | None]
+
+
+class PaperExecutionModelRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "paper_execution_models"
+    __table_args__ = (
+        UniqueConstraint("version", name="uq_paper_execution_models_version"),
+        UniqueConstraint("content_hash", name="uq_paper_execution_models_hash"),
+        UniqueConstraint("id", "content_hash", name="uq_paper_execution_models_id_hash"),
+        CheckConstraint("version = 'execution_model_v1'", name="version_v1"),
+        CheckConstraint("schema_version = 'paper_execution_model_v1'", name="schema_v1"),
+        CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="hash"),
+        CheckConstraint("jsonb_typeof(document) = 'object'", name="document_object"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    version: Mapped[str] = mapped_column(String(100))
+    schema_version: Mapped[str] = mapped_column(String(100))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    document: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class PaperExecutionWindowAuthorityRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "paper_execution_window_authorities"
+    __table_args__ = (
+        UniqueConstraint("order_id", "window_seq", name="uq_paper_execution_windows_order_seq"),
+        UniqueConstraint(
+            "order_id",
+            "window_start_at",
+            "window_end_at",
+            name="uq_paper_execution_windows_order_bounds",
+        ),
+        UniqueConstraint(
+            "id",
+            "order_id",
+            "account_id",
+            "instrument_id",
+            "source_authority_id",
+            name="uq_paper_execution_windows_fill_scope",
+        ),
+        ForeignKeyConstraint(
+            ["order_id", "account_id", "instrument_id"],
+            ["paper_orders.id", "paper_orders.account_id", "paper_orders.instrument_id"],
+            name="fk_paper_execution_windows_order",
+        ),
+        ForeignKeyConstraint(
+            ["source_authority_id", "source", "source_content_hash"],
+            [
+                "price_bar_set_authorities.id",
+                "price_bar_set_authorities.source",
+                "price_bar_set_authorities.content_hash",
+            ],
+            name="fk_paper_execution_windows_authority",
+        ),
+        ForeignKeyConstraint(
+            ["quote_id"], ["latest_quotes.id"], name="fk_paper_execution_windows_quote"
+        ),
+        CheckConstraint("window_seq >= 1", name="seq"),
+        CheckConstraint(
+            "window_end_at = window_start_at + interval '5 minutes' "
+            "AND data_available_at <= evaluated_at",
+            name="bounds",
+        ),
+        CheckConstraint(
+            "delivery_mode IN ('real_time','delayed','fixture','unknown') "
+            "AND btrim(source) <> '' AND btrim(feed) <> ''",
+            name="source",
+        ),
+        CheckConstraint(
+            "vwap > 0 AND volume > 0 AND capacity >= 0 "
+            "AND trunc(capacity) = capacity AND half_spread >= 0",
+            name="values",
+        ),
+        CheckConstraint(
+            "(quote_id IS NULL AND quote_revision IS NULL AND bid IS NULL "
+            "AND ask IS NULL AND half_spread = 0) "
+            "OR (quote_id IS NOT NULL AND quote_revision IS NOT NULL "
+            "AND bid > 0 AND ask >= bid AND half_spread = (ask - bid) / 2)",
+            name="quote_copy",
+        ),
+        CheckConstraint(
+            "source_content_hash ~ '^[0-9a-f]{64}$' "
+            "AND content_hash ~ '^[0-9a-f]{64}$'",
+            name="hashes",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    order_id: Mapped[UUID]
+    account_id: Mapped[UUID]
+    instrument_id: Mapped[UUID]
+    window_seq: Mapped[int] = mapped_column(Integer)
+    window_start_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    window_end_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    evaluated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    data_available_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    source_authority_id: Mapped[UUID]
+    source: Mapped[str] = mapped_column(String(100))
+    source_content_hash: Mapped[str] = mapped_column(String(64))
+    feed: Mapped[str] = mapped_column(String(100))
+    delivery_mode: Mapped[str] = mapped_column(String(20))
+    vwap: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    volume: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    capacity: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    quote_id: Mapped[UUID | None]
+    quote_revision: Mapped[str | None] = mapped_column(String(255))
+    bid: Mapped[Decimal | None] = mapped_column(DECIMAL_NUMERIC)
+    ask: Mapped[Decimal | None] = mapped_column(DECIMAL_NUMERIC)
+    half_spread: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    content_hash: Mapped[str] = mapped_column(String(64))
+
+
+class PaperExecutionWindowMemberRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "paper_execution_window_members"
+    __table_args__ = (
+        UniqueConstraint(
+            "window_authority_id",
+            "member_seq",
+            name="uq_paper_execution_window_member_seq",
+        ),
+        ForeignKeyConstraint(
+            ["window_authority_id"],
+            ["paper_execution_window_authorities.id"],
+            name="fk_paper_execution_window_members_window",
+        ),
+        ForeignKeyConstraint(
+            ["bar_id"], ["price_bar_records.id"], name="fk_paper_execution_window_members_bar"
+        ),
+        CheckConstraint("member_seq BETWEEN 1 AND 5", name="seq"),
+    )
+
+    window_authority_id: Mapped[UUID] = mapped_column(primary_key=True)
+    bar_id: Mapped[UUID] = mapped_column(primary_key=True)
+    member_seq: Mapped[int] = mapped_column(Integer)
+
+
+class PaperRequestIdempotencyRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "paper_request_idempotency"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "operation",
+            "idempotency_key",
+            name="uq_paper_request_idempotency_scope",
+        ),
+        ForeignKeyConstraint(
+            ["order_id", "account_id"],
+            ["paper_orders.id", "paper_orders.account_id"],
+            name="fk_paper_request_idempotency_order",
+        ),
+        CheckConstraint("operation IN ('advance','cancel')", name="operation"),
+        CheckConstraint("length(idempotency_key) BETWEEN 1 AND 255", name="key"),
+        CheckConstraint("result_event_seq IS NULL OR result_event_seq >= 1", name="seq"),
+        CheckConstraint(
+            "request_hash ~ '^[0-9a-f]{64}$' AND result_hash ~ '^[0-9a-f]{64}$'",
+            name="hashes",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    account_id: Mapped[UUID]
+    order_id: Mapped[UUID]
+    operation: Mapped[str] = mapped_column(String(30))
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    result_event_seq: Mapped[int | None] = mapped_column(Integer)
+    result_hash: Mapped[str] = mapped_column(String(64))
 
 
 class PaperFillRecord(ImmutableCreatedAt, Base):
@@ -981,6 +1159,10 @@ class PaperFillRecord(ImmutableCreatedAt, Base):
     __table_args__ = (
         UniqueConstraint("order_id", "fill_seq", name="uq_paper_fills_order_seq"),
         UniqueConstraint("id", "account_id", name="uq_paper_fills_id_account"),
+        UniqueConstraint(
+            "execution_window_authority_id", name="uq_paper_fills_execution_window"
+        ),
+        UniqueConstraint("ledger_transaction_id", name="uq_paper_fills_ledger_transaction"),
         UniqueConstraint(
             "id",
             "account_id",
@@ -1004,6 +1186,37 @@ class PaperFillRecord(ImmutableCreatedAt, Base):
             ["price_bar_set_authorities.id"],
             name="fk_paper_fills_source_authority",
         ),
+        ForeignKeyConstraint(
+            ["execution_model_id", "execution_model_hash"],
+            ["paper_execution_models.id", "paper_execution_models.content_hash"],
+            name="fk_paper_fills_execution_model",
+        ),
+        ForeignKeyConstraint(
+            [
+                "execution_window_authority_id",
+                "order_id",
+                "account_id",
+                "instrument_id",
+                "source_authority_id",
+            ],
+            [
+                "paper_execution_window_authorities.id",
+                "paper_execution_window_authorities.order_id",
+                "paper_execution_window_authorities.account_id",
+                "paper_execution_window_authorities.instrument_id",
+                "paper_execution_window_authorities.source_authority_id",
+            ],
+            name="fk_paper_fills_execution_window",
+        ),
+        ForeignKeyConstraint(
+            ["ledger_transaction_id", "account_id", "order_id"],
+            [
+                "paper_ledger_transactions.id",
+                "paper_ledger_transactions.account_id",
+                "paper_ledger_transactions.order_id",
+            ],
+            name="fk_paper_fills_ledger_transaction",
+        ),
         CheckConstraint("fill_seq >= 1", name="seq_positive"),
         CheckConstraint(
             "quantity > 0 AND trunc(quantity) = quantity "
@@ -1013,6 +1226,13 @@ class PaperFillRecord(ImmutableCreatedAt, Base):
         CheckConstraint(
             "execution_model_hash ~ '^[0-9a-f]{64}$' AND payload_hash ~ '^[0-9a-f]{64}$'",
             name="hashes_canonical",
+        ),
+        CheckConstraint(
+            "window_vwap > 0 AND half_spread >= 0 "
+            "AND slippage_bps IN (10,25) AND slippage_amount >= 0 "
+            "AND commission >= 0 AND regulatory_fee >= 0 "
+            "AND fee = commission + regulatory_fee",
+            name="execution_values",
         ),
     )
 
@@ -1029,6 +1249,16 @@ class PaperFillRecord(ImmutableCreatedAt, Base):
     source_authority_id: Mapped[UUID]
     execution_model_hash: Mapped[str] = mapped_column(String(64))
     payload_hash: Mapped[str] = mapped_column(String(64))
+    execution_model_id: Mapped[UUID]
+    execution_window_authority_id: Mapped[UUID]
+    ledger_transaction_id: Mapped[UUID]
+    window_vwap: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    half_spread: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    slippage_bps: Mapped[int] = mapped_column(Integer)
+    slippage_amount: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    commission: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    regulatory_fee: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    evaluated_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
 class PaperPositionAdjustmentEventRecord(ImmutableCreatedAt, Base):
@@ -1147,6 +1377,9 @@ class PaperPerformanceSnapshotRecord(ImmutableCreatedAt, Base):
             ["paper_accounts.id"],
             name="fk_paper_performance_snapshots_account",
         ),
+        UniqueConstraint(
+            "id", "account_id", name="uq_paper_performance_snapshots_id_account"
+        ),
         CheckConstraint(
             "nav > 0 AND peak_nav >= nav AND cash >= 0 AND fees >= 0 "
             "AND drawdown_ratio >= 0 AND drawdown_ratio <= 1",
@@ -1165,4 +1398,38 @@ class PaperPerformanceSnapshotRecord(ImmutableCreatedAt, Base):
     unrealized_pnl: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
     fees: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
     drawdown_ratio: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    content_hash: Mapped[str] = mapped_column(String(64))
+
+
+class PaperPerformanceAttributionRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "paper_performance_attributions"
+    __table_args__ = (
+        UniqueConstraint(
+            "performance_snapshot_id",
+            "dimension",
+            "dimension_key",
+            name="uq_paper_performance_attribution_dimension",
+        ),
+        ForeignKeyConstraint(
+            ["performance_snapshot_id", "account_id"],
+            ["paper_performance_snapshots.id", "paper_performance_snapshots.account_id"],
+            name="fk_paper_performance_attributions_snapshot",
+        ),
+        CheckConstraint("dimension IN ('cash','instrument','sector')", name="dimension"),
+        CheckConstraint("market_value >= 0 AND fees >= 0 AND slippage >= 0", name="values"),
+        CheckConstraint("completeness IN ('FULL','PARTIAL')", name="completeness"),
+        CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="hash"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    performance_snapshot_id: Mapped[UUID]
+    account_id: Mapped[UUID]
+    dimension: Mapped[str] = mapped_column(String(20))
+    dimension_key: Mapped[str] = mapped_column(String(100))
+    market_value: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    realized_pnl: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    unrealized_pnl: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    fees: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    slippage: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    completeness: Mapped[str] = mapped_column(String(10))
     content_hash: Mapped[str] = mapped_column(String(64))

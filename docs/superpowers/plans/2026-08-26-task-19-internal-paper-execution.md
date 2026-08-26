@@ -13,12 +13,12 @@
 
 ## Slice 2：执行证据迁移和数据库守卫
 
-- [ ] 新增 `engine/tests/integration/test_paper_execution_migration.py`，先断言 0015 表/列/约束/触发器/种子和 downgrade/upgrade 精确往返。
-- [ ] 新增 `engine/alembic/versions/0015_paper_execution.py`，仅向前增表/增列，不修改 `0014_paper.py`。
-- [ ] 更新 `engine/src/nexus/persistence/models/backtest.py` 的 session open/close 列和 `paper.py` 的 Task 19 表模型。
-- [ ] 新增 PostgreSQL 反例：未来 bar、非连续/5 根以外、跨账户/标的、换源、超容量、超订单、成交不完整根、更新/删除不可变事实。
-- [ ] 运行迁移往返和定向 PostgreSQL 测试。
-- [ ] 提交：`feat(db): add paper execution authorities`
+- [x] 新增 `engine/tests/integration/test_paper_execution_migration.py`，先断言 0015 表/列/约束/触发器/种子和 downgrade/upgrade 精确往返。
+- [x] 新增 `engine/alembic/versions/0015_paper_execution.py`，仅向前增表/增列，不修改 `0014_paper.py`。
+- [x] 更新 `engine/src/nexus/persistence/models/backtest.py` 的 session open/close 列和 `paper.py` 的 Task 19 表模型。
+- [x] 新增 PostgreSQL 窗口反例：未来 bar、非连续/5 根以外、跨标的、换源和更新不可变事实。成交根、超容量和超订单反例在 Slice 4 与原子 worker 一起验证。
+- [x] 运行迁移往返和定向 PostgreSQL 测试。
+- [x] 提交：`feat(db): add paper execution authorities`
 
 ## Slice 3：买卖成交记账与持仓投影
 

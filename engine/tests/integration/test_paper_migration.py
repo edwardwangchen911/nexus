@@ -131,10 +131,10 @@ async def _table_names(database_url: str) -> set[str]:
         await engine.dispose()
 
 
-def test_paper_revision_is_the_only_release_head() -> None:
+def test_paper_revision_precedes_the_execution_release_head() -> None:
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0014_paper"]
+    assert script.get_heads() == ["0015_paper_execution"]
     revision = script.get_revision("0014_paper")
     assert revision is not None
     assert revision.down_revision == "0013_shadow"

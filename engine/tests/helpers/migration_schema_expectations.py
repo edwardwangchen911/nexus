@@ -124,6 +124,11 @@ PAPER_TABLES = {
     "paper_position_adjustment_events",
     "paper_position_snapshots",
     "paper_performance_snapshots",
+    "paper_execution_models",
+    "paper_execution_window_authorities",
+    "paper_execution_window_members",
+    "paper_request_idempotency",
+    "paper_performance_attributions",
 }
 EXPECTED_TABLES = EXPECTED_TABLES | PAPER_TABLES
 

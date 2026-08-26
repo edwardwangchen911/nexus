@@ -81,12 +81,20 @@ class ExchangeCalendarSessionRecord(ImmutableCreatedAt, Base):
     """One session belonging to a frozen complete calendar authority."""
 
     __tablename__ = "exchange_calendar_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "market_open_at < market_close_at AND market_close_at <= decision_at",
+            name="market_bounds",
+        ),
+    )
 
     calendar_authority_id: Mapped[UUID] = mapped_column(
         ForeignKey("exchange_calendar_authorities.id"), primary_key=True
     )
     session: Mapped[date] = mapped_column(primary_key=True)
     decision_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    market_open_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    market_close_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
 class BacktestAuthorityCollectionRecord(ImmutableCreatedAt, Base):
