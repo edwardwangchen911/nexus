@@ -66,11 +66,11 @@
 
 ## Slice 8：`/paper` 页面和订单时间线
 
-- [ ] 新增 `tests/unit/paper/page.test.tsx`、`order-timeline.test.tsx` 和边界测试，先覆盖全状态、方向/状态标签、数字格式、事件顺序、source/feed/as-of 和取消确认。
-- [ ] 新增 `app/(protected)/paper/page.tsx`、`app/components/order-timeline.tsx` 和必要的独立类名样式；不改变 NEXUS 现有视觉语言。
-- [ ] 确认已有导航 `/paper` 可到达，屏幕阅读器、键盘、焦点、表格和动态状态均符合无障碍要求。
-- [ ] 运行 paper 页面单测、全量 Web 单测、lint 和 typecheck。
-- [ ] 提交：`feat(web): build internal paper console`
+- [x] 新增 `tests/unit/paper/page.test.tsx`、`order-timeline.test.tsx` 和边界测试，先覆盖全状态、方向/状态标签、数字格式、事件顺序、source/feed/as-of 和取消确认。
+- [x] 新增 `app/(protected)/paper/page.tsx`、`app/components/order-timeline.tsx` 和必要的独立类名样式；不改变 NEXUS 现有视觉语言。
+- [x] 确认已有导航 `/paper` 可到达，屏幕阅读器、键盘、焦点、表格和动态状态均符合无障碍要求。
+- [x] 运行 paper 页面单测、全量 Web 单测、lint 和 typecheck。
+- [x] 提交：`feat(web): build internal paper console`
 
 ## Slice 9：E2E、全量门禁和验收
 
