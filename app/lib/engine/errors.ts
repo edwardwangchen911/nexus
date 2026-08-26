@@ -17,6 +17,8 @@ import {
   researchRunRuntimeSchema,
   runtimeContractSchemas,
   strategySummaryRuntimeSchema,
+  shadowGroupRuntimeSchema,
+  shadowStartRuntimeSchema,
   watchlistMembershipRuntimeSchema,
   whatIfRuntimeSchema,
 } from "../generated/runtime-contract";
@@ -64,10 +66,10 @@ export function safeBffErrorResponse(error: unknown): Response {
   return errorResponse(500, "INTERNAL_ERROR", "The request could not be completed.");
 }
 
-export function rebuildAllowedEngineResponse(status: number, value: unknown, upstreamHeaders = new Headers(), requestUrl?: string, schemaPath?: string): Response | null {
+export function rebuildAllowedEngineResponse(status: number, value: unknown, upstreamHeaders = new Headers(), requestUrl?: string, schemaPath?: string, requestMethod?: string): Response | null {
   if ([200, 201, 202].includes(status) && isObject(value, ["data", "meta"])) {
     const { data, meta } = value;
-    const safeData = allowedSuccessData(data, requestUrl, schemaPath);
+    const safeData = allowedSuccessData(data, requestUrl, schemaPath, requestMethod);
     if (safeData !== INVALID_DATA && isObject(meta, ["request_id", "schema_version", "as_of"])
       && isV7(meta.request_id) && meta.schema_version === "1" && isUtcIso(meta.as_of)
       && responseIdentityValid(safeData, meta, requestUrl)) {
@@ -92,7 +94,7 @@ export function rebuildAllowedEngineResponse(status: number, value: unknown, ups
 
 const INVALID_DATA = Symbol("invalid engine data");
 
-function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: string): unknown | typeof INVALID_DATA {
+function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: string, requestMethod?: string): unknown | typeof INVALID_DATA {
   const pathname = enginePathname(requestUrl, schemaPath);
   if (pathname === "/internal/v1/system-status") {
     return isObject(data, ["status"]) && data.status === "ok" ? { status: "ok" } : INVALID_DATA;
@@ -167,10 +169,20 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
   }
   const proposalLifecycle = /^\/internal\/v1\/optimization-proposals\/([^/]+)\/(shadow|reject)$/.exec(pathname);
   if (proposalLifecycle && validateUuid(proposalLifecycle[1])) {
-    return matchesRuntimeSchema(data, optimizationLifecycleRuntimeSchema) && isPlain(data)
-      && sameUuid(data.proposal_group_id, proposalLifecycle[1])
-      ? data
-      : INVALID_DATA;
+    const method = requestMethod?.toUpperCase();
+    if (proposalLifecycle[2] === "shadow" && method === "POST") {
+      return shadowStartValid(data, proposalLifecycle[1]) ? data : INVALID_DATA;
+    }
+    if (proposalLifecycle[2] === "shadow" && method === "GET") {
+      return shadowGroupValid(data, proposalLifecycle[1]) ? data : INVALID_DATA;
+    }
+    if (proposalLifecycle[2] === "reject" && method === "POST") {
+      return matchesRuntimeSchema(data, optimizationLifecycleRuntimeSchema) && isPlain(data)
+        && sameUuid(data.proposal_group_id, proposalLifecycle[1])
+        ? data
+        : INVALID_DATA;
+    }
+    return INVALID_DATA;
   }
   if (pathname === "/internal/v1/what-if/evaluate") {
     return matchesRuntimeSchema(data, whatIfRuntimeSchema) && isPlain(data)
@@ -225,6 +237,98 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       : INVALID_DATA;
   }
   return schemaPath === undefined && isPlain(data) ? data : INVALID_DATA;
+}
+
+function shadowStartValid(data: unknown, groupId: string): data is Record<string, unknown> {
+  if (!matchesRuntimeSchema(data, shadowStartRuntimeSchema) || !isPlain(data)) return false;
+  return sameUuid(data.proposal_group_id, groupId)
+    && data.status === "shadowing"
+    && orderedShadowWindow(data);
+}
+
+function shadowGroupValid(data: unknown, groupId: string): data is Record<string, unknown> {
+  if (!matchesRuntimeSchema(data, shadowGroupRuntimeSchema) || !isPlain(data)
+    || !sameUuid(data.proposal_group_id, groupId) || !orderedShadowWindow(data)
+    || !isPlain(data.coverage) || !isPlain(data.freshness) || !isPlain(data.safety)
+    || !Array.isArray(data.portfolios) || !Array.isArray(data.checkpoints)) return false;
+
+  const portfolios = data.portfolios;
+  const expectedVariants = ["hold_current", "minimum_change", "strategy_target"];
+  if (portfolios.map((item) => isPlain(item) ? item.variant : null).join(":") !== expectedVariants.join(":")) return false;
+  const portfolioIds = portfolios.map((item) => isPlain(item) ? item.shadow_portfolio_id : null);
+  if (!portfolioIds.every((value) => typeof value === "string") || new Set(portfolioIds).size !== 3) return false;
+
+  const navSessions = portfolios.map((portfolio) => {
+    if (!isPlain(portfolio) || !Array.isArray(portfolio.nav) || portfolio.nav.length > 63) return null;
+    const sessions = portfolio.nav.map((point) => isPlain(point) ? point.session : null);
+    return sessions.every((session) => typeof session === "string")
+      && strictlyIncreasing(sessions as string[]) ? sessions as string[] : null;
+  });
+  if (navSessions.some((sessions) => sessions === null)) return false;
+  const firstSessions = navSessions[0] as string[];
+  if (!navSessions.every((sessions) => (sessions as string[]).join(":") === firstSessions.join(":"))
+    || data.coverage.completed !== firstSessions.length) return false;
+
+  const completed = data.coverage.completed;
+  const nextExpected = data.coverage.next_expected_session;
+  const missing = data.coverage.missing_sessions;
+  if (!Number.isInteger(completed) || completed < 0 || completed > 63
+    || (completed === 63) !== (nextExpected === null)
+    || !Array.isArray(missing) || !missing.every((session) => typeof session === "string")
+    || !strictlyIncreasing(missing as string[])) return false;
+
+  if ((data.freshness.status === "current") !== (data.freshness.reason === null)
+    || (data.freshness.latest_session === null) !== (data.freshness.available_at === null)) return false;
+
+  const ordinals = data.checkpoints.map((checkpoint) => isPlain(checkpoint) ? checkpoint.ordinal : null);
+  if (!ordinals.every((ordinal) => ordinal === 5 || ordinal === 21 || ordinal === 63)
+    || !strictlyIncreasing(ordinals as number[])
+    || !data.checkpoints.every(shadowCheckpointValid)) return false;
+
+  if (data.safety.creates_orders !== false || data.safety.trading_approval !== false) return false;
+  if (data.sealed === true) {
+    if (!(["validated", "rejected", "expired"].includes(String(data.seal_reason)))
+      || data.proposal_status !== data.seal_reason) return false;
+  } else if (data.seal_reason !== null || data.proposal_status !== "shadowing") return false;
+  return true;
+}
+
+function shadowCheckpointValid(value: unknown): boolean {
+  if (!isPlain(value) || !Array.isArray(value.metrics) || value.metrics.length !== 3) return false;
+  const variants = value.metrics.map((metric) => isPlain(metric) ? metric.variant : null);
+  if (variants.join(":") !== "hold_current:minimum_change:strategy_target") return false;
+  const expectedStatus = value.status === "complete" ? "known" : "unknown";
+  if ((value.status === "complete") !== (value.reason === null)) return false;
+  const metricKeys = [
+    "net_cumulative_return",
+    "return_delta_vs_hold",
+    "max_drawdown",
+    "drawdown_improvement",
+    "annualized_volatility",
+    "volatility_improvement",
+    "cumulative_turnover",
+    "fee_drag_index_points",
+  ];
+  return value.metrics.every((variantMetric) => {
+    if (!isPlain(variantMetric) || !isPlain(variantMetric.metrics)) return false;
+    const metrics = variantMetric.metrics;
+    return metricKeys.every((key) => {
+      const metric = metrics[key];
+      return isPlain(metric) && metric.status === expectedStatus;
+    });
+  });
+}
+
+function orderedShadowWindow(data: Record<string, unknown>): boolean {
+  return typeof data.start_session === "string"
+    && typeof data.evaluation_end_session === "string"
+    && typeof data.grace_end_session === "string"
+    && data.start_session <= data.evaluation_end_session
+    && data.evaluation_end_session < data.grace_end_session;
+}
+
+function strictlyIncreasing(values: Array<string | number>): boolean {
+  return values.every((value, index) => index === 0 || values[index - 1] < value);
 }
 
 function safeIntegrationStatus(value: unknown): Record<string, unknown> | null {

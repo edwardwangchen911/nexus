@@ -2757,6 +2757,187 @@ export const runtimeContractSchemas = {
     "title": "SelectedMarketSeriesResponse",
     "type": "object"
   },
+  "ShadowAttemptResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "created_at": {
+        "format": "date-time",
+        "title": "Created At",
+        "type": "string"
+      },
+      "expected_session": {
+        "anyOf": [
+          {
+            "format": "date",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Expected Session"
+      },
+      "observed_at": {
+        "format": "date-time",
+        "title": "Observed At",
+        "type": "string"
+      },
+      "reason": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Reason",
+        "type": "string"
+      },
+      "requested_session": {
+        "format": "date",
+        "title": "Requested Session",
+        "type": "string"
+      },
+      "result": {
+        "enum": [
+          "data_partial",
+          "data_stale",
+          "source_conflict",
+          "session_gap"
+        ],
+        "title": "Result",
+        "type": "string"
+      }
+    },
+    "required": [
+      "requested_session",
+      "expected_session",
+      "result",
+      "reason",
+      "observed_at",
+      "created_at"
+    ],
+    "title": "ShadowAttemptResponse",
+    "type": "object"
+  },
+  "ShadowCheckpointResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "coverage_count": {
+        "maximum": 63,
+        "minimum": 0,
+        "title": "Coverage Count",
+        "type": "integer"
+      },
+      "metrics": {
+        "maxItems": 3,
+        "minItems": 3,
+        "prefixItems": [
+          {
+            "$ref": "#/components/schemas/ShadowVariantMetricsResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ShadowVariantMetricsResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ShadowVariantMetricsResponse"
+          }
+        ],
+        "title": "Metrics",
+        "type": "array"
+      },
+      "ordinal": {
+        "enum": [
+          5,
+          21,
+          63
+        ],
+        "title": "Ordinal",
+        "type": "integer"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "session": {
+        "format": "date",
+        "title": "Session",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "complete",
+          "incomplete"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "ordinal",
+      "session",
+      "status",
+      "coverage_count",
+      "reason",
+      "metrics"
+    ],
+    "title": "ShadowCheckpointResponse",
+    "type": "object"
+  },
+  "ShadowCoverageResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "completed": {
+        "maximum": 63,
+        "minimum": 0,
+        "title": "Completed",
+        "type": "integer"
+      },
+      "due": {
+        "maximum": 63,
+        "minimum": 0,
+        "title": "Due",
+        "type": "integer"
+      },
+      "missing_sessions": {
+        "items": {
+          "format": "date",
+          "type": "string"
+        },
+        "maxItems": 63,
+        "title": "Missing Sessions",
+        "type": "array"
+      },
+      "next_expected_session": {
+        "anyOf": [
+          {
+            "format": "date",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Next Expected Session"
+      },
+      "required": {
+        "const": 63,
+        "title": "Required",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "completed",
+      "due",
+      "required",
+      "next_expected_session",
+      "missing_sessions"
+    ],
+    "title": "ShadowCoverageResponse",
+    "type": "object"
+  },
   "ShadowEligibilityResponse": {
     "additionalProperties": false,
     "properties": {
@@ -2777,6 +2958,644 @@ export const runtimeContractSchemas = {
       "reasons"
     ],
     "title": "ShadowEligibilityResponse",
+    "type": "object"
+  },
+  "ShadowFillResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "cost": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Cost",
+        "type": "string"
+      },
+      "notional": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Notional",
+        "type": "string"
+      },
+      "price": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Price",
+        "type": "string"
+      },
+      "quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Quantity",
+        "type": "string"
+      },
+      "side": {
+        "enum": [
+          "buy",
+          "sell"
+        ],
+        "title": "Side",
+        "type": "string"
+      }
+    },
+    "required": [
+      "side",
+      "quantity",
+      "price",
+      "notional",
+      "cost"
+    ],
+    "title": "ShadowFillResponse",
+    "type": "object"
+  },
+  "ShadowFreshnessResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "available_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Available At"
+      },
+      "database_time": {
+        "format": "date-time",
+        "title": "Database Time",
+        "type": "string"
+      },
+      "last_attempt_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Last Attempt At"
+      },
+      "latest_session": {
+        "anyOf": [
+          {
+            "format": "date",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Latest Session"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "status": {
+        "enum": [
+          "current",
+          "stale",
+          "unknown"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "status",
+      "latest_session",
+      "available_at",
+      "last_attempt_at",
+      "database_time",
+      "reason"
+    ],
+    "title": "ShadowFreshnessResponse",
+    "type": "object"
+  },
+  "ShadowGroupResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "checkpoints": {
+        "items": {
+          "$ref": "#/components/schemas/ShadowCheckpointResponse"
+        },
+        "maxItems": 3,
+        "title": "Checkpoints",
+        "type": "array"
+      },
+      "coverage": {
+        "$ref": "#/components/schemas/ShadowCoverageResponse"
+      },
+      "evaluation_end_session": {
+        "format": "date",
+        "title": "Evaluation End Session",
+        "type": "string"
+      },
+      "freshness": {
+        "$ref": "#/components/schemas/ShadowFreshnessResponse"
+      },
+      "grace_end_session": {
+        "format": "date",
+        "title": "Grace End Session",
+        "type": "string"
+      },
+      "last_failed_attempt": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ShadowAttemptResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "portfolios": {
+        "maxItems": 3,
+        "minItems": 3,
+        "prefixItems": [
+          {
+            "$ref": "#/components/schemas/ShadowPortfolioResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ShadowPortfolioResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ShadowPortfolioResponse"
+          }
+        ],
+        "title": "Portfolios",
+        "type": "array"
+      },
+      "proposal_group_id": {
+        "format": "uuid",
+        "title": "Proposal Group Id",
+        "type": "string"
+      },
+      "proposal_status": {
+        "enum": [
+          "draft",
+          "compared",
+          "shadowing",
+          "validated",
+          "rejected",
+          "expired"
+        ],
+        "title": "Proposal Status",
+        "type": "string"
+      },
+      "safety": {
+        "$ref": "#/components/schemas/ShadowSafetyResponse"
+      },
+      "seal_reason": {
+        "anyOf": [
+          {
+            "enum": [
+              "validated",
+              "rejected",
+              "expired"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Seal Reason"
+      },
+      "sealed": {
+        "title": "Sealed",
+        "type": "boolean"
+      },
+      "shadow_group_id": {
+        "format": "uuid",
+        "title": "Shadow Group Id",
+        "type": "string"
+      },
+      "sources": {
+        "items": {
+          "$ref": "#/components/schemas/ShadowSourceResponse"
+        },
+        "maxItems": 32,
+        "title": "Sources",
+        "type": "array"
+      },
+      "start_session": {
+        "format": "date",
+        "title": "Start Session",
+        "type": "string"
+      },
+      "version": {
+        "minimum": 0,
+        "title": "Version",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "proposal_group_id",
+      "shadow_group_id",
+      "proposal_status",
+      "version",
+      "start_session",
+      "evaluation_end_session",
+      "grace_end_session",
+      "coverage",
+      "freshness",
+      "sources",
+      "portfolios",
+      "checkpoints",
+      "last_failed_attempt",
+      "sealed",
+      "seal_reason",
+      "safety"
+    ],
+    "title": "ShadowGroupResponse",
+    "type": "object"
+  },
+  "ShadowMetricValueResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "reason": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "status": {
+        "enum": [
+          "known",
+          "unknown"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "value": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Value"
+      }
+    },
+    "required": [
+      "status",
+      "value",
+      "reason"
+    ],
+    "title": "ShadowMetricValueResponse",
+    "type": "object"
+  },
+  "ShadowMetricsResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "annualized_volatility": {
+        "$ref": "#/components/schemas/ShadowMetricValueResponse"
+      },
+      "cumulative_turnover": {
+        "$ref": "#/components/schemas/ShadowMetricValueResponse"
+      },
+      "drawdown_improvement": {
+        "$ref": "#/components/schemas/ShadowMetricValueResponse"
+      },
+      "fee_drag_index_points": {
+        "$ref": "#/components/schemas/ShadowMetricValueResponse"
+      },
+      "max_drawdown": {
+        "$ref": "#/components/schemas/ShadowMetricValueResponse"
+      },
+      "net_cumulative_return": {
+        "$ref": "#/components/schemas/ShadowMetricValueResponse"
+      },
+      "return_delta_vs_hold": {
+        "$ref": "#/components/schemas/ShadowMetricValueResponse"
+      },
+      "volatility_improvement": {
+        "$ref": "#/components/schemas/ShadowMetricValueResponse"
+      },
+      "worst_sessions": {
+        "items": {
+          "$ref": "#/components/schemas/ShadowWorstSessionResponse"
+        },
+        "maxItems": 5,
+        "title": "Worst Sessions",
+        "type": "array"
+      }
+    },
+    "required": [
+      "net_cumulative_return",
+      "return_delta_vs_hold",
+      "max_drawdown",
+      "drawdown_improvement",
+      "annualized_volatility",
+      "volatility_improvement",
+      "worst_sessions",
+      "cumulative_turnover",
+      "fee_drag_index_points"
+    ],
+    "title": "ShadowMetricsResponse",
+    "type": "object"
+  },
+  "ShadowNavPointResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "nav": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Nav",
+        "type": "string"
+      },
+      "session": {
+        "format": "date",
+        "title": "Session",
+        "type": "string"
+      }
+    },
+    "required": [
+      "session",
+      "nav"
+    ],
+    "title": "ShadowNavPointResponse",
+    "type": "object"
+  },
+  "ShadowOutcomeResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "fill": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ShadowFillResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "reason": {
+        "maxLength": 255,
+        "minLength": 1,
+        "title": "Reason",
+        "type": "string"
+      },
+      "side": {
+        "enum": [
+          "buy",
+          "sell",
+          "rebalance"
+        ],
+        "title": "Side",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "filled",
+          "missing_bar",
+          "untradable"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "instrument_id",
+      "side",
+      "status",
+      "reason",
+      "fill"
+    ],
+    "title": "ShadowOutcomeResponse",
+    "type": "object"
+  },
+  "ShadowPortfolioResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "initial_outcomes": {
+        "items": {
+          "$ref": "#/components/schemas/ShadowOutcomeResponse"
+        },
+        "maxItems": 30,
+        "title": "Initial Outcomes",
+        "type": "array"
+      },
+      "nav": {
+        "items": {
+          "$ref": "#/components/schemas/ShadowNavPointResponse"
+        },
+        "maxItems": 63,
+        "title": "Nav",
+        "type": "array"
+      },
+      "shadow_portfolio_id": {
+        "format": "uuid",
+        "title": "Shadow Portfolio Id",
+        "type": "string"
+      },
+      "variant": {
+        "enum": [
+          "hold_current",
+          "minimum_change",
+          "strategy_target"
+        ],
+        "title": "Variant",
+        "type": "string"
+      }
+    },
+    "required": [
+      "shadow_portfolio_id",
+      "variant",
+      "nav",
+      "initial_outcomes"
+    ],
+    "title": "ShadowPortfolioResponse",
+    "type": "object"
+  },
+  "ShadowSafetyResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "creates_orders": {
+        "const": false,
+        "title": "Creates Orders",
+        "type": "boolean"
+      },
+      "trading_approval": {
+        "const": false,
+        "title": "Trading Approval",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "creates_orders",
+      "trading_approval"
+    ],
+    "title": "ShadowSafetyResponse",
+    "type": "object"
+  },
+  "ShadowSourceResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "available_at": {
+        "format": "date-time",
+        "title": "Available At",
+        "type": "string"
+      },
+      "delivery_mode": {
+        "enum": [
+          "real_time",
+          "delayed",
+          "fixture",
+          "unknown"
+        ],
+        "title": "Delivery Mode",
+        "type": "string"
+      },
+      "kind": {
+        "enum": [
+          "price_bars",
+          "corporate_actions"
+        ],
+        "title": "Kind",
+        "type": "string"
+      },
+      "latest_session": {
+        "format": "date",
+        "title": "Latest Session",
+        "type": "string"
+      },
+      "source": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Source",
+        "type": "string"
+      }
+    },
+    "required": [
+      "source",
+      "kind",
+      "delivery_mode",
+      "latest_session",
+      "available_at"
+    ],
+    "title": "ShadowSourceResponse",
+    "type": "object"
+  },
+  "ShadowStartData": {
+    "additionalProperties": false,
+    "properties": {
+      "evaluation_end_session": {
+        "format": "date",
+        "title": "Evaluation End Session",
+        "type": "string"
+      },
+      "grace_end_session": {
+        "format": "date",
+        "title": "Grace End Session",
+        "type": "string"
+      },
+      "proposal_group_id": {
+        "format": "uuid",
+        "title": "Proposal Group Id",
+        "type": "string"
+      },
+      "shadow_group_id": {
+        "format": "uuid",
+        "title": "Shadow Group Id",
+        "type": "string"
+      },
+      "start_session": {
+        "format": "date",
+        "title": "Start Session",
+        "type": "string"
+      },
+      "status": {
+        "const": "shadowing",
+        "title": "Status",
+        "type": "string"
+      },
+      "version": {
+        "minimum": 0,
+        "title": "Version",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "proposal_group_id",
+      "shadow_group_id",
+      "status",
+      "version",
+      "start_session",
+      "evaluation_end_session",
+      "grace_end_session"
+    ],
+    "title": "ShadowStartData",
+    "type": "object"
+  },
+  "ShadowVariantMetricsResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "metrics": {
+        "$ref": "#/components/schemas/ShadowMetricsResponse"
+      },
+      "variant": {
+        "enum": [
+          "hold_current",
+          "minimum_change",
+          "strategy_target"
+        ],
+        "title": "Variant",
+        "type": "string"
+      }
+    },
+    "required": [
+      "variant",
+      "metrics"
+    ],
+    "title": "ShadowVariantMetricsResponse",
+    "type": "object"
+  },
+  "ShadowWorstSessionResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "return_value": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Return Value",
+        "type": "string"
+      },
+      "session": {
+        "format": "date",
+        "title": "Session",
+        "type": "string"
+      }
+    },
+    "required": [
+      "session",
+      "return_value"
+    ],
+    "title": "ShadowWorstSessionResponse",
     "type": "object"
   },
   "SnapshotStatus": {
@@ -3035,6 +3854,10 @@ export const optimizationJobRuntimeSchema = runtimeContractSchemas.OptimizationJ
 export const optimizationLifecycleRuntimeSchema = runtimeContractSchemas.OptimizationLifecycleData;
 
 export const optimizationProposalGroupRuntimeSchema = runtimeContractSchemas.OptimizationProposalGroupResponse;
+
+export const shadowStartRuntimeSchema = runtimeContractSchemas.ShadowStartData;
+
+export const shadowGroupRuntimeSchema = runtimeContractSchemas.ShadowGroupResponse;
 
 export const whatIfRuntimeSchema = runtimeContractSchemas.WhatIfResponse;
 

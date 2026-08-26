@@ -133,6 +133,32 @@ describe("optimization BFF routes", () => {
     expect(engineFetch).not.toHaveBeenCalled();
   });
 
+  it("reads Shadow state without forwarding write-only headers or a body", async () => {
+    const route = await import("../../../app/api/v1/optimization-proposals/[proposalGroupId]/shadow/route");
+    await route.GET(new Request(
+      `https://nexus.test/api/v1/optimization-proposals/${groupId}/shadow`,
+      {
+        headers: {
+          accept: "application/json",
+          "idempotency-key": "must-not-forward",
+          "if-match": '"4"',
+        },
+      },
+    ));
+
+    expect(engineFetch).toHaveBeenCalledWith({
+      template: "/internal/v1/optimization-proposals/{group_id}/shadow",
+      path: `/internal/v1/optimization-proposals/${groupId}/shadow`,
+    }, { method: "GET", actor, headers: { accept: "application/json" } });
+
+    engineFetch.mockClear();
+    const invalid = await route.GET(new Request(
+      "https://nexus.test/api/v1/optimization-proposals/not-a-uuid/shadow",
+    ));
+    expect(invalid.status).toBe(400);
+    expect(engineFetch).not.toHaveBeenCalled();
+  });
+
   it("accepts the persisted draft version zero while rejecting invalid lifecycle versions", async () => {
     const route = await import("../../../app/api/v1/optimization-proposals/[proposalGroupId]/reject/route");
     const accepted = await route.POST(new Request(`https://nexus.test/api/v1/optimization-proposals/${groupId}/reject`, {

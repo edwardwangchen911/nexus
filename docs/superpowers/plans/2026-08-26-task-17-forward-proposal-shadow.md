@@ -760,18 +760,25 @@ POST keeps exact body, `Idempotency-Key`, and `If-Match`; GET has no body/idempo
 
 **Steps**
 
-- [ ] Add FastAPI red tests for POST start body/boundaries/idempotency/error mapping and GET not-started 404, fixed order, Decimal strings, data-partial 409, freshness, source latency, safety flags, and no order/trade IDs.
-- [ ] Add OpenAPI contract tests asserting both operations, distinct response schemas, no advance/checkpoint/validate path, and all nested Shadow schemas are closed (`additionalProperties=false`).
-- [ ] Replace `shadow_optimization_group()` with a direct `start_proposal_shadow()` adapter; keep `_transition_endpoint()` only for rejection.
-- [ ] Add GET route using `load_shadow_view()` and stable error details: `SHADOW_NOT_STARTED`, exact Shadow corruption/authority reasons, and no provider/table/credential strings.
-- [ ] Extend `rootNames` in `scripts/generate-client.mjs` with `ShadowStartData` and `ShadowGroupResponse`; export `shadowStartRuntimeSchema` and `shadowGroupRuntimeSchema`, then run `npm run generate:client`.
-- [ ] Export both `GET` and `POST` from the BFF route. GET forwards only actor/accept; POST preserves exact bytes and guarded headers.
-- [ ] Split `allowedSuccessData()` by request method/path, verify proposal group UUID semantically, fixed variant order, 63-point cap, safety false constants, and seal/status consistency before returning data.
-- [ ] Add BFF unit tests for method confusion, malformed nested Decimal/date/UUID/order, oversized arrays, extra fields, unsafe upstream errors, uppercase-equivalent UUIDs, GET 404, and POST response identity.
-- [ ] Run `uv run --package nexus-engine pytest engine/tests/integration/test_shadow_api.py engine/tests/integration/test_optimization_api.py engine/tests/contract/test_openapi.py -q`; expect exit 0.
-- [ ] Run `npm run check:generated && npm run test:unit -- tests/unit/optimize/routes.test.ts tests/unit/optimize/runtime-boundary.test.ts tests/unit/engine/client-security.test.ts`; expect exit 0.
-- [ ] Run Ruff/Mypy for API/Shadow schemas and `npm run typecheck`; expect exit 0.
-- [ ] Commit generated and handwritten contract files together with `feat(api): expose auditable proposal shadow results`.
+- [x] Add FastAPI red tests for POST start body/boundaries/idempotency/error mapping and GET not-started 404, fixed order, Decimal strings, data-partial 409, freshness, source latency, safety flags, and no order/trade IDs.
+- [x] Add OpenAPI contract tests asserting both operations, distinct response schemas, no advance/checkpoint/validate path, and all nested Shadow schemas are closed (`additionalProperties=false`).
+- [x] Replace `shadow_optimization_group()` with a direct `start_proposal_shadow()` adapter; keep `_transition_endpoint()` only for rejection.
+- [x] Add GET route using `load_shadow_view()` and stable error details: `SHADOW_NOT_STARTED`, exact Shadow corruption/authority reasons, and no provider/table/credential strings.
+- [x] Extend `rootNames` in `scripts/generate-client.mjs` with `ShadowStartData` and `ShadowGroupResponse`; export `shadowStartRuntimeSchema` and `shadowGroupRuntimeSchema`, then run `npm run generate:client`.
+- [x] Export both `GET` and `POST` from the BFF route. GET forwards only actor/accept; POST preserves exact bytes and guarded headers.
+- [x] Split `allowedSuccessData()` by request method/path, verify proposal group UUID semantically, fixed variant order, 63-point cap, safety false constants, and seal/status consistency before returning data.
+- [x] Add BFF unit tests for method confusion, malformed nested Decimal/date/UUID/order, oversized arrays, extra fields, unsafe upstream errors, uppercase-equivalent UUIDs, GET 404, and POST response identity.
+- [x] Run `uv run --package nexus-engine pytest engine/tests/integration/test_shadow_api.py engine/tests/integration/test_optimization_api.py engine/tests/contract/test_openapi.py -q`; expect exit 0.
+- [x] Run `npm run check:generated && npm run test:unit -- tests/unit/optimize/routes.test.ts tests/unit/optimize/runtime-boundary.test.ts tests/unit/engine/client-security.test.ts`; expect exit 0.
+- [x] Run Ruff/Mypy for API/Shadow schemas and `npm run typecheck`; expect exit 0.
+- [x] Commit generated and handwritten contract files together with `feat(api): expose auditable proposal shadow results`.
+
+Evidence: the first focused API/OpenAPI run failed in five places because POST
+still returned the generic lifecycle shape and GET did not exist; the first BFF
+run then failed on the missing GET export and both method-specific response
+contracts. The implemented slice passed 28 focused Engine tests and 87 focused
+Web unit tests. Generated-contract checks, Ruff, Mypy across 179 source files,
+TypeScript typecheck, ESLint, and `git diff --check` all exited 0.
 
 ---
 

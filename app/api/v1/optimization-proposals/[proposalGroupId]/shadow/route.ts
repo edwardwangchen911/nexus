@@ -2,6 +2,18 @@ import { engineFetch } from "../../../../../lib/engine/client";
 import { withNexusBff } from "../../../../../lib/engine/with-nexus-bff";
 import { proposalGroupId, readExactJson, requireIdempotencyKey, requireLifecycleVersion } from "../../../../../lib/optimization/bff";
 
+export const GET = withNexusBff(async (request, actor) => {
+  const groupId = proposalGroupId(request, "shadow");
+  return engineFetch({
+    template: "/internal/v1/optimization-proposals/{group_id}/shadow",
+    path: `/internal/v1/optimization-proposals/${groupId}/shadow`,
+  }, {
+    method: "GET",
+    actor,
+    headers: { accept: "application/json" },
+  });
+});
+
 export const POST = withNexusBff(async (request, actor) => {
   const groupId = proposalGroupId(request, "shadow");
   const body = await readExactJson(request, "The shadow request is invalid.");

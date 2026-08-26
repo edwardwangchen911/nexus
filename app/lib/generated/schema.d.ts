@@ -259,10 +259,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** Get Optimization Group Shadow */
+        get: operations["getOptimizationProposalShadow"];
         put?: never;
         /** Shadow Optimization Group */
-        post: operations["shadow_optimization_group_internal_v1_optimization_proposals__group_id__shadow_post"];
+        post: operations["startOptimizationProposalShadow"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1649,12 +1650,348 @@ export interface components {
             /** Source */
             source: string | null;
         };
+        /** ShadowAttemptResponse */
+        ShadowAttemptResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Expected Session */
+            expected_session: string | null;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Reason */
+            reason: string;
+            /**
+             * Requested Session
+             * Format: date
+             */
+            requested_session: string;
+            /**
+             * Result
+             * @enum {string}
+             */
+            result: "data_partial" | "data_stale" | "source_conflict" | "session_gap";
+        };
+        /** ShadowCheckpointResponse */
+        ShadowCheckpointResponse: {
+            /** Coverage Count */
+            coverage_count: number;
+            /** Metrics */
+            metrics: [
+                components["schemas"]["ShadowVariantMetricsResponse"],
+                components["schemas"]["ShadowVariantMetricsResponse"],
+                components["schemas"]["ShadowVariantMetricsResponse"]
+            ];
+            /**
+             * Ordinal
+             * @enum {integer}
+             */
+            ordinal: 5 | 21 | 63;
+            /** Reason */
+            reason: string | null;
+            /**
+             * Session
+             * Format: date
+             */
+            session: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "complete" | "incomplete";
+        };
+        /** ShadowCoverageResponse */
+        ShadowCoverageResponse: {
+            /** Completed */
+            completed: number;
+            /** Due */
+            due: number;
+            /** Missing Sessions */
+            missing_sessions: string[];
+            /** Next Expected Session */
+            next_expected_session: string | null;
+            /**
+             * Required
+             * @constant
+             */
+            required: 63;
+        };
         /** ShadowEligibilityResponse */
         ShadowEligibilityResponse: {
             /** Eligible */
             eligible: boolean;
             /** Reasons */
             reasons: string[];
+        };
+        /** ShadowFillResponse */
+        ShadowFillResponse: {
+            /** Cost */
+            cost: string;
+            /** Notional */
+            notional: string;
+            /** Price */
+            price: string;
+            /** Quantity */
+            quantity: string;
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "buy" | "sell";
+        };
+        /** ShadowFreshnessResponse */
+        ShadowFreshnessResponse: {
+            /** Available At */
+            available_at: string | null;
+            /**
+             * Database Time
+             * Format: date-time
+             */
+            database_time: string;
+            /** Last Attempt At */
+            last_attempt_at: string | null;
+            /** Latest Session */
+            latest_session: string | null;
+            /** Reason */
+            reason: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "current" | "stale" | "unknown";
+        };
+        /** ShadowGroupEnvelope */
+        ShadowGroupEnvelope: {
+            data: components["schemas"]["ShadowGroupResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** ShadowGroupResponse */
+        ShadowGroupResponse: {
+            /** Checkpoints */
+            checkpoints: components["schemas"]["ShadowCheckpointResponse"][];
+            coverage: components["schemas"]["ShadowCoverageResponse"];
+            /**
+             * Evaluation End Session
+             * Format: date
+             */
+            evaluation_end_session: string;
+            freshness: components["schemas"]["ShadowFreshnessResponse"];
+            /**
+             * Grace End Session
+             * Format: date
+             */
+            grace_end_session: string;
+            last_failed_attempt: components["schemas"]["ShadowAttemptResponse"] | null;
+            /** Portfolios */
+            portfolios: [
+                components["schemas"]["ShadowPortfolioResponse"],
+                components["schemas"]["ShadowPortfolioResponse"],
+                components["schemas"]["ShadowPortfolioResponse"]
+            ];
+            /**
+             * Proposal Group Id
+             * Format: uuid
+             */
+            proposal_group_id: string;
+            /**
+             * Proposal Status
+             * @enum {string}
+             */
+            proposal_status: "draft" | "compared" | "shadowing" | "validated" | "rejected" | "expired";
+            safety: components["schemas"]["ShadowSafetyResponse"];
+            /** Seal Reason */
+            seal_reason: ("validated" | "rejected" | "expired") | null;
+            /** Sealed */
+            sealed: boolean;
+            /**
+             * Shadow Group Id
+             * Format: uuid
+             */
+            shadow_group_id: string;
+            /** Sources */
+            sources: components["schemas"]["ShadowSourceResponse"][];
+            /**
+             * Start Session
+             * Format: date
+             */
+            start_session: string;
+            /** Version */
+            version: number;
+        };
+        /** ShadowMetricsResponse */
+        ShadowMetricsResponse: {
+            annualized_volatility: components["schemas"]["ShadowMetricValueResponse"];
+            cumulative_turnover: components["schemas"]["ShadowMetricValueResponse"];
+            drawdown_improvement: components["schemas"]["ShadowMetricValueResponse"];
+            fee_drag_index_points: components["schemas"]["ShadowMetricValueResponse"];
+            max_drawdown: components["schemas"]["ShadowMetricValueResponse"];
+            net_cumulative_return: components["schemas"]["ShadowMetricValueResponse"];
+            return_delta_vs_hold: components["schemas"]["ShadowMetricValueResponse"];
+            volatility_improvement: components["schemas"]["ShadowMetricValueResponse"];
+            /** Worst Sessions */
+            worst_sessions: components["schemas"]["ShadowWorstSessionResponse"][];
+        };
+        /** ShadowMetricValueResponse */
+        ShadowMetricValueResponse: {
+            /** Reason */
+            reason: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "known" | "unknown";
+            /** Value */
+            value: string | null;
+        };
+        /** ShadowNavPointResponse */
+        ShadowNavPointResponse: {
+            /** Nav */
+            nav: string;
+            /**
+             * Session
+             * Format: date
+             */
+            session: string;
+        };
+        /** ShadowOutcomeResponse */
+        ShadowOutcomeResponse: {
+            fill: components["schemas"]["ShadowFillResponse"] | null;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Reason */
+            reason: string;
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "buy" | "sell" | "rebalance";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "filled" | "missing_bar" | "untradable";
+        };
+        /** ShadowPortfolioResponse */
+        ShadowPortfolioResponse: {
+            /** Initial Outcomes */
+            initial_outcomes: components["schemas"]["ShadowOutcomeResponse"][];
+            /** Nav */
+            nav: components["schemas"]["ShadowNavPointResponse"][];
+            /**
+             * Shadow Portfolio Id
+             * Format: uuid
+             */
+            shadow_portfolio_id: string;
+            /**
+             * Variant
+             * @enum {string}
+             */
+            variant: "hold_current" | "minimum_change" | "strategy_target";
+        };
+        /** ShadowSafetyResponse */
+        ShadowSafetyResponse: {
+            /**
+             * Creates Orders
+             * @constant
+             */
+            creates_orders: false;
+            /**
+             * Trading Approval
+             * @constant
+             */
+            trading_approval: false;
+        };
+        /** ShadowSourceResponse */
+        ShadowSourceResponse: {
+            /**
+             * Available At
+             * Format: date-time
+             */
+            available_at: string;
+            /**
+             * Delivery Mode
+             * @enum {string}
+             */
+            delivery_mode: "real_time" | "delayed" | "fixture" | "unknown";
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "price_bars" | "corporate_actions";
+            /**
+             * Latest Session
+             * Format: date
+             */
+            latest_session: string;
+            /** Source */
+            source: string;
+        };
+        /** ShadowStartData */
+        ShadowStartData: {
+            /**
+             * Evaluation End Session
+             * Format: date
+             */
+            evaluation_end_session: string;
+            /**
+             * Grace End Session
+             * Format: date
+             */
+            grace_end_session: string;
+            /**
+             * Proposal Group Id
+             * Format: uuid
+             */
+            proposal_group_id: string;
+            /**
+             * Shadow Group Id
+             * Format: uuid
+             */
+            shadow_group_id: string;
+            /**
+             * Start Session
+             * Format: date
+             */
+            start_session: string;
+            /**
+             * Status
+             * @constant
+             */
+            status: "shadowing";
+            /** Version */
+            version: number;
+        };
+        /** ShadowStartEnvelope */
+        ShadowStartEnvelope: {
+            data: components["schemas"]["ShadowStartData"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** ShadowVariantMetricsResponse */
+        ShadowVariantMetricsResponse: {
+            metrics: components["schemas"]["ShadowMetricsResponse"];
+            /**
+             * Variant
+             * @enum {string}
+             */
+            variant: "hold_current" | "minimum_change" | "strategy_target";
+        };
+        /** ShadowWorstSessionResponse */
+        ShadowWorstSessionResponse: {
+            /** Return Value */
+            return_value: string;
+            /**
+             * Session
+             * Format: date
+             */
+            session: string;
         };
         /** @enum {string} */
         SnapshotStatus: "READY" | "PARTIAL" | "STALE" | "RECONCILIATION_REQUIRED";
@@ -2535,7 +2872,65 @@ export interface operations {
             };
         };
     };
-    shadow_optimization_group_internal_v1_optimization_proposals__group_id__shadow_post: {
+    getOptimizationProposalShadow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShadowGroupEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    startOptimizationProposalShadow: {
         parameters: {
             query?: never;
             header: {
@@ -2559,7 +2954,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["OptimizationLifecycleEnvelope"];
+                    "application/json": components["schemas"]["ShadowStartEnvelope"];
                 };
             };
             /** @description Stable NEXUS error envelope. */

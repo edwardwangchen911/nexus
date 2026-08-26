@@ -42,15 +42,25 @@ export async function engineFetch<Path extends InternalPath>(target: EngineTarge
   for (const [name, value] of Object.entries(protectedHeaders)) headers.set(name, value);
   try {
     const response = await fetch(resolved.url, { ...init, method, headers, body: body.byteLength ? body as unknown as BodyInit : undefined, redirect: "manual", signal: AbortSignal.any([init.signal, AbortSignal.timeout(timeoutForMethod(method))].filter(Boolean) as AbortSignal[]) });
-    return await sanitizeEngineResponse<Path>(response, resolved.url.toString(), resolved.url.pathname);
+    return await sanitizeEngineResponse<Path>(
+      response,
+      resolved.url.toString(),
+      resolved.url.pathname,
+      method,
+    );
   } catch { return internalFailure<Path>(); }
 }
 
-export async function sanitizeEngineResponse<Path extends InternalPath>(response: Response, requestUrl?: string, schemaPath?: string): Promise<EngineResponse<Path>> {
+export async function sanitizeEngineResponse<Path extends InternalPath>(
+  response: Response,
+  requestUrl?: string,
+  schemaPath?: string,
+  requestMethod?: string,
+): Promise<EngineResponse<Path>> {
   if (!response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return internalFailure<Path>();
   const bytes = await boundedResponseBytes(response, responseLimit(requestUrl, schemaPath));
   if (!bytes) return internalFailure<Path>();
-  try { return (rebuildAllowedEngineResponse(response.status, JSON.parse(new TextDecoder().decode(bytes)), response.headers, requestUrl, schemaPath) ?? internalFailure<Path>()) as EngineResponse<Path>; } catch { return internalFailure<Path>(); }
+  try { return (rebuildAllowedEngineResponse(response.status, JSON.parse(new TextDecoder().decode(bytes)), response.headers, requestUrl, schemaPath, requestMethod) ?? internalFailure<Path>()) as EngineResponse<Path>; } catch { return internalFailure<Path>(); }
 }
 
 function responseLimit(requestUrl?: string, schemaPath?: string): number {

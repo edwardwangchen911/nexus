@@ -361,9 +361,14 @@ describe("engineFetch runtime boundary", () => {
       template: "/internal/v1/optimization-proposals/{group_id}/shadow",
       path: "/internal/v1/optimization-proposals/0198d500-1000-7000-8000-000000001303/shadow",
     } as never, { method: "POST", actor, body: new Uint8Array() } as never);
+    await engineFetch({
+      template: "/internal/v1/optimization-proposals/{group_id}/shadow",
+      path: "/internal/v1/optimization-proposals/0198d500-1000-7000-8000-000000001303/shadow",
+    } as never, { method: "GET", actor } as never);
 
     expect(sent).toEqual([
       "http://127.0.0.1:8000/internal/v1/overview?portfolio_id=0198d500-1000-7000-8000-000000001301&session_date=2026-08-24",
+      "http://127.0.0.1:8000/internal/v1/optimization-proposals/0198d500-1000-7000-8000-000000001303/shadow",
       "http://127.0.0.1:8000/internal/v1/optimization-proposals/0198d500-1000-7000-8000-000000001303/shadow",
     ]);
 
@@ -376,7 +381,7 @@ describe("engineFetch runtime boundary", () => {
       path: "/internal/v1/overview",
       query: "session_date=2026-02-30",
     } as never, { method: "GET", actor } as never);
-    expect(sent).toHaveLength(2);
+    expect(sent).toHaveLength(3);
   });
 
   it.each([

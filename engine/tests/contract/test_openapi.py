@@ -139,6 +139,53 @@ def test_integration_status_rejects_naive_wire_timestamps() -> None:
         )
 
 
+def test_openapi_exposes_distinct_closed_shadow_start_and_read_contracts() -> None:
+    """Shadow observation must not expose an imperative advance or trade surface."""
+    document = create_engine_app(EngineSettings.for_test()).openapi()
+    path = "/internal/v1/optimization-proposals/{group_id}/shadow"
+    operations = document["paths"][path]
+
+    assert set(operations) == {"post", "get"}
+    assert operations["post"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ] == {"$ref": "#/components/schemas/ShadowStartEnvelope"}
+    assert operations["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ] == {"$ref": "#/components/schemas/ShadowGroupEnvelope"}
+    assert "requestBody" in operations["post"]
+    assert "requestBody" not in operations["get"]
+    get_headers = {
+        parameter["name"]
+        for parameter in operations["get"]["parameters"]
+        if parameter["in"] == "header"
+    }
+    assert "Idempotency-Key" not in get_headers
+    assert "If-Match" not in get_headers
+
+    schemas = document["components"]["schemas"]
+    shadow_schemas = {
+        name: schema for name, schema in schemas.items() if name.startswith("Shadow")
+    }
+    assert {
+        "ShadowStartData",
+        "ShadowStartEnvelope",
+        "ShadowGroupResponse",
+        "ShadowGroupEnvelope",
+    } <= set(shadow_schemas)
+    assert all(
+        schema.get("type") != "object" or schema.get("additionalProperties") is False
+        for schema in shadow_schemas.values()
+    )
+    assert not any(
+        forbidden in candidate
+        for candidate in document["paths"]
+        for forbidden in ("/advance", "/checkpoint", "/validate", "/promote")
+    )
+    wire = str(shadow_schemas).lower()
+    assert "order_id" not in wire
+    assert "trade_id" not in wire
+
+
 def _walk_openapi_strings(value: object) -> list[str]:
     """Return names and nested values so defaults/examples cannot hide configuration."""
     if isinstance(value, dict):

@@ -29,11 +29,30 @@ from nexus.api.schemas.optimization import (
     ProposalComparisonDimensionsResponse,
     ProposalComparisonMetricsResponse,
     ProposalComparisonResponse,
+    ShadowAttemptResponse,
+    ShadowCheckpointResponse,
+    ShadowCoverageResponse,
     ShadowEligibilityResponse,
+    ShadowFillResponse,
+    ShadowFreshnessResponse,
+    ShadowGroupEnvelope,
+    ShadowGroupResponse,
+    ShadowMetricsResponse,
+    ShadowMetricValueResponse,
+    ShadowNavPointResponse,
+    ShadowOutcomeResponse,
+    ShadowPortfolioResponse,
+    ShadowSafetyResponse,
+    ShadowSourceResponse,
+    ShadowStartData,
+    ShadowStartEnvelope,
+    ShadowVariantMetricsResponse,
+    ShadowWorstSessionResponse,
     WhatIfEnvelope,
     WhatIfRequest,
     WhatIfResponse,
 )
+from nexus.domain.decimal import decimal_to_string
 from nexus.optimizer.admission import admit_queued_job
 from nexus.optimizer.authority import load_admission_authority
 from nexus.optimizer.lifecycle import reject_group_idempotently
@@ -57,6 +76,8 @@ from nexus.reconciliation.persistence_errors import (
     BrokerSyncPersistenceError,
     IdempotencyConflict,
 )
+from nexus.shadow.models import ShadowMetrics, ShadowMetricValue, VariantMetrics
+from nexus.shadow.query import ShadowGroupView, load_shadow_view
 from nexus.shadow.start import start_proposal_shadow
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -475,9 +496,10 @@ async def _transition_endpoint(
 
 @router.post(
     "/internal/v1/optimization-proposals/{group_id}/shadow",
-    response_model=OptimizationLifecycleEnvelope,
+    response_model=ShadowStartEnvelope,
     responses=_ERROR_RESPONSES,
     openapi_extra=_LIFECYCLE_REQUEST_BODY,
+    operation_id="startOptimizationProposalShadow",
 )
 async def shadow_optimization_group(
     group_id: UUID,
@@ -487,7 +509,7 @@ async def shadow_optimization_group(
     body: OptimizationLifecycleRequest = Body(),
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
-) -> OptimizationLifecycleEnvelope:
+) -> ShadowStartEnvelope:
     _validate_if_match(if_match, body.version)
     raw_body = await request.body()
     request_hash = hashlib.sha256(b"shadowing\0" + raw_body).hexdigest()
@@ -514,11 +536,27 @@ async def shadow_optimization_group(
         ) from error
     except ValueError as error:
         reason = str(error)
+        public_reason = (
+            reason
+            if reason
+            in {
+                "VERSION_CONFLICT",
+                "PROPOSAL_STATE_INVALID",
+                "PROPOSAL_NOT_EXECUTABLE",
+                "SHADOW_CALENDAR_INCOMPLETE",
+            }
+            else "SHADOW_START_INVALID"
+        )
         code = (
             ErrorCode.PROPOSAL_NOT_EXECUTABLE
-            if reason in {"PROPOSAL_NOT_EXECUTABLE", "SHADOW_CALENDAR_INCOMPLETE"}
+            if public_reason
+            in {
+                "PROPOSAL_STATE_INVALID",
+                "PROPOSAL_NOT_EXECUTABLE",
+                "SHADOW_CALENDAR_INCOMPLETE",
+            }
             else ErrorCode.VERSION_CONFLICT
-            if reason == "VERSION_CONFLICT"
+            if public_reason == "VERSION_CONFLICT"
             else ErrorCode.VALIDATION_ERROR
         )
         raise NexusError(
@@ -527,14 +565,230 @@ async def shadow_optimization_group(
             status_code=409
             if code in (ErrorCode.VERSION_CONFLICT, ErrorCode.PROPOSAL_NOT_EXECUTABLE)
             else 422,
+            details={"reason": public_reason},
         ) from error
-    return OptimizationLifecycleEnvelope(
-        data=OptimizationLifecycleData(
+    return ShadowStartEnvelope(
+        data=ShadowStartData(
             proposal_group_id=result.proposal_group_id,
+            shadow_group_id=result.shadow_group_id,
             status=result.status,
             version=result.version,
+            start_session=result.start_session,
+            evaluation_end_session=result.evaluation_end_session,
+            grace_end_session=result.grace_end_session,
         ),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=_utc_now(request)),
+    )
+
+
+@router.get(
+    "/internal/v1/optimization-proposals/{group_id}/shadow",
+    response_model=ShadowGroupEnvelope,
+    responses=_ERROR_RESPONSES,
+    operation_id="getOptimizationProposalShadow",
+)
+async def get_optimization_group_shadow(
+    group_id: UUID,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+) -> ShadowGroupEnvelope:
+    try:
+        view = await load_shadow_view(session, group_id=group_id)
+    except ValueError as error:
+        reason = str(error)
+        if reason == "SHADOW_NOT_STARTED":
+            raise NexusError(
+                ErrorCode.NOT_FOUND,
+                "Proposal Shadow was not started.",
+                status_code=404,
+                details={"reason": "SHADOW_NOT_STARTED"},
+            ) from error
+        if reason == "PROPOSAL_GROUP_NOT_FOUND":
+            raise NexusError(
+                ErrorCode.NOT_FOUND,
+                "Proposal group was not found.",
+                status_code=404,
+                details={"reason": "PROPOSAL_GROUP_NOT_FOUND"},
+            ) from error
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL,
+            "Proposal Shadow data is incomplete.",
+            status_code=409,
+            details={"reason": "DATA_PARTIAL"},
+        ) from error
+    return ShadowGroupEnvelope(
+        data=_shadow_group_response(view),
+        meta=SuccessMetaResponse(
+            request_id=actor.request_id,
+            as_of=view.freshness.database_time,
+        ),
+    )
+
+
+def _shadow_group_response(view: ShadowGroupView) -> ShadowGroupResponse:
+    return ShadowGroupResponse(
+        proposal_group_id=view.proposal_group_id,
+        shadow_group_id=view.shadow_group_id,
+        proposal_status=view.proposal_status,
+        version=view.version,
+        start_session=view.start_session,
+        evaluation_end_session=view.evaluation_end_session,
+        grace_end_session=view.grace_end_session,
+        coverage=ShadowCoverageResponse(
+            completed=view.coverage.completed,
+            due=view.coverage.due,
+            required=view.coverage.required,
+            next_expected_session=view.coverage.next_expected_session,
+            missing_sessions=view.coverage.missing_sessions,
+        ),
+        freshness=ShadowFreshnessResponse(
+            status=view.freshness.status,
+            latest_session=view.freshness.latest_session,
+            available_at=view.freshness.available_at,
+            last_attempt_at=view.freshness.last_attempt_at,
+            database_time=view.freshness.database_time,
+            reason=view.freshness.reason,
+        ),
+        sources=tuple(
+            ShadowSourceResponse(
+                source=item.source,
+                kind=cast(Literal["price_bars", "corporate_actions"], item.kind),
+                delivery_mode=cast(
+                    Literal["real_time", "delayed", "fixture", "unknown"],
+                    item.delivery_mode,
+                ),
+                latest_session=item.latest_session,
+                available_at=item.available_at,
+            )
+            for item in view.sources
+        ),
+        portfolios=cast(
+            tuple[
+                ShadowPortfolioResponse,
+                ShadowPortfolioResponse,
+                ShadowPortfolioResponse,
+            ],
+            tuple(
+                ShadowPortfolioResponse(
+                    shadow_portfolio_id=portfolio.shadow_portfolio_id,
+                    variant=portfolio.variant,
+                    nav=tuple(
+                        ShadowNavPointResponse(
+                            session=point.session,
+                            nav=decimal_to_string(point.nav),
+                        )
+                        for point in portfolio.nav
+                    ),
+                    initial_outcomes=tuple(
+                        ShadowOutcomeResponse(
+                            instrument_id=outcome.instrument_id,
+                            side=cast(
+                                Literal["buy", "sell", "rebalance"], outcome.side
+                            ),
+                            status=cast(
+                                Literal["filled", "missing_bar", "untradable"],
+                                outcome.status,
+                            ),
+                            reason=outcome.reason,
+                            fill=(
+                                None
+                                if outcome.fill is None
+                                else ShadowFillResponse(
+                                    side=cast(
+                                        Literal["buy", "sell"], outcome.fill.side
+                                    ),
+                                    quantity=decimal_to_string(outcome.fill.quantity),
+                                    price=decimal_to_string(outcome.fill.price),
+                                    notional=decimal_to_string(outcome.fill.notional),
+                                    cost=decimal_to_string(outcome.fill.cost),
+                                )
+                            ),
+                        )
+                        for outcome in portfolio.initial_outcomes
+                    ),
+                )
+                for portfolio in view.portfolios
+            ),
+        ),
+        checkpoints=tuple(
+            ShadowCheckpointResponse(
+                ordinal=cast(Literal[5, 21, 63], checkpoint.ordinal),
+                session=checkpoint.session,
+                status=cast(Literal["complete", "incomplete"], checkpoint.status),
+                coverage_count=checkpoint.coverage_count,
+                reason=checkpoint.reason,
+                metrics=cast(
+                    tuple[
+                        ShadowVariantMetricsResponse,
+                        ShadowVariantMetricsResponse,
+                        ShadowVariantMetricsResponse,
+                    ],
+                    tuple(_shadow_variant_metrics(item) for item in checkpoint.metrics),
+                ),
+            )
+            for checkpoint in view.checkpoints
+        ),
+        last_failed_attempt=(
+            None
+            if view.last_failed_attempt is None
+            else ShadowAttemptResponse(
+                requested_session=view.last_failed_attempt.requested_session,
+                expected_session=view.last_failed_attempt.expected_session,
+                result=cast(
+                    Literal[
+                        "data_partial",
+                        "data_stale",
+                        "source_conflict",
+                        "session_gap",
+                    ],
+                    view.last_failed_attempt.result,
+                ),
+                reason=view.last_failed_attempt.reason,
+                observed_at=view.last_failed_attempt.observed_at,
+                created_at=view.last_failed_attempt.created_at,
+            )
+        ),
+        sealed=view.sealed,
+        seal_reason=view.seal_reason,
+        safety=ShadowSafetyResponse(
+            creates_orders=view.creates_orders,
+            trading_approval=view.trading_approval,
+        ),
+    )
+
+
+def _shadow_variant_metrics(value: VariantMetrics) -> ShadowVariantMetricsResponse:
+    return ShadowVariantMetricsResponse(
+        variant=value.variant,
+        metrics=_shadow_metrics(value.metrics),
+    )
+
+
+def _shadow_metrics(value: ShadowMetrics) -> ShadowMetricsResponse:
+    return ShadowMetricsResponse(
+        net_cumulative_return=_shadow_metric(value.net_cumulative_return),
+        return_delta_vs_hold=_shadow_metric(value.return_delta_vs_hold),
+        max_drawdown=_shadow_metric(value.max_drawdown),
+        drawdown_improvement=_shadow_metric(value.drawdown_improvement),
+        annualized_volatility=_shadow_metric(value.annualized_volatility),
+        volatility_improvement=_shadow_metric(value.volatility_improvement),
+        worst_sessions=tuple(
+            ShadowWorstSessionResponse(
+                session=item.session,
+                return_value=decimal_to_string(item.return_value),
+            )
+            for item in value.worst_sessions
+        ),
+        cumulative_turnover=_shadow_metric(value.cumulative_turnover),
+        fee_drag_index_points=_shadow_metric(value.fee_drag_index_points),
+    )
+
+
+def _shadow_metric(value: ShadowMetricValue) -> ShadowMetricValueResponse:
+    return ShadowMetricValueResponse(
+        status=value.status,
+        value=None if value.value is None else decimal_to_string(value.value),
+        reason=value.reason,
     )
 
 
