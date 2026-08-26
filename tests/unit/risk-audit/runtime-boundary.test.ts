@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
+import { gzipSync, gunzipSync } from "node:zlib";
 
 import {
   engineFetch,
@@ -38,6 +40,10 @@ describe("risk-audit Engine response boundary", () => {
     const leaked = structuredClone(data);
     Object.assign(leaked.items[0], { payload: { account_id: "must-not-escape" } });
     expect((await sanitizeEngineResponse(json({ data: leaked, meta }), undefined, "/internal/v1/risk-audit", "GET")).status).toBe(500);
+
+    const leakedOutcome = structuredClone(data);
+    Object.assign(leakedOutcome.items[0].outcome, { account_id: "must-not-escape" });
+    expect((await sanitizeEngineResponse(json({ data: leakedOutcome, meta }), undefined, "/internal/v1/risk-audit", "GET")).status).toBe(500);
 
     const tooMany = { ...data, items: Array.from({ length: 101 }, () => data.items[0]) };
     expect((await sanitizeEngineResponse(json({ data: tooMany, meta }), undefined, "/internal/v1/risk-audit", "GET")).status).toBe(500);
@@ -87,7 +93,7 @@ describe("risk-audit Engine response boundary", () => {
   });
 
   it("passes only bounded gzip NDJSON with a fixed safe filename", async () => {
-    const gzip = new Uint8Array([0x1f, 0x8b, 0x08, 0x00]);
+    const gzip = gzipSync(`${JSON.stringify(auditPage().items[0])}\n`);
     const safe = await sanitizeAuditExportResponse(new Response(gzip, {
       status: 200,
       headers: {
@@ -105,6 +111,38 @@ describe("risk-audit Engine response boundary", () => {
       new Response(gzip, { headers: { "content-type": "application/x-ndjson" } }),
       new Response(new Uint8Array([0x7b, 0x7d]), { headers: { "content-type": "application/x-ndjson", "content-encoding": "gzip" } }),
     ]) expect((await sanitizeAuditExportResponse(unsafe)).status).toBe(500);
+  });
+
+  it("normalizes Node fetch auto-decompression without weakening export redaction", async () => {
+    const ndjson = `${JSON.stringify(auditPage().items[0])}\n`;
+    const compressed = gzipSync(ndjson);
+    const server = createServer((_request, response) => {
+      response.writeHead(200, {
+        "content-encoding": "gzip",
+        "content-length": String(compressed.byteLength),
+        "content-type": "application/x-ndjson",
+      });
+      response.end(compressed);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("test server did not bind");
+      const upstream = await fetch(`http://127.0.0.1:${address.port}/audit`);
+      expect(new Uint8Array(await upstream.clone().arrayBuffer()).slice(0, 2)).not.toEqual(new Uint8Array([0x1f, 0x8b]));
+
+      const safe = await sanitizeAuditExportResponse(upstream);
+      expect(safe.status).toBe(200);
+      expect(gunzipSync(Buffer.from(await safe.arrayBuffer())).toString()).toBe(ndjson);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+
+    const leaked = `${JSON.stringify({ ...auditPage().items[0], outcome: { account_id: "must-not-escape" } })}\n`;
+    const rejected = await sanitizeAuditExportResponse(new Response(leaked, {
+      headers: { "content-type": "application/x-ndjson", "content-encoding": "gzip" },
+    }));
+    expect(rejected.status).toBe(500);
   });
 });
 
@@ -137,7 +175,7 @@ function auditPage() {
       actor_kind: "system" as const,
       action: "job.failed",
       schema_version: "1",
-      outcome: { status: "failed", retryable: true, attempt_count: 3 },
+      outcome: { status: "failed", retryable: true, error_code: "PROVIDER_UNAVAILABLE" },
       previous_hash: "a".repeat(64),
       event_hash: "b".repeat(64),
     }],

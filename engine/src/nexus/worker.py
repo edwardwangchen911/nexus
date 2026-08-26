@@ -27,6 +27,7 @@ from nexus.agents.price_authority import (
 )
 from nexus.agents.responses import ResponsesClient, ResponsesCommittee, ResponsesModelConfig
 from nexus.agents.tools import ReadOnlyToolRegistry, ToolInputError
+from nexus.audit.manifest import S3AuditManifestObjectStore
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.daily_local import (
@@ -147,7 +148,9 @@ def _general_registry(
         responses_client=responses_client,
         tools=tools,
     )
-    daily = build_local_daily_pipeline_registry()
+    daily = build_local_daily_pipeline_registry(
+        audit_object_store=S3AuditManifestObjectStore(settings)
+    )
     return JobRegistry((*agent.specs, *daily.specs))
 
 

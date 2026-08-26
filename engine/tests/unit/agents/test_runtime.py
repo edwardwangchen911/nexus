@@ -14,8 +14,9 @@ from nexus.agents.models import ResearchRequest
 from nexus.agents.responses import ResponsesCommittee, ResponsesModelConfig, ResponsesResearchModel
 from nexus.agents.tools import ReadOnlyTools
 from nexus.domain.evidence import EvidenceRef
+from nexus.jobs.models import JobType
 from nexus.settings import EngineSettings, Environment
-from nexus.worker import run_worker
+from nexus.worker import _general_registry, run_worker
 from openai.types.responses.response import Response
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
@@ -63,6 +64,15 @@ def test_non_fixture_runtime_accepts_primary_openai_model_environment_names(
     settings = EngineSettings(environment=Environment.TEST)
     assert settings.openai_extraction_model == "configured-extraction"
     assert settings.openai_reasoning_model == "configured-reasoning"
+
+
+def test_general_worker_registers_the_configured_audit_manifest_handler() -> None:
+    registry = _general_registry(
+        EngineSettings.for_test(),
+        responses_client=None,
+        tools=None,
+    )
+    assert registry.resolve(JobType.AUDIT_MANIFEST.value) is not None
 
 
 @pytest.mark.asyncio

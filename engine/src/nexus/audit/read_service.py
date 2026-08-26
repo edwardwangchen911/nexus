@@ -172,7 +172,10 @@ class RiskAuditReadService:
         account = accounts[0]
         event = await self._session.scalar(
             select(PaperDrawdownLockEventRecord)
-            .where(PaperDrawdownLockEventRecord.account_id == account.id)
+            .where(
+                PaperDrawdownLockEventRecord.account_id == account.id,
+                PaperDrawdownLockEventRecord.occurred_at <= self._now,
+            )
             .order_by(desc(PaperDrawdownLockEventRecord.event_seq))
             .limit(1)
         )
@@ -180,7 +183,10 @@ class RiskAuditReadService:
             return DrawdownLockSummary(state="unknown", event_seq=None, acknowledge_allowed=False)
         performance = await self._session.scalar(
             select(PaperPerformanceSnapshotRecord)
-            .where(PaperPerformanceSnapshotRecord.account_id == account.id)
+            .where(
+                PaperPerformanceSnapshotRecord.account_id == account.id,
+                PaperPerformanceSnapshotRecord.as_of <= self._now,
+            )
             .order_by(
                 desc(PaperPerformanceSnapshotRecord.as_of), desc(PaperPerformanceSnapshotRecord.id)
             )

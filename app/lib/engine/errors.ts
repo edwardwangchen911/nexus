@@ -73,6 +73,23 @@ export function safeBffErrorResponse(error: unknown): Response {
   return errorResponse(500, "INTERNAL_ERROR", "The request could not be completed.");
 }
 
+const SAFE_AUDIT_OUTCOME_FIELDS = new Set([
+  "completeness",
+  "error_code",
+  "outcome",
+  "quality_status",
+  "reason_code",
+  "result",
+  "retryable",
+  "status",
+]);
+
+export function isAllowedAuditExportEvent(value: unknown): boolean {
+  if (!matchesRuntimeSchema(value, runtimeContractSchemas.RiskAuditEventResponse)
+    || !isPlain(value) || !isPlain(value.outcome)) return false;
+  return Object.keys(value.outcome).every((key) => SAFE_AUDIT_OUTCOME_FIELDS.has(key));
+}
+
 export function rebuildAllowedEngineResponse(status: number, value: unknown, upstreamHeaders = new Headers(), requestUrl?: string, schemaPath?: string, requestMethod?: string): Response | null {
   const pathname = enginePathname(requestUrl, schemaPath);
   const readinessStatus = status === 503 && ["/health/ready", "/internal/v1/readiness"].includes(pathname);
@@ -115,6 +132,7 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     if (requestMethod?.toUpperCase() !== "GET"
       || !matchesRuntimeSchema(data, riskAuditPageRuntimeSchema) || !isPlain(data)
       || !Array.isArray(data.items) || data.items.length > 100
+      || data.items.some((item) => !isAllowedAuditExportEvent(item))
       || !isPlain(data.summary) || !isPlain(data.summary.failed_jobs)
       || !Array.isArray(data.summary.failed_jobs.retryable)
       || data.summary.failed_jobs.retryable.length > 20

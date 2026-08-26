@@ -121,7 +121,10 @@ async def acknowledge_drawdown_lock(
         raise DrawdownAcknowledgeError("DRAWDOWN_NOT_RECOVERY_ELIGIBLE")
     performance = await session.scalar(
         select(PaperPerformanceSnapshotRecord)
-        .where(PaperPerformanceSnapshotRecord.account_id == account.id)
+        .where(
+            PaperPerformanceSnapshotRecord.account_id == account.id,
+            PaperPerformanceSnapshotRecord.as_of <= now,
+        )
         .order_by(
             desc(PaperPerformanceSnapshotRecord.as_of),
             desc(PaperPerformanceSnapshotRecord.id),

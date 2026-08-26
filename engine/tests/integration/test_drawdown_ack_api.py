@@ -148,3 +148,74 @@ async def test_drawdown_ack_appends_one_atomic_event_and_never_creates_an_order(
     finally:
         await engine_app.state.session_factory.kw["bind"].dispose()
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_drawdown_ack_cannot_use_a_future_performance_snapshot(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_ready_paper_api(migrated_database_url)
+    now = MARKET_CLOSE - timedelta(minutes=1)
+    engine_app = app(migrated_database_url, now=now)
+    factory = session_factory(engine_app.state.settings)
+    async with factory.begin() as session:
+        session.add_all(
+            (
+                PaperDrawdownLockEventRecord(
+                    id=new_uuid7(),
+                    account_id=seed.execution.account_id,
+                    event_seq=2,
+                    from_state="unlocked",
+                    to_state="locked",
+                    drawdown_ratio=Decimal("0.08"),
+                    user_acknowledged=False,
+                    reason_code="DRAWDOWN_LIMIT_REACHED",
+                    occurred_at=MARKET_CLOSE - timedelta(minutes=3),
+                    payload_hash="d" * 64,
+                ),
+                PaperDrawdownLockEventRecord(
+                    id=new_uuid7(),
+                    account_id=seed.execution.account_id,
+                    event_seq=3,
+                    from_state="locked",
+                    to_state="recovery_eligible",
+                    drawdown_ratio=Decimal("0.05"),
+                    user_acknowledged=False,
+                    reason_code="DRAWDOWN_RECOVERED",
+                    occurred_at=MARKET_CLOSE - timedelta(minutes=2),
+                    payload_hash="e" * 64,
+                ),
+            )
+        )
+
+    path = "/internal/v1/risk/drawdown-lock/acknowledge"
+    body = b'{"expected_event_seq":3}'
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=engine_app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                path,
+                content=body,
+                headers={
+                    **headers("POST", path, body),
+                    "Idempotency-Key": "future-performance-must-not-authorize",
+                    "If-Match": '"3"',
+                },
+            )
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "DATA_PARTIAL"
+        async with factory() as session:
+            unlocked = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(PaperDrawdownLockEventRecord)
+                    .where(PaperDrawdownLockEventRecord.to_state == "unlocked")
+                )
+                or 0
+            )
+            assert unlocked == 1
+    finally:
+        await engine_app.state.session_factory.kw["bind"].dispose()
+        await factory.kw["bind"].dispose()

@@ -4,7 +4,7 @@ import { v7 as uuidv7, validate as validateUuid } from "uuid";
 import type { paths } from "../generated/schema";
 import { integrationProviders } from "../integrations/providers";
 import type { NexusActor } from "../auth/nexus-user";
-import { errorResponse, rebuildAllowedEngineResponse } from "./errors";
+import { errorResponse, isAllowedAuditExportEvent, rebuildAllowedEngineResponse } from "./errors";
 import { createEngineHmacHeaders } from "./hmac";
 
 const MAX_ENGINE_RESPONSE_BYTES = 64 * 1024;
@@ -14,6 +14,7 @@ const MAX_ANALYSIS_RESPONSE_BYTES = 1024 * 1024;
 const MAX_PAPER_RESPONSE_BYTES = 1024 * 1024;
 const MAX_RISK_AUDIT_RESPONSE_BYTES = 1024 * 1024;
 const MAX_AUDIT_EXPORT_BYTES = 32 * 1024 * 1024;
+const MAX_AUDIT_EXPORT_ROWS = 100_000;
 type InternalPath = Extract<keyof paths, `/internal/v1/${string}` | "/health/ready">;
 type DynamicInternalPath = Extract<InternalPath, `${string}{${string}}${string}`>;
 type QueryInternalPath = Extract<InternalPath, "/internal/v1/market" | "/internal/v1/overview" | "/internal/v1/paper/orders" | "/internal/v1/portfolios" | "/internal/v1/instruments/{instrument_id}/research" | "/internal/v1/instruments/{instrument_id}/research-admission" | "/internal/v1/risk-audit" | "/internal/v1/risk-audit/export">;
@@ -80,17 +81,62 @@ export async function sanitizeAuditExportResponse<Path extends InternalPath>(
     return internalFailure<Path>();
   }
   const bytes = await boundedResponseBytes(response, MAX_AUDIT_EXPORT_BYTES);
-  if (!bytes || bytes.byteLength < 2 || bytes[0] !== 0x1f || bytes[1] !== 0x8b) return internalFailure<Path>();
-  return new Response(bytes as unknown as BodyInit, {
+  if (!bytes) return internalFailure<Path>();
+  const safeBytes = await normalizedAuditExportBytes(bytes);
+  if (!safeBytes) return internalFailure<Path>();
+  return new Response(safeBytes as unknown as BodyInit, {
     status: 200,
     headers: {
       "cache-control": "no-store",
       "content-disposition": 'attachment; filename="nexus-risk-audit.ndjson.gz"',
       "content-encoding": "gzip",
-      "content-length": String(bytes.byteLength),
+      "content-length": String(safeBytes.byteLength),
       "content-type": "application/x-ndjson",
     },
   }) as EngineResponse<Path>;
+}
+
+async function normalizedAuditExportBytes(bytes: Uint8Array): Promise<Uint8Array | null> {
+  const isGzip = bytes.byteLength >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+  try {
+    const decoded = isGzip
+      ? await transformedResponseBytes(bytes, new DecompressionStream("gzip"))
+      : bytes;
+    if (!decoded || !validAuditNdjson(decoded)) return null;
+    if (isGzip) return bytes;
+    return transformedResponseBytes(decoded, new CompressionStream("gzip"));
+  } catch {
+    return null;
+  }
+}
+
+async function transformedResponseBytes(
+  bytes: Uint8Array,
+  transform: GenericTransformStream,
+): Promise<Uint8Array | null> {
+  const body = new Response(bytes as unknown as BodyInit).body;
+  if (!body) return null;
+  return boundedResponseBytes(new Response(body.pipeThrough(transform)), MAX_AUDIT_EXPORT_BYTES);
+}
+
+function validAuditNdjson(bytes: Uint8Array): boolean {
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return false;
+  }
+  if (text === "") return true;
+  if (!text.endsWith("\n")) return false;
+  const lines = text.slice(0, -1).split("\n");
+  if (lines.length > MAX_AUDIT_EXPORT_ROWS || lines.some((line) => line.length === 0)) return false;
+  return lines.every((line) => {
+    try {
+      return isAllowedAuditExportEvent(JSON.parse(line));
+    } catch {
+      return false;
+    }
+  });
 }
 
 function responseLimit(requestUrl?: string, schemaPath?: string): number {

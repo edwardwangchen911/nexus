@@ -204,7 +204,7 @@ function auditPage() {
       actor_kind: "system" as const,
       action: "job.failed",
       schema_version: "1",
-      outcome: { status: "failed", retryable: true, attempt_count: 3 },
+      outcome: { status: "failed", retryable: true, error_code: "PROVIDER_UNAVAILABLE" },
       previous_hash: "a".repeat(64),
       event_hash: "b".repeat(64),
     }],
