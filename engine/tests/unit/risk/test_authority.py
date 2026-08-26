@@ -1,9 +1,9 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
 
 import pytest
-from nexus.risk.authority import build_risk_market_snapshot
+from nexus.risk.authority import build_risk_market_snapshot, canonical_query_authority_hash
 from nexus.risk.canonical import canonical_risk_market_authority_hash
 from nexus.risk.models import AuthorityQueryProof, RiskPrice, RiskSectorExposure
 from nexus.strategy.forward import ForwardStrategyDecision, ForwardStrategyTarget
@@ -124,6 +124,27 @@ def test_authority_builds_exact_stable_snapshot_and_hash() -> None:
 
     assert snapshot.authority_hash == canonical_risk_market_authority_hash(snapshot)
     assert reversed_snapshot.authority_hash == snapshot.authority_hash
+
+
+def test_query_authority_hash_rejects_non_utc_timestamp() -> None:
+    with pytest.raises(ValueError, match="UTC"):
+        canonical_query_authority_hash(
+            source_policy_id=UUID(int=3),
+            universe_snapshot_id=UUID(int=5),
+            decision_session=date(2026, 8, 21),
+            kind="suspension",
+            required_instrument_ids=(FIRST_ID,),
+            blocked_instrument_ids=(),
+            complete=True,
+            source_watermark_hash="a" * 64,
+            available_at=datetime(
+                2026,
+                8,
+                22,
+                4,
+                tzinfo=timezone(timedelta(hours=8)),
+            ),
+        )
 
 
 @pytest.mark.parametrize(

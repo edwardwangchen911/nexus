@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Literal, cast
 from uuid import UUID
 
@@ -58,8 +58,12 @@ def canonical_query_authority_hash(
     available_at: datetime,
 ) -> str:
     """Hash the exact no-event/event query scope independently of row identity."""
-    if available_at.tzinfo is None or available_at.utcoffset() is None:
-        raise ValueError("query authority available_at must be timezone-aware")
+    if (
+        available_at.tzinfo is None
+        or available_at.utcoffset() is None
+        or available_at.utcoffset() != UTC.utcoffset(available_at)
+    ):
+        raise ValueError("query authority available_at must use UTC")
     payload = {
         "schema": "risk_query_authority_sha256_v1",
         "source_policy_id": str(source_policy_id).lower(),
@@ -70,7 +74,7 @@ def canonical_query_authority_hash(
         "blocked_instrument_ids": sorted(str(value).lower() for value in blocked_instrument_ids),
         "complete": complete,
         "source_watermark_hash": source_watermark_hash,
-        "available_at": available_at.isoformat(timespec="microseconds"),
+        "available_at": available_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
