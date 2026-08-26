@@ -204,6 +204,61 @@ async def test_publish_performance_keeps_peak_and_calculates_drawdown(
 
 
 @pytest.mark.asyncio
+async def test_performance_publication_rejects_out_of_order_close(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_performance(migrated_database_url, close=Decimal("110"))
+    second_as_of = await seed_second_paper_close(
+        migrated_database_url,
+        execution=seed.execution,
+        close=Decimal("90"),
+    )
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            later = await publish_paper_performance_snapshot(
+                session,
+                account_id=seed.execution.account_id,
+                as_of=second_as_of,
+            )
+        with pytest.raises(PaperPerformanceError) as raised:
+            async with sessions.begin() as session:
+                await publish_paper_performance_snapshot(
+                    session,
+                    account_id=seed.execution.account_id,
+                    as_of=seed.as_of,
+                )
+
+        assert raised.value.code == "PAPER_PERFORMANCE_CONFLICT"
+        async with sessions() as session:
+            snapshots = tuple(await session.scalars(select(PaperPerformanceSnapshotRecord)))
+        assert len(snapshots) == 1
+        assert snapshots[0].id == later.snapshot_id
+
+        forged_nav = later.performance.nav + Decimal("1000")
+        with pytest.raises(DBAPIError, match="performance snapshot chain is invalid"):
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "INSERT INTO paper_performance_snapshots "
+                        "(id, account_id, as_of, nav, peak_nav, cash, realized_pnl, "
+                        "unrealized_pnl, fees, drawdown_ratio, content_hash) VALUES "
+                        "('66200000-0000-0000-0000-000000000001', :account_id, "
+                        ":as_of, :nav, :nav, :nav, 0, 0, 0, 0, :content_hash)"
+                    ),
+                    {
+                        "account_id": seed.execution.account_id,
+                        "as_of": seed.as_of,
+                        "nav": forged_nav,
+                        "content_hash": "a" * 64,
+                    },
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_publish_performance_marks_missing_exact_sector_as_partial(
     migrated_database_url: str,
 ) -> None:

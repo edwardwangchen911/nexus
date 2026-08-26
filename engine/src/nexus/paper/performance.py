@@ -13,7 +13,7 @@ from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
-from sqlalchemy import case, select, text
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.ids import new_uuid7
@@ -972,6 +972,13 @@ async def publish_paper_performance_snapshot(
     )
     if existing is not None:
         return await _load_publication(session, snapshot=existing, replayed=True)
+    latest_as_of = await session.scalar(
+        select(func.max(PaperPerformanceSnapshotRecord.as_of)).where(
+            PaperPerformanceSnapshotRecord.account_id == account_id
+        )
+    )
+    if latest_as_of is not None and effective_at < latest_as_of:
+        raise PaperPerformanceError("PAPER_PERFORMANCE_CONFLICT")
 
     calendar = await session.scalar(
         select(ExchangeCalendarSessionRecord)

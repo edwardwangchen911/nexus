@@ -96,10 +96,10 @@ async def _mutation_is_rejected(database_url: str) -> bool:
         await engine.dispose()
 
 
-def test_0017_is_the_single_head_after_task18() -> None:
+def test_0018_is_the_single_head_after_task18() -> None:
     scripts = ScriptDirectory.from_config(_config())
 
-    assert scripts.get_heads() == ["0017_paper_execution_time_order"]
+    assert scripts.get_heads() == ["0018_paper_performance_chain"]
     revision = scripts.get_revision("0015_paper_execution")
     assert revision is not None
     assert revision.down_revision == "0014_paper"
@@ -109,6 +109,9 @@ def test_0017_is_the_single_head_after_task18() -> None:
     time_order_revision = scripts.get_revision("0017_paper_execution_time_order")
     assert time_order_revision is not None
     assert time_order_revision.down_revision == "0016_paper_execution_atomic"
+    performance_revision = scripts.get_revision("0018_paper_performance_chain")
+    assert performance_revision is not None
+    assert performance_revision.down_revision == "0017_paper_execution_time_order"
 
 
 def test_execution_migration_seeds_authority_backfills_calendar_and_round_trips(
@@ -180,6 +183,14 @@ def test_execution_migration_seeds_authority_backfills_calendar_and_round_trips(
     assert window_chain_trigger == [
         ("trg_paper_execution_window_authorities_chain",)
     ]
+    performance_chain_trigger = asyncio.run(
+        _rows(
+            temporary_database_url,
+            "SELECT tgname FROM pg_trigger WHERE tgname = "
+            "'trg_paper_performance_snapshots_chain' AND NOT tgisinternal",
+        )
+    )
+    assert performance_chain_trigger == [("trg_paper_performance_snapshots_chain",)]
     calendar_columns = {
         str(row[0]): str(row[1])
         for row in asyncio.run(
