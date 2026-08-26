@@ -10,6 +10,9 @@ import {
   optimizationLifecycleRuntimeSchema,
   optimizationProposalGroupRuntimeSchema,
   overviewRuntimeSchema,
+  paperCancelRuntimeSchema,
+  paperOrderPageRuntimeSchema,
+  paperPortfolioRuntimeSchema,
   portfolioPageRuntimeSchema,
   portfolioDiagnosticRuntimeSchema,
   portfolioSnapshotRuntimeSchema,
@@ -126,6 +129,28 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     if (data.portfolio_snapshot_id !== data.diagnostic_report.portfolio_snapshot_id) return INVALID_DATA;
     if (data.proposal_admission !== null && (!isPlain(data.proposal_admission) || data.proposal_admission.portfolio_snapshot_id !== data.portfolio_snapshot_id)) return INVALID_DATA;
     return data;
+  }
+  if (pathname === "/internal/v1/paper/portfolio") {
+    if (!matchesRuntimeSchema(data, paperPortfolioRuntimeSchema) || !isPlain(data)
+      || !Array.isArray(data.positions) || data.positions.length > 500
+      || !Array.isArray(data.attributions) || data.attributions.length > 500) return INVALID_DATA;
+    return data;
+  }
+  if (pathname === "/internal/v1/paper/orders") {
+    if (requestMethod?.toUpperCase() !== "GET"
+      || !matchesRuntimeSchema(data, paperOrderPageRuntimeSchema) || !isPlain(data)
+      || !Array.isArray(data.items) || data.items.length > 50
+      || data.items.some((order) => !paperOrderValid(order))
+      || data.next_cursor !== null && (typeof data.next_cursor !== "string" || data.next_cursor.length > 2048)) return INVALID_DATA;
+    return data;
+  }
+  const paperCancel = /^\/internal\/v1\/paper\/orders\/([^/]+)\/cancel$/.exec(pathname);
+  if (paperCancel && validateUuid(paperCancel[1])) {
+    return requestMethod?.toUpperCase() === "POST"
+      && matchesRuntimeSchema(data, paperCancelRuntimeSchema) && isPlain(data)
+      && sameUuid(data.order_id, paperCancel[1])
+      ? data
+      : INVALID_DATA;
   }
   const portfolioDiagnostic = /^\/internal\/v1\/portfolios\/([^/]+)\/diagnostics\/latest$/.exec(pathname);
   if (portfolioDiagnostic && validateUuid(portfolioDiagnostic[1])) {
@@ -244,6 +269,78 @@ function shadowStartValid(data: unknown, groupId: string): data is Record<string
   return sameUuid(data.proposal_group_id, groupId)
     && data.status === "shadowing"
     && orderedShadowWindow(data);
+}
+
+function paperOrderValid(value: unknown): boolean {
+  if (!isPlain(value) || !Array.isArray(value.events) || value.events.length < 1
+    || !Array.isArray(value.fills)) return false;
+  const events = value.events;
+  const lastEvent = events.at(-1);
+  if (!events.every((event, index) => isPlain(event)
+      && event.event_seq === index + 1
+      && (index === 0 ? event.from_status === null : event.from_status === (events[index - 1] as Record<string, unknown>).to_status))
+    || !isPlain(lastEvent)
+    || value.current_event_seq !== lastEvent.event_seq
+    || value.status !== lastEvent.to_status) return false;
+  const shouldBeCancellable = ["submitted", "partially_filled"].includes(String(value.status))
+    && decimalPositive(value.remaining_quantity);
+  if (value.cancellable !== shouldBeCancellable) return false;
+  const fills = value.fills;
+  return decimalPositive(value.quantity)
+    && decimalPositive(value.worst_price)
+    && decimalNonnegative(value.filled_quantity)
+    && decimalNonnegative(value.remaining_quantity)
+    && decimalSumEquals(value.filled_quantity, value.remaining_quantity, value.quantity)
+    && fills.every((fill, index) => isPlain(fill)
+      && fill.fill_seq === index + 1
+      && decimalPositive(fill.quantity))
+    && decimalListSumEquals(
+      fills.map((fill) => (fill as Record<string, unknown>).quantity),
+      value.filled_quantity,
+    );
+}
+
+type ExactDecimal = { coefficient: bigint; scale: number };
+
+function parseExactDecimal(value: unknown): ExactDecimal | null {
+  if (typeof value !== "string") return null;
+  const match = /^(-?)(0|[1-9]\d*)(?:\.(\d+))?$/.exec(value);
+  if (!match) return null;
+  const fraction = match[3] ?? "";
+  const coefficient = BigInt(`${match[1]}${match[2]}${fraction}`);
+  return { coefficient, scale: fraction.length };
+}
+
+function decimalPositive(value: unknown): boolean {
+  const parsed = parseExactDecimal(value);
+  return parsed !== null && parsed.coefficient > BigInt(0);
+}
+
+function decimalNonnegative(value: unknown): boolean {
+  const parsed = parseExactDecimal(value);
+  return parsed !== null && parsed.coefficient >= BigInt(0);
+}
+
+function decimalSumEquals(left: unknown, right: unknown, expected: unknown): boolean {
+  const values = [left, right, expected].map(parseExactDecimal);
+  if (values.some((value) => value === null)) return false;
+  const decimals = values as ExactDecimal[];
+  const scale = Math.max(...decimals.map((value) => value.scale));
+  const scaled = decimals.map((value) => value.coefficient * BigInt(10) ** BigInt(scale - value.scale));
+  return scaled[0] + scaled[1] === scaled[2];
+}
+
+function decimalListSumEquals(values: unknown[], expected: unknown): boolean {
+  const decimals = values.map(parseExactDecimal);
+  const target = parseExactDecimal(expected);
+  if (target === null || decimals.some((value) => value === null)) return false;
+  const exact = decimals as ExactDecimal[];
+  const scale = Math.max(target.scale, 0, ...exact.map((value) => value.scale));
+  const sum = exact.reduce(
+    (total, value) => total + value.coefficient * BigInt(10) ** BigInt(scale - value.scale),
+    BigInt(0),
+  );
+  return sum === target.coefficient * BigInt(10) ** BigInt(scale - target.scale);
 }
 
 function shadowGroupValid(data: unknown, groupId: string): data is Record<string, unknown> {

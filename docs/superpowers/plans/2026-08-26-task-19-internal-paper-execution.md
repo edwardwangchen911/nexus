@@ -58,11 +58,11 @@
 
 ## Slice 7：Web BFF 安全边界
 
-- [ ] 新增 `tests/unit/paper/routes.test.ts` 和 `runtime-boundary.test.ts`，先覆盖 GET/POST 映射、严格 query/body/header、动态 UUID 路径、响应上限和不可客户端导入。
-- [ ] 新增 `app/api/v1/paper/portfolio/route.ts`、`app/api/v1/paper/orders/route.ts`、`app/api/v1/paper/orders/[orderId]/cancel/route.ts`。
-- [ ] 扩展 `app/lib/engine/client.ts` 的允许路径、规范查询和 paper 响应上限，不放宽其他终端。
-- [ ] 运行 paper BFF 单测、typecheck 和生成合约检查。
-- [ ] 提交：`feat(web): add paper BFF boundary`
+- [x] 新增 `tests/unit/paper/routes.test.ts` 和 `runtime-boundary.test.ts`，先覆盖 GET/POST 映射、严格 query/body/header、动态 UUID 路径、响应上限和不可客户端导入。
+- [x] 新增 `app/api/v1/paper/portfolio/route.ts`、`app/api/v1/paper/orders/route.ts`、`app/api/v1/paper/orders/[orderId]/cancel/route.ts`。
+- [x] 扩展 `app/lib/engine/client.ts` 的允许路径、规范查询和 paper 响应上限，不放宽其他终端；同时收紧出站 caller header 为闭合 allowlist。
+- [x] 运行 paper BFF 单测、typecheck 和生成合约检查。
+- [x] 提交：`feat(web): add paper BFF boundary`
 
 ## Slice 8：`/paper` 页面和订单时间线
 
