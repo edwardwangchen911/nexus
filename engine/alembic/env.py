@@ -13,6 +13,7 @@ from nexus.persistence.models import (  # noqa: F401
     market,
     portfolio,
     runtime,
+    shadow,
 )
 from nexus.settings import EngineSettings
 from sqlalchemy import pool

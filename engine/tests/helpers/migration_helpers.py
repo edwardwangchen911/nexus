@@ -16,6 +16,7 @@ from nexus.persistence.models import (  # noqa: F401
     portfolio,
     research,
     runtime,
+    shadow,
 )
 from nexus.persistence.session import session_factory
 from nexus.quality.source_policy import QUOTE_SOURCE_POLICY_ID

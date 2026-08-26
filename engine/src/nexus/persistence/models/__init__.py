@@ -10,6 +10,7 @@ from nexus.persistence.models import (
     portfolio,
     research,
     runtime,
+    shadow,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "portfolio",
     "research",
     "runtime",
+    "shadow",
 ]

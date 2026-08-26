@@ -181,6 +181,12 @@ class OptimizationProposalRecord(ImmutableCreatedAt, Base):
         UniqueConstraint(
             "proposal_group_id", "variant", name="uq_optimization_proposals_group_variant"
         ),
+        UniqueConstraint(
+            "id",
+            "proposal_group_id",
+            "variant",
+            name="uq_optimization_proposals_shadow_root",
+        ),
         CheckConstraint(
             "variant IN ('hold_current','minimum_change','strategy_target')", name="variant_allowed"
         ),

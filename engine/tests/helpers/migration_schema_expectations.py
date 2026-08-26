@@ -82,6 +82,23 @@ EXPECTED_TABLES = EXPECTED_TABLES | {
     "backtest_order_outcomes",
     "backtest_metrics",
 }
+SHADOW_TABLES = {
+    "shadow_groups",
+    "shadow_portfolios",
+    "shadow_advance_attempts",
+    "shadow_session_authorities",
+    "shadow_session_price_inputs",
+    "shadow_session_event_inputs",
+    "shadow_portfolio_states",
+    "shadow_instrument_states",
+    "shadow_receivable_states",
+    "shadow_simulated_outcomes",
+    "shadow_simulated_fills",
+    "shadow_checkpoints",
+    "shadow_checkpoint_metrics",
+    "shadow_seals",
+}
+EXPECTED_TABLES = EXPECTED_TABLES | SHADOW_TABLES
 
 OPTIONAL_MIGRATION_TABLE_GROUPS = (
     frozenset(
@@ -147,6 +164,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
             "backtest_metrics",
         }
     ),
+    frozenset(SHADOW_TABLES),
 )
 
 EXPECTED_FOREIGN_KEYS = {
@@ -295,3 +313,58 @@ EXPECTED_FOREIGN_KEYS["price_bar_set_authorities"] = {
     "fk_price_bar_set_authorities_evidence_owner",
     "fk_price_bar_set_authorities_source_policy",
 }
+EXPECTED_FOREIGN_KEYS.update(
+    {
+        "shadow_groups": {
+            "fk_shadow_groups_proposal_group",
+            "fk_shadow_groups_baseline_snapshot",
+            "fk_shadow_groups_source_policy",
+            "fk_shadow_groups_cost_policy",
+            "fk_shadow_groups_calendar_authority",
+        },
+        "shadow_portfolios": {
+            "fk_shadow_portfolios_group_root",
+            "fk_shadow_portfolios_proposal_root",
+        },
+        "shadow_advance_attempts": "fk_shadow_advance_attempts_group",
+        "shadow_session_authorities": "fk_shadow_authorities_group_binding",
+        "shadow_session_price_inputs": {
+            "fk_shadow_price_inputs_session_root",
+            "fk_shadow_price_inputs_bar",
+            "fk_shadow_price_inputs_bar_set",
+            "fk_shadow_price_inputs_instrument",
+        },
+        "shadow_session_event_inputs": {
+            "fk_shadow_event_inputs_session_root",
+            "fk_shadow_event_inputs_action",
+        },
+        "shadow_portfolio_states": {
+            "fk_shadow_states_portfolio_root",
+            "fk_shadow_states_session_root",
+        },
+        "shadow_instrument_states": {
+            "fk_shadow_instruments_state_root",
+            "fk_shadow_instruments_instrument",
+        },
+        "shadow_receivable_states": {
+            "fk_shadow_receivables_state_root",
+            "fk_shadow_receivables_action",
+            "fk_shadow_receivables_instrument",
+        },
+        "shadow_simulated_outcomes": {
+            "fk_shadow_outcomes_portfolio_root",
+            "fk_shadow_outcomes_session_root",
+            "fk_shadow_outcomes_instrument",
+        },
+        "shadow_simulated_fills": "fk_shadow_fills_outcome_root",
+        "shadow_checkpoints": {
+            "fk_shadow_checkpoints_group",
+            "fk_shadow_checkpoints_session_root",
+        },
+        "shadow_checkpoint_metrics": {
+            "fk_shadow_metrics_checkpoint_root",
+            "fk_shadow_metrics_portfolio_root",
+        },
+        "shadow_seals": "fk_shadow_seals_group",
+    }
+)

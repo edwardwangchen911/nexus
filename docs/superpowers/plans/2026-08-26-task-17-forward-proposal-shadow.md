@@ -397,16 +397,16 @@ seal_reason = NEW.status
 
 **Steps**
 
-- [ ] Add all fourteen names to `EXPECTED_TABLES`, add a Shadow optional migration group for downgrade-path assertions, and list every named FK expected after head.
-- [ ] Add failing migration tests for head table/constraint presence, `0012 -> 0013 -> 0012 -> 0013`, and downgrade restoration of the non-Shadow 0009 lifecycle function.
-- [ ] Add direct SQL red tests for UPDATE/DELETE rejection, orphan/cross-root rows, noncanonical Decimal/hash/date arrays, a two-portfolio group, a fourth portfolio, incomplete checkpoint metrics, child insert after seal, mismatched seal/status, and direct validated transition without 63/189/3/9 facts.
-- [ ] Run `uv run --package nexus-engine pytest engine/tests/integration/test_migration.py engine/tests/integration/test_shadow_migration.py -q`; confirm intended failures against migration head 0012.
-- [ ] Implement ORM records first with explicit `NUMERIC(38,12)`, `UTCDateTime`, `Date`, UUID, JSONB only for query/source summaries and worst sessions, and named composite constraints.
-- [ ] Register the new ORM module in both model imports and Alembic metadata discovery.
-- [ ] Implement `0013_shadow.py`, including the deferred exact-three/checkpoint guards, seal guard, append-only triggers, lifecycle replacement, and exact downgrade restoration.
-- [ ] Run upgrade/downgrade/upgrade and all migration tests; expect exit 0 and no residual Shadow table/function after downgrade to 0012.
-- [ ] Run `uv run --package nexus-engine ruff check engine/src/nexus/persistence/models/shadow.py engine/alembic/versions/0013_shadow.py engine/tests/integration/test_shadow_migration.py && uv run --package nexus-engine mypy engine/src/nexus/persistence/models/shadow.py`; expect exit 0.
-- [ ] Commit with `feat(db): add append-only proposal shadow schema`.
+- [x] Add all fourteen names to `EXPECTED_TABLES`, add a Shadow optional migration group for downgrade-path assertions, and list every named FK expected after head.
+- [x] Add failing migration tests for head table/constraint presence, `0012 -> 0013 -> 0012 -> 0013`, and downgrade restoration of the non-Shadow 0009 lifecycle function.
+- [x] Add direct SQL red tests for UPDATE/DELETE rejection, orphan/cross-root rows, noncanonical Decimal/hash/date arrays, a two-portfolio group, a fourth portfolio, incomplete checkpoint metrics, child insert after seal, mismatched seal/status, and direct validated transition without 63/189/3/9 facts.
+- [x] Run `uv run --package nexus-engine pytest engine/tests/integration/test_migration.py engine/tests/integration/test_shadow_migration.py -q`; confirm intended failures against migration head 0012.
+- [x] Implement ORM records first with explicit `NUMERIC(38,12)`, `UTCDateTime`, `Date`, UUID, JSONB only for query/source summaries and worst sessions, and named composite constraints.
+- [x] Register the new ORM module in both model imports and Alembic metadata discovery.
+- [x] Implement `0013_shadow.py`, including the deferred exact-three/checkpoint guards, seal guard, append-only triggers, lifecycle replacement, and exact downgrade restoration.
+- [x] Run upgrade/downgrade/upgrade and all migration tests; expect exit 0 and no residual Shadow table/function after downgrade to 0012.
+- [x] Run `uv run --package nexus-engine ruff check engine/src/nexus/persistence/models/shadow.py engine/alembic/versions/0013_shadow.py engine/tests/integration/test_shadow_migration.py && uv run --package nexus-engine mypy engine/src/nexus/persistence/models/shadow.py`; expect exit 0.
+- [x] Commit with `feat(db): add append-only proposal shadow schema`.
 
 ---
 
