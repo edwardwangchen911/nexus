@@ -96,10 +96,10 @@ async def _mutation_is_rejected(database_url: str) -> bool:
         await engine.dispose()
 
 
-def test_0019_is_the_single_head_after_task18() -> None:
+def test_0020_is_the_single_head_after_task19() -> None:
     scripts = ScriptDirectory.from_config(_config())
 
-    assert scripts.get_heads() == ["0019_paper_performance_root"]
+    assert scripts.get_heads() == ["0020_resilient_automation_audit"]
     revision = scripts.get_revision("0015_paper_execution")
     assert revision is not None
     assert revision.down_revision == "0014_paper"
@@ -115,6 +115,9 @@ def test_0019_is_the_single_head_after_task18() -> None:
     performance_root = scripts.get_revision("0019_paper_performance_root")
     assert performance_root is not None
     assert performance_root.down_revision == "0018_paper_performance_chain"
+    automation = scripts.get_revision("0020_resilient_automation_audit")
+    assert automation is not None
+    assert automation.down_revision == "0019_paper_performance_root"
 
 
 def test_execution_migration_seeds_authority_backfills_calendar_and_round_trips(

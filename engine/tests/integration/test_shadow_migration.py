@@ -404,7 +404,7 @@ def test_0013_is_single_head_and_round_trips_from_0012(
     """The Shadow release is one reversible successor of deterministic backtests."""
     config = _config(monkeypatch, temporary_database_url)
     assert ScriptDirectory.from_config(config).get_heads() == [
-        "0019_paper_performance_root"
+        "0020_resilient_automation_audit"
     ]
 
     command.upgrade(config, "0012_backtests")

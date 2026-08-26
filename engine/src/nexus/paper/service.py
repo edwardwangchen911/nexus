@@ -16,6 +16,7 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
 from nexus.paper.errors import PaperBatchError, PaperBatchErrorCode
 from nexus.paper.ledger import make_buy_reservation_transaction
@@ -40,7 +41,7 @@ from nexus.persistence.models.paper import (
     RiskPolicyRecord,
     StrategyDecisionRecord,
 )
-from nexus.persistence.models.runtime import AuditEvent, IdempotencyRecord, OutboxEvent
+from nexus.persistence.models.runtime import IdempotencyRecord, OutboxEvent
 from nexus.risk.authority import load_risk_market_snapshot
 from nexus.risk.canonical import (
     canonical_paper_order_batch_hash,
@@ -603,30 +604,30 @@ def _event_pairs(
     )
 
 
-def _add_event_pair(
+async def _add_event_pair(
     session: AsyncSession,
     *,
     action: str,
     aggregate_id: UUID,
     payload: dict[str, object],
+    occurred_at: datetime,
 ) -> None:
-    session.add_all(
-        (
-            AuditEvent(
-                id=new_uuid7(),
-                actor_id=_ACTOR,
-                action=action,
-                schema_version="paper_event_v1",
-                payload=payload,
-            ),
-            OutboxEvent(
-                id=new_uuid7(),
-                event_type=action,
-                aggregate_id=aggregate_id,
-                schema_version="paper_event_v1",
-                payload=payload,
-                published_at=None,
-            ),
+    await append_audit_event(
+        session,
+        actor_id=_ACTOR,
+        action=action,
+        schema_version="paper_event_v1",
+        payload=payload,
+        occurred_at=occurred_at,
+    )
+    session.add(
+        OutboxEvent(
+            id=new_uuid7(),
+            event_type=action,
+            aggregate_id=aggregate_id,
+            schema_version="paper_event_v1",
+            payload=payload,
+            published_at=None,
         )
     )
 
@@ -926,13 +927,14 @@ async def _persist_new_batch(
         "batch_id": str(batch_id),
         "batch_hash": batch_hash,
     }
-    _add_event_pair(
+    await _add_event_pair(
         session,
         action="strategy_decision.persisted",
         aggregate_id=account_id,
         payload={**common, "decision_hash": decision_hash},
+        occurred_at=request_time,
     )
-    _add_event_pair(
+    await _add_event_pair(
         session,
         action="paper.order_batch.evaluated",
         aggregate_id=account_id,
@@ -942,9 +944,10 @@ async def _persist_new_batch(
             "result_hash": result_hash,
             "idempotency_key_hash": idempotency_key_hash,
         },
+        occurred_at=request_time,
     )
     for order, evaluation in order_pairs:
-        _add_event_pair(
+        await _add_event_pair(
             session,
             action=(
                 "paper.order.risk_rejected"
@@ -958,9 +961,10 @@ async def _persist_new_batch(
                 "instrument_id": str(order.instrument_id),
                 "result_hash": evaluation.result_hash,
             },
+            occurred_at=request_time,
         )
         if evaluation.outcome != "rejected":
-            _add_event_pair(
+            await _add_event_pair(
                 session,
                 action="paper.reservation.created",
                 aggregate_id=order.id,
@@ -970,9 +974,10 @@ async def _persist_new_batch(
                     "result_hash": evaluation.result_hash,
                     "reservation_event_hash": reservation_event_hash_by_order[order.id],
                 },
+                occurred_at=request_time,
             )
             if evaluation.side == "buy":
-                _add_event_pair(
+                await _add_event_pair(
                     session,
                     action="paper.ledger_transaction.posted",
                     aggregate_id=order.id,
@@ -982,6 +987,7 @@ async def _persist_new_batch(
                         "result_hash": evaluation.result_hash,
                         "transaction_hash": ledger_transaction_hash_by_order[order.id],
                     },
+                    occurred_at=request_time,
                 )
     await session.flush()
     _observe(hooks, "audit_outbox_persisted")

@@ -451,5 +451,5 @@ async def test_proposal_admission_returns_one_queued_job_for_idempotent_replay(
     assert {response.status_code for response in concurrent} == {202}
     assert len({response.json()["data"]["job_id"] for response in concurrent}) == 1
     async with factory() as session:
-        assert await session.scalar(select(func.count()).select_from(Job)) == 2
+        assert await session.scalar(select(func.count()).select_from(Job)) == 1
         assert await session.scalar(select(func.count()).select_from(OptimizationProposalGroupRecord)) == 0

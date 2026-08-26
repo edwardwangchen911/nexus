@@ -7,9 +7,10 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
 from nexus.optimizer.repository import TargetStatus, transition_group
-from nexus.persistence.models.runtime import AuditEvent, OutboxEvent
+from nexus.persistence.models.runtime import OutboxEvent
 from nexus.persistence.models.shadow import (
     ShadowCheckpointRecord,
     ShadowGroupRecord,
@@ -111,6 +112,7 @@ async def reject_group_idempotently(
         raise ValueError("VALIDATION_ERROR")
 
     shadow_group: ShadowGroupRecord | None = None
+    sealed_at: datetime | None = None
     if group.status == "shadowing":
         shadow_group = await session.scalar(
             select(ShadowGroupRecord)
@@ -169,27 +171,29 @@ async def reject_group_idempotently(
         "version": group.version,
     }
     if shadow_group is not None:
+        if sealed_at is None:
+            raise RuntimeError("database transaction time is unavailable")
         event_payload = {
             "proposal_group_id": str(group.id),
             "shadow_group_id": str(shadow_group.id),
             "version": group.version,
             "reason": "rejected",
         }
-        session.add_all(
-            (
-                AuditEvent(
-                    actor_id=actor_id,
-                    action="shadow.rejected",
-                    schema_version="1",
-                    payload=event_payload,
-                ),
-                OutboxEvent(
-                    event_type="shadow.rejected",
-                    aggregate_id=shadow_group.id,
-                    schema_version="1",
-                    payload=event_payload,
-                    published_at=None,
-                ),
+        await append_audit_event(
+            session,
+            actor_id=actor_id,
+            action="shadow.rejected",
+            schema_version="1",
+            payload=event_payload,
+            occurred_at=sealed_at,
+        )
+        session.add(
+            OutboxEvent(
+                event_type="shadow.rejected",
+                aggregate_id=shadow_group.id,
+                schema_version="1",
+                payload=event_payload,
+                published_at=None,
             )
         )
     await session.flush()

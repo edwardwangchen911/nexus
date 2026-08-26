@@ -1,10 +1,12 @@
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 from fastapi import Request
 from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET, build_test_hmac_headers
 from nexus.api.auth import VerifiedServiceActor, verify_hmac_v1
 from nexus.api.errors import ErrorCode, NexusError
+from nexus.audit.service import append_audit_event
 from nexus.persistence.models.runtime import AuditEvent, UsedNonce
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
@@ -51,13 +53,13 @@ async def test_hmac_nonce_and_business_record_share_one_outer_transaction(
                 request_id=actor.request_id,
                 key_id=TEST_HMAC_KEY_ID,
             )
-            session.add(
-                AuditEvent(
-                    actor_id=actor.actor_id,
-                    action="internal_test_succeeded",
-                    schema_version="1",
-                    payload={"result": "ok"},
-                )
+            await append_audit_event(
+                session,
+                actor_id=actor.actor_id,
+                action="internal_test_succeeded",
+                schema_version="1",
+                payload={"result": "ok"},
+                occurred_at=datetime.now(UTC),
             )
 
     async with factory() as session:
@@ -79,13 +81,13 @@ async def test_hmac_nonce_and_business_record_share_one_outer_transaction(
                 failed_actor = await verify_hmac_v1(
                     make_request(failed_headers), body, session, settings
                 )
-                session.add(
-                    AuditEvent(
-                        actor_id=failed_actor.actor_id,
-                        action="internal_test_failed",
-                        schema_version="1",
-                        payload={"result": "rollback"},
-                    )
+                await append_audit_event(
+                    session,
+                    actor_id=failed_actor.actor_id,
+                    action="internal_test_failed",
+                    schema_version="1",
+                    payload={"result": "rollback"},
+                    occurred_at=datetime.now(UTC),
                 )
                 raise RuntimeError("business failed")
 
@@ -138,13 +140,13 @@ async def test_concurrent_replay_allows_exactly_one_business_side_effect(
                     actor = await verify_hmac_v1(make_request(headers), body, session, settings)
                 except NexusError:
                     return False
-                session.add(
-                    AuditEvent(
-                        actor_id=actor.actor_id,
-                        action="concurrent_hmac_test",
-                        schema_version="1",
-                        payload={"result": "ok"},
-                    )
+                await append_audit_event(
+                    session,
+                    actor_id=actor.actor_id,
+                    action="concurrent_hmac_test",
+                    schema_version="1",
+                    payload={"result": "ok"},
+                    occurred_at=datetime.now(UTC),
                 )
                 return True
 

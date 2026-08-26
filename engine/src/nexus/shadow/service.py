@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
 from nexus.optimizer.models import ProposalGroupStatus
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
@@ -17,7 +18,7 @@ from nexus.persistence.models.optimization import (
     CostPolicyRecord,
     OptimizationProposalGroupRecord,
 )
-from nexus.persistence.models.runtime import AuditEvent, OutboxEvent
+from nexus.persistence.models.runtime import OutboxEvent
 from nexus.persistence.models.shadow import (
     ShadowAdvanceAttemptRecord,
     ShadowCheckpointMetricRecord,
@@ -315,6 +316,7 @@ async def advance_shadow_session(
             authority=authority_record,
             portfolios=portfolios,
             ordinal=cast(Literal[5, 21, 63], ordinal),
+            occurred_at=observed_at,
         )
         checkpoint_ordinal = ordinal
     if ordinal == 63:
@@ -811,21 +813,21 @@ async def _persist_attempt(
     }
     if authority_hash is not None:
         payload["authority_hash"] = authority_hash
-    session.add_all(
-        (
-            AuditEvent(
-                actor_id="shadow-worker",
-                action=event_type,
-                schema_version="1",
-                payload=payload,
-            ),
-            OutboxEvent(
-                event_type=event_type,
-                aggregate_id=shadow_group_id,
-                schema_version="1",
-                payload=payload,
-                published_at=None,
-            ),
+    await append_audit_event(
+        session,
+        actor_id="shadow-worker",
+        action=event_type,
+        schema_version="1",
+        payload=payload,
+        occurred_at=observed_at,
+    )
+    session.add(
+        OutboxEvent(
+            event_type=event_type,
+            aggregate_id=shadow_group_id,
+            schema_version="1",
+            payload=payload,
+            published_at=None,
         )
     )
     await session.flush()
@@ -838,6 +840,7 @@ async def _persist_complete_checkpoint(
     authority: ShadowSessionAuthorityRecord,
     portfolios: tuple[ShadowPortfolioRecord, ShadowPortfolioRecord, ShadowPortfolioRecord],
     ordinal: Literal[5, 21, 63],
+    occurred_at: datetime,
 ) -> ShadowCheckpointRecord:
     nav_by_variant: dict[ShadowVariant, tuple[ShadowNavPoint, ...]] = {}
     turnover_by_variant: dict[ShadowVariant, Decimal] = {}
@@ -876,6 +879,7 @@ async def _persist_complete_checkpoint(
         reason=None,
         authority=authority,
         metrics=metrics,
+        occurred_at=occurred_at,
     )
 
 
@@ -887,6 +891,7 @@ async def _persist_incomplete_checkpoint(
     ordinal: Literal[5, 21, 63],
     coverage_count: int,
     reason: str,
+    occurred_at: datetime,
 ) -> ShadowCheckpointRecord:
     metrics = calculate_checkpoint_metrics(
         nav_by_variant={variant: () for variant in SHADOW_VARIANTS},
@@ -904,6 +909,7 @@ async def _persist_incomplete_checkpoint(
         reason=reason,
         authority=None,
         metrics=metrics,
+        occurred_at=occurred_at,
     )
 
 
@@ -918,6 +924,7 @@ async def _persist_checkpoint(
     reason: str | None,
     authority: ShadowSessionAuthorityRecord | None,
     metrics: tuple[VariantMetrics, VariantMetrics, VariantMetrics],
+    occurred_at: datetime,
 ) -> ShadowCheckpointRecord:
     checkpoint = ShadowCheckpointRecord(
         id=new_uuid7(),
@@ -966,7 +973,7 @@ async def _persist_checkpoint(
                 ),
             )
         )
-    event_payload = {
+    event_payload: dict[str, object] = {
         "shadow_group_id": str(shadow.id),
         "checkpoint_id": str(checkpoint.id),
         "session": checkpoint.session.isoformat(),
@@ -975,21 +982,21 @@ async def _persist_checkpoint(
         "metrics_hash": checkpoint.metrics_hash,
         "reason": reason,
     }
-    session.add_all(
-        (
-            AuditEvent(
-                actor_id="shadow-worker",
-                action="shadow.checkpoint_created",
-                schema_version="1",
-                payload=event_payload,
-            ),
-            OutboxEvent(
-                event_type="shadow.checkpoint_created",
-                aggregate_id=shadow.id,
-                schema_version="1",
-                payload=event_payload,
-                published_at=None,
-            ),
+    await append_audit_event(
+        session,
+        actor_id="shadow-worker",
+        action="shadow.checkpoint_created",
+        schema_version="1",
+        payload=event_payload,
+        occurred_at=occurred_at,
+    )
+    session.add(
+        OutboxEvent(
+            event_type="shadow.checkpoint_created",
+            aggregate_id=shadow.id,
+            schema_version="1",
+            payload=event_payload,
+            published_at=None,
         )
     )
     await session.flush()
@@ -1060,6 +1067,7 @@ async def _expire_for_data_gap(
                 ordinal=cast(Literal[5, 21, 63], ordinal),
                 coverage_count=coverage,
                 reason="SHADOW_DATA_INCOMPLETE",
+                occurred_at=sealed_at,
             )
     await _seal_and_transition(
         session,
@@ -1123,21 +1131,21 @@ async def _seal_and_transition(
         "reason": reason,
         "reason_code": reason_code,
     }
-    session.add_all(
-        (
-            AuditEvent(
-                actor_id="shadow-worker",
-                action=f"shadow.{reason}",
-                schema_version="1",
-                payload=payload,
-            ),
-            OutboxEvent(
-                event_type=f"shadow.{reason}",
-                aggregate_id=shadow.id,
-                schema_version="1",
-                payload=payload,
-                published_at=None,
-            ),
+    await append_audit_event(
+        session,
+        actor_id="shadow-worker",
+        action=f"shadow.{reason}",
+        schema_version="1",
+        payload=payload,
+        occurred_at=sealed_at,
+    )
+    session.add(
+        OutboxEvent(
+            event_type=f"shadow.{reason}",
+            aggregate_id=shadow.id,
+            schema_version="1",
+            payload=payload,
+            published_at=None,
         )
     )
     await session.flush()

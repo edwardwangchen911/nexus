@@ -52,6 +52,7 @@ from nexus.api.schemas.optimization import (
     WhatIfRequest,
     WhatIfResponse,
 )
+from nexus.audit.service import append_audit_event
 from nexus.domain.decimal import decimal_to_string
 from nexus.optimizer.admission import admit_queued_job
 from nexus.optimizer.authority import load_admission_authority
@@ -70,7 +71,6 @@ from nexus.persistence.models.optimization import (
     ProposalComparisonRecord,
     ProposalPositionRecord,
 )
-from nexus.persistence.models.runtime import AuditEvent
 from nexus.reconciliation.admission_claim import claim_or_lock, validate_request_identity
 from nexus.reconciliation.persistence_errors import (
     BrokerSyncPersistenceError,
@@ -235,17 +235,17 @@ async def evaluate_what_if(
             status_code=409,
         )
     if owner:
-        session.add(
-            AuditEvent(
-                actor_id=actor.actor_id,
-                action="what_if_evaluated",
-                schema_version="1",
-                payload={
-                    "policy_version": payload.policy_version,
-                    "instrument_count": len(payload.positions),
-                    "request_hash": request_hash,
-                },
-            )
+        await append_audit_event(
+            session,
+            actor_id=actor.actor_id,
+            action="what_if_evaluated",
+            schema_version="1",
+            payload={
+                "policy_version": payload.policy_version,
+                "instrument_count": len(payload.positions),
+                "request_hash": request_hash,
+            },
+            occurred_at=_utc_now(request),
         )
     return WhatIfEnvelope(
         data=WhatIfResponse(
@@ -305,6 +305,8 @@ async def admit_optimization_proposal(
                 "data_snapshot_id": str(body.data_snapshot_id),
                 "cost_policy_id": str(body.cost_policy_id),
             },
+            portfolio_id=loaded.portfolio_id,
+            effective_at=loaded.persistence.valuation_time,
         )
     except IdempotencyConflict as error:
         raise NexusError(

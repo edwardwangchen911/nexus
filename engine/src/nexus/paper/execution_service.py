@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
 from nexus.paper.errors import PaperExecutionError
 from nexus.paper.fills import (
@@ -82,7 +83,7 @@ from nexus.persistence.models.paper import (
     PaperReservationRecord,
     StrategyDecisionRecord,
 )
-from nexus.persistence.models.runtime import AuditEvent, OutboxEvent
+from nexus.persistence.models.runtime import OutboxEvent
 
 _SOURCE_PRIORITY = {"fosun": 0, "alpaca": 1, "fixture": 2}
 
@@ -754,6 +755,7 @@ async def _insert_idempotency(
     idempotency_key: str,
     request_hash: str,
     result: PaperAdvanceResult | PaperCancelResult,
+    occurred_at: datetime,
     operation: Literal["advance", "cancel"] = "advance",
 ) -> None:
     session.add(
@@ -779,14 +781,13 @@ async def _insert_idempotency(
         "operation": operation,
         "request_hash": request_hash,
     }
-    session.add(
-        AuditEvent(
-            id=new_uuid7(),
-            actor_id=("system:task19" if operation == "advance" else "user:internal-paper"),
-            action=action,
-            schema_version="paper_execution_v1",
-            payload=payload,
-        )
+    await append_audit_event(
+        session,
+        actor_id=("system:task19" if operation == "advance" else "user:internal-paper"),
+        action=action,
+        schema_version="paper_execution_v1",
+        payload=payload,
+        occurred_at=occurred_at,
     )
     if operation == "cancel" or (
         isinstance(result, PaperAdvanceResult)
@@ -1128,6 +1129,7 @@ async def advance_internal_paper_order(
             idempotency_key=idempotency_key,
             request_hash=request_hash,
             result=result,
+            occurred_at=evaluated_at,
         )
         return result
     if status not in {"submitted", "partially_filled", "reconciling"}:
@@ -1200,6 +1202,7 @@ async def advance_internal_paper_order(
             idempotency_key=idempotency_key,
             request_hash=request_hash,
             result=result,
+            occurred_at=evaluated_at,
         )
         return result
 
@@ -1239,6 +1242,7 @@ async def advance_internal_paper_order(
             idempotency_key=idempotency_key,
             request_hash=request_hash,
             result=result,
+            occurred_at=evaluated_at,
         )
         return result
 
@@ -1295,6 +1299,7 @@ async def advance_internal_paper_order(
             idempotency_key=idempotency_key,
             request_hash=request_hash,
             result=result,
+            occurred_at=evaluated_at,
         )
         return result
 
@@ -1361,6 +1366,7 @@ async def advance_internal_paper_order(
             idempotency_key=idempotency_key,
             request_hash=request_hash,
             result=result,
+            occurred_at=evaluated_at,
         )
         return result
 
@@ -1644,6 +1650,7 @@ async def advance_internal_paper_order(
         idempotency_key=idempotency_key,
         request_hash=request_hash,
         result=result,
+        occurred_at=evaluated_at,
     )
     _observe(hooks, "idempotency_persisted")
     return result
@@ -1805,6 +1812,7 @@ async def cancel_internal_paper_order(
         idempotency_key=idempotency_key,
         request_hash=request_hash,
         result=result,
+        occurred_at=requested_at,
         operation="cancel",
     )
     return result

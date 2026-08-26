@@ -19,6 +19,7 @@ from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
 from nexus.agents.models import ResearchRequest
 from nexus.agents.price_authority import freeze_price_authority
 from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES
+from nexus.jobs.models import JobKeyV1, JobType, canonical_job_key
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentDataSnapshotEvidenceRecord,
@@ -364,13 +365,38 @@ async def admit_research_run(
     )
     session.add(run)
     await session.flush()
+    job_type = JobType.AGENT_RESEARCH
     session.add(
         Job(
-            job_key=f"agent-research:{run.id}",
+            job_key=canonical_job_key(
+                JobKeyV1(
+                    job_type=job_type,
+                    scope_kind="instrument",
+                    scope_id=str(request.instrument_id),
+                    effective_at=request.decision_time,
+                    input_hash=request_hash,
+                )
+            ),
             input_hash=request_hash,
-            status="QUEUED",
+            status="queued",
             schema_version="agent_research_job_v1",
             payload={"run_id": str(run.id)},
+            job_type=job_type.value,
+            queue="general",
+            scope_kind="instrument",
+            scope_id=str(request.instrument_id),
+            effective_at=request.decision_time,
+            priority=180,
+            retry_policy="automatic_safe",
+            max_attempts=3,
+            attempt_count=0,
+            manual_retry_count=0,
+            available_at=now,
+            started_at=None,
+            finished_at=None,
+            last_error_code=None,
+            result_code=None,
+            version=1,
         )
     )
     await session.flush()

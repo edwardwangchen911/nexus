@@ -2,6 +2,8 @@
 """Forced real-PostgreSQL races for queued optimization job admission."""
 
 import asyncio
+from datetime import UTC, datetime
+from uuid import UUID
 
 import pytest
 from nexus.optimizer.admission import admit_queued_job
@@ -29,6 +31,8 @@ async def test_concurrent_same_body_claims_exactly_one_queued_job(
                 idempotency_key="same-key",
                 request_hash=request_hash,
                 payload={"policy": "optimizer_v1"},
+                portfolio_id=UUID("0198d500-1000-7000-8000-000000000001"),
+                effective_at=datetime(2026, 8, 27, tzinfo=UTC),
                 after_authority=barrier.wait,
             )
 
@@ -60,6 +64,8 @@ async def test_concurrent_different_body_conflicts_without_second_job(
                 idempotency_key="different-body",
                 request_hash=request_hash,
                 payload={"policy": "optimizer_v1"},
+                portfolio_id=UUID("0198d500-1000-7000-8000-000000000001"),
+                effective_at=datetime(2026, 8, 27, tzinfo=UTC),
                 after_authority=barrier.wait,
             )
 

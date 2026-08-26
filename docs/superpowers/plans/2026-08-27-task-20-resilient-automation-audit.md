@@ -13,11 +13,11 @@
 
 ## Slice 2：0020 运行权威迁移
 
-- [ ] 新增 `engine/tests/integration/test_automation_migration.py`，先断言单头、历史 Job 状态映射、audit 链回填、新表/列/check/unique/触发器和 `0019 <-> 0020` 往返。
-- [ ] 新增 `engine/alembic/versions/0020_resilient_automation_audit.py`；扩展 jobs/job_leases/outbox/audit，新增 job_attempts/job_dependencies/worker_heartbeats/outbox_delivery_attempts/audit_chain_manifests。
-- [ ] 更新 `engine/src/nexus/persistence/models/runtime.py`；数据库反例覆盖非法状态、fence 倒退、终态篡改、audit 断链与 UPDATE/DELETE。
-- [ ] 更新所有迁移 head 断言为 `0020_resilient_automation_audit`。
-- [ ] 运行迁移往返和 PostgreSQL 守卫；提交 `feat(db): add resilient automation authorities`。
+- [x] 新增 `engine/tests/integration/test_automation_migration.py`，先断言单头、历史 Job 状态映射、audit 链回填、新表/列/check/unique/触发器和 `0019 <-> 0020` 往返。
+- [x] 新增 `engine/alembic/versions/0020_resilient_automation_audit.py`；扩展 jobs/job_leases/outbox/audit，新增 job_attempts/job_dependencies/worker_heartbeats/outbox_delivery_attempts/audit_chain_manifests。
+- [x] 更新 `engine/src/nexus/persistence/models/runtime.py`；数据库反例覆盖非法状态、fence 倒退、终态篡改、audit 断链与 UPDATE/DELETE。
+- [x] 更新所有迁移 head 断言为 `0020_resilient_automation_audit`。
+- [x] 运行迁移往返和 PostgreSQL 守卫；迁移兼容同步接入现有 Job/Outbox/审计生产点，待本切片提交。
 
 ## Slice 3：Job repository、lease 与 fencing
 

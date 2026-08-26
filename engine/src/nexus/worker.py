@@ -1,12 +1,13 @@
 """Bounded database-backed research worker composition root."""
 
 import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
 from uuid import UUID
 
 from openai import AsyncOpenAI
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.committee import (
@@ -36,6 +37,11 @@ from nexus.persistence.session import session_factory
 from nexus.settings import AgentRuntimeMode, EngineSettings, Environment
 
 _JOB_SCHEMA = "agent_research_job_v1"
+_RUN_TO_JOB_STATUS = {
+    "completed": "succeeded",
+    "abstained": "skipped",
+    "failed": "failed",
+}
 
 
 async def run_agent_worker_once(
@@ -52,32 +58,45 @@ async def run_agent_worker_once(
     async with factory() as session, session.begin():
         job = await session.scalar(
             select(Job)
-            .where(Job.schema_version == _JOB_SCHEMA, Job.status == "QUEUED")
+            .where(Job.schema_version == _JOB_SCHEMA, Job.status == "queued")
             .order_by(Job.created_at, Job.id)
             .with_for_update(skip_locked=True)
             .limit(1)
         )
         if job is None:
             return False
-        job.status = "RUNNING"
+        transaction_time = await session.scalar(select(func.transaction_timestamp()))
+        if not isinstance(transaction_time, datetime):
+            raise RuntimeError("database transaction time is unavailable")
+        transaction_time = transaction_time.astimezone(UTC)
+        job.status = "running"
+        job.started_at = transaction_time
+        job.attempt_count += 1
+        job.version += 1
+        await session.flush()
         raw_run_id = job.payload.get("run_id")
         if not isinstance(raw_run_id, str):
-            job.status = "FAILED"
+            _finish_job(job, status="failed", at=transaction_time, error_code="JOB_INPUT_INVALID")
             return True
         try:
             run_id = UUID(raw_run_id)
         except ValueError:
-            job.status = "FAILED"
+            _finish_job(job, status="failed", at=transaction_time, error_code="JOB_INPUT_INVALID")
             return True
         run = await session.get(AgentResearchRunRecord, run_id, with_for_update=True)
         if run is None:
-            job.status = "FAILED"
+            _finish_job(job, status="failed", at=transaction_time, error_code="RUN_NOT_FOUND")
             return True
         if run.status in TERMINAL:
-            job.status = run.status.upper()
+            _finish_job(
+                job,
+                status=_RUN_TO_JOB_STATUS[run.status],
+                at=transaction_time,
+                result_code=run.status,
+            )
             return True
         if run.status != "prepared":
-            job.status = "FAILED"
+            _finish_job(job, status="failed", at=transaction_time, error_code="RUN_STATE_INVALID")
             return True
         try:
             committee = await _committee(
@@ -96,8 +115,28 @@ async def run_agent_worker_once(
             allow_fixture_evidence=allow_fixture_evidence,
             allow_fixture_price_authority=allow_fixture_price_authority,
         )
-        job.status = result.status.upper()
+        _finish_job(
+            job,
+            status=_RUN_TO_JOB_STATUS[result.status],
+            at=transaction_time,
+            result_code=result.status,
+        )
         return True
+
+
+def _finish_job(
+    job: Job,
+    *,
+    status: str,
+    at: datetime,
+    error_code: str | None = None,
+    result_code: str | None = None,
+) -> None:
+    job.status = status
+    job.finished_at = at
+    job.last_error_code = error_code
+    job.result_code = result_code
+    job.version += 1
 
 
 async def run_worker(settings: EngineSettings | None = None, *, run_forever: bool = False) -> None:

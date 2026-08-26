@@ -639,7 +639,7 @@ async def test_posted_fixture_run_reaches_terminal_through_worker_composition(
         job_status = await session.scalar(
             select(Job.status).where(Job.payload["run_id"].as_string() == run_id)
         )
-    assert job_status == "COMPLETED"
+    assert job_status == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -748,7 +748,7 @@ async def test_production_fixture_authority_terminalizes_and_worker_continues_ne
             )
         )
     assert {run.status for run in runs} == {"abstained"}
-    assert {job.status for job in jobs} == {"ABSTAINED"}
+    assert {job.status for job in jobs} == {"skipped"}
     assert {reservation.state for reservation in reservations} == {"released"}
     assert fake.responses.calls == []
 

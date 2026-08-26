@@ -186,7 +186,7 @@ async def test_atomic_admission_replays_same_body_and_conflicts_changed_body(
         )
     assert job is not None
     assert (job.status, job.schema_version, job.payload) == (
-        "QUEUED",
+        "queued",
         "agent_research_job_v1",
         {"run_id": str(same[0].run_id)},
     )
@@ -494,17 +494,26 @@ async def test_agent_job_payload_is_frozen_and_job_cannot_be_deleted(
             daily_limit_usd=Decimal("3.00"),
             now=_NOW,
         )
-    job_key = f"agent-research:{admission.run_id}"
+    async with factory() as session:
+        job_key = await session.scalar(
+            select(Job.job_key).where(
+                Job.payload["run_id"].as_string() == str(admission.run_id)
+            )
+        )
+    assert isinstance(job_key, str)
     with pytest.raises(IntegrityError, match="job authority is immutable"):
         async with factory() as session, session.begin():
             await session.execute(
-                text("UPDATE jobs SET status='RUNNING', payload=:payload WHERE job_key=:job_key"),
+                text(
+                    "UPDATE jobs SET status='running', started_at=now(), version=version+1, "
+                    "payload=:payload WHERE job_key=:job_key"
+                ),
                 {
                     "payload": '{"run_id":"00000000-0000-0000-0000-000000000000"}',
                     "job_key": job_key,
                 },
             )
-    with pytest.raises(IntegrityError, match="job is durable"):
+    with pytest.raises(IntegrityError, match="job state is not deletable"):
         async with factory() as session, session.begin():
             await session.execute(
                 text("DELETE FROM jobs WHERE job_key=:job_key"),

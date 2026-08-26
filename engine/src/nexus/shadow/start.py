@@ -10,10 +10,11 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
 from nexus.optimizer.repository import has_executable_shadow_authority
 from nexus.persistence.models.optimization import CostPolicyRecord
-from nexus.persistence.models.runtime import AuditEvent, OutboxEvent
+from nexus.persistence.models.runtime import OutboxEvent
 from nexus.persistence.models.shadow import ShadowGroupRecord, ShadowPortfolioRecord
 from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
@@ -184,21 +185,21 @@ async def start_proposal_shadow(
         "evaluation_end_session": sessions[62].isoformat(),
         "grace_end_session": sessions[67].isoformat(),
     }
-    session.add_all(
-        (
-            AuditEvent(
-                actor_id=actor_id,
-                action="shadow.started",
-                schema_version="1",
-                payload=event_payload,
-            ),
-            OutboxEvent(
-                event_type="shadow.started",
-                aggregate_id=shadow_group_id,
-                schema_version="1",
-                payload=event_payload,
-                published_at=None,
-            ),
+    await append_audit_event(
+        session,
+        actor_id=actor_id,
+        action="shadow.started",
+        schema_version="1",
+        payload=event_payload,
+        occurred_at=started_at,
+    )
+    session.add(
+        OutboxEvent(
+            event_type="shadow.started",
+            aggregate_id=shadow_group_id,
+            schema_version="1",
+            payload=event_payload,
+            published_at=None,
         )
     )
     await session.flush()

@@ -52,6 +52,7 @@ async def dispatch_paper_outbox(
                         OutboxEvent.event_type.like("paper.%"),
                         OutboxEvent.event_type == "strategy_decision.persisted",
                     ),
+                    OutboxEvent.status == "queued",
                     OutboxEvent.published_at.is_(None),
                 )
                 .order_by(OutboxEvent.created_at, OutboxEvent.id)
@@ -70,6 +71,8 @@ async def dispatch_paper_outbox(
                 payload=dict(event.payload),
             )
         )
+        event.status = "published"
+        event.attempt_count += 1
         event.published_at = published_at
     await session.flush()
     return len(events)
