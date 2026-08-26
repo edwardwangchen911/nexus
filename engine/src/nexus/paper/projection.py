@@ -12,7 +12,7 @@ from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.paper.ledger import balance_ledger
@@ -546,7 +546,13 @@ async def load_paper_projection(
             await session.scalars(
                 select(PaperOrderRecord).where(
                     PaperOrderRecord.account_id == account_id,
-                    PaperOrderRecord.created_at <= as_of,
+                    exists(
+                        select(PaperOrderEventRecord.id).where(
+                            PaperOrderEventRecord.order_id == PaperOrderRecord.id,
+                            PaperOrderEventRecord.event_seq == 1,
+                            PaperOrderEventRecord.occurred_at <= as_of,
+                        )
+                    ),
                 )
             )
         ).all()
@@ -609,7 +615,14 @@ async def load_paper_projection(
             await session.scalars(
                 select(PaperReservationRecord).where(
                     PaperReservationRecord.account_id == account_id,
-                    PaperReservationRecord.created_at <= as_of,
+                    exists(
+                        select(PaperReservationEventRecord.id).where(
+                            PaperReservationEventRecord.reservation_id
+                            == PaperReservationRecord.id,
+                            PaperReservationEventRecord.event_seq == 1,
+                            PaperReservationEventRecord.occurred_at <= as_of,
+                        )
+                    ),
                 )
             )
         ).all()
