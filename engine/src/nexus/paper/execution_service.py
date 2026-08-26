@@ -1093,6 +1093,8 @@ async def advance_internal_paper_order(
             record=existing_request,
             calendar=calendar,
         )
+    if events and evaluated_at < events[-1].occurred_at:
+        raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
 
     fill_rows = tuple(
         (
@@ -1175,6 +1177,8 @@ async def advance_internal_paper_order(
         .order_by(PaperExecutionWindowAuthorityRecord.window_seq.desc())
         .limit(1)
     )
+    if prior_window is not None and evaluated_at < prior_window.evaluated_at:
+        raise PaperExecutionError("PAPER_EXECUTION_CONFLICT")
     if evaluated_at < first_evaluation_at:
         result = _result(
             order_id=order.id,

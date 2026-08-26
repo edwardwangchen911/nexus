@@ -470,6 +470,69 @@ async def test_same_idempotency_key_replays_and_different_request_conflicts(
 
 
 @pytest.mark.asyncio
+async def test_new_worker_request_cannot_move_execution_time_backwards(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_execution(
+        migrated_database_url,
+        window_bar_volumes=(Decimal("10"), Decimal("10")),
+    )
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    first_evaluated_at = seed.evaluation_times[1] + timedelta(minutes=5)
+    try:
+        async with factory.begin() as session:
+            first = await advance_internal_paper_order(
+                session,
+                order_id=seed.order_id,
+                evaluated_at=first_evaluated_at,
+                idempotency_key="advance-monotonic-first",
+            )
+
+        with pytest.raises(PaperExecutionError) as captured:
+            async with factory.begin() as session:
+                await advance_internal_paper_order(
+                    session,
+                    order_id=seed.order_id,
+                    evaluated_at=seed.evaluation_times[1],
+                    idempotency_key="advance-monotonic-backward",
+                )
+
+        async with factory.begin() as session:
+            second = await advance_internal_paper_order(
+                session,
+                order_id=seed.order_id,
+                evaluated_at=first_evaluated_at + timedelta(minutes=5),
+                idempotency_key="advance-monotonic-second",
+            )
+        async with factory.begin() as session:
+            replay = await advance_internal_paper_order(
+                session,
+                order_id=seed.order_id,
+                evaluated_at=first_evaluated_at,
+                idempotency_key="advance-monotonic-first",
+            )
+
+        async with factory() as session:
+            windows = tuple(
+                await session.scalars(
+                    select(PaperExecutionWindowAuthorityRecord)
+                    .where(PaperExecutionWindowAuthorityRecord.order_id == seed.order_id)
+                    .order_by(PaperExecutionWindowAuthorityRecord.window_seq)
+                )
+            )
+
+        assert captured.value.code == "PAPER_EXECUTION_CONFLICT"
+        assert first.action == second.action == "no_capacity"
+        assert replay == first
+        assert [window.evaluated_at for window in windows] == [
+            first_evaluated_at,
+            first_evaluated_at + timedelta(minutes=5),
+        ]
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
 async def test_eight_workers_with_one_key_converge_to_one_fill(
     migrated_database_url: str,
 ) -> None:

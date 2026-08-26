@@ -74,7 +74,9 @@ def test_0010_research_data_round_trips_from_0009_with_the_current_single_head(
         "corporate_actions",
     }
 
-    assert ScriptDirectory.from_config(config).get_heads() == ["0016_paper_execution_atomic"]
+    assert ScriptDirectory.from_config(config).get_heads() == [
+        "0017_paper_execution_time_order"
+    ]
     command.upgrade(config, "0009_optimization")
     assert research_tables.isdisjoint(_table_names(temporary_database_url))
     command.upgrade(config, "0010_research_data")

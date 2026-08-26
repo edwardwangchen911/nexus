@@ -27,7 +27,9 @@ def test_0009_round_trips_from_0008_with_one_head(
         "proposal_positions",
     }
 
-    assert ScriptDirectory.from_config(config).get_heads() == ["0016_paper_execution_atomic"]
+    assert ScriptDirectory.from_config(config).get_heads() == [
+        "0017_paper_execution_time_order"
+    ]
     command.upgrade(config, "0008_diagnostics")
     assert optimization_tables.isdisjoint(_table_names(temporary_database_url))
     command.upgrade(config, "0009_optimization")

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 OPEN = datetime(2026, 8, 27, 13, 30, tzinfo=UTC)
 EVALUATED = datetime(2026, 8, 27, 13, 55, tzinfo=UTC)
+FIRST_WINDOW_EVALUATED = EVALUATED + timedelta(minutes=10)
 ARTIFACT_ID = UUID("63000000-0000-0000-0000-000000000001")
 MANIFEST_ID = UUID("63000000-0000-0000-0000-000000000002")
 WINDOW_ID = UUID("63000000-0000-0000-0000-000000000003")
@@ -115,7 +116,7 @@ async def _seed_valid_window(database_url: str) -> tuple[UUID, tuple[UUID, ...]]
                     window_seq=1,
                     window_start_at=OPEN,
                     window_end_at=OPEN + timedelta(minutes=5),
-                    evaluated_at=EVALUATED,
+                    evaluated_at=FIRST_WINDOW_EVALUATED,
                     data_available_at=EVALUATED,
                     source_authority_id=authority.id,
                     source=authority.source,
@@ -215,7 +216,7 @@ async def test_execution_window_rejects_an_incomplete_or_shifted_bar_set(
                         window_seq=2,
                         window_start_at=OPEN + timedelta(minutes=5),
                         window_end_at=OPEN + timedelta(minutes=10),
-                        evaluated_at=EVALUATED,
+                        evaluated_at=FIRST_WINDOW_EVALUATED + timedelta(minutes=5),
                         data_available_at=EVALUATED,
                         source_authority_id=root.source_authority_id,
                         source=root.source,
@@ -240,6 +241,54 @@ async def test_execution_window_rejects_an_incomplete_or_shifted_bar_set(
                         member_seq=index,
                     )
                     for index, bar_id in enumerate(bar_ids[:4], start=1)
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_execution_window_chain_rejects_backward_evaluation_time(
+    migrated_database_url: str,
+) -> None:
+    order_id, _ = await _seed_valid_window(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions() as read_session:
+            root = await read_session.scalar(
+                select(PaperExecutionWindowAuthorityRecord).where(
+                    PaperExecutionWindowAuthorityRecord.id == WINDOW_ID
+                )
+            )
+        assert root is not None
+        with pytest.raises(DBAPIError, match="execution window chain is invalid"):
+            async with sessions.begin() as session:
+                session.add(
+                    PaperExecutionWindowAuthorityRecord(
+                        id=UUID("63000000-0000-0000-0000-000000000098"),
+                        order_id=order_id,
+                        account_id=root.account_id,
+                        instrument_id=root.instrument_id,
+                        window_seq=2,
+                        window_start_at=OPEN + timedelta(minutes=5),
+                        window_end_at=OPEN + timedelta(minutes=10),
+                        evaluated_at=EVALUATED + timedelta(minutes=5),
+                        data_available_at=EVALUATED,
+                        source_authority_id=root.source_authority_id,
+                        source=root.source,
+                        source_content_hash=root.source_content_hash,
+                        feed=root.feed,
+                        delivery_mode=root.delivery_mode,
+                        vwap=Decimal("100"),
+                        volume=Decimal("5000"),
+                        capacity=Decimal("50"),
+                        quote_id=None,
+                        quote_revision=None,
+                        bid=None,
+                        ask=None,
+                        half_spread=Decimal(0),
+                        content_hash="8" * 64,
+                    )
                 )
     finally:
         await engine.dispose()
