@@ -11,6 +11,7 @@ from nexus.persistence.models import (  # noqa: F401
     data,
     diagnostics,
     market,
+    paper,
     portfolio,
     runtime,
     shadow,

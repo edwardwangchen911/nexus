@@ -99,6 +99,31 @@ SHADOW_TABLES = {
     "shadow_seals",
 }
 EXPECTED_TABLES = EXPECTED_TABLES | SHADOW_TABLES
+PAPER_TABLES = {
+    "risk_policies",
+    "strategy_decisions",
+    "strategy_decision_targets",
+    "paper_accounts",
+    "paper_drawdown_lock_events",
+    "paper_order_batches",
+    "paper_orders",
+    "paper_order_events",
+    "risk_evaluations",
+    "risk_evaluation_rules",
+    "risk_evaluation_price_inputs",
+    "risk_evaluation_sector_inputs",
+    "risk_evaluation_query_proofs",
+    "paper_ledger_accounts",
+    "paper_ledger_transactions",
+    "paper_ledger_entries",
+    "paper_reservations",
+    "paper_reservation_events",
+    "paper_fills",
+    "paper_position_adjustment_events",
+    "paper_position_snapshots",
+    "paper_performance_snapshots",
+}
+EXPECTED_TABLES = EXPECTED_TABLES | PAPER_TABLES
 
 OPTIONAL_MIGRATION_TABLE_GROUPS = (
     frozenset(
@@ -165,6 +190,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
         }
     ),
     frozenset(SHADOW_TABLES),
+    frozenset(PAPER_TABLES),
 )
 
 EXPECTED_FOREIGN_KEYS = {
