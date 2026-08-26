@@ -160,7 +160,7 @@ async def _drain_general(
             worker_id="daily-fixture-worker",
             worker_started_at=now,
             process_version="test-v1",
-            migration_head="0020_resilient_automation_audit",
+            migration_head="0021_manual_job_retry_allowance",
             clock=lambda: now,
             claim_registered_only=True,
         ):
@@ -365,7 +365,7 @@ async def test_local_safe_profile_never_claims_broker_or_placeholder_agent_jobs(
         worker_id="daily-local-safe-worker",
         worker_started_at=now,
         process_version="test-v1",
-        migration_head="0020_resilient_automation_audit",
+        migration_head="0021_manual_job_retry_allowance",
         clock=lambda: now,
         claim_registered_only=True,
     )
@@ -376,7 +376,7 @@ async def test_local_safe_profile_never_claims_broker_or_placeholder_agent_jobs(
         worker_id="daily-local-safe-worker",
         worker_started_at=now,
         process_version="test-v1",
-        migration_head="0020_resilient_automation_audit",
+        migration_head="0021_manual_job_retry_allowance",
         clock=lambda: now,
         claim_registered_only=True,
     )
@@ -387,7 +387,7 @@ async def test_local_safe_profile_never_claims_broker_or_placeholder_agent_jobs(
         worker_id="daily-local-safe-worker",
         worker_started_at=now,
         process_version="test-v1",
-        migration_head="0020_resilient_automation_audit",
+        migration_head="0021_manual_job_retry_allowance",
         clock=lambda: now,
         claim_registered_only=True,
     )
@@ -439,7 +439,7 @@ async def test_local_audit_manifest_runs_only_with_injected_object_store(
             worker_id="daily-audit-worker",
             worker_started_at=now,
             process_version="test-v1",
-            migration_head="0020_resilient_automation_audit",
+            migration_head="0021_manual_job_retry_allowance",
             clock=lambda: now,
             claim_registered_only=True,
         )
@@ -479,7 +479,7 @@ async def test_local_safe_profile_advances_due_internal_paper_order(
         worker_id="daily-paper-worker",
         worker_started_at=planned_tick,
         process_version="test-v1",
-        migration_head="0020_resilient_automation_audit",
+        migration_head="0021_manual_job_retry_allowance",
         clock=lambda: planned_tick,
         claim_registered_only=True,
     )
@@ -499,7 +499,7 @@ async def test_local_safe_profile_advances_due_internal_paper_order(
         worker_id="daily-paper-worker",
         worker_started_at=planned_tick,
         process_version="test-v1",
-        migration_head="0020_resilient_automation_audit",
+        migration_head="0021_manual_job_retry_allowance",
         clock=lambda: FIRST_EVALUATION,
         claim_registered_only=True,
     )
@@ -535,7 +535,7 @@ async def test_nonterminal_paper_execution_enqueues_next_five_minute_window(
         worker_id="daily-partial-worker",
         worker_started_at=planned_tick,
         process_version="test-v1",
-        migration_head="0020_resilient_automation_audit",
+        migration_head="0021_manual_job_retry_allowance",
         clock=lambda: planned_tick,
         claim_registered_only=True,
     )
@@ -546,7 +546,7 @@ async def test_nonterminal_paper_execution_enqueues_next_five_minute_window(
         worker_id="daily-partial-worker",
         worker_started_at=planned_tick,
         process_version="test-v1",
-        migration_head="0020_resilient_automation_audit",
+        migration_head="0021_manual_job_retry_allowance",
         clock=lambda: FIRST_EVALUATION,
         claim_registered_only=True,
     )

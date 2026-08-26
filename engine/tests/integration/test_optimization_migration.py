@@ -28,7 +28,7 @@ def test_0009_round_trips_from_0008_with_one_head(
     }
 
     assert ScriptDirectory.from_config(config).get_heads() == [
-        "0020_resilient_automation_audit"
+        "0021_manual_job_retry_allowance"
     ]
     command.upgrade(config, "0008_diagnostics")
     assert optimization_tables.isdisjoint(_table_names(temporary_database_url))

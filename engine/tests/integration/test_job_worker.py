@@ -124,7 +124,7 @@ async def test_terminal_dependency_mismatch_skips_child_without_running_handler(
         worker_id="worker-dependent",
         worker_started_at=_NOW,
         process_version="test-v1",
-        migration_head="0020_resilient_automation_audit",
+        migration_head="0021_manual_job_retry_allowance",
         clock=lambda: _NOW + timedelta(seconds=4),
         claim_registered_only=True,
     )
@@ -185,7 +185,7 @@ async def test_empty_tick_records_compatible_worker_heartbeat(
         worker_id="worker-empty",
         worker_started_at=_NOW,
         process_version="test-v1",
-        migration_head="0020_resilient_automation_audit",
+        migration_head="0021_manual_job_retry_allowance",
         clock=lambda: _NOW,
     )
     assert worked is False
@@ -230,7 +230,7 @@ async def test_registered_handler_commits_business_fact_and_terminal_job_atomica
         worker_id="worker-success",
         worker_started_at=_NOW,
         process_version="test-v1",
-        migration_head="0020_resilient_automation_audit",
+        migration_head="0021_manual_job_retry_allowance",
         clock=lambda: _NOW + timedelta(seconds=1),
         claim_registered_only=True,
     )
@@ -270,7 +270,7 @@ async def test_unknown_handler_dead_letters_without_interpreting_payload(
         worker_id="worker-unknown",
         worker_started_at=_NOW,
         process_version="test-v1",
-        migration_head="0020_resilient_automation_audit",
+        migration_head="0021_manual_job_retry_allowance",
         clock=lambda: _NOW + timedelta(seconds=1),
     )
     async with factory() as session:
@@ -307,7 +307,7 @@ async def test_registered_handler_rejects_url_payload_before_execution(
         worker_id="worker-unsafe-payload",
         worker_started_at=_NOW,
         process_version="test-v1",
-        migration_head="0020_resilient_automation_audit",
+        migration_head="0021_manual_job_retry_allowance",
         clock=lambda: _NOW + timedelta(seconds=1),
     )
     async with factory() as session:
@@ -370,7 +370,7 @@ async def test_timeout_obeys_declared_retry_policy_and_attempt_limit(
         worker_id=f"worker-timeout-{retry_policy.value}",
         worker_started_at=_NOW,
         process_version="test-v1",
-        migration_head="0020_resilient_automation_audit",
+        migration_head="0021_manual_job_retry_allowance",
         clock=clock,
     )
     async with factory() as session:
@@ -389,7 +389,7 @@ async def test_timeout_obeys_declared_retry_policy_and_attempt_limit(
             worker_id="worker-timeout-auto-second",
             worker_started_at=_NOW,
             process_version="test-v1",
-            migration_head="0020_resilient_automation_audit",
+            migration_head="0021_manual_job_retry_allowance",
             clock=clock,
         )
         async with factory() as session:

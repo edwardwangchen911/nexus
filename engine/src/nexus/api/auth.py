@@ -70,6 +70,17 @@ async def verify_hmac_v1(
     settings: EngineSettings,
 ) -> VerifiedServiceActor:
     """Validate a BFF call and reserve its nonce in the caller's transaction."""
+    actor, nonce = verify_hmac_signature_v1(request, body, settings)
+    await reserve_hmac_nonce(session, actor=actor, nonce=nonce)
+    return actor
+
+
+def verify_hmac_signature_v1(
+    request: Request,
+    body: bytes,
+    settings: EngineSettings,
+) -> tuple[VerifiedServiceActor, UUID]:
+    """Validate HMAC headers without requiring a dependency connection."""
     headers = request.headers
     required = (
         "X-Nexus-Key-Id",
@@ -118,13 +129,22 @@ async def verify_hmac_v1(
     if not hmac.compare_digest(signature, expected):
         raise _unauthenticated()
 
+    return VerifiedServiceActor(actor_id=actor_id, request_id=request_id, key_id=key_id), nonce
+
+
+async def reserve_hmac_nonce(
+    session: AsyncSession,
+    *,
+    actor: VerifiedServiceActor,
+    nonce: UUID,
+) -> None:
+    """Persist replay protection after signature verification succeeds."""
     try:
         async with session.begin_nested():
-            session.add(UsedNonce(key_id=key_id, nonce=str(nonce), used_at=datetime.now(UTC)))
+            session.add(UsedNonce(key_id=actor.key_id, nonce=str(nonce), used_at=datetime.now(UTC)))
             await session.flush()
     except IntegrityError as error:
         raise _unauthenticated() from error
-    return VerifiedServiceActor(actor_id=actor_id, request_id=request_id, key_id=key_id)
 
 
 def _verification_secret(key_id: str | None, settings: EngineSettings) -> str | None:

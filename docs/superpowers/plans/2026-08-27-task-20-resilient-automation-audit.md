@@ -59,11 +59,12 @@
 
 ## Slice 8：Readiness、风险审计与动作 API
 
-- [ ] 新增 `engine/tests/integration/test_health_ready.py`，覆盖 HMAC、DB/object store/migration/heartbeat 独立失败、503 安全响应和 provider outage 不影响 ready。
-- [ ] 新增 `engine/tests/integration/test_risk_audit_api.py`，覆盖签名 cursor/kind/date、Job safe retry、If-Match/幂等并发和 unsafe/未知状态拒绝。
-- [ ] 新增 `engine/tests/integration/test_drawdown_ack_api.py`，覆盖唯一内部账户、recovery threshold、append-only event、版本/幂等/并发和不创建订单。
-- [ ] 实现 health/jobs/risk_audit routes/schemas/services，接入 `main.py` 并生成 OpenAPI；不返回 raw payload 或运行时配置。
-- [ ] 运行 API/HMAC/生成合约定向集；提交 `feat(api): expose readiness and safe recovery`。
+- [x] 新增 `engine/tests/integration/test_health_ready.py`，覆盖 HMAC、DB/object store/migration/heartbeat 独立失败、worker 版本不兼容、503 安全响应和 provider outage 不影响 ready。
+- [x] 新增 `engine/tests/integration/test_risk_audit_api.py`，覆盖签名 cursor/kind/date、脱敏 gzip 导出、Job safe retry、If-Match/幂等并发、DB 越权反例和 unsafe 拒绝。
+- [x] 新增 `engine/tests/integration/test_drawdown_ack_api.py`，覆盖唯一内部账户、recovery threshold、append-only event、版本/幂等并发和不创建订单。
+- [x] 实现 health/jobs/risk_audit routes/schemas/services，接入 `main.py` 并生成二进制导出 OpenAPI 合约；不返回 raw payload 或运行时配置。
+- [x] 追加 `0021_manual_job_retry_allowance`前向迁移：不回改 `0020`，仅为每次受限人工重试增加一次可领取额度，并由 DB trigger 绑定 `failed/dead_letter -> queued`、计数器和尝试号。
+- [x] 定向数据库验收 6 项、Task 20 回归 40 项、API/HMAC/OpenAPI 回归 14 项、Ruff 全量和 Mypy 231 个源文件通过。
 
 ## Slice 9：BFF 与 `/risk-audit` 页面
 

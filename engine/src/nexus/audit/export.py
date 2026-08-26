@@ -39,7 +39,7 @@ def _utc(value: datetime, *, field: str) -> datetime:
     return value.astimezone(UTC)
 
 
-def _kind_condition(kind: AuditKind) -> ColumnElement[bool]:
+def audit_kind_condition(kind: AuditKind) -> ColumnElement[bool]:
     all_prefixes = tuple(
         prefix
         for current_kind, prefixes in _KIND_PREFIXES.items()
@@ -53,7 +53,7 @@ def _kind_condition(kind: AuditKind) -> ColumnElement[bool]:
     )
 
 
-def _redacted_document(event: AuditEvent) -> dict[str, object]:
+def redacted_audit_document(event: AuditEvent) -> dict[str, object]:
     return redact_audit_event(
         AuditExportSource(
             event_seq=event.event_seq,
@@ -71,7 +71,7 @@ def _redacted_document(event: AuditEvent) -> dict[str, object]:
 def render_redacted_audit_gzip(events: Sequence[AuditEvent]) -> bytes:
     """Render ordered source rows as deterministic UTF-8 gzip NDJSON."""
     body = b"".join(
-        (canonical_json(_redacted_document(event)) + "\n").encode("utf-8")
+        (canonical_json(redacted_audit_document(event)) + "\n").encode("utf-8")
         for event in events
     )
     return gzip.compress(body, compresslevel=9, mtime=0)
@@ -101,7 +101,7 @@ async def export_audit_ndjson_gzip(
     if kind is not None:
         if kind not in _KIND_PREFIXES:
             raise ValueError("audit export kind is invalid")
-        conditions.append(_kind_condition(kind))
+        conditions.append(audit_kind_condition(kind))
     events = tuple(
         (
             await session.scalars(

@@ -384,7 +384,7 @@ async def test_automatic_failures_exhaust_and_worker_heartbeat_is_monotonic(
             queue=QueueName.GENERAL,
             worker_id="worker-heartbeat",
             process_version="v1",
-            migration_head="0020_resilient_automation_audit",
+            migration_head="0021_manual_job_retry_allowance",
             started_at=_NOW,
             seen_at=_NOW,
         )
@@ -395,7 +395,7 @@ async def test_automatic_failures_exhaust_and_worker_heartbeat_is_monotonic(
             queue=QueueName.GENERAL,
             worker_id="worker-heartbeat",
             process_version="v2",
-            migration_head="0020_resilient_automation_audit",
+            migration_head="0021_manual_job_retry_allowance",
             started_at=_NOW,
             seen_at=_NOW + timedelta(seconds=5),
         )

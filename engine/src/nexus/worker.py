@@ -42,6 +42,10 @@ from nexus.jobs.registry import (
     JobRegistry,
 )
 from nexus.jobs.worker import UnsafeJobError, run_job_worker_once
+from nexus.persistence.migrations import (
+    CURRENT_GENERAL_WORKER_PROCESS_VERSION,
+    CURRENT_MIGRATION_HEAD,
+)
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
     AgentResearchRunRecord,
@@ -55,8 +59,8 @@ _RUN_TO_JOB_STATUS = {
     "abstained": "skipped",
     "failed": "failed",
 }
-_PROCESS_VERSION = "nexus-engine-task20"
-_MIGRATION_HEAD = "0020_resilient_automation_audit"
+_PROCESS_VERSION = CURRENT_GENERAL_WORKER_PROCESS_VERSION
+_MIGRATION_HEAD = CURRENT_MIGRATION_HEAD
 _ONCE_WORKER_ID = f"agent-once-{new_uuid7()}"
 _ONCE_STARTED_AT = datetime.now(UTC)
 

@@ -212,11 +212,12 @@ event_hash = SHA256(previous_hash UTF-8 || RFC8785_JCS(chain_event_without_hashe
 
 ## 9. 迁移、兼容与回滚
 
-- 新迁移为 `0020_resilient_automation_audit`，父节点 `0019_paper_performance_root`；不回改旧迁移。
+- 主运行权威迁移为 `0020_resilient_automation_audit`，父节点 `0019_paper_performance_root`；不回改旧迁移。Slice 8 审查发现 `attempt_count <= max_attempts` 会使已耗尽的 dead-letter 在人工重排队后仍永远无法领取，因此追加单头前向迁移 `0021_manual_job_retry_allowance`（父节点 `0020`）。它仅将最多两次 `manual_retry_count` 作为额外领取额度，自动重试上限不变，且 DB trigger 禁止越过 API 同时修改尝试次数。
 - 迁移先新增 nullable 列/新表，确定性 backfill Job 状态与 audit 链，再加 NOT NULL/check/unique/触发器。
 - 现有 `QUEUED/RUNNING/COMPLETED/ABSTAINED/FAILED` 分别映射为 `queued/running/succeeded/skipped/failed`；无法映射的行使迁移失败，不能猜测。
 - 当前 `paper.outbox` 调用保持兼容；Agent admission/worker 同步改成小写状态与新 repository。
 - downgrade 会删除 Task 20 attempt/dependency/heartbeat/manifest 事实并移除链列；只适用于无须保留 Task 20 运行事实的本地环境。已有事实时优先前向修复并先备份。
+- `0021` 如已产生超出原 `max_attempts` 的人工尝试事实，downgrade 会因旧 check 无法重建而 fail closed，不会静默删除或改写 attempt 历史。
 
 ## 10. 验收标准
 

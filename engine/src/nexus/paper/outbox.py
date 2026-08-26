@@ -26,6 +26,7 @@ _PAPER_EVENT_SCHEMAS = (
     ("paper.execution.advance.filled", "paper_execution_v1"),
     ("paper.execution.advance.cancelled", "paper_execution_v1"),
     ("paper.execution.cancelled", "paper_execution_v1"),
+    ("paper.drawdown_lock.acknowledged", "paper_drawdown_v1"),
 )
 
 

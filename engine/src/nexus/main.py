@@ -10,6 +10,7 @@ from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.routes.briefs import router as briefs_router
 from nexus.api.routes.broker_sync import router as broker_sync_router
 from nexus.api.routes.diagnostics import router as diagnostics_router
+from nexus.api.routes.health import router as health_router
 from nexus.api.routes.integrations import router as integrations_router
 from nexus.api.routes.market import router as market_router
 from nexus.api.routes.optimization import router as optimization_router
@@ -17,19 +18,28 @@ from nexus.api.routes.overview import router as overview_router
 from nexus.api.routes.paper import router as paper_router
 from nexus.api.routes.portfolios import router as portfolios_router
 from nexus.api.routes.research import router as research_router
+from nexus.api.routes.risk_audit import router as risk_audit_router
 from nexus.api.routes.strategies import router as strategies_router
 from nexus.api.routes.system import router as system_router
 from nexus.api.schemas.optimization import WhatIfRequest
 from nexus.domain.ids import new_uuid7
 from nexus.persistence.session import session_factory
+from nexus.readiness import ReadinessObjectStore, S3ReadinessObjectStore
 from nexus.settings import EngineSettings
 
 
-def create_engine_app(settings: EngineSettings | None = None) -> FastAPI:
+def create_engine_app(
+    settings: EngineSettings | None = None,
+    *,
+    readiness_object_store: ReadinessObjectStore | None = None,
+) -> FastAPI:
     """Create the stateless API application without probing dependencies."""
     app = FastAPI(title="NEXUS Engine", version="0.1.0")
     app.state.settings = settings or EngineSettings()
     app.state.session_factory = session_factory(app.state.settings)
+    app.state.readiness_object_store = readiness_object_store or S3ReadinessObjectStore(
+        app.state.settings
+    )
 
     @app.exception_handler(NexusError)
     async def nexus_error_handler(_: Request, error: NexusError) -> JSONResponse:
@@ -71,6 +81,7 @@ def create_engine_app(settings: EngineSettings | None = None) -> FastAPI:
         return {"status": "alive", "service": "nexus-engine"}
 
     app.include_router(system_router)
+    app.include_router(health_router)
     app.include_router(integrations_router)
     app.include_router(market_router)
     app.include_router(portfolios_router)
@@ -82,6 +93,7 @@ def create_engine_app(settings: EngineSettings | None = None) -> FastAPI:
     app.include_router(research_router)
     app.include_router(briefs_router)
     app.include_router(strategies_router)
+    app.include_router(risk_audit_router)
     _install_what_if_request_schema(app)
     return app
 

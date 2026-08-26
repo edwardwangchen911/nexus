@@ -268,7 +268,7 @@ async def claim_next_job(
         Job.queue == queue.value,
         Job.status == JobStatus.QUEUED.value,
         Job.available_at <= now,
-        Job.attempt_count < Job.max_attempts,
+        Job.attempt_count < Job.max_attempts + Job.manual_retry_count,
         ~nonterminal_dependency,
     ]
     if job_types is not None:

@@ -58,7 +58,7 @@ class Job(ImmutableCreatedAt, Base):
         CheckConstraint(
             "retry_policy IN ('automatic_safe','manual_safe','never') "
             "AND max_attempts BETWEEN 1 AND 3 "
-            "AND attempt_count BETWEEN 0 AND max_attempts "
+            "AND attempt_count BETWEEN 0 AND max_attempts + manual_retry_count "
             "AND manual_retry_count BETWEEN 0 AND 2",
             name="jobs_retry_allowed",
         ),

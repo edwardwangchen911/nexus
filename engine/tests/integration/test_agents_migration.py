@@ -37,6 +37,7 @@ def test_0020_automation_is_the_single_head_after_paper_execution() -> None:
     performance_chain = scripts.get_revision("0018_paper_performance_chain")
     performance_root = scripts.get_revision("0019_paper_performance_root")
     automation = scripts.get_revision("0020_resilient_automation_audit")
+    retry_allowance = scripts.get_revision("0021_manual_job_retry_allowance")
     assert execution is not None
     assert execution.down_revision == "0014_paper"
     assert atomic_execution is not None
@@ -49,7 +50,9 @@ def test_0020_automation_is_the_single_head_after_paper_execution() -> None:
     assert performance_root.down_revision == "0018_paper_performance_chain"
     assert automation is not None
     assert automation.down_revision == "0019_paper_performance_root"
-    assert scripts.get_heads() == ["0020_resilient_automation_audit"]
+    assert retry_allowance is not None
+    assert retry_allowance.down_revision == "0020_resilient_automation_audit"
+    assert scripts.get_heads() == ["0021_manual_job_retry_allowance"]
     assert agents is not None
     assert agents.down_revision == "0010_research_data"
     assert backtests is not None

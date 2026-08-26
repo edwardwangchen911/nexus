@@ -99,7 +99,7 @@ async def _mutation_is_rejected(database_url: str) -> bool:
 def test_0020_is_the_single_head_after_task19() -> None:
     scripts = ScriptDirectory.from_config(_config())
 
-    assert scripts.get_heads() == ["0020_resilient_automation_audit"]
+    assert scripts.get_heads() == ["0021_manual_job_retry_allowance"]
     revision = scripts.get_revision("0015_paper_execution")
     assert revision is not None
     assert revision.down_revision == "0014_paper"
@@ -116,8 +116,11 @@ def test_0020_is_the_single_head_after_task19() -> None:
     assert performance_root is not None
     assert performance_root.down_revision == "0018_paper_performance_chain"
     automation = scripts.get_revision("0020_resilient_automation_audit")
+    retry_allowance = scripts.get_revision("0021_manual_job_retry_allowance")
     assert automation is not None
     assert automation.down_revision == "0019_paper_performance_root"
+    assert retry_allowance is not None
+    assert retry_allowance.down_revision == "0020_resilient_automation_audit"
 
 
 def test_execution_migration_seeds_authority_backfills_calendar_and_round_trips(
