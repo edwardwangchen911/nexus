@@ -84,6 +84,106 @@ class SeededShadowEvent:
     evidence_hash: str
 
 
+async def seed_complete_shadow_session_inputs(
+    database_url: str,
+    *,
+    started: ShadowStartedSeed,
+    ordinal: int,
+    instrument_ids: tuple[UUID, ...] | None = None,
+) -> datetime:
+    """Insert a complete two-instrument raw Bar/event query authority fixture."""
+    factory = session_factory(settings(database_url))
+    async with factory() as session, session.begin():
+        return await _seed_complete_shadow_session_inputs(
+            session,
+            started=started,
+            ordinal=ordinal,
+            instrument_ids=instrument_ids,
+        )
+
+
+async def seed_complete_shadow_window(
+    database_url: str,
+    *,
+    started: ShadowStartedSeed,
+    through_ordinal: int,
+    start_ordinal: int = 1,
+    instrument_ids: tuple[UUID, ...] | None = None,
+) -> tuple[datetime, ...]:
+    """Insert a complete authority fixture window in one transaction."""
+    factory = session_factory(settings(database_url))
+    async with factory() as session, session.begin():
+        return tuple(
+            [
+                await _seed_complete_shadow_session_inputs(
+                    session,
+                    started=started,
+                    ordinal=ordinal,
+                    instrument_ids=instrument_ids,
+                )
+                for ordinal in range(start_ordinal, through_ordinal + 1)
+            ]
+        )
+
+
+async def _seed_complete_shadow_session_inputs(
+    session: AsyncSession,
+    *,
+    started: ShadowStartedSeed,
+    ordinal: int,
+    instrument_ids: tuple[UUID, ...] | None = None,
+) -> datetime:
+    session_date = started.eligible.calendar_sessions[ordinal - 1]
+    query_instruments = (
+        started.eligible.instrument_ids if instrument_ids is None else instrument_ids
+    )
+    decision_at = await session.scalar(
+        select(ExchangeCalendarSessionRecord.decision_at).where(
+            ExchangeCalendarSessionRecord.calendar_authority_id == started.eligible.calendar_id,
+            ExchangeCalendarSessionRecord.session == session_date,
+        )
+    )
+    assert isinstance(decision_at, datetime)
+    decision_at = decision_at.astimezone(UTC)
+    bars = tuple(
+        [
+            await seed_shadow_price_authority(
+                session,
+                instrument_id=instrument_id,
+                session_date=session_date,
+                available_at=decision_at - timedelta(minutes=1),
+                open_price=str(100 + index),
+                close_price=str(101 + index),
+            )
+            for index, instrument_id in enumerate(query_instruments)
+        ]
+    )
+    await seed_shadow_query_proof(
+        session,
+        shadow_group_id=started.start.shadow_group_id,
+        session_date=session_date,
+        kind="price_bars",
+        source="alpaca",
+        delivery_mode="delayed",
+        instrument_ids=query_instruments,
+        complete=True,
+        member_ids=tuple(item.bar_id for item in bars),
+        available_at=decision_at - timedelta(seconds=10),
+    )
+    await seed_shadow_query_proof(
+        session,
+        shadow_group_id=started.start.shadow_group_id,
+        session_date=session_date,
+        kind="corporate_actions",
+        source="fixture",
+        delivery_mode="unknown",
+        instrument_ids=query_instruments,
+        complete=True,
+        available_at=decision_at - timedelta(seconds=10),
+    )
+    return decision_at
+
+
 async def seed_shadow_calendar(
     session: AsyncSession,
     *,
@@ -135,9 +235,13 @@ async def seed_shadow_calendar(
     return ShadowCalendarSeed(calendar_id=calendar.id, sessions=calendar_sessions)
 
 
-async def seed_started_shadow(database_url: str) -> ShadowStartedSeed:
+async def seed_started_shadow(
+    database_url: str,
+    *,
+    all_cash_variant: str | None = None,
+) -> ShadowStartedSeed:
     """Create and atomically start one executable Shadow root."""
-    eligible = await seed_shadow_eligible_group(database_url)
+    eligible = await seed_shadow_eligible_group(database_url, all_cash_variant=all_cash_variant)
     factory = session_factory(settings(database_url))
     async with factory() as session, session.begin():
         started = await start_proposal_shadow(
@@ -275,18 +379,12 @@ async def seed_shadow_query_proof(
             "source": source,
             "delivery_mode": delivery_mode,
             "instrument_ids": [
-                str(value)
-                for value in sorted(instrument_ids, key=lambda item: item.int)
+                str(value) for value in sorted(instrument_ids, key=lambda item: item.int)
             ],
             "complete": complete,
-            "member_ids": [
-                str(value) for value in sorted(member_ids, key=lambda item: item.int)
-            ],
+            "member_ids": [str(value) for value in sorted(member_ids, key=lambda item: item.int)],
             "negative_instrument_ids": [
-                str(value)
-                for value in sorted(
-                    negative_instrument_ids, key=lambda item: item.int
-                )
+                str(value) for value in sorted(negative_instrument_ids, key=lambda item: item.int)
             ],
             "query_hash": query_hash,
         },
@@ -312,9 +410,7 @@ async def seed_shadow_event(
     revision: str = "1",
 ) -> SeededShadowEvent:
     """Insert one content-addressed corporate-action event authority."""
-    evidence_hash = sha256(
-        f"{source}:{provider_event_id}:{revision}".encode()
-    ).hexdigest()
+    evidence_hash = sha256(f"{source}:{provider_event_id}:{revision}".encode()).hexdigest()
     evidence = ResearchEvidenceRef(
         id=uuid4(),
         source=source,
@@ -362,6 +458,7 @@ async def seed_shadow_eligible_group(
     diagnostic_complete: bool = True,
     strategy_evidence_complete: bool = True,
     comparison_non_executable: bool = False,
+    all_cash_variant: str | None = None,
 ) -> ShadowEligibleSeed:
     """Create exactly one compared group and one published future XNYS calendar."""
     await seed_portfolio_list(database_url)
@@ -456,9 +553,7 @@ async def seed_shadow_eligible_group(
         proposal_ids: dict[str, UUID] = {}
         for variant in ("hold_current", "minimum_change", "strategy_target"):
             variant_strategy_evidence_complete = (
-                strategy_evidence_complete
-                if variant == "strategy_target"
-                else True
+                strategy_evidence_complete if variant == "strategy_target" else True
             )
             proposal = OptimizationProposalRecord(
                 id=uuid4(),
@@ -477,10 +572,10 @@ async def seed_shadow_eligible_group(
                 weights[variant],
                 strict=True,
             ):
+                if all_cash_variant in {variant, "all"}:
+                    current_weight = target_weight = "0"
                 persisted_target = (
-                    current_weight
-                    if not variant_strategy_evidence_complete
-                    else target_weight
+                    current_weight if not variant_strategy_evidence_complete else target_weight
                 )
                 session.add(
                     ProposalPositionRecord(

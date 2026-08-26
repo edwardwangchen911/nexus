@@ -660,17 +660,23 @@ Read projection verifies root bundle hash, child counts, per-session authority/s
 
 **Steps**
 
-- [ ] Add unit tests that ordinal 1 invokes `execute_target_weights` exactly once per variant, ordinal 2 never invokes it, all three variants consume the same authority hash, and one variant failure aborts the whole successful-session write.
-- [ ] Add integration tests for session 1 facts/fills/outcomes, an all-cash zero-outcome variant, session replay, gap rejection, failed attempt sanitization, two workers racing the same session, and append-only state reconstruction.
-- [ ] Add tests for 5/21 observation checkpoints, 63 complete auto-validation, initial `missing_bar|untradable` auto-expiration, data gap grace backfill, no session 64, and grace-exhausted expiration.
-- [ ] Add advance/reject and finalize/reject races; assert one matching terminal status/seal, one terminal audit/outbox, and no post-seal child rows.
-- [ ] Add query tests for not-started 404 domain result, fixed variant/NAV ordering, due/missing/freshness/source summaries, last failed attempt, complete metrics, and corruption/hash mismatch fail-closed behavior.
-- [ ] Add a database boundary test that snapshots counts for paper/broker/order/execution-intent tables before 63-session validation and proves they are unchanged afterward.
-- [ ] Run `uv run --package nexus-engine pytest engine/tests/unit/shadow/test_service.py engine/tests/integration/test_shadow_advance_pg.py engine/tests/integration/test_shadow_query_pg.py engine/tests/property/test_shadow_properties.py -q`; confirm failures before the service exists.
-- [ ] Implement state reconstruction from the latest append-only snapshot, one-session simulation, exact child persistence, checkpoint metrics, final-gate calculation, seal/CAS/audit/outbox, and replay behavior.
-- [ ] Implement `load_shadow_view()` as a verified projection; do not recompute financial metrics in the API or browser.
-- [ ] Rerun focused tests plus all Shadow/migration tests, Ruff, and Mypy; expect exit 0.
-- [ ] Commit with `feat(engine): advance and finalize proposal shadows`.
+- [x] Add unit tests that ordinal 1 invokes `execute_target_weights` exactly once per variant, ordinal 2 never invokes it, all three variants consume the same authority hash, and one variant failure aborts the whole successful-session write.
+- [x] Add integration tests for session 1 facts/fills/outcomes, an all-cash zero-outcome variant, session replay, gap rejection, failed attempt sanitization, two workers racing the same session, and append-only state reconstruction.
+- [x] Add tests for 5/21 observation checkpoints, 63 complete auto-validation, initial `missing_bar|untradable` auto-expiration, data gap grace backfill, no session 64, and grace-exhausted expiration.
+- [x] Add advance/reject and finalize/reject races; assert one matching terminal status/seal, one terminal audit/outbox, and no post-seal child rows.
+- [x] Add query tests for not-started 404 domain result, fixed variant/NAV ordering, due/missing/freshness/source summaries, last failed attempt, complete metrics, and corruption/hash mismatch fail-closed behavior.
+- [x] Add a database boundary test that snapshots counts for paper/broker/order/execution-intent tables before 63-session validation and proves they are unchanged afterward.
+- [x] Run `uv run --package nexus-engine pytest engine/tests/unit/shadow/test_service.py engine/tests/integration/test_shadow_advance_pg.py engine/tests/integration/test_shadow_query_pg.py engine/tests/property/test_shadow_properties.py -q`; confirm failures before the service exists.
+- [x] Implement state reconstruction from the latest append-only snapshot, one-session simulation, exact child persistence, checkpoint metrics, final-gate calculation, seal/CAS/audit/outbox, and replay behavior.
+- [x] Implement `load_shadow_view()` as a verified projection; do not recompute financial metrics in the API or browser.
+- [x] Rerun focused tests plus all Shadow/migration tests, Ruff, and Mypy; expect exit 0.
+- [x] Commit with `feat(engine): advance and finalize proposal shadows`.
+
+Evidence: the first focused run failed at collection because `nexus.shadow.service`
+and then `advance_shadow_session` did not exist. The implemented slice passed 23
+focused tests and 104 expanded Shadow/migration tests; `ruff check engine`, `mypy
+engine/src`, and `git diff --check` exited 0. PostgreSQL tests also proved that
+63-session validation did not change broker-order or backtest execution tables.
 
 ---
 

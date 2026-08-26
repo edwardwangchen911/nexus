@@ -1,12 +1,13 @@
 """Property contracts for deterministic Proposal Shadow calculations."""
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
 from hypothesis import given
 from hypothesis import strategies as st
-from nexus.shadow.canonical import target_weights_content_hash
+from nexus.shadow.authority import BoundShadowBar, ShadowSessionInput
+from nexus.shadow.canonical import simulation_state_content_hash, target_weights_content_hash
 from nexus.shadow.metrics import calculate_checkpoint_metrics
 from nexus.shadow.models import (
     SHADOW_VARIANTS,
@@ -14,8 +15,11 @@ from nexus.shadow.models import (
     ShadowNavPoint,
     ShadowVariant,
 )
+from nexus.shadow.service import simulate_shadow_portfolio_session
 from nexus.shadow.state_machine import decide_terminal_action
-from nexus.simulation.models import TargetWeight
+from nexus.simulation.canonical import canonical_decimal
+from nexus.simulation.costs import CostModel
+from nexus.simulation.models import SimulationState, TargetWeight
 
 
 @given(st.permutations(SHADOW_VARIANTS))
@@ -86,4 +90,70 @@ def test_target_weight_hash_is_deterministic_for_input_order(order: list[int]) -
 
     assert target_weights_content_hash(weights, Decimal("0.4")) == target_weights_content_hash(
         tuple(reversed(weights)), Decimal("0.4")
+    )
+
+
+@given(
+    st.integers(min_value=1, max_value=99),
+    st.decimals(min_value="1", max_value="500", places=4),
+    st.decimals(min_value="1", max_value="500", places=4),
+)
+def test_persisted_precision_state_reconstructs_exact_nav(
+    weight_percent: int,
+    open_price: Decimal,
+    close_price: Decimal,
+) -> None:
+    instrument_id = UUID(int=1)
+    bar = BoundShadowBar(
+        price_bar_record_id=UUID(int=11),
+        price_bar_set_authority_id=UUID(int=12),
+        instrument_id=instrument_id,
+        usage="execution_and_mark",
+        source="fixture",
+        delivery_mode="fixture",
+        revision="1",
+        available_at=datetime(2026, 1, 5, 21, tzinfo=UTC),
+        content_hash="a" * 64,
+        open=open_price,
+        close=close_price,
+    )
+    authority = ShadowSessionInput(
+        status="complete",
+        reason=None,
+        session=date(2026, 1, 5),
+        ordinal=1,
+        observed_at=datetime(2026, 1, 5, 22, tzinfo=UTC),
+        late_backfill=False,
+        authority_hash="b" * 64,
+        bars=(bar,),
+        missing_execution_inputs=(),
+        events=(),
+        source_summary=(),
+        delivery_mode_summary=("fixture",),
+        maximum_available_at=bar.available_at,
+    )
+    result = simulate_shadow_portfolio_session(
+        previous_state=SimulationState(cash=Decimal("100"), instruments=(), receivables=()),
+        authority=authority,
+        targets=(
+            TargetWeight(
+                instrument_id=instrument_id,
+                weight=Decimal(weight_percent) / Decimal(100),
+            ),
+        ),
+        cost_model=CostModel.zero(),
+        signal_session=date(2026, 1, 2),
+    )
+    instrument = result.state.instruments[0]
+    reconstructed = canonical_decimal(
+        result.state.cash + instrument.quantity * instrument.last_close  # type: ignore[operator]
+    )
+
+    assert reconstructed == result.nav
+    assert simulation_state_content_hash(result.state) == simulation_state_content_hash(
+        SimulationState(
+            cash=result.state.cash,
+            instruments=result.state.instruments,
+            receivables=result.state.receivables,
+        )
     )
