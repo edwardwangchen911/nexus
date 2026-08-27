@@ -25,6 +25,7 @@ from nexus.evolution.shadow.models import (
 )
 from nexus.market.price_bar_authority import finalize_price_bar_set
 from nexus.optimizer.cost_policy import COST_POLICY_ID
+from nexus.paper.execution_service import cancel_internal_paper_order
 from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.persistence.models.data import (
     DataArtifact,
@@ -44,6 +45,8 @@ from nexus.persistence.models.evolution import (
 )
 from nexus.persistence.models.market import SectorExposure, UniverseMember, UniverseSnapshot
 from nexus.persistence.models.paper import (
+    PaperOrderEventRecord,
+    PaperOrderRecord,
     PaperPerformanceSnapshotRecord,
     PaperPositionSnapshotRecord,
 )
@@ -108,6 +111,12 @@ async def seed_strategy_shadow_ready(
 
     performance = await seed_paper_performance(database_url)
     async with factory() as session, session.begin():
+        await _cancel_remaining_open_orders(
+            session,
+            account_id=performance.execution.account_id,
+            requested_at=performance.as_of - timedelta(seconds=1),
+        )
+    async with factory() as session, session.begin():
         publication = await publish_paper_performance_snapshot(
             session,
             account_id=performance.execution.account_id,
@@ -125,6 +134,37 @@ async def seed_strategy_shadow_ready(
         baseline_snapshot_id=publication.snapshot_id,
         now=START_NOW,
     )
+
+
+async def _cancel_remaining_open_orders(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    requested_at: datetime,
+) -> None:
+    orders = tuple(
+        await session.scalars(
+            select(PaperOrderRecord)
+            .where(PaperOrderRecord.account_id == account_id)
+            .order_by(PaperOrderRecord.id)
+        )
+    )
+    terminal = {"risk_rejected", "filled", "cancelled", "rejected"}
+    for order in orders:
+        latest = await session.scalar(
+            select(PaperOrderEventRecord)
+            .where(PaperOrderEventRecord.order_id == order.id)
+            .order_by(PaperOrderEventRecord.event_seq.desc())
+            .limit(1)
+        )
+        if latest is not None and latest.to_status not in terminal:
+            await cancel_internal_paper_order(
+                session,
+                order_id=order.id,
+                expected_event_seq=latest.event_seq,
+                requested_at=requested_at,
+                idempotency_key=f"strategy-shadow-seal-{order.id}",
+            )
 
 
 async def seed_strategy_shadow_session_evidence(

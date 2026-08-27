@@ -343,6 +343,8 @@ shadow_excess_return - estimated_handover_cost_ratio >= 0
 
 数据、成本或风险未知时进入 `PROMOTION_WAITING_HANDOVER`，不创建订单。交接预检只保存证据；正式订单仍由下一次 Forward 决策产生。
 
+实现时不得信任调用方声称的当前组合。持久化服务必须按交接决策时点重新加载最新封存、无未终结订单的内部模拟快照，归一化后逐项核对 snapshot ID、NAV、现金权重和所有正持仓权重；“真实 snapshot ID + 伪造权重”按 `HANDOVER_AUTHORITY_INVALID` 拒绝。source、cost、risk policy 必须由仓库固定 loader 重新验证，预计成本率必须等于已发布成本政策。交接 instrument authority 还固定 market、currency、asset type、价格、ADV20、可用时间和 blocked 状态；目标级预检覆盖支持范围、交易阻断、流动性、drawdown lock、最小买入额、现金、单名和行业约束。任何晚到或不完整 authority 均为 UNKNOWN，而不是乐观补值。
+
 ### 8.3 并发晋级
 
 - `strategy_registry_heads` 只有 `channel='internal_paper'` 一行。
@@ -352,6 +354,8 @@ shadow_excess_return - estimated_handover_cost_ratio >= 0
 - 自动晋级可由用户通过 registry control event 暂停；暂停不改变冠军或硬风控。
 
 `strategy_registry_heads` 是可重建投影，精确保存 `active_definition_id`、`active_generation`、`last_event_id`、`auto_promotion_paused`、`pending_event_id`、`pending_effective_session` 和 CAS `version`。存在 pending promote/rollback 时不得提交第二个切换；PAUSE 允许提交，但只阻止新的自动 PROMOTE，不取消已通过人工回滚命令建立的 pending rollback。
+
+幂等键同时绑定操作类型、目标 definition、effective session 和固定 reason；同一键跨 PAUSE/PROMOTE/ROLLBACK 或改变参数时必须返回 `REGISTRY_IDEMPOTENCY_CONFLICT`。pending 期间追加 PAUSE/RESUME 后，激活结果和 Forward 绑定仍引用原 PROMOTE/ROLLBACK 激活事件，不得误用最新控制事件。
 
 ### 8.4 安全生效
 
@@ -384,6 +388,8 @@ strategy_definition_id, registry_event_id, champion_generation
 首版仍固定周频，因此保留 `WEEKLY_REBALANCE`、下一 session 和既有 Paper 执行时序。`ForwardStrategyDecision` 从 literal baseline 扩展为内容寻址 definition，但构造函数不接受调用方 targets；它只能执行确定性策略解释器输出。
 
 `paper` 在每个 decision session 开始时读取已生效 registry head，验证 event/hash/generation/definition，然后把该绑定冻结进决策。即使随后冠军切换，当日决策和订单仍引用原 generation。
+
+新决策使用 `forward_strategy_decision_sha256_v2`，将 definition、激活 event 和 generation 纳入 canonical hash。`0022` 之前已经存在的不可变 `baseline_v1` 行不能重写下游 hash，因此只读加载器可为 genesis generation 1 重算并接受旧 v1 hash；所有新写入只能使用 v2。PAUSE/RESUME 不是冠军激活 authority，不能成为 Forward 决策的 `registry_event_id`。
 
 ## 10. Job 编排与可观测性
 

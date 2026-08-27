@@ -27,7 +27,9 @@ from nexus.domain.time import require_utc
 from nexus.paper.cursor import PaperOrderCursorCodec, PaperOrderCursorState
 from nexus.paper.models import InternalOrderStatus
 from nexus.paper.projection import load_paper_projection
+from nexus.persistence.models.backtest import StrategyDefinitionRecord
 from nexus.persistence.models.data import PriceBarSetAuthority, PriceSeriesManifest
+from nexus.persistence.models.evolution import StrategyRegistryEventRecord
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.paper import (
     PaperAccountRecord,
@@ -363,9 +365,19 @@ class PaperReadService:
             )
         ).all()
         _require_bounded("fills", fill_rows, _MAX_FILLS)
-        versions = (
+        authority = (
             await self._session.execute(
-                select(StrategyDecisionRecord.strategy_version, RiskPolicyRecord.version)
+                select(
+                    StrategyDecisionRecord.strategy_version,
+                    RiskPolicyRecord.version,
+                    StrategyDecisionRecord.strategy_definition_id,
+                    StrategyDecisionRecord.registry_event_id,
+                    StrategyDecisionRecord.champion_generation,
+                    StrategyDefinitionRecord.strategy_version,
+                    StrategyRegistryEventRecord.to_definition_id,
+                    StrategyRegistryEventRecord.champion_generation,
+                    StrategyRegistryEventRecord.event_type,
+                )
                 .join(
                     PaperOrderBatchRecord,
                     PaperOrderBatchRecord.strategy_decision_id == StrategyDecisionRecord.id,
@@ -374,10 +386,25 @@ class PaperReadService:
                     RiskPolicyRecord,
                     RiskPolicyRecord.id == PaperOrderBatchRecord.risk_policy_id,
                 )
+                .join(
+                    StrategyDefinitionRecord,
+                    StrategyDefinitionRecord.id == StrategyDecisionRecord.strategy_definition_id,
+                )
+                .join(
+                    StrategyRegistryEventRecord,
+                    StrategyRegistryEventRecord.id == StrategyDecisionRecord.registry_event_id,
+                )
                 .where(PaperOrderBatchRecord.id == order.batch_id)
             )
         ).one_or_none()
-        if versions is None or not events:
+        if (
+            authority is None
+            or not events
+            or authority[0] != authority[5]
+            or authority[2] != authority[6]
+            or authority[4] != authority[7]
+            or authority[8] not in {"GENESIS", "PROMOTE", "ROLLBACK"}
+        ):
             raise NexusError(
                 ErrorCode.DATA_PARTIAL,
                 "The internal paper order projection is incomplete.",
@@ -428,8 +455,8 @@ class PaperReadService:
             cancellable=(status in {"submitted", "partially_filled"} and outstanding > 0),
             current_event_seq=latest_event.event_seq,
             submitted_at=submitted_at,
-            strategy_version=versions[0],
-            risk_policy_version=versions[1],
+            strategy_version=authority[0],
+            risk_policy_version=authority[1],
             events=tuple(
                 PaperOrderEventResponse(
                     event_seq=event.event_seq,

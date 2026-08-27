@@ -417,33 +417,33 @@ git commit -m "feat(engine): validate champion challenger strategy shadow"
 - Produces: `evaluate_handover(snapshot, challenger, authority, risk_policy)`, `promote_internal_paper_champion(...)`, `pause_auto_promotion(...)`, `resume_auto_promotion(...)`, `request_registry_rollback(...)`, `activate_pending_transition(...)`, and generic `ForwardStrategyDecision` bindings.
 - Consumes historical/Shadow promotion decisions, paper projection, risk policy, registry head and strategy interpreter.
 
-- [ ] **Step 1: Write handover and registry red tests**
+- [x] **Step 1: Write handover and registry red tests**
 
 Assert `shadow_excess_return - estimated_handover_cost_ratio >= 0`, exact generation CAS, only one concurrent promote, pause blocks automatic promote, rollback creates a new generation, no compatible target fails closed, open orders create pending state and no registry change affects an existing decision session.
 
-- [ ] **Step 2: Run red tests**
+- [x] **Step 2: Run red tests**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/evolution/test_handover.py engine/tests/unit/evolution/test_registry.py engine/tests/integration/test_strategy_registry_pg.py engine/tests/integration/test_strategy_promotion_concurrency_pg.py engine/tests/integration/test_strategy_rollback_pg.py engine/tests/integration/test_forward_decision_persistence.py -q
 ```
 
-- [ ] **Step 3: Implement handover preflight**
+- [x] **Step 3: Implement handover preflight**
 
 Use the latest PASS balanced paper snapshot and frozen price/cost authorities to compute challenger next targets, transition turnover/cost and existing hard-risk checks. Persist evidence only; do not create paper orders. Unknown data/cost/risk produces `PROMOTION_WAITING_HANDOVER`.
 
-- [ ] **Step 4: Implement registry CAS and event chain**
+- [x] **Step 4: Implement registry CAS and event chain**
 
 Lock the single head, verify expected generation/version, decision bindings and pause state, append canonical event, update pending/active projection, audit and outbox atomically. PROMOTE/ROLLBACK increment champion generation only when effective; PAUSE/RESUME increment event sequence only. Concurrent loser becomes `STALE_CHAMPION_BASELINE`.
 
-- [ ] **Step 5: Implement safe-boundary activation and rollback**
+- [x] **Step 5: Implement safe-boundary activation and rollback**
 
 Check nonterminal paper orders before activation. Keep promote/rollback pending without cancellation; activate after orders terminate and the next exchange decision boundary is reached. Rollback selects the most recent prior compatible verified definition, ignores economic profitability, and never mutates historical paper facts.
 
-- [ ] **Step 6: Generalize Forward binding without caller targets**
+- [x] **Step 6: Generalize Forward binding without caller targets**
 
 Add definition/event/generation fields to `ForwardStrategyDecision`, its canonical hash and persistence. Load the active registry head at session start, compile/verify the definition, call `evaluate_compiled_strategy`, and preserve unique `(account_id,decision_session)`. Existing baseline decisions must serialize identically except for the new explicit registry binding.
 
-- [ ] **Step 7: Prove no broker/live effects and commit**
+- [x] **Step 7: Prove no broker/live effects and commit**
 
 Run tests that snapshot all broker/provider/live tables before promote/rollback/Forward and assert no changes. Assert every Phase 2 API/domain response carries `live_execution_enabled=False`.
 

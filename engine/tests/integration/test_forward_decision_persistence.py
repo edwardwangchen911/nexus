@@ -26,6 +26,9 @@ CURRENT_ID = UUID("30000000-0000-0000-0000-000000000006")
 NEW_ID = UUID("30000000-0000-0000-0000-000000000007")
 EXIT_ID = UUID("30000000-0000-0000-0000-000000000008")
 DECISION_TIME = datetime(2026, 8, 21, 20, tzinfo=UTC)
+BASELINE_DEFINITION_ID = UUID("019d0000-0000-7000-8000-000000002200")
+GENESIS_EVENT_ID = UUID("019d0000-0000-7000-8000-000000002201")
+BASELINE_EXPRESSION_HASH = "f643694ad6d31f0dd504061fbd06068a93f9fb679aba9ba5b75337e2e169d13d"
 
 
 async def _seed_authority(database_url: str, *, published_at: datetime) -> None:
@@ -92,10 +95,7 @@ async def _seed_authority(database_url: str, *, published_at: datetime) -> None:
                     },
                 )
             await connection.execute(
-                text(
-                    "UPDATE universe_snapshots SET published_at = :published_at "
-                    "WHERE id = :id"
-                ),
+                text("UPDATE universe_snapshots SET published_at = :published_at WHERE id = :id"),
                 {"id": UNIVERSE_ID, "published_at": published_at},
             )
             await connection.execute(
@@ -154,7 +154,10 @@ def _decision():
         quality_report_id=QUALITY_REPORT_ID,
         portfolio_projection_hash="c" * 64,
         authority_hash="d" * 64,
-        strategy_parameters_hash="e" * 64,
+        strategy_parameters_hash=BASELINE_EXPRESSION_HASH,
+        strategy_definition_id=BASELINE_DEFINITION_ID,
+        registry_event_id=GENESIS_EVENT_ID,
+        champion_generation=1,
     )
 
 
@@ -280,6 +283,9 @@ def test_not_week_end_produces_no_strategy_decision_row(
             portfolio_projection_hash="a" * 64,
             authority_hash="b" * 64,
             strategy_parameters_hash="c" * 64,
+            strategy_definition_id=BASELINE_DEFINITION_ID,
+            registry_event_id=GENESIS_EVENT_ID,
+            champion_generation=1,
         )
         is None
     )

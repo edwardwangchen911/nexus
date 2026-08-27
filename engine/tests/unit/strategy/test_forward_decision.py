@@ -67,6 +67,9 @@ def _build(
         "portfolio_projection_hash": "a" * 64,
         "authority_hash": "b" * 64,
         "strategy_parameters_hash": "c" * 64,
+        "strategy_definition_id": UUID(int=7),
+        "registry_event_id": UUID(int=8),
+        "champion_generation": 1,
     }
     values.update(overrides)
     return build_forward_strategy_decision(**values)

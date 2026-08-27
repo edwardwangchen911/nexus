@@ -8,6 +8,7 @@ import pytest
 from nexus.paper.models import LedgerEntry, LedgerTransaction
 from nexus.risk.canonical import (
     canonical_forward_strategy_decision_hash,
+    canonical_legacy_forward_strategy_decision_hash,
     canonical_paper_ledger_transaction_hash,
     canonical_paper_order_batch_hash,
     canonical_paper_projection_hash,
@@ -59,6 +60,9 @@ def _decision(**overrides: object) -> ForwardStrategyDecision:
         "portfolio_id": PORTFOLIO_ID,
         "strategy_id": "baseline",
         "strategy_version": "baseline_v1",
+        "strategy_definition_id": UUID(int=8),
+        "registry_event_id": UUID(int=9),
+        "champion_generation": 1,
         "decision_session": date(2026, 8, 21),
         "decision_time": AT,
         "execution_session": date(2026, 8, 24),
@@ -240,7 +244,45 @@ def _transaction(*, transaction_id: UUID = UUID(int=60)) -> LedgerTransaction:
     )
 
 
-def test_forward_decision_hash_matches_the_v1_golden_payload() -> None:
+def test_forward_decision_hash_matches_the_v2_registry_bound_golden_payload() -> None:
+    expected = _digest(
+        {
+            "account_id": str(ACCOUNT_ID),
+            "authority_hash": "b" * 64,
+            "calendar_authority_id": str(UUID(int=5)),
+            "cash_weight": "0.875000000000",
+            "decision_session": "2026-08-21",
+            "decision_time": "2026-08-21T20:00:00.000000Z",
+            "execution_session": "2026-08-24",
+            "champion_generation": 1,
+            "portfolio_id": str(PORTFOLIO_ID),
+            "portfolio_projection_hash": "a" * 64,
+            "quality_report_id": str(UUID(int=7)),
+            "reason": "WEEKLY_REBALANCE",
+            "registry_event_id": str(UUID(int=9)),
+            "schema": "forward_strategy_decision_sha256_v2",
+            "source_policy_id": str(UUID(int=4)),
+            "strategy_id": "baseline",
+            "strategy_definition_id": str(UUID(int=8)),
+            "strategy_parameters_hash": "c" * 64,
+            "strategy_version": "baseline_v1",
+            "targets": [
+                {
+                    "exit": False,
+                    "instrument_id": str(INSTRUMENT_ID),
+                    "reason": "BASELINE_SELECTED",
+                    "strategy_priority": 2,
+                    "target_weight": "0.125000000000",
+                }
+            ],
+            "universe_snapshot_id": str(UUID(int=6)),
+        }
+    )
+
+    assert canonical_forward_strategy_decision_hash(_decision()) == expected
+
+
+def test_legacy_forward_hash_remains_recomputable_for_migrated_rows() -> None:
     expected = _digest(
         {
             "account_id": str(ACCOUNT_ID),
@@ -272,7 +314,7 @@ def test_forward_decision_hash_matches_the_v1_golden_payload() -> None:
         }
     )
 
-    assert canonical_forward_strategy_decision_hash(_decision()) == expected
+    assert canonical_legacy_forward_strategy_decision_hash(_decision()) == expected
 
 
 def test_projection_hash_excludes_random_order_ids() -> None:

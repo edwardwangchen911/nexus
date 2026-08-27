@@ -1061,7 +1061,6 @@ async def create_paper_order_batch(
         select(StrategyDecisionRecord.id)
         .where(
             StrategyDecisionRecord.account_id == account_id,
-            StrategyDecisionRecord.strategy_version == decision_record.strategy_version,
             StrategyDecisionRecord.decision_session > decision_record.decision_session,
         )
         .limit(1)

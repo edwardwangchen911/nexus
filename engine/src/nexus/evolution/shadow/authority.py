@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.backtest.canonical import canonical_decimal
@@ -36,6 +36,8 @@ from nexus.persistence.models.market import (
 )
 from nexus.persistence.models.paper import (
     PaperAccountRecord,
+    PaperOrderEventRecord,
+    PaperOrderRecord,
     PaperPerformanceSnapshotRecord,
     PaperPositionSnapshotRecord,
 )
@@ -105,6 +107,43 @@ async def load_balanced_paper_baseline(
     )
     if snapshot is None:
         raise StrategyShadowAuthorityError("PAPER_BASELINE_MISSING")
+    latest_order_events = (
+        select(
+            PaperOrderEventRecord.order_id,
+            func.max(PaperOrderEventRecord.event_seq).label("event_seq"),
+        )
+        .where(PaperOrderEventRecord.occurred_at <= snapshot.as_of)
+        .group_by(PaperOrderEventRecord.order_id)
+        .subquery()
+    )
+    nonterminal_order = await session.scalar(
+        select(PaperOrderRecord.id)
+        .join(
+            latest_order_events,
+            latest_order_events.c.order_id == PaperOrderRecord.id,
+        )
+        .join(
+            PaperOrderEventRecord,
+            (PaperOrderEventRecord.order_id == latest_order_events.c.order_id)
+            & (PaperOrderEventRecord.event_seq == latest_order_events.c.event_seq),
+        )
+        .where(
+            PaperOrderRecord.account_id == snapshot.account_id,
+            PaperOrderEventRecord.to_status.in_(
+                (
+                    "proposed",
+                    "risk_approved",
+                    "awaiting_approval",
+                    "submitted",
+                    "partially_filled",
+                    "reconciling",
+                )
+            ),
+        )
+        .limit(1)
+    )
+    if nonterminal_order is not None:
+        raise StrategyShadowAuthorityError("PAPER_BASELINE_NOT_SEALED")
     positions = tuple(
         await session.scalars(
             select(PaperPositionSnapshotRecord)

@@ -80,7 +80,40 @@ def _target_payload(decision: ForwardStrategyDecision) -> list[dict[str, Any]]:
 
 
 def canonical_forward_strategy_decision_hash(decision: ForwardStrategyDecision) -> str:
-    """Hash a forward decision while excluding its stored digest and row IDs."""
+    """Hash a registry-bound forward decision excluding only its stored digest."""
+    return _digest(
+        {
+            "schema": "forward_strategy_decision_sha256_v2",
+            "account_id": _uuid(decision.account_id),
+            "portfolio_id": _uuid(decision.portfolio_id),
+            "strategy_id": decision.strategy_id,
+            "strategy_version": decision.strategy_version,
+            "strategy_definition_id": _uuid(decision.strategy_definition_id),
+            "registry_event_id": _uuid(decision.registry_event_id),
+            "champion_generation": decision.champion_generation,
+            "decision_session": _date(decision.decision_session),
+            "decision_time": _utc(decision.decision_time),
+            "execution_session": _date(decision.execution_session),
+            "source_policy_id": _uuid(decision.source_policy_id),
+            "calendar_authority_id": _uuid(decision.calendar_authority_id),
+            "universe_snapshot_id": _uuid(decision.universe_snapshot_id),
+            "quality_report_id": _uuid(decision.quality_report_id),
+            "portfolio_projection_hash": _hash(decision.portfolio_projection_hash),
+            "authority_hash": _hash(decision.authority_hash),
+            "strategy_parameters_hash": _hash(decision.strategy_parameters_hash),
+            "cash_weight": _decimal(decision.cash_weight),
+            "reason": decision.reason,
+            "targets": _target_payload(decision),
+        }
+    )
+
+
+def canonical_legacy_forward_strategy_decision_hash(
+    decision: ForwardStrategyDecision,
+) -> str:
+    """Recompute immutable pre-Phase-2 baseline hashes for migration reads only."""
+    if decision.strategy_id != "baseline" or decision.strategy_version != "baseline_v1":
+        raise ValueError("legacy forward hashes apply only to baseline_v1")
     return _digest(
         {
             "schema": "forward_strategy_decision_sha256_v1",

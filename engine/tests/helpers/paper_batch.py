@@ -8,6 +8,7 @@ from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
+    StrategyDefinitionRecord,
 )
 from nexus.persistence.models.data import (
     DataArtifact,
@@ -16,6 +17,7 @@ from nexus.persistence.models.data import (
     PriceSeriesManifest,
     QualityReport,
 )
+from nexus.persistence.models.evolution import StrategyRegistryHeadRecord
 from nexus.persistence.models.market import (
     Instrument,
     SectorExposure,
@@ -341,6 +343,13 @@ async def seed_paper_batch(
                 account_id=PAPER_ACCOUNT_ID,
                 as_of=DECISION_TIME,
             )
+            registry = await session.get(StrategyRegistryHeadRecord, "internal_paper")
+            assert registry is not None
+            strategy_definition = await session.get(
+                StrategyDefinitionRecord,
+                registry.active_definition_id,
+            )
+            assert strategy_definition is not None
             targets = tuple(
                 ForwardStrategyTarget(
                     instrument_id=instrument_id,
@@ -356,6 +365,9 @@ async def seed_paper_batch(
                 portfolio_id=PORTFOLIO_ID,
                 strategy_id="baseline",
                 strategy_version="baseline_v1",
+                strategy_definition_id=registry.active_definition_id,
+                registry_event_id=registry.last_event_id,
+                champion_generation=registry.active_generation,
                 decision_session=DECISION_SESSION,
                 decision_time=DECISION_TIME,
                 execution_session=EXECUTION_SESSION,
@@ -365,7 +377,7 @@ async def seed_paper_batch(
                 quality_report_id=QUALITY_REPORT_ID,
                 portfolio_projection_hash=projection.projection_hash,
                 authority_hash="0" * 64,
-                strategy_parameters_hash="c" * 64,
+                strategy_parameters_hash=strategy_definition.expression_hash,
                 decision_hash="0" * 64,
                 cash_weight=Decimal("0.69"),
                 reason="WEEKLY_REBALANCE",

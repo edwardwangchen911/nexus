@@ -29,6 +29,9 @@ def _decision(**overrides: object) -> ForwardStrategyDecision:
         "portfolio_id": UUID(int=2),
         "strategy_id": "baseline",
         "strategy_version": "baseline_v1",
+        "strategy_definition_id": UUID(int=7),
+        "registry_event_id": UUID(int=8),
+        "champion_generation": 1,
         "decision_session": date(2026, 8, 21),
         "decision_time": datetime(2026, 8, 21, 20, tzinfo=UTC),
         "execution_session": date(2026, 8, 24),
@@ -96,8 +99,15 @@ def test_forward_decision_rejects_binary_float() -> None:
         _decision(cash_weight=0.75)
 
 
-def test_consumable_forward_decision_is_weekly_baseline_only() -> None:
+def test_consumable_forward_decision_is_weekly_and_registry_bound() -> None:
     with pytest.raises(ValidationError, match="WEEKLY_REBALANCE"):
         _decision(reason="NOT_WEEK_END", targets=(), cash_weight=Decimal("1"))
-    with pytest.raises(ValidationError, match="baseline_v1"):
-        _decision(strategy_version="agent_v1")
+    with pytest.raises(ValidationError, match="strategy identity"):
+        _decision(strategy_version="")
+    with pytest.raises(ValidationError, match="content-addressed version"):
+        _decision(strategy_id="registered")
+    with pytest.raises(ValidationError):
+        _decision(champion_generation=0)
+
+    challenger = _decision(strategy_id="registered", strategy_version="challenger_v2")
+    assert challenger.strategy_version == "challenger_v2"

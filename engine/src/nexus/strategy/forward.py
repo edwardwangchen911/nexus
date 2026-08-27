@@ -27,7 +27,10 @@ from nexus.persistence.models.backtest import (
     StrategyDefinitionRecord,
 )
 from nexus.persistence.models.data import DataSnapshot, QualityReport, SourcePolicy
-from nexus.persistence.models.evolution import StrategyRegistryHeadRecord
+from nexus.persistence.models.evolution import (
+    StrategyRegistryEventRecord,
+    StrategyRegistryHeadRecord,
+)
 from nexus.persistence.models.market import UniverseMember, UniverseSnapshot
 from nexus.persistence.models.paper import (
     PaperAccountRecord,
@@ -99,8 +102,11 @@ class ForwardStrategyTarget(_FrozenModel):
 class ForwardStrategyDecision(_FrozenModel):
     account_id: UUID
     portfolio_id: UUID
-    strategy_id: Literal["baseline"]
-    strategy_version: Literal["baseline_v1"]
+    strategy_id: str
+    strategy_version: str
+    strategy_definition_id: UUID
+    registry_event_id: UUID
+    champion_generation: int = Field(ge=1)
     decision_session: date
     decision_time: datetime
     execution_session: date
@@ -132,6 +138,13 @@ class ForwardStrategyDecision(_FrozenModel):
 
     @model_validator(mode="after")
     def _valid_decision(self) -> ForwardStrategyDecision:
+        if not self.strategy_id.strip() or not self.strategy_version.strip():
+            raise ValueError("strategy identity must be nonempty")
+        expected_strategy_id = (
+            "baseline" if self.strategy_version == "baseline_v1" else "registered"
+        )
+        if self.strategy_id != expected_strategy_id:
+            raise ValueError("strategy identity must match the content-addressed version")
         if self.execution_session <= self.decision_session:
             raise ValueError("execution session must follow decision session")
         instrument_ids = [target.instrument_id for target in self.targets]
@@ -162,15 +175,17 @@ def build_forward_strategy_decision(
     portfolio_projection_hash: str,
     authority_hash: str,
     strategy_parameters_hash: str,
+    strategy_definition_id: UUID,
+    registry_event_id: UUID,
+    champion_generation: int,
 ) -> ForwardStrategyDecision | None:
-    """Adapt the pure ``baseline_v1`` result without accepting caller targets."""
+    """Adapt a verified pure strategy result without accepting caller targets."""
     from nexus.risk.canonical import canonical_forward_strategy_decision_hash
     from nexus.strategy.baseline import StrategyDecision
+    from nexus.strategy.interpreter import CompiledStrategyDecision
 
-    if not isinstance(decision, StrategyDecision):
-        raise TypeError("decision must be a baseline StrategyDecision")
-    if decision.strategy_version != "baseline_v1":
-        raise ValueError("forward decision requires baseline_v1")
+    if not isinstance(decision, StrategyDecision | CompiledStrategyDecision):
+        raise TypeError("decision must be a verified strategy decision")
     if decision.reason == "NOT_WEEK_END":
         if decision.targets or decision.exits or decision.cash_weight is not None:
             raise ValueError("NOT_WEEK_END must not contain consumable targets")
@@ -203,6 +218,7 @@ def build_forward_strategy_decision(
         raise ValueError("forward instruments must be whitelisted")
 
     current_set = set(current)
+    reason_prefix = "BASELINE" if decision.strategy_version == "baseline_v1" else "STRATEGY"
     mapped_targets = [
         ForwardStrategyTarget(
             instrument_id=target.instrument_id,
@@ -210,9 +226,9 @@ def build_forward_strategy_decision(
             exit=False,
             strategy_priority=1 if target.instrument_id in current_set else 2,
             reason=(
-                "BASELINE_CURRENT_TARGET"
+                f"{reason_prefix}_CURRENT_TARGET"
                 if target.instrument_id in current_set
-                else "BASELINE_NEW_TARGET"
+                else f"{reason_prefix}_NEW_TARGET"
             ),
         )
         for target in decision.targets
@@ -223,15 +239,18 @@ def build_forward_strategy_decision(
             target_weight=Decimal(0),
             exit=True,
             strategy_priority=0,
-            reason="BASELINE_EXIT",
+            reason=f"{reason_prefix}_EXIT",
         )
         for instrument_id in decision.exits
     )
     draft = ForwardStrategyDecision(
         account_id=account_id,
         portfolio_id=portfolio_id,
-        strategy_id="baseline",
-        strategy_version="baseline_v1",
+        strategy_id="baseline" if decision.strategy_version == "baseline_v1" else "registered",
+        strategy_version=decision.strategy_version,
+        strategy_definition_id=strategy_definition_id,
+        registry_event_id=registry_event_id,
+        champion_generation=champion_generation,
         decision_session=decision.decision_session,
         decision_time=decision_time.astimezone(UTC),
         execution_session=execution_session,
@@ -249,6 +268,75 @@ def build_forward_strategy_decision(
     )
     return draft.model_copy(
         update={"decision_hash": canonical_forward_strategy_decision_hash(draft)}
+    )
+
+
+async def evaluate_registered_forward_strategy_decision(
+    session: AsyncSession,
+    *,
+    snapshot: object,
+    account_id: UUID,
+    portfolio_id: UUID,
+    decision_time: datetime,
+    execution_session: date | None,
+    source_policy_id: UUID,
+    calendar_authority_id: UUID,
+    universe_snapshot_id: UUID,
+    quality_report_id: UUID,
+    portfolio_projection_hash: str,
+    authority_hash: str,
+) -> ForwardStrategyDecision | None:
+    """Evaluate only the active content-addressed registry definition."""
+    from nexus.strategy.baseline import StrategyDataSnapshot
+    from nexus.strategy.dsl import (
+        baseline_feature_registry,
+        compile_strategy,
+        evolution_feature_registry_v1,
+    )
+    from nexus.strategy.interpreter import evaluate_compiled_strategy
+
+    if not isinstance(snapshot, StrategyDataSnapshot):
+        raise TypeError("snapshot must be a StrategyDataSnapshot")
+    head = await session.get(StrategyRegistryHeadRecord, "internal_paper")
+    if head is None:
+        raise ValueError("internal-paper strategy registry is unavailable at decision time")
+    definition = await session.get(StrategyDefinitionRecord, head.active_definition_id)
+    event = await _active_registry_event(session, head=head, cutoff=decision_time)
+    if definition is None or event is None:
+        raise ValueError("active internal-paper strategy authority is incomplete")
+    if event.event_type != "GENESIS" and definition.published_at > decision_time:
+        raise ValueError("active internal-paper strategy definition is not yet available")
+    registry = (
+        baseline_feature_registry()
+        if definition.strategy_version == "baseline_v1"
+        else evolution_feature_registry_v1()
+    )
+    compiled = compile_strategy(definition.document, registry)
+    if compiled.expression_hash != definition.expression_hash:
+        raise ValueError("active internal-paper strategy definition is invalid")
+    evaluated = evaluate_compiled_strategy(
+        compiled,
+        snapshot,
+        snapshot.decision_session,
+    )
+    return build_forward_strategy_decision(
+        evaluated,
+        account_id=account_id,
+        portfolio_id=portfolio_id,
+        current_positions=snapshot.current_positions,
+        whitelisted_instrument_ids=tuple(item.instrument_id for item in snapshot.instruments),
+        decision_time=decision_time,
+        execution_session=execution_session,
+        source_policy_id=source_policy_id,
+        calendar_authority_id=calendar_authority_id,
+        universe_snapshot_id=universe_snapshot_id,
+        quality_report_id=quality_report_id,
+        portfolio_projection_hash=portfolio_projection_hash,
+        authority_hash=authority_hash,
+        strategy_parameters_hash=definition.expression_hash,
+        strategy_definition_id=definition.id,
+        registry_event_id=event.id,
+        champion_generation=head.active_generation,
     )
 
 
@@ -332,8 +420,11 @@ def _domain_from_records(
     decision = ForwardStrategyDecision(
         account_id=record.account_id,
         portfolio_id=record.portfolio_id,
-        strategy_id="baseline",
-        strategy_version="baseline_v1",
+        strategy_id=record.strategy_id,
+        strategy_version=record.strategy_version,
+        strategy_definition_id=record.strategy_definition_id,
+        registry_event_id=record.registry_event_id,
+        champion_generation=record.champion_generation,
         decision_session=record.decision_session,
         decision_time=record.decision_time,
         execution_session=record.execution_session,
@@ -358,9 +449,15 @@ def _domain_from_records(
             for target in sorted(targets, key=lambda item: item.instrument_id.int)
         ),
     )
-    from nexus.risk.canonical import canonical_forward_strategy_decision_hash
+    from nexus.risk.canonical import (
+        canonical_forward_strategy_decision_hash,
+        canonical_legacy_forward_strategy_decision_hash,
+    )
 
-    if canonical_forward_strategy_decision_hash(decision) != decision.decision_hash:
+    valid_hashes = {canonical_forward_strategy_decision_hash(decision)}
+    if decision.champion_generation == 1 and decision.strategy_version == "baseline_v1":
+        valid_hashes.add(canonical_legacy_forward_strategy_decision_hash(decision))
+    if decision.decision_hash not in valid_hashes:
         raise ValueError("stored forward decision hash does not match content")
     return decision
 
@@ -376,12 +473,13 @@ async def load_forward_strategy_decision(
     record = await session.scalar(
         select(StrategyDecisionRecord).where(
             StrategyDecisionRecord.account_id == account_id,
-            StrategyDecisionRecord.strategy_version == strategy_version,
             StrategyDecisionRecord.decision_session == decision_session,
         )
     )
     if record is None:
         return None
+    if record.strategy_version != strategy_version:
+        raise ForwardDecisionConflictError("forward decision strategy version conflict")
     targets = tuple(
         (
             await session.scalars(
@@ -422,11 +520,23 @@ async def persist_forward_strategy_decision(
     if registry is None:
         raise ValueError("internal-paper strategy registry is incomplete")
     active_definition = await session.get(StrategyDefinitionRecord, registry.active_definition_id)
+    active_event = await _active_registry_event(
+        session,
+        head=registry,
+        cutoff=decision.decision_time,
+    )
     if (
         active_definition is None
+        or decision.strategy_id
+        != ("baseline" if decision.strategy_version == "baseline_v1" else "registered")
         or active_definition.strategy_version != decision.strategy_version
+        or active_definition.id != decision.strategy_definition_id
+        or active_definition.expression_hash != decision.strategy_parameters_hash
+        or registry.active_generation != decision.champion_generation
+        or active_event is None
+        or active_event.id != decision.registry_event_id
     ):
-        raise ValueError("active internal-paper strategy is unsupported by baseline forward")
+        raise ValueError("forward decision registry binding is stale or invalid")
     decision_id = new_uuid7()
     session.add(
         StrategyDecisionRecord(
@@ -435,9 +545,9 @@ async def persist_forward_strategy_decision(
             portfolio_id=decision.portfolio_id,
             strategy_id=decision.strategy_id,
             strategy_version=decision.strategy_version,
-            strategy_definition_id=registry.active_definition_id,
-            registry_event_id=registry.last_event_id,
-            champion_generation=registry.active_generation,
+            strategy_definition_id=decision.strategy_definition_id,
+            registry_event_id=decision.registry_event_id,
+            champion_generation=decision.champion_generation,
             decision_session=decision.decision_session,
             decision_time=decision.decision_time,
             execution_session=decision.execution_session,
@@ -471,3 +581,33 @@ async def persist_forward_strategy_decision(
         decision_id=decision_id,
         decision=decision,
     )
+
+
+async def _active_registry_event(
+    session: AsyncSession,
+    *,
+    head: StrategyRegistryHeadRecord,
+    cutoff: datetime,
+) -> StrategyRegistryEventRecord | None:
+    event = await session.scalar(
+        select(StrategyRegistryEventRecord)
+        .where(
+            StrategyRegistryEventRecord.channel == "internal_paper",
+            StrategyRegistryEventRecord.event_type.in_(("GENESIS", "PROMOTE", "ROLLBACK")),
+            StrategyRegistryEventRecord.to_definition_id == head.active_definition_id,
+            StrategyRegistryEventRecord.champion_generation == head.active_generation,
+        )
+        .order_by(StrategyRegistryEventRecord.sequence.desc())
+        .limit(1)
+    )
+    if event is None:
+        return None
+    if event.event_type != "GENESIS" and event.occurred_at > cutoff:
+        return None
+    if (
+        event.event_type in {"PROMOTE", "ROLLBACK"}
+        and event.effective_session is not None
+        and event.effective_session > cutoff.date()
+    ):
+        return None
+    return event
