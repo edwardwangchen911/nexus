@@ -75,6 +75,29 @@ describe("strategy-evolution Engine boundary", () => {
     ));
   });
 
+  it("accepts the latest bounded registry window only in authority order", async () => {
+    const payload = overviewEnvelope();
+    payload.data.champion.registry_version = 21;
+    payload.data.champion.event_sequence = 21;
+    payload.data.registry_events = Array.from({ length: 20 }, (_, index) => ({
+      ...payload.data.registry_events[0],
+      sequence: index + 2,
+      event_type: index % 2 === 0 ? "PAUSE" as const : "RESUME" as const,
+      status: "recorded" as const,
+      event_hash: (index + 2).toString(16).padStart(64, "0"),
+    }));
+
+    const accepted = await sanitizeEngineResponse(
+      jsonResponse(payload), undefined, "/internal/v1/strategy-evolution", "GET",
+    );
+    expect(accepted.status).toBe(200);
+
+    payload.data.registry_events.reverse();
+    await expectSafeFailure(await sanitizeEngineResponse(
+      jsonResponse(payload), undefined, "/internal/v1/strategy-evolution", "GET",
+    ));
+  });
+
   it("accepts the evolution error codes only at their declared status", async () => {
     const error = {
       error: {

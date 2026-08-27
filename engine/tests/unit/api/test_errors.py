@@ -65,5 +65,7 @@ def test_error_codes_include_all_stable_client_branches() -> None:
         "RECONCILIATION_REQUIRED",
         "BUDGET_EXHAUSTED",
         "PROVIDER_UNAVAILABLE",
+        "AUTHORITY_UNAVAILABLE",
+        "EVOLUTION_BLOCKED",
         "INTERNAL_ERROR",
     }

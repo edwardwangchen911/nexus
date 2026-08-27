@@ -25,6 +25,15 @@ type ExperimentDetailEnvelope = components["schemas"]["ExperimentDetailEnvelope"
 type EvolutionActionEnvelope = components["schemas"]["EvolutionActionEnvelope"];
 type RegistryAction = "pause_auto_promotion" | "resume_auto_promotion";
 type BusyAction = "start" | "control" | "veto" | "rollback" | null;
+type EvolutionCommand = {
+  action: Exclude<BusyAction, null>;
+  path: string;
+  body: Record<string, string>;
+  completedMessage: string;
+  pendingMessage: string;
+  idempotencyKey: string;
+  etag: string;
+};
 
 type Props = {
   state: DataStateKind;
@@ -34,12 +43,14 @@ type Props = {
   busyAction: BusyAction;
   errorMessage: string | null;
   successMessage: string | null;
+  unknownResult: boolean;
   onRefresh: () => void;
   onSelectExperiment: (experimentId: string) => void;
   onStartExperiment: () => void;
   onControlRegistry: (action: RegistryAction) => void;
   onVetoExperiment: (experimentId: string) => void;
   onRollbackRegistry: () => void;
+  onRetryUnknown: () => void;
 };
 
 let actionSequence = 0;
@@ -52,6 +63,7 @@ export default function StrategiesPage(): React.ReactElement {
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [unknownAction, setUnknownAction] = useState<EvolutionCommand | null>(null);
   const authorizedRef = useRef(false);
   const selectedExperimentIdRef = useRef<string | null>(null);
   const evidenceRef = useRef<{ overview: EvolutionOverview; detail: ExperimentDetail | null; etag: string | null } | null>(null);
@@ -62,6 +74,7 @@ export default function StrategiesPage(): React.ReactElement {
     setOverview(null);
     setDetail(null);
     setEtag(null);
+    setUnknownAction(null);
     selectedExperimentIdRef.current = null;
     setState("forbidden");
   }, []);
@@ -147,54 +160,76 @@ export default function StrategiesPage(): React.ReactElement {
     }
   }, [revokeEvidence]);
 
-  const performAction = useCallback(async (
-    action: Exclude<BusyAction, null>,
-    path: string,
-    body: Record<string, string>,
-    completedMessage: string,
-    pendingMessage: string,
-  ) => {
-    if (!etag || state !== "ready") return;
-    setBusyAction(action);
+  const executeAction = useCallback(async (command: EvolutionCommand) => {
+    if (state !== "ready") return;
+    setBusyAction(command.action);
     setErrorMessage(null);
     setSuccessMessage(null);
-    actionSequence += 1;
     try {
-      const response = await fetch(path, {
+      const response = await fetch(command.path, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "idempotency-key": `strategy-evolution-${Date.now()}-${actionSequence}`,
-          "if-match": etag,
+          "idempotency-key": command.idempotencyKey,
+          "if-match": command.etag,
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(command.body),
       });
       if (response.status === 401 || response.status === 403) {
         revokeEvidence();
         return;
       }
       if (response.status === 409) {
+        setUnknownAction(null);
         setErrorMessage("资源已变化，请刷新后重试。");
         await refresh(true);
         return;
       }
       if (!response.ok) {
-        setErrorMessage(response.status === 422
-          ? "确定性策略进化规则阻止了该操作。"
-          : "操作结果未确认，已保持原状态。");
+        if (response.status >= 500) {
+          setUnknownAction(command);
+          setErrorMessage("操作结果未知；在使用同一幂等键确认前，其他写操作已关闭。");
+        } else {
+          setUnknownAction(null);
+          setErrorMessage(response.status === 422
+            ? "确定性策略进化规则阻止了该操作。"
+            : "操作已被拒绝，未更改原状态。");
+        }
         return;
       }
       const envelope = await response.json() as EvolutionActionEnvelope;
+      setUnknownAction(null);
       setSuccessMessage(response.status === 202 || ["QUEUED", "PENDING_BOUNDARY", "PENDING_ORDERS"].includes(envelope.data.status)
-        ? pendingMessage
-        : completedMessage);
+        ? command.pendingMessage
+        : command.completedMessage);
       await refresh(true);
     } catch {
-      setErrorMessage("操作结果未确认，已保持原状态。");
+      setUnknownAction(command);
+      setErrorMessage("操作结果未知；在使用同一幂等键确认前，其他写操作已关闭。");
     } finally {
       setBusyAction(null);
     }
-  }, [etag, refresh, revokeEvidence, state]);
+  }, [refresh, revokeEvidence, state]);
+
+  const performAction = useCallback((
+    action: Exclude<BusyAction, null>,
+    path: string,
+    body: Record<string, string>,
+    completedMessage: string,
+    pendingMessage: string,
+  ) => {
+    if (!etag || state !== "ready" || unknownAction) return;
+    actionSequence += 1;
+    void executeAction({
+      action,
+      path,
+      body,
+      completedMessage,
+      pendingMessage,
+      idempotencyKey: `strategy-evolution-${Date.now()}-${actionSequence}`,
+      etag,
+    });
+  }, [etag, executeAction, state, unknownAction]);
 
   const startExperiment = useCallback(() => void performAction(
     "start", "/api/v1/strategy-evolution/experiments", {}, "已启动受限策略实验。", "实验已入队，等待确定性工作流。",
@@ -219,26 +254,28 @@ export default function StrategiesPage(): React.ReactElement {
     busyAction={busyAction}
     errorMessage={errorMessage}
     successMessage={successMessage}
+    unknownResult={unknownAction !== null}
     onRefresh={() => void refresh()}
     onSelectExperiment={(experimentId) => void selectExperiment(experimentId)}
     onStartExperiment={startExperiment}
     onControlRegistry={controlRegistry}
     onVetoExperiment={vetoExperiment}
     onRollbackRegistry={rollbackRegistry}
+    onRetryUnknown={() => { if (unknownAction) void executeAction(unknownAction); }}
   />;
 }
 
 export function StrategiesPanel(props: Props): React.ReactElement {
   const {
-    state, overview, detail, etag, busyAction, errorMessage, successMessage,
-    onRefresh, onSelectExperiment, onStartExperiment, onControlRegistry, onVetoExperiment, onRollbackRegistry,
+    state, overview, detail, etag, busyAction, errorMessage, successMessage, unknownResult,
+    onRefresh, onSelectExperiment, onStartExperiment, onControlRegistry, onVetoExperiment, onRollbackRegistry, onRetryUnknown,
   } = props;
   const [rollbackOpen, setRollbackOpen] = useState(false);
   const errorRef = useRef<HTMLElement>(null);
   const rollbackTriggerRef = useRef<HTMLButtonElement>(null);
   const rollbackConfirmRef = useRef<HTMLButtonElement>(null);
   const hasEvidence = overview !== null && ["ready", "partial", "stale"].includes(state);
-  const canWrite = state === "ready" && Boolean(etag) && overview?.write_enabled === true && busyAction === null;
+  const canWrite = state === "ready" && Boolean(etag) && overview?.write_enabled === true && busyAction === null && !unknownResult;
 
   useEffect(() => {
     if (errorMessage) errorRef.current?.focus();
@@ -270,6 +307,14 @@ export function StrategiesPanel(props: Props): React.ReactElement {
       </header>
 
       {errorMessage ? <section ref={errorRef} className="inline-notice inline-notice--error evolution-feedback" role="alert" tabIndex={-1}>{errorMessage}</section> : null}
+      {unknownResult ? (
+        <section className="inline-notice evolution-feedback" aria-label="未知操作恢复">
+          <p>仅重放原请求：路径、命令、权威版本和幂等键均保持不变。</p>
+          <button className="button button--quiet" type="button" disabled={busyAction !== null || state !== "ready"} onClick={onRetryUnknown}>
+            <RefreshCw aria-hidden="true" size={17} />使用同一幂等键继续确认
+          </button>
+        </section>
+      ) : null}
       <p className="inline-notice inline-notice--success evolution-feedback" role="status" aria-live="polite">{successMessage ?? ""}</p>
 
       {!hasEvidence ? (
@@ -295,7 +340,13 @@ export function StrategiesPanel(props: Props): React.ReactElement {
 
       {rollbackOpen ? (
         <div className="confirmation-dialog">
-          <dialog open aria-modal="true" aria-labelledby="rollback-dialog-title" onCancel={(event) => { event.preventDefault(); closeRollback(); }}>
+          <dialog
+            open
+            aria-modal="true"
+            aria-labelledby="rollback-dialog-title"
+            onCancel={(event) => { event.preventDefault(); closeRollback(); }}
+            onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); closeRollback(); } }}
+          >
             <h3 id="rollback-dialog-title">确认回滚策略冠军</h3>
             <p>回滚只影响未来内部模拟决策，不会撤销历史成交，也不会创建任何真实订单。</p>
             <p className="inline-notice">确定性注册表会选择上一个兼容且已验证的冠军；页面不能指定任意版本。</p>

@@ -5886,6 +5886,7 @@ export const runtimeContractSchemas = {
         "items": {
           "$ref": "#/components/schemas/RegistryEventResponse"
         },
+        "maxItems": 20,
         "title": "Registry Events",
         "type": "array"
       },

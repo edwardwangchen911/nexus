@@ -126,19 +126,20 @@ def test_interpreter_uses_challenger_threshold_ranking_and_target_weight() -> No
 
 
 def test_interpreter_rejects_forged_compiled_identity() -> None:
-    strategy = compile_strategy(baseline_v1_document(), baseline_feature_registry()).model_copy(
-        update={"expression_hash": "f" * 64}
-    )
+    valid = compile_strategy(baseline_v1_document(), baseline_feature_registry())
     friday = date(2026, 8, 21)
+    snapshot = StrategyDataSnapshot(
+        decision_session=friday,
+        next_session=friday + timedelta(days=3),
+        instruments=(_instrument(1),),
+    )
+    evaluate_compiled_strategy(valid, snapshot, friday)
+    forged = valid.model_copy(update={"expression_hash": "f" * 64})
 
     with pytest.raises(CompiledStrategyEvaluationError, match="INTEGRITY"):
         evaluate_compiled_strategy(
-            strategy,
-            StrategyDataSnapshot(
-                decision_session=friday,
-                next_session=friday + timedelta(days=3),
-                instruments=(_instrument(1),),
-            ),
+            forged,
+            snapshot,
             friday,
         )
 

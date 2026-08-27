@@ -202,6 +202,47 @@ async def test_pause_resume_are_cas_guarded_and_completed_replays_ignore_new_hea
 
 
 @pytest.mark.asyncio
+async def test_overview_returns_latest_registry_window_in_authority_order(
+    migrated_database_url: str,
+) -> None:
+    app = _app(migrated_database_url)
+    control_path = "/internal/v1/strategy-registry/control"
+    overview_path = "/internal/v1/strategy-evolution"
+    expected_version = 1
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        for index in range(20):
+            action = "pause_auto_promotion" if index % 2 == 0 else "resume_auto_promotion"
+            body = json.dumps({"action": action}, separators=(",", ":")).encode()
+            response = await client.post(
+                control_path,
+                content=body,
+                headers=_action_headers(
+                    control_path,
+                    body,
+                    key=f"registry-history-{index}",
+                    etag=f'"g1-v{expected_version}"',
+                ),
+            )
+            assert response.status_code == 200
+            expected_version += 1
+
+        overview = await client.get(
+            overview_path,
+            headers=_headers("GET", overview_path),
+        )
+
+    assert overview.status_code == 200
+    payload = overview.json()["data"]
+    assert payload["champion"]["event_sequence"] == 21
+    assert [event["sequence"] for event in payload["registry_events"]] == list(
+        range(2, 22)
+    )
+
+
+@pytest.mark.asyncio
 async def test_start_experiment_accepts_no_parameters_and_queues_only_strategy_job(
     migrated_database_url: str,
 ) -> None:

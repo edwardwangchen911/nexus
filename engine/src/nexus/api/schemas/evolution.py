@@ -226,7 +226,7 @@ class StrategyEvolutionData(_StrictSchema):
     active_family: ActiveFamilyResponse | None
     cooldown_until: datetime | None
     experiments: tuple[ExperimentSummaryResponse, ...]
-    registry_events: tuple[RegistryEventResponse, ...]
+    registry_events: tuple[RegistryEventResponse, ...] = Field(max_length=20)
     next_cursor: str | None
     live_execution_enabled: Literal[False] = False
 

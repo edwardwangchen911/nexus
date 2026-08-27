@@ -70,6 +70,7 @@ _TERMINAL_STATES = (
     "PROMOTED",
     "STALE_CHAMPION_BASELINE",
 )
+_REGISTRY_HISTORY_LIMIT = 20
 
 
 class EvolutionReadError(ValueError):
@@ -229,7 +230,7 @@ class EvolutionReadService:
             active_family=active_family,
             cooldown_until=cooldown_until,
             experiments=experiments,
-            registry_events=safe_history[:20],
+            registry_events=safe_history[-_REGISTRY_HISTORY_LIMIT:],
             next_cursor=next_cursor,
         )
 
@@ -471,7 +472,7 @@ class EvolutionReadService:
                 ),
                 event_hash=event.event_hash,
             )
-            for event in reversed(events)
+            for event in events
         )
 
     async def _family_response(

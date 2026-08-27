@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
+from functools import lru_cache
 from typing import Literal
 from uuid import UUID
 
@@ -145,7 +146,9 @@ def _evaluate_expression(
         raise CompiledStrategyEvaluationError("COMPILED_OPERATOR_INVALID") from error
 
 
+@lru_cache(maxsize=256)
 def _verify_strategy(strategy: CompiledStrategy) -> None:
+    """Verify one immutable compiled document once per bounded process cache."""
     registry = (
         baseline_feature_registry()
         if strategy.strategy_version == "baseline_v1"

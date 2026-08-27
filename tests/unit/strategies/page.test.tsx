@@ -22,6 +22,7 @@ const callbacks = {
   onControlRegistry: vi.fn(),
   onVetoExperiment: vi.fn(),
   onRollbackRegistry: vi.fn(),
+  onRetryUnknown: vi.fn(),
 };
 
 function renderPanel(state: DataStateKind, overrides = {}) {
@@ -33,6 +34,7 @@ function renderPanel(state: DataStateKind, overrides = {}) {
     busyAction={null}
     errorMessage={null}
     successMessage={null}
+    unknownResult={false}
     {...callbacks}
     {...overrides}
   />);
@@ -94,6 +96,19 @@ describe("strategy evolution workbench", () => {
     renderPanel("ready", { errorMessage: "资源已变化，请刷新后重试。", successMessage: "已暂停自动晋级。" });
     await waitFor(() => expect(screen.getByRole("alert")).toHaveFocus());
     expect(screen.getByRole("status")).toHaveTextContent("已暂停自动晋级。");
+  });
+
+  it("closes new mutations while an unknown result can only replay the original command", () => {
+    renderPanel("ready", {
+      unknownResult: true,
+      errorMessage: "操作结果未知。",
+    });
+
+    expect(screen.getByRole("region", { name: "未知操作恢复" })).toHaveTextContent("路径、命令、权威版本和幂等键均保持不变");
+    expect(screen.getByRole("button", { name: "暂停自动晋级" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "否决本次晋级" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "使用同一幂等键继续确认" }));
+    expect(callbacks.onRetryUnknown).toHaveBeenCalledOnce();
   });
 
   it("refetches after a 409 and clears all protected evidence after authorization is revoked", async () => {

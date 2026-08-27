@@ -35,6 +35,7 @@ export async function assertReleaseAccessibility(page: Page): Promise<void> {
     ".market-evidence-actions",
     ".price-chart__controls",
     ".confirmation-dialog__actions",
+    ".evolution-actions",
     ".app-shell__nav-list",
     ".app-shell__system-list",
   ].join(", ")).evaluateAll((groups) => groups.flatMap((group) => {
