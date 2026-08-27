@@ -192,7 +192,9 @@ minimum, maximum, implementation_hash
 
 现有 `run_backtest()` 保持 `baseline_v1` 专用和 Phase 0–1 语义不变。Phase 2 先抽取共享纯 `simulation_core_v1`，再新增 `run_challenger_backtest_v1()`。
 
-抽取门禁：同一冻结 fixture 下 `baseline_v1` 的逐日 NAV、订单、成交、窗口、指标、归因、比较和 `result_hash` 必须字节级相同。任何差异阻止迁移和发布。
+抽取门禁：先从抽取前的现有内核生成冻结 golden fixture；同一输入下，`baseline_v1` 的逐日 NAV、订单、成交、窗口、指标、归因、比较和其他业务语义载荷在排除 `code_hash`、`result_hash` 后必须字节级相同。任何业务语义差异阻止迁移和发布。
+
+`code_hash` 和 `result_hash` 是实现身份，不是兼容性伪装层。只要哈希覆盖的源码发生变化，新运行必须生成新的 `code_hash` 和 `result_hash`；已持久化的旧运行保持不可变，并继续绑定其原始代码身份，禁止把新内核的结果冒充为历史运行。
 
 新入口只接受已验证 `CompiledStrategy`，不接受 Mapping、JSON 或 Agent 输出。历史逐 Bar 循环只调用确定性策略解释器。
 
@@ -498,7 +500,7 @@ LIVE_EXECUTION_DISABLED
 - Proposal/Delta strict Schema、未知字段、任意代码、路径、URL、binary float 和越权字段反例。
 - 候选枚举稳定、24/3/3 预算、hash 去重、mutation path 封闭。
 - 特征可用时间、offset=0、缺失策略和 no-lookahead 属性测试。
-- `baseline_v1` 旧/新内核字节级等价。
+- `baseline_v1` 旧/新内核业务语义载荷字节级等价；实现身份按源码变化生成新 hash，历史身份不可复用。
 - lineage 累计试验数不能通过新 family、Prompt 或重命名清零。
 - promotion 每个 gate 的边界值、UNKNOWN、双倍成本相对冠军语义。
 - Shadow 同起点、同 authority、账本平衡、订单计数和数据缺口属性。
