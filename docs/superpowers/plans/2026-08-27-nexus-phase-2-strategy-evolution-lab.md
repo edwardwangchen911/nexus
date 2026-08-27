@@ -354,38 +354,39 @@ git commit -m "feat(engine): gate challenger backtests against champion"
 - Test: `engine/tests/integration/test_strategy_shadow_start_pg.py`
 - Test: `engine/tests/integration/test_strategy_shadow_advance_pg.py`
 - Test: `engine/tests/integration/test_strategy_shadow_concurrency_pg.py`
+- Test: `engine/tests/integration/test_strategy_shadow_finalization_pg.py`
 
 **Interfaces:**
 - Produces: `start_strategy_shadow(session, experiment_id, now)`, `advance_strategy_shadow(session, group_id, requested_session, observed_at)`, `finalize_strategy_shadow(session, group_id, now)`, and `StrategyShadowFinalGateV1`.
 - Consumes shared point-in-time authority selectors, Task 2 interpreter, simulation cost/fill primitives, hard-risk evaluator and Task 3 Shadow records.
 
-- [ ] **Step 1: Write same-start, exact-session and metric red tests**
+- [x] **Step 1: Write same-start, exact-session and metric red tests**
 
 Create fixtures with one sealed internal-paper snapshot cloned into champion/challenger legs. Assert NAV=100 normalization, identical cash/positions, exactly 63 evaluation + 5 grace sessions, checkpoints `(5,21,63)`, full-fill-only order count, same authority hash per session and final gate failure for one risk violation or one missing session.
 
-- [ ] **Step 2: Run red tests**
+- [x] **Step 2: Run red tests**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/evolution/shadow engine/tests/property/test_strategy_shadow_properties.py engine/tests/property/test_strategy_shadow_no_lookahead.py engine/tests/integration/test_strategy_shadow_start_pg.py engine/tests/integration/test_strategy_shadow_advance_pg.py engine/tests/integration/test_strategy_shadow_concurrency_pg.py -q
 ```
 
-- [ ] **Step 3: Implement frozen models, hashes and metrics**
+- [x] **Step 3: Implement frozen models, hashes and metrics**
 
 Model two roles only, Decimal NAV/cash/positions/orders/fills and fixed checkpoint ordinals. Canonical hashes cover group bindings, each session authority, both leg transitions, all order/fill facts and checkpoint metrics. Metrics include cost-after return, max drawdown, volatility, worst five sessions, turnover, fees and full-fill count.
 
-- [ ] **Step 4: Implement start and point-in-time authority**
+- [x] **Step 4: Implement start and point-in-time authority**
 
 Lock experiment and registry head; require all historical gates PASS and matching generation. Clone one PASS/balanced internal-paper snapshot into both virtual legs, choose one complete XNYS calendar, 63+5 future sessions and exact source/cost policy. A missing/late/conflicting authority creates a failed advance attempt and permanent data-gap evidence, never a late replacement.
 
-- [ ] **Step 5: Implement atomic advance/finalization**
+- [x] **Step 5: Implement atomic advance/finalization**
 
 Advance only the next expected session under a group row lock. Evaluate both strategies before persisting either transition; if either fails, persist neither leg state. Persist authority, states, orders, fills, checkpoint, audit and outbox in one transaction. At 63 sessions require challenger full fills >=20, no risk violation, excess return >=0 and drawdown delta >=-0.02.
 
-- [ ] **Step 6: Add races and proposal-shadow separation tests**
+- [x] **Step 6: Add races and proposal-shadow separation tests**
 
 Concurrent same-session advance returns one applied fact; out-of-order sessions fail; a champion generation change yields stale finalization. Assert zero writes to existing `shadow_*` Proposal tables, `paper_*` facts, broker tables and execution intents.
 
-- [ ] **Step 7: Verify and commit**
+- [x] **Step 7: Verify and commit**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/evolution/shadow engine/tests/property/test_strategy_shadow_properties.py engine/tests/property/test_strategy_shadow_no_lookahead.py engine/tests/integration/test_strategy_shadow_start_pg.py engine/tests/integration/test_strategy_shadow_advance_pg.py engine/tests/integration/test_strategy_shadow_concurrency_pg.py engine/tests/unit/shadow engine/tests/property/test_shadow_properties.py -q

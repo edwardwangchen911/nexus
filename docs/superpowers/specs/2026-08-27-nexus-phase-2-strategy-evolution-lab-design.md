@@ -303,6 +303,13 @@ Proposal Shadow 比较 `hold_current/minimum_change/strategy_target`，并绑定
 - 最终必须有 63 个完整 session、挑战者至少 20 笔完全成交订单、零硬风控违规、成本后相对冠军收益非负、最大回撤不差超过 2 个百分点。
 - 最终 authority hash 覆盖所有 session、订单、成交和检查点 hash。
 
+### 7.4 实施约束决定
+
+- `DataSnapshot.schema_version` 的数据库上限为 32 字符，Strategy Shadow session 证据使用 `strategy_shadow_evidence_v1`；完整语义继续由 Pydantic payload 类型和内容哈希约束，不能依赖超长显示名。
+- 初始同起点不伪造 ordinal 0 session authority。两条腿分别保存同一个 `initial_state_hash`，该哈希绑定 baseline snapshot、position projection hashes 与 NAV=100 归一化状态；首个真实推进从 ordinal 1 开始。
+- `strategy_shadow_groups` 是不可变创建根，其 `status='running'` 表示创建时状态，不作可变投影。终态唯一由不可变 `strategy_shadow_finalizations` 与 family state projection 推导，API/UI 不得把 group.status 当作当前状态。
+- 现有 baseline-only Forward 在完整 registry 解释器接入前，仅允许 registry 当前 definition 的 `strategy_version` 与 baseline decision 完全一致；不一致时 fail closed，禁止把 baseline targets 误标成 challenger 决策。
+
 ## 8. 晋级、交接与回滚
 
 ### 8.1 结构化解释

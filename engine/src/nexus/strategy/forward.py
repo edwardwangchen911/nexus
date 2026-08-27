@@ -24,8 +24,10 @@ from nexus.domain.ids import new_uuid7
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
+    StrategyDefinitionRecord,
 )
 from nexus.persistence.models.data import DataSnapshot, QualityReport, SourcePolicy
+from nexus.persistence.models.evolution import StrategyRegistryHeadRecord
 from nexus.persistence.models.market import UniverseMember, UniverseSnapshot
 from nexus.persistence.models.paper import (
     PaperAccountRecord,
@@ -416,6 +418,15 @@ async def persist_forward_strategy_decision(
         return existing
 
     await _authority_is_valid(session, decision)
+    registry = await session.get(StrategyRegistryHeadRecord, "internal_paper")
+    if registry is None:
+        raise ValueError("internal-paper strategy registry is incomplete")
+    active_definition = await session.get(StrategyDefinitionRecord, registry.active_definition_id)
+    if (
+        active_definition is None
+        or active_definition.strategy_version != decision.strategy_version
+    ):
+        raise ValueError("active internal-paper strategy is unsupported by baseline forward")
     decision_id = new_uuid7()
     session.add(
         StrategyDecisionRecord(
@@ -424,6 +435,9 @@ async def persist_forward_strategy_decision(
             portfolio_id=decision.portfolio_id,
             strategy_id=decision.strategy_id,
             strategy_version=decision.strategy_version,
+            strategy_definition_id=registry.active_definition_id,
+            registry_event_id=registry.last_event_id,
+            champion_generation=registry.active_generation,
             decision_session=decision.decision_session,
             decision_time=decision.decision_time,
             execution_session=decision.execution_session,
