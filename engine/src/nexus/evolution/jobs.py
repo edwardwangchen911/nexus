@@ -41,6 +41,7 @@ from nexus.persistence.models.evolution import (
     StrategyPromotionDecisionRecord,
     StrategyRegistryHeadRecord,
     StrategyResearchLineageRecord,
+    StrategyShadowAdvanceAttemptRecord,
     StrategyShadowFinalizationRecord,
     StrategyShadowGroupRecord,
     StrategyShadowOrderRecord,
@@ -82,10 +83,12 @@ _TERMINAL_FAMILY_STATES = (
 )
 _CANDIDATE_METRIC_STATES = frozenset(
     {
-        "PROPOSED",
-        "REJECTED",
         "ADMITTED",
-        "BACKTEST_RUNNING",
+        "VALIDATION_FAILED",
+        "VALIDATION_PASSED",
+        "OOS_NOT_SELECTED",
+        "OOS_SELECTED",
+        "OOS_RESERVED",
         "BACKTEST_FAILED",
         "BACKTEST_PASSED",
         "SHADOW_RUNNING",
@@ -280,6 +283,7 @@ async def resolve_due_strategy_rnd_jobs(
         await _due_shadow_jobs(
             session,
             session_date=session_date,
+            now=now,
             generation=head.active_generation,
         )
     )
@@ -639,11 +643,6 @@ async def _due_candidate_jobs(
                     StrategyExperimentFamilyRecord.id == StrategyExperimentRecord.family_id,
                 )
                 .join(
-                    StrategyExperimentStateProjectionRecord,
-                    StrategyExperimentStateProjectionRecord.family_id
-                    == StrategyExperimentFamilyRecord.id,
-                )
-                .join(
                     StrategyExperimentCandidateProjectionRecord,
                     StrategyExperimentCandidateProjectionRecord.experiment_id
                     == StrategyExperimentRecord.id,
@@ -653,9 +652,6 @@ async def _due_candidate_jobs(
                     StrategyExperimentFamilyRecord.champion_generation == generation,
                     StrategyExperimentCandidateProjectionRecord.current_state.in_(
                         ("ADMITTED", "OOS_SELECTED", "OOS_RESERVED")
-                    ),
-                    StrategyExperimentStateProjectionRecord.current_state.in_(
-                        ("ADMITTED", "BACKTEST_RUNNING")
                     ),
                 )
                 .order_by(
@@ -697,6 +693,7 @@ async def _due_shadow_jobs(
     session: AsyncSession,
     *,
     session_date: date,
+    now: datetime,
     generation: int,
 ) -> list[StrategyRNDJobPayloadV1]:
     rows = tuple(
@@ -732,6 +729,15 @@ async def _due_shadow_jobs(
         )
         if finalized is not None and finalized.status != "PASS":
             continue
+        permanent_failure = await session.scalar(
+            select(StrategyShadowAdvanceAttemptRecord.id)
+            .where(
+                StrategyShadowAdvanceAttemptRecord.group_id == group.id,
+                StrategyShadowAdvanceAttemptRecord.status == "failed",
+            )
+            .order_by(StrategyShadowAdvanceAttemptRecord.created_at)
+            .limit(1)
+        )
         completed_sessions = int(
             await session.scalar(
                 select(func.count())
@@ -740,7 +746,23 @@ async def _due_shadow_jobs(
             )
             or 0
         )
-        if finalized is not None or completed_sessions >= group.evaluation_sessions:
+        if permanent_failure is not None:
+            grace_decision_at = await session.scalar(
+                select(ExchangeCalendarSessionRecord.decision_at)
+                .where(
+                    ExchangeCalendarSessionRecord.calendar_authority_id
+                    == group.calendar_authority_id,
+                    ExchangeCalendarSessionRecord.session
+                    > group.created_at.astimezone(_NEW_YORK).date(),
+                )
+                .order_by(ExchangeCalendarSessionRecord.session)
+                .offset(group.evaluation_sessions + group.grace_sessions - 1)
+                .limit(1)
+            )
+            if grace_decision_at is None or now < _utc(grace_decision_at):
+                continue
+            operation = "finalize_promotion"
+        elif finalized is not None or completed_sessions >= group.evaluation_sessions:
             operation = "finalize_promotion"
         else:
             expected_session = await session.scalar(
@@ -1005,16 +1027,12 @@ async def load_strategy_evolution_metrics(
         (
             await session.execute(
                 select(
-                    StrategyExperimentStateProjectionRecord.current_state,
-                    func.sum(StrategyExperimentFamilyRecord.candidate_count),
+                    StrategyExperimentCandidateProjectionRecord.current_state,
+                    func.count(),
                 )
-                .join(
-                    StrategyExperimentFamilyRecord,
-                    StrategyExperimentFamilyRecord.id
-                    == StrategyExperimentStateProjectionRecord.family_id,
-                )
-                .group_by(StrategyExperimentStateProjectionRecord.current_state)
-                .order_by(StrategyExperimentStateProjectionRecord.current_state)
+                .select_from(StrategyExperimentCandidateProjectionRecord)
+                .group_by(StrategyExperimentCandidateProjectionRecord.current_state)
+                .order_by(StrategyExperimentCandidateProjectionRecord.current_state)
             )
         ).tuples()
     )

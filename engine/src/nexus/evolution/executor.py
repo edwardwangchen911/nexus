@@ -575,7 +575,9 @@ def _model_configuration(authority: LoadedGenerationAuthority) -> ResponsesModel
         max_input_tokens=model.max_input_tokens,
         max_output_tokens=model.max_output_tokens,
         max_tool_calls=model.max_tool_calls,
-        absolute_timeout_seconds=Decimal("120"),
+        # The Job worker owns a hard 45-second deadline. Leave deterministic
+        # headroom for authority loading, persistence, and terminalization.
+        absolute_timeout_seconds=Decimal("30"),
         input_usd_per_million=model.input_usd_per_million,
         output_usd_per_million=model.output_usd_per_million,
     )

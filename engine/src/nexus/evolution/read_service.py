@@ -316,18 +316,33 @@ class EvolutionReadService:
             )
         except ValueError:
             family_authority = None
+        verified_candidate = (
+            None
+            if family_authority is None
+            else family_authority.candidate_projection(experiment.id)
+        )
         family_valid = (
             family_authority is not None
             and family_authority.family_projection.current_state == projection.current_state
             and family_authority.family_projection.version == projection.version
             and any(item.id == experiment.id for item in family_authority.experiments)
+            and verified_candidate is not None
+            and verified_candidate.current_state == candidate_projection.current_state
+            and verified_candidate.version == candidate_projection.version
         )
         comparison, comparison_valid = await self._comparison(experiment.id)
         shadow, shadow_valid = await self._shadow(experiment.id, events=events)
         gates, gates_valid = await self._gates(experiment.id)
-        if projection.current_state not in {"PROPOSED", "ADMITTED"}:
+        candidate_state = candidate_projection.current_state
+        if candidate_state in {
+            "BACKTEST_PASSED",
+            "SHADOW_RUNNING",
+            "SHADOW_FAILED",
+            "PROMOTION_ELIGIBLE",
+            "PROMOTED",
+        }:
             comparison_valid = comparison_valid and comparison.status != "unavailable"
-        shadow_authority_required = projection.current_state in {
+        shadow_authority_required = candidate_state in {
             "SHADOW_RUNNING",
             "SHADOW_FAILED",
             "PROMOTION_ELIGIBLE",
@@ -335,7 +350,7 @@ class EvolutionReadService:
         }
         if shadow_authority_required:
             shadow_valid = shadow_valid and shadow.status != "not_started"
-        if projection.current_state in {
+        if candidate_state in {
             "BACKTEST_PASSED",
             "SHADOW_RUNNING",
             "SHADOW_FAILED",
@@ -355,9 +370,11 @@ class EvolutionReadService:
             if integrity_valid and evidence_valid
             else "partial"
         )
-        write_enabled = integrity_status == "verified" and projection.current_state in {
+        write_enabled = integrity_status == "verified" and candidate_state in {
             "ADMITTED",
-            "BACKTEST_RUNNING",
+            "VALIDATION_PASSED",
+            "OOS_SELECTED",
+            "OOS_RESERVED",
             "BACKTEST_PASSED",
             "SHADOW_RUNNING",
             "PROMOTION_ELIGIBLE",

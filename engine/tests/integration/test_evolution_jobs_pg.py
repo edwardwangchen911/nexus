@@ -1,6 +1,6 @@
 """PostgreSQL contracts for bounded Strategy R&D scheduling and execution."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from uuid import UUID
 
 import pytest
@@ -15,7 +15,7 @@ from nexus.evolution.jobs import (
     resolve_due_strategy_rnd_jobs,
 )
 from nexus.evolution.registry import pause_auto_promotion
-from nexus.evolution.shadow.service import start_strategy_shadow
+from nexus.evolution.shadow.service import advance_strategy_shadow, start_strategy_shadow
 from nexus.jobs.models import JOB_PRIORITIES, JobType, QueueName
 from nexus.jobs.registry import JobHandlerResult
 from nexus.jobs.worker import run_job_worker_once
@@ -23,14 +23,16 @@ from nexus.outbox.models import OutboxMessage
 from nexus.persistence.models.data import DataSnapshot, QualityReport
 from nexus.persistence.models.evolution import (
     StrategyEvolutionPolicyRecord,
+    StrategyExperimentCandidateProjectionRecord,
     StrategyExperimentFamilyRecord,
+    StrategyExperimentStateProjectionRecord,
     StrategyRegistryHeadRecord,
     StrategyResearchLineageRecord,
 )
 from nexus.persistence.models.runtime import AuditEvent, Job, OutboxEvent
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 _NOW = datetime(2026, 8, 27, 22, tzinfo=UTC)
 
@@ -194,6 +196,42 @@ async def test_due_candidate_job_binds_current_projection_and_ignores_terminal_o
     assert len(candidate_jobs) == 1
     assert candidate_jobs[0].candidate_state == "OOS_RESERVED"
     assert candidate_jobs[0].candidate_version == 4
+
+
+@pytest.mark.asyncio
+async def test_due_candidate_job_is_not_suppressed_by_family_aggregate_state(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    pair = await seed_evaluation_pair(factory)
+    async with factory() as session, session.begin():
+        family_projection = await session.get(
+            StrategyExperimentStateProjectionRecord, pair.family_id
+        )
+        candidate_projection = await session.get(
+            StrategyExperimentCandidateProjectionRecord, pair.experiment_id
+        )
+        assert family_projection is not None and candidate_projection is not None
+        assert candidate_projection.current_state == "OOS_RESERVED"
+        # Model the valid multi-candidate case where a sibling already owns Shadow.
+        await session.execute(
+            text("ALTER TABLE strategy_experiment_state_projections DISABLE TRIGGER USER")
+        )
+        family_projection.current_state = "SHADOW_RUNNING"
+        await session.flush()
+        await session.execute(
+            text("ALTER TABLE strategy_experiment_state_projections ENABLE TRIGGER USER")
+        )
+
+    async with factory() as session:
+        due = await resolve_due_strategy_rnd_jobs(
+            session, session_date=_NOW.date(), now=_NOW
+        )
+
+    candidate_jobs = [item for item in due if item.operation == "evaluate_candidate"]
+    assert len(candidate_jobs) == 1
+    assert candidate_jobs[0].experiment_id == pair.experiment_id
+    assert candidate_jobs[0].candidate_state == "OOS_RESERVED"
 
 
 @pytest.mark.asyncio
@@ -418,3 +456,67 @@ async def test_daily_shadow_target_is_one_typed_operation_and_queued_work_is_not
     }
     assert audit_events
     assert all(set(event.payload) <= allowed_audit_keys for event in audit_events)
+
+
+@pytest.mark.asyncio
+async def test_permanent_shadow_failure_waits_then_finalizes_after_frozen_grace(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    seed = await seed_strategy_shadow_ready(migrated_database_url, factory)
+    async with factory() as session, session.begin():
+        started = await start_strategy_shadow(
+            session,
+            experiment_id=seed.pair.experiment_id,
+            now=seed.now,
+        )
+        failed = await advance_strategy_shadow(
+            session,
+            group_id=started.group_id,
+            requested_session=started.evaluation_end_session,
+            observed_at=seed.now,
+        )
+        assert failed.status == "failed"
+
+    before_grace = datetime.combine(
+        started.evaluation_end_session, time(23), tzinfo=UTC
+    )
+    after_grace = datetime.combine(started.grace_end_session, time(23), tzinfo=UTC)
+    async with factory() as session:
+        waiting = await resolve_due_strategy_rnd_jobs(
+            session,
+            session_date=before_grace.date(),
+            now=before_grace,
+        )
+        due = await resolve_due_strategy_rnd_jobs(
+            session,
+            session_date=after_grace.date(),
+            now=after_grace,
+        )
+
+    assert not [
+        item
+        for item in waiting
+        if item.experiment_id == seed.pair.experiment_id
+        and item.operation in {"advance_shadow", "finalize_promotion"}
+    ]
+    finalizations = [
+        item
+        for item in due
+        if item.experiment_id == seed.pair.experiment_id
+        and item.operation == "finalize_promotion"
+    ]
+    assert len(finalizations) == 1
+
+
+@pytest.mark.asyncio
+async def test_metrics_count_candidate_projection_not_family_aggregate(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await seed_evaluation_pair(factory)
+
+    async with factory() as session:
+        metrics = await load_strategy_evolution_metrics(session, now=_NOW)
+
+    assert metrics.candidate_status_counts == {"OOS_RESERVED": 1}

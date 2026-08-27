@@ -221,6 +221,9 @@ async def test_experiment_summary_uses_candidate_state_not_family_aggregate(
     detail_data = detail.json()["data"]
     assert detail_data["experiment"]["state"] == "OOS_RESERVED"
     assert detail_data["family"]["state"] == "BACKTEST_RUNNING"
+    assert detail_data["integrity_status"] == "verified"
+    assert detail_data["write_enabled"] is True
+    assert detail_data["write_block_reason"] is None
 
 
 async def _detail_response(database_url: str, experiment_id) -> httpx.Response:

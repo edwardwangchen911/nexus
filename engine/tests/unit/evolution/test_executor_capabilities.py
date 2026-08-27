@@ -1,10 +1,12 @@
 """The production Strategy R&D composition must remain capability-isolated."""
 
 import ast
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from nexus.evolution.executor import build_strategy_rnd_executor
+from nexus.evolution.executor import _model_configuration, build_strategy_rnd_executor
 from nexus.evolution.jobs import build_strategy_rnd_registry
 from nexus.jobs.models import JobType, QueueName
 from nexus.settings import AgentRuntimeMode, EngineSettings, Environment
@@ -40,6 +42,29 @@ def test_registry_contains_only_the_strategy_rnd_queue() -> None:
 
     assert {spec.queue for spec in registry.specs} == {QueueName.STRATEGY_RND}
     assert registry.job_types == {JobType.STRATEGY_RND.value}
+
+
+def test_responses_deadline_fits_inside_strategy_job_timeout() -> None:
+    executor = build_strategy_rnd_executor(EngineSettings.for_test())
+    spec = build_strategy_rnd_registry(executor=executor).resolve(
+        JobType.STRATEGY_RND.value
+    )
+    assert spec is not None
+    config = _model_configuration(
+        SimpleNamespace(
+            model=SimpleNamespace(
+                model_id="fixture-model",
+                version="fixture-v1",
+                max_input_tokens=10_000,
+                max_output_tokens=1_000,
+                max_tool_calls=8,
+                input_usd_per_million=Decimal("1"),
+                output_usd_per_million=Decimal("2"),
+            )
+        )
+    )
+
+    assert float(config.absolute_timeout_seconds) < spec.timeout_seconds
 
 
 def test_production_executor_requires_explicit_responses_authority() -> None:
