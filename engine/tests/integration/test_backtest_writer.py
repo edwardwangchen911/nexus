@@ -31,11 +31,18 @@ from nexus.backtest.engine import (
     authority_collection_content_hash,
     exchange_calendar_content_hash,
     run_backtest,
+    run_challenger_backtest_v1,
 )
 from nexus.backtest.persistence import (
     BacktestPersistenceAuthority,
     expected_data_snapshot_payload,
     persist_backtest_result,
+)
+from nexus.evolution.candidate import apply_candidate_delta, generate_candidate_deltas
+from nexus.evolution.models import StrategyExperimentProposalV1
+from nexus.evolution.policies import (
+    candidate_budget_policy_v1,
+    evolution_search_space_v1,
 )
 from nexus.market.price_bar_authority import finalize_price_bar_set
 from nexus.persistence.models.backtest import (
@@ -55,6 +62,7 @@ from nexus.strategy.dsl import (
     baseline_feature_registry,
     baseline_v1_document,
     compile_strategy,
+    evolution_feature_registry_v1,
 )
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
@@ -164,6 +172,73 @@ async def test_writer_rejects_diagnostic_run_without_walk_forward(
             await persist_backtest_result(
                 session, strategy, data, diagnostic_protocol, result, authority
             )
+
+
+@pytest.mark.asyncio
+async def test_writer_persists_published_challenger_with_trial_count(
+    migrated_database_url: str,
+) -> None:
+    _, bars, sessions, protocol = _raw_inputs()
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    price_authorities = await _seed_upstream_authorities(factory, bars, sessions)
+    data = _dataset(bars, sessions, price_authorities)
+    proposal = StrategyExperimentProposalV1.model_validate(
+        {
+            "schema_version": "strategy_experiment_proposal_v1",
+            "parent_strategy_definition_id": "019d0000-0000-7000-8000-000000002200",
+            "champion_generation": 1,
+            "research_lineage_id": "019d0000-0000-7000-8000-000000005501",
+            "hypothesis": "A registered target weight may improve robustness.",
+            "expected_mechanism": "Frozen validation measures the bounded change.",
+            "invalidation_conditions": ["The paired comparison does not improve."],
+            "evidence_refs": ["019d0000-0000-7000-8000-000000005502"],
+            "mutation_axes": [{"axis": "target_weight", "values": ["0.10"]}],
+        }
+    )
+    parent = baseline_v1_document()
+    delta = generate_candidate_deltas(proposal, parent, candidate_budget_policy_v1())[0]
+    document = apply_candidate_delta(parent, delta, evolution_search_space_v1())
+    challenger = compile_strategy(document, evolution_feature_registry_v1())
+    challenger_protocol = protocol.model_copy(update={"experiment_attempt_count": 3})
+    result = run_challenger_backtest_v1(
+        challenger,
+        data,
+        challenger_protocol,
+        experiment_attempt_count=3,
+    )
+    await _seed_data_snapshot(factory, data, challenger_protocol, result)
+    async with factory() as session, session.begin():
+        session.add(
+            StrategyDefinitionRecord(
+                strategy_version=challenger.strategy_version,
+                schema_version="strategy_dsl_v1",
+                expression_hash=challenger.expression_hash,
+                document=document,
+                lifecycle="challenger",
+                published_at=COMPLETED_AT,
+            )
+        )
+    authority = BacktestPersistenceAuthority(
+        authority_bundle_id=AUTHORITY_BUNDLE_ID,
+        data_snapshot_id=DATA_SNAPSHOT_ID,
+        source_policy_id=SOURCE_POLICY_ID,
+        cost_policy_id=BACKTEST_COST_POLICY_ID,
+        completed_at=COMPLETED_AT,
+    )
+
+    async with factory() as session, session.begin():
+        record = await persist_backtest_result(
+            session,
+            challenger,
+            data,
+            challenger_protocol,
+            result,
+            authority,
+        )
+
+    assert record.promotable is False
+    assert record.historical_agent_overlay is False
+    assert record.protocol["experiment_attempt_count"] == 3
 
 
 async def _seed_upstream_authorities(
@@ -622,12 +697,8 @@ async def _seed_data_snapshot(
                     "calendar": calendar.authority_id,
                     "session": value,
                     "decision_at": calendar.decision_times[value],
-                    "market_open_at": exchange_calendar.session_open(
-                        value
-                    ).to_pydatetime(),
-                    "market_close_at": exchange_calendar.session_close(
-                        value
-                    ).to_pydatetime(),
+                    "market_open_at": exchange_calendar.session_open(value).to_pydatetime(),
+                    "market_close_at": exchange_calendar.session_close(value).to_pydatetime(),
                 }
                 for value in calendar.sessions
             ],

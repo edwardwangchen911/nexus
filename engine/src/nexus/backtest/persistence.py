@@ -26,6 +26,7 @@ from nexus.backtest.engine import (
     _hash,
     _mapped_session_on_or_after,
     run_backtest,
+    run_challenger_backtest_v1,
 )
 from nexus.backtest.metrics import BacktestMetrics
 from nexus.domain.ids import new_uuid7
@@ -73,7 +74,13 @@ from nexus.quality.source_policy import (
     load_source_policy_v1,
     price_manifest_admissible_under_source_policy_v1,
 )
-from nexus.strategy.dsl import CompiledStrategy, baseline_v1_document
+from nexus.strategy.dsl import (
+    CompiledStrategy,
+    baseline_feature_registry,
+    baseline_v1_document,
+    compile_strategy,
+    evolution_feature_registry_v1,
+)
 
 _SUPPORTED_US_EXCHANGES = frozenset({"XNYS", "XNAS", "ARCX"})
 _BACKTEST_ASSET_TYPE_BY_MASTER = {
@@ -144,11 +151,13 @@ async def persist_backtest_result(
         .where(StrategyDefinitionRecord.strategy_version == strategy.strategy_version)
         .execution_options(populate_existing=True)
     )
-    document = baseline_v1_document()
     if definition is None:
+        if strategy.strategy_version != "baseline_v1":
+            raise ValueError("challenger strategy must be published before backtest persistence")
+        document = baseline_v1_document()
         definition = StrategyDefinitionRecord(
             strategy_version=strategy.strategy_version,
-            schema_version="2",
+            schema_version="strategy_dsl_v1",
             expression_hash=strategy.expression_hash,
             document=document,
             lifecycle="champion",
@@ -357,7 +366,7 @@ def _validate_result(
     if result.result_hash != _hash(result.model_dump(mode="json", exclude={"result_hash"})):
         raise ValueError("backtest result hash is invalid")
     if result.historical_agent_overlay or result.promotable:
-        raise ValueError("Phase 0-1 historical results must remain locked and Agent-free")
+        raise ValueError("historical results must remain non-promotable and Agent-free")
     if not result.strategy_data_complete or result.strategy_incomplete_reasons:
         raise ValueError("incomplete strategy data cannot be persisted as evidence")
     if not result.benchmark_comparison_complete:
@@ -377,7 +386,17 @@ def _validate_result(
             raise ValueError("untradable execution lacks frozen delisting authority")
     if not result.attribution.reconciled:
         raise ValueError("unreconciled performance attribution cannot be persisted")
-    if result != run_backtest(strategy, data, protocol):
+    replay = (
+        run_backtest(strategy, data, protocol)
+        if strategy.strategy_version == "baseline_v1"
+        else run_challenger_backtest_v1(
+            strategy,
+            data,
+            protocol,
+            experiment_attempt_count=protocol.experiment_attempt_count,
+        )
+    )
+    if result != replay:
         raise ValueError("backtest result does not match deterministic engine replay")
 
 
@@ -1470,13 +1489,26 @@ def _validate_strategy_definition(
     strategy: CompiledStrategy,
     completed_at: datetime,
 ) -> None:
+    if definition is None:
+        raise ValueError("published strategy definition does not match the compiled strategy")
+    registry = (
+        baseline_feature_registry()
+        if strategy.strategy_version == "baseline_v1"
+        else evolution_feature_registry_v1()
+    )
+    try:
+        compiled = compile_strategy(definition.document, registry)
+    except ValueError as error:
+        raise ValueError(
+            "published strategy definition does not match the compiled strategy"
+        ) from error
+    expected_lifecycle = "champion" if strategy.strategy_version == "baseline_v1" else "challenger"
     if (
-        definition is None
-        or definition.strategy_version != strategy.strategy_version
-        or definition.schema_version != "2"
+        definition.strategy_version != strategy.strategy_version
+        or definition.schema_version != "strategy_dsl_v1"
         or definition.expression_hash != strategy.expression_hash
-        or definition.document != baseline_v1_document()
-        or definition.lifecycle != "champion"
+        or compiled != strategy
+        or definition.lifecycle != expected_lifecycle
         or definition.published_at > completed_at
     ):
         raise ValueError("published strategy definition does not match the compiled strategy")

@@ -296,7 +296,7 @@ git commit -m "feat(engine): admit fixed strategy R&D experiments"
 - Produces: `select_oos_candidates(validation_results, policy)`, `persist_champion_comparison(...) -> StrategyChampionComparisonRecord`, and `evaluate_historical_promotion(comparison, policy) -> PromotionDecisionV1`.
 - Consumes Task 2 challenger backtest and Task 3/4 immutable experiment facts.
 
-- [ ] **Step 1: Write validation-selection and gate boundary red tests**
+- [x] **Step 1: Write validation-selection and gate boundary red tests**
 
 ```python
 def test_double_cost_gate_compares_challenger_to_champion() -> None:
@@ -309,25 +309,25 @@ def test_double_cost_gate_compares_challenger_to_champion() -> None:
 
 Cover exactly 7/8 OOS windows, 0.949999/0.95 DSR, Sharpe +0.149999/+0.15, return +0.009999/+0.01, drawdown -0.020001/-0.02, incomplete authority/benchmark and cumulative trial counts.
 
-- [ ] **Step 2: Run red tests**
+- [x] **Step 2: Run red tests**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/evolution/test_evaluation.py engine/tests/integration/test_evolution_backtest_pg.py engine/tests/integration/test_evolution_promotion_gate_pg.py -q
 ```
 
-- [ ] **Step 3: Implement validation shortlist and paired evaluation**
+- [x] **Step 3: Implement validation shortlist and paired evaluation**
 
 Rank validation candidates using the frozen policy tuple `(validation_sharpe desc, validation_max_drawdown desc, validation_cost asc, expression_hash asc)` and take at most 3. Run OOS candidates and the bound champion with identical authority/protocol/cost; persist both immutable backtests plus a canonical paired comparison. Never update `promotable`.
 
-- [ ] **Step 4: Implement structured historical gates**
+- [x] **Step 4: Implement structured historical gates**
 
 Return ordered `PromotionGateResultV1` rows with string Decimal values, evidence IDs and fixed reason codes. Treat missing/unknown as fail closed. Persist the decision and append the correct experiment event atomically; only all-PASS decisions can start Strategy Shadow.
 
-- [ ] **Step 5: Verify identical authority and stale-generation handling**
+- [x] **Step 5: Verify identical authority and stale-generation handling**
 
 Add PostgreSQL tests that reject mismatched authority/protocol/cost/parent generation. Change registry generation between comparison creation and decision persistence; assert `STALE_CHAMPION_BASELINE`, no Shadow group and no registry event.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/evolution/test_evaluation.py engine/tests/integration/test_evolution_backtest_pg.py engine/tests/integration/test_evolution_promotion_gate_pg.py engine/tests/unit/backtest engine/tests/integration/test_backtest_writer.py -q
