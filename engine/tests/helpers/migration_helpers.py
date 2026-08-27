@@ -11,6 +11,7 @@ from nexus.integrations.service import IntegrationStatusService
 from nexus.persistence.base import Base
 from nexus.persistence.models import (  # noqa: F401
     data,
+    evolution,
     market,
     optimization,
     portfolio,
@@ -30,6 +31,7 @@ from helpers.migration_assertions import created_at_trigger_exists
 from helpers.migration_schema_expectations import (
     EXPECTED_FOREIGN_KEYS,
     EXPECTED_TABLES,
+    NO_CREATED_AT_TRIGGER_TABLES,
     OPTIONAL_MIGRATION_TABLE_GROUPS,
 )
 
@@ -317,7 +319,7 @@ def _assert_reflected_schema(connection: Connection) -> None:
     assert isinstance(macro_value["type"], postgresql.NUMERIC)
     assert macro_value["type"].precision == 38
     assert macro_value["type"].scale == 12
-    for table_name in expected_tables:
+    for table_name in expected_tables - NO_CREATED_AT_TRIGGER_TABLES:
         assert created_at_trigger_exists(connection, table_name)
     if diagnostic_tables <= actual_tables:
         evidence_columns = {

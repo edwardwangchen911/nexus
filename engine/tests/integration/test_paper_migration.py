@@ -147,7 +147,7 @@ async def _table_names(database_url: str) -> set[str]:
 def test_paper_revision_precedes_the_execution_release_head() -> None:
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0021_manual_job_retry_allowance"]
+    assert script.get_heads() == ["0022_strategy_evolution"]
     revision = script.get_revision("0014_paper")
     assert revision is not None
     assert revision.down_revision == "0013_shadow"

@@ -199,29 +199,29 @@ git commit -m "feat(engine): interpret bounded challenger strategies"
 - Produces the exact tables in spec section 6, a genesis `internal_paper` registry event/head for `baseline_v1`, and non-null `strategy_definition_id`, `registry_event_id`, `champion_generation` bindings on `strategy_decisions`.
 - Consumes existing `strategy_definitions`, Agent prompt/model records, backtest facts, portfolio snapshots, policies, audit/outbox and paper decisions.
 
-- [ ] **Step 1: Generate the migration skeleton and write red migration tests**
+- [x] **Step 1: Generate the migration skeleton and write red migration tests**
 
 Run `uv run --package nexus-engine alembic -c engine/alembic.ini revision -m strategy_evolution --rev-id 0022_strategy_evolution`, then write tests that assert `down_revision == "0021_manual_job_retry_allowance"`, one head, exact tables/columns/checks/FKs/unique constraints, genesis registry generation 1, old decision backfill and downgrade refusal when Phase 2 facts exist.
 
-- [ ] **Step 2: Prove the tests fail against the empty skeleton**
+- [x] **Step 2: Prove the tests fail against the empty skeleton**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/integration/test_evolution_migration.py engine/tests/integration/test_evolution_db_guards.py -q
 ```
 
-- [ ] **Step 3: Implement ORM records**
+- [x] **Step 3: Implement ORM records**
 
 Use focused classes named `StrategyRNDRunRecord`, `StrategyRNDOutputRecord`, `StrategyEvolutionPolicyRecord`, `StrategyPromotionPolicyRecord`, `StrategyResearchLineageRecord`, `StrategyExperimentFamilyRecord`, `StrategyExperimentRecord`, `StrategyExperimentEventRecord`, `StrategyExperimentAttemptRecord`, `StrategyExperimentStateProjectionRecord`, `StrategyChampionComparisonRecord`, `StrategyPromotionDecisionRecord`, Strategy Shadow records, `StrategyRegistryEventRecord`, and `StrategyRegistryHeadRecord`. Authority records inherit `ImmutableCreatedAt`; head/projection do not.
 
-- [ ] **Step 4: Implement migration/backfill/triggers**
+- [x] **Step 4: Implement migration/backfill/triggers**
 
 Create all v1 checks, SHA-256 checks, cardinality constraints, one-active-family partial unique index, one `internal_paper` head, event sequence/hash and immutable triggers. Extend Agent prompt role allowlist with `strategy_rnd`. Backfill every existing baseline decision to the genesis definition/event/generation, replace decision uniqueness with `(account_id,decision_session)`, then add NOT NULL/FKs. Preserve `backtest_runs.phase01_promotion_locked` unchanged.
 
-- [ ] **Step 5: Add database bypass/concurrency counterexamples**
+- [x] **Step 5: Add database bypass/concurrency counterexamples**
 
 Assert UPDATE/DELETE rejection for every authority table; duplicate active family, event sequence, candidate expression, shadow leg, session authority, registry channel and decision session fail at PostgreSQL. Assert head/projection updates reject generation/version regression and registry event hashes cannot be changed.
 
-- [ ] **Step 6: Run round-trip, all migration tests, and commit**
+- [x] **Step 6: Run round-trip, all migration tests, and commit**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/integration/test_evolution_migration.py engine/tests/integration/test_evolution_db_guards.py engine/tests/integration/test_migration.py engine/tests/integration/test_backtest_migration.py engine/tests/integration/test_paper_migration.py engine/tests/integration/test_automation_migration.py -q

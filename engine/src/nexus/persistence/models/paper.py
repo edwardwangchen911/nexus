@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     ARRAY,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -118,9 +119,8 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
     __table_args__ = (
         UniqueConstraint(
             "account_id",
-            "strategy_version",
             "decision_session",
-            name="uq_strategy_decisions_account_version_session",
+            name="uq_strategy_decisions_account_session",
         ),
         UniqueConstraint("id", "account_id", name="uq_strategy_decisions_id_account"),
         UniqueConstraint("decision_hash", name="uq_strategy_decisions_hash"),
@@ -149,9 +149,20 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
             ["quality_reports.id"],
             name="fk_strategy_decisions_quality",
         ),
+        ForeignKeyConstraint(
+            ["strategy_definition_id"],
+            ["strategy_definitions.id"],
+            name="fk_strategy_decisions_strategy_definition",
+        ),
+        ForeignKeyConstraint(
+            ["registry_event_id"],
+            ["strategy_registry_events.id"],
+            name="fk_strategy_decisions_registry_event",
+        ),
         CheckConstraint(
-            "strategy_id = 'baseline' AND strategy_version = 'baseline_v1'",
-            name="strategy_fixed",
+            "btrim(strategy_id) <> '' AND btrim(strategy_version) <> '' "
+            "AND champion_generation >= 1",
+            name="strategy_content_addressed",
         ),
         CheckConstraint("execution_session > decision_session", name="sessions_ordered"),
         CheckConstraint("reason = 'WEEKLY_REBALANCE'", name="reason_weekly"),
@@ -170,6 +181,9 @@ class StrategyDecisionRecord(ImmutableCreatedAt, Base):
     portfolio_id: Mapped[UUID]
     strategy_id: Mapped[str] = mapped_column(String(50))
     strategy_version: Mapped[str] = mapped_column(String(50))
+    strategy_definition_id: Mapped[UUID]
+    registry_event_id: Mapped[UUID]
+    champion_generation: Mapped[int] = mapped_column(BigInteger)
     decision_session: Mapped[date] = mapped_column(Date)
     decision_time: Mapped[datetime] = mapped_column(UTCDateTime())
     execution_session: Mapped[date] = mapped_column(Date)

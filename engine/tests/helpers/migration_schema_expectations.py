@@ -139,6 +139,38 @@ AUTOMATION_TABLES = {
     "audit_chain_manifests",
 }
 EXPECTED_TABLES = EXPECTED_TABLES | AUTOMATION_TABLES
+EVOLUTION_TABLES = {
+    "strategy_rnd_runs",
+    "strategy_rnd_outputs",
+    "strategy_evolution_policies",
+    "strategy_promotion_policies",
+    "strategy_research_lineages",
+    "strategy_experiment_families",
+    "strategy_experiments",
+    "strategy_experiment_events",
+    "strategy_experiment_attempts",
+    "strategy_experiment_state_projections",
+    "strategy_champion_comparisons",
+    "strategy_promotion_decisions",
+    "strategy_shadow_groups",
+    "strategy_shadow_legs",
+    "strategy_shadow_advance_attempts",
+    "strategy_shadow_session_authorities",
+    "strategy_shadow_session_price_inputs",
+    "strategy_shadow_leg_states",
+    "strategy_shadow_orders",
+    "strategy_shadow_fills",
+    "strategy_shadow_checkpoints",
+    "strategy_shadow_checkpoint_metrics",
+    "strategy_shadow_finalizations",
+    "strategy_registry_events",
+    "strategy_registry_heads",
+}
+EXPECTED_TABLES = EXPECTED_TABLES | EVOLUTION_TABLES
+NO_CREATED_AT_TRIGGER_TABLES = {
+    "strategy_experiment_state_projections",
+    "strategy_registry_heads",
+}
 
 OPTIONAL_MIGRATION_TABLE_GROUPS = (
     frozenset(
@@ -207,6 +239,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
     frozenset(SHADOW_TABLES),
     frozenset(PAPER_TABLES),
     frozenset(AUTOMATION_TABLES),
+    frozenset(EVOLUTION_TABLES),
 )
 
 EXPECTED_FOREIGN_KEYS = {

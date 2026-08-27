@@ -28,7 +28,7 @@ class AgentPromptVersionRecord(ImmutableCreatedAt, Base):
         UniqueConstraint("role", "version", name="uq_agent_prompt_versions_role_version"),
         CheckConstraint(
             "role IN ('orchestrator','fundamental','market_state','macro_sector','bull','bear',"
-            "'evidence_audit','portfolio')",
+            "'evidence_audit','portfolio','strategy_rnd')",
             name="role_allowed",
         ),
         CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),

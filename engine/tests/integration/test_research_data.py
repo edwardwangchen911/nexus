@@ -75,7 +75,7 @@ def test_0010_research_data_round_trips_from_0009_with_the_current_single_head(
     }
 
     assert ScriptDirectory.from_config(config).get_heads() == [
-        "0021_manual_job_retry_allowance"
+        "0022_strategy_evolution"
     ]
     command.upgrade(config, "0009_optimization")
     assert research_tables.isdisjoint(_table_names(temporary_database_url))
