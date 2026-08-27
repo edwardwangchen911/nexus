@@ -425,11 +425,11 @@ git commit -m "fix(engine): rebuild strategy registry from immutable facts"
 - Produces: `load_point_in_time_dataset(session, baseline_run_id, as_of)`, `run_candidate_validation_v1(strategy, data, protocol)`, `DatabaseStrategyRNDAuthorityResolver`, `StrategyRNDExecutor`, `build_strategy_rnd_executor(settings, responses_client=None)`, CLI `nexus-engine-strategy-rnd-worker`.
 - Consumes: Tasks 2–4 verified state, shortlist/OOS functions, existing backtest/Shadow/handover/registry services.
 
-- [ ] **Step 1: Write authority-loader round-trip red test**
+- [x] **Step 1: Write authority-loader round-trip red test**
 
 Seed one real test authority bundle with existing helpers, persist a baseline run, then load it through the new production loader. Assert the reconstructed `PointInTimeDataset` and `BacktestProtocol` reproduce the stored baseline `result_hash` when run with the stored code version. Tamper one exact-set member and assert `BACKTEST_AUTHORITY_INCOMPLETE`.
 
-- [ ] **Step 2: Run loader test and observe RED**
+- [x] **Step 2: Run loader test and observe RED**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -438,7 +438,7 @@ uv run --package nexus-engine pytest \
 
 Expected: FAIL because no production authority loader exists.
 
-- [ ] **Step 3: Implement the point-in-time authority loader and validation evaluator**
+- [x] **Step 3: Implement the point-in-time authority loader and validation evaluator**
 
 Load only IDs enumerated by `BacktestAuthorityBundleRecord` and its member tables. Reconstruct calendar, raw/all price authorities and bars, universe snapshots, sector classifications, corporate actions/delistings, instrument metadata and benchmarks. Recompute every collection and bundle content hash and require every `available_at <= as_of`.
 
@@ -453,7 +453,7 @@ authority_complete = bool(valid_windows) and not incomplete_reasons
 
 No session after the frozen validation cutoff may be present in the evaluator input.
 
-- [ ] **Step 4: Write real executor red tests**
+- [x] **Step 4: Write real executor red tests**
 
 Use a fixed `StrategyRNDRuntime`, but do not inject a fake operation executor. Invoke `build_strategy_rnd_executor()` and assert operation transitions:
 
@@ -471,7 +471,7 @@ rollback request + activation -> previous champion
 
 Use a small deterministic fixture authority that still passes the real loader and deterministic services. Assert paper orders, broker snapshots and live execution facts remain unchanged.
 
-- [ ] **Step 5: Implement the four-operation executor**
+- [x] **Step 5: Implement the four-operation executor**
 
 `StrategyRNDExecutor.__call__(context, payload)` dispatches only the four enum values. It resolves all IDs from the current transaction, verifies candidate state/version and maps only stable domain outcomes to `JobHandlerResult`. Unknown exceptions are not serialized into Job/audit output.
 
@@ -493,7 +493,7 @@ nexus-engine-strategy-rnd-worker = "nexus.evolution.worker:main"
 
 `worker.main()` constructs `EngineSettings`, calls `build_strategy_rnd_executor(settings)`, and runs forever. No CLI argument may accept strategy DSL, policy thresholds, account, Broker, order or live flag.
 
-- [ ] **Step 6: Add capability static test and run executor suites GREEN**
+- [x] **Step 6: Add capability static test and run executor suites GREEN**
 
 The static test parses imports in `nexus/evolution/executor.py`, `authority.py`, `validation.py`, and `worker.py` and rejects module names containing `broker`, `fosun`, `account`, `order_create`, `live_write`. It also instantiates the registry and asserts its only queue is `strategy_rnd`.
 
@@ -518,7 +518,7 @@ uv run --package nexus-engine mypy \
 
 Expected: PASS; the worker test calls the real executor and no longer defines a fake `execute()` callback.
 
-- [ ] **Step 7: Commit Task 5**
+- [x] **Step 7: Commit Task 5**
 
 ```bash
 git add engine/src/nexus/backtest/authority_loader.py \
@@ -551,11 +551,11 @@ git commit -m "feat(engine): execute the restricted strategy evolution loop"
 - Produces public validators `validate_champion_comparison_record`, `validate_promotion_decision_record`, `validate_shadow_finalization_record`, `validate_handover_decision_record`.
 - Changes `ShadowProgressResponse` to include `evaluation_sessions`, `grace_sessions`, `grace_elapsed_sessions`.
 
-- [ ] **Step 1: Write identity/hash mismatch red tests**
+- [x] **Step 1: Write identity/hash mismatch red tests**
 
 Create schema-valid JSON with one mismatched field at a time: comparison ID, experiment ID, policy ID, comparison hash, decision hash, finalization hash and Shadow group ID. The detail endpoint must return partial/stale, `write_enabled=false`, and no fabricated metrics.
 
-- [ ] **Step 2: Run read API test and observe RED**
+- [x] **Step 2: Run read API test and observe RED**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -564,15 +564,15 @@ uv run --package nexus-engine pytest \
 
 Expected: at least one mismatch is incorrectly reported as verified by the current schema-only reader.
 
-- [ ] **Step 3: Expose and reuse strict validators**
+- [x] **Step 3: Expose and reuse strict validators**
 
 Move the existing private comparison and decision checks behind public functions; add equivalent Shadow/handover checks. The read service must call these functions and verify candidate projection/family aggregate plus registry activations. Derive Shadow status only from finalization status; `group.status` is creation metadata.
 
-- [ ] **Step 4: Batch integrity reads and add fixed-query scale test**
+- [x] **Step 4: Batch integrity reads and add fixed-query scale test**
 
 Seed 500 terminal families with 24 candidate projections and 2,000 registry facts. Attach a SQLAlchemy query counter. One overview call must execute no more than 12 SQL statements independent of family count; assert no query is issued inside a per-family loop. Keep stable `(created_at,id)` pagination and only materialize the requested 20 experiment/history responses.
 
-- [ ] **Step 5: Run read tests GREEN**
+- [x] **Step 5: Run read tests GREEN**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -587,7 +587,7 @@ uv run --package nexus-engine mypy \
   engine/src/nexus/api/schemas/evolution.py
 ```
 
-- [ ] **Step 6: Commit Task 6**
+- [x] **Step 6: Commit Task 6**
 
 ```bash
 git add engine/src/nexus/evolution/evaluation.py \
@@ -603,7 +603,7 @@ git commit -m "fix(api): verify strategy evolution evidence identities"
 ### Task 7: Close Web ETag, Shadow progress, and modal accessibility gaps
 
 **Files:**
-- Modify: `contracts/openapi.yaml`
+- Modify: `contracts/openapi.json`
 - Regenerate: `app/lib/generated/schema.d.ts`
 - Regenerate: `app/lib/generated/runtime-contract.ts`
 - Modify: `app/(protected)/strategies/page.tsx`
@@ -616,7 +616,7 @@ git commit -m "fix(api): verify strategy evolution evidence identities"
 - Consumes Task 6 Shadow progress fields and ETag semantics.
 - Produces strict overview/detail authority binding and accessible rollback modal behavior.
 
-- [ ] **Step 1: Write Web red tests**
+- [x] **Step 1: Write Web red tests**
 
 Add Vitest cases where detail ETag is missing or differs from overview; both must render partial, clear detail evidence and disable all mutations. Add manual experiment-selection mismatch. Assert Shadow copy is `21 / 63 sessions` and shows `宽限期 5 sessions` separately.
 
@@ -633,17 +633,17 @@ await confirm.click();
 await expect(rollback).toBeFocused();
 ```
 
-- [ ] **Step 2: Run Web tests and observe RED**
+- [x] **Step 2: Run Web tests and observe RED**
 
 ```bash
 npm test -- tests/unit/strategies/page.test.tsx \
   tests/unit/strategies/runtime-boundary.test.ts
-npx playwright test tests/e2e/strategy-evolution.spec.ts --project=chromium
+npx playwright test tests/e2e/strategy-evolution.spec.ts
 ```
 
 Expected: missing detail ETag is accepted, progress shows 68, and Tab can escape or confirm fails to restore focus.
 
-- [ ] **Step 3: Implement strict ETag and modal behavior**
+- [x] **Step 3: Implement strict ETag and modal behavior**
 
 Require `nextEtag !== null && detailEtag !== null && detailEtag === nextEtag` on initial refresh and selection. On mismatch set detail null, keep the last verified overview read-only, enter partial and update the evidence ref accordingly.
 
@@ -651,25 +651,25 @@ Use a dialog ref and `showModal()` after mount. Trap Tab between the two action 
 
 Use `shadow.evaluation_sessions` for the progress denominator; show `grace_sessions` and `grace_elapsed_sessions` as separate text.
 
-- [ ] **Step 4: Regenerate contracts and run Web GREEN**
+- [x] **Step 4: Regenerate contracts and run Web GREEN**
 
 ```bash
-npm run generate:contracts
+npm run generate:client
 npm run check:generated
 npm test -- tests/unit/strategies/page.test.tsx \
   tests/unit/strategies/runtime-boundary.test.ts \
   tests/unit/strategies/routes.test.ts
 npm run lint
 npm run build
-npx playwright test tests/e2e/strategy-evolution.spec.ts --project=chromium
+npx playwright test tests/e2e/strategy-evolution.spec.ts
 ```
 
 Expected: all PASS; Axe critical/serious findings remain zero and no real-trading control appears.
 
-- [ ] **Step 5: Commit Task 7**
+- [x] **Step 5: Commit Task 7**
 
 ```bash
-git add contracts/openapi.yaml \
+git add contracts/openapi.json \
   app/lib/generated/schema.d.ts \
   app/lib/generated/runtime-contract.ts \
   'app/(protected)/strategies/page.tsx' \
@@ -690,24 +690,24 @@ git commit -m "fix(web): bind strategy evidence and modal authority"
 - Consumes all prior tasks.
 - Produces final exact-tree verification record, independent review evidence, and a clean committed branch.
 
-- [ ] **Step 1: Run migration round trip on a fresh database**
+- [x] **Step 1: Run migration round trip on a fresh database**
 
 Run `0022 -> 0023 -> 0022 -> 0023`, verify one head, then insert each new fact class and prove downgrade refuses with SQLSTATE `23514`. Record the temporary Compose project name; never print credentials.
 
-- [ ] **Step 2: Run exact final-tree Engine verification**
+- [x] **Step 2: Run exact final-tree Engine verification**
 
 ```bash
-uv run --package nexus-engine ruff check engine/src engine/tests integrations
-uv run --package nexus-engine mypy engine/src
-uv run --package nexus-engine pytest \
+uv run --project engine ruff check engine
+uv run --project engine mypy engine/src
+uv run --project engine pytest --import-mode=importlib \
   engine/tests/unit engine/tests/property engine/tests/evals engine/tests/contract \
   engine/tests/test_health.py -q
-uv run --package nexus-engine pytest engine/tests/integration -q
+uv run --project engine pytest engine/tests/integration -q
 ```
 
 If the integration suite exceeds one worker lease/window, partition only by mutually exclusive file lists and record the exact total. Zero unexpected `nexus_test_%` databases may remain.
 
-- [ ] **Step 3: Run exact final-tree Web verification**
+- [x] **Step 3: Run exact final-tree Web verification**
 
 ```bash
 npm run check:generated
@@ -717,7 +717,7 @@ npm run build
 npx playwright test
 ```
 
-- [ ] **Step 4: Run safety and fact assertions**
+- [x] **Step 4: Run safety and fact assertions**
 
 Verify:
 
@@ -732,13 +732,13 @@ orphan test databases: 0
 git diff --check: clean
 ```
 
-- [ ] **Step 5: Request a fresh read-only independent review**
+- [x] **Step 5: Request a fresh read-only independent review**
 
 Provide the reviewer the remediation spec, this plan, the complete Phase 2 diff and exact test evidence. Require findings classified Critical/Important/Minor and explicitly inspect: production executor, 24→3 shortlist, OOS crash/replay/concurrency, projection replay, registry activation, read identity, ETag/modal, Broker/live boundary.
 
 Every reproduced Critical or Important finding gets a red regression test and fix before repeating Steps 2–5. Do not mark completion based only on test counts or the existence of a review task.
 
-- [ ] **Step 6: Update acceptance artifacts and commit**
+- [x] **Step 6: Update acceptance artifacts and commit**
 
 Mark plan checkboxes from actual evidence only. Update the review record with exact commands, counts, commit hash, residual Minor findings and the independent review result.
 
@@ -748,6 +748,17 @@ git add docs/superpowers/plans/2026-08-27-nexus-phase-2-independent-review-remed
 git commit -m "docs: record phase 2 remediation acceptance"
 ```
 
-- [ ] **Step 7: Clean only task-created temporary resources**
+- [x] **Step 7: Clean only task-created temporary resources**
 
 Stop the exact temporary Compose project with its explicit project name and remove only its task-created volumes. Confirm the worktree is clean. Do not merge, push, deploy or delete the worktree as part of this task.
+
+## Final acceptance record — 2026-08-28
+
+- Code review range: `07b246e..02fab6f` (13 remediation commits before this acceptance-doc commit).
+- Fresh read-only Bugbot review: 0 Critical, 4 Important, 1 Minor. All five findings were reproduced or statically confirmed and fixed in `02fab6f`; no Broker/live or ETag permission-bypass finding was reported.
+- Post-review Engine verification: PostgreSQL integration `771 passed in 1988.19s`; non-integration `895 passed in 45.24s`; Ruff passed; Mypy passed for 263 source files.
+- Post-review Web verification: generated client check passed; 41 Vitest files / 453 tests passed; typecheck, lint and build passed; Playwright `79 passed (1.9m)`.
+- Migration acceptance remained green at single head `0023_evolution_authority`: 9 focused round-trip/refusal tests passed, including `0022 -> 0023 -> 0022 -> 0023` and fail-closed non-empty downgrade with SQLSTATE `23514`.
+- Safety facts: API/private-key header matches 0; forbidden evolution capability imports 0; Phase 2 hosting changes 0; orphan `nexus_test_%` databases 0; `git diff --check` clean. Focused safety tests proved paper-order and broker-snapshot deltas remained zero and registry/candidate replay remained valid.
+- Cleanup: exact Compose project `nexus-phase2-completion-audit` removed 2 task containers, 1 task network and 2 task-created anonymous volumes; post-cleanup counts are zero.
+- No merge, push, deployment, live-account access, Broker write, real order, secret change or Git-history rewrite was performed.

@@ -11,7 +11,45 @@
 
 **审查方式：** 单一执行者分离代码、安全和验收阶段自审；本轮未使用独立子 Agent。
 
-## 结论
+## 2026-08-28 独立审查整改验收
+
+**整改基线：** `07b246e`
+
+**验收代码范围：** `07b246e..02fab6f`（13 个提交；不含本验收文档提交）
+
+**最终结论：** 整改代码在本地隔离环境内验收通过。当前无未解决 Critical 或 Important；新鲜只读 Bugbot 审查报告的 4 个 Important 和 1 个 Minor 均已通过红测试或静态反例确认，并在 `02fab6f` 修复。该结论不包含部署、外部 Agent/provider 激活、真实账户访问、Broker 写入或真实订单批准。
+
+### 新鲜只读审查与处理
+
+| 级别 | 审查发现 | 修复与回归证据 |
+|---|---|---|
+| Important（已修复） | 实验详情虽然展示候选状态，但 comparison/Shadow/gates 要求和 `write_enabled` 仍取 family aggregate，导致合法的 `OOS_RESERVED` 候选被错误标记为 partial。 | `read_service.py` 现在显式校验并使用候选投影状态；回归要求 `OOS_RESERVED` 候选在 family `BACKTEST_RUNNING` 时仍为 `verified/write_enabled=true`。 |
+| Important（已修复） | Shadow 首次永久数据缺口后，调度器持续创建 sealed advance，冻结的 5-session grace 到期也不会安排 finalize。 | 调度器识别永久失败事实；宽限期内不重复 advance，到冻结 grace 决策时间后只创建 `finalize_promotion`。PostgreSQL 回归覆盖等待与到期转换。 |
+| Important（已修复） | Responses 运行时允许 120 秒，但 Job worker 的硬上限为 45 秒，45–120 秒的合法请求必然被外层取消并重试失败。 | Responses 绝对截止改为 30 秒，保留权威加载、持久化和 terminalization 余量；单元测试强制内部截止严格小于 Job 上限。 |
+| Important（已修复） | 同一家族某候选先进入 `SHADOW_RUNNING` 后，family aggregate 会抑制仍为 `OOS_SELECTED/OOS_RESERVED` 的兄弟候选恢复调度。 | due-candidate 查询只按候选投影、家族准入和 champion generation 选择；handler 仍在执行前重放完整 family/candidate authority。回归覆盖 family aggregate 已前进但候选仍需恢复的场景。 |
+| Minor（已修复） | `candidate_status_counts` 用 family aggregate × candidate_count，24→3 后会把家族状态冒充全部候选状态。 | 遥测直接按 `StrategyExperimentCandidateProjectionRecord.current_state` 分组计数，并将允许标签收紧到真实 CandidateState 集合。 |
+
+审查者同时明确排除了 ETag 权限绕过、modal 键盘路径、Broker/live 边界、registry activation/head replay 和 24→3 排序本身的可报告缺陷。Bugbot 按只读审查工作流只运行一次；上述修复后的结论来自确定性回归、全量验证和执行者复核，不把它描述为“审查者零发现”。
+
+### 整改后精确验证
+
+- Engine PostgreSQL 全量集成：`771 passed in 1988.19s`。
+- Engine 非集成全量（使用 `--import-mode=importlib`）：`895 passed in 45.24s`。
+- 受影响的读模型、调度器、生产 executor 与 Shadow finalization PostgreSQL 回归：`23 passed in 94.27s`；新增 4 个关键场景单独复验通过。
+- Ruff 全 `engine` 通过；Mypy `engine/src` 的 263 个源文件通过。
+- 生成客户端校验通过；Vitest 41 个文件、453 项通过；TypeScript typecheck、ESLint 和生产构建通过。
+- Playwright：`79 passed (1.9m)`，包含 Strategy Evolution 的窄屏、键盘、partial/stale、409、未知结果同幂等键重放、forbidden 清空和 Axe 闸门。
+- 迁移单一 head 为 `0023_evolution_authority`；9 个聚焦迁移用例通过，覆盖 `0022 -> 0023 -> 0022 -> 0023` 以及存在新事实时以 SQLSTATE `23514` 拒绝降级。
+- 安全事实：API/private-key header 扫描 0，受限进化模块 Broker/Fosun/account/order-create/live-write import 0，Phase 2 `.openai/hosting.json` 改动 0，`nexus_test_%` 残留库 0，`git diff --check` 通过。
+- 任务专用 Compose 项目 `nexus-phase2-completion-audit` 已清理：2 个容器、1 个网络和 2 个匿名卷均不存在；未触碰其他 Docker 项目。
+
+### 保留的非阻断 Minor / 后续闸门
+
+- 生产 executor、24→3、OOS、Shadow、handover、promotion 和 rollback 已分别由真实服务与 PostgreSQL 场景覆盖，但仍没有一条使用真实 executor 从 24 个候选贯穿到 rollback 的单体超长测试。当前采用分层闭环证据以降低测试脆弱性；若后续调整跨阶段编排，应新增一条夜间端到端验收。
+- 部署安全响应头仍只能在目标边缘验证；CSP/HSTS/frame/referrer/permissions 组合保持首次部署前的硬闸门。本轮没有部署或修改 `.openai/hosting.json`。
+- 修复后没有第二次独立 Bugbot 运行；合并前若需要额外组织级保证，可由另一审查者复核 `02fab6f`。这不替代本轮已经通过的全量确定性验收。
+
+## 2026-08-27 原始 Phase 2A 结论（历史记录）
 
 Phase 2A 在本地、离线/测试边界内验收通过，无未解决 Critical 或 Important 发现。它已形成“固定研究 Agent 提案 → 确定性候选生成 → 时点正确回测 → 独立 Strategy Shadow → 确定性闸门/交接 → 内部模拟盘冠军注册表”闭环。
 
