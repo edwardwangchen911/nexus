@@ -167,6 +167,16 @@ class StrategyGenerationEligibilityV1(BaseModel):
     cooldown_until: datetime | None = None
 
 
+class StrategyGenerationFamilyContextV1(BaseModel):
+    """Already verified family aggregates reused by read-only callers."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    research_lineage_id: UUID
+    active_family_count: int = Field(ge=0)
+    latest_family_at: datetime | None = None
+
+
 def strategy_rnd_payload_hash(
     *,
     operation: StrategyRNDOperation,
@@ -461,6 +471,7 @@ async def strategy_generation_eligibility(
     now: datetime,
     check_existing_job: bool = True,
     known_head: StrategyRegistryHeadRecord | None = None,
+    known_family_context: StrategyGenerationFamilyContextV1 | None = None,
 ) -> StrategyGenerationEligibilityV1:
     """Explain why one server-chosen family generation can or cannot be queued."""
     now = _utc(now)
@@ -499,18 +510,28 @@ async def strategy_generation_eligibility(
             registry_version=head.version,
         )
     lineage = active_lineages[0]
-    active_family_count = int(
-        await session.scalar(
-            select(func.count())
-            .select_from(StrategyExperimentStateProjectionRecord)
-            .where(
-                StrategyExperimentStateProjectionRecord.research_lineage_id == lineage.id,
-                StrategyExperimentStateProjectionRecord.current_state.not_in(
-                    _TERMINAL_FAMILY_STATES
-                ),
+    reusable_family_context = (
+        known_family_context
+        if known_family_context is not None
+        and known_family_context.research_lineage_id == lineage.id
+        else None
+    )
+    active_family_count = (
+        reusable_family_context.active_family_count
+        if reusable_family_context is not None
+        else int(
+            await session.scalar(
+                select(func.count())
+                .select_from(StrategyExperimentStateProjectionRecord)
+                .where(
+                    StrategyExperimentStateProjectionRecord.research_lineage_id == lineage.id,
+                    StrategyExperimentStateProjectionRecord.current_state.not_in(
+                        _TERMINAL_FAMILY_STATES
+                    ),
+                )
             )
+            or 0
         )
-        or 0
     )
     if active_family_count:
         return StrategyGenerationEligibilityV1(
@@ -541,9 +562,13 @@ async def strategy_generation_eligibility(
             champion_generation=head.active_generation,
             registry_version=head.version,
         )
-    latest_family_at = await session.scalar(
-        select(func.max(StrategyExperimentFamilyRecord.created_at)).where(
-            StrategyExperimentFamilyRecord.research_lineage_id == lineage.id
+    latest_family_at = (
+        reusable_family_context.latest_family_at
+        if reusable_family_context is not None
+        else await session.scalar(
+            select(func.max(StrategyExperimentFamilyRecord.created_at)).where(
+                StrategyExperimentFamilyRecord.research_lineage_id == lineage.id
+            )
         )
     )
     cooldown_until = None if latest_family_at is None else _calendar_quarter_after(latest_family_at)

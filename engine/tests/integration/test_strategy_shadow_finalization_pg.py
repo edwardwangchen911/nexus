@@ -8,6 +8,10 @@ from helpers.evolution_shadow import (
     seed_strategy_shadow_ready,
 )
 from nexus.domain.ids import new_uuid7
+from nexus.evolution.registry import (
+    registry_activation_content_hash,
+    registry_event_content_hash,
+)
 from nexus.evolution.shadow.service import (
     StrategyShadowServiceError,
     finalize_strategy_shadow,
@@ -16,6 +20,7 @@ from nexus.evolution.shadow.service import (
 from nexus.persistence.models.evolution import (
     StrategyExperimentStateProjectionRecord,
     StrategyPromotionDecisionRecord,
+    StrategyRegistryActivationRecord,
     StrategyRegistryEventRecord,
     StrategyRegistryHeadRecord,
     StrategyShadowFinalizationRecord,
@@ -136,6 +141,8 @@ async def test_generation_change_finalizes_stale_without_shadow_promotion_decisi
         assert head is not None
         prior = await session.get(StrategyRegistryEventRecord, head.last_event_id)
         assert prior is not None
+        effective_session = seed.calendar_sessions[0]
+        payload = {"schema_version": "strategy_shadow_stale_fixture_v1"}
         event = StrategyRegistryEventRecord(
             id=new_uuid7(),
             channel="internal_paper",
@@ -149,18 +156,60 @@ async def test_generation_change_finalizes_stale_without_shadow_promotion_decisi
             to_definition_id=seed.pair.challenger_definition_id,
             promotion_decision_id=None,
             champion_generation=head.active_generation + 1,
-            effective_session=None,
-            payload={"schema_version": "strategy_shadow_stale_fixture_v1"},
+            effective_session=effective_session,
+            payload=payload,
             previous_hash=prior.event_hash,
-            event_hash="f" * 64,
+            event_hash=registry_event_content_hash(
+                sequence=head.event_sequence + 1,
+                event_type="PROMOTE",
+                idempotency_key="strategy-shadow-stale-fixture",
+                actor_kind="service",
+                occurred_at=seed.now,
+                from_definition_id=seed.pair.champion_definition_id,
+                to_definition_id=seed.pair.challenger_definition_id,
+                promotion_decision_id=None,
+                champion_generation=head.active_generation + 1,
+                effective_session=effective_session,
+                payload=payload,
+                previous_hash=prior.event_hash,
+            ),
             created_at=seed.now,
         )
         session.add(event)
         await session.flush()
-        head.active_definition_id = seed.pair.challenger_definition_id
-        head.active_generation += 1
         head.last_event_id = event.id
         head.event_sequence += 1
+        head.pending_event_id = event.id
+        head.pending_effective_session = effective_session
+        head.version += 1
+        head.updated_at = seed.now
+    async with factory() as session, session.begin():
+        head = await session.get(StrategyRegistryHeadRecord, "internal_paper")
+        assert head is not None
+        session.add(
+            StrategyRegistryActivationRecord(
+                id=new_uuid7(),
+                registry_event_id=event.id,
+                decision_session=effective_session,
+                activated_at=seed.now,
+                from_definition_id=seed.pair.champion_definition_id,
+                to_definition_id=seed.pair.challenger_definition_id,
+                champion_generation=event.champion_generation,
+                activation_hash=registry_activation_content_hash(
+                    registry_event_id=event.id,
+                    decision_session=effective_session,
+                    activated_at=seed.now,
+                    from_definition_id=seed.pair.champion_definition_id,
+                    to_definition_id=seed.pair.challenger_definition_id,
+                    champion_generation=event.champion_generation,
+                ),
+                created_at=seed.now,
+            )
+        )
+        head.active_definition_id = seed.pair.challenger_definition_id
+        head.active_generation += 1
+        head.pending_event_id = None
+        head.pending_effective_session = None
         head.version += 1
         head.updated_at = seed.now
     async with factory() as session, session.begin():

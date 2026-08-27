@@ -23,6 +23,7 @@ from nexus.optimizer.cost_policy import COST_POLICY_ID
 from nexus.persistence.models.evolution import (
     StrategyChampionComparisonRecord,
     StrategyRegistryHeadRecord,
+    StrategyShadowFinalizationRecord,
 )
 from nexus.persistence.models.paper import RiskPolicyRecord
 from nexus.quality.source_policy import SOURCE_POLICY_ID
@@ -85,7 +86,17 @@ async def seed_promotable_registry(
             select(RiskPolicyRecord).where(RiskPolicyRecord.active.is_(True))
         )
         head = await session.get(StrategyRegistryHeadRecord, "internal_paper")
-        assert comparison is not None and risk_record is not None and head is not None
+        finalization = await session.scalar(
+            select(StrategyShadowFinalizationRecord).where(
+                StrategyShadowFinalizationRecord.group_id == started.group_id
+            )
+        )
+        assert (
+            comparison is not None
+            and risk_record is not None
+            and head is not None
+            and finalization is not None
+        )
         baseline = await load_balanced_paper_baseline(session, now=finalized_at)
         state = baseline.normalized_state
         snapshot_instruments = tuple(
@@ -136,7 +147,7 @@ async def seed_promotable_registry(
                 available_at=finalized_at,
                 estimated_cost_rate=Decimal(0),
                 complete=True,
-                authority_hash="a" * 64,
+                authority_hash=finalization.final_authority_hash,
             ),
             RiskPolicy.v1(),
         )

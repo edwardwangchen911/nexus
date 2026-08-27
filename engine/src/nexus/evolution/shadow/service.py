@@ -14,7 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
-from nexus.evolution.evaluation import _comparison_model, _promotion_decision_model
+from nexus.evolution.evaluation import (
+    validate_champion_comparison_record,
+    validate_promotion_decision_record,
+)
 from nexus.evolution.policies import load_promotion_policy_v1
 from nexus.evolution.repository import (
     FamilyAggregateState,
@@ -192,8 +195,13 @@ async def start_strategy_shadow(
         raise StrategyShadowServiceError("HISTORICAL_DECISION_INCOMPLETE")
     try:
         policy = load_promotion_policy_v1(policy_record.document, policy_record.content_hash)
-        report = _comparison_model(comparison)
-        persisted_decision = _promotion_decision_model(decision, report, policy)
+        report = validate_champion_comparison_record(comparison)
+        persisted_decision = validate_promotion_decision_record(
+            decision,
+            report,
+            policy,
+            expected_promotion_policy_id=decision.promotion_policy_id,
+        )
     except ValueError as error:
         raise StrategyShadowServiceError("HISTORICAL_DECISION_INCOMPLETE") from error
     if persisted_decision.status != "PASS":
@@ -976,17 +984,11 @@ async def _replay_finalization(
     finalization: StrategyShadowFinalizationRecord,
     family_state: FamilyAggregateState,
 ) -> StrategyShadowFinalizationResultV1:
-    try:
-        gate = StrategyShadowFinalGateV1.model_validate(finalization.gate_report)
-    except ValueError as error:
-        raise StrategyShadowServiceError("STRATEGY_SHADOW_FINALIZATION_INVALID") from error
-    if (
-        gate.status != finalization.status
-        or gate.reason_code != finalization.reason_code
-        or gate.final_authority_hash != finalization.final_authority_hash
-        or gate.finalization_hash != finalization.finalization_hash
-    ):
-        raise StrategyShadowServiceError("STRATEGY_SHADOW_FINALIZATION_INVALID")
+    gate = await validate_shadow_finalization_record(
+        session,
+        group=group,
+        finalization=finalization,
+    )
     return StrategyShadowFinalizationResultV1(
         group_id=group.id,
         finalization_id=finalization.id,
@@ -994,6 +996,107 @@ async def _replay_finalization(
         family_state=family_state,
         reason_code=gate.reason_code,
     )
+
+
+async def validate_shadow_finalization_record(
+    session: AsyncSession,
+    *,
+    group: StrategyShadowGroupRecord,
+    finalization: StrategyShadowFinalizationRecord,
+) -> StrategyShadowFinalGateV1:
+    """Rebuild and verify one immutable Shadow finalization and its evidence chain."""
+    try:
+        gate = StrategyShadowFinalGateV1.model_validate(finalization.gate_report)
+    except ValueError as error:
+        raise StrategyShadowServiceError("STRATEGY_SHADOW_FINALIZATION_INVALID") from error
+    historical_decision = await session.get(
+        StrategyPromotionDecisionRecord, group.historical_promotion_decision_id
+    )
+    legs = tuple(
+        await session.scalars(
+            select(StrategyShadowLegRecord)
+            .where(StrategyShadowLegRecord.group_id == group.id)
+            .order_by(StrategyShadowLegRecord.role)
+        )
+    )
+    checkpoint = await session.scalar(
+        select(StrategyShadowCheckpointRecord).where(
+            StrategyShadowCheckpointRecord.group_id == group.id,
+            StrategyShadowCheckpointRecord.checkpoint_ordinal == EVALUATION_SESSION_COUNT,
+        )
+    )
+    if (
+        historical_decision is None
+        or historical_decision.stage != "historical"
+        or len(legs) != 2
+        or {item.role for item in legs} != {"champion", "challenger"}
+    ):
+        raise StrategyShadowServiceError("STRATEGY_SHADOW_FINALIZATION_INVALID")
+    metrics = await _load_final_metrics(session, legs=legs, checkpoint=checkpoint)
+    evidence_ids, evidence_hashes = await _load_final_evidence_chain(
+        session,
+        group=group,
+        legs=legs,
+        historical_decision=historical_decision,
+    )
+    champion = metrics[next(item.id for item in legs if item.role == "champion")]
+    challenger = metrics[next(item.id for item in legs if item.role == "challenger")]
+    expected = evaluate_strategy_shadow_final_gate(
+        champion=champion,
+        challenger=challenger,
+        champion_generation=group.champion_generation,
+        active_generation=gate.active_generation,
+        evidence_ids=evidence_ids,
+        evidence_hashes=evidence_hashes,
+    )
+    if (
+        finalization.group_id != group.id
+        or finalization.promotion_policy_id != historical_decision.promotion_policy_id
+        or gate.champion_generation != group.champion_generation
+        or gate != expected
+        or gate.status != finalization.status
+        or gate.reason_code != finalization.reason_code
+        or gate.final_authority_hash != finalization.final_authority_hash
+        or gate.finalization_hash != finalization.finalization_hash
+    ):
+        raise StrategyShadowServiceError("STRATEGY_SHADOW_FINALIZATION_INVALID")
+    return gate
+
+
+def validate_shadow_promotion_decision_record(
+    record: StrategyPromotionDecisionRecord,
+    *,
+    comparison_id: UUID,
+    historical_decision: StrategyPromotionDecisionRecord,
+    finalization: StrategyShadowFinalizationRecord,
+    gate: StrategyShadowFinalGateV1,
+) -> StrategyShadowFinalGateV1:
+    """Verify the Shadow decision binds the exact finalization and historical policy."""
+    expected_hash = content_hash(
+        {
+            "schema_version": "strategy_shadow_promotion_decision_v1",
+            "comparison_id": str(comparison_id),
+            "promotion_policy_id": str(historical_decision.promotion_policy_id),
+            "finalization_id": str(finalization.id),
+            "finalization_hash": finalization.finalization_hash,
+            "status": gate.status,
+        }
+    )
+    try:
+        persisted = StrategyShadowFinalGateV1.model_validate(record.gate_report)
+    except ValueError as error:
+        raise StrategyShadowServiceError("STRATEGY_SHADOW_DECISION_INVALID") from error
+    if (
+        record.stage != "shadow"
+        or record.comparison_id != comparison_id
+        or record.promotion_policy_id != historical_decision.promotion_policy_id
+        or record.status != gate.status
+        or record.reason_code != gate.reason_code
+        or record.decision_hash != expected_hash
+        or persisted != gate
+    ):
+        raise StrategyShadowServiceError("STRATEGY_SHADOW_DECISION_INVALID")
+    return persisted
 
 
 async def _append_finalization_audit_and_outbox(

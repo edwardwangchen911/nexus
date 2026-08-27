@@ -12,10 +12,10 @@ from nexus.evolution.evaluation import (
     ChampionComparisonRunV1,
     EvolutionEvaluationError,
     ValidationCandidateResultV1,
-    _comparison_model,
-    _promotion_decision_model,
     evaluate_historical_promotion,
     select_oos_candidates,
+    validate_champion_comparison_record,
+    validate_promotion_decision_record,
 )
 from nexus.evolution.policies import candidate_budget_policy_v1, promotion_policy_v1
 from nexus.persistence.models.evolution import (
@@ -213,14 +213,14 @@ def test_missing_authority_benchmark_or_trial_count_is_unknown_and_fail_closed()
 def test_comparison_loader_recomputes_hash_before_trusting_metrics() -> None:
     report = _comparison()
     record = _comparison_record(report)
-    assert _comparison_model(record) == report
+    assert validate_champion_comparison_record(record) == report
     record.metric_report = {
         **record.metric_report,
         "challenger_sharpe": "9.0000000000",
     }
 
     with pytest.raises(EvolutionEvaluationError, match="COMPARISON_HASH_MISMATCH"):
-        _comparison_model(record)
+        validate_champion_comparison_record(record)
 
 
 def test_decision_loader_recomputes_policy_bound_result_before_replay() -> None:
@@ -237,8 +237,21 @@ def test_decision_loader_recomputes_policy_bound_result_before_replay() -> None:
         reason_code=decision.reason_code,
         decision_hash=decision.decision_hash,
     )
-    assert _promotion_decision_model(record, comparison, policy) == decision
+    assert (
+        validate_promotion_decision_record(
+            record,
+            comparison,
+            policy,
+            expected_promotion_policy_id=record.promotion_policy_id,
+        )
+        == decision
+    )
     record.reason_code = "TAMPERED_DECISION"
 
     with pytest.raises(EvolutionEvaluationError, match="DECISION_AUTHORITY_INCOMPLETE"):
-        _promotion_decision_model(record, comparison, policy)
+        validate_promotion_decision_record(
+            record,
+            comparison,
+            policy,
+            expected_promotion_policy_id=record.promotion_policy_id,
+        )

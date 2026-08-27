@@ -1083,7 +1083,7 @@ async def persist_champion_comparison(
             != authority.lineage_projection.cumulative_oos_trial_count
         ):
             raise EvolutionEvaluationError("COMPARISON_IDEMPOTENCY_CONFLICT")
-        _comparison_model(existing)
+        validate_champion_comparison_record(existing)
         evidence = await session.scalar(
             select(StrategyOOSEvidenceLinkRecord).where(
                 StrategyOOSEvidenceLinkRecord.comparison_id == existing.id
@@ -1306,7 +1306,7 @@ async def persist_historical_promotion_decision(
     if experiment is None or family is None or authority is None or head is None:
         raise EvolutionEvaluationError("COMPARISON_AUTHORITY_INCOMPLETE")
     candidate_projection = authority.candidate_projection(experiment.id)
-    report = _comparison_model(comparison)
+    report = validate_champion_comparison_record(comparison)
     existing = await session.scalar(
         select(StrategyPromotionDecisionRecord).where(
             StrategyPromotionDecisionRecord.comparison_id == comparison.id,
@@ -1317,7 +1317,12 @@ async def persist_historical_promotion_decision(
         if existing.promotion_policy_id != promotion_policy_id:
             raise EvolutionEvaluationError("PROMOTION_DECISION_IDEMPOTENCY_CONFLICT")
         policy = await _load_promotion_policy(session, promotion_policy_id)
-        persisted = _promotion_decision_model(existing, report, policy)
+        persisted = validate_promotion_decision_record(
+            existing,
+            report,
+            policy,
+            expected_promotion_policy_id=promotion_policy_id,
+        )
         return HistoricalPromotionOutcomeV1(
             comparison_id=comparison.id,
             decision_id=existing.id,
@@ -1584,9 +1589,10 @@ def _paired_metric_report(
     return report
 
 
-def _comparison_model(
+def validate_champion_comparison_record(
     record: StrategyChampionComparisonRecord,
 ) -> ChampionComparisonRunV1:
+    """Verify every persisted comparison identity and its canonical content hash."""
     try:
         report = ChampionComparisonRunV1.model_validate(record.metric_report)
     except ValueError as error:
@@ -1612,11 +1618,14 @@ def _comparison_model(
     return report
 
 
-def _promotion_decision_model(
+def validate_promotion_decision_record(
     record: StrategyPromotionDecisionRecord,
     comparison: ChampionComparisonRunV1,
     policy: PromotionPolicyV1,
+    *,
+    expected_promotion_policy_id: UUID,
 ) -> PromotionDecisionV1:
+    """Verify one historical decision against its comparison and exact policy row."""
     try:
         persisted = PromotionDecisionV1.model_validate(record.gate_report)
     except ValueError as error:
@@ -1625,6 +1634,7 @@ def _promotion_decision_model(
     if (
         record.stage != "historical"
         or record.comparison_id != comparison.comparison_id
+        or record.promotion_policy_id != expected_promotion_policy_id
         or record.status != persisted.status
         or record.reason_code != persisted.reason_code
         or record.decision_hash != persisted.decision_hash

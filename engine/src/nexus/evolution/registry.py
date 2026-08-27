@@ -233,6 +233,42 @@ async def persist_handover_promotion_decision(
     return record
 
 
+def validate_handover_decision_record(
+    record: StrategyPromotionDecisionRecord,
+    *,
+    comparison_id: UUID,
+    promotion_policy_id: UUID,
+    finalization: StrategyShadowFinalizationRecord,
+    expected_definition_id: UUID,
+) -> HandoverEvaluationV1:
+    """Verify a handover decision against its policy, Shadow seal, and risk policy."""
+    try:
+        evaluation = HandoverEvaluationV1.model_validate(record.gate_report)
+        expected = evaluate_handover(
+            evaluation.snapshot,
+            evaluation.challenger,
+            evaluation.authority,
+            RiskPolicy.v1(),
+        )
+    except ValueError as error:
+        raise RegistryServiceError("HANDOVER_DECISION_INVALID") from error
+    if (
+        record.stage != "handover"
+        or record.comparison_id != comparison_id
+        or record.promotion_policy_id != promotion_policy_id
+        or finalization.status != "PASS"
+        or finalization.promotion_policy_id != promotion_policy_id
+        or evaluation.strategy_definition_id != expected_definition_id
+        or evaluation.authority.authority_hash != finalization.final_authority_hash
+        or evaluation.status != record.status
+        or evaluation.reason_code != record.reason_code
+        or evaluation.evaluation_hash != record.decision_hash
+        or evaluation != expected
+    ):
+        raise RegistryServiceError("HANDOVER_DECISION_INVALID")
+    return evaluation
+
+
 def _published_cost_rate(parameters: dict[str, object]) -> Decimal | None:
     commission = parameters.get("commission_bps")
     slippage = parameters.get("slippage_bps")
@@ -775,6 +811,7 @@ async def _load_promotion_evidence(
     )
     shadow = next((item for item in decisions if item.stage == "shadow"), None)
     handover = next((item for item in decisions if item.stage == "handover"), None)
+    historical = next((item for item in decisions if item.stage == "historical"), None)
     group = await session.scalar(
         select(StrategyShadowGroupRecord).where(
             StrategyShadowGroupRecord.experiment_id == experiment.id
@@ -790,23 +827,21 @@ async def _load_promotion_evidence(
         )
     )
     if (
-        shadow is None
+        historical is None
+        or shadow is None
         or shadow.status != "PASS"
         or handover is None
         or finalization is None
         or finalization.status != "PASS"
     ):
         return None
-    try:
-        evaluation = HandoverEvaluationV1.model_validate(handover.gate_report)
-    except ValueError as error:
-        raise RegistryServiceError("HANDOVER_DECISION_INVALID") from error
-    if (
-        evaluation.strategy_definition_id != expected_definition_id
-        or evaluation.status != handover.status
-        or evaluation.evaluation_hash != handover.decision_hash
-    ):
-        raise RegistryServiceError("HANDOVER_DECISION_INVALID")
+    evaluation = validate_handover_decision_record(
+        handover,
+        comparison_id=comparison.id,
+        promotion_policy_id=historical.promotion_policy_id,
+        finalization=finalization,
+        expected_definition_id=expected_definition_id,
+    )
     return _PromotionEvidence(
         record_id=handover.id,
         status=evaluation.status,

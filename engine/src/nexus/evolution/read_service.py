@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from calendar import monthrange
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal, cast
@@ -29,30 +30,54 @@ from nexus.api.schemas.evolution import (
     ShadowProgressResponse,
     StrategyEvolutionData,
 )
-from nexus.evolution.evaluation import ChampionComparisonRunV1, PromotionDecisionV1
-from nexus.evolution.handover import HandoverEvaluationV1
-from nexus.evolution.jobs import strategy_generation_eligibility
+from nexus.evolution.evaluation import (
+    EvolutionEvaluationError,
+    validate_champion_comparison_record,
+    validate_promotion_decision_record,
+)
+from nexus.evolution.jobs import (
+    StrategyGenerationFamilyContextV1,
+    strategy_generation_eligibility,
+)
 from nexus.evolution.models import StrategyExperimentProposalV1
-from nexus.evolution.registry import registry_chain_is_valid
+from nexus.evolution.policies import load_promotion_policy_v1
+from nexus.evolution.registry import (
+    RegistryServiceError,
+    registry_chain_is_valid,
+    validate_handover_decision_record,
+)
 from nexus.evolution.repository import (
-    experiment_chain_is_valid,
-    experiment_projection_is_valid,
+    VerifiedExperimentAuthority,
+    load_verified_experiment_authority,
+    verified_experiment_authority_is_valid,
 )
 from nexus.evolution.shadow.models import (
-    StrategyShadowFinalGateV1,
+    EVALUATION_SESSION_COUNT,
+    GRACE_SESSION_COUNT,
     StrategyShadowLegMetricsV1,
 )
-from nexus.persistence.models.backtest import StrategyDefinitionRecord
+from nexus.evolution.shadow.service import (
+    StrategyShadowServiceError,
+    validate_shadow_finalization_record,
+    validate_shadow_promotion_decision_record,
+)
+from nexus.persistence.models.backtest import (
+    ExchangeCalendarSessionRecord,
+    StrategyDefinitionRecord,
+)
 from nexus.persistence.models.evolution import (
     StrategyChampionComparisonRecord,
+    StrategyExperimentCandidateProjectionRecord,
     StrategyExperimentEventRecord,
     StrategyExperimentFamilyRecord,
     StrategyExperimentRecord,
     StrategyExperimentStateProjectionRecord,
     StrategyPromotionDecisionRecord,
+    StrategyPromotionPolicyRecord,
     StrategyRegistryActivationRecord,
     StrategyRegistryEventRecord,
     StrategyRegistryHeadRecord,
+    StrategyResearchLineageProjectionRecord,
     StrategyRNDOutputRecord,
     StrategyShadowCheckpointMetricRecord,
     StrategyShadowCheckpointRecord,
@@ -72,6 +97,17 @@ _TERMINAL_STATES = (
     "STALE_CHAMPION_BASELINE",
 )
 _REGISTRY_HISTORY_LIMIT = 20
+
+
+@dataclass(frozen=True)
+class _FamilyAuthorityBatch:
+    valid: bool
+    active_row: tuple[
+        StrategyExperimentFamilyRecord,
+        StrategyExperimentStateProjectionRecord,
+    ] | None
+    latest_family_at: datetime | None
+    generation_context: StrategyGenerationFamilyContextV1 | None
 
 
 class EvolutionReadError(ValueError):
@@ -95,11 +131,16 @@ class EvolutionReadService:
         self._cursor = EvolutionCursorCodec(cursor_secrets, self._now)
 
     async def overview(self, *, limit: int, cursor: str | None) -> StrategyEvolutionData:
-        head, champion, registry_events, registry_valid = await self._registry_authority()
-        family_projections_valid = await self._all_family_projections_valid()
+        head, champion, registry_events, registry_definitions, registry_valid = (
+            await self._registry_authority()
+        )
+        family_batch = await self._family_authority_batch()
+        family_projections_valid = family_batch.valid
         generation = await strategy_generation_eligibility(
             self._session,
             now=self._now,
+            known_head=head,
+            known_family_context=family_batch.generation_context,
         )
         cursor_state = None
         if cursor is not None:
@@ -162,42 +203,22 @@ class EvolutionReadService:
                 )
             )
 
-        active_row = (
-            (
-                await self._session.execute(
-                    select(StrategyExperimentFamilyRecord, StrategyExperimentStateProjectionRecord)
-                    .join(
-                        StrategyExperimentStateProjectionRecord,
-                        StrategyExperimentStateProjectionRecord.family_id
-                        == StrategyExperimentFamilyRecord.id,
-                    )
-                    .where(
-                        StrategyExperimentStateProjectionRecord.current_state.not_in(
-                            _TERMINAL_STATES
-                        )
-                    )
-                    .order_by(
-                        StrategyExperimentFamilyRecord.created_at.desc(),
-                        StrategyExperimentFamilyRecord.id.desc(),
-                    )
-                    .limit(1)
-                )
-            )
-            .tuples()
-            .first()
-        )
+        active_row = family_batch.active_row
         active_family = (
             None
             if active_row is None
             else await self._family_response(active_row[0], active_row[1])
         )
-        latest_family_at = await self._session.scalar(
-            select(func.max(StrategyExperimentFamilyRecord.created_at))
-        )
         cooldown_until = (
-            None if latest_family_at is None else _calendar_quarter_after(latest_family_at)
+            None
+            if family_batch.latest_family_at is None
+            else _calendar_quarter_after(family_batch.latest_family_at)
         )
-        safe_history = await self._registry_history(head, registry_events)
+        safe_history = self._registry_history(
+            head,
+            registry_events,
+            registry_definitions,
+        )
         status: EvolutionViewStatus = (
             "stale"
             if not registry_valid
@@ -231,12 +252,12 @@ class EvolutionReadService:
             active_family=active_family,
             cooldown_until=cooldown_until,
             experiments=experiments,
-            registry_events=safe_history[-_REGISTRY_HISTORY_LIMIT:],
+            registry_events=safe_history,
             next_cursor=next_cursor,
         )
 
     async def detail(self, experiment_id: UUID) -> ExperimentDetailResponse:
-        head, _, _, registry_valid = await self._registry_authority()
+        head, _, _, _, registry_valid = await self._registry_authority()
         row = (
             (
                 await self._session.execute(
@@ -276,18 +297,30 @@ class EvolutionReadService:
                 .order_by(StrategyExperimentEventRecord.sequence)
             )
         )
-        family_valid = experiment_chain_is_valid(family.id, events, projection)
+        try:
+            family_authority = await load_verified_experiment_authority(
+                self._session, family.id
+            )
+        except ValueError:
+            family_authority = None
+        family_valid = (
+            family_authority is not None
+            and family_authority.family_projection.current_state == projection.current_state
+            and family_authority.family_projection.version == projection.version
+            and any(item.id == experiment.id for item in family_authority.experiments)
+        )
         comparison, comparison_valid = await self._comparison(experiment.id)
-        shadow, shadow_valid = await self._shadow(experiment.id)
+        shadow, shadow_valid = await self._shadow(experiment.id, events=events)
         gates, gates_valid = await self._gates(experiment.id)
         if projection.current_state not in {"PROPOSED", "ADMITTED"}:
             comparison_valid = comparison_valid and comparison.status != "unavailable"
-        if projection.current_state in {
+        shadow_authority_required = projection.current_state in {
             "SHADOW_RUNNING",
             "SHADOW_FAILED",
             "PROMOTION_ELIGIBLE",
             "PROMOTED",
-        }:
+        }
+        if shadow_authority_required:
             shadow_valid = shadow_valid and shadow.status != "not_started"
         if projection.current_state in {
             "BACKTEST_PASSED",
@@ -297,6 +330,9 @@ class EvolutionReadService:
             "PROMOTED",
         }:
             gates_valid = gates_valid and bool(gates)
+        if not comparison_valid or (shadow_authority_required and not shadow_valid):
+            gates = ()
+            gates_valid = False
         integrity_valid = registry_valid and family_valid and comparison_valid and shadow_valid
         evidence_valid = comparison_valid and shadow_valid and gates_valid
         integrity_status: Literal["verified", "partial", "stale"] = (
@@ -343,30 +379,128 @@ class EvolutionReadService:
         )
 
     async def require_registry_integrity(self) -> StrategyRegistryHeadRecord:
-        head, _, _, valid = await self._registry_authority(lock=True)
+        head, _, _, _, valid = await self._registry_authority(lock=True)
         if not valid or not await self._all_family_projections_valid():
             raise EvolutionReadError("REGISTRY_AUTHORITY_INVALID")
         return head
 
     async def require_registry_chain_integrity(self) -> StrategyRegistryHeadRecord:
         """Allow partial family evidence reads while still binding the response ETag."""
-        head, _, _, valid = await self._registry_authority()
+        head, _, _, _, valid = await self._registry_authority()
         if not valid:
             raise EvolutionReadError("REGISTRY_AUTHORITY_INVALID")
         return head
 
     async def _all_family_projections_valid(self) -> bool:
-        projections = tuple(
+        return (await self._family_authority_batch()).valid
+
+    async def _family_authority_batch(self) -> _FamilyAuthorityBatch:
+        """Load every family authority in three fixed queries, then replay in memory."""
+        roots = tuple(
+            (
+                await self._session.execute(
+                    select(
+                        StrategyExperimentFamilyRecord,
+                        StrategyExperimentStateProjectionRecord,
+                        StrategyResearchLineageProjectionRecord,
+                    )
+                    .outerjoin(
+                        StrategyExperimentStateProjectionRecord,
+                        StrategyExperimentStateProjectionRecord.family_id
+                        == StrategyExperimentFamilyRecord.id,
+                    )
+                    .outerjoin(
+                        StrategyResearchLineageProjectionRecord,
+                        StrategyResearchLineageProjectionRecord.lineage_id
+                        == StrategyExperimentFamilyRecord.research_lineage_id,
+                    )
+                    .order_by(StrategyExperimentFamilyRecord.id)
+                )
+            ).tuples()
+        )
+        candidate_rows = tuple(
+            (
+                await self._session.execute(
+                    select(
+                        StrategyExperimentRecord,
+                        StrategyExperimentCandidateProjectionRecord,
+                    )
+                    .outerjoin(
+                        StrategyExperimentCandidateProjectionRecord,
+                        StrategyExperimentCandidateProjectionRecord.experiment_id
+                        == StrategyExperimentRecord.id,
+                    )
+                    .order_by(
+                        StrategyExperimentRecord.family_id,
+                        StrategyExperimentRecord.candidate_ordinal,
+                    )
+                )
+            ).tuples()
+        )
+        events = tuple(
             await self._session.scalars(
-                select(StrategyExperimentStateProjectionRecord).order_by(
-                    StrategyExperimentStateProjectionRecord.family_id
+                select(StrategyExperimentEventRecord).order_by(
+                    StrategyExperimentEventRecord.family_id,
+                    StrategyExperimentEventRecord.sequence,
                 )
             )
         )
-        for projection in projections:
-            if not await experiment_projection_is_valid(self._session, projection):
-                return False
-        return True
+        experiments_by_family: dict[UUID, list[StrategyExperimentRecord]] = {}
+        candidates_by_family: dict[
+            UUID, list[StrategyExperimentCandidateProjectionRecord]
+        ] = {}
+        valid = True
+        for experiment, candidate in candidate_rows:
+            experiments_by_family.setdefault(experiment.family_id, []).append(experiment)
+            if candidate is None or candidate.family_id != experiment.family_id:
+                valid = False
+            else:
+                candidates_by_family.setdefault(experiment.family_id, []).append(candidate)
+        events_by_family: dict[UUID, list[StrategyExperimentEventRecord]] = {}
+        for event in events:
+            events_by_family.setdefault(event.family_id, []).append(event)
+
+        active_rows: list[
+            tuple[StrategyExperimentFamilyRecord, StrategyExperimentStateProjectionRecord]
+        ] = []
+        latest_family_at = max((item[0].created_at for item in roots), default=None)
+        for family, projection, lineage_projection in roots:
+            if projection is None:
+                if family.admission_status == "ADMITTED":
+                    valid = False
+                continue
+            if lineage_projection is None:
+                valid = False
+                continue
+            authority = VerifiedExperimentAuthority(
+                family=family,
+                experiments=tuple(experiments_by_family.get(family.id, ())),
+                events=tuple(events_by_family.get(family.id, ())),
+                candidate_projections=tuple(candidates_by_family.get(family.id, ())),
+                family_projection=projection,
+                lineage_projection=lineage_projection,
+            )
+            if not verified_experiment_authority_is_valid(authority):
+                valid = False
+            if projection.current_state not in _TERMINAL_STATES:
+                active_rows.append((family, projection))
+        active_rows.sort(key=lambda item: (item[0].created_at, item[0].id), reverse=True)
+        lineage_ids = {family.research_lineage_id for family, _, _ in roots}
+        generation_context = (
+            StrategyGenerationFamilyContextV1(
+                research_lineage_id=next(iter(lineage_ids)),
+                active_family_count=len(active_rows),
+                latest_family_at=latest_family_at,
+            )
+            if len(lineage_ids) == 1
+            else None
+        )
+        return _FamilyAuthorityBatch(
+            valid=valid,
+            active_row=active_rows[0] if active_rows else None,
+            latest_family_at=latest_family_at,
+            generation_context=generation_context,
+        )
 
     async def _registry_authority(
         self, *, lock: bool = False
@@ -374,6 +508,7 @@ class EvolutionReadService:
         StrategyRegistryHeadRecord,
         ChampionStateResponse,
         tuple[StrategyRegistryEventRecord, ...],
+        dict[UUID, StrategyDefinitionRecord],
         bool,
     ]:
         head_statement = select(StrategyRegistryHeadRecord).where(
@@ -383,9 +518,6 @@ class EvolutionReadService:
             head_statement = head_statement.with_for_update()
         head = await self._session.scalar(head_statement)
         if head is None:
-            raise EvolutionReadError("STRATEGY_REGISTRY_INCOMPLETE")
-        definition = await self._session.get(StrategyDefinitionRecord, head.active_definition_id)
-        if definition is None:
             raise EvolutionReadError("STRATEGY_REGISTRY_INCOMPLETE")
         events = tuple(
             await self._session.scalars(
@@ -402,6 +534,22 @@ class EvolutionReadService:
                 )
             )
         )
+        definitions = {
+            item.id: item
+            for item in tuple(
+                await self._session.scalars(
+                    select(StrategyDefinitionRecord).where(
+                        StrategyDefinitionRecord.id.in_(
+                            {head.active_definition_id}
+                            | {event.to_definition_id for event in events}
+                        )
+                    )
+                )
+            )
+        }
+        definition = definitions.get(head.active_definition_id)
+        if definition is None:
+            raise EvolutionReadError("STRATEGY_REGISTRY_INCOMPLETE")
         valid = registry_chain_is_valid(head, events, activations)
         active_event = next(
             (
@@ -437,25 +585,14 @@ class EvolutionReadService:
             ),
             pending_effective_session=head.pending_effective_session,
         )
-        return head, champion, events, valid
+        return head, champion, events, definitions, valid
 
-    async def _registry_history(
+    def _registry_history(
         self,
         head: StrategyRegistryHeadRecord,
         events: tuple[StrategyRegistryEventRecord, ...],
+        definitions: dict[UUID, StrategyDefinitionRecord],
     ) -> tuple[RegistryEventResponse, ...]:
-        definitions = {
-            item.id: item
-            for item in tuple(
-                await self._session.scalars(
-                    select(StrategyDefinitionRecord).where(
-                        StrategyDefinitionRecord.id.in_(
-                            {event.to_definition_id for event in events}
-                        )
-                    )
-                )
-            )
-        }
         return tuple(
             RegistryEventResponse(
                 sequence=event.sequence,
@@ -481,7 +618,7 @@ class EvolutionReadService:
                 ),
                 event_hash=event.event_hash,
             )
-            for event in events
+            for event in events[-_REGISTRY_HISTORY_LIMIT:]
         )
 
     async def _family_response(
@@ -540,8 +677,8 @@ class EvolutionReadService:
         if record is None:
             return unavailable, True
         try:
-            report = ChampionComparisonRunV1.model_validate(record.metric_report)
-        except ValueError:
+            report = validate_champion_comparison_record(record)
+        except EvolutionEvaluationError:
             return unavailable.model_copy(update={"status": "partial"}), False
         return (
             ComparisonResponse(
@@ -572,7 +709,12 @@ class EvolutionReadService:
             True,
         )
 
-    async def _shadow(self, experiment_id: UUID) -> tuple[ShadowProgressResponse, bool]:
+    async def _shadow(
+        self,
+        experiment_id: UUID,
+        *,
+        events: tuple[StrategyExperimentEventRecord, ...],
+    ) -> tuple[ShadowProgressResponse, bool]:
         group = await self._session.scalar(
             select(StrategyShadowGroupRecord).where(
                 StrategyShadowGroupRecord.experiment_id == experiment_id
@@ -583,6 +725,9 @@ class EvolutionReadService:
                 ShadowProgressResponse(
                     status="not_started",
                     completed_sessions=0,
+                    evaluation_sessions=EVALUATION_SESSION_COUNT,
+                    grace_sessions=GRACE_SESSION_COUNT,
+                    grace_elapsed_sessions=0,
                     checkpoints_completed=(),
                     full_fill_count=0,
                     after_cost_excess_return=None,
@@ -617,6 +762,7 @@ class EvolutionReadService:
                         select(
                             StrategyShadowLegRecord.role,
                             StrategyShadowCheckpointMetricRecord.metric_report,
+                            StrategyShadowCheckpointMetricRecord.metric_hash,
                         )
                         .join(
                             StrategyShadowLegRecord,
@@ -630,8 +776,16 @@ class EvolutionReadService:
             try:
                 metrics_by_role = {
                     role: StrategyShadowLegMetricsV1.model_validate(report)
-                    for role, report in metric_rows
+                    for role, report, _ in metric_rows
                 }
+                valid = (
+                    len(metric_rows) == 2
+                    and set(metrics_by_role) == {"champion", "challenger"}
+                    and all(
+                        metrics_by_role[role].metrics_hash == metric_hash
+                        for role, _, metric_hash in metric_rows
+                    )
+                )
             except ValueError:
                 valid = False
                 metrics_by_role = {}
@@ -642,19 +796,97 @@ class EvolutionReadService:
                 StrategyShadowFinalizationRecord.group_id == group.id
             )
         )
-        status: Literal["not_started", "running", "failed", "finalized", "stale"] = (
-            "stale"
-            if group.status == "stale"
-            else "finalized"
-            if finalization is not None
-            else "failed"
-            if group.status == "failed"
-            else "running"
+        final_gate = None
+        if finalization is not None:
+            try:
+                final_gate = await validate_shadow_finalization_record(
+                    self._session,
+                    group=group,
+                    finalization=finalization,
+                )
+            except StrategyShadowServiceError:
+                valid = False
+        running_event = next(
+            (
+                item
+                for item in events
+                if item.experiment_id == experiment_id and item.event_type == "SHADOW_RUNNING"
+            ),
+            None,
         )
+        if (
+            running_event is None
+            or running_event.payload.get("group_id") != str(group.id)
+            or running_event.payload.get("authority_hash") != group.authority_hash
+        ):
+            valid = False
+        if finalization is not None:
+            final_event = next(
+                (
+                    item
+                    for item in reversed(events)
+                    if item.experiment_id == experiment_id
+                    and item.event_type
+                    in {"PROMOTION_ELIGIBLE", "SHADOW_FAILED", "STALE_CHAMPION_BASELINE"}
+                ),
+                None,
+            )
+            if (
+                final_event is None
+                or final_event.payload.get("group_id") != str(group.id)
+                or final_event.payload.get("finalization_id") != str(finalization.id)
+                or final_event.payload.get("final_authority_hash")
+                != finalization.final_authority_hash
+            ):
+                valid = False
+        status: Literal["not_started", "running", "failed", "finalized", "stale"]
+        if finalization is None:
+            status = "running"
+        elif not valid or final_gate is None or final_gate.status == "STALE":
+            status = "stale"
+        elif final_gate.status == "PASS":
+            status = "finalized"
+        else:
+            status = "failed"
+        grace_elapsed = 0
+        if session_count >= group.evaluation_sessions:
+            evaluation_end = await self._session.scalar(
+                select(StrategyShadowSessionAuthorityRecord.session).where(
+                    StrategyShadowSessionAuthorityRecord.group_id == group.id,
+                    StrategyShadowSessionAuthorityRecord.session_ordinal
+                    == group.evaluation_sessions,
+                )
+            )
+            if evaluation_end is None:
+                valid = False
+            else:
+                grace_elapsed = min(
+                    group.grace_sessions,
+                    int(
+                        await self._session.scalar(
+                            select(func.count())
+                            .select_from(ExchangeCalendarSessionRecord)
+                            .where(
+                                ExchangeCalendarSessionRecord.calendar_authority_id
+                                == group.calendar_authority_id,
+                                ExchangeCalendarSessionRecord.session > evaluation_end,
+                                ExchangeCalendarSessionRecord.decision_at <= self._now,
+                            )
+                        )
+                        or 0
+                    ),
+                )
+        if not valid:
+            metrics_by_role = {}
+            challenger = None
+            champion = None
         return (
             ShadowProgressResponse(
                 status=status,
-                completed_sessions=session_count,
+                completed_sessions=min(session_count, group.evaluation_sessions),
+                evaluation_sessions=group.evaluation_sessions,
+                grace_sessions=group.grace_sessions,
+                grace_elapsed_sessions=grace_elapsed,
                 checkpoints_completed=cast(
                     tuple[Literal[5, 21, 63], ...],
                     tuple(item.checkpoint_ordinal for item in checkpoints),
@@ -672,7 +904,8 @@ class EvolutionReadService:
                     0 if challenger is None else challenger.hard_risk_violation_count
                 ),
                 data_complete=(
-                    session_count <= group.evaluation_sessions + group.grace_sessions
+                    valid
+                    and session_count <= group.evaluation_sessions
                     and (latest is None or latest.checkpoint_ordinal <= session_count)
                 ),
                 authority_hash=group.authority_hash,
@@ -688,6 +921,10 @@ class EvolutionReadService:
         )
         if comparison is None:
             return (), True
+        try:
+            comparison_report = validate_champion_comparison_record(comparison)
+        except EvolutionEvaluationError:
+            return (), False
         decisions = tuple(
             await self._session.scalars(
                 select(StrategyPromotionDecisionRecord)
@@ -695,14 +932,54 @@ class EvolutionReadService:
                 .order_by(StrategyPromotionDecisionRecord.created_at)
             )
         )
+        canonical_policy_record = await self._session.scalar(
+            select(StrategyPromotionPolicyRecord).where(
+                StrategyPromotionPolicyRecord.version == "promotion_policy_v1"
+            )
+        )
+        group = await self._session.scalar(
+            select(StrategyShadowGroupRecord).where(
+                StrategyShadowGroupRecord.experiment_id == experiment_id
+            )
+        )
+        finalization = (
+            None
+            if group is None
+            else await self._session.scalar(
+                select(StrategyShadowFinalizationRecord).where(
+                    StrategyShadowFinalizationRecord.group_id == group.id
+                )
+            )
+        )
+        historical = next((item for item in decisions if item.stage == "historical"), None)
         responses: list[GateResultResponse] = []
         try:
+            if canonical_policy_record is None:
+                raise ValueError("canonical promotion policy is unavailable")
+            policy = load_promotion_policy_v1(
+                canonical_policy_record.document,
+                canonical_policy_record.content_hash,
+            )
+            final_gate = (
+                None
+                if group is None or finalization is None
+                else await validate_shadow_finalization_record(
+                    self._session,
+                    group=group,
+                    finalization=finalization,
+                )
+            )
             for decision in sorted(
                 decisions,
                 key=lambda item: {"historical": 0, "shadow": 1, "handover": 2}[item.stage],
             ):
                 if decision.stage == "historical":
-                    historical_report = PromotionDecisionV1.model_validate(decision.gate_report)
+                    historical_report = validate_promotion_decision_record(
+                        decision,
+                        comparison_report,
+                        policy,
+                        expected_promotion_policy_id=canonical_policy_record.id,
+                    )
                     responses.extend(
                         GateResultResponse(
                             stage="historical",
@@ -715,7 +992,19 @@ class EvolutionReadService:
                         for gate in historical_report.gates
                     )
                 elif decision.stage == "shadow":
-                    shadow_report = StrategyShadowFinalGateV1.model_validate(decision.gate_report)
+                    if (
+                        historical is None
+                        or finalization is None
+                        or final_gate is None
+                    ):
+                        raise ValueError("Shadow decision authority is unavailable")
+                    shadow_report = validate_shadow_promotion_decision_record(
+                        decision,
+                        comparison_id=comparison.id,
+                        historical_decision=historical,
+                        finalization=finalization,
+                        gate=final_gate,
+                    )
                     responses.extend(
                         GateResultResponse(
                             stage="shadow",
@@ -728,7 +1017,20 @@ class EvolutionReadService:
                         for gate in shadow_report.gates
                     )
                 else:
-                    handover_report = HandoverEvaluationV1.model_validate(decision.gate_report)
+                    if historical is None or finalization is None:
+                        raise ValueError("handover authority is unavailable")
+                    experiment = await self._session.get(
+                        StrategyExperimentRecord, experiment_id
+                    )
+                    if experiment is None:
+                        raise ValueError("experiment authority is unavailable")
+                    handover_report = validate_handover_decision_record(
+                        decision,
+                        comparison_id=comparison.id,
+                        promotion_policy_id=historical.promotion_policy_id,
+                        finalization=finalization,
+                        expected_definition_id=experiment.candidate_strategy_definition_id,
+                    )
                     responses.extend(
                         GateResultResponse(
                             stage="handover",
@@ -740,8 +1042,14 @@ class EvolutionReadService:
                         )
                         for gate in handover_report.gates
                     )
-        except (ValueError, KeyError):
-            return tuple(responses), False
+        except (
+            EvolutionEvaluationError,
+            RegistryServiceError,
+            StrategyShadowServiceError,
+            ValueError,
+            KeyError,
+        ):
+            return (), False
         return tuple(responses), True
 
 

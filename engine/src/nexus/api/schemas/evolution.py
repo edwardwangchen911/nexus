@@ -165,7 +165,10 @@ class ComparisonResponse(_StrictSchema):
 
 class ShadowProgressResponse(_StrictSchema):
     status: Literal["not_started", "running", "failed", "finalized", "stale"]
-    completed_sessions: int = Field(ge=0, le=68)
+    completed_sessions: int = Field(ge=0, le=63)
+    evaluation_sessions: int = Field(ge=1, le=63)
+    grace_sessions: int = Field(ge=0, le=5)
+    grace_elapsed_sessions: int = Field(ge=0, le=5)
     checkpoints_completed: tuple[Literal[5, 21, 63], ...]
     full_fill_count: int = Field(ge=0)
     after_cost_excess_return: str | None

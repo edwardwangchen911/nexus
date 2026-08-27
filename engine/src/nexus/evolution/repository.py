@@ -218,7 +218,7 @@ async def load_verified_experiment_authority(
         family_projection=projection,
         lineage_projection=lineage_projection,
     )
-    if not _verified_experiment_authority_is_valid(authority):
+    if not verified_experiment_authority_is_valid(authority):
         raise ValueError("STRATEGY_EXPERIMENT_CHAIN_INVALID")
     return authority
 
@@ -557,9 +557,10 @@ def _event_chain_content_is_valid(
     return True
 
 
-def _verified_experiment_authority_is_valid(
+def verified_experiment_authority_is_valid(
     authority: VerifiedExperimentAuthority,
 ) -> bool:
+    """Replay a fully materialized family authority without issuing any queries."""
     family = authority.family
     experiments = authority.experiments
     projections = authority.candidate_projections
