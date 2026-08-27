@@ -547,25 +547,25 @@ Verification evidence before commit:
 - Produces all six routes in spec section 11 with strict envelopes, stable cursor, `If-Match`, `Idempotency-Key`, 200/202/409/422/503 semantics and `live_execution_enabled=False`.
 - Consumes evolution service/registry reads and commands; keeps `/internal/v1/strategies` operational.
 
-- [ ] **Step 1: Write contract and HTTP red tests**
+- [x] **Step 1: Write contract and HTTP red tests**
 
 Cover ready/empty/partial, 20-item defaults, 100-item maximum, signed cursor, Decimal strings, safe evidence, forbidden DSL fields, missing/duplicate idempotency, stale `If-Match`, active family/cooldown, veto, pause/resume, pending rollback and authority-unavailable 503. Assert raw Prompt/tool/strategy document/account/order data never appears.
 
-- [ ] **Step 2: Run red tests**
+- [x] **Step 2: Run red tests**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/api/test_evolution_contracts.py engine/tests/integration/test_evolution_api.py engine/tests/contract/test_openapi.py -q
 ```
 
-- [ ] **Step 3: Implement strict schemas and read assembler**
+- [x] **Step 3: Implement strict schemas and read assembler**
 
 Create frozen extra-forbid models for champion, family, candidate counts, comparison, Shadow, gate results, registry history and action responses. Assemble only verified hash/evidence summaries; if registry chain/head/projection verification fails, return a safe partial/read-only response and block commands.
 
-- [ ] **Step 4: Implement bounded command routes**
+- [x] **Step 4: Implement bounded command routes**
 
 POST experiment accepts an empty strict body plus headers; veto accepts a fixed reason enum; control accepts pause/resume only; rollback accepts fixed reason only. Map domain reasons to exact HTTP statuses and never accept account, strategy, parameter, policy, Prompt or order fields.
 
-- [ ] **Step 5: Generate and verify OpenAPI client**
+- [x] **Step 5: Generate and verify OpenAPI client**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/api/test_evolution_contracts.py engine/tests/integration/test_evolution_api.py engine/tests/contract/test_openapi.py -q
@@ -573,7 +573,7 @@ npm run generate:client
 npm run check:generated
 ```
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```bash
 uv run --package nexus-engine ruff check engine/src/nexus/api engine/tests/unit/api/test_evolution_contracts.py
@@ -581,6 +581,13 @@ uv run --package nexus-engine mypy engine/src/nexus/api
 git add engine/src/nexus/api engine/src/nexus/main.py engine/tests/unit/api/test_evolution_contracts.py engine/tests/integration/test_evolution_api.py engine/tests/contract/test_openapi.py app/lib/generated/schema.d.ts
 git commit -m "feat(api): expose strategy evolution evidence and controls"
 ```
+
+Verification evidence before commit:
+
+- `22 passed in 21.17s` for the strict schemas, cursor/ETag contracts, OpenAPI contract and all six PostgreSQL API routes.
+- `35 passed in 62.41s` across the Strategy R&D Job, promotion gate, registry, rollback, concurrency and API regressions after enforcing complete registry and experiment event-chain verification.
+- Ruff and Mypy passed for the affected Engine sources; `npm run generate:client` and `npm run check:generated` passed.
+- Review confirmed the API exposes no strategy document, Prompt/tool payload, account/order authority or live execution capability; every command remains HMAC-authenticated, CAS/idempotency guarded and fail-closed.
 
 ### Task 10: Build safe BFF routes and the `/strategies` evolution workbench
 

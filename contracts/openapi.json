@@ -1,6 +1,121 @@
 {
   "components": {
     "schemas": {
+      "ActiveFamilyResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "authority_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Authority Hash",
+            "type": "string"
+          },
+          "candidate_count": {
+            "maximum": 24,
+            "minimum": 0,
+            "title": "Candidate Count",
+            "type": "integer"
+          },
+          "code_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Code Hash",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "cumulative_oos_trial_count": {
+            "minimum": 0,
+            "title": "Cumulative Oos Trial Count",
+            "type": "integer"
+          },
+          "expected_mechanism": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Mechanism"
+          },
+          "family_id": {
+            "format": "uuid",
+            "title": "Family Id",
+            "type": "string"
+          },
+          "hypothesis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hypothesis"
+          },
+          "next_step": {
+            "title": "Next Step",
+            "type": "string"
+          },
+          "projection_version": {
+            "minimum": 1,
+            "title": "Projection Version",
+            "type": "integer"
+          },
+          "protocol_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Protocol Hash",
+            "type": "string"
+          },
+          "search_axes": {
+            "items": {
+              "$ref": "#/components/schemas/SearchAxisSummaryResponse"
+            },
+            "title": "Search Axes",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "PROPOSED",
+              "REJECTED",
+              "ADMITTED",
+              "BACKTEST_RUNNING",
+              "BACKTEST_FAILED",
+              "BACKTEST_PASSED",
+              "SHADOW_RUNNING",
+              "SHADOW_FAILED",
+              "EXPIRED",
+              "VETOED",
+              "PROMOTION_ELIGIBLE",
+              "PROMOTED",
+              "STALE_CHAMPION_BASELINE"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "family_id",
+          "created_at",
+          "hypothesis",
+          "expected_mechanism",
+          "search_axes",
+          "candidate_count",
+          "state",
+          "projection_version",
+          "cumulative_oos_trial_count",
+          "authority_hash",
+          "protocol_hash",
+          "code_hash",
+          "next_step"
+        ],
+        "title": "ActiveFamilyResponse",
+        "type": "object"
+      },
       "AgentRunStatus": {
         "enum": [
           "prepared",
@@ -368,6 +483,91 @@
         "title": "CashBucketResponse",
         "type": "object"
       },
+      "ChampionStateResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_promotion_paused": {
+            "title": "Auto Promotion Paused",
+            "type": "boolean"
+          },
+          "effective_session": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Session"
+          },
+          "event_sequence": {
+            "minimum": 1,
+            "title": "Event Sequence",
+            "type": "integer"
+          },
+          "generation": {
+            "minimum": 1,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "live_execution_enabled": {
+            "const": false,
+            "default": false,
+            "title": "Live Execution Enabled",
+            "type": "boolean"
+          },
+          "pending_effective_session": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Effective Session"
+          },
+          "pending_transition": {
+            "anyOf": [
+              {
+                "enum": [
+                  "PROMOTE",
+                  "ROLLBACK"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Transition"
+          },
+          "registry_version": {
+            "minimum": 1,
+            "title": "Registry Version",
+            "type": "integer"
+          },
+          "strategy_version": {
+            "title": "Strategy Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "strategy_version",
+          "generation",
+          "registry_version",
+          "event_sequence",
+          "effective_session",
+          "auto_promotion_paused",
+          "pending_transition",
+          "pending_effective_session"
+        ],
+        "title": "ChampionStateResponse",
+        "type": "object"
+      },
       "ComparisonMetricResponse": {
         "additionalProperties": false,
         "properties": {
@@ -410,6 +610,146 @@
           "reason"
         ],
         "title": "ComparisonMetricResponse",
+        "type": "object"
+      },
+      "ComparisonResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "annualized_return": {
+            "$ref": "#/components/schemas/MetricPairResponse"
+          },
+          "authority_hash": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authority Hash"
+          },
+          "comparison_hash": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comparison Hash"
+          },
+          "cost_policy_hash": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Policy Hash"
+          },
+          "cumulative_oos_trial_count": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cumulative Oos Trial Count"
+          },
+          "data_mode": {
+            "enum": [
+              "point_in_time",
+              "unavailable"
+            ],
+            "title": "Data Mode",
+            "type": "string"
+          },
+          "double_cost_return": {
+            "$ref": "#/components/schemas/MetricPairResponse"
+          },
+          "equal_weight_comparison_complete": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Equal Weight Comparison Complete"
+          },
+          "max_drawdown": {
+            "$ref": "#/components/schemas/MetricPairResponse"
+          },
+          "protocol_hash": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocol Hash"
+          },
+          "sharpe": {
+            "$ref": "#/components/schemas/MetricPairResponse"
+          },
+          "spy_comparison_complete": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spy Comparison Complete"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "unavailable",
+              "partial"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "valid_oos_window_count": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid Oos Window Count"
+          }
+        },
+        "required": [
+          "status",
+          "annualized_return",
+          "sharpe",
+          "max_drawdown",
+          "double_cost_return",
+          "spy_comparison_complete",
+          "equal_weight_comparison_complete",
+          "data_mode"
+        ],
+        "title": "ComparisonResponse",
         "type": "object"
       },
       "CurrencyCode": {
@@ -815,6 +1155,8 @@
           "RECONCILIATION_REQUIRED",
           "BUDGET_EXHAUSTED",
           "PROVIDER_UNAVAILABLE",
+          "EVOLUTION_BLOCKED",
+          "AUTHORITY_UNAVAILABLE",
           "INTERNAL_ERROR"
         ],
         "title": "ErrorCode",
@@ -900,6 +1242,328 @@
         "title": "EvidenceRef",
         "type": "object"
       },
+      "EvolutionActionEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/EvolutionActionResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/EvolutionSuccessMeta"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "EvolutionActionEnvelope",
+        "type": "object"
+      },
+      "EvolutionActionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "generate_family",
+              "veto_experiment",
+              "pause_auto_promotion",
+              "resume_auto_promotion",
+              "rollback_registry"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "generation": {
+            "minimum": 1,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "live_execution_enabled": {
+            "const": false,
+            "default": false,
+            "title": "Live Execution Enabled",
+            "type": "boolean"
+          },
+          "pending_effective_session": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Effective Session"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "registry_version": {
+            "minimum": 1,
+            "title": "Registry Version",
+            "type": "integer"
+          },
+          "resource_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Id"
+          },
+          "status": {
+            "enum": [
+              "QUEUED",
+              "VETOED",
+              "PAUSED",
+              "EFFECTIVE",
+              "PENDING_BOUNDARY",
+              "PENDING_ORDERS",
+              "FAILED"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "status",
+          "reason_code",
+          "generation",
+          "registry_version",
+          "resource_id",
+          "pending_effective_session"
+        ],
+        "title": "EvolutionActionResponse",
+        "type": "object"
+      },
+      "EvolutionSuccessMeta": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "title": "As Of",
+            "type": "string"
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "1",
+            "default": "1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "as_of"
+        ],
+        "title": "EvolutionSuccessMeta",
+        "type": "object"
+      },
+      "ExperimentDetailEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ExperimentDetailResponse"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/EvolutionSuccessMeta"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "ExperimentDetailEnvelope",
+        "type": "object"
+      },
+      "ExperimentDetailResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "comparison": {
+            "$ref": "#/components/schemas/ComparisonResponse"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/ExperimentEventResponse"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "experiment": {
+            "$ref": "#/components/schemas/ExperimentSummaryResponse"
+          },
+          "family": {
+            "$ref": "#/components/schemas/ActiveFamilyResponse"
+          },
+          "gates": {
+            "items": {
+              "$ref": "#/components/schemas/GateResultResponse"
+            },
+            "title": "Gates",
+            "type": "array"
+          },
+          "integrity_status": {
+            "enum": [
+              "verified",
+              "partial",
+              "stale"
+            ],
+            "title": "Integrity Status",
+            "type": "string"
+          },
+          "live_execution_enabled": {
+            "const": false,
+            "default": false,
+            "title": "Live Execution Enabled",
+            "type": "boolean"
+          },
+          "shadow": {
+            "$ref": "#/components/schemas/ShadowProgressResponse"
+          },
+          "write_block_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Write Block Reason"
+          },
+          "write_enabled": {
+            "title": "Write Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "experiment",
+          "family",
+          "comparison",
+          "shadow",
+          "gates",
+          "events",
+          "integrity_status",
+          "write_enabled",
+          "write_block_reason"
+        ],
+        "title": "ExperimentDetailResponse",
+        "type": "object"
+      },
+      "ExperimentEventResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "event_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Event Hash",
+            "type": "string"
+          },
+          "event_type": {
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "sequence": {
+            "minimum": 1,
+            "title": "Sequence",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sequence",
+          "event_type",
+          "occurred_at",
+          "event_hash"
+        ],
+        "title": "ExperimentEventResponse",
+        "type": "object"
+      },
+      "ExperimentSummaryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Candidate Hash",
+            "type": "string"
+          },
+          "candidate_ordinal": {
+            "maximum": 24,
+            "minimum": 1,
+            "title": "Candidate Ordinal",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "experiment_id": {
+            "format": "uuid",
+            "title": "Experiment Id",
+            "type": "string"
+          },
+          "expression_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Expression Hash",
+            "type": "string"
+          },
+          "family_id": {
+            "format": "uuid",
+            "title": "Family Id",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "PROPOSED",
+              "REJECTED",
+              "ADMITTED",
+              "BACKTEST_RUNNING",
+              "BACKTEST_FAILED",
+              "BACKTEST_PASSED",
+              "SHADOW_RUNNING",
+              "SHADOW_FAILED",
+              "EXPIRED",
+              "VETOED",
+              "PROMOTION_ELIGIBLE",
+              "PROMOTED",
+              "STALE_CHAMPION_BASELINE"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "strategy_version": {
+            "title": "Strategy Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "experiment_id",
+          "family_id",
+          "candidate_ordinal",
+          "strategy_version",
+          "state",
+          "created_at",
+          "candidate_hash",
+          "expression_hash"
+        ],
+        "title": "ExperimentSummaryResponse",
+        "type": "object"
+      },
       "FailedJobSummary": {
         "additionalProperties": false,
         "properties": {
@@ -921,6 +1585,62 @@
           "retryable"
         ],
         "title": "FailedJobSummary",
+        "type": "object"
+      },
+      "GateResultResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "gate": {
+            "title": "Gate",
+            "type": "string"
+          },
+          "observed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Observed",
+            "type": "array"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "stage": {
+            "enum": [
+              "historical",
+              "shadow",
+              "handover"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "PASS",
+              "FAIL",
+              "UNKNOWN",
+              "STALE"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "thresholds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Thresholds",
+            "type": "array"
+          }
+        },
+        "required": [
+          "stage",
+          "gate",
+          "status",
+          "observed",
+          "thresholds",
+          "reason_code"
+        ],
+        "title": "GateResultResponse",
         "type": "object"
       },
       "IntegrationConnectivityTestRequest": {
@@ -1537,6 +2257,51 @@
           "selected_series"
         ],
         "title": "MarketPageResponse",
+        "type": "object"
+      },
+      "MetricPairResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "challenger": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Challenger"
+          },
+          "champion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Champion"
+          },
+          "delta": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta"
+          }
+        },
+        "required": [
+          "challenger",
+          "champion",
+          "delta"
+        ],
+        "title": "MetricPairResponse",
         "type": "object"
       },
       "NexusErrorEnvelope": {
@@ -3732,6 +4497,98 @@
         "title": "ReadinessResponse",
         "type": "object"
       },
+      "RegistryControlRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "pause_auto_promotion",
+              "resume_auto_promotion"
+            ],
+            "title": "Action",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "RegistryControlRequest",
+        "type": "object"
+      },
+      "RegistryEventResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "champion_generation": {
+            "minimum": 1,
+            "title": "Champion Generation",
+            "type": "integer"
+          },
+          "effective_session": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Session"
+          },
+          "event_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Event Hash",
+            "type": "string"
+          },
+          "event_type": {
+            "enum": [
+              "GENESIS",
+              "PROMOTE",
+              "ROLLBACK",
+              "PAUSE",
+              "RESUME",
+              "VETO"
+            ],
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "sequence": {
+            "minimum": 1,
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "effective",
+              "pending",
+              "recorded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target_strategy_version": {
+            "title": "Target Strategy Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sequence",
+          "event_type",
+          "target_strategy_version",
+          "champion_generation",
+          "occurred_at",
+          "effective_session",
+          "status",
+          "event_hash"
+        ],
+        "title": "RegistryEventResponse",
+        "type": "object"
+      },
       "ResearchAdmissionEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -4574,6 +5431,54 @@
         "title": "RoleVote",
         "type": "object"
       },
+      "RollbackRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "enum": [
+              "USER_REQUESTED",
+              "PERFORMANCE_REGRESSION",
+              "DATA_QUALITY_CONCERN",
+              "OPERATIONAL_RISK"
+            ],
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "RollbackRequest",
+        "type": "object"
+      },
+      "SearchAxisSummaryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "axis": {
+            "enum": [
+              "min_adv20_usd",
+              "min_close",
+              "target_weight",
+              "ranking_feature",
+              "positive_return_filter_enabled"
+            ],
+            "title": "Axis",
+            "type": "string"
+          },
+          "candidate_value_count": {
+            "maximum": 8,
+            "minimum": 1,
+            "title": "Candidate Value Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "axis",
+          "candidate_value_count"
+        ],
+        "title": "SearchAxisSummaryResponse",
+        "type": "object"
+      },
       "SelectedMarketSeriesResponse": {
         "additionalProperties": false,
         "description": "At most one repository-selected historical series in a market page.",
@@ -5376,6 +6281,100 @@
         "title": "ShadowPortfolioResponse",
         "type": "object"
       },
+      "ShadowProgressResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "after_cost_excess_return": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After Cost Excess Return"
+          },
+          "authority_hash": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authority Hash"
+          },
+          "checkpoints_completed": {
+            "items": {
+              "enum": [
+                5,
+                21,
+                63
+              ],
+              "type": "integer"
+            },
+            "title": "Checkpoints Completed",
+            "type": "array"
+          },
+          "completed_sessions": {
+            "maximum": 68,
+            "minimum": 0,
+            "title": "Completed Sessions",
+            "type": "integer"
+          },
+          "data_complete": {
+            "title": "Data Complete",
+            "type": "boolean"
+          },
+          "drawdown_difference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drawdown Difference"
+          },
+          "full_fill_count": {
+            "minimum": 0,
+            "title": "Full Fill Count",
+            "type": "integer"
+          },
+          "hard_risk_violation_count": {
+            "minimum": 0,
+            "title": "Hard Risk Violation Count",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "not_started",
+              "running",
+              "failed",
+              "finalized",
+              "stale"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "completed_sessions",
+          "checkpoints_completed",
+          "full_fill_count",
+          "after_cost_excess_return",
+          "drawdown_difference",
+          "hard_risk_violation_count",
+          "data_complete"
+        ],
+        "title": "ShadowProgressResponse",
+        "type": "object"
+      },
       "ShadowSafetyResponse": {
         "additionalProperties": false,
         "properties": {
@@ -5567,6 +6566,139 @@
         ],
         "type": "string"
       },
+      "StartExperimentRequest": {
+        "additionalProperties": false,
+        "description": "The browser cannot choose a strategy, search axis, model, or data source.",
+        "properties": {},
+        "title": "StartExperimentRequest",
+        "type": "object"
+      },
+      "StrategyEvolutionData": {
+        "additionalProperties": false,
+        "properties": {
+          "active_family": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActiveFamilyResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "champion": {
+            "$ref": "#/components/schemas/ChampionStateResponse"
+          },
+          "cooldown_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cooldown Until"
+          },
+          "experiment_start_enabled": {
+            "title": "Experiment Start Enabled",
+            "type": "boolean"
+          },
+          "experiment_start_reason": {
+            "title": "Experiment Start Reason",
+            "type": "string"
+          },
+          "experiments": {
+            "items": {
+              "$ref": "#/components/schemas/ExperimentSummaryResponse"
+            },
+            "title": "Experiments",
+            "type": "array"
+          },
+          "live_execution_enabled": {
+            "const": false,
+            "default": false,
+            "title": "Live Execution Enabled",
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "registry_events": {
+            "items": {
+              "$ref": "#/components/schemas/RegistryEventResponse"
+            },
+            "title": "Registry Events",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "empty",
+              "ready",
+              "partial",
+              "stale"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "write_block_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Write Block Reason"
+          },
+          "write_enabled": {
+            "title": "Write Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "status",
+          "write_enabled",
+          "write_block_reason",
+          "experiment_start_enabled",
+          "experiment_start_reason",
+          "champion",
+          "active_family",
+          "cooldown_until",
+          "experiments",
+          "registry_events",
+          "next_cursor"
+        ],
+        "title": "StrategyEvolutionData",
+        "type": "object"
+      },
+      "StrategyEvolutionEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/StrategyEvolutionData"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/EvolutionSuccessMeta"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ],
+        "title": "StrategyEvolutionEnvelope",
+        "type": "object"
+      },
       "StrategyListEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -5681,6 +6813,25 @@
           "FAILED"
         ],
         "type": "string"
+      },
+      "VetoExperimentRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "enum": [
+              "USER_VETO",
+              "EVIDENCE_CONCERN",
+              "OPERATIONAL_RISK"
+            ],
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "VetoExperimentRequest",
+        "type": "object"
       },
       "WatchlistMembershipEnvelope": {
         "additionalProperties": false,
@@ -8040,6 +9191,7 @@
                     "agent_cost",
                     "job",
                     "reconciliation",
+                    "evolution",
                     "audit"
                   ],
                   "type": "string"
@@ -8228,6 +9380,7 @@
                     "agent_cost",
                     "job",
                     "reconciliation",
+                    "evolution",
                     "audit"
                   ],
                   "type": "string"
@@ -8455,6 +9608,581 @@
           }
         },
         "summary": "List Strategies"
+      }
+    },
+    "/internal/v1/strategy-evolution": {
+      "get": {
+        "operationId": "getStrategyEvolution",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StrategyEvolutionEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Get Strategy Evolution"
+      }
+    },
+    "/internal/v1/strategy-experiments": {
+      "post": {
+        "operationId": "startStrategyExperiment",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 7,
+              "title": "If-Match",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartExperimentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvolutionActionEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Start Strategy Experiment"
+      }
+    },
+    "/internal/v1/strategy-experiments/{experiment_id}": {
+      "get": {
+        "operationId": "getStrategyExperiment",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "experiment_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Experiment Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExperimentDetailEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Get Strategy Experiment"
+      }
+    },
+    "/internal/v1/strategy-experiments/{experiment_id}/veto": {
+      "post": {
+        "operationId": "vetoStrategyExperiment",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "experiment_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Experiment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 7,
+              "title": "If-Match",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VetoExperimentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvolutionActionEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Veto Experiment"
+      }
+    },
+    "/internal/v1/strategy-registry/control": {
+      "post": {
+        "operationId": "controlStrategyRegistry",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 7,
+              "title": "If-Match",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegistryControlRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvolutionActionEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Control Strategy Registry"
+      }
+    },
+    "/internal/v1/strategy-registry/rollback": {
+      "post": {
+        "operationId": "rollbackStrategyRegistry",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 7,
+              "title": "If-Match",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RollbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvolutionActionEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Rollback Strategy Registry"
       }
     },
     "/internal/v1/system-status": {

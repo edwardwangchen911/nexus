@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import cast
 from uuid import UUID
@@ -67,20 +67,15 @@ async def active_lineage_projection(
         await session.scalar(
             select(StrategyExperimentStateProjectionRecord)
             .where(
-                StrategyExperimentStateProjectionRecord.research_lineage_id
-                == lineage_id,
-                StrategyExperimentStateProjectionRecord.current_state.not_in(
-                    terminal_states
-                ),
+                StrategyExperimentStateProjectionRecord.research_lineage_id == lineage_id,
+                StrategyExperimentStateProjectionRecord.current_state.not_in(terminal_states),
             )
             .with_for_update()
         ),
     )
 
 
-async def latest_family_created_at(
-    session: AsyncSession, lineage_id: UUID
-) -> datetime | None:
+async def latest_family_created_at(session: AsyncSession, lineage_id: UUID) -> datetime | None:
     return cast(
         datetime | None,
         await session.scalar(
@@ -176,3 +171,66 @@ async def append_admitted_event(
     session.add(event)
     await session.flush()
     return event
+
+
+def experiment_chain_is_valid(
+    family_id: UUID,
+    events: Sequence[StrategyExperimentEventRecord],
+    projection: StrategyExperimentStateProjectionRecord,
+) -> bool:
+    """Verify a family's event content, sequence, and current-state projection."""
+    if not events or projection.event_sequence != events[-1].sequence:
+        return False
+    compatible_last_events = {
+        "PROPOSED": {"PROPOSED"},
+        "REJECTED": {"REJECTED"},
+        "ADMITTED": {"ADMITTED"},
+        "BACKTEST_RUNNING": {"BACKTEST_RUNNING"},
+        "BACKTEST_FAILED": {"BACKTEST_FAILED"},
+        "BACKTEST_PASSED": {"BACKTEST_PASSED"},
+        "SHADOW_RUNNING": {"SHADOW_RUNNING"},
+        "SHADOW_FAILED": {"SHADOW_FAILED"},
+        "EXPIRED": {"EXPIRED"},
+        "VETOED": {"VETOED"},
+        "PROMOTION_ELIGIBLE": {"PROMOTION_ELIGIBLE"},
+        "PROMOTED": {"PROMOTED"},
+        "STALE_CHAMPION_BASELINE": {"STALE_CHAMPION_BASELINE"},
+    }
+    if events[-1].event_type not in compatible_last_events.get(projection.current_state, set()):
+        return False
+    prior_hash = "0" * 64
+    for index, event in enumerate(events, start=1):
+        identity = {
+            "schema_version": event.schema_version,
+            "family_id": str(family_id),
+            "sequence": event.sequence,
+            "event_type": event.event_type,
+            "idempotency_key": event.idempotency_key,
+            "actor_kind": event.actor_kind,
+            "occurred_at": event.occurred_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "payload": event.payload,
+            "previous_hash": event.previous_hash,
+        }
+        expected = hashlib.sha256(canonical_json(identity).encode()).hexdigest()
+        if (
+            event.sequence != index
+            or event.previous_hash != prior_hash
+            or event.event_hash != expected
+        ):
+            return False
+        prior_hash = event.event_hash
+    return True
+
+
+async def experiment_projection_is_valid(
+    session: AsyncSession,
+    projection: StrategyExperimentStateProjectionRecord,
+) -> bool:
+    events = tuple(
+        await session.scalars(
+            select(StrategyExperimentEventRecord)
+            .where(StrategyExperimentEventRecord.family_id == projection.family_id)
+            .order_by(StrategyExperimentEventRecord.sequence)
+        )
+    )
+    return experiment_chain_is_valid(projection.family_id, events, projection)

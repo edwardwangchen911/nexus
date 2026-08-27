@@ -10,6 +10,7 @@ from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.routes.briefs import router as briefs_router
 from nexus.api.routes.broker_sync import router as broker_sync_router
 from nexus.api.routes.diagnostics import router as diagnostics_router
+from nexus.api.routes.evolution import router as evolution_router
 from nexus.api.routes.health import router as health_router
 from nexus.api.routes.integrations import router as integrations_router
 from nexus.api.routes.market import router as market_router
@@ -93,6 +94,7 @@ def create_engine_app(
     app.include_router(research_router)
     app.include_router(briefs_router)
     app.include_router(strategies_router)
+    app.include_router(evolution_router)
     app.include_router(risk_audit_router)
     _install_what_if_request_schema(app)
     return app

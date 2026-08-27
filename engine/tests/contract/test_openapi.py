@@ -186,6 +186,71 @@ def test_openapi_exposes_distinct_closed_shadow_start_and_read_contracts() -> No
     assert "trade_id" not in wire
 
 
+def test_openapi_exposes_closed_strategy_evolution_surface() -> None:
+    document = create_engine_app(EngineSettings.for_test()).openapi()
+    paths = document["paths"]
+    expected = {
+        "/internal/v1/strategy-evolution": {"get"},
+        "/internal/v1/strategy-experiments/{experiment_id}": {"get"},
+        "/internal/v1/strategy-experiments": {"post"},
+        "/internal/v1/strategy-experiments/{experiment_id}/veto": {"post"},
+        "/internal/v1/strategy-registry/control": {"post"},
+        "/internal/v1/strategy-registry/rollback": {"post"},
+    }
+    assert {path: set(paths[path]) for path in expected} == expected
+    for path, methods in expected.items():
+        for method in methods:
+            operation = paths[path][method]
+            if method == "post":
+                headers = {
+                    item["name"]
+                    for item in operation["parameters"]
+                    if item["in"] == "header"
+                }
+                assert {"Idempotency-Key", "If-Match"} <= headers
+                if path in {
+                    "/internal/v1/strategy-experiments",
+                    "/internal/v1/strategy-registry/rollback",
+                }:
+                    assert "Location" in operation["responses"]["202"]["headers"]
+    schemas = document["components"]["schemas"]
+    assert {
+        "StrategyEvolutionEnvelope",
+        "ExperimentDetailEnvelope",
+        "EvolutionActionEnvelope",
+        "StartExperimentRequest",
+        "VetoExperimentRequest",
+        "RegistryControlRequest",
+        "RollbackRequest",
+    } <= set(schemas)
+    start = schemas["StartExperimentRequest"]
+    assert start["additionalProperties"] is False
+    assert start.get("properties", {}) == {}
+    public = str(
+        {
+            key: schemas[key]
+            for key in schemas
+            if any(
+                token in key.lower()
+                for token in ("evolution", "experiment", "champion", "registry", "shadowprogress")
+            )
+        }
+    ).lower()
+    assert not any(
+        forbidden in public
+        for forbidden in (
+            "prompt_version_id",
+            "model_config_id",
+            "candidate_delta",
+            "strategy_document",
+            "account_id",
+            "order_id",
+            "credential",
+            "api_key",
+        )
+    )
+
+
 def _walk_openapi_strings(value: object) -> list[str]:
     """Return names and nested values so defaults/examples cannot hide configuration."""
     if isinstance(value, dict):

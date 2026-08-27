@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
+from nexus.audit.canonical import canonical_json
 from nexus.backtest.cost_policy import BACKTEST_COST_POLICY_ID
 from nexus.persistence.models.backtest import (
     BacktestAuthorityBundleRecord,
@@ -98,6 +100,24 @@ async def seed_evaluation_pair(
         },
     }
     async with factory() as session, session.begin():
+        admitted_at = NOW - timedelta(minutes=1)
+        admitted_payload = {"schema_version": "fixture"}
+        admitted_key = "evaluation-fixture-admitted"
+        admitted_hash = hashlib.sha256(
+            canonical_json(
+                {
+                    "schema_version": "strategy_experiment_event_v1",
+                    "family_id": str(FAMILY_ID),
+                    "sequence": 1,
+                    "event_type": "ADMITTED",
+                    "idempotency_key": admitted_key,
+                    "actor_kind": "service",
+                    "occurred_at": admitted_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                    "payload": admitted_payload,
+                    "previous_hash": "0" * 64,
+                }
+            ).encode()
+        ).hexdigest()
         session.add_all(
             [
                 Instrument(
@@ -255,13 +275,13 @@ async def seed_evaluation_pair(
                     schema_version="strategy_experiment_event_v1",
                     sequence=1,
                     event_type="ADMITTED",
-                    idempotency_key="evaluation-fixture-admitted",
+                    idempotency_key=admitted_key,
                     actor_kind="service",
-                    occurred_at=NOW - timedelta(minutes=1),
-                    payload={"schema_version": "fixture"},
+                    occurred_at=admitted_at,
+                    payload=admitted_payload,
                     previous_hash="0" * 64,
-                    event_hash="e" * 64,
-                    created_at=NOW - timedelta(minutes=1),
+                    event_hash=admitted_hash,
+                    created_at=admitted_at,
                 ),
                 StrategyExperimentStateProjectionRecord(
                     family_id=FAMILY_ID,

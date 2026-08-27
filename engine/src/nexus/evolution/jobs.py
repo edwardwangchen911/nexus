@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nexus.audit.service import append_audit_event
+from nexus.evolution.repository import experiment_projection_is_valid
 from nexus.jobs.models import (
     JOB_PRIORITIES,
     Hash64,
@@ -53,6 +54,17 @@ StrategyRNDOperation = Literal[
 StrategyRNDOperationExecutor = Callable[
     [JobHandlerContext, "StrategyRNDJobPayloadV1"],
     Awaitable[JobHandlerResult],
+]
+StrategyGenerationReason = Literal[
+    "GENERATION_ELIGIBLE",
+    "STRATEGY_REGISTRY_INCOMPLETE",
+    "EVOLUTION_PAUSED",
+    "REGISTRY_TRANSITION_PENDING",
+    "LINEAGE_AUTHORITY_INCOMPLETE",
+    "ACTIVE_FAMILY_EXISTS",
+    "EVIDENCE_INCOMPLETE",
+    "EXPERIMENT_COOLDOWN_ACTIVE",
+    "EXPERIMENT_ALREADY_QUEUED",
 ]
 _NEW_YORK = ZoneInfo("America/New_York")
 _TERMINAL_FAMILY_STATES = (
@@ -124,6 +136,18 @@ class StrategyRNDJobPayloadV1(BaseModel):
         if self.input_hash != expected:
             raise ValueError("strategy R&D input_hash does not match its authority")
         return self
+
+
+class StrategyGenerationEligibilityV1(BaseModel):
+    """A safe reasoned preflight shared by the scheduler and command API."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    eligible: bool
+    reason_code: StrategyGenerationReason
+    champion_generation: int | None = Field(default=None, ge=1)
+    registry_version: int | None = Field(default=None, ge=1)
+    cooldown_until: datetime | None = None
 
 
 def strategy_rnd_payload_hash(
@@ -388,8 +412,44 @@ async def _generation_is_due(
     now: datetime,
     check_existing_job: bool = True,
 ) -> bool:
-    if head.auto_promotion_paused or head.pending_event_id is not None:
-        return False
+    eligibility = await strategy_generation_eligibility(
+        session,
+        now=now,
+        check_existing_job=check_existing_job,
+        known_head=head,
+    )
+    return eligibility.eligible
+
+
+async def strategy_generation_eligibility(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    check_existing_job: bool = True,
+    known_head: StrategyRegistryHeadRecord | None = None,
+) -> StrategyGenerationEligibilityV1:
+    """Explain why one server-chosen family generation can or cannot be queued."""
+    now = _utc(now)
+    head = known_head or await session.get(StrategyRegistryHeadRecord, "internal_paper")
+    if head is None:
+        return StrategyGenerationEligibilityV1(
+            eligible=False,
+            reason_code="STRATEGY_REGISTRY_INCOMPLETE",
+        )
+    if head.auto_promotion_paused:
+        return StrategyGenerationEligibilityV1(
+            eligible=False,
+            reason_code="EVOLUTION_PAUSED",
+            champion_generation=head.active_generation,
+            registry_version=head.version,
+        )
+    if head.pending_event_id is not None:
+        return StrategyGenerationEligibilityV1(
+            eligible=False,
+            reason_code="REGISTRY_TRANSITION_PENDING",
+            champion_generation=head.active_generation,
+            registry_version=head.version,
+        )
     active_lineages = tuple(
         await session.scalars(
             select(StrategyResearchLineageRecord)
@@ -398,7 +458,12 @@ async def _generation_is_due(
         )
     )
     if len(active_lineages) != 1:
-        return False
+        return StrategyGenerationEligibilityV1(
+            eligible=False,
+            reason_code="LINEAGE_AUTHORITY_INCOMPLETE",
+            champion_generation=head.active_generation,
+            registry_version=head.version,
+        )
     lineage = active_lineages[0]
     active_family_count = int(
         await session.scalar(
@@ -414,7 +479,12 @@ async def _generation_is_due(
         or 0
     )
     if active_family_count:
-        return False
+        return StrategyGenerationEligibilityV1(
+            eligible=False,
+            reason_code="ACTIVE_FAMILY_EXISTS",
+            champion_generation=head.active_generation,
+            registry_version=head.version,
+        )
     latest_quality = await session.scalar(
         select(QualityReport)
         .join(DataSnapshot, DataSnapshot.id == QualityReport.data_snapshot_id)
@@ -431,16 +501,34 @@ async def _generation_is_due(
         .limit(1)
     )
     if latest_quality is None or latest_quality.status != "PASS":
-        return False
+        return StrategyGenerationEligibilityV1(
+            eligible=False,
+            reason_code="EVIDENCE_INCOMPLETE",
+            champion_generation=head.active_generation,
+            registry_version=head.version,
+        )
     latest_family_at = await session.scalar(
         select(func.max(StrategyExperimentFamilyRecord.created_at)).where(
             StrategyExperimentFamilyRecord.research_lineage_id == lineage.id
         )
     )
-    if latest_family_at is not None and now < _calendar_quarter_after(latest_family_at):
-        return False
+    cooldown_until = None if latest_family_at is None else _calendar_quarter_after(latest_family_at)
+    if cooldown_until is not None and now < cooldown_until:
+        return StrategyGenerationEligibilityV1(
+            eligible=False,
+            reason_code="EXPERIMENT_COOLDOWN_ACTIVE",
+            cooldown_until=cooldown_until,
+            champion_generation=head.active_generation,
+            registry_version=head.version,
+        )
     if not check_existing_job:
-        return True
+        return StrategyGenerationEligibilityV1(
+            eligible=True,
+            reason_code="GENERATION_ELIGIBLE",
+            cooldown_until=cooldown_until,
+            champion_generation=head.active_generation,
+            registry_version=head.version,
+        )
     quarter_start = datetime(
         now.year,
         ((now.month - 1) // 3) * 3 + 1,
@@ -457,7 +545,21 @@ async def _generation_is_due(
         )
         .limit(1)
     )
-    return already_scheduled is None
+    if already_scheduled is not None:
+        return StrategyGenerationEligibilityV1(
+            eligible=False,
+            reason_code="EXPERIMENT_ALREADY_QUEUED",
+            cooldown_until=cooldown_until,
+            champion_generation=head.active_generation,
+            registry_version=head.version,
+        )
+    return StrategyGenerationEligibilityV1(
+        eligible=True,
+        reason_code="GENERATION_ELIGIBLE",
+        cooldown_until=cooldown_until,
+        champion_generation=head.active_generation,
+        registry_version=head.version,
+    )
 
 
 async def _due_candidate_jobs(
@@ -716,13 +818,23 @@ async def _preflight_strategy_rnd_job(
 
     family = await session.get(StrategyExperimentFamilyRecord, payload.family_id)
     experiment = await session.get(StrategyExperimentRecord, payload.experiment_id)
+    projection = (
+        None
+        if family is None
+        else await session.get(StrategyExperimentStateProjectionRecord, family.id)
+    )
     if (
         family is None
         or experiment is None
+        or projection is None
         or experiment.family_id != family.id
         or family.champion_generation != payload.expected_champion_generation
     ):
         raise ValueError("strategy experiment authority is inconsistent")
+    if not await experiment_projection_is_valid(session, projection):
+        raise ValueError("strategy experiment authority is inconsistent")
+    if projection.current_state in _TERMINAL_FAMILY_STATES:
+        return JobHandlerResult(outcome="skipped", result_code="FAMILY_TERMINAL")
     if payload.operation == "evaluate_candidate" and experiment.status in {
         "BACKTEST_FAILED",
         "BACKTEST_PASSED",
@@ -733,6 +845,11 @@ async def _preflight_strategy_rnd_job(
         "PROMOTION_ELIGIBLE",
         "PROMOTED",
         "STALE_CHAMPION_BASELINE",
+    }:
+        return JobHandlerResult(outcome="skipped", result_code="CANDIDATE_ALREADY_EVALUATED")
+    if payload.operation == "evaluate_candidate" and projection.current_state not in {
+        "ADMITTED",
+        "BACKTEST_RUNNING",
     }:
         return JobHandlerResult(outcome="skipped", result_code="CANDIDATE_ALREADY_EVALUATED")
     if payload.operation in {"advance_shadow", "finalize_promotion"}:

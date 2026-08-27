@@ -543,6 +543,108 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/strategy-evolution": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Strategy Evolution */
+        get: operations["getStrategyEvolution"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/strategy-experiments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start Strategy Experiment */
+        post: operations["startStrategyExperiment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/strategy-experiments/{experiment_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Strategy Experiment */
+        get: operations["getStrategyExperiment"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/strategy-experiments/{experiment_id}/veto": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Veto Experiment */
+        post: operations["vetoStrategyExperiment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/strategy-registry/control": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Control Strategy Registry */
+        post: operations["controlStrategyRegistry"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/strategy-registry/rollback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rollback Strategy Registry */
+        post: operations["rollbackStrategyRegistry"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/system-status": {
         parameters: {
             query?: never;
@@ -611,6 +713,44 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** ActiveFamilyResponse */
+        ActiveFamilyResponse: {
+            /** Authority Hash */
+            authority_hash: string;
+            /** Candidate Count */
+            candidate_count: number;
+            /** Code Hash */
+            code_hash: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Cumulative Oos Trial Count */
+            cumulative_oos_trial_count: number;
+            /** Expected Mechanism */
+            expected_mechanism: string | null;
+            /**
+             * Family Id
+             * Format: uuid
+             */
+            family_id: string;
+            /** Hypothesis */
+            hypothesis: string | null;
+            /** Next Step */
+            next_step: string;
+            /** Projection Version */
+            projection_version: number;
+            /** Protocol Hash */
+            protocol_hash: string;
+            /** Search Axes */
+            search_axes: components["schemas"]["SearchAxisSummaryResponse"][];
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "PROPOSED" | "REJECTED" | "ADMITTED" | "BACKTEST_RUNNING" | "BACKTEST_FAILED" | "BACKTEST_PASSED" | "SHADOW_RUNNING" | "SHADOW_FAILED" | "EXPIRED" | "VETOED" | "PROMOTION_ELIGIBLE" | "PROMOTED" | "STALE_CHAMPION_BASELINE";
+        };
         /** @enum {string} */
         AgentRunStatus: "prepared" | "running" | "validated" | "audited" | "synthesized" | "completed" | "failed" | "abstained";
         /**
@@ -758,6 +898,31 @@ export interface components {
             /** Provider As Of */
             provider_as_of: string | null;
         };
+        /** ChampionStateResponse */
+        ChampionStateResponse: {
+            /** Auto Promotion Paused */
+            auto_promotion_paused: boolean;
+            /** Effective Session */
+            effective_session: string | null;
+            /** Event Sequence */
+            event_sequence: number;
+            /** Generation */
+            generation: number;
+            /**
+             * Live Execution Enabled
+             * @default false
+             * @constant
+             */
+            live_execution_enabled: false;
+            /** Pending Effective Session */
+            pending_effective_session: string | null;
+            /** Pending Transition */
+            pending_transition: ("PROMOTE" | "ROLLBACK") | null;
+            /** Registry Version */
+            registry_version: number;
+            /** Strategy Version */
+            strategy_version: string;
+        };
         /** ComparisonMetricResponse */
         ComparisonMetricResponse: {
             /** Reason */
@@ -769,6 +934,39 @@ export interface components {
             status: "known" | "unknown";
             /** Value */
             value: string | null;
+        };
+        /** ComparisonResponse */
+        ComparisonResponse: {
+            annualized_return: components["schemas"]["MetricPairResponse"];
+            /** Authority Hash */
+            authority_hash?: string | null;
+            /** Comparison Hash */
+            comparison_hash?: string | null;
+            /** Cost Policy Hash */
+            cost_policy_hash?: string | null;
+            /** Cumulative Oos Trial Count */
+            cumulative_oos_trial_count?: number | null;
+            /**
+             * Data Mode
+             * @enum {string}
+             */
+            data_mode: "point_in_time" | "unavailable";
+            double_cost_return: components["schemas"]["MetricPairResponse"];
+            /** Equal Weight Comparison Complete */
+            equal_weight_comparison_complete: boolean | null;
+            max_drawdown: components["schemas"]["MetricPairResponse"];
+            /** Protocol Hash */
+            protocol_hash?: string | null;
+            sharpe: components["schemas"]["MetricPairResponse"];
+            /** Spy Comparison Complete */
+            spy_comparison_complete: boolean | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "available" | "unavailable" | "partial";
+            /** Valid Oos Window Count */
+            valid_oos_window_count?: number | null;
         };
         CurrencyCode: string;
         /** DailyBriefEnvelope */
@@ -897,7 +1095,7 @@ export interface components {
          * @description Client-visible error codes defined by the API contract.
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "DATA_PARTIAL" | "DATA_STALE" | "BROKER_STALE" | "SOURCE_CONFLICT" | "CAPABILITY_EXPIRED" | "PROPOSAL_NOT_EXECUTABLE" | "ACCOUNT_TYPE_MISMATCH" | "APPROVAL_REQUIRED" | "RISK_REJECTED" | "DRAWDOWN_LOCKED" | "RECONCILIATION_REQUIRED" | "BUDGET_EXHAUSTED" | "PROVIDER_UNAVAILABLE" | "INTERNAL_ERROR";
+        ErrorCode: "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "DATA_PARTIAL" | "DATA_STALE" | "BROKER_STALE" | "SOURCE_CONFLICT" | "CAPABILITY_EXPIRED" | "PROPOSAL_NOT_EXECUTABLE" | "ACCOUNT_TYPE_MISMATCH" | "APPROVAL_REQUIRED" | "RISK_REJECTED" | "DRAWDOWN_LOCKED" | "RECONCILIATION_REQUIRED" | "BUDGET_EXHAUSTED" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "INTERNAL_ERROR";
         /** EvidenceCompletenessSummary */
         EvidenceCompletenessSummary: {
             /** Complete */
@@ -928,12 +1126,162 @@ export interface components {
             /** Source */
             source: string;
         };
+        /** EvolutionActionEnvelope */
+        EvolutionActionEnvelope: {
+            data: components["schemas"]["EvolutionActionResponse"];
+            meta: components["schemas"]["EvolutionSuccessMeta"];
+        };
+        /** EvolutionActionResponse */
+        EvolutionActionResponse: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "generate_family" | "veto_experiment" | "pause_auto_promotion" | "resume_auto_promotion" | "rollback_registry";
+            /** Generation */
+            generation: number;
+            /**
+             * Live Execution Enabled
+             * @default false
+             * @constant
+             */
+            live_execution_enabled: false;
+            /** Pending Effective Session */
+            pending_effective_session: string | null;
+            /** Reason Code */
+            reason_code: string;
+            /** Registry Version */
+            registry_version: number;
+            /** Resource Id */
+            resource_id: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "QUEUED" | "VETOED" | "PAUSED" | "EFFECTIVE" | "PENDING_BOUNDARY" | "PENDING_ORDERS" | "FAILED";
+        };
+        /** EvolutionSuccessMeta */
+        EvolutionSuccessMeta: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            request_id: string;
+            /**
+             * Schema Version
+             * @default 1
+             * @constant
+             */
+            schema_version: "1";
+        };
+        /** ExperimentDetailEnvelope */
+        ExperimentDetailEnvelope: {
+            data: components["schemas"]["ExperimentDetailResponse"];
+            meta: components["schemas"]["EvolutionSuccessMeta"];
+        };
+        /** ExperimentDetailResponse */
+        ExperimentDetailResponse: {
+            comparison: components["schemas"]["ComparisonResponse"];
+            /** Events */
+            events: components["schemas"]["ExperimentEventResponse"][];
+            experiment: components["schemas"]["ExperimentSummaryResponse"];
+            family: components["schemas"]["ActiveFamilyResponse"];
+            /** Gates */
+            gates: components["schemas"]["GateResultResponse"][];
+            /**
+             * Integrity Status
+             * @enum {string}
+             */
+            integrity_status: "verified" | "partial" | "stale";
+            /**
+             * Live Execution Enabled
+             * @default false
+             * @constant
+             */
+            live_execution_enabled: false;
+            shadow: components["schemas"]["ShadowProgressResponse"];
+            /** Write Block Reason */
+            write_block_reason: string | null;
+            /** Write Enabled */
+            write_enabled: boolean;
+        };
+        /** ExperimentEventResponse */
+        ExperimentEventResponse: {
+            /** Event Hash */
+            event_hash: string;
+            /** Event Type */
+            event_type: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Sequence */
+            sequence: number;
+        };
+        /** ExperimentSummaryResponse */
+        ExperimentSummaryResponse: {
+            /** Candidate Hash */
+            candidate_hash: string;
+            /** Candidate Ordinal */
+            candidate_ordinal: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Experiment Id
+             * Format: uuid
+             */
+            experiment_id: string;
+            /** Expression Hash */
+            expression_hash: string;
+            /**
+             * Family Id
+             * Format: uuid
+             */
+            family_id: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "PROPOSED" | "REJECTED" | "ADMITTED" | "BACKTEST_RUNNING" | "BACKTEST_FAILED" | "BACKTEST_PASSED" | "SHADOW_RUNNING" | "SHADOW_FAILED" | "EXPIRED" | "VETOED" | "PROMOTION_ELIGIBLE" | "PROMOTED" | "STALE_CHAMPION_BASELINE";
+            /** Strategy Version */
+            strategy_version: string;
+        };
         /** FailedJobSummary */
         FailedJobSummary: {
             /** Count */
             count: number;
             /** Retryable */
             retryable: components["schemas"]["RetryableJobSummary"][];
+        };
+        /** GateResultResponse */
+        GateResultResponse: {
+            /** Gate */
+            gate: string;
+            /** Observed */
+            observed: string[];
+            /** Reason Code */
+            reason_code: string;
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "historical" | "shadow" | "handover";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "PASS" | "FAIL" | "UNKNOWN" | "STALE";
+            /** Thresholds */
+            thresholds: string[];
         };
         /**
          * IntegrationConnectivityTestRequest
@@ -1166,6 +1514,15 @@ export interface components {
             /** Next Cursor */
             next_cursor: string | null;
             selected_series: components["schemas"]["SelectedMarketSeriesResponse"] | null;
+        };
+        /** MetricPairResponse */
+        MetricPairResponse: {
+            /** Challenger */
+            challenger: string | null;
+            /** Champion */
+            champion: string | null;
+            /** Delta */
+            delta: string | null;
         };
         /**
          * NexusErrorEnvelope
@@ -1995,6 +2352,42 @@ export interface components {
              */
             status: "ready" | "unready";
         };
+        /** RegistryControlRequest */
+        RegistryControlRequest: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "pause_auto_promotion" | "resume_auto_promotion";
+        };
+        /** RegistryEventResponse */
+        RegistryEventResponse: {
+            /** Champion Generation */
+            champion_generation: number;
+            /** Effective Session */
+            effective_session: string | null;
+            /** Event Hash */
+            event_hash: string;
+            /**
+             * Event Type
+             * @enum {string}
+             */
+            event_type: "GENESIS" | "PROMOTE" | "ROLLBACK" | "PAUSE" | "RESUME" | "VETO";
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Sequence */
+            sequence: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "effective" | "pending" | "recorded";
+            /** Target Strategy Version */
+            target_strategy_version: string;
+        };
         /** ResearchAdmissionEnvelope */
         ResearchAdmissionEnvelope: {
             data: components["schemas"]["ResearchAdmissionResponse"];
@@ -2296,6 +2689,24 @@ export interface components {
              */
             vote: "support" | "oppose" | "abstain";
         };
+        /** RollbackRequest */
+        RollbackRequest: {
+            /**
+             * Reason
+             * @enum {string}
+             */
+            reason: "USER_REQUESTED" | "PERFORMANCE_REGRESSION" | "DATA_QUALITY_CONCERN" | "OPERATIONAL_RISK";
+        };
+        /** SearchAxisSummaryResponse */
+        SearchAxisSummaryResponse: {
+            /**
+             * Axis
+             * @enum {string}
+             */
+            axis: "min_adv20_usd" | "min_close" | "target_weight" | "ranking_feature" | "positive_return_filter_enabled";
+            /** Candidate Value Count */
+            candidate_value_count: number;
+        };
         /**
          * SelectedMarketSeriesResponse
          * @description At most one repository-selected historical series in a market page.
@@ -2572,6 +2983,30 @@ export interface components {
              */
             variant: "hold_current" | "minimum_change" | "strategy_target";
         };
+        /** ShadowProgressResponse */
+        ShadowProgressResponse: {
+            /** After Cost Excess Return */
+            after_cost_excess_return: string | null;
+            /** Authority Hash */
+            authority_hash?: string | null;
+            /** Checkpoints Completed */
+            checkpoints_completed: (5 | 21 | 63)[];
+            /** Completed Sessions */
+            completed_sessions: number;
+            /** Data Complete */
+            data_complete: boolean;
+            /** Drawdown Difference */
+            drawdown_difference: string | null;
+            /** Full Fill Count */
+            full_fill_count: number;
+            /** Hard Risk Violation Count */
+            hard_risk_violation_count: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "not_started" | "running" | "failed" | "finalized" | "stale";
+        };
         /** ShadowSafetyResponse */
         ShadowSafetyResponse: {
             /**
@@ -2671,6 +3106,48 @@ export interface components {
         };
         /** @enum {string} */
         SnapshotStatus: "READY" | "PARTIAL" | "STALE" | "RECONCILIATION_REQUIRED";
+        /**
+         * StartExperimentRequest
+         * @description The browser cannot choose a strategy, search axis, model, or data source.
+         */
+        StartExperimentRequest: Record<string, never>;
+        /** StrategyEvolutionData */
+        StrategyEvolutionData: {
+            active_family: components["schemas"]["ActiveFamilyResponse"] | null;
+            champion: components["schemas"]["ChampionStateResponse"];
+            /** Cooldown Until */
+            cooldown_until: string | null;
+            /** Experiment Start Enabled */
+            experiment_start_enabled: boolean;
+            /** Experiment Start Reason */
+            experiment_start_reason: string;
+            /** Experiments */
+            experiments: components["schemas"]["ExperimentSummaryResponse"][];
+            /**
+             * Live Execution Enabled
+             * @default false
+             * @constant
+             */
+            live_execution_enabled: false;
+            /** Next Cursor */
+            next_cursor: string | null;
+            /** Registry Events */
+            registry_events: components["schemas"]["RegistryEventResponse"][];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "empty" | "ready" | "partial" | "stale";
+            /** Write Block Reason */
+            write_block_reason: string | null;
+            /** Write Enabled */
+            write_enabled: boolean;
+        };
+        /** StrategyEvolutionEnvelope */
+        StrategyEvolutionEnvelope: {
+            data: components["schemas"]["StrategyEvolutionData"];
+            meta: components["schemas"]["EvolutionSuccessMeta"];
+        };
         /** StrategyListEnvelope */
         StrategyListEnvelope: {
             /** Data */
@@ -2735,6 +3212,14 @@ export interface components {
         };
         /** @enum {string} */
         SyncRunStatus: "ACTIVE" | "READY" | "PARTIAL" | "STALE" | "RECONCILIATION_REQUIRED" | "FAILED";
+        /** VetoExperimentRequest */
+        VetoExperimentRequest: {
+            /**
+             * Reason
+             * @enum {string}
+             */
+            reason: "USER_VETO" | "EVIDENCE_CONCERN" | "OPERATIONAL_RISK";
+        };
         /** WatchlistMembershipEnvelope */
         WatchlistMembershipEnvelope: {
             data: components["schemas"]["WatchlistMembershipResponse"];
@@ -4296,7 +4781,7 @@ export interface operations {
             query?: {
                 cursor?: string | null;
                 from?: string | null;
-                kind?: ("quality" | "risk" | "agent_cost" | "job" | "reconciliation" | "audit") | null;
+                kind?: ("quality" | "risk" | "agent_cost" | "job" | "reconciliation" | "evolution" | "audit") | null;
                 limit?: number;
                 to?: string | null;
             };
@@ -4375,7 +4860,7 @@ export interface operations {
         parameters: {
             query: {
                 from: string;
-                kind?: ("quality" | "risk" | "agent_cost" | "job" | "reconciliation" | "audit") | null;
+                kind?: ("quality" | "risk" | "agent_cost" | "job" | "reconciliation" | "evolution" | "audit") | null;
                 to: string;
             };
             header?: never;
@@ -4550,6 +5035,383 @@ export interface operations {
             };
             /** @description Unauthorized */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getStrategyEvolution: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StrategyEvolutionEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    startStrategyExperiment: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["StartExperimentRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    ETag?: string;
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvolutionActionEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getStrategyExperiment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                experiment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentDetailEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    vetoStrategyExperiment: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
+            };
+            path: {
+                experiment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VetoExperimentRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    ETag?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvolutionActionEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    controlStrategyRegistry: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RegistryControlRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    ETag?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvolutionActionEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rollbackStrategyRegistry: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RollbackRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    ETag?: string;
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvolutionActionEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

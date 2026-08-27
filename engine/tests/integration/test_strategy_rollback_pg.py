@@ -11,6 +11,7 @@ from nexus.domain.ids import new_uuid7
 from nexus.evolution.registry import (
     activate_pending_transition,
     promote_internal_paper_champion,
+    registry_event_content_hash,
     request_registry_rollback,
 )
 from nexus.persistence.models.evolution import (
@@ -131,6 +132,7 @@ async def test_pending_transition_waits_for_nonterminal_internal_paper_orders(
         assert head is not None
         prior = await session.get(StrategyRegistryEventRecord, head.last_event_id)
         assert prior is not None
+        payload = {"schema_version": "pending_order_guard_fixture_v1"}
         event = StrategyRegistryEventRecord(
             id=new_uuid7(),
             channel="internal_paper",
@@ -145,9 +147,22 @@ async def test_pending_transition_waits_for_nonterminal_internal_paper_orders(
             promotion_decision_id=None,
             champion_generation=head.active_generation + 1,
             effective_session=EXECUTION_SESSION,
-            payload={"schema_version": "pending_order_guard_fixture_v1"},
+            payload=payload,
             previous_hash=prior.event_hash,
-            event_hash="e" * 64,
+            event_hash=registry_event_content_hash(
+                sequence=head.event_sequence + 1,
+                event_type="PROMOTE",
+                idempotency_key="pending-order-guard-fixture",
+                actor_kind="service",
+                occurred_at=now,
+                from_definition_id=head.active_definition_id,
+                to_definition_id=pair.challenger_definition_id,
+                promotion_decision_id=None,
+                champion_generation=head.active_generation + 1,
+                effective_session=EXECUTION_SESSION,
+                payload=payload,
+                previous_hash=prior.event_hash,
+            ),
             created_at=now,
         )
         session.add(event)

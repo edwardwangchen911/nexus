@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Literal
@@ -15,6 +16,7 @@ from nexus.audit.service import append_audit_event
 from nexus.backtest.canonical import canonical_decimal
 from nexus.domain.ids import new_uuid7
 from nexus.evolution.handover import HandoverEvaluationV1, evaluate_handover
+from nexus.evolution.repository import experiment_projection_is_valid
 from nexus.evolution.shadow.authority import (
     StrategyShadowAuthorityError,
     load_balanced_paper_baseline,
@@ -59,6 +61,7 @@ RegistryTransitionStatus = Literal[
     "WAITING_HANDOVER",
     "FAILED",
     "NO_PENDING_TRANSITION",
+    "VETOED",
 ]
 
 
@@ -265,6 +268,8 @@ async def promote_internal_paper_champion(
     )
     if experiment is None or family is None or projection is None:
         raise RegistryServiceError("PROMOTION_AUTHORITY_INCOMPLETE")
+    if not await experiment_projection_is_valid(session, projection):
+        raise RegistryServiceError("STRATEGY_EXPERIMENT_CHAIN_INVALID")
     replay = await _registry_replay(
         session,
         head=head,
@@ -405,6 +410,131 @@ async def resume_auto_promotion(
         idempotency_key=idempotency_key,
         now=now,
     )
+
+
+async def veto_strategy_experiment(
+    session: AsyncSession,
+    *,
+    experiment_id: UUID,
+    expected_generation: int,
+    expected_version: int,
+    idempotency_key: str,
+    reason_code: str,
+    now: datetime,
+) -> RegistryTransitionResultV1:
+    """Append a user veto before promotion without changing the champion."""
+    now = _utc(now)
+    _idempotency_key(idempotency_key)
+    if reason_code not in {"USER_VETO", "EVIDENCE_CONCERN", "OPERATIONAL_RISK"}:
+        raise RegistryServiceError("VETO_REASON_INVALID")
+    head = await _lock_head(session)
+    experiment = await session.scalar(
+        select(StrategyExperimentRecord)
+        .where(StrategyExperimentRecord.id == experiment_id)
+        .with_for_update()
+    )
+    family = (
+        None
+        if experiment is None
+        else await session.scalar(
+            select(StrategyExperimentFamilyRecord)
+            .where(StrategyExperimentFamilyRecord.id == experiment.family_id)
+            .with_for_update()
+        )
+    )
+    projection = (
+        None
+        if family is None
+        else await session.scalar(
+            select(StrategyExperimentStateProjectionRecord)
+            .where(StrategyExperimentStateProjectionRecord.family_id == family.id)
+            .with_for_update()
+        )
+    )
+    if experiment is None or family is None or projection is None:
+        raise RegistryServiceError("EXPERIMENT_NOT_FOUND")
+    if not await experiment_projection_is_valid(session, projection):
+        raise RegistryServiceError("STRATEGY_EXPERIMENT_CHAIN_INVALID")
+    existing = await session.scalar(
+        select(StrategyRegistryEventRecord).where(
+            StrategyRegistryEventRecord.idempotency_key == idempotency_key
+        )
+    )
+    if existing is not None:
+        if (
+            existing.event_type != "VETO"
+            or existing.payload.get("experiment_id") != str(experiment_id)
+            or existing.payload.get("reason_code") != reason_code
+            or projection.current_state != "VETOED"
+        ):
+            raise RegistryServiceError("REGISTRY_IDEMPOTENCY_CONFLICT")
+        return _result(
+            head,
+            status="VETOED",
+            reason_code="EXPERIMENT_VETOED",
+            registry_event_id=existing.id,
+        )
+    _exact_cas(head, expected_generation=expected_generation, expected_version=expected_version)
+    if family.champion_generation != head.active_generation:
+        raise RegistryServiceError("STALE_CHAMPION_BASELINE")
+    if head.pending_event_id is not None:
+        raise RegistryServiceError("REGISTRY_TRANSITION_PENDING")
+    if projection.current_state not in {
+        "ADMITTED",
+        "BACKTEST_RUNNING",
+        "BACKTEST_PASSED",
+        "SHADOW_RUNNING",
+        "PROMOTION_ELIGIBLE",
+    }:
+        raise RegistryServiceError("VETO_STATE_INVALID")
+    event = await _append_registry_event(
+        session,
+        head=head,
+        event_type="VETO",
+        idempotency_key=idempotency_key,
+        actor_kind="user",
+        from_definition_id=head.active_definition_id,
+        to_definition_id=head.active_definition_id,
+        promotion_decision_id=None,
+        effective_session=None,
+        now=now,
+        payload={
+            "schema_version": "strategy_registry_veto_payload_v1",
+            "experiment_id": str(experiment.id),
+            "family_id": str(family.id),
+            "reason_code": reason_code,
+        },
+    )
+    family_event = await append_strategy_experiment_event(
+        session,
+        family_id=family.id,
+        event_type="VETOED",
+        idempotency_key=f"strategy-veto-{event.id}",
+        occurred_at=now,
+        payload={
+            "schema_version": "strategy_experiment_vetoed_payload_v1",
+            "registry_event_id": str(event.id),
+            "reason_code": reason_code,
+        },
+    )
+    projection.current_state = "VETOED"
+    projection.event_sequence = family_event.sequence
+    projection.version += 1
+    projection.updated_at = now
+    head.last_event_id = event.id
+    head.event_sequence = event.sequence
+    head.version += 1
+    head.updated_at = now
+    await _append_registry_audit_and_outbox(
+        session,
+        action="strategy.experiment.vetoed",
+        event=event,
+        head=head,
+        status="VETOED",
+        now=now,
+    )
+    await session.flush()
+    return _result(head, status="VETOED", reason_code="EXPERIMENT_VETOED")
 
 
 async def request_registry_rollback(
@@ -696,6 +826,15 @@ async def _lock_head(session: AsyncSession) -> StrategyRegistryHeadRecord:
     )
     if head is None:
         raise RegistryServiceError("STRATEGY_REGISTRY_INCOMPLETE")
+    events = tuple(
+        await session.scalars(
+            select(StrategyRegistryEventRecord)
+            .where(StrategyRegistryEventRecord.channel == "internal_paper")
+            .order_by(StrategyRegistryEventRecord.sequence)
+        )
+    )
+    if not registry_chain_is_valid(head, events):
+        raise RegistryServiceError("STRATEGY_REGISTRY_CHAIN_INVALID")
     return head
 
 
@@ -746,11 +885,65 @@ def registry_event_content_hash(
     )
 
 
+def registry_chain_is_valid(
+    head: StrategyRegistryHeadRecord,
+    events: Sequence[StrategyRegistryEventRecord],
+) -> bool:
+    """Verify the complete immutable chain and its mutable head projection."""
+    if not events or events[-1].id != head.last_event_id:
+        return False
+    prior_hash = "0" * 64
+    for index, event in enumerate(events, start=1):
+        if event.sequence != index or event.previous_hash != prior_hash:
+            return False
+        if event.event_type == "GENESIS":
+            expected = content_hash(
+                {
+                    "channel": event.channel,
+                    "schema_version": event.schema_version,
+                    "sequence": event.sequence,
+                    "event_type": event.event_type,
+                    "idempotency_key": event.idempotency_key,
+                    "actor_kind": event.actor_kind,
+                    "occurred_at": _utc(event.occurred_at).isoformat().replace("+00:00", "Z"),
+                    "from_definition_id": None,
+                    "to_definition_id": str(event.to_definition_id),
+                    "champion_generation": event.champion_generation,
+                    "effective_session": None,
+                    "payload": event.payload,
+                    "previous_hash": event.previous_hash,
+                }
+            )
+        else:
+            if event.from_definition_id is None:
+                return False
+            expected = registry_event_content_hash(
+                sequence=event.sequence,
+                event_type=event.event_type,
+                idempotency_key=event.idempotency_key,
+                actor_kind=event.actor_kind,
+                occurred_at=event.occurred_at,
+                from_definition_id=event.from_definition_id,
+                to_definition_id=event.to_definition_id,
+                promotion_decision_id=event.promotion_decision_id,
+                champion_generation=event.champion_generation,
+                effective_session=event.effective_session,
+                payload=event.payload,
+                previous_hash=event.previous_hash,
+            )
+        if expected != event.event_hash:
+            return False
+        prior_hash = event.event_hash
+    return head.event_sequence == events[-1].sequence and (head.pending_event_id is None) == (
+        head.pending_effective_session is None
+    )
+
+
 async def _append_registry_event(
     session: AsyncSession,
     *,
     head: StrategyRegistryHeadRecord,
-    event_type: Literal["PROMOTE", "ROLLBACK", "PAUSE", "RESUME"],
+    event_type: Literal["PROMOTE", "ROLLBACK", "PAUSE", "RESUME", "VETO"],
     idempotency_key: str,
     actor_kind: Literal["service", "user"],
     from_definition_id: UUID,
@@ -992,6 +1185,8 @@ async def _mark_promoted_family(
     )
     if experiment is None or projection is None:
         raise RegistryServiceError("PROMOTION_FAMILY_MISSING")
+    if not await experiment_projection_is_valid(session, projection):
+        raise RegistryServiceError("STRATEGY_EXPERIMENT_CHAIN_INVALID")
     family_event = await append_strategy_experiment_event(
         session,
         family_id=experiment.family_id,
