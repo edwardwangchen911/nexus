@@ -93,6 +93,9 @@ export const detail: components["schemas"]["ExperimentDetailResponse"] = {
   shadow: {
     status: "running",
     completed_sessions: 21,
+    evaluation_sessions: 63,
+    grace_sessions: 5,
+    grace_elapsed_sessions: 0,
     checkpoints_completed: [5, 21],
     full_fill_count: 24,
     after_cost_excess_return: "0.012",

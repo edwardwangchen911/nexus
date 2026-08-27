@@ -26,7 +26,9 @@ for (const viewport of releaseViewports) {
     await expect(page.getByRole("heading", { name: "Strategy Shadow" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "晋级解释" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "冠军历史" })).toBeVisible();
-    await expect(page.getByText("21 / 68 sessions")).toBeVisible();
+    await expect(page.getByText("21 / 63 sessions")).toBeVisible();
+    await expect(page.getByText("宽限期 5 sessions")).toBeVisible();
+    await expect(page.getByText("已等待 0 sessions")).toBeVisible();
     await expect(page.getByRole("button", { name: /下单|交易|买入|卖出|券商/ })).toHaveCount(0);
 
     const comparison = page.getByRole("region", { name: "挑战者与冠军比较表" });
@@ -124,12 +126,19 @@ test("pause, resume, veto and rollback submit only fixed commands", async ({ pag
   const rollback = page.getByRole("button", { name: "回滚上一个冠军" });
   await rollback.click();
   const dialog = page.getByRole("dialog", { name: "确认回滚策略冠军" });
-  await expect(dialog.getByRole("button", { name: "确认回滚" })).toBeFocused();
+  const cancel = dialog.getByRole("button", { name: "取消" });
+  const confirm = dialog.getByRole("button", { name: "确认回滚" });
+  await expect(confirm).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(cancel).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(confirm).toBeFocused();
   await dialog.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(rollback).toBeFocused();
   await rollback.click();
   await page.getByRole("button", { name: "确认回滚" }).click();
+  await expect(rollback).toBeFocused();
   await expect(page.getByText("回滚已接受，正在等待确定性边界生效。")).toBeVisible();
 
   expect(actions.map(({ body }) => body)).toEqual([

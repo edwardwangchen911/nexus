@@ -5593,7 +5593,7 @@ export const runtimeContractSchemas = {
         "type": "array"
       },
       "completed_sessions": {
-        "maximum": 68,
+        "maximum": 63,
         "minimum": 0,
         "title": "Completed Sessions",
         "type": "integer"
@@ -5613,9 +5613,27 @@ export const runtimeContractSchemas = {
         ],
         "title": "Drawdown Difference"
       },
+      "evaluation_sessions": {
+        "maximum": 63,
+        "minimum": 1,
+        "title": "Evaluation Sessions",
+        "type": "integer"
+      },
       "full_fill_count": {
         "minimum": 0,
         "title": "Full Fill Count",
+        "type": "integer"
+      },
+      "grace_elapsed_sessions": {
+        "maximum": 5,
+        "minimum": 0,
+        "title": "Grace Elapsed Sessions",
+        "type": "integer"
+      },
+      "grace_sessions": {
+        "maximum": 5,
+        "minimum": 0,
+        "title": "Grace Sessions",
         "type": "integer"
       },
       "hard_risk_violation_count": {
@@ -5638,6 +5656,9 @@ export const runtimeContractSchemas = {
     "required": [
       "status",
       "completed_sessions",
+      "evaluation_sessions",
+      "grace_sessions",
+      "grace_elapsed_sessions",
       "checkpoints_completed",
       "full_fill_count",
       "after_cost_excess_return",

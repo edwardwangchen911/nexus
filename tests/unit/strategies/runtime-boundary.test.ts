@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { sanitizeEngineResponse } from "../../../app/lib/engine/client";
+import { detailEnvelope, experimentId } from "../strategy-evolution/fixtures";
 
 const meta = {
   request_id: "0198f7a0-1111-7777-8111-111111111114",
@@ -29,6 +30,38 @@ function json(data: unknown): Response {
 }
 
 describe("strategy runtime boundary", () => {
+  it("requires separate bounded Shadow evaluation and grace progress", async () => {
+    const accepted = await sanitizeEngineResponse(
+      Response.json(detailEnvelope()),
+      undefined,
+      `/internal/v1/strategy-experiments/${experimentId}`,
+      "GET",
+    );
+    expect(accepted.status).toBe(200);
+
+    for (const field of ["evaluation_sessions", "grace_sessions", "grace_elapsed_sessions"] as const) {
+      const envelope = detailEnvelope();
+      delete (envelope.data.shadow as Partial<typeof envelope.data.shadow>)[field];
+      const rejected = await sanitizeEngineResponse(
+        Response.json(envelope),
+        undefined,
+        `/internal/v1/strategy-experiments/${experimentId}`,
+        "GET",
+      );
+      expect(rejected.status).toBe(500);
+    }
+
+    const overflow = detailEnvelope();
+    overflow.data.shadow.completed_sessions = 64;
+    const rejected = await sanitizeEngineResponse(
+      Response.json(overflow),
+      undefined,
+      `/internal/v1/strategy-experiments/${experimentId}`,
+      "GET",
+    );
+    expect(rejected.status).toBe(500);
+  });
+
   it("accepts only one locked, Agent-free baseline champion", async () => {
     const response = await sanitizeEngineResponse(
       json([baseline]),

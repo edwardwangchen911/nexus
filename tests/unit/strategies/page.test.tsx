@@ -62,7 +62,9 @@ describe("strategy evolution workbench", () => {
     expect(screen.getByRole("heading", { name: "证据比较" })).toBeVisible();
     expect(screen.getByText("SPY 比较完整")).toBeVisible();
     expect(screen.getByText("等权白名单比较完整")).toBeVisible();
-    expect(screen.getByText("21 / 68 sessions")).toBeVisible();
+    expect(screen.getByText("21 / 63 sessions")).toBeVisible();
+    expect(screen.getByText("宽限期 5 sessions")).toBeVisible();
+    expect(screen.getByText("已等待 0 sessions")).toBeVisible();
     expect(screen.getByText("检查点 5 · 已完成")).toBeVisible();
     expect(screen.getByText("检查点 21 · 已完成")).toBeVisible();
     expect(screen.getByText("检查点 63 · 等待")).toBeVisible();
@@ -80,16 +82,25 @@ describe("strategy evolution workbench", () => {
     }
   });
 
-  it("uses an accessible, fixed-copy rollback confirmation", () => {
+  it("traps and restores focus in the fixed-copy rollback confirmation", async () => {
     renderPanel("ready");
-    fireEvent.click(screen.getByRole("button", { name: "回滚上一个冠军" }));
+    const rollback = screen.getByRole("button", { name: "回滚上一个冠军" });
+    fireEvent.click(rollback);
 
     const dialog = screen.getByRole("dialog", { name: "确认回滚策略冠军" });
+    const cancel = screen.getByRole("button", { name: "取消" });
+    const confirm = screen.getByRole("button", { name: "确认回滚" });
     expect(dialog).toHaveTextContent("只影响未来内部模拟决策");
     expect(dialog).toHaveTextContent("不会撤销历史成交");
     expect(dialog).toHaveTextContent("不会创建任何真实订单");
-    fireEvent.click(screen.getByRole("button", { name: "确认回滚" }));
+    await waitFor(() => expect(confirm).toHaveFocus());
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(confirm).toHaveFocus();
+    fireEvent.click(confirm);
     expect(callbacks.onRollbackRegistry).toHaveBeenCalledOnce();
+    await waitFor(() => expect(rollback).toHaveFocus());
   });
 
   it("focuses the safe error summary and exposes a polite success status", async () => {
@@ -161,5 +172,56 @@ describe("strategy evolution workbench", () => {
     for (const button of screen.getAllByRole("button")) {
       if (button.getAttribute("aria-label") !== "刷新策略进化证据") expect(button).toBeDisabled();
     }
+  });
+
+  it.each([
+    ["missing overview ETag", null, '"g1-v1"'],
+    ["missing detail ETag", '"g1-v1"', null],
+    ["mismatched detail ETag", '"g1-v1"', '"g1-v2"'],
+  ])("fails closed and clears detail evidence for %s", async (_case, overviewEtag, detailEtag) => {
+    const overviewHeaders: HeadersInit = overviewEtag === null ? {} : { etag: overviewEtag };
+    const detailHeaders: HeadersInit = detailEtag === null ? {} : { etag: detailEtag };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(overviewEnvelope()), { status: 200, headers: overviewHeaders }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detailEnvelope()), { status: 200, headers: detailHeaders }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<StrategiesPage />);
+
+    expect(await screen.findByText("数据不完整")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "baseline_v1" })).toBeVisible();
+    expect(screen.getAllByText("当前没有可验证证据；不使用 0 或浏览器默认值代替。")).toHaveLength(3);
+    expect(screen.queryByText("0.142")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "暂停自动晋级" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "回滚上一个冠军" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "否决本次晋级" })).not.toBeInTheDocument();
+  });
+
+  it.each(["identity", "etag"] as const)("fails closed on manual experiment-selection %s mismatch", async (mismatch) => {
+    const secondExperiment = {
+      ...structuredClone(overview.experiments[0]),
+      experiment_id: "0198d500-1000-7000-8000-000000002299",
+      candidate_ordinal: 2,
+      strategy_version: "challenger_liquidity_v2",
+    };
+    const nextOverview = structuredClone(overview);
+    nextOverview.experiments.push(secondExperiment);
+    const selectedDetail = structuredClone(detail);
+    selectedDetail.experiment = mismatch === "identity"
+      ? structuredClone(detail.experiment)
+      : structuredClone(secondExperiment);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...overviewEnvelope(), data: nextOverview }), { status: 200, headers: { etag: '"g1-v1"' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detailEnvelope()), { status: 200, headers: { etag: '"g1-v1"' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...detailEnvelope(), data: selectedDetail }), {
+        status: 200,
+        headers: { etag: mismatch === "etag" ? '"g1-v2"' : '"g1-v1"' },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<StrategiesPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "2 · challenger_liquidity_v2" }));
+    expect(await screen.findByText("数据不完整")).toBeVisible();
+    expect(screen.getAllByText("当前没有可验证证据；不使用 0 或浏览器默认值代替。")).toHaveLength(3);
+    expect(screen.queryByRole("button", { name: "否决本次晋级" })).not.toBeInTheDocument();
   });
 });

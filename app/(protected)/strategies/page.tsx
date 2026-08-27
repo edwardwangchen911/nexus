@@ -79,6 +79,16 @@ export default function StrategiesPage(): React.ReactElement {
     setState("forbidden");
   }, []);
 
+  const invalidateDetailEvidence = useCallback((message: string | null = null) => {
+    setDetail(null);
+    setEtag(null);
+    setState("partial");
+    if (message !== null) setErrorMessage(message);
+    if (evidenceRef.current) {
+      evidenceRef.current = { ...evidenceRef.current, detail: null, etag: null };
+    }
+  }, []);
+
   const refresh = useCallback(async (keepFeedback = false) => {
     if (!keepFeedback) {
       setErrorMessage(null);
@@ -102,7 +112,7 @@ export default function StrategiesPage(): React.ReactElement {
         ? selectedExperimentId
         : nextOverview.experiments[0]?.experiment_id ?? null;
       let nextDetail: ExperimentDetail | null = null;
-      let detailAuthorityBound = true;
+      let detailAuthorityBound = nextEtag !== null;
       if (preferredExperiment) {
         const detailResponse = await fetch(`/api/v1/strategy-evolution/experiments/${preferredExperiment}`, { headers: { accept: "application/json" } });
         if (detailResponse.status === 401 || detailResponse.status === 403) {
@@ -110,21 +120,25 @@ export default function StrategiesPage(): React.ReactElement {
           return;
         }
         if (detailResponse.ok) {
-          nextDetail = (await detailResponse.json() as ExperimentDetailEnvelope).data;
+          const candidateDetail = (await detailResponse.json() as ExperimentDetailEnvelope).data;
           const detailEtag = detailResponse.headers.get("etag");
-          detailAuthorityBound = detailEtag === null || detailEtag === nextEtag;
+          detailAuthorityBound = nextEtag !== null
+            && detailEtag !== null
+            && detailEtag === nextEtag
+            && candidateDetail.experiment.experiment_id === preferredExperiment;
+          nextDetail = detailAuthorityBound ? candidateDetail : null;
         } else {
           detailAuthorityBound = false;
         }
       }
+      const boundEtag = detailAuthorityBound ? nextEtag : null;
       authorizedRef.current = true;
-      evidenceRef.current = { overview: nextOverview, detail: nextDetail, etag: nextEtag };
+      evidenceRef.current = { overview: nextOverview, detail: nextDetail, etag: boundEtag };
       setOverview(nextOverview);
       setDetail(nextDetail);
-      setEtag(nextEtag);
+      setEtag(boundEtag);
       selectedExperimentIdRef.current = preferredExperiment;
-      const writeAuthorityBound = !nextOverview.write_enabled || nextEtag !== null;
-      setState(!detailAuthorityBound || !writeAuthorityBound ? "partial" : nextOverview.status === "empty" ? "empty" : nextOverview.status);
+      setState(!detailAuthorityBound ? "partial" : nextOverview.status === "empty" ? "empty" : nextOverview.status);
     } catch {
       const fallback = authorizedRef.current ? evidenceRef.current : null;
       setOverview(fallback?.overview ?? null);
@@ -142,6 +156,14 @@ export default function StrategiesPage(): React.ReactElement {
   const selectExperiment = useCallback(async (experimentId: string) => {
     selectedExperimentIdRef.current = experimentId;
     setErrorMessage(null);
+    if (
+      etag === null
+      || evidenceRef.current === null
+      || !evidenceRef.current.overview.experiments.some((item) => item.experiment_id === experimentId)
+    ) {
+      invalidateDetailEvidence("无法将该实验绑定到当前策略权威。");
+      return;
+    }
     try {
       const response = await fetch(`/api/v1/strategy-evolution/experiments/${experimentId}`, { headers: { accept: "application/json" } });
       if (response.status === 401 || response.status === 403) {
@@ -149,16 +171,25 @@ export default function StrategiesPage(): React.ReactElement {
         return;
       }
       if (!response.ok) {
-        setErrorMessage("无法读取该实验的安全证据。");
+        invalidateDetailEvidence("无法读取该实验的安全证据。");
         return;
       }
       const nextDetail = (await response.json() as ExperimentDetailEnvelope).data;
+      const detailEtag = response.headers.get("etag");
+      if (
+        detailEtag === null
+        || detailEtag !== etag
+        || nextDetail.experiment.experiment_id !== experimentId
+      ) {
+        invalidateDetailEvidence("无法将该实验绑定到当前策略权威。");
+        return;
+      }
       setDetail(nextDetail);
       if (evidenceRef.current) evidenceRef.current = { ...evidenceRef.current, detail: nextDetail };
     } catch {
-      setErrorMessage("无法读取该实验的安全证据。");
+      invalidateDetailEvidence("无法读取该实验的安全证据。");
     }
-  }, [revokeEvidence]);
+  }, [etag, invalidateDetailEvidence, revokeEvidence]);
 
   const executeAction = useCallback(async (command: EvolutionCommand) => {
     if (state !== "ready") return;
@@ -273,7 +304,9 @@ export function StrategiesPanel(props: Props): React.ReactElement {
   const [rollbackOpen, setRollbackOpen] = useState(false);
   const errorRef = useRef<HTMLElement>(null);
   const rollbackTriggerRef = useRef<HTMLButtonElement>(null);
+  const rollbackDialogRef = useRef<HTMLDialogElement>(null);
   const rollbackConfirmRef = useRef<HTMLButtonElement>(null);
+  const restoreRollbackFocusAfterActionRef = useRef(false);
   const hasEvidence = overview !== null && ["ready", "partial", "stale"].includes(state);
   const canWrite = state === "ready" && Boolean(etag) && overview?.write_enabled === true && busyAction === null && !unknownResult;
 
@@ -281,12 +314,53 @@ export function StrategiesPanel(props: Props): React.ReactElement {
     if (errorMessage) errorRef.current?.focus();
   }, [errorMessage]);
   useEffect(() => {
-    if (rollbackOpen) rollbackConfirmRef.current?.focus();
+    if (!rollbackOpen) return;
+    const dialog = rollbackDialogRef.current;
+    if (dialog !== null && !dialog.open) {
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    }
+    rollbackConfirmRef.current?.focus();
   }, [rollbackOpen]);
+  useEffect(() => {
+    if (
+      restoreRollbackFocusAfterActionRef.current
+      && !rollbackOpen
+      && busyAction === null
+    ) {
+      restoreRollbackFocusAfterActionRef.current = false;
+      globalThis.queueMicrotask(() => rollbackTriggerRef.current?.focus());
+    }
+  }, [busyAction, rollbackOpen]);
 
-  function closeRollback(): void {
+  function closeRollback(restoreAfterAction = false): void {
+    const dialog = rollbackDialogRef.current;
+    if (dialog?.open) {
+      if (typeof dialog.close === "function") dialog.close();
+      else dialog.removeAttribute("open");
+    }
+    restoreRollbackFocusAfterActionRef.current = restoreAfterAction;
     setRollbackOpen(false);
-    globalThis.setTimeout(() => rollbackTriggerRef.current?.focus(), 0);
+    if (!restoreAfterAction) {
+      globalThis.queueMicrotask(() => rollbackTriggerRef.current?.focus());
+    }
+  }
+
+  function onRollbackDialogKeyDown(event: React.KeyboardEvent<HTMLDialogElement>): void {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeRollback();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const controls = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not([disabled])")];
+    if (controls.length === 0) return;
+    const current = controls.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.shiftKey
+      ? (current <= 0 ? controls.length - 1 : current - 1)
+      : (current < 0 || current === controls.length - 1 ? 0 : current + 1);
+    event.preventDefault();
+    controls[next].focus();
   }
 
   return (
@@ -341,18 +415,18 @@ export function StrategiesPanel(props: Props): React.ReactElement {
       {rollbackOpen ? (
         <div className="confirmation-dialog">
           <dialog
-            open
+            ref={rollbackDialogRef}
             aria-modal="true"
             aria-labelledby="rollback-dialog-title"
             onCancel={(event) => { event.preventDefault(); closeRollback(); }}
-            onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); closeRollback(); } }}
+            onKeyDown={onRollbackDialogKeyDown}
           >
             <h3 id="rollback-dialog-title">确认回滚策略冠军</h3>
             <p>回滚只影响未来内部模拟决策，不会撤销历史成交，也不会创建任何真实订单。</p>
             <p className="inline-notice">确定性注册表会选择上一个兼容且已验证的冠军；页面不能指定任意版本。</p>
             <div className="confirmation-dialog__actions">
-              <button className="button button--quiet" type="button" onClick={closeRollback}>取消</button>
-              <button ref={rollbackConfirmRef} className="button button--danger" type="button" onClick={() => { setRollbackOpen(false); onRollbackRegistry(); }}>确认回滚</button>
+              <button className="button button--quiet" type="button" onClick={() => closeRollback()}>取消</button>
+              <button ref={rollbackConfirmRef} className="button button--danger" type="button" onClick={() => { closeRollback(true); onRollbackRegistry(); }}>确认回滚</button>
             </div>
           </dialog>
         </div>
@@ -463,7 +537,8 @@ function ShadowSection({ detail }: { detail: ExperimentDetail | null }): React.R
   return (
     <section className="evolution-section evolution-shadow" aria-labelledby="shadow-title">
       <header className="evolution-section__heading"><div><p className="eyebrow">04 / FORWARD PAPER EVIDENCE</p><h2 id="shadow-title">Strategy Shadow</h2></div><span className="state-chip">{shadow.status}</span></header>
-      <div className="evolution-progress" aria-label={`Shadow 已完成 ${shadow.completed_sessions} 个 session`}><div style={{ inlineSize: `${Math.min(100, shadow.completed_sessions / 68 * 100)}%` }} /><span>{shadow.completed_sessions} / 68 sessions</span></div>
+      <div className="evolution-progress" aria-label={`Shadow 评估已完成 ${shadow.completed_sessions} / ${shadow.evaluation_sessions} 个 session`}><div style={{ inlineSize: `${Math.min(100, shadow.completed_sessions / shadow.evaluation_sessions * 100)}%` }} /><span>{shadow.completed_sessions} / {shadow.evaluation_sessions} sessions</span></div>
+      <div className="evolution-comparison-badges" aria-label="Shadow 宽限进度"><span className="mode-badge">宽限期 {shadow.grace_sessions} sessions</span><span className="mode-badge">已等待 {shadow.grace_elapsed_sessions} sessions</span></div>
       <ol className="evolution-checkpoints" aria-label="Shadow 检查点">{[5, 21, 63].map((checkpoint) => <li key={checkpoint} data-complete={shadow.checkpoints_completed.includes(checkpoint as 5 | 21 | 63)}>检查点 {checkpoint} · {shadow.checkpoints_completed.includes(checkpoint as 5 | 21 | 63) ? "已完成" : "等待"}</li>)}</ol>
       <dl className="evolution-ledger numeric-data"><div><dt>完全成交</dt><dd>{shadow.full_fill_count}</dd></div><div><dt>成本后超额</dt><dd>{formatMetric(shadow.after_cost_excess_return)}</dd></div><div><dt>回撤差</dt><dd>{formatMetric(shadow.drawdown_difference)}</dd></div><div><dt>硬风控违规</dt><dd>{shadow.hard_risk_violation_count}</dd></div><div><dt>数据完整性</dt><dd>{shadow.data_complete ? "PASS" : "FAIL"}</dd></div></dl>
       <HashRail values={[["Shadow 权威", shadow.authority_hash]]} />

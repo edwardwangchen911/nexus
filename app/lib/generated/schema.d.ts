@@ -2997,8 +2997,14 @@ export interface components {
             data_complete: boolean;
             /** Drawdown Difference */
             drawdown_difference: string | null;
+            /** Evaluation Sessions */
+            evaluation_sessions: number;
             /** Full Fill Count */
             full_fill_count: number;
+            /** Grace Elapsed Sessions */
+            grace_elapsed_sessions: number;
+            /** Grace Sessions */
+            grace_sessions: number;
             /** Hard Risk Violation Count */
             hard_risk_violation_count: number;
             /**
