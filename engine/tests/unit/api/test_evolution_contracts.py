@@ -64,4 +64,3 @@ def test_evolution_cursor_is_signed_scoped_and_short_lived() -> None:
         EvolutionCursorCodec(
             ("current-secret",), datetime(2026, 8, 27, 12, 6, tzinfo=UTC)
         ).decode(encoded)
-
