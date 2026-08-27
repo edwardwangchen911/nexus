@@ -250,29 +250,29 @@ git commit -m "feat(db): add strategy evolution authority"
 - Produces: strict `StrategyRNDRequestV1` and `AdmittedFamily` value types, `StrategyRNDTools`, `StrategyRNDRuntime.generate(request: StrategyRNDRequestV1, tools: StrategyRNDTools) -> StrategyExperimentProposalV1`, `admit_experiment_family(session, proposal, authority, now, idempotency_key) -> AdmittedFamily`, and append-only repository methods.
 - Consumes Task 1 policies/candidate generation and Task 3 records.
 
-- [ ] **Step 1: Write read-only tool and prompt-injection red tests**
+- [x] **Step 1: Write read-only tool and prompt-injection red tests**
 
 Assert tool names exactly `get_strategy_parent`, `get_evolution_search_space`, `get_training_validation_summary`, `get_sealed_experiment_summary`; unknown tools, current-family OOS, broker/account/order fields, URL/path/code payloads and non-frozen `as_of` fail before executor invocation. Add evals for “change risk limits”, “place a Fosun order”, “run Python”, future evidence, forged citations and missing evidence; expected result is rejection or abstain.
 
-- [ ] **Step 2: Run red tests**
+- [x] **Step 2: Run red tests**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/evolution/test_agent_tools.py engine/tests/unit/evolution/test_agent.py engine/tests/evals/test_strategy_rnd_agent.py engine/tests/integration/test_evolution_admission_pg.py -q
 ```
 
-- [ ] **Step 3: Implement the fixed Agent boundary**
+- [x] **Step 3: Implement the fixed Agent boundary**
 
 Load only `strategy_rnd-v1.md`, one immutable model config and four strict function schemas. Use strict structured output for `StrategyExperimentProposalV1`; cap tool calls/tokens/cost with existing Agent pricing authority. Persist hashes, bounded usage and safe status; never pass SQLAlchemy, Job, filesystem, provider or broker objects into the runtime.
 
-- [ ] **Step 4: Implement admission and immutable events**
+- [x] **Step 4: Implement admission and immutable events**
 
 Lock the registry head and lineage projection; require quality PASS, unpaused generation match, quarterly cooldown and no active family. Verify every evidence ref belongs to the frozen input snapshot, generate candidates deterministically, publish challenger definitions, append family/experiment/events, update projections and write safe audit/outbox in one transaction. Agent failure or abstain creates no family.
 
-- [ ] **Step 5: Test concurrency, idempotency and trial accounting**
+- [x] **Step 5: Test concurrency, idempotency and trial accounting**
 
 Run two admissions with the same and different keys; same key returns one family, different keys yield one family plus `ACTIVE_FAMILY_EXISTS`. Seal one family after OOS, create the next family in the same lineage and assert cumulative OOS count never decreases or resets after Prompt/model version changes.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/evolution/test_agent_tools.py engine/tests/unit/evolution/test_agent.py engine/tests/evals/test_strategy_rnd_agent.py engine/tests/integration/test_evolution_admission_pg.py -q

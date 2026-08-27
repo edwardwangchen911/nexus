@@ -29,7 +29,11 @@ RegisteredMutationAxisName = Literal[
 MutationValue = StrictStr | StrictBool
 
 _UNSAFE_TEXT = re.compile(
-    r"(?:https?://|file://|\.\./|\.\.\\|~/|\b(?:python|sql|shell|import|exec|eval|subprocess)\b|os\.system)",
+    r"(?:https?://|file://|\.\./|\.\.\\|~/|"
+    r"\b(?:python|sql|shell|import|exec|eval|subprocess|broker|credential|api[_ -]?key)\b|"
+    r"\b(?:place|submit|cancel|modify)\s+(?:an?\s+)?(?:live\s+)?order\b|"
+    r"\b(?:change|modify|override|bypass)\s+(?:the\s+)?(?:hard\s+)?risk\s+limits?\b|"
+    r"os\.system)",
     re.IGNORECASE,
 )
 
