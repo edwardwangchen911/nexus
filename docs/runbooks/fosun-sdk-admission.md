@@ -11,9 +11,25 @@ the runtime boolean alone cannot override it. The gateway image carries that exa
 admits only when its SDK/OpenAPI subject matches the frozen constants and all written-permission,
 provider-test-vector, security-review, and TLS-remediation references are populated.
 
-The reviewed candidate is tag `v1.2.0` at commit
-`891d95fb4967efaa682387c1b35966ceea38fb21`. The repository has no standard license file,
-so written permission for the intended use and distribution model remains unresolved.
+The reviewed candidate is tag [`v1.2.0`](https://github.com/fosunwealth/openapi-python-sdk/tree/891d95fb4967efaa682387c1b35966ceea38fb21)
+at commit `891d95fb4967efaa682387c1b35966ceea38fb21`. A separate public-source refresh on
+2026-08-27 found `main` still at
+[`7f0fb48f3e1ce04329b990cf16f391cf59078137`](https://github.com/fosunwealth/openapi-python-sdk/tree/7f0fb48f3e1ce04329b990cf16f391cf59078137).
+`main` is comparison evidence only; it is neither the admitted subject nor an auto-upgrade target.
+
+Both reviewed trees contain `setup.py` but no `LICENSE`, `COPYING`, or `NOTICE` file, and
+`setup.py` declares no license metadata/classifier. Therefore the committed manifest must retain
+`license: UNRESOLVED`; written permission for the intended private use and build/distribution model
+remains a separate required artifact.
+
+The frozen candidate still calls `requests.Session.request(..., verify=False)` in
+[`fsopenapi/client.py`](https://github.com/fosunwealth/openapi-python-sdk/blob/891d95fb4967efaa682387c1b35966ceea38fb21/fsopenapi/client.py#L154-L158).
+The refreshed `main` has the same behavior in
+[`fsopenapi/client.py`](https://github.com/fosunwealth/openapi-python-sdk/blob/7f0fb48f3e1ce04329b990cf16f391cf59078137/fsopenapi/client.py#L161-L165).
+No current-main evidence resolves the TLS gate. The SDK stays out of `uv.lock` until an upstream
+fix or an independently tested remediation restores certificate verification without disabling
+the gateway's mTLS/provider trust policy.
+
 The three public OpenAPI documents matched the SHA-256 values in
 `contracts/providers/fosun/manifest.json` on 2026-08-22. A future mismatch blocks admission
 and requires a reviewed manifest and fixture update; it never auto-upgrades this adapter.

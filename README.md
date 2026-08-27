@@ -20,6 +20,7 @@ npm run build
 - [Provider 故障处置](docs/runbooks/provider-outage.md)
 - [密钥与证书轮换](docs/runbooks/key-rotation.md)
 - [复星 SDK admission](docs/runbooks/fosun-sdk-admission.md)
+- [复星只读激活门禁](docs/runbooks/fosun-read-only-activation.md)
 - [PostgreSQL 事务权威 ADR](docs/adr/0001-postgresql-owner.md)
 - [复星独立只读网关 ADR](docs/adr/0002-fosun-gateway-boundary.md)
 

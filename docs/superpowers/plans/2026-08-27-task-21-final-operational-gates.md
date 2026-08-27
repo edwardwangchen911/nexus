@@ -51,11 +51,21 @@
 
 ## Slice 6：复星 SDK admission 与只读激活 gate
 
-- [ ] 补全 `docs/runbooks/fosun-sdk-admission.md` 的 candidate/current-main/许可/TLS 当前证据，不安装被阻塞 SDK。
-- [ ] 为 `FosunActivationResult` 、脱敏 probe artifact 与 contract hash 写纯函数单测，覆盖证据缺失、过期、多/少操作、write 操作和成功反例。
-- [ ] 实现无 transport 的 `nexus-fosun-activation-gate`；当前 manifest 生成且只能生成 `fixture_with_next_action`。
-- [ ] 新增 `docs/runbooks/fosun-read-only-activation.md`，记录真实 probe 的确认门、操作白名单、请求上限、脱敏 artifact 和回滚。
-- [ ] 在不接触凭据/账户的情况下运行当前 gate；提交 `feat(gateway): add guarded read-only activation result`。
+- [x] 补全 `docs/runbooks/fosun-sdk-admission.md` 的 candidate/current-main/许可/TLS 当前证据，不安装被阻塞 SDK。
+- [x] 为 `FosunActivationResult` 、脱敏 probe artifact 与 contract hash 写纯函数单测，覆盖证据缺失、过期、多/少操作、write 操作和成功反例。
+- [x] 实现无 transport 的 `nexus-fosun-activation-gate`；当前 manifest 生成且只能生成 `fixture_with_next_action`。
+- [x] 新增 `docs/runbooks/fosun-read-only-activation.md`，记录真实 probe 的确认门、操作白名单、请求上限、脱敏 artifact 和回滚。
+- [x] 在不接触凭据/账户的情况下运行当前 gate；提交 `feat(gateway): add guarded read-only activation result`。
+
+验收记录（2026-08-27）：从 missing module 收集红灯开始，最终 24 项激活单测覆盖四类 admission
+证据缺失、probe 过期、多/少/重复操作、下单/撤单/模拟/Subscription/Webhook 操作、
+manifest/SDK subject 错配、每操作和总请求上限、六类证据失败、敏感字段拒绝、精确 artifact
+字节哈希、未来时间和唯一成功反例。完整 loopback-only gateway 测试 `128 passed`，Ruff/Mypy、uv lock、10 项
+repository policy 与 761 个依赖/0 finding 清单通过。公开仓库重新确认 candidate
+`v1.2.0@891d95fb4967efaa682387c1b35966ceea38fb21`、current main
+`7f0fb48f3e1ce04329b990cf16f391cf59078137`；两者仍无标准许可文件且仍有 `verify=False`，SDK 未
+加入 lock。无 probe 执行当前 gate 稳定返回 `fixture_with_next_action / COMPLETE_SDK_ADMISSION`，
+`--require-activated` 退出 2；未读取凭据、账户或调用 provider。
 
 ## Slice 7：最终演练、审查与验收
 

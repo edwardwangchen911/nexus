@@ -37,6 +37,11 @@ def sdk_admission_is_valid(settings: GatewaySettings) -> bool:
         document = json.loads(settings.provider_manifest.read_text())
     except (OSError, UnicodeError, json.JSONDecodeError):
         return False
+    return sdk_admission_document_is_valid(document)
+
+
+def sdk_admission_document_is_valid(document: object) -> bool:
+    """Validate admission evidence without reading settings, credentials, or provider state."""
     if not isinstance(document, Mapping) or document.get("provider") != "fosun":
         return False
     sdk = document.get("sdk")
