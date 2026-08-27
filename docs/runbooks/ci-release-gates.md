@@ -57,7 +57,8 @@ uv run pip-audit --local --skip-editable
 
 - 完整 `npm audit`（含 CI/build devDependencies）：0 vulnerability；`pip-audit`：0 known vulnerability；
 - 首次 Python 审计发现 11 条已知漏洞，最小升级到 cryptography 50.0.1、pyarrow 23.0.1、pytest 9.0.3、pytest-asyncio 1.4.0 后清零；首次完整 npm 审计发现 16 条（其中 12 high），升级 Cloudflare/Vinext/Vite/Wrangler、React RSC 和传递依赖后清零；
-- gateway 145/145、Engine unit 704/704、Web unit 424/424、Chromium E2E 64/64；本轮容器所有权加固前的 Engine＋空 PostgreSQL 全量证据为 1428/1428（22 分 52 秒），加固后已跑完全部 unit，仍需在可启动新容器的 runtime 上重跑空库全量；
+- gateway 145/145、Engine unit 704/704、Web unit 424/424、Chromium E2E 64/64；加固后从空 PostgreSQL 顺序迁移至 `0021_manual_job_retry_allowance` 并完成 Engine 全量 1432/1432（23 分 00 秒），临时容器残留 0；
+- 加固后 fixture 恢复演练验证 dump 736,450 bytes、1 个对象/245 bytes、migration head、表计数、账本、READY/绩效/审计根与对象哈希，database/object/container residue 全部为 0；
 - 策略测试 12/12，761 个第三方依赖完成许可证 inventory，Ruff/Mypy/生成客户端/生产构建/Compose config 均通过；
 - 空 PostgreSQL 验证容器结束后残留为 0。
 

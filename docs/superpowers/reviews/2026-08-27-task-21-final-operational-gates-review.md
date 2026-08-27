@@ -1,6 +1,6 @@
 # Task 21 最终离线发布、运维与复星只读门禁审查
 
-**当前结论：** 代码与安全审查中的 Critical/Important 未解决项为 `0/0`，但 Task 21 最终运行验收尚未关闭。本机 Docker Desktop 能够解析镜像、读取状态和维持已有容器，但任意新容器均停在 `Created`。因此当前不声明 `phase0_offline_ready`；必须在可启动新容器的 runtime 上重跑空 PostgreSQL 全量和加固后备份/恢复成功演练。复星结论仍严格为 `fixture_with_next_action / COMPLETE_SDK_ADMISSION`。
+**当前结论：** 代码与安全审查中的 Critical/Important 未解决项为 `0/0`，Task 21 本地运行验收已关闭，当前可以声明 `phase0_offline_ready`。Phase 1 只读代码在无凭据状态下通过，但真实复星激活仍严格为 `fixture_with_next_action / COMPLETE_SDK_ADMISSION`；这不是 `activated_read_only`，也不授权任何 Provider 或账户调用。
 
 ## 1. 审查范围与方法
 
@@ -26,25 +26,26 @@
 | 门禁 | 结果 |
 | --- | --- |
 | Web | ESLint、TypeScript、generated client、production build 退出 0；39 个文件/424 unit 通过。 |
-| 浏览器 E2E | Chromium 64/64（1.3 分钟）；覆盖七档视口/横屏、200% 缩放、键盘/焦点/表格、Agent abstention、源冲突、STALE/对账失败、部分成交、回撤锁和两个锁定实盘页。 |
+| 浏览器 E2E | Chromium 64/64（1.5 分钟）；覆盖七档视口/横屏、200% 缩放、键盘/焦点/表格、Agent abstention、源冲突、STALE/对账失败、部分成交、回撤锁和两个锁定实盘页。 |
 | Gateway offline | loopback-only guard 自测通过，guard 下 145/145；Ruff 和 Mypy 19 个源文件通过。没有 provider 请求。 |
 | Engine 无数据库 | unit 704/704（34.28 秒）；Ruff 和 Mypy 234 个源文件通过。 |
-| Engine 空 PostgreSQL | 纠正前最近完整证据为 1428/1428（22:52）且容器残留 0；本轮新增 4 个 Engine unit 及容器所有权/timeout 修正后无法在当前 Docker runtime 上重跑，故不视为最终证据。 |
-| 备份/恢复 | 纠正前最近成功 fixture 演练：dump 736,456 bytes、1 对象/244 bytes，backup 0.237s、restore 0.428s、verify 0.091s，fixture RPO 0.132s/RTO 0.520s，残留 0。加固后当前故障路径在 30 秒内失败且容器 `0 → 0`；仍需成功路径重跑。 |
-| Policy/供应链 | 12/12 policy；761 个第三方依赖/0 finding；uv lock、两 Compose profile、workflow YAML 通过；本轮未改依赖，最近完整 npm audit 与 pip-audit 均为 0。 |
+| Engine 空 PostgreSQL | 从空库顺序迁移 `0001 -> 0021_manual_job_retry_allowance`，全量 1432/1432（23:00），独立动态回环端口/tmpfs 容器残留 0。 |
+| 备份/恢复 | 加固后成功 fixture 演练：dump 736,450 bytes、1 对象/245 bytes，backup 0.388s、restore 0.446s、verify 0.093s，fixture RPO 0.177s/RTO 0.539s；migration head、表计数、账本、READY/绩效/审计根、对象哈希全部通过，database/object/container residue 0。 |
+| Policy/供应链 | 12/12 policy；761 个第三方依赖/0 finding；uv lock、两 Compose profile、workflow YAML 通过；完整 npm audit 与 pip-audit 均为 0。 |
 | 复星激活 | 在 offline guard 下当前结果为 `fixture_with_next_action`，`next_action=COMPLETE_SDK_ADMISSION`，contract hash `62223818f1a331308ea882cfc729a7e81baa2461d48d9d4b6cba2cdf9190ae32`。 |
 | 清理/密钥 | 本轮演练容器前后 0/0；repository policy 密钥 finding 0；未加载历史暴露 key。其他会话的既有容器未停止、删除或修改。 |
 
-## 4. Docker runtime 阻塞证据
+## 4. Docker runtime 恢复与隔离证据
 
 - Docker client/server 均为 29.7.2，`docker info`、镜像 digest、Compose config、已有容器与 `docker inspect` 均正常。
-- 精确命名、`--network none`、本地已有的 pinned `python:3.12-slim` 最小容器仍停在 `Created`，`StartedAt` 为零值，入口进程从未执行。
-- 本轮精确探针容器和演练容器均已删除；未重启 Docker Desktop，因为重启会停止其他会话正在使用的容器，其 tmpfs 数据可能丢失。
+- 一次早期有界最小探针复现了新容器无法启动；最终门禁前，同名策略的新精确探针在 pinned `python:3.12-slim`、`--network none` 下成功退出 0 并自动无残留，因此无需重启 Docker Desktop。
+- 其他任务留下的三个 `Created` 容器经只读 inspect 均显示旧的 5432/9000 端口冲突，不是本轮目标；没有停止、删除、启动或修改它们。三个已有健康容器也保持运行。
+- 最终空库容器使用独立名称、任务所有权标签、动态回环端口和 tmpfs；演练容器使用 128-bit run ID、精确标签/名称。两条成功路径结束后的本任务容器残留均为 0。
 
-## 5. 关闭条件与回滚
+## 5. 最终本地结论、外部门禁与回滚
 
-1. 在不影响其他任务的前提下恢复 Docker-compatible runtime；不要删除或复用其他会话容器。
-2. 从清洁工作树重跑空库 migration＋Engine 全量，以及加固后 backup/restore 成功路径；要求临时 database/object/container residue 全部为 0。
-3. 重跑受本轮纠正影响的 Gateway/Policy/Compose，再更新主计划、progress ledger 和本文档结论；只有届时才声明 `phase0_offline_ready`。
+1. Phase 0 离线研究、回测、Shadow、硬风控和内部模拟交易达到 `phase0_offline_ready`；这只描述本地可复现代码/运维门禁，不承诺收益、生产 RPO/RTO 或外部部署状态。
+2. Phase 1 read-only code complete without credentials；真实激活仍需先关闭 SDK 许可/测试向量/独立安全证据、确认历史 key 已撤销并直接轮换到 gateway secret domain、固定 egress/IP allowlist 和客户端密钥，再对那一次只读 probe 单独取得确认。
+3. 任一外部证据失败、artifact 过期/错配、TLS surface 漂移或 base URL 不一致都继续返回 fixture/503，不安装 SDK、不发 Provider 请求、不回退到不受控数据源。
 
-本次只有本地可回滚文件差异。停止本地进程即阻止新任务；备份演练只删除 label/名称/前缀/数据库都精确匹配本次 128-bit run ID 的对象。未来任何复星网络 probe、凭据/权限变更、部署或实盘订单仍须单独确认；真实订单继续逐笔人工确认。
+本次只有本地可回滚代码、文档和提交。停止本地进程即阻止新任务；备份演练只删除 label/名称/前缀/数据库都精确匹配本次 128-bit run ID 的对象。未来任何复星网络 probe、凭据/权限变更、部署或实盘订单仍须单独确认；真实订单继续逐笔人工确认。

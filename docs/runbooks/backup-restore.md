@@ -10,6 +10,7 @@
 - 该 PostgreSQL 容器内的 `/tmp/nexus_drill_<run_id>.dump`。
 
 `NEXUS_ENV=production` 会在任何容器或数据目标创建前失败。不要为演练将 Docker socket 挂载进 app/API/worker 容器；该命令应在受控的本地工作区通过 `uv` 运行。
+两个容器均携带精确 `nexus.drill.run_id` 所有权标签；已有同名容器会在启动前被拒绝，cleanup 只删除标签与本次 run ID 恒等的精确名称。普通子命令上限 30 秒，迁移上限 120 秒。
 
 ## 前置检查
 
@@ -41,10 +42,10 @@ NEXUS_ENV=test uv run --package nexus-engine nexus-engine-backup-restore-drill
 
 ## 2026-08-27 本地演练记录
 
-- PostgreSQL custom dump：736,456 bytes；
-- 对象：1 个，244 bytes，source/backup/restore SHA-256 一致；
-- backup 0.237 秒，restore 0.428 秒，verify 0.091 秒；
-- 本次 fixture 实测 RPO 0.132 秒，RTO 0.520 秒；
+- PostgreSQL custom dump：736,450 bytes；
+- 对象：1 个，245 bytes，source/backup/restore SHA-256 一致；
+- backup 0.388 秒，restore 0.446 秒，verify 0.093 秒；
+- 本次 fixture 实测 RPO 0.177 秒，RTO 0.539 秒，总验证清理前 8.406 秒；
 - migration head `0021_manual_job_retry_allowance`，表计数/平衡账本/三类根/对象哈希全部通过；
 - database/object/container residue 均为 0。
 

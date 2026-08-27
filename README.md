@@ -2,6 +2,14 @@
 
 NEXUS 是私人投资研究、回测与模拟交易工作台。它不提供投资建议，也不承诺收益。
 
+## 当前状态
+
+- `phase0_offline_ready`：美股研究、确定性回测、三方案比较、Forward Shadow、硬风控和内部模拟交易已通过离线发布门禁。
+- Phase 1 只读代码已就绪，但复星外部门禁仍为 `fixture_with_next_action / COMPLETE_SDK_ADMISSION`；未安装被阻塞的 SDK、未读取历史暴露密钥，也未调用真实账户或 Provider。
+- `00656.HK` 继续仅作只读持仓展示；券商模拟写入和实盘页保持锁定，任何未来真实订单仍须逐笔人工确认。
+
+最终本地证据和外部门禁见 [CI 与离线发布门禁](docs/runbooks/ci-release-gates.md) 与 [Task 21 审查](docs/superpowers/reviews/2026-08-27-task-21-final-operational-gates-review.md)。
+
 ## 命令
 
 ```bash
@@ -9,7 +17,11 @@ npm install
 npm run lint
 npm run typecheck
 npm run test:unit
+npm run test:e2e -- --workers=3
 npm run build
+uv run pytest engine/tests -q --import-mode=importlib
+NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
+  uv run pytest integrations/fosun_gateway/tests -q
 ```
 
 ## 本地运行与运维

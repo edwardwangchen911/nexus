@@ -69,11 +69,13 @@ repository policy 与 761 个依赖/0 finding 清单通过。公开仓库重新�
 
 ## Slice 7：最终演练、审查与验收
 
-- [ ] 从清洁工作树运行 Web/Engine/Gateway/Compose/E2E/策略/演练全量门禁，记录精确总数与耗时。
+- [x] 从清洁工作树运行 Web/Engine/Gateway/Compose/E2E/策略/演练全量门禁，记录精确总数与耗时。
 - [x] 运行单执行者分离式架构/安全审查，重点复核真实路由、CI 外网、artifact 泄密、备份目标、恢复根、激活绕过和 Compose secret 域。
 - [x] 修复所有 Critical/Important，重跑受影响门禁；新增 Task 21 review 文档。
-- [ ] 更新 README、主计划和本地 progress ledger，明确 `phase0_offline_ready` 与 `fixture_with_next_action` 两个结论。
-- [ ] 提交 `test: close NEXUS phase 0 and read-only phase 1 gates`。
+- [x] 更新 README、主计划和本地 progress ledger，明确 `phase0_offline_ready` 与 `fixture_with_next_action` 两个结论。
+- [x] 提交 `test: close NEXUS phase 0 and read-only phase 1 gates`。
+
+验收记录（2026-08-27）：从清洁提交运行 Web lint/typecheck/generated/build、39 文件/424 unit、Chromium E2E 64/64（1.5 分钟）；loopback-only Gateway 145/145、Engine unit 704/704、空 PostgreSQL migration `0001 -> 0021` 后全量 1432/1432（23:00）；备份恢复验证 database/object/container residue 0；Policy 12/12、第三方依赖 761/0 finding、npm/Python 已知漏洞 0、Ruff/Mypy 253 源文件、uv lock、两 Compose profile 和 workflow YAML 全部通过。审查 Critical/Important 未解决项为 0/0。当前结论为 `phase0_offline_ready`；复星仍为 `fixture_with_next_action / COMPLETE_SDK_ADMISSION`，没有 Provider、账户、凭据或真实订单调用。
 
 ## 中止条件
 
