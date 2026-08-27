@@ -10,6 +10,8 @@ The committed manifest has machine-readable `status: blocked` and null evidence 
 the runtime boolean alone cannot override it. The gateway image carries that exact record and
 admits only when its SDK/OpenAPI subject matches the frozen constants and all written-permission,
 provider-test-vector, security-review, and TLS-remediation references are populated.
+`admission.provider_base_url` is also `null`; admission must bind the exact reviewed HTTPS base URL
+before a credential can be loaded, and runtime configuration must match it byte-for-byte.
 
 The reviewed candidate is tag [`v1.2.0`](https://github.com/fosunwealth/openapi-python-sdk/tree/891d95fb4967efaa682387c1b35966ceea38fb21)
 at commit `891d95fb4967efaa682387c1b35966ceea38fb21`. A separate public-source refresh on
@@ -24,11 +26,19 @@ remains a separate required artifact.
 
 The frozen candidate still calls `requests.Session.request(..., verify=False)` in
 [`fsopenapi/client.py`](https://github.com/fosunwealth/openapi-python-sdk/blob/891d95fb4967efaa682387c1b35966ceea38fb21/fsopenapi/client.py#L154-L158).
+Its session handshake separately calls module-level `requests.post(..., verify=False)` in
+[`fsopenapi/auth.py`](https://github.com/fosunwealth/openapi-python-sdk/blob/891d95fb4967efaa682387c1b35966ceea38fb21/fsopenapi/auth.py#L163-L169).
 The refreshed `main` has the same behavior in
 [`fsopenapi/client.py`](https://github.com/fosunwealth/openapi-python-sdk/blob/7f0fb48f3e1ce04329b990cf16f391cf59078137/fsopenapi/client.py#L161-L165).
-No current-main evidence resolves the TLS gate. The SDK stays out of `uv.lock` until an upstream
-fix or an independently tested remediation restores certificate verification without disabling
-the gateway's mTLS/provider trust policy.
+No current-main evidence resolves the TLS gate. NEXUS now has a gateway-owned candidate remediation
+that wraps both exact v1.2.0 HTTP surfaces and unconditionally replaces `verify=False` with
+`verify=True` while disabling redirects so provider headers cannot cross to a redirected host.
+`FSOPENAPI_BASE_URL` must be an absolute credential-free HTTPS URL with no query/fragment; any
+surface drift blocks SDK construction before a network call, and repository policy prevents either
+wrapper from being removed. This code and its two-surface tests still need
+to be cited by the independent security-review evidence before the manifest's
+`tls_verification_remediation` field may be populated. The SDK stays out of `uv.lock` until that
+review and every other admission gate pass.
 
 The three public OpenAPI documents matched the SHA-256 values in
 `contracts/providers/fosun/manifest.json` on 2026-08-22. A future mismatch blocks admission
@@ -39,10 +49,12 @@ and requires a reviewed manifest and fixture update; it never auto-upgrades this
 - Attach written permission or an applicable license determination approved for this private
   deployment and its build/distribution process.
 - Archive the reviewed source provenance and independently reproduce the candidate commit hash.
+- Record the exact credential-free HTTPS provider base URL in `admission.provider_base_url`; it
+  must have no query, fragment, redirect dependency, ambiguous port, or trailing slash.
 - Complete a security review of the SDK, dependencies, session lifecycle, cryptography, error
-  handling, and network behavior. The frozen candidate currently calls its HTTP session with
-  TLS verification disabled (`verify=False`); admission stays blocked until this is corrected
-  upstream or an approved, tested remediation exists.
+  handling, and network behavior. The frozen candidate disables TLS verification in both session
+  creation and ordinary requests; admission stays blocked until the review approves the tested
+  gateway-owned two-surface remediation or an exact upstream replacement.
 - Approve a sanitized, provider-confirmed test vector for authentication/session creation,
   account and portfolio reads, pagination, price `power`, permission errors, rate limiting, and
   malformed responses. No real account response may become a fixture.
@@ -64,7 +76,14 @@ CA. Uvicorn uses `CERT_REQUIRED`. The engine-side client certificate/key/CA are 
 and files; neither TLS identity nor HMAC keys may be reused from the browser-to-engine BFF domain.
 
 The composition root imports `fsopenapi` only after admission and configuration checks. A missing
-or unapproved SDK returns `SDK_NOT_ADMITTED`; it never falls back to fixtures. SDK construction
+or unapproved SDK returns `SDK_NOT_ADMITTED`; it never falls back to fixtures. `admitted` also
+requires `sdk.license` to contain the reviewed license/permission determination rather than
+`UNRESOLVED`. Runtime startup additionally reads the bounded sanitized artifact at
+`FOSUN_ACTIVATION_PROBE_ARTIFACT`, recomputes the activation decision, and compares it in constant
+time with `FOSUN_ACTIVATION_CONTRACT_HASH` before importing the SDK. A missing, changed, expired,
+or subject-mismatched artifact blocks startup, and the adapter rechecks expiry after any queue,
+rate-limit or retry wait immediately before every Provider attempt.
+SDK construction
 forces `logging_enable=false` and `log_body=false`. Gateway logs allow only operation name, attempt,
 outcome, and safe timing/correlation fields—never raw bodies, headers, endpoint strings, external
 account IDs, or secrets.

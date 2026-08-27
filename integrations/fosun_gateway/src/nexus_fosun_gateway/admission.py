@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Mapping
+from urllib.parse import urlsplit
 
 from nexus_fosun_gateway.settings import GatewaySettings
 
@@ -37,7 +38,10 @@ def sdk_admission_is_valid(settings: GatewaySettings) -> bool:
         document = json.loads(settings.provider_manifest.read_text())
     except (OSError, UnicodeError, json.JSONDecodeError):
         return False
-    return sdk_admission_document_is_valid(document)
+    return (
+        sdk_admission_document_is_valid(document)
+        and _provider_base_url(document) == settings.fsopenapi_base_url
+    )
 
 
 def sdk_admission_document_is_valid(document: object) -> bool:
@@ -48,6 +52,13 @@ def sdk_admission_document_is_valid(document: object) -> bool:
     if not isinstance(sdk, Mapping):
         return False
     if sdk.get("tag") != _SDK_TAG or sdk.get("commit") != _SDK_COMMIT:
+        return False
+    license_name = sdk.get("license")
+    if (
+        not isinstance(license_name, str)
+        or not license_name.strip()
+        or license_name.strip().upper() == "UNRESOLVED"
+    ):
         return False
     openapi = document.get("openapi")
     if not isinstance(openapi, Mapping):
@@ -60,6 +71,8 @@ def sdk_admission_document_is_valid(document: object) -> bool:
             return False
     admission = document.get("admission")
     if not isinstance(admission, Mapping) or admission.get("status") != "admitted":
+        return False
+    if _provider_base_url(document) is None:
         return False
     if admission.get("sdk_commit") != _SDK_COMMIT:
         return False
@@ -76,3 +89,31 @@ def sdk_admission_document_is_valid(document: object) -> bool:
 
 def _evidence_reference(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip()) and len(value) <= 512
+
+
+def _provider_base_url(document: Mapping[object, object]) -> str | None:
+    admission = document.get("admission")
+    if not isinstance(admission, Mapping):
+        return None
+    value = admission.get("provider_base_url")
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or value != value.rstrip("/")
+    ):
+        return None
+    parsed = urlsplit(value)
+    try:
+        parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return value

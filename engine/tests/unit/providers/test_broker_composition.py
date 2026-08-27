@@ -32,6 +32,18 @@ def test_compose_separates_broker_secrets_from_api_and_research_worker() -> None
     assert "env_file:" not in _service_block(compose, "broker-worker")
 
 
+def test_activation_artifact_is_mounted_only_into_the_provider_gateway_domain() -> None:
+    compose = (WORKTREE_ROOT / "infra/compose.yaml").read_text()
+    activation = {
+        "FOSUN_ACTIVATION_PROBE_ARTIFACT",
+        "FOSUN_ACTIVATION_CONTRACT_HASH",
+    }
+
+    assert activation <= _service_environment(compose, "fosun-gateway")
+    for service in ("api", "worker", "broker-worker"):
+        assert _service_environment(compose, service).isdisjoint(activation)
+
+
 def test_compose_profiles_keep_broker_capability_out_of_the_app_profile() -> None:
     compose = (WORKTREE_ROOT / "infra/compose.yaml").read_text()
 

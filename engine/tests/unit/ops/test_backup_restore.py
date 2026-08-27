@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from typing import NoReturn
 
@@ -88,6 +89,80 @@ def test_disposable_containers_use_dynamic_loopback_ports_and_tmpfs_only() -> No
     assert "--tmpfs" in postgres and "--tmpfs" in minio
     assert "--volume" not in postgres and "--volume" not in minio
     assert "-v" not in postgres and "-v" not in minio
+    ownership_label = f"nexus.drill.run_id={_RUN_ID}"
+    assert ownership_label in postgres
+    assert ownership_label in minio
+
+
+@pytest.mark.asyncio
+async def test_start_rejects_a_preexisting_container_before_any_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = LocalDockerDrillOperations()
+    targets = DrillTargets.from_run_id(_RUN_ID)
+    commands: list[tuple[str, ...]] = []
+
+    async def _existing(command: tuple[str, ...], **_kwargs: object):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "existing-id\n", "")
+
+    monkeypatch.setattr(operations, "_run", _existing)
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        await operations.start(targets)
+
+    assert commands == [
+        (
+            "docker",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            targets.postgres_container,
+        )
+    ]
+    assert all("run" not in command for command in commands)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_refuses_to_remove_a_container_without_its_run_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = LocalDockerDrillOperations()
+    targets = DrillTargets.from_run_id(_RUN_ID)
+    commands: list[tuple[str, ...]] = []
+
+    async def _foreign(command: tuple[str, ...], **_kwargs: object):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "another-run-id\n", "")
+
+    monkeypatch.setattr(operations, "_run", _foreign)
+
+    with pytest.raises(RuntimeError, match="ownership"):
+        await operations._remove_owned_container(  # noqa: SLF001
+            targets.postgres_container,
+            targets.run_id,
+        )
+
+    assert len(commands) == 1
+    assert "rm" not in commands[0]
+
+
+@pytest.mark.asyncio
+async def test_every_subprocess_has_a_bounded_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = LocalDockerDrillOperations()
+    captured: dict[str, object] = {}
+
+    def _completed(command: tuple[str, ...], **kwargs: object):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("nexus.ops.backup_restore.subprocess.run", _completed)
+
+    await operations._run(("docker", "version"))  # noqa: SLF001
+
+    assert captured["timeout"] == 30
 
 
 def test_verification_set_covers_authority_roots_and_balanced_ledger() -> None:

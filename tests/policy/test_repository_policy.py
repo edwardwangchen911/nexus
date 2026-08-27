@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from scripts.ci.repository_policy import (
@@ -10,9 +11,11 @@ from scripts.ci.repository_policy import (
     check_container_hardening,
     check_container_pins,
     check_forbidden_gateway_surface,
+    check_provider_tls_remediation,
     check_sdk_lock_admission,
     check_workflow,
     license_findings,
+    repository_texts,
     scan_secret_material,
 )
 
@@ -31,6 +34,21 @@ def test_secret_scan_reports_only_pattern_and_path_not_material() -> None:
     assert all("a" * 20 not in finding.message for finding in findings)
 
 
+def test_secret_scan_cannot_be_bypassed_by_binary_or_large_tracked_file(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    leak = tmp_path / "large-binary.dat"
+    leak.write_bytes(b"\xff\xfe" + b"ak_" + b"z" * 30 + b"=" + b"x" * (2 * 1024 * 1024))
+    subprocess.run(["git", "add", leak.name], cwd=tmp_path, check=True)
+
+    findings = scan_secret_material(repository_texts(tmp_path))
+
+    assert [(finding.rule, finding.path) for finding in findings] == [
+        ("fosun_api_key", leak.name)
+    ]
+
+
 def test_gateway_source_forbids_write_and_webhook_surface(tmp_path: Path) -> None:
     source = tmp_path / "integrations/fosun_gateway/src"
     source.mkdir(parents=True)
@@ -43,6 +61,25 @@ def test_gateway_source_forbids_write_and_webhook_surface(tmp_path: Path) -> Non
     assert [(finding.rule, finding.path) for finding in findings] == [
         ("forbidden_gateway_surface", "integrations/fosun_gateway/src/unsafe.py")
     ]
+
+
+def test_gateway_requires_both_frozen_sdk_tls_remediation_surfaces(tmp_path: Path) -> None:
+    source = tmp_path / "integrations/fosun_gateway/src/nexus_fosun_gateway"
+    security = source / "security"
+    security.mkdir(parents=True)
+    (source / "main.py").write_text("enforce_sdk_tls_verification(client, auth_module)")
+    remediation = security / "provider_tls.py"
+    remediation.write_text(
+        'kwargs["verify"] = True\nkwargs["allow_redirects"] = False\n'
+        'kwargs["verify"] = True\nkwargs["allow_redirects"] = False\n'
+    )
+
+    assert check_provider_tls_remediation(tmp_path) == []
+
+    remediation.write_text('kwargs["verify"] = True\n')
+    assert {finding.rule for finding in check_provider_tls_remediation(tmp_path)} == {
+        "provider_tls_remediation_missing"
+    }
 
 
 def test_sdk_lock_requires_complete_machine_readable_admission(tmp_path: Path) -> None:

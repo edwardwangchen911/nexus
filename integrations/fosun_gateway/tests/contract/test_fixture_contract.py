@@ -30,6 +30,7 @@ def test_provider_manifest_pins_reviewed_public_contracts_and_sdk_source() -> No
         "reviewed_at": "2026-08-22",
         "admission": {
             "status": "blocked",
+            "provider_base_url": None,
             "sdk_commit": "891d95fb4967efaa682387c1b35966ceea38fb21",
             "openapi_sha256": {
                 "market": "f35cfaa3484d8507723729b68a2b8d60fa85d4d28d06991b4a434995cbfac22a",

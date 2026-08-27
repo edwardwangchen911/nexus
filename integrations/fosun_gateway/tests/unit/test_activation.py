@@ -64,6 +64,36 @@ def test_activation_requires_every_admission_evidence_reference(
     assert result.next_action == "COMPLETE_SDK_ADMISSION"
 
 
+def test_unresolved_sdk_license_cannot_be_labeled_admitted() -> None:
+    manifest = _admitted_manifest()
+    manifest["sdk"]["license"] = "UNRESOLVED"
+    manifest_bytes = _json_bytes(manifest)
+
+    result = evaluate_activation(
+        manifest_bytes,
+        _probe_bytes(manifest_bytes),
+        checked_at=CHECKED_AT,
+    )
+
+    assert result.status == "fixture_with_next_action"
+    assert result.next_action == "COMPLETE_SDK_ADMISSION"
+
+
+def test_admission_requires_an_exact_https_provider_base_url() -> None:
+    manifest = _admitted_manifest()
+    manifest["admission"]["provider_base_url"] = None
+    manifest_bytes = _json_bytes(manifest)
+
+    result = evaluate_activation(
+        manifest_bytes,
+        _probe_bytes(manifest_bytes),
+        checked_at=CHECKED_AT,
+    )
+
+    assert result.status == "fixture_with_next_action"
+    assert result.next_action == "COMPLETE_SDK_ADMISSION"
+
+
 def test_expired_probe_cannot_activate_read_only() -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     probe = _probe_document(manifest_bytes)
@@ -224,7 +254,9 @@ def test_cli_reports_current_block_without_requiring_probe(
 
 def _admitted_manifest() -> dict[str, object]:
     manifest = json.loads(MANIFEST_PATH.read_text())
+    manifest["sdk"]["license"] = "WRITTEN-PERMISSION"
     manifest["admission"]["status"] = "admitted"
+    manifest["admission"]["provider_base_url"] = "https://provider.invalid"
     manifest["admission"]["evidence"] = {
         "written_permission": "evidence/written-permission.sha256",
         "provider_test_vector": "evidence/provider-test-vector.sha256",

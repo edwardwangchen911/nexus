@@ -65,6 +65,8 @@ _MINIO_IMAGE = (
 _DATABASE_USER = "nexus_drill"
 _MAX_OBJECTS = 100
 _MAX_OBJECT_BYTES = 4 * 1024 * 1024
+_COMMAND_TIMEOUT_SECONDS = 30
+_MIGRATION_TIMEOUT_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -199,6 +201,8 @@ def postgres_container_command(targets: DrillTargets) -> tuple[str, ...]:
         "-d",
         "--name",
         targets.postgres_container,
+        "--label",
+        f"nexus.drill.run_id={targets.run_id}",
         "-e",
         "POSTGRES_DB",
         "-e",
@@ -222,6 +226,8 @@ def minio_container_command(targets: DrillTargets) -> tuple[str, ...]:
         "-d",
         "--name",
         targets.minio_container,
+        "--label",
+        f"nexus.drill.run_id={targets.run_id}",
         "-e",
         "MINIO_ROOT_USER",
         "-e",
@@ -314,6 +320,8 @@ class LocalDockerDrillOperations:
             raise RuntimeError("backup/restore drill is forbidden in production")
         if not self._alembic_config.is_file():
             raise RuntimeError("drill Alembic configuration is unavailable")
+        for container in (targets.postgres_container, targets.minio_container):
+            await self._assert_container_absent(container)
         await self._run(
             postgres_container_command(targets),
             environment={
@@ -604,7 +612,7 @@ class LocalDockerDrillOperations:
                 cleanup_errors.append(error)
         for container in (targets.minio_container, targets.postgres_container):
             try:
-                await self._stop_container(container)
+                await self._remove_owned_container(container, targets.run_id)
             except Exception as error:
                 cleanup_errors.append(error)
         if self._result is not None:
@@ -643,6 +651,7 @@ class LocalDockerDrillOperations:
                 "head",
             ),
             environment={"DATABASE_URL": database_url},
+            timeout_seconds=_MIGRATION_TIMEOUT_SECONDS,
         )
 
     async def _wait_for_postgres(self, targets: DrillTargets) -> None:
@@ -850,14 +859,36 @@ class LocalDockerDrillOperations:
         finally:
             await engine.dispose()
 
-    async def _stop_container(self, container: str) -> None:
-        await self._run(("docker", "stop", "--time", "5", container), check=False)
-        for _ in range(50):
-            result = await self._run(("docker", "inspect", container), check=False)
-            if result.returncode != 0:
-                return
-            await asyncio.sleep(0.1)
-        raise RuntimeError("drill container cleanup is incomplete")
+    async def _assert_container_absent(self, container: str) -> None:
+        result = await self._run(
+            ("docker", "inspect", "--format", "{{.Id}}", container),
+            check=False,
+        )
+        if result.returncode == 0:
+            raise RuntimeError("drill container target already exists")
+
+    async def _remove_owned_container(self, container: str, run_id: str) -> None:
+        label = await self._run(
+            (
+                "docker",
+                "inspect",
+                "--format",
+                '{{ index .Config.Labels "nexus.drill.run_id" }}',
+                container,
+            ),
+            check=False,
+        )
+        if label.returncode != 0:
+            return
+        if not secrets.compare_digest(label.stdout.strip(), run_id):
+            raise RuntimeError("drill container ownership does not match run ID")
+        await self._run(
+            ("docker", "rm", "--force", "--volumes", container),
+            check=False,
+        )
+        residue = await self._run(("docker", "inspect", container), check=False)
+        if residue.returncode == 0:
+            raise RuntimeError("drill container cleanup is incomplete")
 
     async def _run(
         self,
@@ -865,6 +896,7 @@ class LocalDockerDrillOperations:
         *,
         environment: dict[str, str] | None = None,
         check: bool = True,
+        timeout_seconds: int = _COMMAND_TIMEOUT_SECONDS,
     ) -> subprocess.CompletedProcess[str]:
         child_environment = os.environ.copy()
         if environment:
@@ -876,6 +908,7 @@ class LocalDockerDrillOperations:
             capture_output=True,
             text=True,
             env=child_environment,
+            timeout=timeout_seconds,
         )
 
     @staticmethod

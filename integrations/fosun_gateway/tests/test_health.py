@@ -140,6 +140,8 @@ def _production_settings() -> dict[str, object]:
         "FOSUN_GATEWAY_SERVER_KEY": "/run/secrets/synthetic-server-key",
         "FOSUN_GATEWAY_SERVER_CLIENT_CA": "/run/secrets/synthetic-client-ca",
         "FOSUN_SDK_ADMITTED": True,
+        "FOSUN_ACTIVATION_PROBE_ARTIFACT": "/synthetic/fosun-probe.json",
+        "FOSUN_ACTIVATION_CONTRACT_HASH": "a" * 64,
         "FSOPENAPI_BASE_URL": "https://provider.invalid",
         "FSOPENAPI_API_KEY": "synthetic-api-key",
         "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-client-private-key",

@@ -11,10 +11,10 @@ CI 不部署、不发布镜像、不改变权限，也不构成复星 SDK admiss
 | Job | 门禁 |
 | --- | --- |
 | `web` | npm clean install、lint、typecheck、424 项 unit、generated client、production build |
-| `gateway-offline` | guard 自测、guard 下全部 104 项 gateway 测试、Ruff、Mypy |
-| `engine-postgres` | 固定 digest PostgreSQL、空库迁移到 head、全部 Engine 测试、Ruff、Mypy |
+| `gateway-offline` | guard 自测、guard 下全部 145 项 gateway 测试、Ruff、Mypy |
+| `engine-postgres` | 固定 digest PostgreSQL、空库迁移到 head、全部 Engine 测试、隔离 PostgreSQL＋MinIO fixture 恢复演练、Ruff、Mypy |
 | `e2e` | Playwright 锁定 Chromium、3 workers、64 项 synthetic E2E |
-| `policy` | 10 项策略测试、密钥/禁止路由/SDK lock/容器/CI 策略、761 项依赖许可证清单、npm/Python 漏洞审计、两 Compose profile |
+| `policy` | 12 项策略测试、密钥/禁止路由/TLS 修复/SDK lock/容器/CI 策略、761 项依赖许可证清单、npm/Python 漏洞审计、两 Compose profile |
 
 第三方 Actions 使用完整 commit SHA；容器引用同时保留可读 tag 和不可变 SHA-256 digest。两个运行镜像最终都声明非 root 用户，`.dockerignore` 排除 VCS、secret、env、依赖缓存和测试产物域。
 
@@ -57,8 +57,8 @@ uv run pip-audit --local --skip-editable
 
 - 完整 `npm audit`（含 CI/build devDependencies）：0 vulnerability；`pip-audit`：0 known vulnerability；
 - 首次 Python 审计发现 11 条已知漏洞，最小升级到 cryptography 50.0.1、pyarrow 23.0.1、pytest 9.0.3、pytest-asyncio 1.4.0 后清零；首次完整 npm 审计发现 16 条（其中 12 high），升级 Cloudflare/Vinext/Vite/Wrangler、React RSC 和传递依赖后清零；
-- gateway 104/104、Engine unit 700/700、Engine＋空 PostgreSQL 1428/1428（22 分 52 秒）、Web unit 424/424、Chromium E2E 64/64；
-- 策略测试 10/10，761 个第三方依赖完成许可证 inventory，Ruff/Mypy/生成客户端/生产构建/Compose config 均通过；
+- gateway 145/145、Engine unit 704/704、Web unit 424/424、Chromium E2E 64/64；本轮容器所有权加固前的 Engine＋空 PostgreSQL 全量证据为 1428/1428（22 分 52 秒），加固后已跑完全部 unit，仍需在可启动新容器的 runtime 上重跑空库全量；
+- 策略测试 12/12，761 个第三方依赖完成许可证 inventory，Ruff/Mypy/生成客户端/生产构建/Compose config 均通过；
 - 空 PostgreSQL 验证容器结束后残留为 0。
 
 以上是本机离线发布证据，不代表 GitHub-hosted run 已发生，也不代表部署或复星真实激活。

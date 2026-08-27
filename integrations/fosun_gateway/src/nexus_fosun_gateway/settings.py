@@ -4,8 +4,9 @@ import hmac
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Self
+from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -71,6 +72,17 @@ class GatewaySettings(BaseSettings):
         default=Path("contracts/providers/fosun/manifest.json"),
         validation_alias="FOSUN_PROVIDER_MANIFEST",
     )
+    activation_probe_artifact: Path | None = Field(
+        default=None,
+        validation_alias="FOSUN_ACTIVATION_PROBE_ARTIFACT",
+    )
+    activation_contract_hash: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+        validation_alias="FOSUN_ACTIVATION_CONTRACT_HASH",
+    )
     fsopenapi_base_url: str | None = Field(
         default=None,
         validation_alias="FSOPENAPI_BASE_URL",
@@ -95,6 +107,28 @@ class GatewaySettings(BaseSettings):
             ("transport_mode", self.transport_mode),
         ]
 
+    @field_validator("fsopenapi_base_url")
+    @classmethod
+    def provider_base_url_requires_https(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        parsed = urlsplit(stripped)
+        try:
+            parsed.port
+        except ValueError as error:
+            raise ValueError("provider base URL port is invalid") from error
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("provider base URL must be an unambiguous HTTPS URL")
+        return stripped.rstrip("/")
+
     @model_validator(mode="after")
     def apply_environment_policy(self) -> Self:
         if self.environment is Environment.PRODUCTION:
@@ -107,6 +141,8 @@ class GatewaySettings(BaseSettings):
                 or self.server_key is None
                 or self.server_client_ca is None
                 or not self.sdk_admitted
+                or self.activation_probe_artifact is None
+                or self.activation_contract_hash is None
                 or self.fsopenapi_base_url is None
                 or self.fsopenapi_api_key is None
                 or self.fsopenapi_client_private_key is None
@@ -114,7 +150,8 @@ class GatewaySettings(BaseSettings):
             ):
                 raise ValueError(
                     "production settings require admitted read_only transport, TLS server "
-                    "identity, provider config, and a current gateway HMAC identity"
+                    "identity, an activation contract, provider config, and a current gateway "
+                    "HMAC identity"
                 )
         elif self.capability is None:
             self.capability = "READ_ONLY"

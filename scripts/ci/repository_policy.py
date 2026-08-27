@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from importlib.metadata import distributions
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 _SDK_PACKAGE = re.compile(r'(?im)^name\s*=\s*["\']fsopenapi["\']|openapi-python-sdk')
 _SHA256_IMAGE = re.compile(r"^[^\s@]+:[^\s@]+@sha256:[0-9a-f]{64}$")
@@ -83,6 +84,43 @@ def check_forbidden_gateway_surface(root: Path) -> list[PolicyFinding]:
                 )
             )
     return findings
+
+
+def check_provider_tls_remediation(root: Path) -> list[PolicyFinding]:
+    """Pin the two reviewed v1.2.0 verify=False call sites to gateway-owned verification."""
+    main_path = root / "integrations/fosun_gateway/src/nexus_fosun_gateway/main.py"
+    remediation_path = (
+        root
+        / "integrations/fosun_gateway/src/nexus_fosun_gateway/security/provider_tls.py"
+    )
+    if not main_path.is_file() or not remediation_path.is_file():
+        return [
+            PolicyFinding(
+                "provider_tls_remediation_missing",
+                "integrations/fosun_gateway/src/nexus_fosun_gateway",
+                "provider TLS remediation source is unavailable",
+            )
+        ]
+    main_content = _read_text(main_path)
+    remediation = _read_text(remediation_path)
+    gateway_source = "\n".join(
+        _read_text(path)
+        for path in sorted((root / "integrations/fosun_gateway/src").rglob("*.py"))
+    )
+    if (
+        "enforce_sdk_tls_verification(client, auth_module)" not in main_content
+        or remediation.count('kwargs["verify"] = True') < 2
+        or remediation.count('kwargs["allow_redirects"] = False') < 2
+        or re.search(r"verify\s*=\s*False", gateway_source) is not None
+    ):
+        return [
+            PolicyFinding(
+                "provider_tls_remediation_missing",
+                _relative(root, remediation_path),
+                "both reviewed SDK HTTP surfaces must force certificate verification",
+            )
+        ]
+    return []
 
 
 def check_sdk_lock_admission(root: Path) -> list[PolicyFinding]:
@@ -159,6 +197,8 @@ def _complete_sdk_admission(admission: object, sdk: object) -> bool:
         return False
     if admission.get("sdk_commit") != commit:
         return False
+    if not _valid_provider_base_url(admission.get("provider_base_url")):
+        return False
     license_name = sdk.get("license")
     if not isinstance(license_name, str) or license_name.upper() in {"", "UNRESOLVED"}:
         return False
@@ -166,6 +206,28 @@ def _complete_sdk_admission(admission: object, sdk: object) -> bool:
     return isinstance(evidence, dict) and all(
         isinstance(evidence.get(name), str) and bool(evidence[name].strip())
         for name in _REQUIRED_SDK_EVIDENCE
+    )
+
+
+def _valid_provider_base_url(value: object) -> bool:
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or value != value.rstrip("/")
+    ):
+        return False
+    parsed = urlsplit(value)
+    try:
+        parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
     )
 
 
@@ -396,6 +458,7 @@ def check_workflow(root: Path) -> list[PolicyFinding]:
         "NEXUS_OFFLINE_SOCKET_GUARD: \"1\"",
         "scripts/offline_guard/selftest.py",
         "scripts/ci/repository_policy.py",
+        "nexus-engine-backup-restore-drill",
         "npm audit --audit-level=high",
         "pip-audit",
     )
@@ -437,10 +500,10 @@ def repository_texts(root: Path) -> dict[str, str]:
         relative = raw_path.decode("utf-8")
         path = root / relative
         try:
-            if not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
+            if not path.is_file():
                 continue
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
+            content = path.read_bytes().decode("utf-8", errors="ignore")
+        except OSError:
             continue
         files[relative] = content
     return files
@@ -450,6 +513,7 @@ def run_all(root: Path) -> tuple[list[PolicyFinding], list[DependencyRecord]]:
     inventory = dependency_inventory(root)
     findings = scan_secret_material(repository_texts(root))
     findings.extend(check_forbidden_gateway_surface(root))
+    findings.extend(check_provider_tls_remediation(root))
     findings.extend(check_sdk_lock_admission(root))
     findings.extend(check_container_pins(root))
     findings.extend(check_container_hardening(root))

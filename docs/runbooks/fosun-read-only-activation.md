@@ -31,13 +31,17 @@ Do not ask for or execute a real probe until all of these are independently evid
 3. The fixed production egress IP has been added to the provider allowlist and the intended target
    environment is recorded.
 4. `docs/runbooks/fosun-sdk-admission.md` has attached written permission, provider test vector,
-   security review, and TLS-verification remediation for the exact pinned SDK/OpenAPI subject.
+   security review, TLS-verification remediation, and exact provider base URL for the pinned
+   SDK/OpenAPI subject.
 5. The manifest is reviewed to `admission.status: admitted`, and the runtime admission tests,
    offline gateway suite, route-surface policy and secret scan all pass.
 6. A probe owner, UTC window, stop conditions and rollback owner are recorded. Only then request one
    explicit user confirmation for that exact network probe.
 
 Missing evidence is a stop, not permission to reduce checks or fall back to unreviewed data.
+The configured provider base URL must be an absolute HTTPS URL without embedded credentials,
+query, fragment, or redirect dependence; the admitted adapter forces certificate verification and
+rejects redirects on both frozen-SDK HTTP surfaces.
 
 ## Closed operation set and request budget
 
@@ -89,6 +93,15 @@ when present, exact sanitized-artifact bytes. Only an admitted manifest plus an 
 subject-matched, exact closed operation set with every check passing returns
 `activated_read_only`. Every other path returns `fixture_with_next_action` with a stable action.
 The result itself cannot change transport mode, permissions, deployment state, or secrets.
+
+For a later separately approved deployment, mount the exact artifact read-only into the gateway
+secret/config domain, set its in-container path as `FOSUN_ACTIVATION_PROBE_ARTIFACT`, and set the
+separately recorded 64-character result as `FOSUN_ACTIVATION_CONTRACT_HASH`. Neither variable is
+available to the API, research worker, or broker worker. Gateway startup recomputes and compares the
+contract before SDK import; the SDK adapter checks the artifact expiry at operation entry and again
+after queue/rate-limit waits before every Provider attempt, so a long-running process fails closed
+when the capability window ends. Re-probing, mounting, changing these environment values, or
+restarting/deploying the gateway remains approval-gated.
 
 ## Activation and rollback
 

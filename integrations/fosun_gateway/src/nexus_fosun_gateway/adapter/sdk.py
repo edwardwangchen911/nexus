@@ -23,6 +23,10 @@ _MAX_ATTEMPTS = 3
 _DEADLINE_SECONDS = 10.0
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 class RateLimiter(Protocol):
     async def acquire(self) -> None: ...
 
@@ -123,11 +127,19 @@ class SdkFosunTransport:
         rate_limiter: RateLimiter | None = None,
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
+        capability_expires_at: datetime | None = None,
+        utc_clock: Callable[[], datetime] = _utc_now,
     ) -> None:
+        if capability_expires_at is not None and (
+            capability_expires_at.tzinfo is None or capability_expires_at.utcoffset() is None
+        ):
+            raise ValueError("activation expiry must be timezone-aware")
         self._client = client
         self._rate_limiter = rate_limiter or DualTokenBucket(clock=clock, sleeper=sleeper)
         self._sleeper = sleeper
         self._clock = clock
+        self._capability_expires_at = capability_expires_at
+        self._utc_clock = utc_clock
         self._concurrency = asyncio.Semaphore(1)
         self._executor = ThreadPoolExecutor(
             max_workers=1,
@@ -139,6 +151,7 @@ class SdkFosunTransport:
         operation: GatewayOperation,
         payload: Mapping[str, object],
     ) -> GatewayPage[GatewayItem]:
+        self._require_active_capability()
         if operation not in READ_ONLY_OPERATIONS:
             raise GatewayError(
                 "OPERATION_NOT_ALLOWED",
@@ -208,6 +221,18 @@ class SdkFosunTransport:
             context=payload,
         )
 
+    def _require_active_capability(self) -> None:
+        if self._capability_expires_at is None:
+            return
+        now = self._utc_clock()
+        if now.tzinfo is None or now.utcoffset() is None or now >= self._capability_expires_at:
+            raise GatewayError(
+                "ACTIVATION_EXPIRED",
+                "Provider read-only activation has expired.",
+                status_code=503,
+                next_action="REFRESH_GUARDED_READ_ONLY_PROBE",
+            )
+
     async def _portfolio(
         self,
         payload: Mapping[str, object],
@@ -267,6 +292,9 @@ class SdkFosunTransport:
         deadline = self._clock() + _DEADLINE_SECONDS
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             await self._rate_limiter.acquire()
+            # Queueing, rate-limit waits, or retry backoff can cross the approved
+            # capability boundary. Recheck immediately before every provider call.
+            self._require_active_capability()
             remaining = deadline - self._clock()
             if remaining <= 0:
                 raise GatewayError(

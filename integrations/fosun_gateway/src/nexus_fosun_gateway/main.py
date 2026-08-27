@@ -1,5 +1,6 @@
 """HTTP API process entry point for the isolated Fosun gateway."""
 
+import hmac
 import importlib
 
 import uvicorn
@@ -7,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from nexus_fosun_gateway.activation import evaluate_activation_paths
 from nexus_fosun_gateway.adapter.fixture import FixtureFosunTransport
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
 from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
@@ -14,6 +16,7 @@ from nexus_fosun_gateway.admission import sdk_admission_is_valid
 from nexus_fosun_gateway.domain import GatewayError
 from nexus_fosun_gateway.routes.read_only import router as read_only_router
 from nexus_fosun_gateway.security.hmac import GatewayHmacVerifier, VerifiedGatewayActor
+from nexus_fosun_gateway.security.provider_tls import enforce_sdk_tls_verification
 from nexus_fosun_gateway.security.tls import production_uvicorn_kwargs
 from nexus_fosun_gateway.settings import Environment, GatewaySettings
 
@@ -28,10 +31,26 @@ def build_transport(settings: GatewaySettings) -> FosunTransport:
         or settings.fsopenapi_api_key is None
         or settings.fsopenapi_client_private_key is None
         or settings.fsopenapi_server_public_key is None
+        or settings.activation_probe_artifact is None
+        or settings.activation_contract_hash is None
+    ):
+        raise _sdk_not_admitted()
+    activation = evaluate_activation_paths(
+        settings.provider_manifest,
+        settings.activation_probe_artifact,
+    )
+    if (
+        activation.status != "activated_read_only"
+        or activation.capability_expires_at is None
+        or not hmac.compare_digest(
+            activation.contract_hash,
+            settings.activation_contract_hash,
+        )
     ):
         raise _sdk_not_admitted()
     try:
         module = importlib.import_module("fsopenapi")
+        auth_module = importlib.import_module("fsopenapi.auth")
         client_type = getattr(module, "SDKClient")
     except (ImportError, AttributeError):
         raise _sdk_not_admitted() from None
@@ -42,9 +61,13 @@ def build_transport(settings: GatewaySettings) -> FosunTransport:
             logging_enable=False,
             log_body=False,
         )
+        enforce_sdk_tls_verification(client, auth_module)
     except Exception:
         raise _sdk_not_admitted() from None
-    return SdkFosunTransport(client)
+    return SdkFosunTransport(
+        client,
+        capability_expires_at=activation.capability_expires_at,
+    )
 
 
 def _sdk_not_admitted() -> GatewayError:

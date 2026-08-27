@@ -70,8 +70,8 @@ repository policy 与 761 个依赖/0 finding 清单通过。公开仓库重新�
 ## Slice 7：最终演练、审查与验收
 
 - [ ] 从清洁工作树运行 Web/Engine/Gateway/Compose/E2E/策略/演练全量门禁，记录精确总数与耗时。
-- [ ] 运行单执行者分离式架构/安全审查，重点复核真实路由、CI 外网、artifact 泄密、备份目标、恢复根、激活绕过和 Compose secret 域。
-- [ ] 修复所有 Critical/Important，重跑受影响门禁；新增 Task 21 review 文档。
+- [x] 运行单执行者分离式架构/安全审查，重点复核真实路由、CI 外网、artifact 泄密、备份目标、恢复根、激活绕过和 Compose secret 域。
+- [x] 修复所有 Critical/Important，重跑受影响门禁；新增 Task 21 review 文档。
 - [ ] 更新 README、主计划和本地 progress ledger，明确 `phase0_offline_ready` 与 `fixture_with_next_action` 两个结论。
 - [ ] 提交 `test: close NEXUS phase 0 and read-only phase 1 gates`。
 

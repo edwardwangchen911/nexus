@@ -63,7 +63,7 @@ jobs:
 
   engine-postgres:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     services:
       postgres:
         image: postgres:17@sha256:e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449
@@ -92,6 +92,10 @@ jobs:
       - run: uv sync --frozen --package nexus-engine
       - run: uv run alembic -c engine/alembic.ini upgrade head
       - run: uv run pytest engine/tests -q --import-mode=importlib
+      - name: Run isolated PostgreSQL and MinIO recovery drill
+        env:
+          NEXUS_ENV: test
+        run: uv run --package nexus-engine nexus-engine-backup-restore-drill
       - run: uv run ruff check engine
       - run: uv run mypy engine/src
 

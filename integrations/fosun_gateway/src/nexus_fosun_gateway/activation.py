@@ -216,6 +216,20 @@ def evaluate_activation(
     )
 
 
+def evaluate_activation_paths(
+    manifest_path: Path,
+    probe_path: Path | None = None,
+    *,
+    checked_at: datetime | None = None,
+) -> FosunActivationResult:
+    """Read bounded local artifacts and evaluate them without provider or credential access."""
+    return evaluate_activation(
+        _read_bounded_or_empty(manifest_path),
+        _read_bounded_or_empty(probe_path) if probe_path is not None else None,
+        checked_at=checked_at,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Evaluate Fosun activation from local metadata without provider transport."
@@ -229,11 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--require-activated", action="store_true")
     args = parser.parse_args(argv)
 
-    manifest_bytes = _read_bounded_or_empty(args.manifest)
-    probe_bytes = (
-        _read_bounded_or_empty(args.probe_artifact) if args.probe_artifact is not None else None
-    )
-    result = evaluate_activation(manifest_bytes, probe_bytes)
+    result = evaluate_activation_paths(args.manifest, args.probe_artifact)
     print(result.model_dump_json())
     if args.require_activated and result.status != "activated_read_only":
         return 2
