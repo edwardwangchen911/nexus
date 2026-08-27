@@ -49,3 +49,4 @@ packages = ["src/nexus"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "../contracts/strategy/strategy-dsl.schema.json" = "nexus/strategy/strategy-dsl.schema.json"
+"../contracts/strategy/strategy-evolution.schema.json" = "nexus/evolution/strategy-evolution.schema.json"

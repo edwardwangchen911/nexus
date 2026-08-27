@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/contracts/strategy/strategy-evolution.schema.json",
+  "title": "NEXUS StrategyExperimentProposalV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "parent_strategy_definition_id",
+    "champion_generation",
+    "research_lineage_id",
+    "hypothesis",
+    "expected_mechanism",
+    "invalidation_conditions",
+    "evidence_refs",
+    "mutation_axes"
+  ],
+  "properties": {
+    "schema_version": { "const": "strategy_experiment_proposal_v1" },
+    "parent_strategy_definition_id": { "$ref": "#/$defs/uuid" },
+    "champion_generation": { "type": "integer", "minimum": 1 },
+    "research_lineage_id": { "$ref": "#/$defs/uuid" },
+    "hypothesis": { "$ref": "#/$defs/narrative" },
+    "expected_mechanism": { "$ref": "#/$defs/narrative" },
+    "invalidation_conditions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 250 }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/uuid" }
+    },
+    "mutation_axes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": { "$ref": "#/$defs/mutationAxis" }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "narrative": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 500,
+      "pattern": "^(?!.*(?:https?://|file://|\\.\\./|~/|[Pp][Yy][Tt][Hh][Oo][Nn]|[Ss][Qq][Ll]|[Ss][Hh][Ee][Ll][Ll]|[Ii][Mm][Pp][Oo][Rr][Tt])).*$"
+    },
+    "decimalString": {
+      "type": "string",
+      "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+    },
+    "decimalAxis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["axis", "values"],
+      "properties": {
+        "axis": { "enum": ["min_adv20_usd", "min_close", "target_weight"] },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/decimalString" }
+        }
+      }
+    },
+    "rankingAxis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["axis", "values"],
+      "properties": {
+        "axis": { "const": "ranking_feature" },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "enum": ["momentum_126_skip5", "return_126"] }
+        }
+      }
+    },
+    "filterAxis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["axis", "values"],
+      "properties": {
+        "axis": { "const": "positive_return_filter_enabled" },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "type": "boolean" }
+        }
+      }
+    },
+    "mutationAxis": {
+      "oneOf": [
+        { "$ref": "#/$defs/decimalAxis" },
+        { "$ref": "#/$defs/rankingAxis" },
+        { "$ref": "#/$defs/filterAxis" }
+      ]
+    }
+  }
+}

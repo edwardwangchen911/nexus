@@ -73,7 +73,7 @@
 - Produces: `StrategyExperimentProposalV1`, `StrategyCandidateDeltaV1`, `CandidateBudgetPolicyV1`, `EvolutionSearchSpaceV1`, `PromotionPolicyV1`, `generate_candidate_deltas(proposal, parent, policy) -> tuple[StrategyCandidateDeltaV1, ...]`, and `apply_candidate_delta(parent_document, delta, search_space) -> dict[str, object]`.
 - Consumes: existing `CompiledStrategy`, `compile_strategy`, canonical JSON and SHA-256 helpers.
 
-- [ ] **Step 1: Write strict contract and policy red tests**
+- [x] **Step 1: Write strict contract and policy red tests**
 
 ```python
 def test_proposal_rejects_unregistered_or_executable_fields() -> None:
@@ -93,7 +93,7 @@ def test_proposal_rejects_unregistered_or_executable_fields() -> None:
 
 Assert exact rejections for unknown fields, binary float, URL/path/code-like keys, zero/four axes, empty evidence, nonpositive generation, Agent-supplied bounds, arbitrary JSON paths and offsets.
 
-- [ ] **Step 2: Run the focused tests and observe missing-module failures**
+- [x] **Step 2: Run the focused tests and observe missing-module failures**
 
 Run:
 
@@ -103,19 +103,19 @@ uv run --package nexus-engine pytest engine/tests/unit/evolution/test_models.py 
 
 Expected: collection fails because `nexus.evolution` and the contract do not exist.
 
-- [ ] **Step 3: Implement frozen models and immutable v1 policies**
+- [x] **Step 3: Implement frozen models and immutable v1 policies**
 
 Use `ConfigDict(frozen=True, extra="forbid")`, Decimal strings, `Literal` schema versions and exact limits `axes<=3`, `candidate_budget=24`, `oos_budget=3`. Define registered axes only for `min_adv20_usd`, `min_close`, `target_weight`, `ranking_feature` and registered filter toggles. Policy loaders reject any database document whose canonical hash or exact version differs from the built-in v1 authority.
 
-- [ ] **Step 4: Implement stable candidate generation**
+- [x] **Step 4: Implement stable candidate generation**
 
 Enumerate the stable cartesian product, normalize mutation order, apply only server-owned field bindings, sort by candidate hash, deduplicate expression hashes and cap at 24. The returned strategy version is service-owned (`challenger_<hash-prefix>`) and the full document must compile with the extended feature registry.
 
-- [ ] **Step 5: Add property tests for stability and boundary closure**
+- [x] **Step 5: Add property tests for stability and boundary closure**
 
 For arbitrary proposal axis ordering, assert identical output hashes; assert no result changes `universe`, `rebalance`, `fill_timing`, `hard_risk_exit`, source/cost/risk policy fields or inserts a positive/negative offset. Assert all emitted documents compile and no more than 24 are returned.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/evolution/test_models.py engine/tests/unit/evolution/test_candidate.py engine/tests/property/test_evolution_candidate_properties.py -q
