@@ -77,7 +77,7 @@ async def test_same_candidate_job_is_idempotent_and_executes_only_on_strategy_qu
         worker_id="strategy-rnd-test",
         worker_started_at=_NOW,
         process_version="test-v1",
-        migration_head="0022_strategy_evolution",
+        migration_head="0023_evolution_authority",
         clock=lambda: _NOW + timedelta(seconds=1),
         claim_registered_only=True,
     )
@@ -258,7 +258,7 @@ async def test_generation_requires_pass_quality_one_lineage_and_obeys_pause_and_
         worker_id="strategy-rnd-quality-gate",
         worker_started_at=_NOW,
         process_version="test-v1",
-        migration_head="0022_strategy_evolution",
+        migration_head="0023_evolution_authority",
         clock=lambda: _NOW + timedelta(days=1),
         claim_registered_only=True,
     )

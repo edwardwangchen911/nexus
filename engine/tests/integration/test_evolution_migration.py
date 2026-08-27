@@ -43,6 +43,15 @@ EVOLUTION_TABLES = {
     "strategy_registry_events",
     "strategy_registry_heads",
 }
+EVOLUTION_AUTHORITY_0023_TABLES = {
+    "strategy_research_lineage_projections",
+    "strategy_experiment_candidate_projections",
+    "strategy_candidate_validation_results",
+    "strategy_oos_exposures",
+    "strategy_experiment_oos_exposure_links",
+    "strategy_oos_evidence_links",
+    "strategy_registry_activations",
+}
 
 
 def _config() -> Config:
@@ -143,13 +152,108 @@ async def _seed_legacy_decision(database_url: str) -> UUID:
     return decision_id
 
 
-def test_0022_is_the_single_head_over_0021() -> None:
+def test_0023_is_the_single_head_over_0022() -> None:
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0022_strategy_evolution"]
-    revision = script.get_revision("0022_strategy_evolution")
+    assert script.get_heads() == ["0023_evolution_authority"]
+    revision = script.get_revision("0023_evolution_authority")
     assert revision is not None
-    assert revision.down_revision == "0021_manual_job_retry_allowance"
+    assert revision.down_revision == "0022_strategy_evolution"
+
+
+def test_0023_adds_authority_facts_and_round_trips(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = _config()
+    command.upgrade(config, "0022_strategy_evolution")
+    assert EVOLUTION_AUTHORITY_0023_TABLES.isdisjoint(
+        asyncio.run(_table_names(temporary_database_url))
+    )
+
+    command.upgrade(config, "0023_evolution_authority")
+
+    assert EVOLUTION_AUTHORITY_0023_TABLES <= asyncio.run(
+        _table_names(temporary_database_url)
+    )
+    event_columns = asyncio.run(
+        _columns(temporary_database_url, "strategy_experiment_events")
+    )
+    family_columns = asyncio.run(
+        _columns(temporary_database_url, "strategy_experiment_families")
+    )
+    assert event_columns["experiment_id"] == "YES"
+    assert family_columns["baseline_backtest_run_id"] == "YES"
+    constraints = asyncio.run(
+        _rows(
+            temporary_database_url,
+            "SELECT conname,pg_get_constraintdef(oid) AS definition "
+            "FROM pg_constraint WHERE conrelid IN "
+            "('strategy_oos_exposures'::regclass,"
+            "'strategy_registry_activations'::regclass)",
+        )
+    )
+    names = {str(row["conname"]) for row in constraints}
+    assert {
+        "uq_strategy_oos_exposures_lineage_expression",
+        "uq_strategy_oos_exposures_lineage_ordinal",
+        "uq_strategy_registry_activations_event",
+        "uq_strategy_registry_activations_hash",
+    } <= names
+    definitions = {
+        str(row["conname"]): str(row["definition"]) for row in constraints
+    }
+    assert definitions["uq_strategy_oos_exposures_lineage_expression"] == (
+        "UNIQUE (research_lineage_id, expression_hash)"
+    )
+
+    command.downgrade(config, "0022_strategy_evolution")
+    assert EVOLUTION_AUTHORITY_0023_TABLES.isdisjoint(
+        asyncio.run(_table_names(temporary_database_url))
+    )
+    assert "experiment_id" not in asyncio.run(
+        _columns(temporary_database_url, "strategy_experiment_events")
+    )
+    assert "baseline_backtest_run_id" not in asyncio.run(
+        _columns(temporary_database_url, "strategy_experiment_families")
+    )
+    command.upgrade(config, "0023_evolution_authority")
+    assert EVOLUTION_AUTHORITY_0023_TABLES <= asyncio.run(
+        _table_names(temporary_database_url)
+    )
+
+
+def test_0023_downgrade_refuses_lineage_trial_facts(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = _config()
+    command.upgrade(config, "0023_evolution_authority")
+    asyncio.run(
+        _execute(
+            temporary_database_url,
+            "INSERT INTO strategy_research_lineages "
+            "(id,lineage_key,evolution_policy_id,cumulative_oos_trial_count,status) "
+            "SELECT '019d0000-0000-7000-8000-000000002310','downgrade-trial-fact',id,0,"
+            "'active' FROM strategy_evolution_policies "
+            "WHERE policy_kind='evolution_search_space'",
+        )
+    )
+    asyncio.run(
+        _execute(
+            temporary_database_url,
+            "INSERT INTO strategy_research_lineage_projections "
+            "(lineage_id,cumulative_oos_trial_count,version) VALUES "
+            "('019d0000-0000-7000-8000-000000002310',1,1)",
+        )
+    )
+
+    with pytest.raises(DBAPIError, match="authority facts prevent downgrade") as captured:
+        command.downgrade(config, "0022_strategy_evolution")
+
+    assert captured.value.orig.sqlstate == "23514"
 
 
 def test_0022_creates_exact_authorities_genesis_and_round_trips(

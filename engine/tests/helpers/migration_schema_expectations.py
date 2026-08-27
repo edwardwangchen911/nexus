@@ -165,10 +165,19 @@ EVOLUTION_TABLES = {
     "strategy_shadow_finalizations",
     "strategy_registry_events",
     "strategy_registry_heads",
+    "strategy_research_lineage_projections",
+    "strategy_experiment_candidate_projections",
+    "strategy_candidate_validation_results",
+    "strategy_oos_exposures",
+    "strategy_experiment_oos_exposure_links",
+    "strategy_oos_evidence_links",
+    "strategy_registry_activations",
 }
 EXPECTED_TABLES = EXPECTED_TABLES | EVOLUTION_TABLES
 NO_CREATED_AT_TRIGGER_TABLES = {
     "strategy_experiment_state_projections",
+    "strategy_research_lineage_projections",
+    "strategy_experiment_candidate_projections",
     "strategy_registry_heads",
 }
 

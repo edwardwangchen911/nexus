@@ -68,5 +68,5 @@ async def test_dedicated_worker_claims_only_strategy_queue_with_injected_executo
     assert seen == ["evaluate_candidate"]
     assert heartbeat is not None
     assert heartbeat.process_version == STRATEGY_RND_WORKER_PROCESS_VERSION
-    assert heartbeat.migration_head == "0022_strategy_evolution"
+    assert heartbeat.migration_head == "0023_evolution_authority"
     assert broker_heartbeat is None

@@ -416,7 +416,7 @@ async def test_veto_appends_verified_events_and_never_changes_champion(
         worker_id="veto-preflight-test",
         worker_started_at=_CLOCK,
         process_version="test-v1",
-        migration_head="0022_strategy_evolution",
+        migration_head="0023_evolution_authority",
         clock=lambda: _CLOCK + timedelta(seconds=1),
         claim_registered_only=True,
     )

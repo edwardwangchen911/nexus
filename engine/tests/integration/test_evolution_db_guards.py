@@ -33,6 +33,11 @@ AUTHORITY_TABLES = {
     "strategy_shadow_checkpoint_metrics",
     "strategy_shadow_finalizations",
     "strategy_registry_events",
+    "strategy_candidate_validation_results",
+    "strategy_oos_exposures",
+    "strategy_experiment_oos_exposure_links",
+    "strategy_oos_evidence_links",
+    "strategy_registry_activations",
 }
 
 

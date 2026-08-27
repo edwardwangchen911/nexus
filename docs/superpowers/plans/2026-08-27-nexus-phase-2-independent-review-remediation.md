@@ -4,7 +4,7 @@
 
 **Goal:** 把 Phase 2 从“组件和测试存在”修复为可由仓库内受限 worker 执行、可按候选重放、OOS 次数不可重置、注册表可完整重建的内部模拟闭环。
 
-**Architecture:** 使用前向迁移 `0023_strategy_evolution_authority` 增加候选级投影、验证结果、lineage OOS 暴露账本和 registry activation，不回改 `0022`。一个数据库受限的 `nexus.evolution.executor` 组合四种既有 Job operation；所有比较、Top-3、试验次数、Shadow 和内部模拟冠军切换从 PostgreSQL 权威派生，读模型与 Web 对 identity/hash/ETag 失败关闭。
+**Architecture:** 使用前向迁移 `0023_evolution_authority` 增加候选级投影、验证结果、lineage OOS 暴露账本和 registry activation，不回改 `0022`。一个数据库受限的 `nexus.evolution.executor` 组合四种既有 Job operation；所有比较、Top-3、试验次数、Shadow 和内部模拟冠军切换从 PostgreSQL 权威派生，读模型与 Web 对 identity/hash/ETag 失败关闭。
 
 **Tech Stack:** Python 3.12、Pydantic 2、SQLAlchemy 2 async、Alembic、PostgreSQL 16、pytest/pytest-asyncio/Hypothesis、FastAPI；React 19、TypeScript、vinext、Vitest、Playwright。
 
@@ -14,7 +14,7 @@
 
 - Agent 不能生成或执行任意代码、修改硬风控、访问 Broker/账户/交易密钥、创建订单、决定 Top-3、覆盖门禁或启用实盘。
 - 实盘默认关闭；真实账户、券商写操作、真实订单、部署、密钥/权限、付费调用和破坏性操作不在本计划授权范围内。
-- 不编辑已提交的 `0022_strategy_evolution`；新迁移必须是单头 `0023_strategy_evolution_authority`。
+- 不编辑已提交的 `0022_strategy_evolution`；新迁移必须是单头 `0023_evolution_authority`。
 - PostgreSQL 是候选状态、OOS 次数、registry head、审批与内部模拟冠军的最终权威；前端状态不能授权写操作。
 - 所有新业务状态先写可复现红测并观察预期失败，再写最小生产实现。
 - 保留 `run_backtest()` 的 baseline-only、Agent-free、`promotable=false` 语义；新评价不能改变已有历史运行。
@@ -35,9 +35,9 @@
 
 **Interfaces:**
 - Consumes: current Alembic head `0022_strategy_evolution` and its immutable Phase 2 roots.
-- Produces: ORM records `StrategyResearchLineageProjectionRecord`, `StrategyExperimentCandidateProjectionRecord`, `StrategyCandidateValidationResultRecord`, `StrategyOOSExposureRecord`, `StrategyExperimentOOSExposureLinkRecord`, `StrategyOOSEvidenceLinkRecord`, `StrategyRegistryActivationRecord`; nullable `StrategyExperimentEventRecord.experiment_id`; nullable `StrategyExperimentFamilyRecord.baseline_backtest_run_id`; migration head `0023_strategy_evolution_authority`.
+- Produces: ORM records `StrategyResearchLineageProjectionRecord`, `StrategyExperimentCandidateProjectionRecord`, `StrategyCandidateValidationResultRecord`, `StrategyOOSExposureRecord`, `StrategyExperimentOOSExposureLinkRecord`, `StrategyOOSEvidenceLinkRecord`, `StrategyRegistryActivationRecord`; nullable `StrategyExperimentEventRecord.experiment_id`; nullable `StrategyExperimentFamilyRecord.baseline_backtest_run_id`; migration head `0023_evolution_authority`.
 
-- [ ] **Step 1: Write migration red tests**
+- [x] **Step 1: Write migration red tests**
 
 Add exact schema expectations and round-trip tests:
 
@@ -82,7 +82,7 @@ def test_0023_adds_candidate_oos_and_activation_authorities(
 
 Add a downgrade test that inserts one OOS exposure and expects SQLSTATE `23514`, plus an allowed empty `0023 -> 0022 -> 0023` round trip.
 
-- [ ] **Step 2: Run migration tests and observe RED**
+- [x] **Step 2: Run migration tests and observe RED**
 
 Run:
 
@@ -92,14 +92,14 @@ uv run --package nexus-engine pytest \
   engine/tests/integration/test_evolution_db_guards.py -q
 ```
 
-Expected: FAIL because revision `0023_strategy_evolution_authority` and the new tables/columns do not exist.
+Expected: FAIL because revision `0023_evolution_authority` and the new tables/columns do not exist.
 
-- [ ] **Step 3: Implement the forward migration and ORM records**
+- [x] **Step 3: Implement the forward migration and ORM records**
 
 The revision declaration is exact:
 
 ```python
-revision = "0023_strategy_evolution_authority"
+revision = "0023_evolution_authority"
 down_revision = "0022_strategy_evolution"
 branch_labels = None
 depends_on = None
@@ -110,12 +110,12 @@ Create all seven tables from the spec, add `experiment_id` and `baseline_backtes
 Set:
 
 ```python
-CURRENT_MIGRATION_HEAD = "0023_strategy_evolution_authority"
+CURRENT_MIGRATION_HEAD = "0023_evolution_authority"
 ```
 
 Do not add a second Alembic head and do not modify `0022_strategy_evolution.py`.
 
-- [ ] **Step 4: Verify migration GREEN and guards**
+- [x] **Step 4: Verify migration GREEN and guards**
 
 Run:
 
@@ -130,9 +130,9 @@ uv run --package nexus-engine ruff check \
 uv run --package nexus-engine mypy engine/src/nexus/persistence/models/evolution.py
 ```
 
-Expected: migration and guard tests PASS; Alembic reports one head, exactly `0023_strategy_evolution_authority`.
+Expected: migration and guard tests PASS; Alembic reports one head, exactly `0023_evolution_authority`.
 
-- [ ] **Step 5: Commit Task 1**
+- [x] **Step 5: Commit Task 1**
 
 ```bash
 git add engine/alembic/versions/0023_strategy_evolution_authority.py \

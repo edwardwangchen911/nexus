@@ -29,7 +29,7 @@ Agent 仍不能生成或执行任意代码、修改硬风控、访问 Broker、�
 - 不把 Top-3、试验次数或门禁交给 Agent 或前端。
 - 不在第一次候选 Job 中同时登记 OOS 暴露并运行回测；同一事务回滚会让崩溃后的暴露消失。
 - 不仅加强 Python 校验而保留可任意更新的数据库 head；PostgreSQL 仍是最终权威。
-- 不回改已提交的 `0022_strategy_evolution`。使用单头前向迁移 `0023_strategy_evolution_authority`，父节点为 `0022_strategy_evolution`。
+- 不回改已提交的 `0022_strategy_evolution`。使用单头前向迁移 `0023_evolution_authority`，父节点为 `0022_strategy_evolution`；revision ID 保持在现有 `alembic_version.version_num varchar(32)` 上限内。
 
 ## 4. 持久化权威
 
@@ -121,7 +121,7 @@ Job payload 增加 server-owned `candidate_state` 和 `candidate_version`，并�
 
 ## 8. 迁移与回滚
 
-`0023_strategy_evolution_authority` 只新增表、列、索引和 guards，并回填：
+`0023_evolution_authority` 只新增表、列、索引和 guards，并回填：
 
 - 每条 lineage 建一行 projection，初始计数取现有非负计数最大值。
 - 仅当既有 Phase 2 family 仍处于纯 `ADMITTED`、没有 comparison/Shadow/promotion 事实时，按 experiment 回填 candidate projection；存在无法唯一归属的进阶事实则 upgrade fail closed，不猜测候选。

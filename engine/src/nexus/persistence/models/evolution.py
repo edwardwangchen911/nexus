@@ -130,6 +130,24 @@ class StrategyResearchLineageRecord(ImmutableCreatedAt, Base):
     status: Mapped[str] = mapped_column(String(16))
 
 
+class StrategyResearchLineageProjectionRecord(Base):
+    __tablename__ = "strategy_research_lineage_projections"
+    __table_args__ = (
+        CheckConstraint(
+            "cumulative_oos_trial_count >= 0 AND version >= 1", name="counters"
+        ),
+    )
+
+    lineage_id: Mapped[UUID] = mapped_column(
+        ForeignKey("strategy_research_lineages.id", ondelete="CASCADE"), primary_key=True
+    )
+    cumulative_oos_trial_count: Mapped[int] = mapped_column(BigInteger)
+    version: Mapped[int] = mapped_column(BigInteger)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class StrategyExperimentFamilyRecord(ImmutableCreatedAt, Base):
     __tablename__ = "strategy_experiment_families"
     __table_args__ = (
@@ -160,6 +178,9 @@ class StrategyExperimentFamilyRecord(ImmutableCreatedAt, Base):
     authority_hash: Mapped[str] = mapped_column(String(64))
     protocol_hash: Mapped[str] = mapped_column(String(64))
     code_hash: Mapped[str] = mapped_column(String(64))
+    baseline_backtest_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("backtest_runs.id")
+    )
 
 
 class StrategyExperimentRecord(ImmutableCreatedAt, Base):
@@ -222,6 +243,7 @@ class StrategyExperimentEventRecord(ImmutableCreatedAt, Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     family_id: Mapped[UUID] = mapped_column(ForeignKey("strategy_experiment_families.id"))
+    experiment_id: Mapped[UUID | None] = mapped_column(ForeignKey("strategy_experiments.id"))
     schema_version: Mapped[str] = mapped_column(
         String(64), server_default="strategy_experiment_event_v1"
     )
@@ -265,6 +287,39 @@ class StrategyExperimentAttemptRecord(ImmutableCreatedAt, Base):
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
+class StrategyCandidateValidationResultRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "strategy_candidate_validation_results"
+    __table_args__ = (
+        UniqueConstraint(
+            "experiment_id",
+            name="uq_strategy_candidate_validation_results_experiment",
+        ),
+        UniqueConstraint("attempt_id", name="uq_strategy_candidate_validation_results_attempt"),
+        UniqueConstraint("result_hash", name="uq_strategy_candidate_validation_results_hash"),
+        CheckConstraint("validation_cost >= 0 AND valid_window_count >= 0", name="metrics"),
+        CheckConstraint(
+            "authority_hash ~ '^[0-9a-f]{64}$' AND "
+            "protocol_hash ~ '^[0-9a-f]{64}$' AND code_hash ~ '^[0-9a-f]{64}$' "
+            "AND result_hash ~ '^[0-9a-f]{64}$'",
+            name="hashes",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    experiment_id: Mapped[UUID] = mapped_column(ForeignKey("strategy_experiments.id"))
+    attempt_id: Mapped[UUID] = mapped_column(ForeignKey("strategy_experiment_attempts.id"))
+    validation_sharpe: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    validation_max_drawdown: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    validation_cost: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
+    valid_window_count: Mapped[int] = mapped_column(Integer)
+    authority_complete: Mapped[bool] = mapped_column(Boolean)
+    authority_hash: Mapped[str] = mapped_column(String(64))
+    protocol_hash: Mapped[str] = mapped_column(String(64))
+    code_hash: Mapped[str] = mapped_column(String(64))
+    result_hash: Mapped[str] = mapped_column(String(64))
+    completed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
 class StrategyExperimentStateProjectionRecord(Base):
     __tablename__ = "strategy_experiment_state_projections"
     __table_args__ = (
@@ -304,6 +359,86 @@ Index(
 )
 
 
+class StrategyExperimentCandidateProjectionRecord(Base):
+    __tablename__ = "strategy_experiment_candidate_projections"
+    __table_args__ = (
+        CheckConstraint("event_sequence >= 1 AND version >= 1", name="counters"),
+        CheckConstraint(
+            "current_state IN ('ADMITTED','VALIDATION_FAILED','VALIDATION_PASSED',"
+            "'OOS_NOT_SELECTED','OOS_SELECTED','OOS_RESERVED','BACKTEST_FAILED',"
+            "'BACKTEST_PASSED','SHADOW_RUNNING','SHADOW_FAILED','EXPIRED','VETOED',"
+            "'PROMOTION_ELIGIBLE','PROMOTED','STALE_CHAMPION_BASELINE')",
+            name="state",
+        ),
+    )
+
+    experiment_id: Mapped[UUID] = mapped_column(
+        ForeignKey("strategy_experiments.id", ondelete="CASCADE"), primary_key=True
+    )
+    family_id: Mapped[UUID] = mapped_column(
+        ForeignKey("strategy_experiment_families.id", ondelete="CASCADE")
+    )
+    current_state: Mapped[str] = mapped_column(String(40))
+    event_sequence: Mapped[int] = mapped_column(BigInteger)
+    version: Mapped[int] = mapped_column(BigInteger)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), server_default=func.now(), onupdate=func.now()
+    )
+
+
+Index(
+    "ix_strategy_experiment_candidate_projections_family_state",
+    StrategyExperimentCandidateProjectionRecord.family_id,
+    StrategyExperimentCandidateProjectionRecord.current_state,
+)
+
+
+class StrategyOOSExposureRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "strategy_oos_exposures"
+    __table_args__ = (
+        UniqueConstraint(
+            "research_lineage_id",
+            "expression_hash",
+            name="uq_strategy_oos_exposures_lineage_expression",
+        ),
+        UniqueConstraint(
+            "research_lineage_id", "ordinal", name="uq_strategy_oos_exposures_lineage_ordinal"
+        ),
+        UniqueConstraint("exposure_hash", name="uq_strategy_oos_exposures_hash"),
+        CheckConstraint("ordinal >= 1", name="ordinal"),
+        CheckConstraint(
+            "expression_hash ~ '^[0-9a-f]{64}$' AND exposure_hash ~ '^[0-9a-f]{64}$'",
+            name="hashes",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    research_lineage_id: Mapped[UUID] = mapped_column(
+        ForeignKey("strategy_research_lineages.id")
+    )
+    expression_hash: Mapped[str] = mapped_column(String(64))
+    ordinal: Mapped[int] = mapped_column(BigInteger)
+    first_experiment_id: Mapped[UUID] = mapped_column(ForeignKey("strategy_experiments.id"))
+    exposed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    exposure_hash: Mapped[str] = mapped_column(String(64))
+
+
+class StrategyExperimentOOSExposureLinkRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "strategy_experiment_oos_exposure_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "experiment_id", name="uq_strategy_experiment_oos_exposure_links_experiment"
+        ),
+        UniqueConstraint("link_hash", name="uq_strategy_experiment_oos_exposure_links_hash"),
+        CheckConstraint("link_hash ~ '^[0-9a-f]{64}$'", name="hash"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    experiment_id: Mapped[UUID] = mapped_column(ForeignKey("strategy_experiments.id"))
+    exposure_id: Mapped[UUID] = mapped_column(ForeignKey("strategy_oos_exposures.id"))
+    link_hash: Mapped[str] = mapped_column(String(64))
+
+
 class StrategyChampionComparisonRecord(ImmutableCreatedAt, Base):
     __tablename__ = "strategy_champion_comparisons"
     __table_args__ = (
@@ -334,6 +469,31 @@ class StrategyChampionComparisonRecord(ImmutableCreatedAt, Base):
     protocol_hash: Mapped[str] = mapped_column(String(64))
     cost_policy_hash: Mapped[str] = mapped_column(String(64))
     comparison_hash: Mapped[str] = mapped_column(String(64))
+
+
+class StrategyOOSEvidenceLinkRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "strategy_oos_evidence_links"
+    __table_args__ = (
+        UniqueConstraint("experiment_id", name="uq_strategy_oos_evidence_links_experiment"),
+        UniqueConstraint("comparison_id", name="uq_strategy_oos_evidence_links_comparison"),
+        UniqueConstraint("evidence_hash", name="uq_strategy_oos_evidence_links_hash"),
+        CheckConstraint(
+            "champion_backtest_run_id <> challenger_backtest_run_id", name="distinct_runs"
+        ),
+        CheckConstraint(
+            "authority_hash ~ '^[0-9a-f]{64}$' AND evidence_hash ~ '^[0-9a-f]{64}$'",
+            name="hashes",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    experiment_id: Mapped[UUID] = mapped_column(ForeignKey("strategy_experiments.id"))
+    exposure_id: Mapped[UUID] = mapped_column(ForeignKey("strategy_oos_exposures.id"))
+    comparison_id: Mapped[UUID] = mapped_column(ForeignKey("strategy_champion_comparisons.id"))
+    champion_backtest_run_id: Mapped[UUID] = mapped_column(ForeignKey("backtest_runs.id"))
+    challenger_backtest_run_id: Mapped[UUID] = mapped_column(ForeignKey("backtest_runs.id"))
+    authority_hash: Mapped[str] = mapped_column(String(64))
+    evidence_hash: Mapped[str] = mapped_column(String(64))
 
 
 class StrategyPromotionDecisionRecord(ImmutableCreatedAt, Base):
@@ -667,6 +827,26 @@ class StrategyRegistryEventRecord(ImmutableCreatedAt, Base):
     payload: Mapped[dict[str, object]] = mapped_column(JSONB)
     previous_hash: Mapped[str] = mapped_column(String(64))
     event_hash: Mapped[str] = mapped_column(String(64))
+
+
+class StrategyRegistryActivationRecord(ImmutableCreatedAt, Base):
+    __tablename__ = "strategy_registry_activations"
+    __table_args__ = (
+        UniqueConstraint("registry_event_id", name="uq_strategy_registry_activations_event"),
+        UniqueConstraint("activation_hash", name="uq_strategy_registry_activations_hash"),
+        CheckConstraint("champion_generation >= 2", name="generation"),
+        CheckConstraint("from_definition_id <> to_definition_id", name="distinct_definitions"),
+        CheckConstraint("activation_hash ~ '^[0-9a-f]{64}$'", name="hash"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    registry_event_id: Mapped[UUID] = mapped_column(ForeignKey("strategy_registry_events.id"))
+    decision_session: Mapped[date] = mapped_column(Date)
+    activated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    from_definition_id: Mapped[UUID] = mapped_column(ForeignKey("strategy_definitions.id"))
+    to_definition_id: Mapped[UUID] = mapped_column(ForeignKey("strategy_definitions.id"))
+    champion_generation: Mapped[int] = mapped_column(BigInteger)
+    activation_hash: Mapped[str] = mapped_column(String(64))
 
 
 class StrategyRegistryHeadRecord(Base):
