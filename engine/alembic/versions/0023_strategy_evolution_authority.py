@@ -139,7 +139,7 @@ def _create_projection_tables() -> None:
         ),
         sa.CheckConstraint(
             "cumulative_oos_trial_count >= 0 AND version >= 1",
-            name="ck_strategy_research_lineage_projections_counters",
+            name=op.f("ck_strategy_research_lineage_projections_counters"),
         ),
     )
     states = ",".join(f"'{state}'" for state in _CANDIDATE_STATES)
@@ -171,11 +171,11 @@ def _create_projection_tables() -> None:
         ),
         sa.CheckConstraint(
             "event_sequence >= 1 AND version >= 1",
-            name="ck_strategy_experiment_candidate_projections_counters",
+            name=op.f("ck_strategy_experiment_candidate_projections_counters"),
         ),
         sa.CheckConstraint(
             f"current_state IN ({states})",
-            name="ck_strategy_experiment_candidate_projections_state",
+            name=op.f("ck_strategy_experiment_candidate_projections_state"),
         ),
     )
     op.create_index(
@@ -225,13 +225,13 @@ def _create_validation_and_oos_tables() -> None:
         ),
         sa.CheckConstraint(
             "validation_cost >= 0 AND valid_window_count >= 0",
-            name="ck_strategy_candidate_validation_results_metrics",
+            name=op.f("ck_strategy_candidate_validation_results_metrics"),
         ),
         sa.CheckConstraint(
             "authority_hash ~ '^[0-9a-f]{64}$' AND "
             "protocol_hash ~ '^[0-9a-f]{64}$' AND "
             "code_hash ~ '^[0-9a-f]{64}$' AND result_hash ~ '^[0-9a-f]{64}$'",
-            name="ck_strategy_candidate_validation_results_hashes",
+            name=op.f("ck_strategy_candidate_validation_results_hashes"),
         ),
     )
     op.create_table(
@@ -266,11 +266,13 @@ def _create_validation_and_oos_tables() -> None:
             name="uq_strategy_oos_exposures_lineage_ordinal",
         ),
         sa.UniqueConstraint("exposure_hash", name="uq_strategy_oos_exposures_hash"),
-        sa.CheckConstraint("ordinal >= 1", name="ck_strategy_oos_exposures_ordinal"),
+        sa.CheckConstraint(
+            "ordinal >= 1", name=op.f("ck_strategy_oos_exposures_ordinal")
+        ),
         sa.CheckConstraint(
             "expression_hash ~ '^[0-9a-f]{64}$' AND "
             "exposure_hash ~ '^[0-9a-f]{64}$'",
-            name="ck_strategy_oos_exposures_hashes",
+            name=op.f("ck_strategy_oos_exposures_hashes"),
         ),
     )
     op.create_table(
@@ -299,7 +301,7 @@ def _create_validation_and_oos_tables() -> None:
         ),
         sa.CheckConstraint(
             "link_hash ~ '^[0-9a-f]{64}$'",
-            name="ck_strategy_experiment_oos_exposure_links_hash",
+            name=op.f("ck_strategy_experiment_oos_exposure_links_hash"),
         ),
     )
     op.create_table(
@@ -344,12 +346,12 @@ def _create_validation_and_oos_tables() -> None:
         sa.UniqueConstraint("evidence_hash", name="uq_strategy_oos_evidence_links_hash"),
         sa.CheckConstraint(
             "champion_backtest_run_id <> challenger_backtest_run_id",
-            name="ck_strategy_oos_evidence_links_distinct_runs",
+            name=op.f("ck_strategy_oos_evidence_links_distinct_runs"),
         ),
         sa.CheckConstraint(
             "authority_hash ~ '^[0-9a-f]{64}$' AND "
             "evidence_hash ~ '^[0-9a-f]{64}$'",
-            name="ck_strategy_oos_evidence_links_hashes",
+            name=op.f("ck_strategy_oos_evidence_links_hashes"),
         ),
     )
 
@@ -390,15 +392,15 @@ def _create_registry_activation_table() -> None:
         ),
         sa.CheckConstraint(
             "champion_generation >= 2",
-            name="ck_strategy_registry_activations_generation",
+            name=op.f("ck_strategy_registry_activations_generation"),
         ),
         sa.CheckConstraint(
             "from_definition_id <> to_definition_id",
-            name="ck_strategy_registry_activations_distinct_definitions",
+            name=op.f("ck_strategy_registry_activations_distinct_definitions"),
         ),
         sa.CheckConstraint(
             "activation_hash ~ '^[0-9a-f]{64}$'",
-            name="ck_strategy_registry_activations_hash",
+            name=op.f("ck_strategy_registry_activations_hash"),
         ),
     )
 

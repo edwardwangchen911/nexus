@@ -257,6 +257,13 @@ class StrategyExperimentEventRecord(ImmutableCreatedAt, Base):
     event_hash: Mapped[str] = mapped_column(String(64))
 
 
+Index(
+    "ix_strategy_experiment_events_experiment_sequence",
+    StrategyExperimentEventRecord.experiment_id,
+    StrategyExperimentEventRecord.sequence,
+)
+
+
 class StrategyExperimentAttemptRecord(ImmutableCreatedAt, Base):
     __tablename__ = "strategy_experiment_attempts"
     __table_args__ = (
