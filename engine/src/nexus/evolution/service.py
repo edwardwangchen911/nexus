@@ -224,6 +224,27 @@ async def execute_strategy_rnd(
         )
         session.add(output)
         await session.flush()
+    await append_audit_event(
+        session,
+        actor_id="service:strategy_rnd",
+        action=(
+            "strategy.proposal.created"
+            if status == "completed"
+            else "strategy.proposal.rejected"
+        ),
+        schema_version="strategy_evolution_event_v1",
+        payload={
+            "schema_version": "strategy_evolution_event_v1",
+            "event_type": (
+                "PROPOSAL_CREATED" if status == "completed" else "PROPOSAL_REJECTED"
+            ),
+            "status": status.upper(),
+            "reason_code": reason_code or "PROPOSAL_CREATED",
+            "request_hash": request_hash,
+            **({} if output is None else {"proposal_hash": output.proposal_hash}),
+        },
+        occurred_at=now,
+    )
     return StrategyRNDExecutionResult(
         run_id=run.id,
         status=status,
@@ -452,7 +473,7 @@ async def admit_experiment_family(
             updated_at=now,
         )
     )
-    safe_payload = {
+    outbox_payload = {
         "status": "ADMITTED",
         "candidate_count": len(deltas),
         "champion_generation": head.active_generation,
@@ -463,7 +484,14 @@ async def admit_experiment_family(
         actor_id="service:strategy_rnd",
         action="strategy.experiment.admitted",
         schema_version="strategy_evolution_event_v1",
-        payload=safe_payload,
+        payload={
+            "schema_version": "strategy_evolution_event_v1",
+            "event_type": "CANDIDATES_ADMITTED",
+            "status": "ADMITTED",
+            "authority_hash": authority.authority_hash,
+            "protocol_hash": authority.protocol_hash,
+            "code_hash": authority.code_hash,
+        },
         occurred_at=now,
     )
     session.add(
@@ -472,7 +500,7 @@ async def admit_experiment_family(
             event_type="strategy.experiment.admitted",
             aggregate_id=family.id,
             schema_version="strategy_evolution_event_v1",
-            payload=safe_payload,
+            payload=outbox_payload,
             published_at=None,
         )
     )

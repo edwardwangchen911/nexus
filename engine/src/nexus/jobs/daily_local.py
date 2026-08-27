@@ -9,6 +9,7 @@ from sqlalchemy import and_, any_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.manifest import AuditManifestObjectStore, publish_audit_chain_manifest
+from nexus.evolution.jobs import resolve_due_strategy_rnd_jobs
 from nexus.jobs.daily_payloads import (
     STAGE_SCHEMA,
     DailyPipelinePayload,
@@ -93,6 +94,11 @@ async def _resolve_local_targets(
         paper_execution=await _paper_execution_target_ids(session, root=root),
         shadow=await _shadow_target_ids(session, root=root),
         performance=await _performance_target_ids(session),
+        strategy_rnd=await resolve_due_strategy_rnd_jobs(
+            session,
+            session_date=date.fromisoformat(root.session),
+            now=parse_utc(root.planned_at),
+        ),
     )
 
 

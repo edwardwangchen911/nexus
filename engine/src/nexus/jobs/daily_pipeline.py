@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.ids import new_uuid7
+from nexus.evolution.jobs import StrategyRNDJobPayloadV1, enqueue_strategy_rnd_job
 from nexus.jobs.daily_payloads import (
     PROFILE_PATTERN,
     ROOT_SCHEMA,
@@ -57,6 +58,7 @@ class DailyTargetSet:
     paper_execution: tuple[UUID | None, ...]
     shadow: tuple[UUID | None, ...]
     performance: tuple[UUID | None, ...]
+    strategy_rnd: tuple[StrategyRNDJobPayloadV1, ...] = ()
 
 
 DailyTargetResolver = Callable[
@@ -213,11 +215,7 @@ def build_daily_pipeline_registry(
                 job_type=job_type,
                 schema_version=STAGE_SCHEMA,
                 payload_model=DailyStagePayload,
-                queue=(
-                    QueueName.STRATEGY_RND
-                    if job_type is JobType.STRATEGY_RND
-                    else QueueName.GENERAL
-                ),
+                queue=QueueName.GENERAL,
                 timeout_seconds=45,
                 retry_policy=RetryPolicy.AUTOMATIC_SAFE,
                 max_attempts=3,
@@ -242,7 +240,6 @@ _GENERAL_STAGE_TYPES = frozenset(
         JobType.PAPER_PERFORMANCE,
         JobType.DAILY_BRIEF,
         JobType.AUDIT_MANIFEST,
-        JobType.STRATEGY_RND,
     }
 )
 
@@ -258,6 +255,7 @@ async def _materialize_daily_dag(
             paper_execution=(None,),
             shadow=(None,),
             performance=(None,),
+            strategy_rnd=(),
         )
         if target_resolver is None
         else await target_resolver(context.session, root)
@@ -418,15 +416,13 @@ async def _materialize_daily_dag(
         enabled_stage_types=enabled_stage_types,
         finished_at=context.finished_at(),
     )
-    await _enqueue_or_skip_stage(
-        context.session,
-        root=root,
-        root_job_id=context.claim.job_id,
-        job_type=JobType.STRATEGY_RND,
-        dependencies=(JobDependencyInput(audit.id, "succeeded_or_skipped"),),
-        enabled_stage_types=enabled_stage_types,
-        finished_at=context.finished_at(),
-    )
+    for payload in targets.strategy_rnd:
+        await enqueue_strategy_rnd_job(
+            context.session,
+            payload=payload,
+            effective_at=parse_utc(root.planned_at),
+            dependencies=(JobDependencyInput(audit.id, "succeeded_or_skipped"),),
+        )
 
 
 async def _enqueue_or_skip_stage(

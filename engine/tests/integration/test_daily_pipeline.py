@@ -18,7 +18,7 @@ from nexus.jobs.daily_pipeline import (
     build_daily_pipeline_registry,
     schedule_due_daily_pipeline,
 )
-from nexus.jobs.models import JOB_PRIORITIES, JobType, QueueName
+from nexus.jobs.models import JobType, QueueName
 from nexus.jobs.registry import JobHandlerContext, JobHandlerResult
 from nexus.jobs.worker import run_job_worker_once
 from nexus.persistence.models.backtest import (
@@ -244,10 +244,7 @@ async def test_scheduler_is_idempotent_and_materializes_strict_weekly_dag(
         2026, 8, 31, 13, 55, tzinfo=UTC
     )
     assert by_type[JobType.PAPER_ADMIT_ORDERS.value].status == "succeeded"
-    assert by_type[JobType.STRATEGY_RND.value].priority == JOB_PRIORITIES[
-        JobType.STRATEGY_RND
-    ]
-    assert by_type[JobType.STRATEGY_RND.value].queue == QueueName.STRATEGY_RND.value
+    assert JobType.STRATEGY_RND.value not in by_type
     edges = set(edge_rows)
     assert (JobType.QUALITY_FREEZE.value, JobType.BROKER_SYNC.value) in edges
     assert (JobType.DIAGNOSTICS_RUN.value, JobType.QUALITY_FREEZE.value) in edges

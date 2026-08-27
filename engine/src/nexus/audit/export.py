@@ -25,6 +25,7 @@ _KIND_PREFIXES: dict[AuditKind, tuple[str, ...]] = {
     "agent_cost": ("agent.budget.", "agent.cost."),
     "job": ("job.", "outbox."),
     "reconciliation": ("reconciliation.", "broker.reconciliation."),
+    "evolution": ("strategy.",),
     "audit": (),
 }
 

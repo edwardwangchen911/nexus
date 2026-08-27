@@ -474,29 +474,29 @@ git commit -m "feat(engine): promote and rollback internal paper champions"
 - Produces: `StrategyRNDJobPayloadV1`, `strategy_rnd_handler(context) -> JobHandlerResult`, safe evolution audit classifications and daily enqueue hooks.
 - Consumes Task 4–7 services through immutable IDs only.
 
-- [ ] **Step 1: Write strict Job and scheduler red tests**
+- [x] **Step 1: Write strict Job and scheduler red tests**
 
 Assert exactly four operations, forbidden payload keys/code/URL/path rejection, one candidate per evaluate job, same-key idempotency, quarterly cooldown, one active family, pause behavior, daily Shadow advance, finalization enqueue and low-priority strategy queue isolation.
 
-- [ ] **Step 2: Run red tests**
+- [x] **Step 2: Run red tests**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/evolution/test_jobs.py engine/tests/integration/test_evolution_jobs_pg.py engine/tests/integration/test_daily_pipeline.py -q
 ```
 
-- [ ] **Step 3: Implement the bounded handler**
+- [x] **Step 3: Implement the bounded handler**
 
 Resolve only database IDs and the operation enum. `generate_family` invokes fixed Agent admission, `evaluate_candidate` evaluates one experiment, `advance_shadow` advances one expected session, and `finalize_promotion` runs Shadow final gate/handover/registry. Declare `strategy_rnd` queue, existing low priority 20, strict timeout/retry/idempotency and no broker composition.
 
-- [ ] **Step 4: Wire the daily pipeline**
+- [x] **Step 4: Wire the daily pipeline**
 
 At a PASS quality session, enqueue due Strategy Shadow advances. Only when no family is active, pause is false and the last family is at least one calendar quarter old may the scheduler enqueue generation. Use outbox events to enqueue downstream evaluation/finalization; repeated scheduler/outbox events return existing Jobs.
 
-- [ ] **Step 5: Add redacted audit and safe metrics**
+- [x] **Step 5: Add redacted audit and safe metrics**
 
 Classify all events listed in spec section 10.3. Persist only type/version/hash/gate/reason; reject strategy documents, hypothesis text, Prompt/tool payloads, symbol/account/order/amount fields. Expose counters/gauges without labels containing identifiers or investment data.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/evolution/test_jobs.py engine/tests/integration/test_evolution_jobs_pg.py engine/tests/integration/test_daily_pipeline.py engine/tests/integration/test_job_worker.py engine/tests/integration/test_job_leases.py engine/tests/integration/test_audit_service.py -q
@@ -506,6 +506,29 @@ git add engine/src/nexus/evolution/jobs.py engine/src/nexus/jobs engine/src/nexu
 git add -u engine/tests
 git commit -m "feat(engine): automate bounded strategy evolution jobs"
 ```
+
+Implementation decisions recorded during execution:
+
+- The durable payload remains the specified UUID-typed model. Because the generic worker uses
+  Pydantic strict JSON parsing, the model has an explicit canonical-UUID pre-parser; non-canonical
+  text and all extra fields still fail before handler execution.
+- Daily scheduling freezes only typed operation identities before the DAG runs. The handler repeats
+  generation, quality, pause, active-family and generation checks after the audit dependency reaches
+  a terminal state, preventing pre-quality materialization from becoming execution authority.
+- Task 4–7 service composition is injected as a trusted Engine-side operation executor. The Job layer
+  exposes no Prompt, strategy document, provider method, broker client or credential capability, and
+  never pretends an unavailable Agent/backtest/handover composition succeeded.
+- Admission and Shadow-finalization outbox consumers reuse any exact existing operation Job, so a
+  daily scheduler/outbox race cannot evaluate or promote the same candidate twice.
+- Source audit rows and public audit export are separately allowlisted. Audit rows contain only safe
+  type/version/status/reason/hash fields; routing IDs remain confined to the transactional outbox.
+
+Verification evidence before commit:
+
+- `132 passed in 268.39s` across the new Job/daily/audit suites plus existing Agent, admission,
+  historical promotion, Strategy Shadow and registry integration suites.
+- After the final active-lineage cooldown review fix: `53 passed in 68.89s` for the complete Task 8
+  Job/lease/daily/audit gate; Ruff passed and Mypy passed across 29 affected source files.
 
 ### Task 9: Expose the typed Engine API and generated contracts
 

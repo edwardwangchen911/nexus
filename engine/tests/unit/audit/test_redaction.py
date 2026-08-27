@@ -12,6 +12,8 @@ from nexus.audit.redaction import AuditExportSource, classify_audit_action, reda
         ("paper.risk.rejected", "risk"),
         ("agent.budget.settled", "agent_cost"),
         ("job.failed", "job"),
+        ("strategy.shadow.finalized", "evolution"),
+        ("strategy.registry.promoted", "evolution"),
         ("broker.reconciliation.mismatch", "reconciliation"),
         ("shadow.started", "audit"),
     ),
@@ -91,3 +93,45 @@ def test_actor_is_reduced_to_a_non_identifying_kind(actor_id: str, expected: str
     )
 
     assert redact_audit_event(source)["actor_kind"] == expected
+
+
+def test_evolution_export_keeps_only_safe_type_hash_gate_and_reason() -> None:
+    source = AuditExportSource(
+        event_seq=3,
+        occurred_at=datetime(2026, 8, 27, tzinfo=UTC),
+        actor_id="strategy-rnd-service",
+        action="strategy.promotion.gated",
+        schema_version="strategy_evolution_event_v1",
+        payload={
+            "status": "PASS",
+            "event_type": "PROMOTION_GATED",
+            "policy_version": "promotion_v1",
+            "authority_hash": "a" * 64,
+            "decision_hash": "b" * 64,
+            "gate_code": "HISTORICAL_GATES_PASSED",
+            "reason_code": "HISTORICAL_GATES_PASSED",
+            "strategy_document": {"rebalance": "WEEKLY_REBALANCE"},
+            "hypothesis": "private Agent content",
+            "symbol": "PRIVATE",
+            "account_id": "private-account",
+            "amount": "90000",
+        },
+        previous_hash="c" * 64,
+        event_hash="d" * 64,
+    )
+
+    exported = redact_audit_event(source)
+
+    assert exported["kind"] == "evolution"
+    assert exported["outcome"] == {
+        "authority_hash": "a" * 64,
+        "decision_hash": "b" * 64,
+        "event_type": "PROMOTION_GATED",
+        "gate_code": "HISTORICAL_GATES_PASSED",
+        "policy_version": "promotion_v1",
+        "reason_code": "HISTORICAL_GATES_PASSED",
+        "status": "PASS",
+    }
+    serialized = json.dumps(exported, sort_keys=True)
+    for private in ("rebalance", "private Agent content", "PRIVATE", "private-account", "90000"):
+        assert private not in serialized

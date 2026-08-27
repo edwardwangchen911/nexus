@@ -411,6 +411,8 @@ class StrategyRNDJobPayloadV1(BaseModel):
 
 Job payload 不含 Prompt、代码、URL、路径、SQL、provider 方法或策略 JSON。handler 根据数据库中的不可变 ID 加载事实。每个 candidate 单独评估，避免一个 24 候选任务超时；结果通过 idempotency key 合并。
 
+实现约定：持久化 JSON 中 UUID 使用 canonical 文本，严格 worker 在模型解析前只将 canonical UUID 文本转为 UUID 类型；大小写、变体、额外字段或 hash 不匹配均拒绝。operation executor 只在 Engine 组合根注入，Job 层不会加载 broker/provider/secret 能力。
+
 ### 10.2 自动节奏
 
 - 同一 lineage 无活动 family、registry 未暂停、最新质量 PASS 且距上一 family 至少一个自然季度时，daily pipeline 可入队 `generate_family`。
@@ -418,6 +420,8 @@ Job payload 不含 Prompt、代码、URL、路径、SQL、provider 方法或策�
 - family admission 后为每个 candidate 入队 `evaluate_candidate`。
 - 历史门禁通过后创建 Strategy Shadow；daily pipeline 每个合格 session 入队 `advance_shadow`。
 - 63 日最终化后入队 `finalize_promotion`；重复 outbox/Job 只返回同一事实。
+
+daily DAG 在质量 Job 之前物化，因此调度器只冻结“可能到期”的类型化操作；`strategy_rnd` handler 必须在 audit dependency 终态后重新校验最新质量、暂停、活动 family、冷却期和 champion generation。任一重校验失败均为可审计 skip，不执行 Agent、回测或晋级。
 
 ### 10.3 Audit 与指标
 

@@ -443,6 +443,20 @@ async def request_registry_rollback(
         raise RegistryServiceError("REGISTRY_TRANSITION_PENDING")
     target = await _previous_compatible_definition(session, head=head)
     if target is None:
+        await append_audit_event(
+            session,
+            actor_id="strategy-registry-service",
+            action="strategy.registry.rollback_failed",
+            schema_version="1",
+            payload={
+                "schema_version": "strategy_registry_change_v1",
+                "event_type": "ROLLBACK",
+                "status": "FAILED",
+                "reason_code": "ROLLBACK_TARGET_NOT_FOUND",
+                "live_execution_enabled": False,
+            },
+            occurred_at=now,
+        )
         return _result(head, status="FAILED", reason_code="ROLLBACK_TARGET_NOT_FOUND")
     event = await _append_registry_event(
         session,
@@ -1020,7 +1034,13 @@ async def _append_registry_audit_and_outbox(
         actor_id="strategy-registry-service",
         action=action,
         schema_version="1",
-        payload=payload,
+        payload={
+            "schema_version": "strategy_registry_change_v1",
+            "event_type": event.event_type,
+            "event_hash": event.event_hash,
+            "status": status,
+            "live_execution_enabled": False,
+        },
         occurred_at=now,
     )
     session.add(

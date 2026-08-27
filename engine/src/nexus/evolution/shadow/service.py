@@ -997,7 +997,14 @@ async def _append_finalization_audit_and_outbox(
         actor_id="strategy-shadow-service",
         action="strategy.shadow.finalized",
         schema_version="1",
-        payload=payload,
+        payload={
+            "schema_version": "strategy_shadow_finalized_v1",
+            "event_type": "SHADOW_FINALIZED",
+            "status": finalization.status,
+            "reason_code": finalization.reason_code,
+            "final_authority_hash": finalization.final_authority_hash,
+            "live_execution_enabled": False,
+        },
         occurred_at=now,
     )
     session.add(
@@ -1060,7 +1067,13 @@ async def _append_start_audit_and_outbox(
         actor_id="strategy-shadow-service",
         action="strategy.shadow.started",
         schema_version="1",
-        payload=payload,
+        payload={
+            "schema_version": "strategy_shadow_started_v1",
+            "event_type": "SHADOW_STARTED",
+            "status": "RUNNING",
+            "authority_hash": group.authority_hash,
+            "live_execution_enabled": False,
+        },
         occurred_at=now,
     )
     session.add(
@@ -1616,7 +1629,13 @@ async def _append_advance_audit_and_outbox(
         actor_id="strategy-shadow-service",
         action="strategy.shadow.advanced",
         schema_version="1",
-        payload=payload,
+        payload={
+            "schema_version": "strategy_shadow_advance_v1",
+            "event_type": "SHADOW_ADVANCED",
+            "status": status,
+            "reason_code": reason_code,
+            "live_execution_enabled": False,
+        },
         occurred_at=observed_at,
     )
     session.add(

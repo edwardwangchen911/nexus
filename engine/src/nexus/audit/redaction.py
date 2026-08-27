@@ -8,7 +8,9 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 Hash64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-AuditKind = Literal["quality", "risk", "agent_cost", "job", "reconciliation", "audit"]
+AuditKind = Literal[
+    "quality", "risk", "agent_cost", "job", "reconciliation", "evolution", "audit"
+]
 
 _SAFE_OUTCOME_FIELDS = frozenset(
     {
@@ -20,6 +22,21 @@ _SAFE_OUTCOME_FIELDS = frozenset(
         "result",
         "retryable",
         "status",
+    }
+)
+_SAFE_EVOLUTION_FIELDS = frozenset(
+    {
+        "authority_hash",
+        "code_hash",
+        "decision_hash",
+        "event_hash",
+        "event_type",
+        "final_authority_hash",
+        "gate_code",
+        "policy_version",
+        "proposal_hash",
+        "protocol_hash",
+        "request_hash",
     }
 )
 
@@ -56,6 +73,8 @@ def classify_audit_action(action: str) -> AuditKind:
         return "agent_cost"
     if action.startswith(("job.", "outbox.")):
         return "job"
+    if action.startswith("strategy."):
+        return "evolution"
     if action.startswith(("reconciliation.", "broker.reconciliation.")):
         return "reconciliation"
     return "audit"
@@ -71,15 +90,21 @@ def _actor_kind(actor_id: str) -> Literal["user", "system", "service"]:
 
 def redact_audit_event(source: AuditExportSource) -> dict[str, object]:
     """Project one source event without copying any non-allowlisted payload key."""
+    kind = classify_audit_action(source.action)
+    allowed = (
+        _SAFE_OUTCOME_FIELDS | _SAFE_EVOLUTION_FIELDS
+        if kind == "evolution"
+        else _SAFE_OUTCOME_FIELDS
+    )
     outcome = {
         key: source.payload[key]
-        for key in sorted(_SAFE_OUTCOME_FIELDS)
+        for key in sorted(allowed)
         if key in source.payload and isinstance(source.payload[key], str | bool | int)
     }
     return {
         "event_seq": source.event_seq,
         "occurred_at": source.occurred_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-        "kind": classify_audit_action(source.action),
+        "kind": kind,
         "actor_kind": _actor_kind(source.actor_id),
         "action": source.action,
         "schema_version": source.schema_version,

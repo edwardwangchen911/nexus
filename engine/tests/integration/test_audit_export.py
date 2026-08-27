@@ -50,6 +50,20 @@ async def _seed(database_url: str) -> None:
             payload={"status": "partial", "portfolio_id": "private-portfolio"},
             occurred_at=_START + timedelta(days=1),
         )
+        await append_audit_event(
+            session,
+            actor_id="strategy-rnd-private",
+            action="strategy.promotion.gated",
+            schema_version="strategy_evolution_event_v1",
+            payload={
+                "status": "PASS",
+                "gate_code": "HISTORICAL_GATES_PASSED",
+                "decision_hash": "d" * 64,
+                "strategy_document": {"private": True},
+                "symbol": "PRIVATE",
+            },
+            occurred_at=_START + timedelta(days=1, hours=1),
+        )
 
 
 @pytest.mark.asyncio
@@ -72,17 +86,23 @@ async def test_export_is_deterministic_gzip_ndjson_and_redacts_private_fields(
     assert first == replay
     decoded = gzip.decompress(first).decode("utf-8")
     lines = decoded.splitlines()
-    assert len(lines) == 3
+    assert len(lines) == 4
     documents = [json.loads(line) for line in lines]
-    assert [item["event_seq"] for item in documents] == [1, 2, 3]
+    assert [item["event_seq"] for item in documents] == [1, 2, 3, 4]
     assert [item["kind"] for item in documents] == [
         "quality",
         "job",
         "reconciliation",
+        "evolution",
     ]
     assert documents[0]["actor_kind"] == "user"
     assert documents[1]["actor_kind"] == "system"
     assert documents[2]["actor_kind"] == "service"
+    assert documents[3]["outcome"] == {
+        "decision_hash": "d" * 64,
+        "gate_code": "HISTORICAL_GATES_PASSED",
+        "status": "PASS",
+    }
     assert documents[0]["outcome"] == {
         "reason_code": "SOURCE_STALE",
         "status": "failed",
@@ -95,6 +115,8 @@ async def test_export_is_deterministic_gzip_ndjson_and_redacts_private_fields(
         "private-order",
         "private-portfolio",
         "broker-worker-private",
+        "strategy-rnd-private",
+        "PRIVATE",
     ):
         assert private not in decoded
 

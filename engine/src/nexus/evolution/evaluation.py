@@ -14,6 +14,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.canonical import canonical_json
+from nexus.audit.service import append_audit_event
 from nexus.backtest.canonical import canonical_decimal
 from nexus.backtest.cost_policy import load_backtest_cost_policy_v1
 from nexus.domain.ids import new_uuid7
@@ -584,6 +585,20 @@ async def persist_champion_comparison(
     )
     projection.version += 1
     projection.updated_at = now
+    await append_audit_event(
+        session,
+        actor_id="service:strategy_rnd",
+        action="strategy.backtest.completed",
+        schema_version="strategy_evolution_event_v1",
+        payload={
+            "schema_version": "strategy_evolution_event_v1",
+            "event_type": "BACKTEST_COMPLETED",
+            "status": "COMPLETED",
+            "authority_hash": champion.authority_hash,
+            "protocol_hash": champion.protocol_hash,
+        },
+        occurred_at=now,
+    )
     await session.flush()
     return record
 
@@ -675,6 +690,20 @@ async def persist_historical_promotion_decision(
             projection.event_sequence = event.sequence
             projection.version += 1
             projection.updated_at = now
+            await append_audit_event(
+                session,
+                actor_id="service:strategy_rnd",
+                action="strategy.promotion.gated",
+                schema_version="strategy_evolution_event_v1",
+                payload={
+                    "schema_version": "strategy_evolution_event_v1",
+                    "event_type": "HISTORICAL_PROMOTION_GATE",
+                    "status": "STALE",
+                    "reason_code": "STALE_CHAMPION_BASELINE",
+                    "authority_hash": comparison.authority_hash,
+                },
+                occurred_at=now,
+            )
             await session.flush()
         return HistoricalPromotionOutcomeV1(
             comparison_id=comparison.id,
@@ -721,6 +750,20 @@ async def persist_historical_promotion_decision(
     projection.event_sequence = event.sequence
     projection.version += 1
     projection.updated_at = now
+    await append_audit_event(
+        session,
+        actor_id="service:strategy_rnd",
+        action="strategy.promotion.gated",
+        schema_version="strategy_evolution_event_v1",
+        payload={
+            "schema_version": "strategy_evolution_event_v1",
+            "event_type": "HISTORICAL_PROMOTION_GATE",
+            "status": decision.status,
+            "reason_code": decision.reason_code,
+            "decision_hash": decision.decision_hash,
+        },
+        occurred_at=now,
+    )
     await session.flush()
     return HistoricalPromotionOutcomeV1(
         comparison_id=comparison.id,
