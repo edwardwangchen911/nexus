@@ -610,33 +610,33 @@ Verification evidence before commit:
 - Produces browser-safe GET/actions and a single accessible workbench with champion, experiment, comparison, Strategy Shadow, promotion gates and history/rollback.
 - Consumes generated OpenAPI types only; browser never sees Engine HMAC.
 
-- [ ] **Step 1: Write BFF boundary red tests**
+- [x] **Step 1: Write BFF boundary red tests**
 
 Assert only generated evolution paths/methods are allowed, response size <=1 MiB, JSON content type, no redirects, no-store, strict action body allowlists and preserved idempotency/If-Match. Inject DSL/Prompt/account/order fields in Engine responses and assert BFF returns the generic safe failure envelope.
 
-- [ ] **Step 2: Write page state/interaction red tests**
+- [x] **Step 2: Write page state/interaction red tests**
 
 Cover loading/empty/ready/partial/stale/error/forbidden; live-closed badge always present; active hypothesis/search-axis summaries; champion/challenger/SPY/equal comparison; 5/21/63 and full-fill progress; ordered gate status; pause/resume; veto; rollback confirmation; stale write-disable; 409 refetch; 202 pending orders; error-summary focus and aria-live success.
 
-- [ ] **Step 3: Run red tests**
+- [x] **Step 3: Run red tests**
 
 ```bash
 npm run test:unit -- tests/unit/strategy-evolution/bff.test.ts tests/unit/strategies/page.test.tsx tests/unit/engine/client-evolution-boundary.test.ts
 ```
 
-- [ ] **Step 4: Implement BFF validation and routes**
+- [x] **Step 4: Implement BFF validation and routes**
 
 Use generated request/response types and existing `withNexusBff`/`engineFetch`. Browser POST bodies are fixed action enums only; server creates exact JSON bytes, forwards idempotency/version headers and sanitizes all Engine errors. Add no dependency.
 
-- [ ] **Step 5: Implement the workbench**
+- [x] **Step 5: Implement the workbench**
 
 Retain existing NEXUS typography/tokens/AppShell. Render the six ordered sections from spec section 12, semantic `dl/table/ol` evidence, explicit data mode/source/hash, and a fixed “实盘关闭” boundary. Use an accessible confirmation dialog for rollback without free-text input. No buy/sell/order/broker control is present.
 
-- [ ] **Step 6: Add responsive/accessibility styles**
+- [x] **Step 6: Add responsive/accessibility styles**
 
 At 375/390 px use stacked definition cards; at 768+ use two-column evidence where safe; only immutable audit/comparison tables may have named local horizontal scroll. Maintain 44px actions, visible focus, reduced motion and no document-level overflow.
 
-- [ ] **Step 7: Verify and commit**
+- [x] **Step 7: Verify and commit**
 
 ```bash
 npm run test:unit -- tests/unit/strategy-evolution/bff.test.ts tests/unit/strategies/page.test.tsx tests/unit/engine/client-evolution-boundary.test.ts
@@ -647,6 +647,13 @@ npm run build
 git add app/lib/strategy-evolution app/api/v1/strategy-evolution app/lib/engine/client.ts 'app/(protected)/strategies/page.tsx' app/styles/tokens.css tests/unit app/lib/generated/schema.d.ts
 git commit -m "feat(web): add strategy evolution workbench"
 ```
+
+Verification evidence before commit:
+
+- The initial red gate failed on all missing evolution BFF routes and six Engine boundary cases; after implementation, the focused Task 10 suite passed `30` tests across BFF, page interaction and Engine sanitization.
+- The widened Web boundary regression passed `152` tests across `14` Engine, strategy and strategy-evolution unit files.
+- `npm run typecheck`, `npm run lint`, `npm run check:generated` and `npm run build` all exited `0`; the production build enumerated all six browser-safe strategy-evolution routes.
+- Review added fail-closed ETag/detail binding, family identity and event-sequence checks. Browser bodies remain fixed enums/empty JSON, Engine HMAC stays server-only, every page state displays “实盘关闭”, and no trading/order/broker control was added.
 
 ### Task 11: Run E2E, full regression, security review, and acceptance
 

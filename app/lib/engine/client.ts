@@ -17,7 +17,7 @@ const MAX_AUDIT_EXPORT_BYTES = 32 * 1024 * 1024;
 const MAX_AUDIT_EXPORT_ROWS = 100_000;
 type InternalPath = Extract<keyof paths, `/internal/v1/${string}` | "/health/ready">;
 type DynamicInternalPath = Extract<InternalPath, `${string}{${string}}${string}`>;
-type QueryInternalPath = Extract<InternalPath, "/internal/v1/market" | "/internal/v1/overview" | "/internal/v1/paper/orders" | "/internal/v1/portfolios" | "/internal/v1/instruments/{instrument_id}/research" | "/internal/v1/instruments/{instrument_id}/research-admission" | "/internal/v1/risk-audit" | "/internal/v1/risk-audit/export">;
+type QueryInternalPath = Extract<InternalPath, "/internal/v1/market" | "/internal/v1/overview" | "/internal/v1/paper/orders" | "/internal/v1/portfolios" | "/internal/v1/instruments/{instrument_id}/research" | "/internal/v1/instruments/{instrument_id}/research-admission" | "/internal/v1/risk-audit" | "/internal/v1/risk-audit/export" | "/internal/v1/strategy-evolution">;
 type EngineBody = string | Uint8Array | ArrayBuffer;
 type MethodFor<Path extends InternalPath> =
   | (Exclude<paths[Path]["get"], undefined> extends never ? never : "GET")
@@ -184,7 +184,7 @@ function allowedTarget<Path extends InternalPath>(target: EngineTarget<Path>, ba
   if (!matchesTemplate(template, path)) return null;
 
   const query = dynamic?.query;
-  if (query !== undefined && template !== "/internal/v1/market" && template !== "/internal/v1/overview" && template !== "/internal/v1/paper/orders" && template !== "/internal/v1/portfolios" && template !== "/internal/v1/instruments/{instrument_id}/research" && template !== "/internal/v1/instruments/{instrument_id}/research-admission" && template !== "/internal/v1/risk-audit" && template !== "/internal/v1/risk-audit/export") return null;
+  if (query !== undefined && template !== "/internal/v1/market" && template !== "/internal/v1/overview" && template !== "/internal/v1/paper/orders" && template !== "/internal/v1/portfolios" && template !== "/internal/v1/instruments/{instrument_id}/research" && template !== "/internal/v1/instruments/{instrument_id}/research-admission" && template !== "/internal/v1/risk-audit" && template !== "/internal/v1/risk-audit/export" && template !== "/internal/v1/strategy-evolution") return null;
   const canonicalQuery = template === "/internal/v1/market"
     ? canonicalMarketQuery(query ?? "")
     : template === "/internal/v1/overview"
@@ -199,6 +199,8 @@ function allowedTarget<Path extends InternalPath>(target: EngineTarget<Path>, ba
         ? canonicalRiskAuditQuery(query ?? "", false)
       : template === "/internal/v1/risk-audit/export"
         ? canonicalRiskAuditQuery(query ?? "", true)
+      : template === "/internal/v1/strategy-evolution"
+        ? canonicalEvolutionQuery(query ?? "")
       : "";
   if (canonicalQuery === null) return null;
 
@@ -214,7 +216,7 @@ function allowedTarget<Path extends InternalPath>(target: EngineTarget<Path>, ba
 }
 
 function matchesTemplate(template: InternalPath, path: string): boolean {
-  if (["/health/ready", "/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/paper/orders", "/internal/v1/paper/portfolio", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/optimization-proposals", "/internal/v1/what-if/evaluate", "/internal/v1/research-runs", "/internal/v1/strategies", "/internal/v1/risk-audit", "/internal/v1/risk-audit/export", "/internal/v1/risk/drawdown-lock/acknowledge"].includes(template)) {
+  if (["/health/ready", "/internal/v1/system-status", "/internal/v1/integrations", "/internal/v1/market", "/internal/v1/overview", "/internal/v1/paper/orders", "/internal/v1/paper/portfolio", "/internal/v1/portfolios", "/internal/v1/broker-sync-runs", "/internal/v1/optimization-proposals", "/internal/v1/what-if/evaluate", "/internal/v1/research-runs", "/internal/v1/strategies", "/internal/v1/risk-audit", "/internal/v1/risk-audit/export", "/internal/v1/risk/drawdown-lock/acknowledge", "/internal/v1/strategy-evolution", "/internal/v1/strategy-experiments", "/internal/v1/strategy-registry/control", "/internal/v1/strategy-registry/rollback"].includes(template)) {
     return path === template;
   }
   const integration = /^\/internal\/v1\/integrations\/([^/]+)\/(test|mode)$/.exec(path);
@@ -265,6 +267,12 @@ function matchesTemplate(template: InternalPath, path: string): boolean {
   const brief = /^\/internal\/v1\/briefs\/(\d{4}-\d{2}-\d{2})$/.exec(path);
   if (brief && isIsoDate(brief[1])) {
     return template === "/internal/v1/briefs/{session_date}";
+  }
+  const strategyExperiment = /^\/internal\/v1\/strategy-experiments\/([^/]+)(?:\/(veto))?$/.exec(path);
+  if (strategyExperiment && validateUuid(strategyExperiment[1])) {
+    return template === (strategyExperiment[2]
+      ? "/internal/v1/strategy-experiments/{experiment_id}/veto"
+      : "/internal/v1/strategy-experiments/{experiment_id}");
   }
   const syncRun = /^\/internal\/v1\/broker-sync-runs\/([^/]+)$/.exec(path);
   return Boolean(syncRun && validateUuid(syncRun[1]) && template === "/internal/v1/broker-sync-runs/{run_id}");
@@ -371,6 +379,22 @@ function canonicalRiskAuditQuery(query: string, exportRequest: boolean): string 
   return pairs.map(([key, value]) => `${key}=${value}`).join("&");
 }
 
+function canonicalEvolutionQuery(query: string): string | null {
+  if (query.includes("?") || query.includes("#") || !hasValidPercentEscapes(query)) return null;
+  const allowedKeys = new Set(["cursor", "limit"]);
+  const seen = new Set<string>();
+  const pairs: Array<[string, string]> = [];
+  for (const [key, value] of new URLSearchParams(query)) {
+    if (!allowedKeys.has(key) || seen.has(key)) return null;
+    if (key === "limit" && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 100)) return null;
+    if (key === "cursor" && (value.length < 1 || value.length > 2048)) return null;
+    seen.add(key);
+    pairs.push([strictPercentEncode(key), strictPercentEncode(value)]);
+  }
+  pairs.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  return pairs.map(([key, value]) => `${key}=${value}`).join("&");
+}
+
 function isValidMarketQueryValue(key: string, value: string): boolean {
   if (key === "limit") return /^\d+$/.test(value) && Number(value) >= 1 && Number(value) <= 100;
   if (key === "watchlist") return value === "true" || value === "false";
@@ -411,7 +435,10 @@ function isAnalysisPath(pathname: string): boolean {
     || pathname.endsWith("/what-if/evaluate")
     || pathname.includes("/research-runs")
     || pathname.includes("/instruments/") && (pathname.endsWith("/research") || pathname.endsWith("/research-admission"))
-    || pathname.includes("/briefs/");
+    || pathname.includes("/briefs/")
+    || pathname.includes("/strategy-evolution")
+    || pathname.includes("/strategy-experiments")
+    || pathname.includes("/strategy-registry/");
 }
 function engineConfig(): { baseUrl: string; keyId: string; secret: string } { const baseUrl = process.env.NEXUS_ENGINE_BASE_URL; const keyId = process.env.NEXUS_ENGINE_HMAC_CURRENT_KEY_ID ?? "current"; const secret = process.env.NEXUS_ENGINE_HMAC_CURRENT_SECRET ?? process.env.NEXUS_ENGINE_HMAC_SECRET; if (!baseUrl || !secret) throw new Error("NEXUS engine service configuration is incomplete"); return { baseUrl, keyId, secret }; }
 function exactBodyBytes(body: EngineBody | undefined): Uint8Array { if (body === undefined) return new Uint8Array(); if (typeof body === "string") return new TextEncoder().encode(body); if (body instanceof Uint8Array) return body; if (body instanceof ArrayBuffer) return new Uint8Array(body); throw new TypeError("engine request bodies must have exact byte representation"); }

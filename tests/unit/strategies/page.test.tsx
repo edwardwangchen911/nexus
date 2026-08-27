@@ -3,16 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import StrategiesPage, { StrategiesPanel } from "../../../app/(protected)/strategies/page";
 import type { DataStateKind } from "../../../app/components/data-state";
-
-const baseline = {
-  strategy_version: "baseline_v1" as const,
-  champion: true as const,
-  evolution_status: "locked" as const,
-  rebalance_frequency: "weekly" as const,
-  historical_agent_overlay: false as const,
-  live_execution_enabled: false as const,
-  latest_backtest: null,
-};
+import { actionEnvelope, detail, detailEnvelope, overview, overviewEnvelope } from "../strategy-evolution/fixtures";
 
 const states: Array<[DataStateKind, string]> = [
   ["loading", "正在加载"],
@@ -24,97 +15,136 @@ const states: Array<[DataStateKind, string]> = [
   ["forbidden", "无权访问"],
 ];
 
-describe("strategy governance page", () => {
-  afterEach(() => vi.unstubAllGlobals());
+const callbacks = {
+  onRefresh: vi.fn(),
+  onSelectExperiment: vi.fn(),
+  onStartExperiment: vi.fn(),
+  onControlRegistry: vi.fn(),
+  onVetoExperiment: vi.fn(),
+  onRollbackRegistry: vi.fn(),
+};
 
-  it.each(states)("renders the visible %s state", (state, label) => {
-    render(
-      <StrategiesPanel
-        state={state}
-        strategies={["ready", "partial", "stale"].includes(state) ? [baseline] : []}
-        onRefresh={vi.fn()}
-      />,
-    );
+function renderPanel(state: DataStateKind, overrides = {}) {
+  return render(<StrategiesPanel
+    state={state}
+    overview={["ready", "partial", "stale"].includes(state) ? overview : null}
+    detail={["ready", "partial", "stale"].includes(state) ? detail : null}
+    etag={state === "ready" ? '"g1-v1"' : null}
+    busyAction={null}
+    errorMessage={null}
+    successMessage={null}
+    {...callbacks}
+    {...overrides}
+  />);
+}
 
-    expect(screen.getAllByText(label).length).toBeGreaterThan(0);
-    expect(screen.getByRole("region", { name: "策略与实验页面" })).toHaveAttribute("data-state", state);
+describe("strategy evolution workbench", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
   });
 
-  it("shows the immutable baseline and every execution boundary without a trade surface", () => {
-    render(<StrategiesPanel state="ready" strategies={[baseline]} onRefresh={vi.fn()} />);
+  it.each(states)("renders the visible %s state and the immutable live boundary", (state, label) => {
+    renderPanel(state);
+    expect(screen.getAllByText(label).length).toBeGreaterThan(0);
+    expect(screen.getByRole("region", { name: "策略进化工作台" })).toHaveAttribute("data-state", state);
+    expect(screen.getByText("实盘关闭")).toBeVisible();
+  });
+
+  it("renders the complete evidence lifecycle without a trade surface", () => {
+    renderPanel("ready");
 
     expect(screen.getByRole("heading", { name: "baseline_v1" })).toBeVisible();
-    expect(screen.getByText("当前唯一冠军")).toBeVisible();
-    expect(screen.getByText("策略进化未启用")).toBeVisible();
-    expect(screen.getByText("历史回测不含 Agent overlay")).toBeVisible();
-    expect(screen.getByText("实盘执行关闭")).toBeVisible();
-    expect(screen.getByText("暂无已持久化的回测结果")).toBeVisible();
-    expect(screen.queryByRole("button", { name: /下单|交易|买入|卖出|晋级/ })).not.toBeInTheDocument();
+    expect(screen.getByText("提高流动性门槛可减少成本侵蚀，同时保留中期动量溢价。")).toBeVisible();
+    expect(screen.getByText("ADV20 最低成交额 · 3 个候选值")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "证据比较" })).toBeVisible();
+    expect(screen.getByText("SPY 比较完整")).toBeVisible();
+    expect(screen.getByText("等权白名单比较完整")).toBeVisible();
+    expect(screen.getByText("21 / 68 sessions")).toBeVisible();
+    expect(screen.getByText("检查点 5 · 已完成")).toBeVisible();
+    expect(screen.getByText("检查点 21 · 已完成")).toBeVisible();
+    expect(screen.getByText("检查点 63 · 等待")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "晋级解释" })).toBeVisible();
+    expect(screen.getAllByText("通过").length).toBeGreaterThan(0);
+    expect(screen.getByRole("heading", { name: "冠军历史" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /下单|交易|买入|卖出/ })).not.toBeInTheDocument();
   });
 
-  it("renders only server-confirmed backtest evidence and benchmark completeness", () => {
-    render(<StrategiesPanel state="ready" strategies={[{
-      ...baseline,
-      latest_backtest: {
-        result_hash: "a".repeat(64),
-        data_hash: "b".repeat(64),
-        code_hash: "c".repeat(64),
-        start_session: "2018-01-02",
-        end_session: "2026-08-25",
-        oos_window_count: 8,
-        comparison_keys: ["spy", "equal_weight", "champion"],
-        benchmark_comparison_complete: true,
-        data_mode: "fixture" as const,
-        data_sources: ["fixture:test:fixture"],
-        completed_at: "2026-08-26T00:00:00Z",
-      },
-    }]} onRefresh={vi.fn()} />);
-
-    expect(screen.getByRole("heading", { name: "最新回测证据" })).toBeVisible();
-    expect(screen.getByText("基准比较完整")).toBeVisible();
-    expect(screen.getByText("8 个样本外窗口")).toBeVisible();
-    expect(screen.getByText("FIXTURE / 合成数据")).toBeVisible();
-    expect(screen.getByText(/仅用于验证流程/)).toBeVisible();
-    expect(screen.queryByText("暂无已持久化的回测结果")).not.toBeInTheDocument();
+  it.each(["partial", "stale"] as const)("disables every mutation when evidence is %s", (state) => {
+    renderPanel(state);
+    for (const button of screen.getAllByRole("button")) {
+      if (button.getAttribute("aria-label") === "刷新策略进化证据") expect(button).toBeEnabled();
+      else expect(button).toBeDisabled();
+    }
   });
 
-  it("warns when mixed provenance contains any fixture authority domain", () => {
-    render(<StrategiesPanel state="ready" strategies={[{
-      ...baseline,
-      latest_backtest: {
-        result_hash: "a".repeat(64),
-        data_hash: "b".repeat(64),
-        code_hash: "c".repeat(64),
-        start_session: "2018-01-02",
-        end_session: "2026-08-25",
-        oos_window_count: 8,
-        comparison_keys: ["spy", "equal_weight", "champion"],
-        benchmark_comparison_complete: true,
-        data_mode: "mixed" as const,
-        data_sources: ["price:alpaca:sip:real_time", "sector:fixture"],
-        completed_at: "2026-08-26T00:00:00Z",
-      },
-    }]} onRefresh={vi.fn()} />);
+  it("uses an accessible, fixed-copy rollback confirmation", () => {
+    renderPanel("ready");
+    fireEvent.click(screen.getByRole("button", { name: "回滚上一个冠军" }));
 
-    expect(screen.getByText("MIXED / 混合来源")).toBeVisible();
-    expect(screen.getByText(/含 fixture 证据/)).toBeVisible();
+    const dialog = screen.getByRole("dialog", { name: "确认回滚策略冠军" });
+    expect(dialog).toHaveTextContent("只影响未来内部模拟决策");
+    expect(dialog).toHaveTextContent("不会撤销历史成交");
+    expect(dialog).toHaveTextContent("不会创建任何真实订单");
+    fireEvent.click(screen.getByRole("button", { name: "确认回滚" }));
+    expect(callbacks.onRollbackRegistry).toHaveBeenCalledOnce();
   });
 
-  it("never restores protected strategy data after authorization is revoked", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [baseline] }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(null, { status: 403 }))
-      .mockRejectedValueOnce(new TypeError("network unavailable"));
+  it("focuses the safe error summary and exposes a polite success status", async () => {
+    renderPanel("ready", { errorMessage: "资源已变化，请刷新后重试。", successMessage: "已暂停自动晋级。" });
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveFocus());
+    expect(screen.getByRole("status")).toHaveTextContent("已暂停自动晋级。");
+  });
+
+  it("refetches after a 409 and clears all protected evidence after authorization is revoked", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(overviewEnvelope()), { status: 200, headers: { etag: '"g1-v1"' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detailEnvelope()), { status: 200, headers: { etag: '"g1-v1"' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: "VERSION_CONFLICT" } }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(overviewEnvelope()), { status: 200, headers: { etag: '"g1-v2"' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detailEnvelope()), { status: 200, headers: { etag: '"g1-v2"' } }))
+      .mockResolvedValueOnce(new Response(null, { status: 403 }));
     vi.stubGlobal("fetch", fetchMock);
     render(<StrategiesPage />);
 
     expect(await screen.findByRole("heading", { name: "baseline_v1" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "刷新策略" }));
-    expect(await screen.findByRole("status", { name: "无权访问" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "刷新策略" }));
+    fireEvent.click(screen.getByRole("button", { name: "暂停自动晋级" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    expect(screen.getByRole("alert")).toHaveTextContent("资源已变化");
 
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("加载失败"));
+    fireEvent.click(screen.getByRole("button", { name: "刷新策略进化证据" }));
+    expect(await screen.findByRole("status", { name: "无权访问" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "baseline_v1" })).not.toBeInTheDocument();
+  });
+
+  it("keeps accepted actions pending until the refreshed authority confirms them", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(overviewEnvelope()), { status: 200, headers: { etag: '"g1-v1"' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detailEnvelope()), { status: 200, headers: { etag: '"g1-v1"' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(actionEnvelope("rollback_registry")), { status: 202, headers: { location: "/api/v1/strategy-evolution" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(overviewEnvelope()), { status: 200, headers: { etag: '"g1-v2"' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detailEnvelope()), { status: 200, headers: { etag: '"g1-v2"' } }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<StrategiesPage />);
+
+    expect(await screen.findByRole("heading", { name: "baseline_v1" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "回滚上一个冠军" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认回滚" }));
+    expect(await screen.findByText("回滚已接受，正在等待确定性边界生效。")).toBeVisible();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+  });
+
+  it("fails closed when experiment evidence cannot be bound to the overview authority", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(overviewEnvelope()), { status: 200, headers: { etag: '"g1-v1"' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: "AUTHORITY_UNAVAILABLE" } }), { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<StrategiesPage />);
+
+    expect(await screen.findByText("数据不完整")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "baseline_v1" })).toBeVisible();
+    for (const button of screen.getAllByRole("button")) {
+      if (button.getAttribute("aria-label") !== "刷新策略进化证据") expect(button).toBeDisabled();
+    }
   });
 });

@@ -22,6 +22,9 @@ import {
   riskAuditPageRuntimeSchema,
   runtimeContractSchemas,
   strategySummaryRuntimeSchema,
+  strategyEvolutionRuntimeSchema,
+  experimentDetailRuntimeSchema,
+  evolutionActionRuntimeSchema,
   shadowGroupRuntimeSchema,
   shadowStartRuntimeSchema,
   watchlistMembershipRuntimeSchema,
@@ -32,9 +35,9 @@ import {
 import { integrationProviders } from "../integrations/providers";
 import { sameUuid } from "../optimization/uuid";
 
-export type NexusErrorCode = "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "INTERNAL_ERROR";
+export type NexusErrorCode = "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "INTERNAL_ERROR";
 export const ERROR_STATUSES = {
-  UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422, 429], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], BUDGET_EXHAUSTED: [409, 429], PROVIDER_UNAVAILABLE: [503], INTERNAL_ERROR: [500],
+  UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422, 429], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], BUDGET_EXHAUSTED: [409, 429], EVOLUTION_BLOCKED: [422], AUTHORITY_UNAVAILABLE: [503], PROVIDER_UNAVAILABLE: [503], INTERNAL_ERROR: [500],
 } as const;
 export type StableEngineErrorCode = keyof typeof ERROR_STATUSES;
 export const SAFE_ENGINE_ERROR_MESSAGES: Record<StableEngineErrorCode, string> = {
@@ -56,6 +59,8 @@ export const SAFE_ENGINE_ERROR_MESSAGES: Record<StableEngineErrorCode, string> =
   DRAWDOWN_LOCKED: "The drawdown lock is active.",
   RECONCILIATION_REQUIRED: "Reconciliation is required before continuing.",
   BUDGET_EXHAUSTED: "The configured budget is exhausted.",
+  EVOLUTION_BLOCKED: "The strategy evolution action is blocked.",
+  AUTHORITY_UNAVAILABLE: "The strategy evolution authority is unavailable.",
   PROVIDER_UNAVAILABLE: "The provider is unavailable.",
   INTERNAL_ERROR: "The request could not be completed.",
 };
@@ -287,6 +292,40 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       && champions[0].strategy_version === "baseline_v1"
       && champions[0].historical_agent_overlay === false
       && champions[0].live_execution_enabled === false
+      ? data
+      : INVALID_DATA;
+  }
+  if (pathname === "/internal/v1/strategy-evolution") {
+    if (requestMethod?.toUpperCase() !== "GET"
+      || !matchesRuntimeSchema(data, strategyEvolutionRuntimeSchema) || !isPlain(data)
+      || !Array.isArray(data.experiments) || data.experiments.length > 100
+      || !Array.isArray(data.registry_events) || data.registry_events.length > 20
+      || data.next_cursor !== null && (typeof data.next_cursor !== "string" || data.next_cursor.length > 2048)
+      || data.live_execution_enabled !== false
+      || (["partial", "stale"].includes(String(data.status)) && data.write_enabled !== false)
+      || !evolutionOverviewValid(data)) {
+      return INVALID_DATA;
+    }
+    return data;
+  }
+  const evolutionExperiment = /^\/internal\/v1\/strategy-experiments\/([^/]+)$/.exec(pathname);
+  if (evolutionExperiment && validateUuid(evolutionExperiment[1])) {
+    return requestMethod?.toUpperCase() === "GET"
+      && matchesRuntimeSchema(data, experimentDetailRuntimeSchema) && isPlain(data)
+      && isPlain(data.experiment) && sameUuid(data.experiment.experiment_id, evolutionExperiment[1])
+      && evolutionDetailValid(data)
+      && data.live_execution_enabled === false
+      && (!["partial", "stale"].includes(String(data.integrity_status)) || data.write_enabled === false)
+      ? data
+      : INVALID_DATA;
+  }
+  const expectedEvolutionAction = evolutionActionFor(pathname, requestMethod);
+  if (expectedEvolutionAction !== null) {
+    return matchesRuntimeSchema(data, evolutionActionRuntimeSchema) && isPlain(data)
+      && data.live_execution_enabled === false
+      && (Array.isArray(expectedEvolutionAction)
+        ? expectedEvolutionAction.includes(String(data.action))
+        : data.action === expectedEvolutionAction)
       ? data
       : INVALID_DATA;
   }
@@ -612,8 +651,39 @@ function enginePathname(requestUrl?: string, schemaPath?: string): string {
   if (!requestUrl) return "";
   try {
     const pathname = new URL(requestUrl).pathname;
-    return pathname.startsWith("/api/v1/") ? pathname.replace("/api/v1/", "/internal/v1/") : pathname;
+    if (!pathname.startsWith("/api/v1/")) return pathname;
+    if (pathname === "/api/v1/strategy-evolution/experiments") return "/internal/v1/strategy-experiments";
+    if (pathname === "/api/v1/strategy-evolution/registry/control") return "/internal/v1/strategy-registry/control";
+    if (pathname === "/api/v1/strategy-evolution/registry/rollback") return "/internal/v1/strategy-registry/rollback";
+    const experiment = /^\/api\/v1\/strategy-evolution\/experiments\/([^/]+)(?:\/(veto))?$/.exec(pathname);
+    if (experiment) return `/internal/v1/strategy-experiments/${experiment[1]}${experiment[2] ? "/veto" : ""}`;
+    return pathname.replace("/api/v1/", "/internal/v1/");
   } catch { return ""; }
+}
+
+function evolutionActionFor(pathname: string, requestMethod?: string): string | string[] | null {
+  if (requestMethod?.toUpperCase() !== "POST") return null;
+  if (pathname === "/internal/v1/strategy-experiments") return "generate_family";
+  if (/^\/internal\/v1\/strategy-experiments\/[^/]+\/veto$/.test(pathname)) return "veto_experiment";
+  if (pathname === "/internal/v1/strategy-registry/control") return ["pause_auto_promotion", "resume_auto_promotion"];
+  if (pathname === "/internal/v1/strategy-registry/rollback") return "rollback_registry";
+  return null;
+}
+
+function evolutionOverviewValid(data: Record<string, unknown>): boolean {
+  if (!isPlain(data.champion) || !Array.isArray(data.experiments) || !Array.isArray(data.registry_events)) return false;
+  const experimentIds = data.experiments.map((experiment) => isPlain(experiment) ? experiment.experiment_id : null);
+  if (experimentIds.some((value) => typeof value !== "string") || new Set(experimentIds).size !== experimentIds.length) return false;
+  if (!data.registry_events.every((event) => isPlain(event) && Number.isSafeInteger(event.sequence))) return false;
+  const sequences = data.registry_events.map((event) => Number((event as Record<string, unknown>).sequence));
+  return strictlyIncreasing(sequences)
+    && (sequences.length === 0 || sequences.at(-1) === data.champion.event_sequence);
+}
+
+function evolutionDetailValid(data: Record<string, unknown>): boolean {
+  if (!isPlain(data.experiment) || !isPlain(data.family) || !Array.isArray(data.events)) return false;
+  if (!sameUuid(data.experiment.family_id, data.family.family_id)) return false;
+  return data.events.every((event, index) => isPlain(event) && event.sequence === index + 1);
 }
 
 function responseIdentityValid(data: unknown, meta: Record<string, unknown>, requestUrl?: string): boolean {
