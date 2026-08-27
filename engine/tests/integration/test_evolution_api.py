@@ -22,7 +22,10 @@ from nexus.evolution.jobs import (
     build_strategy_rnd_registry,
     enqueue_strategy_rnd_job,
 )
-from nexus.evolution.registry import registry_event_content_hash
+from nexus.evolution.registry import (
+    registry_activation_content_hash,
+    registry_event_content_hash,
+)
 from nexus.evolution.repository import append_admitted_event
 from nexus.jobs.models import QueueName
 from nexus.jobs.registry import JobHandlerResult
@@ -40,6 +43,7 @@ from nexus.persistence.models.evolution import (
     StrategyExperimentFamilyRecord,
     StrategyExperimentRecord,
     StrategyExperimentStateProjectionRecord,
+    StrategyRegistryActivationRecord,
     StrategyRegistryEventRecord,
     StrategyRegistryHeadRecord,
     StrategyResearchLineageProjectionRecord,
@@ -518,14 +522,14 @@ async def test_rollback_uses_server_calendar_and_leaves_transition_pending(
     app = _app(migrated_database_url)
     path = "/internal/v1/strategy-registry/rollback"
     body = json.dumps({"reason": "USER_REQUESTED"}, separators=(",", ":")).encode()
-    headers = _action_headers(path, body, key="rollback-api-first", etag='"g2-v2"')
+    headers = _action_headers(path, body, key="rollback-api-first", etag='"g2-v3"')
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
     ) as client:
         response = await client.post(path, content=body, headers=headers)
 
     assert response.status_code == 202
-    assert response.headers["etag"] == '"g2-v3"'
+    assert response.headers["etag"] == '"g2-v4"'
     assert response.headers["location"] == "/internal/v1/strategy-evolution"
     assert response.json()["data"]["status"] == "PENDING_BOUNDARY"
     assert response.json()["data"]["pending_effective_session"] == "2026-08-28"
@@ -600,12 +604,38 @@ async def _seed_effective_registry_promotion(factory) -> None:
         )
         session.add(event)
         await session.flush()
-        head.active_definition_id = challenger.id
-        head.active_generation = 2
         head.last_event_id = event.id
         head.event_sequence = 2
+        head.pending_event_id = event.id
+        head.pending_effective_session = effective_session
         head.version = 2
         head.updated_at = _CLOCK - timedelta(minutes=1)
+        await session.flush()
+        activation = StrategyRegistryActivationRecord(
+            registry_event_id=event.id,
+            decision_session=effective_session,
+            activated_at=_CLOCK - timedelta(minutes=1),
+            from_definition_id=head.active_definition_id,
+            to_definition_id=challenger.id,
+            champion_generation=2,
+            activation_hash=registry_activation_content_hash(
+                registry_event_id=event.id,
+                decision_session=effective_session,
+                activated_at=_CLOCK - timedelta(minutes=1),
+                from_definition_id=head.active_definition_id,
+                to_definition_id=challenger.id,
+                champion_generation=2,
+            ),
+            created_at=_CLOCK - timedelta(minutes=1),
+        )
+        session.add(activation)
+        await session.flush()
+        head.active_definition_id = challenger.id
+        head.active_generation = 2
+        head.pending_event_id = None
+        head.pending_effective_session = None
+        head.version = 3
+        await session.flush()
         calendar = ExchangeCalendarAuthorityRecord(
             exchange="XNYS",
             version="evolution-api-next-session-v1",

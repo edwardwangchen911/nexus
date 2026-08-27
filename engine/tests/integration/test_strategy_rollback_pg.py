@@ -15,6 +15,7 @@ from nexus.evolution.registry import (
     request_registry_rollback,
 )
 from nexus.persistence.models.evolution import (
+    StrategyRegistryActivationRecord,
     StrategyRegistryEventRecord,
     StrategyRegistryHeadRecord,
 )
@@ -76,6 +77,12 @@ async def test_effective_promotion_can_rollback_to_previous_compatible_champion(
             )
             or 0
         )
+        activation_count = int(
+            await session.scalar(
+                select(func.count()).select_from(StrategyRegistryActivationRecord)
+            )
+            or 0
+        )
 
     assert promoted.status == "EFFECTIVE"
     assert rollback_pending.status == "PENDING_BOUNDARY"
@@ -84,6 +91,7 @@ async def test_effective_promotion_can_rollback_to_previous_compatible_champion(
     assert rolled_back.active_generation == seed.expected_generation + 2
     assert head is not None and head.pending_event_id is None
     assert rollback_count == 1
+    assert activation_count == 2
 
 
 @pytest.mark.asyncio
@@ -183,8 +191,16 @@ async def test_pending_transition_waits_for_nonterminal_internal_paper_orders(
             decision_session=EXECUTION_SESSION,
             now=now,
         )
+    async with factory() as session:
+        activation_count = int(
+            await session.scalar(
+                select(func.count()).select_from(StrategyRegistryActivationRecord)
+            )
+            or 0
+        )
 
     assert result.status == "PENDING_ORDERS"
     assert result.reason_code == "PROMOTION_PENDING_ORDERS"
     assert result.active_definition_id == pair.champion_definition_id
     assert result.active_generation == 1
+    assert activation_count == 0

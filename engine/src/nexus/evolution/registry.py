@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +33,7 @@ from nexus.persistence.models.evolution import (
     StrategyExperimentRecord,
     StrategyPromotionDecisionRecord,
     StrategyPromotionPolicyRecord,
+    StrategyRegistryActivationRecord,
     StrategyRegistryEventRecord,
     StrategyRegistryHeadRecord,
     StrategyShadowFinalizationRecord,
@@ -88,6 +89,21 @@ class RegistryTransitionResultV1(BaseModel):
     pending_effective_session: date | None
     auto_promotion_paused: bool
     live_execution_enabled: Literal[False] = False
+
+
+class RegistryReplayStateV1(BaseModel):
+    """Every mutable registry-head field rebuilt from append-only facts."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    active_definition_id: UUID
+    active_generation: int = Field(ge=1)
+    last_event_id: UUID
+    event_sequence: int = Field(ge=1)
+    auto_promotion_paused: bool
+    pending_event_id: UUID | None
+    pending_effective_session: date | None
+    version: int = Field(ge=1)
 
 
 async def persist_handover_promotion_decision(
@@ -656,7 +672,11 @@ async def activate_pending_transition(
             reason_code="REGISTRY_TRANSITION_NOT_PENDING",
         )
     event = await session.get(StrategyRegistryEventRecord, head.pending_event_id)
-    if event is None or event.event_type not in {"PROMOTE", "ROLLBACK"}:
+    if (
+        event is None
+        or event.event_type not in {"PROMOTE", "ROLLBACK"}
+        or event.from_definition_id is None
+    ):
         raise RegistryServiceError("REGISTRY_PENDING_EVENT_INVALID")
     if decision_session < head.pending_effective_session:
         return _result(
@@ -676,6 +696,26 @@ async def activate_pending_transition(
             ),
             registry_event_id=event.id,
         )
+    activation = StrategyRegistryActivationRecord(
+        id=new_uuid7(),
+        registry_event_id=event.id,
+        decision_session=decision_session,
+        activated_at=now,
+        from_definition_id=event.from_definition_id,
+        to_definition_id=event.to_definition_id,
+        champion_generation=event.champion_generation,
+        activation_hash=registry_activation_content_hash(
+            registry_event_id=event.id,
+            decision_session=decision_session,
+            activated_at=now,
+            from_definition_id=event.from_definition_id,
+            to_definition_id=event.to_definition_id,
+            champion_generation=event.champion_generation,
+        ),
+        created_at=now,
+    )
+    session.add(activation)
+    await session.flush()
     head.active_definition_id = event.to_definition_id
     head.active_generation = event.champion_generation
     head.pending_event_id = None
@@ -852,7 +892,15 @@ async def _lock_head(session: AsyncSession) -> StrategyRegistryHeadRecord:
             .order_by(StrategyRegistryEventRecord.sequence)
         )
     )
-    if not registry_chain_is_valid(head, events):
+    activations = tuple(
+        await session.scalars(
+            select(StrategyRegistryActivationRecord).order_by(
+                StrategyRegistryActivationRecord.created_at,
+                StrategyRegistryActivationRecord.id,
+            )
+        )
+    )
+    if not registry_chain_is_valid(head, events, activations):
         raise RegistryServiceError("STRATEGY_REGISTRY_CHAIN_INVALID")
     return head
 
@@ -904,12 +952,158 @@ def registry_event_content_hash(
     )
 
 
+def registry_activation_content_hash(
+    *,
+    registry_event_id: UUID,
+    decision_session: date,
+    activated_at: datetime,
+    from_definition_id: UUID,
+    to_definition_id: UUID,
+    champion_generation: int,
+) -> str:
+    """Hash every immutable activation authority field."""
+    return content_hash(
+        {
+            "schema_version": "strategy_registry_activation_v1",
+            "registry_event_id": str(registry_event_id),
+            "decision_session": decision_session.isoformat(),
+            "activated_at": _utc(activated_at).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "from_definition_id": str(from_definition_id),
+            "to_definition_id": str(to_definition_id),
+            "champion_generation": champion_generation,
+        }
+    )
+
+
+def rebuild_registry_head(
+    events: Sequence[StrategyRegistryEventRecord],
+    activations: Sequence[StrategyRegistryActivationRecord],
+) -> RegistryReplayStateV1:
+    """Replay the registry without trusting any mutable-head field."""
+    if not _registry_event_chain_content_is_valid(events):
+        raise ValueError("STRATEGY_REGISTRY_CHAIN_INVALID")
+    genesis = events[0]
+    if (
+        genesis.event_type != "GENESIS"
+        or genesis.from_definition_id is not None
+        or genesis.promotion_decision_id is not None
+        or genesis.champion_generation != 1
+        or genesis.effective_session is not None
+    ):
+        raise ValueError("STRATEGY_REGISTRY_CHAIN_INVALID")
+    activation_by_event = {item.registry_event_id: item for item in activations}
+    if len(activation_by_event) != len(activations):
+        raise ValueError("STRATEGY_REGISTRY_ACTIVATION_INVALID")
+
+    active_definition_id = genesis.to_definition_id
+    active_generation = 1
+    paused = False
+    pending: StrategyRegistryEventRecord | None = None
+    used_activations: set[UUID] = set()
+    version = 1
+    for event in events[1:]:
+        if not _registry_event_follows_state(
+            event,
+            active_definition_id=active_definition_id,
+            active_generation=active_generation,
+            paused=paused,
+            pending=pending,
+        ):
+            if pending is None or pending.id not in activation_by_event:
+                raise ValueError("STRATEGY_REGISTRY_REPLAY_INVALID")
+            activation = activation_by_event[pending.id]
+            _require_registry_activation(
+                activation,
+                transition=pending,
+                active_definition_id=active_definition_id,
+                active_generation=active_generation,
+            )
+            active_definition_id = activation.to_definition_id
+            active_generation = activation.champion_generation
+            pending = None
+            used_activations.add(activation.id)
+            version += 1
+        if not _registry_event_follows_state(
+            event,
+            active_definition_id=active_definition_id,
+            active_generation=active_generation,
+            paused=paused,
+            pending=pending,
+        ):
+            raise ValueError("STRATEGY_REGISTRY_REPLAY_INVALID")
+        if event.event_type in {"PROMOTE", "ROLLBACK"}:
+            pending = event
+        elif event.event_type == "PAUSE":
+            paused = True
+        elif event.event_type == "RESUME":
+            paused = False
+        version += 1
+
+    if pending is not None and pending.id in activation_by_event:
+        activation = activation_by_event[pending.id]
+        _require_registry_activation(
+            activation,
+            transition=pending,
+            active_definition_id=active_definition_id,
+            active_generation=active_generation,
+        )
+        active_definition_id = activation.to_definition_id
+        active_generation = activation.champion_generation
+        pending = None
+        used_activations.add(activation.id)
+        version += 1
+    if used_activations != {item.id for item in activations}:
+        raise ValueError("STRATEGY_REGISTRY_ACTIVATION_INVALID")
+    return RegistryReplayStateV1(
+        active_definition_id=active_definition_id,
+        active_generation=active_generation,
+        last_event_id=events[-1].id,
+        event_sequence=events[-1].sequence,
+        auto_promotion_paused=paused,
+        pending_event_id=None if pending is None else pending.id,
+        pending_effective_session=(
+            None if pending is None else pending.effective_session
+        ),
+        version=version,
+    )
+
+
+def registry_head_is_valid(
+    head: StrategyRegistryHeadRecord,
+    events: Sequence[StrategyRegistryEventRecord],
+    activations: Sequence[StrategyRegistryActivationRecord],
+) -> bool:
+    """Compare every mutable head field with a complete deterministic replay."""
+    try:
+        rebuilt = rebuild_registry_head(events, activations)
+    except (ValueError, RegistryServiceError):
+        return False
+    return (
+        head.channel == "internal_paper"
+        and head.active_definition_id == rebuilt.active_definition_id
+        and head.active_generation == rebuilt.active_generation
+        and head.last_event_id == rebuilt.last_event_id
+        and head.event_sequence == rebuilt.event_sequence
+        and head.auto_promotion_paused == rebuilt.auto_promotion_paused
+        and head.pending_event_id == rebuilt.pending_event_id
+        and head.pending_effective_session == rebuilt.pending_effective_session
+        and head.version == rebuilt.version
+    )
+
+
 def registry_chain_is_valid(
     head: StrategyRegistryHeadRecord,
     events: Sequence[StrategyRegistryEventRecord],
+    activations: Sequence[StrategyRegistryActivationRecord] = (),
 ) -> bool:
-    """Verify the complete immutable chain and its mutable head projection."""
-    if not events or events[-1].id != head.last_event_id:
+    """Backward-compatible name for complete event/activation/head replay."""
+    return registry_head_is_valid(head, events, activations)
+
+
+def _registry_event_chain_content_is_valid(
+    events: Sequence[StrategyRegistryEventRecord],
+) -> bool:
+    if not events:
         return False
     prior_hash = "0" * 64
     for index, event in enumerate(events, start=1):
@@ -953,9 +1147,73 @@ def registry_chain_is_valid(
         if expected != event.event_hash:
             return False
         prior_hash = event.event_hash
-    return head.event_sequence == events[-1].sequence and (head.pending_event_id is None) == (
-        head.pending_effective_session is None
+    return True
+
+
+def _registry_event_follows_state(
+    event: StrategyRegistryEventRecord,
+    *,
+    active_definition_id: UUID,
+    active_generation: int,
+    paused: bool,
+    pending: StrategyRegistryEventRecord | None,
+) -> bool:
+    if event.event_type in {"PROMOTE", "ROLLBACK"}:
+        return (
+            pending is None
+            and event.from_definition_id == active_definition_id
+            and event.to_definition_id != active_definition_id
+            and event.champion_generation == active_generation + 1
+            and event.effective_session is not None
+        )
+    if event.event_type not in {"PAUSE", "RESUME", "VETO"}:
+        return False
+    expected_generation = (
+        active_generation if pending is None else pending.champion_generation
     )
+    if (
+        event.from_definition_id != active_definition_id
+        or event.to_definition_id != active_definition_id
+        or event.champion_generation != expected_generation
+        or event.effective_session is not None
+        or event.promotion_decision_id is not None
+    ):
+        return False
+    if event.event_type == "PAUSE":
+        return not paused
+    if event.event_type == "RESUME":
+        return paused
+    return pending is None
+
+
+def _require_registry_activation(
+    activation: StrategyRegistryActivationRecord,
+    *,
+    transition: StrategyRegistryEventRecord,
+    active_definition_id: UUID,
+    active_generation: int,
+) -> None:
+    if (
+        transition.event_type not in {"PROMOTE", "ROLLBACK"}
+        or transition.effective_session is None
+        or activation.registry_event_id != transition.id
+        or activation.decision_session < transition.effective_session
+        or activation.from_definition_id != active_definition_id
+        or activation.from_definition_id != transition.from_definition_id
+        or activation.to_definition_id != transition.to_definition_id
+        or activation.champion_generation != transition.champion_generation
+        or activation.champion_generation != active_generation + 1
+        or activation.activation_hash
+        != registry_activation_content_hash(
+            registry_event_id=activation.registry_event_id,
+            decision_session=activation.decision_session,
+            activated_at=activation.activated_at,
+            from_definition_id=activation.from_definition_id,
+            to_definition_id=activation.to_definition_id,
+            champion_generation=activation.champion_generation,
+        )
+    ):
+        raise ValueError("STRATEGY_REGISTRY_ACTIVATION_INVALID")
 
 
 async def _append_registry_event(

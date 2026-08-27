@@ -20,6 +20,7 @@ from nexus.persistence.models.evolution import (
     StrategyChampionComparisonRecord,
     StrategyExperimentStateProjectionRecord,
     StrategyPromotionDecisionRecord,
+    StrategyRegistryActivationRecord,
     StrategyRegistryEventRecord,
     StrategyRegistryHeadRecord,
 )
@@ -153,6 +154,9 @@ async def test_pause_resume_promote_and_safe_boundary_activation_are_append_only
         event_count = int(
             await session.scalar(select(func.count()).select_from(StrategyRegistryEventRecord)) or 0
         )
+        activations = tuple(
+            await session.scalars(select(StrategyRegistryActivationRecord))
+        )
         after = await _protected_counts(session)
 
     assert paused.status == "PAUSED" and paused.auto_promotion_paused is True
@@ -173,6 +177,10 @@ async def test_pause_resume_promote_and_safe_boundary_activation_are_append_only
     assert head is not None and head.pending_event_id is None
     assert projection is not None and projection.current_state == "PROMOTED"
     assert event_count == 5
+    assert len(activations) == 1
+    assert activations[0].registry_event_id == pending.registry_event_id
+    assert activations[0].from_definition_id == seed.active_definition_id
+    assert activations[0].to_definition_id == seed.challenger_definition_id
     assert after == before
 
 

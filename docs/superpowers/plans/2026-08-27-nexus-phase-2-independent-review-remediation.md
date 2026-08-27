@@ -353,7 +353,7 @@ git commit -m "fix(engine): make OOS selection and trials authoritative"
 - Produces: `RegistryReplayStateV1`, `rebuild_registry_head(events, activations)`, `registry_head_is_valid(head, events, activations)`.
 - Changes: `activate_pending_transition()` appends `StrategyRegistryActivationRecord` before updating the mutable head.
 
-- [ ] **Step 1: Write pure replay counterexample tests**
+- [x] **Step 1: Write pure replay counterexample tests**
 
 Build literal GENESIS, PAUSE, RESUME, PROMOTE and activation facts. Assert the rebuilt state has exact active definition/generation, pause, pending, last event, sequence and `version=len(events)+len(activations)`. Mutate only one head field at a time and assert validation fails.
 
@@ -367,7 +367,7 @@ for field, forged in (
     assert not registry_head_is_valid(replace(head, **{field: forged}), events, activations)
 ```
 
-- [ ] **Step 2: Run registry unit tests and observe RED**
+- [x] **Step 2: Run registry unit tests and observe RED**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/evolution/test_registry.py -q
@@ -375,13 +375,13 @@ uv run --package nexus-engine pytest engine/tests/unit/evolution/test_registry.p
 
 Expected: FAIL because current chain verification checks hashes/last event but does not replay the head.
 
-- [ ] **Step 3: Implement full replay and activation persistence**
+- [x] **Step 3: Implement full replay and activation persistence**
 
 Replace `registry_chain_is_valid()` internals with full replay. Requesting PROMOTE/ROLLBACK leaves a pending transition; PAUSE/RESUME/VETO advance event sequence without making the transition effective; activation makes exactly the referenced transition effective and clears pending. Reject an activation whose event is not the current pending transition, whose decision session precedes the effective session, or whose from definition/generation no longer matches.
 
 The PostgreSQL head guard from Task 1 must compare new head fields with facts visible in the same transaction. Add direct SQL tests for same-generation active swaps, pause flips and forged pending bindings; all must return SQLSTATE `23514`.
 
-- [ ] **Step 4: Verify promotion, rollback, open-order and concurrency flows GREEN**
+- [x] **Step 4: Verify promotion, rollback, open-order and concurrency flows GREEN**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -393,7 +393,7 @@ uv run --package nexus-engine pytest \
 
 Assert pending orders create no activation and do not change the active champion. Replay the same boundary after successful activation and assert one activation row and one effective head.
 
-- [ ] **Step 5: Commit Task 4**
+- [x] **Step 5: Commit Task 4**
 
 ```bash
 git add engine/src/nexus/evolution/registry.py \

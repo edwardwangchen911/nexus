@@ -114,6 +114,55 @@ def test_registry_head_rejects_generation_regression(migrated_database_url: str)
     assert captured.value.orig.sqlstate == "23514"
 
 
+def test_registry_head_rejects_active_definition_swap_without_activation(
+    migrated_database_url: str,
+) -> None:
+    alternate_id = "019d0000-0000-7000-8000-000000003901"
+    asyncio.run(
+        _execute(
+            migrated_database_url,
+            "INSERT INTO strategy_definitions "
+            "(id,strategy_version,schema_version,expression_hash,document,lifecycle,"
+            "published_at,created_at) SELECT "
+            f"'{alternate_id}','registry_guard_alternate',schema_version,repeat('e',64),"
+            "document,'challenger',published_at,created_at FROM strategy_definitions "
+            "WHERE strategy_version='baseline_v1'",
+        )
+    )
+    with pytest.raises(DBAPIError) as captured:
+        asyncio.run(
+            _execute(
+                migrated_database_url,
+                "UPDATE strategy_registry_heads "
+                f"SET active_definition_id='{alternate_id}',version=2 "
+                "WHERE channel='internal_paper'",
+            )
+        )
+    assert captured.value.orig.sqlstate == "23514"
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    (
+        "auto_promotion_paused=true",
+        "pending_event_id=last_event_id,pending_effective_session='2026-10-02'",
+    ),
+)
+def test_registry_head_rejects_control_or_pending_state_without_matching_event(
+    migrated_database_url: str,
+    assignment: str,
+) -> None:
+    with pytest.raises(DBAPIError) as captured:
+        asyncio.run(
+            _execute(
+                migrated_database_url,
+                f"UPDATE strategy_registry_heads SET {assignment},version=2 "
+                "WHERE channel='internal_paper'",
+            )
+        )
+    assert captured.value.orig.sqlstate == "23514"
+
+
 def test_experiment_projection_rejects_trial_count_regression(
     migrated_database_url: str,
 ) -> None:

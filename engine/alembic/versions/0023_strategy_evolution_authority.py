@@ -683,9 +683,111 @@ def _install_guards() -> None:
         "ON strategy_registry_activations FOR EACH ROW "
         "EXECUTE FUNCTION nexus_strategy_registry_activation_valid()"
     )
+    _install_registry_head_replay_guard()
+
+
+def _install_registry_head_replay_guard() -> None:
+    op.execute(
+        """
+        CREATE OR REPLACE FUNCTION nexus_strategy_registry_head_monotonic()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE
+          latest_event_id uuid;
+          latest_sequence bigint;
+          event_count bigint;
+          activation_count bigint;
+          expected_active_definition_id uuid;
+          expected_active_generation bigint;
+          expected_auto_promotion_paused boolean := false;
+          expected_pending_event_id uuid;
+          expected_pending_effective_session date;
+          unactivated_transition_count bigint;
+          pending_transition strategy_registry_events%ROWTYPE;
+        BEGIN
+          IF NEW.channel <> OLD.channel
+            OR NEW.version <> OLD.version + 1
+            OR NEW.event_sequence < OLD.event_sequence
+            OR NEW.event_sequence > OLD.event_sequence + 1
+            OR NEW.active_generation < OLD.active_generation
+            OR NEW.active_generation > OLD.active_generation + 1 THEN
+            RAISE EXCEPTION 'strategy registry head regressed' USING ERRCODE='23514';
+          END IF;
+
+          SELECT count(*),max(sequence) INTO event_count,latest_sequence
+          FROM strategy_registry_events WHERE channel='internal_paper';
+          SELECT id INTO latest_event_id FROM strategy_registry_events
+          WHERE channel='internal_paper' ORDER BY sequence DESC LIMIT 1;
+          SELECT count(*) INTO activation_count FROM strategy_registry_activations;
+
+          SELECT a.to_definition_id,a.champion_generation
+          INTO expected_active_definition_id,expected_active_generation
+          FROM strategy_registry_activations a
+          JOIN strategy_registry_events e ON e.id=a.registry_event_id
+          ORDER BY e.sequence DESC LIMIT 1;
+          IF expected_active_definition_id IS NULL THEN
+            SELECT to_definition_id,champion_generation
+            INTO expected_active_definition_id,expected_active_generation
+            FROM strategy_registry_events
+            WHERE channel='internal_paper' AND sequence=1 AND event_type='GENESIS';
+          END IF;
+
+          SELECT event_type='PAUSE' INTO expected_auto_promotion_paused
+          FROM strategy_registry_events
+          WHERE channel='internal_paper' AND event_type IN ('PAUSE','RESUME')
+          ORDER BY sequence DESC LIMIT 1;
+          expected_auto_promotion_paused := COALESCE(
+            expected_auto_promotion_paused,false
+          );
+
+          SELECT count(*) INTO unactivated_transition_count
+          FROM strategy_registry_events e
+          LEFT JOIN strategy_registry_activations a ON a.registry_event_id=e.id
+          WHERE e.channel='internal_paper'
+            AND e.event_type IN ('PROMOTE','ROLLBACK') AND a.id IS NULL;
+          IF unactivated_transition_count = 1 THEN
+            SELECT e.* INTO pending_transition
+            FROM strategy_registry_events e
+            LEFT JOIN strategy_registry_activations a ON a.registry_event_id=e.id
+            WHERE e.channel='internal_paper'
+              AND e.event_type IN ('PROMOTE','ROLLBACK') AND a.id IS NULL;
+            expected_pending_event_id := pending_transition.id;
+            expected_pending_effective_session := pending_transition.effective_session;
+            IF pending_transition.from_definition_id <> expected_active_definition_id
+              OR pending_transition.to_definition_id = expected_active_definition_id
+              OR pending_transition.champion_generation <> expected_active_generation + 1
+              OR pending_transition.effective_session IS NULL THEN
+              RAISE EXCEPTION 'strategy registry pending transition is invalid'
+                USING ERRCODE='23514';
+            END IF;
+          ELSIF unactivated_transition_count > 1 THEN
+            RAISE EXCEPTION 'strategy registry has multiple pending transitions'
+              USING ERRCODE='23514';
+          END IF;
+
+          IF event_count < 1 OR latest_event_id IS NULL
+            OR expected_active_definition_id IS NULL
+            OR expected_active_generation IS NULL
+            OR NEW.last_event_id IS DISTINCT FROM latest_event_id
+            OR NEW.event_sequence IS DISTINCT FROM latest_sequence
+            OR NEW.active_definition_id IS DISTINCT FROM expected_active_definition_id
+            OR NEW.active_generation IS DISTINCT FROM expected_active_generation
+            OR NEW.auto_promotion_paused IS DISTINCT FROM expected_auto_promotion_paused
+            OR NEW.pending_event_id IS DISTINCT FROM expected_pending_event_id
+            OR NEW.pending_effective_session
+              IS DISTINCT FROM expected_pending_effective_session
+            OR NEW.version IS DISTINCT FROM event_count + activation_count THEN
+            RAISE EXCEPTION 'strategy registry head lacks immutable replay authority'
+              USING ERRCODE='23514';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
 
 
 def _drop_guards() -> None:
+    _restore_registry_head_monotonic_guard()
     op.execute(
         "DROP TRIGGER trg_strategy_experiment_events_family_complete "
         "ON strategy_experiment_events"
@@ -718,6 +820,33 @@ def _drop_guards() -> None:
     for table_name in reversed(_NEW_AUTHORITY_TABLES):
         op.execute(f"DROP TRIGGER trg_{table_name}_immutable ON {table_name}")
         op.execute(f"DROP TRIGGER trg_{table_name}_created_at_immutable ON {table_name}")
+
+
+def _restore_registry_head_monotonic_guard() -> None:
+    op.execute(
+        """
+        CREATE OR REPLACE FUNCTION nexus_strategy_registry_head_monotonic()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.channel <> OLD.channel
+            OR NEW.version <> OLD.version + 1
+            OR NEW.event_sequence < OLD.event_sequence
+            OR NEW.event_sequence > OLD.event_sequence + 1
+            OR NEW.active_generation < OLD.active_generation
+            OR NEW.active_generation > OLD.active_generation + 1 THEN
+            RAISE EXCEPTION 'strategy registry head regressed' USING ERRCODE='23514';
+          END IF;
+          IF NEW.active_generation = OLD.active_generation + 1
+            AND NEW.active_definition_id = OLD.active_definition_id
+            AND NEW.pending_event_id IS NULL THEN
+            RAISE EXCEPTION 'strategy registry generation lacks a new champion'
+              USING ERRCODE='23514';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
 
 
 def _refuse_downgrade_with_authority_facts() -> None:

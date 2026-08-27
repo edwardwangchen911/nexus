@@ -10,10 +10,15 @@ from nexus.evolution.evaluation import (
     persist_champion_comparison,
     persist_historical_promotion_decision,
 )
+from nexus.evolution.registry import (
+    registry_activation_content_hash,
+    registry_event_content_hash,
+)
 from nexus.persistence.models.evolution import (
     StrategyExperimentEventRecord,
     StrategyExperimentStateProjectionRecord,
     StrategyPromotionDecisionRecord,
+    StrategyRegistryActivationRecord,
     StrategyRegistryEventRecord,
     StrategyRegistryHeadRecord,
     StrategyShadowGroupRecord,
@@ -165,17 +170,56 @@ async def _advance_registry_generation(factory, pair) -> None:
             to_definition_id=pair.challenger_definition_id,
             promotion_decision_id=None,
             champion_generation=2,
-            effective_session=None,
+            effective_session=NOW.date(),
             payload={"schema_version": "fixture"},
             previous_hash=prior.event_hash,
-            event_hash="f" * 64,
+            event_hash=registry_event_content_hash(
+                sequence=2,
+                event_type="PROMOTE",
+                idempotency_key="evaluation-fixture-external-promotion",
+                actor_kind="service",
+                occurred_at=NOW,
+                from_definition_id=pair.champion_definition_id,
+                to_definition_id=pair.challenger_definition_id,
+                promotion_decision_id=None,
+                champion_generation=2,
+                effective_session=NOW.date(),
+                payload={"schema_version": "fixture"},
+                previous_hash=prior.event_hash,
+            ),
             created_at=NOW,
         )
         session.add(event)
         await session.flush()
-        head.active_definition_id = pair.challenger_definition_id
-        head.active_generation = 2
         head.last_event_id = event.id
         head.event_sequence = 2
+        head.pending_event_id = event.id
+        head.pending_effective_session = NOW.date()
         head.version = 2
         head.updated_at = NOW
+        await session.flush()
+        activation = StrategyRegistryActivationRecord(
+            registry_event_id=event.id,
+            decision_session=NOW.date(),
+            activated_at=NOW,
+            from_definition_id=pair.champion_definition_id,
+            to_definition_id=pair.challenger_definition_id,
+            champion_generation=2,
+            activation_hash=registry_activation_content_hash(
+                registry_event_id=event.id,
+                decision_session=NOW.date(),
+                activated_at=NOW,
+                from_definition_id=pair.champion_definition_id,
+                to_definition_id=pair.challenger_definition_id,
+                champion_generation=2,
+            ),
+            created_at=NOW,
+        )
+        session.add(activation)
+        await session.flush()
+        head.active_definition_id = pair.challenger_definition_id
+        head.active_generation = 2
+        head.pending_event_id = None
+        head.pending_effective_session = None
+        head.version = 3
+        await session.flush()

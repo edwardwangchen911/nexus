@@ -50,6 +50,7 @@ from nexus.persistence.models.evolution import (
     StrategyExperimentRecord,
     StrategyExperimentStateProjectionRecord,
     StrategyPromotionDecisionRecord,
+    StrategyRegistryActivationRecord,
     StrategyRegistryEventRecord,
     StrategyRegistryHeadRecord,
     StrategyRNDOutputRecord,
@@ -393,7 +394,15 @@ class EvolutionReadService:
                 .order_by(StrategyRegistryEventRecord.sequence)
             )
         )
-        valid = registry_chain_is_valid(head, events)
+        activations = tuple(
+            await self._session.scalars(
+                select(StrategyRegistryActivationRecord).order_by(
+                    StrategyRegistryActivationRecord.created_at,
+                    StrategyRegistryActivationRecord.id,
+                )
+            )
+        )
+        valid = registry_chain_is_valid(head, events, activations)
         active_event = next(
             (
                 event
