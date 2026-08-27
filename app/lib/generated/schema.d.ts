@@ -1251,7 +1251,7 @@ export interface components {
              * State
              * @enum {string}
              */
-            state: "PROPOSED" | "REJECTED" | "ADMITTED" | "BACKTEST_RUNNING" | "BACKTEST_FAILED" | "BACKTEST_PASSED" | "SHADOW_RUNNING" | "SHADOW_FAILED" | "EXPIRED" | "VETOED" | "PROMOTION_ELIGIBLE" | "PROMOTED" | "STALE_CHAMPION_BASELINE";
+            state: "ADMITTED" | "VALIDATION_FAILED" | "VALIDATION_PASSED" | "OOS_NOT_SELECTED" | "OOS_SELECTED" | "OOS_RESERVED" | "BACKTEST_FAILED" | "BACKTEST_PASSED" | "SHADOW_RUNNING" | "SHADOW_FAILED" | "EXPIRED" | "VETOED" | "PROMOTION_ELIGIBLE" | "PROMOTED" | "STALE_CHAMPION_BASELINE";
             /** Strategy Version */
             strategy_version: string;
         };

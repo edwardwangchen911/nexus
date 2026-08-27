@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.api.schemas.evolution import (
     ActiveFamilyResponse,
+    CandidateEvolutionState,
     ChampionStateResponse,
     ComparisonResponse,
     EvolutionCursorCodec,
@@ -154,6 +155,7 @@ class EvolutionReadService:
                 StrategyExperimentRecord,
                 StrategyExperimentFamilyRecord,
                 StrategyExperimentStateProjectionRecord,
+                StrategyExperimentCandidateProjectionRecord,
                 StrategyDefinitionRecord,
             )
             .join(
@@ -164,6 +166,11 @@ class EvolutionReadService:
                 StrategyExperimentStateProjectionRecord,
                 StrategyExperimentStateProjectionRecord.family_id
                 == StrategyExperimentFamilyRecord.id,
+            )
+            .join(
+                StrategyExperimentCandidateProjectionRecord,
+                StrategyExperimentCandidateProjectionRecord.experiment_id
+                == StrategyExperimentRecord.id,
             )
             .join(
                 StrategyDefinitionRecord,
@@ -189,8 +196,8 @@ class EvolutionReadService:
         rows = tuple((await self._session.execute(statement)).tuples())
         visible_rows = rows[:limit]
         experiments = tuple(
-            _experiment_summary(experiment, family, projection, definition)
-            for experiment, family, projection, definition in visible_rows
+            _experiment_summary(experiment, family, candidate_projection, definition)
+            for experiment, family, _, candidate_projection, definition in visible_rows
         )
         next_cursor = None
         if len(rows) > limit and visible_rows:
@@ -265,6 +272,7 @@ class EvolutionReadService:
                         StrategyExperimentRecord,
                         StrategyExperimentFamilyRecord,
                         StrategyExperimentStateProjectionRecord,
+                        StrategyExperimentCandidateProjectionRecord,
                         StrategyDefinitionRecord,
                     )
                     .join(
@@ -275,6 +283,11 @@ class EvolutionReadService:
                         StrategyExperimentStateProjectionRecord,
                         StrategyExperimentStateProjectionRecord.family_id
                         == StrategyExperimentFamilyRecord.id,
+                    )
+                    .join(
+                        StrategyExperimentCandidateProjectionRecord,
+                        StrategyExperimentCandidateProjectionRecord.experiment_id
+                        == StrategyExperimentRecord.id,
                     )
                     .join(
                         StrategyDefinitionRecord,
@@ -289,7 +302,7 @@ class EvolutionReadService:
         )
         if row is None:
             raise EvolutionReadError("EXPERIMENT_NOT_FOUND")
-        experiment, family, projection, definition = row
+        experiment, family, projection, candidate_projection, definition = row
         events = tuple(
             await self._session.scalars(
                 select(StrategyExperimentEventRecord)
@@ -359,7 +372,9 @@ class EvolutionReadService:
             else "EXPERIMENT_STATE_NOT_WRITABLE"
         )
         return ExperimentDetailResponse(
-            experiment=_experiment_summary(experiment, family, projection, definition),
+            experiment=_experiment_summary(
+                experiment, family, candidate_projection, definition
+            ),
             family=await self._family_response(family, projection),
             comparison=comparison,
             shadow=shadow,
@@ -1056,7 +1071,7 @@ class EvolutionReadService:
 def _experiment_summary(
     experiment: StrategyExperimentRecord,
     family: StrategyExperimentFamilyRecord,
-    projection: StrategyExperimentStateProjectionRecord,
+    projection: StrategyExperimentCandidateProjectionRecord,
     definition: StrategyDefinitionRecord,
 ) -> ExperimentSummaryResponse:
     return ExperimentSummaryResponse(
@@ -1064,7 +1079,7 @@ def _experiment_summary(
         family_id=family.id,
         candidate_ordinal=experiment.candidate_ordinal,
         strategy_version=definition.strategy_version,
-        state=cast(EvolutionState, projection.current_state),
+        state=cast(CandidateEvolutionState, projection.current_state),
         created_at=experiment.created_at,
         candidate_hash=experiment.candidate_hash,
         expression_hash=experiment.expression_hash,

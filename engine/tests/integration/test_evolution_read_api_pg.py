@@ -191,6 +191,38 @@ async def test_shadow_progress_separates_evaluation_and_grace_sessions(
     assert shadow["grace_elapsed_sessions"] == 0
 
 
+@pytest.mark.asyncio
+async def test_experiment_summary_uses_candidate_state_not_family_aggregate(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(_settings(migrated_database_url))
+    pair = await seed_evaluation_pair(factory)
+    app = _app(migrated_database_url)
+    overview_path = "/internal/v1/strategy-evolution"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        overview = await client.get(
+            overview_path, headers=_headers("GET", overview_path)
+        )
+    detail = await _detail_response(migrated_database_url, pair.experiment_id)
+
+    assert overview.status_code == 200
+    overview_data = overview.json()["data"]
+    summary = next(
+        item
+        for item in overview_data["experiments"]
+        if item["experiment_id"] == str(pair.experiment_id)
+    )
+    assert summary["state"] == "OOS_RESERVED"
+    assert overview_data["active_family"]["state"] == "BACKTEST_RUNNING"
+    assert detail.status_code == 200
+    detail_data = detail.json()["data"]
+    assert detail_data["experiment"]["state"] == "OOS_RESERVED"
+    assert detail_data["family"]["state"] == "BACKTEST_RUNNING"
+
+
 async def _detail_response(database_url: str, experiment_id) -> httpx.Response:
     app = _app(database_url)
     path = f"/internal/v1/strategy-experiments/{experiment_id}"

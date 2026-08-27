@@ -1351,10 +1351,12 @@ export const runtimeContractSchemas = {
       },
       "state": {
         "enum": [
-          "PROPOSED",
-          "REJECTED",
           "ADMITTED",
-          "BACKTEST_RUNNING",
+          "VALIDATION_FAILED",
+          "VALIDATION_PASSED",
+          "OOS_NOT_SELECTED",
+          "OOS_SELECTED",
+          "OOS_RESERVED",
           "BACKTEST_FAILED",
           "BACKTEST_PASSED",
           "SHADOW_RUNNING",

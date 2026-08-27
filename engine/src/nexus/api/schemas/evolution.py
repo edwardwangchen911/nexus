@@ -31,6 +31,23 @@ EvolutionState = Literal[
     "PROMOTED",
     "STALE_CHAMPION_BASELINE",
 ]
+CandidateEvolutionState = Literal[
+    "ADMITTED",
+    "VALIDATION_FAILED",
+    "VALIDATION_PASSED",
+    "OOS_NOT_SELECTED",
+    "OOS_SELECTED",
+    "OOS_RESERVED",
+    "BACKTEST_FAILED",
+    "BACKTEST_PASSED",
+    "SHADOW_RUNNING",
+    "SHADOW_FAILED",
+    "EXPIRED",
+    "VETOED",
+    "PROMOTION_ELIGIBLE",
+    "PROMOTED",
+    "STALE_CHAMPION_BASELINE",
+]
 GateStatus = Literal["PASS", "FAIL", "UNKNOWN", "STALE"]
 
 _CURSOR_DOMAIN = b"nexus-strategy-evolution-cursor-v1\0"
@@ -127,7 +144,7 @@ class ExperimentSummaryResponse(_StrictSchema):
     family_id: UUID
     candidate_ordinal: int = Field(ge=1, le=24)
     strategy_version: str
-    state: EvolutionState
+    state: CandidateEvolutionState
     created_at: datetime
     candidate_hash: Hash64 = Field(pattern=r"^[0-9a-f]{64}$")
     expression_hash: Hash64 = Field(pattern=r"^[0-9a-f]{64}$")
