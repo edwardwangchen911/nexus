@@ -55,15 +55,16 @@ from nexus.strategy.baseline import (
     BaselineSectorExposure,
     PositionRankState,
     StrategyDataSnapshot,
-    evaluate_baseline_v1,
 )
 from nexus.strategy.dsl import (
     CompiledStrategy,
     baseline_feature_registry,
     baseline_v1_document,
     compile_strategy,
+    evolution_feature_registry_v1,
     verify_compiled_strategy,
 )
+from nexus.strategy.interpreter import evaluate_compiled_strategy
 
 
 class _FrozenModel(BaseModel):
@@ -1063,6 +1064,41 @@ def run_backtest(
 ) -> BacktestResult:
     """Run the verified historical baseline over frozen, point-in-time authorities."""
     _verify_baseline_strategy(strategy)
+    return simulation_core_v1(strategy, data, protocol)
+
+
+def run_challenger_backtest_v1(
+    strategy: CompiledStrategy,
+    data: PointInTimeDataset,
+    protocol: BacktestProtocol,
+    *,
+    experiment_attempt_count: int,
+) -> BacktestResult:
+    """Run one verified Phase 2 challenger without changing historical promotion flags."""
+    if not strategy.strategy_version.startswith("challenger_"):
+        raise ValueError("challenger strategy version is required")
+    verify_compiled_strategy(strategy, evolution_feature_registry_v1())
+    if experiment_attempt_count < 1:
+        raise ValueError("experiment attempt count must be positive")
+    return simulation_core_v1(
+        strategy,
+        data,
+        protocol.model_copy(update={"experiment_attempt_count": experiment_attempt_count}),
+    )
+
+
+def simulation_core_v1(
+    strategy: CompiledStrategy,
+    data: PointInTimeDataset,
+    protocol: BacktestProtocol,
+) -> BacktestResult:
+    """Execute a verified restricted strategy over one frozen point-in-time dataset."""
+    if strategy.strategy_version == "baseline_v1":
+        _verify_baseline_strategy(strategy)
+    else:
+        if not strategy.strategy_version.startswith("challenger_"):
+            raise ValueError("challenger strategy version is required")
+        verify_compiled_strategy(strategy, evolution_feature_registry_v1())
     _validate_authority_binding(data, protocol)
     prepared = _prepare_dataset(data)
     base = _run_simulation(strategy, data, protocol, prepared=prepared)
@@ -1390,7 +1426,12 @@ def _run_simulation(
             current_positions=tuple(ledger.holdings),
             position_rank_streaks=position_rank_streaks,
         )
-        decision = evaluate_baseline_v1(snapshot, session, _min_adv20_usd=min_adv20_usd)
+        decision = evaluate_compiled_strategy(
+            strategy,
+            snapshot,
+            session,
+            _parameter_overrides={"min_adv20_usd": min_adv20_usd},
+        )
         if decision.reason == "WEEKLY_REBALANCE" and next_session is not None:
             position_rank_streaks = {
                 state.instrument_id: state.consecutive_outside_top20_weeks
@@ -2549,6 +2590,7 @@ def _engine_code_hash(code_version: str) -> str:
         root / "simulation" / "models.py",
         root / "strategy" / "baseline.py",
         root / "strategy" / "dsl.py",
+        root / "strategy" / "interpreter.py",
     )
     digest = hashlib.sha256()
     digest.update(code_version.encode())

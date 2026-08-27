@@ -142,7 +142,7 @@ git commit -m "feat(engine): define bounded strategy evolution candidates"
 - Consumes: `CompiledStrategy`, `StrategyDataSnapshot`, frozen `PointInTimeDataset`, `BacktestProtocol`.
 - Produces: `CompiledStrategyDecision`, `evaluate_compiled_strategy(strategy, snapshot, decision_session)`, pure `simulation_core_v1(strategy, data, protocol)`, and `run_challenger_backtest_v1(strategy, data, protocol, experiment_attempt_count)`.
 
-- [ ] **Step 1: Write equivalence and challenger red tests**
+- [x] **Step 1: Write equivalence and challenger red tests**
 
 ```python
 def test_interpreter_is_baseline_v1_equivalent(baseline_snapshot) -> None:
@@ -154,25 +154,25 @@ def test_interpreter_is_baseline_v1_equivalent(baseline_snapshot) -> None:
 
 Before changing any hash-covered source, generate and review `baseline_v1_semantic_golden.json` from the current `run_backtest()`. The fixture stores the complete canonical result plus its original identity. Add an assertion that the extracted core returns a byte-identical canonical payload after excluding only `code_hash` and `result_hash`; assert that hash-covered source changes produce a new valid `code_hash` and `result_hash` while the frozen historical identity is never reused. Add challenger tests for allowed threshold/ranking mutations and rejection of a forged compiled hash.
 
-- [ ] **Step 2: Run the focused suite and confirm missing interpreter/entry-point failures**
+- [x] **Step 2: Run the focused suite and confirm missing interpreter/entry-point failures**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/strategy/test_interpreter.py engine/tests/unit/backtest/test_challenger_engine.py engine/tests/property/test_evolution_no_lookahead.py -q
 ```
 
-- [ ] **Step 3: Extend feature metadata without changing baseline identity**
+- [x] **Step 3: Extend feature metadata without changing baseline identity**
 
 Add compatibility class, inputs, unit, minimum history, availability delay, missing policy and implementation hash to the evolution registry identity. Preserve the exact legacy `baseline_feature_registry()` identity used by Phase 0–1 hashes; expose a separate `evolution_feature_registry_v1()` for Phase 2.
 
-- [ ] **Step 4: Implement the expression/policy interpreter**
+- [x] **Step 4: Implement the expression/policy interpreter**
 
 Evaluate registered features from the frozen snapshot, boolean/comparison nodes, ranking, selection, target/cash weights and trend/ranking exits. Use Decimal only, reject unavailable features, and preserve baseline tie-breaking by `(rank_value desc, instrument_id asc)` and existing sector/ETF caps.
 
-- [ ] **Step 5: Extract the simulation core and add challenger entry point**
+- [x] **Step 5: Extract the simulation core and add challenger entry point**
 
 Keep public `run_backtest()` baseline-only and `promotable=False`. Route its internal simulation through `simulation_core_v1`; add `run_challenger_backtest_v1` that verifies a compiled evolution strategy and passes lineage attempt count to `calculate_metrics`. Do not add Agent calls to any historical loop.
 
-- [ ] **Step 6: Verify semantic byte equivalence, identity renewal, no-lookahead, and commit**
+- [x] **Step 6: Verify semantic byte equivalence, identity renewal, no-lookahead, and commit**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/strategy engine/tests/unit/backtest engine/tests/property/test_no_lookahead.py engine/tests/property/test_evolution_no_lookahead.py -q

@@ -45,11 +45,22 @@ class FeatureDefinition(_FrozenModel):
     availability: Literal["exchange_close_plus_30m"]
     minimum: Decimal
     maximum: Decimal
+    compatibility_class: str | None = Field(
+        default=None, max_length=100, pattern=r"^[a-z][a-z0-9_]*$"
+    )
+    inputs: tuple[str, ...] = ()
+    unit: str | None = Field(default=None, max_length=100, pattern=r"^[a-z][a-z0-9_]*$")
+    minimum_history_sessions: int | None = Field(default=None, ge=1, le=10_000)
+    availability_delay: Literal["exchange_close_plus_30m"] | None = None
+    missing_policy: Literal["reject_instrument"] | None = None
+    implementation_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def _ordered_range(self) -> FeatureDefinition:
         if self.minimum > self.maximum:
             raise ValueError("feature minimum must not exceed maximum")
+        if len(self.inputs) != len(set(self.inputs)):
+            raise ValueError("feature inputs must be unique")
         return self
 
 
@@ -69,7 +80,12 @@ class FeatureRegistry:
         return tuple(self._definitions[name] for name in sorted(self._definitions))
 
     def identity(self, names: set[str]) -> dict[str, object]:
-        return {name: self._definitions[name].model_dump(mode="json") for name in sorted(names)}
+        return {
+            name: self._definitions[name].model_dump(
+                mode="json", exclude_none=True, exclude_defaults=True
+            )
+            for name in sorted(names)
+        }
 
 
 class ExpressionNode(_FrozenModel):
@@ -277,6 +293,65 @@ def baseline_feature_registry() -> FeatureRegistry:
             ),
         )
     )
+
+
+def evolution_feature_registry_v1() -> FeatureRegistry:
+    """Feature authority with explicit availability metadata for Phase 2 strategies."""
+    metadata: dict[str, dict[str, object]] = {
+        "raw_close": {
+            "compatibility_class": "price_level",
+            "inputs": ("raw_close",),
+            "unit": "usd_per_share",
+            "minimum_history_sessions": 1,
+        },
+        "adjusted_close": {
+            "compatibility_class": "price_level",
+            "inputs": ("adjusted_close",),
+            "unit": "usd_per_share",
+            "minimum_history_sessions": 1,
+        },
+        "adv20_usd": {
+            "compatibility_class": "liquidity_usd",
+            "inputs": ("raw_close", "raw_volume"),
+            "unit": "usd",
+            "minimum_history_sessions": 20,
+        },
+        "sma200": {
+            "compatibility_class": "trend_level",
+            "inputs": ("adjusted_close",),
+            "unit": "usd_per_share",
+            "minimum_history_sessions": 200,
+        },
+        "return_126": {
+            "compatibility_class": "momentum_rank",
+            "inputs": ("adjusted_close",),
+            "unit": "ratio",
+            "minimum_history_sessions": 127,
+        },
+        "momentum_126_skip5": {
+            "compatibility_class": "momentum_rank",
+            "inputs": ("adjusted_close",),
+            "unit": "ratio",
+            "minimum_history_sessions": 127,
+        },
+    }
+    definitions: list[FeatureDefinition] = []
+    for definition in baseline_feature_registry().definitions():
+        details = metadata[definition.name]
+        implementation_hash = hashlib.sha256(
+            f"nexus.feature.{definition.version}.phase2_v1".encode()
+        ).hexdigest()
+        definitions.append(
+            definition.model_copy(
+                update={
+                    **details,
+                    "availability_delay": "exchange_close_plus_30m",
+                    "missing_policy": "reject_instrument",
+                    "implementation_hash": implementation_hash,
+                }
+            )
+        )
+    return FeatureRegistry(tuple(definitions))
 
 
 def baseline_v1_document() -> dict[str, object]:

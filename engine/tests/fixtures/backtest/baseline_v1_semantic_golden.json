@@ -1,0 +1,173 @@
+{
+  "attribution": {
+    "by_instrument": [
+      {
+        "key": "00000000-0000-0000-0000-000000000001",
+        "value": "-0.624960939941"
+      }
+    ],
+    "by_sector": [
+      {
+        "key": "consumer_discretionary",
+        "value": "-0.624960939941"
+      }
+    ],
+    "cash_contribution": "0E-12",
+    "costs": "0.624960939941",
+    "realized_pnl": "0E-12",
+    "reconciled": true,
+    "reconciliation_difference": "0E-12",
+    "unrealized_pnl": "0E-12"
+  },
+  "authority_bundle_id": "00000000-0000-0000-0000-000000015f90",
+  "authority_hash": "b7e10ada254dddcdd00a3a070e06b8fff271559977909c9d9283172640183fb6",
+  "benchmark_comparison_complete": true,
+  "code_hash": "6ae9c0c9396bca23ebc5e070912404917cf78090ed2d8f0a1ac2a2d3e44dcd63",
+  "comparisons": [
+    {
+      "comparison_key": "champion",
+      "complete": true,
+      "excess_total_return": "0E-12",
+      "incomplete_reasons": [],
+      "metrics": {
+        "annualized_return": "-0.015626132882",
+        "annualized_volatility": "0E-12",
+        "calmar": "-250.033752244118",
+        "cost_ratio": "0.000500000000",
+        "deflated_sharpe_confidence": "0E-12",
+        "expected_shortfall_95": "-0.000062496094",
+        "max_drawdown": "-0.000062496094",
+        "sharpe": "0E-12",
+        "sortino": "0E-12",
+        "total_cost": "0.624960939941",
+        "total_return": "-0.000062496094",
+        "turnover": "0.124992187988"
+      },
+      "terminal_nav": "9999.375039060059"
+    },
+    {
+      "comparison_key": "equal_weight",
+      "complete": true,
+      "excess_total_return": "0.000437254031",
+      "incomplete_reasons": [],
+      "metrics": {
+        "annualized_return": "-0.118357391165",
+        "annualized_volatility": "0E-12",
+        "calmar": "-236.833139721749",
+        "cost_ratio": "0.000500000000",
+        "deflated_sharpe_confidence": "0E-12",
+        "expected_shortfall_95": "-0.000499750125",
+        "max_drawdown": "-0.000499750125",
+        "sharpe": "0E-12",
+        "sortino": "0E-12",
+        "total_cost": "4.997501249375",
+        "total_return": "-0.000499750125",
+        "turnover": "0.999500249875"
+      },
+      "terminal_nav": "9995.002498750625"
+    },
+    {
+      "comparison_key": "spy",
+      "complete": true,
+      "excess_total_return": "0.000437254031",
+      "incomplete_reasons": [],
+      "metrics": {
+        "annualized_return": "-0.118357391165",
+        "annualized_volatility": "0E-12",
+        "calmar": "-236.833139721749",
+        "cost_ratio": "0.000500000000",
+        "deflated_sharpe_confidence": "0E-12",
+        "expected_shortfall_95": "-0.000499750125",
+        "max_drawdown": "-0.000499750125",
+        "sharpe": "0E-12",
+        "sortino": "0E-12",
+        "total_cost": "4.997501249375",
+        "total_return": "-0.000499750125",
+        "turnover": "0.999500249875"
+      },
+      "terminal_nav": "9995.002498750625"
+    }
+  ],
+  "cost_policy_id": "0198d500-1000-7000-8000-000000001604",
+  "cost_policy_version": "backtest_cost_policy_v1",
+  "cost_sensitivity": {
+    "base_terminal_nav": "9999.375039060059",
+    "double_cost_terminal_nav": "9998.750156230471",
+    "half_cost_terminal_nav": "9999.687509765320"
+  },
+  "data_hash": "4f55bb8e4b9bf3d198c95c4ce6a389e5ac3db17cbf3c8fa7ab74afa75d758b14",
+  "data_snapshot_id": "0198d500-1000-7000-8000-000000001602",
+  "delisting_count": 0,
+  "execution_sensitivity": {
+    "next_close_terminal_nav": "9999.375039060059",
+    "next_open_terminal_nav": "9999.375039060059"
+  },
+  "expression_hash": "f643694ad6d31f0dd504061fbd06068a93f9fb679aba9ba5b75337e2e169d13d",
+  "fills": [
+    {
+      "cost": "0.624960939941",
+      "fill_session": "2021-01-11",
+      "instrument_id": "00000000-0000-0000-0000-000000000001",
+      "notional": "1249.921879882507",
+      "price": "10.000000000000",
+      "quantity": "124.992187988251",
+      "side": "buy",
+      "signal_session": "2021-01-08"
+    }
+  ],
+  "historical_agent_overlay": false,
+  "history_requirement_met": false,
+  "metrics": {
+    "annualized_return": "-0.015626132882",
+    "annualized_volatility": "0E-12",
+    "calmar": "-250.033752244118",
+    "cost_ratio": "0.000500000000",
+    "deflated_sharpe_confidence": "0E-12",
+    "expected_shortfall_95": "-0.000062496094",
+    "max_drawdown": "-0.000062496094",
+    "sharpe": "0E-12",
+    "sortino": "0E-12",
+    "total_cost": "0.624960939941",
+    "total_return": "-0.000062496094",
+    "turnover": "0.124992187988"
+  },
+  "nav": [
+    {
+      "cash": "10000.000000000000",
+      "nav": "10000.000000000000",
+      "session": "2021-01-08"
+    },
+    {
+      "cash": "8749.453159177551",
+      "nav": "9999.375039060059",
+      "session": "2021-01-11"
+    }
+  ],
+  "oos_window_count_sufficient": false,
+  "order_outcomes": [
+    {
+      "instrument_id": "00000000-0000-0000-0000-000000000001",
+      "reason": "filled at target-session open",
+      "side": "buy",
+      "signal_session": "2021-01-08",
+      "status": "filled",
+      "target_session": "2021-01-11"
+    }
+  ],
+  "parameter_sensitivity": {
+    "adv20_40m_terminal_nav": "9999.375039060059",
+    "adv20_60m_terminal_nav": "10000.000000000000",
+    "base_terminal_nav": "9999.375039060059"
+  },
+  "promotable": false,
+  "protocol_hash": "93e65889a61230b247310c84e62f37eb5427dd011ebef403929d3039fcda0f76",
+  "random_seed": 0,
+  "result_hash": "f3d250c08b7959ed2bf50c6e06dcfb9594f79d1c0345269e39f8c416714baac1",
+  "source_policy_id": "0198d500-1000-7000-8000-000000001603",
+  "source_policy_version": "source_policy_v1",
+  "strategy_data_complete": true,
+  "strategy_incomplete_reasons": [],
+  "strategy_version": "baseline_v1",
+  "valid_oos_window_count": 0,
+  "windows": []
+}

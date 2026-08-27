@@ -35,12 +35,17 @@ from nexus.backtest.engine import (
     authority_collection_content_hash,
     exchange_calendar_content_hash,
     run_backtest,
+    run_challenger_backtest_v1,
 )
+from nexus.evolution.candidate import apply_candidate_delta, generate_candidate_deltas
+from nexus.evolution.models import StrategyExperimentProposalV1
+from nexus.evolution.policies import candidate_budget_policy_v1, evolution_search_space_v1
 from nexus.market.universe import EQUITY_SECTOR_CODES
 from nexus.strategy.dsl import (
     baseline_feature_registry,
     baseline_v1_document,
     compile_strategy,
+    evolution_feature_registry_v1,
 )
 
 DATA_SNAPSHOT_ID = UUID("0198d500-1000-7000-8000-000000001602")
@@ -358,10 +363,59 @@ def test_backtest_fills_on_next_calendar_session_and_applies_exact_decimal_costs
         mode="json",
         exclude={"code_hash", "result_hash"},
     )
-    semantic_hash = hashlib.sha256(
-        json.dumps(semantic_payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    assert semantic_hash == "5ca5672ab8d5e6413d0155464dce28ebe1b5e130ea4d5a8cb070fbcfb3cdd370"
+    golden = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "fixtures/backtest/baseline_v1_semantic_golden.json"
+        ).read_text()
+    )
+    original_identity = {field: golden.pop(field) for field in ("code_hash", "result_hash")}
+    assert semantic_payload == golden
+    assert result.code_hash != original_identity["code_hash"]
+    assert result.result_hash != original_identity["result_hash"]
+
+
+def test_challenger_entry_executes_a_verified_candidate_and_stays_non_promotable() -> None:
+    instrument = UUID(int=1)
+    friday = date(2021, 1, 8)
+    monday = date(2021, 1, 11)
+    history = _history_sessions(friday)
+    dataset = _dataset(
+        bars=tuple(_bar(instrument, session, "8") for session in history)
+        + (_bar(instrument, friday, "10"), _bar(instrument, monday, "10")),
+        sessions=(*history, friday, monday),
+        universe_members=(instrument,),
+    )
+    proposal = StrategyExperimentProposalV1.model_validate(
+        {
+            "schema_version": "strategy_experiment_proposal_v1",
+            "parent_strategy_definition_id": "019d0000-0000-7000-8000-000000000001",
+            "champion_generation": 1,
+            "research_lineage_id": "019d0000-0000-7000-8000-000000000002",
+            "hypothesis": "Registered weight variation may improve robustness.",
+            "expected_mechanism": "The frozen validation protocol measures the effect.",
+            "invalidation_conditions": ["The paired validation comparison is not positive."],
+            "evidence_refs": ["019d0000-0000-7000-8000-000000000003"],
+            "mutation_axes": [{"axis": "target_weight", "values": ["0.10"]}],
+        }
+    )
+    parent = baseline_v1_document()
+    delta = generate_candidate_deltas(proposal, parent, candidate_budget_policy_v1())[0]
+    document = apply_candidate_delta(parent, delta, evolution_search_space_v1())
+    challenger = compile_strategy(document, evolution_feature_registry_v1())
+
+    result = run_challenger_backtest_v1(
+        challenger,
+        dataset,
+        _protocol(friday, monday),
+        experiment_attempt_count=7,
+    )
+
+    assert result.strategy_version == challenger.strategy_version
+    assert result.expression_hash == challenger.expression_hash
+    assert result.fills[0].notional == Decimal("1000.000000000000")
+    assert result.promotable is False
+    assert result.historical_agent_overlay is False
 
 
 def test_nonzero_cost_rebalance_preserves_post_cost_target_weights_and_cash_floor() -> None:
@@ -1010,6 +1064,7 @@ def test_engine_code_hash_covers_shared_simulation_kernel() -> None:
         root / "simulation" / "models.py",
         root / "strategy" / "baseline.py",
         root / "strategy" / "dsl.py",
+        root / "strategy" / "interpreter.py",
     )
     digest = hashlib.sha256()
     digest.update(b"nexus_backtest_engine_v1")

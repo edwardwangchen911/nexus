@@ -21,7 +21,12 @@ from nexus.evolution.policies import (
     candidate_budget_policy_v1,
     evolution_search_space_v1,
 )
-from nexus.strategy.dsl import baseline_feature_registry, compile_strategy
+from nexus.strategy.dsl import (
+    FeatureRegistry,
+    baseline_feature_registry,
+    compile_strategy,
+    evolution_feature_registry_v1,
+)
 
 
 class EvolutionCandidateError(ValueError):
@@ -134,6 +139,14 @@ def _validated_mutations(
             raise EvolutionCandidateError("MUTATION_VALUE_NOT_REGISTERED")
 
 
+def _registry_for_parent(parent_document: Mapping[str, object]) -> FeatureRegistry:
+    return (
+        baseline_feature_registry()
+        if parent_document.get("version") == "baseline_v1"
+        else evolution_feature_registry_v1()
+    )
+
+
 def apply_candidate_delta(
     parent_document: Mapping[str, object],
     delta: StrategyCandidateDeltaV1,
@@ -142,7 +155,8 @@ def apply_candidate_delta(
     """Apply only released bindings, verify identity, and return a compilable copy."""
     if search_space != evolution_search_space_v1():
         raise EvolutionCandidateError("SEARCH_SPACE_AUTHORITY_MISMATCH")
-    parent = compile_strategy(parent_document, baseline_feature_registry())
+    parent_registry = _registry_for_parent(parent_document)
+    parent = compile_strategy(parent_document, parent_registry)
     if delta.parent_expression_hash != parent.expression_hash:
         raise EvolutionCandidateError("PARENT_EXPRESSION_HASH_MISMATCH")
     _validated_mutations(delta.mutations, search_space)
@@ -158,14 +172,16 @@ def apply_candidate_delta(
     for field, expected in immutable.items():
         if document.get(field) != expected:
             raise EvolutionCandidateError("IMMUTABLE_STRATEGY_FIELD_CHANGED")
-    compile_strategy(document, baseline_feature_registry())
+    compile_strategy(document, evolution_feature_registry_v1())
     return document
 
 
-def _semantic_hash(document: Mapping[str, object], parent_version: object) -> str:
+def _semantic_hash(
+    document: Mapping[str, object], parent_version: object, parent_registry: FeatureRegistry
+) -> str:
     semantic = deepcopy(dict(document))
     semantic["version"] = parent_version
-    return compile_strategy(semantic, baseline_feature_registry()).expression_hash
+    return compile_strategy(semantic, parent_registry).expression_hash
 
 
 def generate_candidate_deltas(
@@ -176,7 +192,8 @@ def generate_candidate_deltas(
     """Enumerate, hash-sort, semantic-deduplicate, and cap registered candidates."""
     if policy != candidate_budget_policy_v1():
         raise EvolutionCandidateError("CANDIDATE_BUDGET_AUTHORITY_MISMATCH")
-    parent = compile_strategy(parent_document, baseline_feature_registry())
+    parent_registry = _registry_for_parent(parent_document)
+    parent = compile_strategy(parent_document, parent_registry)
     search_space = evolution_search_space_v1()
     axes = tuple(sorted(proposal.mutation_axes, key=lambda item: item.axis))
     if len(axes) > policy.max_axes:
@@ -206,7 +223,7 @@ def generate_candidate_deltas(
             candidate_hash=digest,
         )
         document = apply_candidate_delta(parent_document, provisional, search_space)
-        semantic_hash = _semantic_hash(document, parent_version)
+        semantic_hash = _semantic_hash(document, parent_version, parent_registry)
         if semantic_hash in semantic_hashes:
             continue
         semantic_hashes.add(semantic_hash)
