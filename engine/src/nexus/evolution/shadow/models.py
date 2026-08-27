@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from nexus.backtest.canonical import canonical_decimal
 from nexus.evolution.models import _reject_binary_float
+from nexus.evolution.repository import FamilyAggregateState
 from nexus.strategy.baseline import PositionRankState, StrategyDataSnapshot
 
 EVALUATION_SESSION_COUNT = 63
@@ -276,7 +277,7 @@ class StrategyShadowFinalizationResultV1(_FrozenModel):
     group_id: UUID
     finalization_id: UUID
     status: StrategyShadowFinalStatus
-    family_state: Literal["PROMOTION_ELIGIBLE", "SHADOW_FAILED", "STALE_CHAMPION_BASELINE"]
+    family_state: FamilyAggregateState
     reason_code: str
     live_execution_enabled: Literal[False] = False
 

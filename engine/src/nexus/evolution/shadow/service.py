@@ -16,6 +16,11 @@ from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
 from nexus.evolution.evaluation import _comparison_model, _promotion_decision_model
 from nexus.evolution.policies import load_promotion_policy_v1
+from nexus.evolution.repository import (
+    FamilyAggregateState,
+    append_candidate_event,
+    load_verified_experiment_authority,
+)
 from nexus.evolution.shadow.authority import (
     StrategyShadowAuthorityError,
     load_balanced_paper_baseline,
@@ -44,10 +49,7 @@ from nexus.evolution.shadow.models import (
     StrategyShadowStartResultV1,
     StrategyShadowStateV1,
 )
-from nexus.evolution.shadow.repository import (
-    append_strategy_experiment_event,
-    load_exact_calendar_sessions,
-)
+from nexus.evolution.shadow.repository import load_exact_calendar_sessions
 from nexus.optimizer.cost_policy import COST_POLICY_ID, load_cost_policy_v1
 from nexus.persistence.models.backtest import (
     ExchangeCalendarSessionRecord,
@@ -57,7 +59,6 @@ from nexus.persistence.models.evolution import (
     StrategyChampionComparisonRecord,
     StrategyExperimentFamilyRecord,
     StrategyExperimentRecord,
-    StrategyExperimentStateProjectionRecord,
     StrategyPromotionDecisionRecord,
     StrategyPromotionPolicyRecord,
     StrategyRegistryHeadRecord,
@@ -124,36 +125,34 @@ async def start_strategy_shadow(
         ),
         {"experiment_id": str(experiment_id)},
     )
-    experiment = await session.scalar(
-        select(StrategyExperimentRecord)
-        .where(StrategyExperimentRecord.id == experiment_id)
-        .with_for_update()
-    )
-    family = (
+    experiment_root = await session.get(StrategyExperimentRecord, experiment_id)
+    try:
+        authority = (
+            None
+            if experiment_root is None
+            else await load_verified_experiment_authority(
+                session, experiment_root.family_id, lock=True
+            )
+        )
+    except ValueError as error:
+        raise StrategyShadowServiceError("STRATEGY_EXPERIMENT_CHAIN_INVALID") from error
+    experiment = (
         None
-        if experiment is None
-        else await session.scalar(
-            select(StrategyExperimentFamilyRecord)
-            .where(StrategyExperimentFamilyRecord.id == experiment.family_id)
-            .with_for_update()
+        if authority is None
+        else next(
+            (item for item in authority.experiments if item.id == experiment_id),
+            None,
         )
     )
-    projection = (
-        None
-        if family is None
-        else await session.scalar(
-            select(StrategyExperimentStateProjectionRecord)
-            .where(StrategyExperimentStateProjectionRecord.family_id == family.id)
-            .with_for_update()
-        )
-    )
+    family = None if authority is None else authority.family
     head = await session.scalar(
         select(StrategyRegistryHeadRecord)
         .where(StrategyRegistryHeadRecord.channel == "internal_paper")
         .with_for_update()
     )
-    if experiment is None or family is None or projection is None or head is None:
+    if experiment is None or family is None or authority is None or head is None:
         raise StrategyShadowServiceError("STRATEGY_SHADOW_AUTHORITY_INCOMPLETE")
+    candidate_projection = authority.candidate_projection(experiment.id)
 
     existing = await session.scalar(
         select(StrategyShadowGroupRecord).where(
@@ -163,7 +162,7 @@ async def start_strategy_shadow(
     if existing is not None:
         return await _replay_start(session, existing, experiment, family)
 
-    if projection.current_state != "BACKTEST_PASSED":
+    if candidate_projection.current_state != "BACKTEST_PASSED":
         raise StrategyShadowServiceError("HISTORICAL_GATES_NOT_PASSED")
     if (
         head.active_generation != family.champion_generation
@@ -270,9 +269,10 @@ async def start_strategy_shadow(
             ),
         )
     )
-    event = await append_strategy_experiment_event(
+    await append_candidate_event(
         session,
-        family_id=family.id,
+        authority=authority,
+        experiment_id=experiment.id,
         event_type="SHADOW_RUNNING",
         idempotency_key=f"strategy-shadow-running-{group.id}",
         occurred_at=now,
@@ -286,10 +286,6 @@ async def start_strategy_shadow(
             "grace_end_session": calendar_sessions[67].isoformat(),
         },
     )
-    projection.current_state = "SHADOW_RUNNING"
-    projection.event_sequence = event.sequence
-    projection.version += 1
-    projection.updated_at = now
     await _append_start_audit_and_outbox(session, group=group, now=now)
     await session.flush()
     return _start_result(group, calendar_sessions)
@@ -609,27 +605,50 @@ async def finalize_strategy_shadow(
         )
     )
     if existing is not None:
-        return await _replay_finalization(session, group=group, finalization=existing)
+        experiment_root = await session.get(StrategyExperimentRecord, group.experiment_id)
+        try:
+            authority = (
+                None
+                if experiment_root is None
+                else await load_verified_experiment_authority(
+                    session, experiment_root.family_id, lock=True
+                )
+            )
+        except ValueError as error:
+            raise StrategyShadowServiceError("STRATEGY_EXPERIMENT_CHAIN_INVALID") from error
+        if authority is None:
+            raise StrategyShadowServiceError(
+                "STRATEGY_SHADOW_FINALIZATION_AUTHORITY_INCOMPLETE"
+            )
+        return await _replay_finalization(
+            session,
+            group=group,
+            finalization=existing,
+            family_state=cast(
+                FamilyAggregateState, authority.family_projection.current_state
+            ),
+        )
 
-    experiment = await session.get(StrategyExperimentRecord, group.experiment_id)
-    family = (
+    experiment_root = await session.get(StrategyExperimentRecord, group.experiment_id)
+    try:
+        authority = (
+            None
+            if experiment_root is None
+            else await load_verified_experiment_authority(
+                session, experiment_root.family_id, lock=True
+            )
+        )
+    except ValueError as error:
+        raise StrategyShadowServiceError("STRATEGY_EXPERIMENT_CHAIN_INVALID") from error
+    experiment = (
         None
-        if experiment is None
-        else await session.scalar(
-            select(StrategyExperimentFamilyRecord)
-            .where(StrategyExperimentFamilyRecord.id == experiment.family_id)
-            .with_for_update()
+        if authority is None
+        else next(
+            (item for item in authority.experiments if item.id == group.experiment_id),
+            None,
         )
     )
-    projection = (
-        None
-        if family is None
-        else await session.scalar(
-            select(StrategyExperimentStateProjectionRecord)
-            .where(StrategyExperimentStateProjectionRecord.family_id == family.id)
-            .with_for_update()
-        )
-    )
+    family = None if authority is None else authority.family
     head = await session.scalar(
         select(StrategyRegistryHeadRecord)
         .where(StrategyRegistryHeadRecord.channel == "internal_paper")
@@ -641,10 +660,11 @@ async def finalize_strategy_shadow(
     if (
         experiment is None
         or family is None
-        or projection is None
+        or authority is None
         or head is None
         or historical_decision is None
-        or projection.current_state != "SHADOW_RUNNING"
+        or authority.candidate_projection(experiment.id).current_state
+        != "SHADOW_RUNNING"
     ):
         raise StrategyShadowServiceError("STRATEGY_SHADOW_FINALIZATION_AUTHORITY_INCOMPLETE")
 
@@ -719,9 +739,10 @@ async def finalize_strategy_shadow(
             )
         )
     family_state = _final_family_state(final_gate)
-    event = await append_strategy_experiment_event(
+    await append_candidate_event(
         session,
-        family_id=family.id,
+        authority=authority,
+        experiment_id=experiment.id,
         event_type=family_state,
         idempotency_key=f"strategy-shadow-finalized-{group.id}",
         occurred_at=now,
@@ -737,15 +758,13 @@ async def finalize_strategy_shadow(
             "live_execution_enabled": False,
         },
     )
-    projection.current_state = family_state
-    projection.event_sequence = event.sequence
-    projection.version += 1
-    projection.updated_at = now
     await _append_finalization_audit_and_outbox(
         session,
         group=group,
         finalization=finalization,
-        family_state=family_state,
+        family_state=cast(
+            FamilyAggregateState, authority.family_projection.current_state
+        ),
         now=now,
     )
     await session.flush()
@@ -753,7 +772,9 @@ async def finalize_strategy_shadow(
         group_id=group.id,
         finalization_id=finalization.id,
         status=final_gate.status,
-        family_state=family_state,
+        family_state=cast(
+            FamilyAggregateState, authority.family_projection.current_state
+        ),
         reason_code=final_gate.reason_code,
     )
 
@@ -953,6 +974,7 @@ async def _replay_finalization(
     *,
     group: StrategyShadowGroupRecord,
     finalization: StrategyShadowFinalizationRecord,
+    family_state: FamilyAggregateState,
 ) -> StrategyShadowFinalizationResultV1:
     try:
         gate = StrategyShadowFinalGateV1.model_validate(finalization.gate_report)
@@ -969,7 +991,7 @@ async def _replay_finalization(
         group_id=group.id,
         finalization_id=finalization.id,
         status=gate.status,
-        family_state=_final_family_state(gate),
+        family_state=family_state,
         reason_code=gate.reason_code,
     )
 

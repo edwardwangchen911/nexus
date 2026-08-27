@@ -6,7 +6,7 @@ import hashlib
 from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -25,13 +25,17 @@ from nexus.evolution.policies import (
     PromotionPolicyV1,
     load_promotion_policy_v1,
 )
+from nexus.evolution.repository import (
+    FamilyAggregateState,
+    append_candidate_event,
+    append_family_event,
+    load_verified_experiment_authority,
+)
 from nexus.persistence.models.backtest import BacktestRunRecord
 from nexus.persistence.models.evolution import (
     StrategyChampionComparisonRecord,
-    StrategyExperimentEventRecord,
     StrategyExperimentFamilyRecord,
     StrategyExperimentRecord,
-    StrategyExperimentStateProjectionRecord,
     StrategyPromotionDecisionRecord,
     StrategyPromotionPolicyRecord,
     StrategyRegistryHeadRecord,
@@ -427,7 +431,7 @@ class HistoricalPromotionOutcomeV1(_FrozenModel):
     comparison_id: UUID
     decision_id: UUID | None
     status: Literal["PASS", "FAIL", "UNKNOWN", "STALE"]
-    family_state: Literal["BACKTEST_PASSED", "BACKTEST_FAILED", "STALE_CHAMPION_BASELINE"]
+    family_state: FamilyAggregateState
     reason_code: str = Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")
 
 
@@ -457,40 +461,27 @@ async def persist_champion_comparison(
             StrategyChampionComparisonRecord.experiment_id == experiment_id
         )
     )
-    if existing is not None:
-        if (
-            existing.champion_backtest_run_id != champion_backtest_run_id
-            or existing.challenger_backtest_run_id != challenger_backtest_run_id
-            or existing.champion_generation != champion_generation
-            or existing.cumulative_oos_trial_count != cumulative_oos_trial_count
-        ):
-            raise EvolutionEvaluationError("COMPARISON_IDEMPOTENCY_CONFLICT")
-        _comparison_model(existing)
-        return existing
 
-    experiment = await session.scalar(
-        select(StrategyExperimentRecord)
-        .where(StrategyExperimentRecord.id == experiment_id)
-        .with_for_update()
-    )
-    family = (
+    experiment_root = await session.get(StrategyExperimentRecord, experiment_id)
+    try:
+        authority = (
+            None
+            if experiment_root is None
+            else await load_verified_experiment_authority(
+                session, experiment_root.family_id, lock=True
+            )
+        )
+    except ValueError as error:
+        raise EvolutionEvaluationError("STRATEGY_EXPERIMENT_CHAIN_INVALID") from error
+    experiment = (
         None
-        if experiment is None
-        else await session.scalar(
-            select(StrategyExperimentFamilyRecord)
-            .where(StrategyExperimentFamilyRecord.id == experiment.family_id)
-            .with_for_update()
+        if authority is None
+        else next(
+            (item for item in authority.experiments if item.id == experiment_id),
+            None,
         )
     )
-    projection = (
-        None
-        if family is None
-        else await session.scalar(
-            select(StrategyExperimentStateProjectionRecord)
-            .where(StrategyExperimentStateProjectionRecord.family_id == family.id)
-            .with_for_update()
-        )
-    )
+    family = None if authority is None else authority.family
     head = await session.scalar(
         select(StrategyRegistryHeadRecord)
         .where(StrategyRegistryHeadRecord.channel == "internal_paper")
@@ -501,16 +492,32 @@ async def persist_champion_comparison(
     if (
         experiment is None
         or family is None
-        or projection is None
+        or authority is None
         or head is None
         or champion is None
         or challenger is None
     ):
         raise EvolutionEvaluationError("PAIRED_AUTHORITY_INCOMPLETE")
-    if projection.current_state not in {"ADMITTED", "BACKTEST_RUNNING"}:
+    candidate_projection = authority.candidate_projection(experiment_id)
+    if existing is not None:
+        if (
+            existing.champion_backtest_run_id != champion_backtest_run_id
+            or existing.challenger_backtest_run_id != challenger_backtest_run_id
+            or existing.champion_generation != champion_generation
+            or existing.cumulative_oos_trial_count != cumulative_oos_trial_count
+            or existing.champion_generation != family.champion_generation
+            or existing.cumulative_oos_trial_count
+            != authority.lineage_projection.cumulative_oos_trial_count
+        ):
+            raise EvolutionEvaluationError("COMPARISON_IDEMPOTENCY_CONFLICT")
+        _comparison_model(existing)
+        return existing
+    if candidate_projection.current_state != "OOS_RESERVED":
         raise EvolutionEvaluationError("FAMILY_TERMINAL")
     if (
         family.champion_generation != champion_generation
+        or authority.lineage_projection.cumulative_oos_trial_count
+        != cumulative_oos_trial_count
         or head.active_generation != champion_generation
         or head.active_definition_id != family.parent_strategy_definition_id
         or champion.strategy_definition_id != family.parent_strategy_definition_id
@@ -565,9 +572,9 @@ async def persist_champion_comparison(
         created_at=now,
     )
     session.add(record)
-    event = await _append_family_event(
+    await append_family_event(
         session,
-        family_id=family.id,
+        authority=authority,
         event_type="BACKTEST_RUNNING",
         idempotency_key=f"comparison-running-{comparison_id}",
         occurred_at=now,
@@ -578,13 +585,6 @@ async def persist_champion_comparison(
             "cumulative_oos_trial_count": cumulative_oos_trial_count,
         },
     )
-    projection.current_state = "BACKTEST_RUNNING"
-    projection.event_sequence = event.sequence
-    projection.cumulative_oos_trial_count = max(
-        projection.cumulative_oos_trial_count, cumulative_oos_trial_count
-    )
-    projection.version += 1
-    projection.updated_at = now
     await append_audit_event(
         session,
         actor_id="service:strategy_rnd",
@@ -626,28 +626,38 @@ async def persist_historical_promotion_decision(
     )
     if comparison is None:
         raise EvolutionEvaluationError("COMPARISON_AUTHORITY_INCOMPLETE")
-    experiment = await session.get(StrategyExperimentRecord, comparison.experiment_id)
-    family = (
+    experiment_root = await session.get(StrategyExperimentRecord, comparison.experiment_id)
+    try:
+        authority = (
+            None
+            if experiment_root is None
+            else await load_verified_experiment_authority(
+                session, experiment_root.family_id, lock=True
+            )
+        )
+    except ValueError as error:
+        raise EvolutionEvaluationError("STRATEGY_EXPERIMENT_CHAIN_INVALID") from error
+    experiment = (
         None
-        if experiment is None
-        else await session.get(StrategyExperimentFamilyRecord, experiment.family_id)
-    )
-    projection = (
-        None
-        if family is None
-        else await session.scalar(
-            select(StrategyExperimentStateProjectionRecord)
-            .where(StrategyExperimentStateProjectionRecord.family_id == family.id)
-            .with_for_update()
+        if authority is None
+        else next(
+            (
+                item
+                for item in authority.experiments
+                if item.id == comparison.experiment_id
+            ),
+            None,
         )
     )
+    family = None if authority is None else authority.family
     head = await session.scalar(
         select(StrategyRegistryHeadRecord)
         .where(StrategyRegistryHeadRecord.channel == "internal_paper")
         .with_for_update()
     )
-    if experiment is None or family is None or projection is None or head is None:
+    if experiment is None or family is None or authority is None or head is None:
         raise EvolutionEvaluationError("COMPARISON_AUTHORITY_INCOMPLETE")
+    candidate_projection = authority.candidate_projection(experiment.id)
     report = _comparison_model(comparison)
     existing = await session.scalar(
         select(StrategyPromotionDecisionRecord).where(
@@ -664,17 +674,20 @@ async def persist_historical_promotion_decision(
             comparison_id=comparison.id,
             decision_id=existing.id,
             status=persisted.status,
-            family_state=("BACKTEST_PASSED" if persisted.status == "PASS" else "BACKTEST_FAILED"),
+            family_state=cast(
+                FamilyAggregateState, authority.family_projection.current_state
+            ),
             reason_code=persisted.reason_code,
         )
     if (
         head.active_generation != comparison.champion_generation
         or head.active_definition_id != family.parent_strategy_definition_id
     ):
-        if projection.current_state != "STALE_CHAMPION_BASELINE":
-            event = await _append_family_event(
+        if candidate_projection.current_state != "STALE_CHAMPION_BASELINE":
+            await append_candidate_event(
                 session,
-                family_id=family.id,
+                authority=authority,
+                experiment_id=experiment.id,
                 event_type="STALE_CHAMPION_BASELINE",
                 idempotency_key=f"comparison-stale-{comparison.id}",
                 occurred_at=now,
@@ -686,10 +699,6 @@ async def persist_historical_promotion_decision(
                     "reason_code": "STALE_CHAMPION_BASELINE",
                 },
             )
-            projection.current_state = "STALE_CHAMPION_BASELINE"
-            projection.event_sequence = event.sequence
-            projection.version += 1
-            projection.updated_at = now
             await append_audit_event(
                 session,
                 actor_id="service:strategy_rnd",
@@ -709,10 +718,12 @@ async def persist_historical_promotion_decision(
             comparison_id=comparison.id,
             decision_id=None,
             status="STALE",
-            family_state="STALE_CHAMPION_BASELINE",
+            family_state=cast(
+                FamilyAggregateState, authority.family_projection.current_state
+            ),
             reason_code="STALE_CHAMPION_BASELINE",
         )
-    if projection.current_state != "BACKTEST_RUNNING":
+    if candidate_projection.current_state != "OOS_RESERVED":
         raise EvolutionEvaluationError("FAMILY_STATE_INVALID")
 
     policy = await _load_promotion_policy(session, promotion_policy_id)
@@ -732,9 +743,10 @@ async def persist_historical_promotion_decision(
     state: Literal["BACKTEST_PASSED", "BACKTEST_FAILED"] = (
         "BACKTEST_PASSED" if decision.status == "PASS" else "BACKTEST_FAILED"
     )
-    event = await _append_family_event(
+    await append_candidate_event(
         session,
-        family_id=family.id,
+        authority=authority,
+        experiment_id=experiment.id,
         event_type=state,
         idempotency_key=f"historical-decision-{comparison.id}",
         occurred_at=now,
@@ -746,10 +758,6 @@ async def persist_historical_promotion_decision(
             "reason_code": decision.reason_code,
         },
     )
-    projection.current_state = state
-    projection.event_sequence = event.sequence
-    projection.version += 1
-    projection.updated_at = now
     await append_audit_event(
         session,
         actor_id="service:strategy_rnd",
@@ -769,7 +777,7 @@ async def persist_historical_promotion_decision(
         comparison_id=comparison.id,
         decision_id=record.id,
         status=decision.status,
-        family_state=state,
+        family_state=cast(FamilyAggregateState, authority.family_projection.current_state),
         reason_code=decision.reason_code,
     )
 
@@ -976,67 +984,6 @@ def _cost_policy_hash(policy: CostPolicyRecord) -> str:
         "available_at": policy.available_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
     }
     return hashlib.sha256(canonical_json(identity).encode()).hexdigest()
-
-
-async def _append_family_event(
-    session: AsyncSession,
-    *,
-    family_id: UUID,
-    event_type: str,
-    idempotency_key: str,
-    occurred_at: datetime,
-    payload: dict[str, object],
-) -> StrategyExperimentEventRecord:
-    await session.execute(
-        text(
-            "SELECT pg_advisory_xact_lock("
-            "hashtextextended('strategy-experiment-event:' || :family_id, 0))"
-        ),
-        {"family_id": str(family_id)},
-    )
-    existing = await session.scalar(
-        select(StrategyExperimentEventRecord).where(
-            StrategyExperimentEventRecord.idempotency_key == idempotency_key
-        )
-    )
-    if existing is not None:
-        return existing
-    prior = await session.scalar(
-        select(StrategyExperimentEventRecord)
-        .where(StrategyExperimentEventRecord.family_id == family_id)
-        .order_by(StrategyExperimentEventRecord.sequence.desc())
-        .limit(1)
-    )
-    sequence = 1 if prior is None else prior.sequence + 1
-    previous_hash = "0" * 64 if prior is None else prior.event_hash
-    identity = {
-        "schema_version": "strategy_experiment_event_v1",
-        "family_id": str(family_id),
-        "sequence": sequence,
-        "event_type": event_type,
-        "idempotency_key": idempotency_key,
-        "actor_kind": "service",
-        "occurred_at": occurred_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-        "payload": payload,
-        "previous_hash": previous_hash,
-    }
-    event = StrategyExperimentEventRecord(
-        id=new_uuid7(),
-        family_id=family_id,
-        schema_version="strategy_experiment_event_v1",
-        sequence=sequence,
-        event_type=event_type,
-        idempotency_key=idempotency_key,
-        actor_kind="service",
-        occurred_at=occurred_at,
-        payload=payload,
-        previous_hash=previous_hash,
-        event_hash=hashlib.sha256(canonical_json(identity).encode()).hexdigest(),
-        created_at=occurred_at,
-    )
-    session.add(event)
-    await session.flush()
-    return event
 
 
 def _mapping(value: object) -> dict[str, object]:

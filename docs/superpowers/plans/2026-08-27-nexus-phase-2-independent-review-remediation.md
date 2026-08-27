@@ -160,7 +160,7 @@ git commit -m "feat(engine): add strategy evolution authority facts"
 - Produces: `CandidateState`, `aggregate_family_state(states)`, `append_candidate_event(...)`, `load_verified_experiment_authority(session, family_id, lock=False)`, `transition_candidate_state(...)`.
 - Consumes: Task 1 candidate projection and event `experiment_id` columns.
 
-- [ ] **Step 1: Write pure state-machine red tests**
+- [x] **Step 1: Write pure state-machine red tests**
 
 Cover every legal edge and these illegal mutations:
 
@@ -184,7 +184,7 @@ def test_candidate_state_rejects_skipped_or_terminal_transitions(before, after) 
         require_candidate_transition(before, after)
 ```
 
-- [ ] **Step 2: Run state tests and observe RED**
+- [x] **Step 2: Run state tests and observe RED**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/evolution/test_candidate_state.py -q
@@ -192,13 +192,13 @@ uv run --package nexus-engine pytest engine/tests/unit/evolution/test_candidate_
 
 Expected: FAIL because the candidate replay/state functions do not exist.
 
-- [ ] **Step 3: Implement candidate event replay and verified loader**
+- [x] **Step 3: Implement candidate event replay and verified loader**
 
 `load_verified_experiment_authority()` must perform one family/event/candidate-projection load, verify every event content hash and sequence, verify each candidate projection points to its latest candidate event, replay legal transitions, compute family aggregate, and compare the stored family projection including lineage cumulative count. Its return type must expose immutable records plus the verified projections, so callers do not issue a second unverified load.
 
 Admission must append one candidate-bound `ADMITTED` event per experiment and create one candidate projection per experiment. Replace direct family projection reads in admission, comparison, Shadow start/finalize, veto, stale marking and promotion with the verified loader before any mutation.
 
-- [ ] **Step 4: Add PostgreSQL corruption and multi-candidate red tests**
+- [x] **Step 4: Add PostgreSQL corruption and multi-candidate red tests**
 
 Use controlled SQL to create:
 
@@ -208,7 +208,7 @@ Use controlled SQL to create:
 
 Each service write must raise `STRATEGY_EXPERIMENT_CHAIN_INVALID`, and the database projection trigger must reject a projection update without the matching event.
 
-- [ ] **Step 5: Run focused integration tests GREEN**
+- [x] **Step 5: Run focused integration tests GREEN**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -222,7 +222,7 @@ uv run --package nexus-engine pytest \
 
 Expected: PASS; no test directly changes a family projection without first appending a legal event.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```bash
 git add engine/src/nexus/evolution/repository.py \

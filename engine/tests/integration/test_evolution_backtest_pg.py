@@ -16,6 +16,7 @@ from nexus.persistence.models.evolution import (
 )
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
+from sqlalchemy import text
 
 
 @pytest.mark.asyncio
@@ -83,6 +84,47 @@ async def test_paired_comparison_rejects_parent_generation_mismatch(
                 champion_backtest_run_id=pair.champion_run_id,
                 challenger_backtest_run_id=pair.challenger_run_id,
                 champion_generation=2,
+                cumulative_oos_trial_count=3,
+                now=NOW,
+            )
+
+
+@pytest.mark.asyncio
+async def test_paired_comparison_rejects_corrupt_candidate_projection(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    pair = await seed_evaluation_pair(factory)
+    async with factory() as session, session.begin():
+        await session.execute(
+            text(
+                "ALTER TABLE strategy_experiment_candidate_projections "
+                "DISABLE TRIGGER USER"
+            )
+        )
+        await session.execute(
+            text(
+                "UPDATE strategy_experiment_candidate_projections "
+                "SET event_sequence=1 WHERE experiment_id=:experiment_id"
+            ),
+            {"experiment_id": pair.experiment_id},
+        )
+        await session.execute(
+            text(
+                "ALTER TABLE strategy_experiment_candidate_projections "
+                "ENABLE TRIGGER USER"
+            )
+        )
+    async with factory() as session, session.begin():
+        with pytest.raises(
+            EvolutionEvaluationError, match="STRATEGY_EXPERIMENT_CHAIN_INVALID"
+        ):
+            await persist_champion_comparison(
+                session,
+                experiment_id=pair.experiment_id,
+                champion_backtest_run_id=pair.champion_run_id,
+                challenger_backtest_run_id=pair.challenger_run_id,
+                champion_generation=1,
                 cumulative_oos_trial_count=3,
                 now=NOW,
             )

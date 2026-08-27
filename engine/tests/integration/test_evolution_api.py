@@ -36,11 +36,13 @@ from nexus.persistence.models.backtest import (
 from nexus.persistence.models.data import DataSnapshot, QualityReport
 from nexus.persistence.models.evolution import (
     StrategyEvolutionPolicyRecord,
+    StrategyExperimentCandidateProjectionRecord,
     StrategyExperimentFamilyRecord,
     StrategyExperimentRecord,
     StrategyExperimentStateProjectionRecord,
     StrategyRegistryEventRecord,
     StrategyRegistryHeadRecord,
+    StrategyResearchLineageProjectionRecord,
     StrategyResearchLineageRecord,
 )
 from nexus.persistence.models.runtime import Job
@@ -237,9 +239,7 @@ async def test_overview_returns_latest_registry_window_in_authority_order(
     assert overview.status_code == 200
     payload = overview.json()["data"]
     assert payload["champion"]["event_sequence"] == 21
-    assert [event["sequence"] for event in payload["registry_events"]] == list(
-        range(2, 22)
-    )
+    assert [event["sequence"] for event in payload["registry_events"]] == list(range(2, 22))
 
 
 @pytest.mark.asyncio
@@ -296,9 +296,7 @@ async def test_start_experiment_accepts_no_parameters_and_queues_only_strategy_j
         forbidden = await client.post(
             path,
             content=forbidden_body,
-            headers=_action_headers(
-                path, forbidden_body, key="generate-forbidden", etag='"g1-v1"'
-            ),
+            headers=_action_headers(path, forbidden_body, key="generate-forbidden", etag='"g1-v1"'),
         )
         queued = await client.post(
             path,
@@ -342,9 +340,7 @@ async def test_start_experiment_fails_closed_without_lineage_or_quality(
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "AUTHORITY_UNAVAILABLE"
-    assert response.json()["error"]["details"]["reason_code"] == (
-        "LINEAGE_AUTHORITY_INCOMPLETE"
-    )
+    assert response.json()["error"]["details"]["reason_code"] == ("LINEAGE_AUTHORITY_INCOMPLETE")
 
 
 @pytest.mark.asyncio
@@ -393,9 +389,7 @@ async def test_veto_appends_verified_events_and_never_changes_champion(
         )
 
     assert active_family.status_code == 422
-    assert active_family.json()["error"]["details"]["reason_code"] == (
-        "ACTIVE_FAMILY_EXISTS"
-    )
+    assert active_family.json()["error"]["details"]["reason_code"] == ("ACTIVE_FAMILY_EXISTS")
     assert detail.status_code == 200
     assert detail.json()["data"]["integrity_status"] == "verified"
     assert vetoed.status_code == 200
@@ -447,9 +441,7 @@ async def test_experiment_history_defaults_to_twenty_and_uses_signed_stable_curs
         second_path = f"{first_path}?cursor={cursor}"
         second = await client.get(second_path, headers=_headers("GET", second_path))
         too_large_path = f"{first_path}?limit=101"
-        too_large = await client.get(
-            too_large_path, headers=_headers("GET", too_large_path)
-        )
+        too_large = await client.get(too_large_path, headers=_headers("GET", too_large_path))
         forged_path = f"{first_path}?cursor={cursor[:-1]}x"
         forged = await client.get(forged_path, headers=_headers("GET", forged_path))
 
@@ -501,8 +493,7 @@ async def test_detail_serializes_decimal_evidence_from_a_verified_event_chain(
     assert data["comparison"]["status"] == "available"
     for metric in ("annualized_return", "sharpe", "max_drawdown", "double_cost_return"):
         assert all(
-            value is None or isinstance(value, str)
-            for value in data["comparison"][metric].values()
+            value is None or isinstance(value, str) for value in data["comparison"][metric].values()
         )
     assert [item["gate"] for item in data["gates"]] == [
         "minimum_oos_windows",
@@ -543,9 +534,7 @@ async def test_rollback_uses_server_calendar_and_leaves_transition_pending(
         head = await session.get(StrategyRegistryHeadRecord, "internal_paper")
         events = tuple(
             await session.scalars(
-                select(StrategyRegistryEventRecord).order_by(
-                    StrategyRegistryEventRecord.sequence
-                )
+                select(StrategyRegistryEventRecord).order_by(StrategyRegistryEventRecord.sequence)
             )
         )
     assert head is not None and head.active_generation == 2
@@ -645,9 +634,7 @@ async def _seed_effective_registry_promotion(factory) -> None:
         )
 
 
-async def _seed_admitted_experiment(
-    factory, *, candidate_count: int = 1
-) -> tuple[UUID, UUID]:
+async def _seed_admitted_experiment(factory, *, candidate_count: int = 1) -> tuple[UUID, UUID]:
     now = _CLOCK - timedelta(minutes=1)
     experiment_ids = tuple(new_uuid7() for _ in range(candidate_count))
     experiment_id = experiment_ids[0]
@@ -671,6 +658,14 @@ async def _seed_admitted_experiment(
         )
         session.add(lineage)
         await session.flush()
+        session.add(
+            StrategyResearchLineageProjectionRecord(
+                lineage_id=lineage.id,
+                cumulative_oos_trial_count=0,
+                version=1,
+                updated_at=now,
+            )
+        )
         family = StrategyExperimentFamilyRecord(
             id=family_id,
             research_lineage_id=lineage.id,
@@ -687,6 +682,7 @@ async def _seed_admitted_experiment(
         )
         session.add(family)
         await session.flush()
+        experiments: list[StrategyExperimentRecord] = []
         for ordinal, candidate_id in enumerate(experiment_ids, start=1):
             document = baseline_v1_document()
             document["version"] = f"api_challenger_{candidate_id.hex[-12:]}"
@@ -702,32 +698,57 @@ async def _seed_admitted_experiment(
             )
             session.add(definition)
             await session.flush()
+            experiment = StrategyExperimentRecord(
+                id=candidate_id,
+                family_id=family.id,
+                candidate_strategy_definition_id=definition.id,
+                candidate_ordinal=ordinal,
+                candidate_delta={"schema_version": "strategy_candidate_delta_v1"},
+                candidate_hash=f"{ordinal:064x}",
+                expression_hash=definition.expression_hash,
+                status="ADMITTED",
+                created_at=now,
+            )
+            session.add(experiment)
+            experiments.append(experiment)
+        await session.flush()
+        previous_hash = "0" * 64
+        event_sequence = 0
+        for experiment in experiments:
+            event_sequence += 1
+            event = await append_admitted_event(
+                session,
+                family_id=family.id,
+                experiment_id=experiment.id,
+                sequence=event_sequence,
+                previous_hash=previous_hash,
+                idempotency_key=(
+                    f"api-admitted-{family_id.hex[-12:]}-{experiment.candidate_ordinal}"
+                ),
+                occurred_at=now,
+                payload={
+                    "schema_version": "strategy_candidate_admitted_payload_v1",
+                    "candidate_ordinal": experiment.candidate_ordinal,
+                },
+            )
+            previous_hash = event.event_hash
             session.add(
-                StrategyExperimentRecord(
-                    id=candidate_id,
+                StrategyExperimentCandidateProjectionRecord(
+                    experiment_id=experiment.id,
                     family_id=family.id,
-                    candidate_strategy_definition_id=definition.id,
-                    candidate_ordinal=ordinal,
-                    candidate_delta={"schema_version": "strategy_candidate_delta_v1"},
-                    candidate_hash=f"{ordinal:064x}",
-                    expression_hash=definition.expression_hash,
-                    status="ADMITTED",
-                    created_at=now,
+                    current_state="ADMITTED",
+                    event_sequence=event.sequence,
+                    version=1,
+                    updated_at=now,
                 )
             )
-        event = await append_admitted_event(
-            session,
-            family_id=family.id,
-            idempotency_key=f"api-admitted-{family_id.hex[-20:]}",
-            occurred_at=now,
-            payload={"schema_version": "strategy_family_admitted_payload_v1"},
-        )
+            await session.flush()
         session.add(
             StrategyExperimentStateProjectionRecord(
                 family_id=family.id,
                 research_lineage_id=lineage.id,
                 current_state="ADMITTED",
-                event_sequence=event.sequence,
+                event_sequence=event_sequence,
                 cumulative_oos_trial_count=0,
                 version=1,
                 updated_at=now,

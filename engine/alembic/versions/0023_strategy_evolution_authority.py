@@ -491,6 +491,10 @@ def _install_guards() -> None:
         DECLARE
           bound_event strategy_experiment_events%ROWTYPE;
         BEGIN
+          IF TG_OP='DELETE' THEN
+            RAISE EXCEPTION 'strategy candidate projection cannot be deleted'
+              USING ERRCODE='23514';
+          END IF;
           IF TG_OP='UPDATE' AND (
             NEW.experiment_id <> OLD.experiment_id
             OR NEW.family_id <> OLD.family_id
@@ -518,8 +522,134 @@ def _install_guards() -> None:
     )
     op.execute(
         "CREATE TRIGGER trg_strategy_experiment_candidate_projections_valid "
-        "BEFORE INSERT OR UPDATE ON strategy_experiment_candidate_projections FOR EACH ROW "
+        "BEFORE INSERT OR UPDATE OR DELETE ON "
+        "strategy_experiment_candidate_projections FOR EACH ROW "
         "EXECUTE FUNCTION nexus_strategy_candidate_projection_valid()"
+    )
+    op.execute(
+        """
+        CREATE FUNCTION nexus_strategy_family_projection_valid()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE
+          expected_state text;
+          lineage_trials bigint;
+          bound_event_id uuid;
+        BEGIN
+          SELECT CASE
+            WHEN bool_or(current_state='PROMOTED') THEN 'PROMOTED'
+            WHEN bool_or(current_state='PROMOTION_ELIGIBLE') THEN 'PROMOTION_ELIGIBLE'
+            WHEN bool_or(current_state='SHADOW_RUNNING') THEN 'SHADOW_RUNNING'
+            WHEN bool_or(current_state='BACKTEST_PASSED') THEN 'BACKTEST_PASSED'
+            WHEN bool_and(current_state='ADMITTED') THEN 'ADMITTED'
+            WHEN bool_or(current_state IN (
+              'ADMITTED','VALIDATION_PASSED','OOS_SELECTED','OOS_RESERVED'
+            )) THEN 'BACKTEST_RUNNING'
+            WHEN bool_or(current_state='STALE_CHAMPION_BASELINE')
+              THEN 'STALE_CHAMPION_BASELINE'
+            WHEN bool_or(current_state='SHADOW_FAILED') THEN 'SHADOW_FAILED'
+            WHEN bool_or(current_state='EXPIRED') THEN 'EXPIRED'
+            WHEN bool_or(current_state='VETOED') THEN 'VETOED'
+            ELSE 'BACKTEST_FAILED'
+          END INTO expected_state
+          FROM strategy_experiment_candidate_projections
+          WHERE family_id=NEW.family_id;
+          SELECT cumulative_oos_trial_count INTO lineage_trials
+          FROM strategy_research_lineage_projections
+          WHERE lineage_id=NEW.research_lineage_id;
+          SELECT id INTO bound_event_id FROM strategy_experiment_events
+          WHERE family_id=NEW.family_id AND sequence=NEW.event_sequence;
+          IF expected_state IS NULL OR lineage_trials IS NULL OR bound_event_id IS NULL
+            OR NEW.current_state <> expected_state
+            OR NEW.cumulative_oos_trial_count > lineage_trials
+            OR (
+              expected_state NOT IN (
+                'BACKTEST_FAILED','SHADOW_FAILED','EXPIRED','VETOED','PROMOTED',
+                'STALE_CHAMPION_BASELINE'
+              )
+              AND NEW.cumulative_oos_trial_count <> lineage_trials
+            ) THEN
+            RAISE EXCEPTION 'strategy family projection lacks replay authority'
+              USING ERRCODE='23514';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        "CREATE TRIGGER trg_strategy_experiment_state_projections_valid "
+        "BEFORE INSERT OR UPDATE ON strategy_experiment_state_projections FOR EACH ROW "
+        "EXECUTE FUNCTION nexus_strategy_family_projection_valid()"
+    )
+    op.execute(
+        """
+        CREATE FUNCTION nexus_strategy_family_projection_deferred_valid()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE
+          target_family_id uuid;
+          expected_state text;
+          lineage_trials bigint;
+          latest_sequence bigint;
+          stored strategy_experiment_state_projections%ROWTYPE;
+        BEGIN
+          target_family_id := NEW.family_id;
+          SELECT CASE
+            WHEN bool_or(current_state='PROMOTED') THEN 'PROMOTED'
+            WHEN bool_or(current_state='PROMOTION_ELIGIBLE') THEN 'PROMOTION_ELIGIBLE'
+            WHEN bool_or(current_state='SHADOW_RUNNING') THEN 'SHADOW_RUNNING'
+            WHEN bool_or(current_state='BACKTEST_PASSED') THEN 'BACKTEST_PASSED'
+            WHEN bool_and(current_state='ADMITTED') THEN 'ADMITTED'
+            WHEN bool_or(current_state IN (
+              'ADMITTED','VALIDATION_PASSED','OOS_SELECTED','OOS_RESERVED'
+            )) THEN 'BACKTEST_RUNNING'
+            WHEN bool_or(current_state='STALE_CHAMPION_BASELINE')
+              THEN 'STALE_CHAMPION_BASELINE'
+            WHEN bool_or(current_state='SHADOW_FAILED') THEN 'SHADOW_FAILED'
+            WHEN bool_or(current_state='EXPIRED') THEN 'EXPIRED'
+            WHEN bool_or(current_state='VETOED') THEN 'VETOED'
+            ELSE 'BACKTEST_FAILED'
+          END INTO expected_state
+          FROM strategy_experiment_candidate_projections
+          WHERE family_id=target_family_id;
+          SELECT * INTO stored FROM strategy_experiment_state_projections
+          WHERE family_id=target_family_id;
+          SELECT max(sequence) INTO latest_sequence FROM strategy_experiment_events
+          WHERE family_id=target_family_id;
+          SELECT cumulative_oos_trial_count INTO lineage_trials
+          FROM strategy_research_lineage_projections
+          WHERE lineage_id=stored.research_lineage_id;
+          IF stored.family_id IS NULL OR expected_state IS NULL
+            OR latest_sequence IS NULL OR lineage_trials IS NULL
+            OR stored.current_state <> expected_state
+            OR stored.event_sequence <> latest_sequence
+            OR stored.cumulative_oos_trial_count > lineage_trials
+            OR (
+              expected_state NOT IN (
+                'BACKTEST_FAILED','SHADOW_FAILED','EXPIRED','VETOED','PROMOTED',
+                'STALE_CHAMPION_BASELINE'
+              )
+              AND stored.cumulative_oos_trial_count <> lineage_trials
+            ) THEN
+            RAISE EXCEPTION 'strategy family projection is not transactionally complete'
+              USING ERRCODE='23514';
+          END IF;
+          RETURN NULL;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        "CREATE CONSTRAINT TRIGGER "
+        "trg_strategy_experiment_candidate_projections_family_complete "
+        "AFTER INSERT OR UPDATE ON strategy_experiment_candidate_projections "
+        "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+        "EXECUTE FUNCTION nexus_strategy_family_projection_deferred_valid()"
+    )
+    op.execute(
+        "CREATE CONSTRAINT TRIGGER trg_strategy_experiment_events_family_complete "
+        "AFTER INSERT ON strategy_experiment_events "
+        "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+        "EXECUTE FUNCTION nexus_strategy_family_projection_deferred_valid()"
     )
     op.execute(
         """
@@ -556,6 +686,20 @@ def _install_guards() -> None:
 
 
 def _drop_guards() -> None:
+    op.execute(
+        "DROP TRIGGER trg_strategy_experiment_events_family_complete "
+        "ON strategy_experiment_events"
+    )
+    op.execute(
+        "DROP TRIGGER trg_strategy_experiment_candidate_projections_family_complete "
+        "ON strategy_experiment_candidate_projections"
+    )
+    op.execute("DROP FUNCTION nexus_strategy_family_projection_deferred_valid()")
+    op.execute(
+        "DROP TRIGGER trg_strategy_experiment_state_projections_valid "
+        "ON strategy_experiment_state_projections"
+    )
+    op.execute("DROP FUNCTION nexus_strategy_family_projection_valid()")
     op.execute(
         "DROP TRIGGER trg_strategy_registry_activations_valid "
         "ON strategy_registry_activations"

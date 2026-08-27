@@ -16,20 +16,21 @@ from nexus.audit.service import append_audit_event
 from nexus.backtest.canonical import canonical_decimal
 from nexus.domain.ids import new_uuid7
 from nexus.evolution.handover import HandoverEvaluationV1, evaluate_handover
-from nexus.evolution.repository import experiment_projection_is_valid
+from nexus.evolution.repository import (
+    VerifiedExperimentAuthority,
+    append_candidate_event,
+    load_verified_experiment_authority,
+)
 from nexus.evolution.shadow.authority import (
     StrategyShadowAuthorityError,
     load_balanced_paper_baseline,
 )
 from nexus.evolution.shadow.canonical import content_hash
-from nexus.evolution.shadow.repository import append_strategy_experiment_event
 from nexus.optimizer.cost_policy import load_cost_policy_v1
 from nexus.persistence.models.backtest import StrategyDefinitionRecord
 from nexus.persistence.models.evolution import (
     StrategyChampionComparisonRecord,
-    StrategyExperimentFamilyRecord,
     StrategyExperimentRecord,
-    StrategyExperimentStateProjectionRecord,
     StrategyPromotionDecisionRecord,
     StrategyPromotionPolicyRecord,
     StrategyRegistryEventRecord,
@@ -100,10 +101,32 @@ async def persist_handover_promotion_decision(
     """Persist one immutable handover gate report; never create an order."""
     now = _utc(now)
     comparison = await session.get(StrategyChampionComparisonRecord, comparison_id)
-    experiment = (
+    experiment_root = (
         None
         if comparison is None
         else await session.get(StrategyExperimentRecord, comparison.experiment_id)
+    )
+    try:
+        authority = (
+            None
+            if experiment_root is None
+            else await load_verified_experiment_authority(
+                session, experiment_root.family_id, lock=True
+            )
+        )
+    except ValueError as error:
+        raise RegistryServiceError("STRATEGY_EXPERIMENT_CHAIN_INVALID") from error
+    experiment = (
+        None
+        if authority is None or comparison is None
+        else next(
+            (
+                item
+                for item in authority.experiments
+                if item.id == comparison.experiment_id
+            ),
+            None,
+        )
     )
     paper_snapshot = await session.get(PaperPerformanceSnapshotRecord, evaluation.paper_snapshot_id)
     definition = await session.get(StrategyDefinitionRecord, evaluation.strategy_definition_id)
@@ -123,6 +146,9 @@ async def persist_handover_promotion_decision(
         baseline = None
     if (
         experiment is None
+        or authority is None
+        or authority.candidate_projection(experiment.id).current_state
+        != "PROMOTION_ELIGIBLE"
         or paper_snapshot is None
         or definition is None
         or source_policy is None
@@ -243,33 +269,29 @@ async def promote_internal_paper_champion(
     now = _utc(now)
     _idempotency_key(idempotency_key)
     head = await _lock_head(session)
-    experiment = await session.scalar(
-        select(StrategyExperimentRecord)
-        .where(StrategyExperimentRecord.id == experiment_id)
-        .with_for_update()
-    )
-    family = (
+    experiment_root = await session.get(StrategyExperimentRecord, experiment_id)
+    try:
+        authority = (
+            None
+            if experiment_root is None
+            else await load_verified_experiment_authority(
+                session, experiment_root.family_id, lock=True
+            )
+        )
+    except ValueError as error:
+        raise RegistryServiceError("STRATEGY_EXPERIMENT_CHAIN_INVALID") from error
+    experiment = (
         None
-        if experiment is None
-        else await session.scalar(
-            select(StrategyExperimentFamilyRecord)
-            .where(StrategyExperimentFamilyRecord.id == experiment.family_id)
-            .with_for_update()
+        if authority is None
+        else next(
+            (item for item in authority.experiments if item.id == experiment_id),
+            None,
         )
     )
-    projection = (
-        None
-        if family is None
-        else await session.scalar(
-            select(StrategyExperimentStateProjectionRecord)
-            .where(StrategyExperimentStateProjectionRecord.family_id == family.id)
-            .with_for_update()
-        )
-    )
-    if experiment is None or family is None or projection is None:
+    family = None if authority is None else authority.family
+    if experiment is None or family is None or authority is None:
         raise RegistryServiceError("PROMOTION_AUTHORITY_INCOMPLETE")
-    if not await experiment_projection_is_valid(session, projection):
-        raise RegistryServiceError("STRATEGY_EXPERIMENT_CHAIN_INVALID")
+    candidate_projection = authority.candidate_projection(experiment.id)
     replay = await _registry_replay(
         session,
         head=head,
@@ -324,11 +346,13 @@ async def promote_internal_paper_champion(
         or head.active_definition_id != family.parent_strategy_definition_id
         or head.pending_event_id is not None
     ):
-        await _mark_family_stale(session, family=family, projection=projection, now=now)
+        await _mark_family_stale(
+            session, authority=authority, experiment_id=experiment.id, now=now
+        )
         return _result(head, status="STALE", reason_code="STALE_CHAMPION_BASELINE")
     if head.auto_promotion_paused:
         return _result(head, status="PAUSED", reason_code="AUTO_PROMOTION_PAUSED")
-    if projection.current_state != "PROMOTION_ELIGIBLE":
+    if candidate_projection.current_state != "PROMOTION_ELIGIBLE":
         raise RegistryServiceError("PROMOTION_STATE_INVALID")
     handover = await _load_promotion_evidence(
         session,
@@ -428,33 +452,29 @@ async def veto_strategy_experiment(
     if reason_code not in {"USER_VETO", "EVIDENCE_CONCERN", "OPERATIONAL_RISK"}:
         raise RegistryServiceError("VETO_REASON_INVALID")
     head = await _lock_head(session)
-    experiment = await session.scalar(
-        select(StrategyExperimentRecord)
-        .where(StrategyExperimentRecord.id == experiment_id)
-        .with_for_update()
-    )
-    family = (
+    experiment_root = await session.get(StrategyExperimentRecord, experiment_id)
+    try:
+        authority = (
+            None
+            if experiment_root is None
+            else await load_verified_experiment_authority(
+                session, experiment_root.family_id, lock=True
+            )
+        )
+    except ValueError as error:
+        raise RegistryServiceError("STRATEGY_EXPERIMENT_CHAIN_INVALID") from error
+    experiment = (
         None
-        if experiment is None
-        else await session.scalar(
-            select(StrategyExperimentFamilyRecord)
-            .where(StrategyExperimentFamilyRecord.id == experiment.family_id)
-            .with_for_update()
+        if authority is None
+        else next(
+            (item for item in authority.experiments if item.id == experiment_id),
+            None,
         )
     )
-    projection = (
-        None
-        if family is None
-        else await session.scalar(
-            select(StrategyExperimentStateProjectionRecord)
-            .where(StrategyExperimentStateProjectionRecord.family_id == family.id)
-            .with_for_update()
-        )
-    )
-    if experiment is None or family is None or projection is None:
+    family = None if authority is None else authority.family
+    if experiment is None or family is None or authority is None:
         raise RegistryServiceError("EXPERIMENT_NOT_FOUND")
-    if not await experiment_projection_is_valid(session, projection):
-        raise RegistryServiceError("STRATEGY_EXPERIMENT_CHAIN_INVALID")
+    candidate_projection = authority.candidate_projection(experiment.id)
     existing = await session.scalar(
         select(StrategyRegistryEventRecord).where(
             StrategyRegistryEventRecord.idempotency_key == idempotency_key
@@ -465,7 +485,7 @@ async def veto_strategy_experiment(
             existing.event_type != "VETO"
             or existing.payload.get("experiment_id") != str(experiment_id)
             or existing.payload.get("reason_code") != reason_code
-            or projection.current_state != "VETOED"
+            or candidate_projection.current_state != "VETOED"
         ):
             raise RegistryServiceError("REGISTRY_IDEMPOTENCY_CONFLICT")
         return _result(
@@ -479,9 +499,11 @@ async def veto_strategy_experiment(
         raise RegistryServiceError("STALE_CHAMPION_BASELINE")
     if head.pending_event_id is not None:
         raise RegistryServiceError("REGISTRY_TRANSITION_PENDING")
-    if projection.current_state not in {
+    if candidate_projection.current_state not in {
         "ADMITTED",
-        "BACKTEST_RUNNING",
+        "VALIDATION_PASSED",
+        "OOS_SELECTED",
+        "OOS_RESERVED",
         "BACKTEST_PASSED",
         "SHADOW_RUNNING",
         "PROMOTION_ELIGIBLE",
@@ -505,9 +527,10 @@ async def veto_strategy_experiment(
             "reason_code": reason_code,
         },
     )
-    family_event = await append_strategy_experiment_event(
+    await append_candidate_event(
         session,
-        family_id=family.id,
+        authority=authority,
+        experiment_id=experiment.id,
         event_type="VETOED",
         idempotency_key=f"strategy-veto-{event.id}",
         occurred_at=now,
@@ -517,10 +540,6 @@ async def veto_strategy_experiment(
             "reason_code": reason_code,
         },
     )
-    projection.current_state = "VETOED"
-    projection.event_sequence = family_event.sequence
-    projection.version += 1
-    projection.updated_at = now
     head.last_event_id = event.id
     head.event_sequence = event.sequence
     head.version += 1
@@ -1132,27 +1151,25 @@ async def _has_nonterminal_paper_orders(session: AsyncSession) -> bool:
 async def _mark_family_stale(
     session: AsyncSession,
     *,
-    family: StrategyExperimentFamilyRecord,
-    projection: StrategyExperimentStateProjectionRecord,
+    authority: VerifiedExperimentAuthority,
+    experiment_id: UUID,
     now: datetime,
 ) -> None:
+    projection = authority.candidate_projection(experiment_id)
     if projection.current_state in {"PROMOTED", "STALE_CHAMPION_BASELINE"}:
         return
-    event = await append_strategy_experiment_event(
+    await append_candidate_event(
         session,
-        family_id=family.id,
+        authority=authority,
+        experiment_id=experiment_id,
         event_type="STALE_CHAMPION_BASELINE",
-        idempotency_key=f"strategy-registry-stale-{family.id}",
+        idempotency_key=f"strategy-registry-stale-{authority.family.id}",
         occurred_at=now,
         payload={
             "schema_version": "strategy_registry_stale_payload_v1",
-            "champion_generation": family.champion_generation,
+            "champion_generation": authority.family.champion_generation,
         },
     )
-    projection.current_state = "STALE_CHAMPION_BASELINE"
-    projection.event_sequence = event.sequence
-    projection.version += 1
-    projection.updated_at = now
 
 
 async def _mark_promoted_family(
@@ -1174,22 +1191,22 @@ async def _mark_promoted_family(
         if comparison is None
         else await session.get(StrategyExperimentRecord, comparison.experiment_id)
     )
-    projection = (
-        None
-        if experiment is None
-        else await session.scalar(
-            select(StrategyExperimentStateProjectionRecord)
-            .where(StrategyExperimentStateProjectionRecord.family_id == experiment.family_id)
-            .with_for_update()
+    try:
+        authority = (
+            None
+            if experiment is None
+            else await load_verified_experiment_authority(
+                session, experiment.family_id, lock=True
+            )
         )
-    )
-    if experiment is None or projection is None:
+    except ValueError as error:
+        raise RegistryServiceError("STRATEGY_EXPERIMENT_CHAIN_INVALID") from error
+    if experiment is None or authority is None:
         raise RegistryServiceError("PROMOTION_FAMILY_MISSING")
-    if not await experiment_projection_is_valid(session, projection):
-        raise RegistryServiceError("STRATEGY_EXPERIMENT_CHAIN_INVALID")
-    family_event = await append_strategy_experiment_event(
+    await append_candidate_event(
         session,
-        family_id=experiment.family_id,
+        authority=authority,
+        experiment_id=experiment.id,
         event_type="PROMOTED",
         idempotency_key=f"strategy-registry-promoted-{event.id}",
         occurred_at=now,
@@ -1199,10 +1216,6 @@ async def _mark_promoted_family(
             "champion_generation": event.champion_generation,
         },
     )
-    projection.current_state = "PROMOTED"
-    projection.event_sequence = family_event.sequence
-    projection.version += 1
-    projection.updated_at = now
 
 
 async def _append_registry_audit_and_outbox(

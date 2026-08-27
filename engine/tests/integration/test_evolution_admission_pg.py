@@ -12,9 +12,14 @@ import pytest
 from nexus.agents.responses import ResponsesModelConfig
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.audit.canonical import canonical_json
+from nexus.domain.ids import new_uuid7
 from nexus.evolution.agent import StrategyRNDRequestV1
 from nexus.evolution.agent_tools import StrategyRNDToolContext, StrategyRNDTools
 from nexus.evolution.models import StrategyExperimentProposalV1
+from nexus.evolution.repository import (
+    append_candidate_event,
+    load_verified_experiment_authority,
+)
 from nexus.evolution.service import (
     EvolutionAdmissionAuthorityV1,
     EvolutionAdmissionError,
@@ -30,9 +35,12 @@ from nexus.persistence.models.backtest import StrategyDefinitionRecord
 from nexus.persistence.models.data import DataSnapshot, QualityReport
 from nexus.persistence.models.evolution import (
     StrategyEvolutionPolicyRecord,
+    StrategyExperimentCandidateProjectionRecord,
+    StrategyExperimentEventRecord,
     StrategyExperimentFamilyRecord,
     StrategyExperimentRecord,
     StrategyExperimentStateProjectionRecord,
+    StrategyResearchLineageProjectionRecord,
     StrategyResearchLineageRecord,
     StrategyRNDOutputRecord,
     StrategyRNDRunRecord,
@@ -42,6 +50,7 @@ from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
 
 NOW = datetime(2026, 8, 27, 12, tzinfo=UTC)
 INSTRUMENT_ID = UUID("019d0000-0000-7000-8000-000000004301")
@@ -258,6 +267,23 @@ async def test_admission_publishes_bounded_candidates_and_replays_same_key(
                 )
             )
         )
+        events = list(
+            await session.scalars(
+                select(StrategyExperimentEventRecord)
+                .where(StrategyExperimentEventRecord.family_id == admitted.family_id)
+                .order_by(StrategyExperimentEventRecord.sequence)
+            )
+        )
+        candidate_projections = list(
+            await session.scalars(
+                select(StrategyExperimentCandidateProjectionRecord)
+                .where(
+                    StrategyExperimentCandidateProjectionRecord.family_id
+                    == admitted.family_id
+                )
+                .order_by(StrategyExperimentCandidateProjectionRecord.experiment_id)
+            )
+        )
         paper_orders = await session.scalar(text("SELECT count(*) FROM paper_orders"))
         broker_orders = await session.scalar(
             text("SELECT count(*) FROM broker_order_snapshots")
@@ -267,6 +293,18 @@ async def test_admission_publishes_bounded_candidates_and_replays_same_key(
     assert [item.candidate_ordinal for item in experiments] == [1, 2]
     assert len({item.expression_hash for item in experiments}) == 2
     assert {definition.lifecycle for definition in definitions} == {"challenger"}
+    assert [event.sequence for event in events] == [1, 2]
+    assert {event.experiment_id for event in events} == {
+        experiment.id for experiment in experiments
+    }
+    assert all(event.event_type == "ADMITTED" for event in events)
+    assert {
+        projection.experiment_id for projection in candidate_projections
+    } == {experiment.id for experiment in experiments}
+    assert all(
+        projection.current_state == "ADMITTED"
+        for projection in candidate_projections
+    )
     assert (paper_orders, broker_orders, provider_runs) == (0, 0, 0)
 
 
@@ -306,6 +344,277 @@ async def test_active_family_and_forged_evidence_fail_closed(
 
 
 @pytest.mark.asyncio
+async def test_verified_loader_rejects_candidate_projection_bound_to_other_event(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    proposal, authority = await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admitted = await admit_experiment_family(
+            session,
+            proposal=proposal,
+            authority=authority,
+            now=NOW,
+            idempotency_key="phase2-corrupt-candidate-projection",
+        )
+    async with factory() as session, session.begin():
+        projections = list(
+            await session.scalars(
+                select(StrategyExperimentCandidateProjectionRecord)
+                .where(
+                    StrategyExperimentCandidateProjectionRecord.family_id
+                    == admitted.family_id
+                )
+                .order_by(StrategyExperimentCandidateProjectionRecord.event_sequence)
+            )
+        )
+        await session.execute(
+            text(
+                "ALTER TABLE strategy_experiment_candidate_projections "
+                "DISABLE TRIGGER USER"
+            )
+        )
+        projections[0].event_sequence = projections[1].event_sequence
+        await session.flush()
+        await session.execute(
+            text(
+                "ALTER TABLE strategy_experiment_candidate_projections "
+                "ENABLE TRIGGER USER"
+            )
+        )
+    async with factory() as session:
+        with pytest.raises(ValueError, match="STRATEGY_EXPERIMENT_CHAIN_INVALID"):
+            await load_verified_experiment_authority(session, admitted.family_id)
+    async with factory() as session, session.begin():
+        with pytest.raises(
+            EvolutionAdmissionError, match="STRATEGY_EXPERIMENT_CHAIN_INVALID"
+        ):
+            await admit_experiment_family(
+                session,
+                proposal=proposal,
+                authority=authority,
+                now=NOW,
+                idempotency_key="phase2-corrupt-candidate-projection",
+            )
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_family_projection_that_disagrees_with_candidates(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    proposal, authority = await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admitted = await admit_experiment_family(
+            session,
+            proposal=proposal,
+            authority=authority,
+            now=NOW,
+            idempotency_key="phase2-family-aggregate-guard",
+        )
+    async with factory() as session, session.begin():
+        with pytest.raises(DBAPIError) as captured:
+            await session.execute(
+                text(
+                    "UPDATE strategy_experiment_state_projections "
+                    "SET current_state='BACKTEST_FAILED',version=version+1 "
+                    "WHERE family_id=:family_id"
+                ),
+                {"family_id": admitted.family_id},
+            )
+    assert captured.value.orig.sqlstate == "23514"
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_candidate_projection_without_matching_event(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    proposal, authority = await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admitted = await admit_experiment_family(
+            session,
+            proposal=proposal,
+            authority=authority,
+            now=NOW,
+            idempotency_key="phase2-candidate-projection-guard",
+        )
+    async with factory() as session, session.begin():
+        with pytest.raises(DBAPIError) as captured:
+            await session.execute(
+                text(
+                    "UPDATE strategy_experiment_candidate_projections "
+                    "SET current_state='VALIDATION_PASSED',version=version+1 "
+                    "WHERE family_id=:family_id"
+                ),
+                {"family_id": admitted.family_id},
+            )
+    assert captured.value.orig.sqlstate == "23514"
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_candidate_event_without_family_aggregate_update(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    proposal, authority = await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admitted = await admit_experiment_family(
+            session,
+            proposal=proposal,
+            authority=authority,
+            now=NOW,
+            idempotency_key="phase2-deferred-family-aggregate-guard",
+        )
+    async with factory() as session:
+        experiment = await session.scalar(
+            select(StrategyExperimentRecord)
+            .where(StrategyExperimentRecord.family_id == admitted.family_id)
+            .order_by(StrategyExperimentRecord.candidate_ordinal)
+        )
+    assert experiment is not None
+    with pytest.raises(DBAPIError) as captured:
+        async with factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "INSERT INTO strategy_experiment_events "
+                    "(id,family_id,experiment_id,sequence,event_type,idempotency_key,"
+                    "actor_kind,occurred_at,payload,previous_hash,event_hash) "
+                    "SELECT :event_id,:family_id,:experiment_id,3,'VALIDATION_PASSED',"
+                    "'candidate-without-family-update','service',:occurred_at,'{}'::jsonb,"
+                    "event_hash,repeat('f',64) FROM strategy_experiment_events "
+                    "WHERE family_id=:family_id AND sequence=2"
+                ),
+                {
+                    "event_id": new_uuid7(),
+                    "family_id": admitted.family_id,
+                    "experiment_id": experiment.id,
+                    "occurred_at": NOW + timedelta(minutes=1),
+                },
+            )
+            await session.execute(
+                text(
+                    "UPDATE strategy_experiment_candidate_projections "
+                    "SET current_state='VALIDATION_PASSED',event_sequence=3,version=2 "
+                    "WHERE experiment_id=:experiment_id"
+                ),
+                {"experiment_id": experiment.id},
+            )
+    assert captured.value.orig.sqlstate == "23514"
+
+
+@pytest.mark.asyncio
+async def test_candidate_transition_replays_independently_and_updates_family_aggregate(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    proposal, authority = await _seed_authority(factory)
+    async with factory() as session, session.begin():
+        admitted = await admit_experiment_family(
+            session,
+            proposal=proposal,
+            authority=authority,
+            now=NOW,
+            idempotency_key="phase2-independent-candidate-transition",
+        )
+    async with factory() as session, session.begin():
+        verified = await load_verified_experiment_authority(
+            session, admitted.family_id, lock=True
+        )
+        first = verified.experiments[0]
+        await append_candidate_event(
+            session,
+            authority=verified,
+            experiment_id=first.id,
+            event_type="VALIDATION_FAILED",
+            idempotency_key="candidate-validation-failed-one",
+            occurred_at=NOW + timedelta(minutes=1),
+            payload={
+                "schema_version": "strategy_candidate_validation_payload_v1",
+                "reason_code": "VALIDATION_FAILED",
+            },
+        )
+    async with factory() as session:
+        replayed = await load_verified_experiment_authority(session, admitted.family_id)
+    assert replayed.family_projection.current_state == "BACKTEST_RUNNING"
+    assert [
+        projection.current_state
+        for projection in sorted(
+            replayed.candidate_projections, key=lambda item: item.event_sequence
+        )
+    ] == ["ADMITTED", "VALIDATION_FAILED"]
+
+
+@pytest.mark.asyncio
+async def test_twenty_four_candidates_advance_without_cross_candidate_state_loss(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    proposal, authority = await _seed_authority(factory, bind_agent_output=False)
+    proposal = StrategyExperimentProposalV1.model_validate(
+        {
+            **proposal.model_dump(mode="python"),
+            "mutation_axes": (
+                {
+                    "axis": "min_adv20_usd",
+                    "values": ("25000000", "50000000", "75000000", "100000000"),
+                },
+                {"axis": "min_close", "values": ("3", "5", "10")},
+                {"axis": "target_weight", "values": ("0.075", "0.10", "0.125")},
+            ),
+        }
+    )
+    await _seed_bound_agent_output(
+        factory,
+        parent_id=proposal.parent_strategy_definition_id,
+        proposal=proposal,
+    )
+    async with factory() as session, session.begin():
+        admitted = await admit_experiment_family(
+            session,
+            proposal=proposal,
+            authority=authority.model_copy(update={"rnd_output_id": RND_OUTPUT_ID}),
+            now=NOW,
+            idempotency_key="phase2-twenty-four-independent-candidates",
+        )
+    assert admitted.candidate_count == 24
+
+    for index in range(24):
+        async with factory() as session, session.begin():
+            verified = await load_verified_experiment_authority(
+                session, admitted.family_id, lock=True
+            )
+            experiment = verified.experiments[index]
+            await append_candidate_event(
+                session,
+                authority=verified,
+                experiment_id=experiment.id,
+                event_type=(
+                    "VALIDATION_FAILED" if index == 0 else "VALIDATION_PASSED"
+                ),
+                idempotency_key=f"twenty-four-validation-{index + 1}",
+                occurred_at=NOW + timedelta(minutes=index + 1),
+                payload={
+                    "schema_version": "strategy_candidate_validation_payload_v1",
+                    "reason_code": (
+                        "VALIDATION_FAILED" if index == 0 else "VALIDATION_PASSED"
+                    ),
+                },
+            )
+    async with factory() as session:
+        replayed = await load_verified_experiment_authority(session, admitted.family_id)
+    assert [
+        projection.current_state
+        for projection in replayed.candidate_projections
+    ].count("VALIDATION_FAILED") == 1
+    assert [
+        projection.current_state
+        for projection in replayed.candidate_projections
+    ].count("VALIDATION_PASSED") == 23
+    assert replayed.family_projection.current_state == "BACKTEST_RUNNING"
+
+
+@pytest.mark.asyncio
 async def test_next_family_preserves_lineage_trial_count_across_time(
     migrated_database_url: str,
 ) -> None:
@@ -320,14 +629,42 @@ async def test_next_family_preserves_lineage_trial_count_across_time(
             idempotency_key="phase2-lineage-first",
         )
     async with factory() as session, session.begin():
-        await session.execute(
-            text(
-                "UPDATE strategy_experiment_state_projections "
-                "SET current_state='SHADOW_FAILED',cumulative_oos_trial_count=3,"
-                "event_sequence=1,version=2,updated_at=:updated_at WHERE family_id=:family_id"
-            ),
-            {"family_id": first.family_id, "updated_at": NOW + timedelta(days=1)},
+        verified = await load_verified_experiment_authority(
+            session, first.family_id, lock=True
         )
+        for index, experiment in enumerate(verified.experiments, start=1):
+            current = await load_verified_experiment_authority(
+                session, first.family_id, lock=True
+            )
+            await append_candidate_event(
+                session,
+                authority=current,
+                experiment_id=experiment.id,
+                event_type="VALIDATION_FAILED",
+                idempotency_key=f"lineage-first-validation-failed-{index}",
+                occurred_at=NOW + timedelta(minutes=index),
+                payload={
+                    "schema_version": "strategy_candidate_validation_payload_v1",
+                    "reason_code": "VALIDATION_FAILED",
+                },
+            )
+        terminal = await load_verified_experiment_authority(
+            session, first.family_id, lock=True
+        )
+        lineage_projection = await session.get(
+            StrategyResearchLineageProjectionRecord,
+            proposal.research_lineage_id,
+            with_for_update=True,
+        )
+        assert lineage_projection is not None
+        lineage_projection.cumulative_oos_trial_count = 3
+        lineage_projection.version += 1
+        lineage_projection.updated_at = NOW + timedelta(days=1)
+        await session.flush()
+        terminal.family_projection.cumulative_oos_trial_count = 3
+        terminal.family_projection.version += 1
+        terminal.family_projection.updated_at = NOW + timedelta(days=1)
+        await session.flush()
     async with factory() as session, session.begin():
         with pytest.raises(
             EvolutionAdmissionError, match="RND_OUTPUT_AUTHORITY_INVALID"

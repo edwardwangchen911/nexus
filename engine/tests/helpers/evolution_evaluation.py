@@ -20,12 +20,14 @@ from nexus.persistence.models.backtest import (
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.evolution import (
     StrategyEvolutionPolicyRecord,
+    StrategyExperimentCandidateProjectionRecord,
     StrategyExperimentEventRecord,
     StrategyExperimentFamilyRecord,
     StrategyExperimentRecord,
     StrategyExperimentStateProjectionRecord,
     StrategyPromotionPolicyRecord,
     StrategyRegistryHeadRecord,
+    StrategyResearchLineageProjectionRecord,
     StrategyResearchLineageRecord,
 )
 from nexus.persistence.models.market import Instrument, InstrumentAlias
@@ -100,24 +102,7 @@ async def seed_evaluation_pair(
         },
     }
     async with factory() as session, session.begin():
-        admitted_at = NOW - timedelta(minutes=1)
-        admitted_payload = {"schema_version": "fixture"}
-        admitted_key = "evaluation-fixture-admitted"
-        admitted_hash = hashlib.sha256(
-            canonical_json(
-                {
-                    "schema_version": "strategy_experiment_event_v1",
-                    "family_id": str(FAMILY_ID),
-                    "sequence": 1,
-                    "event_type": "ADMITTED",
-                    "idempotency_key": admitted_key,
-                    "actor_kind": "service",
-                    "occurred_at": admitted_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-                    "payload": admitted_payload,
-                    "previous_hash": "0" * 64,
-                }
-            ).encode()
-        ).hexdigest()
+        admitted_at = NOW - timedelta(minutes=4)
         session.add_all(
             [
                 Instrument(
@@ -240,6 +225,14 @@ async def seed_evaluation_pair(
         )
         await session.flush()
         session.add(
+            StrategyResearchLineageProjectionRecord(
+                lineage_id=LINEAGE_ID,
+                cumulative_oos_trial_count=3,
+                version=1,
+                updated_at=NOW - timedelta(minutes=1),
+            )
+        )
+        session.add(
             StrategyExperimentFamilyRecord(
                 id=FAMILY_ID,
                 research_lineage_id=LINEAGE_ID,
@@ -256,43 +249,44 @@ async def seed_evaluation_pair(
             )
         )
         await session.flush()
-        session.add_all(
-            [
-                StrategyExperimentRecord(
-                    id=EXPERIMENT_ID,
-                    family_id=FAMILY_ID,
-                    candidate_strategy_definition_id=CHALLENGER_DEFINITION_ID,
-                    candidate_ordinal=1,
-                    candidate_delta={"schema_version": "fixture"},
-                    candidate_hash="5" * 64,
-                    expression_hash=challenger.expression_hash,
-                    status="ADMITTED",
-                    created_at=NOW - timedelta(minutes=1),
-                ),
-                StrategyExperimentEventRecord(
-                    id=UUID("019d0000-0000-7000-8000-000000005616"),
-                    family_id=FAMILY_ID,
-                    schema_version="strategy_experiment_event_v1",
-                    sequence=1,
-                    event_type="ADMITTED",
-                    idempotency_key=admitted_key,
-                    actor_kind="service",
-                    occurred_at=admitted_at,
-                    payload=admitted_payload,
-                    previous_hash="0" * 64,
-                    event_hash=admitted_hash,
-                    created_at=admitted_at,
-                ),
-                StrategyExperimentStateProjectionRecord(
-                    family_id=FAMILY_ID,
-                    research_lineage_id=LINEAGE_ID,
-                    current_state="ADMITTED",
-                    event_sequence=1,
-                    cumulative_oos_trial_count=0,
-                    version=1,
-                    updated_at=NOW - timedelta(minutes=1),
-                ),
-            ]
+        session.add(
+            StrategyExperimentRecord(
+                id=EXPERIMENT_ID,
+                family_id=FAMILY_ID,
+                candidate_strategy_definition_id=CHALLENGER_DEFINITION_ID,
+                candidate_ordinal=1,
+                candidate_delta={"schema_version": "fixture"},
+                candidate_hash="5" * 64,
+                expression_hash=challenger.expression_hash,
+                status="ADMITTED",
+                created_at=NOW - timedelta(minutes=1),
+            )
+        )
+        await session.flush()
+        candidate_events = _candidate_events(admitted_at)
+        session.add_all(candidate_events)
+        await session.flush()
+        session.add(
+            StrategyExperimentCandidateProjectionRecord(
+                experiment_id=EXPERIMENT_ID,
+                family_id=FAMILY_ID,
+                current_state="OOS_RESERVED",
+                event_sequence=4,
+                version=4,
+                updated_at=NOW - timedelta(minutes=1),
+            )
+        )
+        await session.flush()
+        session.add(
+            StrategyExperimentStateProjectionRecord(
+                family_id=FAMILY_ID,
+                research_lineage_id=LINEAGE_ID,
+                current_state="BACKTEST_RUNNING",
+                event_sequence=4,
+                cumulative_oos_trial_count=3,
+                version=1,
+                updated_at=NOW - timedelta(minutes=1),
+            )
         )
         await session.flush()
         champion_run = _backtest_run(
@@ -328,6 +322,49 @@ async def seed_evaluation_pair(
         challenger_run_id=CHALLENGER_RUN_ID,
         promotion_policy_id=promotion_policy.id,
     )
+
+
+def _candidate_events(admitted_at: datetime) -> list[StrategyExperimentEventRecord]:
+    events: list[StrategyExperimentEventRecord] = []
+    previous_hash = "0" * 64
+    for sequence, event_type in enumerate(
+        ("ADMITTED", "VALIDATION_PASSED", "OOS_SELECTED", "OOS_RESERVED"), start=1
+    ):
+        occurred_at = admitted_at + timedelta(minutes=sequence - 1)
+        idempotency_key = f"evaluation-fixture-{event_type.lower()}"
+        payload = {"schema_version": "fixture", "state": event_type}
+        identity = {
+            "schema_version": "strategy_experiment_event_v1",
+            "family_id": str(FAMILY_ID),
+            "sequence": sequence,
+            "event_type": event_type,
+            "idempotency_key": idempotency_key,
+            "actor_kind": "service",
+            "occurred_at": occurred_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "payload": payload,
+            "previous_hash": previous_hash,
+            "experiment_id": str(EXPERIMENT_ID),
+        }
+        event_hash = hashlib.sha256(canonical_json(identity).encode()).hexdigest()
+        events.append(
+            StrategyExperimentEventRecord(
+                id=UUID(f"019d0000-0000-7000-8000-{5615 + sequence:012d}"),
+                family_id=FAMILY_ID,
+                experiment_id=EXPERIMENT_ID,
+                schema_version="strategy_experiment_event_v1",
+                sequence=sequence,
+                event_type=event_type,
+                idempotency_key=idempotency_key,
+                actor_kind="service",
+                occurred_at=occurred_at,
+                payload=payload,
+                previous_hash=previous_hash,
+                event_hash=event_hash,
+                created_at=occurred_at,
+            )
+        )
+        previous_hash = event_hash
+    return events
 
 
 def _backtest_run(

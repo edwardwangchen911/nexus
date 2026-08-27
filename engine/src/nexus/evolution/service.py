@@ -36,11 +36,10 @@ from nexus.evolution.policies import (
     load_evolution_search_space_v1,
 )
 from nexus.evolution.repository import (
-    active_lineage_projection,
     append_admitted_event,
     cumulative_lineage_trial_count,
     find_family_by_idempotency,
-    latest_family_created_at,
+    load_verified_experiment_authority,
     lock_internal_paper_registry_head,
     publish_challenger_definition,
 )
@@ -53,9 +52,11 @@ from nexus.persistence.models.backtest import StrategyDefinitionRecord
 from nexus.persistence.models.data import DataSnapshot, QualityReport
 from nexus.persistence.models.evolution import (
     StrategyEvolutionPolicyRecord,
+    StrategyExperimentCandidateProjectionRecord,
     StrategyExperimentFamilyRecord,
     StrategyExperimentRecord,
     StrategyExperimentStateProjectionRecord,
+    StrategyResearchLineageProjectionRecord,
     StrategyResearchLineageRecord,
     StrategyRNDOutputRecord,
     StrategyRNDRunRecord,
@@ -281,6 +282,7 @@ async def admit_experiment_family(
         ):
             raise EvolutionAdmissionError("IDEMPOTENCY_CONFLICT")
         try:
+            await load_verified_experiment_authority(session, existing.id, lock=True)
             await _require_valid_rnd_output(
                 session,
                 proposal,
@@ -290,6 +292,10 @@ async def admit_experiment_family(
             )
         except EvolutionAdmissionError as error:
             raise EvolutionAdmissionError("IDEMPOTENCY_CONFLICT") from error
+        except ValueError as error:
+            raise EvolutionAdmissionError(
+                "STRATEGY_EXPERIMENT_CHAIN_INVALID"
+            ) from error
         return AdmittedFamily(
             family_id=existing.id,
             candidate_count=existing.candidate_count,
@@ -324,9 +330,33 @@ async def admit_experiment_family(
         raise EvolutionAdmissionError("LINEAGE_AUTHORITY_INCOMPLETE")
     if lineage.evolution_policy_id != authority.evolution_policy_id:
         raise EvolutionAdmissionError("EVOLUTION_POLICY_MISMATCH")
-    if await active_lineage_projection(session, lineage.id) is not None:
-        raise EvolutionAdmissionError("ACTIVE_FAMILY_EXISTS")
-    latest_created_at = await latest_family_created_at(session, lineage.id)
+    latest_family = await session.scalar(
+        select(StrategyExperimentFamilyRecord)
+        .where(StrategyExperimentFamilyRecord.research_lineage_id == lineage.id)
+        .order_by(StrategyExperimentFamilyRecord.created_at.desc())
+        .limit(1)
+        .with_for_update()
+    )
+    latest_created_at = None
+    if latest_family is not None:
+        try:
+            latest_authority = await load_verified_experiment_authority(
+                session, latest_family.id, lock=True
+            )
+        except ValueError as error:
+            raise EvolutionAdmissionError(
+                "STRATEGY_EXPERIMENT_CHAIN_INVALID"
+            ) from error
+        if latest_authority.family_projection.current_state not in {
+            "BACKTEST_FAILED",
+            "SHADOW_FAILED",
+            "EXPIRED",
+            "VETOED",
+            "PROMOTED",
+            "STALE_CHAMPION_BASELINE",
+        }:
+            raise EvolutionAdmissionError("ACTIVE_FAMILY_EXISTS")
+        latest_created_at = latest_family.created_at
     if latest_created_at is not None and now < _calendar_quarter_after(
         latest_created_at
     ):
@@ -415,6 +445,7 @@ async def admit_experiment_family(
     session.add(family)
     await session.flush()
     candidate_hashes: list[str] = []
+    experiments: list[StrategyExperimentRecord] = []
     for delta in deltas:
         try:
             document = apply_candidate_delta(parent.document, delta, search_policy)
@@ -427,8 +458,7 @@ async def admit_experiment_family(
             expression_hash=compiled.expression_hash,
             published_at=now,
         )
-        session.add(
-            StrategyExperimentRecord(
+        experiment = StrategyExperimentRecord(
                 id=new_uuid7(),
                 family_id=family.id,
                 candidate_strategy_definition_id=definition.id,
@@ -439,35 +469,74 @@ async def admit_experiment_family(
                 status="ADMITTED",
                 created_at=now,
             )
-        )
+        session.add(experiment)
+        experiments.append(experiment)
         candidate_hashes.append(delta.candidate_hash)
 
-    cumulative_trials = max(
-        lineage.cumulative_oos_trial_count,
-        await cumulative_lineage_trial_count(session, lineage.id),
+    await session.flush()
+    lineage_projection = await session.get(
+        StrategyResearchLineageProjectionRecord,
+        lineage.id,
+        with_for_update=True,
     )
-    event_key = "family-admitted-" + hashlib.sha256(idempotency_key.encode()).hexdigest()[:40]
-    await append_admitted_event(
-        session,
-        family_id=family.id,
-        idempotency_key=event_key,
-        occurred_at=now,
-        payload={
-            "schema_version": "strategy_family_admitted_payload_v1",
-            "champion_generation": head.active_generation,
-            "candidate_count": len(deltas),
-            "candidate_hashes": candidate_hashes,
-            "authority_hash": authority.authority_hash,
-            "protocol_hash": authority.protocol_hash,
-            "code_hash": authority.code_hash,
-        },
-    )
+    if lineage_projection is None:
+        lineage_projection = StrategyResearchLineageProjectionRecord(
+            lineage_id=lineage.id,
+            cumulative_oos_trial_count=max(
+                lineage.cumulative_oos_trial_count,
+                await cumulative_lineage_trial_count(session, lineage.id),
+            ),
+            version=1,
+            updated_at=now,
+        )
+        session.add(lineage_projection)
+        await session.flush()
+    cumulative_trials = lineage_projection.cumulative_oos_trial_count
+    previous_hash = "0" * 64
+    event_sequence = 0
+    key_prefix = hashlib.sha256(idempotency_key.encode()).hexdigest()[:32]
+    for experiment in experiments:
+        event_sequence += 1
+        event = await append_admitted_event(
+            session,
+            family_id=family.id,
+            experiment_id=experiment.id,
+            sequence=event_sequence,
+            previous_hash=previous_hash,
+            idempotency_key=(
+                f"candidate-admitted-{key_prefix}-{experiment.candidate_ordinal}"
+            ),
+            occurred_at=now,
+            payload={
+                "schema_version": "strategy_candidate_admitted_payload_v1",
+                "champion_generation": head.active_generation,
+                "candidate_count": len(deltas),
+                "candidate_ordinal": experiment.candidate_ordinal,
+                "candidate_hash": experiment.candidate_hash,
+                "candidate_hashes": candidate_hashes,
+                "authority_hash": authority.authority_hash,
+                "protocol_hash": authority.protocol_hash,
+                "code_hash": authority.code_hash,
+            },
+        )
+        previous_hash = event.event_hash
+        session.add(
+            StrategyExperimentCandidateProjectionRecord(
+                experiment_id=experiment.id,
+                family_id=family.id,
+                current_state="ADMITTED",
+                event_sequence=event.sequence,
+                version=1,
+                updated_at=now,
+            )
+        )
+        await session.flush()
     session.add(
         StrategyExperimentStateProjectionRecord(
             family_id=family.id,
             research_lineage_id=lineage.id,
             current_state="ADMITTED",
-            event_sequence=1,
+            event_sequence=event_sequence,
             cumulative_oos_trial_count=cumulative_trials,
             version=1,
             updated_at=now,

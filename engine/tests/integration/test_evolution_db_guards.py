@@ -122,6 +122,13 @@ def test_experiment_projection_rejects_trial_count_regression(
     asyncio.run(
         _execute(
             migrated_database_url,
+            "UPDATE strategy_research_lineage_projections "
+            "SET cumulative_oos_trial_count=5,version=2",
+        )
+    )
+    asyncio.run(
+        _execute(
+            migrated_database_url,
             "UPDATE strategy_experiment_state_projections "
             f"SET cumulative_oos_trial_count=5,version=2 WHERE family_id='{family_id}'",
         )
@@ -160,6 +167,14 @@ async def _insert_lineage_family(database_url: str, *, suffix: str) -> None:
                 ),
                 {"id": lineage_id, "policy_id": policy_id},
             )
+            await connection.execute(
+                text(
+                    "INSERT INTO strategy_research_lineage_projections "
+                    "(lineage_id,cumulative_oos_trial_count,version) "
+                    "VALUES (:id,0,1) ON CONFLICT DO NOTHING"
+                ),
+                {"id": lineage_id},
+            )
             family_id = f"019d0000-0000-7000-8000-0000000030{suffix}"
             await connection.execute(
                 text(
@@ -177,11 +192,50 @@ async def _insert_lineage_family(database_url: str, *, suffix: str) -> None:
                     "key": f"family-{suffix}",
                 },
             )
+            experiment_id = f"019d0000-0000-7000-8000-0000000031{suffix}"
+            event_id = f"019d0000-0000-7000-8000-0000000032{suffix}"
+            await connection.execute(
+                text(
+                    "INSERT INTO strategy_experiments "
+                    "(id,family_id,candidate_strategy_definition_id,candidate_ordinal,"
+                    "candidate_delta,candidate_hash,expression_hash,status) VALUES "
+                    "(:experiment_id,:family_id,:baseline_id,1,'{}'::jsonb,repeat('d',64),"
+                    "repeat('e',64),'ADMITTED')"
+                ),
+                {
+                    "experiment_id": experiment_id,
+                    "family_id": family_id,
+                    "baseline_id": baseline_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO strategy_experiment_events "
+                    "(id,family_id,experiment_id,sequence,event_type,idempotency_key,"
+                    "actor_kind,occurred_at,payload,previous_hash,event_hash) VALUES "
+                    "(:event_id,:family_id,:experiment_id,1,'ADMITTED',:event_key,'service',"
+                    "'2026-08-27T00:00:00Z','{}'::jsonb,repeat('0',64),repeat('1',64))"
+                ),
+                {
+                    "event_id": event_id,
+                    "family_id": family_id,
+                    "experiment_id": experiment_id,
+                    "event_key": f"family-event-{suffix}",
+                },
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO strategy_experiment_candidate_projections "
+                    "(experiment_id,family_id,current_state,event_sequence,version) "
+                    "VALUES (:experiment_id,:family_id,'ADMITTED',1,1)"
+                ),
+                {"experiment_id": experiment_id, "family_id": family_id},
+            )
             await connection.execute(
                 text(
                     "INSERT INTO strategy_experiment_state_projections "
                     "(family_id,research_lineage_id,current_state,event_sequence,version) "
-                    "VALUES (:id,:lineage_id,'ADMITTED',0,1)"
+                    "VALUES (:id,:lineage_id,'ADMITTED',1,1)"
                 ),
                 {"id": family_id, "lineage_id": lineage_id},
             )
@@ -199,18 +253,6 @@ def test_only_one_nonterminal_family_per_lineage(migrated_database_url: str) -> 
 def test_experiment_event_sequence_cannot_skip(migrated_database_url: str) -> None:
     asyncio.run(_insert_lineage_family(migrated_database_url, suffix="11"))
     family_id = "019d0000-0000-7000-8000-000000003011"
-    asyncio.run(
-        _execute(
-            migrated_database_url,
-            "INSERT INTO strategy_experiment_events "
-            "(id,family_id,sequence,event_type,idempotency_key,actor_kind,occurred_at,payload,"
-            "previous_hash,event_hash) VALUES "
-            f"('019d0000-0000-7000-8000-000000003012','{family_id}',1,'ADMITTED',"
-            "'event-1','service','2026-08-27T00:00:00Z','{}'::jsonb,repeat('0',64),"
-            "repeat('1',64))",
-        )
-    )
-
     with pytest.raises(DBAPIError) as captured:
         asyncio.run(
             _execute(
