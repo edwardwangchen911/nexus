@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from decimal import Decimal
 
 import pytest
 from helpers.evolution_evaluation import NOW, seed_evaluation_pair
+from nexus.audit.canonical import canonical_json
 from nexus.evolution.evaluation import (
     EvolutionEvaluationError,
     persist_champion_comparison,
@@ -45,7 +47,20 @@ async def test_paired_comparison_persists_exact_authority_and_trial_count(
 
     assert stored is not None
     assert stored.authority_hash == "a" * 64
-    assert stored.protocol_hash == "b" * 64
+    assert stored.protocol_hash == hashlib.sha256(
+        canonical_json(
+            {
+                "schema_version": "paired_protocol_fixture_v1",
+                "experiment_attempt_count": 1,
+                "random_seed": 0,
+                "cost_model": {
+                    "commission_bps": "0",
+                    "spread_bps": "5",
+                    "slippage_bps": "10",
+                },
+            }
+        ).encode()
+    ).hexdigest()
     assert stored.cumulative_oos_trial_count == 1
     assert Decimal(stored.metric_report["challenger_double_cost_return"]) == Decimal("0.06")
     assert Decimal(stored.metric_report["champion_double_cost_return"]) == Decimal("0.05")
@@ -56,6 +71,26 @@ async def test_paired_comparison_persists_exact_authority_and_trial_count(
     assert evidence.experiment_id == pair.experiment_id
     assert evidence.champion_backtest_run_id == pair.champion_run_id
     assert evidence.challenger_backtest_run_id == pair.challenger_run_id
+
+
+@pytest.mark.asyncio
+async def test_paired_comparison_binds_frozen_baseline_but_uses_final_trial_count(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    pair = await seed_evaluation_pair(factory, mismatch="final_trial_count")
+
+    async with factory() as session, session.begin():
+        comparison = await persist_champion_comparison(
+            session,
+            experiment_id=pair.experiment_id,
+            champion_backtest_run_id=pair.champion_run_id,
+            challenger_backtest_run_id=pair.challenger_run_id,
+            now=NOW,
+        )
+
+    assert comparison.cumulative_oos_trial_count == 3
+    assert comparison.metric_report["cumulative_oos_trial_count"] == 3
 
 
 @pytest.mark.asyncio

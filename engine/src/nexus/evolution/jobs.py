@@ -327,10 +327,7 @@ async def materialize_strategy_rnd_outbox_jobs(
             candidate_projection = await session.get(
                 StrategyExperimentCandidateProjectionRecord, candidate.id
             )
-            if (
-                candidate_projection is None
-                or candidate_projection.family_id != family.id
-            ):
+            if candidate_projection is None or candidate_projection.family_id != family.id:
                 raise ValueError("admitted candidate projection is incomplete")
             payload = build_strategy_rnd_job_payload(
                 operation="evaluate_candidate",
@@ -651,10 +648,8 @@ async def _due_candidate_jobs(
                 Job.job_type == JobType.STRATEGY_RND.value,
                 Job.payload["operation"].as_string() == "evaluate_candidate",
                 Job.payload["experiment_id"].as_string() == str(experiment.id),
-                Job.payload["candidate_state"].as_string()
-                == candidate_projection.current_state,
-                Job.payload["candidate_version"].as_integer()
-                == candidate_projection.version,
+                Job.payload["candidate_state"].as_string() == candidate_projection.current_state,
+                Job.payload["candidate_version"].as_integer() == candidate_projection.version,
                 Job.status.in_(("queued", "running")),
             )
             .limit(1)
@@ -706,11 +701,11 @@ async def _due_shadow_jobs(
     targets: list[StrategyRNDJobPayloadV1] = []
     for group, experiment, family in rows:
         finalized = await session.scalar(
-            select(StrategyShadowFinalizationRecord.id).where(
+            select(StrategyShadowFinalizationRecord).where(
                 StrategyShadowFinalizationRecord.group_id == group.id
             )
         )
-        if finalized is not None:
+        if finalized is not None and finalized.status != "PASS":
             continue
         completed_sessions = int(
             await session.scalar(
@@ -720,7 +715,7 @@ async def _due_shadow_jobs(
             )
             or 0
         )
-        if completed_sessions >= group.evaluation_sessions:
+        if finalized is not None or completed_sessions >= group.evaluation_sessions:
             operation = "finalize_promotion"
         else:
             expected_session = await session.scalar(

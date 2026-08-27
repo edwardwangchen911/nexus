@@ -1103,6 +1103,13 @@ async def persist_champion_comparison(
         return existing
     if candidate_projection.current_state != "OOS_RESERVED":
         raise EvolutionEvaluationError("FAMILY_TERMINAL")
+    baseline = (
+        None
+        if family.baseline_backtest_run_id is None
+        else await session.get(BacktestRunRecord, family.baseline_backtest_run_id)
+    )
+    if baseline is None:
+        raise EvolutionEvaluationError("PAIRED_AUTHORITY_INCOMPLETE")
     if (
         head.active_generation != champion_generation
         or head.active_definition_id != family.parent_strategy_definition_id
@@ -1113,6 +1120,7 @@ async def persist_champion_comparison(
     _require_identical_backtest_authority(
         champion=champion,
         challenger=challenger,
+        baseline=baseline,
         family=family,
         cumulative_oos_trial_count=cumulative_oos_trial_count,
     )
@@ -1426,6 +1434,7 @@ def _require_identical_backtest_authority(
     *,
     champion: BacktestRunRecord,
     challenger: BacktestRunRecord,
+    baseline: BacktestRunRecord,
     family: StrategyExperimentFamilyRecord,
     cumulative_oos_trial_count: int,
 ) -> None:
@@ -1447,12 +1456,36 @@ def _require_identical_backtest_authority(
     )
     if any(getattr(champion, field) != getattr(challenger, field) for field in fields):
         raise EvolutionEvaluationError("PAIRED_AUTHORITY_MISMATCH")
-    protocol_attempts = champion.protocol.get("experiment_attempt_count")
+    baseline_fields = (
+        "authority_bundle_id",
+        "data_snapshot_id",
+        "source_policy_id",
+        "cost_policy_id",
+        "start_session",
+        "end_session",
+        "initial_nav",
+        "authority_hash",
+        "data_hash",
+        "code_hash",
+        "random_seed",
+    )
+    paired_protocol = dict(champion.protocol)
+    baseline_protocol = dict(baseline.protocol)
+    protocol_attempts = paired_protocol.pop("experiment_attempt_count", None)
+    baseline_protocol.pop("experiment_attempt_count", None)
     if (
         protocol_attempts != cumulative_oos_trial_count
-        or family.authority_hash != champion.authority_hash
-        or family.protocol_hash != champion.protocol_hash
-        or family.code_hash != champion.code_hash
+        or paired_protocol != baseline_protocol
+        or any(
+            getattr(baseline, field) != getattr(champion, field)
+            for field in baseline_fields
+        )
+        or baseline.strategy_definition_id != family.parent_strategy_definition_id
+        or family.authority_hash != baseline.authority_hash
+        or family.protocol_hash != baseline.protocol_hash
+        or family.code_hash != baseline.code_hash
+        or not baseline.graph_sealed
+        or baseline.historical_agent_overlay
         or not champion.graph_sealed
         or not challenger.graph_sealed
         or champion.promotable

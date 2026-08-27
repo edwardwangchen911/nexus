@@ -61,6 +61,7 @@ CHALLENGER_RUN_ID = UUID("019d0000-0000-7000-8000-000000005614")
 ALTERNATE_COST_POLICY_ID = UUID("019d0000-0000-7000-8000-000000005615")
 OOS_EXPOSURE_ID = UUID("019d0000-0000-7000-8000-000000005616")
 OOS_EXPOSURE_LINK_ID = UUID("019d0000-0000-7000-8000-000000005617")
+BASELINE_RUN_ID = UUID("019d0000-0000-7000-8000-000000005618")
 
 
 @dataclass(frozen=True)
@@ -95,9 +96,9 @@ async def seed_evaluation_pair(
     challenger = compile_strategy(document, evolution_feature_registry_v1())
     start = date(2018, 1, 2)
     end = date(2025, 12, 31)
-    protocol = {
+    baseline_protocol = {
         "schema_version": "paired_protocol_fixture_v1",
-        "experiment_attempt_count": 2 if mismatch == "trial_count" else 1,
+        "experiment_attempt_count": 1,
         "random_seed": 0,
         "cost_model": {
             "commission_bps": "0",
@@ -105,6 +106,17 @@ async def seed_evaluation_pair(
             "slippage_bps": "10",
         },
     }
+    cumulative_oos_trial_count = 3 if mismatch == "final_trial_count" else 1
+    protocol = {
+        **baseline_protocol,
+        "experiment_attempt_count": (
+            2 if mismatch == "trial_count" else cumulative_oos_trial_count
+        ),
+    }
+    baseline_protocol_hash = hashlib.sha256(
+        canonical_json(baseline_protocol).encode()
+    ).hexdigest()
+    paired_protocol_hash = hashlib.sha256(canonical_json(protocol).encode()).hexdigest()
     async with factory() as session, session.begin():
         admitted_at = NOW - timedelta(minutes=4)
         session.add_all(
@@ -231,11 +243,22 @@ async def seed_evaluation_pair(
         session.add(
             StrategyResearchLineageProjectionRecord(
                 lineage_id=LINEAGE_ID,
-                cumulative_oos_trial_count=1,
+                cumulative_oos_trial_count=cumulative_oos_trial_count,
                 version=2,
                 updated_at=NOW - timedelta(minutes=1),
             )
         )
+        baseline_run = _backtest_run(
+            run_id=BASELINE_RUN_ID,
+            definition_id=champion_definition_id,
+            protocol=baseline_protocol,
+            result_hash="8" * 64,
+            role="champion",
+            passing=passing,
+            protocol_hash=baseline_protocol_hash,
+        )
+        session.add(baseline_run)
+        await session.flush()
         session.add(
             StrategyExperimentFamilyRecord(
                 id=FAMILY_ID,
@@ -246,8 +269,9 @@ async def seed_evaluation_pair(
                 admission_status="ADMITTED",
                 candidate_count=1,
                 idempotency_key="evaluation-fixture-family",
+                baseline_backtest_run_id=BASELINE_RUN_ID,
                 authority_hash="a" * 64,
-                protocol_hash="b" * 64,
+                protocol_hash=baseline_protocol_hash,
                 code_hash="c" * 64,
                 created_at=NOW - timedelta(minutes=1),
             )
@@ -329,7 +353,7 @@ async def seed_evaluation_pair(
                 research_lineage_id=LINEAGE_ID,
                 current_state="BACKTEST_RUNNING",
                 event_sequence=4,
-                cumulative_oos_trial_count=1,
+                cumulative_oos_trial_count=cumulative_oos_trial_count,
                 version=1,
                 updated_at=NOW - timedelta(minutes=1),
             )
@@ -342,6 +366,7 @@ async def seed_evaluation_pair(
             result_hash="6" * 64,
             role="champion",
             passing=passing,
+            protocol_hash=paired_protocol_hash,
         )
         challenger_run = _backtest_run(
             run_id=CHALLENGER_RUN_ID,
@@ -350,6 +375,7 @@ async def seed_evaluation_pair(
             result_hash="7" * 64,
             role="challenger",
             passing=passing,
+            protocol_hash=paired_protocol_hash,
         )
         if mismatch == "authority":
             challenger_run.authority_hash = "9" * 64
@@ -421,6 +447,7 @@ def _backtest_run(
     result_hash: str,
     role: str,
     passing: bool,
+    protocol_hash: str,
 ) -> BacktestRunRecord:
     is_challenger = role == "challenger"
     sharpe = "1.15" if is_challenger and passing else "1.00"
@@ -456,7 +483,7 @@ def _backtest_run(
                 "adv20_60m_terminal_nav": "104",
             },
         },
-        protocol_hash="b" * 64,
+        protocol_hash=protocol_hash,
         authority_hash="a" * 64,
         data_hash="d" * 64,
         code_hash="c" * 64,

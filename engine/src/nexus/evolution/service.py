@@ -92,6 +92,7 @@ class EvolutionAdmissionAuthorityV1(_FrozenModel):
     authority_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     protocol_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     code_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    baseline_backtest_run_id: UUID | None = None
     rnd_output_id: UUID | None = None
 
 
@@ -440,6 +441,7 @@ async def admit_experiment_family(
         authority_hash=authority.authority_hash,
         protocol_hash=authority.protocol_hash,
         code_hash=authority.code_hash,
+        baseline_backtest_run_id=authority.baseline_backtest_run_id,
         created_at=now,
     )
     session.add(family)
@@ -595,6 +597,7 @@ def _family_matches(
         and family.authority_hash == authority.authority_hash
         and family.protocol_hash == authority.protocol_hash
         and family.code_hash == authority.code_hash
+        and family.baseline_backtest_run_id == authority.baseline_backtest_run_id
         and family.rnd_output_id == authority.rnd_output_id
     )
 

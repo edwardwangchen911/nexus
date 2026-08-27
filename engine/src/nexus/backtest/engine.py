@@ -92,6 +92,11 @@ class BacktestBar(_FrozenModel):
             raise TypeError("backtest values must not contain binary floats")
         return value
 
+    @field_validator("open", "high", "low", "close", "volume", mode="after")
+    @classmethod
+    def _canonical_values(cls, value: Decimal) -> Decimal:
+        return canonical_decimal(value)
+
     @field_validator("observed_at", "available_at", "received_at")
     @classmethod
     def _utc(cls, value: datetime) -> datetime:
@@ -223,6 +228,11 @@ class PriceSourceSelectionAuthority(_FrozenModel):
             raise TypeError("source-selection tick size must be exact")
         return value
 
+    @field_validator("tick_size", mode="after")
+    @classmethod
+    def _canonical_tick_size(cls, value: Decimal) -> Decimal:
+        return canonical_decimal(value)
+
     @model_validator(mode="after")
     def _complete_candidates(self) -> PriceSourceSelectionAuthority:
         if self.request_start_session > self.request_end_session:
@@ -274,6 +284,11 @@ class SectorClassification(_FrozenModel):
         if isinstance(value, float):
             raise TypeError("sector weights must not contain binary floats")
         return value
+
+    @field_validator("weight", mode="after")
+    @classmethod
+    def _canonical_weight(cls, value: Decimal) -> Decimal:
+        return canonical_decimal(value)
 
     @model_validator(mode="after")
     def _valid_weight(self) -> SectorClassification:
@@ -496,6 +511,11 @@ class CorporateActionEvent(_FrozenModel):
             raise TypeError("corporate action values must not contain binary floats")
         return value
 
+    @field_validator("value", mode="after")
+    @classmethod
+    def _canonical_value(cls, value: Decimal) -> Decimal:
+        return canonical_decimal(value)
+
     @field_validator("available_at")
     @classmethod
     def _utc(cls, value: datetime) -> datetime:
@@ -555,6 +575,11 @@ class DelistingEvent(_FrozenModel):
         if isinstance(value, float):
             raise TypeError("delisting recovery must not contain binary floats")
         return value
+
+    @field_validator("recovery_price", mode="after")
+    @classmethod
+    def _canonical_recovery_price(cls, value: Decimal) -> Decimal:
+        return canonical_decimal(value)
 
     @field_validator("available_at")
     @classmethod

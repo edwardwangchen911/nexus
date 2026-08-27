@@ -99,9 +99,19 @@ class BacktestPersistenceAuthority:
     source_policy_id: UUID
     cost_policy_id: UUID
     completed_at: datetime
+    data_cutoff_at: datetime | None = None
 
     def __post_init__(self) -> None:
         require_utc(self.completed_at)
+        if self.data_cutoff_at is not None:
+            require_utc(self.data_cutoff_at)
+            if self.data_cutoff_at > self.completed_at:
+                raise ValueError("backtest data cutoff cannot follow execution completion")
+
+    @property
+    def authority_cutoff_at(self) -> datetime:
+        """Frozen market-data clock, independent of later challenger execution."""
+        return self.data_cutoff_at or self.completed_at
 
 
 async def persist_backtest_result(
@@ -408,6 +418,7 @@ async def _validate_database_authority(
     authority: BacktestPersistenceAuthority,
     authority_frozen_at: datetime,
 ) -> None:
+    completed_at = authority.authority_cutoff_at
     expected_ids = (
         data.authority.authority_bundle_id,
         data.authority.data_snapshot_id,
@@ -433,13 +444,13 @@ async def _validate_database_authority(
     cost_policy = await load_backtest_cost_policy_v1(session)
     if (
         source_policy.record_id != authority.source_policy_id
-        or source_policy.available_at > authority.completed_at
+        or source_policy.available_at > completed_at
     ):
         raise ValueError("backtest source policy is not the published authority")
     if (
         cost_policy.id != authority.cost_policy_id
         or cost_policy.version != result.cost_policy_version
-        or cost_policy.available_at > authority.completed_at
+        or cost_policy.available_at > completed_at
     ):
         raise ValueError("backtest cost policy is not the published authority")
     expected_costs = {
@@ -461,8 +472,8 @@ async def _validate_database_authority(
         or snapshot.schema_version != "backtest_authority_v1"
         or snapshot.payload != expected_data_snapshot_payload(data, result)
         or not snapshot.observed_at <= snapshot.available_at <= snapshot.received_at
-        or snapshot.available_at > authority.completed_at
-        or snapshot.received_at > authority.completed_at
+        or snapshot.available_at > completed_at
+        or snapshot.received_at > completed_at
     ):
         raise ValueError("frozen backtest data snapshot is missing or invalid")
 
@@ -471,16 +482,16 @@ async def _validate_database_authority(
         data,
         protocol,
         result,
-        authority.completed_at,
+        completed_at,
         authority_frozen_at,
     )
     await _validate_source_selection_authorities(
-        session, data, authority.completed_at, authority_frozen_at
+        session, data, completed_at, authority_frozen_at
     )
-    await _validate_price_authorities(session, data, authority.completed_at, authority_frozen_at)
-    await _validate_universe_authorities(session, data, authority.completed_at)
-    await _validate_sector_authorities(session, data, authority.completed_at)
-    await _validate_corporate_action_authorities(session, data, authority.completed_at)
+    await _validate_price_authorities(session, data, completed_at, authority_frozen_at)
+    await _validate_universe_authorities(session, data, completed_at)
+    await _validate_sector_authorities(session, data, completed_at)
+    await _validate_corporate_action_authorities(session, data, completed_at)
 
 
 async def _validate_bundle_authority(

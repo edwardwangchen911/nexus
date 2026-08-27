@@ -1,9 +1,4 @@
-"""Capability-injected runtime shell for the isolated Strategy R&D queue.
-
-This module deliberately has no CLI entry point and does not construct an Agent,
-provider client, broker client, or operation executor. A deployment must inject
-the reviewed Engine-side executor explicitly before it can activate this queue.
-"""
+"""Dedicated runtime and CLI for the isolated Strategy R&D queue."""
 
 from __future__ import annotations
 
@@ -12,6 +7,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from nexus.domain.ids import new_uuid7
+from nexus.evolution.executor import build_strategy_rnd_executor
 from nexus.evolution.jobs import StrategyRNDOperationExecutor, build_strategy_rnd_registry
 from nexus.jobs.models import QueueName
 from nexus.jobs.worker import run_job_worker_once
@@ -73,3 +69,16 @@ async def run_strategy_rnd_worker(
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def main() -> None:
+    """Run the reviewed, fail-closed Strategy R&D composition forever."""
+    settings = EngineSettings()
+    executor = build_strategy_rnd_executor(settings)
+    asyncio.run(
+        run_strategy_rnd_worker(
+            settings,
+            executor=executor,
+            run_forever=True,
+        )
+    )
