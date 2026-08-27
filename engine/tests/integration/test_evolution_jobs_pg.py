@@ -46,6 +46,8 @@ async def test_same_candidate_job_is_idempotent_and_executes_only_on_strategy_qu
         family_id=pair.family_id,
         experiment_id=pair.experiment_id,
         expected_champion_generation=1,
+        candidate_state="OOS_RESERVED",
+        candidate_version=4,
     )
     async with factory() as session, session.begin():
         first = await enqueue_strategy_rnd_job(
@@ -112,6 +114,8 @@ async def test_admission_outbox_materializes_one_idempotent_job_per_candidate(
                 family_id=pair.family_id,
                 experiment_id=pair.experiment_id,
                 expected_champion_generation=1,
+                candidate_state="OOS_RESERVED",
+                candidate_version=4,
             ),
             effective_at=_NOW - timedelta(minutes=1),
         )
@@ -138,6 +142,58 @@ async def test_admission_outbox_materializes_one_idempotent_job_per_candidate(
     assert len(first) == len(replay) == 1
     assert first[0].id == replay[0].id == scheduled_first.id
     assert first[0].payload["experiment_id"] == str(pair.experiment_id)
+    assert first[0].payload["candidate_state"] == "OOS_RESERVED"
+    assert first[0].payload["candidate_version"] == 4
+
+
+@pytest.mark.asyncio
+async def test_due_candidate_job_binds_current_projection_and_ignores_terminal_old_job(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    pair = await seed_evaluation_pair(factory)
+    old = build_strategy_rnd_job_payload(
+        operation="evaluate_candidate",
+        family_id=pair.family_id,
+        experiment_id=pair.experiment_id,
+        expected_champion_generation=1,
+        candidate_state="OOS_SELECTED",
+        candidate_version=3,
+    )
+    async with factory() as session, session.begin():
+        old_job = await enqueue_strategy_rnd_job(
+            session, payload=old, effective_at=_NOW - timedelta(days=1)
+        )
+
+    async def must_not_execute(context, payload):
+        del context, payload
+        raise AssertionError("stale candidate state must stop before execution")
+
+    assert await run_job_worker_once(
+        factory,
+        registry=build_strategy_rnd_registry(executor=must_not_execute),
+        queue=QueueName.STRATEGY_RND,
+        worker_id="strategy-rnd-stale-candidate-test",
+        worker_started_at=_NOW,
+        process_version="test-v1",
+        migration_head="0023_evolution_authority",
+        clock=lambda: _NOW,
+        claim_registered_only=True,
+    )
+    async with factory() as session, session.begin():
+        stored_old = await session.get(Job, old_job.id)
+        assert stored_old is not None
+        assert (stored_old.status, stored_old.result_code) == (
+            "skipped",
+            "CANDIDATE_STATE_STALE",
+        )
+        due = await resolve_due_strategy_rnd_jobs(
+            session, session_date=_NOW.date(), now=_NOW
+        )
+    candidate_jobs = [item for item in due if item.operation == "evaluate_candidate"]
+    assert len(candidate_jobs) == 1
+    assert candidate_jobs[0].candidate_state == "OOS_RESERVED"
+    assert candidate_jobs[0].candidate_version == 4
 
 
 @pytest.mark.asyncio

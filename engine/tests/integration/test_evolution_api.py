@@ -357,6 +357,8 @@ async def test_veto_appends_verified_events_and_never_changes_champion(
                 family_id=family_id,
                 experiment_id=experiment_id,
                 expected_champion_generation=1,
+                candidate_state="ADMITTED",
+                candidate_version=1,
             ),
             effective_at=_CLOCK - timedelta(minutes=1),
         )
@@ -421,7 +423,7 @@ async def test_veto_appends_verified_events_and_never_changes_champion(
     assert head is not None and head.active_generation == 1
     assert projection is not None and projection.current_state == "VETOED"
     assert persisted_job is not None and persisted_job.status == "skipped"
-    assert persisted_job.result_code == "FAMILY_TERMINAL"
+    assert persisted_job.result_code == "CANDIDATE_STATE_STALE"
     assert executed == []
 
 
@@ -468,8 +470,6 @@ async def test_detail_serializes_decimal_evidence_from_a_verified_event_chain(
             experiment_id=pair.experiment_id,
             champion_backtest_run_id=pair.champion_run_id,
             challenger_backtest_run_id=pair.challenger_run_id,
-            champion_generation=1,
-            cumulative_oos_trial_count=3,
             now=EVALUATION_NOW,
         )
         await persist_historical_promotion_decision(

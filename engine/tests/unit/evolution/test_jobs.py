@@ -35,6 +35,8 @@ def test_payload_is_closed_content_addressed_and_safe(
         family_id=family_id,
         experiment_id=experiment_id,
         expected_champion_generation=3,
+        candidate_state="ADMITTED" if operation == "evaluate_candidate" else None,
+        candidate_version=1 if operation == "evaluate_candidate" else None,
     )
 
     assert payload.schema_version == STRATEGY_RND_JOB_SCHEMA
@@ -84,11 +86,32 @@ def test_payload_rejects_tampered_content_hash() -> None:
         family_id=_FAMILY_ID,
         experiment_id=_EXPERIMENT_ID,
         expected_champion_generation=3,
+        candidate_state="ADMITTED",
+        candidate_version=1,
     ).model_dump(mode="json")
     document["expected_champion_generation"] = 4
 
     with pytest.raises(ValidationError, match="input_hash"):
         StrategyRNDJobPayloadV1.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    ("candidate_state", "candidate_version"),
+    ((None, None), ("ADMITTED", None), (None, 1)),
+)
+def test_candidate_job_requires_hash_bound_projection_identity(
+    candidate_state: str | None,
+    candidate_version: int | None,
+) -> None:
+    with pytest.raises(ValidationError):
+        build_strategy_rnd_job_payload(
+            operation="evaluate_candidate",
+            family_id=_FAMILY_ID,
+            experiment_id=_EXPERIMENT_ID,
+            expected_champion_generation=3,
+            candidate_state=candidate_state,
+            candidate_version=candidate_version,
+        )
 
 
 def test_registry_isolated_on_low_priority_strategy_queue() -> None:

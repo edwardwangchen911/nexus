@@ -23,8 +23,10 @@ from nexus.persistence.models.evolution import (
     StrategyExperimentCandidateProjectionRecord,
     StrategyExperimentEventRecord,
     StrategyExperimentFamilyRecord,
+    StrategyExperimentOOSExposureLinkRecord,
     StrategyExperimentRecord,
     StrategyExperimentStateProjectionRecord,
+    StrategyOOSExposureRecord,
     StrategyPromotionPolicyRecord,
     StrategyRegistryHeadRecord,
     StrategyResearchLineageProjectionRecord,
@@ -57,6 +59,8 @@ CHALLENGER_DEFINITION_ID = UUID("019d0000-0000-7000-8000-000000005612")
 CHAMPION_RUN_ID = UUID("019d0000-0000-7000-8000-000000005613")
 CHALLENGER_RUN_ID = UUID("019d0000-0000-7000-8000-000000005614")
 ALTERNATE_COST_POLICY_ID = UUID("019d0000-0000-7000-8000-000000005615")
+OOS_EXPOSURE_ID = UUID("019d0000-0000-7000-8000-000000005616")
+OOS_EXPOSURE_LINK_ID = UUID("019d0000-0000-7000-8000-000000005617")
 
 
 @dataclass(frozen=True)
@@ -93,7 +97,7 @@ async def seed_evaluation_pair(
     end = date(2025, 12, 31)
     protocol = {
         "schema_version": "paired_protocol_fixture_v1",
-        "experiment_attempt_count": 3,
+        "experiment_attempt_count": 2 if mismatch == "trial_count" else 1,
         "random_seed": 0,
         "cost_model": {
             "commission_bps": "0",
@@ -227,8 +231,8 @@ async def seed_evaluation_pair(
         session.add(
             StrategyResearchLineageProjectionRecord(
                 lineage_id=LINEAGE_ID,
-                cumulative_oos_trial_count=3,
-                version=1,
+                cumulative_oos_trial_count=1,
+                version=2,
                 updated_at=NOW - timedelta(minutes=1),
             )
         )
@@ -238,7 +242,7 @@ async def seed_evaluation_pair(
                 research_lineage_id=LINEAGE_ID,
                 parent_strategy_definition_id=champion_definition_id,
                 rnd_output_id=None,
-                champion_generation=1,
+                champion_generation=2 if mismatch == "generation" else 1,
                 admission_status="ADMITTED",
                 candidate_count=1,
                 idempotency_key="evaluation-fixture-family",
@@ -263,6 +267,48 @@ async def seed_evaluation_pair(
             )
         )
         await session.flush()
+        if mismatch != "missing_exposure":
+            exposed_at = NOW - timedelta(minutes=2)
+            exposure_identity = {
+                "schema_version": "strategy_oos_exposure_v1",
+                "exposure_id": str(OOS_EXPOSURE_ID),
+                "research_lineage_id": str(LINEAGE_ID),
+                "expression_hash": challenger.expression_hash,
+                "ordinal": 1,
+                "first_experiment_id": str(EXPERIMENT_ID),
+                "exposed_at": exposed_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            }
+            session.add(
+                StrategyOOSExposureRecord(
+                    id=OOS_EXPOSURE_ID,
+                    research_lineage_id=LINEAGE_ID,
+                    expression_hash=challenger.expression_hash,
+                    ordinal=1,
+                    first_experiment_id=EXPERIMENT_ID,
+                    exposed_at=exposed_at,
+                    exposure_hash=hashlib.sha256(
+                        canonical_json(exposure_identity).encode()
+                    ).hexdigest(),
+                    created_at=exposed_at,
+                )
+            )
+            await session.flush()
+            link_identity = {
+                "schema_version": "strategy_experiment_oos_exposure_link_v1",
+                "experiment_id": str(EXPERIMENT_ID),
+                "exposure_id": str(OOS_EXPOSURE_ID),
+            }
+            session.add(
+                StrategyExperimentOOSExposureLinkRecord(
+                    id=OOS_EXPOSURE_LINK_ID,
+                    experiment_id=EXPERIMENT_ID,
+                    exposure_id=OOS_EXPOSURE_ID,
+                    link_hash=hashlib.sha256(
+                        canonical_json(link_identity).encode()
+                    ).hexdigest(),
+                    created_at=exposed_at,
+                )
+            )
         candidate_events = _candidate_events(admitted_at)
         session.add_all(candidate_events)
         await session.flush()
@@ -283,7 +329,7 @@ async def seed_evaluation_pair(
                 research_lineage_id=LINEAGE_ID,
                 current_state="BACKTEST_RUNNING",
                 event_sequence=4,
-                cumulative_oos_trial_count=3,
+                cumulative_oos_trial_count=1,
                 version=1,
                 updated_at=NOW - timedelta(minutes=1),
             )

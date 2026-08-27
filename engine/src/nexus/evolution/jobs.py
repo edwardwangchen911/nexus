@@ -14,7 +14,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nexus.audit.service import append_audit_event
-from nexus.evolution.repository import experiment_projection_is_valid
+from nexus.evolution.repository import (
+    CandidateState,
+    load_verified_experiment_authority,
+)
 from nexus.jobs.models import (
     JOB_PRIORITIES,
     Hash64,
@@ -31,6 +34,7 @@ from nexus.outbox.registry import PublisherRegistry
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.data import DataSnapshot, QualityReport
 from nexus.persistence.models.evolution import (
+    StrategyExperimentCandidateProjectionRecord,
     StrategyExperimentFamilyRecord,
     StrategyExperimentRecord,
     StrategyExperimentStateProjectionRecord,
@@ -106,6 +110,8 @@ class StrategyRNDJobPayloadV1(BaseModel):
     family_id: UUID | None
     experiment_id: UUID | None
     expected_champion_generation: int = Field(ge=1)
+    candidate_state: CandidateState | None = None
+    candidate_version: int | None = Field(default=None, ge=1)
     input_hash: Hash64
 
     @field_validator("family_id", "experiment_id", mode="before")
@@ -123,15 +129,26 @@ class StrategyRNDJobPayloadV1(BaseModel):
     def _exact_identity_and_hash(self) -> StrategyRNDJobPayloadV1:
         identifiers_absent = self.family_id is None and self.experiment_id is None
         identifiers_present = self.family_id is not None and self.experiment_id is not None
+        candidate_identity_present = (
+            self.candidate_state is not None and self.candidate_version is not None
+        )
         if self.operation == "generate_family" and not identifiers_absent:
             raise ValueError("generate_family must not accept family or experiment IDs")
         if self.operation != "generate_family" and not identifiers_present:
             raise ValueError("candidate operations require family and experiment IDs")
+        if self.operation == "evaluate_candidate" and not candidate_identity_present:
+            raise ValueError("evaluate_candidate requires candidate state and version")
+        if self.operation != "evaluate_candidate" and (
+            self.candidate_state is not None or self.candidate_version is not None
+        ):
+            raise ValueError("only evaluate_candidate accepts candidate state and version")
         expected = strategy_rnd_payload_hash(
             operation=self.operation,
             family_id=self.family_id,
             experiment_id=self.experiment_id,
             expected_champion_generation=self.expected_champion_generation,
+            candidate_state=self.candidate_state,
+            candidate_version=self.candidate_version,
         )
         if self.input_hash != expected:
             raise ValueError("strategy R&D input_hash does not match its authority")
@@ -156,6 +173,8 @@ def strategy_rnd_payload_hash(
     family_id: UUID | None,
     experiment_id: UUID | None,
     expected_champion_generation: int,
+    candidate_state: CandidateState | None,
+    candidate_version: int | None,
 ) -> str:
     """Hash the complete business input while excluding only the hash itself."""
     return job_input_hash(
@@ -165,6 +184,8 @@ def strategy_rnd_payload_hash(
             "family_id": None if family_id is None else str(family_id),
             "experiment_id": None if experiment_id is None else str(experiment_id),
             "expected_champion_generation": expected_champion_generation,
+            "candidate_state": candidate_state,
+            "candidate_version": candidate_version,
         }
     )
 
@@ -175,6 +196,8 @@ def build_strategy_rnd_job_payload(
     family_id: UUID | None,
     experiment_id: UUID | None,
     expected_champion_generation: int,
+    candidate_state: str | None = None,
+    candidate_version: int | None = None,
 ) -> StrategyRNDJobPayloadV1:
     """Build the only payload shape accepted by the Strategy R&D worker."""
     typed_operation = cast(StrategyRNDOperation, operation)
@@ -183,11 +206,15 @@ def build_strategy_rnd_job_payload(
         family_id=family_id,
         experiment_id=experiment_id,
         expected_champion_generation=expected_champion_generation,
+        candidate_state=cast(CandidateState | None, candidate_state),
+        candidate_version=candidate_version,
         input_hash=strategy_rnd_payload_hash(
             operation=typed_operation,
             family_id=family_id,
             experiment_id=experiment_id,
             expected_champion_generation=expected_champion_generation,
+            candidate_state=cast(CandidateState | None, candidate_state),
+            candidate_version=candidate_version,
         ),
     )
 
@@ -297,11 +324,21 @@ async def materialize_strategy_rnd_outbox_jobs(
             raise ValueError("admitted candidate authority is incomplete")
         jobs: list[Job] = []
         for candidate in experiments:
+            candidate_projection = await session.get(
+                StrategyExperimentCandidateProjectionRecord, candidate.id
+            )
+            if (
+                candidate_projection is None
+                or candidate_projection.family_id != family.id
+            ):
+                raise ValueError("admitted candidate projection is incomplete")
             payload = build_strategy_rnd_job_payload(
                 operation="evaluate_candidate",
                 family_id=family.id,
                 experiment_id=candidate.id,
                 expected_champion_generation=family.champion_generation,
+                candidate_state=candidate_projection.current_state,
+                candidate_version=candidate_projection.version,
             )
             existing = await _existing_exact_operation_job(session, payload=payload)
             jobs.append(
@@ -570,7 +607,11 @@ async def _due_candidate_jobs(
     rows = tuple(
         (
             await session.execute(
-                select(StrategyExperimentRecord, StrategyExperimentFamilyRecord)
+                select(
+                    StrategyExperimentRecord,
+                    StrategyExperimentFamilyRecord,
+                    StrategyExperimentCandidateProjectionRecord,
+                )
                 .join(
                     StrategyExperimentFamilyRecord,
                     StrategyExperimentFamilyRecord.id == StrategyExperimentRecord.family_id,
@@ -580,10 +621,17 @@ async def _due_candidate_jobs(
                     StrategyExperimentStateProjectionRecord.family_id
                     == StrategyExperimentFamilyRecord.id,
                 )
+                .join(
+                    StrategyExperimentCandidateProjectionRecord,
+                    StrategyExperimentCandidateProjectionRecord.experiment_id
+                    == StrategyExperimentRecord.id,
+                )
                 .where(
                     StrategyExperimentFamilyRecord.admission_status == "ADMITTED",
                     StrategyExperimentFamilyRecord.champion_generation == generation,
-                    StrategyExperimentRecord.status == "ADMITTED",
+                    StrategyExperimentCandidateProjectionRecord.current_state.in_(
+                        ("ADMITTED", "OOS_SELECTED", "OOS_RESERVED")
+                    ),
                     StrategyExperimentStateProjectionRecord.current_state.in_(
                         ("ADMITTED", "BACKTEST_RUNNING")
                     ),
@@ -596,13 +644,18 @@ async def _due_candidate_jobs(
         ).tuples()
     )
     targets: list[StrategyRNDJobPayloadV1] = []
-    for experiment, family in rows:
+    for experiment, family, candidate_projection in rows:
         existing = await session.scalar(
             select(Job.id)
             .where(
                 Job.job_type == JobType.STRATEGY_RND.value,
                 Job.payload["operation"].as_string() == "evaluate_candidate",
                 Job.payload["experiment_id"].as_string() == str(experiment.id),
+                Job.payload["candidate_state"].as_string()
+                == candidate_projection.current_state,
+                Job.payload["candidate_version"].as_integer()
+                == candidate_projection.version,
+                Job.status.in_(("queued", "running")),
             )
             .limit(1)
         )
@@ -613,6 +666,8 @@ async def _due_candidate_jobs(
                     family_id=family.id,
                     experiment_id=experiment.id,
                     expected_champion_generation=generation,
+                    candidate_state=candidate_projection.current_state,
+                    candidate_version=candidate_projection.version,
                 )
             )
     return targets
@@ -818,38 +873,32 @@ async def _preflight_strategy_rnd_job(
 
     family = await session.get(StrategyExperimentFamilyRecord, payload.family_id)
     experiment = await session.get(StrategyExperimentRecord, payload.experiment_id)
-    projection = (
-        None
-        if family is None
-        else await session.get(StrategyExperimentStateProjectionRecord, family.id)
-    )
     if (
         family is None
         or experiment is None
-        or projection is None
         or experiment.family_id != family.id
         or family.champion_generation != payload.expected_champion_generation
     ):
         raise ValueError("strategy experiment authority is inconsistent")
-    if not await experiment_projection_is_valid(session, projection):
+    try:
+        authority = await load_verified_experiment_authority(session, family.id)
+    except ValueError as error:
+        raise ValueError("strategy experiment authority is inconsistent") from error
+    projection = authority.family_projection
+    candidate_projection = authority.candidate_projection(experiment.id)
+    if payload.operation == "evaluate_candidate" and (
+        candidate_projection.current_state != payload.candidate_state
+        or candidate_projection.version != payload.candidate_version
+    ):
+        return JobHandlerResult(outcome="skipped", result_code="CANDIDATE_STATE_STALE")
+    if experiment not in authority.experiments:
         raise ValueError("strategy experiment authority is inconsistent")
     if projection.current_state in _TERMINAL_FAMILY_STATES:
         return JobHandlerResult(outcome="skipped", result_code="FAMILY_TERMINAL")
-    if payload.operation == "evaluate_candidate" and experiment.status in {
-        "BACKTEST_FAILED",
-        "BACKTEST_PASSED",
-        "SHADOW_RUNNING",
-        "SHADOW_FAILED",
-        "EXPIRED",
-        "VETOED",
-        "PROMOTION_ELIGIBLE",
-        "PROMOTED",
-        "STALE_CHAMPION_BASELINE",
-    }:
-        return JobHandlerResult(outcome="skipped", result_code="CANDIDATE_ALREADY_EVALUATED")
-    if payload.operation == "evaluate_candidate" and projection.current_state not in {
+    if payload.operation == "evaluate_candidate" and candidate_projection.current_state not in {
         "ADMITTED",
-        "BACKTEST_RUNNING",
+        "OOS_SELECTED",
+        "OOS_RESERVED",
     }:
         return JobHandlerResult(outcome="skipped", result_code="CANDIDATE_ALREADY_EVALUATED")
     if payload.operation in {"advance_shadow", "finalize_promotion"}:

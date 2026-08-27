@@ -31,6 +31,8 @@ async def test_dedicated_worker_claims_only_strategy_queue_with_injected_executo
         family_id=pair.family_id,
         experiment_id=pair.experiment_id,
         expected_champion_generation=1,
+        candidate_state="OOS_RESERVED",
+        candidate_version=4,
     )
     async with factory() as session, session.begin():
         job = await enqueue_strategy_rnd_job(session, payload=payload, effective_at=_NOW)

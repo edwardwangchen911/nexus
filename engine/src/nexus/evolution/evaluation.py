@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.canonical import canonical_json
@@ -23,6 +23,7 @@ from nexus.evolution.models import _reject_binary_float
 from nexus.evolution.policies import (
     CandidateBudgetPolicyV1,
     PromotionPolicyV1,
+    candidate_budget_policy_v1,
     load_promotion_policy_v1,
 )
 from nexus.evolution.repository import (
@@ -33,12 +34,18 @@ from nexus.evolution.repository import (
 )
 from nexus.persistence.models.backtest import BacktestRunRecord
 from nexus.persistence.models.evolution import (
+    StrategyCandidateValidationResultRecord,
     StrategyChampionComparisonRecord,
+    StrategyExperimentAttemptRecord,
     StrategyExperimentFamilyRecord,
+    StrategyExperimentOOSExposureLinkRecord,
     StrategyExperimentRecord,
+    StrategyOOSEvidenceLinkRecord,
+    StrategyOOSExposureRecord,
     StrategyPromotionDecisionRecord,
     StrategyPromotionPolicyRecord,
     StrategyRegistryHeadRecord,
+    StrategyResearchLineageProjectionRecord,
 )
 from nexus.persistence.models.optimization import CostPolicyRecord
 
@@ -88,6 +95,14 @@ class ValidationCandidateResultV1(_FrozenModel):
     @classmethod
     def _canonical_decimal(cls, value: Decimal) -> Decimal:
         return canonical_decimal(value)
+
+
+class OOSExposureReservationV1(_FrozenModel):
+    experiment_id: UUID
+    exposure_id: UUID
+    ordinal: int = Field(ge=1)
+    cumulative_oos_trial_count: int = Field(ge=1)
+    replayed: bool
 
 
 class ChampionComparisonRunV1(_FrozenModel):
@@ -194,6 +209,548 @@ def select_oos_candidates(
         ),
     )
     return tuple(ranked[: policy.max_oos_candidates])
+
+
+async def persist_candidate_validation_result(
+    session: AsyncSession,
+    *,
+    experiment_id: UUID,
+    validation_sharpe: Decimal,
+    validation_max_drawdown: Decimal,
+    validation_cost: Decimal,
+    valid_window_count: int,
+    authority_complete: bool,
+    authority_hash: str,
+    protocol_hash: str,
+    code_hash: str,
+    now: datetime,
+) -> StrategyCandidateValidationResultRecord:
+    """Persist one immutable validation fact and deterministically advance shortlist."""
+    now = require_utc(now)
+    validation_sharpe = canonical_decimal(validation_sharpe)
+    validation_max_drawdown = canonical_decimal(validation_max_drawdown)
+    validation_cost = canonical_decimal(validation_cost)
+    if validation_cost < 0 or valid_window_count < 0:
+        raise EvolutionEvaluationError("VALIDATION_RESULT_INVALID")
+    await session.execute(
+        text(
+            "SELECT pg_advisory_xact_lock("
+            "hashtextextended('strategy-validation:' || :experiment_id, 2205))"
+        ),
+        {"experiment_id": str(experiment_id)},
+    )
+    experiment_root = await session.get(StrategyExperimentRecord, experiment_id)
+    try:
+        authority = (
+            None
+            if experiment_root is None
+            else await load_verified_experiment_authority(
+                session, experiment_root.family_id, lock=True
+            )
+        )
+    except ValueError as error:
+        raise EvolutionEvaluationError("STRATEGY_EXPERIMENT_CHAIN_INVALID") from error
+    experiment = (
+        None
+        if authority is None
+        else next(
+            (item for item in authority.experiments if item.id == experiment_id),
+            None,
+        )
+    )
+    if experiment is None or authority is None:
+        raise EvolutionEvaluationError("VALIDATION_AUTHORITY_INCOMPLETE")
+    family = authority.family
+    if (
+        family.authority_hash != authority_hash
+        or family.protocol_hash != protocol_hash
+        or family.code_hash != code_hash
+    ):
+        raise EvolutionEvaluationError("VALIDATION_AUTHORITY_MISMATCH")
+    existing = await session.scalar(
+        select(StrategyCandidateValidationResultRecord).where(
+            StrategyCandidateValidationResultRecord.experiment_id == experiment_id
+        )
+    )
+    if existing is not None:
+        attempt = await session.get(StrategyExperimentAttemptRecord, existing.attempt_id)
+        _require_validation_result_identity(
+            existing,
+            attempt=attempt,
+            experiment_id=experiment_id,
+            validation_sharpe=validation_sharpe,
+            validation_max_drawdown=validation_max_drawdown,
+            validation_cost=validation_cost,
+            valid_window_count=valid_window_count,
+            authority_complete=authority_complete,
+            authority_hash=authority_hash,
+            protocol_hash=protocol_hash,
+            code_hash=code_hash,
+        )
+        await finalize_validation_shortlist(session, family_id=family.id, now=now)
+        return existing
+    candidate = authority.candidate_projection(experiment_id)
+    if candidate.current_state != "ADMITTED":
+        raise EvolutionEvaluationError("VALIDATION_STATE_INVALID")
+    attempt_number = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(StrategyExperimentAttemptRecord)
+            .where(StrategyExperimentAttemptRecord.experiment_id == experiment_id)
+        )
+        or 0
+    ) + 1
+    input_hash = hashlib.sha256(
+        canonical_json(
+            {
+                "schema_version": "strategy_candidate_validation_input_v1",
+                "experiment_id": str(experiment_id),
+                "authority_hash": authority_hash,
+                "protocol_hash": protocol_hash,
+                "code_hash": code_hash,
+                "phase": "validation",
+            }
+        ).encode()
+    ).hexdigest()
+    attempt_id = new_uuid7()
+    result_identity = {
+        "schema_version": "strategy_candidate_validation_result_v1",
+        "experiment_id": str(experiment_id),
+        "attempt_id": str(attempt_id),
+        "validation_sharpe": format(validation_sharpe, "f"),
+        "validation_max_drawdown": format(validation_max_drawdown, "f"),
+        "validation_cost": format(validation_cost, "f"),
+        "valid_window_count": valid_window_count,
+        "authority_complete": authority_complete,
+        "authority_hash": authority_hash,
+        "protocol_hash": protocol_hash,
+        "code_hash": code_hash,
+        "completed_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+    result_hash = hashlib.sha256(canonical_json(result_identity).encode()).hexdigest()
+    attempt = StrategyExperimentAttemptRecord(
+        id=attempt_id,
+        experiment_id=experiment_id,
+        attempt_number=attempt_number,
+        attempt_kind="backtest",
+        status="completed" if authority_complete and valid_window_count > 0 else "failed",
+        input_hash=input_hash,
+        output_hash=result_hash,
+        reason_code=(
+            None
+            if authority_complete and valid_window_count > 0
+            else "VALIDATION_EVIDENCE_INCOMPLETE"
+        ),
+        started_at=now,
+        completed_at=now,
+        created_at=now,
+    )
+    session.add(attempt)
+    await session.flush()
+    result = StrategyCandidateValidationResultRecord(
+        id=new_uuid7(),
+        experiment_id=experiment_id,
+        attempt_id=attempt.id,
+        validation_sharpe=validation_sharpe,
+        validation_max_drawdown=validation_max_drawdown,
+        validation_cost=validation_cost,
+        valid_window_count=valid_window_count,
+        authority_complete=authority_complete,
+        authority_hash=authority_hash,
+        protocol_hash=protocol_hash,
+        code_hash=code_hash,
+        result_hash=result_hash,
+        completed_at=now,
+        created_at=now,
+    )
+    session.add(result)
+    await session.flush()
+    passed = authority_complete and valid_window_count > 0
+    await append_candidate_event(
+        session,
+        authority=authority,
+        experiment_id=experiment_id,
+        event_type="VALIDATION_PASSED" if passed else "VALIDATION_FAILED",
+        idempotency_key=f"candidate-validation-{experiment_id}",
+        occurred_at=now,
+        payload={
+            "schema_version": "strategy_candidate_validation_payload_v1",
+            "result_id": str(result.id),
+            "result_hash": result_hash,
+            "authority_complete": authority_complete,
+            "valid_window_count": valid_window_count,
+            "reason_code": (
+                "VALIDATION_PASSED" if passed else "VALIDATION_EVIDENCE_INCOMPLETE"
+            ),
+        },
+    )
+    await finalize_validation_shortlist(session, family_id=family.id, now=now)
+    return result
+
+
+async def finalize_validation_shortlist(
+    session: AsyncSession,
+    *,
+    family_id: UUID,
+    now: datetime,
+) -> tuple[UUID, ...]:
+    """Select Top-3 only after every candidate has a terminal validation fact."""
+    now = require_utc(now)
+    try:
+        authority = await load_verified_experiment_authority(
+            session, family_id, lock=True
+        )
+    except ValueError as error:
+        raise EvolutionEvaluationError("STRATEGY_EXPERIMENT_CHAIN_INVALID") from error
+    states = {item.current_state for item in authority.candidate_projections}
+    if states <= {"OOS_SELECTED", "OOS_NOT_SELECTED", "VALIDATION_FAILED"}:
+        selected_ids = {
+            item.experiment_id
+            for item in authority.candidate_projections
+            if item.current_state == "OOS_SELECTED"
+        }
+        selected_results = tuple(
+            await session.scalars(
+                select(StrategyCandidateValidationResultRecord).where(
+                    StrategyCandidateValidationResultRecord.experiment_id.in_(selected_ids)
+                )
+            )
+        )
+        selected_experiments_by_id = {
+            item.id: item for item in authority.experiments
+        }
+        ranked = select_oos_candidates(
+            tuple(
+                ValidationCandidateResultV1(
+                    experiment_id=result.experiment_id,
+                    expression_hash=selected_experiments_by_id[
+                        result.experiment_id
+                    ].expression_hash,
+                    validation_sharpe=result.validation_sharpe,
+                    validation_max_drawdown=result.validation_max_drawdown,
+                    validation_cost=result.validation_cost,
+                    authority_complete=result.authority_complete,
+                )
+                for result in selected_results
+            ),
+            candidate_budget_policy_v1(),
+        )
+        if len(ranked) != len(selected_ids):
+            raise EvolutionEvaluationError("VALIDATION_AUTHORITY_INCOMPLETE")
+        return tuple(item.experiment_id for item in ranked)
+    if not states <= {"ADMITTED", "VALIDATION_PASSED", "VALIDATION_FAILED"}:
+        raise EvolutionEvaluationError("VALIDATION_SHORTLIST_STATE_INVALID")
+    if "ADMITTED" in states:
+        return ()
+    results = tuple(
+        await session.scalars(
+            select(StrategyCandidateValidationResultRecord).where(
+                StrategyCandidateValidationResultRecord.experiment_id.in_(
+                    [item.id for item in authority.experiments]
+                )
+            )
+        )
+    )
+    by_experiment = {item.experiment_id: item for item in results}
+    if len(by_experiment) != len(authority.experiments):
+        raise EvolutionEvaluationError("VALIDATION_AUTHORITY_INCOMPLETE")
+    ranked_input = tuple(
+        ValidationCandidateResultV1(
+            experiment_id=experiment.id,
+            expression_hash=experiment.expression_hash,
+            validation_sharpe=by_experiment[experiment.id].validation_sharpe,
+            validation_max_drawdown=by_experiment[
+                experiment.id
+            ].validation_max_drawdown,
+            validation_cost=by_experiment[experiment.id].validation_cost,
+            authority_complete=by_experiment[experiment.id].authority_complete,
+        )
+        for experiment in authority.experiments
+        if authority.candidate_projection(experiment.id).current_state
+        == "VALIDATION_PASSED"
+    )
+    selected = select_oos_candidates(ranked_input, candidate_budget_policy_v1())
+    selected_ids = {item.experiment_id for item in selected}
+    for experiment in authority.experiments:
+        if authority.candidate_projection(experiment.id).current_state != "VALIDATION_PASSED":
+            continue
+        current = await load_verified_experiment_authority(session, family_id, lock=True)
+        await append_candidate_event(
+            session,
+            authority=current,
+            experiment_id=experiment.id,
+            event_type=(
+                "OOS_SELECTED" if experiment.id in selected_ids else "OOS_NOT_SELECTED"
+            ),
+            idempotency_key=f"validation-shortlist-{family_id}-{experiment.id}",
+            occurred_at=now,
+            payload={
+                "schema_version": "strategy_validation_shortlist_payload_v1",
+                "selected": experiment.id in selected_ids,
+                "max_oos_candidates": candidate_budget_policy_v1().max_oos_candidates,
+            },
+        )
+    return tuple(item.experiment_id for item in selected)
+
+
+def _require_validation_result_identity(
+    record: StrategyCandidateValidationResultRecord,
+    *,
+    attempt: StrategyExperimentAttemptRecord | None,
+    **expected: object,
+) -> None:
+    for field, value in expected.items():
+        if getattr(record, field) != value:
+            raise EvolutionEvaluationError("VALIDATION_RESULT_IDEMPOTENCY_CONFLICT")
+    passed = record.authority_complete and record.valid_window_count > 0
+    input_identity = {
+        "schema_version": "strategy_candidate_validation_input_v1",
+        "experiment_id": str(record.experiment_id),
+        "authority_hash": record.authority_hash,
+        "protocol_hash": record.protocol_hash,
+        "code_hash": record.code_hash,
+        "phase": "validation",
+    }
+    result_identity = {
+        "schema_version": "strategy_candidate_validation_result_v1",
+        "experiment_id": str(record.experiment_id),
+        "attempt_id": str(record.attempt_id),
+        "validation_sharpe": format(record.validation_sharpe, "f"),
+        "validation_max_drawdown": format(record.validation_max_drawdown, "f"),
+        "validation_cost": format(record.validation_cost, "f"),
+        "valid_window_count": record.valid_window_count,
+        "authority_complete": record.authority_complete,
+        "authority_hash": record.authority_hash,
+        "protocol_hash": record.protocol_hash,
+        "code_hash": record.code_hash,
+        "completed_at": record.completed_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+    if (
+        attempt is None
+        or attempt.id != record.attempt_id
+        or attempt.experiment_id != record.experiment_id
+        or attempt.attempt_kind != "backtest"
+        or attempt.status != ("completed" if passed else "failed")
+        or attempt.input_hash != _sha256_identity(input_identity)
+        or attempt.output_hash != record.result_hash
+        or attempt.reason_code
+        != (None if passed else "VALIDATION_EVIDENCE_INCOMPLETE")
+        or attempt.completed_at != record.completed_at
+        or record.result_hash != _sha256_identity(result_identity)
+    ):
+        raise EvolutionEvaluationError("VALIDATION_RESULT_AUTHORITY_MISMATCH")
+
+
+async def load_lineage_oos_trial_count(
+    session: AsyncSession,
+    lineage_id: UUID,
+) -> int:
+    """Load the database-owned irreversible OOS trial count."""
+    projection = await session.get(StrategyResearchLineageProjectionRecord, lineage_id)
+    if projection is None:
+        raise EvolutionEvaluationError("OOS_LINEAGE_AUTHORITY_INCOMPLETE")
+    return projection.cumulative_oos_trial_count
+
+
+async def reserve_oos_exposure(
+    session: AsyncSession,
+    *,
+    experiment_id: UUID,
+    now: datetime,
+) -> OOSExposureReservationV1:
+    """Commit one lineage/expression exposure before any OOS computation starts."""
+    now = require_utc(now)
+    root = await session.execute(
+        select(
+            StrategyExperimentRecord.family_id,
+            StrategyExperimentRecord.expression_hash,
+            StrategyExperimentFamilyRecord.research_lineage_id,
+        )
+        .join(
+            StrategyExperimentFamilyRecord,
+            StrategyExperimentFamilyRecord.id == StrategyExperimentRecord.family_id,
+        )
+        .where(StrategyExperimentRecord.id == experiment_id)
+    )
+    identity = root.one_or_none()
+    if identity is None:
+        raise EvolutionEvaluationError("OOS_EXPERIMENT_NOT_FOUND")
+    family_id, expression_hash, lineage_id = identity
+
+    # One lineage-scoped transaction lock makes first exposure allocation serial even
+    # when different families independently reach the same expression.
+    await session.execute(
+        text(
+            "SELECT pg_advisory_xact_lock("
+            "hashtextextended('strategy-oos-lineage:' || :lineage_id, 2205))"
+        ),
+        {"lineage_id": str(lineage_id)},
+    )
+    try:
+        authority = await load_verified_experiment_authority(session, family_id, lock=True)
+    except ValueError as error:
+        raise EvolutionEvaluationError("STRATEGY_EXPERIMENT_CHAIN_INVALID") from error
+    experiment = next(
+        (item for item in authority.experiments if item.id == experiment_id), None
+    )
+    if experiment is None or experiment.expression_hash != expression_hash:
+        raise EvolutionEvaluationError("OOS_EXPERIMENT_AUTHORITY_MISMATCH")
+
+    existing_link = await session.scalar(
+        select(StrategyExperimentOOSExposureLinkRecord).where(
+            StrategyExperimentOOSExposureLinkRecord.experiment_id == experiment_id
+        )
+    )
+    if existing_link is not None:
+        exposure = await session.get(StrategyOOSExposureRecord, existing_link.exposure_id)
+        if exposure is None:
+            raise EvolutionEvaluationError("OOS_EXPOSURE_AUTHORITY_INCOMPLETE")
+        _require_exposure_identity(
+            exposure,
+            lineage_id=lineage_id,
+            expression_hash=expression_hash,
+        )
+        _require_exposure_link_identity(existing_link, experiment_id, exposure.id)
+        if authority.candidate_projection(experiment_id).current_state == "OOS_SELECTED":
+            raise EvolutionEvaluationError("OOS_RESERVATION_PROJECTION_MISSING")
+        return OOSExposureReservationV1(
+            experiment_id=experiment_id,
+            exposure_id=exposure.id,
+            ordinal=exposure.ordinal,
+            cumulative_oos_trial_count=(
+                authority.lineage_projection.cumulative_oos_trial_count
+            ),
+            replayed=True,
+        )
+
+    candidate = authority.candidate_projection(experiment_id)
+    if candidate.current_state != "OOS_SELECTED":
+        raise EvolutionEvaluationError("OOS_RESERVATION_STATE_INVALID")
+    exposure = await session.scalar(
+        select(StrategyOOSExposureRecord).where(
+            StrategyOOSExposureRecord.research_lineage_id == lineage_id,
+            StrategyOOSExposureRecord.expression_hash == expression_hash,
+        )
+    )
+    if exposure is None:
+        ordinal = authority.lineage_projection.cumulative_oos_trial_count + 1
+        exposure_id = new_uuid7()
+        exposure_identity = {
+            "schema_version": "strategy_oos_exposure_v1",
+            "exposure_id": str(exposure_id),
+            "research_lineage_id": str(lineage_id),
+            "expression_hash": expression_hash,
+            "ordinal": ordinal,
+            "first_experiment_id": str(experiment_id),
+            "exposed_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        }
+        exposure = StrategyOOSExposureRecord(
+            id=exposure_id,
+            research_lineage_id=lineage_id,
+            expression_hash=expression_hash,
+            ordinal=ordinal,
+            first_experiment_id=experiment_id,
+            exposed_at=now,
+            exposure_hash=_sha256_identity(exposure_identity),
+            created_at=now,
+        )
+        session.add(exposure)
+        authority.lineage_projection.cumulative_oos_trial_count = ordinal
+        authority.lineage_projection.version += 1
+        authority.lineage_projection.updated_at = now
+        await session.flush()
+    else:
+        _require_exposure_identity(
+            exposure,
+            lineage_id=lineage_id,
+            expression_hash=expression_hash,
+        )
+
+    link_identity = {
+        "schema_version": "strategy_experiment_oos_exposure_link_v1",
+        "experiment_id": str(experiment_id),
+        "exposure_id": str(exposure.id),
+    }
+    link = StrategyExperimentOOSExposureLinkRecord(
+        id=new_uuid7(),
+        experiment_id=experiment_id,
+        exposure_id=exposure.id,
+        link_hash=_sha256_identity(link_identity),
+        created_at=now,
+    )
+    session.add(link)
+    await session.flush()
+    await append_candidate_event(
+        session,
+        authority=authority,
+        experiment_id=experiment_id,
+        event_type="OOS_RESERVED",
+        idempotency_key=f"oos-reservation-{experiment_id}",
+        occurred_at=now,
+        payload={
+            "schema_version": "strategy_oos_reservation_payload_v1",
+            "exposure_id": str(exposure.id),
+            "exposure_hash": exposure.exposure_hash,
+            "ordinal": exposure.ordinal,
+            "cumulative_oos_trial_count": (
+                authority.lineage_projection.cumulative_oos_trial_count
+            ),
+        },
+    )
+    return OOSExposureReservationV1(
+        experiment_id=experiment_id,
+        exposure_id=exposure.id,
+        ordinal=exposure.ordinal,
+        cumulative_oos_trial_count=(
+            authority.lineage_projection.cumulative_oos_trial_count
+        ),
+        replayed=False,
+    )
+
+
+def _require_exposure_identity(
+    exposure: StrategyOOSExposureRecord,
+    *,
+    lineage_id: UUID,
+    expression_hash: str,
+) -> None:
+    identity = {
+        "schema_version": "strategy_oos_exposure_v1",
+        "exposure_id": str(exposure.id),
+        "research_lineage_id": str(exposure.research_lineage_id),
+        "expression_hash": exposure.expression_hash,
+        "ordinal": exposure.ordinal,
+        "first_experiment_id": str(exposure.first_experiment_id),
+        "exposed_at": exposure.exposed_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+    if (
+        exposure.research_lineage_id != lineage_id
+        or exposure.expression_hash != expression_hash
+        or exposure.exposure_hash != _sha256_identity(identity)
+    ):
+        raise EvolutionEvaluationError("OOS_EXPOSURE_AUTHORITY_MISMATCH")
+
+
+def _require_exposure_link_identity(
+    link: StrategyExperimentOOSExposureLinkRecord,
+    experiment_id: UUID,
+    exposure_id: UUID,
+) -> None:
+    identity = {
+        "schema_version": "strategy_experiment_oos_exposure_link_v1",
+        "experiment_id": str(experiment_id),
+        "exposure_id": str(exposure_id),
+    }
+    if (
+        link.experiment_id != experiment_id
+        or link.exposure_id != exposure_id
+        or link.link_hash != _sha256_identity(identity)
+    ):
+        raise EvolutionEvaluationError("OOS_EXPOSURE_LINK_AUTHORITY_MISMATCH")
+
+
+def _sha256_identity(identity: Mapping[str, object]) -> str:
+    return hashlib.sha256(canonical_json(identity).encode()).hexdigest()
 
 
 def evaluate_historical_promotion(
@@ -441,14 +998,10 @@ async def persist_champion_comparison(
     experiment_id: UUID,
     champion_backtest_run_id: UUID,
     challenger_backtest_run_id: UUID,
-    champion_generation: int,
-    cumulative_oos_trial_count: int,
     now: datetime,
 ) -> StrategyChampionComparisonRecord:
-    """Persist one same-authority champion/challenger comparison and running event."""
+    """Persist a paired comparison using only locked database authority facts."""
     now = require_utc(now)
-    if champion_generation < 1 or cumulative_oos_trial_count < 1:
-        raise EvolutionEvaluationError("PAIRED_AUTHORITY_INCOMPLETE")
     await session.execute(
         text(
             "SELECT pg_advisory_xact_lock("
@@ -498,27 +1051,60 @@ async def persist_champion_comparison(
         or challenger is None
     ):
         raise EvolutionEvaluationError("PAIRED_AUTHORITY_INCOMPLETE")
+    champion_generation = family.champion_generation
+    cumulative_oos_trial_count = (
+        authority.lineage_projection.cumulative_oos_trial_count
+    )
+    exposure_link = await session.scalar(
+        select(StrategyExperimentOOSExposureLinkRecord).where(
+            StrategyExperimentOOSExposureLinkRecord.experiment_id == experiment_id
+        )
+    )
+    exposure = (
+        None
+        if exposure_link is None
+        else await session.get(StrategyOOSExposureRecord, exposure_link.exposure_id)
+    )
+    if exposure_link is None or exposure is None or cumulative_oos_trial_count < 1:
+        raise EvolutionEvaluationError("OOS_EXPOSURE_AUTHORITY_INCOMPLETE")
+    _require_exposure_identity(
+        exposure,
+        lineage_id=family.research_lineage_id,
+        expression_hash=experiment.expression_hash,
+    )
+    _require_exposure_link_identity(exposure_link, experiment_id, exposure.id)
     candidate_projection = authority.candidate_projection(experiment_id)
     if existing is not None:
         if (
             existing.champion_backtest_run_id != champion_backtest_run_id
             or existing.challenger_backtest_run_id != challenger_backtest_run_id
-            or existing.champion_generation != champion_generation
-            or existing.cumulative_oos_trial_count != cumulative_oos_trial_count
             or existing.champion_generation != family.champion_generation
             or existing.cumulative_oos_trial_count
             != authority.lineage_projection.cumulative_oos_trial_count
         ):
             raise EvolutionEvaluationError("COMPARISON_IDEMPOTENCY_CONFLICT")
         _comparison_model(existing)
+        evidence = await session.scalar(
+            select(StrategyOOSEvidenceLinkRecord).where(
+                StrategyOOSEvidenceLinkRecord.comparison_id == existing.id
+            )
+        )
+        if evidence is None:
+            raise EvolutionEvaluationError("OOS_EVIDENCE_AUTHORITY_INCOMPLETE")
+        _require_oos_evidence_identity(
+            evidence,
+            experiment_id=experiment_id,
+            exposure_id=exposure.id,
+            comparison_id=existing.id,
+            champion_backtest_run_id=champion.id,
+            challenger_backtest_run_id=challenger.id,
+            authority_hash=existing.authority_hash,
+        )
         return existing
     if candidate_projection.current_state != "OOS_RESERVED":
         raise EvolutionEvaluationError("FAMILY_TERMINAL")
     if (
-        family.champion_generation != champion_generation
-        or authority.lineage_projection.cumulative_oos_trial_count
-        != cumulative_oos_trial_count
-        or head.active_generation != champion_generation
+        head.active_generation != champion_generation
         or head.active_definition_id != family.parent_strategy_definition_id
         or champion.strategy_definition_id != family.parent_strategy_definition_id
         or challenger.strategy_definition_id != experiment.candidate_strategy_definition_id
@@ -572,6 +1158,29 @@ async def persist_champion_comparison(
         created_at=now,
     )
     session.add(record)
+    await session.flush()
+    evidence_identity = {
+        "schema_version": "strategy_oos_evidence_link_v1",
+        "experiment_id": str(experiment.id),
+        "exposure_id": str(exposure.id),
+        "comparison_id": str(record.id),
+        "champion_backtest_run_id": str(champion.id),
+        "challenger_backtest_run_id": str(challenger.id),
+        "authority_hash": champion.authority_hash,
+    }
+    evidence = StrategyOOSEvidenceLinkRecord(
+        id=new_uuid7(),
+        experiment_id=experiment.id,
+        exposure_id=exposure.id,
+        comparison_id=record.id,
+        champion_backtest_run_id=champion.id,
+        challenger_backtest_run_id=challenger.id,
+        authority_hash=champion.authority_hash,
+        evidence_hash=_sha256_identity(evidence_identity),
+        created_at=now,
+    )
+    session.add(evidence)
+    await session.flush()
     await append_family_event(
         session,
         authority=authority,
@@ -601,6 +1210,37 @@ async def persist_champion_comparison(
     )
     await session.flush()
     return record
+
+
+def _require_oos_evidence_identity(
+    evidence: StrategyOOSEvidenceLinkRecord,
+    *,
+    experiment_id: UUID,
+    exposure_id: UUID,
+    comparison_id: UUID,
+    champion_backtest_run_id: UUID,
+    challenger_backtest_run_id: UUID,
+    authority_hash: str,
+) -> None:
+    identity = {
+        "schema_version": "strategy_oos_evidence_link_v1",
+        "experiment_id": str(experiment_id),
+        "exposure_id": str(exposure_id),
+        "comparison_id": str(comparison_id),
+        "champion_backtest_run_id": str(champion_backtest_run_id),
+        "challenger_backtest_run_id": str(challenger_backtest_run_id),
+        "authority_hash": authority_hash,
+    }
+    if (
+        evidence.experiment_id != experiment_id
+        or evidence.exposure_id != exposure_id
+        or evidence.comparison_id != comparison_id
+        or evidence.champion_backtest_run_id != champion_backtest_run_id
+        or evidence.challenger_backtest_run_id != challenger_backtest_run_id
+        or evidence.authority_hash != authority_hash
+        or evidence.evidence_hash != _sha256_identity(identity)
+    ):
+        raise EvolutionEvaluationError("OOS_EVIDENCE_AUTHORITY_MISMATCH")
 
 
 async def persist_historical_promotion_decision(

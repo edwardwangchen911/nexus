@@ -97,8 +97,6 @@ async def seed_strategy_shadow_ready(
             experiment_id=pair.experiment_id,
             champion_backtest_run_id=pair.champion_run_id,
             challenger_backtest_run_id=pair.challenger_run_id,
-            champion_generation=1,
-            cumulative_oos_trial_count=3,
             now=START_NOW,
         )
     async with factory() as session, session.begin():

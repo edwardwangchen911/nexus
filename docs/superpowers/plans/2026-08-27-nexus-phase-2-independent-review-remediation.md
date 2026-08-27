@@ -254,7 +254,7 @@ git commit -m "fix(engine): replay candidate strategy state independently"
 - Produces: `persist_candidate_validation_result(...)`, `finalize_validation_shortlist(session, family_id, now)`, `reserve_oos_exposure(session, experiment_id, now)`, `load_lineage_oos_trial_count(...)`, database-derived `persist_champion_comparison(session, experiment_id, champion_backtest_run_id, challenger_backtest_run_id, now)`.
 - Changes: `StrategyRNDJobPayloadV1` adds nullable, hash-bound `candidate_state` and `candidate_version` for `evaluate_candidate` only.
 
-- [ ] **Step 1: Write 24-candidate shortlist red test**
+- [x] **Step 1: Write 24-candidate shortlist red test**
 
 Seed 24 literal validation results whose hand-computed ordering has tie cases. Assert:
 
@@ -267,7 +267,7 @@ assert family_projection.current_state == "BACKTEST_RUNNING"
 
 Repeat the final result concurrently from two sessions and assert one immutable result and the same shortlist.
 
-- [ ] **Step 2: Run shortlist test and observe RED**
+- [x] **Step 2: Run shortlist test and observe RED**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -276,13 +276,13 @@ uv run --package nexus-engine pytest \
 
 Expected: FAIL because validation facts and production shortlist finalization do not exist.
 
-- [ ] **Step 3: Implement immutable validation and shortlist finalization**
+- [x] **Step 3: Implement immutable validation and shortlist finalization**
 
 Persist terminal strategy attempt and validation result in one transaction, transition only that candidate, then lock the family. Run Top-3 only when all 24 candidate projections are `VALIDATION_PASSED|VALIDATION_FAILED`; load metrics from the database and never accept a caller-supplied shortlist.
 
 Update `_due_candidate_jobs()` to target candidate projections, not `StrategyExperimentRecord.status`. A queued/running Job for the same experiment, candidate state and version is a duplicate; a terminal Job from an earlier state is not.
 
-- [ ] **Step 4: Write OOS reservation, dedup, crash, replay and concurrency red tests**
+- [x] **Step 4: Write OOS reservation, dedup, crash, replay and concurrency red tests**
 
 Cover:
 
@@ -296,7 +296,7 @@ assert await load_lineage_oos_trial_count(session, lineage_id) == 1
 
 Commit reservation, simulate an exception before backtest persistence, retry and assert the count remains one. Run two first-time reservations concurrently and assert one exposure, one ordinal and two experiment links.
 
-- [ ] **Step 5: Implement OOS reservation and remove caller-owned trial count**
+- [x] **Step 5: Implement OOS reservation and remove caller-owned trial count**
 
 `persist_champion_comparison()` must load the experiment exposure link and locked lineage projection, then require:
 
@@ -307,7 +307,7 @@ comparison_report.cumulative_oos_trial_count == protocol_attempts
 
 Remove `champion_generation` and `cumulative_oos_trial_count` parameters from every call site. Insert `strategy_oos_evidence_links` with the final comparison and both backtest runs. Reject a comparison when no committed exposure exists.
 
-- [ ] **Step 6: Run Task 3 focused suites GREEN**
+- [x] **Step 6: Run Task 3 focused suites GREEN**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -323,7 +323,7 @@ uv run --package nexus-engine mypy engine/src/nexus/evolution
 
 Expected: PASS; `rg "cumulative_oos_trial_count=" engine/src/nexus/evolution` finds no comparison call that supplies a caller count.
 
-- [ ] **Step 7: Commit Task 3**
+- [x] **Step 7: Commit Task 3**
 
 ```bash
 git add engine/src/nexus/evolution/evaluation.py \

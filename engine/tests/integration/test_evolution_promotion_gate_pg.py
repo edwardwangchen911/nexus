@@ -35,8 +35,6 @@ async def test_historical_pass_persists_ordered_gates_without_starting_shadow(
             experiment_id=pair.experiment_id,
             champion_backtest_run_id=pair.champion_run_id,
             challenger_backtest_run_id=pair.challenger_run_id,
-            champion_generation=1,
-            cumulative_oos_trial_count=3,
             now=NOW,
         )
     async with factory() as session, session.begin():
@@ -83,8 +81,6 @@ async def test_historical_failure_is_terminal_and_does_not_start_shadow(
             experiment_id=pair.experiment_id,
             champion_backtest_run_id=pair.champion_run_id,
             challenger_backtest_run_id=pair.challenger_run_id,
-            champion_generation=1,
-            cumulative_oos_trial_count=3,
             now=NOW,
         )
         outcome = await persist_historical_promotion_decision(
@@ -116,8 +112,6 @@ async def test_generation_change_marks_comparison_stale_without_decision_or_regi
             experiment_id=pair.experiment_id,
             champion_backtest_run_id=pair.champion_run_id,
             challenger_backtest_run_id=pair.challenger_run_id,
-            champion_generation=1,
-            cumulative_oos_trial_count=3,
             now=NOW,
         )
     await _advance_registry_generation(factory, pair)

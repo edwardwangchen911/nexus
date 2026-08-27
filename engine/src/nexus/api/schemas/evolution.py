@@ -385,4 +385,9 @@ def _b64encode(value: bytes) -> str:
 
 
 def _b64decode(value: str) -> bytes:
-    return base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+    decoded = base64.b64decode(
+        value + "=" * (-len(value) % 4), altchars=b"-_", validate=True
+    )
+    if _b64encode(decoded) != value:
+        raise ValueError("strategy evolution cursor base64 is not canonical")
+    return decoded
