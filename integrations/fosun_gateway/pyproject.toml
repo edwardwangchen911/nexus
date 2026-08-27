@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "NEXUS isolated Fosun read-only gateway"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "cryptography>=45,<46",
+    "cryptography>=50,<51",
     "fastapi>=0.116,<0.141",
     "httpx>=0.28,<0.29",
     "limits>=5.4,<6",
@@ -20,8 +20,8 @@ dev = [
     "httpx==0.28.*",
     "hypothesis==6.138.*",
     "mypy==1.17.*",
-    "pytest-asyncio==1.1.*",
-    "pytest==8.4.*",
+    "pytest-asyncio==1.4.*",
+    "pytest==9.0.*",
     "respx==0.22.*",
     "ruff==0.12.*",
 ]

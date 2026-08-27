@@ -16,6 +16,7 @@ npm run build
 
 - [本地开发与 Compose](docs/runbooks/local-development.md)：不强制 Docker Desktop，Docker Desktop、OrbStack 或 Colima 均可。
 - [备份/恢复演练](docs/runbooks/backup-restore.md)
+- [CI 与离线发布门禁](docs/runbooks/ci-release-gates.md)
 - [Provider 故障处置](docs/runbooks/provider-outage.md)
 - [密钥与证书轮换](docs/runbooks/key-rotation.md)
 - [复星 SDK admission](docs/runbooks/fosun-sdk-admission.md)

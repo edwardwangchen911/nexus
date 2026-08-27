@@ -5,7 +5,7 @@ export default defineConfig({
   use: {
     baseURL: "http://127.0.0.1:4173",
     browserName: "chromium",
-    channel: "chrome",
+    channel: process.env.NEXUS_E2E_BROWSER_CHANNEL === "chromium" ? "chromium" : "chrome",
     viewport: { width: 390, height: 844 },
     extraHTTPHeaders: {
       "oai-authenticated-user-id": "task-1-browser-test-user",

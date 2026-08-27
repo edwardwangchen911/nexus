@@ -42,10 +42,12 @@
 
 ## Slice 5：CI、离线网络和供应链门禁
 
-- [ ] 新增 gateway loopback-only socket guard 与自测；在该 guard 下运行全部 gateway 测试。
-- [ ] 新增禁止路由/密钥模式/依赖与许可证清单/SDK lock admission 策略脚本及测试。
-- [ ] 创建 `.github/workflows/ci.yml`，拆分 web/gateway-offline/engine-postgres/e2e/policy，最小 `contents: read`，失败时仅上传脱敏 Playwright artifact。
-- [ ] 本地通过 workflow 语法、所有策略脚本和全量静态门禁；提交 `ci: add offline release gates`。
+- [x] 新增 gateway loopback-only socket guard 与自测；在该 guard 下运行全部 gateway 测试。
+- [x] 新增禁止路由/密钥模式/依赖与许可证清单/SDK lock admission 策略脚本及测试。
+- [x] 创建 `.github/workflows/ci.yml`，拆分 web/gateway-offline/engine-postgres/e2e/policy，最小 `contents: read`，失败时仅上传脱敏 Playwright artifact。
+- [x] 本地通过 workflow 语法、所有策略脚本和全量静态门禁；提交 `ci: add offline release gates`。
+
+验收记录（2026-08-27）：首个策略红灯证明 `.github/workflows/ci.yml` 缺失；随后 10 项 policy test 覆盖真实回环正例、保留地址/DNS 反例、可恢复且幂等的 socket guard、gateway 禁止写/Webhook surface、密钥模式、SDK lock/admission 一致性、许可证、镜像 digest、非 root runtime、Docker context 与 CI 结构。guard 自测和其下 gateway `104 passed`；repository policy inventory 761 个第三方依赖、0 finding。首次 `pip-audit` 发现 cryptography/pyarrow/pytest 共 11 条已知漏洞，升级到 50.0.1/23.0.1/9.0.3 并配套 pytest-asyncio 1.4.0 后清零；完整 npm 审计另发现 16 条（12 high），升级 Cloudflare/Vinext/Vite/Wrangler、React RSC 与传递依赖后清零，最终两类 audit 均为 0。五个 job 使用 `contents: read`、完整 action SHA、无 Secrets；容器使用 tag＋digest，Engine/Gateway 最终 non-root，失败 artifact 仅 `test-results/**`/3 天/排除隐藏文件。Workflow YAML、uv 0.12.1 lock、两 Compose profile、两个 Dockerfile check 和完整 cache-only image build 通过；Web unit `424 passed`＋build，Engine unit `700 passed`，空库迁移后全 Engine `1428 passed in 22:52` 且临时容器残留 0，Chromium E2E 安装前先保留 launch 红灯，安装 Playwright 锁定浏览器并完成依赖升级后 `64 passed`，Ruff/Mypy `251 source files` 通过。GitHub-hosted CI 尚未推送/运行，本记录只证明本地可复现门禁。
 
 ## Slice 6：复星 SDK admission 与只读激活 gate
 

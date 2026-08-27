@@ -1,0 +1,167 @@
+name: NEXUS CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nexus-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22.19.0"
+  UV_VERSION: "0.12.1"
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run check:generated
+      - run: npm run build
+
+  gateway-offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - run: uv sync --frozen --package nexus-fosun-gateway
+      - name: Prove loopback-only network guard
+        env:
+          NEXUS_OFFLINE_SOCKET_GUARD: "1"
+          PYTHONPATH: ${{ github.workspace }}/scripts/offline_guard
+        run: uv run python scripts/offline_guard/selftest.py
+      - name: Run every gateway test offline
+        env:
+          NEXUS_OFFLINE_SOCKET_GUARD: "1"
+          PYTHONPATH: ${{ github.workspace }}/scripts/offline_guard
+        run: uv run pytest integrations/fosun_gateway/tests -q
+      - run: uv run ruff check integrations/fosun_gateway scripts/offline_guard
+      - run: uv run mypy integrations/fosun_gateway/src
+
+  engine-postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17@sha256:e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449
+        env:
+          POSTGRES_DB: nexus_ci
+          POSTGRES_USER: nexus_ci
+          POSTGRES_PASSWORD: synthetic_ci_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nexus_ci -d nexus_ci"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      NEXUS_ENV: test
+      DATABASE_URL: postgresql+asyncpg://nexus_ci:synthetic_ci_only@127.0.0.1:5432/nexus_ci
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - run: uv sync --frozen --package nexus-engine
+      - run: uv run alembic -c engine/alembic.ini upgrade head
+      - run: uv run pytest engine/tests -q --import-mode=importlib
+      - run: uv run ruff check engine
+      - run: uv run mypy engine/src
+
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      NEXUS_E2E_BROWSER_CHANNEL: chromium
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          package-manager-cache: false
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e -- --workers=3
+      - name: Upload synthetic failure evidence only
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nexus-e2e-failure-${{ github.run_id }}
+          path: test-results/**
+          if-no-files-found: ignore
+          retention-days: 3
+          include-hidden-files: false
+
+  policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          package-manager-cache: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - run: npm ci
+      - run: uv sync --frozen --all-packages
+      - run: uv run pytest tests/policy -q
+      - name: Run repository and license policy
+        run: >-
+          uv run python scripts/ci/repository_policy.py
+          --root .
+          --inventory-output "$RUNNER_TEMP/nexus-dependency-inventory.json"
+      - run: npm audit --audit-level=high
+      - run: uv run pip-audit --local --skip-editable
+      - name: Validate both Compose profiles
+        env:
+          NEXUS_ENV: test
+          DATABASE_URL: postgresql+asyncpg://nexus_ci:synthetic_ci_only@postgres:5432/nexus_ci
+          OBJECT_STORE_ENDPOINT: http://minio:9000
+          OBJECT_STORE_REGION: us-east-1
+          OBJECT_STORE_BUCKET: nexus-ci
+          OBJECT_STORE_ACCESS_KEY_ID: synthetic-ci-access
+          OBJECT_STORE_SECRET_ACCESS_KEY: synthetic-ci-secret
+          POSTGRES_DB: nexus_ci
+          POSTGRES_USER: nexus_ci
+          POSTGRES_PASSWORD: synthetic_ci_only
+          MINIO_ROOT_USER: synthetic-ci-minio
+          MINIO_ROOT_PASSWORD: synthetic-ci-minio-secret
+        run: |
+          docker compose -f infra/compose.yaml --profile app config --quiet
+          docker compose -f infra/compose.yaml --profile broker config --quiet
