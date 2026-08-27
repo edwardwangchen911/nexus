@@ -667,17 +667,17 @@ Verification evidence before commit:
 - Produces complete, reproducible acceptance evidence and a clean commit range.
 - Consumes every prior task and the design spec requirement matrix.
 
-- [ ] **Step 1: Add E2E fixtures and red assertions**
+- [x] **Step 1: Add E2E fixtures and red assertions**
 
 Test 375/390/768/1024/1440 and 390x844 landscape for ready, active, partial, stale, pending promotion, rollback-pending-orders and forbidden states. Exercise experiment start, pause/resume, veto, rollback confirm, 409 refetch and unknown 202 recovery. Assert no page overflow, Axe critical/serious 0, keyboard dialog/focus return, aria-live status and absence of real/broker/order controls.
 
-- [ ] **Step 2: Run focused E2E and fix only observed failures with red tests**
+- [x] **Step 2: Run focused E2E and fix only observed failures with red tests**
 
 ```bash
 npm run test:e2e -- tests/e2e/strategy-evolution.spec.ts
 ```
 
-- [ ] **Step 3: Run migration and Engine full gates**
+- [x] **Step 3: Run migration and Engine full gates**
 
 Use the existing Docker-compatible runtime; do not install Docker Desktop. Start PostgreSQL/MinIO, create a temporary test database, run `0021 -> 0022 -> 0021 -> 0022`, then:
 
@@ -690,7 +690,7 @@ uv run --package nexus-engine alembic -c engine/alembic.ini heads
 
 Expected: one head `0022_strategy_evolution`, all tests pass, Ruff/Mypy exit 0.
 
-- [ ] **Step 4: Run Web full gates**
+- [x] **Step 4: Run Web full gates**
 
 ```bash
 npm test
@@ -701,7 +701,7 @@ npm run build
 npm run test:e2e
 ```
 
-- [ ] **Step 5: Run security/boundary verification**
+- [x] **Step 5: Run security/boundary verification**
 
 ```bash
 git grep -nE 'ak_[A-Za-z0-9]|BEGIN .*PRIVATE KEY|NEXUS_ENGINE_HMAC.*=' -- . ':!package-lock.json'
@@ -711,15 +711,15 @@ git diff --check f0336b6..HEAD
 
 Expected: secret scan has no repository secret, evolution has no broker/write import or operation, diff check exits 0. Query the temporary database and record zero unexpected broker/live facts, zero mutable authority updates, one registry head and a valid event hash chain.
 
-- [ ] **Step 6: Perform a separated single-owner code and security review**
+- [x] **Step 6: Perform a separated single-owner code and security review**
 
 Review the full `f0336b6..HEAD` range for look-ahead, adaptive trial reset, authority mismatch, candidate/risk escape, Agent tool escape, event immutability, idempotency, promotion races, pending-order behavior, rollback history mutation, Forward duplication, API/BFF confusion, secret/identifier leakage, accessibility and false live semantics. Record every Critical/Important/Minor finding with file/line and evidence. Fix every Critical/Important with a failing test and rerun focused/full gates; do not accept unresolved Critical/Important.
 
-- [ ] **Step 7: Write acceptance review and update progress**
+- [x] **Step 7: Write acceptance review and update progress**
 
 Record exact commit range, commands, pass counts, migration round-trip, database residual counts, review findings/fixes and the single-owner review limitation in `docs/superpowers/reviews/2026-08-27-nexus-phase-2-strategy-evolution-review.md`. Mark this plan and progress ledger complete only after all evidence exists.
 
-- [ ] **Step 8: Commit acceptance evidence**
+- [x] **Step 8: Commit acceptance evidence**
 
 ```bash
 git add tests/e2e/strategy-evolution.spec.ts docs/superpowers/reviews/2026-08-27-nexus-phase-2-strategy-evolution-review.md docs/superpowers/plans/2026-08-27-nexus-phase-2-strategy-evolution-lab.md .superpowers/sdd/2026-08-22-nexus-phase-0-1/progress.md
@@ -728,6 +728,30 @@ git status --short --branch
 ```
 
 Expected: clean Phase 2 worktree.
+
+Acceptance evidence:
+
+- Code range `f0336b6..09f090d` contains all Phase 2 executable changes and the four
+  Important acceptance fixes: dedicated injected worker composition, unknown-result exact
+  idempotency replay, ordered latest registry history, and bounded immutable-strategy validation
+  caching without relaxing the existing performance gate.
+- Fresh PostgreSQL completed `0021 -> 0022 -> 0021 -> 0022`; Alembic reported the single
+  `0022_strategy_evolution` head. The verified fixture database contained only one registry head
+  and GENESIS event, no strategy/broker/live facts, and left zero `nexus_test_*` databases.
+- Engine evidence: 734 full PostgreSQL integration tests across three isolated partitions, 853
+  non-integration tests on the final tree, and 82 affected PostgreSQL tests after the final bounded
+  validation-cache change. Ruff passed; Mypy passed 278 source files.
+- Web evidence: 447 unit tests, generated-contract check, TypeScript, ESLint and production build
+  passed; Playwright passed all 79 tests in 2.7 minutes with the Phase 2 responsive, accessibility,
+  conflict, forbidden and exact-idempotency recovery cases.
+- Secret/private-key patterns were absent and `nexus.evolution` had no Fosun/broker/live-write
+  capability. No real account, order, deployment, credential or permission operation occurred.
+- The detailed finding log, exact durations, residual counts, rollback boundary and the remaining
+  deployment-header Minor are recorded in
+  `docs/superpowers/reviews/2026-08-27-nexus-phase-2-strategy-evolution-review.md`.
+- The plan originally referenced an ignored local `.superpowers/.../progress.md` ledger. That file
+  is absent from this isolated worktree and `/.superpowers/` is repository-ignored, so no hidden or
+  uncommittable ledger was fabricated; this tracked plan and review are the acceptance record.
 
 ---
 
