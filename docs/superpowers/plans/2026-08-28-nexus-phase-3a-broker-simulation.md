@@ -263,25 +263,25 @@ git commit -m "feat(broker): prepare and approve simulation intents"
 - Produces: `SimulationGateway` protocol, `FixtureSimulationGatewayClient`, default-disabled `HttpSimulationGatewayClient`, `dispatch_approved_intent`, `prepare_modify_command`, `prepare_cancel_command`.
 - Consumes Gateway contracts, HMAC client primitives, database attempt uniqueness, and Task 4 risk revalidation.
 
-- [ ] **Step 1: Write failing serial-dispatch and unknown-result tests**
+- [x] **Step 1: Write failing serial-dispatch and unknown-result tests**
 
 Tests assert one external attempt maximum, canonical order sorting, stop-after-first-non-success, remaining `not_sent`, transport exception after possible send becomes `result_unknown`, worker restart starts reconciliation instead of resend, modify creates a new approval-bound command, and cancel requires explicit actor/idempotency input.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `uv run --project engine pytest engine/tests/unit/providers/test_simulation_gateway_client.py engine/tests/integration/test_broker_simulation_dispatch.py -q`
 
-- [ ] **Step 3: Implement the attempt transaction boundary**
+- [x] **Step 3: Implement the attempt transaction boundary**
 
 Before each call, atomically acquire a command lease, persist `sending` and attempt number, revalidate account/capability/approval/snapshot/risk, then call the injected gateway outside the row-lock transaction. A definite response appends an outcome event. Any exception after attempt persistence writes only `result_unknown` plus account lock/reconciliation job. No code path transitions `result_unknown` to `sending`.
 
 `HttpSimulationGatewayClient` can be constructed only when `SIMULATION_WRITE_ACTIVATED` and a valid admission record are injected. Phase 3A tests assert its constructor fails before creating `httpx.AsyncClient`.
 
-- [ ] **Step 4: Run failure-injection and restart tests**
+- [x] **Step 4: Run failure-injection and restart tests**
 
 Run: `uv run --project engine pytest engine/tests/unit/providers/test_simulation_gateway_client.py engine/tests/integration/test_broker_simulation_dispatch.py engine/tests/integration/test_outbox.py -q`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/providers/broker/simulation_gateway.py engine/src/nexus/broker_simulation/commands.py engine/tests/unit/providers/test_simulation_gateway_client.py engine/tests/integration/test_broker_simulation_dispatch.py

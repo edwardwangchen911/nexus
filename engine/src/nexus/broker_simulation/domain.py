@@ -295,7 +295,11 @@ _COMMAND_EDGES = {
 }
 
 _ORDER_EDGES = {
-    OrderStatus.NOT_SENT: {OrderStatus.ACKNOWLEDGED, OrderStatus.REJECTED},
+    OrderStatus.NOT_SENT: {
+        OrderStatus.ACKNOWLEDGED,
+        OrderStatus.REJECTED,
+        OrderStatus.RECONCILING,
+    },
     OrderStatus.ACKNOWLEDGED: {
         OrderStatus.WORKING,
         OrderStatus.PARTIALLY_FILLED,

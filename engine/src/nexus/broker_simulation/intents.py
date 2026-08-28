@@ -344,6 +344,60 @@ async def expire_execution_intents(session: AsyncSession, *, now: datetime) -> i
     return len(intents)
 
 
+async def revalidate_approved_intent(
+    session: AsyncSession,
+    *,
+    intent_id: UUID,
+    authority: BrokerApprovalAuthority,
+    at: datetime,
+) -> tuple[
+    BrokerExecutionIntentRecord,
+    BrokerAccountBindingRecord,
+    tuple[BrokerOrderDocument, ...],
+]:
+    """Reload and lock every persisted authority immediately before a Gateway attempt."""
+    at = require_utc(at)
+    intent = await session.scalar(
+        select(BrokerExecutionIntentRecord)
+        .where(BrokerExecutionIntentRecord.id == intent_id)
+        .with_for_update()
+    )
+    if intent is None or intent.status not in {"approved", "dispatching"}:
+        raise BrokerIntentError("INTENT_NOT_DISPATCHABLE")
+    if at >= intent.expires_at:
+        raise BrokerIntentError("INTENT_EXPIRED")
+    binding = await session.scalar(
+        select(BrokerAccountBindingRecord)
+        .where(BrokerAccountBindingRecord.id == intent.account_binding_id)
+        .with_for_update()
+    )
+    orders = tuple(
+        _order_document(record)
+        for record in await session.scalars(
+            select(BrokerExecutionIntentOrderRecord)
+            .where(BrokerExecutionIntentOrderRecord.intent_id == intent.id)
+            .order_by(BrokerExecutionIntentOrderRecord.ordinal)
+        )
+    )
+    _require_current_authority(intent, binding, orders, authority, at)
+    if binding is None:
+        raise BrokerIntentAuthorityChanged("INTENT_AUTHORITY_CHANGED")
+    document = BrokerIntentDocument(
+        proposal_group_id=intent.proposal_group_id,
+        strategy_decision_id=intent.strategy_decision_id,
+        portfolio_snapshot_id=intent.portfolio_snapshot_id,
+        evidence_hashes=tuple(intent.evidence_hashes),
+        risk_policy_hash=intent.risk_policy_hash,
+        execution_model_hash=intent.execution_model_hash,
+        account_binding_id=intent.account_binding_id,
+        orders=orders,
+        total_notional=intent.total_notional,
+    )
+    if canonical_document_hash(document) != intent.body_hash:
+        raise BrokerIntentAuthorityChanged("INTENT_AUTHORITY_CHANGED")
+    return intent, binding, orders
+
+
 def _require_current_authority(
     intent: BrokerExecutionIntentRecord,
     binding: BrokerAccountBindingRecord | None,
