@@ -302,23 +302,23 @@ git commit -m "feat(broker): dispatch simulation commands fail closed"
 - Produces: `receive_webhook`, `run_simulation_reconciliation`, `acknowledge_reconciliation`; `WebhookAuthenticator` protocol whose Phase 3A implementation always returns `not_admitted` unless a fixture test injects a verifier.
 - Consumes exact raw bytes, content hash, event identity, Gateway orders/portfolio/cash-flow snapshots, and account locks.
 
-- [ ] **Step 1: Write failing duplicate, disorder, conflict, and unlock tests**
+- [x] **Step 1: Write failing duplicate, disorder, conflict, and unlock tests**
 
 Tests cover body limit, schema closure, repeated event ID/hash, event-ID collision with different bytes, old timestamps, out-of-order candidates, unauthenticated hints, polling confirmation, webhook/poll conflict, ambiguous unknown result, explicit acknowledgement, and inability to unlock without a complete matched snapshot.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `uv run --project engine pytest engine/tests/unit/broker_simulation/test_webhooks.py engine/tests/integration/test_broker_simulation_reconciliation.py -q`
 
-- [ ] **Step 3: Implement non-authoritative receipts and authoritative polling**
+- [x] **Step 3: Implement non-authoritative receipts and authoritative polling**
 
 Webhook receipt stores event ID, body SHA-256, byte length, received time, auth status and safe code only; raw body stays in the injected immutable evidence store and never in logs/database JSON. It may append a candidate event but cannot unlock an account or finalize a fill. Polling archives normalized snapshot hashes, reconciles exact provider-order mappings, and unlocks only after orders, positions, cash and cash flows all match under one reconciliation run.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run: `uv run --project engine pytest engine/tests/unit/broker_simulation/test_webhooks.py engine/tests/integration/test_broker_simulation_reconciliation.py -q`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/broker_simulation/webhooks.py engine/src/nexus/broker_simulation/reconciliation.py engine/tests/unit/broker_simulation/test_webhooks.py engine/tests/integration/test_broker_simulation_reconciliation.py
