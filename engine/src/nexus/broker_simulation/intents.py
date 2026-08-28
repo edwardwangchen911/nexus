@@ -1,0 +1,403 @@
+"""Preparation and human approval services for broker-simulation intents."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Annotated, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from nexus.broker_simulation.domain import (
+    BrokerIntentDocument,
+    BrokerOrderDocument,
+    IntentStatus,
+    canonical_document_hash,
+    effective_approval_expiry,
+    require_intent_transition,
+)
+from nexus.broker_simulation.risk import BrokerRiskContext, evaluate_broker_order_batch
+from nexus.domain.ids import new_uuid7
+from nexus.domain.time import require_utc
+from nexus.persistence.models.broker_simulation import (
+    BrokerAccountBindingRecord,
+    BrokerBatchApprovalRecord,
+    BrokerExecutionIntentOrderRecord,
+    BrokerExecutionIntentRecord,
+)
+
+Hash64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+
+class BrokerIntentError(ValueError):
+    """A stable broker intent admission failure."""
+
+
+class BrokerIntentAuthorityChanged(BrokerIntentError):
+    """One or more independently loaded authority facts drifted."""
+
+
+class _FrozenModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class BrokerIntentPreparation(_FrozenModel):
+    proposal_group_id: UUID
+    strategy_decision_id: UUID
+    portfolio_snapshot_id: UUID
+    evidence_hashes: tuple[Hash64, ...]
+    risk_policy_hash: Hash64
+    execution_model_hash: Hash64
+    account_binding_id: UUID
+    orders: tuple[BrokerOrderDocument, ...]
+    risk_context: BrokerRiskContext
+    prepared_at: datetime
+    quote_expires_at: datetime
+    session_close_at: datetime
+
+    @field_validator("prepared_at", "quote_expires_at", "session_close_at")
+    @classmethod
+    def _times_are_utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+
+class BrokerApprovalAuthority(_FrozenModel):
+    account_binding_id: UUID
+    account_binding_version: int = Field(ge=1)
+    account_snapshot_identity_hash: Hash64
+    capability_subject: str = Field(min_length=1, max_length=255)
+    evidence_hashes: tuple[Hash64, ...]
+    risk_policy_hash: Hash64
+    execution_model_hash: Hash64
+    orders: tuple[BrokerOrderDocument, ...]
+
+
+@dataclass(frozen=True)
+class PreparedExecutionIntent:
+    intent_id: UUID
+    status: str
+    version: int
+    body_hash: str
+    expires_at: datetime
+    replayed: bool
+
+
+@dataclass(frozen=True)
+class ApprovedExecutionIntent:
+    intent_id: UUID
+    approval_id: UUID
+    status: str
+    version: int
+    body_hash: str
+    expires_at: datetime
+    replayed: bool
+
+
+async def prepare_execution_intent(
+    session: AsyncSession,
+    authority: BrokerIntentPreparation,
+) -> PreparedExecutionIntent:
+    """Persist a server-owned batch only after deterministic risk and binding checks."""
+    binding = await session.scalar(
+        select(BrokerAccountBindingRecord)
+        .where(BrokerAccountBindingRecord.id == authority.account_binding_id)
+        .with_for_update()
+    )
+    if binding is None:
+        raise BrokerIntentError("ACCOUNT_BINDING_NOT_FOUND")
+    if (
+        binding.locked
+        or binding.reconciliation_status != "matched"
+        or binding.provider != "fosun"
+        or binding.environment != "simulation"
+        or binding.account_type != "simulation"
+    ):
+        raise BrokerIntentError("ACCOUNT_BINDING_NOT_READY")
+    if binding.snapshot_identity_hash not in authority.evidence_hashes:
+        raise BrokerIntentError("BINDING_SNAPSHOT_NOT_EVIDENCED")
+    expires_at = effective_approval_expiry(
+        prepared_at=authority.prepared_at,
+        quote_expires_at=authority.quote_expires_at,
+        capability_expires_at=binding.capability_expires_at,
+        session_close_at=authority.session_close_at,
+    )
+    if expires_at <= authority.prepared_at:
+        raise BrokerIntentError("INTENT_AUTHORITY_EXPIRED")
+    risk = evaluate_broker_order_batch(authority.orders, authority.risk_context)
+    if not risk.passed:
+        raise BrokerIntentError("RISK_REJECTED:" + ",".join(risk.reason_codes))
+    total_notional = sum(
+        (order.limit_price * order.quantity for order in authority.orders),
+        start=authority.orders[0].limit_price * 0,
+    )
+    document = BrokerIntentDocument(
+        proposal_group_id=authority.proposal_group_id,
+        strategy_decision_id=authority.strategy_decision_id,
+        portfolio_snapshot_id=authority.portfolio_snapshot_id,
+        evidence_hashes=authority.evidence_hashes,
+        risk_policy_hash=authority.risk_policy_hash,
+        execution_model_hash=authority.execution_model_hash,
+        account_binding_id=authority.account_binding_id,
+        orders=authority.orders,
+        total_notional=total_notional,
+    )
+    body_hash = canonical_document_hash(document)
+    existing = await session.scalar(
+        select(BrokerExecutionIntentRecord).where(
+            BrokerExecutionIntentRecord.body_hash == body_hash
+        )
+    )
+    if existing is not None:
+        return PreparedExecutionIntent(
+            intent_id=existing.id,
+            status=existing.status,
+            version=existing.version,
+            body_hash=existing.body_hash,
+            expires_at=existing.expires_at,
+            replayed=True,
+        )
+    intent = BrokerExecutionIntentRecord(
+        id=new_uuid7(),
+        account_binding_id=authority.account_binding_id,
+        proposal_group_id=authority.proposal_group_id,
+        strategy_decision_id=authority.strategy_decision_id,
+        portfolio_snapshot_id=authority.portfolio_snapshot_id,
+        evidence_hashes=list(authority.evidence_hashes),
+        risk_policy_hash=authority.risk_policy_hash,
+        execution_model_hash=authority.execution_model_hash,
+        status=IntentStatus.PREPARED.value,
+        version=1,
+        body_hash=body_hash,
+        total_notional=total_notional,
+        prepared_at=authority.prepared_at,
+        expires_at=expires_at,
+    )
+    session.add(intent)
+    await session.flush()
+    for ordinal, order in enumerate(authority.orders, start=1):
+        session.add(
+            BrokerExecutionIntentOrderRecord(
+                id=new_uuid7(),
+                intent_id=intent.id,
+                ordinal=ordinal,
+                instrument_id=order.instrument_id,
+                side=order.side,
+                quantity=order.quantity,
+                limit_price=order.limit_price,
+                currency=order.currency,
+                order_type=order.order_type,
+                time_in_force=order.time_in_force,
+                session=order.session,
+                status="not_sent",
+                order_hash=canonical_document_hash(order),
+            )
+        )
+    await session.flush()
+    return PreparedExecutionIntent(
+        intent_id=intent.id,
+        status=intent.status,
+        version=intent.version,
+        body_hash=intent.body_hash,
+        expires_at=intent.expires_at,
+        replayed=False,
+    )
+
+
+async def approve_execution_intent(
+    session: AsyncSession,
+    *,
+    intent_id: UUID,
+    actor_id: str,
+    expected_version: int,
+    if_match: str,
+    request_body_hash: str,
+    idempotency_key: str,
+    approved_at: datetime,
+    authority: BrokerApprovalAuthority,
+) -> ApprovedExecutionIntent:
+    """Approve one exact server batch; caller-provided order facts are not accepted."""
+    approved_at = require_utc(approved_at)
+    intent = await session.scalar(
+        select(BrokerExecutionIntentRecord)
+        .where(BrokerExecutionIntentRecord.id == intent_id)
+        .with_for_update()
+    )
+    if intent is None:
+        raise BrokerIntentError("INTENT_NOT_FOUND")
+    existing = await session.scalar(
+        select(BrokerBatchApprovalRecord).where(
+            BrokerBatchApprovalRecord.intent_id == intent_id,
+            BrokerBatchApprovalRecord.actor_id == actor_id,
+            BrokerBatchApprovalRecord.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        if (
+            existing.request_body_hash != request_body_hash
+            or existing.intent_body_hash != if_match
+        ):
+            raise BrokerIntentError("IDEMPOTENCY_CONFLICT")
+        return _approved_result(intent, existing, replayed=True)
+    if intent.status != IntentStatus.PREPARED.value:
+        raise BrokerIntentError("INTENT_NOT_PREPARED")
+    if intent.version != expected_version or intent.body_hash != if_match:
+        raise BrokerIntentError("INTENT_VERSION_CONFLICT")
+    if approved_at >= intent.expires_at:
+        raise BrokerIntentError("INTENT_EXPIRED")
+    binding = await session.scalar(
+        select(BrokerAccountBindingRecord)
+        .where(BrokerAccountBindingRecord.id == intent.account_binding_id)
+        .with_for_update()
+    )
+    orders = tuple(
+        _order_document(record)
+        for record in await session.scalars(
+            select(BrokerExecutionIntentOrderRecord)
+            .where(BrokerExecutionIntentOrderRecord.intent_id == intent.id)
+            .order_by(BrokerExecutionIntentOrderRecord.ordinal)
+        )
+    )
+    _require_current_authority(intent, binding, orders, authority, approved_at)
+    document = BrokerIntentDocument(
+        proposal_group_id=intent.proposal_group_id,
+        strategy_decision_id=intent.strategy_decision_id,
+        portfolio_snapshot_id=intent.portfolio_snapshot_id,
+        evidence_hashes=tuple(intent.evidence_hashes),
+        risk_policy_hash=intent.risk_policy_hash,
+        execution_model_hash=intent.execution_model_hash,
+        account_binding_id=intent.account_binding_id,
+        orders=orders,
+        total_notional=intent.total_notional,
+    )
+    if canonical_document_hash(document) != intent.body_hash:
+        raise BrokerIntentAuthorityChanged("INTENT_AUTHORITY_CHANGED")
+    approval = BrokerBatchApprovalRecord(
+        id=new_uuid7(),
+        intent_id=intent.id,
+        intent_version=intent.version,
+        intent_body_hash=intent.body_hash,
+        request_body_hash=request_body_hash,
+        actor_id=actor_id,
+        idempotency_key=idempotency_key,
+        approved_at=approved_at,
+        expires_at=intent.expires_at,
+    )
+    session.add(approval)
+    require_intent_transition(IntentStatus.PREPARED, IntentStatus.APPROVED)
+    intent.status = IntentStatus.APPROVED.value
+    intent.version += 1
+    await session.flush()
+    return _approved_result(intent, approval, replayed=False)
+
+
+async def reject_execution_intent(
+    session: AsyncSession,
+    *,
+    intent_id: UUID,
+    expected_version: int,
+    reason: Literal["user_rejected", "authority_changed"],
+) -> PreparedExecutionIntent:
+    del reason
+    intent = await session.scalar(
+        select(BrokerExecutionIntentRecord)
+        .where(BrokerExecutionIntentRecord.id == intent_id)
+        .with_for_update()
+    )
+    if intent is None:
+        raise BrokerIntentError("INTENT_NOT_FOUND")
+    if intent.version != expected_version or intent.status not in {"draft", "prepared"}:
+        raise BrokerIntentError("INTENT_VERSION_CONFLICT")
+    require_intent_transition(IntentStatus(intent.status), IntentStatus.REJECTED)
+    intent.status = IntentStatus.REJECTED.value
+    intent.version += 1
+    await session.flush()
+    return PreparedExecutionIntent(
+        intent_id=intent.id,
+        status=intent.status,
+        version=intent.version,
+        body_hash=intent.body_hash,
+        expires_at=intent.expires_at,
+        replayed=False,
+    )
+
+
+async def expire_execution_intents(session: AsyncSession, *, now: datetime) -> int:
+    now = require_utc(now)
+    intents = tuple(
+        await session.scalars(
+            select(BrokerExecutionIntentRecord)
+            .where(
+                BrokerExecutionIntentRecord.status.in_(("prepared", "approved")),
+                BrokerExecutionIntentRecord.expires_at <= now,
+            )
+            .with_for_update(skip_locked=True)
+        )
+    )
+    for intent in intents:
+        require_intent_transition(IntentStatus(intent.status), IntentStatus.EXPIRED)
+        intent.status = IntentStatus.EXPIRED.value
+        intent.version += 1
+    await session.flush()
+    return len(intents)
+
+
+def _require_current_authority(
+    intent: BrokerExecutionIntentRecord,
+    binding: BrokerAccountBindingRecord | None,
+    orders: tuple[BrokerOrderDocument, ...],
+    authority: BrokerApprovalAuthority,
+    approved_at: datetime,
+) -> None:
+    if (
+        binding is None
+        or binding.id != authority.account_binding_id
+        or binding.id != intent.account_binding_id
+        or binding.version != authority.account_binding_version
+        or binding.snapshot_identity_hash != authority.account_snapshot_identity_hash
+        or binding.snapshot_identity_hash not in intent.evidence_hashes
+        or binding.capability_subject != authority.capability_subject
+        or binding.capability_expires_at <= approved_at
+        or binding.locked
+        or binding.reconciliation_status != "matched"
+        or tuple(intent.evidence_hashes) != authority.evidence_hashes
+        or intent.risk_policy_hash != authority.risk_policy_hash
+        or intent.execution_model_hash != authority.execution_model_hash
+        or orders != authority.orders
+    ):
+        raise BrokerIntentAuthorityChanged("INTENT_AUTHORITY_CHANGED")
+
+
+def _order_document(record: BrokerExecutionIntentOrderRecord) -> BrokerOrderDocument:
+    return BrokerOrderDocument.model_validate(
+        {
+            "instrument_id": record.instrument_id,
+            "side": record.side,
+            "quantity": int(record.quantity),
+            "limit_price": record.limit_price,
+            "currency": record.currency,
+            "order_type": record.order_type,
+            "time_in_force": record.time_in_force,
+            "session": record.session,
+            "sort_key": record.ordinal,
+        }
+    )
+
+
+def _approved_result(
+    intent: BrokerExecutionIntentRecord,
+    approval: BrokerBatchApprovalRecord,
+    *,
+    replayed: bool,
+) -> ApprovedExecutionIntent:
+    return ApprovedExecutionIntent(
+        intent_id=intent.id,
+        approval_id=approval.id,
+        status=intent.status,
+        version=intent.version,
+        body_hash=intent.body_hash,
+        expires_at=approval.expires_at,
+        replayed=replayed,
+    )

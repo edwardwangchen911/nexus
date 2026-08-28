@@ -224,25 +224,25 @@ git commit -m "feat(gateway): add isolated simulation fixture surface"
 - Produces: `prepare_execution_intent`, `approve_execution_intent`, `reject_execution_intent`, `expire_execution_intents`, `BrokerRiskDecision`.
 - Consumes existing proposal-group, strategy-decision, portfolio snapshot, market evidence, source policy, drawdown lock, whitelist and sector/cash constraints.
 
-- [ ] **Step 1: Write failing server-authority and drift tests**
+- [x] **Step 1: Write failing server-authority and drift tests**
 
 Tests prove the service generates the order set from database facts, canonical sorting is stable, the browser cannot override facts, all order restrictions are enforced, and any evidence/account/risk/hash/version drift causes `INTENT_AUTHORITY_CHANGED` before approval.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `uv run --project engine pytest engine/tests/unit/broker_simulation/test_risk.py engine/tests/integration/test_broker_simulation_intents.py -q`
 
-- [ ] **Step 3: Implement prepare/approve/reject under row locks**
+- [x] **Step 3: Implement prepare/approve/reject under row locks**
 
 `prepare_execution_intent` requires a simulation binding with `reconciliation_status="matched"`, builds only `DAY` limit whole-share orders, creates an immutable intent/order set plus prepared event, and returns its canonical hash, version and expiry. `approve_execution_intent` accepts only `intent_id`, `actor_id`, `expected_version`, `if_match`, `request_body_hash`, `idempotency_key`, and `approved_at`; it reloads every authority and writes one approval or returns the original idempotent result. The actor is the verified service actor, never a body field.
 
-- [ ] **Step 4: Run focused and conflicting-approval tests**
+- [x] **Step 4: Run focused and conflicting-approval tests**
 
 Run: `uv run --project engine pytest engine/tests/unit/broker_simulation/test_risk.py engine/tests/integration/test_broker_simulation_intents.py -q`
 
 Expected: all pass; two concurrent approvals yield one approval fact and one stable response.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/broker_simulation/risk.py engine/src/nexus/broker_simulation/intents.py engine/tests/unit/broker_simulation/test_risk.py engine/tests/integration/test_broker_simulation_intents.py

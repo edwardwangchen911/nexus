@@ -84,6 +84,9 @@ def test_intent_requires_sorted_unique_orders_and_exact_notional() -> None:
 def test_canonical_hash_is_stable_and_rejects_binary_floats() -> None:
     intent = _intent()
     assert canonical_document_hash(intent) == canonical_document_hash(intent.model_dump())
+    assert canonical_document_hash({"price": Decimal("12.3400")}) == canonical_document_hash(
+        {"price": Decimal("12.34")}
+    )
     assert len(canonical_document_hash(intent)) == 64
     with pytest.raises(TypeError, match="binary floats"):
         canonical_document_hash({"price": 12.34})

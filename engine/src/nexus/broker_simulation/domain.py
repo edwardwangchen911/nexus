@@ -231,7 +231,10 @@ def _canonical_value(value: object) -> object:
     if isinstance(value, UUID):
         return str(value)
     if isinstance(value, Decimal):
-        return decimal_to_string(value)
+        rendered = decimal_to_string(value)
+        if "." in rendered:
+            rendered = rendered.rstrip("0").rstrip(".")
+        return "0" if rendered == "-0" else rendered
     if isinstance(value, datetime):
         return require_utc(value).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     if isinstance(value, float):
