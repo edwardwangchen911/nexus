@@ -49,6 +49,23 @@ QUOTE_SOURCE_POLICY_PAYLOAD: dict[str, object] = {
     },
     "fixture": {"delivery_mode": "fixture"},
 }
+INTRADAY_SOURCE_POLICY_ID = UUID("8fab80c9-5b6a-5b2b-8f36-3b22319b54ef")
+INTRADAY_SOURCE_POLICY_KEY = "intraday_monitor"
+INTRADAY_SOURCE_POLICY_VERSION = "intraday_monitor_policy_v1"
+INTRADAY_SOURCE_POLICY_PAYLOAD: dict[str, object] = {
+    "priority": ["fosun", "alpaca", "fixture"],
+    "fosun": {
+        "mode": "read_only",
+        "operation": "fosun_get_bars",
+        "market_scope": "US",
+    },
+    "alpaca": {
+        "feeds": ["iex", "sip", "delayed_sip"],
+        "delivery_modes": ["real_time", "delayed"],
+    },
+    "fixture": {"delivery_mode": "fixture"},
+    "purpose": "display_only_intraday_monitor",
+}
 _PRIORITY = ("fosun", "alpaca", "fixture")
 
 

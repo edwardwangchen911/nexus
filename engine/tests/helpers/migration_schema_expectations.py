@@ -188,6 +188,8 @@ BROKER_SIMULATION_TABLES = {
     "broker_simulation_admissions",
 }
 EXPECTED_TABLES = EXPECTED_TABLES | BROKER_SIMULATION_TABLES
+INTRADAY_MARKET_TABLES = {"intraday_bar_set_authorities"}
+EXPECTED_TABLES = EXPECTED_TABLES | INTRADAY_MARKET_TABLES
 NO_CREATED_AT_TRIGGER_TABLES = {
     "strategy_experiment_state_projections",
     "strategy_research_lineage_projections",
@@ -264,6 +266,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
     frozenset(AUTOMATION_TABLES),
     frozenset(EVOLUTION_TABLES),
     frozenset(BROKER_SIMULATION_TABLES),
+    frozenset(INTRADAY_MARKET_TABLES),
 )
 
 EXPECTED_FOREIGN_KEYS = {
@@ -286,7 +289,10 @@ EXPECTED_FOREIGN_KEYS = {
         "fk_universe_members_universe_snapshot_id_universe_snapshots",
     },
     "sector_exposures": "fk_sector_exposures_instrument_id_instruments",
-    "latest_quotes": "fk_latest_quotes_instrument_id_instruments",
+    "latest_quotes": {
+        "fk_latest_quotes_instrument_id_instruments",
+        "fk_latest_quotes_data_artifact",
+    },
     "watchlist_members": {
         "fk_watchlist_members_instrument_id_instruments",
         "fk_watchlist_members_watchlist_id_watchlists",
@@ -417,6 +423,11 @@ EXPECTED_FOREIGN_KEYS["price_bar_set_authorities"] = {
     "fk_price_bar_set_authorities_manifest",
     "fk_price_bar_set_authorities_evidence_owner",
     "fk_price_bar_set_authorities_source_policy",
+}
+EXPECTED_FOREIGN_KEYS["intraday_bar_set_authorities"] = {
+    "fk_intraday_bar_set_authorities_manifest",
+    "fk_intraday_bar_set_authorities_evidence_owner",
+    "fk_intraday_bar_set_authorities_source_policy",
 }
 EXPECTED_FOREIGN_KEYS.update(
     {

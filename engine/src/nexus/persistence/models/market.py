@@ -4,7 +4,16 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Boolean, CheckConstraint, Date, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Date,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -120,7 +129,13 @@ class LatestQuote(ImmutableCreatedAt, Base):
     __tablename__ = "latest_quotes"
     __table_args__ = (
         UniqueConstraint(
-            "instrument_id", "source", "feed", name="uq_latest_quotes_instrument_source_feed"
+            "instrument_id",
+            "source",
+            "feed",
+            "event_kind",
+            "observed_at",
+            "content_hash",
+            name="uq_latest_quotes_observation",
         ),
         CheckConstraint(
             "delivery_mode IN ('real_time', 'delayed', 'fixture', 'unknown')",
@@ -133,6 +148,51 @@ class LatestQuote(ImmutableCreatedAt, Base):
         CheckConstraint(
             "source <> 'fosun' OR delivery_mode <> 'fixture'",
             name="fosun_delivery_mode",
+        ),
+        CheckConstraint(
+            "event_kind IN ('trade','quote','snapshot','fixture')",
+            name="event_kind_allowed",
+        ),
+        CheckConstraint(
+            "content_hash ~ '^[0-9a-f]{64}$'",
+            name="content_hash_canonical",
+        ),
+        CheckConstraint(
+            "evidence_status IN ('verified','legacy_unverified','fixture')",
+            name="evidence_status_allowed",
+        ),
+        CheckConstraint(
+            "available_at >= observed_at AND received_at >= available_at",
+            name="time_order",
+        ),
+        CheckConstraint("bid IS NULL OR bid > 0", name="bid_positive"),
+        CheckConstraint("ask IS NULL OR ask > 0", name="ask_positive"),
+        CheckConstraint("last IS NULL OR last > 0", name="last_positive"),
+        CheckConstraint("bid IS NULL OR ask IS NULL OR bid <= ask", name="spread_order"),
+        CheckConstraint(
+            "(event_kind = 'trade' AND last IS NOT NULL AND bid IS NULL AND ask IS NULL) OR "
+            "(event_kind = 'quote' AND bid IS NOT NULL AND ask IS NOT NULL AND last IS NULL) "
+            "OR (event_kind IN ('snapshot','fixture') AND "
+            "(bid IS NOT NULL OR ask IS NOT NULL OR last IS NOT NULL))",
+            name="event_shape",
+        ),
+        CheckConstraint(
+            "(source = 'fixture' AND evidence_status = 'fixture' "
+            "AND data_artifact_id IS NULL) OR "
+            "(source <> 'fixture' AND evidence_status = 'verified' "
+            "AND data_artifact_id IS NOT NULL) OR "
+            "(source <> 'fixture' AND evidence_status = 'legacy_unverified' "
+            "AND data_artifact_id IS NULL)",
+            name="evidence_state_consistent",
+        ),
+        Index(
+            "ix_latest_quotes_observation_lookup",
+            "instrument_id",
+            "source",
+            "feed",
+            "event_kind",
+            "observed_at",
+            "available_at",
         ),
     )
 
@@ -151,6 +211,12 @@ class LatestQuote(ImmutableCreatedAt, Base):
     received_at: Mapped[datetime] = mapped_column(UTCDateTime())
     revision: Mapped[str] = mapped_column(String(255))
     quality_flags: Mapped[list[str]] = mapped_column(JSONB)
+    event_kind: Mapped[str] = mapped_column(String(16))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    evidence_status: Mapped[str] = mapped_column(String(24))
+    data_artifact_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("data_artifacts.id", name="fk_latest_quotes_data_artifact")
+    )
 
 
 class Watchlist(ImmutableCreatedAt, Base):

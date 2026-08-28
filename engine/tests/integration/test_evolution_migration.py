@@ -155,7 +155,7 @@ async def _seed_legacy_decision(database_url: str) -> UUID:
 def test_0023_precedes_the_broker_simulation_head() -> None:
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0024_broker_simulation"]
+    assert script.get_heads() == ["0025_intraday_market_monitor"]
     revision = script.get_revision("0023_evolution_authority")
     assert revision is not None
     assert revision.down_revision == "0022_strategy_evolution"

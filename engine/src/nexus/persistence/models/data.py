@@ -255,6 +255,72 @@ class PriceBarSetAuthority(ImmutableCreatedAt, Base):
     available_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
+class IntradayBarSetAuthority(ImmutableCreatedAt, Base):
+    """Immutable display-only authority for one normalized 1Min manifest."""
+
+    __tablename__ = "intraday_bar_set_authorities"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["evidence_ref_id", "source", "provider_object_id", "revision"],
+            [
+                "research_evidence_refs.id",
+                "research_evidence_refs.source",
+                "research_evidence_refs.provider_object_id",
+                "research_evidence_refs.revision",
+            ],
+            name="fk_intraday_bar_set_authorities_evidence_owner",
+        ),
+        UniqueConstraint(
+            "price_series_manifest_id", name="uq_intraday_bar_set_authority_manifest"
+        ),
+        UniqueConstraint("evidence_ref_id", name="uq_intraday_bar_set_authority_evidence"),
+        UniqueConstraint(
+            "id",
+            "source",
+            "content_hash",
+            name="uq_intraday_bar_set_authorities_id_source_hash",
+        ),
+        CheckConstraint(
+            "hash_version = 'intraday_bar_set_sha256_v1'", name="hash_version_v1"
+        ),
+        CheckConstraint(
+            "policy_version = 'intraday_monitor_authority_v1'", name="policy_version_v1"
+        ),
+        CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
+        CheckConstraint("byte_length > 0", name="byte_length_positive"),
+        CheckConstraint("bar_count BETWEEN 1 AND 90", name="bar_count_bounded"),
+        CheckConstraint(
+            "first_observed_at <= last_observed_at", name="observation_time_ordered"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    price_series_manifest_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "price_series_manifests.id", name="fk_intraday_bar_set_authorities_manifest"
+        )
+    )
+    evidence_ref_id: Mapped[UUID]
+    source_policy_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_policies.id", name="fk_intraday_bar_set_authorities_source_policy")
+    )
+    source: Mapped[str] = mapped_column(String(100))
+    provider_object_id: Mapped[str] = mapped_column(String(255))
+    revision: Mapped[str] = mapped_column(String(255))
+    hash_version: Mapped[str] = mapped_column(
+        String(64), default="intraday_bar_set_sha256_v1"
+    )
+    policy_version: Mapped[str] = mapped_column(
+        String(64), default="intraday_monitor_authority_v1"
+    )
+    content_hash: Mapped[str] = mapped_column(String(64))
+    byte_length: Mapped[int] = mapped_column(BigInteger)
+    bar_count: Mapped[int] = mapped_column(Integer)
+    first_observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    last_observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
 class MacroObservation(ImmutableCreatedAt, Base):
     __tablename__ = "macro_observations"
     __table_args__ = (
