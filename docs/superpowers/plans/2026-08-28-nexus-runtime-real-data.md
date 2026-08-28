@@ -196,7 +196,7 @@ class RecordingFixedOriginClient:
         return self.payload
 ```
 
-- [ ] **Step 1: Write failing origin, redirect, deadline, response-size, and retry tests**
+- [x] **Step 1: Write failing origin, redirect, deadline, response-size, and retry tests**
 
 ```python
 @pytest.mark.asyncio
@@ -224,13 +224,13 @@ async def test_302_is_never_followed_or_retried() -> None:
     assert calls == 1
 ```
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `uv run --project engine pytest engine/tests/unit/providers/test_http.py -q`
 
 Expected: FAIL because `nexus.providers.http` is missing.
 
-- [ ] **Step 3: Implement the minimal fixed-origin client**
+- [x] **Step 3: Implement the minimal fixed-origin client**
 
 ```python
 @dataclass(frozen=True)
@@ -262,13 +262,13 @@ class FixedOriginHttpClient:
 
 `_canonical_path` must reject empty, dot, slash, percent-encoded slash/backslash, scheme, query, fragment, control, and non-ASCII segments. `_bounded_get` must use one absolute monotonic deadline, `follow_redirects=False`, stream chunks while enforcing the byte cap, accept only 2xx, reject 3xx immediately, and retry only configured statuses/transport errors within the same deadline. It may honor an integer `Retry-After` only when `0 <= value <= 5`. Retry ownership is single-layer: Alpaca and FRED use this client's bounded retry, while SEC composition sets `max_attempts=1` because `SecCompanyFactsClient` already owns its three-attempt deadline and process-wide limiter.
 
-- [ ] **Step 4: Prove retry and log redaction behavior**
+- [x] **Step 4: Prove retry and log redaction behavior**
 
 Run: `uv run --project engine pytest engine/tests/unit/providers/test_http.py -q`
 
 Expected: PASS; captured logs contain only provider name, attempt, status class, elapsed bucket, and result code, with no host, path, query, headers, or body.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/providers/http.py engine/tests/unit/providers/test_http.py engine/tests/support/provider_fakes.py
