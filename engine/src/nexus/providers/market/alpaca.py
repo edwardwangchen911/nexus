@@ -17,9 +17,7 @@ NEW_YORK = ZoneInfo("America/New_York")
 class AlpacaTransport(Protocol):
     """Injected HTTP boundary; production composition owns credentials."""
 
-    async def fetch_bars(
-        self, request: BarsRequest, cursor: str | None
-    ) -> AlpacaRawResponse: ...
+    async def fetch_bars(self, request: BarsRequest, cursor: str | None) -> AlpacaRawResponse: ...
 
 
 @dataclass(frozen=True)
@@ -124,10 +122,12 @@ class AlpacaMarketDataProvider:
 
 
 def _decimal_string(value: object, field: str) -> Decimal:
-    if not isinstance(value, str):
+    if isinstance(value, bool) or isinstance(value, float):
+        raise MarketProviderPayloadError(f"{field} must be a decimal string")
+    if not isinstance(value, Decimal | int | str):
         raise MarketProviderPayloadError(f"{field} must be a decimal string")
     try:
-        result = Decimal(value)
+        result = value if isinstance(value, Decimal) else Decimal(value)
     except Exception as error:
         raise MarketProviderPayloadError(f"{field} must be a decimal string") from error
     if not result.is_finite():

@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from uuid import UUID
 
 import pytest
+from nexus.providers.base import InstrumentId
 from nexus.providers.composition import (
     ProviderBundle,
     build_alpaca_market_provider,
+    build_alpaca_snapshot_provider,
     build_provider_bundle,
 )
 from nexus.providers.market.fixture import FixtureMarketDataProvider
+from nexus.providers.market.snapshot_contracts import (
+    IntradaySnapshotRequest,
+    SnapshotInstrument,
+)
 from nexus.providers.settings import ProviderRuntimeMode, ProviderSettings
 from pydantic import ValidationError
 
@@ -24,6 +31,7 @@ from tests.support.provider_fakes import (
 
 def test_fixture_bundle_never_constructs_http_or_reads_secret_values() -> None:
     """A fixture regression that enters production composition could make real calls."""
+
     def forbidden_http_factory(*_: object) -> object:
         pytest.fail("HTTP factory called")
 
@@ -173,13 +181,62 @@ async def test_alpaca_factory_uses_configured_feed_and_delivery_authority() -> N
     assert recorder.calls[0].path_segments == ("v2", "stocks", "AAPL", "bars")
 
 
-def _production_settings() -> ProviderSettings:
-    return ProviderSettings(
-        runtime_mode="production",
-        alpaca_key_id="key-id-canary",
-        alpaca_secret_key="secret-canary",
-        alpaca_feed="sip",
-        alpaca_delivery_mode="delayed",
-        sec_contact="owner@example.com",
-        fred_api_key="fred-canary",
+def test_intraday_snapshot_factory_is_disabled_by_default() -> None:
+    recorder = RecordingFixedOriginClient(payload=b"{}")
+    with pytest.raises(RuntimeError, match="INTRADAY_MONITOR_DISABLED"):
+        build_alpaca_snapshot_provider(
+            _production_settings(),
+            client=recorder,
+            symbol_resolver=FixedInstrumentSymbolResolver("AAPL"),
+        )
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("intraday_poll_seconds", 14), ("intraday_max_symbols", 31)),
+)
+def test_intraday_settings_keep_fixed_operational_bounds(field: str, value: int) -> None:
+    with pytest.raises(ValidationError):
+        ProviderSettings(**{field: value})
+
+
+@pytest.mark.asyncio
+async def test_intraday_snapshot_factory_binds_exact_authority() -> None:
+    instrument_id = InstrumentId(UUID("019d0000-0000-7000-8000-0000000000a1"))
+    recorder = RecordingFixedOriginClient(payload=b'{"AAPL":{}}')
+    provider = build_alpaca_snapshot_provider(
+        _production_settings(
+            intraday_monitor_mode="production",
+            alpaca_intraday_feed="iex",
+            alpaca_intraday_delivery_mode="real_time",
+        ),
+        client=recorder,
+        symbol_resolver=FixedInstrumentSymbolResolver("AAPL"),
     )
+
+    batch = await provider.fetch_snapshots(
+        IntradaySnapshotRequest(
+            instruments=(SnapshotInstrument(instrument_id=instrument_id, symbol="AAPL"),),
+            feed="iex",
+            delivery_mode="real_time",
+        )
+    )
+
+    assert batch.provenance.feed == "iex"
+    assert batch.snapshots[0].trade is None
+    assert recorder.calls[0].path_segments == ("v2", "stocks", "snapshots")
+
+
+def _production_settings(**overrides: object) -> ProviderSettings:
+    values: dict[str, object] = {
+        "runtime_mode": "production",
+        "alpaca_key_id": "key-id-canary",
+        "alpaca_secret_key": "secret-canary",
+        "alpaca_feed": "sip",
+        "alpaca_delivery_mode": "delayed",
+        "sec_contact": "owner@example.com",
+        "fred_api_key": "fred-canary",
+    }
+    values.update(overrides)
+    return ProviderSettings(**values)

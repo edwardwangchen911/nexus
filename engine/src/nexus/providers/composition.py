@@ -20,10 +20,11 @@ from nexus.providers.market.alpaca_http import (
     InstrumentSymbolResolver,
     SqlInstrumentSymbolResolver,
 )
+from nexus.providers.market.alpaca_snapshot import AlpacaSnapshotProvider
 from nexus.providers.market.fixture import FixtureMarketDataProvider
 from nexus.providers.sec import SecCompanyFactsClient
 from nexus.providers.sec_http import SecHttpTransport
-from nexus.providers.settings import ProviderRuntimeMode, ProviderSettings
+from nexus.providers.settings import IntradayMonitorMode, ProviderRuntimeMode, ProviderSettings
 
 HttpClientFactory = Callable[..., FixedOriginBytes]
 MarketProviderFactory = Callable[[object], MarketDataProvider]
@@ -88,6 +89,36 @@ def build_alpaca_market_provider(
             feed=feed,
             symbol_resolver=symbol_resolver,
         ),
+        feed=feed,
+        delivery_mode=delivery_mode,
+    )
+
+
+def build_alpaca_snapshot_provider(
+    settings: ProviderSettings,
+    *,
+    client: FixedOriginBytes,
+    symbol_resolver: InstrumentSymbolResolver,
+) -> AlpacaSnapshotProvider:
+    """Bind the separately gated display-only Snapshot operation."""
+    if settings.intraday_monitor_mode is not IntradayMonitorMode.PRODUCTION:
+        raise RuntimeError("INTRADAY_MONITOR_DISABLED")
+    if settings.runtime_mode is not ProviderRuntimeMode.PRODUCTION:
+        raise RuntimeError("PRODUCTION_PROVIDER_CONFIGURATION_REQUIRED")
+    key_id = settings.alpaca_key_id
+    secret = settings.alpaca_secret_key
+    feed = settings.alpaca_intraday_feed
+    delivery_mode = settings.alpaca_intraday_delivery_mode
+    if key_id is None or secret is None or feed is None or delivery_mode is None:
+        raise RuntimeError("INTRADAY_PROVIDER_CONFIGURATION_INCOMPLETE")
+    expected_delivery = "delayed" if feed == "delayed_sip" else "real_time"
+    if delivery_mode != expected_delivery:
+        raise RuntimeError("ALPACA_INTRADAY_AUTHORITY_MISMATCH")
+    return AlpacaSnapshotProvider(
+        client,
+        key_id=key_id,
+        secret=secret,
+        symbol_resolver=symbol_resolver,
         feed=feed,
         delivery_mode=delivery_mode,
     )

@@ -14,6 +14,11 @@ class ProviderRuntimeMode(StrEnum):
     PRODUCTION = "production"
 
 
+class IntradayMonitorMode(StrEnum):
+    DISABLED = "disabled"
+    PRODUCTION = "production"
+
+
 class ProviderSettings(BaseSettings):
     """Provider-only settings whose errors and representation hide all inputs."""
 
@@ -45,6 +50,26 @@ class ProviderSettings(BaseSettings):
         default=None,
         validation_alias="ALPACA_DELIVERY_MODE",
     )
+    intraday_monitor_mode: IntradayMonitorMode = Field(
+        default=IntradayMonitorMode.DISABLED,
+        validation_alias="NEXUS_INTRADAY_MONITOR_MODE",
+    )
+    intraday_poll_seconds: Literal[15] = Field(
+        default=15,
+        validation_alias="NEXUS_INTRADAY_POLL_SECONDS",
+    )
+    intraday_max_symbols: Literal[30] = Field(
+        default=30,
+        validation_alias="NEXUS_INTRADAY_MAX_SYMBOLS",
+    )
+    alpaca_intraday_feed: Literal["iex", "sip", "delayed_sip"] | None = Field(
+        default=None,
+        validation_alias="ALPACA_INTRADAY_FEED",
+    )
+    alpaca_intraday_delivery_mode: Literal["real_time", "delayed"] | None = Field(
+        default=None,
+        validation_alias="ALPACA_INTRADAY_DELIVERY_MODE",
+    )
     sec_contact: str | None = Field(default=None, validation_alias="SEC_CONTACT")
     fred_api_key: SecretStr | None = Field(
         default=None,
@@ -52,10 +77,25 @@ class ProviderSettings(BaseSettings):
     )
 
     def __repr_args__(self) -> list[tuple[str | None, object]]:
-        return [("runtime_mode", self.runtime_mode)]
+        return [
+            ("runtime_mode", self.runtime_mode),
+            ("intraday_monitor_mode", self.intraday_monitor_mode),
+        ]
 
     @model_validator(mode="after")
     def require_production_authorities(self) -> Self:
+        if self.intraday_monitor_mode is IntradayMonitorMode.PRODUCTION:
+            if self.runtime_mode is not ProviderRuntimeMode.PRODUCTION:
+                raise ValueError("INTRADAY_PRODUCTION_PROVIDER_MODE_REQUIRED")
+            if self.alpaca_intraday_feed is None:
+                raise ValueError("ALPACA_INTRADAY_FEED_REQUIRED")
+            if self.alpaca_intraday_delivery_mode is None:
+                raise ValueError("ALPACA_INTRADAY_DELIVERY_MODE_REQUIRED")
+            expected_delivery = (
+                "delayed" if self.alpaca_intraday_feed == "delayed_sip" else "real_time"
+            )
+            if self.alpaca_intraday_delivery_mode != expected_delivery:
+                raise ValueError("ALPACA_INTRADAY_AUTHORITY_MISMATCH")
         if self.runtime_mode is ProviderRuntimeMode.FIXTURE:
             return self
         required: tuple[tuple[str, object | None], ...] = (

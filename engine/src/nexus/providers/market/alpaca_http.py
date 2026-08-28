@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Literal, Protocol
 
 from pydantic import SecretStr
@@ -102,10 +103,7 @@ class AlpacaHttpTransport:
                 ("APCA-API-SECRET-KEY", self._secret.get_secret_value()),
             ),
         )
-        try:
-            value = json.loads(raw, object_pairs_hook=_unique_object)
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
-            raise MarketProviderPayloadError("ALPACA_OBJECT_REQUIRED") from error
+        value = load_exact_json(raw)
         if not isinstance(value, Mapping):
             raise MarketProviderPayloadError("ALPACA_OBJECT_REQUIRED")
         request_id = _optional_request_id(value.get("request_id"))
@@ -169,3 +167,24 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise MarketProviderPayloadError("ALPACA_DUPLICATE_KEY")
         result[key] = value
     return result
+
+
+def _reject_json_constant(value: str) -> object:
+    del value
+    raise MarketProviderPayloadError("ALPACA_JSON_CONSTANT_INVALID")
+
+
+def load_exact_json(raw: bytes) -> object:
+    """Decode JSON once with exact Decimals and duplicate-key rejection."""
+    try:
+        return json.loads(
+            raw,
+            object_pairs_hook=_unique_object,
+            parse_float=Decimal,
+            parse_int=Decimal,
+            parse_constant=_reject_json_constant,
+        )
+    except MarketProviderPayloadError:
+        raise
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise MarketProviderPayloadError("ALPACA_OBJECT_REQUIRED") from error
