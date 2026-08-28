@@ -9,7 +9,10 @@ NEXUS 是私人投资研究、回测与模拟交易工作台。它不提供投�
 - 美股真实数据传输与耐久采集链路已实现但默认关闭：Alpaca、SEC、FRED/ALFRED
   使用固定源、冻结 universe、原始证据归档和幂等入库；未配置或启用真实 Provider
   凭据时继续使用无网络 fixture。
-- `00656.HK` 继续仅作只读持仓展示；券商模拟写入和实盘页保持锁定，任何未来真实订单仍须逐笔人工确认。
+- Phase 2 策略进化实验室已完成本地验收；候选策略只能经过确定性回测、Shadow 和治理门禁，Agent 不能自行晋级或交易。
+- `Phase 3A offline_ready / Phase 3B external_activation_blocked`：券商模拟执行状态机只在无网络 fixture 中闭环，复星外部模拟写入未激活。
+- 分钟级盘中监控保持 `Intraday Monitor offline_ready / external_data_activation_blocked`：只读 Snapshot、确定性波动指标和证据页面已实现，真实 Provider 请求仍默认关闭。
+- `00656.HK` 继续仅作只读持仓展示；实盘页保持锁定，任何未来真实订单仍须逐笔人工确认。
 
 最终本地证据和外部门禁见 [CI 与离线发布门禁](docs/runbooks/ci-release-gates.md) 与 [Task 21 审查](docs/superpowers/reviews/2026-08-27-task-21-final-operational-gates-review.md)。
 
@@ -33,6 +36,7 @@ NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
 - [备份/恢复演练](docs/runbooks/backup-restore.md)
 - [CI 与离线发布门禁](docs/runbooks/ci-release-gates.md)
 - [Provider 故障处置](docs/runbooks/provider-outage.md)
+- [分钟级盘中市场监控激活门禁](docs/runbooks/intraday-market-monitor.md)
 - [密钥与证书轮换](docs/runbooks/key-rotation.md)
 - [复星 SDK admission](docs/runbooks/fosun-sdk-admission.md)
 - [复星只读激活门禁](docs/runbooks/fosun-read-only-activation.md)

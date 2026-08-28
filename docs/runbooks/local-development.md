@@ -30,7 +30,7 @@ cp infra/env.example infra/.env.local
 - Engine：`NEXUS_ENV=development`、`DATABASE_URL`、全部 `OBJECT_STORE_*`、Engine HMAC current key ID/secret；
 - Agent：`AGENT_RUNTIME_MODE=fixture`；默认不需要任何 `OPENAI_*`；
 - 行情/财报：`NEXUS_PROVIDER_RUNTIME_MODE=fixture`；普通 `app` profile 不接收
-  Alpaca/FRED 密钥，也不会发起外部数据请求；
+  Alpaca/FRED 密钥或 `NEXUS_INTRADAY_*` 配置，也不会发起外部数据请求；
 - 端口：默认 5432/9000/9001/8000，被占用时用 `NEXUS_*_HOST_PORT` 改为其他本地端口。
 
 `DATABASE_URL` 与 `OBJECT_STORE_ENDPOINT` 供容器使用，因此 host 分别应指向 Compose service 名 `postgres` 与 `minio`，而不是 `127.0.0.1`。
@@ -76,6 +76,12 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml --profile provi
 它不会加载复星交易网关或 broker 写能力。每日 Job 只读取调度时冻结并绑定哈希的
 美股 universe（上限 100 个）；不存在、哈希不匹配、数据冲突或证据不完整时均跳过，
 不会临时扩展股票池。
+
+分钟级 Snapshot 是这个独立 profile 中另一项默认关闭的能力。跟踪模板固定为
+`NEXUS_INTRADAY_MONITOR_MODE=disabled`、15 秒 bucket 和最多 30 个标的；仅当
+`ALPACA_INTRADAY_FEED` 与 `ALPACA_INTRADAY_DELIVERY_MODE` 构成合法 authority 时才可能通过
+配置校验。不要在普通本地开发中把 mode 改为 `production`。任何真实数据激活、凭据注入
+或有界探测都先按[分钟级盘中市场监控激活手册](intraday-market-monitor.md)冻结证据并获得精确批准。
 
 ## 验证
 
