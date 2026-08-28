@@ -67,6 +67,37 @@ function marketEnvelope(barCount = 1) {
           session: new Date(Date.UTC(2025, 0, index + 1)).toISOString().slice(0, 10),
         })),
       },
+      intraday_monitor: {
+        instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e781",
+        status: "ready",
+        source: "alpaca",
+        feed: "iex",
+        delivery_mode: "real_time",
+        last: "103.00",
+        bid: "102.98",
+        ask: "103.02",
+        trade_as_of: "2026-08-28T15:30:50Z",
+        quote_as_of: "2026-08-28T15:30:51Z",
+        bar_as_of: "2026-08-28T15:30:00Z",
+        return_5m: "0.010000000000",
+        return_30m: "0.030000000000",
+        range_30m: "0.040000000000",
+        spread_bps: "3.883872000000",
+        quote_age_seconds: 9,
+        bar_age_seconds: 60,
+        sample_count: 1,
+        quality_reasons: [],
+        bars: [{
+          observed_at: "2026-08-28T15:30:00Z",
+          open: "102.90",
+          high: "103.10",
+          low: "102.80",
+          close: "103.00",
+          volume: "1200",
+          available_at: "2026-08-28T15:31:00Z",
+          quality_flags: [],
+        }],
+      },
     },
     meta: successPayload().meta,
   };
@@ -205,6 +236,22 @@ describe("engineFetch runtime boundary", () => {
       undefined,
       "/internal/v1/market",
     ));
+
+    const withIntradaySecret = marketEnvelope();
+    Object.assign(withIntradaySecret.data.intraday_monitor.bars[0], { token: "must-not-escape" });
+    await expectSafeInternalError(await sanitizeEngineResponse(
+      jsonResponse(withIntradaySecret),
+      undefined,
+      "/internal/v1/market",
+    ));
+
+    const invalidIntradayDecimal = marketEnvelope();
+    Object.assign(invalidIntradayDecimal.data.intraday_monitor, { return_5m: 0.01 });
+    await expectSafeInternalError(await sanitizeEngineResponse(
+      jsonResponse(invalidIntradayDecimal),
+      undefined,
+      "/internal/v1/market",
+    ));
   });
 
   it("streams the legal 500-bar market envelope through the real engine client", async () => {
@@ -233,6 +280,13 @@ describe("engineFetch runtime boundary", () => {
     const tooManyBars = marketEnvelope();
     tooManyBars.data.selected_series.bars = Array.from({ length: 501 }, () => tooManyBars.data.selected_series.bars[0]);
     expect(rebuildAllowedEngineResponse(200, tooManyBars, new Headers(), undefined, "/internal/v1/market")).toBeNull();
+
+    const tooManyIntradayBars = marketEnvelope();
+    tooManyIntradayBars.data.intraday_monitor.bars = Array.from(
+      { length: 61 },
+      () => tooManyIntradayBars.data.intraday_monitor.bars[0],
+    );
+    expect(rebuildAllowedEngineResponse(200, tooManyIntradayBars, new Headers(), undefined, "/internal/v1/market")).toBeNull();
   });
 
   it("accepts only the generated closed watchlist membership contract", async () => {

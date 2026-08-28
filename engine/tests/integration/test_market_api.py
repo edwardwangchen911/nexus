@@ -12,6 +12,11 @@ import pytest
 from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET, build_test_hmac_headers
 from nexus.main import create_engine_app
 from nexus.market.intraday_ingestion import canonical_quote_observation
+from nexus.market.intraday_metrics import (
+    IntradayAuthorityView,
+    IntradayQuoteView,
+    IntradayTradeView,
+)
 from nexus.persistence.models.data import DataArtifact, ProviderCapability
 from nexus.persistence.models.market import (
     Instrument,
@@ -350,6 +355,7 @@ async def test_market_returns_exact_source_aware_point_in_time_rows(
         ],
         "next_cursor": None,
         "selected_series": None,
+        "intraday_monitor": None,
     }
     assert response.json()["meta"]["as_of"] == "2026-08-24T14:00:00Z"
 
@@ -877,6 +883,70 @@ async def test_selected_series_missing_seam_returns_explicit_no_history(
         "quality_reasons": ["NO_HISTORY_DATA"],
         "bars": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_selected_instrument_returns_strict_intraday_monitor_without_network(
+    migrated_database_url: str,
+) -> None:
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    observed_at = _DECISION_TIME - timedelta(minutes=1)
+    bar = PriceBar(
+        instrument_id=InstrumentId(_AAPL_ID),
+        session=_DECISION_TIME.date(),
+        open="102.90",
+        high="103.10",
+        low="102.80",
+        close="103.00",
+        volume="1200",
+        observed_at=observed_at,
+        available_at=_DECISION_TIME - timedelta(seconds=15),
+        received_at=_DECISION_TIME - timedelta(seconds=14),
+        revision="1",
+    )
+
+    async def offline_intraday_loader(
+        instrument_id: UUID,
+        decision_time: datetime,
+    ) -> IntradayAuthorityView:
+        assert instrument_id == _AAPL_ID
+        assert decision_time == _DECISION_TIME
+        return IntradayAuthorityView(
+            instrument_id=_AAPL_ID,
+            source="alpaca",
+            feed="iex",
+            delivery_mode="real_time",
+            bars=(bar,),
+            trade=IntradayTradeView(
+                last="103.00",
+                observed_at=_DECISION_TIME - timedelta(seconds=10),
+                available_at=_DECISION_TIME - timedelta(seconds=9),
+                quality_flags=(),
+            ),
+            quote=IntradayQuoteView(
+                bid="102.98",
+                ask="103.02",
+                observed_at=_DECISION_TIME - timedelta(seconds=9),
+                available_at=_DECISION_TIME - timedelta(seconds=8),
+                quality_flags=(),
+            ),
+        )
+
+    path = f"/internal/v1/market?selected_instrument_id={_AAPL_ID}"
+    app = _app(migrated_database_url)
+    app.state.market_intraday_series_loader = offline_intraday_loader
+    async with _client(app) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    assert response.status_code == 200
+    monitor = response.json()["data"]["intraday_monitor"]
+    assert monitor["status"] == "partial"
+    assert monitor["source"] == "alpaca"
+    assert monitor["last"] == "103.00"
+    assert monitor["spread_bps"] == "3.883495145631"
+    assert monitor["return_5m"] is None
+    assert monitor["sample_count"] == 1
+    assert len(monitor["bars"]) == 1
 
 
 @pytest.mark.asyncio

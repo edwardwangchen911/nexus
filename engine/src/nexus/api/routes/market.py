@@ -10,7 +10,7 @@ from nexus.api.dependencies import get_settings, require_service_actor, transact
 from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
 from nexus.api.schemas.market import MarketPageEnvelope, WatchlistMembershipEnvelope
 from nexus.domain.time import require_utc
-from nexus.market.service import MarketService, PriceSeriesLoader
+from nexus.market.service import IntradaySeriesLoader, MarketService, PriceSeriesLoader
 from nexus.settings import EngineSettings
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,11 +47,15 @@ async def list_market(
 ) -> MarketPageEnvelope:
     """List point-in-time quote evidence and optionally one selected series."""
     loader = getattr(request.app.state, "market_price_series_loader", None)
+    intraday_loader = getattr(request.app.state, "market_intraday_series_loader", None)
     service = MarketService(
         session,
         now,
         cursor_signing_secrets=_cursor_secrets(settings),
         price_series_loader=(cast(PriceSeriesLoader, loader) if loader is not None else None),
+        intraday_series_loader=(
+            cast(IntradaySeriesLoader, intraday_loader) if intraday_loader is not None else None
+        ),
     )
     page, decision_time = await service.market_page(
         limit=limit,
@@ -79,9 +83,7 @@ async def put_watchlist_membership(
     now: datetime = Depends(_utc_now),
 ) -> WatchlistMembershipEnvelope:
     """Ensure the instrument belongs to the stable default private watchlist."""
-    service = MarketService(
-        session, now, cursor_signing_secrets=_cursor_secrets(settings)
-    )
+    service = MarketService(session, now, cursor_signing_secrets=_cursor_secrets(settings))
     membership = await service.set_watchlisted(instrument_id, watchlisted=True)
     return WatchlistMembershipEnvelope(
         data=membership,
@@ -103,9 +105,7 @@ async def delete_watchlist_membership(
     now: datetime = Depends(_utc_now),
 ) -> WatchlistMembershipEnvelope:
     """Ensure the instrument is absent from the stable default private watchlist."""
-    service = MarketService(
-        session, now, cursor_signing_secrets=_cursor_secrets(settings)
-    )
+    service = MarketService(session, now, cursor_signing_secrets=_cursor_secrets(settings))
     membership = await service.set_watchlisted(instrument_id, watchlisted=False)
     return WatchlistMembershipEnvelope(
         data=membership,

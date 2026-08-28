@@ -1773,6 +1773,86 @@ export interface components {
              */
             source: "internal_ledger";
         };
+        /**
+         * IntradayBarResponse
+         * @description One complete 1Min fact from the selected intraday source authority.
+         */
+        IntradayBarResponse: {
+            /**
+             * Available At
+             * Format: date-time
+             */
+            available_at: string;
+            /** Close */
+            close: string;
+            /** High */
+            high: string;
+            /** Low */
+            low: string;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Open */
+            open: string;
+            /** Quality Flags */
+            quality_flags: string[];
+            /** Volume */
+            volume: string;
+        };
+        /**
+         * IntradayMonitorResponse
+         * @description Display-only facts and deterministic metrics for one selected instrument.
+         */
+        IntradayMonitorResponse: {
+            /** Ask */
+            ask: string | null;
+            /** Bar Age Seconds */
+            bar_age_seconds?: number | null;
+            /** Bar As Of */
+            bar_as_of: string | null;
+            /** Bars */
+            bars: components["schemas"]["IntradayBarResponse"][];
+            /** Bid */
+            bid: string | null;
+            /** Delivery Mode */
+            delivery_mode: ("real_time" | "delayed" | "fixture" | "unknown") | null;
+            /** Feed */
+            feed: string | null;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Last */
+            last: string | null;
+            /** Quality Reasons */
+            quality_reasons: string[];
+            /** Quote Age Seconds */
+            quote_age_seconds?: number | null;
+            /** Quote As Of */
+            quote_as_of: string | null;
+            /** Range 30M */
+            range_30m: string | null;
+            /** Return 5M */
+            return_5m: string | null;
+            /** Return 30M */
+            return_30m: string | null;
+            /** Sample Count */
+            sample_count: number;
+            /** Source */
+            source: string | null;
+            /** Spread Bps */
+            spread_bps: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ready" | "partial" | "stale" | "outside_session" | "unavailable";
+            /** Trade As Of */
+            trade_as_of: string | null;
+        };
         /** JobRetryEnvelope */
         JobRetryEnvelope: {
             data: components["schemas"]["JobRetryResponse"];
@@ -1872,6 +1952,7 @@ export interface components {
          * @description A bounded deterministic page plus one optional chart series.
          */
         MarketPageResponse: {
+            intraday_monitor: components["schemas"]["IntradayMonitorResponse"] | null;
             /** Items */
             items: components["schemas"]["MarketItemResponse"][];
             /** Next Cursor */

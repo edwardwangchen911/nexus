@@ -18,15 +18,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.market import (
+    IntradayBarResponse,
+    IntradayMonitorResponse,
     MarketBarResponse,
     MarketItemResponse,
     MarketPageResponse,
     SelectedMarketSeriesResponse,
     WatchlistMembershipResponse,
 )
-from nexus.domain.decimal import decimal_to_string
+from nexus.domain.decimal import DecimalString, decimal_to_string
 from nexus.domain.time import require_utc
-from nexus.market.database_series import load_daily_series
+from nexus.market.database_series import load_daily_series, load_intraday_series
+from nexus.market.intraday_metrics import (
+    IntradayAuthorityView,
+    IntradayMetrics,
+    compute_intraday_metrics,
+)
 from nexus.persistence.models.data import DataArtifact
 from nexus.persistence.models.market import (
     Instrument,
@@ -68,6 +75,14 @@ class PriceSeriesLoader(Protocol):
     ) -> Sequence[PriceSeries]: ...
 
 
+class IntradaySeriesLoader(Protocol):
+    """Test seam for an already authority-validated whole-source intraday view."""
+
+    async def __call__(
+        self, instrument_id: UUID, decision_time: datetime
+    ) -> IntradayAuthorityView: ...
+
+
 class MarketService:
     """Repository owner for market evidence and watchlist set semantics."""
 
@@ -78,6 +93,7 @@ class MarketService:
         *,
         cursor_signing_secrets: Sequence[str],
         price_series_loader: PriceSeriesLoader | None = None,
+        intraday_series_loader: IntradaySeriesLoader | None = None,
     ) -> None:
         self._session = session
         self._request_time = require_utc(decision_time)
@@ -85,6 +101,7 @@ class MarketService:
         if not self._cursor_secrets:
             raise ValueError("at least one cursor signing secret is required")
         self._price_series_loader = price_series_loader
+        self._intraday_series_loader = intraday_series_loader
 
     async def market_page(
         self,
@@ -119,11 +136,16 @@ class MarketService:
                 watchlist=watchlist,
             )
         selected_series = await self._selected_series(selected_instrument_id, decision_time)
+        intraday_monitor = await self._intraday_monitor(
+            selected_instrument_id,
+            decision_time,
+        )
         return (
             MarketPageResponse(
                 items=tuple(items),
                 next_cursor=next_cursor,
                 selected_series=selected_series,
+                intraday_monitor=intraday_monitor,
             ),
             decision_time,
         )
@@ -358,10 +380,7 @@ class MarketService:
             and (quote.source != "fosun" or fosun_admitted)
             and (
                 quote.source != "alpaca"
-                or (
-                    quote.feed == alpaca_feed
-                    and quote.delivery_mode in alpaca_delivery_modes
-                )
+                or (quote.feed == alpaca_feed and quote.delivery_mode in alpaca_delivery_modes)
             )
         ]
         if not eligible:
@@ -481,6 +500,73 @@ class MarketService:
                     quality_flags=bar.quality_flags,
                 )
                 for bar in bars
+            ),
+        )
+
+    async def _intraday_monitor(
+        self,
+        instrument_id: UUID | None,
+        decision_time: datetime,
+    ) -> IntradayMonitorResponse | None:
+        if instrument_id is None:
+            return None
+        view = (
+            await load_intraday_series(self._session, instrument_id, decision_time)
+            if self._intraday_series_loader is None
+            else await self._intraday_series_loader(instrument_id, decision_time)
+        )
+        if view.instrument_id != instrument_id:
+            view = IntradayAuthorityView(
+                instrument_id=instrument_id,
+                source=None,
+                feed=None,
+                delivery_mode=None,
+                bars=(),
+                trade=None,
+                quote=None,
+                quality_reasons=("INTRADAY_INSTRUMENT_MISMATCH",),
+            )
+        metrics = compute_intraday_metrics(view, decision_time)
+        complete_bars = tuple(
+            bar
+            for bar in view.bars
+            if bar.instrument_id == instrument_id
+            and bar.observed_at is not None
+            and bar.available_at <= decision_time
+            and bar.observed_at + timedelta(minutes=1) <= decision_time
+        )[-60:]
+        return IntradayMonitorResponse(
+            instrument_id=instrument_id,
+            status=_intraday_status(view, metrics),
+            source=view.source,
+            feed=view.feed,
+            delivery_mode=view.delivery_mode,
+            last=None if view.trade is None else decimal_to_string(view.trade.last),
+            bid=None if view.quote is None else decimal_to_string(view.quote.bid),
+            ask=None if view.quote is None else decimal_to_string(view.quote.ask),
+            trade_as_of=None if view.trade is None else view.trade.observed_at,
+            quote_as_of=None if view.quote is None else view.quote.observed_at,
+            bar_as_of=None if not complete_bars else complete_bars[-1].observed_at,
+            return_5m=_optional_decimal(metrics.return_5m),
+            return_30m=_optional_decimal(metrics.return_30m),
+            range_30m=_optional_decimal(metrics.range_30m),
+            spread_bps=_optional_decimal(metrics.spread_bps),
+            quote_age_seconds=metrics.quote_age_seconds,
+            bar_age_seconds=metrics.bar_age_seconds,
+            sample_count=metrics.sample_count,
+            quality_reasons=metrics.quality_reasons,
+            bars=tuple(
+                IntradayBarResponse(
+                    observed_at=cast(datetime, bar.observed_at),
+                    open=decimal_to_string(bar.open),
+                    high=decimal_to_string(bar.high),
+                    low=decimal_to_string(bar.low),
+                    close=decimal_to_string(bar.close),
+                    volume=decimal_to_string(bar.volume),
+                    available_at=bar.available_at,
+                    quality_flags=bar.quality_flags,
+                )
+                for bar in complete_bars
             ),
         )
 
@@ -780,6 +866,35 @@ def _empty_series(instrument_id: UUID, reason: str) -> SelectedMarketSeriesRespo
         quality_reasons=(reason,),
         bars=(),
     )
+
+
+def _optional_decimal(value: Decimal | None) -> DecimalString | None:
+    return None if value is None else decimal_to_string(value)
+
+
+def _intraday_status(
+    view: IntradayAuthorityView,
+    metrics: IntradayMetrics,
+) -> Literal["ready", "partial", "stale", "outside_session", "unavailable"]:
+    reasons = set(metrics.quality_reasons)
+    has_facts = view.trade is not None or view.quote is not None or bool(view.bars)
+    if not has_facts:
+        return "unavailable"
+    if "INTRADAY_OUTSIDE_SESSION" in reasons:
+        return "outside_session"
+    if reasons.intersection({"INTRADAY_TRADE_STALE", "INTRADAY_QUOTE_STALE", "INTRADAY_BAR_STALE"}):
+        return "stale"
+    if (
+        view.trade is not None
+        and view.quote is not None
+        and metrics.return_5m is not None
+        and metrics.return_30m is not None
+        and metrics.range_30m is not None
+        and metrics.spread_bps is not None
+        and not reasons
+    ):
+        return "ready"
+    return "partial"
 
 
 def _instrument_not_found(instrument_id: UUID) -> NexusError:

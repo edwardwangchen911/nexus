@@ -2518,6 +2518,328 @@
         "title": "InternalPaperPortfolioListItemResponse",
         "type": "object"
       },
+      "IntradayBarResponse": {
+        "additionalProperties": false,
+        "description": "One complete 1Min fact from the selected intraday source authority.",
+        "properties": {
+          "available_at": {
+            "format": "date-time",
+            "title": "Available At",
+            "type": "string"
+          },
+          "close": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Close",
+            "type": "string"
+          },
+          "high": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "High",
+            "type": "string"
+          },
+          "low": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Low",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "open": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Open",
+            "type": "string"
+          },
+          "quality_flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Quality Flags",
+            "type": "array"
+          },
+          "volume": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Volume",
+            "type": "string"
+          }
+        },
+        "required": [
+          "observed_at",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume",
+          "available_at",
+          "quality_flags"
+        ],
+        "title": "IntradayBarResponse",
+        "type": "object"
+      },
+      "IntradayMonitorResponse": {
+        "additionalProperties": false,
+        "description": "Display-only facts and deterministic metrics for one selected instrument.",
+        "properties": {
+          "ask": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ask"
+          },
+          "bar_age_seconds": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bar Age Seconds"
+          },
+          "bar_as_of": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bar As Of"
+          },
+          "bars": {
+            "items": {
+              "$ref": "#/components/schemas/IntradayBarResponse"
+            },
+            "maxItems": 60,
+            "title": "Bars",
+            "type": "array"
+          },
+          "bid": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bid"
+          },
+          "delivery_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "real_time",
+                  "delayed",
+                  "fixture",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivery Mode"
+          },
+          "feed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feed"
+          },
+          "instrument_id": {
+            "format": "uuid",
+            "title": "Instrument Id",
+            "type": "string"
+          },
+          "last": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last"
+          },
+          "quality_reasons": {
+            "items": {
+              "pattern": "^[A-Z][A-Z0-9_]{0,99}$",
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Quality Reasons",
+            "type": "array"
+          },
+          "quote_age_seconds": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quote Age Seconds"
+          },
+          "quote_as_of": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quote As Of"
+          },
+          "range_30m": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range 30M"
+          },
+          "return_30m": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Return 30M"
+          },
+          "return_5m": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Return 5M"
+          },
+          "sample_count": {
+            "maximum": 90,
+            "minimum": 0,
+            "title": "Sample Count",
+            "type": "integer"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "spread_bps": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spread Bps"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "partial",
+              "stale",
+              "outside_session",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "trade_as_of": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trade As Of"
+          }
+        },
+        "required": [
+          "instrument_id",
+          "status",
+          "source",
+          "feed",
+          "delivery_mode",
+          "last",
+          "bid",
+          "ask",
+          "trade_as_of",
+          "quote_as_of",
+          "bar_as_of",
+          "return_5m",
+          "return_30m",
+          "range_30m",
+          "spread_bps",
+          "sample_count",
+          "quality_reasons",
+          "bars"
+        ],
+        "title": "IntradayMonitorResponse",
+        "type": "object"
+      },
       "JobRetryEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -2779,6 +3101,16 @@
         "additionalProperties": false,
         "description": "A bounded deterministic page plus one optional chart series.",
         "properties": {
+          "intraday_monitor": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IntradayMonitorResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/MarketItemResponse"
@@ -2811,7 +3143,8 @@
         "required": [
           "items",
           "next_cursor",
-          "selected_series"
+          "selected_series",
+          "intraday_monitor"
         ],
         "title": "MarketPageResponse",
         "type": "object"
