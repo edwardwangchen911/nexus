@@ -34,7 +34,7 @@ test("client-side route changes focus the main landmark with a visible outline",
   await page.route("**/api/v1/market?**", async (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
-    body: JSON.stringify({ data: { items: [], next_cursor: null, selected_series: null }, meta: meta() }),
+    body: JSON.stringify({ data: { items: [], next_cursor: null, selected_series: null, intraday_monitor: null }, meta: meta() }),
   }));
   await page.goto("/overview");
   await expect(page.getByRole("heading", { name: "尚无可用诊断" })).toBeVisible();
@@ -137,6 +137,7 @@ async function installMarketFixture(page: Page): Promise<void> {
               { session: "2026-08-26", open: "226.000000000000", high: "229.000000000000", low: "225.000000000000", close: "227.160000000000", volume: "51000000.000000000000", available_at: "2026-08-27T00:01:00Z", observed_at: "2026-08-26T20:00:00Z", quality_flags: [] },
             ],
           } : null,
+          intraday_monitor: null,
         },
         meta: meta(),
       }),

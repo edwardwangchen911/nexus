@@ -52,6 +52,38 @@ const selectedSeries = {
   ],
 };
 
+const intradayMonitor = {
+  instrument_id: instrumentId,
+  status: "ready",
+  source: "alpaca",
+  feed: "iex",
+  delivery_mode: "real_time",
+  last: "227.160000000000",
+  bid: "227.110000000000",
+  ask: "227.210000000000",
+  trade_as_of: "2026-08-21T20:00:02Z",
+  quote_as_of: "2026-08-21T20:00:01Z",
+  bar_as_of: "2026-08-21T20:00:00Z",
+  return_5m: "0.010000000000",
+  return_30m: "-0.025000000000",
+  range_30m: "0.031250000000",
+  spread_bps: "4.402300000000",
+  quote_age_seconds: 14,
+  bar_age_seconds: 15,
+  sample_count: 4,
+  quality_reasons: [],
+  bars: ["19:57", "19:58", "19:59", "20:00"].map((time, index) => ({
+    observed_at: `2026-08-21T${time}:00Z`,
+    available_at: `2026-08-21T${time}:00Z`,
+    open: `${224 + index}.000000000000`,
+    high: `${225 + index}.000000000000`,
+    low: `${223 + index}.000000000000`,
+    close: `${224 + index}.500000000000`,
+    volume: `${1_000_000 + index}.000000000000`,
+    quality_flags: [],
+  })),
+};
+
 for (const viewport of [
   { name: "desktop", width: 1440, height: 1000 },
   { name: "mobile", width: 390, height: 844 },
@@ -63,6 +95,11 @@ for (const viewport of [
 
     await expect(page.getByRole("region", { name: "AAPL 报价证据" })).toContainText("ALPACA");
     await expect(page.getByRole("region", { name: "AAPL 报价证据" })).toContainText("实时");
+    await expect(page.getByRole("region", { name: "AAPL 盘中证据" })).toContainText("实时 IEX（仅 IEX）");
+    await expect(page.getByRole("table", { name: "AAPL 1 分钟行情数据" })).toContainText("227.500000000000");
+    const intradayTableRight = page.getByRole("button", { name: "向右浏览 AAPL 盘中表格" });
+    await intradayTableRight.focus();
+    await expect(intradayTableRight).toBeFocused();
     await expect(page.getByRole("region", { name: "AAPL OHLCV 证据" })).toContainText("ALPACA");
     await expect(page.getByRole("region", { name: "AAPL OHLCV 证据" })).toContainText("延迟");
     await expect(page.getByRole("region", { name: "AAPL 价格图表" })).toBeVisible();
@@ -77,6 +114,11 @@ for (const viewport of [
 
     await page.getByRole("button", { name: "将 AAPL 加入观察列表" }).click();
     await expect(page.getByText("AAPL 已加入观察列表。", { exact: true })).toBeVisible();
+
+    await page.screenshot({
+      path: `test-results/intraday-market-${viewport.name}.png`,
+      fullPage: true,
+    });
 
     const serious = (await new AxeBuilder({ page }).analyze()).violations.filter(
       (violation) => violation.impact === "serious" || violation.impact === "critical",
@@ -115,6 +157,7 @@ async function installMarketFixtures(page: Page): Promise<void> {
           items: [item],
           next_cursor: null,
           selected_series: selected === instrumentId ? selectedSeries : null,
+          intraday_monitor: selected === instrumentId ? intradayMonitor : null,
         },
         meta: { request_id: requestId, schema_version: "1", as_of: "2026-08-22T00:00:00Z" },
       }),

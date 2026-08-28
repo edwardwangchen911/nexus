@@ -57,6 +57,7 @@ test("source conflict exposes no selected price, chart, proposal, or order actio
         }],
         next_cursor: null,
         selected_series: null,
+        intraday_monitor: null,
       },
       meta: fixtureMeta(),
     }),

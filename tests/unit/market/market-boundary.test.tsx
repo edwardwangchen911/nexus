@@ -56,6 +56,37 @@ function engineEnvelope(includeSeries: boolean) {
         quality_reasons: [],
         bars,
       } : null,
+      intraday_monitor: includeSeries ? {
+        instrument_id: instrumentId,
+        status: "ready",
+        source: "alpaca",
+        feed: "iex",
+        delivery_mode: "real_time",
+        last: "227.160000000000",
+        bid: "227.110000000000",
+        ask: "227.210000000000",
+        trade_as_of: "2026-08-21T20:00:02Z",
+        quote_as_of: "2026-08-21T20:00:01Z",
+        bar_as_of: "2026-08-21T20:00:00Z",
+        return_5m: "0.010000000000",
+        return_30m: "-0.025000000000",
+        range_30m: "0.031250000000",
+        spread_bps: "4.402300000000",
+        quote_age_seconds: 14,
+        bar_age_seconds: 15,
+        sample_count: 4,
+        quality_reasons: [],
+        bars: ["19:57", "19:58", "19:59", "20:00"].map((time, index) => ({
+          observed_at: `2026-08-21T${time}:00Z`,
+          available_at: `2026-08-21T${time}:00Z`,
+          open: `${224 + index}.000000000000`,
+          high: `${225 + index}.000000000000`,
+          low: `${223 + index}.000000000000`,
+          close: `${224 + index}.500000000000`,
+          volume: `${1_000_000 + index}.000000000000`,
+          quality_flags: [],
+        })),
+      } : null,
     },
     meta: {
       request_id: "0198f7a0-1111-7777-8111-111111111115",
@@ -102,6 +133,7 @@ describe("market UI to Engine boundary", () => {
     expect(await screen.findByRole("region", { name: "AAPL 价格图表" }, { timeout: 5_000 })).toBeVisible();
     expect(screen.getByText(/共 500 个交易日/)).toBeVisible();
     expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent("ALPACA");
+    expect(screen.getByRole("region", { name: "AAPL 盘中证据" })).toHaveTextContent("实时 IEX（仅 IEX）");
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("POLYGON");
 
     const selectedRequest = engineRequests.find(({ url }) => url.searchParams.has("selected_instrument_id"));

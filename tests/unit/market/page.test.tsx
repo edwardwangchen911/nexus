@@ -9,6 +9,7 @@ import MarketPage, {
   type SelectedMarketSeries,
 } from "../../../app/(protected)/market/page";
 import { PriceChart } from "../../../app/components/price-chart";
+import type { IntradayMonitorData } from "../../../app/components/intraday-monitor";
 import type { DataStateKind } from "../../../app/components/data-state";
 
 const item: MarketItem = {
@@ -73,6 +74,45 @@ const msftSeries: SelectedMarketSeries = {
   bars: selectedSeries.bars.map((bar) => ({ ...bar, close: "418.790000000000" })),
 };
 
+const intradayMonitor: IntradayMonitorData = {
+  instrument_id: item.instrument_id,
+  status: "ready",
+  source: "alpaca",
+  feed: "iex",
+  delivery_mode: "real_time",
+  bar_as_of: "2026-08-21T20:00:00Z",
+  quote_as_of: "2026-08-21T20:00:01Z",
+  trade_as_of: "2026-08-21T20:00:02Z",
+  bar_age_seconds: 15,
+  quote_age_seconds: 14,
+  last: item.price,
+  bid: "227.110000000000",
+  ask: "227.210000000000",
+  return_5m: "0.010000000000",
+  return_30m: "-0.025000000000",
+  range_30m: "0.031250000000",
+  spread_bps: "4.402300000000",
+  sample_count: 4,
+  quality_reasons: [],
+  bars: ["19:57", "19:58", "19:59", "20:00"].map((time, index) => ({
+    observed_at: `2026-08-21T${time}:00Z`,
+    available_at: `2026-08-21T${time}:00Z`,
+    open: `${224 + index}.000000000000`,
+    high: `${225 + index}.000000000000`,
+    low: `${223 + index}.000000000000`,
+    close: `${224 + index}.500000000000`,
+    volume: `${1_000_000 + index}.000000000000`,
+    quality_flags: [],
+  })),
+};
+
+const msftIntradayMonitor: IntradayMonitorData = {
+  ...intradayMonitor,
+  instrument_id: msftItem.instrument_id,
+  last: msftItem.price,
+  bars: intradayMonitor.bars.map((bar) => ({ ...bar, close: msftItem.price! })),
+};
+
 const stateLabels: Array<[DataStateKind, string]> = [
   ["loading", "正在加载"],
   ["empty", "暂无数据"],
@@ -98,6 +138,7 @@ afterEach(() => {
 function marketEnvelope(overrides: {
   items?: MarketItem[];
   selectedSeries?: SelectedMarketSeries | null;
+  intradayMonitor?: IntradayMonitorData | null;
   nextCursor?: string | null;
 } = {}) {
   return {
@@ -105,6 +146,7 @@ function marketEnvelope(overrides: {
       items: overrides.items ?? [item],
       next_cursor: overrides.nextCursor ?? null,
       selected_series: overrides.selectedSeries === undefined ? selectedSeries : overrides.selectedSeries,
+      intraday_monitor: overrides.intradayMonitor === undefined ? intradayMonitor : overrides.intradayMonitor,
     },
     meta: {
       request_id: "0198f7a0-1111-7777-8111-111111111115",
@@ -195,6 +237,25 @@ describe("market vertical slice", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "将 AAPL 移出观察列表" }));
     expect(onToggleWatchlist).toHaveBeenCalledWith(item);
+  });
+
+  it("binds the intraday monitor to the selected instrument and ignores mismatched evidence", async () => {
+    window.history.replaceState(null, "", `/market?selected=${item.instrument_id}`);
+    let mismatch = false;
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(marketEnvelope({
+      intradayMonitor: mismatch ? msftIntradayMonitor : intradayMonitor,
+    }))));
+
+    const view = render(<MarketPage />);
+    expect(await screen.findByRole("region", { name: "AAPL 盘中证据" })).toHaveTextContent(
+      "实时 IEX（仅 IEX）",
+    );
+
+    view.unmount();
+    mismatch = true;
+    render(<MarketPage />);
+    await screen.findByRole("region", { name: "AAPL 报价证据" });
+    expect(screen.queryByRole("region", { name: "AAPL 盘中证据" })).not.toBeInTheDocument();
   });
 
   it("shows a source conflict as a blocked evidence state without inventing a price", () => {
@@ -533,21 +594,26 @@ describe("market vertical slice", () => {
       resolveNewMsft?.(jsonResponse(marketEnvelope({
         items: [item, msftItem],
         selectedSeries: msftSeries,
+        intradayMonitor: msftIntradayMonitor,
       })));
       await Promise.resolve();
     });
     expect(await screen.findByRole("region", { name: "MSFT 价格图表" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "MSFT 盘中证据" })).toBeVisible();
 
     await act(async () => {
       resolveOldAapl?.(jsonResponse(marketEnvelope({
         items: [item, msftItem],
         selectedSeries,
+        intradayMonitor,
       })));
       await Promise.resolve();
     });
     expect(window.location.search).toBe(`?selected=${msftItem.instrument_id}`);
     expect(screen.getByRole("region", { name: "MSFT 价格图表" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "MSFT 盘中证据" })).toBeVisible();
     expect(screen.queryByRole("region", { name: "AAPL 价格图表" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "AAPL 盘中证据" })).not.toBeInTheDocument();
   });
 
   it("polls stale market data at 15 seconds without issuing business writes", async () => {

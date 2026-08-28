@@ -127,6 +127,7 @@ async function installJourneyFixtures(page: Page, state: JourneyFixture): Promis
               quality_flags: [],
             }],
           } : null,
+          intraday_monitor: null,
         },
         meta,
       }),

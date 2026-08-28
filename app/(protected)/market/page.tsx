@@ -4,6 +4,7 @@ import { DatabaseZap, RefreshCw, Star, StarOff, TriangleAlert } from "lucide-rea
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
+import { IntradayMonitor, type IntradayMonitorData } from "../../components/intraday-monitor";
 import { PriceChart } from "../../components/price-chart";
 import type { components } from "../../lib/generated/schema";
 
@@ -20,6 +21,7 @@ type MarketPanelProps = {
   state: DataStateKind;
   items: MarketItem[];
   selectedSeries: SelectedMarketSeries | null;
+  intradayMonitor?: IntradayMonitorData | null;
   selectedInstrumentId: string | null;
   watchlistOnly: boolean;
   nextCursor: string | null;
@@ -40,6 +42,7 @@ export default function MarketPage(): React.ReactElement {
   const [state, setState] = useState<DataStateKind>("loading");
   const [items, setItems] = useState<MarketItem[]>([]);
   const [selectedSeries, setSelectedSeries] = useState<SelectedMarketSeries | null>(null);
+  const [intradayMonitor, setIntradayMonitor] = useState<IntradayMonitorData | null>(null);
   const [selectedInstrumentId, setSelectedInstrumentId] = useState<string | null>(initialLocation.selectedInstrumentId);
   const [watchlistOnly, setWatchlistOnly] = useState(initialLocation.watchlistOnly);
   const [cursor, setCursor] = useState<string | null>(initialLocation.cursor);
@@ -91,6 +94,7 @@ export default function MarketPage(): React.ReactElement {
         itemsRef.current = [];
         setItems([]);
         setSelectedSeries(null);
+        setIntradayMonitor(null);
         return;
       }
       const data = result.envelope.data;
@@ -103,6 +107,11 @@ export default function MarketPage(): React.ReactElement {
       setSelectedSeries(
         data.selected_series?.instrument_id === nextSelectedInstrumentId
           ? data.selected_series
+          : null,
+      );
+      setIntradayMonitor(
+        data.intraday_monitor?.instrument_id === nextSelectedInstrumentId
+          ? data.intraday_monitor
           : null,
       );
       setNextCursor(data.next_cursor);
@@ -168,6 +177,7 @@ export default function MarketPage(): React.ReactElement {
     locationVersionRef.current += 1;
     setSelectedInstrumentId(instrumentId);
     setSelectedSeries(null);
+    setIntradayMonitor(null);
     replaceMarketQuery({ selectedInstrumentId: instrumentId, watchlistOnly, cursor });
   }
 
@@ -230,6 +240,7 @@ export default function MarketPage(): React.ReactElement {
       state={state}
       items={items}
       selectedSeries={selectedSeries}
+      intradayMonitor={intradayMonitor}
       selectedInstrumentId={selectedInstrumentId}
       watchlistOnly={watchlistOnly}
       nextCursor={nextCursor}
@@ -247,6 +258,7 @@ export default function MarketPage(): React.ReactElement {
         setNextCursor(null);
         setSelectedInstrumentId(null);
         setSelectedSeries(null);
+        setIntradayMonitor(null);
         setWatchlistOnly(nextWatchlistOnly);
         replaceMarketQuery({ selectedInstrumentId: null, watchlistOnly: nextWatchlistOnly, cursor: null });
       }}
@@ -257,6 +269,7 @@ export default function MarketPage(): React.ReactElement {
         setCursor(nextCursor);
         setSelectedInstrumentId(null);
         setSelectedSeries(null);
+        setIntradayMonitor(null);
         replaceMarketQuery({ selectedInstrumentId: null, watchlistOnly, cursor: nextCursor });
       }}
     />
@@ -267,6 +280,7 @@ export function MarketPanel({
   state,
   items,
   selectedSeries,
+  intradayMonitor = null,
   selectedInstrumentId,
   watchlistOnly,
   nextCursor,
@@ -287,6 +301,9 @@ export function MarketPanel({
   );
   const selectedSeriesForItem = selectedSeries?.instrument_id === selectedItem?.instrument_id
     ? selectedSeries
+    : null;
+  const intradayMonitorForItem = intradayMonitor?.instrument_id === selectedItem?.instrument_id
+    ? intradayMonitor
     : null;
   const hasData = ["ready", "partial", "stale"].includes(state) && items.length > 0;
 
@@ -384,6 +401,14 @@ export function MarketPanel({
                   <p className="inline-notice">显示最后已知行情；截止时间和来源保持可见，不触发任何业务动作。</p>
                 ) : null}
 
+                {intradayMonitorForItem ? (
+                  <IntradayMonitor
+                    key={`intraday:${selectedItem.instrument_id}`}
+                    symbol={selectedItem.symbol}
+                    monitor={intradayMonitorForItem}
+                  />
+                ) : null}
+
                 {selectedSeriesForItem?.source && selectedSeriesForItem.feed && selectedSeriesForItem.interval === "1Day" && selectedSeriesForItem.quality !== "FAIL" && selectedSeriesForItem.bars.length > 0 ? (
                   <>
                     <HistoryEvidence symbol={selectedItem.symbol} series={selectedSeriesForItem} />
@@ -426,8 +451,17 @@ export function refreshIntervalMs(visibility: DocumentVisibilityState): number {
 function classifyMarketState(data: MarketData): DataStateKind {
   if (data.items.length === 0) return "empty";
   const reasons = [...data.items.flatMap((item) => item.quality_reasons), ...(data.selected_series?.quality_reasons ?? [])];
-  if (reasons.some((reason) => reason === "SELECTED_SOURCE_STALE" || reason === "QUOTE_STALE")) return "stale";
-  if (!data.selected_series || data.items.some((item) => item.quality !== "PASS") || data.selected_series.quality !== "PASS") return "partial";
+  if (
+    reasons.some((reason) => reason === "SELECTED_SOURCE_STALE" || reason === "QUOTE_STALE")
+    || data.intraday_monitor?.status === "stale"
+  ) return "stale";
+  if (
+    !data.selected_series
+    || data.items.some((item) => item.quality !== "PASS")
+    || data.selected_series.quality !== "PASS"
+    || data.intraday_monitor?.status === "partial"
+    || data.intraday_monitor?.status === "unavailable"
+  ) return "partial";
   return "ready";
 }
 

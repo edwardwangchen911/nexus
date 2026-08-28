@@ -130,6 +130,30 @@ main { min-block-size: 100vh; margin-inline-start: 16rem; padding: var(--space-6
 .market-history-empty { display: flex; align-items: start; gap: var(--space-3); border: 1px solid var(--color-border); background: var(--color-surface); padding: var(--space-6); }
 .market-history-empty h2, .market-history-empty p { margin: 0; }
 .market-history-empty p { color: var(--color-text-muted); }
+.intraday-monitor { display: grid; min-inline-size: 0; gap: var(--space-4); border: 1px solid var(--color-border); border-block-start: 4px solid var(--color-info); background: var(--color-surface); padding: var(--space-4); }
+.intraday-monitor[data-status="stale"], .intraday-monitor[data-status="partial"] { border-block-start-color: var(--color-warning); }
+.intraday-monitor[data-status="unavailable"] { border-block-start-color: var(--color-danger); }
+.intraday-monitor__heading { display: flex; align-items: start; justify-content: space-between; gap: var(--space-4); }
+.intraday-monitor__heading h2, .intraday-monitor__heading p { margin: 0; }
+.intraday-monitor__heading h2 { margin-block: var(--space-1); font-size: 1.5rem; }
+.intraday-monitor__heading p:last-child { color: var(--color-text-muted); }
+.intraday-monitor__trace { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); border-block: 1px solid var(--color-border); padding-block: var(--space-3); color: var(--color-text-muted); font-size: 0.8rem; }
+.intraday-monitor__trace svg, .intraday-monitor__trace strong { color: var(--color-info); }
+.intraday-monitor__metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin: 0; border: 1px solid var(--color-border); }
+.intraday-monitor__metrics > div { min-inline-size: 0; padding: var(--space-3); }
+.intraday-monitor__metrics > div + div { border-inline-start: 1px solid var(--color-border); }
+.intraday-monitor__metrics dt { color: var(--color-text-muted); font-size: 0.75rem; }
+.intraday-monitor__metrics dd { margin: var(--space-1) 0 0; overflow-wrap: anywhere; font-weight: 700; }
+.intraday-monitor__reasons { display: flex; align-items: start; gap: var(--space-2); border-inline-start: 4px solid var(--color-warning); background: var(--color-canvas); padding: var(--space-3); color: var(--color-warning); }
+.intraday-monitor__reasons ul { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.intraday-monitor__reasons li { font-family: var(--component-numeric-font-family); overflow-wrap: anywhere; }
+.intraday-monitor__figure { display: grid; gap: var(--space-2); margin: 0; }
+.intraday-monitor__chart { display: block; inline-size: 100%; block-size: 240px; border-block: 1px solid var(--color-border); background: var(--component-chart-background); }
+.intraday-monitor__chart line { stroke: var(--component-chart-grid); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.intraday-monitor__chart polyline { fill: none; stroke: var(--color-info); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.intraday-monitor__figure figcaption { color: var(--color-text-muted); font-size: 0.75rem; }
+.intraday-monitor__empty { display: flex; align-items: center; gap: var(--space-2); margin: 0; border-block: 1px solid var(--color-border); padding-block: var(--space-4); color: var(--color-text-muted); }
+.intraday-monitor__table-scroll { min-block-size: 44px; }
 .price-chart { display: grid; gap: var(--space-3); min-inline-size: 0; border: 1px solid var(--color-border); background: var(--color-surface); padding: var(--space-4); }
 .price-chart__heading { display: flex; align-items: start; justify-content: space-between; gap: var(--space-4); }
 .price-chart__heading h2 { margin: var(--space-1) 0; }
@@ -586,12 +610,16 @@ main { min-block-size: 100vh; margin-inline-start: 16rem; padding: var(--space-6
   .page-heading, .global-status__heading { align-items: stretch; flex-direction: column; }
   .global-status__facts, .integration-card__facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .integration-grid { grid-template-columns: 1fr; }
-  .market-page__heading-actions, .price-chart__heading { align-items: stretch; flex-direction: column; }
+  .market-page__heading-actions, .price-chart__heading, .intraday-monitor__heading { align-items: stretch; flex-direction: column; }
   .market-workspace { grid-template-columns: 1fr; }
   .market-rail { position: static; }
   .market-evidence-band { grid-template-columns: 1fr; align-items: stretch; }
   .market-evidence-band dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .market-evidence-band--history { grid-template-columns: 1fr; }
+  .intraday-monitor__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .intraday-monitor__metrics > div + div { border-inline-start: 0; }
+  .intraday-monitor__metrics > div:nth-child(even) { border-inline-start: 1px solid var(--color-border); }
+  .intraday-monitor__metrics > div:nth-child(n + 3) { border-block-start: 1px solid var(--color-border); }
   .price-chart__controls { justify-content: flex-start; }
   .portfolio-page__actions { align-items: stretch; flex-direction: column; }
   .portfolio-workspace { grid-template-columns: 1fr; }
@@ -668,6 +696,12 @@ main { min-block-size: 100vh; margin-inline-start: 16rem; padding: var(--space-6
   .broker-hero__actions { justify-content: flex-start; }
   .broker-capability, .broker-intent__body, .broker-ledger-grid { grid-template-columns: 1fr; }
   .broker-capability__facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 480px) {
+  .intraday-monitor__metrics { grid-template-columns: 1fr; }
+  .intraday-monitor__metrics > div:nth-child(even) { border-inline-start: 0; }
+  .intraday-monitor__metrics > div + div { border-block-start: 1px solid var(--color-border); }
 }
 
 @media (prefers-reduced-motion: reduce) {
