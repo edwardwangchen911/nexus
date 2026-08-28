@@ -50,6 +50,7 @@ class JobType(StrEnum):
     BROKER_SIMULATION_RECONCILE = "broker.simulation.reconcile"
     COLLECT_MARKET = "collect.market"
     COLLECT_SEC_MACRO = "collect.sec_macro"
+    COLLECT_INTRADAY_SNAPSHOT = "collect.intraday_snapshot"
     QUALITY_FREEZE = "quality.freeze"
     DIAGNOSTICS_RUN = "diagnostics.run"
     PAPER_EXECUTE_DUE = "paper.execute_due"
@@ -81,6 +82,7 @@ JOB_PRIORITIES: dict[JobType, int] = {
     JobType.DAILY_PIPELINE: 280,
     JobType.COLLECT_MARKET: 280,
     JobType.COLLECT_SEC_MACRO: 280,
+    JobType.COLLECT_INTRADAY_SNAPSHOT: 160,
     JobType.STRATEGY_RND: 20,
 }
 

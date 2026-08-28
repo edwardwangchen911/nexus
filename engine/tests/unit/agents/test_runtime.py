@@ -8,6 +8,7 @@ from json import dumps
 from typing import cast
 from uuid import UUID
 
+import httpx
 import pytest
 from nexus.agents.committee import load_prompt_assets
 from nexus.agents.models import ResearchRequest
@@ -15,6 +16,7 @@ from nexus.agents.responses import ResponsesCommittee, ResponsesModelConfig, Res
 from nexus.agents.tools import ReadOnlyTools
 from nexus.domain.evidence import EvidenceRef
 from nexus.jobs.models import JobType
+from nexus.providers.settings import ProviderSettings
 from nexus.settings import EngineSettings, Environment
 from nexus.worker import _general_registry, run_worker
 from openai.types.responses.response import Response
@@ -75,6 +77,50 @@ def test_general_worker_registers_the_configured_audit_manifest_handler() -> Non
     assert registry.resolve(JobType.AUDIT_MANIFEST.value) is not None
     assert registry.resolve(JobType.COLLECT_MARKET.value) is not None
     assert registry.resolve(JobType.COLLECT_SEC_MACRO.value) is not None
+    assert registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value) is None
+
+
+def test_disabled_intraday_monitor_does_not_register_snapshot_handler() -> None:
+    registry = _general_registry(
+        EngineSettings.for_test(),
+        responses_client=None,
+        tools=None,
+        provider_settings=ProviderSettings(intraday_monitor_mode="disabled"),
+    )
+    assert registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value) is None
+
+
+@pytest.mark.asyncio
+async def test_enabled_intraday_monitor_registers_without_sending_http() -> None:
+    requests = 0
+
+    def fail_if_requested(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(599)
+
+    provider_settings = ProviderSettings(
+        runtime_mode="production",
+        intraday_monitor_mode="production",
+        alpaca_key_id="key-canary",
+        alpaca_secret_key="secret-canary",
+        alpaca_feed="sip",
+        alpaca_delivery_mode="delayed",
+        alpaca_intraday_feed="iex",
+        alpaca_intraday_delivery_mode="real_time",
+        sec_contact="owner@example.com",
+        fred_api_key="fred-canary",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fail_if_requested)) as client:
+        registry = _general_registry(
+            EngineSettings.for_test(),
+            responses_client=None,
+            tools=None,
+            provider_http_client=client,
+            provider_settings=provider_settings,
+        )
+    assert registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value) is not None
+    assert requests == 0
 
 
 @pytest.mark.asyncio
