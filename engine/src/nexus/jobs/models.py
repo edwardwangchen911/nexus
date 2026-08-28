@@ -46,6 +46,8 @@ class JobType(StrEnum):
     DAILY_PIPELINE = "daily.pipeline"
     BROKER_SYNC = "broker.sync"
     BROKER_RECONCILE = "broker.reconcile"
+    BROKER_SIMULATION_DISPATCH = "broker.simulation.dispatch"
+    BROKER_SIMULATION_RECONCILE = "broker.simulation.reconcile"
     COLLECT_MARKET = "collect.market"
     COLLECT_SEC_MACRO = "collect.sec_macro"
     QUALITY_FREEZE = "quality.freeze"
@@ -64,6 +66,8 @@ class JobType(StrEnum):
 JOB_PRIORITIES: dict[JobType, int] = {
     JobType.BROKER_SYNC: 300,
     JobType.BROKER_RECONCILE: 300,
+    JobType.BROKER_SIMULATION_DISPATCH: 300,
+    JobType.BROKER_SIMULATION_RECONCILE: 300,
     JobType.QUALITY_FREEZE: 280,
     JobType.DIAGNOSTICS_RUN: 260,
     JobType.PAPER_EXECUTE_DUE: 260,
@@ -79,6 +83,15 @@ JOB_PRIORITIES: dict[JobType, int] = {
     JobType.COLLECT_SEC_MACRO: 280,
     JobType.STRATEGY_RND: 20,
 }
+
+BROKER_JOB_TYPES = frozenset(
+    {
+        JobType.BROKER_SYNC,
+        JobType.BROKER_RECONCILE,
+        JobType.BROKER_SIMULATION_DISPATCH,
+        JobType.BROKER_SIMULATION_RECONCILE,
+    }
+)
 
 
 class JobKeyV1(BaseModel):

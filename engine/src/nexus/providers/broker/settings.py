@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+from enum import StrEnum
 from pathlib import Path
 from typing import Self
 
@@ -9,6 +10,11 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from nexus.settings import Environment
+
+
+class BrokerSimulationMode(StrEnum):
+    OFFLINE_FIXTURE = "offline_fixture"
+    EXTERNAL = "external"
 
 
 class BrokerWorkerSettings(BaseSettings):
@@ -20,18 +26,32 @@ class BrokerWorkerSettings(BaseSettings):
         populate_by_name=True,
     )
 
-    environment: Environment = Field(validation_alias="NEXUS_ENV")
+    environment: Environment = Field(
+        default=Environment.DEVELOPMENT, validation_alias="NEXUS_ENV"
+    )
     database_url: str = Field(validation_alias="DATABASE_URL")
-    gateway_origin: str = Field(validation_alias="FOSUN_GATEWAY_BASE_URL")
-    gateway_hmac_key_id: str = Field(validation_alias="FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID")
-    gateway_hmac_secret: SecretStr = Field(validation_alias="FOSUN_GATEWAY_HMAC_CURRENT_SECRET")
-    client_cert: Path = Field(validation_alias="FOSUN_GATEWAY_CLIENT_CERT")
-    client_key: Path = Field(validation_alias="FOSUN_GATEWAY_CLIENT_KEY")
-    client_ca: Path = Field(validation_alias="FOSUN_GATEWAY_CLIENT_CA")
-    external_id_current_key: SecretStr = Field(
+    simulation_mode: BrokerSimulationMode = Field(
+        default=BrokerSimulationMode.OFFLINE_FIXTURE,
+        validation_alias="NEXUS_BROKER_SIMULATION_MODE",
+    )
+    gateway_origin: str | None = Field(
+        default=None, validation_alias="FOSUN_GATEWAY_BASE_URL"
+    )
+    gateway_hmac_key_id: str | None = Field(
+        default=None, validation_alias="FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID"
+    )
+    gateway_hmac_secret: SecretStr | None = Field(
+        default=None, validation_alias="FOSUN_GATEWAY_HMAC_CURRENT_SECRET"
+    )
+    client_cert: Path | None = Field(default=None, validation_alias="FOSUN_GATEWAY_CLIENT_CERT")
+    client_key: Path | None = Field(default=None, validation_alias="FOSUN_GATEWAY_CLIENT_KEY")
+    client_ca: Path | None = Field(default=None, validation_alias="FOSUN_GATEWAY_CLIENT_CA")
+    external_id_current_key: SecretStr | None = Field(
+        default=None,
         validation_alias="NEXUS_BROKER_EXTERNAL_ID_AEAD_CURRENT_KEY"
     )
-    external_id_current_key_version: str = Field(
+    external_id_current_key_version: str | None = Field(
+        default=None,
         validation_alias="NEXUS_BROKER_EXTERNAL_ID_AEAD_CURRENT_KEY_VERSION"
     )
     external_id_previous_key: SecretStr | None = Field(
@@ -42,7 +62,8 @@ class BrokerWorkerSettings(BaseSettings):
         default=None,
         validation_alias="NEXUS_BROKER_EXTERNAL_ID_AEAD_PREVIOUS_KEY_VERSION",
     )
-    external_id_blind_index_key: SecretStr = Field(
+    external_id_blind_index_key: SecretStr | None = Field(
+        default=None,
         validation_alias="NEXUS_BROKER_EXTERNAL_ID_BLIND_INDEX_KEY"
     )
 
@@ -51,6 +72,29 @@ class BrokerWorkerSettings(BaseSettings):
 
     @model_validator(mode="after")
     def broker_secrets_are_strong_and_distinct(self) -> Self:
+        if self.simulation_mode is BrokerSimulationMode.OFFLINE_FIXTURE:
+            return self
+        required = {
+            "gateway_origin": self.gateway_origin,
+            "gateway_hmac_key_id": self.gateway_hmac_key_id,
+            "gateway_hmac_secret": self.gateway_hmac_secret,
+            "client_cert": self.client_cert,
+            "client_key": self.client_key,
+            "client_ca": self.client_ca,
+            "external_id_current_key": self.external_id_current_key,
+            "external_id_current_key_version": self.external_id_current_key_version,
+            "external_id_blind_index_key": self.external_id_blind_index_key,
+        }
+        missing = tuple(name for name, value in required.items() if value is None)
+        if missing:
+            raise ValueError(
+                "external broker settings require: " + ", ".join(sorted(missing))
+            )
+        assert self.gateway_hmac_secret is not None
+        assert self.external_id_current_key is not None
+        assert self.external_id_blind_index_key is not None
+        assert self.gateway_hmac_key_id is not None
+        assert self.external_id_current_key_version is not None
         hmac_secret = self.gateway_hmac_secret.get_secret_value()
         if hmac_secret != hmac_secret.strip() or len(hmac_secret.encode()) < 32:
             raise ValueError("gateway HMAC secret must be at least 32 unpadded bytes")
@@ -93,6 +137,7 @@ class BrokerWorkerSettings(BaseSettings):
             {
                 "NEXUS_ENV": "test",
                 "DATABASE_URL": database_url,
+                "NEXUS_BROKER_SIMULATION_MODE": "external",
                 "FOSUN_GATEWAY_BASE_URL": "https://fosun-gateway.internal:8443",
                 "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-gateway-current",
                 "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": (

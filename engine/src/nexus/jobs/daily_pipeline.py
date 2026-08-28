@@ -24,6 +24,7 @@ from nexus.jobs.daily_payloads import (
 )
 from nexus.jobs.daily_schedule import build_daily_session_schedule
 from nexus.jobs.models import (
+    BROKER_JOB_TYPES,
     JOB_PRIORITIES,
     JobKeyV1,
     JobType,
@@ -662,14 +663,14 @@ async def _record_terminal_skip(
         job_type=job_type,
         scope_kind=(
             "provider"
-            if job_type in {JobType.BROKER_SYNC, JobType.BROKER_RECONCILE}
+            if job_type in BROKER_JOB_TYPES
             else "global"
             if target_id is None
             else "portfolio"
         ),
         scope_id=(
             "broker.disabled"
-            if job_type in {JobType.BROKER_SYNC, JobType.BROKER_RECONCILE}
+            if job_type in BROKER_JOB_TYPES
             else f"XNYS.{root.session}"
             if target_id is None
             else str(target_id)
@@ -687,7 +688,7 @@ async def _record_terminal_skip(
         job_type=job_type.value,
         queue=(
             QueueName.BROKER.value
-            if job_type in {JobType.BROKER_SYNC, JobType.BROKER_RECONCILE}
+            if job_type in BROKER_JOB_TYPES
             else QueueName.STRATEGY_RND.value
             if job_type is JobType.STRATEGY_RND
             else QueueName.GENERAL.value

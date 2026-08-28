@@ -341,23 +341,23 @@ git commit -m "feat(broker): reconcile simulation orders authoritatively"
 - Produces broker-queue handlers for `broker.simulation.dispatch` and `broker.simulation.reconcile`; updates `JobType` and `JOB_PRIORITIES` together.
 - Consumes the injected fixture gateway for tests and no Agent/research registry.
 
-- [ ] **Step 1: Write failing queue, composition, capability-expiry, and lease tests**
+- [x] **Step 1: Write failing queue, composition, capability-expiry, and lease tests**
 
 Tests assert the broker registry has exactly the two Phase 3A handlers plus existing read-only sync/reconcile handlers, all use `QueueName.BROKER`, task payloads are strict and location-free, app/general workers cannot claim them, and `OFFLINE_FIXTURE` never constructs the HTTP Gateway client.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `uv run --project engine pytest engine/tests/unit/broker_simulation/test_jobs.py engine/tests/integration/test_broker_simulation_worker.py -q`
 
-- [ ] **Step 3: Implement one-shot and polling broker worker composition**
+- [x] **Step 3: Implement one-shot and polling broker worker composition**
 
 `BrokerWorkerSettings` adds only non-secret `NEXUS_BROKER_SIMULATION_MODE=offline_fixture|external` and requires an injected fixture gateway in offline mode. `external` requires a current admitted capability and the existing isolated gateway identity; Phase 3A repository defaults contain neither. The loop revalidates capability before claim, before Gateway call, after wait and before commit.
 
-- [ ] **Step 4: Run broker and existing read-only worker regression**
+- [x] **Step 4: Run broker and existing read-only worker regression**
 
 Run: `uv run --project engine pytest engine/tests/unit/broker_simulation/test_jobs.py engine/tests/integration/test_broker_simulation_worker.py engine/tests/integration/test_broker_sync_admission.py engine/tests/integration/test_job_worker.py -q`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/broker_simulation/jobs.py engine/src/nexus/broker_worker.py engine/src/nexus/providers/broker/settings.py engine/src/nexus/jobs/models.py engine/tests/unit/broker_simulation/test_jobs.py engine/tests/integration/test_broker_simulation_worker.py

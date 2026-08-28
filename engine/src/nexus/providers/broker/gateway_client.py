@@ -47,6 +47,15 @@ class FosunGatewayClient:
         wall_time: Callable[[], float] = time.time,
         uuid_factory: Callable[[], UUID] = new_uuid7,
     ) -> None:
+        if (
+            settings.gateway_origin is None
+            or settings.gateway_hmac_key_id is None
+            or settings.gateway_hmac_secret is None
+            or settings.client_cert is None
+            or settings.client_key is None
+            or settings.client_ca is None
+        ):
+            raise ValueError("READ_ONLY_GATEWAY_IDENTITY_REQUIRED")
         self._origin = _validated_origin(settings.gateway_origin)
         self._key_id = settings.gateway_hmac_key_id
         self._secret = settings.gateway_hmac_secret.get_secret_value()

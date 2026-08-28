@@ -171,6 +171,15 @@ class HttpSimulationGatewayClient:
             raise ValueError("SIMULATION_WRITE_NOT_ACTIVATED")
         if external_id_digester is None:
             raise ValueError("SIMULATION_EXTERNAL_ID_DIGESTER_REQUIRED")
+        if (
+            settings.gateway_origin is None
+            or settings.gateway_hmac_key_id is None
+            or settings.gateway_hmac_secret is None
+            or settings.client_cert is None
+            or settings.client_key is None
+            or settings.client_ca is None
+        ):
+            raise ValueError("SIMULATION_GATEWAY_IDENTITY_REQUIRED")
         self._origin = _validated_origin(settings.gateway_origin)
         self._key_id = settings.gateway_hmac_key_id
         self._secret = settings.gateway_hmac_secret.get_secret_value()

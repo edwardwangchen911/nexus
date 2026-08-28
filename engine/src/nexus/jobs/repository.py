@@ -17,6 +17,7 @@ from sqlalchemy.orm import aliased
 from nexus.audit.canonical import canonical_json
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.models import (
+    BROKER_JOB_TYPES,
     JOB_PRIORITIES,
     JobKeyV1,
     JobStatus,
@@ -40,9 +41,6 @@ JobApply = Callable[[AsyncSession], Awaitable[None]]
 JobExecution = Callable[[AsyncSession], Awaitable["JobCompletion"]]
 
 _ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,99}$")
-_BROKER_TYPES = frozenset({JobType.BROKER_SYNC, JobType.BROKER_RECONCILE})
-
-
 class JobConflictError(RuntimeError):
     """A canonical JobKey resolved to different immutable authority fields."""
 
@@ -106,7 +104,7 @@ def _error_code(value: str) -> str:
 def _require_queue(job_type: JobType, queue: QueueName) -> None:
     expected = (
         QueueName.BROKER
-        if job_type in _BROKER_TYPES
+        if job_type in BROKER_JOB_TYPES
         else QueueName.STRATEGY_RND
         if job_type is JobType.STRATEGY_RND
         else QueueName.GENERAL

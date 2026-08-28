@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.canonical import canonical_json
-from nexus.jobs.models import JOB_PRIORITIES, JobType, QueueName, RetryPolicy
+from nexus.jobs.models import BROKER_JOB_TYPES, JOB_PRIORITIES, JobType, QueueName, RetryPolicy
 from nexus.jobs.repository import ClaimedJob
 
 HandlerOutcome = Literal["succeeded", "skipped", "failed"]
@@ -83,7 +83,7 @@ class JobHandlerSpec:
             raise ValueError("handler idempotency_namespace is invalid")
         expected_queue = (
             QueueName.BROKER
-            if self.job_type in {JobType.BROKER_SYNC, JobType.BROKER_RECONCILE}
+            if self.job_type in BROKER_JOB_TYPES
             else QueueName.STRATEGY_RND
             if self.job_type is JobType.STRATEGY_RND
             else QueueName.GENERAL
