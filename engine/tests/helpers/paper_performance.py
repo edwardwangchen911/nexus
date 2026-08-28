@@ -7,15 +7,14 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
+from helpers.paper_batch import CALENDAR_ID, EXECUTION_SESSION
+from helpers.paper_execution import PaperExecutionSeed, seed_paper_execution
 from nexus.market.price_bar_authority import finalize_price_bar_set
 from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
 from nexus.persistence.models.data import DataArtifact, PriceBarRecord, PriceSeriesManifest
 from nexus.persistence.models.market import SectorExposure
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from helpers.paper_batch import CALENDAR_ID, EXECUTION_SESSION
-from helpers.paper_execution import PaperExecutionSeed, seed_paper_execution
 
 MARKET_CLOSE = datetime(2026, 8, 27, 20, tzinfo=UTC)
 SECOND_MARKET_CLOSE = datetime(2026, 8, 28, 20, tzinfo=UTC)

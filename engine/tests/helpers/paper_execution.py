@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
+from helpers.paper_batch import EXECUTION_SESSION, INSTRUMENTS, seed_paper_batch
 from nexus.market.price_bar_authority import finalize_price_bar_set
 from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.data import DataArtifact, PriceBarRecord, PriceSeriesManifest
@@ -14,8 +15,6 @@ from nexus.persistence.models.market import LatestQuote
 from nexus.persistence.models.paper import PaperOrderRecord
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from helpers.paper_batch import EXECUTION_SESSION, INSTRUMENTS, seed_paper_batch
 
 MARKET_OPEN = datetime(2026, 8, 27, 13, 30, tzinfo=UTC)
 FIRST_EVALUATION = datetime(2026, 8, 27, 13, 55, tzinfo=UTC)

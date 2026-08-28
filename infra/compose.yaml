@@ -190,3 +190,51 @@ services:
       - FSOPENAPI_CLIENT_PRIVATE_KEY
       - FSOPENAPI_SERVER_PUBLIC_KEY
       - FSOPENAPI_BASE_URL
+
+  # Phase 3A static-only profile. It compiles the isolated fixture surface and
+  # deliberately gives the broker worker no in-process fixture dependency, so
+  # starting the profile fails closed until a separately reviewed composition
+  # and Phase 3B admission package replace this guard configuration.
+  broker-simulation-worker:
+    profiles: ["broker-simulation"]
+    build:
+      context: ..
+      dockerfile: infra/docker/engine.Dockerfile
+    command: ["nexus-engine-broker-worker"]
+    environment:
+      - NEXUS_ENV=${NEXUS_BROKER_SIMULATION_ENV:-test}
+      - DATABASE_URL
+      - NEXUS_BROKER_SIMULATION_MODE=offline_fixture
+      - FOSUN_GATEWAY_BASE_URL=${FOSUN_SIMULATION_GATEWAY_BASE_URL:-}
+      - FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID=${FOSUN_SIMULATION_GATEWAY_HMAC_CURRENT_KEY_ID:-}
+      - FOSUN_GATEWAY_HMAC_CURRENT_SECRET=${FOSUN_SIMULATION_GATEWAY_HMAC_CURRENT_SECRET:-}
+      - FOSUN_GATEWAY_CLIENT_CERT=${FOSUN_SIMULATION_GATEWAY_CLIENT_CERT:-}
+      - FOSUN_GATEWAY_CLIENT_KEY=${FOSUN_SIMULATION_GATEWAY_CLIENT_KEY:-}
+      - FOSUN_GATEWAY_CLIENT_CA=${FOSUN_SIMULATION_GATEWAY_CLIENT_CA:-}
+      - NEXUS_BROKER_EXTERNAL_ID_AEAD_CURRENT_KEY=${NEXUS_SIMULATION_EXTERNAL_ID_AEAD_CURRENT_KEY:-}
+      - NEXUS_BROKER_EXTERNAL_ID_AEAD_CURRENT_KEY_VERSION=${NEXUS_SIMULATION_EXTERNAL_ID_AEAD_CURRENT_KEY_VERSION:-}
+      - NEXUS_BROKER_EXTERNAL_ID_AEAD_PREVIOUS_KEY=${NEXUS_SIMULATION_EXTERNAL_ID_AEAD_PREVIOUS_KEY:-}
+      - NEXUS_BROKER_EXTERNAL_ID_AEAD_PREVIOUS_KEY_VERSION=${NEXUS_SIMULATION_EXTERNAL_ID_AEAD_PREVIOUS_KEY_VERSION:-}
+      - NEXUS_BROKER_EXTERNAL_ID_BLIND_INDEX_KEY=${NEXUS_SIMULATION_EXTERNAL_ID_BLIND_INDEX_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      fosun-simulation-gateway:
+        condition: service_started
+
+  fosun-simulation-gateway:
+    profiles: ["broker-simulation"]
+    build:
+      context: ..
+      dockerfile: infra/docker/fosun-gateway.Dockerfile
+    command: ["nexus-fosun-simulation-fixture"]
+    environment:
+      - NEXUS_ENV=${NEXUS_BROKER_SIMULATION_ENV:-test}
+      - FOSUN_GATEWAY_TRANSPORT_MODE=fixture
+      - FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID=${FOSUN_SIMULATION_GATEWAY_HMAC_CURRENT_KEY_ID:-}
+      - FOSUN_GATEWAY_HMAC_CURRENT_SECRET=${FOSUN_SIMULATION_GATEWAY_HMAC_CURRENT_SECRET:-}
+      - FOSUN_GATEWAY_HMAC_PREVIOUS_KEY_ID=${FOSUN_SIMULATION_GATEWAY_HMAC_PREVIOUS_KEY_ID:-}
+      - FOSUN_GATEWAY_HMAC_PREVIOUS_SECRET=${FOSUN_SIMULATION_GATEWAY_HMAC_PREVIOUS_SECRET:-}
+      - FOSUN_GATEWAY_SERVER_CERT=${FOSUN_SIMULATION_GATEWAY_SERVER_CERT:-}
+      - FOSUN_GATEWAY_SERVER_KEY=${FOSUN_SIMULATION_GATEWAY_SERVER_KEY:-}
+      - FOSUN_GATEWAY_SERVER_CLIENT_CA=${FOSUN_SIMULATION_GATEWAY_SERVER_CLIENT_CA:-}

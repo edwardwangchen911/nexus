@@ -7,6 +7,12 @@ from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from uuid import UUID
 
+from helpers.evolution_shadow import (
+    StrategyShadowReadySeed,
+    seed_complete_strategy_shadow_history,
+    seed_strategy_shadow_ready,
+)
+from helpers.paper_batch import INSTRUMENTS
 from nexus.evolution.handover import (
     HandoverAuthorityV1,
     HandoverChallengerV1,
@@ -30,13 +36,6 @@ from nexus.quality.source_policy import SOURCE_POLICY_ID
 from nexus.risk.policy import RiskPolicy
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-from helpers.evolution_shadow import (
-    StrategyShadowReadySeed,
-    seed_complete_strategy_shadow_history,
-    seed_strategy_shadow_ready,
-)
-from helpers.paper_batch import INSTRUMENTS
 
 
 @dataclass(frozen=True)

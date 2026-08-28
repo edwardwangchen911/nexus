@@ -230,7 +230,7 @@ async def _runtime_mutations_are_rejected(database_url: str) -> None:
 def test_0020_is_the_single_head_after_task19() -> None:
     scripts = ScriptDirectory.from_config(_config())
 
-    assert scripts.get_heads() == ["0023_evolution_authority"]
+    assert scripts.get_heads() == ["0024_broker_simulation"]
     automation = scripts.get_revision("0020_resilient_automation_audit")
     retry_allowance = scripts.get_revision("0021_manual_job_retry_allowance")
     assert automation is not None
@@ -404,4 +404,4 @@ def test_0020_backfills_runtime_authorities_guards_audit_and_round_trips(
     command.upgrade(config, "head")
     assert asyncio.run(
         _rows(temporary_database_url, "SELECT version_num FROM alembic_version")
-    ) == [("0023_evolution_authority",)]
+    ) == [("0024_broker_simulation",)]

@@ -174,6 +174,20 @@ EVOLUTION_TABLES = {
     "strategy_registry_activations",
 }
 EXPECTED_TABLES = EXPECTED_TABLES | EVOLUTION_TABLES
+BROKER_SIMULATION_TABLES = {
+    "broker_account_bindings",
+    "broker_execution_intents",
+    "broker_execution_intent_orders",
+    "broker_batch_approvals",
+    "broker_commands",
+    "broker_command_attempts",
+    "broker_order_events",
+    "broker_webhook_receipts",
+    "broker_reconciliation_runs",
+    "broker_reconciliation_diffs",
+    "broker_simulation_admissions",
+}
+EXPECTED_TABLES = EXPECTED_TABLES | BROKER_SIMULATION_TABLES
 NO_CREATED_AT_TRIGGER_TABLES = {
     "strategy_experiment_state_projections",
     "strategy_research_lineage_projections",
@@ -249,6 +263,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
     frozenset(PAPER_TABLES),
     frozenset(AUTOMATION_TABLES),
     frozenset(EVOLUTION_TABLES),
+    frozenset(BROKER_SIMULATION_TABLES),
 )
 
 EXPECTED_FOREIGN_KEYS = {

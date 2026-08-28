@@ -9,6 +9,11 @@ const localEnvironment = Object.fromEntries(
   Object.entries({
     NEXUS_ALLOWED_USER_ID: process.env.NEXUS_ALLOWED_USER_ID,
     NEXUS_AUTH_MODE: process.env.NEXUS_AUTH_MODE,
+    NEXUS_ENGINE_BASE_URL: process.env.NEXUS_ENGINE_BASE_URL,
+    NEXUS_ENGINE_HMAC_CURRENT_KEY_ID:
+      process.env.NEXUS_ENGINE_HMAC_CURRENT_KEY_ID,
+    NEXUS_ENGINE_HMAC_CURRENT_SECRET:
+      process.env.NEXUS_ENGINE_HMAC_CURRENT_SECRET,
     NEXUS_ENV: process.env.NEXUS_ENV,
   }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
 ) as Record<string, string>;

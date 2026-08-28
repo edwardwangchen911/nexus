@@ -451,7 +451,7 @@ Run: `npm run typecheck && npm run lint && npm run build`
 
 Run: `npm run test:e2e -- tests/e2e/broker-simulation.spec.ts tests/e2e/accessibility-gates.spec.ts`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/'(protected)'/broker-simulation app/api/v1/broker-simulation app/components/broker-simulation app/lib/broker-simulation tests/unit/broker-simulation tests/e2e/broker-simulation.spec.ts
@@ -474,15 +474,15 @@ git commit -m "feat(web): add offline broker simulation workbench"
 - Produces a statically valid, non-default `broker-simulation` profile whose external adapter is disabled without a future admission package; produces the Phase 3B checklist, not an activation.
 - Consumes Tasks 1–9 and the design's external gates.
 
-- [ ] **Step 1: Write failing Compose and secret-surface tests**
+- [x] **Step 1: Write failing Compose and secret-surface tests**
 
 Tests prove the app profile has no simulation service/credential mapping, read-only Gateway has no simulation route, simulation profile uses distinct service name/HMAC/mTLS variable names, `SIMULATION_WRITE` defaults false/absent, `LIVE_WRITE` is absent, and no tracked file contains Provider credential-shaped fixture values.
 
-- [ ] **Step 2: Add the static profile and activation runbook**
+- [x] **Step 2: Add the static profile and activation runbook**
 
 The profile may define `fosun-simulation-gateway` and `broker-worker` wiring, but no ordinary local command starts it. The runbook lists exact Phase 1 five-session evidence, frozen SDK/contract/test-vector/authentication requirements, bounded first-batch approval contents, stop conditions, rollback, and `external_activation_blocked` as the current state. It contains no secret value and performs no real request.
 
-- [ ] **Step 3: Run offline Engine/Gateway/PostgreSQL suites**
+- [x] **Step 3: Run offline Engine/Gateway/PostgreSQL suites**
 
 ```bash
 NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
@@ -503,7 +503,7 @@ Run: `NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" uv ru
 
 Expected: all pass, socket attempts 0, external HTTP client constructions 0.
 
-- [ ] **Step 4: Run full repository and UI acceptance**
+- [x] **Step 4: Run full repository and UI acceptance**
 
 ```bash
 uv run --project engine ruff check engine integrations/fosun_gateway
@@ -523,7 +523,7 @@ git diff --check
 
 Expected: all exit 0; one Alembic head; `nexus_test_%` residue 0; task Compose residue 0; secret scan 0; Agent-to-broker imports 0; Critical/Important findings 0.
 
-- [ ] **Step 5: Record independent review and final commit**
+- [x] **Step 5: Record independent review and final commit**
 
 The review records exact test counts/durations, migration round trip, concurrency/failure injection, socket guard, route sets, secret scan, Web accessibility, unresolved Minor findings and rollback. It explicitly states `Phase 3A offline_ready` and `Phase 3B external_activation_blocked`.
 

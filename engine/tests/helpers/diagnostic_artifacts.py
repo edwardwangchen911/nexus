@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 
+from helpers.portfolio_api import settings
 from nexus.diagnostics.calendar_policy import (
     XNYS_CALENDAR_ADOPTION_ID,
     XNYS_CALENDAR_ADOPTION_KEY,
@@ -13,8 +14,6 @@ from nexus.persistence.session import session_factory
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import text
-
-from helpers.portfolio_api import settings
 
 
 class FixtureArtifactReader:

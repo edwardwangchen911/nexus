@@ -1,6 +1,7 @@
 from decimal import Decimal
 from uuid import UUID
 
+from helpers.broker_seed import NOW, PORTFOLIO_ID
 from nexus.providers.broker.base import (
     BrokerOrderFact,
     BrokerPosition,
@@ -9,8 +10,6 @@ from nexus.providers.broker.base import (
     PortfolioSnapshot,
     SourceObservation,
 )
-
-from helpers.broker_seed import NOW, PORTFOLIO_ID
 
 
 def _snapshot(instrument_id: UUID, snapshot_id: UUID, status: str) -> PortfolioSnapshot:

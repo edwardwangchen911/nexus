@@ -57,6 +57,7 @@ def test_error_codes_include_all_stable_client_branches() -> None:
         "BROKER_STALE",
         "SOURCE_CONFLICT",
         "CAPABILITY_EXPIRED",
+        "SIMULATION_WRITE_DISABLED",
         "PROPOSAL_NOT_EXECUTABLE",
         "ACCOUNT_TYPE_MISMATCH",
         "APPROVAL_REQUIRED",

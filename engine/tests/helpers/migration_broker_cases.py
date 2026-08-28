@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-
 from helpers.migration_helpers import _assert_schema, _table_names
 
 

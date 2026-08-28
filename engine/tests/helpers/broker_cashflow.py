@@ -1,10 +1,9 @@
 from datetime import date
 from decimal import Decimal
 
+from helpers.broker_seed import NOW
 from nexus.providers.broker.base import SourceObservation
 from nexus.reconciliation.cash_flows import CashFlowSyncResult, NormalizedCashFlow
-
-from helpers.broker_seed import NOW
 
 
 def _cash_flow_result(*, watermark: date) -> CashFlowSyncResult:

@@ -730,7 +730,7 @@ git commit -m "docs(ops): publish fixture runtime workflow"
 - Consumes: Tasks 1–7.
 - Produces: exact acceptance evidence, residual risks, and rollback record.
 
-- [ ] **Step 1: Run focused offline and security suites**
+- [x] **Step 1: Run focused offline and security suites**
 
 ```bash
 NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
@@ -743,19 +743,19 @@ NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
 
 Expected: all focused tests PASS with zero external socket attempts.
 
-- [ ] **Step 2: Run PostgreSQL provider integration tests**
+- [x] **Step 2: Run PostgreSQL provider integration tests**
 
 Run: `uv run --project engine pytest engine/tests/integration/test_provider_collection_pg.py engine/tests/integration/test_market_ingestion.py engine/tests/integration/test_agent_persistence_pg.py -q`
 
 Expected: PASS with `nexus_test_%` residual database count 0.
 
-- [ ] **Step 3: Run the exact local fixture smoke workflow**
+- [x] **Step 3: Run the exact local fixture smoke workflow**
 
 Create ignored `infra/.env.phase3-acceptance` from `infra/env.example` with deterministic fixture values and loopback ports `55433`, `59000`, `59001`, and `58000`. Use Compose project `nexus-phase3-runtime-acceptance`. Execute `doctor`, `up`, a second object-store initialization replay, `status`, `curl --fail http://127.0.0.1:58000/health/live`, and authenticated `/api/v1/readiness` through the Web BFF using its existing test HMAC flow. In a `finally`/shell trap, execute `nexus-local-stack down --env-file infra/.env.phase3-acceptance --project-name nexus-phase3-runtime-acceptance`; remove only that ignored env file after `docker compose -p nexus-phase3-runtime-acceptance ps -aq` and `docker network ls --filter label=com.docker.compose.project=nexus-phase3-runtime-acceptance -q` are empty. Do not pass `--volumes` and do not touch project `nexus-phase01-task2`.
 
 Expected: API and worker ready, single migration head, bucket existing on replay, no broker services, no external network.
 
-- [ ] **Step 4: Run full static and regression gates**
+- [x] **Step 4: Run full static and regression gates**
 
 ```bash
 uv run --project engine ruff check engine
@@ -772,7 +772,7 @@ git diff --check
 
 Expected: all commands exit 0.
 
-- [ ] **Step 5: Record review evidence and commit**
+- [x] **Step 5: Record review evidence and commit**
 
 The review must classify Critical/Important/Minor findings, list exact test counts and durations, prove fixture socket attempts 0, secret-pattern findings 0, broker services 0, orphan databases 0, and task Compose residue 0.
 

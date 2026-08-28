@@ -8,6 +8,10 @@ from decimal import Decimal
 from hashlib import sha256
 from uuid import UUID
 
+from helpers.evolution_evaluation import SeededEvaluationPair, seed_evaluation_pair
+from helpers.paper_batch import INSTRUMENTS
+from helpers.paper_performance import seed_paper_performance
+from helpers.shadow import seed_shadow_calendar
 from nexus.domain.ids import new_uuid7
 from nexus.evolution.evaluation import (
     persist_champion_comparison,
@@ -58,11 +62,6 @@ from nexus.strategy.baseline import (
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-from helpers.evolution_evaluation import SeededEvaluationPair, seed_evaluation_pair
-from helpers.paper_batch import INSTRUMENTS
-from helpers.paper_performance import seed_paper_performance
-from helpers.shadow import seed_shadow_calendar
 
 START_NOW = datetime(2026, 8, 28, 15, tzinfo=UTC)
 

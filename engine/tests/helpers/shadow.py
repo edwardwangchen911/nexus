@@ -8,6 +8,8 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import exchange_calendars
+from helpers.optimization import complete_comparison_metrics
+from helpers.portfolio_api import INSTRUMENT_ID, PORTFOLIOS, seed_portfolio_list, settings
 from nexus.backtest.engine import exchange_calendar_content_hash
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.market.price_bar_authority import finalize_price_bar_set
@@ -38,9 +40,6 @@ from nexus.shadow.canonical import shadow_source_query_content_hash
 from nexus.shadow.start import ShadowStartResult, start_proposal_shadow
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from helpers.optimization import complete_comparison_metrics
-from helpers.portfolio_api import INSTRUMENT_ID, PORTFOLIOS, seed_portfolio_list, settings
 
 _BASELINE_ID = UUID("0198d500-1000-7000-8000-000000000041")
 _OPTIMIZER_POLICY_ID = UUID("e690b91d-1e24-5de3-b2b2-566a463fca25")

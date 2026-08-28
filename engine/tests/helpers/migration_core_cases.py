@@ -6,9 +6,6 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from nexus.quality.source_policy import QUOTE_SOURCE_POLICY_ID, QUOTE_SOURCE_POLICY_PAYLOAD
-from sqlalchemy.exc import IntegrityError
-
 from helpers.migration_helpers import (
     _assert_legacy_read_only_is_effectively_disabled,
     _assert_schema,
@@ -24,6 +21,8 @@ from helpers.migration_helpers import (
     _table_columns,
     _table_names,
 )
+from nexus.quality.source_policy import QUOTE_SOURCE_POLICY_ID, QUOTE_SOURCE_POLICY_PAYLOAD
+from sqlalchemy.exc import IntegrityError
 
 
 def test_initial_migration_creates_an_exact_reversible_schema(

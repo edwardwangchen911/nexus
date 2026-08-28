@@ -3,6 +3,8 @@
 from datetime import UTC, date, datetime
 from uuid import UUID
 
+from helpers.optimization import complete_comparison_metrics
+from helpers.portfolio_api import INSTRUMENT_ID, PORTFOLIOS
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.optimizer.cost_policy import COST_POLICY_ID
 from nexus.persistence.models.data import DataSnapshot
@@ -16,9 +18,6 @@ from nexus.persistence.models.optimization import (
 )
 from nexus.quality.source_policy import SOURCE_POLICY_ID
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from helpers.optimization import complete_comparison_metrics
-from helpers.portfolio_api import INSTRUMENT_ID, PORTFOLIOS
 
 OPTIMIZER_POLICY_ID = UUID("e690b91d-1e24-5de3-b2b2-566a463fca25")
 SNAPSHOT_ID = UUID("0198d500-1000-7000-8000-000000000041")
