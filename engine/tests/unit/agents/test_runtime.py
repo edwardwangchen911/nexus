@@ -73,6 +73,8 @@ def test_general_worker_registers_the_configured_audit_manifest_handler() -> Non
         tools=None,
     )
     assert registry.resolve(JobType.AUDIT_MANIFEST.value) is not None
+    assert registry.resolve(JobType.COLLECT_MARKET.value) is not None
+    assert registry.resolve(JobType.COLLECT_SEC_MACRO.value) is not None
 
 
 @pytest.mark.asyncio

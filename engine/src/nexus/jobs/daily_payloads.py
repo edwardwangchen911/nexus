@@ -15,6 +15,7 @@ _UUID = re.compile(
 )
 _SESSION = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _UTC_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
+_HASH64 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def format_utc(value: datetime) -> str:
@@ -46,6 +47,8 @@ class DailyPipelinePayload(BaseModel):
     )
     last_session_of_week: bool
     profile_id: str = Field(pattern=PROFILE_PATTERN.pattern)
+    universe_snapshot_id: str | None = Field(default=None, pattern=_UUID.pattern)
+    universe_content_hash: str | None = Field(default=None, pattern=_HASH64.pattern)
 
     @field_validator("session", "next_session")
     @classmethod
@@ -72,6 +75,10 @@ class DailyPipelinePayload(BaseModel):
             raise ValueError("next session and execution time must be present together")
         if self.last_session_of_week and self.next_session is None:
             raise ValueError("week boundary requires the next authoritative session")
+        if (self.universe_snapshot_id is None) != (
+            self.universe_content_hash is None
+        ):
+            raise ValueError("universe snapshot identity and hash must be present together")
         return self
 
 
@@ -88,6 +95,8 @@ class DailyStagePayload(BaseModel):
     quality_cutoff_at: str = Field(pattern=_UTC_TIMESTAMP.pattern)
     profile_id: str = Field(pattern=PROFILE_PATTERN.pattern)
     target_id: str | None = Field(default=None, pattern=_UUID.pattern)
+    universe_snapshot_id: str | None = Field(default=None, pattern=_UUID.pattern)
+    universe_content_hash: str | None = Field(default=None, pattern=_HASH64.pattern)
 
     @field_validator("session")
     @classmethod
@@ -100,3 +109,11 @@ class DailyStagePayload(BaseModel):
     def _valid_timestamp(cls, value: str) -> str:
         parse_utc(value)
         return value
+
+    @model_validator(mode="after")
+    def _universe_binding(self) -> DailyStagePayload:
+        if (self.universe_snapshot_id is None) != (
+            self.universe_content_hash is None
+        ):
+            raise ValueError("universe snapshot identity and hash must be present together")
+        return self

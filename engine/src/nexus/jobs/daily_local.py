@@ -22,7 +22,12 @@ from nexus.jobs.daily_pipeline import (
     build_daily_pipeline_registry,
 )
 from nexus.jobs.models import JobKeyV1, JobType, QueueName, RetryPolicy, job_input_hash
-from nexus.jobs.registry import JobHandlerContext, JobHandlerResult, JobRegistry
+from nexus.jobs.registry import (
+    JobHandlerContext,
+    JobHandlerResult,
+    JobHandlerSpec,
+    JobRegistry,
+)
 from nexus.jobs.repository import JobDependencyInput, enqueue_job
 from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.paper.performance import publish_paper_performance_snapshot
@@ -51,6 +56,7 @@ _LOCAL_SAFE_STAGES = frozenset(
 def build_local_daily_pipeline_registry(
     *,
     audit_object_store: AuditManifestObjectStore | None = None,
+    stage_specs: tuple[JobHandlerSpec, ...] = (),
 ) -> JobRegistry:
     """Compose local paper adapters and optional audit storage, never broker or Agent."""
     enabled = (
@@ -58,6 +64,7 @@ def build_local_daily_pipeline_registry(
         if audit_object_store is None
         else _LOCAL_SAFE_STAGES | {JobType.AUDIT_MANIFEST}
     )
+    enabled = frozenset((*enabled, *(spec.job_type for spec in stage_specs)))
 
     async def execute(
         job_type: JobType,
@@ -83,6 +90,7 @@ def build_local_daily_pipeline_registry(
         stage_executor=execute,
         enabled_stage_types=frozenset(enabled),
         target_resolver=_resolve_local_targets,
+        stage_specs=stage_specs,
     )
 
 

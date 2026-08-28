@@ -23,8 +23,10 @@ def _missing_bucket() -> ClientError:
 @dataclass
 class _S3Client:
     exists: bool
+    versioning_enabled: bool = False
     head_calls: list[dict[str, object]] = field(default_factory=list)
     create_calls: list[dict[str, object]] = field(default_factory=list)
+    put_versioning_calls: list[dict[str, object]] = field(default_factory=list)
 
     def head_bucket(self, **kwargs: object) -> object:
         self.head_calls.append(kwargs)
@@ -35,6 +37,14 @@ class _S3Client:
     def create_bucket(self, **kwargs: object) -> object:
         self.create_calls.append(kwargs)
         self.exists = True
+        return {}
+
+    def get_bucket_versioning(self, **kwargs: object) -> object:
+        return {"Status": "Enabled"} if self.versioning_enabled else {}
+
+    def put_bucket_versioning(self, **kwargs: object) -> object:
+        self.put_versioning_calls.append(kwargs)
+        self.versioning_enabled = True
         return {}
 
 
@@ -49,10 +59,16 @@ def test_development_creates_exact_missing_bucket_and_verifies_it() -> None:
         {"Bucket": "nexus-fixtures"},
         {"Bucket": "nexus-fixtures"},
     ]
+    assert client.put_versioning_calls == [
+        {
+            "Bucket": "nexus-fixtures",
+            "VersioningConfiguration": {"Status": "Enabled"},
+        }
+    ]
 
 
 def test_existing_bucket_replay_is_idempotent() -> None:
-    client = _S3Client(exists=True)
+    client = _S3Client(exists=True, versioning_enabled=True)
 
     first = ensure_bucket(_settings("development"), client=client)
     replay = ensure_bucket(_settings("development"), client=client)
@@ -63,6 +79,25 @@ def test_existing_bucket_replay_is_idempotent() -> None:
         {"Bucket": "nexus-fixtures"},
         {"Bucket": "nexus-fixtures"},
     ]
+    assert client.put_versioning_calls == []
+
+
+def test_development_enables_versioning_on_an_existing_local_bucket() -> None:
+    client = _S3Client(exists=True)
+
+    assert ensure_bucket(_settings("development"), client=client) == "existing"
+
+    assert client.versioning_enabled
+    assert len(client.put_versioning_calls) == 1
+
+
+def test_production_requires_preprovisioned_bucket_versioning() -> None:
+    client = _S3Client(exists=True)
+
+    with pytest.raises(RuntimeError, match="production object-store versioning is disabled"):
+        ensure_bucket(_settings("production"), client=client)
+
+    assert client.put_versioning_calls == []
 
 
 def test_production_missing_bucket_fails_without_creating() -> None:

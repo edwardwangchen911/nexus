@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import cast
 from uuid import UUID
 
+import httpx
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,6 +37,7 @@ from nexus.jobs.daily_local import (
 )
 from nexus.jobs.daily_pipeline import schedule_due_daily_pipeline
 from nexus.jobs.models import JobType, QueueName, RetryPolicy
+from nexus.jobs.provider_collection import build_provider_collection_registry
 from nexus.jobs.registry import (
     JobHandlerContext,
     JobHandlerResult,
@@ -43,6 +45,7 @@ from nexus.jobs.registry import (
     JobRegistry,
 )
 from nexus.jobs.worker import UnsafeJobError, run_job_worker_once
+from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.persistence.migrations import (
     CURRENT_GENERAL_WORKER_PROCESS_VERSION,
     CURRENT_MIGRATION_HEAD,
@@ -52,6 +55,9 @@ from nexus.persistence.models.agents import (
     AgentResearchRunRecord,
 )
 from nexus.persistence.session import session_factory
+from nexus.providers.composition import build_provider_bundle
+from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
+from nexus.providers.settings import ProviderSettings
 from nexus.settings import AgentRuntimeMode, EngineSettings, Environment
 
 _JOB_SCHEMA = "agent_research_job_v1"
@@ -111,30 +117,36 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
         await asyncio.sleep(0)
         return
     factory = session_factory(configured)
-    registry = _general_registry(configured, responses_client=None, tools=None)
-    worker_id = f"agent-general-{new_uuid7()}"
-    started_at = datetime.now(UTC)
-    while True:
-        now = datetime.now(UTC)
-        async with factory() as session, session.begin():
-            await schedule_due_daily_pipeline(
-                session,
-                now=now,
-                profile_id=LOCAL_SAFE_DAILY_PROFILE,
-            )
-        worked = await run_job_worker_once(
-            factory,
-            registry=registry,
-            queue=QueueName.GENERAL,
-            worker_id=worker_id,
-            worker_started_at=started_at,
-            process_version=_PROCESS_VERSION,
-            migration_head=_MIGRATION_HEAD,
-            clock=lambda: datetime.now(UTC),
-            claim_registered_only=True,
+    async with httpx.AsyncClient(follow_redirects=False, timeout=None) as provider_http:
+        registry = _general_registry(
+            configured,
+            responses_client=None,
+            tools=None,
+            provider_http_client=provider_http,
         )
-        if not worked:
-            await asyncio.sleep(0.5)
+        worker_id = f"agent-general-{new_uuid7()}"
+        started_at = datetime.now(UTC)
+        while True:
+            now = datetime.now(UTC)
+            async with factory() as session, session.begin():
+                await schedule_due_daily_pipeline(
+                    session,
+                    now=now,
+                    profile_id=LOCAL_SAFE_DAILY_PROFILE,
+                )
+            worked = await run_job_worker_once(
+                factory,
+                registry=registry,
+                queue=QueueName.GENERAL,
+                worker_id=worker_id,
+                worker_started_at=started_at,
+                process_version=_PROCESS_VERSION,
+                migration_head=_MIGRATION_HEAD,
+                clock=lambda: datetime.now(UTC),
+                claim_registered_only=True,
+            )
+            if not worked:
+                await asyncio.sleep(0.5)
 
 
 def _general_registry(
@@ -142,14 +154,44 @@ def _general_registry(
     *,
     responses_client: object | None,
     tools: ReadOnlyToolRegistry | None,
+    provider_http_client: httpx.AsyncClient | None = None,
 ) -> JobRegistry:
     agent = _agent_registry(
         settings,
         responses_client=responses_client,
         tools=tools,
     )
+    provider_settings = ProviderSettings()
+
+    def http_factory(
+        *,
+        provider_name: str,
+        origin: AllowedOrigin,
+        policy: HttpRequestPolicy,
+    ) -> FixedOriginHttpClient:
+        if provider_http_client is None:
+            raise RuntimeError("PRODUCTION_PROVIDER_HTTP_CLIENT_REQUIRED")
+        return FixedOriginHttpClient(
+            provider_name=provider_name,
+            origin=origin,
+            policy=policy,
+            client=provider_http_client,
+        )
+
+    provider_bundle = build_provider_bundle(
+        provider_settings,
+        http_client_factory=http_factory,
+    )
+    provider_store = S3ProviderEvidenceStore(settings)
+    provider = build_provider_collection_registry(
+        provider_bundle,
+        provider_store,
+        provider_store,
+        lambda: datetime.now(UTC),
+    )
     daily = build_local_daily_pipeline_registry(
-        audit_object_store=S3AuditManifestObjectStore(settings)
+        audit_object_store=S3AuditManifestObjectStore(settings),
+        stage_specs=provider.specs,
     )
     return JobRegistry((*agent.specs, *daily.specs))
 

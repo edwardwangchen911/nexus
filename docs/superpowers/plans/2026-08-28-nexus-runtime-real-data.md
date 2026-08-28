@@ -548,7 +548,7 @@ git commit -m "feat(providers): add bounded SEC and FRED transports"
 
 `engine/tests/unit/jobs/test_provider_collection.py` defines `InMemoryRawEvidenceStore`, `InMemoryMarketObjectStore`, `fixture_provider_bundle`, `provider_bundle_with_source_conflict`, `run_market_collection`, `selected_price_authority_count`, `daily_stage_context`, `daily_stage_payload`, and the fixed UUID/time constants used below. `engine/tests/integration/test_provider_collection_pg.py` uses the existing PostgreSQL `session` fixtures and in-memory object stores; it does not call S3 or the internet.
 
-- [ ] **Step 1: Write failing handler admission tests**
+- [x] **Step 1: Write failing handler admission tests**
 
 ```python
 @pytest.mark.asyncio
@@ -575,7 +575,7 @@ async def test_stale_or_conflicting_market_data_cannot_publish_selected_authorit
     assert await selected_price_authority_count(session) == 0
 ```
 
-- [ ] **Step 2: Run unit/integration tests and verify RED**
+- [x] **Step 2: Run unit/integration tests and verify RED**
 
 Run unit: `uv run --project engine pytest engine/tests/unit/jobs/test_provider_collection.py -q`
 
@@ -583,7 +583,7 @@ Run PostgreSQL: `uv run --project engine pytest engine/tests/integration/test_pr
 
 Expected: collection registry tests fail because the module is missing.
 
-- [ ] **Step 3: Implement bounded handlers**
+- [x] **Step 3: Implement bounded handlers**
 
 ```python
 def build_provider_collection_registry(
@@ -620,7 +620,7 @@ def build_provider_collection_registry(
 
 The scheduler resolves one latest complete `UniverseSnapshot` whose `published_at <= planned_at`, stores its UUID and content hash in the strict `DailyPipelinePayload`, and skips both collection stages with `NO_FROZEN_UNIVERSE` when none exists. The daily DAG remains one global `collect.market` node and one global `collect.sec_macro` node. Each handler reads at most 100 USD US instruments from that exact snapshot and exactly the eight approved macro series; it does not perform unbounded watchlist discovery inside the Job. `S3ProviderEvidenceStore` in `nexus.market.object_store` implements both `MarketObjectStore` and `RawEvidenceStore`, uses content-addressed keys plus object version IDs, and never overwrites an existing digest. Handlers archive exact raw bytes before normalization metadata commits, bind object hash/URI/length/source/received_at, and use the existing source policy to publish or abstain. They return safe result codes and never include provider error text. `collect.market` calls `ingest_price_page` per page; `collect.sec_macro` persists `ResearchEvidenceRef`, normalized financial facts and macro observations through one transaction per provider object so a restart can conflict on immutable identities without duplicating facts.
 
-- [ ] **Step 4: Register composition and prove restart idempotency**
+- [x] **Step 4: Register composition and prove restart idempotency**
 
 Update `worker.py` to construct `ProviderSettings`, call `build_provider_bundle`, and merge the registry only after settings validation. Extend `daily_pipeline.py` payload construction without changing schedule authority.
 
@@ -628,7 +628,7 @@ Run: `uv run --project engine pytest engine/tests/unit/jobs/test_provider_collec
 
 Expected: PASS; same job identity produces one raw object metadata record and one normalized authority set after worker restart.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/jobs/provider_collection.py engine/src/nexus/jobs/daily_pipeline.py engine/src/nexus/jobs/daily_payloads.py engine/src/nexus/market/object_store.py engine/src/nexus/worker.py engine/tests/unit/jobs/test_provider_collection.py engine/tests/integration/test_provider_collection_pg.py

@@ -43,6 +43,7 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
 )
+from nexus.persistence.models.market import UniverseSnapshot
 from nexus.persistence.models.runtime import Job, JobDependency
 
 DailyStageExecutor = Callable[
@@ -119,6 +120,20 @@ async def schedule_due_daily_pipeline(
     )
     if schedule is None:
         return None
+    universe = await session.scalar(
+        select(UniverseSnapshot)
+        .where(
+            UniverseSnapshot.effective_from <= schedule.session,
+            UniverseSnapshot.published_at.is_not(None),
+            UniverseSnapshot.published_at <= schedule.planned_at,
+        )
+        .order_by(
+            UniverseSnapshot.published_at.desc(),
+            UniverseSnapshot.effective_from.desc(),
+            UniverseSnapshot.id.desc(),
+        )
+        .limit(1)
+    )
     payload = DailyPipelinePayload(
         calendar_authority_id=str(calendar.calendar_authority_id),
         session=schedule.session.isoformat(),
@@ -133,6 +148,8 @@ async def schedule_due_daily_pipeline(
         ),
         last_session_of_week=schedule.last_session_of_week,
         profile_id=profile_id,
+        universe_snapshot_id=None if universe is None else str(universe.id),
+        universe_content_hash=None if universe is None else universe.content_hash,
     )
     document = payload.model_dump(mode="json")
     return await enqueue_job(
@@ -159,6 +176,7 @@ def build_daily_pipeline_registry(
     stage_executor: DailyStageExecutor,
     enabled_stage_types: frozenset[JobType] | None = None,
     target_resolver: DailyTargetResolver | None = None,
+    stage_specs: Sequence[JobHandlerSpec] = (),
 ) -> JobRegistry:
     """Build an explicit local registry; constructing it never loads broker code."""
     if PROFILE_PATTERN.fullmatch(profile_id) is None:
@@ -196,9 +214,28 @@ def build_daily_pipeline_registry(
     registered_stages = (
         _GENERAL_STAGE_TYPES if enabled_stage_types is None else enabled_stage_types
     )
+    provided_specs = {spec.job_type: spec for spec in stage_specs}
+    if len(provided_specs) != len(stage_specs):
+        raise ValueError("duplicate daily stage handler")
+    if not set(provided_specs).issubset(registered_stages):
+        raise ValueError("daily stage handler is not enabled")
+    for spec in provided_specs.values():
+        if (
+            spec.job_type not in _GENERAL_STAGE_TYPES
+            or spec.schema_version != STAGE_SCHEMA
+            or spec.payload_model is not DailyStagePayload
+            or spec.queue is not QueueName.GENERAL
+        ):
+            raise ValueError("daily stage handler authority is invalid")
+
     for job_type in sorted(registered_stages, key=lambda item: item.value):
         if job_type not in _GENERAL_STAGE_TYPES:
             raise ValueError(f"unsupported daily stage type: {job_type.value}")
+
+        provided = provided_specs.get(job_type)
+        if provided is not None:
+            specs.append(provided)
+            continue
 
         async def handle(
             context: JobHandlerContext,
@@ -437,6 +474,21 @@ async def _enqueue_or_skip_stage(
     scheduled_for: datetime | None = None,
     target_id: UUID | None = None,
 ) -> Job:
+    if (
+        job_type in {JobType.COLLECT_MARKET, JobType.COLLECT_SEC_MACRO}
+        and root.universe_snapshot_id is None
+    ):
+        return await _record_terminal_skip(
+            session,
+            root=root,
+            root_job_id=root_job_id,
+            job_type=job_type,
+            dependencies=dependencies,
+            finished_at=finished_at,
+            result_code="NO_FROZEN_UNIVERSE",
+            scheduled_for=scheduled_for,
+            target_id=target_id,
+        )
     if job_type in enabled_stage_types:
         return await _enqueue_stage(
             session,
@@ -517,6 +569,8 @@ def _stage_payload(
         quality_cutoff_at=root.quality_cutoff_at,
         profile_id=root.profile_id,
         target_id=None if target_id is None else str(target_id),
+        universe_snapshot_id=root.universe_snapshot_id,
+        universe_content_hash=root.universe_content_hash,
     )
 
 

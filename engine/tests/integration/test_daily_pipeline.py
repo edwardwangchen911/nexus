@@ -25,6 +25,7 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
 )
+from nexus.persistence.models.market import UniverseSnapshot
 from nexus.persistence.models.runtime import Job, JobDependency, JobLease
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
@@ -33,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 _CALENDAR_ID = UUID("0198d500-1000-7000-8000-000000002201")
+_UNIVERSE_ID = UUID("0198d500-1000-7000-8000-000000002211")
 _PROFILE = "fixture_daily_v1"
 _THURSDAY = date(2026, 8, 27)
 _FRIDAY = date(2026, 8, 28)
@@ -55,7 +57,9 @@ class _AuditStore:
         return f"memory://daily-audit/{key}"
 
 
-async def _seed_calendar(factory: async_sessionmaker[AsyncSession]) -> None:
+async def _seed_calendar(
+    factory: async_sessionmaker[AsyncSession], *, include_universe: bool = True
+) -> None:
     async with factory() as session, session.begin():
         session.add(
             ExchangeCalendarAuthorityRecord(
@@ -96,6 +100,18 @@ async def _seed_calendar(factory: async_sessionmaker[AsyncSession]) -> None:
                 ),
             )
         )
+        if include_universe:
+            session.add(
+                UniverseSnapshot(
+                    id=_UNIVERSE_ID,
+                    key="us_liquid",
+                    version="daily-pipeline-fixture-v1",
+                    effective_from=_THURSDAY,
+                    source="fixture",
+                    content_hash="a" * 64,
+                    published_at=datetime(2026, 8, 1, tzinfo=UTC),
+                )
+            )
 
 
 @pytest.mark.asyncio
@@ -206,6 +222,8 @@ async def test_scheduler_is_idempotent_and_materializes_strict_weekly_dag(
         )
     assert first is not None and replay is not None and first.id == replay.id
     assert first.payload["last_session_of_week"] is True
+    assert first.payload["universe_snapshot_id"] == str(_UNIVERSE_ID)
+    assert first.payload["universe_content_hash"] == "a" * 64
 
     executed: list[JobType] = []
     assert await _drain_general(
@@ -262,6 +280,53 @@ async def test_scheduler_is_idempotent_and_materializes_strict_weekly_dag(
     assert executed.index(JobType.OPTIMIZATION_PROPOSE) > executed.index(
         JobType.AGENT_RESEARCH
     )
+
+
+@pytest.mark.asyncio
+async def test_collection_stages_skip_when_scheduler_cannot_freeze_a_universe(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_calendar(factory, include_universe=False)
+    now = _FRIDAY_CLOSE + timedelta(minutes=31)
+    async with factory() as session, session.begin():
+        root = await schedule_due_daily_pipeline(session, now=now, profile_id=_PROFILE)
+    assert root is not None
+    assert root.payload["universe_snapshot_id"] is None
+    registry = build_daily_pipeline_registry(
+        profile_id=_PROFILE,
+        stage_executor=_successful_executor([]),
+    )
+    assert await run_job_worker_once(
+        factory,
+        registry=registry,
+        queue=QueueName.GENERAL,
+        worker_id="daily-no-universe-worker",
+        worker_started_at=now,
+        process_version="test-v1",
+        migration_head="0021_manual_job_retry_allowance",
+        clock=lambda: now,
+        claim_registered_only=True,
+    )
+    async with factory() as session:
+        collection_rows = tuple(
+            (
+                await session.execute(
+                    select(Job.job_type, Job.status, Job.result_code).where(
+                        Job.job_type.in_(
+                            (
+                                JobType.COLLECT_MARKET.value,
+                                JobType.COLLECT_SEC_MACRO.value,
+                            )
+                        )
+                    )
+                )
+            ).tuples()
+        )
+    assert set(collection_rows) == {
+        (JobType.COLLECT_MARKET.value, "skipped", "NO_FROZEN_UNIVERSE"),
+        (JobType.COLLECT_SEC_MACRO.value, "skipped", "NO_FROZEN_UNIVERSE"),
+    }
 
 
 @pytest.mark.asyncio

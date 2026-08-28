@@ -75,6 +75,10 @@ class ObjectStoreInitClient(Protocol):
 
     def create_bucket(self, **kwargs: object) -> object: ...
 
+    def get_bucket_versioning(self, **kwargs: object) -> object: ...
+
+    def put_bucket_versioning(self, **kwargs: object) -> object: ...
+
 
 def ensure_bucket(
     settings: ObjectStoreInitSettings,
@@ -85,27 +89,45 @@ def ensure_bucket(
     s3 = client or _client(settings)
     try:
         s3.head_bucket(Bucket=settings.bucket)
-        return "existing"
+        result: InitResult = "existing"
     except ClientError as error:
         if not _is_missing(error):
             raise
-    if settings.environment is Environment.PRODUCTION:
-        raise RuntimeError("production object-store bucket is missing")
-
-    create: dict[str, object] = {"Bucket": settings.bucket}
-    if settings.region != "us-east-1":
-        create["CreateBucketConfiguration"] = {
-            "LocationConstraint": settings.region,
-        }
-    try:
-        s3.create_bucket(**create)
-    except ClientError as error:
-        if not _is_replayable_create(error):
-            raise
+        if settings.environment is Environment.PRODUCTION:
+            raise RuntimeError("production object-store bucket is missing") from None
+        create: dict[str, object] = {"Bucket": settings.bucket}
+        if settings.region != "us-east-1":
+            create["CreateBucketConfiguration"] = {
+                "LocationConstraint": settings.region,
+            }
+        try:
+            s3.create_bucket(**create)
+            result = "created"
+        except ClientError as create_error:
+            if not _is_replayable_create(create_error):
+                raise
+            result = "existing"
         s3.head_bucket(Bucket=settings.bucket)
-        return "existing"
-    s3.head_bucket(Bucket=settings.bucket)
-    return "created"
+    _ensure_versioning(settings, s3)
+    return result
+
+
+def _ensure_versioning(
+    settings: ObjectStoreInitSettings,
+    client: ObjectStoreInitClient,
+) -> None:
+    current = client.get_bucket_versioning(Bucket=settings.bucket)
+    if isinstance(current, dict) and current.get("Status") == "Enabled":
+        return
+    if settings.environment is Environment.PRODUCTION:
+        raise RuntimeError("production object-store versioning is disabled")
+    client.put_bucket_versioning(
+        Bucket=settings.bucket,
+        VersioningConfiguration={"Status": "Enabled"},
+    )
+    verified = client.get_bucket_versioning(Bucket=settings.bucket)
+    if not isinstance(verified, dict) or verified.get("Status") != "Enabled":
+        raise RuntimeError("object-store versioning could not be enabled")
 
 
 def main() -> int:

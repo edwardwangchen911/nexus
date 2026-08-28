@@ -53,8 +53,10 @@ async def ingest_price_page(
     session: AsyncSession,
     object_store: MarketObjectStore,
     page: ProviderPage[PriceBar],
+    *,
+    commit: bool = True,
 ) -> MarketIngestionResult:
-    """Archive raw, atomically publish Parquet, then commit metadata."""
+    """Archive raw, atomically publish Parquet, then flush or commit metadata."""
     if not page.items:
         raise ValueError("market page must contain at least one bar")
     if not page.raw_payload:
@@ -144,7 +146,8 @@ async def ingest_price_page(
         )
         await session.flush()
         finalized = await finalize_price_bar_set(session, manifest)
-        await session.commit()
+        if commit:
+            await session.commit()
         return MarketIngestionResult(
             raw_uri=raw_uri,
             artifact=artifact,
