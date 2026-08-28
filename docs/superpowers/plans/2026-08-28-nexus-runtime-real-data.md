@@ -289,7 +289,7 @@ git commit -m "feat(providers): add fixed-origin HTTP policy"
 - Produces: `ProviderRuntimeMode`, `ProviderSettings`, `ProviderBundle`, `build_provider_bundle(settings, http_client_factory)`.
 - Consumes: existing fixture provider implementations and future HTTP transports from Tasks 4–5.
 
-- [ ] **Step 1: Write failing fixture-isolation and production-validation tests**
+- [x] **Step 1: Write failing fixture-isolation and production-validation tests**
 
 ```python
 def test_fixture_bundle_never_calls_http_factory() -> None:
@@ -305,13 +305,13 @@ def test_production_requires_explicit_delivery_mode_and_credentials() -> None:
         ProviderSettings(runtime_mode="production", alpaca_key_id="key", alpaca_secret_key="secret")
 ```
 
-- [ ] **Step 2: Run and observe RED**
+- [x] **Step 2: Run and observe RED**
 
 Run: `uv run --project engine pytest engine/tests/unit/providers/test_composition.py -q`
 
 Expected: FAIL because settings/composition modules do not exist.
 
-- [ ] **Step 3: Implement strict settings and bundle protocols**
+- [x] **Step 3: Implement strict settings and bundle protocols**
 
 ```python
 class ProviderRuntimeMode(StrEnum):
@@ -340,13 +340,13 @@ class ProviderSettings(BaseSettings):
 
 `ProviderBundle` exposes only typed provider protocols, a mode, and `market_provider(session: AsyncSession) -> MarketDataProvider`; its `repr` must not expose `SecretStr` values. Production market construction creates a session-bound `SqlInstrumentSymbolResolver`, while fixture construction ignores the session, does not resolve secret values, and does not create any HTTP object.
 
-- [ ] **Step 4: Run settings, composition, and existing settings tests**
+- [x] **Step 4: Run settings, composition, and existing settings tests**
 
 Run: `uv run --project engine pytest engine/tests/unit/providers/test_composition.py engine/tests/test_health.py -q`
 
 Expected: PASS with no secret canary in repr, error, or captured logs.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/providers/settings.py engine/src/nexus/providers/composition.py engine/tests/unit/providers/test_composition.py engine/src/nexus/settings.py
