@@ -1,7 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import BrokerSimulationPage from "../../../app/(protected)/broker-simulation/page";
 import IntegrationsPage, { IntegrationsPanel } from "../../../app/(protected)/integrations/page";
 import LiveApprovalsPage from "../../../app/(protected)/live-approvals/page";
 import { GlobalSystemStatus, GlobalSystemStatusView,
@@ -224,15 +223,8 @@ describe("integrations vertical slice", () => {
     expect(screen.getByText("FOSUN · FIXTURE")).toBeVisible();
   });
 
-  it("keeps broker simulation and live approval routes visibly locked with no submit surface", () => {
-    const { rerender } = render(<BrokerSimulationPage />);
-
-    expect(screen.getByText("阶段 3 前锁定")).toBeVisible();
-    expect(screen.queryByRole("form")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "返回集成状态" })).toHaveClass("button");
-
-    rerender(<LiveApprovalsPage />);
+  it("keeps the live approval route visibly locked with no submit surface", () => {
+    render(<LiveApprovalsPage />);
     expect(screen.getByText("阶段 4 前锁定")).toBeVisible();
     expect(screen.queryByRole("form")).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();

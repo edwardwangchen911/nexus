@@ -4,6 +4,9 @@ import { v7 as uuidv7, validate as validateUuid, version as uuidVersion } from "
 import {
   integrationStatusRuntimeSchema,
   brokerSyncRunRuntimeSchema,
+  brokerSimulationRuntimeSchema,
+  brokerIntentRuntimeSchema,
+  brokerActionRuntimeSchema,
   dailyBriefRuntimeSchema,
   marketPageRuntimeSchema,
   optimizationJobRuntimeSchema,
@@ -35,9 +38,9 @@ import {
 import { integrationProviders } from "../integrations/providers";
 import { sameUuid } from "../optimization/uuid";
 
-export type NexusErrorCode = "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "INTERNAL_ERROR";
+export type NexusErrorCode = "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "SIMULATION_WRITE_DISABLED" | "INTERNAL_ERROR";
 export const ERROR_STATUSES = {
-  UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422, 429], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], BUDGET_EXHAUSTED: [409, 429], EVOLUTION_BLOCKED: [422], AUTHORITY_UNAVAILABLE: [503], PROVIDER_UNAVAILABLE: [503], INTERNAL_ERROR: [500],
+  UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422, 429], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], SIMULATION_WRITE_DISABLED: [409], BUDGET_EXHAUSTED: [409, 429], EVOLUTION_BLOCKED: [422], AUTHORITY_UNAVAILABLE: [503], PROVIDER_UNAVAILABLE: [503], INTERNAL_ERROR: [500],
 } as const;
 export type StableEngineErrorCode = keyof typeof ERROR_STATUSES;
 export const SAFE_ENGINE_ERROR_MESSAGES: Record<StableEngineErrorCode, string> = {
@@ -58,6 +61,7 @@ export const SAFE_ENGINE_ERROR_MESSAGES: Record<StableEngineErrorCode, string> =
   RISK_REJECTED: "The action was rejected by deterministic risk controls.",
   DRAWDOWN_LOCKED: "The drawdown lock is active.",
   RECONCILIATION_REQUIRED: "Reconciliation is required before continuing.",
+  SIMULATION_WRITE_DISABLED: "External broker simulation writes are disabled.",
   BUDGET_EXHAUSTED: "The configured budget is exhausted.",
   EVOLUTION_BLOCKED: "The strategy evolution action is blocked.",
   AUTHORITY_UNAVAILABLE: "The strategy evolution authority is unavailable.",
@@ -157,6 +161,29 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
   if (pathname === "/internal/v1/risk/drawdown-lock/acknowledge") {
     return requestMethod?.toUpperCase() === "POST"
       && matchesRuntimeSchema(data, drawdownAcknowledgeRuntimeSchema) && isPlain(data)
+      ? data
+      : INVALID_DATA;
+  }
+  if (pathname === "/internal/v1/broker-simulation") {
+    return requestMethod?.toUpperCase() === "GET"
+      && matchesRuntimeSchema(data, brokerSimulationRuntimeSchema) && isPlain(data)
+      && brokerSimulationValid(data)
+      ? data
+      : INVALID_DATA;
+  }
+  if (pathname === "/internal/v1/broker-simulation/intents") {
+    return requestMethod?.toUpperCase() === "POST"
+      && matchesRuntimeSchema(data, brokerIntentRuntimeSchema) && isPlain(data)
+      && brokerIntentValid(data)
+      ? data
+      : INVALID_DATA;
+  }
+  const brokerAction = brokerActionFor(pathname, requestMethod);
+  if (brokerAction !== null) {
+    return matchesRuntimeSchema(data, brokerActionRuntimeSchema) && isPlain(data)
+      && data.action === brokerAction.action
+      && sameUuid(data.resource_id, brokerAction.resourceId)
+      && data.dispatch_created === false
       ? data
       : INVALID_DATA;
   }
@@ -668,6 +695,51 @@ function evolutionActionFor(pathname: string, requestMethod?: string): string | 
   if (pathname === "/internal/v1/strategy-registry/control") return ["pause_auto_promotion", "resume_auto_promotion"];
   if (pathname === "/internal/v1/strategy-registry/rollback") return "rollback_registry";
   return null;
+}
+
+function brokerActionFor(
+  pathname: string,
+  requestMethod?: string,
+): { action: "approve" | "reject" | "acknowledge"; resourceId: string } | null {
+  if (requestMethod?.toUpperCase() !== "POST") return null;
+  const intent = /^\/internal\/v1\/broker-simulation\/intents\/([^/]+)\/(approve|reject)$/.exec(pathname);
+  if (intent && validateUuid(intent[1])) {
+    return { action: intent[2] as "approve" | "reject", resourceId: intent[1] };
+  }
+  const reconciliation = /^\/internal\/v1\/broker-simulation\/reconciliation\/([^/]+)\/acknowledge$/.exec(pathname);
+  return reconciliation && validateUuid(reconciliation[1])
+    ? { action: "acknowledge", resourceId: reconciliation[1] }
+    : null;
+}
+
+function brokerSimulationValid(data: Record<string, unknown>): boolean {
+  if (!isPlain(data.capability) || !isPlain(data.actions)
+    || data.capability.live_trading !== false
+    || data.actions.can_dispatch !== false
+    || data.actions.can_modify !== false
+    || data.actions.can_cancel !== false
+    || (data.capability.external_activation === "external_activation_blocked"
+      && data.capability.simulation_write_enabled !== false)
+    || !Array.isArray(data.events) || data.events.length > 200) return false;
+  if (data.intent !== null && (!isPlain(data.intent) || !brokerIntentValid(data.intent))) return false;
+  if (data.account !== null && !isPlain(data.account)) return false;
+  if (data.reconciliation !== null && !isPlain(data.reconciliation)) return false;
+  const sequences = data.events.map((event) => isPlain(event) ? event.sequence : null);
+  if (!sequences.every((sequence) => Number.isSafeInteger(sequence))
+    || !strictlyIncreasing(sequences as number[])) return false;
+  if (isPlain(data.intent)) {
+    const orderIds = new Set((data.intent.orders as Array<Record<string, unknown>>).map((order) => order.order_id));
+    if (data.events.some((event) => !isPlain(event) || !orderIds.has(event.order_id))) return false;
+  } else if (data.events.length > 0) return false;
+  return true;
+}
+
+function brokerIntentValid(data: Record<string, unknown>): boolean {
+  if (!Array.isArray(data.orders) || data.orders.length > 100
+    || !Array.isArray(data.evidence_hashes) || data.evidence_hashes.length > 100
+    || !data.evidence_hashes.every((hash) => typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash))) return false;
+  const orderIds = data.orders.map((order) => isPlain(order) ? order.order_id : null);
+  return orderIds.every((id) => typeof id === "string") && new Set(orderIds).size === orderIds.length;
 }
 
 function evolutionOverviewValid(data: Record<string, unknown>): boolean {

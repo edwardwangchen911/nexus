@@ -431,19 +431,19 @@ git commit -m "feat(api): expose offline broker simulation workbench"
 - Produces a server-rendered `offline_ready` workbench and BFF validators for UUID path segments, empty/fixed bodies, If-Match and Idempotency-Key.
 - Consumes generated runtime contract and existing `engineFetch`/`withNexusBff` HMAC boundary.
 
-- [ ] **Step 1: Write failing rendering, BFF, and accessibility tests**
+- [x] **Step 1: Write failing rendering, BFF, and accessibility tests**
 
 Tests cover loading, empty, ready, partial, stale, error, forbidden, reconciling and unknown states; 200% reflow; keyboard/focus order; `aria-live`; and Axe critical/serious zero. Boundary tests send every forbidden order/account/Provider field and prove rejection before `engineFetch`.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `npm test -- --run tests/unit/broker-simulation/bff.test.ts tests/unit/broker-simulation/page.test.tsx`
 
-- [ ] **Step 3: Implement the page information hierarchy**
+- [x] **Step 3: Implement the page information hierarchy**
 
 Render capability/account summary, proposal-vs-simulation difference, risk/evidence, server order preview, approval state, event timeline, internal-vs-broker comparison, reconciliation and audit. The banner always shows `实盘关闭`. Under `external_activation_blocked`, dispatch/modify/cancel buttons are not rendered as enabled controls; the page explains the external gate and still exposes inspectable fixture evidence.
 
-- [ ] **Step 4: Run Web gates**
+- [x] **Step 4: Run Web gates**
 
 Run: `npm test -- --run tests/unit/broker-simulation`
 

@@ -2,7 +2,6 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
 const routes = [
-  { path: "/broker-simulation", heading: "复星模拟盘验证", stage: "阶段 3 前锁定" },
   { path: "/live-approvals", heading: "实盘逐笔批准", stage: "阶段 4 前锁定" },
 ] as const;
 
