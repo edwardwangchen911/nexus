@@ -185,25 +185,25 @@ git commit -m "feat(db): persist broker simulation authority"
 - Produces exactly seven operations: `capabilities`, `create-order`, `modify-order`, `cancel-order`, `orders`, `portfolio`, `cash-flows` under `/internal/v1/fosun-simulation/`.
 - Consumes existing HMAC/mTLS middleware; uses no SDK and no provider secret in fixture mode.
 
-- [ ] **Step 1: Write failing route-set and scripted-outcome tests**
+- [x] **Step 1: Write failing route-set and scripted-outcome tests**
 
 Tests enumerate the FastAPI route table, reject extra keys and generic URL/method/header inputs, enforce 64 KiB request and 1 MiB response limits, and replay fixed scripts for acknowledged, rejected, partial batch, pre-send timeout, post-send unknown, pagination, duplicate event, and reconciliation conflict.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `uv run --package nexus-fosun-gateway pytest integrations/fosun_gateway/tests/contract/test_simulation_fixture_contract.py integrations/fosun_gateway/tests/security/test_simulation_surface.py -q`
 
-- [ ] **Step 3: Implement a separate composition root**
+- [x] **Step 3: Implement a separate composition root**
 
 `simulation_main.create_simulation_gateway_app` accepts only `GatewaySettings.for_test()` plus injected `FixtureSimulationGatewayScript`. It does not import `SdkFosunTransport` or `read_only_router`. The existing `main.create_gateway_app` remains exact read-only and its route-set tests must prove no simulation route appeared.
 
-- [ ] **Step 4: Run Gateway regression with socket guard**
+- [x] **Step 4: Run Gateway regression with socket guard**
 
 Run: `NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" uv run --package nexus-fosun-gateway pytest integrations/fosun_gateway/tests -q`
 
 Expected: all pass with zero external socket attempts; read-only and simulation operation sets are disjoint.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/providers/broker/simulation_contracts.py integrations/fosun_gateway

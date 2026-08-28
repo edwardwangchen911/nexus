@@ -15,6 +15,7 @@ dependencies = [
 [project.scripts]
 nexus-fosun-gateway = "nexus_fosun_gateway.main:run"
 nexus-fosun-activation-gate = "nexus_fosun_gateway.activation:main"
+nexus-fosun-simulation-fixture = "nexus_fosun_gateway.simulation_main:run_fixture"
 
 [dependency-groups]
 dev = [
