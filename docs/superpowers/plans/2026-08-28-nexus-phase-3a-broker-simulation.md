@@ -81,7 +81,7 @@ Supported order facts are fixed to `USD`, `buy|sell`, positive whole shares, `li
 - Produces: the exact enums above, `BrokerOrderDocument`, `BrokerIntentDocument`, `ApprovalDocument`, `canonical_document_hash`, `require_intent_transition`, `require_command_transition`, `require_order_transition`, and `effective_approval_expiry`.
 - Consumes: `nexus.audit.canonical.canonical_json`, `nexus.domain.time.require_utc`, Decimal and UUID.
 
-- [ ] **Step 1: Write failing closed-enum, canonical-hash, transition, and expiry tests**
+- [x] **Step 1: Write failing closed-enum, canonical-hash, transition, and expiry tests**
 
 ```python
 def test_unknown_result_has_no_edge_back_to_sending() -> None:
@@ -98,17 +98,17 @@ def test_approval_expiry_uses_earliest_authority() -> None:
     ) == utc("2026-08-28T14:02:00Z")
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `uv run --project engine pytest engine/tests/unit/broker_simulation/test_domain.py engine/tests/property/test_broker_simulation_state_machines.py -q`
 
 Expected: collection fails because `nexus.broker_simulation.domain` is absent.
 
-- [ ] **Step 3: Implement only closed Pydantic/dataclass contracts and explicit edge sets**
+- [x] **Step 3: Implement only closed Pydantic/dataclass contracts and explicit edge sets**
 
 `BrokerOrderDocument` uses `extra="forbid"`, is frozen, accepts no binary floats, validates whole shares and tick alignment, and includes `instrument_id`, `side`, `quantity`, `limit_price`, `currency="USD"`, `order_type="limit"`, `time_in_force="DAY"`, `session="regular"`, `sort_key`. `BrokerIntentDocument` binds proposal group, strategy decision, portfolio snapshot, evidence hash set, risk-policy hash, execution-model hash, account-binding ID, tuple of orders, and total notional. Hashes are SHA-256 of canonical JSON only.
 
-- [ ] **Step 4: Run focused tests and static checks**
+- [x] **Step 4: Run focused tests and static checks**
 
 Run: `uv run --project engine pytest engine/tests/unit/broker_simulation/test_domain.py engine/tests/property/test_broker_simulation_state_machines.py -q`
 
@@ -116,7 +116,7 @@ Run: `uv run --project engine ruff check engine/src/nexus/broker_simulation/doma
 
 Expected: all pass; Hypothesis proves no invalid or backward edge is accepted.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/broker_simulation engine/tests/unit/broker_simulation/test_domain.py engine/tests/property/test_broker_simulation_state_machines.py
@@ -138,11 +138,11 @@ git commit -m "feat(broker): define simulation execution authority"
 - Produces: ORM records for the ten table groups in design section 12 and revision `0024_broker_simulation` with `down_revision="0023_strategy_evolution_authority"`.
 - Consumes: existing UUIDv7, immutable-created-at mixins, UTC type, deferred PostgreSQL constraints and Alembic test helpers.
 
-- [ ] **Step 1: Write failing metadata and database-constraint tests**
+- [x] **Step 1: Write failing metadata and database-constraint tests**
 
 Tests assert exact table names, unique intent/order hashes, one approval per intent version/body hash, one active send attempt per command, monotonic event sequences, simulation-only binding checks, no `live` capability string, conflict-locked accounts rejecting new commands, and terminal event immutability.
 
-- [ ] **Step 2: Verify RED and generate the revision**
+- [x] **Step 2: Verify RED and generate the revision**
 
 Run: `uv run --project engine pytest engine/tests/integration/test_broker_simulation_schema.py engine/tests/integration/test_broker_simulation_constraints.py -q`
 
@@ -150,17 +150,17 @@ Expected: missing model/table failures.
 
 Generate: `uv run --project engine alembic -c engine/alembic.ini revision -m broker_simulation --rev-id 0024_broker_simulation`
 
-- [ ] **Step 3: Implement models, forward DDL, and guarded downgrade**
+- [x] **Step 3: Implement models, forward DDL, and guarded downgrade**
 
 The revision creates: `broker_account_bindings`, `broker_execution_intents`, `broker_execution_intent_orders`, `broker_batch_approvals`, `broker_commands`, `broker_command_attempts`, `broker_order_events`, `broker_webhook_receipts`, `broker_reconciliation_runs`, `broker_reconciliation_diffs`, and `broker_simulation_admissions`. Provider/account/order external identifiers are stored only as keyed digest or encrypted envelope using the existing broker external-ID crypto boundary. Downgrade checks all eleven tables; if any row exists it raises SQLSTATE `P3D01`, otherwise drops in reverse dependency order.
 
-- [ ] **Step 4: Run round-trip and concurrency tests**
+- [x] **Step 4: Run round-trip and concurrency tests**
 
 Run: `uv run --project engine pytest engine/tests/integration/test_broker_simulation_schema.py engine/tests/integration/test_broker_simulation_constraints.py engine/tests/integration/test_persistence_invariants.py -q`
 
 Expected: empty `0023 -> 0024 -> 0023 -> 0024` succeeds; populated downgrade and every illegal invariant fail without residue.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/persistence/models engine/alembic/versions/0024_broker_simulation.py engine/tests/integration/test_broker_simulation_schema.py engine/tests/integration/test_broker_simulation_constraints.py
