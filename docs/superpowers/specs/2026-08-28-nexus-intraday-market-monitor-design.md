@@ -156,14 +156,16 @@ Handler 在网络前重算 payload；配置、calendar、bucket、symbol hash �
 - 删除 `uq_latest_quotes_instrument_source_feed`；
 - 新增 `event_kind = trade | quote | snapshot | fixture`；
 - 新增 `content_hash CHAR(64)`；
-- 新增可空 `data_artifact_id -> data_artifacts.id`，非 fixture 必须非空；
+- 新增 `evidence_status = verified | legacy_unverified | fixture`；
+- 新增可空 `data_artifact_id -> data_artifacts.id`；新写入的非 fixture 行必须为
+  `verified` 且 artifact 非空，fixture 行必须为 `fixture`；
 - 新唯一键 `(instrument_id, source, feed, event_kind, observed_at, content_hash)`；
 - 索引 `(instrument_id, source, feed, event_kind, observed_at DESC, available_at DESC)`；
 - 约束 `available_at >= observed_at`、`received_at >= available_at`；
 - 所有非空价格必须大于 0，bid/ask 同时存在时 `bid <= ask`；
 - `trade` 必须只有 `last`，`quote` 必须有 bid/ask，`snapshot`/`fixture` 至少有一个价格。
 
-历史行按字段形态回填 `fixture` 或 `snapshot`，使用 PostgreSQL `pgcrypto` 对规范化旧字段生成 content hash。迁移前后引用这些行的 paper execution FK 保持不变；之后禁止 UPDATE/DELETE 已存在 observation 的业务字段。
+历史行按字段形态回填 `fixture` 或 `snapshot`，使用 PostgreSQL `pgcrypto` 对规范化旧字段生成 content hash。旧 fixture 行标记为 `fixture`；没有 raw artifact 的旧非 fixture 行标记为 `legacy_unverified`，不得伪造 artifact，也不得被新的盘中 API、指标或执行窗口选中。迁移前后引用这些行的既有 paper execution FK 保持不变；之后禁止 UPDATE/DELETE 已存在 observation 的业务字段。运行时 ingestion 不得创建 `legacy_unverified`。
 
 ### 7.2 `intraday_bar_set_authorities`
 
@@ -199,7 +201,7 @@ Fosun 只有在对应 read-only admission 有效时才可选中。不同来源�
 
 ## 8. 采集落库
 
-一个 Snapshot 原始响应只归档一次，并建立 `DataArtifact(schema_version=alpaca_stock_snapshots_v1)`。同批所有非 fixture quote observations 引用该 artifact。
+一个 Snapshot 原始响应只归档一次，并建立 `DataArtifact(schema_version=alpaca_stock_snapshots_v1)`。同批所有非 fixture quote observations 标记为 `verified` 并引用该 artifact。
 
 - latest trade 生成一行 `event_kind=trade`；
 - latest quote 生成一行 `event_kind=quote`；
@@ -216,7 +218,7 @@ Market API 对选中 instrument 同时返回日线历史和独立 `intraday_moni
 
 读取流程：
 
-1. 以 decision time 查询每个 source/feed 最新、可见、不可变的 trade 和 quote observation；
+1. 以 decision time 查询每个 source/feed 最新、可见、不可变且 evidence status 可准入的 trade 和 quote observation；`legacy_unverified` 只可审计，不可参与选择；
 2. 加载最近 90 分钟的 `intraday_bar_set_authorities`，对同一 bar timestamp 选择当时可见的最新 revision；
 3. 只保留已完整结束的 1 分钟 bar，即 `observed_at + 1 minute <= decision_time`；
 4. 按盘中 source policy 整组选择，不跨来源拼 bars；
