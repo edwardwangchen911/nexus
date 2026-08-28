@@ -119,12 +119,41 @@ def test_settings_and_composition_logs_never_reveal_secret_values(
     caplog.set_level(logging.DEBUG)
     settings = _production_settings()
 
+    def safe_failure(*_: object) -> ProviderBundle:
+        raise RuntimeError("PRODUCTION_PROVIDER_BUNDLE_UNAVAILABLE")
+
     with pytest.raises(RuntimeError, match="PRODUCTION_PROVIDER_BUNDLE_UNAVAILABLE"):
-        build_provider_bundle(settings, http_client_factory=lambda *_: object())
+        build_provider_bundle(
+            settings,
+            http_client_factory=lambda *_: object(),
+            production_builder=safe_failure,
+        )
 
     assert "secret-canary" not in caplog.text
     assert "fred-canary" not in caplog.text
     assert "secret-canary" not in repr(settings)
+
+
+def test_default_production_bundle_constructs_only_three_exact_origins() -> None:
+    """A wrong host or nested retry budget must be visible at composition time."""
+    calls: list[dict[str, object]] = []
+
+    def http_factory(**kwargs: object) -> RecordingFixedOriginClient:
+        calls.append(kwargs)
+        return RecordingFixedOriginClient(payload=b"{}")
+
+    bundle = build_provider_bundle(
+        _production_settings(),
+        http_client_factory=http_factory,
+    )
+
+    assert bundle.mode is ProviderRuntimeMode.PRODUCTION
+    assert [(call["provider_name"], call["origin"].host) for call in calls] == [
+        ("alpaca", "data.alpaca.markets"),
+        ("sec", "data.sec.gov"),
+        ("fred", "api.stlouisfed.org"),
+    ]
+    assert [call["policy"].max_attempts for call in calls] == [3, 1, 3]
 
 
 @pytest.mark.asyncio

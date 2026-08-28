@@ -470,7 +470,7 @@ git commit -m "feat(providers): wire bounded Alpaca bars transport"
 - Produces: `SecHttpTransport.get(path, headers) -> bytes`; `FredHttpTransport.get(path) -> bytes`.
 - Consumes: `FixedOriginHttpClient`, `SecCompanyFactsClient`, `FredSeriesClient`, `ProviderSettings`.
 
-- [ ] **Step 1: Write failing fixed-path tests**
+- [x] **Step 1: Write failing fixed-path tests**
 
 ```python
 @pytest.mark.asyncio
@@ -493,13 +493,13 @@ async def test_fred_allows_only_frozen_series_and_exact_vintage_dates() -> None:
         await transport.get("/fred/series/observations?series_id=SP500")
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `uv run --project engine pytest engine/tests/unit/providers/test_sec_http.py engine/tests/unit/providers/test_fred_http.py -q`
 
 Expected: FAIL because the HTTP transport modules do not exist.
 
-- [ ] **Step 3: Implement exact parsers instead of generic URL forwarding**
+- [x] **Step 3: Implement exact parsers instead of generic URL forwarding**
 
 ```python
 _SEC_COMPANYFACTS = re.compile(r"^/api/xbrl/companyfacts/CIK(?P<cik>[0-9]{10})\.json$")
@@ -516,13 +516,13 @@ class SecHttpTransport:
 
 `FredHttpTransport` must parse with `urllib.parse.parse_qsl(..., strict_parsing=True)`, accept the internal `/fred/series/observations` and `/alfred/series/observations` seams, map both to the external fixed path segments `("fred", "series", "observations")`, require one approved `series_id`, require both ISO `realtime_start`/`realtime_end` together for the ALFRED seam, append `api_key` and `file_type=json` internally, and never log either value.
 
-- [ ] **Step 4: Run all provider normalization and transport tests**
+- [x] **Step 4: Run all provider normalization and transport tests**
 
 Run: `uv run --project engine pytest engine/tests/unit/providers/test_sec_http.py engine/tests/unit/providers/test_fred_http.py engine/tests/unit/providers/test_sec.py engine/tests/unit/providers/test_fred.py -q`
 
 Expected: PASS, including contact header, CIK bounds, date order, series allowlist, 429 budget, response-size, and secret redaction.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/providers/sec_http.py engine/src/nexus/providers/fred_http.py engine/src/nexus/providers/composition.py engine/tests/unit/providers/test_sec_http.py engine/tests/unit/providers/test_fred_http.py
