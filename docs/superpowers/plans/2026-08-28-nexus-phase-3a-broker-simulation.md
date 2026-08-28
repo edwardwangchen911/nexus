@@ -382,19 +382,19 @@ git commit -m "feat(broker): run isolated simulation job handlers"
 - Produces the seven internal routes in design section 16 and closed `BrokerSimulationResponse`, `BrokerIntentResponse`, `BrokerActionResponse` roots.
 - Consumes verified service actor, raw-body hash, Idempotency-Key, If-Match, expected version/event sequence, and 64 KiB body middleware.
 
-- [ ] **Step 1: Write failing API contract and authority-boundary tests**
+- [x] **Step 1: Write failing API contract and authority-boundary tests**
 
 Tests assert auth on every route, `GET` returns `offline_ready/external_activation_blocked`, external action attempts return `409 SIMULATION_WRITE_DISABLED`, prepare/reject remain local-authority operations, approve cannot dispatch when external activation is blocked, body/query extras return 422, replay returns the same resource, stale ETag/version returns 409, and errors never include account/Provider IDs.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `uv run --project engine pytest engine/tests/integration/test_broker_simulation_api.py -q`
 
-- [ ] **Step 3: Implement routes and register the router**
+- [x] **Step 3: Implement routes and register the router**
 
 The GET response contains only internal IDs and redacted account label. The server derives actor, request hash, all order facts and account binding. `approve`, `modify`, `cancel`, and reconciliation acknowledgement use their exact database service; external dispatch admission is independently checked and returns `SIMULATION_WRITE_DISABLED` in ordinary Phase 3A.
 
-- [ ] **Step 4: Regenerate and verify contracts**
+- [x] **Step 4: Regenerate and verify contracts**
 
 Run: `npm run generate:client`
 
@@ -402,7 +402,7 @@ Run: `npm run check:generated && uv run --project engine pytest engine/tests/int
 
 Expected: generator adds the three new root schemas; generated files have no manual edits.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/api engine/src/nexus/main.py engine/tests/integration/test_broker_simulation_api.py contracts/openapi.json app/lib/generated scripts/generate-client.mjs

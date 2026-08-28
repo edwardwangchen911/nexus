@@ -329,6 +329,509 @@ export const runtimeContractSchemas = {
     "title": "BriefInvalidationSummary",
     "type": "object"
   },
+  "BrokerAccountResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "binding_id": {
+        "format": "uuid",
+        "title": "Binding Id",
+        "type": "string"
+      },
+      "capability_expires_at": {
+        "format": "date-time",
+        "title": "Capability Expires At",
+        "type": "string"
+      },
+      "locked": {
+        "title": "Locked",
+        "type": "boolean"
+      },
+      "reconciliation_status": {
+        "enum": [
+          "pending",
+          "running",
+          "matched",
+          "conflict",
+          "acknowledged"
+        ],
+        "title": "Reconciliation Status",
+        "type": "string"
+      },
+      "redacted_label": {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Redacted Label",
+        "type": "string"
+      }
+    },
+    "required": [
+      "binding_id",
+      "redacted_label",
+      "reconciliation_status",
+      "locked",
+      "capability_expires_at"
+    ],
+    "title": "BrokerAccountResponse",
+    "type": "object"
+  },
+  "BrokerActionResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "enum": [
+          "prepare",
+          "approve",
+          "reject",
+          "acknowledge"
+        ],
+        "title": "Action",
+        "type": "string"
+      },
+      "dispatch_created": {
+        "const": false,
+        "default": false,
+        "title": "Dispatch Created",
+        "type": "boolean"
+      },
+      "replayed": {
+        "title": "Replayed",
+        "type": "boolean"
+      },
+      "resource_id": {
+        "format": "uuid",
+        "title": "Resource Id",
+        "type": "string"
+      },
+      "status": {
+        "maxLength": 32,
+        "minLength": 1,
+        "title": "Status",
+        "type": "string"
+      },
+      "version": {
+        "anyOf": [
+          {
+            "minimum": 1,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Version"
+      }
+    },
+    "required": [
+      "resource_id",
+      "action",
+      "status",
+      "replayed"
+    ],
+    "title": "BrokerActionResponse",
+    "type": "object"
+  },
+  "BrokerAvailableActionsResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "can_approve": {
+        "title": "Can Approve",
+        "type": "boolean"
+      },
+      "can_cancel": {
+        "const": false,
+        "default": false,
+        "title": "Can Cancel",
+        "type": "boolean"
+      },
+      "can_dispatch": {
+        "const": false,
+        "default": false,
+        "title": "Can Dispatch",
+        "type": "boolean"
+      },
+      "can_modify": {
+        "const": false,
+        "default": false,
+        "title": "Can Modify",
+        "type": "boolean"
+      },
+      "can_prepare": {
+        "title": "Can Prepare",
+        "type": "boolean"
+      },
+      "can_reject": {
+        "title": "Can Reject",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "can_prepare",
+      "can_approve",
+      "can_reject"
+    ],
+    "title": "BrokerAvailableActionsResponse",
+    "type": "object"
+  },
+  "BrokerCapabilityResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "external_activation": {
+        "enum": [
+          "external_activation_blocked",
+          "externally_activated"
+        ],
+        "title": "External Activation",
+        "type": "string"
+      },
+      "live_trading": {
+        "const": false,
+        "default": false,
+        "title": "Live Trading",
+        "type": "boolean"
+      },
+      "simulation_write_enabled": {
+        "title": "Simulation Write Enabled",
+        "type": "boolean"
+      },
+      "status": {
+        "enum": [
+          "offline_ready",
+          "read_only_activated",
+          "simulation_write_activated"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "status",
+      "external_activation",
+      "simulation_write_enabled"
+    ],
+    "title": "BrokerCapabilityResponse",
+    "type": "object"
+  },
+  "BrokerEventResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "occurred_at": {
+        "format": "date-time",
+        "title": "Occurred At",
+        "type": "string"
+      },
+      "order_id": {
+        "format": "uuid",
+        "title": "Order Id",
+        "type": "string"
+      },
+      "sequence": {
+        "minimum": 1,
+        "title": "Sequence",
+        "type": "integer"
+      },
+      "source": {
+        "enum": [
+          "gateway",
+          "webhook",
+          "poll",
+          "recovery"
+        ],
+        "title": "Source",
+        "type": "string"
+      },
+      "status": {
+        "maxLength": 32,
+        "minLength": 1,
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "sequence",
+      "order_id",
+      "source",
+      "status",
+      "occurred_at"
+    ],
+    "title": "BrokerEventResponse",
+    "type": "object"
+  },
+  "BrokerIntentResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "body_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Body Hash",
+        "type": "string"
+      },
+      "evidence_hashes": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Evidence Hashes",
+        "type": "array"
+      },
+      "expires_at": {
+        "format": "date-time",
+        "title": "Expires At",
+        "type": "string"
+      },
+      "intent_id": {
+        "format": "uuid",
+        "title": "Intent Id",
+        "type": "string"
+      },
+      "orders": {
+        "items": {
+          "$ref": "#/components/schemas/BrokerOrderResponse"
+        },
+        "title": "Orders",
+        "type": "array"
+      },
+      "prepared_at": {
+        "format": "date-time",
+        "title": "Prepared At",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "draft",
+          "prepared",
+          "approved",
+          "rejected",
+          "expired",
+          "dispatching",
+          "completed",
+          "partially_completed",
+          "failed",
+          "submission_unknown",
+          "reconciling",
+          "reconciled"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "total_notional": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Total Notional",
+        "type": "string"
+      },
+      "version": {
+        "minimum": 1,
+        "title": "Version",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "intent_id",
+      "status",
+      "version",
+      "body_hash",
+      "total_notional",
+      "prepared_at",
+      "expires_at",
+      "evidence_hashes",
+      "orders"
+    ],
+    "title": "BrokerIntentResponse",
+    "type": "object"
+  },
+  "BrokerOrderResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "currency": {
+        "const": "USD",
+        "title": "Currency",
+        "type": "string"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "limit_price": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Limit Price",
+        "type": "string"
+      },
+      "order_id": {
+        "format": "uuid",
+        "title": "Order Id",
+        "type": "string"
+      },
+      "order_type": {
+        "const": "limit",
+        "title": "Order Type",
+        "type": "string"
+      },
+      "quantity": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Quantity",
+        "type": "string"
+      },
+      "session": {
+        "const": "regular",
+        "title": "Session",
+        "type": "string"
+      },
+      "side": {
+        "enum": [
+          "buy",
+          "sell"
+        ],
+        "title": "Side",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "not_sent",
+          "acknowledged",
+          "working",
+          "partially_filled",
+          "filled",
+          "cancelled",
+          "rejected",
+          "expired",
+          "reconciling"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "time_in_force": {
+        "const": "DAY",
+        "title": "Time In Force",
+        "type": "string"
+      }
+    },
+    "required": [
+      "order_id",
+      "instrument_id",
+      "side",
+      "quantity",
+      "limit_price",
+      "currency",
+      "order_type",
+      "time_in_force",
+      "session",
+      "status"
+    ],
+    "title": "BrokerOrderResponse",
+    "type": "object"
+  },
+  "BrokerReconciliationResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "completed_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Completed At"
+      },
+      "diff_count": {
+        "minimum": 0,
+        "title": "Diff Count",
+        "type": "integer"
+      },
+      "run_id": {
+        "format": "uuid",
+        "title": "Run Id",
+        "type": "string"
+      },
+      "started_at": {
+        "format": "date-time",
+        "title": "Started At",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "pending",
+          "running",
+          "matched",
+          "conflict",
+          "acknowledged"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "run_id",
+      "status",
+      "diff_count",
+      "started_at",
+      "completed_at"
+    ],
+    "title": "BrokerReconciliationResponse",
+    "type": "object"
+  },
+  "BrokerSimulationResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "account": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/BrokerAccountResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "actions": {
+        "$ref": "#/components/schemas/BrokerAvailableActionsResponse"
+      },
+      "capability": {
+        "$ref": "#/components/schemas/BrokerCapabilityResponse"
+      },
+      "events": {
+        "items": {
+          "$ref": "#/components/schemas/BrokerEventResponse"
+        },
+        "maxItems": 200,
+        "title": "Events",
+        "type": "array"
+      },
+      "intent": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/BrokerIntentResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "reconciliation": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/BrokerReconciliationResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "capability",
+      "account",
+      "intent",
+      "events",
+      "reconciliation",
+      "actions"
+    ],
+    "title": "BrokerSimulationResponse",
+    "type": "object"
+  },
   "BrokerSyncRunResponse": {
     "additionalProperties": false,
     "properties": {
@@ -6190,6 +6693,12 @@ export const portfolioPageRuntimeSchema = runtimeContractSchemas.PortfolioPageRe
 export const portfolioSnapshotRuntimeSchema = runtimeContractSchemas.PortfolioSnapshotResponse;
 
 export const brokerSyncRunRuntimeSchema = runtimeContractSchemas.BrokerSyncRunResponse;
+
+export const brokerSimulationRuntimeSchema = runtimeContractSchemas.BrokerSimulationResponse;
+
+export const brokerIntentRuntimeSchema = runtimeContractSchemas.BrokerIntentResponse;
+
+export const brokerActionRuntimeSchema = runtimeContractSchemas.BrokerActionResponse;
 
 export const watchlistMembershipRuntimeSchema = runtimeContractSchemas.WatchlistMembershipResponse;
 

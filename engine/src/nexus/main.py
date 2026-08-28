@@ -8,6 +8,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.routes.briefs import router as briefs_router
+from nexus.api.routes.broker_simulation import router as broker_simulation_router
 from nexus.api.routes.broker_sync import router as broker_sync_router
 from nexus.api.routes.diagnostics import router as diagnostics_router
 from nexus.api.routes.evolution import router as evolution_router
@@ -91,6 +92,7 @@ def create_engine_app(
     app.include_router(optimization_router)
     app.include_router(paper_router)
     app.include_router(broker_sync_router)
+    app.include_router(broker_simulation_router)
     app.include_router(research_router)
     app.include_router(briefs_router)
     app.include_router(strategies_router)

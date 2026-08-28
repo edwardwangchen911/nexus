@@ -61,6 +61,125 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/broker-simulation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Broker Simulation */
+        get: operations["getBrokerSimulation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/broker-simulation/intents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Prepare Broker Intent */
+        post: operations["prepareBrokerSimulationIntent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/broker-simulation/intents/{intent_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approve Broker Intent */
+        post: operations["approveBrokerSimulationIntent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/broker-simulation/intents/{intent_id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reject Broker Intent */
+        post: operations["rejectBrokerSimulationIntent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/broker-simulation/orders/{order_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Broker Order */
+        post: operations["cancelBrokerSimulationOrder"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/broker-simulation/orders/{order_id}/modify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Modify Broker Order */
+        post: operations["modifyBrokerSimulationOrder"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/v1/broker-simulation/reconciliation/{run_id}/acknowledge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Acknowledge Broker Reconciliation */
+        post: operations["acknowledgeBrokerSimulationReconciliation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/broker-sync-runs": {
         parameters: {
             query?: never;
@@ -840,6 +959,250 @@ export interface components {
              */
             run_id: string;
         };
+        /** BrokerAccountResponse */
+        BrokerAccountResponse: {
+            /**
+             * Binding Id
+             * Format: uuid
+             */
+            binding_id: string;
+            /**
+             * Capability Expires At
+             * Format: date-time
+             */
+            capability_expires_at: string;
+            /** Locked */
+            locked: boolean;
+            /**
+             * Reconciliation Status
+             * @enum {string}
+             */
+            reconciliation_status: "pending" | "running" | "matched" | "conflict" | "acknowledged";
+            /** Redacted Label */
+            redacted_label: string;
+        };
+        /** BrokerActionEnvelope */
+        BrokerActionEnvelope: {
+            data: components["schemas"]["BrokerActionResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** BrokerActionResponse */
+        BrokerActionResponse: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "prepare" | "approve" | "reject" | "acknowledge";
+            /**
+             * Dispatch Created
+             * @default false
+             * @constant
+             */
+            dispatch_created: false;
+            /** Replayed */
+            replayed: boolean;
+            /**
+             * Resource Id
+             * Format: uuid
+             */
+            resource_id: string;
+            /** Status */
+            status: string;
+            /** Version */
+            version?: number | null;
+        };
+        /** BrokerAvailableActionsResponse */
+        BrokerAvailableActionsResponse: {
+            /** Can Approve */
+            can_approve: boolean;
+            /**
+             * Can Cancel
+             * @default false
+             * @constant
+             */
+            can_cancel: false;
+            /**
+             * Can Dispatch
+             * @default false
+             * @constant
+             */
+            can_dispatch: false;
+            /**
+             * Can Modify
+             * @default false
+             * @constant
+             */
+            can_modify: false;
+            /** Can Prepare */
+            can_prepare: boolean;
+            /** Can Reject */
+            can_reject: boolean;
+        };
+        /** BrokerCapabilityResponse */
+        BrokerCapabilityResponse: {
+            /**
+             * External Activation
+             * @enum {string}
+             */
+            external_activation: "external_activation_blocked" | "externally_activated";
+            /**
+             * Live Trading
+             * @default false
+             * @constant
+             */
+            live_trading: false;
+            /** Simulation Write Enabled */
+            simulation_write_enabled: boolean;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "offline_ready" | "read_only_activated" | "simulation_write_activated";
+        };
+        /** BrokerEventResponse */
+        BrokerEventResponse: {
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /**
+             * Order Id
+             * Format: uuid
+             */
+            order_id: string;
+            /** Sequence */
+            sequence: number;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "gateway" | "webhook" | "poll" | "recovery";
+            /** Status */
+            status: string;
+        };
+        /** BrokerIntentEnvelope */
+        BrokerIntentEnvelope: {
+            data: components["schemas"]["BrokerIntentResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** BrokerIntentResponse */
+        BrokerIntentResponse: {
+            /** Body Hash */
+            body_hash: string;
+            /** Evidence Hashes */
+            evidence_hashes: string[];
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /**
+             * Intent Id
+             * Format: uuid
+             */
+            intent_id: string;
+            /** Orders */
+            orders: components["schemas"]["BrokerOrderResponse"][];
+            /**
+             * Prepared At
+             * Format: date-time
+             */
+            prepared_at: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "draft" | "prepared" | "approved" | "rejected" | "expired" | "dispatching" | "completed" | "partially_completed" | "failed" | "submission_unknown" | "reconciling" | "reconciled";
+            /** Total Notional */
+            total_notional: string;
+            /** Version */
+            version: number;
+        };
+        /** BrokerOrderResponse */
+        BrokerOrderResponse: {
+            /**
+             * Currency
+             * @constant
+             */
+            currency: "USD";
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Limit Price */
+            limit_price: string;
+            /**
+             * Order Id
+             * Format: uuid
+             */
+            order_id: string;
+            /**
+             * Order Type
+             * @constant
+             */
+            order_type: "limit";
+            /** Quantity */
+            quantity: string;
+            /**
+             * Session
+             * @constant
+             */
+            session: "regular";
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "buy" | "sell";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "not_sent" | "acknowledged" | "working" | "partially_filled" | "filled" | "cancelled" | "rejected" | "expired" | "reconciling";
+            /**
+             * Time In Force
+             * @constant
+             */
+            time_in_force: "DAY";
+        };
+        /** BrokerReconciliationResponse */
+        BrokerReconciliationResponse: {
+            /** Completed At */
+            completed_at: string | null;
+            /** Diff Count */
+            diff_count: number;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "running" | "matched" | "conflict" | "acknowledged";
+        };
+        /** BrokerSimulationEnvelope */
+        BrokerSimulationEnvelope: {
+            data: components["schemas"]["BrokerSimulationResponse"];
+            meta: components["schemas"]["SuccessMetaResponse"];
+        };
+        /** BrokerSimulationResponse */
+        BrokerSimulationResponse: {
+            account: components["schemas"]["BrokerAccountResponse"] | null;
+            actions: components["schemas"]["BrokerAvailableActionsResponse"];
+            capability: components["schemas"]["BrokerCapabilityResponse"];
+            /** Events */
+            events: components["schemas"]["BrokerEventResponse"][];
+            intent: components["schemas"]["BrokerIntentResponse"] | null;
+            reconciliation: components["schemas"]["BrokerReconciliationResponse"] | null;
+        };
         /** BrokerSyncCreateRequest */
         BrokerSyncCreateRequest: {
             /**
@@ -1095,7 +1458,7 @@ export interface components {
          * @description Client-visible error codes defined by the API contract.
          * @enum {string}
          */
-        ErrorCode: "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "DATA_PARTIAL" | "DATA_STALE" | "BROKER_STALE" | "SOURCE_CONFLICT" | "CAPABILITY_EXPIRED" | "PROPOSAL_NOT_EXECUTABLE" | "ACCOUNT_TYPE_MISMATCH" | "APPROVAL_REQUIRED" | "RISK_REJECTED" | "DRAWDOWN_LOCKED" | "RECONCILIATION_REQUIRED" | "BUDGET_EXHAUSTED" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "INTERNAL_ERROR";
+        ErrorCode: "UNAUTHENTICATED" | "FORBIDDEN" | "VALIDATION_ERROR" | "NOT_FOUND" | "VERSION_CONFLICT" | "IDEMPOTENCY_CONFLICT" | "DATA_PARTIAL" | "DATA_STALE" | "BROKER_STALE" | "SOURCE_CONFLICT" | "CAPABILITY_EXPIRED" | "PROPOSAL_NOT_EXECUTABLE" | "ACCOUNT_TYPE_MISMATCH" | "APPROVAL_REQUIRED" | "RISK_REJECTED" | "DRAWDOWN_LOCKED" | "RECONCILIATION_REQUIRED" | "SIMULATION_WRITE_DISABLED" | "BUDGET_EXHAUSTED" | "PROVIDER_UNAVAILABLE" | "EVOLUTION_BLOCKED" | "AUTHORITY_UNAVAILABLE" | "INTERNAL_ERROR";
         /** EvidenceCompletenessSummary */
         EvidenceCompletenessSummary: {
             /** Complete */
@@ -3426,6 +3789,425 @@ export interface operations {
                 };
             };
             /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getBrokerSimulation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrokerSimulationEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    prepareBrokerSimulationIntent: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrokerIntentEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    approveBrokerSimulationIntent: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
+            };
+            path: {
+                intent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrokerActionEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rejectBrokerSimulationIntent: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
+            };
+            path: {
+                intent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrokerActionEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    cancelBrokerSimulationOrder: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
+            };
+            path: {
+                order_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrokerActionEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    modifyBrokerSimulationOrder: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
+            };
+            path: {
+                order_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrokerActionEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    acknowledgeBrokerSimulationReconciliation: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                "If-Match": string;
+            };
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrokerActionEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
             422: {
                 headers: {
                     [name: string]: unknown;
