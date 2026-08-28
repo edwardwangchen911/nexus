@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from uuid import UUID
 
 from helpers.paper_batch import EXECUTION_SESSION, INSTRUMENTS, seed_paper_batch
+from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.market.price_bar_authority import finalize_price_bar_set
 from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.data import DataArtifact, PriceBarRecord, PriceSeriesManifest
@@ -146,9 +148,25 @@ async def seed_paper_execution(
                 assert finalized is not None
 
             if with_quote:
+                quote_id = UUID("65000000-0000-0000-0000-000000000099")
+                observed_at = MARKET_OPEN + timedelta(minutes=2)
+                canonical = canonical_quote_observation(
+                    instrument_id=order.instrument_id,
+                    source="fixture",
+                    feed="fixture",
+                    delivery_mode="fixture",
+                    event_kind="fixture",
+                    bid=Decimal("99.90"),
+                    ask=Decimal("100.10"),
+                    last=Decimal("100"),
+                    observed_at=observed_at,
+                    available_at=FIRST_EVALUATION,
+                    received_at=FIRST_EVALUATION,
+                    revision="v1",
+                )
                 session.add(
                     LatestQuote(
-                        id=UUID("65000000-0000-0000-0000-000000000099"),
+                        id=quote_id,
                         instrument_id=order.instrument_id,
                         source="fixture",
                         feed="fixture",
@@ -156,11 +174,15 @@ async def seed_paper_execution(
                         bid=Decimal("99.90"),
                         ask=Decimal("100.10"),
                         last=Decimal("100"),
-                        observed_at=MARKET_OPEN + timedelta(minutes=2),
+                        observed_at=observed_at,
                         available_at=FIRST_EVALUATION,
                         received_at=FIRST_EVALUATION,
                         revision="v1",
                         quality_flags=[],
+                        event_kind="fixture",
+                        content_hash=sha256(canonical).hexdigest(),
+                        evidence_status="fixture",
+                        data_artifact_id=None,
                     )
                 )
         return PaperExecutionSeed(

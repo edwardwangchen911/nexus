@@ -26,6 +26,8 @@ from nexus.api.schemas.market import (
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
+from nexus.market.database_series import load_daily_series
+from nexus.persistence.models.data import DataArtifact
 from nexus.persistence.models.market import (
     Instrument,
     InstrumentAlias,
@@ -249,12 +251,55 @@ class MarketService:
             return []
         instruments = [row[0] for row in rows]
         instrument_ids = [instrument.id for instrument in instruments]
+        ranked_quotes = (
+            select(
+                LatestQuote.id.label("id"),
+                func.row_number()
+                .over(
+                    partition_by=(
+                        LatestQuote.instrument_id,
+                        LatestQuote.source,
+                        LatestQuote.feed,
+                        LatestQuote.event_kind,
+                    ),
+                    order_by=(
+                        LatestQuote.observed_at.desc(),
+                        LatestQuote.available_at.desc(),
+                        LatestQuote.received_at.desc(),
+                        LatestQuote.id.desc(),
+                    ),
+                )
+                .label("quote_rank"),
+            )
+            .outerjoin(DataArtifact, DataArtifact.id == LatestQuote.data_artifact_id)
+            .where(
+                LatestQuote.instrument_id.in_(instrument_ids),
+                LatestQuote.available_at <= decision_time,
+                LatestQuote.observed_at <= decision_time,
+                LatestQuote.event_kind.in_(("trade", "quote", "snapshot", "fixture")),
+                or_(
+                    and_(
+                        LatestQuote.evidence_status == "fixture",
+                        LatestQuote.source == "fixture",
+                        LatestQuote.data_artifact_id.is_(None),
+                    ),
+                    and_(
+                        LatestQuote.evidence_status == "verified",
+                        LatestQuote.source != "fixture",
+                        LatestQuote.data_artifact_id.is_not(None),
+                        DataArtifact.source == LatestQuote.source,
+                        DataArtifact.available_at <= decision_time,
+                    ),
+                ),
+            )
+            .subquery()
+        )
         quotes = list(
             await self._session.scalars(
-                select(LatestQuote).where(
-                    LatestQuote.instrument_id.in_(instrument_ids),
-                    LatestQuote.available_at <= decision_time,
-                    LatestQuote.observed_at <= decision_time,
+                select(LatestQuote)
+                .join(ranked_quotes, ranked_quotes.c.id == LatestQuote.id)
+                .where(
+                    ranked_quotes.c.quote_rank == 1,
                 )
             )
         )
@@ -368,9 +413,11 @@ class MarketService:
         instrument = await self._active_instrument(instrument_id, decision_time)
         if instrument is None:
             raise _instrument_not_found(instrument_id)
-        if self._price_series_loader is None:
-            return _empty_series(instrument_id, "NO_HISTORY_DATA")
-        candidates = tuple(await self._price_series_loader(instrument_id, decision_time))
+        candidates = (
+            tuple(await load_daily_series(self._session, instrument_id, decision_time))
+            if self._price_series_loader is None
+            else tuple(await self._price_series_loader(instrument_id, decision_time))
+        )
         if not candidates:
             return _empty_series(instrument_id, "NO_HISTORY_DATA")
         daily_candidates = tuple(

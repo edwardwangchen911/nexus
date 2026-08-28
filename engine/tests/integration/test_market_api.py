@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
@@ -10,7 +11,8 @@ import httpx
 import pytest
 from helpers.hmac import TEST_HMAC_KEY_ID, TEST_HMAC_SECRET, build_test_hmac_headers
 from nexus.main import create_engine_app
-from nexus.persistence.models.data import ProviderCapability
+from nexus.market.intraday_ingestion import canonical_quote_observation
+from nexus.persistence.models.data import DataArtifact, ProviderCapability
 from nexus.persistence.models.market import (
     Instrument,
     InstrumentAlias,
@@ -160,6 +162,39 @@ async def _seed_quote(
     factory = session_factory(_settings(database_url))
     try:
         async with factory() as session:
+            visible_at = available_at or observed_at + timedelta(seconds=1)
+            received_at = max(observed_at + timedelta(seconds=2), visible_at)
+            event_kind = "fixture" if source == "fixture" else "trade"
+            canonical = canonical_quote_observation(
+                instrument_id=instrument_id,
+                source=source,
+                feed=feed,
+                delivery_mode=delivery_mode,
+                event_kind=event_kind,
+                bid=None,
+                ask=None,
+                last=last,
+                observed_at=observed_at,
+                available_at=visible_at,
+                received_at=received_at,
+                revision="1",
+            )
+            artifact = None
+            if source != "fixture":
+                raw_digest = sha256(b"market-api-fixture:" + canonical).hexdigest()
+                artifact = DataArtifact(
+                    uri=f"memory://sha256/{raw_digest}",
+                    sha256=raw_digest,
+                    byte_size=len(canonical),
+                    mime_type="application/json",
+                    schema_version="market_api_fixture_v1",
+                    source=source,
+                    observed_at=observed_at,
+                    available_at=visible_at,
+                    received_at=received_at,
+                )
+                session.add(artifact)
+                await session.flush()
             session.add(
                 LatestQuote(
                     instrument_id=instrument_id,
@@ -170,10 +205,14 @@ async def _seed_quote(
                     ask=None,
                     last=last,
                     observed_at=observed_at,
-                    available_at=available_at or observed_at + timedelta(seconds=1),
-                    received_at=observed_at + timedelta(seconds=2),
+                    available_at=visible_at,
+                    received_at=received_at,
                     revision="1",
                     quality_flags=list(quality_flags),
+                    event_kind=event_kind,
+                    content_hash=sha256(canonical).hexdigest(),
+                    evidence_status="fixture" if source == "fixture" else "verified",
+                    data_artifact_id=None if artifact is None else artifact.id,
                 )
             )
             await session.commit()

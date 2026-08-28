@@ -133,6 +133,24 @@ class QuoteSourcePolicy(BaseModel):
         return value
 
 
+class IntradaySourcePolicy(BaseModel):
+    """Runtime projection of the display-only intraday source policy."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    record_id: UUID
+    key: Literal["intraday_monitor"]
+    version: Literal["intraday_monitor_policy_v1"] = "intraday_monitor_policy_v1"
+    schema_version: Literal["1"]
+
+    @field_validator("record_id")
+    @classmethod
+    def _canonical_record(cls, value: UUID) -> UUID:
+        if value != INTRADAY_SOURCE_POLICY_ID:
+            raise ValueError("intraday policy must be bound to the published record")
+        return value
+
+
 class FosunMarketAdmission(BaseModel):
     """Validated Task 5 authority scoped to one read-only market operation."""
 
@@ -212,6 +230,29 @@ async def load_quote_source_policy_v1(session: AsyncSession) -> QuoteSourcePolic
         record_id=record.id,
         key=cast(Literal["market_quote"], record.key),
         version=cast(Literal["quote_source_policy_v1"], record.version),
+        schema_version=cast(Literal["1"], record.schema_version),
+    )
+
+
+async def load_intraday_source_policy_v1(session: AsyncSession) -> IntradaySourcePolicy:
+    """Load the exact immutable policy used by intraday read authorities."""
+    record = await session.scalar(
+        select(SourcePolicyRecord).where(
+            SourcePolicyRecord.key == INTRADAY_SOURCE_POLICY_KEY,
+            SourcePolicyRecord.version == INTRADAY_SOURCE_POLICY_VERSION,
+        )
+    )
+    if (
+        record is None
+        or record.id != INTRADAY_SOURCE_POLICY_ID
+        or record.schema_version != "1"
+        or record.payload != INTRADAY_SOURCE_POLICY_PAYLOAD
+    ):
+        raise ValueError("published intraday source policy is missing or invalid")
+    return IntradaySourcePolicy(
+        record_id=record.id,
+        key=cast(Literal["intraday_monitor"], record.key),
+        version=cast(Literal["intraday_monitor_policy_v1"], record.version),
         schema_version=cast(Literal["1"], record.schema_version),
     )
 
