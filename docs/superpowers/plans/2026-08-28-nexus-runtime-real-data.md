@@ -64,7 +64,7 @@
 - Produces: `LocalStackAction`, `LocalStackCommand`, `build_local_stack_commands(action, *, repo_root, env_file, project_name)`, `run_local_stack(action, *, repo_root, env_file, project_name, runner=subprocess.run)`, and `main(argv: Sequence[str] | None = None) -> int`.
 - Consumes: `infra/compose.yaml`, `infra/.env.local`, Docker CLI, uv, Node, npm.
 
-- [ ] **Step 1: Write failing command-policy tests**
+- [x] **Step 1: Write failing command-policy tests**
 
 ```python
 def test_up_uses_exact_app_services_and_never_broker_profile(repo_root: Path) -> None:
@@ -89,13 +89,13 @@ def test_missing_or_tracked_env_file_fails_before_subprocess(repo_root: Path) ->
         )
 ```
 
-- [ ] **Step 2: Run the tests and verify the missing module failure**
+- [x] **Step 2: Run the tests and verify the missing module failure**
 
 Run: `uv run --project engine pytest engine/tests/unit/ops/test_local_stack.py -q`
 
 Expected: FAIL during collection because `nexus.ops.local_stack` does not exist.
 
-- [ ] **Step 3: Implement the exact command builder and redacted runner**
+- [x] **Step 3: Implement the exact command builder and redacted runner**
 
 ```python
 class LocalStackAction(StrEnum):
@@ -144,7 +144,7 @@ def build_local_stack_commands(
 
 `_validate_local_env` resolves both paths, requires a regular file strictly below `repo_root`, rejects symlinks, rejects any file returned by `git -C <repo_root> ls-files --error-unmatch -- <relative-path>`, and rejects a file not matched by `git check-ignore -q`. `run_local_stack` must call `subprocess.run(argv, cwd=repo_root, timeout=..., check=False, text=True, capture_output=True)` and return only action, ordinal, exit code, and a fixed safe result code. It must not return captured stdout/stderr for Compose commands. `main` uses `argparse` with positional `{doctor,up,status,down}` plus `--repo-root`, `--env-file` and `--project-name`; defaults are the discovered repository root, `infra/.env.local`, and `nexus-local`. `doctor` alone may omit the env file.
 
-- [ ] **Step 4: Add the console entry point and run focused tests**
+- [x] **Step 4: Add the console entry point and run focused tests**
 
 Add to `engine/pyproject.toml`:
 
@@ -156,7 +156,7 @@ Run: `uv run --project engine pytest engine/tests/unit/ops/test_local_stack.py -
 
 Expected: all tests PASS, including invalid project names, tracked env files, command timeouts, non-zero exits, and output redaction.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/ops/local_stack.py engine/tests/unit/ops/test_local_stack.py engine/tests/unit/ops/conftest.py engine/pyproject.toml
