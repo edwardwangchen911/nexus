@@ -6,10 +6,20 @@ import logging
 from collections.abc import Callable
 
 import pytest
-from nexus.providers.composition import ProviderBundle, build_provider_bundle
+from nexus.providers.composition import (
+    ProviderBundle,
+    build_alpaca_market_provider,
+    build_provider_bundle,
+)
 from nexus.providers.market.fixture import FixtureMarketDataProvider
 from nexus.providers.settings import ProviderRuntimeMode, ProviderSettings
 from pydantic import ValidationError
+
+from tests.support.provider_fakes import (
+    FixedInstrumentSymbolResolver,
+    RecordingFixedOriginClient,
+    canonical_bars_request,
+)
 
 
 def test_fixture_bundle_never_constructs_http_or_reads_secret_values() -> None:
@@ -115,6 +125,23 @@ def test_settings_and_composition_logs_never_reveal_secret_values(
     assert "secret-canary" not in caplog.text
     assert "fred-canary" not in caplog.text
     assert "secret-canary" not in repr(settings)
+
+
+@pytest.mark.asyncio
+async def test_alpaca_factory_uses_configured_feed_and_delivery_authority() -> None:
+    """Hard-coded SIP/delayed provenance would misstate the purchased data authority."""
+    recorder = RecordingFixedOriginClient(payload=b'{"bars": []}')
+    provider = build_alpaca_market_provider(
+        _production_settings(),
+        client=recorder,
+        symbol_resolver=FixedInstrumentSymbolResolver("AAPL"),
+    )
+
+    page = await provider.fetch_bars(canonical_bars_request())
+
+    assert page.provenance.feed == "sip"
+    assert page.provenance.delivery_mode == "delayed"
+    assert recorder.calls[0].path_segments == ("v2", "stocks", "AAPL", "bars")
 
 
 def _production_settings() -> ProviderSettings:

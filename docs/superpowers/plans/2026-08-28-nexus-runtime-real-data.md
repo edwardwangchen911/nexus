@@ -367,7 +367,7 @@ git commit -m "feat(providers): add fail-closed provider composition"
 - Produces: `AlpacaHttpTransport.fetch_bars(request: BarsRequest, cursor: str | None) -> AlpacaRawResponse` and async `SqlInstrumentSymbolResolver.resolve(instrument_id, as_of) -> str`.
 - Consumes: `FixedOriginHttpClient`, `ProviderSettings`, existing `AlpacaMarketDataProvider`.
 
-- [ ] **Step 1: Write failing exact request and delivery-authority tests**
+- [x] **Step 1: Write failing exact request and delivery-authority tests**
 
 ```python
 @pytest.mark.asyncio
@@ -403,13 +403,13 @@ def test_provider_uses_configured_delivery_mode_not_feed_name() -> None:
     assert provider.delivery_mode == "delayed"
 ```
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `uv run --project engine pytest engine/tests/unit/providers/test_alpaca_http.py engine/tests/unit/providers/test_market_providers.py -q`
 
 Expected: FAIL because `AlpacaHttpTransport` and explicit delivery mode are absent.
 
-- [ ] **Step 3: Implement typed path/query construction and JSON bounds**
+- [x] **Step 3: Implement typed path/query construction and JSON bounds**
 
 ```python
 @dataclass(frozen=True)
@@ -442,13 +442,13 @@ class AlpacaHttpTransport:
 
 `_bars_query` emits the seven canonical fields shown above and adds one bounded `page_token` last when present; start/end are canonical second-precision UTC. `SqlInstrumentSymbolResolver` performs one awaited query for `InstrumentAlias(alias_type="ticker")` whose validity contains `request.end.date()`, verifies the joined instrument is USD on a supported US exchange, and rejects missing/overlapping aliases. `FixedInstrumentSymbolResolver` is defined in the test support module. Update `AlpacaMarketDataProvider.__init__` to require `feed: Literal["iex", "sip"]` and `delivery_mode: Literal["real_time", "delayed"]`, preserve `AlpacaRawResponse.raw_payload` byte-for-byte, and emit those configured values in provenance. Remove its adapter-level retry so the fixed-origin client is the only retry owner. For a real bar without an upstream availability timestamp, use the adapter's UTC `received_at` as conservative `available_at`; fixture-only `available_at` remains accepted for deterministic historical tests.
 
-- [ ] **Step 4: Run provider tests**
+- [x] **Step 4: Run provider tests**
 
 Run: `uv run --project engine pytest engine/tests/unit/providers/test_alpaca_http.py engine/tests/unit/providers/test_market_providers.py engine/tests/unit/quality/test_market.py -q`
 
 Expected: PASS for cursor bounds, symbol/path rejection, decimal-string normalization, response-size failure, explicit IEX/SIP labels, and real_time/delayed authority.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/nexus/providers/market/alpaca_http.py engine/src/nexus/providers/market/alpaca.py engine/src/nexus/providers/composition.py engine/tests/unit/providers/test_alpaca_http.py

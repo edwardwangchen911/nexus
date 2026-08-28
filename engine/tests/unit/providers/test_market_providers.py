@@ -8,7 +8,7 @@ import pytest
 from nexus.providers.base import BarsRequest, MarketDataProvenance, PriceBar, ProviderPage
 from nexus.providers.market.alpaca import (
     AlpacaMarketDataProvider,
-    MarketProviderDeadlineExceeded,
+    AlpacaRawResponse,
     MarketProviderPayloadError,
 )
 from nexus.providers.market.fixture import FixtureMarketDataProvider
@@ -95,13 +95,13 @@ class ScriptedTransport:
 
     async def fetch_bars(
         self, request: BarsRequest, cursor: str | None
-    ) -> dict[str, Any]:
+    ) -> AlpacaRawResponse:
         del request, cursor
         response = self.responses[self.calls]
         self.calls += 1
         if isinstance(response, Exception):
             raise response
-        assert isinstance(response, dict)
+        assert isinstance(response, AlpacaRawResponse)
         return response
 
 
@@ -125,26 +125,31 @@ def _alpaca_payload(*, close: object = "100.5") -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
-async def test_alpaca_adapter_owns_bounded_retry_and_normalizes_decimal_strings() -> None:
-    transport = ScriptedTransport(
-        [httpx.ReadTimeout("temporary"), _alpaca_payload()]
+def _alpaca_response(*, close: object = "100.5") -> AlpacaRawResponse:
+    return AlpacaRawResponse(
+        payload=_alpaca_payload(close=close),
+        raw_payload=b'{"fixture":"exact-raw"}',
+        request_id="request-1",
     )
+
+
+@pytest.mark.asyncio
+async def test_alpaca_adapter_normalizes_one_transport_response() -> None:
+    transport = ScriptedTransport([_alpaca_response()])
     provider = AlpacaMarketDataProvider(
         transport,
-        max_attempts=2,
-        deadline_seconds=1,
-        backoff_seconds=0,
+        feed="sip",
+        delivery_mode="delayed",
         now=lambda: END,
     )
 
     page = await provider.fetch_bars(REQUEST)
 
-    assert transport.calls == 2
+    assert transport.calls == 1
     assert page.items[0].close == Decimal("100.5")
     assert page.items[0].received_at == END
     assert page.next_cursor == "next"
-    assert b'"request_id":"request-1"' in page.raw_payload
+    assert page.raw_payload == b'{"fixture":"exact-raw"}'
     assert page.provenance == MarketDataProvenance(
         source="alpaca",
         feed="sip",
@@ -158,9 +163,9 @@ async def test_alpaca_adapter_owns_bounded_retry_and_normalizes_decimal_strings(
 @pytest.mark.asyncio
 async def test_alpaca_adapter_rejects_binary_float_financial_payloads() -> None:
     provider = AlpacaMarketDataProvider(
-        ScriptedTransport([_alpaca_payload(close=100.5)]),
-        deadline_seconds=1,
-        backoff_seconds=0,
+        ScriptedTransport([_alpaca_response(close=100.5)]),
+        feed="sip",
+        delivery_mode="delayed",
         now=lambda: END,
     )
 
@@ -168,24 +173,18 @@ async def test_alpaca_adapter_rejects_binary_float_financial_payloads() -> None:
         await provider.fetch_bars(REQUEST)
 
 
-class NeverReturningTransport:
-    async def fetch_bars(
-        self, request: BarsRequest, cursor: str | None
-    ) -> dict[str, Any]:
-        del request, cursor
-        await __import__("asyncio").Event().wait()
-        raise AssertionError("unreachable")
-
-
 @pytest.mark.asyncio
-async def test_alpaca_adapter_enforces_an_absolute_deadline() -> None:
+async def test_alpaca_adapter_never_retries_transport_errors() -> None:
+    transport = ScriptedTransport(
+        [httpx.ReadTimeout("temporary"), _alpaca_response()]
+    )
     provider = AlpacaMarketDataProvider(
-        NeverReturningTransport(),
-        max_attempts=3,
-        deadline_seconds=0.01,
-        backoff_seconds=0,
+        transport,
+        feed="sip",
+        delivery_mode="delayed",
         now=lambda: END,
     )
 
-    with pytest.raises(MarketProviderDeadlineExceeded):
+    with pytest.raises(httpx.ReadTimeout):
         await provider.fetch_bars(REQUEST)
+    assert transport.calls == 1

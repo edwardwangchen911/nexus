@@ -8,6 +8,12 @@ from datetime import UTC, datetime
 
 from nexus.providers.base import MarketDataProvider
 from nexus.providers.fred import FredSeriesClient
+from nexus.providers.market.alpaca import AlpacaMarketDataProvider
+from nexus.providers.market.alpaca_http import (
+    AlpacaHttpTransport,
+    FixedOriginBytes,
+    InstrumentSymbolResolver,
+)
 from nexus.providers.market.fixture import FixtureMarketDataProvider
 from nexus.providers.sec import SecCompanyFactsClient
 from nexus.providers.settings import ProviderRuntimeMode, ProviderSettings
@@ -51,6 +57,34 @@ def build_provider_bundle(
     if bundle.mode is not ProviderRuntimeMode.PRODUCTION:
         raise RuntimeError("PRODUCTION_PROVIDER_BUNDLE_MODE_INVALID")
     return bundle
+
+
+def build_alpaca_market_provider(
+    settings: ProviderSettings,
+    *,
+    client: FixedOriginBytes,
+    symbol_resolver: InstrumentSymbolResolver,
+) -> AlpacaMarketDataProvider:
+    """Bind exact production Alpaca authorities to one session-owned resolver."""
+    if settings.runtime_mode is not ProviderRuntimeMode.PRODUCTION:
+        raise RuntimeError("PRODUCTION_PROVIDER_CONFIGURATION_REQUIRED")
+    key_id = settings.alpaca_key_id
+    secret = settings.alpaca_secret_key
+    feed = settings.alpaca_feed
+    delivery_mode = settings.alpaca_delivery_mode
+    if key_id is None or secret is None or feed is None or delivery_mode is None:
+        raise RuntimeError("PRODUCTION_PROVIDER_CONFIGURATION_INCOMPLETE")
+    return AlpacaMarketDataProvider(
+        AlpacaHttpTransport(
+            client,
+            key_id=key_id,
+            secret=secret,
+            feed=feed,
+            symbol_resolver=symbol_resolver,
+        ),
+        feed=feed,
+        delivery_mode=delivery_mode,
+    )
 
 
 class _EmptySecFixtureTransport:
