@@ -71,7 +71,14 @@ def build_local_stack_commands(
         return (
             LocalStackCommand((*compose, "config", "--quiet"), 30),
             LocalStackCommand((*compose, "up", "-d", "postgres", "minio"), 120),
-            LocalStackCommand((*compose, "run", "--rm", "object-store-init"), 120),
+            LocalStackCommand(
+                (*compose, "build", "object-store-init", "api", "worker"),
+                300,
+            ),
+            LocalStackCommand(
+                (*compose, "run", "--rm", "object-store-init"),
+                120,
+            ),
             LocalStackCommand(
                 (
                     *compose,
@@ -87,7 +94,10 @@ def build_local_stack_commands(
                 ),
                 180,
             ),
-            LocalStackCommand((*compose, "up", "-d", "api", "worker"), 180),
+            LocalStackCommand(
+                (*compose, "up", "-d", "--no-build", "api", "worker"),
+                180,
+            ),
         )
     if action is LocalStackAction.STATUS:
         return (LocalStackCommand((*compose, "ps", "-a"), 30),)

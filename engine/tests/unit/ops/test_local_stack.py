@@ -25,7 +25,12 @@ def test_up_uses_exact_app_services_and_never_broker_profile(repo_root: Path) ->
 
     rendered = [command.argv for command in commands]
     assert all("broker" not in argument for argv in rendered for argument in argv)
-    assert rendered[-1][-4:] == ("up", "-d", "api", "worker")
+    assert rendered[2][-4:] == ("build", "object-store-init", "api", "worker")
+    assert commands[2].timeout_seconds == 300
+    assert rendered[3][-3:] == ("run", "--rm", "object-store-init")
+    assert "--no-build" not in rendered[3]
+    assert "--no-build" not in rendered[4]
+    assert rendered[-1][-5:] == ("up", "-d", "--no-build", "api", "worker")
 
 
 def test_missing_env_file_fails_before_any_command_is_built(repo_root: Path) -> None:

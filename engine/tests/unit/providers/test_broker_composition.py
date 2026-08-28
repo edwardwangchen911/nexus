@@ -108,6 +108,16 @@ def test_engine_image_contains_migrations_and_packaged_contract_assets() -> None
     assert "COPY engine/alembic engine/alembic" in dockerfile
 
 
+def test_engine_image_installs_hash_pinned_uv_without_ghcr_builder_dependency() -> None:
+    dockerfile = (WORKTREE_ROOT / "infra/docker/engine.Dockerfile").read_text()
+    requirements = (WORKTREE_ROOT / "infra/docker/uv-requirements.txt").read_text()
+
+    assert "ghcr.io/astral-sh/uv" not in dockerfile
+    assert "pip install --no-cache-dir --require-hashes" in dockerfile
+    assert "uv==0.12.1" in requirements
+    assert requirements.count("--hash=sha256:") == 2
+
+
 def _service_block(compose: str, service: str) -> str:
     match = re.search(
         rf"(?ms)^  {re.escape(service)}:\n(?P<body>.*?)(?=^  [a-z0-9-]+:\n|\Z)",
