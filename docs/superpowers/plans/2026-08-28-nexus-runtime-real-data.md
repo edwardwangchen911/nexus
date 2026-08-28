@@ -650,7 +650,7 @@ git commit -m "feat(jobs): collect durable provider evidence"
 - Produces: documented fixture workflow and explicit provider environment mapping.
 - Consumes: `nexus-local-stack`, app Compose profile, ProviderSettings.
 
-- [ ] **Step 1: Write failing Compose-policy tests**
+- [x] **Step 1: Write failing Compose-policy tests**
 
 ```python
 def test_app_profile_defaults_to_fixture_and_has_no_provider_secrets(compose_yaml: str) -> None:
@@ -672,13 +672,13 @@ def test_production_provider_profile_is_not_started_by_local_stack() -> None:
 
 `compose_service_block` is a small indentation-aware helper in this test module that returns the exact text below one top-level service key through the next service key. The fixture copies `infra/compose.yaml` into the temporary repository created by `engine/tests/unit/ops/conftest.py`; no YAML library or Docker daemon is required for the unit assertion.
 
-- [ ] **Step 2: Run and verify the missing configuration failure**
+- [x] **Step 2: Run and verify the missing configuration failure**
 
 Run: `uv run --project engine pytest engine/tests/unit/ops/test_provider_compose_policy.py -q`
 
 Expected: FAIL because the explicit provider runtime mode is absent.
 
-- [ ] **Step 3: Add only non-secret defaults and production variable names**
+- [x] **Step 3: Add only non-secret defaults and production variable names**
 
 Add to `infra/env.example`:
 
@@ -692,7 +692,7 @@ SEC_CONTACT=
 
 The app worker receives only `NEXUS_PROVIDER_RUNTIME_MODE=fixture` by default. Create no Compose path that mounts production provider secrets in ordinary local development.
 
-- [ ] **Step 4: Update runbooks and verify exact commands**
+- [x] **Step 4: Update runbooks and verify exact commands**
 
 Document:
 
@@ -711,7 +711,7 @@ Run: `docker compose --env-file infra/env.example -f infra/compose.yaml --profil
 
 Expected: PASS; broker profile remains statically valid but is not started.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add infra/env.example infra/compose.yaml docs/runbooks/local-development.md README.md engine/tests/unit/ops/test_provider_compose_policy.py

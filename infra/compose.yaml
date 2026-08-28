@@ -29,7 +29,7 @@ services:
       retries: 10
 
   object-store-init:
-    profiles: ["app"]
+    profiles: ["app", "provider"]
     build:
       context: ..
       dockerfile: infra/docker/engine.Dockerfile
@@ -96,6 +96,43 @@ services:
       - OPENAI_API_KEY
       - OPENAI_EXTRACTION_MODEL
       - OPENAI_REASONING_MODEL
+      - NEXUS_PROVIDER_RUNTIME_MODE=${NEXUS_PROVIDER_RUNTIME_MODE:-fixture}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      object-store-init:
+        condition: service_completed_successfully
+
+  provider-worker:
+    profiles: ["provider"]
+    build:
+      context: ..
+      dockerfile: infra/docker/engine.Dockerfile
+    command: ["nexus-engine-worker"]
+    environment:
+      - NEXUS_ENV
+      - DATABASE_URL
+      - OBJECT_STORE_ENDPOINT
+      - OBJECT_STORE_REGION
+      - OBJECT_STORE_BUCKET
+      - OBJECT_STORE_ACCESS_KEY_ID
+      - OBJECT_STORE_SECRET_ACCESS_KEY
+      - NEXUS_ENGINE_HMAC_SECRET
+      - NEXUS_ENGINE_HMAC_CURRENT_KEY_ID
+      - NEXUS_ENGINE_HMAC_CURRENT_SECRET
+      - NEXUS_ENGINE_HMAC_PREVIOUS_KEY_ID
+      - NEXUS_ENGINE_HMAC_PREVIOUS_SECRET
+      - AGENT_RUNTIME_MODE=${AGENT_RUNTIME_MODE:-fixture}
+      - OPENAI_API_KEY
+      - OPENAI_EXTRACTION_MODEL
+      - OPENAI_REASONING_MODEL
+      - NEXUS_PROVIDER_RUNTIME_MODE=production
+      - ALPACA_API_KEY_ID
+      - ALPACA_API_SECRET_KEY
+      - ALPACA_DATA_FEED
+      - ALPACA_DELIVERY_MODE
+      - SEC_CONTACT
+      - FRED_API_KEY
     depends_on:
       postgres:
         condition: service_healthy

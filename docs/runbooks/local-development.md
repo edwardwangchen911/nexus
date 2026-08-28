@@ -29,6 +29,8 @@ cp infra/env.example infra/.env.local
 - 基础设施：`POSTGRES_*`、`MINIO_ROOT_*`；
 - Engine：`NEXUS_ENV=development`、`DATABASE_URL`、全部 `OBJECT_STORE_*`、Engine HMAC current key ID/secret；
 - Agent：`AGENT_RUNTIME_MODE=fixture`；默认不需要任何 `OPENAI_*`；
+- 行情/财报：`NEXUS_PROVIDER_RUNTIME_MODE=fixture`；普通 `app` profile 不接收
+  Alpaca/FRED 密钥，也不会发起外部数据请求；
 - 端口：默认 5432/9000/9001/8000，被占用时用 `NEXUS_*_HOST_PORT` 改为其他本地端口。
 
 `DATABASE_URL` 与 `OBJECT_STORE_ENDPOINT` 供容器使用，因此 host 分别应指向 Compose service 名 `postgres` 与 `minio`，而不是 `127.0.0.1`。
@@ -51,7 +53,29 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app r
 docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app up -d api worker
 ```
 
-`object-store-init` 只对配置的单一 bucket 执行 `HEAD`；development/test 缺失时创建并再次验证，production 缺失时直接失败。重复执行应返回 `existing`。
+`object-store-init` 只操作配置的单一 bucket；development/test 缺失时创建，随后启用并复核对象版本控制，production 则要求 bucket 与版本控制均已预置。重复执行应返回 `existing`。Provider 原始证据采用内容寻址键与 `versionId`，同一摘要只能复核，不能覆盖。
+
+## 可选的真实美股只读数据
+
+真实美股行情、SEC 财报与 FRED/ALFRED 宏观数据属于独立的 `provider`
+profile，不属于默认本地启动流程。启用前需要在批准的密钥域注入
+`ALPACA_API_KEY_ID`、`ALPACA_API_SECRET_KEY`、`FRED_API_KEY`，并配置
+`ALPACA_DATA_FEED`、`ALPACA_DELIVERY_MODE` 与带联系方式的 `SEC_CONTACT`；
+不要把值写入仓库、命令历史或日志。
+
+先确保数据库迁移和 object-store init 已完成，再停止 fixture worker，并且只启动一个
+通用 worker：
+
+```bash
+docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app stop worker
+docker compose --env-file infra/.env.local -f infra/compose.yaml --profile provider up -d provider-worker
+```
+
+`provider-worker` 强制 `NEXUS_PROVIDER_RUNTIME_MODE=production`，只开放三个固定 HTTPS
+源：Alpaca bars、SEC company facts/submissions、FRED/ALFRED 的 8 个白名单序列。
+它不会加载复星交易网关或 broker 写能力。每日 Job 只读取调度时冻结并绑定哈希的
+美股 universe（上限 100 个）；不存在、哈希不匹配、数据冲突或证据不完整时均跳过，
+不会临时扩展股票池。
 
 ## 验证
 
@@ -82,3 +106,5 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app d
 - init 失败：检查六个必填值和 MinIO health；CLI 故意不打印 Provider 错误详情。
 - migration `incompatible`：在当前代码镜像重跑 `upgrade head`，不手工改 `alembic_version`。
 - worker `stale`：确认 worker 正在运行且使用同一数据库/迁移 head；不直接写 heartbeat 表。
+- Provider Job `FROZEN_UNIVERSE_*`：先发布完整 universe，再等待下一次调度；不要手工改 Job payload。
+- Provider evidence `*_CONFLICT`：保留现有版本与对象，停止自动重试并核对上游修订；不要覆盖同摘要对象。

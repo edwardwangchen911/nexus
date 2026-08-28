@@ -84,7 +84,7 @@ def test_compose_initializes_only_the_object_store_before_app_processes() -> Non
     init = _service_block(compose, "object-store-init")
 
     assert 'command: ["nexus-engine-object-store-init"]' in init
-    assert _service_profiles(compose, "object-store-init") == {"app"}
+    assert _service_profiles(compose, "object-store-init") == {"app", "provider"}
     assert _service_environment(compose, "object-store-init") == {
         "NEXUS_ENV",
         "OBJECT_STORE_ENDPOINT",

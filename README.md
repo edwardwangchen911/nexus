@@ -6,6 +6,9 @@ NEXUS 是私人投资研究、回测与模拟交易工作台。它不提供投�
 
 - `phase0_offline_ready`：美股研究、确定性回测、三方案比较、Forward Shadow、硬风控和内部模拟交易已通过离线发布门禁。
 - Phase 1 只读代码已就绪，但复星外部门禁仍为 `fixture_with_next_action / COMPLETE_SDK_ADMISSION`；未安装被阻塞的 SDK、未读取历史暴露密钥，也未调用真实账户或 Provider。
+- 美股真实数据传输与耐久采集链路已实现但默认关闭：Alpaca、SEC、FRED/ALFRED
+  使用固定源、冻结 universe、原始证据归档和幂等入库；未配置或启用真实 Provider
+  凭据时继续使用无网络 fixture。
 - `00656.HK` 继续仅作只读持仓展示；券商模拟写入和实盘页保持锁定，任何未来真实订单仍须逐笔人工确认。
 
 最终本地证据和外部门禁见 [CI 与离线发布门禁](docs/runbooks/ci-release-gates.md) 与 [Task 21 审查](docs/superpowers/reviews/2026-08-27-task-21-final-operational-gates-review.md)。
