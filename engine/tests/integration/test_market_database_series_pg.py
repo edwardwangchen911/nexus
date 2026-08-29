@@ -13,10 +13,19 @@ from helpers.price_bar_authority import (
     insert_valid_authority_from_prepare,
     seed_price_candidate,
 )
+from nexus.jobs.market_authority import ProviderMarketBinding
 from nexus.market.database_series import load_daily_series, load_intraday_series
+from nexus.market.ingestion import ingest_price_page
 from nexus.market.intraday_ingestion import ingest_intraday_snapshot
+from nexus.persistence.models.data import ProviderCapability
+from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.persistence.session import session_factory
-from nexus.providers.base import InstrumentId, MarketDataProvenance, PriceBar
+from nexus.providers.base import (
+    InstrumentId,
+    MarketDataProvenance,
+    PriceBar,
+    ProviderPage,
+)
 from nexus.providers.market.snapshot_contracts import (
     MarketSnapshot,
     SnapshotBatch,
@@ -99,7 +108,7 @@ def _batch(*, received_at: datetime, close: str) -> SnapshotBatch:
 
 
 @pytest.mark.asyncio
-async def test_database_loaders_return_only_visible_revalidated_authorities(
+async def test_current_database_loaders_exclude_legacy_alpaca_and_fixture_authorities(
     migrated_database_url: str,
 ) -> None:
     settings = EngineSettings(database_url=migrated_database_url)
@@ -126,13 +135,213 @@ async def test_database_loaders_return_only_visible_revalidated_authorities(
         daily = await load_daily_series(session, INSTRUMENT_ID, DECISION_TIME)
         intraday = await load_intraday_series(session, INSTRUMENT_ID, DECISION_TIME)
 
+    assert daily == ()
+    assert intraday.source is None
+    assert intraday.bars == ()
+    assert intraday.trade is None
+    assert intraday.quote is None
+    assert intraday.quality_reasons == ("INTRADAY_DATA_UNAVAILABLE",)
+
+
+@pytest.mark.asyncio
+async def test_current_database_loaders_return_only_exact_fosun_v2_bindings(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await seed_price_candidate(factory)
+    checked_at = datetime.now(UTC)
+    received_at = checked_at - timedelta(seconds=1)
+    decision_time = checked_at + timedelta(seconds=1)
+    status_id = uuid4()
+    quote_capability_id = uuid4()
+    bars_capability_id = uuid4()
+    contract_hash = "a" * 64
+    async with factory() as session, session.begin():
+        session.add_all(
+            (
+                ProviderCapability(
+                    id=quote_capability_id,
+                    provider="fosun",
+                    capability="READ_ONLY",
+                    contract_hash=contract_hash,
+                    expires_at=checked_at + timedelta(hours=1),
+                    schema_version="1",
+                    payload={
+                        "operation": "fosun_get_quotes",
+                        "market_scope": "US",
+                        "delivery_mode": "real_time",
+                    },
+                    created_at=checked_at - timedelta(hours=1),
+                ),
+                ProviderCapability(
+                    id=bars_capability_id,
+                    provider="fosun",
+                    capability="READ_ONLY",
+                    contract_hash=contract_hash,
+                    expires_at=checked_at + timedelta(hours=1),
+                    schema_version="1",
+                    payload={
+                        "operation": "fosun_get_bars",
+                        "market_scope": "US",
+                        "delivery_mode": "real_time",
+                    },
+                    created_at=checked_at - timedelta(hours=1),
+                ),
+                IntegrationStatus(
+                    id=status_id,
+                    provider="fosun",
+                    status="read_only",
+                    last_success_at=received_at,
+                    version=1,
+                    mode_changed_at=checked_at - timedelta(hours=2),
+                    capability_invalidated_at=None,
+                    admitted_contract_hash=contract_hash,
+                    created_at=checked_at - timedelta(hours=2),
+                ),
+            )
+        )
+    quote_binding = ProviderMarketBinding(
+        provider_capability_id=quote_capability_id,
+        provider_status_id=status_id,
+        provider_status_version=1,
+        provider_contract_hash=contract_hash,
+        provider_authorized_at=checked_at,
+    )
+    bars_binding = quote_binding.model_copy(
+        update={"provider_capability_id": bars_capability_id}
+    )
+    daily_bar = PriceBar(
+        instrument_id=InstrumentId(INSTRUMENT_ID),
+        session=date(2026, 8, 28),
+        open=Decimal("100"),
+        high=Decimal("104"),
+        low=Decimal("99"),
+        close=Decimal("103"),
+        volume=Decimal("1200"),
+        observed_at=received_at - timedelta(days=1),
+        available_at=received_at,
+        received_at=received_at,
+        revision="fosun-daily-v2",
+    )
+    store = _ObjectStore()
+    async with factory() as session, session.begin():
+        await ingest_price_page(
+            session,
+            store,
+            ProviderPage(
+                items=(daily_bar,),
+                next_cursor=None,
+                raw_payload=b'{"bars":"fosun"}',
+                source_request_id="fosun-daily-v2",
+                as_of=received_at,
+                provenance=MarketDataProvenance(
+                    source="fosun",
+                    feed="l1",
+                    adjustment="raw",
+                    interval="1Day",
+                    mode="read_only",
+                    delivery_mode="real_time",
+                ),
+            ),
+            provider_binding=bars_binding,
+            commit=False,
+        )
+    minute_observed = received_at.replace(second=0, microsecond=0) - timedelta(
+        minutes=1
+    )
+    intraday_batch = SnapshotBatch(
+        snapshots=(
+            MarketSnapshot(
+                instrument_id=InstrumentId(INSTRUMENT_ID),
+                symbol="AAPL",
+                trade=SnapshotTrade(
+                    price=Decimal("103.50"),
+                    observed_at=received_at,
+                    event_kind="snapshot",
+                    quality_flags=(
+                        "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",
+                        "INTRADAY_BID_ASK_UNAVAILABLE",
+                    ),
+                ),
+                quote=None,
+                minute_bar=SnapshotMinuteBar(
+                    bar=PriceBar(
+                        instrument_id=InstrumentId(INSTRUMENT_ID),
+                        session=date(2026, 8, 28),
+                        open=Decimal("103"),
+                        high=Decimal("104"),
+                        low=Decimal("102.5"),
+                        close=Decimal("103.5"),
+                        volume=Decimal("1000"),
+                        observed_at=minute_observed,
+                        available_at=received_at,
+                        received_at=received_at,
+                        revision="fosun-minute-v2",
+                    )
+                ),
+            ),
+        ),
+        raw_payload=b'{"schema":"fosun_gateway_market_snapshot_v1"}',
+        received_at=received_at,
+        provenance=MarketDataProvenance(
+            source="fosun",
+            feed="l1",
+            adjustment="raw",
+            interval="1Min",
+            mode="read_only",
+            delivery_mode="real_time",
+        ),
+    )
+    async with factory() as session, session.begin():
+        await ingest_intraday_snapshot(
+            session,
+            store,
+            intraday_batch,
+            quote_binding=quote_binding,
+            bar_bindings={INSTRUMENT_ID: bars_binding},
+            commit=False,
+        )
+
+    async with factory() as session:
+        daily = await load_daily_series(session, INSTRUMENT_ID, decision_time)
+        intraday = await load_intraday_series(session, INSTRUMENT_ID, decision_time)
+
     assert len(daily) == 1
-    assert daily[0].interval == "1Day"
-    assert intraday.source == "alpaca"
-    assert intraday.feed == "iex"
-    assert [bar.close for bar in intraday.bars] == [Decimal("103")]
-    assert intraday.trade is not None and intraday.trade.last == Decimal("103")
-    assert intraday.quote is not None and intraday.quote.ask == Decimal("103.02")
+    assert daily[0].source == "fosun"
+    assert daily[0].feed == "l1"
+    assert daily[0].contract_hash == contract_hash
+    assert daily[0].bars[0].close == Decimal("103")
+    assert intraday.source == "fosun"
+    assert intraday.feed == "l1"
+    assert intraday.delivery_mode == "real_time"
+    assert [bar.close for bar in intraday.bars] == [Decimal("103.5")]
+    assert intraday.trade is not None
+    assert intraday.trade.last == Decimal("103.50")
+    assert intraday.quote is None
+
+    async with factory() as session, session.begin():
+        await session.execute(
+            text(
+                "UPDATE integration_status "
+                "SET status='disabled', version=2, "
+                "mode_changed_at=:changed_at, capability_invalidated_at=:changed_at, "
+                "admitted_contract_hash=NULL WHERE id=:status_id"
+            ),
+            {
+                "changed_at": decision_time + timedelta(seconds=1),
+                "status_id": status_id,
+            },
+        )
+    async with factory() as session:
+        replayed_daily = await load_daily_series(
+            session, INSTRUMENT_ID, decision_time
+        )
+        replayed_intraday = await load_intraday_series(
+            session, INSTRUMENT_ID, decision_time
+        )
+
+    assert replayed_daily == daily
+    assert replayed_intraday == intraday
 
 
 @pytest.mark.asyncio

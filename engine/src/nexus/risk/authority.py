@@ -12,7 +12,15 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.market.price_bar_authority import prepare_price_bar_set
+from nexus.market.price_bar_authority import (
+    HASH_VERSION,
+    HASH_VERSION_V2,
+    POLICY_VERSION,
+    POLICY_VERSION_V2,
+    SOURCE_POLICY_ID,
+    SOURCE_POLICY_V2_ID,
+    prepare_price_bar_set,
+)
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -22,6 +30,7 @@ from nexus.persistence.models.data import (
     PriceBarRecord,
     PriceBarSetAuthority,
     PriceSeriesManifest,
+    ProviderCapability,
     QualityReport,
     SourcePolicy,
 )
@@ -32,6 +41,14 @@ from nexus.persistence.models.market import (
     UniverseSnapshot,
 )
 from nexus.persistence.models.paper import RiskQueryAuthorityRecord
+from nexus.persistence.models.research import ResearchEvidenceRef
+from nexus.quality.source_policy import (
+    SOURCE_POLICY_KEY,
+    SOURCE_POLICY_PAYLOAD,
+    SOURCE_POLICY_V2_PAYLOAD,
+    SOURCE_POLICY_V2_VERSION,
+    SOURCE_POLICY_VERSION,
+)
 from nexus.risk.canonical import canonical_risk_market_authority_hash
 from nexus.risk.models import (
     AuthorityQueryProof,
@@ -43,6 +60,114 @@ from nexus.strategy.forward import ForwardStrategyDecision
 
 _QUERY_KINDS = frozenset(("corporate_action", "suspension", "delisting"))
 _US_EXCHANGES = frozenset(("AMEX", "ARCX", "NASDAQ", "NYSE", "NYSE_ARCA", "XNAS", "XNYS"))
+
+
+def _valid_source_policy(policy: SourcePolicy) -> bool:
+    if policy.id == SOURCE_POLICY_V2_ID:
+        return (
+            policy.key == SOURCE_POLICY_KEY
+            and policy.version == SOURCE_POLICY_V2_VERSION
+            and policy.schema_version == "2"
+            and policy.payload == SOURCE_POLICY_V2_PAYLOAD
+        )
+    if policy.id == SOURCE_POLICY_ID:
+        return (
+            policy.key == SOURCE_POLICY_KEY
+            and policy.version == SOURCE_POLICY_VERSION
+            and policy.schema_version == "1"
+            and policy.payload == SOURCE_POLICY_PAYLOAD
+        )
+    return False
+
+
+def _valid_price_protocol(
+    authority: PriceBarSetAuthority,
+    manifest: PriceSeriesManifest,
+) -> bool:
+    if authority.source_policy_id == SOURCE_POLICY_V2_ID:
+        return (
+            authority.hash_version == HASH_VERSION_V2
+            and authority.policy_version == POLICY_VERSION_V2
+            and authority.source == manifest.source == "fosun"
+            and manifest.feed == "l1"
+            and manifest.delivery_mode in {"real_time", "delayed"}
+            and manifest.adjustment == "raw"
+            and manifest.interval == "1Day"
+            and all(
+                value is not None
+                for value in (
+                    manifest.provider_capability_id,
+                    manifest.provider_status_id,
+                    manifest.provider_status_version,
+                    manifest.provider_contract_hash,
+                    manifest.provider_authorized_at,
+                )
+            )
+        )
+    if authority.source_policy_id == SOURCE_POLICY_ID:
+        legacy_source = (
+            manifest.source == "alpaca"
+            and manifest.feed == "sip"
+            and manifest.delivery_mode == "delayed"
+        ) or (
+            manifest.source == "fixture"
+            and bool(manifest.feed)
+            and manifest.delivery_mode == "fixture"
+        )
+        return (
+            authority.hash_version == HASH_VERSION
+            and authority.policy_version == POLICY_VERSION
+            and authority.source == manifest.source
+            and legacy_source
+            and manifest.adjustment == "raw"
+            and manifest.interval == "1Day"
+        )
+    return False
+
+
+def _valid_v2_provider_authority(
+    manifest: PriceSeriesManifest,
+    capability: ProviderCapability | None,
+    decision_time: datetime,
+) -> bool:
+    if manifest.source != "fosun":
+        return capability is None
+    authorized_at = manifest.provider_authorized_at
+    return (
+        capability is not None
+        and manifest.provider_capability_id == capability.id
+        and manifest.provider_status_id is not None
+        and manifest.provider_status_version is not None
+        and manifest.provider_status_version > 0
+        and manifest.provider_contract_hash is not None
+        and authorized_at is not None
+        and capability.provider == "fosun"
+        and capability.capability == "READ_ONLY"
+        and capability.schema_version == "1"
+        and capability.contract_hash == manifest.provider_contract_hash
+        and capability.created_at <= authorized_at <= decision_time
+        and capability.expires_at > decision_time
+        and capability.payload.get("operation") == "fosun_get_bars"
+        and capability.payload.get("market_scope") == "US"
+        and capability.payload.get("delivery_mode") == manifest.delivery_mode
+    )
+
+
+def _valid_price_evidence(
+    authority: PriceBarSetAuthority,
+    manifest: PriceSeriesManifest,
+    evidence: ResearchEvidenceRef,
+) -> bool:
+    return (
+        authority.source == manifest.source == evidence.source
+        and authority.provider_object_id
+        == evidence.provider_object_id
+        == f"price-bar-set:{manifest.id}"
+        and authority.revision == evidence.revision == authority.content_hash
+        and authority.content_hash == evidence.content_hash
+        and authority.byte_length == evidence.byte_length
+        and authority.available_at == evidence.available_at
+    )
 
 
 def canonical_query_authority_hash(
@@ -139,7 +264,13 @@ async def _validate_root_authorities(
     calendar = await session.get(ExchangeCalendarAuthorityRecord, decision.calendar_authority_id)
     universe = await session.get(UniverseSnapshot, decision.universe_snapshot_id)
     quality = await session.get(QualityReport, decision.quality_report_id)
-    if source_policy is None or calendar is None or universe is None or quality is None:
+    if (
+        source_policy is None
+        or not _valid_source_policy(source_policy)
+        or calendar is None
+        or universe is None
+        or quality is None
+    ):
         raise ValueError("risk authority roots are incomplete")
     quality_snapshot = await session.get(DataSnapshot, quality.data_snapshot_id)
     if quality_snapshot is None or quality.status != "PASS":
@@ -210,7 +341,14 @@ async def _load_prices(
 ) -> tuple[RiskPrice, ...]:
     rows = (
         await session.execute(
-            select(PriceBarSetAuthority, PriceSeriesManifest, PriceBarRecord, Instrument)
+            select(
+                PriceBarSetAuthority,
+                PriceSeriesManifest,
+                PriceBarRecord,
+                Instrument,
+                ResearchEvidenceRef,
+                ProviderCapability,
+            )
             .join(
                 PriceSeriesManifest,
                 PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
@@ -220,6 +358,14 @@ async def _load_prices(
                 PriceBarRecord.price_series_manifest_id == PriceSeriesManifest.id,
             )
             .join(Instrument, Instrument.id == PriceBarRecord.instrument_id)
+            .join(
+                ResearchEvidenceRef,
+                ResearchEvidenceRef.id == PriceBarSetAuthority.evidence_ref_id,
+            )
+            .outerjoin(
+                ProviderCapability,
+                ProviderCapability.id == PriceSeriesManifest.provider_capability_id,
+            )
             .where(
                 PriceBarSetAuthority.source_policy_id == decision.source_policy_id,
                 PriceBarRecord.instrument_id.in_(required),
@@ -231,7 +377,7 @@ async def _load_prices(
         raise ValueError("risk prices do not exactly cover required instruments")
     prices: list[RiskPrice] = []
     observed_ids: set[UUID] = set()
-    for authority, manifest, bar, instrument in rows:
+    for authority, manifest, bar, instrument, evidence, capability in rows:
         if bar.instrument_id in observed_ids:
             raise ValueError("risk prices contain duplicate instruments")
         observed_ids.add(bar.instrument_id)
@@ -244,11 +390,13 @@ async def _load_prices(
             or prepared.first_session != authority.first_session
             or prepared.last_session != authority.last_session
             or prepared.available_at != authority.available_at
-            or authority.hash_version != "price_bar_set_sha256_v1"
-            or authority.policy_version != "agent_price_authority_v1"
-            or authority.source != manifest.source
-            or manifest.adjustment != "raw"
-            or manifest.interval != "1Day"
+            or not _valid_price_protocol(authority, manifest)
+            or not _valid_price_evidence(authority, manifest, evidence)
+            or not _valid_v2_provider_authority(
+                manifest,
+                capability,
+                decision.decision_time,
+            )
             or instrument.currency != "USD"
             or instrument.asset_type not in {"ETF", "common_stock"}
             or instrument.exchange not in _US_EXCHANGES

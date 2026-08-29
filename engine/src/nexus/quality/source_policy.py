@@ -195,6 +195,75 @@ class IntradaySourcePolicy(BaseModel):
         return value
 
 
+class SourcePolicyV2(BaseModel):
+    """Current selected-source policy; fallback is deliberately impossible."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    record_id: UUID
+    key: Literal["market_price"]
+    version: Literal["source_policy_v2"] = "source_policy_v2"
+    schema_version: Literal["2"]
+    available_at: datetime
+    instrument_tick_size: Decimal | None
+
+    @field_validator("record_id")
+    @classmethod
+    def _canonical_record(cls, value: UUID) -> UUID:
+        if value != SOURCE_POLICY_V2_ID:
+            raise ValueError("source policy must be bound to the published v2 record")
+        return value
+
+    @field_validator("available_at")
+    @classmethod
+    def _available_at_utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+
+class QuoteSourcePolicyV2(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    record_id: UUID
+    key: Literal["market_quote"]
+    version: Literal["quote_source_policy_v2"] = "quote_source_policy_v2"
+    schema_version: Literal["2"]
+    available_at: datetime
+
+    @field_validator("record_id")
+    @classmethod
+    def _canonical_record(cls, value: UUID) -> UUID:
+        if value != QUOTE_SOURCE_POLICY_V2_ID:
+            raise ValueError("quote source policy must use the published v2 record")
+        return value
+
+    @field_validator("available_at")
+    @classmethod
+    def _available_at_utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+
+class IntradaySourcePolicyV2(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    record_id: UUID
+    key: Literal["intraday_monitor"]
+    version: Literal["intraday_monitor_policy_v2"] = "intraday_monitor_policy_v2"
+    schema_version: Literal["2"]
+    available_at: datetime
+
+    @field_validator("record_id")
+    @classmethod
+    def _canonical_record(cls, value: UUID) -> UUID:
+        if value != INTRADAY_SOURCE_POLICY_V2_ID:
+            raise ValueError("intraday policy must use the published v2 record")
+        return value
+
+    @field_validator("available_at")
+    @classmethod
+    def _available_at_utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+
 class FosunMarketAdmission(BaseModel):
     """Validated Task 5 authority scoped to one read-only market operation."""
 
@@ -206,15 +275,24 @@ class FosunMarketAdmission(BaseModel):
     status_id: UUID
     status_version: int
     capability_invalidated_at: datetime | None
+    status_created_at: datetime
+    status_mode_changed_at: datetime
     admitted_contract_hash: str
     provider: Literal["fosun"]
     mode: Literal["read_only"]
     operation: Literal["fosun_get_quotes", "fosun_get_bars"]
     market_scope: Literal["US"]
+    delivery_mode: Literal["unknown", "real_time", "delayed"]
     contract_hash: str
     expires_at: datetime
 
-    @field_validator("expires_at", "capability_created_at", "capability_invalidated_at")
+    @field_validator(
+        "expires_at",
+        "capability_created_at",
+        "capability_invalidated_at",
+        "status_created_at",
+        "status_mode_changed_at",
+    )
     @classmethod
     def _expires_utc(cls, value: datetime | None) -> datetime | None:
         return None if value is None else require_utc(value)
@@ -301,6 +379,95 @@ async def load_intraday_source_policy_v1(session: AsyncSession) -> IntradaySourc
     )
 
 
+async def load_source_policy_v2(
+    session: AsyncSession,
+    *,
+    instrument_tick_size: Decimal | None,
+    decision_time: datetime,
+) -> SourcePolicyV2:
+    decision_time = require_utc(decision_time)
+    record = await session.scalar(
+        select(SourcePolicyRecord).where(
+            SourcePolicyRecord.key == SOURCE_POLICY_KEY,
+            SourcePolicyRecord.version == SOURCE_POLICY_V2_VERSION,
+        )
+    )
+    if (
+        record is None
+        or record.id != SOURCE_POLICY_V2_ID
+        or record.schema_version != "2"
+        or record.payload != SOURCE_POLICY_V2_PAYLOAD
+        or record.created_at > decision_time
+    ):
+        raise ValueError("published source_policy_v2 is missing or invalid")
+    return SourcePolicyV2(
+        record_id=record.id,
+        key=cast(Literal["market_price"], record.key),
+        version=cast(Literal["source_policy_v2"], record.version),
+        schema_version=cast(Literal["2"], record.schema_version),
+        available_at=record.created_at,
+        instrument_tick_size=instrument_tick_size,
+    )
+
+
+async def load_quote_source_policy_v2(
+    session: AsyncSession,
+    *,
+    decision_time: datetime,
+) -> QuoteSourcePolicyV2:
+    decision_time = require_utc(decision_time)
+    record = await session.scalar(
+        select(SourcePolicyRecord).where(
+            SourcePolicyRecord.key == QUOTE_SOURCE_POLICY_KEY,
+            SourcePolicyRecord.version == QUOTE_SOURCE_POLICY_V2_VERSION,
+        )
+    )
+    if (
+        record is None
+        or record.id != QUOTE_SOURCE_POLICY_V2_ID
+        or record.schema_version != "2"
+        or record.payload != QUOTE_SOURCE_POLICY_V2_PAYLOAD
+        or record.created_at > decision_time
+    ):
+        raise ValueError("published quote_source_policy_v2 is missing or invalid")
+    return QuoteSourcePolicyV2(
+        record_id=record.id,
+        key=cast(Literal["market_quote"], record.key),
+        version=cast(Literal["quote_source_policy_v2"], record.version),
+        schema_version=cast(Literal["2"], record.schema_version),
+        available_at=record.created_at,
+    )
+
+
+async def load_intraday_source_policy_v2(
+    session: AsyncSession,
+    *,
+    decision_time: datetime,
+) -> IntradaySourcePolicyV2:
+    decision_time = require_utc(decision_time)
+    record = await session.scalar(
+        select(SourcePolicyRecord).where(
+            SourcePolicyRecord.key == INTRADAY_SOURCE_POLICY_KEY,
+            SourcePolicyRecord.version == INTRADAY_SOURCE_POLICY_V2_VERSION,
+        )
+    )
+    if (
+        record is None
+        or record.id != INTRADAY_SOURCE_POLICY_V2_ID
+        or record.schema_version != "2"
+        or record.payload != INTRADAY_SOURCE_POLICY_V2_PAYLOAD
+        or record.created_at > decision_time
+    ):
+        raise ValueError("published intraday source policy v2 is missing or invalid")
+    return IntradaySourcePolicyV2(
+        record_id=record.id,
+        key=cast(Literal["intraday_monitor"], record.key),
+        version=cast(Literal["intraday_monitor_policy_v2"], record.version),
+        schema_version=cast(Literal["2"], record.schema_version),
+        available_at=record.created_at,
+    )
+
+
 async def load_fosun_market_admission(
     session: AsyncSession,
     *,
@@ -331,7 +498,12 @@ async def load_fosun_market_admission(
         return None
     payload_operation = authority.payload.get("operation")
     payload_market_scope = authority.payload.get("market_scope")
-    if payload_operation != operation or payload_market_scope != market_scope:
+    payload_delivery_mode = authority.payload.get("delivery_mode")
+    if (
+        payload_operation != operation
+        or payload_market_scope != market_scope
+        or payload_delivery_mode not in {"unknown", "real_time", "delayed"}
+    ):
         return None
     admission = FosunMarketAdmission(
         capability_id=authority.id,
@@ -340,11 +512,16 @@ async def load_fosun_market_admission(
         status_id=status.id,
         status_version=status.version,
         capability_invalidated_at=status.capability_invalidated_at,
+        status_created_at=status.created_at,
+        status_mode_changed_at=status.mode_changed_at,
         admitted_contract_hash=status.admitted_contract_hash,
         provider="fosun",
         mode="read_only",
         operation=cast(Literal["fosun_get_quotes", "fosun_get_bars"], payload_operation),
         market_scope=cast(Literal["US"], payload_market_scope),
+        delivery_mode=cast(
+            Literal["unknown", "real_time", "delayed"], payload_delivery_mode
+        ),
         contract_hash=authority.contract_hash,
         expires_at=authority.expires_at,
     )
@@ -357,29 +534,94 @@ async def select_price_series(
     instrument_tick_size: Decimal | None,
     decision_time: datetime,
 ) -> SourceSelection:
-    """Load repository authority and choose one complete point-in-time series."""
+    """Choose only the current selected Fosun source; fallback is disabled."""
     decision_time = require_utc(decision_time)
     try:
-        policy = await load_source_policy_v1(session, instrument_tick_size=instrument_tick_size)
+        policy = await load_source_policy_v2(
+            session,
+            instrument_tick_size=instrument_tick_size,
+            decision_time=decision_time,
+        )
     except ValueError:
         return SourceSelection(
             selected=None,
             quality="FAIL",
             reasons=("SOURCE_POLICY_UNAVAILABLE",),
         )
-    fosun_admission = None
-    if any(candidate.source == "fosun" for candidate in candidates):
-        fosun_admission = await load_fosun_market_admission(
-            session,
-            decision_time=decision_time,
-            operation="fosun_get_bars",
-            market_scope="US",
-        )
-    return apply_source_policy_v1(
+    fosun_admission = await load_fosun_market_admission(
+        session,
+        decision_time=decision_time,
+        operation="fosun_get_bars",
+        market_scope="US",
+    )
+    return apply_source_policy_v2(
         candidates,
         policy,
         decision_time,
         fosun_admission,
+    )
+
+
+def apply_source_policy_v2(
+    candidates: Sequence[PriceSeries],
+    policy: SourcePolicyV2,
+    decision_time: datetime,
+    fosun_admission: FosunMarketAdmission | None,
+) -> SourceSelection:
+    """Apply the no-fallback whole-source Fosun policy to current decisions."""
+    del policy
+    reasons: set[str] = set()
+    eligible: list[PriceSeries] = []
+    point_in_time_candidate_seen = False
+    for candidate in candidates:
+        if candidate.source != "fosun" or candidate.quality == "FAIL":
+            continue
+        if (
+            candidate.feed != "l1"
+            or candidate.adjustment != "raw"
+            or candidate.delivery_mode not in {"real_time", "delayed"}
+            or not delivery_mode_matches_provider_mode(
+                candidate.mode,
+                candidate.delivery_mode,
+            )
+        ):
+            continue
+        if not _valid_fosun_candidate(candidate, fosun_admission, decision_time):
+            reasons.add("FOSUN_CAPABILITY_EXPIRED")
+            continue
+        point_in_time_candidate_seen = True
+        visible = tuple(bar for bar in candidate.bars if bar.available_at <= decision_time)
+        if not visible:
+            continue
+        if len(visible) != len(candidate.bars):
+            reasons.add("FUTURE_DATA_EXCLUDED")
+        eligible.append(
+            candidate.model_copy(
+                update={"bars": canonical_price_bars(candidate, visible)}
+            )
+        )
+    if not eligible:
+        return SourceSelection(
+            selected=None,
+            quality="FAIL",
+            reasons=(
+                _ordered_reasons(reasons)
+                if reasons
+                else (
+                    "NO_POINT_IN_TIME_DATA"
+                    if point_in_time_candidate_seen
+                    else "NO_ELIGIBLE_SOURCE",
+                )
+            ),
+        )
+    selected = sorted(eligible, key=_series_sort_key)[0]
+    quality: Literal["PASS", "PARTIAL", "FAIL"] = selected.quality
+    if "FUTURE_DATA_EXCLUDED" in reasons:
+        quality = "PARTIAL"
+    return SourceSelection(
+        selected=selected,
+        quality=quality,
+        reasons=_ordered_reasons(reasons),
     )
 
 
@@ -454,6 +696,7 @@ def _valid_fosun_candidate(
         and admission.expires_at > decision_time
         and admission.admitted_contract_hash == admission.contract_hash
         and candidate.contract_hash == admission.contract_hash
+        and candidate.delivery_mode == admission.delivery_mode
     )
 
 

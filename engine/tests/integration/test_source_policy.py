@@ -9,15 +9,57 @@ from uuid import UUID
 import pytest
 from alembic import command
 from alembic.config import Config
-from nexus.persistence.models.data import ProviderCapability
+from nexus.persistence.models.data import ProviderCapability, SourcePolicy
 from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.persistence.session import session_factory
 from nexus.providers.base import PriceBar, PriceSeries
-from nexus.quality.source_policy import load_fosun_market_admission, select_price_series
+from nexus.quality.source_policy import (
+    INTRADAY_SOURCE_POLICY_V2_ID,
+    QUOTE_SOURCE_POLICY_V2_ID,
+    SOURCE_POLICY_V2_ID,
+    load_fosun_market_admission,
+    load_intraday_source_policy_v2,
+    load_quote_source_policy_v2,
+    load_source_policy_v2,
+    select_price_series,
+)
 from nexus.settings import EngineSettings
+from sqlalchemy import select
 
 INSTRUMENT_ID = UUID("29e18e7a-78fb-5fc1-a65a-6641fbc1cc64")
 DECISION_TIME = datetime(2026, 8, 21, 22, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("policy_id", "loader"),
+    [
+        (
+            SOURCE_POLICY_V2_ID,
+            lambda session, decision_time: load_source_policy_v2(
+                session,
+                instrument_tick_size=None,
+                decision_time=decision_time,
+            ),
+        ),
+        (QUOTE_SOURCE_POLICY_V2_ID, load_quote_source_policy_v2),
+        (INTRADAY_SOURCE_POLICY_V2_ID, load_intraday_source_policy_v2),
+    ],
+)
+async def test_v2_policy_is_not_visible_before_its_publication_time(
+    migrated_database_url: str,
+    policy_id: UUID,
+    loader: object,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        record = await session.scalar(select(SourcePolicy).where(SourcePolicy.id == policy_id))
+        assert record is not None
+        with pytest.raises(ValueError, match="missing or invalid"):
+            await loader(  # type: ignore[operator]
+                session,
+                decision_time=record.created_at - timedelta(microseconds=1),
+            )
 
 
 def test_public_selector_is_async_and_owns_all_authority_loading() -> None:
@@ -125,7 +167,7 @@ async def test_public_selector_rejects_caller_authority_parameters(
         ),
     ],
 )
-async def test_public_selector_falls_back_when_task5_authority_is_invalid(
+async def test_public_selector_never_falls_back_when_fosun_authority_is_invalid(
     migrated_database_url: str,
     payload: dict[str, str],
     expires_at: datetime,
@@ -166,11 +208,12 @@ async def test_public_selector_falls_back_when_task5_authority_is_invalid(
             DECISION_TIME,
         )
 
-    assert result.selected == candidates[1]
+    assert result.selected is None
+    assert result.quality == "FAIL"
 
 
 @pytest.mark.asyncio
-async def test_public_selector_falls_back_without_task5_capability(
+async def test_public_selector_returns_unavailable_without_fosun_capability(
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
@@ -183,7 +226,8 @@ async def test_public_selector_falls_back_without_task5_capability(
             session, candidates, Decimal("0.01"), DECISION_TIME
         )
 
-    assert result.selected == candidates[1]
+    assert result.selected is None
+    assert result.quality == "FAIL"
 
 
 @pytest.mark.asyncio
@@ -199,7 +243,11 @@ async def test_future_created_capability_cannot_authorize_past_decision(
                 contract_hash="a" * 64,
                 expires_at=DECISION_TIME + timedelta(hours=2),
                 schema_version="1",
-                payload={"operation": "fosun_get_bars", "market_scope": "US"},
+                payload={
+                    "operation": "fosun_get_bars",
+                    "market_scope": "US",
+                    "delivery_mode": "unknown",
+                },
                 created_at=DECISION_TIME + timedelta(minutes=1),
             )
         )
@@ -219,7 +267,7 @@ async def test_future_created_capability_cannot_authorize_past_decision(
 
         result = await _select(session, candidates)
 
-    assert result.selected == candidates[1]
+    assert result.selected is None
 
 
 @pytest.mark.asyncio
@@ -250,7 +298,11 @@ async def test_future_status_cannot_authorize_past_market_decision(
                 contract_hash="a" * 64,
                 expires_at=DECISION_TIME + timedelta(hours=2),
                 schema_version="1",
-                payload={"operation": "fosun_get_bars", "market_scope": "US"},
+                payload={
+                    "operation": "fosun_get_bars",
+                    "market_scope": "US",
+                    "delivery_mode": "unknown",
+                },
                 created_at=DECISION_TIME - timedelta(hours=2),
             )
         )
@@ -305,7 +357,8 @@ def _series(
     interval: str = "1Day",
     quality: str = "PASS",
     bars: tuple[PriceBar, ...] | None = None,
-    adjustment: str = "all",
+    adjustment: str | None = None,
+    delivery_mode: str | None = None,
     contract_hash: str | None = None,
 ) -> PriceSeries:
     mode = (
@@ -315,14 +368,22 @@ def _series(
         if source == "fixture"
         else "delayed"
     )
-    delivery_mode = "unknown" if source == "fosun" else mode
+    resolved_delivery = (
+        delivery_mode
+        if delivery_mode is not None
+        else "real_time"
+        if source == "fosun"
+        else mode
+    )
     return PriceSeries(
         source=source,
-        feed="authorized" if source == "fosun" else "sip",
-        adjustment=adjustment,
+        feed="l1" if source == "fosun" else "sip",
+        adjustment=("raw" if source == "fosun" else "all")
+        if adjustment is None
+        else adjustment,
         interval=interval,
         mode=mode,
-        delivery_mode=delivery_mode,
+        delivery_mode=resolved_delivery,
         quality=quality,
         contract_hash=contract_hash if source == "fosun" else None,
         bars=bars or (_bar(close),),
@@ -338,7 +399,7 @@ async def _select(
 
 
 @pytest.mark.asyncio
-async def test_selection_contract_uses_only_database_loaded_policy_and_admission(
+async def test_current_selection_uses_only_bound_fosun_and_never_falls_back(
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
@@ -350,7 +411,11 @@ async def test_selection_contract_uses_only_database_loaded_policy_and_admission
                 contract_hash="a" * 64,
                 expires_at=DECISION_TIME + timedelta(hours=1),
                 schema_version="1",
-                payload={"operation": "fosun_get_bars", "market_scope": "US"},
+                payload={
+                    "operation": "fosun_get_bars",
+                    "market_scope": "US",
+                    "delivery_mode": "real_time",
+                },
                 created_at=DECISION_TIME - timedelta(hours=2),
             )
         )
@@ -367,6 +432,7 @@ async def test_selection_contract_uses_only_database_loaded_policy_and_admission
         alpaca = _series("alpaca", "100.01")
         preferred = await _select(session, (alpaca, fosun))
         assert (preferred.quality, preferred.selected) == ("PASS", fosun)
+
         contract_mismatch = await _select(
             session,
             (
@@ -374,39 +440,14 @@ async def test_selection_contract_uses_only_database_loaded_policy_and_admission
                 alpaca,
             ),
         )
-        assert contract_mismatch.selected == alpaca
-
-        conflict = await _select(session, (fosun, _series("alpaca", "100.21")))
-        assert (conflict.selected, conflict.quality, conflict.reasons) == (
-            None,
-            "FAIL",
-            ("SOURCE_CONFLICT",),
-        )
-        unknown_tick = await _select(
-            session, (fosun, _series("alpaca", "100.00")), None
-        )
-        adjustment_mismatch = await _select(
-            session,
-            (fosun, _series("alpaca", "100.00", adjustment="raw")),
-            None,
-        )
-        assert (unknown_tick.quality, unknown_tick.reasons) == (
-            "PARTIAL",
-            ("TICK_SIZE_UNKNOWN",),
-        )
-        assert adjustment_mismatch.reasons == ("SOURCE_CONFLICT",)
-
-        candidates = (
-            _series("alpaca", "100", quality="PARTIAL"),
-            _series("alpaca", "101", quality="PASS"),
-            _series("fixture", "99", quality="PASS"),
-        )
-        candidate_results = {
-            (await _select(session, order)).model_dump_json()
-            for order in permutations(candidates)
-        }
-        assert len(candidate_results) == 1
-        assert (await _select(session, candidates)).selected == candidates[1]
+        assert contract_mismatch.selected is None
+        assert (await _select(session, (alpaca,))).selected is None
+        assert (
+            await _select(
+                session,
+                (fosun.model_copy(update={"adjustment": "all"}), alpaca),
+            )
+        ).selected is None
 
         old = _bar("99", available_at=DECISION_TIME - timedelta(minutes=2), revision="1")
         latest = _bar(
@@ -417,48 +458,41 @@ async def test_selection_contract_uses_only_database_loaded_policy_and_admission
         )
         revision_results = {
             (
-                await _select(session, (_series("alpaca", "0", bars=order),))
+                await _select(
+                    session,
+                    (
+                        _series(
+                            "fosun",
+                            "0",
+                            bars=order,
+                            contract_hash="a" * 64,
+                        ),
+                    ),
+                )
             ).model_dump_json()
             for order in permutations((old, latest, future))
         }
         assert len(revision_results) == 1
         selected_revision = await _select(
-            session, (_series("alpaca", "0", bars=(future, old, latest)),)
+            session,
+            (
+                _series(
+                    "fosun",
+                    "0",
+                    bars=(future, old, latest),
+                    contract_hash="a" * 64,
+                ),
+            ),
         )
         assert selected_revision.selected is not None
         assert selected_revision.selected.bars == (latest,)
-
-        instant = DECISION_TIME - timedelta(minutes=1)
-        intraday_fosun = _series(
-            "fosun",
-            "0",
-            interval="1Min",
-            contract_hash="a" * 64,
-            bars=(
-                _bar("80", observed_at=instant, available_at=instant, revision="1"),
-                _bar("100", observed_at=instant, revision="2"),
-            ),
-        )
-        mismatched_instant = _series(
-            "alpaca",
-            "0",
-            interval="1Min",
-            bars=(_bar("200", observed_at=instant - timedelta(minutes=1)),),
-        )
-        matching_instant = _series(
-            "alpaca",
-            "0",
-            interval="1Min",
-            bars=(_bar("101", observed_at=instant),),
-        )
-        assert (await _select(session, (intraday_fosun, mismatched_instant))).reasons == ()
-        assert (
-            await _select(session, (intraday_fosun, matching_instant))
-        ).reasons == ("INTRADAY_DIVERGENCE_ALERT",)
+        assert selected_revision.quality == "PARTIAL"
+        assert selected_revision.reasons == ("FUTURE_DATA_EXCLUDED",)
 
         future_only = _series(
-            "alpaca",
+            "fosun",
             "100",
+            contract_hash="a" * 64,
             bars=(
                 _bar(
                     "100",

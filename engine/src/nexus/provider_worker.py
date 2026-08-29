@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol, cast
@@ -15,7 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.daily_profiles import PRIMARY_DAILY_PROFILE
-from nexus.jobs.intraday_collection import build_intraday_collection_registry
+from nexus.jobs.intraday_collection import (
+    IntradaySnapshotProvider,
+    build_intraday_collection_registry,
+)
 from nexus.jobs.intraday_schedule import schedule_due_intraday_snapshot
 from nexus.jobs.models import QueueName
 from nexus.jobs.provider_collection import RawEvidenceStore, build_provider_collection_registry
@@ -25,12 +29,11 @@ from nexus.market.ingestion import MarketObjectStore
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.providers.composition import (
-    build_alpaca_snapshot_provider,
+    FosunGatewayFactory,
     build_provider_bundle,
 )
 from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
-from nexus.providers.market.alpaca_http import SqlInstrumentSymbolResolver
-from nexus.providers.market.alpaca_snapshot import AlpacaSnapshotProvider
+from nexus.providers.market.fosun_gateway import FosunMarketGatewayClient
 from nexus.providers.settings import (
     IntradayMonitorMode,
     ProviderRuntimeMode,
@@ -140,12 +143,14 @@ class ProviderStore(MarketObjectStore, RawEvidenceStore, Protocol):
     """Combined create-only provider evidence boundary."""
 
 
-def _provider_registry(
+@asynccontextmanager
+async def _provider_registry(
     *,
     provider_settings: ProviderSettings,
     provider_http_client: httpx.AsyncClient,
     store: ProviderStore,
-) -> JobRegistry:
+    fosun_gateway_factory: FosunGatewayFactory = FosunMarketGatewayClient,
+) -> AsyncIterator[JobRegistry]:
     """Compose only provider jobs; construction performs no external request."""
 
     def http_factory(
@@ -164,38 +169,34 @@ def _provider_registry(
     bundle = build_provider_bundle(
         provider_settings,
         http_client_factory=http_factory,
+        fosun_gateway_factory=fosun_gateway_factory,
     )
-    provider = build_provider_collection_registry(
-        bundle,
-        store,
-        store,
-        lambda: datetime.now(UTC),
-        expected_profile_id=PRIMARY_DAILY_PROFILE,
-    )
-    intraday_specs: tuple[JobHandlerSpec, ...] = ()
-    if provider_settings.intraday_monitor_mode is IntradayMonitorMode.PRODUCTION:
-        snapshot_client = http_factory(
-            provider_name="alpaca-snapshot",
-            origin=AllowedOrigin(scheme="https", host="data.alpaca.markets"),
-            policy=HttpRequestPolicy(max_attempts=3),
-        )
-
-        def snapshot_provider(session: object) -> AlpacaSnapshotProvider:
-            if not hasattr(session, "execute"):
-                raise RuntimeError("ASYNC_SESSION_REQUIRED")
-            return build_alpaca_snapshot_provider(
-                provider_settings,
-                client=snapshot_client,
-                symbol_resolver=SqlInstrumentSymbolResolver(cast(AsyncSession, session)),
-            )
-
-        intraday_specs = build_intraday_collection_registry(
-            snapshot_provider,
+    try:
+        provider = build_provider_collection_registry(
+            bundle,
+            store,
             store,
             lambda: datetime.now(UTC),
-            settings=provider_settings,
-        ).specs
-    return JobRegistry((*provider.specs, *intraday_specs))
+            expected_profile_id=PRIMARY_DAILY_PROFILE,
+        )
+        intraday_specs: tuple[JobHandlerSpec, ...] = ()
+        if provider_settings.intraday_monitor_mode is IntradayMonitorMode.PRODUCTION:
+
+            def snapshot_provider(session: object) -> IntradaySnapshotProvider:
+                return cast(
+                    IntradaySnapshotProvider,
+                    bundle.snapshot_provider(session),
+                )
+
+            intraday_specs = build_intraday_collection_registry(
+                snapshot_provider,
+                store,
+                lambda: datetime.now(UTC),
+                settings=provider_settings,
+            ).specs
+        yield JobRegistry((*provider.specs, *intraday_specs))
+    finally:
+        await bundle.aclose()
 
 
 async def run_provider_worker(
@@ -223,35 +224,35 @@ async def run_provider_worker(
             return
         store = S3ProviderEvidenceStore(runtime)
         async with httpx.AsyncClient(follow_redirects=False, timeout=None) as client:
-            registry = _provider_registry(
+            async with _provider_registry(
                 provider_settings=configured,
                 provider_http_client=client,
                 store=store,
-            )
-            worker_id = f"provider-{new_uuid7()}"
-            started_at = datetime.now(UTC)
-            while True:
-                now = datetime.now(UTC)
-                if configured.intraday_monitor_mode is IntradayMonitorMode.PRODUCTION:
-                    async with factory() as session, session.begin():
-                        await schedule_due_intraday_snapshot(
-                            session,
-                            now=now,
-                            settings=configured,
-                        )
-                worked = await run_job_worker_once(
-                    factory,
-                    registry=registry,
-                    queue=QueueName.PROVIDER,
-                    worker_id=worker_id,
-                    worker_started_at=started_at,
-                    process_version=_PROCESS_VERSION,
-                    migration_head=CURRENT_MIGRATION_HEAD,
-                    clock=lambda: datetime.now(UTC),
-                    claim_registered_only=True,
-                )
-                if not worked:
-                    await asyncio.sleep(0.5)
+            ) as registry:
+                worker_id = f"provider-{new_uuid7()}"
+                started_at = datetime.now(UTC)
+                while True:
+                    now = datetime.now(UTC)
+                    if configured.intraday_monitor_mode is IntradayMonitorMode.PRODUCTION:
+                        async with factory() as session, session.begin():
+                            await schedule_due_intraday_snapshot(
+                                session,
+                                now=now,
+                                settings=configured,
+                            )
+                    worked = await run_job_worker_once(
+                        factory,
+                        registry=registry,
+                        queue=QueueName.PROVIDER,
+                        worker_id=worker_id,
+                        worker_started_at=started_at,
+                        process_version=_PROCESS_VERSION,
+                        migration_head=CURRENT_MIGRATION_HEAD,
+                        clock=lambda: datetime.now(UTC),
+                        claim_registered_only=True,
+                    )
+                    if not worked:
+                        await asyncio.sleep(0.5)
     finally:
         await engine.dispose()
 

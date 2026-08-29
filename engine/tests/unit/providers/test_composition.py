@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import date
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -20,7 +21,12 @@ from nexus.providers.market.snapshot_contracts import (
     IntradaySnapshotRequest,
     SnapshotInstrument,
 )
-from nexus.providers.settings import ProviderRuntimeMode, ProviderSettings
+from nexus.providers.settings import (
+    AlpacaMarketMode,
+    MarketProvider,
+    ProviderRuntimeMode,
+    ProviderSettings,
+)
 from pydantic import ValidationError
 
 from tests.support.provider_fakes import (
@@ -76,6 +82,8 @@ def test_production_requires_every_explicit_authority(
     """Omitting one production authority must fail before composition."""
     values: dict[str, object] = {
         "runtime_mode": "production",
+        "market_provider": "alpaca",
+        "alpaca_market_mode": "enabled",
         "alpaca_key_id": "key-id-canary",
         "alpaca_secret_key": "secret-canary",
         "alpaca_feed": "sip",
@@ -121,6 +129,53 @@ def test_valid_production_settings_use_only_injected_builder() -> None:
     assert calls == 1
 
 
+def test_fosun_is_default_production_market_and_does_not_construct_alpaca() -> None:
+    http_calls: list[str] = []
+    gateway_calls: list[object] = []
+
+    def http_factory(**kwargs: object) -> RecordingFixedOriginClient:
+        http_calls.append(str(kwargs["provider_name"]))
+        return RecordingFixedOriginClient(payload=b"{}")
+
+    def gateway_factory(identity: object) -> object:
+        gateway_calls.append(identity)
+        return _NoopFosunGateway()
+
+    settings = _fosun_production_settings()
+    bundle = build_provider_bundle(
+        settings,
+        http_client_factory=http_factory,
+        fosun_gateway_factory=gateway_factory,
+    )
+
+    assert settings.market_provider is MarketProvider.FOSUN
+    assert settings.alpaca_market_mode is AlpacaMarketMode.DISABLED
+    assert settings.intraday_max_symbols == 10
+    assert bundle.market_source == "fosun"
+    assert http_calls == ["sec", "fred"]
+    assert len(gateway_calls) == 1
+
+
+def test_fosun_gateway_failure_never_falls_back_to_alpaca() -> None:
+    http_calls: list[str] = []
+
+    def http_factory(**kwargs: object) -> RecordingFixedOriginClient:
+        http_calls.append(str(kwargs["provider_name"]))
+        return RecordingFixedOriginClient(payload=b"{}")
+
+    def failing_gateway(_identity: object) -> object:
+        raise RuntimeError("FOSUN_MARKET_PROVIDER_UNAVAILABLE")
+
+    with pytest.raises(RuntimeError, match="FOSUN_MARKET_PROVIDER_UNAVAILABLE"):
+        build_provider_bundle(
+            _fosun_production_settings(),
+            http_client_factory=http_factory,
+            fosun_gateway_factory=failing_gateway,
+        )
+
+    assert "alpaca" not in http_calls
+
+
 def test_settings_and_composition_logs_never_reveal_secret_values(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -158,11 +213,11 @@ def test_default_production_bundle_constructs_only_three_exact_origins() -> None
 
     assert bundle.mode is ProviderRuntimeMode.PRODUCTION
     assert [(call["provider_name"], call["origin"].host) for call in calls] == [
-        ("alpaca", "data.alpaca.markets"),
         ("sec", "data.sec.gov"),
         ("fred", "api.stlouisfed.org"),
+        ("alpaca", "data.alpaca.markets"),
     ]
-    assert [call["policy"].max_attempts for call in calls] == [3, 1, 3]
+    assert [call["policy"].max_attempts for call in calls] == [1, 3, 3]
 
 
 @pytest.mark.asyncio
@@ -233,6 +288,8 @@ async def test_intraday_snapshot_factory_binds_exact_authority() -> None:
 def _production_settings(**overrides: object) -> ProviderSettings:
     values: dict[str, object] = {
         "runtime_mode": "production",
+        "market_provider": "alpaca",
+        "alpaca_market_mode": "enabled",
         "alpaca_key_id": "key-id-canary",
         "alpaca_secret_key": "secret-canary",
         "alpaca_feed": "sip",
@@ -242,3 +299,32 @@ def _production_settings(**overrides: object) -> ProviderSettings:
     }
     values.update(overrides)
     return ProviderSettings(**values)
+
+
+def _fosun_production_settings(**overrides: object) -> ProviderSettings:
+    values: dict[str, object] = {
+        "runtime_mode": "production",
+        "fosun_market_gateway_origin": "https://fosun-gateway.internal:8443",
+        "fosun_market_gateway_key_id": "synthetic-market-current",
+        "fosun_market_gateway_secret": "synthetic-market-secret",
+        "fosun_market_gateway_client_cert": Path("/synthetic/market.crt"),
+        "fosun_market_gateway_client_key": Path("/synthetic/market.key"),
+        "fosun_market_gateway_client_ca": Path("/synthetic/ca.crt"),
+        "sec_contact": "owner@example.com",
+        "fred_api_key": "fred-canary",
+    }
+    values.update(overrides)
+    return ProviderSettings(**values)
+
+
+class _NoopFosunGateway:
+    async def read_quotes_raw(self, codes: tuple[str, ...]) -> object:
+        del codes
+        raise AssertionError("external read is not part of composition")
+
+    async def read_bars_raw(self, **kwargs: object) -> object:
+        del kwargs
+        raise AssertionError("external read is not part of composition")
+
+    async def aclose(self) -> None:
+        return None

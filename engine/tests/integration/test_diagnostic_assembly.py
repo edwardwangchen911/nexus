@@ -11,6 +11,7 @@ from helpers.diagnostic_artifacts import (
     diagnostic_report_count,
     diagnostic_report_count_from_url,
     fixture_xnys_calendar_adoption,
+    publish_diagnostic_v2_after,
 )
 from helpers.portfolio_api import (
     INSTRUMENT_ID,
@@ -379,6 +380,7 @@ async def test_different_conflict_artifact_changes_input_hash_and_blocked_refs(
 
 
 async def _seed_spy(session: AsyncSession) -> None:
+    await publish_diagnostic_v2_after(session, SNAPSHOT_AT)
     session.add(
         Instrument(
             id=SPY_ID,

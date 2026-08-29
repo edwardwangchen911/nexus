@@ -34,7 +34,7 @@ from nexus.market.intraday_metrics import (
     IntradayMetrics,
     compute_intraday_metrics,
 )
-from nexus.persistence.models.data import DataArtifact
+from nexus.persistence.models.data import DataArtifact, ProviderCapability
 from nexus.persistence.models.market import (
     Instrument,
     InstrumentAlias,
@@ -47,9 +47,8 @@ from nexus.persistence.models.market import (
 from nexus.providers.base import DeliveryMode, PriceSeries
 from nexus.quality.market import xnys_session_window
 from nexus.quality.source_policy import (
-    QUOTE_SOURCE_POLICY_PAYLOAD,
-    load_fosun_market_admission,
-    load_quote_source_policy_v1,
+    load_quote_source_policy_v2,
+    load_source_policy_v2,
     select_price_series,
 )
 
@@ -59,8 +58,6 @@ _CURSOR_SCOPE = "nexus.market.v1"
 _CURSOR_MAX_LENGTH = 2048
 _CURSOR_MAX_AGE = timedelta(minutes=5)
 _STALE_AFTER = timedelta(seconds=45)
-_INTRADAY_COMPARISON_WINDOW = timedelta(seconds=5)
-_INTRADAY_DIVERGENCE_RATE = Decimal("0.005")
 _SELECTED_SERIES_BAR_LIMIT = 500
 _UNIVERSE_KEY = "us_liquid"
 _UNIVERSE_VERSION = "us_liquid_v1"
@@ -294,27 +291,44 @@ class MarketService:
                 .label("quote_rank"),
             )
             .outerjoin(DataArtifact, DataArtifact.id == LatestQuote.data_artifact_id)
+            .outerjoin(
+                ProviderCapability,
+                ProviderCapability.id == LatestQuote.provider_capability_id,
+            )
             .where(
                 LatestQuote.instrument_id.in_(instrument_ids),
                 LatestQuote.available_at <= decision_time,
                 LatestQuote.received_at <= decision_time,
                 LatestQuote.observed_at <= decision_time,
-                LatestQuote.event_kind.in_(("trade", "quote", "snapshot", "fixture")),
-                or_(
-                    and_(
-                        LatestQuote.evidence_status == "fixture",
-                        LatestQuote.source == "fixture",
-                        LatestQuote.data_artifact_id.is_(None),
-                    ),
-                    and_(
-                        LatestQuote.evidence_status == "verified",
-                        LatestQuote.source != "fixture",
-                        LatestQuote.data_artifact_id.is_not(None),
-                        DataArtifact.source == LatestQuote.source,
-                        DataArtifact.available_at <= decision_time,
-                        DataArtifact.received_at <= decision_time,
-                    ),
-                ),
+                LatestQuote.event_kind == "snapshot",
+                LatestQuote.source == "fosun",
+                LatestQuote.feed == "l1",
+                LatestQuote.delivery_mode.in_(("unknown", "real_time", "delayed")),
+                LatestQuote.evidence_status == "verified",
+                LatestQuote.data_artifact_id.is_not(None),
+                LatestQuote.provider_capability_id.is_not(None),
+                LatestQuote.provider_status_id.is_not(None),
+                LatestQuote.provider_status_version.is_not(None),
+                LatestQuote.provider_contract_hash.is_not(None),
+                LatestQuote.provider_authorized_at.is_not(None),
+                LatestQuote.provider_authorized_at <= decision_time,
+                DataArtifact.source == "fosun",
+                DataArtifact.schema_version == "fosun_gateway_market_snapshot_v1",
+                DataArtifact.available_at <= decision_time,
+                DataArtifact.received_at <= decision_time,
+                LatestQuote.revision == DataArtifact.sha256,
+                ProviderCapability.provider == "fosun",
+                ProviderCapability.capability == "READ_ONLY",
+                ProviderCapability.schema_version == "1",
+                ProviderCapability.contract_hash
+                == LatestQuote.provider_contract_hash,
+                ProviderCapability.created_at <= LatestQuote.provider_authorized_at,
+                ProviderCapability.expires_at > decision_time,
+                ProviderCapability.payload["operation"].as_string()
+                == "fosun_get_quotes",
+                ProviderCapability.payload["market_scope"].as_string() == "US",
+                ProviderCapability.payload["delivery_mode"].as_string()
+                == LatestQuote.delivery_mode,
             )
             .subquery()
         )
@@ -332,7 +346,10 @@ class MarketService:
             quotes_by_instrument[quote.instrument_id].append(quote)
         watchlisted = await self._watchlisted_ids(instrument_ids)
         try:
-            await load_quote_source_policy_v1(self._session)
+            await load_quote_source_policy_v2(
+                self._session,
+                decision_time=decision_time,
+            )
         except ValueError:
             return [
                 self._unavailable_item(
@@ -343,14 +360,6 @@ class MarketService:
                 )
                 for instrument, symbol in rows
             ]
-        fosun_admission = None
-        if any(quote.source == "fosun" for quote in quotes):
-            fosun_admission = await load_fosun_market_admission(
-                self._session,
-                decision_time=decision_time,
-                operation="fosun_get_quotes",
-                market_scope="US",
-            )
         return [
             self._quote_item(
                 instrument,
@@ -358,7 +367,6 @@ class MarketService:
                 quotes_by_instrument[instrument.id],
                 watchlisted=instrument.id in watchlisted,
                 decision_time=decision_time,
-                fosun_admitted=fosun_admission is not None,
             )
             for instrument, symbol in rows
         ]
@@ -371,35 +379,26 @@ class MarketService:
         *,
         watchlisted: bool,
         decision_time: datetime,
-        fosun_admitted: bool,
     ) -> MarketItemResponse:
-        priority, alpaca_feed, alpaca_delivery_modes = _published_quote_policy()
         eligible = [
             quote
             for quote in quotes
-            if quote.source in priority
-            and _quote_delivery_mode_is_consistent(quote)
-            and (quote.source != "fosun" or fosun_admitted)
-            and (
-                quote.source != "alpaca"
-                or (quote.feed == alpaca_feed and quote.delivery_mode in alpaca_delivery_modes)
-            )
+            if quote.source == "fosun"
+            and quote.feed == "l1"
+            and quote.delivery_mode in {"unknown", "real_time", "delayed"}
+            and quote.event_kind == "snapshot"
         ]
         if not eligible:
             reason = "NO_ELIGIBLE_SOURCE" if quotes else "QUOTE_UNAVAILABLE"
             return self._unavailable_item(
                 instrument, symbol, watchlisted=watchlisted, reason=reason
             )
-        eligible.sort(key=lambda quote: _quote_sort_key(quote, priority))
+        eligible.sort(key=_quote_sort_key)
         selected = eligible[0]
         reasons: set[str] = set()
         quality: Literal["PASS", "PARTIAL", "FAIL"] = "PASS"
-        cross_source = _quote_cross_check(eligible)
-        if cross_source is not None:
-            reasons.add(cross_source)
-            quality = "PARTIAL"
         if selected.quality_flags:
-            reasons.add("QUOTE_QUALITY_FLAGS")
+            reasons.update(selected.quality_flags)
             quality = "PARTIAL"
         if selected.last is None:
             reasons.add("QUOTE_PRICE_UNAVAILABLE")
@@ -434,11 +433,15 @@ class MarketService:
         instrument = await self._active_instrument(instrument_id, decision_time)
         if instrument is None:
             raise _instrument_not_found(instrument_id)
-        candidates = (
-            tuple(await load_daily_series(self._session, instrument_id, decision_time))
-            if self._price_series_loader is None
-            else tuple(await self._price_series_loader(instrument_id, decision_time))
-        )
+        loader = self._price_series_loader
+        if loader is None:
+            candidates = tuple(
+                await load_daily_series(self._session, instrument_id, decision_time)
+            )
+            database_authority = True
+        else:
+            candidates = tuple(await loader(instrument_id, decision_time))
+            database_authority = False
         if not candidates:
             return _empty_series(instrument_id, "NO_HISTORY_DATA")
         daily_candidates = tuple(
@@ -452,13 +455,29 @@ class MarketService:
             for bar in candidate.bars
         ):
             return _empty_series(instrument_id, "HISTORY_INSTRUMENT_MISMATCH")
-        selection = await select_price_series(
-            self._session,
-            daily_candidates,
-            instrument.tick_size,
-            decision_time,
-        )
-        selected = selection.selected
+        selected: PriceSeries | None
+        if database_authority:
+            try:
+                await load_source_policy_v2(
+                    self._session,
+                    instrument_tick_size=instrument.tick_size,
+                    decision_time=decision_time,
+                )
+            except ValueError:
+                return _empty_series(instrument_id, "SOURCE_POLICY_UNAVAILABLE")
+            selected = daily_candidates[0]
+            selection_quality: Literal["PASS", "PARTIAL", "FAIL"] = selected.quality
+            selection_reasons: tuple[str, ...] = ()
+        else:
+            selection = await select_price_series(
+                self._session,
+                daily_candidates,
+                instrument.tick_size,
+                decision_time,
+            )
+            selected = selection.selected
+            selection_quality = selection.quality
+            selection_reasons = selection.reasons
         if selected is None:
             return SelectedMarketSeriesResponse(
                 instrument_id=instrument_id,
@@ -467,15 +486,15 @@ class MarketService:
                 delivery_mode=None,
                 adjustment=None,
                 interval=None,
-                quality=selection.quality,
-                quality_reasons=selection.reasons,
+                quality=selection_quality,
+                quality_reasons=selection_reasons,
                 bars=(),
             )
         if selected.interval != "1Day":
             return _empty_series(instrument_id, "NO_DAILY_HISTORY_DATA")
         bars = selected.bars[-_SELECTED_SERIES_BAR_LIMIT:]
-        quality: Literal["PASS", "PARTIAL", "FAIL"] = selection.quality
-        reasons = list(selection.reasons)
+        quality: Literal["PASS", "PARTIAL", "FAIL"] = selection_quality
+        reasons = list(selection_reasons)
         if len(selected.bars) > _SELECTED_SERIES_BAR_LIMIT:
             reasons.append("HISTORY_TRUNCATED")
             if quality == "PASS":
@@ -773,36 +792,8 @@ class MarketService:
             ) from None
 
 
-def _published_quote_policy() -> tuple[tuple[str, ...], str, tuple[str, ...]]:
-    priority = QUOTE_SOURCE_POLICY_PAYLOAD.get("priority")
-    alpaca = QUOTE_SOURCE_POLICY_PAYLOAD.get("alpaca")
-    if (
-        not isinstance(priority, list)
-        or not all(isinstance(source, str) for source in priority)
-        or not isinstance(alpaca, dict)
-        or not isinstance(alpaca.get("feed"), str)
-        or not isinstance(alpaca.get("delivery_modes"), list)
-        or not all(isinstance(mode, str) for mode in alpaca["delivery_modes"])
-    ):
-        raise RuntimeError("published quote source policy is invalid")
+def _quote_sort_key(quote: LatestQuote) -> tuple[object, ...]:
     return (
-        tuple(priority),
-        cast(str, alpaca["feed"]),
-        tuple(cast(list[str], alpaca["delivery_modes"])),
-    )
-
-
-def _quote_delivery_mode_is_consistent(quote: LatestQuote) -> bool:
-    return (
-        quote.delivery_mode in {"real_time", "delayed", "fixture", "unknown"}
-        and (quote.source != "fixture" or quote.delivery_mode == "fixture")
-        and (quote.source != "fosun" or quote.delivery_mode != "fixture")
-    )
-
-
-def _quote_sort_key(quote: LatestQuote, priority: Sequence[str]) -> tuple[object, ...]:
-    return (
-        priority.index(quote.source),
         0 if quote.last is not None else 1,
         0 if not quote.quality_flags else 1,
         -quote.available_at.timestamp(),
@@ -814,39 +805,12 @@ def _quote_sort_key(quote: LatestQuote, priority: Sequence[str]) -> tuple[object
     )
 
 
-def _quote_cross_check(quotes: Sequence[LatestQuote]) -> str | None:
-    latest_by_source: dict[str, LatestQuote] = {}
-    for quote in quotes:
-        previous = latest_by_source.get(quote.source)
-        if quote.last is not None and (
-            previous is None or quote.observed_at > previous.observed_at
-        ):
-            latest_by_source[quote.source] = quote
-    latest = list(latest_by_source.values())
-    if len(latest) < 2:
-        return None
-    for index, first_quote in enumerate(latest):
-        for second_quote in latest[index + 1 :]:
-            if (
-                abs(first_quote.observed_at - second_quote.observed_at)
-                > _INTRADAY_COMPARISON_WINDOW
-            ):
-                continue
-            first = first_quote.last
-            second = second_quote.last
-            if first is None or second is None:
-                continue
-            baseline = min(abs(first), abs(second))
-            threshold = baseline * _INTRADAY_DIVERGENCE_RATE
-            if abs(first - second) > threshold:
-                return "INTRADAY_SOURCE_DIVERGENCE"
-    return None
-
-
 def _ordered_reasons(reasons: set[str]) -> tuple[str, ...]:
     order = (
         "INTRADAY_SOURCE_DIVERGENCE",
         "SELECTED_SOURCE_STALE",
+        "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",
+        "INTRADAY_BID_ASK_UNAVAILABLE",
         "QUOTE_PRICE_UNAVAILABLE",
         "TICK_SIZE_UNKNOWN",
         "QUOTE_QUALITY_FLAGS",

@@ -7,15 +7,14 @@ from nexus.market.database_series import _intraday_provenance_allowed
 @pytest.mark.parametrize(
     ("source", "feed", "delivery_mode", "expected"),
     (
-        ("alpaca", "iex", "real_time", True),
-        ("alpaca", "sip", "real_time", True),
-        ("alpaca", "delayed_sip", "delayed", True),
-        ("alpaca", "iex", "delayed", False),
-        ("alpaca", "sip", "delayed", False),
-        ("alpaca", "delayed_sip", "real_time", False),
-        ("fixture", "fixture", "fixture", True),
-        ("fixture", "iex", "fixture", False),
-        ("unknown", "iex", "real_time", False),
+        ("fosun", "l1", "unknown", True),
+        ("fosun", "l1", "real_time", True),
+        ("fosun", "l1", "delayed", True),
+        ("fosun", "sip", "real_time", False),
+        ("alpaca", "iex", "real_time", False),
+        ("alpaca", "delayed_sip", "delayed", False),
+        ("fixture", "fixture", "fixture", False),
+        ("unknown", "l1", "real_time", False),
     ),
 )
 def test_intraday_provenance_requires_an_explicit_source_feed_delivery_pair(

@@ -22,6 +22,7 @@ from nexus.diagnostics.models import (
     MarketEvidence,
 )
 from nexus.diagnostics.series_authority import (
+    DiagnosticSourcePolicyAuthority,
     SeriesAuthority,
     select_authoritative_series,
 )
@@ -41,8 +42,12 @@ from nexus.providers.broker.base import PortfolioSnapshot
 from nexus.quality.source_policy import (
     SOURCE_POLICY_ID,
     SOURCE_POLICY_PAYLOAD,
+    SOURCE_POLICY_V2_ID,
+    SOURCE_POLICY_V2_PAYLOAD,
+    SOURCE_POLICY_V2_VERSION,
     SOURCE_POLICY_VERSION,
     load_source_policy_v1,
+    load_source_policy_v2,
 )
 
 _SPY_ID = cast(UUID, stable_instrument_id("SPY"))
@@ -74,11 +79,12 @@ async def assemble_diagnostic_evidence(
             "diagnostic snapshot timestamp is unavailable"
         )
     snapshot_bindings, snapshot_inputs = await _snapshot_bindings(session, snapshot)
-    policy_ref = await _source_policy_ref(session, snapshot.as_of)
+    policy_authority = await load_diagnostic_source_policy(session, snapshot.as_of)
+    policy_ref = policy_authority.ref
     calendar_adoption = await load_xnys_calendar_adoption(session, snapshot.as_of)
     calendar = completed_xnys_calendar(snapshot.as_of, calendar_adoption)
     benchmark_result = await _canonical_spy_series(
-        session, snapshot.as_of, artifact_reader, policy_ref
+        session, snapshot.as_of, artifact_reader, policy_authority
     )
     benchmark_authority = None if benchmark_result is None else benchmark_result[0]
     benchmark_identity_input = None if benchmark_result is None else benchmark_result[1]
@@ -133,7 +139,7 @@ async def assemble_diagnostic_evidence(
             position.instrument_id,
             snapshot.as_of,
             artifact_reader,
-            policy_ref,
+            policy_authority,
         )
         series_authorities[position.instrument_id] = authority
         source_conflict = source_conflict or authority.source_conflict
@@ -176,9 +182,20 @@ async def assemble_diagnostic_evidence(
         adv_bindings[instrument_id] = binding
         if adv is not None:
             adv20[instrument_id] = adv
-    quality: Literal["PASS", "PARTIAL", "FAIL"] = (
-        "PASS" if benchmark is not None and len(selected) == len(snapshot.positions) else "PARTIAL"
+    quality = _market_quality(
+        policy_version=policy_authority.version,
+        benchmark_available=benchmark is not None,
+        selected_count=len(selected),
+        position_count=len(snapshot.positions),
     )
+    if policy_authority.version == "source_policy_v2":
+        incomplete_refs.extend(
+            (
+                policy_ref,
+                *(ref for _, binding in selected.values() for ref in binding.refs),
+                *(() if benchmark is None else benchmark[1].refs),
+            )
+        )
     evidence = DiagnosticEvidence(
         snapshot=cast(EvidenceBinding, snapshot_bindings["snapshot"]),
         cash=cast(dict[str, EvidenceBinding], snapshot_bindings["cash"]),
@@ -235,11 +252,28 @@ async def assemble_diagnostic_evidence(
     )
 
 
+def _market_quality(
+    *,
+    policy_version: Literal["source_policy_v1", "source_policy_v2"],
+    benchmark_available: bool,
+    selected_count: int,
+    position_count: int,
+) -> Literal["PASS", "PARTIAL", "FAIL"]:
+    complete = benchmark_available and selected_count == position_count
+    if not complete:
+        return "PARTIAL"
+    # Fosun v2 currently proves raw-only bars. Corporate-action-adjusted
+    # authority is required before volatility/drawdown diagnostics may pass.
+    if policy_version == "source_policy_v2":
+        return "PARTIAL"
+    return "PASS"
+
+
 async def _canonical_spy_series(
     session: AsyncSession,
     as_of: datetime,
     reader: ArtifactByteReader,
-    policy_ref: EvidenceRef,
+    policy_authority: DiagnosticSourcePolicyAuthority,
 ) -> tuple[SeriesAuthority, dict[str, object], tuple[EvidenceRef, ...]] | None:
     row = (
         await session.execute(
@@ -267,7 +301,13 @@ async def _canonical_spy_series(
         _db_ref("instrument", instrument.id, instrument.created_at, identity_input["instrument"]),
         _db_ref("instrument-alias", alias.id, alias.created_at, identity_input["alias"]),
     )
-    authority = await select_authoritative_series(session, _SPY_ID, as_of, reader, policy_ref)
+    authority = await select_authoritative_series(
+        session,
+        _SPY_ID,
+        as_of,
+        reader,
+        policy_authority,
+    )
     if authority.selected is not None:
         series, binding = authority.selected
         authority = replace(
@@ -280,19 +320,61 @@ async def _canonical_spy_series(
     return authority, identity_input, identity_refs
 
 
-async def _source_policy_ref(session: AsyncSession, as_of: datetime) -> EvidenceRef:
-    await load_source_policy_v1(session, instrument_tick_size=None)
+async def load_diagnostic_source_policy(
+    session: AsyncSession,
+    as_of: datetime,
+) -> DiagnosticSourcePolicyAuthority:
+    """Use v2 once published at the snapshot; retain exact v1 historical replay."""
+    v2_record = await session.scalar(
+        select(SourcePolicyRecord).where(SourcePolicyRecord.id == SOURCE_POLICY_V2_ID)
+    )
+    if v2_record is not None and v2_record.created_at <= as_of:
+        v2_policy = await load_source_policy_v2(
+            session,
+            instrument_tick_size=None,
+            decision_time=as_of,
+        )
+        return DiagnosticSourcePolicyAuthority(
+            version="source_policy_v2",
+            policy=v2_policy,
+            ref=_source_policy_evidence(
+                SOURCE_POLICY_V2_ID,
+                SOURCE_POLICY_V2_VERSION,
+                SOURCE_POLICY_V2_PAYLOAD,
+                v2_record.created_at,
+            ),
+        )
+
+    v1_policy = await load_source_policy_v1(session, instrument_tick_size=None)
     record = await session.scalar(
         select(SourcePolicyRecord).where(SourcePolicyRecord.id == SOURCE_POLICY_ID)
     )
     if record is None or record.created_at > as_of:
         raise ValueError("published source_policy_v1 is unavailable at snapshot")
+    return DiagnosticSourcePolicyAuthority(
+        version="source_policy_v1",
+        policy=v1_policy,
+        ref=_source_policy_evidence(
+            SOURCE_POLICY_ID,
+            SOURCE_POLICY_VERSION,
+            SOURCE_POLICY_PAYLOAD,
+            record.created_at,
+        ),
+    )
+
+
+def _source_policy_evidence(
+    policy_id: UUID,
+    version: str,
+    payload: dict[str, object],
+    available_at: datetime,
+) -> EvidenceRef:
     return EvidenceRef(
         source="nexus_db",
-        object_id=f"source-policy:{SOURCE_POLICY_ID}:{SOURCE_POLICY_VERSION}",
-        available_at=record.created_at,
-        location=f"db://source-policies/{SOURCE_POLICY_ID}",
-        content_hash=_canonical_hash(SOURCE_POLICY_PAYLOAD),
+        object_id=f"source-policy:{policy_id}:{version}",
+        available_at=available_at,
+        location=f"db://source-policies/{policy_id}",
+        content_hash=_canonical_hash(payload),
     )
 
 

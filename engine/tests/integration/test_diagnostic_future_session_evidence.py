@@ -4,7 +4,11 @@ from hashlib import sha256
 from uuid import UUID
 
 import pytest
-from helpers.diagnostic_artifacts import FixtureArtifactReader, fixture_xnys_calendar_adoption
+from helpers.diagnostic_artifacts import (
+    FixtureArtifactReader,
+    fixture_xnys_calendar_adoption,
+    publish_diagnostic_v2_after,
+)
 from helpers.portfolio_api import INSTRUMENT_ID, PORTFOLIOS, seed_portfolio_list, settings
 from nexus.diagnostics.calendar import completed_xnys_calendar
 from nexus.diagnostics.service import diagnose_and_persist
@@ -102,6 +106,7 @@ async def test_future_position_session_persists_selected_artifact_conflict_evide
 
 
 async def _seed_spy(session: AsyncSession) -> None:
+    await publish_diagnostic_v2_after(session, SNAPSHOT_AT)
     session.add(
         Instrument(
             id=SPY_ID,

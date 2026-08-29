@@ -9,33 +9,30 @@ from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.time import require_utc
 from nexus.market.intraday_authority import (
-    HASH_VERSION as INTRADAY_HASH_VERSION,
+    HASH_VERSION_V2 as INTRADAY_HASH_VERSION_V2,
 )
 from nexus.market.intraday_authority import (
-    POLICY_VERSION as INTRADAY_POLICY_VERSION,
-)
-from nexus.market.intraday_authority import (
+    INTRADAY_SOURCE_POLICY_V2_ID,
     IntradayBarSetPreparation,
     prepare_intraday_bar_set,
+)
+from nexus.market.intraday_authority import (
+    POLICY_VERSION_V2 as INTRADAY_POLICY_VERSION_V2,
 )
 from nexus.market.intraday_metrics import (
     IntradayAuthorityView,
     IntradayQuoteView,
     IntradayTradeView,
 )
+from nexus.market.price_bar_authority import HASH_VERSION_V2 as DAILY_HASH_VERSION_V2
+from nexus.market.price_bar_authority import POLICY_VERSION_V2 as DAILY_POLICY_VERSION_V2
 from nexus.market.price_bar_authority import (
-    HASH_VERSION as DAILY_HASH_VERSION,
-)
-from nexus.market.price_bar_authority import (
-    POLICY_VERSION as DAILY_POLICY_VERSION,
-)
-from nexus.market.price_bar_authority import (
-    SOURCE_POLICY_ID as DAILY_SOURCE_POLICY_ID,
+    SOURCE_POLICY_V2_ID as DAILY_SOURCE_POLICY_V2_ID,
 )
 from nexus.market.price_bar_authority import (
     PriceBarSetPreparation,
@@ -47,14 +44,13 @@ from nexus.persistence.models.data import (
     PriceBarRecord,
     PriceBarSetAuthority,
     PriceSeriesManifest,
+    ProviderCapability,
 )
 from nexus.persistence.models.market import LatestQuote
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.providers.base import InstrumentId, PriceBar, PriceSeries
 from nexus.quality.source_policy import (
-    INTRADAY_SOURCE_POLICY_ID,
-    INTRADAY_SOURCE_POLICY_PAYLOAD,
-    load_intraday_source_policy_v1,
+    load_intraday_source_policy_v2,
 )
 
 _MAX_DAILY_CANDIDATES = 16
@@ -89,11 +85,37 @@ async def load_daily_series(
                 ResearchEvidenceRef,
                 ResearchEvidenceRef.id == PriceBarSetAuthority.evidence_ref_id,
             )
+            .join(
+                ProviderCapability,
+                ProviderCapability.id
+                == PriceSeriesManifest.provider_capability_id,
+            )
             .where(
                 PriceSeriesManifest.instrument == str(instrument_id),
                 PriceSeriesManifest.interval == "1Day",
+                PriceSeriesManifest.source == "fosun",
+                PriceSeriesManifest.feed == "l1",
+                PriceSeriesManifest.adjustment == "raw",
+                PriceSeriesManifest.delivery_mode.in_(("real_time", "delayed")),
+                PriceSeriesManifest.provider_authorized_at <= decision,
+                PriceBarSetAuthority.source_policy_id == DAILY_SOURCE_POLICY_V2_ID,
+                PriceBarSetAuthority.hash_version == DAILY_HASH_VERSION_V2,
+                PriceBarSetAuthority.policy_version == DAILY_POLICY_VERSION_V2,
                 PriceBarSetAuthority.available_at <= decision,
                 ResearchEvidenceRef.available_at <= decision,
+                ProviderCapability.provider == "fosun",
+                ProviderCapability.capability == "READ_ONLY",
+                ProviderCapability.schema_version == "1",
+                ProviderCapability.contract_hash
+                == PriceSeriesManifest.provider_contract_hash,
+                ProviderCapability.created_at
+                <= PriceSeriesManifest.provider_authorized_at,
+                ProviderCapability.expires_at > decision,
+                ProviderCapability.payload["operation"].as_string()
+                == "fosun_get_bars",
+                ProviderCapability.payload["market_scope"].as_string() == "US",
+                ProviderCapability.payload["delivery_mode"].as_string()
+                == PriceSeriesManifest.delivery_mode,
             )
             .order_by(
                 PriceBarSetAuthority.available_at.desc(),
@@ -142,6 +164,7 @@ async def load_daily_series(
                     manifest.delivery_mode,
                 ),
                 quality="PASS",
+                contract_hash=manifest.provider_contract_hash,
             )
         )
     return tuple(loaded)
@@ -155,7 +178,10 @@ async def load_intraday_series(
     """Load one whole-source intraday view without admitting legacy evidence."""
     decision = require_utc(decision_time)
     try:
-        await load_intraday_source_policy_v1(session)
+        await load_intraday_source_policy_v2(
+            session,
+            decision_time=decision_time,
+        )
     except ValueError:
         return _empty_intraday(instrument_id, "INTRADAY_SOURCE_POLICY_UNAVAILABLE")
 
@@ -174,12 +200,41 @@ async def load_intraday_series(
                 ResearchEvidenceRef,
                 ResearchEvidenceRef.id == IntradayBarSetAuthority.evidence_ref_id,
             )
+            .join(
+                ProviderCapability,
+                ProviderCapability.id
+                == PriceSeriesManifest.provider_capability_id,
+            )
             .where(
                 PriceSeriesManifest.instrument == str(instrument_id),
                 PriceSeriesManifest.interval == "1Min",
+                PriceSeriesManifest.source == "fosun",
+                PriceSeriesManifest.feed == "l1",
+                PriceSeriesManifest.adjustment == "raw",
+                PriceSeriesManifest.delivery_mode.in_(
+                    ("unknown", "real_time", "delayed")
+                ),
+                PriceSeriesManifest.provider_authorized_at <= decision,
+                IntradayBarSetAuthority.source_policy_id
+                == INTRADAY_SOURCE_POLICY_V2_ID,
+                IntradayBarSetAuthority.hash_version == INTRADAY_HASH_VERSION_V2,
+                IntradayBarSetAuthority.policy_version == INTRADAY_POLICY_VERSION_V2,
                 IntradayBarSetAuthority.available_at <= decision,
                 IntradayBarSetAuthority.last_observed_at >= decision - _INTRADAY_LOOKBACK,
                 ResearchEvidenceRef.available_at <= decision,
+                ProviderCapability.provider == "fosun",
+                ProviderCapability.capability == "READ_ONLY",
+                ProviderCapability.schema_version == "1",
+                ProviderCapability.contract_hash
+                == PriceSeriesManifest.provider_contract_hash,
+                ProviderCapability.created_at
+                <= PriceSeriesManifest.provider_authorized_at,
+                ProviderCapability.expires_at > decision,
+                ProviderCapability.payload["operation"].as_string()
+                == "fosun_get_bars",
+                ProviderCapability.payload["market_scope"].as_string() == "US",
+                ProviderCapability.payload["delivery_mode"].as_string()
+                == PriceSeriesManifest.delivery_mode,
             )
             .order_by(
                 IntradayBarSetAuthority.available_at.desc(),
@@ -304,9 +359,18 @@ def _daily_authority_valid(
     prepared: PriceBarSetPreparation,
 ) -> bool:
     return (
-        authority.source_policy_id == DAILY_SOURCE_POLICY_ID
-        and authority.hash_version == DAILY_HASH_VERSION
-        and authority.policy_version == DAILY_POLICY_VERSION
+        authority.source_policy_id == DAILY_SOURCE_POLICY_V2_ID
+        and authority.hash_version == DAILY_HASH_VERSION_V2
+        and authority.policy_version == DAILY_POLICY_VERSION_V2
+        and manifest.source == "fosun"
+        and manifest.feed == "l1"
+        and manifest.adjustment == "raw"
+        and manifest.delivery_mode in {"real_time", "delayed"}
+        and manifest.provider_capability_id is not None
+        and manifest.provider_status_id is not None
+        and manifest.provider_status_version is not None
+        and manifest.provider_contract_hash is not None
+        and manifest.provider_authorized_at is not None
         and authority.source == manifest.source == evidence.source
         and authority.provider_object_id
         == evidence.provider_object_id
@@ -328,9 +392,18 @@ def _intraday_authority_valid(
     prepared: IntradayBarSetPreparation,
 ) -> bool:
     return (
-        authority.source_policy_id == INTRADAY_SOURCE_POLICY_ID
-        and authority.hash_version == INTRADAY_HASH_VERSION
-        and authority.policy_version == INTRADAY_POLICY_VERSION
+        authority.source_policy_id == INTRADAY_SOURCE_POLICY_V2_ID
+        and authority.hash_version == INTRADAY_HASH_VERSION_V2
+        and authority.policy_version == INTRADAY_POLICY_VERSION_V2
+        and manifest.source == "fosun"
+        and manifest.feed == "l1"
+        and manifest.adjustment == "raw"
+        and manifest.delivery_mode in {"unknown", "real_time", "delayed"}
+        and manifest.provider_capability_id is not None
+        and manifest.provider_status_id is not None
+        and manifest.provider_status_version is not None
+        and manifest.provider_contract_hash is not None
+        and manifest.provider_authorized_at is not None
         and authority.source == manifest.source == evidence.source
         and authority.provider_object_id
         == evidence.provider_object_id
@@ -374,12 +447,10 @@ def _provider_mode(
 
 
 def _intraday_provenance_allowed(source: str, feed: str, delivery_mode: str) -> bool:
-    if source == "fixture":
-        return feed == "fixture" and delivery_mode == "fixture"
-    if source != "alpaca":
-        return False
-    return (feed in {"iex", "sip"} and delivery_mode == "real_time") or (
-        feed == "delayed_sip" and delivery_mode == "delayed"
+    return (
+        source == "fosun"
+        and feed == "l1"
+        and delivery_mode in {"unknown", "real_time", "delayed"}
     )
 
 
@@ -443,50 +514,44 @@ async def _latest_intraday_observations(
             .label("observation_rank"),
         )
         .outerjoin(DataArtifact, DataArtifact.id == LatestQuote.data_artifact_id)
+        .outerjoin(
+            ProviderCapability,
+            ProviderCapability.id == LatestQuote.provider_capability_id,
+        )
         .where(
             LatestQuote.instrument_id == instrument_id,
             LatestQuote.available_at <= decision_time,
             LatestQuote.received_at <= decision_time,
             LatestQuote.observed_at <= decision_time,
             LatestQuote.observed_at >= decision_time - _INTRADAY_LOOKBACK,
-            LatestQuote.event_kind.in_(("trade", "quote", "snapshot", "fixture")),
-            or_(
-                and_(
-                    LatestQuote.source == "alpaca",
-                    LatestQuote.feed.in_(("iex", "sip")),
-                    LatestQuote.delivery_mode == "real_time",
-                ),
-                and_(
-                    LatestQuote.source == "alpaca",
-                    LatestQuote.feed == "delayed_sip",
-                    LatestQuote.delivery_mode == "delayed",
-                ),
-                and_(
-                    LatestQuote.source == "fixture",
-                    LatestQuote.feed == "fixture",
-                    LatestQuote.delivery_mode == "fixture",
-                ),
-            ),
-            or_(
-                and_(
-                    LatestQuote.evidence_status == "fixture",
-                    LatestQuote.source == "fixture",
-                    LatestQuote.data_artifact_id.is_(None),
-                ),
-                and_(
-                    LatestQuote.evidence_status == "verified",
-                    LatestQuote.source != "fixture",
-                    LatestQuote.data_artifact_id.is_not(None),
-                    DataArtifact.source == LatestQuote.source,
-                    DataArtifact.available_at <= decision_time,
-                    DataArtifact.received_at <= decision_time,
-                    or_(
-                        LatestQuote.revision == DataArtifact.sha256,
-                        func.right(LatestQuote.revision, 65)
-                        == func.concat(":", DataArtifact.sha256),
-                    ),
-                ),
-            ),
+            LatestQuote.event_kind == "snapshot",
+            LatestQuote.source == "fosun",
+            LatestQuote.feed == "l1",
+            LatestQuote.delivery_mode.in_(("unknown", "real_time", "delayed")),
+            LatestQuote.evidence_status == "verified",
+            LatestQuote.data_artifact_id.is_not(None),
+            LatestQuote.provider_capability_id.is_not(None),
+            LatestQuote.provider_status_id.is_not(None),
+            LatestQuote.provider_status_version.is_not(None),
+            LatestQuote.provider_contract_hash.is_not(None),
+            LatestQuote.provider_authorized_at.is_not(None),
+            LatestQuote.provider_authorized_at <= decision_time,
+            DataArtifact.source == "fosun",
+            DataArtifact.schema_version == "fosun_gateway_market_snapshot_v1",
+            DataArtifact.available_at <= decision_time,
+            DataArtifact.received_at <= decision_time,
+            LatestQuote.revision == DataArtifact.sha256,
+            ProviderCapability.provider == "fosun",
+            ProviderCapability.capability == "READ_ONLY",
+            ProviderCapability.schema_version == "1",
+            ProviderCapability.contract_hash == LatestQuote.provider_contract_hash,
+            ProviderCapability.created_at <= LatestQuote.provider_authorized_at,
+            ProviderCapability.expires_at > decision_time,
+            ProviderCapability.payload["operation"].as_string()
+            == "fosun_get_quotes",
+            ProviderCapability.payload["market_scope"].as_string() == "US",
+            ProviderCapability.payload["delivery_mode"].as_string()
+            == LatestQuote.delivery_mode,
         )
         .subquery()
     )
@@ -508,21 +573,23 @@ def _select_intraday_key(
     candidates: tuple[_IntradayCandidate, ...],
     observations: tuple[LatestQuote, ...],
 ) -> tuple[str, str, str] | None:
-    candidate_keys = {_candidate_key(candidate) for candidate in candidates}
-    observation_keys = {
-        (row.source, row.feed, row.delivery_mode)
-        for row in observations
-        if _intraday_provenance_allowed(row.source, row.feed, row.delivery_mode)
+    freshness: dict[tuple[str, str, str], datetime] = {
+        _candidate_key(candidate): candidate.latest_authority_at
+        for candidate in candidates
     }
-    keys = candidate_keys | observation_keys
-    priority = cast(list[str], INTRADAY_SOURCE_POLICY_PAYLOAD["priority"])
-    feed_priority = cast(dict[str, object], INTRADAY_SOURCE_POLICY_PAYLOAD["alpaca"])["feeds"]
-    assert isinstance(feed_priority, list)
-    return min(
-        keys,
+    for row in observations:
+        key = (row.source, row.feed, row.delivery_mode)
+        if not _intraday_provenance_allowed(*key):
+            continue
+        previous = freshness.get(key)
+        if previous is None or row.available_at > previous:
+            freshness[key] = row.available_at
+    delivery_priority = {"real_time": 2, "delayed": 1, "unknown": 0}
+    return max(
+        freshness,
         key=lambda key: (
-            priority.index(key[0]),
-            feed_priority.index(key[1]) if key[0] == "alpaca" else 0,
+            freshness[key],
+            delivery_priority[key[2]],
             key,
         ),
         default=None,
@@ -534,22 +601,7 @@ def _candidate_key(candidate: _IntradayCandidate) -> tuple[str, str, str]:
 
 
 def _cross_source_reasons(observations: tuple[LatestQuote, ...]) -> tuple[str, ...]:
-    latest_by_source: dict[str, LatestQuote] = {}
-    for row in observations:
-        if row.last is None:
-            continue
-        previous = latest_by_source.get(row.source)
-        if previous is None or row.observed_at > previous.observed_at:
-            latest_by_source[row.source] = row
-    values = tuple(latest_by_source.values())
-    for index, first in enumerate(values):
-        for second in values[index + 1 :]:
-            if abs(first.observed_at - second.observed_at) > timedelta(seconds=5):
-                continue
-            assert first.last is not None and second.last is not None
-            baseline = min(abs(first.last), abs(second.last))
-            if baseline == 0 or abs(first.last - second.last) / baseline > Decimal("0.005"):
-                return ("INTRADAY_SOURCE_DIVERGENCE",)
+    del observations
     return ()
 
 

@@ -185,21 +185,11 @@ def _valid_owner(
         and policy.version == SOURCE_POLICY_VERSION
         and policy.schema_version == "1"
         and policy.payload == SOURCE_POLICY_PAYLOAD
-        and (
-            (
-                manifest.source == "alpaca"
-                and manifest.feed == "sip"
-                and manifest.delivery_mode == "delayed"
-                and manifest.interval == "1Day"
-            )
-            or (
-                allow_fixture
-                and manifest.source == "fixture"
-                and bool(manifest.feed)
-                and manifest.delivery_mode == "fixture"
-                and manifest.interval == "1Day"
-            )
-        )
+        and allow_fixture
+        and manifest.source == "fixture"
+        and bool(manifest.feed)
+        and manifest.delivery_mode == "fixture"
+        and manifest.interval == "1Day"
     )
     v2_protocol = (
         authority.source_policy_id == policy.id == SOURCE_POLICY_V2_ID

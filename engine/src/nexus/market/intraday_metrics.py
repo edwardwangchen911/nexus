@@ -122,6 +122,10 @@ def compute_intraday_metrics(
     """Compute exact metrics or explicit nulls; never interpolate or synthesize facts."""
     decision = require_utc(decision_time)
     reasons = set(view.quality_reasons)
+    if view.delivery_mode == "unknown":
+        reasons.add("INTRADAY_DELIVERY_UNVERIFIED")
+    if view.trade is not None:
+        reasons.update(view.trade.quality_flags)
     usable, bar_invalid = _usable_bars(view, decision, reasons)
     sample_count = len(usable)
     session = xnys_session_window(decision.date())
@@ -308,6 +312,9 @@ def _ordered_reasons(reasons: set[str]) -> tuple[str, ...]:
         "INTRADAY_AUTHORITY_INVALID",
         "INTRADAY_SOURCE_POLICY_UNAVAILABLE",
         "INTRADAY_SOURCE_CONFLICT",
+        "INTRADAY_DELIVERY_UNVERIFIED",
+        "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",
+        "INTRADAY_BID_ASK_UNAVAILABLE",
         "INTRADAY_OUTSIDE_SESSION",
         "INTRADAY_BAR_NOT_VISIBLE",
         "INTRADAY_BAR_INCOMPLETE",

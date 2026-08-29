@@ -34,6 +34,8 @@ def parse_price_series_artifact(
         or manifest.data_artifact_id != artifact.id
         or manifest.source != artifact.source
         or manifest.instrument != str(expected_instrument_id)
+        or manifest.interval != "1Day"
+        or not _valid_fosun_manifest(manifest)
     ):
         raise ValueError("diagnostic artifact provenance is invalid")
     rows = pq.read_table(BytesIO(payload)).to_pylist()
@@ -58,6 +60,7 @@ def parse_price_series_artifact(
             mode=mode,
             delivery_mode=cast(DeliveryMode, manifest.delivery_mode),
             quality="PASS",
+            contract_hash=manifest.provider_contract_hash,
         ),
         EvidenceRef(
             source=artifact.source,
@@ -66,6 +69,25 @@ def parse_price_series_artifact(
             location=f"db://data-artifacts/{artifact.id}",
             content_hash=artifact.sha256,
         ),
+    )
+
+
+def _valid_fosun_manifest(manifest: PriceSeriesManifest) -> bool:
+    if manifest.source != "fosun":
+        return True
+    contract_hash = manifest.provider_contract_hash
+    return (
+        manifest.feed == "l1"
+        and manifest.adjustment == "raw"
+        and manifest.delivery_mode in {"real_time", "delayed"}
+        and manifest.provider_capability_id is not None
+        and manifest.provider_status_id is not None
+        and manifest.provider_status_version is not None
+        and manifest.provider_status_version > 0
+        and contract_hash is not None
+        and len(contract_hash) == 64
+        and all(character in "0123456789abcdef" for character in contract_hash)
+        and manifest.provider_authorized_at is not None
     )
 
 

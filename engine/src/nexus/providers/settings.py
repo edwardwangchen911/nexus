@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import Field, SecretStr, model_validator
@@ -17,6 +18,16 @@ class ProviderRuntimeMode(StrEnum):
 class IntradayMonitorMode(StrEnum):
     DISABLED = "disabled"
     PRODUCTION = "production"
+
+
+class MarketProvider(StrEnum):
+    FOSUN = "fosun"
+    ALPACA = "alpaca"
+
+
+class AlpacaMarketMode(StrEnum):
+    DISABLED = "disabled"
+    ENABLED = "enabled"
 
 
 class ProviderWorkerSettings(BaseSettings):
@@ -74,6 +85,42 @@ class ProviderSettings(BaseSettings):
         default=ProviderRuntimeMode.FIXTURE,
         validation_alias="NEXUS_PROVIDER_RUNTIME_MODE",
     )
+    market_provider: MarketProvider = Field(
+        default=MarketProvider.FOSUN,
+        validation_alias="NEXUS_MARKET_PROVIDER",
+    )
+    alpaca_market_mode: AlpacaMarketMode = Field(
+        default=AlpacaMarketMode.DISABLED,
+        validation_alias="NEXUS_ALPACA_MARKET_MODE",
+    )
+    fosun_market_delivery_mode: Literal["unknown", "real_time", "delayed"] = Field(
+        default="unknown",
+        validation_alias="FOSUN_MARKET_DELIVERY_MODE",
+    )
+    fosun_market_gateway_origin: str | None = Field(
+        default=None,
+        validation_alias="FOSUN_MARKET_GATEWAY_BASE_URL",
+    )
+    fosun_market_gateway_key_id: str | None = Field(
+        default=None,
+        validation_alias="FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID",
+    )
+    fosun_market_gateway_secret: SecretStr | None = Field(
+        default=None,
+        validation_alias="FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET",
+    )
+    fosun_market_gateway_client_cert: Path | None = Field(
+        default=None,
+        validation_alias="FOSUN_MARKET_GATEWAY_CLIENT_CERT",
+    )
+    fosun_market_gateway_client_key: Path | None = Field(
+        default=None,
+        validation_alias="FOSUN_MARKET_GATEWAY_CLIENT_KEY",
+    )
+    fosun_market_gateway_client_ca: Path | None = Field(
+        default=None,
+        validation_alias="FOSUN_MARKET_GATEWAY_CLIENT_CA",
+    )
     alpaca_key_id: SecretStr | None = Field(
         default=None,
         validation_alias="ALPACA_API_KEY_ID",
@@ -98,8 +145,10 @@ class ProviderSettings(BaseSettings):
         default=15,
         validation_alias="NEXUS_INTRADAY_POLL_SECONDS",
     )
-    intraday_max_symbols: Literal[30] = Field(
-        default=30,
+    intraday_max_symbols: int = Field(
+        default=10,
+        ge=1,
+        le=30,
         validation_alias="NEXUS_INTRADAY_MAX_SYMBOLS",
     )
     alpaca_intraday_feed: Literal["iex", "sip", "delayed_sip"] | None = Field(
@@ -119,6 +168,8 @@ class ProviderSettings(BaseSettings):
     def __repr_args__(self) -> list[tuple[str | None, object]]:
         return [
             ("runtime_mode", self.runtime_mode),
+            ("market_provider", self.market_provider),
+            ("alpaca_market_mode", self.alpaca_market_mode),
             ("intraday_monitor_mode", self.intraday_monitor_mode),
         ]
 
@@ -127,28 +178,71 @@ class ProviderSettings(BaseSettings):
         if self.intraday_monitor_mode is IntradayMonitorMode.PRODUCTION:
             if self.runtime_mode is not ProviderRuntimeMode.PRODUCTION:
                 raise ValueError("INTRADAY_PRODUCTION_PROVIDER_MODE_REQUIRED")
-            if self.alpaca_intraday_feed is None:
-                raise ValueError("ALPACA_INTRADAY_FEED_REQUIRED")
-            if self.alpaca_intraday_delivery_mode is None:
-                raise ValueError("ALPACA_INTRADAY_DELIVERY_MODE_REQUIRED")
-            expected_delivery = (
-                "delayed" if self.alpaca_intraday_feed == "delayed_sip" else "real_time"
-            )
-            if self.alpaca_intraday_delivery_mode != expected_delivery:
-                raise ValueError("ALPACA_INTRADAY_AUTHORITY_MISMATCH")
+            if self.market_provider is MarketProvider.FOSUN:
+                if self.intraday_max_symbols > 10:
+                    raise ValueError("FOSUN_INTRADAY_MAX_SYMBOLS_EXCEEDED")
+            else:
+                if self.alpaca_intraday_feed is None:
+                    raise ValueError("ALPACA_INTRADAY_FEED_REQUIRED")
+                if self.alpaca_intraday_delivery_mode is None:
+                    raise ValueError("ALPACA_INTRADAY_DELIVERY_MODE_REQUIRED")
+                expected_delivery = (
+                    "delayed"
+                    if self.alpaca_intraday_feed == "delayed_sip"
+                    else "real_time"
+                )
+                if self.alpaca_intraday_delivery_mode != expected_delivery:
+                    raise ValueError("ALPACA_INTRADAY_AUTHORITY_MISMATCH")
         if self.runtime_mode is ProviderRuntimeMode.FIXTURE:
             return self
-        required: tuple[tuple[str, object | None], ...] = (
-            ("ALPACA_API_KEY_ID_REQUIRED", self.alpaca_key_id),
-            ("ALPACA_API_SECRET_KEY_REQUIRED", self.alpaca_secret_key),
-            ("ALPACA_DATA_FEED_REQUIRED", self.alpaca_feed),
-            ("ALPACA_DELIVERY_MODE_REQUIRED", self.alpaca_delivery_mode),
+        common: tuple[tuple[str, object | None], ...] = (
             ("SEC_CONTACT_REQUIRED", self.sec_contact),
             ("FRED_API_KEY_REQUIRED", self.fred_api_key),
         )
-        for error_code, value in required:
+        for error_code, value in common:
             if _missing(value):
                 raise ValueError(error_code)
+        if self.market_provider is MarketProvider.FOSUN:
+            if self.alpaca_market_mode is not AlpacaMarketMode.DISABLED:
+                raise ValueError("ALPACA_MODE_REQUIRES_ALPACA_MARKET_PROVIDER")
+            fosun_required: tuple[tuple[str, object | None], ...] = (
+                ("FOSUN_MARKET_GATEWAY_BASE_URL_REQUIRED", self.fosun_market_gateway_origin),
+                (
+                    "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID_REQUIRED",
+                    self.fosun_market_gateway_key_id,
+                ),
+                (
+                    "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET_REQUIRED",
+                    self.fosun_market_gateway_secret,
+                ),
+                (
+                    "FOSUN_MARKET_GATEWAY_CLIENT_CERT_REQUIRED",
+                    self.fosun_market_gateway_client_cert,
+                ),
+                (
+                    "FOSUN_MARKET_GATEWAY_CLIENT_KEY_REQUIRED",
+                    self.fosun_market_gateway_client_key,
+                ),
+                (
+                    "FOSUN_MARKET_GATEWAY_CLIENT_CA_REQUIRED",
+                    self.fosun_market_gateway_client_ca,
+                ),
+            )
+            for error_code, value in fosun_required:
+                if _missing(value):
+                    raise ValueError(error_code)
+        else:
+            if self.alpaca_market_mode is not AlpacaMarketMode.ENABLED:
+                raise ValueError("ALPACA_MARKET_MODE_DISABLED")
+            alpaca_required: tuple[tuple[str, object | None], ...] = (
+                ("ALPACA_API_KEY_ID_REQUIRED", self.alpaca_key_id),
+                ("ALPACA_API_SECRET_KEY_REQUIRED", self.alpaca_secret_key),
+                ("ALPACA_DATA_FEED_REQUIRED", self.alpaca_feed),
+                ("ALPACA_DELIVERY_MODE_REQUIRED", self.alpaca_delivery_mode),
+            )
+            for error_code, value in alpaca_required:
+                if _missing(value):
+                    raise ValueError(error_code)
         assert self.sec_contact is not None
         if (
             self.sec_contact != self.sec_contact.strip()

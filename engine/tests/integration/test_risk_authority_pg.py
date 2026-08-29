@@ -4,7 +4,11 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
-from nexus.market.price_bar_authority import SOURCE_POLICY_ID, finalize_price_bar_set
+from nexus.market.price_bar_authority import (
+    SOURCE_POLICY_ID,
+    SOURCE_POLICY_V2_ID,
+    finalize_price_bar_set,
+)
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -14,6 +18,7 @@ from nexus.persistence.models.data import (
     DataSnapshot,
     PriceBarRecord,
     PriceSeriesManifest,
+    ProviderCapability,
     QualityReport,
 )
 from nexus.persistence.models.market import (
@@ -23,6 +28,7 @@ from nexus.persistence.models.market import (
     UniverseSnapshot,
 )
 from nexus.persistence.models.paper import RiskQueryAuthorityRecord
+from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.risk.authority import (
     build_risk_market_snapshot,
     canonical_query_authority_hash,
@@ -58,7 +64,12 @@ DECISION_TIME = datetime(2026, 8, 21, 21, tzinfo=UTC)
 AVAILABLE_AT = datetime(2026, 8, 21, 20, tzinfo=UTC)
 
 
-def _decision(authority_hash: str) -> ForwardStrategyDecision:
+def _decision(
+    authority_hash: str,
+    *,
+    source_policy_id: UUID = SOURCE_POLICY_ID,
+    decision_time: datetime = DECISION_TIME,
+) -> ForwardStrategyDecision:
     draft = ForwardStrategyDecision(
         account_id=PAPER_ACCOUNT_ID,
         portfolio_id=PORTFOLIO_ID,
@@ -68,9 +79,9 @@ def _decision(authority_hash: str) -> ForwardStrategyDecision:
         registry_event_id=REGISTRY_EVENT_ID,
         champion_generation=1,
         decision_session=DECISION_SESSION,
-        decision_time=DECISION_TIME,
+        decision_time=decision_time,
         execution_session=EXECUTION_SESSION,
-        source_policy_id=SOURCE_POLICY_ID,
+        source_policy_id=source_policy_id,
         calendar_authority_id=CALENDAR_ID,
         universe_snapshot_id=UNIVERSE_ID,
         quality_report_id=QUALITY_ID,
@@ -100,11 +111,49 @@ async def _seed_authority(
     *,
     adjustment: str = "raw",
     query_kinds: tuple[str, ...] = ("corporate_action", "suspension", "delisting"),
+    price_source: str = "fixture",
+    capability_expires_at: datetime = datetime(2027, 1, 1, tzinfo=UTC),
+    decision_time: datetime = DECISION_TIME,
 ) -> ForwardStrategyDecision:
+    source_policy_id = (
+        SOURCE_POLICY_V2_ID if price_source == "fosun" else SOURCE_POLICY_ID
+    )
+    capability_id = UUID("40000000-0000-0000-0000-000000000010")
+    status_id = UUID("40000000-0000-0000-0000-000000000011")
+    contract_hash = "9" * 64
+    provider_authorized_at = datetime(2026, 8, 21, 20, 30, tzinfo=UTC)
     engine = create_async_engine(database_url)
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:
         async with sessions.begin() as session:
+            if price_source == "fosun":
+                session.add_all(
+                    (
+                        ProviderCapability(
+                            id=capability_id,
+                            provider="fosun",
+                            capability="READ_ONLY",
+                            contract_hash=contract_hash,
+                            expires_at=capability_expires_at,
+                            schema_version="1",
+                            payload={
+                                "operation": "fosun_get_bars",
+                                "market_scope": "US",
+                                "delivery_mode": "real_time",
+                            },
+                            created_at=datetime(2026, 8, 21, 19, tzinfo=UTC),
+                        ),
+                        IntegrationStatus(
+                            id=status_id,
+                            provider="fosun",
+                            status="read_only",
+                            version=1,
+                            mode_changed_at=datetime(2026, 8, 21, 19, tzinfo=UTC),
+                            admitted_contract_hash=contract_hash,
+                            created_at=datetime(2026, 8, 21, 19, tzinfo=UTC),
+                        ),
+                    )
+                )
             session.add(
                 Instrument(
                     id=INSTRUMENT_ID,
@@ -134,7 +183,7 @@ async def _seed_authority(
                     ExchangeCalendarSessionRecord(
                         calendar_authority_id=CALENDAR_ID,
                         session=DECISION_SESSION,
-                        decision_at=DECISION_TIME,
+                        decision_at=decision_time,
                     ),
                     ExchangeCalendarSessionRecord(
                         calendar_authority_id=CALENDAR_ID,
@@ -172,9 +221,17 @@ async def _seed_authority(
                     uri="memory://paper-risk-bar",
                     sha256="e" * 64,
                     byte_size=100,
-                    mime_type="application/x-parquet",
-                    schema_version="v1",
-                    source="fixture",
+                    mime_type=(
+                        "application/vnd.apache.parquet"
+                        if price_source == "fosun"
+                        else "application/x-parquet"
+                    ),
+                    schema_version=(
+                        "price_bars_v1"
+                        if price_source == "fosun"
+                        else "v1"
+                    ),
+                    source=price_source,
                     observed_at=AVAILABLE_AT,
                     available_at=AVAILABLE_AT,
                     received_at=AVAILABLE_AT,
@@ -211,14 +268,25 @@ async def _seed_authority(
                 evidence_ref_id=None,
                 data_artifact_id=ARTIFACT_ID,
                 instrument=str(INSTRUMENT_ID),
-                source="fixture",
-                feed="fixture",
-                delivery_mode="fixture",
+                source=price_source,
+                feed="l1" if price_source == "fosun" else "fixture",
+                delivery_mode="real_time" if price_source == "fosun" else "fixture",
                 adjustment=adjustment,
                 interval="1Day",
                 start_at=AVAILABLE_AT,
                 end_at=AVAILABLE_AT,
                 row_count=1,
+                provider_capability_id=(
+                    capability_id if price_source == "fosun" else None
+                ),
+                provider_status_id=status_id if price_source == "fosun" else None,
+                provider_status_version=1 if price_source == "fosun" else None,
+                provider_contract_hash=(
+                    contract_hash if price_source == "fosun" else None
+                ),
+                provider_authorized_at=(
+                    provider_authorized_at if price_source == "fosun" else None
+                ),
             )
             session.add(manifest)
             await session.flush()
@@ -261,7 +329,7 @@ async def _seed_authority(
             proofs: list[AuthorityQueryProof] = []
             for index, kind in enumerate(query_kinds, start=1):
                 content_hash = canonical_query_authority_hash(
-                    source_policy_id=SOURCE_POLICY_ID,
+                    source_policy_id=source_policy_id,
                     universe_snapshot_id=UNIVERSE_ID,
                     decision_session=DECISION_SESSION,
                     kind=kind,
@@ -275,7 +343,7 @@ async def _seed_authority(
                 session.add(
                     RiskQueryAuthorityRecord(
                         id=query_id,
-                        source_policy_id=SOURCE_POLICY_ID,
+                        source_policy_id=source_policy_id,
                         universe_snapshot_id=UNIVERSE_ID,
                         decision_session=DECISION_SESSION,
                         kind=kind,
@@ -298,7 +366,11 @@ async def _seed_authority(
                     )
                 )
 
-            provisional = _decision("0" * 64)
+            provisional = _decision(
+                "0" * 64,
+                source_policy_id=source_policy_id,
+                decision_time=decision_time,
+            )
             if len(proofs) != 3:
                 return provisional
             market = build_risk_market_snapshot(
@@ -313,9 +385,15 @@ async def _seed_authority(
                         currency="USD",
                         asset_type="common_stock",
                         close=Decimal("100"),
-                        source="fixture",
-                        delivery_mode="fixture",
-                        available_at=AVAILABLE_AT,
+                        source=price_source,
+                        delivery_mode=(
+                            "real_time" if price_source == "fosun" else "fixture"
+                        ),
+                        available_at=(
+                            provider_authorized_at
+                            if price_source == "fosun"
+                            else AVAILABLE_AT
+                        ),
                         content_hash=price_authority.content_hash,
                     ),
                 ),
@@ -330,7 +408,11 @@ async def _seed_authority(
                 ),
                 query_proofs=tuple(proofs),
             )
-            return _decision(market.authority_hash)
+            return _decision(
+                market.authority_hash,
+                source_policy_id=source_policy_id,
+                decision_time=decision_time,
+            )
     finally:
         await engine.dispose()
 
@@ -359,6 +441,35 @@ def test_pg_loader_reconstructs_the_exact_bound_authority(
     assert market.prices[0].source == "fixture"
     assert market.prices[0].delivery_mode == "fixture"
     assert market.whitelisted_instrument_ids == (INSTRUMENT_ID,)
+
+
+def test_pg_loader_accepts_exact_fosun_v2_price_authority(
+    migrated_database_url: str,
+) -> None:
+    decision = asyncio.run(
+        _seed_authority(migrated_database_url, price_source="fosun")
+    )
+    market = asyncio.run(_load(migrated_database_url, decision))
+
+    assert market.authority_hash == decision.authority_hash
+    assert market.prices[0].source == "fosun"
+    assert market.prices[0].delivery_mode == "real_time"
+
+
+def test_pg_loader_rejects_fosun_capability_expired_at_decision_time(
+    migrated_database_url: str,
+) -> None:
+    decision = asyncio.run(
+        _seed_authority(
+            migrated_database_url,
+            price_source="fosun",
+            capability_expires_at=datetime(2027, 1, 1, tzinfo=UTC),
+            decision_time=datetime(2027, 1, 2, tzinfo=UTC),
+        )
+    )
+
+    with pytest.raises(ValueError, match="price authority is invalid"):
+        asyncio.run(_load(migrated_database_url, decision))
 
 
 @pytest.mark.parametrize(

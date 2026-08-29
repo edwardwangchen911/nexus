@@ -133,6 +133,33 @@ def test_stale_quote_removes_spread_without_changing_bar_returns() -> None:
     assert "INTRADAY_QUOTE_STALE" in metrics.quality_reasons
 
 
+def test_fosun_receipt_only_unknown_delivery_preserves_explicit_null_reasons() -> None:
+    view = _view().model_copy(
+        update={
+            "source": "fosun",
+            "feed": "l1",
+            "delivery_mode": "unknown",
+            "trade": IntradayTradeView(
+                last=Decimal("103"),
+                observed_at=DECISION_TIME - timedelta(seconds=10),
+                available_at=DECISION_TIME - timedelta(seconds=9),
+                quality_flags=(
+                    "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",
+                    "INTRADAY_BID_ASK_UNAVAILABLE",
+                ),
+            ),
+            "quote": None,
+        }
+    )
+
+    metrics = compute_intraday_metrics(view, DECISION_TIME)
+
+    assert metrics.spread_bps is None
+    assert "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE" in metrics.quality_reasons
+    assert "INTRADAY_BID_ASK_UNAVAILABLE" in metrics.quality_reasons
+    assert "INTRADAY_DELIVERY_UNVERIFIED" in metrics.quality_reasons
+
+
 def test_cross_source_reason_blocks_all_composite_metrics() -> None:
     metrics = compute_intraday_metrics(
         _view(reasons=("INTRADAY_SOURCE_CONFLICT",)),

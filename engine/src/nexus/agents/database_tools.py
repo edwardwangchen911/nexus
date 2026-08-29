@@ -16,8 +16,11 @@ from nexus.agents.price_features import compute_price_features
 from nexus.agents.tools import ReadOnlyTools, ToolExecutor, ToolInputError
 from nexus.market.price_bar_authority import (
     HASH_VERSION,
+    HASH_VERSION_V2,
     POLICY_VERSION,
+    POLICY_VERSION_V2,
     SOURCE_POLICY_ID,
+    SOURCE_POLICY_V2_ID,
     prepare_price_bar_set,
 )
 from nexus.persistence.models.agents import (
@@ -37,6 +40,8 @@ from nexus.persistence.models.research import Filing, FinancialFactRecord, Resea
 from nexus.quality.source_policy import (
     SOURCE_POLICY_KEY,
     SOURCE_POLICY_PAYLOAD,
+    SOURCE_POLICY_V2_PAYLOAD,
+    SOURCE_POLICY_V2_VERSION,
     SOURCE_POLICY_VERSION,
 )
 
@@ -236,11 +241,17 @@ class _BoundDatabaseExecutors:
             return self._invalid_price_authority()
         expected = expected_price_evidence[0]
 
-        production_source = and_(
-            PriceSeriesManifest.source == "alpaca",
-            PriceSeriesManifest.feed == "sip",
-            PriceSeriesManifest.delivery_mode == "delayed",
+        fosun_source = and_(
+            PriceSeriesManifest.source == "fosun",
+            PriceSeriesManifest.feed == "l1",
+            PriceSeriesManifest.delivery_mode.in_(("real_time", "delayed")),
+            PriceSeriesManifest.adjustment == "raw",
             PriceSeriesManifest.interval == "1Day",
+            PriceSeriesManifest.provider_capability_id.is_not(None),
+            PriceSeriesManifest.provider_status_id.is_not(None),
+            PriceSeriesManifest.provider_status_version.is_not(None),
+            PriceSeriesManifest.provider_contract_hash.is_not(None),
+            PriceSeriesManifest.provider_authorized_at.is_not(None),
         )
         fixture_source = and_(
             PriceSeriesManifest.source == "fixture",
@@ -248,10 +259,32 @@ class _BoundDatabaseExecutors:
             PriceSeriesManifest.delivery_mode == "fixture",
             PriceSeriesManifest.interval == "1Day",
         )
-        runtime_source = (
-            or_(production_source, fixture_source)
+        fosun_v2_protocol = and_(
+            fosun_source,
+            PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_V2_ID,
+            PriceBarSetAuthority.hash_version == HASH_VERSION_V2,
+            PriceBarSetAuthority.policy_version == POLICY_VERSION_V2,
+            SourcePolicyRecord.id == SOURCE_POLICY_V2_ID,
+            SourcePolicyRecord.key == SOURCE_POLICY_KEY,
+            SourcePolicyRecord.version == SOURCE_POLICY_V2_VERSION,
+            SourcePolicyRecord.schema_version == "2",
+            SourcePolicyRecord.payload == SOURCE_POLICY_V2_PAYLOAD,
+        )
+        fixture_v1_protocol = and_(
+            fixture_source,
+            PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
+            PriceBarSetAuthority.hash_version == HASH_VERSION,
+            PriceBarSetAuthority.policy_version == POLICY_VERSION,
+            SourcePolicyRecord.id == SOURCE_POLICY_ID,
+            SourcePolicyRecord.key == SOURCE_POLICY_KEY,
+            SourcePolicyRecord.version == SOURCE_POLICY_VERSION,
+            SourcePolicyRecord.schema_version == "1",
+            SourcePolicyRecord.payload == SOURCE_POLICY_PAYLOAD,
+        )
+        price_protocol = (
+            or_(fosun_v2_protocol, fixture_v1_protocol)
             if self._allow_fixture_price_evidence
-            else production_source
+            else fosun_v2_protocol
         )
         authority_rows = tuple(
             (
@@ -319,9 +352,7 @@ class _BoundDatabaseExecutors:
                         ResearchEvidenceRef.available_at == expected.available_at,
                         ResearchEvidenceRef.location == expected.location,
                         ResearchEvidenceRef.content_hash == expected.content_hash,
-                        PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
-                        PriceBarSetAuthority.hash_version == HASH_VERSION,
-                        PriceBarSetAuthority.policy_version == POLICY_VERSION,
+                        price_protocol,
                         PriceBarSetAuthority.source == ResearchEvidenceRef.source,
                         PriceBarSetAuthority.provider_object_id
                         == ResearchEvidenceRef.provider_object_id,
@@ -334,11 +365,8 @@ class _BoundDatabaseExecutors:
                         == ResearchEvidenceRef.content_hash,
                         PriceBarSetAuthority.byte_length
                         == ResearchEvidenceRef.byte_length,
-                        SourcePolicyRecord.id == SOURCE_POLICY_ID,
-                        SourcePolicyRecord.key == SOURCE_POLICY_KEY,
-                        SourcePolicyRecord.version == SOURCE_POLICY_VERSION,
-                        SourcePolicyRecord.schema_version == "1",
-                        SourcePolicyRecord.payload == SOURCE_POLICY_PAYLOAD,
+                        SourcePolicyRecord.created_at
+                        <= AgentDataSnapshotEvidenceRecord.selected_at,
                         PriceSeriesManifest.instrument == str(self._instrument_id),
                         PriceSeriesManifest.source == PriceBarSetAuthority.source,
                         PriceSeriesManifest.row_count == PriceBarSetAuthority.bar_count,
@@ -348,7 +376,6 @@ class _BoundDatabaseExecutors:
                         <= AgentDataSnapshotEvidenceRecord.selected_at,
                         PriceSeriesManifest.end_at
                         <= AgentDataSnapshotEvidenceRecord.selected_at,
-                        runtime_source,
                     )
                     .limit(2)
                     .execution_options(populate_existing=True)

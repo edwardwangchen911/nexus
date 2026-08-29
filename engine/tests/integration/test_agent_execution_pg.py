@@ -46,10 +46,11 @@ from nexus.persistence.models.data import (
     PriceBarRecord,
     PriceBarSetAuthority,
     PriceSeriesManifest,
+    ProviderCapability,
 )
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.research import Filing, FinancialFactRecord, ResearchEvidenceRef
-from nexus.persistence.models.runtime import IdempotencyRecord, Job
+from nexus.persistence.models.runtime import IdempotencyRecord, IntegrationStatus, Job
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings, Environment
 from nexus.worker import run_agent_worker_once
@@ -926,6 +927,44 @@ async def test_database_tools_are_complete_and_reject_authority_escape(
 
 
 @pytest.mark.asyncio
+async def test_database_price_tool_accepts_exact_fosun_v2_authority_without_fixture_mode(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(factory, price_source="fosun")
+    async with factory() as session, session.begin():
+        admission = await _admit_price_run(
+            session,
+            prompt_ids,
+            allow_fixture_price_authority=False,
+        )
+        authority = await session.scalar(select(PriceBarSetAuthority))
+        assert authority is not None
+        assert authority.policy_version == "agent_price_authority_v2"
+        tools = await database_read_only_tools(
+            session,
+            admission.run,
+            allow_fixture_evidence=True,
+            allow_fixture_price_evidence=False,
+        )
+        price = await tools.execute(
+            "get_price_features",
+            {
+                "instrument_id": str(_INSTRUMENT_ID),
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "as_of": "2026-08-24T12:00:00Z",
+                "features": ["close", "sma_20", "sma_200"],
+            },
+        )
+
+    assert price["status"] == "ok"
+    assert price["items"][0]["source"] == "fosun"
+    assert price["items"][0]["feed"] == "l1"
+    assert price["items"][0]["adjustment"] == "raw"
+
+
+@pytest.mark.asyncio
 async def test_admission_selects_and_freezes_db_resident_price_authority(
     migrated_database_url: str,
 ) -> None:
@@ -1042,6 +1081,37 @@ async def _assert_empty_admission_scope(
     assert counts == (0, 0, 0, 0)
 
 
+@pytest.mark.asyncio
+async def test_current_admission_rejects_retained_legacy_alpaca_v1_authority(
+    migrated_database_url: str,
+) -> None:
+    """Historical Alpaca v1 evidence must not be reused by a current run."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(
+        factory,
+        link_price=True,
+        price_source="alpaca",
+    )
+    scope = "retained-legacy-alpaca-v1-admission"
+    request_hash = "1" * 64
+
+    with pytest.raises(ValueError, match="existing price authority is invalid"):
+        async with factory() as session, session.begin():
+            await _admit_scoped_price_run(
+                session,
+                prompt_ids,
+                scope=scope,
+                request_hash=request_hash,
+            )
+
+    await _assert_empty_admission_scope(
+        factory,
+        scope=scope,
+        request_hash=request_hash,
+    )
+
+
 def _price_tool_payload() -> dict[str, object]:
     return {
         "instrument_id": str(_INSTRUMENT_ID),
@@ -1070,7 +1140,7 @@ async def _prepared_production_price_admission(database_url: str):
     await _seed_database_tool_authority(
         factory,
         link_price=False,
-        price_source="alpaca",
+        price_source="fosun",
     )
     async with factory() as session, session.begin():
         admission = await _admit_price_run(
@@ -1756,7 +1826,7 @@ async def test_admission_rejects_retained_price_binding_copied_field_drift(
     await _seed_database_tool_authority(
         factory,
         link_price=True,
-        price_source="alpaca",
+        price_source="fosun",
     )
     scope = "retained-price-binding-admission"
     request_hash = "a" * 64
@@ -1842,7 +1912,7 @@ async def test_admission_rejects_retained_snapshot_pit_drift(
     await _seed_database_tool_authority(
         factory,
         link_price=True,
-        price_source="alpaca",
+        price_source="fosun",
     )
     scope = f"retained-{timestamp_column}-admission"
     request_hash = ("b" if timestamp_column == "available_at" else "c") * 64
@@ -1895,7 +1965,7 @@ async def test_admission_rejects_retained_price_owner_copied_field_drift(
     await _seed_database_tool_authority(
         factory,
         link_price=True,
-        price_source="alpaca",
+        price_source="fosun",
     )
     scope = "retained-price-owner-admission"
     request_hash = "d" * 64
@@ -1984,7 +2054,7 @@ async def test_admission_rejects_research_shaped_existing_price_binding(
     await _seed_database_tool_authority(
         factory,
         link_price=True,
-        price_source="alpaca",
+        price_source="fosun",
     )
     scope = "research-shaped-price-binding-admission"
     request_hash = "f" * 64
@@ -2198,7 +2268,7 @@ async def test_corrupted_frozen_price_bar_set_cannot_create_positive_intent(
     await _seed_database_tool_authority(
         factory,
         link_price=False,
-        price_source="alpaca",
+        price_source="fosun",
     )
     async with factory() as session, session.begin():
         admission = await _admit_price_run(
@@ -2247,7 +2317,7 @@ async def test_price_binding_drift_before_final_synthesis_cannot_create_positive
     await _seed_database_tool_authority(
         factory,
         link_price=False,
-        price_source="alpaca",
+        price_source="fosun",
     )
     async with factory() as session, session.begin():
         admission = await _admit_price_run(
@@ -2791,7 +2861,7 @@ async def test_nonfixture_price_features_use_only_frozen_postgres_without_transp
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     prompt_ids = await _seed_authority(factory, include_base_evidence=False)
     await _seed_database_tool_authority(
-        factory, link_price=False, price_source="alpaca"
+        factory, link_price=False, price_source="fosun"
     )
     async with factory() as session, session.begin():
         admission = await admit_research_run(
@@ -2823,7 +2893,7 @@ async def test_nonfixture_price_features_use_only_frozen_postgres_without_transp
             },
         )
     assert result["status"] == "ok"
-    assert result["items"][0]["source"] == "alpaca"
+    assert result["items"][0]["source"] == "fosun"
     assert result["items"][0]["features"] == {
         "close": "100.000000000000",
         "sma_20": "100.000000000000",
@@ -3291,6 +3361,9 @@ async def _seed_database_tool_authority(
     unfrozen_value_id = UUID("0198d500-1000-7000-8000-000000001704")
     filing_id = UUID("0198d500-1000-7000-8000-000000001705")
     price_evidence_id = UUID("0198d500-1000-7000-8000-000000001708")
+    fosun_capability_id = UUID("0198d500-1000-7000-8000-000000001709")
+    fosun_status_id = UUID("0198d500-1000-7000-8000-000000001710")
+    fosun_contract_hash = "a" * 64
 
     def bar_time(index: int) -> datetime:
         if future_last_bar and index == bar_count - 1:
@@ -3298,6 +3371,34 @@ async def _seed_database_tool_authority(
         return _NOW - timedelta(days=bar_count - index)
 
     async with factory() as session, session.begin():
+        if price_source == "fosun":
+            session.add_all(
+                (
+                    ProviderCapability(
+                        id=fosun_capability_id,
+                        provider="fosun",
+                        capability="READ_ONLY",
+                        contract_hash=fosun_contract_hash,
+                        expires_at=datetime(2027, 1, 1, tzinfo=UTC),
+                        schema_version="1",
+                        payload={
+                            "operation": "fosun_get_bars",
+                            "market_scope": "US",
+                            "delivery_mode": "real_time",
+                        },
+                        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    ),
+                    IntegrationStatus(
+                        id=fosun_status_id,
+                        provider="fosun",
+                        status="read_only",
+                        version=1,
+                        mode_changed_at=datetime(2026, 1, 1, tzinfo=UTC),
+                        admitted_contract_hash=fosun_contract_hash,
+                        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    ),
+                )
+            )
         evidence = (
             ResearchEvidenceRef(
                 id=sec_evidence_id,
@@ -3454,13 +3555,36 @@ async def _seed_database_tool_authority(
             data_artifact_id=UUID("0198d500-1000-7000-8000-000000001706"),
             instrument=str(_INSTRUMENT_ID),
             source=price_source,
-            feed=("sip" if price_source == "alpaca" else "adjusted-daily"),
-            delivery_mode=("delayed" if price_source == "alpaca" else "fixture"),
-            adjustment="split_dividend",
+            feed=(
+                "sip"
+                if price_source == "alpaca"
+                else "l1"
+                if price_source == "fosun"
+                else "adjusted-daily"
+            ),
+            delivery_mode=(
+                "delayed"
+                if price_source == "alpaca"
+                else "real_time"
+                if price_source == "fosun"
+                else "fixture"
+            ),
+            adjustment="raw" if price_source == "fosun" else "split_dividend",
             interval="1Day",
             start_at=_NOW - timedelta(days=bar_count),
             end_at=bar_time(bar_count - 1),
             row_count=bar_count,
+            provider_capability_id=(
+                fosun_capability_id if price_source == "fosun" else None
+            ),
+            provider_status_id=fosun_status_id if price_source == "fosun" else None,
+            provider_status_version=1 if price_source == "fosun" else None,
+            provider_contract_hash=(
+                fosun_contract_hash if price_source == "fosun" else None
+            ),
+            provider_authorized_at=(
+                _NOW - timedelta(seconds=30) if price_source == "fosun" else None
+            ),
         )
         session.add(manifest)
         await session.flush()

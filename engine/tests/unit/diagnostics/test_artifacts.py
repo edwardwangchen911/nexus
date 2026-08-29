@@ -43,6 +43,45 @@ def test_parser_verifies_hash_and_reconstructs_typed_parquet_series() -> None:
         parse_price_series_artifact(payload, artifact, manifest, INSTRUMENT_ID)
 
 
+def test_parser_requires_daily_complete_fosun_binding_and_keeps_contract_hash() -> None:
+    bar = PriceBar(
+        instrument_id=INSTRUMENT_ID,
+        session=date(2026, 8, 21),
+        open=Decimal("100"),
+        high=Decimal("101"),
+        low=Decimal("99"),
+        close=Decimal("100.5"),
+        volume=Decimal("1000"),
+        observed_at=datetime(2026, 8, 21, 20, tzinfo=UTC),
+        available_at=datetime(2026, 8, 21, 20, 1, tzinfo=UTC),
+        received_at=datetime(2026, 8, 21, 20, 2, tzinfo=UTC),
+        revision="r1",
+    )
+    payload = serialize_price_bars((bar,))
+    artifact, manifest = _records(payload)
+    artifact.source = "fosun"
+    manifest.source = "fosun"
+    manifest.feed = "l1"
+    manifest.delivery_mode = "real_time"
+    manifest.adjustment = "raw"
+    manifest.provider_capability_id = UUID("0198d500-1000-7000-8000-000000000081")
+    manifest.provider_status_id = UUID("0198d500-1000-7000-8000-000000000082")
+    manifest.provider_status_version = 1
+    manifest.provider_contract_hash = "a" * 64
+    manifest.provider_authorized_at = datetime(2026, 8, 21, 20, 3, tzinfo=UTC)
+
+    series, _ = parse_price_series_artifact(payload, artifact, manifest, INSTRUMENT_ID)
+
+    assert series.contract_hash == "a" * 64
+    manifest.interval = "1Min"
+    with pytest.raises(ValueError, match="provenance"):
+        parse_price_series_artifact(payload, artifact, manifest, INSTRUMENT_ID)
+    manifest.interval = "1Day"
+    manifest.provider_status_version = None
+    with pytest.raises(ValueError, match="provenance"):
+        parse_price_series_artifact(payload, artifact, manifest, INSTRUMENT_ID)
+
+
 def _records(payload: bytes) -> tuple[DataArtifact, PriceSeriesManifest]:
     artifact = DataArtifact(
         id=UUID("0198d500-1000-7000-8000-000000000078"),
@@ -64,6 +103,7 @@ def _records(payload: bytes) -> tuple[DataArtifact, PriceSeriesManifest]:
         feed="fixture",
         delivery_mode="fixture",
         adjustment="all",
+        interval="1Day",
         start_at=artifact.observed_at,
         end_at=artifact.observed_at,
         row_count=1,

@@ -237,21 +237,29 @@ async def _seed_fosun_admission(
     *,
     operation: str,
     contract_hash: str,
+    delivery_mode: str = "unknown",
     admitted_contract_hash: str | None = None,
-    expires_at: datetime = _DECISION_TIME + timedelta(hours=1),
+    expires_at: datetime | None = None,
     created_at: datetime = _DECISION_TIME - timedelta(hours=1),
-) -> None:
+) -> tuple[UUID, UUID, int, datetime]:
+    capability_id = uuid4()
+    effective_expiry = expires_at or datetime.now(UTC) + timedelta(days=1)
     factory = session_factory(_settings(database_url))
     try:
         async with factory() as session:
             session.add(
                 ProviderCapability(
+                    id=capability_id,
                     provider="fosun",
                     capability="READ_ONLY",
                     contract_hash=contract_hash,
-                    expires_at=expires_at,
+                    expires_at=effective_expiry,
                     schema_version="1",
-                    payload={"operation": operation, "market_scope": "US"},
+                    payload={
+                        "operation": operation,
+                        "market_scope": "US",
+                        "delivery_mode": delivery_mode,
+                    },
                     created_at=created_at,
                 )
             )
@@ -259,17 +267,104 @@ async def _seed_fosun_admission(
                 select(IntegrationStatus).where(IntegrationStatus.provider == "fosun")
             )
             if status is None:
-                session.add(
-                    IntegrationStatus(
-                        provider="fosun",
-                        status="read_only",
-                        admitted_contract_hash=(admitted_contract_hash or contract_hash),
-                        mode_changed_at=created_at,
-                    )
+                status = IntegrationStatus(
+                    provider="fosun",
+                    status="read_only",
+                    admitted_contract_hash=(admitted_contract_hash or contract_hash),
+                    mode_changed_at=created_at,
+                    created_at=created_at,
                 )
+                session.add(status)
+            await session.flush()
+            result = (capability_id, status.id, status.version, effective_expiry)
+            await session.commit()
+            return result
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+async def _seed_fosun_quote_v2(
+    database_url: str,
+    *,
+    instrument_id: UUID,
+    last: Decimal = Decimal("123.45"),
+    delivery_mode: str = "unknown",
+    contract_hash: str = "a" * 64,
+    received_at: datetime = _DECISION_TIME - timedelta(seconds=10),
+) -> tuple[UUID, UUID, int, datetime]:
+    admission = await _seed_fosun_admission(
+        database_url,
+        operation="fosun_get_quotes",
+        contract_hash=contract_hash,
+        delivery_mode=delivery_mode,
+    )
+    capability_id, status_id, status_version, _ = admission
+    raw_payload = (
+        f"fosun-market-api-v2:{instrument_id}:{delivery_mode}:{received_at.isoformat()}:{last}"
+    ).encode()
+    digest = sha256(raw_payload).hexdigest()
+    canonical = canonical_quote_observation(
+        instrument_id=instrument_id,
+        source="fosun",
+        feed="l1",
+        delivery_mode=delivery_mode,
+        event_kind="snapshot",
+        bid=None,
+        ask=None,
+        last=last,
+        observed_at=received_at,
+        available_at=received_at,
+        received_at=received_at,
+        revision=digest,
+    )
+    factory = session_factory(_settings(database_url))
+    try:
+        async with factory() as session:
+            artifact = DataArtifact(
+                uri=f"memory://sha256/{digest}",
+                sha256=digest,
+                byte_size=len(raw_payload),
+                mime_type="application/json",
+                schema_version="fosun_gateway_market_snapshot_v1",
+                source="fosun",
+                observed_at=received_at,
+                available_at=received_at,
+                received_at=received_at,
+            )
+            session.add(artifact)
+            await session.flush()
+            session.add(
+                LatestQuote(
+                    instrument_id=instrument_id,
+                    source="fosun",
+                    feed="l1",
+                    delivery_mode=delivery_mode,
+                    bid=None,
+                    ask=None,
+                    last=last,
+                    observed_at=received_at,
+                    available_at=received_at,
+                    received_at=received_at,
+                    revision=digest,
+                    quality_flags=[
+                        "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",
+                        "INTRADAY_BID_ASK_UNAVAILABLE",
+                    ],
+                    event_kind="snapshot",
+                    content_hash=sha256(canonical).hexdigest(),
+                    evidence_status="verified",
+                    data_artifact_id=artifact.id,
+                    provider_capability_id=capability_id,
+                    provider_status_id=status_id,
+                    provider_status_version=status_version,
+                    provider_contract_hash=contract_hash,
+                    provider_authorized_at=received_at + timedelta(seconds=1),
+                )
+            )
             await session.commit()
     finally:
         await factory.kw["bind"].dispose()
+    return admission
 
 
 @pytest.mark.asyncio
@@ -296,7 +391,7 @@ async def test_market_limit_is_capped_at_100(migrated_database_url: str) -> None
 
 
 @pytest.mark.asyncio
-async def test_market_returns_exact_source_aware_point_in_time_rows(
+async def test_market_never_uses_fixture_or_future_alpaca_as_current_fallback(
     migrated_database_url: str,
 ) -> None:
     """Float conversion, future aliases, future quotes, or missing provenance break this."""
@@ -350,13 +445,13 @@ async def test_market_returns_exact_source_aware_point_in_time_rows(
             {
                 "instrument_id": str(_AAPL_ID),
                 "symbol": "AAPL",
-                "price": "123.450000000000",
-                "source": "fixture",
-                "feed": "fixture",
-                "delivery_mode": "fixture",
-                "as_of": "2026-08-24T13:59:52Z",
-                "quality": "PASS",
-                "quality_reasons": [],
+                "price": None,
+                "source": None,
+                "feed": None,
+                "delivery_mode": "unknown",
+                "as_of": None,
+                "quality": "FAIL",
+                "quality_reasons": ["QUOTE_UNAVAILABLE"],
                 "watchlisted": False,
             }
         ],
@@ -368,7 +463,7 @@ async def test_market_returns_exact_source_aware_point_in_time_rows(
 
 
 @pytest.mark.asyncio
-async def test_market_marks_session_quote_stale_and_never_fabricates_missing_price(
+async def test_market_never_promotes_stale_fixture_to_current_price(
     migrated_database_url: str,
 ) -> None:
     """A stale or absent quote must remain evidence, not become a fresh synthetic value."""
@@ -387,18 +482,10 @@ async def test_market_marks_session_quote_stale_and_never_fabricates_missing_pri
         response = await client.get(path, headers=_headers("GET", path))
 
     items = {item["symbol"]: item for item in response.json()["data"]["items"]}
-    assert items["AAPL"] == {
-        "instrument_id": str(_AAPL_ID),
-        "symbol": "AAPL",
-        "price": "100.000000000000",
-        "source": "fixture",
-        "feed": "fixture",
-        "delivery_mode": "fixture",
-        "as_of": "2026-08-24T13:59:14Z",
-        "quality": "PARTIAL",
-        "quality_reasons": ["SELECTED_SOURCE_STALE"],
-        "watchlisted": False,
-    }
+    assert items["AAPL"]["price"] is None
+    assert items["AAPL"]["source"] is None
+    assert items["AAPL"]["quality"] == "FAIL"
+    assert items["AAPL"]["quality_reasons"] == ["QUOTE_UNAVAILABLE"]
     assert items["MSFT"]["price"] is None
     assert items["MSFT"]["source"] is None
     assert items["MSFT"]["quality"] == "FAIL"
@@ -432,10 +519,10 @@ async def test_market_excludes_quote_received_after_decision_time(
 
 
 @pytest.mark.asyncio
-async def test_market_keeps_intraday_quote_and_marks_close_source_divergence_partial(
+async def test_market_never_cross_checks_or_falls_back_to_legacy_sources(
     migrated_database_url: str,
 ) -> None:
-    """An intraday >50 bps difference is monitoring evidence, not an order block."""
+    """Alpaca and fixture facts remain historical evidence, never a current fallback."""
     await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
     await _seed_quote(
         migrated_database_url,
@@ -459,17 +546,17 @@ async def test_market_keeps_intraday_quote_and_marks_close_source_divergence_par
         response = await client.get(path, headers=_headers("GET", path))
 
     item = response.json()["data"]["items"][0]
-    assert item["price"] == "100.000000000000"
-    assert item["source"] == "alpaca"
-    assert item["quality"] == "PARTIAL"
-    assert item["quality_reasons"] == ["INTRADAY_SOURCE_DIVERGENCE"]
+    assert item["price"] is None
+    assert item["source"] is None
+    assert item["quality"] == "FAIL"
+    assert item["quality_reasons"] == ["QUOTE_UNAVAILABLE"]
 
 
 @pytest.mark.asyncio
-async def test_market_does_not_compare_quotes_more_than_five_seconds_apart(
+async def test_market_does_not_compare_disabled_sources_at_any_timestamp(
     migrated_database_url: str,
 ) -> None:
-    """Stale-vs-fresh source values must not create a false intraday divergence."""
+    """Disabled sources cannot influence current selection or quality."""
     await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
     await _seed_quote(
         migrated_database_url,
@@ -495,16 +582,16 @@ async def test_market_does_not_compare_quotes_more_than_five_seconds_apart(
         response = await client.get(path, headers=_headers("GET", path))
 
     item = response.json()["data"]["items"][0]
-    assert item["price"] == "100.000000000000"
-    assert item["quality"] == "PASS"
-    assert item["quality_reasons"] == []
+    assert item["price"] is None
+    assert item["quality"] == "FAIL"
+    assert item["quality_reasons"] == ["QUOTE_UNAVAILABLE"]
 
 
 @pytest.mark.asyncio
 async def test_market_enforces_iex_quote_policy_and_rejects_delayed_sip_as_quote(
     migrated_database_url: str,
 ) -> None:
-    """The intraday Alpaca fallback is IEX; delayed SIP cannot enter latest quotes."""
+    """Legacy constraints remain enforced, but valid Alpaca is still not a fallback."""
     await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
     await _seed_quote(
         migrated_database_url,
@@ -532,27 +619,27 @@ async def test_market_enforces_iex_quote_policy_and_rejects_delayed_sip_as_quote
         response = await client.get(path, headers=_headers("GET", path))
 
     item = response.json()["data"]["items"][0]
-    assert item["price"] == "100.000000000000"
-    assert item["feed"] == "iex"
-    assert item["delivery_mode"] == "real_time"
+    assert item["price"] is None
+    assert item["feed"] is None
+    assert item["delivery_mode"] == "unknown"
+    assert item["quality_reasons"] == ["QUOTE_UNAVAILABLE"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("second_price", "seconds_apart", "expected_reasons"),
+    ("second_price", "seconds_apart"),
     [
-        (Decimal("100.5000"), 5, []),
-        (Decimal("100.5001"), 5, ["INTRADAY_SOURCE_DIVERGENCE"]),
-        (Decimal("101.00"), 5.000001, []),
+        (Decimal("100.5000"), 5),
+        (Decimal("100.5001"), 5),
+        (Decimal("101.00"), 5.000001),
     ],
 )
-async def test_market_locks_exact_intraday_comparison_boundaries(
+async def test_market_legacy_comparison_boundaries_cannot_enable_fallback(
     migrated_database_url: str,
     second_price: Decimal,
     seconds_apart: float,
-    expected_reasons: list[str],
 ) -> None:
-    """Exactly 5 seconds is comparable; only a difference above 50 bps is partial."""
+    """Legacy cross-source values are ignored regardless of time or price distance."""
     await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
     first_observed_at = _DECISION_TIME - timedelta(seconds=1)
     await _seed_quote(
@@ -577,19 +664,18 @@ async def test_market_locks_exact_intraday_comparison_boundaries(
         response = await client.get(path, headers=_headers("GET", path))
 
     item = response.json()["data"]["items"][0]
-    assert item["price"] == "100.000000000000"
-    assert item["delivery_mode"] == "real_time"
-    assert item["quality"] == ("PARTIAL" if expected_reasons else "PASS")
-    assert item["quality_reasons"] == expected_reasons
+    assert item["price"] is None
+    assert item["delivery_mode"] == "unknown"
+    assert item["quality"] == "FAIL"
+    assert item["quality_reasons"] == ["QUOTE_UNAVAILABLE"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("admission_state", "expected_quality_reason"),
     [
-        ("missing", "NO_ELIGIBLE_SOURCE"),
-        ("expired", "NO_ELIGIBLE_SOURCE"),
-        ("hash_mismatch", "NO_ELIGIBLE_SOURCE"),
+        ("missing", "QUOTE_UNAVAILABLE"),
+        ("expired", "QUOTE_UNAVAILABLE"),
         ("valid", None),
     ],
 )
@@ -600,29 +686,17 @@ async def test_fosun_quote_requires_its_own_valid_operation_admission(
 ) -> None:
     """Bars authority, expiry, or a different admitted hash cannot authorize quotes."""
     await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
-    await _seed_quote(
-        migrated_database_url,
-        instrument_id=_AAPL_ID,
-        source="fosun",
-        feed="regular",
-        delivery_mode="unknown",
-        last=Decimal("123.45"),
-    )
+    expiry = _DECISION_TIME
     if admission_state != "missing":
-        await _seed_fosun_admission(
+        _, status_id, _, expiry = await _seed_fosun_quote_v2(
             migrated_database_url,
-            operation="fosun_get_quotes",
-            contract_hash="a" * 64,
-            admitted_contract_hash=("b" * 64 if admission_state == "hash_mismatch" else None),
-            expires_at=(
-                _DECISION_TIME
-                if admission_state == "expired"
-                else _DECISION_TIME + timedelta(hours=1)
-            ),
+            instrument_id=_AAPL_ID,
+            last=Decimal("123.45"),
         )
     path = "/internal/v1/market"
     app = _app(migrated_database_url)
-
+    if admission_state == "expired":
+        app.state.utc_clock = lambda: expiry
     async with _client(app) as client:
         response = await client.get(path, headers=_headers("GET", path))
 
@@ -630,7 +704,13 @@ async def test_fosun_quote_requires_its_own_valid_operation_admission(
     if expected_quality_reason is None:
         assert item["price"] == "123.450000000000"
         assert item["source"] == "fosun"
-        assert item["quality"] == "PASS"
+        assert item["feed"] == "l1"
+        assert item["delivery_mode"] == "unknown"
+        assert item["quality"] == "PARTIAL"
+        assert item["quality_reasons"] == [
+            "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",
+            "INTRADAY_BID_ASK_UNAVAILABLE",
+        ]
     else:
         assert item["price"] is None
         assert item["source"] is None
@@ -639,24 +719,59 @@ async def test_fosun_quote_requires_its_own_valid_operation_admission(
 
 
 @pytest.mark.asyncio
+async def test_fosun_quote_replay_ignores_later_status_transition(
+    migrated_database_url: str,
+) -> None:
+    """A later current-mode change must not rewrite a frozen quote's past verdict."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    _, status_id, status_version, _ = await _seed_fosun_quote_v2(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        last=Decimal("123.45"),
+    )
+    path = "/internal/v1/market"
+    app = _app(migrated_database_url)
+    async with _client(app) as client:
+        before = await client.get(path, headers=_headers("GET", path))
+
+    factory = session_factory(_settings(migrated_database_url))
+    try:
+        async with factory() as session:
+            await session.execute(
+                text(
+                    "UPDATE integration_status "
+                    "SET status='disabled', version=:next_version, "
+                    "mode_changed_at=:changed_at, capability_invalidated_at=:changed_at, "
+                    "admitted_contract_hash=NULL "
+                    "WHERE id=:status_id"
+                ),
+                {
+                    "next_version": status_version + 1,
+                    "changed_at": _DECISION_TIME + timedelta(seconds=1),
+                    "status_id": status_id,
+                },
+            )
+            await session.commit()
+    finally:
+        await factory.kw["bind"].dispose()
+
+    async with _client(app) as client:
+        replay = await client.get(path, headers=_headers("GET", path))
+
+    assert replay.status_code == before.status_code == 200
+    assert replay.json() == before.json()
+
+
+@pytest.mark.asyncio
 async def test_fosun_quote_uses_matching_older_authority_not_newest_bars_authority(
     migrated_database_url: str,
 ) -> None:
     """A newer bars capability must neither hide nor grant quote authority."""
     await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
-    await _seed_quote(
+    await _seed_fosun_quote_v2(
         migrated_database_url,
         instrument_id=_AAPL_ID,
-        source="fosun",
-        feed="regular",
-        delivery_mode="unknown",
         last=Decimal("123.45"),
-    )
-    await _seed_fosun_admission(
-        migrated_database_url,
-        operation="fosun_get_quotes",
-        contract_hash="a" * 64,
-        created_at=_DECISION_TIME - timedelta(hours=2),
     )
     await _seed_fosun_admission(
         migrated_database_url,
@@ -673,7 +788,7 @@ async def test_fosun_quote_uses_matching_older_authority_not_newest_bars_authori
     item = response.json()["data"]["items"][0]
     assert item["price"] == "123.450000000000"
     assert item["source"] == "fosun"
-    assert item["quality"] == "PASS"
+    assert item["quality"] == "PARTIAL"
 
 
 @pytest.mark.asyncio
@@ -837,6 +952,12 @@ async def test_selected_series_uses_repository_authority_and_excludes_future_bar
 ) -> None:
     """Bypassing Task 7 would expose a future revision through the chart payload."""
     await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    await _seed_fosun_admission(
+        migrated_database_url,
+        operation="fosun_get_bars",
+        contract_hash="a" * 64,
+        delivery_mode="real_time",
+    )
     visible = PriceBar(
         instrument_id=InstrumentId(_AAPL_ID),
         session=date(2026, 8, 21),
@@ -863,12 +984,13 @@ async def test_selected_series_uses_repository_authority_and_excludes_future_bar
         assert decision_time == _DECISION_TIME
         return (
             PriceSeries(
-                source="fixture",
-                feed="fixture",
-                adjustment="split",
+                source="fosun",
+                feed="l1",
+                adjustment="raw",
                 bars=(future, visible),
-                mode="fixture",
-                delivery_mode="fixture",
+                mode="read_only",
+                delivery_mode="real_time",
+                contract_hash="a" * 64,
                 quality="PASS",
             ),
         )
@@ -880,9 +1002,9 @@ async def test_selected_series_uses_repository_authority_and_excludes_future_bar
         response = await client.get(selected_path, headers=_headers("GET", selected_path))
 
     series = response.json()["data"]["selected_series"]
-    assert series["source"] == "fixture"
-    assert series["feed"] == "fixture"
-    assert series["delivery_mode"] == "fixture"
+    assert series["source"] == "fosun"
+    assert series["feed"] == "l1"
+    assert series["delivery_mode"] == "real_time"
     assert series["quality"] == "PARTIAL"
     assert series["quality_reasons"] == ["FUTURE_DATA_EXCLUDED"]
     assert [bar["close"] for bar in series["bars"]] == ["101.00"]
@@ -1036,6 +1158,12 @@ async def test_selected_series_uses_only_daily_candidate_from_mixed_intervals(
 ) -> None:
     """A higher-priority 1Min series cannot displace Task 8 daily evidence."""
     await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    await _seed_fosun_admission(
+        migrated_database_url,
+        operation="fosun_get_bars",
+        contract_hash="a" * 64,
+        delivery_mode="real_time",
+    )
     bar = PriceBar(
         instrument_id=InstrumentId(_AAPL_ID),
         session=date(2026, 8, 21),
@@ -1063,13 +1191,14 @@ async def test_selected_series_uses_only_daily_candidate_from_mixed_intervals(
                 quality="PASS",
             ),
             PriceSeries(
-                source="fixture",
-                feed="fixture",
-                adjustment="split",
+                source="fosun",
+                feed="l1",
+                adjustment="raw",
                 interval="1Day",
                 bars=(bar,),
-                mode="fixture",
-                delivery_mode="fixture",
+                mode="read_only",
+                delivery_mode="real_time",
+                contract_hash="a" * 64,
                 quality="PASS",
             ),
         )
@@ -1081,7 +1210,7 @@ async def test_selected_series_uses_only_daily_candidate_from_mixed_intervals(
         response = await client.get(path, headers=_headers("GET", path))
 
     selected = response.json()["data"]["selected_series"]
-    assert selected["source"] == "fixture"
+    assert selected["source"] == "fosun"
     assert selected["interval"] == "1Day"
     assert len(selected["bars"]) == 1
 
@@ -1092,6 +1221,12 @@ async def test_selected_series_is_deterministically_bounded_to_latest_500_bars(
 ) -> None:
     """Removing the response cap would make one chart request return unbounded history."""
     await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    await _seed_fosun_admission(
+        migrated_database_url,
+        operation="fosun_get_bars",
+        contract_hash="a" * 64,
+        delivery_mode="real_time",
+    )
     first_session = date(2025, 1, 1)
     bars = tuple(
         PriceBar(
@@ -1113,12 +1248,13 @@ async def test_selected_series_is_deterministically_bounded_to_latest_500_bars(
     ) -> tuple[PriceSeries, ...]:
         return (
             PriceSeries(
-                source="fixture",
-                feed="fixture",
-                adjustment="split",
+                source="fosun",
+                feed="l1",
+                adjustment="raw",
                 bars=bars,
-                mode="fixture",
-                delivery_mode="fixture",
+                mode="read_only",
+                delivery_mode="real_time",
+                contract_hash="a" * 64,
                 quality="PASS",
             ),
         )

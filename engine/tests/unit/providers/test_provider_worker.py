@@ -1,5 +1,6 @@
 """Provider worker capability and queue isolation."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -22,12 +23,12 @@ def _settings(*, intraday: bool) -> ProviderSettings:
     return ProviderSettings(
         runtime_mode="production",
         intraday_monitor_mode="production" if intraday else "disabled",
-        alpaca_key_id="key-canary",
-        alpaca_secret_key="secret-canary",
-        alpaca_feed="sip",
-        alpaca_delivery_mode="delayed",
-        alpaca_intraday_feed="iex" if intraday else None,
-        alpaca_intraday_delivery_mode="real_time" if intraday else None,
+        fosun_market_gateway_origin="https://fosun-gateway.internal:8443",
+        fosun_market_gateway_key_id="synthetic-market-current",
+        fosun_market_gateway_secret="synthetic-market-secret",
+        fosun_market_gateway_client_cert=Path("/synthetic/market.crt"),
+        fosun_market_gateway_client_key=Path("/synthetic/market.key"),
+        fosun_market_gateway_client_ca=Path("/synthetic/ca.crt"),
         sec_contact="owner@example.com",
         fred_api_key="fred-canary",
     )
@@ -36,6 +37,7 @@ def _settings(*, intraday: bool) -> ProviderSettings:
 @pytest.mark.asyncio
 async def test_provider_registry_contains_only_provider_capabilities_without_http() -> None:
     requests = 0
+    gateway = _NoopGateway()
 
     def fail_if_requested(_request: httpx.Request) -> httpx.Response:
         nonlocal requests
@@ -43,19 +45,57 @@ async def test_provider_registry_contains_only_provider_capabilities_without_htt
         return httpx.Response(599)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(fail_if_requested)) as client:
-        registry = _provider_registry(
+        async with _provider_registry(
             provider_settings=_settings(intraday=True),
             provider_http_client=client,
             store=SimpleNamespace(),
-        )
+            fosun_gateway_factory=lambda _identity: gateway,
+        ) as registry:
+            assert registry.job_types == {
+                JobType.COLLECT_MARKET.value,
+                JobType.COLLECT_SEC_MACRO.value,
+                JobType.COLLECT_INTRADAY_SNAPSHOT.value,
+            }
+            assert all(spec.queue is QueueName.PROVIDER for spec in registry.specs)
+            assert gateway.close_calls == 0
 
-    assert registry.job_types == {
-        JobType.COLLECT_MARKET.value,
-        JobType.COLLECT_SEC_MACRO.value,
-        JobType.COLLECT_INTRADAY_SNAPSHOT.value,
-    }
-    assert all(spec.queue is QueueName.PROVIDER for spec in registry.specs)
     assert requests == 0
+    assert gateway.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_registry_closes_owned_gateway_when_worker_body_fails() -> None:
+    gateway = _NoopGateway()
+
+    with pytest.raises(RuntimeError, match="sentinel"):
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: None)
+        ) as client:
+            async with _provider_registry(
+                provider_settings=_settings(intraday=False),
+                provider_http_client=client,
+                store=SimpleNamespace(),
+                fosun_gateway_factory=lambda _identity: gateway,
+            ):
+                raise RuntimeError("sentinel")
+
+    assert gateway.close_calls == 1
+
+
+class _NoopGateway:
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    async def read_quotes_raw(self, codes: tuple[str, ...]) -> object:
+        del codes
+        raise AssertionError("composition must not perform a provider read")
+
+    async def read_bars_raw(self, **kwargs: object) -> object:
+        del kwargs
+        raise AssertionError("composition must not perform a provider read")
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
 
 
 @pytest.mark.asyncio

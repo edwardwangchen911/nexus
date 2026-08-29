@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from helpers.portfolio_api import settings
 from nexus.diagnostics.calendar_policy import (
@@ -11,6 +11,7 @@ from nexus.diagnostics.calendar_policy import (
 )
 from nexus.persistence.models.diagnostics import DiagnosticPolicy, PortfolioDiagnosticReportRecord
 from nexus.persistence.session import session_factory
+from nexus.quality.source_policy import SOURCE_POLICY_V2_ID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import text
@@ -59,3 +60,24 @@ async def diagnostic_items_without_refs(session: AsyncSession) -> int:
         "WHERE ref.item_id = item.id)"
     )
     return int(await session.scalar(statement))
+
+
+async def publish_diagnostic_v2_after(
+    session: AsyncSession,
+    snapshot_at: datetime,
+) -> None:
+    """Model a historical v1 snapshot despite the suite's globally frozen seed clock."""
+    await session.execute(text("ALTER TABLE source_policies DISABLE TRIGGER USER"))
+    try:
+        await session.execute(
+            text(
+                "UPDATE source_policies SET created_at = :published_at "
+                "WHERE id = :policy_id"
+            ),
+            {
+                "published_at": snapshot_at.astimezone(UTC) + timedelta(seconds=1),
+                "policy_id": SOURCE_POLICY_V2_ID,
+            },
+        )
+    finally:
+        await session.execute(text("ALTER TABLE source_policies ENABLE TRIGGER USER"))
