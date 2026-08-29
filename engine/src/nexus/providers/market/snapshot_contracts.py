@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -47,17 +47,23 @@ class IntradaySnapshotRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     instruments: tuple[SnapshotInstrument, ...]
-    feed: Literal["iex", "sip", "delayed_sip"]
-    delivery_mode: Literal["real_time", "delayed"]
+    symbol_as_of: date
+    feed: Literal["l1", "iex", "sip", "delayed_sip"]
+    delivery_mode: Literal["unknown", "real_time", "delayed"]
 
     @model_validator(mode="after")
     def _bounded_and_consistent(self) -> IntradaySnapshotRequest:
-        if not 1 <= len(self.instruments) <= 30:
-            raise ValueError("snapshot instruments must contain 1 to 30 items")
+        maximum = 10 if self.feed == "l1" else 30
+        if not 1 <= len(self.instruments) <= maximum:
+            raise ValueError(f"snapshot instruments must contain 1 to {maximum} items")
         ids = tuple(item.instrument_id for item in self.instruments)
         symbols = tuple(item.symbol for item in self.instruments)
         if len(set(ids)) != len(ids) or len(set(symbols)) != len(symbols):
             raise ValueError("snapshot instruments must be unique")
+        if self.feed == "l1":
+            if self.delivery_mode not in {"unknown", "real_time", "delayed"}:
+                raise ValueError("snapshot feed contradicts delivery mode")
+            return self
         expected = "delayed" if self.feed == "delayed_sip" else "real_time"
         if self.delivery_mode != expected:
             raise ValueError("snapshot feed contradicts delivery mode")
@@ -70,6 +76,8 @@ class SnapshotTrade(BaseModel):
     price: Decimal
     observed_at: datetime
     provider_trade_id: str | None = None
+    event_kind: Literal["trade", "snapshot"] = "trade"
+    quality_flags: tuple[str, ...] = ()
 
     @field_validator("price", mode="before")
     @classmethod
@@ -83,6 +91,15 @@ class SnapshotTrade(BaseModel):
     @classmethod
     def _observed_utc(cls, value: datetime) -> datetime:
         return require_utc(value)
+
+    @field_validator("quality_flags")
+    @classmethod
+    def _safe_flags(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) > 16 or len(set(value)) != len(value) or any(
+            re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", flag) is None for flag in value
+        ):
+            raise ValueError("snapshot quality flags are invalid")
+        return value
 
 
 class SnapshotQuote(BaseModel):

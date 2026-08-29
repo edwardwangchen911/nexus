@@ -1,6 +1,5 @@
 """Strict, bounded Alpaca snapshot contracts."""
 
-from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -45,6 +44,7 @@ def _request() -> IntradaySnapshotRequest:
             SnapshotInstrument(instrument_id=AAPL_ID, symbol="AAPL"),
             SnapshotInstrument(instrument_id=MSFT_ID, symbol="MSFT"),
         ),
+        symbol_as_of=date(2026, 8, 28),
         feed="iex",
         delivery_mode="real_time",
     )
@@ -72,7 +72,8 @@ def _provider(
 async def test_snapshot_provider_preserves_exact_decimal_and_fixed_request() -> None:
     provider, recorder = _provider()
 
-    batch = await provider.fetch_snapshots(_request())
+    request = _request()
+    batch = await provider.fetch_snapshots(request)
 
     assert batch.provenance.source == "alpaca"
     assert batch.provenance.feed == "iex"
@@ -95,9 +96,7 @@ async def test_snapshot_provider_preserves_exact_decimal_and_fixed_request() -> 
 async def test_snapshot_received_at_is_captured_after_transport_returns() -> None:
     resolver = _SnapshotSymbolResolver()
     recorder = RecordingFixedOriginClient(payload=FIXTURE.read_bytes())
-    request_started_at = datetime(2026, 8, 28, 14, 30, 15, tzinfo=UTC)
     response_received_at = datetime(2026, 8, 28, 14, 31, tzinfo=UTC)
-    times: Iterator[datetime] = iter((request_started_at, response_received_at))
     provider = AlpacaSnapshotProvider(
         recorder,
         key_id=SecretStr("id-canary"),
@@ -105,12 +104,13 @@ async def test_snapshot_received_at_is_captured_after_transport_returns() -> Non
         symbol_resolver=resolver,
         feed="iex",
         delivery_mode="real_time",
-        now=lambda: next(times),
+        now=lambda: response_received_at,
     )
 
-    batch = await provider.fetch_snapshots(_request())
+    request = _request()
+    batch = await provider.fetch_snapshots(request)
 
-    assert resolver.as_of_dates == [request_started_at.date(), request_started_at.date()]
+    assert resolver.as_of_dates == [request.symbol_as_of, request.symbol_as_of]
     assert batch.received_at == response_received_at
     assert batch.snapshots[0].minute_bar is not None
     assert batch.snapshots[0].minute_bar.bar.received_at == response_received_at
@@ -133,12 +133,7 @@ async def test_snapshot_does_not_publish_an_in_progress_minute_bar() -> None:
 async def test_snapshot_rejects_provider_fact_after_response_receipt() -> None:
     payload = b'{"AAPL":{"latestTrade":{"p":1,"t":"2026-08-28T14:30:18Z"}}}'
     recorder = RecordingFixedOriginClient(payload=payload)
-    times = iter(
-        (
-            datetime(2026, 8, 28, 14, 30, 15, tzinfo=UTC),
-            datetime(2026, 8, 28, 14, 30, 17, tzinfo=UTC),
-        )
-    )
+    response_received_at = datetime(2026, 8, 28, 14, 30, 17, tzinfo=UTC)
     provider = AlpacaSnapshotProvider(
         recorder,
         key_id=SecretStr("id-canary"),
@@ -146,10 +141,11 @@ async def test_snapshot_rejects_provider_fact_after_response_receipt() -> None:
         symbol_resolver=_SnapshotSymbolResolver(),
         feed="iex",
         delivery_mode="real_time",
-        now=lambda: next(times),
+        now=lambda: response_received_at,
     )
     request = IntradaySnapshotRequest(
         instruments=(SnapshotInstrument(instrument_id=AAPL_ID, symbol="AAPL"),),
+        symbol_as_of=date(2026, 8, 28),
         feed="iex",
         delivery_mode="real_time",
     )
@@ -182,6 +178,7 @@ def test_snapshot_request_rejects_unbounded_or_duplicate_instruments(
     with pytest.raises(ValidationError):
         IntradaySnapshotRequest(
             instruments=instruments,
+            symbol_as_of=date(2026, 8, 28),
             feed="iex",
             delivery_mode="real_time",
         )
@@ -204,6 +201,7 @@ def test_snapshot_request_rejects_feed_delivery_mismatch(
     with pytest.raises(ValidationError):
         IntradaySnapshotRequest(
             instruments=(SnapshotInstrument(instrument_id=AAPL_ID, symbol="AAPL"),),
+            symbol_as_of=date(2026, 8, 28),
             feed=feed,
             delivery_mode=delivery_mode,
         )
@@ -242,6 +240,7 @@ async def test_snapshot_payload_contract_fails_closed(payload: bytes, code: str)
     provider, recorder = _provider(payload)
     request = IntradaySnapshotRequest(
         instruments=(SnapshotInstrument(instrument_id=AAPL_ID, symbol="AAPL"),),
+        symbol_as_of=date(2026, 8, 28),
         feed="iex",
         delivery_mode="real_time",
     )
@@ -258,6 +257,7 @@ async def test_snapshot_transport_returns_raw_before_contract_validation() -> No
     provider, recorder = _provider(payload)
     request = IntradaySnapshotRequest(
         instruments=(SnapshotInstrument(instrument_id=AAPL_ID, symbol="AAPL"),),
+        symbol_as_of=date(2026, 8, 28),
         feed="iex",
         delivery_mode="real_time",
     )
@@ -298,6 +298,7 @@ async def test_snapshot_payload_over_eight_mib_is_rejected() -> None:
 def test_snapshot_normalizer_rejects_binary_float_injected_after_json_boundary() -> None:
     request = IntradaySnapshotRequest(
         instruments=(SnapshotInstrument(instrument_id=AAPL_ID, symbol="AAPL"),),
+        symbol_as_of=date(2026, 8, 28),
         feed="iex",
         delivery_mode="real_time",
     )

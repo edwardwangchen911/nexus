@@ -64,6 +64,14 @@ class AlpacaSnapshotProvider:
 
     async def fetch_snapshots(self, request: IntradaySnapshotRequest) -> SnapshotBatch:
         envelope = await self.fetch_raw_snapshots(request)
+        return self.normalize_raw_snapshots(envelope, request)
+
+    def normalize_raw_snapshots(
+        self,
+        envelope: RawSnapshotEnvelope,
+        request: IntradaySnapshotRequest,
+    ) -> SnapshotBatch:
+        """Use the provider-owned normalizer selected by composition."""
         return normalize_snapshot_envelope(envelope, request=request)
 
     async def fetch_raw_snapshots(
@@ -72,10 +80,12 @@ class AlpacaSnapshotProvider:
         """Return bounded transport bytes without parsing provider-controlled JSON."""
         if request.feed != self._feed or request.delivery_mode != self._delivery_mode:
             raise MarketProviderPayloadError("ALPACA_INTRADAY_AUTHORITY_MISMATCH")
-        resolution_at = self._now()
         resolved: list[str] = []
         for item in request.instruments:
-            symbol = await self._symbol_resolver.resolve(item.instrument_id, resolution_at.date())
+            symbol = await self._symbol_resolver.resolve(
+                item.instrument_id,
+                request.symbol_as_of,
+            )
             if symbol != item.symbol:
                 raise MarketProviderPayloadError("INTRADAY_SYMBOL_AUTHORITY_INVALID")
             resolved.append(symbol)

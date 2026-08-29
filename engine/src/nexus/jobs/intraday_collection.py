@@ -31,7 +31,6 @@ from nexus.market.intraday_ingestion import (
 from nexus.persistence.models.data import DataArtifact
 from nexus.providers.base import InstrumentId
 from nexus.providers.market.alpaca import MarketProviderPayloadError
-from nexus.providers.market.alpaca_snapshot import normalize_snapshot_envelope
 from nexus.providers.market.snapshot_contracts import (
     IntradaySnapshotRequest,
     RawSnapshotEnvelope,
@@ -45,6 +44,12 @@ class IntradaySnapshotProvider(Protocol):
     async def fetch_raw_snapshots(
         self, request: IntradaySnapshotRequest
     ) -> RawSnapshotEnvelope: ...
+
+    def normalize_raw_snapshots(
+        self,
+        envelope: RawSnapshotEnvelope,
+        request: IntradaySnapshotRequest,
+    ) -> SnapshotBatch: ...
 
 
 ProviderFactory = Callable[[object], IntradaySnapshotProvider]
@@ -122,6 +127,7 @@ def build_intraday_collection_registry(
                 )
                 for item in payload.instruments
             ),
+            symbol_as_of=payload.session,
             feed=payload.feed,
             delivery_mode=payload.delivery_mode,
         )
@@ -134,7 +140,7 @@ def build_intraday_collection_registry(
             commit=False,
         )
         try:
-            batch = normalize_snapshot_envelope(envelope, request=request)
+            batch = provider.normalize_raw_snapshots(envelope, request)
         except MarketProviderPayloadError:
             return JobHandlerResult(
                 outcome="skipped",

@@ -16,6 +16,7 @@ from nexus.jobs.repository import ClaimedJob
 from nexus.jobs.worker import UnsafeJobError
 from nexus.providers.base import InstrumentId, MarketDataProvenance
 from nexus.providers.market.snapshot_contracts import (
+    IntradaySnapshotRequest,
     MarketSnapshot,
     RawSnapshotEnvelope,
     SnapshotBatch,
@@ -58,6 +59,22 @@ class _Provider:
                 mode="read_only",
                 delivery_mode="real_time",
             ),
+        )
+
+    def normalize_raw_snapshots(
+        self,
+        envelope: RawSnapshotEnvelope,
+        request: IntradaySnapshotRequest,
+    ) -> SnapshotBatch:
+        if self.snapshot is None:
+            from nexus.providers.market.alpaca_snapshot import normalize_snapshot_envelope
+
+            return normalize_snapshot_envelope(envelope, request=request)
+        return SnapshotBatch(
+            snapshots=(self.snapshot,),
+            raw_payload=envelope.raw_payload,
+            received_at=envelope.received_at,
+            provenance=envelope.provenance,
         )
 
 

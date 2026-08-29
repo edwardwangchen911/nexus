@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import date
 from uuid import UUID
 
 import pytest
@@ -218,6 +219,7 @@ async def test_intraday_snapshot_factory_binds_exact_authority() -> None:
     batch = await provider.fetch_snapshots(
         IntradaySnapshotRequest(
             instruments=(SnapshotInstrument(instrument_id=instrument_id, symbol="AAPL"),),
+            symbol_as_of=date(2026, 8, 28),
             feed="iex",
             delivery_mode="real_time",
         )
