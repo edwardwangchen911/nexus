@@ -63,17 +63,30 @@ profile，不属于默认本地启动流程。启用前需要在批准的密钥�
 `ALPACA_DATA_FEED`、`ALPACA_DELIVERY_MODE` 与带联系方式的 `SEC_CONTACT`；
 不要把值写入仓库、命令历史或日志。
 
-先确保数据库迁移和 object-store init 已完成，再停止 fixture worker，并且只启动一个
-通用 worker：
+先确保数据库迁移和 object-store init 已完成，并为 Provider 创建独立的非
+superuser、非 `BYPASSRLS` 数据库角色。`infra/postgres/provider-runtime-grants.sql`
+是待审批的授权模板：它不创建角色或凭据，只授予固定表/列权限，并对共享 Job 表启用
+强制 RLS。受控 policy 函数把父 daily root 的只读可见性与 Provider 子任务的写权限分开，
+startup probe 会校验 policy 的实际 `USING/WITH CHECK` 谓词及函数定义，而不只检查名称。
+执行该模板、创建角色及注入 `PROVIDER_DATABASE_URL` 都属于权限变更，不能
+在普通本地启动中自动执行。
+
+生产数据模式仍只保留一个由通用 worker 管理的 `daily.pipeline` 根。激活时，通用
+worker 使用原 `DATABASE_URL` 并显式设置 `NEXUS_PROVIDER_JOBS_ENABLED=true`，只负责将
+两个 Provider 子任务写入 `provider` 队列；Provider-only worker 使用独立
+`PROVIDER_DATABASE_URL` 领取这些子任务。不能停止通用 worker，也不能让 Provider
+worker创建第二个日任务根。以下仅是批准后的启动形态，不是本地默认命令：
 
 ```bash
-docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app stop worker
-docker compose --env-file infra/.env.local -f infra/compose.yaml --profile provider up -d provider-worker
+NEXUS_PROVIDER_JOBS_ENABLED=true docker compose --env-file infra/.env.local \
+  -f infra/compose.yaml --profile app --profile provider up -d worker provider-worker
 ```
 
 `provider-worker` 强制 `NEXUS_PROVIDER_RUNTIME_MODE=production`，只开放三个固定 HTTPS
 源：Alpaca bars、SEC company facts/submissions、FRED/ALFRED 的 8 个白名单序列。
-它不会加载复星交易网关或 broker 写能力。每日 Job 只读取调度时冻结并绑定哈希的
+它不会加载复星交易网关或 broker 写能力。Provider 数据库角色只能读写
+`provider` 队列及只读查看其 `daily.pipeline` 父任务，并在进程启动时复核精确权限、
+强制 RLS、策略实际谓词和受控函数定义。每日 Job 只读取调度时冻结并绑定哈希的
 美股 universe（上限 100 个）；不存在、哈希不匹配、数据冲突或证据不完整时均跳过，
 不会临时扩展股票池。
 

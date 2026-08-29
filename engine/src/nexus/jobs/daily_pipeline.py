@@ -26,6 +26,7 @@ from nexus.jobs.daily_schedule import build_daily_session_schedule
 from nexus.jobs.models import (
     BROKER_JOB_TYPES,
     JOB_PRIORITIES,
+    PROVIDER_JOB_TYPES,
     JobKeyV1,
     JobType,
     QueueName,
@@ -225,7 +226,12 @@ def build_daily_pipeline_registry(
             spec.job_type not in _GENERAL_STAGE_TYPES
             or spec.schema_version != STAGE_SCHEMA
             or spec.payload_model is not DailyStagePayload
-            or spec.queue is not QueueName.GENERAL
+            or spec.queue
+            is not (
+                QueueName.PROVIDER
+                if spec.job_type in PROVIDER_JOB_TYPES
+                else QueueName.GENERAL
+            )
         ):
             raise ValueError("daily stage handler authority is invalid")
 
@@ -236,6 +242,8 @@ def build_daily_pipeline_registry(
         provided = provided_specs.get(job_type)
         if provided is not None:
             specs.append(provided)
+            continue
+        if job_type in PROVIDER_JOB_TYPES:
             continue
 
         async def handle(
@@ -253,7 +261,11 @@ def build_daily_pipeline_registry(
                 job_type=job_type,
                 schema_version=STAGE_SCHEMA,
                 payload_model=DailyStagePayload,
-                queue=QueueName.GENERAL,
+                queue=(
+                    QueueName.PROVIDER
+                    if job_type in PROVIDER_JOB_TYPES
+                    else QueueName.GENERAL
+                ),
                 timeout_seconds=45,
                 retry_policy=RetryPolicy.AUTOMATIC_SAFE,
                 max_attempts=3,
@@ -603,6 +615,8 @@ async def _enqueue_stage(
     queue = (
         QueueName.STRATEGY_RND
         if job_type is JobType.STRATEGY_RND
+        else QueueName.PROVIDER
+        if job_type in PROVIDER_JOB_TYPES
         else QueueName.GENERAL
     )
     return await enqueue_job(
@@ -689,6 +703,8 @@ async def _record_terminal_skip(
         queue=(
             QueueName.BROKER.value
             if job_type in BROKER_JOB_TYPES
+            else QueueName.PROVIDER.value
+            if job_type in PROVIDER_JOB_TYPES
             else QueueName.STRATEGY_RND.value
             if job_type is JobType.STRATEGY_RND
             else QueueName.GENERAL.value

@@ -1,6 +1,7 @@
 """Strict, bounded Alpaca snapshot contracts."""
 
-from datetime import UTC, datetime
+from collections.abc import Iterator
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
@@ -10,10 +11,12 @@ from nexus.providers.base import InstrumentId
 from nexus.providers.market.alpaca import MarketProviderPayloadError
 from nexus.providers.market.alpaca_snapshot import (
     AlpacaSnapshotProvider,
+    normalize_snapshot_envelope,
     normalize_snapshot_payload,
 )
 from nexus.providers.market.snapshot_contracts import (
     IntradaySnapshotRequest,
+    RawSnapshotEnvelope,
     SnapshotInstrument,
 )
 from pydantic import SecretStr, ValidationError
@@ -23,12 +26,16 @@ from tests.support.provider_fakes import RecordingFixedOriginClient
 AAPL_ID = InstrumentId(UUID("019d0000-0000-7000-8000-0000000000a1"))
 MSFT_ID = InstrumentId(UUID("019d0000-0000-7000-8000-0000000000a2"))
 FIXTURE = Path(__file__).resolve().parents[2] / "fixtures/providers/alpaca_snapshot.json"
-RECEIVED_AT = datetime(2026, 8, 28, 14, 30, 15, tzinfo=UTC)
+RECEIVED_AT = datetime(2026, 8, 28, 14, 31, tzinfo=UTC)
 
 
 class _SnapshotSymbolResolver:
+    def __init__(self) -> None:
+        self.as_of_dates: list[date] = []
+
     async def resolve(self, instrument_id: InstrumentId, as_of: object) -> str:
-        del as_of
+        assert isinstance(as_of, date)
+        self.as_of_dates.append(as_of)
         return {AAPL_ID: "AAPL", MSFT_ID: "MSFT"}[instrument_id]
 
 
@@ -45,6 +52,8 @@ def _request() -> IntradaySnapshotRequest:
 
 def _provider(
     payload: bytes | None = None,
+    *,
+    received_at: datetime = RECEIVED_AT,
 ) -> tuple[AlpacaSnapshotProvider, RecordingFixedOriginClient]:
     recorder = RecordingFixedOriginClient(payload=payload or FIXTURE.read_bytes())
     provider = AlpacaSnapshotProvider(
@@ -54,7 +63,7 @@ def _provider(
         symbol_resolver=_SnapshotSymbolResolver(),
         feed="iex",
         delivery_mode="real_time",
-        now=lambda: RECEIVED_AT,
+        now=lambda: received_at,
     )
     return provider, recorder
 
@@ -80,6 +89,73 @@ async def test_snapshot_provider_preserves_exact_decimal_and_fixed_request() -> 
         ("feed", "iex"),
         ("symbols", "AAPL,MSFT"),
     )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_received_at_is_captured_after_transport_returns() -> None:
+    resolver = _SnapshotSymbolResolver()
+    recorder = RecordingFixedOriginClient(payload=FIXTURE.read_bytes())
+    request_started_at = datetime(2026, 8, 28, 14, 30, 15, tzinfo=UTC)
+    response_received_at = datetime(2026, 8, 28, 14, 31, tzinfo=UTC)
+    times: Iterator[datetime] = iter((request_started_at, response_received_at))
+    provider = AlpacaSnapshotProvider(
+        recorder,
+        key_id=SecretStr("id-canary"),
+        secret=SecretStr("secret-canary"),
+        symbol_resolver=resolver,
+        feed="iex",
+        delivery_mode="real_time",
+        now=lambda: next(times),
+    )
+
+    batch = await provider.fetch_snapshots(_request())
+
+    assert resolver.as_of_dates == [request_started_at.date(), request_started_at.date()]
+    assert batch.received_at == response_received_at
+    assert batch.snapshots[0].minute_bar is not None
+    assert batch.snapshots[0].minute_bar.bar.received_at == response_received_at
+
+
+@pytest.mark.asyncio
+async def test_snapshot_does_not_publish_an_in_progress_minute_bar() -> None:
+    provider, _ = _provider(
+        received_at=datetime(2026, 8, 28, 14, 30, 59, 999_999, tzinfo=UTC)
+    )
+
+    batch = await provider.fetch_snapshots(_request())
+
+    assert batch.snapshots[0].trade is not None
+    assert batch.snapshots[0].quote is not None
+    assert batch.snapshots[0].minute_bar is None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rejects_provider_fact_after_response_receipt() -> None:
+    payload = b'{"AAPL":{"latestTrade":{"p":1,"t":"2026-08-28T14:30:18Z"}}}'
+    recorder = RecordingFixedOriginClient(payload=payload)
+    times = iter(
+        (
+            datetime(2026, 8, 28, 14, 30, 15, tzinfo=UTC),
+            datetime(2026, 8, 28, 14, 30, 17, tzinfo=UTC),
+        )
+    )
+    provider = AlpacaSnapshotProvider(
+        recorder,
+        key_id=SecretStr("id-canary"),
+        secret=SecretStr("secret-canary"),
+        symbol_resolver=_SnapshotSymbolResolver(),
+        feed="iex",
+        delivery_mode="real_time",
+        now=lambda: next(times),
+    )
+    request = IntradaySnapshotRequest(
+        instruments=(SnapshotInstrument(instrument_id=AAPL_ID, symbol="AAPL"),),
+        feed="iex",
+        delivery_mode="real_time",
+    )
+
+    with pytest.raises(MarketProviderPayloadError, match="ALPACA_SNAPSHOT_FUTURE_FACT"):
+        await provider.fetch_snapshots(request)
 
 
 @pytest.mark.parametrize(
@@ -174,6 +250,42 @@ async def test_snapshot_payload_contract_fails_closed(payload: bytes, code: str)
         await provider.fetch_snapshots(request)
 
     assert len(recorder.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_snapshot_transport_returns_raw_before_contract_validation() -> None:
+    payload = b'{"AAPL":{},"AAPL":{}}'
+    provider, recorder = _provider(payload)
+    request = IntradaySnapshotRequest(
+        instruments=(SnapshotInstrument(instrument_id=AAPL_ID, symbol="AAPL"),),
+        feed="iex",
+        delivery_mode="real_time",
+    )
+
+    envelope = await provider.fetch_raw_snapshots(request)
+
+    assert envelope.raw_payload == payload
+    assert len(recorder.calls) == 1
+    with pytest.raises(MarketProviderPayloadError, match="ALPACA_DUPLICATE_KEY"):
+        normalize_snapshot_envelope(envelope, request=request)
+
+
+def test_snapshot_envelope_rejects_mismatched_provenance_during_normalization() -> None:
+    envelope = RawSnapshotEnvelope(
+        raw_payload=b'{"AAPL":{}}',
+        received_at=RECEIVED_AT,
+        provenance={
+            "source": "alpaca",
+            "feed": "sip",
+            "adjustment": "raw",
+            "interval": "1Min",
+            "mode": "read_only",
+            "delivery_mode": "real_time",
+        },
+    )
+
+    with pytest.raises(MarketProviderPayloadError, match="ALPACA_INTRADAY_AUTHORITY_MISMATCH"):
+        normalize_snapshot_envelope(envelope, request=_request())
 
 
 @pytest.mark.asyncio

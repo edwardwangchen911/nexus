@@ -52,7 +52,7 @@ def test_0020_automation_is_the_single_head_after_paper_execution() -> None:
     assert automation.down_revision == "0019_paper_performance_root"
     assert retry_allowance is not None
     assert retry_allowance.down_revision == "0020_resilient_automation_audit"
-    assert scripts.get_heads() == ["0025_intraday_market_monitor"]
+    assert scripts.get_heads() == ["0026_intraday_review_hardening"]
     assert agents is not None
     assert agents.down_revision == "0010_research_data"
     assert backtests is not None

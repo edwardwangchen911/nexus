@@ -21,6 +21,7 @@ from nexus.jobs.daily_pipeline import (
     DailyTargetSet,
     build_daily_pipeline_registry,
 )
+from nexus.jobs.daily_profiles import PRIMARY_DAILY_PROFILE
 from nexus.jobs.models import JobKeyV1, JobType, QueueName, RetryPolicy, job_input_hash
 from nexus.jobs.registry import (
     JobHandlerContext,
@@ -43,7 +44,7 @@ from nexus.persistence.models.runtime import Job
 from nexus.persistence.models.shadow import ShadowGroupRecord
 from nexus.shadow.service import advance_shadow_session
 
-LOCAL_SAFE_DAILY_PROFILE = "local_safe_v1"
+LOCAL_SAFE_DAILY_PROFILE = PRIMARY_DAILY_PROFILE
 _LOCAL_SAFE_STAGES = frozenset(
     {
         JobType.PAPER_EXECUTE_DUE,
@@ -57,6 +58,7 @@ def build_local_daily_pipeline_registry(
     *,
     audit_object_store: AuditManifestObjectStore | None = None,
     stage_specs: tuple[JobHandlerSpec, ...] = (),
+    include_provider_stages: bool = False,
 ) -> JobRegistry:
     """Compose local paper adapters and optional audit storage, never broker or Agent."""
     enabled = (
@@ -65,6 +67,10 @@ def build_local_daily_pipeline_registry(
         else _LOCAL_SAFE_STAGES | {JobType.AUDIT_MANIFEST}
     )
     enabled = frozenset((*enabled, *(spec.job_type for spec in stage_specs)))
+    if include_provider_stages:
+        enabled |= frozenset(
+            {JobType.COLLECT_MARKET, JobType.COLLECT_SEC_MACRO}
+        )
 
     async def execute(
         job_type: JobType,

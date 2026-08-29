@@ -14,6 +14,9 @@
 - 固定查询键：`symbols`、`feed`、`currency=USD`；每批 1–30 个由数据库 authority 解析的美股 ticker。
 - 固定调度：15 秒 bucket；超过 bucket 结束 45 秒的任务跳过，不补发。
 - 页面只轮询 NEXUS 数据库，浏览器不直连 Alpaca，也不创建采集 Job。
+- 采集只由 `nexus-engine-provider-worker` 从独立 `provider` 队列执行；通用 Agent worker 不加载 Provider handler、配置或凭据。
+- Provider worker 必须使用独立 `PROVIDER_DATABASE_URL`；启动时拒绝 superuser、`BYPASSRLS`、任何角色继承、过宽表/列权限、缺失强制 RLS，或队列 policy 完整集合、角色、命令、`USING/WITH CHECK` 谓词及受控函数签名、源码、owner、ACL 不精确的角色。
+- 全平台只有通用 worker 创建 `daily.pipeline` 根；启用日线 Provider 子任务时，由它显式设置 `NEXUS_PROVIDER_JOBS_ENABLED=true` 后跨队列物化，Provider worker 不创建第二个根。
 - `iex` 或 `sip` 必须标记为 `real_time`；`delayed_sip` 必须标记为 `delayed`。
 - 页面显示 `实时 IEX（仅 IEX）`、`实时 SIP（全市场）` 或 `延迟 SIP`，不能把 IEX 表示为全市场实时行情。
 - 分钟 authority 是 `display_only_intraday_monitor`，不得进入 Agent、回测、策略晋级、硬风控、订单 sizing、模拟成交或券商命令。
@@ -31,6 +34,9 @@
 6. 固定出口、TLS、代理和 DNS 策略验证；实际响应正文与 header 不进入日志。
 7. 一个 UTC 激活窗口、调用上限、预算/费用上限、操作人、观察人和立即停止负责人。
 8. 通过离线 socket guard、Compose 隔离、全量测试、密钥扫描和恢复演练的当前提交 SHA。
+9. 独立 Provider 数据库角色已由授权管理员按
+   `infra/postgres/provider-runtime-grants.sql` 审核配置，且 startup probe 证明其不是
+   superuser/`BYPASSRLS`，不能读取 Agent、Broker、账户或审批表。
 
 外部数据激活窗口必须逐次批准。批准内容必须精确写明：账户/订阅范围、feed、UTC 起止、最多标的数、最大请求数、费用上限、允许的唯一 GET operation 和回滚负责人。不能用“继续”“试一下”或历史批准替代。
 
@@ -73,6 +79,8 @@ docker compose --env-file infra/env.example -f infra/compose.yaml --profile prov
 
 - `api` 与普通 `worker` 不含 `NEXUS_INTRADAY_*`、`ALPACA_INTRADAY_*` 或 Alpaca secret；
 - 只有 `provider-worker` 接收盘中配置，且模板值仍为 `disabled/15/30`；
+- `provider-worker` 只接收 `PROVIDER_DATABASE_URL`，不接收通用 `DATABASE_URL`；模板
+  `NEXUS_PROVIDER_JOBS_ENABLED=false`，普通启动不会物化 Provider 日任务；
 - broker、broker-simulation 和 Fosun Gateway 不含盘中配置；
 - 当前提交与批准 package 的提交一致，工作树没有未审查差异。
 
@@ -84,7 +92,7 @@ docker compose --env-file infra/env.example -f infra/compose.yaml --profile prov
 
 - entitlement、401/403、feed/delivery 或 source label 与 admission 不一致；
 - 429、费用或请求预算达到上限；
-- 返回未知 ticker、未知字段、重复 JSON key、float/NaN/Infinity、超过 8 MiB 或时间不为 aware UTC；
+- 返回未知 ticker、未知字段、重复 JSON key、float/NaN/Infinity、超过 8 MiB 或时间不为 aware UTC；不超过 transport 上限的 malformed 响应必须先归档 raw 再稳定跳过，超过 8 MiB 则在网络硬边界拒绝；
 - bid 高于 ask、负值、无效 OHLC、未来 bar、不完整分钟、来源交叉或 authority/hash 不一致；
 - raw-first 归档失败、对象版本缺失、数据库事务部分可见、重复 observation 未幂等；
 - 发生 broker/Fosun/Agent/risk/paper 的意外依赖或任何非 GET 网络请求；
@@ -96,7 +104,7 @@ docker compose --env-file infra/env.example -f infra/compose.yaml --profile prov
 
 1. 停止精确的 `provider-worker`，将外部配置恢复为 `NEXUS_INTRADAY_MONITOR_MODE=disabled`；普通 app 可继续读取已持久化的最后证据并标记 stale/partial。
 2. 吊销本次 Key 或移除 secret-manager grant 属于权限变更，须按批准流程执行并记录脱敏结果。
-3. 不降级含事实的 `0025_intraday_market_monitor`。迁移会 fail closed；优先使用前向修复。
+3. 不降级含事实的 `0025_intraday_market_monitor` 或其前向加固 `0026_intraday_review_hardening`。迁移会 fail closed；优先使用新的前向修复。
 4. raw 对象、DataArtifact、quote/trade observation 和分钟 authority 是审计事实。停止采集不会删除它们；保留成本需在 admission 前纳入容量与费用预算。
 5. 只有经独立确认的数据保留政策才能执行精确清理；不得使用广泛 volume、bucket 或数据库删除。
 

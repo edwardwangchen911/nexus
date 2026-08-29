@@ -88,6 +88,10 @@ class EngineSettings(_SafeSettings):
     agent_daily_budget_usd: Decimal = Field(
         default=Decimal("3.00"), validation_alias="AGENT_DAILY_BUDGET_USD", gt=0
     )
+    provider_jobs_enabled: bool = Field(
+        default=False,
+        validation_alias="NEXUS_PROVIDER_JOBS_ENABLED",
+    )
 
     @model_validator(mode="after")
     def apply_environment_policy(self) -> Self:

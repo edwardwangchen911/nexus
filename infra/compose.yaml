@@ -96,7 +96,7 @@ services:
       - OPENAI_API_KEY
       - OPENAI_EXTRACTION_MODEL
       - OPENAI_REASONING_MODEL
-      - NEXUS_PROVIDER_RUNTIME_MODE=${NEXUS_PROVIDER_RUNTIME_MODE:-fixture}
+      - NEXUS_PROVIDER_JOBS_ENABLED=${NEXUS_PROVIDER_JOBS_ENABLED:-false}
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,24 +108,14 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/engine.Dockerfile
-    command: ["nexus-engine-worker"]
+    command: ["nexus-engine-provider-worker"]
     environment:
-      - NEXUS_ENV
-      - DATABASE_URL
+      - PROVIDER_DATABASE_URL
       - OBJECT_STORE_ENDPOINT
       - OBJECT_STORE_REGION
       - OBJECT_STORE_BUCKET
       - OBJECT_STORE_ACCESS_KEY_ID
       - OBJECT_STORE_SECRET_ACCESS_KEY
-      - NEXUS_ENGINE_HMAC_SECRET
-      - NEXUS_ENGINE_HMAC_CURRENT_KEY_ID
-      - NEXUS_ENGINE_HMAC_CURRENT_SECRET
-      - NEXUS_ENGINE_HMAC_PREVIOUS_KEY_ID
-      - NEXUS_ENGINE_HMAC_PREVIOUS_SECRET
-      - AGENT_RUNTIME_MODE=${AGENT_RUNTIME_MODE:-fixture}
-      - OPENAI_API_KEY
-      - OPENAI_EXTRACTION_MODEL
-      - OPENAI_REASONING_MODEL
       - NEXUS_PROVIDER_RUNTIME_MODE=production
       - ALPACA_API_KEY_ID
       - ALPACA_API_SECRET_KEY

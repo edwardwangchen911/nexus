@@ -56,6 +56,10 @@ def test_payload_freezes_sorted_symbol_authority() -> None:
     (
         {"contract_hash": "f" * 64},
         {"bucket_end": "2026-08-28T14:30:31.000000Z"},
+        {
+            "bucket_start": "2026-08-28T14:30:16.000000Z",
+            "bucket_end": "2026-08-28T14:30:31.000000Z",
+        },
         {"delivery_mode": "delayed"},
         {
             "instruments": [

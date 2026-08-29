@@ -54,7 +54,8 @@ from nexus.quality.source_policy import SOURCE_POLICY_ID
 from nexus.settings import EngineSettings
 from nexus.strategy.dsl import baseline_feature_registry, baseline_v1_document, compile_strategy
 from sqlalchemy import func, select, text
-from test_backtest_writer import (
+
+from engine.tests.integration.test_backtest_writer import (
     AUTHORITY_BUNDLE_ID,
     BACKTEST_COST_MODEL,
     COMPLETED_AT,
@@ -64,10 +65,10 @@ from test_backtest_writer import (
     _seed_data_snapshot,
     _seed_upstream_authorities,
 )
-from test_backtest_writer import (
+from engine.tests.integration.test_backtest_writer import (
     INSTRUMENT_ID as BACKTEST_INSTRUMENT_ID,
 )
-from test_evolution_admission_pg import (
+from engine.tests.integration.test_evolution_admission_pg import (
     INSTRUMENT_ID,
     NOW,
     RND_OUTPUT_ID,

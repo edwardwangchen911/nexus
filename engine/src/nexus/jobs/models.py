@@ -32,6 +32,7 @@ class JobStatus(StrEnum):
 
 class QueueName(StrEnum):
     GENERAL = "general"
+    PROVIDER = "provider"
     BROKER = "broker"
     STRATEGY_RND = "strategy_rnd"
 
@@ -92,6 +93,14 @@ BROKER_JOB_TYPES = frozenset(
         JobType.BROKER_RECONCILE,
         JobType.BROKER_SIMULATION_DISPATCH,
         JobType.BROKER_SIMULATION_RECONCILE,
+    }
+)
+
+PROVIDER_JOB_TYPES = frozenset(
+    {
+        JobType.COLLECT_MARKET,
+        JobType.COLLECT_SEC_MACRO,
+        JobType.COLLECT_INTRADAY_SNAPSHOT,
     }
 )
 

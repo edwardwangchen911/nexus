@@ -6,7 +6,7 @@
 
 **Architecture:** Provider Worker 以 15 秒耐久 bucket 对最多 30 个观察标的执行固定 Alpaca Snapshot GET，raw-first 归档后写入追加式 trade/quote observation 和独立的 1Min monitor authority。Market API 从 PostgreSQL authority 读取日线和分钟事实，服务端计算波动指标；浏览器只轮询 NEXUS，不直连 Provider，Agent/风控/交易不能消费盘中域。
 
-**Tech Stack:** Python 3.13、FastAPI、Pydantic v2、SQLAlchemy asyncio、PostgreSQL 17、Alembic、httpx、PyArrow、pytest、Hypothesis、TypeScript、React、vinext、Vitest、Playwright、Chart.js、Docker Compose
+**Tech Stack:** Python 3.12、FastAPI、Pydantic v2、SQLAlchemy asyncio、PostgreSQL 17、Alembic、httpx、PyArrow、pytest、Hypothesis、TypeScript、React、vinext、Vitest、Playwright、语义表格与装饰性 SVG、Docker Compose
 
 **Spec:** `docs/superpowers/specs/2026-08-28-nexus-intraday-market-monitor-design.md`
 
@@ -20,7 +20,7 @@
 - 1Min monitor authority 与研究/回测 `PriceBarSetAuthority` 隔离，不能进入 Agent、风控、订单、模拟成交或策略晋级。
 - Decimal 从 JSON 直接解析，不经过二进制 float；所有 API 金融数值继续使用字符串。
 - 浏览器轮询只读数据库，不触发 Provider、Job、proposal、order 或 broker command。
-- 不修改历史迁移；新 schema 只通过 `0025_intraday_market_monitor` 前向迁移引入。
+- 不修改历史迁移；`0025_intraday_market_monitor` 引入初始 schema，独立审查加固只通过前向迁移 `0026_intraday_review_hardening` 引入。
 - 不配置真实密钥、不启用 Provider profile、不执行部署、不产生付费调用。
 
 ---
@@ -31,6 +31,7 @@
 - Modify: `engine/src/nexus/persistence/models/market.py`
 - Modify: `engine/src/nexus/persistence/models/data.py`
 - Create: `engine/alembic/versions/0025_intraday_market_monitor.py`
+- Create: `engine/alembic/versions/0026_intraday_review_hardening.py`
 - Create: `engine/tests/integration/test_intraday_market_migration.py`
 - Modify: `engine/tests/helpers/migration_schema_expectations.py`
 - Modify: `engine/tests/helpers/migration_helpers.py`
@@ -44,12 +45,12 @@
 - Produces: fixed source policy constants `INTRADAY_SOURCE_POLICY_ID/KEY/VERSION/PAYLOAD`
 - Preserves: every existing `latest_quotes.id` and inbound FK
 
-- [ ] **Step 1: Add RED migration and model tests**
+- [x] **Step 1: Add RED migration and model tests**
 
 Write PostgreSQL tests that upgrade from `0024_broker_simulation` to head and assert:
 
 ```python
-assert current_head(connection) == "0025_intraday_market_monitor"
+assert current_head(connection) == "0026_intraday_review_hardening"
 assert not has_constraint(connection, "latest_quotes", "uq_latest_quotes_instrument_source_feed")
 assert has_constraint(connection, "latest_quotes", "uq_latest_quotes_observation")
 assert columns(connection, "latest_quotes") >= {
@@ -88,7 +89,7 @@ async def test_existing_paper_quote_fk_survives_append_only_migration(...):
     assert await quote_last(quote_id) == Decimal("100")
 ```
 
-- [ ] **Step 2: Run RED migration tests**
+- [x] **Step 2: Run RED migration tests**
 
 Run:
 
@@ -100,7 +101,7 @@ uv run --package nexus-engine pytest \
 
 Expected: failures name the missing revision, columns, table, constraints and policy.
 
-- [ ] **Step 3: Add ORM models and generate the new migration**
+- [x] **Step 3: Add ORM models and generate the new migration**
 
 Change `LatestQuote` so the old unique constraint is replaced by:
 
@@ -156,7 +157,7 @@ uv run --package nexus-engine alembic -c engine/alembic.ini revision \
 
 Name the generated revision `0025_intraday_market_monitor`, set `down_revision='0024_broker_simulation'`, and add the reviewed data backfill, immutable trigger, fixed source-policy insert and guarded downgrade. Historical migration files remain byte-identical.
 
-- [ ] **Step 4: Implement SQL authority guards**
+- [x] **Step 4: Implement SQL authority guards**
 
 The migration must:
 
@@ -170,7 +171,7 @@ Runtime ingestion may create only `verified` or `fixture`; source-policy selecti
 
 Use stable SQLSTATE `23514` for authority rejection. Add the new tables to created-at immutability coverage and migration residue checks.
 
-- [ ] **Step 5: Run migration round trip GREEN**
+- [x] **Step 5: Run migration round trip GREEN**
 
 Run:
 
@@ -183,7 +184,7 @@ uv run --package nexus-engine pytest \
 
 Expected: empty `0024 -> 0025 -> 0024 -> 0025` passes; downgrade with facts is rejected; no temporary databases remain.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 ```bash
 git add engine/src/nexus/persistence engine/src/nexus/quality/source_policy.py \
@@ -214,7 +215,7 @@ git commit -m "feat(db): add intraday market authority"
 - Produces: `AlpacaSnapshotProvider.fetch_snapshots(request) -> SnapshotBatch`
 - Produces: `build_alpaca_snapshot_provider(settings, client, resolver)`
 
-- [ ] **Step 1: Write strict RED contract tests**
+- [x] **Step 1: Write strict RED contract tests**
 
 Define the wished-for request:
 
@@ -244,7 +245,7 @@ query == (("currency", "USD"), ("feed", "iex"), ("symbols", "AAPL,MSFT"))
 
 Parameterized failures cover 0/31 instruments, duplicate symbol/ID, lowercase or unsafe ticker, feed/delivery mismatch, top-level unknown ticker, duplicate JSON key, unknown per-symbol field, binary float injected after parsing, NaN/Infinity, bid above ask, negative volume, invalid OHLC, naive time and response over 8 MiB.
 
-- [ ] **Step 2: Run provider RED tests**
+- [x] **Step 2: Run provider RED tests**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -255,7 +256,7 @@ uv run --package nexus-engine pytest \
 
 Expected: import failures for the new contracts/provider and one historical numeric-payload test failing because the old parser creates floats.
 
-- [ ] **Step 3: Implement immutable contracts**
+- [x] **Step 3: Implement immutable contracts**
 
 Use frozen Pydantic models with `extra="forbid"`:
 
@@ -287,7 +288,7 @@ class MarketSnapshot(BaseModel):
 
 Every Decimal validator rejects `float`, accepts only `Decimal|int|str`, and requires finite values. Every datetime becomes aware UTC.
 
-- [ ] **Step 4: Implement the fixed Snapshot transport**
+- [x] **Step 4: Implement the fixed Snapshot transport**
 
 Parse with:
 
@@ -303,7 +304,7 @@ json.loads(
 
 Apply the same exact parser to existing Alpaca historical bars so real numeric JSON never traverses binary float. Preserve raw bytes unchanged. `dailyBar` and `prevDailyBar` are recognized keys but not normalized into business models.
 
-- [ ] **Step 5: Add fail-closed settings and composition**
+- [x] **Step 5: Add fail-closed settings and composition**
 
 Add:
 
@@ -315,7 +316,7 @@ class IntradayMonitorMode(StrEnum):
 
 Provider settings fields map to the exact environment names in the spec. Validate poll seconds equals 15 and max symbols equals 30. `build_alpaca_snapshot_provider` raises before HTTP-client construction when disabled, incomplete or inconsistent. Fixture bundle does not contain a production snapshot provider.
 
-- [ ] **Step 6: Run provider GREEN and socket guard**
+- [x] **Step 6: Run provider GREEN and socket guard**
 
 ```bash
 NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
@@ -328,7 +329,7 @@ NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
 
 Expected: all pass; external socket attempts 0; disabled mode constructs no client.
 
-- [ ] **Step 7: Commit Task 2**
+- [x] **Step 7: Commit Task 2**
 
 ```bash
 git add engine/src/nexus/providers engine/tests/unit/providers engine/tests/fixtures/providers/alpaca_snapshot.json
@@ -351,7 +352,7 @@ git commit -m "feat(provider): normalize bounded intraday snapshots"
 - Produces: `ingest_intraday_snapshot(session, object_store, batch, commit=False) -> IntradayIngestionResult`
 - Produces: `finalize_intraday_bar_set(session, manifest) -> IntradayBarSetAuthority | None`
 
-- [ ] **Step 1: Write RED ingestion tests**
+- [x] **Step 1: Write RED ingestion tests**
 
 Cover:
 
@@ -366,7 +367,7 @@ assert store.archived_payloads == [batch.raw_payload]
 
 Re-run the identical batch and assert no second observation, DataArtifact, manifest or authority. Change only a same-minute bar revision and assert a new immutable monitor authority is created while the first remains unchanged. Inject a forged artifact owner, partial DB failure and object-store promotion failure; assert no readable partial authority remains.
 
-- [ ] **Step 2: Run ingestion RED tests**
+- [x] **Step 2: Run ingestion RED tests**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -376,7 +377,7 @@ uv run --package nexus-engine pytest \
 
 Expected: missing module/functions and tables fail for the intended reasons.
 
-- [ ] **Step 3: Implement canonical quote observations**
+- [x] **Step 3: Implement canonical quote observations**
 
 Canonical JSON includes only:
 
@@ -399,13 +400,13 @@ Canonical JSON includes only:
 
 Hash UTF-8 canonical bytes with SHA-256. Insert through PostgreSQL `ON CONFLICT ... DO NOTHING RETURNING id`; on replay select the exact existing row and compare every field before reporting replay.
 
-- [ ] **Step 4: Implement raw-first batch ingestion**
+- [x] **Step 4: Implement raw-first batch ingestion**
 
 Archive the exact raw response once under a content-addressed key. Persist `DataArtifact(schema_version="alpaca_stock_snapshots_v1")`. Create separate `trade` and `quote` observations referencing it. Serialize each minute bar to deterministic Parquet, but finalize it through `IntradayBarSetAuthority`, never `PriceBarSetAuthority`.
 
 All DB mutations use the caller transaction when `commit=False`. Temporary normalized objects are cleaned in `finally`; an archived raw object is content-addressed and may remain after rollback without becoming readable authority.
 
-- [ ] **Step 5: Verify GREEN and corruption guards**
+- [x] **Step 5: Verify GREEN and corruption guards**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -415,7 +416,7 @@ uv run --package nexus-engine pytest \
   engine/tests/integration/test_price_bar_authority_pg.py -q
 ```
 
-- [ ] **Step 6: Commit Task 3**
+- [x] **Step 6: Commit Task 3**
 
 ```bash
 git add engine/src/nexus/market engine/tests/unit/market engine/tests/integration/test_intraday_ingestion_pg.py
@@ -441,7 +442,7 @@ git commit -m "feat(market): ingest immutable intraday evidence"
 - Produces: `schedule_due_intraday_snapshot(session, now, settings) -> Job | None`
 - Produces: `build_intraday_collection_registry(provider, store, now) -> JobRegistry`
 
-- [ ] **Step 1: Write RED pure schedule tests**
+- [x] **Step 1: Write RED pure schedule tests**
 
 Assert `bucket_for(2026-08-28T14:30:29Z)` returns `[14:30:15Z,14:30:30Z)`. Cover DST, half-day, before open, at close, missing/unpublished calendar, empty watchlist, 31 members, duplicate ticker, non-USD and alias collision.
 
@@ -465,7 +466,7 @@ The legal payload must equal:
 }
 ```
 
-- [ ] **Step 2: Run scheduler RED tests**
+- [x] **Step 2: Run scheduler RED tests**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -473,7 +474,7 @@ uv run --package nexus-engine pytest \
   engine/tests/unit/jobs/test_intraday_collection.py -q
 ```
 
-- [ ] **Step 3: Implement idempotent schedule and closed Job authority**
+- [x] **Step 3: Implement idempotent schedule and closed Job authority**
 
 Add `JobType.COLLECT_INTRADAY_SNAPSHOT = "collect.intraday_snapshot"` with priority 160. Schedule through `enqueue_job` using bucket start as effective time and canonical payload hash. Concurrent scheduler calls must resolve to one Job.
 
@@ -488,11 +489,11 @@ now >= bucket_end + 45 seconds -> skipped / INTRADAY_BUCKET_EXPIRED
 
 Unknown provider errors surface only through existing sanitized `HANDLER_FAILED`; no raw error text enters Job.
 
-- [ ] **Step 4: Wire worker without enabling external traffic**
+- [x] **Step 4: Wire worker without enabling external traffic**
 
 In the worker loop, call schedule only when validated mode is `production`. Register the handler only in that mode. In disabled mode, tests assert no Snapshot provider and no `httpx` request is constructed. Keep general daily pipeline and Agent registries byte-compatible.
 
-- [ ] **Step 5: Run concurrency/failure GREEN**
+- [x] **Step 5: Run concurrency/failure GREEN**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -503,7 +504,7 @@ uv run --package nexus-engine pytest \
   engine/tests/integration/test_job_leases.py -q
 ```
 
-- [ ] **Step 6: Commit Task 4**
+- [x] **Step 6: Commit Task 4**
 
 ```bash
 git add engine/src/nexus/jobs engine/src/nexus/worker.py \
@@ -529,7 +530,7 @@ git commit -m "feat(worker): schedule bounded intraday snapshots"
 - Produces: `load_intraday_series(session, instrument_id, decision_time) -> IntradayAuthorityView`
 - Produces: `compute_intraday_metrics(view, decision_time) -> IntradayMetrics`
 
-- [ ] **Step 1: Write RED metric tests**
+- [x] **Step 1: Write RED metric tests**
 
 Build Decimal 1Min fixtures and assert:
 
@@ -544,11 +545,11 @@ assert metrics.sample_count == 31
 
 Separate cases remove one middle minute, duplicate a timestamp, add a future/incomplete bar, use stale quote, cross source, flagged bar and out-of-session time. Assert the affected metric is `None` and the stable reason is present; never assert a fabricated zero.
 
-- [ ] **Step 2: Write RED PostgreSQL loader tests**
+- [x] **Step 2: Write RED PostgreSQL loader tests**
 
 Without setting `app.state.market_price_series_loader`, seed approved daily and intraday authorities. Assert `/internal/v1/market?selected_instrument_id=...` returns both. Seed a later revision available after decision time and assert it is excluded. Corrupt authority/evidence ownership with direct SQL and assert the response degrades to unavailable rather than reading it.
 
-- [ ] **Step 3: Run loader/metric RED tests**
+- [x] **Step 3: Run loader/metric RED tests**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -557,21 +558,21 @@ uv run --package nexus-engine pytest \
   engine/tests/integration/test_market_api.py -q
 ```
 
-- [ ] **Step 4: Implement authority-preserving database loaders**
+- [x] **Step 4: Implement authority-preserving database loaders**
 
 Daily loader joins `PriceBarSetAuthority -> PriceSeriesManifest -> PriceBarRecord -> ResearchEvidenceRef`, re-runs `prepare_price_bar_set`, enforces point-in-time and returns whole candidates. Intraday loader joins `IntradayBarSetAuthority -> PriceSeriesManifest -> PriceBarRecord -> ResearchEvidenceRef`, re-runs the same canonical bar validation with the `1Min` interval requirement, deduplicates same-minute revisions by latest authority visible at decision time, keeps one source/feed series and returns at most the most recent 90 minutes.
 
 Tests may override loaders, but `MarketService` must use database loaders by default.
 
-- [ ] **Step 5: Implement exact metrics and quality state**
+- [x] **Step 5: Implement exact metrics and quality state**
 
 Use only complete bars (`observed_at + 1 minute <= decision_time`). A continuous window requires timestamps spaced exactly one minute. Quantize API-facing values through existing `decimal_to_string`; internal calculations retain full Decimal precision. Use separate trade, quote and bar timestamps and the 45/90-second stale limits from the spec.
 
-- [ ] **Step 6: Bound latest quote queries**
+- [x] **Step 6: Bound latest quote queries**
 
 Replace the unbounded `select(LatestQuote)` with a PostgreSQL window/subquery that returns at most one latest visible row per `(instrument_id, source, feed, event_kind)`. Cross-source checks operate only on last-bearing `trade|snapshot|fixture` rows; spread reads only `quote|snapshot|fixture` rows.
 
-- [ ] **Step 7: Run GREEN and query scale tests**
+- [x] **Step 7: Run GREEN and query scale tests**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -583,7 +584,7 @@ uv run --package nexus-engine pytest \
 
 Add a scale case with 30 instruments × 1,000 historical observations and assert the page result remains bounded and correct; use SQL statement count rather than a wall-clock threshold.
 
-- [ ] **Step 8: Commit Task 5**
+- [x] **Step 8: Commit Task 5**
 
 ```bash
 git add engine/src/nexus/market engine/src/nexus/quality/source_policy.py \
@@ -611,13 +612,13 @@ git commit -m "feat(market): expose deterministic intraday metrics"
 - Extends: `MarketPageResponse.intraday_monitor`
 - Preserves: BFF query and method surface
 
-- [ ] **Step 1: Write RED API and runtime-boundary tests**
+- [x] **Step 1: Write RED API and runtime-boundary tests**
 
 Assert the strict response contains the exact fields in the spec, at most 60 bars, aware UTC timestamps and Decimal strings. Reject extra nested secret-like fields, 61 bars, numeric JSON finance values, invalid status, unknown quality reason shape and source/selected-instrument mismatch.
 
 In TypeScript, extend the canonical `marketEnvelope()` fixture and assert `rebuildAllowedEngineResponse` accepts the legal envelope but returns null for every malformed variant.
 
-- [ ] **Step 2: Run RED contracts**
+- [x] **Step 2: Run RED contracts**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -626,7 +627,7 @@ uv run --package nexus-engine pytest \
 npm run test:unit -- tests/unit/engine/client-security.test.ts tests/unit/engine/market-routes.test.ts
 ```
 
-- [ ] **Step 3: Implement Pydantic response schemas**
+- [x] **Step 3: Implement Pydantic response schemas**
 
 `IntradayMonitorResponse` uses:
 
@@ -654,7 +655,7 @@ bars: tuple[IntradayBarResponse, ...]
 
 Field validators require aware UTC, non-negative ages/sample count and at most 60 bars. The route performs no network or writes.
 
-- [ ] **Step 4: Regenerate artifacts through project scripts**
+- [x] **Step 4: Regenerate artifacts through project scripts**
 
 ```bash
 npm run generate:client
@@ -663,7 +664,7 @@ npm run check:generated
 
 Do not hand-edit generated files after generation.
 
-- [ ] **Step 5: Run API/BFF GREEN**
+- [x] **Step 5: Run API/BFF GREEN**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/contract/test_openapi.py engine/tests/integration/test_market_api.py -q
@@ -671,7 +672,7 @@ npm run test:unit -- tests/unit/engine/client-security.test.ts tests/unit/engine
 npm run typecheck
 ```
 
-- [ ] **Step 6: Commit Task 6**
+- [x] **Step 6: Commit Task 6**
 
 ```bash
 git add engine/src/nexus/api engine/tests/contract/test_openapi.py \
@@ -697,7 +698,7 @@ git commit -m "feat(api): expose intraday market evidence"
 - Consumes: generated `IntradayMonitorResponse`
 - Produces: `<IntradayMonitor symbol monitor />`
 
-- [ ] **Step 1: Write RED component tests**
+- [x] **Step 1: Write RED component tests**
 
 Render ready IEX evidence and assert:
 
@@ -711,23 +712,23 @@ expect(screen.getByRole("table", { name: "AAPL 1 分钟行情数据" })).toHaveT
 
 Cases cover null metric rendered as “证据不足”, stale/partial/outside-session/unavailable, delayed SIP text, no investment language, selected-instrument mismatch, 60 bars, keyboard table access and chart/table value equality.
 
-- [ ] **Step 2: Run UI RED tests**
+- [x] **Step 2: Run UI RED tests**
 
 ```bash
 npm run test:unit -- tests/unit/market/page.test.tsx tests/unit/market/market-boundary.test.tsx
 ```
 
-- [ ] **Step 3: Implement the focused component**
+- [x] **Step 3: Implement the focused component**
 
 Use existing tokens and `PriceChart` visual language, but keep a separate minute chart component inside `intraday-monitor.tsx` so daily labels cannot leak into minute data. The chart is decorative unless paired with the semantic table. No animation runs when `prefers-reduced-motion` is set.
 
 `MarketPage` stores `data.intraday_monitor` alongside selected series, clears both on selection/context changes and ignores out-of-order responses using the existing refresh version. `classifyMarketState` includes intraday stale/partial status without turning `outside_session` into an error.
 
-- [ ] **Step 4: Add responsive and accessibility CSS**
+- [x] **Step 4: Add responsive and accessibility CSS**
 
 Reuse semantic surface/border/action tokens. Four facts use a responsive grid: four columns desktop, two tablet, one at narrow/200% reflow. The minute table has a named scroll region and 44px focusable target. Direction and status never rely only on red/green.
 
-- [ ] **Step 5: Extend Playwright evidence**
+- [x] **Step 5: Extend Playwright evidence**
 
 Update the intercepted market envelope. Test 390 and 1440 widths plus the existing global viewport/reflow suite. Assert:
 
@@ -739,7 +740,7 @@ Update the intercepted market envelope. Test 390 and 1440 widths plus the existi
 - Axe serious/critical violations 0;
 - 15/60-second browser polling remains GET-only.
 
-- [ ] **Step 6: Run UI GREEN**
+- [x] **Step 6: Run UI GREEN**
 
 ```bash
 npm run test:unit -- tests/unit/market/page.test.tsx tests/unit/market/market-boundary.test.tsx
@@ -749,7 +750,7 @@ npm run typecheck
 npm run build
 ```
 
-- [ ] **Step 7: Commit Task 7**
+- [x] **Step 7: Commit Task 7**
 
 ```bash
 git add app/components/intraday-monitor.tsx 'app/(protected)/market/page.tsx' \
@@ -774,7 +775,7 @@ git commit -m "feat(web): add intraday market monitor"
 - Produces: static disabled/default configuration and activation runbook
 - Preserves: app profile has no Provider credentials or monitor configuration
 
-- [ ] **Step 1: Write RED Compose policy tests**
+- [x] **Step 1: Write RED Compose policy tests**
 
 Parse Compose for app/provider/broker profiles and assert:
 
@@ -789,7 +790,7 @@ assert not broker_environment.keys() & intraday_environment_keys
 
 Assert rendered app config contains no Alpaca/Fosun/OpenAI secret values.
 
-- [ ] **Step 2: Run RED ops tests**
+- [x] **Step 2: Run RED ops tests**
 
 ```bash
 uv run --package nexus-engine pytest \
@@ -797,11 +798,11 @@ uv run --package nexus-engine pytest \
   engine/tests/unit/ops/test_provider_compose_policy.py -q
 ```
 
-- [ ] **Step 3: Add static configuration without activation**
+- [x] **Step 3: Add static configuration without activation**
 
 Add variable names and safe disabled defaults only. Do not place values in `infra/.env.local`. Provider profile may pass the variable names to provider-worker, but no ordinary command starts or activates it.
 
-- [ ] **Step 4: Write the runbook and current status**
+- [x] **Step 4: Write the runbook and current status**
 
 The runbook must state:
 
@@ -813,7 +814,7 @@ It documents fixed endpoint, IEX-vs-SIP labeling, account entitlement evidence, 
 
 Update README to show Phase 2, Phase 3A and Intraday Monitor accurately; external Fosun simulation and live remain locked.
 
-- [ ] **Step 5: Run ops GREEN**
+- [x] **Step 5: Run ops GREEN**
 
 ```bash
 uv run --package nexus-engine pytest engine/tests/unit/ops -q
@@ -823,7 +824,7 @@ docker compose --env-file infra/env.example -f infra/compose.yaml --profile brok
 git diff --check
 ```
 
-- [ ] **Step 6: Commit Task 8**
+- [x] **Step 6: Commit Task 8**
 
 ```bash
 git add infra docs/runbooks README.md engine/tests/unit/ops
@@ -841,7 +842,7 @@ git commit -m "docs(ops): gate intraday provider activation"
 **Interfaces:**
 - Produces: final local acceptance evidence
 
-- [ ] **Step 1: Create an ignored, task-specific acceptance environment**
+- [x] **Step 1: Create an ignored, task-specific acceptance environment**
 
 Create `infra/.env.intraday-acceptance` with `apply_patch`; it must remain ignored and contain only disposable fixture values:
 
@@ -876,7 +877,7 @@ git check-ignore -q infra/.env.intraday-acceptance
 git status --short
 ```
 
-- [ ] **Step 2: Run focused PostgreSQL acceptance**
+- [x] **Step 2: Run focused PostgreSQL acceptance**
 
 Use a task-specific Compose project name and existing Docker-compatible runtime. Do not stop or clean other NEXUS projects.
 
@@ -895,9 +896,9 @@ DATABASE_URL="postgresql+asyncpg://nexus_intraday:nexus-intraday-fixture@127.0.0
   engine/tests/integration/test_market_api.py -q
 ```
 
-Expected: all pass; one Alembic head `0025_intraday_market_monitor`; temporary DB residue 0.
+Expected: all pass; one Alembic head `0026_intraday_review_hardening`; temporary DB residue 0.
 
-- [ ] **Step 3: Run complete Python gates**
+- [x] **Step 3: Run complete Python gates**
 
 ```bash
 NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
@@ -911,7 +912,7 @@ DATABASE_URL="postgresql+asyncpg://nexus_intraday:nexus-intraday-fixture@127.0.0
 
 Record the exact pass count and duration from the complete PostgreSQL integration suite.
 
-- [ ] **Step 4: Run complete Web gates**
+- [x] **Step 4: Run complete Web gates**
 
 ```bash
 npm run check:generated
@@ -922,7 +923,7 @@ npm run build
 npm run test:e2e -- --workers=3
 ```
 
-- [ ] **Step 5: Prove safety boundaries**
+- [x] **Step 5: Prove safety boundaries**
 
 Run and record:
 
@@ -936,7 +937,7 @@ docker ps --format '{{.Names}}' | rg 'fosun|broker|intraday' || true
 
 Expected: forbidden import hits 0, tracked credential-shaped findings 0, externally active Fosun/Broker/Intraday containers 0.
 
-- [ ] **Step 6: Review changed code against the risk checklist**
+- [x] **Step 6: Review changed code against the risk checklist**
 
 Review the complete diff for:
 
@@ -951,7 +952,7 @@ Review the complete diff for:
 
 For every finding, first add a failing regression test, reproduce, then implement the minimum fix. Record Critical/Important/Minor counts and final residual findings in the review document.
 
-- [ ] **Step 7: Clean only the task-specific runtime**
+- [x] **Step 7: Clean only the task-specific runtime**
 
 ```bash
 COMPOSE_PROJECT_NAME=nexus-intraday-acceptance \
@@ -960,7 +961,7 @@ COMPOSE_PROJECT_NAME=nexus-intraday-acceptance \
 
 Do not use `--volumes` unless the exact task volume is separately verified disposable. Confirm task containers/networks 0, delete only the task-owned ignored `infra/.env.intraday-acceptance` with `apply_patch`, and leave other NEXUS projects untouched.
 
-- [ ] **Step 8: Commit review evidence**
+- [x] **Step 8: Commit review evidence**
 
 ```bash
 git add docs/superpowers/reviews/2026-08-28-nexus-intraday-market-monitor-review.md
@@ -977,3 +978,9 @@ Final report must state `Intraday Monitor offline_ready / external_data_activati
 - Authority consistency: research price authority remains unchanged; new 1Min authority is display-only and import-isolated.
 - Execution readiness: every task names exact paths, RED command, interface, GREEN command and commit boundary.
 - Scope: WebSocket, notifications, Agent features, real Provider activation, Fosun writes, deployment and live trading remain excluded.
+
+## Independent Review Remediation
+
+最终编码覆盖：响应后接收时间、GET 前后数据库 authority 重验、解析前归档包括 malformed/空事实响应的 raw、相同 raw bytes 跨 bucket 内容复用、verified observation 与 raw digest 绑定、`available_at/received_at` 双重 PIT 可见性、显式 source/feed/delivery 配对、采集中分钟拒绝、已发布分钟 bar 集合的追加保护、独立 Provider 进程与 `provider` 队列、仅搬迁 queued 历史 Provider Job、terminal/heartbeat 降级拒绝、单一跨队列日任务根、独立最小权限数据库角色、完整 RLS policy 集合与受控函数签名/源码/owner/ACL 校验、Provider 角色继承拒绝、90 分钟查询界限，以及 API/UI 有界说明。相关 schema 修复统一进入 `0026_intraday_review_hardening`；通用 worker 不加载 Provider registry 或凭据，Provider worker 也不创建第二个 daily root。
+
+数据库角色授权由 `infra/postgres/provider-runtime-grants.sql` 提供无凭据模板，要求强制 RLS 并允许 Provider 子任务只读查看其 `daily.pipeline` 父任务。执行授权、创建角色与注入 `PROVIDER_DATABASE_URL` 属于外部激活权限门禁，不在本地实现计划中自动执行。

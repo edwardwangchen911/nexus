@@ -69,6 +69,13 @@ class IntradayBucket:
     end: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class IntradayDatabaseAuthority:
+    calendar_authority_id: UUID
+    session: date
+    instruments: tuple[tuple[UUID, str], ...]
+
+
 class IntradaySnapshotInstrumentV1(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -126,6 +133,8 @@ class IntradaySnapshotJobPayloadV1(BaseModel):
         end = _parse_utc(self.bucket_end)
         if end - start != timedelta(seconds=15):
             raise ValueError("intraday bucket must span 15 seconds")
+        if bucket_for(start).start != start:
+            raise ValueError("intraday bucket must align to 15 seconds")
         if not 1 <= len(self.instruments) <= 30:
             raise ValueError("intraday instruments must contain 1 to 30 items")
         identities = tuple((item.instrument_id, item.symbol) for item in self.instruments)
@@ -187,6 +196,89 @@ async def schedule_due_intraday_snapshot(
     scheduled_at = _require_utc(now, field="now")
     if settings.intraday_monitor_mode is not IntradayMonitorMode.PRODUCTION:
         return None
+    authority = await _load_current_intraday_authority(
+        session,
+        effective_at=scheduled_at,
+        max_symbols=settings.intraday_max_symbols,
+    )
+    if authority is None:
+        return None
+    feed = settings.alpaca_intraday_feed
+    delivery_mode = settings.alpaca_intraday_delivery_mode
+    if feed is None or delivery_mode is None:
+        return None
+    bucket = bucket_for(scheduled_at)
+    try:
+        payload = build_intraday_payload(
+            calendar_authority_id=authority.calendar_authority_id,
+            session=authority.session,
+            bucket=bucket,
+            instruments=authority.instruments,
+            feed=feed,
+            delivery_mode=delivery_mode,
+        )
+    except ValueError:
+        return None
+    encoded = payload.model_dump(mode="json")
+    return await enqueue_job(
+        session,
+        key=JobKeyV1(
+            job_type=JobType.COLLECT_INTRADAY_SNAPSHOT,
+            scope_kind="provider",
+            scope_id="alpaca-intraday",
+            effective_at=bucket.start,
+            input_hash=job_input_hash(encoded),
+        ),
+        schema_version=_SCHEMA,
+        payload=encoded,
+        queue=QueueName.PROVIDER,
+        retry_policy=RetryPolicy.AUTOMATIC_SAFE,
+        max_attempts=3,
+        available_at=bucket.start,
+    )
+
+
+async def revalidate_intraday_payload_authority(
+    session: AsyncSession,
+    payload: IntradaySnapshotJobPayloadV1,
+    *,
+    effective_at: datetime,
+    settings: ProviderSettings,
+) -> bool:
+    """Recheck every mutable/database authority before any external request."""
+    bucket_start = _parse_utc(payload.bucket_start)
+    if (
+        settings.intraday_monitor_mode is not IntradayMonitorMode.PRODUCTION
+        or _require_utc(effective_at, field="effective_at") != bucket_start
+        or settings.alpaca_intraday_feed != payload.feed
+        or settings.alpaca_intraday_delivery_mode != payload.delivery_mode
+    ):
+        return False
+    authority = await _load_current_intraday_authority(
+        session,
+        effective_at=bucket_start,
+        max_symbols=settings.intraday_max_symbols,
+    )
+    if authority is None:
+        return False
+    payload_identities = tuple(
+        (item.instrument_id, item.symbol) for item in payload.instruments
+    )
+    return (
+        authority.calendar_authority_id == payload.calendar_authority_id
+        and authority.session == payload.session
+        and authority.instruments == payload_identities
+    )
+
+
+async def _load_current_intraday_authority(
+    session: AsyncSession,
+    *,
+    effective_at: datetime,
+    max_symbols: int,
+) -> IntradayDatabaseAuthority | None:
+    authority_at = _require_utc(effective_at, field="effective_at")
+    bucket_end = bucket_for(authority_at).end
     calendar_row = (
         await session.execute(
             select(
@@ -201,9 +293,9 @@ async def schedule_due_intraday_snapshot(
             .where(
                 ExchangeCalendarAuthorityRecord.exchange == "XNYS",
                 ExchangeCalendarAuthorityRecord.completeness_status == "complete",
-                ExchangeCalendarAuthorityRecord.published_at <= scheduled_at,
-                ExchangeCalendarSessionRecord.market_open_at <= scheduled_at,
-                scheduled_at < ExchangeCalendarSessionRecord.market_close_at,
+                ExchangeCalendarAuthorityRecord.published_at <= authority_at,
+                ExchangeCalendarSessionRecord.market_open_at <= authority_at,
+                bucket_end <= ExchangeCalendarSessionRecord.market_close_at,
             )
             .order_by(
                 ExchangeCalendarAuthorityRecord.published_at.desc(),
@@ -230,7 +322,7 @@ async def schedule_due_intraday_snapshot(
         .select_from(WatchlistMember)
         .where(WatchlistMember.watchlist_id == _DEFAULT_WATCHLIST_ID)
     )
-    if member_count is None or not 1 <= member_count <= settings.intraday_max_symbols:
+    if member_count is None or not 1 <= member_count <= max_symbols:
         return None
     rows = (
         await session.execute(
@@ -261,38 +353,16 @@ async def schedule_due_intraday_snapshot(
         for _instrument_id, _symbol, exchange, currency in rows
     ):
         return None
-    identities = tuple((instrument_id, symbol) for instrument_id, symbol, _, _ in rows)
-    feed = settings.alpaca_intraday_feed
-    delivery_mode = settings.alpaca_intraday_delivery_mode
-    if feed is None or delivery_mode is None:
-        return None
-    try:
-        payload = build_intraday_payload(
-            calendar_authority_id=calendar_authority_id,
-            session=session_date,
-            bucket=bucket_for(scheduled_at),
-            instruments=identities,
-            feed=feed,
-            delivery_mode=delivery_mode,
+    identities = tuple(
+        sorted(
+            ((instrument_id, symbol) for instrument_id, symbol, _, _ in rows),
+            key=lambda item: (item[1], str(item[0])),
         )
-    except ValueError:
-        return None
-    encoded = payload.model_dump(mode="json")
-    return await enqueue_job(
-        session,
-        key=JobKeyV1(
-            job_type=JobType.COLLECT_INTRADAY_SNAPSHOT,
-            scope_kind="provider",
-            scope_id="alpaca-intraday",
-            effective_at=bucket_for(scheduled_at).start,
-            input_hash=job_input_hash(encoded),
-        ),
-        schema_version=_SCHEMA,
-        payload=encoded,
-        queue=QueueName.GENERAL,
-        retry_policy=RetryPolicy.AUTOMATIC_SAFE,
-        max_attempts=3,
-        available_at=bucket_for(scheduled_at).start,
+    )
+    return IntradayDatabaseAuthority(
+        calendar_authority_id=calendar_authority_id,
+        session=session_date,
+        instruments=identities,
     )
 
 

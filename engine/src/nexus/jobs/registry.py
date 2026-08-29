@@ -12,7 +12,14 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.canonical import canonical_json
-from nexus.jobs.models import BROKER_JOB_TYPES, JOB_PRIORITIES, JobType, QueueName, RetryPolicy
+from nexus.jobs.models import (
+    BROKER_JOB_TYPES,
+    JOB_PRIORITIES,
+    PROVIDER_JOB_TYPES,
+    JobType,
+    QueueName,
+    RetryPolicy,
+)
 from nexus.jobs.repository import ClaimedJob
 
 HandlerOutcome = Literal["succeeded", "skipped", "failed"]
@@ -84,6 +91,8 @@ class JobHandlerSpec:
         expected_queue = (
             QueueName.BROKER
             if self.job_type in BROKER_JOB_TYPES
+            else QueueName.PROVIDER
+            if self.job_type in PROVIDER_JOB_TYPES
             else QueueName.STRATEGY_RND
             if self.job_type is JobType.STRATEGY_RND
             else QueueName.GENERAL

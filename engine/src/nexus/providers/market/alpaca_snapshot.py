@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
@@ -20,6 +20,7 @@ from nexus.providers.market.alpaca_http import (
 from nexus.providers.market.snapshot_contracts import (
     IntradaySnapshotRequest,
     MarketSnapshot,
+    RawSnapshotEnvelope,
     SnapshotBatch,
     SnapshotMinuteBar,
     SnapshotQuote,
@@ -62,12 +63,19 @@ class AlpacaSnapshotProvider:
         self._now = now or (lambda: datetime.now(UTC))
 
     async def fetch_snapshots(self, request: IntradaySnapshotRequest) -> SnapshotBatch:
+        envelope = await self.fetch_raw_snapshots(request)
+        return normalize_snapshot_envelope(envelope, request=request)
+
+    async def fetch_raw_snapshots(
+        self, request: IntradaySnapshotRequest
+    ) -> RawSnapshotEnvelope:
+        """Return bounded transport bytes without parsing provider-controlled JSON."""
         if request.feed != self._feed or request.delivery_mode != self._delivery_mode:
             raise MarketProviderPayloadError("ALPACA_INTRADAY_AUTHORITY_MISMATCH")
-        received_at = self._now()
+        resolution_at = self._now()
         resolved: list[str] = []
         for item in request.instruments:
-            symbol = await self._symbol_resolver.resolve(item.instrument_id, received_at.date())
+            symbol = await self._symbol_resolver.resolve(item.instrument_id, resolution_at.date())
             if symbol != item.symbol:
                 raise MarketProviderPayloadError("INTRADAY_SYMBOL_AUTHORITY_INVALID")
             resolved.append(symbol)
@@ -83,15 +91,50 @@ class AlpacaSnapshotProvider:
                 ("APCA-API-SECRET-KEY", self._secret.get_secret_value()),
             ),
         )
-        if not raw or len(raw) > _MAX_RAW_BYTES:
-            raise MarketProviderPayloadError("ALPACA_SNAPSHOT_SIZE_INVALID")
-        payload = load_exact_json(raw)
-        return normalize_snapshot_payload(
-            payload,
-            raw_payload=raw,
-            request=request,
-            received_at=received_at,
+        received_at = self._now()
+        mode: Literal["delayed", "read_only"] = (
+            "delayed" if request.delivery_mode == "delayed" else "read_only"
         )
+        return RawSnapshotEnvelope(
+            raw_payload=raw,
+            received_at=received_at,
+            provenance=MarketDataProvenance(
+                source="alpaca",
+                feed=request.feed,
+                adjustment="raw",
+                interval="1Min",
+                mode=mode,
+                delivery_mode=request.delivery_mode,
+            ),
+        )
+
+
+def normalize_snapshot_envelope(
+    envelope: RawSnapshotEnvelope,
+    *,
+    request: IntradaySnapshotRequest,
+) -> SnapshotBatch:
+    """Validate transport authority, then parse and normalize captured bytes."""
+    expected_mode = "delayed" if request.delivery_mode == "delayed" else "read_only"
+    provenance = envelope.provenance
+    if (
+        provenance.source != "alpaca"
+        or provenance.feed != request.feed
+        or provenance.delivery_mode != request.delivery_mode
+        or provenance.adjustment != "raw"
+        or provenance.interval != "1Min"
+        or provenance.mode != expected_mode
+    ):
+        raise MarketProviderPayloadError("ALPACA_INTRADAY_AUTHORITY_MISMATCH")
+    if not envelope.raw_payload or len(envelope.raw_payload) > _MAX_RAW_BYTES:
+        raise MarketProviderPayloadError("ALPACA_SNAPSHOT_SIZE_INVALID")
+    payload = load_exact_json(envelope.raw_payload)
+    return normalize_snapshot_payload(
+        payload,
+        raw_payload=envelope.raw_payload,
+        request=request,
+        received_at=envelope.received_at,
+    )
 
 
 def normalize_snapshot_payload(
@@ -102,6 +145,8 @@ def normalize_snapshot_payload(
     received_at: datetime,
 ) -> SnapshotBatch:
     """Normalize an already exact-decimal parse; reject injected floats and drift."""
+    if not raw_payload or len(raw_payload) > _MAX_RAW_BYTES:
+        raise MarketProviderPayloadError("ALPACA_SNAPSHOT_SIZE_INVALID")
     if not isinstance(payload, Mapping):
         raise MarketProviderPayloadError("ALPACA_SNAPSHOT_OBJECT_REQUIRED")
     expected = {item.symbol: item for item in request.instruments}
@@ -141,6 +186,17 @@ def normalize_snapshot_payload(
                 ),
             )
         )
+    if any(
+        observed_at > received_at
+        for snapshot in snapshots
+        for observed_at in (
+            None if snapshot.trade is None else snapshot.trade.observed_at,
+            None if snapshot.quote is None else snapshot.quote.observed_at,
+            None if snapshot.minute_bar is None else snapshot.minute_bar.bar.observed_at,
+        )
+        if observed_at is not None
+    ):
+        raise MarketProviderPayloadError("ALPACA_SNAPSHOT_FUTURE_FACT")
     mode: Literal["delayed", "read_only"] = (
         "delayed" if request.delivery_mode == "delayed" else "read_only"
     )
@@ -209,6 +265,10 @@ def _minute_bar(
     if high < max(open_price, close, low) or low > min(open_price, close, high):
         raise MarketProviderPayloadError("ALPACA_SNAPSHOT_OHLC_INVALID")
     observed_at = _time(mapping.get("t"))
+    if observed_at > received_at:
+        raise MarketProviderPayloadError("ALPACA_SNAPSHOT_FUTURE_FACT")
+    if observed_at + timedelta(minutes=1) > received_at:
+        return None
     try:
         bar = PriceBar(
             instrument_id=instrument_id,

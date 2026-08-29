@@ -9,6 +9,7 @@ from datetime import datetime
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from nexus.jobs.errors import RetryableJobError, UnsafeJobError
 from nexus.jobs.models import QueueName
 from nexus.jobs.registry import (
     JobHandlerContext,
@@ -29,22 +30,6 @@ from nexus.jobs.repository import (
 )
 
 Clock = Callable[[], datetime]
-
-
-class RetryableJobError(RuntimeError):
-    """A handler failed with a sanitized, registry-approved retryable code."""
-
-    def __init__(self, error_code: str) -> None:
-        super().__init__(error_code)
-        self.error_code = error_code
-
-
-class UnsafeJobError(RuntimeError):
-    """A handler detected an input or capability that must never be retried."""
-
-    def __init__(self, error_code: str) -> None:
-        super().__init__(error_code)
-        self.error_code = error_code
 
 
 def _authority_matches(claim: ClaimedJob, spec: JobHandlerSpec) -> bool:

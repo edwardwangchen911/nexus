@@ -47,7 +47,7 @@ class Job(ImmutableCreatedAt, Base):
             name="jobs_status_allowed",
         ),
         CheckConstraint(
-            "queue IN ('general','broker','strategy_rnd')",
+            "queue IN ('general','provider','broker','strategy_rnd')",
             name="jobs_queue_allowed",
         ),
         CheckConstraint(
@@ -202,7 +202,7 @@ class WorkerHeartbeat(ImmutableCreatedAt, Base):
             "queue", "worker_id", name="uq_worker_heartbeats_queue_worker"
         ),
         CheckConstraint(
-            "queue IN ('general','broker','strategy_rnd')", name="queue_allowed"
+            "queue IN ('general','provider','broker','strategy_rnd')", name="queue_allowed"
         ),
         CheckConstraint("seen_at >= started_at", name="time_order"),
     )

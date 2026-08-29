@@ -12,7 +12,8 @@ from nexus.persistence.session import session_factory
 from nexus.quality.source_policy import SOURCE_POLICY_ID
 from nexus.settings import EngineSettings
 from sqlalchemy import text
-from test_backtest_writer import (
+
+from engine.tests.integration.test_backtest_writer import (
     AUTHORITY_BUNDLE_ID,
     COMPLETED_AT,
     DATA_SNAPSHOT_ID,

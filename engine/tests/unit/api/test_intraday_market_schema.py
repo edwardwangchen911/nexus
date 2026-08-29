@@ -62,6 +62,10 @@ def test_intraday_monitor_accepts_only_the_exact_decimal_string_contract() -> No
         lambda payload: payload.update({"quote_age_seconds": -1}),
         lambda payload: payload.update({"credential": "must-not-escape"}),
         lambda payload: payload.update({"bars": payload["bars"] * 61}),
+        lambda payload: payload["bars"][0].update({"quality_flags": ["bad-flag"]}),
+        lambda payload: payload["bars"][0].update(
+            {"quality_flags": [f"FLAG_{index}" for index in range(17)]}
+        ),
     ),
 )
 def test_intraday_monitor_rejects_malformed_or_oversized_shapes(mutation) -> None:

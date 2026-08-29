@@ -297,6 +297,7 @@ class MarketService:
             .where(
                 LatestQuote.instrument_id.in_(instrument_ids),
                 LatestQuote.available_at <= decision_time,
+                LatestQuote.received_at <= decision_time,
                 LatestQuote.observed_at <= decision_time,
                 LatestQuote.event_kind.in_(("trade", "quote", "snapshot", "fixture")),
                 or_(
@@ -311,6 +312,7 @@ class MarketService:
                         LatestQuote.data_artifact_id.is_not(None),
                         DataArtifact.source == LatestQuote.source,
                         DataArtifact.available_at <= decision_time,
+                        DataArtifact.received_at <= decision_time,
                     ),
                 ),
             )

@@ -204,6 +204,7 @@ async def load_intraday_series(
                 .where(
                     PriceBarRecord.price_series_manifest_id == manifest.id,
                     PriceBarRecord.available_at <= decision,
+                    PriceBarRecord.received_at <= decision,
                     PriceBarRecord.observed_at >= decision - _INTRADAY_LOOKBACK,
                 )
                 .order_by(
@@ -374,12 +375,12 @@ def _provider_mode(
 
 def _intraday_provenance_allowed(source: str, feed: str, delivery_mode: str) -> bool:
     if source == "fixture":
-        return delivery_mode == "fixture"
+        return feed == "fixture" and delivery_mode == "fixture"
     if source != "alpaca":
         return False
-    alpaca = INTRADAY_SOURCE_POLICY_PAYLOAD["alpaca"]
-    assert isinstance(alpaca, dict)
-    return feed in alpaca["feeds"] and delivery_mode in alpaca["delivery_modes"]
+    return (feed in {"iex", "sip"} and delivery_mode == "real_time") or (
+        feed == "delayed_sip" and delivery_mode == "delayed"
+    )
 
 
 def _intraday_candidate(
@@ -445,8 +446,27 @@ async def _latest_intraday_observations(
         .where(
             LatestQuote.instrument_id == instrument_id,
             LatestQuote.available_at <= decision_time,
+            LatestQuote.received_at <= decision_time,
             LatestQuote.observed_at <= decision_time,
+            LatestQuote.observed_at >= decision_time - _INTRADAY_LOOKBACK,
             LatestQuote.event_kind.in_(("trade", "quote", "snapshot", "fixture")),
+            or_(
+                and_(
+                    LatestQuote.source == "alpaca",
+                    LatestQuote.feed.in_(("iex", "sip")),
+                    LatestQuote.delivery_mode == "real_time",
+                ),
+                and_(
+                    LatestQuote.source == "alpaca",
+                    LatestQuote.feed == "delayed_sip",
+                    LatestQuote.delivery_mode == "delayed",
+                ),
+                and_(
+                    LatestQuote.source == "fixture",
+                    LatestQuote.feed == "fixture",
+                    LatestQuote.delivery_mode == "fixture",
+                ),
+            ),
             or_(
                 and_(
                     LatestQuote.evidence_status == "fixture",
@@ -459,6 +479,12 @@ async def _latest_intraday_observations(
                     LatestQuote.data_artifact_id.is_not(None),
                     DataArtifact.source == LatestQuote.source,
                     DataArtifact.available_at <= decision_time,
+                    DataArtifact.received_at <= decision_time,
+                    or_(
+                        LatestQuote.revision == DataArtifact.sha256,
+                        func.right(LatestQuote.revision, 65)
+                        == func.concat(":", DataArtifact.sha256),
+                    ),
                 ),
             ),
         )

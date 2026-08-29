@@ -83,7 +83,7 @@ export function IntradayMonitor({ symbol, monitor }: IntradayMonitorProps): Reac
             <polyline points={chartPoints.join(" ")} />
           </svg>
           <figcaption>
-            {monitor.sample_count} 个连续样本；折线仅作趋势辅助，精确值以下方表格为准。
+            {monitor.bars.length} 个已返回样本；折线仅作趋势辅助，精确值以下方表格为准。
           </figcaption>
         </figure>
       ) : (

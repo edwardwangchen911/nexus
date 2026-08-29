@@ -108,7 +108,12 @@ def test_job_state_machine_rejects_bypasses(source: JobStatus, target: JobStatus
 
 
 def test_queues_priorities_and_retry_policies_are_closed() -> None:
-    assert set(QueueName) == {QueueName.GENERAL, QueueName.BROKER, QueueName.STRATEGY_RND}
+    assert set(QueueName) == {
+        QueueName.GENERAL,
+        QueueName.PROVIDER,
+        QueueName.BROKER,
+        QueueName.STRATEGY_RND,
+    }
     assert set(RetryPolicy) == {
         RetryPolicy.AUTOMATIC_SAFE,
         RetryPolicy.MANUAL_SAFE,

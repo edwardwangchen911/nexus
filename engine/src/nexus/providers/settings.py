@@ -19,6 +19,46 @@ class IntradayMonitorMode(StrEnum):
     PRODUCTION = "production"
 
 
+class ProviderWorkerSettings(BaseSettings):
+    """Database and object-store settings isolated from Agent/HMAC secrets."""
+
+    model_config = SettingsConfigDict(
+        env_file=None,
+        env_ignore_empty=True,
+        extra="ignore",
+        hide_input_in_errors=True,
+        populate_by_name=True,
+    )
+
+    database_url: str = Field(validation_alias="PROVIDER_DATABASE_URL")
+    object_store_endpoint: str = Field(validation_alias="OBJECT_STORE_ENDPOINT")
+    object_store_region: str = Field(validation_alias="OBJECT_STORE_REGION")
+    object_store_bucket: str = Field(validation_alias="OBJECT_STORE_BUCKET")
+    object_store_access_key_id: SecretStr = Field(
+        validation_alias="OBJECT_STORE_ACCESS_KEY_ID"
+    )
+    object_store_secret_access_key: SecretStr = Field(
+        validation_alias="OBJECT_STORE_SECRET_ACCESS_KEY"
+    )
+
+    def __repr_args__(self) -> list[tuple[str | None, object]]:
+        return []
+
+    @model_validator(mode="after")
+    def require_nonempty_values(self) -> Self:
+        values: tuple[object, ...] = (
+            self.database_url,
+            self.object_store_endpoint,
+            self.object_store_region,
+            self.object_store_bucket,
+            self.object_store_access_key_id,
+            self.object_store_secret_access_key,
+        )
+        if any(_missing(value) for value in values):
+            raise ValueError("PROVIDER_WORKER_STORAGE_SETTINGS_REQUIRED")
+        return self
+
+
 class ProviderSettings(BaseSettings):
     """Provider-only settings whose errors and representation hide all inputs."""
 

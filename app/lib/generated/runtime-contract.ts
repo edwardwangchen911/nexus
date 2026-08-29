@@ -2243,8 +2243,10 @@ export const runtimeContractSchemas = {
       },
       "quality_flags": {
         "items": {
+          "pattern": "^[A-Z][A-Z0-9_]{0,99}$",
           "type": "string"
         },
+        "maxItems": 16,
         "title": "Quality Flags",
         "type": "array"
       },

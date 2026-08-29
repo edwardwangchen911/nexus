@@ -25,7 +25,7 @@ from nexus.persistence.models.data import (
 from nexus.persistence.models.market import LatestQuote
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.providers.base import PriceBar
-from nexus.providers.market.snapshot_contracts import SnapshotBatch
+from nexus.providers.market.snapshot_contracts import RawSnapshotEnvelope, SnapshotBatch
 
 
 @dataclass(frozen=True)
@@ -36,6 +36,12 @@ class IntradayIngestionResult:
     created_quote_observations: int
     created_bar_authorities: int
     replayed: int
+
+
+@dataclass(frozen=True)
+class IntradayRawArchive:
+    raw_uri: str
+    raw_artifact: DataArtifact
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,7 @@ async def ingest_intraday_snapshot(
     object_store: MarketObjectStore,
     batch: SnapshotBatch,
     *,
+    raw_artifact: DataArtifact | None = None,
     commit: bool = True,
 ) -> IntradayIngestionResult:
     """Archive raw bytes, publish normalized objects, then expose DB authorities."""
@@ -92,10 +99,26 @@ async def ingest_intraday_snapshot(
         raise ValueError("intraday batch must retain its raw payload")
     raw_digest = sha256(batch.raw_payload).hexdigest()
     date_path = batch.received_at.astimezone(UTC).strftime("%Y/%m/%d")
-    raw_key = f"raw/market/intraday/{date_path}/{raw_digest}.json"
     temporary_keys: list[str] = []
     try:
-        raw_uri = await object_store.archive_raw(raw_key, batch.raw_payload)
+        if raw_artifact is None:
+            archived = await archive_intraday_snapshot_raw(
+                session,
+                object_store,
+                RawSnapshotEnvelope(
+                    raw_payload=batch.raw_payload,
+                    received_at=batch.received_at,
+                    provenance=batch.provenance,
+                ),
+                commit=False,
+            )
+            raw_artifact = archived.raw_artifact
+        elif (
+            raw_artifact.sha256 != raw_digest
+            or raw_artifact.byte_size != len(batch.raw_payload)
+            or raw_artifact.source != batch.provenance.source
+        ):
+            raise RuntimeError("INTRADAY_RAW_ARCHIVE_MISMATCH")
         published: list[_PublishedBar] = []
         for snapshot in batch.snapshots:
             if snapshot.minute_bar is None:
@@ -111,29 +134,6 @@ async def ingest_intraday_snapshot(
             await object_store.put_temporary(temporary_key, payload)
             uri = await object_store.promote(temporary_key, final_key)
             published.append(_PublishedBar(bar=bar, payload=payload, digest=digest, uri=uri))
-
-        observed_times = tuple(
-            observed
-            for snapshot in batch.snapshots
-            for observed in (
-                None if snapshot.trade is None else snapshot.trade.observed_at,
-                None if snapshot.quote is None else snapshot.quote.observed_at,
-                None if snapshot.minute_bar is None else snapshot.minute_bar.bar.observed_at,
-            )
-            if observed is not None
-        )
-        raw_artifact, _ = await _get_or_create_artifact(
-            session,
-            uri=raw_uri,
-            digest=raw_digest,
-            byte_size=len(batch.raw_payload),
-            mime_type="application/json",
-            schema_version="alpaca_stock_snapshots_v1",
-            source=batch.provenance.source,
-            observed_at=min(observed_times, default=batch.received_at),
-            available_at=batch.received_at,
-            received_at=batch.received_at,
-        )
 
         created_trade = 0
         created_quote = 0
@@ -198,7 +198,7 @@ async def ingest_intraday_snapshot(
         if commit:
             await session.commit()
         return IntradayIngestionResult(
-            raw_uri=raw_uri,
+            raw_uri=raw_artifact.uri,
             raw_artifact=raw_artifact,
             created_trade_observations=created_trade,
             created_quote_observations=created_quote,
@@ -211,6 +211,38 @@ async def ingest_intraday_snapshot(
     finally:
         for temporary_key in temporary_keys:
             await _safe_delete_temporary(object_store, temporary_key)
+
+
+async def archive_intraday_snapshot_raw(
+    session: AsyncSession,
+    object_store: MarketObjectStore,
+    envelope: RawSnapshotEnvelope,
+    *,
+    commit: bool = True,
+) -> IntradayRawArchive:
+    """Persist exact response bytes and database provenance before parsing them."""
+    raw_digest = sha256(envelope.raw_payload).hexdigest()
+    raw_key = f"raw/market/intraday/sha256/{raw_digest[:2]}/{raw_digest}.json"
+    try:
+        raw_uri = await object_store.archive_raw(raw_key, envelope.raw_payload)
+        raw_artifact, _ = await _get_or_create_artifact(
+            session,
+            uri=raw_uri,
+            digest=raw_digest,
+            byte_size=len(envelope.raw_payload),
+            mime_type="application/json",
+            schema_version="alpaca_stock_snapshots_v1",
+            source=envelope.provenance.source,
+            observed_at=envelope.received_at,
+            available_at=envelope.received_at,
+            received_at=envelope.received_at,
+        )
+        if commit:
+            await session.commit()
+        return IntradayRawArchive(raw_uri=raw_artifact.uri, raw_artifact=raw_artifact)
+    except Exception:
+        await session.rollback()
+        raise
 
 
 async def _insert_observation(
@@ -430,8 +462,9 @@ async def _get_or_create_artifact(
         if inserted_id is not None
         else await session.scalar(select(DataArtifact).where(DataArtifact.sha256 == digest))
     )
+    content_identity = ("sha256", "byte_size", "mime_type", "schema_version", "source")
     if artifact is None or any(
-        getattr(artifact, field) != value for field, value in values.items() if field != "id"
+        getattr(artifact, field) != values[field] for field in content_identity
     ):
         raise RuntimeError("INTRADAY_ARTIFACT_REPLAY_CONFLICT")
     return artifact, inserted_id is not None

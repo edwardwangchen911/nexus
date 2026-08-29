@@ -14,6 +14,7 @@ from sqlalchemy import or_, select
 from nexus.audit.canonical import canonical_json
 from nexus.domain.evidence import EvidenceRef
 from nexus.jobs.daily_payloads import STAGE_SCHEMA, DailyStagePayload, parse_utc
+from nexus.jobs.errors import UnsafeJobError
 from nexus.jobs.models import JobType, QueueName, RetryPolicy
 from nexus.jobs.registry import (
     JobHandler,
@@ -61,10 +62,13 @@ def build_provider_collection_registry(
     market_object_store: MarketObjectStore,
     raw_evidence_store: RawEvidenceStore,
     now: Callable[[], datetime],
+    *,
+    expected_profile_id: str | None = None,
 ) -> JobRegistry:
     """Build the closed provider collection registry for one runtime mode."""
 
     async def collect_market(context: JobHandlerContext) -> JobHandlerResult:
+        _require_provider_profile(context, expected_profile_id)
         if bundle.mode is ProviderRuntimeMode.FIXTURE:
             return _fixture_skip()
         payload = cast(DailyStagePayload, context.payload)
@@ -161,6 +165,7 @@ def build_provider_collection_registry(
         return JobHandlerResult(outcome="skipped", result_code="MARKET_NO_DATA")
 
     async def collect_sec_macro(context: JobHandlerContext) -> JobHandlerResult:
+        _require_provider_profile(context, expected_profile_id)
         if bundle.mode is ProviderRuntimeMode.FIXTURE:
             return _fixture_skip()
         payload = cast(DailyStagePayload, context.payload)
@@ -214,6 +219,17 @@ def _fixture_skip() -> JobHandlerResult:
         outcome="skipped",
         result_code="FIXTURE_PROVIDER_DATA_UNAVAILABLE",
     )
+
+
+def _require_provider_profile(
+    context: JobHandlerContext,
+    expected_profile_id: str | None,
+) -> None:
+    if expected_profile_id is None:
+        return
+    payload = cast(DailyStagePayload, context.payload)
+    if payload.profile_id != expected_profile_id:
+        raise UnsafeJobError("PROVIDER_PROFILE_MISMATCH")
 
 
 async def _frozen_universe(
@@ -737,7 +753,7 @@ def _spec(job_type: JobType, handler: JobHandler) -> JobHandlerSpec:
         job_type=job_type,
         schema_version=STAGE_SCHEMA,
         payload_model=DailyStagePayload,
-        queue=QueueName.GENERAL,
+        queue=QueueName.PROVIDER,
         timeout_seconds=45,
         retry_policy=RetryPolicy.AUTOMATIC_SAFE,
         max_attempts=3,

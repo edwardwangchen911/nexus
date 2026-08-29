@@ -129,6 +129,21 @@ class MarketSnapshot(BaseModel):
     minute_bar: SnapshotMinuteBar | None
 
 
+class RawSnapshotEnvelope(BaseModel):
+    """Transport-complete bytes captured before any payload interpretation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    raw_payload: bytes
+    received_at: datetime
+    provenance: MarketDataProvenance
+
+    @field_validator("received_at")
+    @classmethod
+    def _received_utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+
 class SnapshotBatch(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 

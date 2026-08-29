@@ -6,7 +6,11 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
-from nexus.jobs.intraday_schedule import schedule_due_intraday_snapshot
+from nexus.jobs.intraday_schedule import (
+    IntradaySnapshotJobPayloadV1,
+    revalidate_intraday_payload_authority,
+    schedule_due_intraday_snapshot,
+)
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -21,7 +25,7 @@ from nexus.persistence.models.runtime import Job
 from nexus.persistence.session import session_factory
 from nexus.providers.settings import ProviderSettings
 from nexus.settings import EngineSettings
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 NOW = datetime(2026, 8, 28, 14, 30, 29, tzinfo=UTC)
 CALENDAR_ID = UUID("019d0000-0000-7000-8000-0000000000c1")
@@ -142,3 +146,36 @@ async def test_schedule_noops_before_open_and_at_half_open_close(
     assert job is None
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(Job)) == 0
+
+
+@pytest.mark.asyncio
+async def test_execution_authority_revalidation_detects_watchlist_drift(
+    migrated_database_url: str,
+) -> None:
+    await _seed_schedule(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        job = await schedule_due_intraday_snapshot(session, now=NOW, settings=_settings())
+    assert job is not None
+    payload = IntradaySnapshotJobPayloadV1.model_validate(job.payload)
+
+    async with factory() as session, session.begin():
+        assert await revalidate_intraday_payload_authority(
+            session,
+            payload,
+            effective_at=job.effective_at,
+            settings=_settings(),
+        )
+
+    async with factory() as session, session.begin():
+        await session.execute(
+            delete(WatchlistMember).where(WatchlistMember.instrument_id == MSFT_ID)
+        )
+
+    async with factory() as session, session.begin():
+        assert not await revalidate_intraday_payload_authority(
+            session,
+            payload,
+            effective_at=job.effective_at,
+            settings=_settings(),
+        )

@@ -4,6 +4,7 @@ import gzip
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -18,8 +19,8 @@ from nexus.jobs.daily_pipeline import (
     build_daily_pipeline_registry,
     schedule_due_daily_pipeline,
 )
-from nexus.jobs.models import JobType, QueueName
-from nexus.jobs.registry import JobHandlerContext, JobHandlerResult
+from nexus.jobs.models import JobType, QueueName, RetryPolicy
+from nexus.jobs.registry import JobHandlerContext, JobHandlerResult, JobHandlerSpec
 from nexus.jobs.worker import run_job_worker_once
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
@@ -157,7 +158,7 @@ async def test_scheduler_fails_closed_without_next_authoritative_session(
         assert await session.scalar(select(func.count()).select_from(Job)) == 0
 
 
-async def _drain_general(
+async def _drain_daily_queues(
     factory: async_sessionmaker[AsyncSession],
     *,
     now: datetime,
@@ -166,23 +167,59 @@ async def _drain_general(
     registry = build_daily_pipeline_registry(
         profile_id=_PROFILE,
         stage_executor=executor,
+        stage_specs=_provider_stage_specs(executor),
     )
     worked = 0
-    for _ in range(32):
-        if not await run_job_worker_once(
-            factory,
-            registry=registry,
-            queue=QueueName.GENERAL,
-            worker_id="daily-fixture-worker",
-            worker_started_at=now,
-            process_version="test-v1",
-            migration_head="0021_manual_job_retry_allowance",
-            clock=lambda: now,
-            claim_registered_only=True,
-        ):
+    for _ in range(64):
+        tick_worked = False
+        for queue in (QueueName.GENERAL, QueueName.PROVIDER):
+            queue_worked = await run_job_worker_once(
+                factory,
+                registry=registry,
+                queue=queue,
+                worker_id=f"daily-fixture-{queue.value}-worker",
+                worker_started_at=now,
+                process_version="test-v1",
+                migration_head="0026_intraday_review_hardening",
+                clock=lambda: now,
+                claim_registered_only=True,
+            )
+            tick_worked = tick_worked or queue_worked
+            worked += int(queue_worked)
+        if not tick_worked:
             return worked
-        worked += 1
     raise AssertionError("daily fixture did not drain within the bounded tick count")
+
+
+def _provider_stage_specs(executor: StageExecutor) -> tuple[JobHandlerSpec, ...]:
+    specs: list[JobHandlerSpec] = []
+    for job_type in (JobType.COLLECT_MARKET, JobType.COLLECT_SEC_MACRO):
+
+        async def handle(
+            context: JobHandlerContext,
+            *,
+            current_type: JobType = job_type,
+        ) -> JobHandlerResult:
+            return await executor(
+                current_type,
+                context,
+                cast(DailyStagePayload, context.payload),
+            )
+
+        specs.append(
+            JobHandlerSpec(
+                job_type=job_type,
+                schema_version="daily_pipeline_stage_v1",
+                payload_model=DailyStagePayload,
+                queue=QueueName.PROVIDER,
+                timeout_seconds=45,
+                retry_policy=RetryPolicy.AUTOMATIC_SAFE,
+                max_attempts=3,
+                idempotency_namespace=job_type.value,
+                handler=handle,
+            )
+        )
+    return tuple(specs)
 
 
 def _successful_executor(executed: list[JobType]) -> StageExecutor:
@@ -226,7 +263,7 @@ async def test_scheduler_is_idempotent_and_materializes_strict_weekly_dag(
     assert first.payload["universe_content_hash"] == "a" * 64
 
     executed: list[JobType] = []
-    assert await _drain_general(
+    assert await _drain_daily_queues(
         factory,
         now=now,
         executor=_successful_executor(executed),
@@ -254,6 +291,8 @@ async def test_scheduler_is_idempotent_and_materializes_strict_weekly_dag(
         )
     by_type = {job.job_type: job for job in jobs}
     assert len([job for job in jobs if job.job_type == JobType.DAILY_PIPELINE.value]) == 1
+    root = next(job for job in jobs if job.job_type == JobType.DAILY_PIPELINE.value)
+    assert root.queue == QueueName.GENERAL.value
     assert by_type[JobType.BROKER_SYNC.value].status == "skipped"
     assert by_type[JobType.BROKER_SYNC.value].result_code == "SKIPPED_CAPABILITY"
     assert broker_leases == 0
@@ -363,7 +402,7 @@ async def test_quality_cutoff_skips_decision_chain_but_completes_audit_tail(
             result_code=f"{job_type.name}_OK",
         )
 
-    assert await _drain_general(factory, now=now, executor=cutoff_executor) == 11
+    assert await _drain_daily_queues(factory, now=now, executor=cutoff_executor) == 11
     async with factory() as session:
         rows = tuple(
             (
@@ -468,6 +507,57 @@ async def test_local_safe_profile_never_claims_broker_or_placeholder_agent_jobs(
     assert results[JobType.AGENT_RESEARCH.value] == "SKIPPED_CAPABILITY"
     assert results[JobType.PAPER_EXECUTE_DUE.value] == "SKIPPED_NO_DUE_TARGETS"
     assert results[JobType.PAPER_PERFORMANCE.value] == "PERFORMANCE_PUBLISHED"
+
+
+@pytest.mark.asyncio
+async def test_general_root_materializes_provider_children_without_registering_handlers(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_calendar(factory)
+    now = _FRIDAY_CLOSE + timedelta(minutes=31)
+    async with factory() as session, session.begin():
+        root = await schedule_due_daily_pipeline(
+            session,
+            now=now,
+            profile_id=LOCAL_SAFE_DAILY_PROFILE,
+        )
+    assert root is not None
+    registry = build_local_daily_pipeline_registry(include_provider_stages=True)
+    assert JobType.COLLECT_MARKET.value not in registry.job_types
+    assert JobType.COLLECT_SEC_MACRO.value not in registry.job_types
+
+    assert await run_job_worker_once(
+        factory,
+        registry=registry,
+        queue=QueueName.GENERAL,
+        worker_id="daily-provider-materializer",
+        worker_started_at=now,
+        process_version="test-v1",
+        migration_head="0026_intraday_review_hardening",
+        clock=lambda: now,
+        claim_registered_only=True,
+    )
+
+    async with factory() as session:
+        children = tuple(
+            (
+                await session.scalars(
+                    select(Job)
+                    .where(Job.job_type.in_((
+                        JobType.COLLECT_MARKET.value,
+                        JobType.COLLECT_SEC_MACRO.value,
+                    )))
+                    .order_by(Job.job_type)
+                )
+            ).all()
+        )
+    assert [child.job_type for child in children] == [
+        JobType.COLLECT_MARKET.value,
+        JobType.COLLECT_SEC_MACRO.value,
+    ]
+    assert all(child.queue == QueueName.PROVIDER.value for child in children)
+    assert all(child.status == "queued" for child in children)
 
 
 @pytest.mark.asyncio

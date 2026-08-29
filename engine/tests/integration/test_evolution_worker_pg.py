@@ -11,6 +11,7 @@ from nexus.evolution.worker import (
     run_strategy_rnd_worker_once,
 )
 from nexus.jobs.models import QueueName
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.runtime import Job, WorkerHeartbeat
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
@@ -63,5 +64,5 @@ async def test_dedicated_worker_claims_only_strategy_queue_with_real_executor(
     assert stored.last_error_code == "BACKTEST_AUTHORITY_INCOMPLETE"
     assert heartbeat is not None
     assert heartbeat.process_version == STRATEGY_RND_WORKER_PROCESS_VERSION
-    assert heartbeat.migration_head == "0023_evolution_authority"
+    assert heartbeat.migration_head == CURRENT_MIGRATION_HEAD
     assert broker_heartbeat is None

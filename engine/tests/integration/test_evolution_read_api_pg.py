@@ -25,7 +25,8 @@ from nexus.persistence.models.evolution import (
 )
 from nexus.persistence.session import session_factory
 from sqlalchemy import select, text
-from test_evolution_api import _app, _headers, _settings
+
+from engine.tests.integration.test_evolution_api import _app, _headers, _settings
 
 
 @pytest.mark.asyncio

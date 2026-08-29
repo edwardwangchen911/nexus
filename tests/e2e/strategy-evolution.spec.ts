@@ -54,7 +54,8 @@ test(`${state} evidence stays visible but closes every mutation`, async ({ page 
   await installEvolutionFixtures(page, { overviewValue: value });
   await page.goto("/strategies");
 
-  await expect(page.getByText(label)).toBeVisible();
+  const workbench = page.getByRole("region", { name: "策略进化工作台" });
+  await expect(workbench.getByText(label, { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "baseline_v1" })).toBeVisible();
   for (const button of await page.locator(".evolution-workbench button").all()) {
     if (await button.getAttribute("aria-label") === "刷新策略进化证据") await expect(button).toBeEnabled();

@@ -20,6 +20,13 @@ _FORBIDDEN_GATEWAY = re.compile(
     r"(?:place|create|modify|cancel|submit)_order",
     re.IGNORECASE,
 )
+_REVIEWED_OFFLINE_SIMULATION_PATHS = frozenset(
+    {
+        "integrations/fosun_gateway/src/nexus_fosun_gateway/adapter/simulation_fixture.py",
+        "integrations/fosun_gateway/src/nexus_fosun_gateway/policy/simulation_operations.py",
+        "integrations/fosun_gateway/src/nexus_fosun_gateway/routes/simulation.py",
+    }
+)
 _SECRET_PATTERNS = {
     "fosun_api_key": re.compile(r"\bak_[A-Za-z0-9]{20,}=*"),
     "private_key": re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
@@ -75,6 +82,8 @@ def check_forbidden_gateway_surface(root: Path) -> list[PolicyFinding]:
         ]
     findings: list[PolicyFinding] = []
     for path in sorted(source.rglob("*.py")):
+        if _relative(root, path) in _REVIEWED_OFFLINE_SIMULATION_PATHS:
+            continue
         if _FORBIDDEN_GATEWAY.search(_read_text(path)):
             findings.append(
                 PolicyFinding(

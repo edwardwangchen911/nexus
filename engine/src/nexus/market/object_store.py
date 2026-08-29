@@ -13,8 +13,25 @@ from urllib.parse import quote
 import boto3  # type: ignore[import-untyped]
 from botocore.config import Config  # type: ignore[import-untyped]
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
+from pydantic import SecretStr
 
-from nexus.settings import EngineSettings
+
+class ObjectStoreSettings(Protocol):
+    @property
+    def object_store_endpoint(self) -> str | None: ...
+
+    @property
+    def object_store_region(self) -> str | None: ...
+
+    @property
+    def object_store_bucket(self) -> str | None: ...
+
+    @property
+    def object_store_access_key_id(self) -> SecretStr | None: ...
+
+    @property
+    def object_store_secret_access_key(self) -> SecretStr | None: ...
+
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _TEMPORARY = re.compile(
@@ -43,7 +60,7 @@ class S3ProviderEvidenceStore:
 
     def __init__(
         self,
-        settings: EngineSettings,
+        settings: ObjectStoreSettings,
         *,
         client: _S3Client | None = None,
     ) -> None:

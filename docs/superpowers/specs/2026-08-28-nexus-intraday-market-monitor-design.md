@@ -403,3 +403,24 @@ Intraday Monitor offline_ready / external_data_activation_blocked
 - **成本：** 采用每 15 秒单批 Snapshot，最多 30 symbols；不实现 WebSocket、通知和高频指标。
 - **安全：** 默认 disabled、固定源、无浏览器 Provider、无 Agent/交易消费、无真实请求。
 - **范围：** 本规格是单一可交付工作包；真实 Agent 激活和复星外部门禁保留为后续独立工作。
+
+## 19. 独立审查加固裁决
+
+实现后的独立审查要求增加前向迁移 `0026_intraday_review_hardening`，且不改写 `0025`：
+
+- Provider 的 `received_at` 必须在 HTTP 响应返回后采集；任何事实时间晚于接收时间都 fail closed。
+- durable Job 执行外部 GET 前后都必须重新比对 claim `effective_at`、15 秒 bucket、交易日历 authority、默认观察列表以及 feed/delivery 配置；GET 后发生漂移时只保留 raw，不写规范化事实。
+- 原始响应对象按 SHA-256 内容复用；每次交付时间保存在 observation/bar，不能把交付时间混入内容身份。
+- HTTP transport 返回后、任何 JSON 解析或字段校验前先按内容寻址归档原始 bytes；重复 key、未知字段、无效 OHLC、未来事实或全空 Snapshot 都不得绕过 raw-first 证据，也不得发布规范化事实。超过 transport 8 MiB 硬上限的响应在网络边界直接拒绝。
+- Alpaca 只允许 `iex|sip + real_time` 或 `delayed_sip + delayed`；loader 与数据库约束同时执行该配对。
+- `trade/quote` 的 verified observation 必须绑定同 source 且 revision 包含相同 SHA-256 的 `DataArtifact`；历史 `snapshot` 行保留兼容但不得进入新盘中读取。
+- 1 分钟 bar 只有在 `received_at >= observed_at + 1 minute` 后才能进入 authority，阻止随 decision time 推移把采集中分钟误判为完整。
+- 已发布 intraday authority 的 `price_bar_records` 不可继续追加；manifest、artifact 和 research evidence 继续使用既有全局不可变/追加写触发器。
+- Provider 使用独立 `provider` 队列、`nexus-engine-provider-worker` 入口和仅含数据库/对象存储/Provider 的设置域；通用 Agent worker 不注册或领取 Provider Job，也不接收 Provider 凭据。升级时只搬迁仍为 `queued` 的历史 Provider Job；terminal 历史保留原执行队列，运行中的任务使迁移 fail closed。降级遇到 Provider heartbeat 或 terminal Provider 历史同样 fail closed。
+- `daily.pipeline` 只有通用 worker 一个根；它在显式配置后跨队列创建 Provider 子任务，从而保留全 DAG 依赖顺序。Provider worker 不调度第二个日任务根。
+- Provider worker 使用独立 `PROVIDER_DATABASE_URL` 和固定 `public,pg_catalog` search path，启动时验证非 superuser、非 `BYPASSRLS`、不可建库/建角色/复制、无任何角色继承、无 schema CREATE、精确表/列权限、强制 RLS，以及每表完整 policy 集合的唯一角色、命令、permissiveness、`USING/WITH CHECK` 表达式和受控函数签名、源码、owner、ACL；角色授权模板在任何权限变更前执行同级 fail-closed 预检，不包含凭据，且外部激活前仍需单独审批执行。
+- 所有盘中 observation、raw artifact 和 bar record 必须同时满足 `available_at <= decision_time` 与 `received_at <= decision_time`；“已标记可用但当时尚未接收”的记录不得进入历史视图。
+- 盘中 observation 查询只扫描 decision time 前 90 分钟，并同时约束 instrument、source/feed/delivery、evidence 状态和 artifact digest，避免在历史表上做无界窗口排名。
+- 单根 bar 的 `quality_flags` 最多 16 个且使用规范错误码；图表说明只报告实际返回样本，不宣称数据连续。
+
+上述变更不激活外部 Provider，不改变 display-only 边界，也不授权任何交易操作。

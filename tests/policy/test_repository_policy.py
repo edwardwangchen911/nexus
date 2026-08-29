@@ -63,6 +63,32 @@ def test_gateway_source_forbids_write_and_webhook_surface(tmp_path: Path) -> Non
     ]
 
 
+def test_gateway_policy_exempts_only_the_reviewed_offline_simulation_files(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "integrations/fosun_gateway/src/nexus_fosun_gateway"
+    reviewed = (
+        package / "adapter/simulation_fixture.py",
+        package / "policy/simulation_operations.py",
+        package / "routes/simulation.py",
+    )
+    for path in reviewed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def create_order(): pass\n")
+
+    assert check_forbidden_gateway_surface(tmp_path) == []
+
+    near_miss = package / "routes/simulation_external.py"
+    near_miss.write_text("def create_order(): pass\n")
+    findings = check_forbidden_gateway_surface(tmp_path)
+    assert [(finding.rule, finding.path) for finding in findings] == [
+        (
+            "forbidden_gateway_surface",
+            "integrations/fosun_gateway/src/nexus_fosun_gateway/routes/simulation_external.py",
+        )
+    ]
+
+
 def test_gateway_requires_both_frozen_sdk_tls_remediation_surfaces(tmp_path: Path) -> None:
     source = tmp_path / "integrations/fosun_gateway/src/nexus_fosun_gateway"
     security = source / "security"

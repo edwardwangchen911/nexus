@@ -19,6 +19,7 @@ from nexus.domain.ids import new_uuid7
 from nexus.jobs.models import (
     BROKER_JOB_TYPES,
     JOB_PRIORITIES,
+    PROVIDER_JOB_TYPES,
     JobKeyV1,
     JobStatus,
     JobType,
@@ -66,6 +67,7 @@ class ClaimedJob:
     retry_policy: str
     max_attempts: int
     attempt_no: int
+    effective_at: datetime
     worker_id: str
     lease_token: UUID
     fence_token: int
@@ -105,6 +107,8 @@ def _require_queue(job_type: JobType, queue: QueueName) -> None:
     expected = (
         QueueName.BROKER
         if job_type in BROKER_JOB_TYPES
+        else QueueName.PROVIDER
+        if job_type in PROVIDER_JOB_TYPES
         else QueueName.STRATEGY_RND
         if job_type is JobType.STRATEGY_RND
         else QueueName.GENERAL
@@ -378,6 +382,7 @@ async def claim_next_job(
         retry_policy=job.retry_policy,
         max_attempts=job.max_attempts,
         attempt_no=job.attempt_count,
+        effective_at=job.effective_at,
         worker_id=worker_id,
         lease_token=lease_token,
         fence_token=fence_token,

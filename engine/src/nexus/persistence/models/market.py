@@ -150,6 +150,16 @@ class LatestQuote(ImmutableCreatedAt, Base):
             name="fosun_delivery_mode",
         ),
         CheckConstraint(
+            "event_kind NOT IN ('trade','quote') OR "
+            "(source = 'alpaca' AND evidence_status = 'verified' AND "
+            "(((feed = 'iex' OR feed = 'sip') AND delivery_mode = 'real_time') OR "
+            "(feed = 'delayed_sip' AND delivery_mode = 'delayed'))) OR "
+            "(source = 'fixture' AND evidence_status = 'fixture' "
+            "AND feed = 'fixture' AND delivery_mode = 'fixture') OR "
+            "(source NOT IN ('alpaca','fixture') AND evidence_status = 'verified')",
+            name="intraday_delivery_pair",
+        ),
+        CheckConstraint(
             "event_kind IN ('trade','quote','snapshot','fixture')",
             name="event_kind_allowed",
         ),

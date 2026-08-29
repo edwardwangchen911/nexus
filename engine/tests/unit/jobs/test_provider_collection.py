@@ -14,6 +14,7 @@ from nexus.jobs.models import JobType, QueueName, RetryPolicy
 from nexus.jobs.provider_collection import build_provider_collection_registry
 from nexus.jobs.registry import JobHandlerContext
 from nexus.jobs.repository import ClaimedJob
+from nexus.jobs.worker import UnsafeJobError
 from nexus.market.ingestion import MarketObjectStore
 from nexus.providers.composition import build_provider_bundle
 from nexus.providers.settings import ProviderSettings
@@ -79,11 +80,12 @@ def _context(job_type: JobType) -> JobHandlerContext:
         job_type=job_type.value,
         schema_version="daily_pipeline_stage_v1",
         payload=payload.model_dump(mode="json"),
-        queue=QueueName.GENERAL.value,
+        queue=QueueName.PROVIDER.value,
         priority=280,
         retry_policy=RetryPolicy.AUTOMATIC_SAFE.value,
         max_attempts=3,
         attempt_no=1,
+        effective_at=FROZEN_NOW,
         worker_id="provider-fixture-worker",
         lease_token=LEASE_TOKEN,
         fence_token=1,
@@ -115,7 +117,7 @@ def test_registry_uses_existing_daily_payload_and_bounded_general_handlers() -> 
     }
     for spec in registry.specs:
         assert spec.payload_model is DailyStagePayload
-        assert spec.queue is QueueName.GENERAL
+        assert spec.queue is QueueName.PROVIDER
         assert spec.timeout_seconds == 45
         assert spec.max_attempts == 3
 
@@ -173,3 +175,19 @@ async def test_fixture_collection_skips_without_database_or_external_calls(
     assert market_store.objects == {}
     assert raw_store.objects == {}
     assert market_store.external_calls == raw_store.external_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_provider_profile_mismatch_fails_before_fixture_or_external_work() -> None:
+    registry = build_provider_collection_registry(
+        _fixture_bundle(),
+        cast(MarketObjectStore, InMemoryMarketObjectStore()),
+        InMemoryRawEvidenceStore(),
+        lambda: FROZEN_NOW,
+        expected_profile_id="provider_production_v1",
+    )
+    spec = registry.resolve(JobType.COLLECT_MARKET.value)
+    assert spec is not None
+
+    with pytest.raises(UnsafeJobError, match="PROVIDER_PROFILE_MISMATCH"):
+        await spec.handler(_context(JobType.COLLECT_MARKET))

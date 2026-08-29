@@ -15,9 +15,11 @@ from nexus.persistence.models.market import (
 from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.persistence.session import session_factory
 from nexus.quality.source_policy import (
+    INTRADAY_SOURCE_POLICY_ID,
     QUOTE_SOURCE_POLICY_ID,
     SOURCE_POLICY_ID,
     load_fosun_market_admission,
+    load_intraday_source_policy_v1,
     load_quote_source_policy_v1,
     load_source_policy_v1,
 )
@@ -443,26 +445,37 @@ async def _assert_backend_waits_on_lock(factory, backend_pid: int) -> None:
 
 
 @pytest.mark.asyncio
-async def test_canonical_source_policy_is_single_loadable_and_database_immutable(
+async def test_canonical_source_policies_are_loadable_and_database_immutable(
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     async with factory() as session:
         policy = await load_source_policy_v1(session, instrument_tick_size=None)
         quote_policy = await load_quote_source_policy_v1(session)
-        records = list(
-            await session.scalars(text("SELECT id FROM source_policies ORDER BY key"))
+        intraday_policy = await load_intraday_source_policy_v1(session)
+        records = dict(
+            (
+                await session.execute(
+                    text("SELECT key,id FROM source_policies ORDER BY key")
+                )
+            ).all()
         )
         assert policy.record_id == SOURCE_POLICY_ID
         assert quote_policy.record_id == QUOTE_SOURCE_POLICY_ID
-        assert records == [SOURCE_POLICY_ID, QUOTE_SOURCE_POLICY_ID]
-        for statement in (
-            "UPDATE source_policies SET payload = '{}'::jsonb WHERE id = :id",
-            "DELETE FROM source_policies WHERE id = :id",
-        ):
-            with pytest.raises(DBAPIError, match="published source policy is immutable"):
-                await session.execute(text(statement), {"id": SOURCE_POLICY_ID})
-            await session.rollback()
+        assert intraday_policy.record_id == INTRADAY_SOURCE_POLICY_ID
+        assert records == {
+            "intraday_monitor": INTRADAY_SOURCE_POLICY_ID,
+            "market_price": SOURCE_POLICY_ID,
+            "market_quote": QUOTE_SOURCE_POLICY_ID,
+        }
+        for policy_id in records.values():
+            for statement in (
+                "UPDATE source_policies SET payload = '{}'::jsonb WHERE id = :id",
+                "DELETE FROM source_policies WHERE id = :id",
+            ):
+                with pytest.raises(DBAPIError, match="published source policy is immutable"):
+                    await session.execute(text(statement), {"id": policy_id})
+                await session.rollback()
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,6 @@
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).parents[4]
 INTRADAY_ENVIRONMENT_KEYS = {
     "NEXUS_INTRADAY_MONITOR_MODE",

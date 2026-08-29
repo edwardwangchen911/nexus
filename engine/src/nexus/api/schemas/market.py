@@ -83,7 +83,7 @@ class IntradayBarResponse(_StrictSchema):
     close: DecimalString
     volume: DecimalString
     available_at: datetime
-    quality_flags: tuple[str, ...]
+    quality_flags: tuple[QualityReason, ...] = Field(max_length=16)
 
     @field_validator("observed_at", "available_at")
     @classmethod

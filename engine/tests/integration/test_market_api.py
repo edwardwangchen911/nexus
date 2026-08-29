@@ -32,6 +32,7 @@ from nexus.persistence.session import session_factory
 from nexus.providers.base import InstrumentId, PriceBar, PriceSeries
 from nexus.settings import EngineSettings
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from uuid6 import uuid7
 
 _DECISION_TIME = datetime(2026, 8, 24, 14, 0, tzinfo=UTC)
@@ -162,14 +163,20 @@ async def _seed_quote(
     last: Decimal | None = Decimal("100.00"),
     observed_at: datetime = _DECISION_TIME - timedelta(seconds=10),
     available_at: datetime | None = None,
+    received_at: datetime | None = None,
     quality_flags: Sequence[str] = (),
 ) -> None:
     factory = session_factory(_settings(database_url))
     try:
         async with factory() as session:
             visible_at = available_at or observed_at + timedelta(seconds=1)
-            received_at = max(observed_at + timedelta(seconds=2), visible_at)
+            received_at = received_at or visible_at
             event_kind = "fixture" if source == "fixture" else "trade"
+            raw_payload = (
+                f"market-api-fixture:{instrument_id}:{source}:{feed}:"
+                f"{delivery_mode}:{observed_at.isoformat()}:{last}"
+            ).encode()
+            revision = "1" if source == "fixture" else sha256(raw_payload).hexdigest()
             canonical = canonical_quote_observation(
                 instrument_id=instrument_id,
                 source=source,
@@ -182,15 +189,15 @@ async def _seed_quote(
                 observed_at=observed_at,
                 available_at=visible_at,
                 received_at=received_at,
-                revision="1",
+                revision=revision,
             )
             artifact = None
             if source != "fixture":
-                raw_digest = sha256(b"market-api-fixture:" + canonical).hexdigest()
+                raw_digest = sha256(raw_payload).hexdigest()
                 artifact = DataArtifact(
                     uri=f"memory://sha256/{raw_digest}",
                     sha256=raw_digest,
-                    byte_size=len(canonical),
+                    byte_size=len(raw_payload),
                     mime_type="application/json",
                     schema_version="market_api_fixture_v1",
                     source=source,
@@ -212,7 +219,7 @@ async def _seed_quote(
                     observed_at=observed_at,
                     available_at=visible_at,
                     received_at=received_at,
-                    revision="1",
+                    revision=revision,
                     quality_flags=list(quality_flags),
                     event_kind=event_kind,
                     content_hash=sha256(canonical).hexdigest(),
@@ -399,6 +406,32 @@ async def test_market_marks_session_quote_stale_and_never_fabricates_missing_pri
 
 
 @pytest.mark.asyncio
+async def test_market_excludes_quote_received_after_decision_time(
+    migrated_database_url: str,
+) -> None:
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    await _seed_quote(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        source="alpaca",
+        feed="iex",
+        delivery_mode="real_time",
+        observed_at=_DECISION_TIME - timedelta(seconds=10),
+        available_at=_DECISION_TIME - timedelta(seconds=5),
+        received_at=_DECISION_TIME + timedelta(seconds=1),
+    )
+    path = "/internal/v1/market"
+    app = _app(migrated_database_url)
+
+    async with _client(app) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    item = response.json()["data"]["items"][0]
+    assert item["price"] is None
+    assert item["quality_reasons"] == ["QUOTE_UNAVAILABLE"]
+
+
+@pytest.mark.asyncio
 async def test_market_keeps_intraday_quote_and_marks_close_source_divergence_partial(
     migrated_database_url: str,
 ) -> None:
@@ -468,10 +501,10 @@ async def test_market_does_not_compare_quotes_more_than_five_seconds_apart(
 
 
 @pytest.mark.asyncio
-async def test_market_uses_iex_quote_policy_without_reusing_delayed_sip_bars_policy(
+async def test_market_enforces_iex_quote_policy_and_rejects_delayed_sip_as_quote(
     migrated_database_url: str,
 ) -> None:
-    """The intraday Alpaca fallback is IEX; SIP remains historical-series authority."""
+    """The intraday Alpaca fallback is IEX; delayed SIP cannot enter latest quotes."""
     await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
     await _seed_quote(
         migrated_database_url,
@@ -482,15 +515,16 @@ async def test_market_uses_iex_quote_policy_without_reusing_delayed_sip_bars_pol
         last=Decimal("100.00"),
         observed_at=_DECISION_TIME - timedelta(seconds=2),
     )
-    await _seed_quote(
-        migrated_database_url,
-        instrument_id=_AAPL_ID,
-        source="alpaca",
-        feed="sip",
-        delivery_mode="delayed",
-        last=Decimal("999.00"),
-        observed_at=_DECISION_TIME - timedelta(seconds=1),
-    )
+    with pytest.raises(IntegrityError, match="intraday_delivery_pair"):
+        await _seed_quote(
+            migrated_database_url,
+            instrument_id=_AAPL_ID,
+            source="alpaca",
+            feed="sip",
+            delivery_mode="delayed",
+            last=Decimal("999.00"),
+            observed_at=_DECISION_TIME - timedelta(seconds=1),
+        )
     path = "/internal/v1/market"
     app = _app(migrated_database_url)
 
