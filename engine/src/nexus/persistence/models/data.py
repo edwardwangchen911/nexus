@@ -142,6 +142,25 @@ class PriceSeriesManifest(ImmutableCreatedAt, Base):
             name="fosun_delivery_mode",
         ),
         CheckConstraint("interval IN ('1Min', '1Day')", name="interval_allowed"),
+        CheckConstraint(
+            "num_nonnulls(provider_capability_id,provider_status_id,"
+            "provider_status_version,provider_contract_hash,provider_authorized_at) "
+            "IN (0,5)",
+            name="provider_binding_complete",
+        ),
+        CheckConstraint(
+            "source = 'fosun' OR num_nonnulls(provider_capability_id,provider_status_id,"
+            "provider_status_version,provider_contract_hash,provider_authorized_at) = 0",
+            name="provider_binding_fosun_only",
+        ),
+        CheckConstraint(
+            "provider_status_version IS NULL OR provider_status_version > 0",
+            name="provider_status_version_positive",
+        ),
+        CheckConstraint(
+            "provider_contract_hash IS NULL OR provider_contract_hash ~ '^[0-9a-f]{64}$'",
+            name="provider_contract_hash_canonical",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
@@ -164,6 +183,21 @@ class PriceSeriesManifest(ImmutableCreatedAt, Base):
     start_at: Mapped[datetime] = mapped_column(UTCDateTime())
     end_at: Mapped[datetime] = mapped_column(UTCDateTime())
     row_count: Mapped[int] = mapped_column(BigInteger)
+    provider_capability_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "provider_capabilities.id",
+            name="fk_price_series_manifests_provider_capability",
+        )
+    )
+    provider_status_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "integration_status.id",
+            name="fk_price_series_manifests_provider_status",
+        )
+    )
+    provider_status_version: Mapped[int | None] = mapped_column(Integer)
+    provider_contract_hash: Mapped[str | None] = mapped_column(String(64))
+    provider_authorized_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class PriceBarRecord(ImmutableCreatedAt, Base):
@@ -226,8 +260,13 @@ class PriceBarSetAuthority(ImmutableCreatedAt, Base):
             "content_hash",
             name="uq_price_bar_set_authorities_id_source_hash",
         ),
-        CheckConstraint("hash_version = 'price_bar_set_sha256_v1'", name="hash_version_v1"),
-        CheckConstraint("policy_version = 'agent_price_authority_v1'", name="policy_version_v1"),
+        CheckConstraint(
+            "(hash_version = 'price_bar_set_sha256_v1' "
+            "AND policy_version = 'agent_price_authority_v1') OR "
+            "(hash_version = 'price_bar_set_sha256_v2' "
+            "AND policy_version = 'agent_price_authority_v2')",
+            name="hash_policy_version_tuple",
+        ),
         CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
         CheckConstraint("byte_length > 0", name="byte_length_positive"),
         CheckConstraint("bar_count BETWEEN 1 AND 10000", name="bar_count_bounded"),
@@ -281,10 +320,11 @@ class IntradayBarSetAuthority(ImmutableCreatedAt, Base):
             name="uq_intraday_bar_set_authorities_id_source_hash",
         ),
         CheckConstraint(
-            "hash_version = 'intraday_bar_set_sha256_v1'", name="hash_version_v1"
-        ),
-        CheckConstraint(
-            "policy_version = 'intraday_monitor_authority_v1'", name="policy_version_v1"
+            "(hash_version = 'intraday_bar_set_sha256_v1' "
+            "AND policy_version = 'intraday_monitor_authority_v1') OR "
+            "(hash_version = 'intraday_bar_set_sha256_v2' "
+            "AND policy_version = 'intraday_monitor_authority_v2')",
+            name="hash_policy_version_tuple",
         ),
         CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
         CheckConstraint("byte_length > 0", name="byte_length_positive"),

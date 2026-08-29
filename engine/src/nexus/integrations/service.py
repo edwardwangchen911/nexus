@@ -400,6 +400,7 @@ class IntegrationStatusService:
 def _is_valid_capability(capability: ProviderCapability, now: datetime) -> bool:
     return (
         _CONTRACT_HASH.fullmatch(capability.contract_hash) is not None
+        and capability.created_at <= now
         and capability.expires_at > now
     )
 

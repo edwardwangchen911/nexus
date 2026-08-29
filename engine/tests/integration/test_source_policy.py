@@ -13,7 +13,7 @@ from nexus.persistence.models.data import ProviderCapability
 from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.persistence.session import session_factory
 from nexus.providers.base import PriceBar, PriceSeries
-from nexus.quality.source_policy import select_price_series
+from nexus.quality.source_policy import load_fosun_market_admission, select_price_series
 from nexus.settings import EngineSettings
 
 INSTRUMENT_ID = UUID("29e18e7a-78fb-5fc1-a65a-6641fbc1cc64")
@@ -184,6 +184,95 @@ async def test_public_selector_falls_back_without_task5_capability(
         )
 
     assert result.selected == candidates[1]
+
+
+@pytest.mark.asyncio
+async def test_future_created_capability_cannot_authorize_past_decision(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        session.add(
+            ProviderCapability(
+                provider="fosun",
+                capability="READ_ONLY",
+                contract_hash="a" * 64,
+                expires_at=DECISION_TIME + timedelta(hours=2),
+                schema_version="1",
+                payload={"operation": "fosun_get_bars", "market_scope": "US"},
+                created_at=DECISION_TIME + timedelta(minutes=1),
+            )
+        )
+        session.add(
+            IntegrationStatus(
+                provider="fosun",
+                status="read_only",
+                admitted_contract_hash="a" * 64,
+                mode_changed_at=DECISION_TIME - timedelta(hours=1),
+            )
+        )
+        await session.commit()
+        candidates = (
+            _series("fosun", "100", contract_hash="a" * 64),
+            _series("alpaca", "100"),
+        )
+
+        result = await _select(session, candidates)
+
+    assert result.selected == candidates[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_created_at", "mode_changed_at"),
+    [
+        (
+            DECISION_TIME + timedelta(minutes=1),
+            DECISION_TIME - timedelta(hours=1),
+        ),
+        (
+            DECISION_TIME - timedelta(hours=2),
+            DECISION_TIME + timedelta(minutes=1),
+        ),
+    ],
+)
+async def test_future_status_cannot_authorize_past_market_decision(
+    migrated_database_url: str,
+    status_created_at: datetime,
+    mode_changed_at: datetime,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        session.add(
+            ProviderCapability(
+                provider="fosun",
+                capability="READ_ONLY",
+                contract_hash="a" * 64,
+                expires_at=DECISION_TIME + timedelta(hours=2),
+                schema_version="1",
+                payload={"operation": "fosun_get_bars", "market_scope": "US"},
+                created_at=DECISION_TIME - timedelta(hours=2),
+            )
+        )
+        session.add(
+            IntegrationStatus(
+                provider="fosun",
+                status="read_only",
+                admitted_contract_hash="a" * 64,
+                created_at=status_created_at,
+                mode_changed_at=mode_changed_at,
+            )
+        )
+        await session.commit()
+
+        admission = await load_fosun_market_admission(
+            session,
+            decision_time=DECISION_TIME,
+            operation="fosun_get_bars",
+            market_scope="US",
+        )
+
+    assert admission is None
 
 
 def _bar(

@@ -33,6 +33,21 @@ SOURCE_POLICY_PAYLOAD: dict[str, object] = {
     "alpaca": {"feed": "sip", "modes": ["delayed", "fixture"]},
     "fixture": {"mode": "fixture"},
 }
+SOURCE_POLICY_V2_ID = UUID("f780fa7f-9135-5004-ab21-d665ae7be24b")
+SOURCE_POLICY_V2_VERSION = "source_policy_v2"
+SOURCE_POLICY_V2_PAYLOAD: dict[str, object] = {
+    "selected_source": "fosun",
+    "fallback": "disabled",
+    "fosun": {
+        "feed": "l1",
+        "delivery_modes": ["real_time", "delayed"],
+        "adjustment": "raw",
+        "operation": "fosun_get_bars",
+        "market_scope": "US",
+    },
+    "alpaca": {"mode": "disabled"},
+    "purpose": "agent_price_and_daily_bars",
+}
 QUOTE_SOURCE_POLICY_ID = UUID("6d243c22-a020-5d1d-b884-e6240cc2d8bb")
 QUOTE_SOURCE_POLICY_KEY = "market_quote"
 QUOTE_SOURCE_POLICY_VERSION = "quote_source_policy_v1"
@@ -49,6 +64,20 @@ QUOTE_SOURCE_POLICY_PAYLOAD: dict[str, object] = {
     },
     "fixture": {"delivery_mode": "fixture"},
 }
+QUOTE_SOURCE_POLICY_V2_ID = UUID("15afb077-46c6-5eea-8307-a7d203d11c2d")
+QUOTE_SOURCE_POLICY_V2_VERSION = "quote_source_policy_v2"
+QUOTE_SOURCE_POLICY_V2_PAYLOAD: dict[str, object] = {
+    "selected_source": "fosun",
+    "fallback": "disabled",
+    "fosun": {
+        "feed": "l1",
+        "delivery_modes": ["unknown", "real_time", "delayed"],
+        "operation": "fosun_get_quotes",
+        "market_scope": "US",
+    },
+    "alpaca": {"mode": "disabled"},
+    "purpose": "display_only_last_price",
+}
 INTRADAY_SOURCE_POLICY_ID = UUID("8fab80c9-5b6a-5b2b-8f36-3b22319b54ef")
 INTRADAY_SOURCE_POLICY_KEY = "intraday_monitor"
 INTRADAY_SOURCE_POLICY_VERSION = "intraday_monitor_policy_v1"
@@ -64,6 +93,21 @@ INTRADAY_SOURCE_POLICY_PAYLOAD: dict[str, object] = {
         "delivery_modes": ["real_time", "delayed"],
     },
     "fixture": {"delivery_mode": "fixture"},
+    "purpose": "display_only_intraday_monitor",
+}
+INTRADAY_SOURCE_POLICY_V2_ID = UUID("9bd1eb52-5486-5f40-a3d8-06bd56f80b8d")
+INTRADAY_SOURCE_POLICY_V2_VERSION = "intraday_monitor_policy_v2"
+INTRADAY_SOURCE_POLICY_V2_PAYLOAD: dict[str, object] = {
+    "selected_source": "fosun",
+    "fallback": "disabled",
+    "fosun": {
+        "feed": "l1",
+        "delivery_modes": ["unknown", "real_time", "delayed"],
+        "adjustment": "raw",
+        "operation": "fosun_get_bars",
+        "market_scope": "US",
+    },
+    "alpaca": {"mode": "disabled"},
     "purpose": "display_only_intraday_monitor",
 }
 _PRIORITY = ("fosun", "alpaca", "fixture")
@@ -274,6 +318,8 @@ async def load_fosun_market_admission(
     if (
         status is None
         or status.status != "read_only"
+        or status.created_at > decision_time
+        or status.mode_changed_at > decision_time
         or authority is None
         or authority.schema_version != "1"
         or status.admitted_contract_hash != authority.contract_hash

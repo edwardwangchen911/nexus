@@ -8,12 +8,15 @@ from uuid import UUID
 import pytest
 from helpers.price_bar_authority import (
     AVAILABLE_AT,
+    FOSUN_AUTHORIZED_AT,
     INSTRUMENT_ID,
     MANIFEST_ID,
     OBSERVED_AT,
     RECEIVED_AT,
     clean_bar,
+    insert_fosun_authority_from_prepare,
     insert_valid_authority_from_prepare,
+    seed_fosun_price_candidate,
     seed_price_candidate,
     seed_price_candidate_in_reverse,
 )
@@ -51,7 +54,7 @@ SOURCE_POLICY_ID = UUID("3c60888d-e92d-5e04-913c-7d427004cfef")
 SELECTION_SNAPSHOT_ID = UUID("018f75b4-4d86-7c36-bc4c-cd71f2f64526")
 
 CANONICAL_MUTATIONS = (
-    ({"source": "fosun", "feed": "sip", "delivery_mode": "delayed"}, {}),
+    ({"source": "polygon", "feed": "sip", "delivery_mode": "delayed"}, {}),
     ({"feed": "iex"}, {}),
     ({"delivery_mode": "real_time"}, {}),
     ({"adjustment": "raw"}, {}),
@@ -255,7 +258,7 @@ PREPARE_REJECTIONS = (
     pytest.param({"feed": "iex"}, {}, 1, id="alpaca-non-sip"),
     pytest.param({"delivery_mode": "real_time"}, {}, 1, id="alpaca-not-delayed"),
     pytest.param(
-        {"source": "fosun", "feed": "sip", "delivery_mode": "delayed"},
+        {"source": "polygon", "feed": "sip", "delivery_mode": "delayed"},
         {},
         1,
         id="unapproved-source",
@@ -373,8 +376,8 @@ async def test_price_authority_selection_prefers_production_over_newer_fixture(
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    await seed_price_candidate(factory, manifest_id=MANIFEST_ID)
-    await insert_valid_authority_from_prepare(factory, MANIFEST_ID)
+    await seed_fosun_price_candidate(factory, manifest_id=MANIFEST_ID)
+    await insert_fosun_authority_from_prepare(factory, MANIFEST_ID)
     await seed_price_candidate(
         factory,
         manifest_id=MUTATED_MANIFEST_ID,
@@ -395,17 +398,22 @@ async def test_price_authority_selection_uses_available_at_desc_before_manifest_
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    await seed_price_candidate(factory, manifest_id=SECOND_MUTATED_MANIFEST_ID)
-    await insert_valid_authority_from_prepare(factory, SECOND_MUTATED_MANIFEST_ID)
-    await seed_price_candidate(
+    await seed_fosun_price_candidate(
+        factory,
+        manifest_id=SECOND_MUTATED_MANIFEST_ID,
+        provider_authorized_at=FOSUN_AUTHORIZED_AT,
+    )
+    await insert_fosun_authority_from_prepare(factory, SECOND_MUTATED_MANIFEST_ID)
+    await seed_fosun_price_candidate(
         factory,
         manifest_id=MUTATED_MANIFEST_ID,
+        provider_authorized_at=FOSUN_AUTHORIZED_AT + timedelta(hours=1),
         bar_overrides={
             "available_at": AVAILABLE_AT + timedelta(hours=1),
             "received_at": RECEIVED_AT + timedelta(hours=1),
         },
     )
-    await insert_valid_authority_from_prepare(factory, MUTATED_MANIFEST_ID)
+    await insert_fosun_authority_from_prepare(factory, MUTATED_MANIFEST_ID)
     assert (
         await _selected_price_manifest(factory, allow_fixture=False)
         == MUTATED_MANIFEST_ID
@@ -417,10 +425,10 @@ async def test_price_authority_selection_uses_manifest_id_desc_as_final_tie_brea
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    await seed_price_candidate(factory, manifest_id=MANIFEST_ID)
-    await insert_valid_authority_from_prepare(factory, MANIFEST_ID)
-    await seed_price_candidate(factory, manifest_id=MUTATED_MANIFEST_ID)
-    await insert_valid_authority_from_prepare(factory, MUTATED_MANIFEST_ID)
+    await seed_fosun_price_candidate(factory, manifest_id=MANIFEST_ID)
+    await insert_fosun_authority_from_prepare(factory, MANIFEST_ID)
+    await seed_fosun_price_candidate(factory, manifest_id=MUTATED_MANIFEST_ID)
+    await insert_fosun_authority_from_prepare(factory, MUTATED_MANIFEST_ID)
     assert (
         await _selected_price_manifest(factory, allow_fixture=False)
         == MUTATED_MANIFEST_ID

@@ -45,7 +45,7 @@ def test_0024_is_single_head_over_0023() -> None:
     config = Config("engine/alembic.ini")
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0026_intraday_review_hardening"]
+    assert script.get_heads() == ["0027_fosun_market_authority"]
     revision = script.get_revision("0024_broker_simulation")
     assert revision is not None
     assert revision.down_revision == "0023_evolution_authority"

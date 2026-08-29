@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.persistence.models.data import IntradayBarSetAuthority, PriceSeriesManifest
@@ -13,6 +13,9 @@ from nexus.quality.source_policy import INTRADAY_SOURCE_POLICY_ID
 
 HASH_VERSION = "intraday_bar_set_sha256_v1"
 POLICY_VERSION = "intraday_monitor_authority_v1"
+INTRADAY_SOURCE_POLICY_V2_ID = UUID("9bd1eb52-5486-5f40-a3d8-06bd56f80b8d")
+HASH_VERSION_V2 = "intraday_bar_set_sha256_v2"
+POLICY_VERSION_V2 = "intraday_monitor_authority_v2"
 
 
 @dataclass(frozen=True)
@@ -28,10 +31,18 @@ class IntradayBarSetPreparation:
 async def prepare_intraday_bar_set(
     session: AsyncSession, manifest_id: UUID
 ) -> IntradayBarSetPreparation | None:
+    source = await session.scalar(
+        select(PriceSeriesManifest.source).where(PriceSeriesManifest.id == manifest_id)
+    )
+    function = (
+        "nexus_prepare_intraday_bar_set_v2"
+        if source == "fosun"
+        else "nexus_prepare_intraday_bar_set"
+    )
     row = (
         (
             await session.execute(
-                text("SELECT * FROM nexus_prepare_intraday_bar_set(:manifest_id)"),
+                text(f"SELECT * FROM {function}(:manifest_id)"),
                 {"manifest_id": manifest_id},
             )
         )
@@ -48,6 +59,14 @@ async def finalize_intraday_bar_set(
     prepared = await prepare_intraday_bar_set(session, manifest.id)
     if prepared is None:
         return None
+    if manifest.source == "fosun":
+        source_policy_id = INTRADAY_SOURCE_POLICY_V2_ID
+        hash_version = HASH_VERSION_V2
+        policy_version = POLICY_VERSION_V2
+    else:
+        source_policy_id = INTRADAY_SOURCE_POLICY_ID
+        hash_version = HASH_VERSION
+        policy_version = POLICY_VERSION
     provider_object_id = f"intraday-bar-set:{manifest.id}"
     evidence = ResearchEvidenceRef(
         source=manifest.source,
@@ -63,12 +82,12 @@ async def finalize_intraday_bar_set(
     authority = IntradayBarSetAuthority(
         price_series_manifest_id=manifest.id,
         evidence_ref_id=evidence.id,
-        source_policy_id=INTRADAY_SOURCE_POLICY_ID,
+        source_policy_id=source_policy_id,
         source=manifest.source,
         provider_object_id=provider_object_id,
         revision=prepared.content_hash,
-        hash_version=HASH_VERSION,
-        policy_version=POLICY_VERSION,
+        hash_version=hash_version,
+        policy_version=policy_version,
         content_hash=prepared.content_hash,
         byte_length=prepared.byte_length,
         bar_count=prepared.bar_count,

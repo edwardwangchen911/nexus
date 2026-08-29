@@ -180,7 +180,7 @@ async def _drain_daily_queues(
                 worker_id=f"daily-fixture-{queue.value}-worker",
                 worker_started_at=now,
                 process_version="test-v1",
-                migration_head="0026_intraday_review_hardening",
+                migration_head="0027_fosun_market_authority",
                 clock=lambda: now,
                 claim_registered_only=True,
             )
@@ -534,7 +534,7 @@ async def test_general_root_materializes_provider_children_without_registering_h
         worker_id="daily-provider-materializer",
         worker_started_at=now,
         process_version="test-v1",
-        migration_head="0026_intraday_review_hardening",
+        migration_head="0027_fosun_market_authority",
         clock=lambda: now,
         claim_registered_only=True,
     )

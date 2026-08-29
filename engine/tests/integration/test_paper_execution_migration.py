@@ -99,7 +99,7 @@ async def _mutation_is_rejected(database_url: str) -> bool:
 def test_0020_is_the_single_head_after_task19() -> None:
     scripts = ScriptDirectory.from_config(_config())
 
-    assert scripts.get_heads() == ["0026_intraday_review_hardening"]
+    assert scripts.get_heads() == ["0027_fosun_market_authority"]
     revision = scripts.get_revision("0015_paper_execution")
     assert revision is not None
     assert revision.down_revision == "0014_paper"

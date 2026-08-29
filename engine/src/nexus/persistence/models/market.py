@@ -10,6 +10,7 @@ from sqlalchemy import (
     Date,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -195,6 +196,25 @@ class LatestQuote(ImmutableCreatedAt, Base):
             "AND data_artifact_id IS NULL)",
             name="evidence_state_consistent",
         ),
+        CheckConstraint(
+            "num_nonnulls(provider_capability_id,provider_status_id,"
+            "provider_status_version,provider_contract_hash,provider_authorized_at) "
+            "IN (0,5)",
+            name="provider_binding_complete",
+        ),
+        CheckConstraint(
+            "source = 'fosun' OR num_nonnulls(provider_capability_id,provider_status_id,"
+            "provider_status_version,provider_contract_hash,provider_authorized_at) = 0",
+            name="provider_binding_fosun_only",
+        ),
+        CheckConstraint(
+            "provider_status_version IS NULL OR provider_status_version > 0",
+            name="provider_status_version_positive",
+        ),
+        CheckConstraint(
+            "provider_contract_hash IS NULL OR provider_contract_hash ~ '^[0-9a-f]{64}$'",
+            name="provider_contract_hash_canonical",
+        ),
         Index(
             "ix_latest_quotes_observation_lookup",
             "instrument_id",
@@ -227,6 +247,21 @@ class LatestQuote(ImmutableCreatedAt, Base):
     data_artifact_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("data_artifacts.id", name="fk_latest_quotes_data_artifact")
     )
+    provider_capability_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "provider_capabilities.id",
+            name="fk_latest_quotes_provider_capability",
+        )
+    )
+    provider_status_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "integration_status.id",
+            name="fk_latest_quotes_provider_status",
+        )
+    )
+    provider_status_version: Mapped[int | None] = mapped_column(Integer)
+    provider_contract_hash: Mapped[str | None] = mapped_column(String(64))
+    provider_authorized_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class Watchlist(ImmutableCreatedAt, Base):

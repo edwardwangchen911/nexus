@@ -11,7 +11,9 @@ from sqlalchemy.sql import Select
 
 from nexus.market.price_bar_authority import (
     HASH_VERSION,
+    HASH_VERSION_V2,
     POLICY_VERSION,
+    POLICY_VERSION_V2,
     SOURCE_POLICY_ID,
     prepare_price_bar_set,
 )
@@ -31,16 +33,30 @@ from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.quality.source_policy import (
     SOURCE_POLICY_KEY,
     SOURCE_POLICY_PAYLOAD,
+    SOURCE_POLICY_V2_ID,
+    SOURCE_POLICY_V2_PAYLOAD,
+    SOURCE_POLICY_V2_VERSION,
     SOURCE_POLICY_VERSION,
 )
 
 
 def _runtime_eligible(manifest: PriceSeriesManifest, *, allow_fixture: bool) -> bool:
     if (
-        manifest.source == "alpaca"
-        and manifest.feed == "sip"
-        and manifest.delivery_mode == "delayed"
+        manifest.source == "fosun"
+        and manifest.feed == "l1"
+        and manifest.delivery_mode in {"real_time", "delayed"}
+        and manifest.adjustment == "raw"
         and manifest.interval == "1Day"
+        and all(
+            value is not None
+            for value in (
+                manifest.provider_capability_id,
+                manifest.provider_status_id,
+                manifest.provider_status_version,
+                manifest.provider_contract_hash,
+                manifest.provider_authorized_at,
+            )
+        )
     ):
         return True
     return (
@@ -65,7 +81,19 @@ def _authority_statement(
         SourcePolicyRecord,
     ]
 ]:
-    production = and_(
+    fosun = and_(
+        PriceSeriesManifest.source == "fosun",
+        PriceSeriesManifest.feed == "l1",
+        PriceSeriesManifest.delivery_mode.in_(("real_time", "delayed")),
+        PriceSeriesManifest.adjustment == "raw",
+        PriceSeriesManifest.interval == "1Day",
+        PriceSeriesManifest.provider_capability_id.is_not(None),
+        PriceSeriesManifest.provider_status_id.is_not(None),
+        PriceSeriesManifest.provider_status_version.is_not(None),
+        PriceSeriesManifest.provider_contract_hash.is_not(None),
+        PriceSeriesManifest.provider_authorized_at.is_not(None),
+    )
+    historical_alpaca = and_(
         PriceSeriesManifest.source == "alpaca",
         PriceSeriesManifest.feed == "sip",
         PriceSeriesManifest.delivery_mode == "delayed",
@@ -77,7 +105,31 @@ def _authority_statement(
         PriceSeriesManifest.delivery_mode == "fixture",
         PriceSeriesManifest.interval == "1Day",
     )
-    runtime_source = production if allow_fixture is False else or_(production, fixture)
+    runtime_source = fosun if allow_fixture is False else or_(fosun, fixture)
+    if allow_fixture is None:
+        runtime_source = or_(fosun, historical_alpaca, fixture)
+    v1_protocol = and_(
+        PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
+        PriceBarSetAuthority.hash_version == HASH_VERSION,
+        PriceBarSetAuthority.policy_version == POLICY_VERSION,
+        SourcePolicyRecord.id == SOURCE_POLICY_ID,
+        SourcePolicyRecord.key == SOURCE_POLICY_KEY,
+        SourcePolicyRecord.version == SOURCE_POLICY_VERSION,
+        SourcePolicyRecord.schema_version == "1",
+        SourcePolicyRecord.payload == SOURCE_POLICY_PAYLOAD,
+        or_(historical_alpaca, fixture),
+    )
+    v2_protocol = and_(
+        PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_V2_ID,
+        PriceBarSetAuthority.hash_version == HASH_VERSION_V2,
+        PriceBarSetAuthority.policy_version == POLICY_VERSION_V2,
+        SourcePolicyRecord.id == SOURCE_POLICY_V2_ID,
+        SourcePolicyRecord.key == SOURCE_POLICY_KEY,
+        SourcePolicyRecord.version == SOURCE_POLICY_V2_VERSION,
+        SourcePolicyRecord.schema_version == "2",
+        SourcePolicyRecord.payload == SOURCE_POLICY_V2_PAYLOAD,
+        fosun,
+    )
     return (
         select(
             PriceBarSetAuthority,
@@ -98,20 +150,17 @@ def _authority_statement(
             SourcePolicyRecord.id == PriceBarSetAuthority.source_policy_id,
         )
         .where(
-            PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
-            PriceBarSetAuthority.hash_version == HASH_VERSION,
-            PriceBarSetAuthority.policy_version == POLICY_VERSION,
-            SourcePolicyRecord.id == SOURCE_POLICY_ID,
-            SourcePolicyRecord.key == SOURCE_POLICY_KEY,
-            SourcePolicyRecord.version == SOURCE_POLICY_VERSION,
-            SourcePolicyRecord.schema_version == "1",
-            SourcePolicyRecord.payload == SOURCE_POLICY_PAYLOAD,
+            or_(v1_protocol, v2_protocol),
             PriceSeriesManifest.instrument == str(instrument_id),
             PriceBarSetAuthority.available_at <= selected_at,
             runtime_source,
         )
         .order_by(
-            case((PriceSeriesManifest.source == "alpaca", 0), else_=1),
+            case(
+                (PriceSeriesManifest.source == "fosun", 0),
+                (PriceSeriesManifest.source == "alpaca", 1),
+                else_=2,
+            ),
             PriceBarSetAuthority.available_at.desc(),
             PriceSeriesManifest.id.desc(),
         )
@@ -128,12 +177,44 @@ def _valid_owner(
     selected_at: datetime,
     allow_fixture: bool,
 ) -> bool:
+    v1_protocol = (
+        authority.source_policy_id == policy.id == SOURCE_POLICY_ID
+        and authority.hash_version == HASH_VERSION
+        and authority.policy_version == POLICY_VERSION
+        and policy.key == SOURCE_POLICY_KEY
+        and policy.version == SOURCE_POLICY_VERSION
+        and policy.schema_version == "1"
+        and policy.payload == SOURCE_POLICY_PAYLOAD
+        and (
+            (
+                manifest.source == "alpaca"
+                and manifest.feed == "sip"
+                and manifest.delivery_mode == "delayed"
+                and manifest.interval == "1Day"
+            )
+            or (
+                allow_fixture
+                and manifest.source == "fixture"
+                and bool(manifest.feed)
+                and manifest.delivery_mode == "fixture"
+                and manifest.interval == "1Day"
+            )
+        )
+    )
+    v2_protocol = (
+        authority.source_policy_id == policy.id == SOURCE_POLICY_V2_ID
+        and authority.hash_version == HASH_VERSION_V2
+        and authority.policy_version == POLICY_VERSION_V2
+        and policy.key == SOURCE_POLICY_KEY
+        and policy.version == SOURCE_POLICY_V2_VERSION
+        and policy.schema_version == "2"
+        and policy.payload == SOURCE_POLICY_V2_PAYLOAD
+        and _runtime_eligible(manifest, allow_fixture=False)
+    )
     return (
         authority.price_series_manifest_id == manifest.id
         and authority.evidence_ref_id == evidence.id
-        and authority.source_policy_id == policy.id == SOURCE_POLICY_ID
-        and authority.hash_version == HASH_VERSION
-        and authority.policy_version == POLICY_VERSION
+        and (v1_protocol or v2_protocol)
         and authority.source == manifest.source == evidence.source
         and authority.provider_object_id
         == evidence.provider_object_id
@@ -146,11 +227,6 @@ def _valid_owner(
         and evidence.location
         == f"db://price-bar-set/{manifest.id}@sha256:{authority.content_hash}"
         and manifest.instrument == str(instrument_id)
-        and policy.key == SOURCE_POLICY_KEY
-        and policy.version == SOURCE_POLICY_VERSION
-        and policy.schema_version == "1"
-        and policy.payload == SOURCE_POLICY_PAYLOAD
-        and _runtime_eligible(manifest, allow_fixture=allow_fixture)
     )
 
 

@@ -28,7 +28,7 @@ def test_0009_round_trips_from_0008_with_one_head(
     }
 
     assert ScriptDirectory.from_config(config).get_heads() == [
-        "0026_intraday_review_hardening"
+        "0027_fosun_market_authority"
     ]
     command.upgrade(config, "0008_diagnostics")
     assert optimization_tables.isdisjoint(_table_names(temporary_database_url))

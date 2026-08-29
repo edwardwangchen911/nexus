@@ -8,14 +8,17 @@ from hashlib import sha256
 from uuid import UUID
 
 from nexus.domain.ids import new_uuid7
+from nexus.market.price_bar_authority import finalize_price_bar_set
 from nexus.persistence.models.data import (
     DataArtifact,
     PriceBarRecord,
     PriceBarSetAuthority,
     PriceSeriesManifest,
+    ProviderCapability,
 )
 from nexus.persistence.models.market import Instrument
 from nexus.persistence.models.research import ResearchEvidenceRef
+from nexus.persistence.models.runtime import IntegrationStatus
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -24,6 +27,10 @@ MANIFEST_ID = UUID("018f75b4-4d86-7c36-bc4c-cd71f2f64521")
 OBSERVED_AT = datetime(2026, 8, 24, 20, tzinfo=UTC)
 AVAILABLE_AT = datetime(2026, 8, 24, 20, 15, tzinfo=UTC)
 RECEIVED_AT = datetime(2026, 8, 24, 20, 15, 1, tzinfo=UTC)
+FOSUN_AUTHORIZED_AT = RECEIVED_AT + timedelta(days=1)
+FOSUN_CAPABILITY_ID = UUID("018f75b4-4d86-7c36-bc4c-cd71f2f64530")
+FOSUN_STATUS_ID = UUID("018f75b4-4d86-7c36-bc4c-cd71f2f64531")
+FOSUN_CONTRACT_HASH = "f" * 64
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,62 @@ async def seed_price_candidate(
         manifest_overrides=manifest_overrides,
         bar_overrides=bar_overrides,
         reverse_bar_insertion=False,
+    )
+
+
+async def seed_fosun_price_candidate(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    manifest_id: UUID = MANIFEST_ID,
+    provider_authorized_at: datetime = FOSUN_AUTHORIZED_AT,
+    bar_overrides: Mapping[str, object] | None = None,
+) -> SeededPriceCandidate:
+    """Insert one authority-bound Fosun daily candidate for runtime-selection tests."""
+    async with factory() as session, session.begin():
+        if await session.get(ProviderCapability, FOSUN_CAPABILITY_ID) is None:
+            session.add(
+                ProviderCapability(
+                    id=FOSUN_CAPABILITY_ID,
+                    provider="fosun",
+                    capability="READ_ONLY",
+                    contract_hash=FOSUN_CONTRACT_HASH,
+                    expires_at=datetime(2027, 1, 1, tzinfo=UTC),
+                    schema_version="1",
+                    payload={
+                        "operation": "fosun_get_bars",
+                        "market_scope": "US",
+                        "delivery_mode": "real_time",
+                    },
+                )
+            )
+        if await session.get(IntegrationStatus, FOSUN_STATUS_ID) is None:
+            session.add(
+                IntegrationStatus(
+                    id=FOSUN_STATUS_ID,
+                    provider="fosun",
+                    status="read_only",
+                    last_success_at=provider_authorized_at,
+                    version=1,
+                    mode_changed_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    capability_invalidated_at=None,
+                    admitted_contract_hash=FOSUN_CONTRACT_HASH,
+                )
+            )
+    return await seed_price_candidate(
+        factory,
+        manifest_id=manifest_id,
+        source="fosun",
+        feed="l1",
+        delivery_mode="real_time",
+        adjustment="raw",
+        manifest_overrides={
+            "provider_capability_id": FOSUN_CAPABILITY_ID,
+            "provider_status_id": FOSUN_STATUS_ID,
+            "provider_status_version": 1,
+            "provider_contract_hash": FOSUN_CONTRACT_HASH,
+            "provider_authorized_at": provider_authorized_at,
+        },
+        bar_overrides=bar_overrides,
     )
 
 
@@ -239,6 +302,19 @@ async def insert_valid_authority_from_prepare(
         session.add(authority)
         await session.flush()
     return authority
+
+
+async def insert_fosun_authority_from_prepare(
+    factory: async_sessionmaker[AsyncSession], manifest_id: UUID
+) -> PriceBarSetAuthority:
+    """Finalize one v2 Fosun candidate through the production finalizer."""
+    async with factory() as session, session.begin():
+        manifest = await session.get(PriceSeriesManifest, manifest_id)
+        assert manifest is not None
+        finalized = await finalize_price_bar_set(session, manifest)
+        assert finalized is not None
+        authority, _ = finalized
+        return authority
 
 
 def clean_bar(*, manifest_id: UUID, session: date) -> PriceBarRecord:
