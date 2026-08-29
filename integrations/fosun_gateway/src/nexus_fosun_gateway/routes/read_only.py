@@ -26,6 +26,14 @@ Cursor = Annotated[
     str,
     StringConstraints(strict=True, pattern=r"^[0-9]+$", max_length=12),
 ]
+USCode = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        pattern=r"^us[A-Z][A-Z0-9.-]{0,14}$",
+        max_length=17,
+    ),
+]
 
 
 class RequestModel(BaseModel):
@@ -73,15 +81,21 @@ class CashFlowRequest(AccountPageRequest):
 
 
 class QuotesRequest(RequestModel):
-    codes: Annotated[tuple[str, ...], Field(min_length=1, max_length=50)]
+    codes: Annotated[tuple[USCode, ...], Field(min_length=1, max_length=50)]
+
+    @model_validator(mode="after")
+    def codes_are_unique_and_canonically_sorted(self) -> "QuotesRequest":
+        if len(set(self.codes)) != len(self.codes) or self.codes != tuple(sorted(self.codes)):
+            raise ValueError("quote codes must be unique and canonically sorted")
+        return self
 
 
 class BarsRequest(RequestModel):
-    code: str
+    code: USCode
     ktype: Literal["day", "minute"]
     start_time: datetime | None = None
     end_time: datetime | None = None
-    limit: Annotated[int, Field(ge=1, le=500)] = 100
+    limit: Annotated[StrictInt, Field(ge=1, le=500)] = 100
 
     @field_validator("start_time", "end_time")
     @classmethod
@@ -89,6 +103,18 @@ class BarsRequest(RequestModel):
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("bar time must be timezone-aware")
         return value
+
+    @model_validator(mode="after")
+    def bar_window_is_complete_and_ordered(self) -> "BarsRequest":
+        if (self.start_time is None) != (self.end_time is None):
+            raise ValueError("bar window boundaries must be supplied together")
+        if (
+            self.start_time is not None
+            and self.end_time is not None
+            and self.start_time > self.end_time
+        ):
+            raise ValueError("bar window must be ordered")
+        return self
 
 
 async def _execute(
@@ -120,6 +146,13 @@ async def _execute(
     body = b"".join(chunks)
     actor = await request.app.state.hmac_verifier.verify(request, body)
     request.state.verified_gateway_actor = actor
+    if operation not in actor.allowed_operations:
+        raise GatewayError(
+            "OPERATION_NOT_ALLOWED",
+            "Gateway operation is not available to this caller.",
+            status_code=404,
+            next_action="USE_AUTHORIZED_OPERATION",
+        )
     try:
         decoded = json.loads(body)
         if not isinstance(decoded, dict):

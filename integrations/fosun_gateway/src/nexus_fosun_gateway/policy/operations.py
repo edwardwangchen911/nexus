@@ -23,3 +23,18 @@ READ_ONLY_OPERATIONS: Final[frozenset[str]] = frozenset(
         "fosun_get_bars",
     }
 )
+
+BROKER_OPERATIONS: Final[frozenset[GatewayOperation]] = frozenset(
+    {
+        "fosun_sync_portfolio",
+        "fosun_list_orders",
+        "fosun_list_cash_flows",
+    }
+)
+
+MARKET_OPERATIONS: Final[frozenset[GatewayOperation]] = frozenset(
+    {
+        "fosun_get_quotes",
+        "fosun_get_bars",
+    }
+)

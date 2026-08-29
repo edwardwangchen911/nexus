@@ -45,9 +45,7 @@ class GatewayCommandResult(BaseModel):
     command_id: UUID
     outcome: GatewayOutcome
     safe_code: str = Field(min_length=1, max_length=64)
-    provider_order_digest: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    provider_order_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     as_of: datetime
 
     @field_validator("as_of")
@@ -125,9 +123,7 @@ class FixtureSimulationGatewayClient:
 class SimulationHttpAdmission(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    capability_status: Literal[
-        "SIMULATION_CONTRACT_ADMITTED", "SIMULATION_WRITE_ACTIVATED"
-    ]
+    capability_status: Literal["SIMULATION_CONTRACT_ADMITTED", "SIMULATION_WRITE_ACTIVATED"]
     subject: str = Field(min_length=1, max_length=255)
     valid_until: datetime
     artifact_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -249,19 +245,32 @@ class HttpSimulationGatewayClient:
         if nonce.version != 7 or request_id.version != 7:
             raise SimulationGatewayError("gateway identity generation failed")
         body_hash = hashlib.sha256(body).hexdigest()
-        canonical = "\n".join(("POST", path, str(timestamp), str(nonce), body_hash))
+        actor_id = "nexus-broker-worker"
+        canonical = "\n".join(
+            (
+                "hmac-v2",
+                "POST",
+                path,
+                str(timestamp),
+                str(nonce),
+                actor_id,
+                str(request_id),
+                body_hash,
+            )
+        )
         signature = base64.urlsafe_b64encode(
             hmac.new(self._secret.encode(), canonical.encode(), hashlib.sha256).digest()
         ).rstrip(b"=")
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "X-Nexus-Signature-Version": "hmac-v2",
             "X-Nexus-Key-Id": self._key_id,
             "X-Nexus-Timestamp": str(timestamp),
             "X-Nexus-Nonce": str(nonce),
             "X-Nexus-Body-SHA256": body_hash,
             "X-Nexus-Signature": signature.decode(),
-            "X-Nexus-Actor-Id": "nexus-broker-worker",
+            "X-Nexus-Actor-Id": actor_id,
             "X-Request-Id": str(request_id),
         }
         try:

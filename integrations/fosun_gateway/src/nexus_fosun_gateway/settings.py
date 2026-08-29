@@ -55,6 +55,22 @@ class GatewaySettings(BaseSettings):
         default=None,
         validation_alias="FOSUN_GATEWAY_HMAC_PREVIOUS_SECRET",
     )
+    market_gateway_hmac_current_key_id: str | None = Field(
+        default=None,
+        validation_alias="FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID",
+    )
+    market_gateway_hmac_current_secret: SecretStr | None = Field(
+        default=None,
+        validation_alias="FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET",
+    )
+    market_gateway_hmac_previous_key_id: str | None = Field(
+        default=None,
+        validation_alias="FOSUN_MARKET_GATEWAY_HMAC_PREVIOUS_KEY_ID",
+    )
+    market_gateway_hmac_previous_secret: SecretStr | None = Field(
+        default=None,
+        validation_alias="FOSUN_MARKET_GATEWAY_HMAC_PREVIOUS_SECRET",
+    )
     server_cert: Path | None = Field(
         default=None,
         validation_alias="FOSUN_GATEWAY_SERVER_CERT",
@@ -131,12 +147,16 @@ class GatewaySettings(BaseSettings):
 
     @model_validator(mode="after")
     def apply_environment_policy(self) -> Self:
+        if self.transport_mode == "read_only" and self.environment is not Environment.PRODUCTION:
+            raise ValueError("read_only transport requires the production mTLS environment")
         if self.environment is Environment.PRODUCTION:
             if (
                 self.capability is None
                 or self.transport_mode != "read_only"
                 or self.gateway_hmac_current_key_id is None
                 or self.gateway_hmac_current_secret is None
+                or self.market_gateway_hmac_current_key_id is None
+                or self.market_gateway_hmac_current_secret is None
                 or self.server_cert is None
                 or self.server_key is None
                 or self.server_client_ca is None
@@ -151,7 +171,7 @@ class GatewaySettings(BaseSettings):
                 raise ValueError(
                     "production settings require admitted read_only transport, TLS server "
                     "identity, an activation contract, provider config, and a current gateway "
-                    "HMAC identity"
+                    "broker and market HMAC identities"
                 )
         elif self.capability is None:
             self.capability = "READ_ONLY"
@@ -159,12 +179,14 @@ class GatewaySettings(BaseSettings):
             self.gateway_hmac_current_key_id = "fixture-gateway-current"
         if self.transport_mode == "fixture" and self.gateway_hmac_current_secret is None:
             self.gateway_hmac_current_secret = SecretStr("fixture-gateway-current-secret-32-bytes")
-        if (
-            self.transport_mode == "read_only"
-            and (
-                self.gateway_hmac_current_key_id is None
-                or self.gateway_hmac_current_secret is None
+        if self.transport_mode == "fixture" and self.market_gateway_hmac_current_key_id is None:
+            self.market_gateway_hmac_current_key_id = "fixture-market-gateway-current"
+        if self.transport_mode == "fixture" and self.market_gateway_hmac_current_secret is None:
+            self.market_gateway_hmac_current_secret = SecretStr(
+                "fixture-market-gateway-current-secret-32-bytes"
             )
+        if self.transport_mode == "read_only" and (
+            self.gateway_hmac_current_key_id is None or self.gateway_hmac_current_secret is None
         ):
             raise ValueError("read_only transport requires an explicit gateway HMAC identity")
         if (
@@ -176,20 +198,60 @@ class GatewaySettings(BaseSettings):
             self.gateway_hmac_previous_secret = SecretStr(
                 "fixture-gateway-previous-secret-32-bytes"
             )
-        if (self.gateway_hmac_previous_key_id is None) != (
-            self.gateway_hmac_previous_secret is None
-        ):
-            raise ValueError("previous gateway HMAC identity must be complete")
-        if self.gateway_hmac_previous_key_id == self.gateway_hmac_current_key_id:
-            raise ValueError("gateway HMAC key IDs must be distinct")
-        current_value = _strong_hmac_secret(self.gateway_hmac_current_secret)
-        previous_value = _strong_hmac_secret(self.gateway_hmac_previous_secret)
         if (
-            current_value is not None
-            and previous_value is not None
-            and hmac.compare_digest(current_value.encode(), previous_value.encode())
+            self.environment is Environment.TEST
+            and self.transport_mode == "fixture"
+            and self.market_gateway_hmac_previous_key_id is None
         ):
-            raise ValueError("gateway HMAC rotation secrets must be distinct")
+            self.market_gateway_hmac_previous_key_id = "fixture-market-gateway-previous"
+            self.market_gateway_hmac_previous_secret = SecretStr(
+                "fixture-market-gateway-previous-secret-32-bytes"
+            )
+        identities = (
+            (
+                "broker",
+                self.gateway_hmac_current_key_id,
+                self.gateway_hmac_current_secret,
+                self.gateway_hmac_previous_key_id,
+                self.gateway_hmac_previous_secret,
+            ),
+            (
+                "market",
+                self.market_gateway_hmac_current_key_id,
+                self.market_gateway_hmac_current_secret,
+                self.market_gateway_hmac_previous_key_id,
+                self.market_gateway_hmac_previous_secret,
+            ),
+        )
+        key_ids: list[str] = []
+        secrets: list[str] = []
+        for role, current_key_id, current_secret, previous_key_id, previous_secret in identities:
+            _validate_hmac_rotation(
+                role,
+                current_key_id,
+                current_secret,
+                previous_key_id,
+                previous_secret,
+            )
+            key_ids.extend(
+                key_id for key_id in (current_key_id, previous_key_id) if key_id is not None
+            )
+            secrets.extend(
+                value
+                for value in (
+                    _strong_hmac_secret(current_secret),
+                    _strong_hmac_secret(previous_secret),
+                )
+                if value is not None
+            )
+        if len(set(key_ids)) != len(key_ids):
+            raise ValueError("gateway HMAC key IDs must be unique across principals")
+        for index, secret in enumerate(secrets):
+            if any(
+                hmac.compare_digest(secret.encode(), other.encode())
+                for other in secrets[index + 1 :]
+            ):
+                raise ValueError("gateway HMAC secrets must be unique across principals")
         return self
 
     @classmethod
@@ -200,12 +262,16 @@ class GatewaySettings(BaseSettings):
                 "FOSUN_GATEWAY_CAPABILITY": "READ_ONLY",
                 "FOSUN_GATEWAY_TRANSPORT_MODE": "fixture",
                 "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "fixture-gateway-current",
-                "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": (
-                    "fixture-gateway-current-secret-32-bytes"
-                ),
+                "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": ("fixture-gateway-current-secret-32-bytes"),
                 "FOSUN_GATEWAY_HMAC_PREVIOUS_KEY_ID": "fixture-gateway-previous",
-                "FOSUN_GATEWAY_HMAC_PREVIOUS_SECRET": (
-                    "fixture-gateway-previous-secret-32-bytes"
+                "FOSUN_GATEWAY_HMAC_PREVIOUS_SECRET": ("fixture-gateway-previous-secret-32-bytes"),
+                "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID": ("fixture-market-gateway-current"),
+                "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET": (
+                    "fixture-market-gateway-current-secret-32-bytes"
+                ),
+                "FOSUN_MARKET_GATEWAY_HMAC_PREVIOUS_KEY_ID": ("fixture-market-gateway-previous"),
+                "FOSUN_MARKET_GATEWAY_HMAC_PREVIOUS_SECRET": (
+                    "fixture-market-gateway-previous-secret-32-bytes"
                 ),
             }
         )
@@ -218,3 +284,18 @@ def _strong_hmac_secret(secret: SecretStr | None) -> str | None:
     if value != value.strip() or len(value.encode()) < 32:
         raise ValueError("gateway HMAC secrets must be unpadded and at least 32 bytes")
     return value
+
+
+def _validate_hmac_rotation(
+    role: str,
+    current_key_id: str | None,
+    current_secret: SecretStr | None,
+    previous_key_id: str | None,
+    previous_secret: SecretStr | None,
+) -> None:
+    if (current_key_id is None) != (current_secret is None):
+        raise ValueError(f"current {role} gateway HMAC identity must be complete")
+    if (previous_key_id is None) != (previous_secret is None):
+        raise ValueError(f"previous {role} gateway HMAC identity must be complete")
+    if previous_key_id is not None and current_key_id is None:
+        raise ValueError(f"previous {role} gateway HMAC identity requires a current identity")

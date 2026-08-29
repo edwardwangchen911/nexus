@@ -8,7 +8,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 from nexus_fosun_gateway.main import create_gateway_app
-from nexus_fosun_gateway.security.hmac import GatewayHmacVerifier, ReplayCache, canonical_hmac_v1
+from nexus_fosun_gateway.security.hmac import GatewayHmacVerifier, ReplayCache, canonical_hmac_v2
 from nexus_fosun_gateway.settings import GatewaySettings
 from pydantic import ValidationError
 from read_only_helpers import (
@@ -21,15 +21,19 @@ from read_only_helpers import (
 )
 
 
-def test_gateway_hmac_v1_canonical_vector_matches_engine_semantics() -> None:
+def test_gateway_hmac_v2_binds_actor_and_request_id() -> None:
     """Query sorting, UTF-8 hashing, or encoding drift would break engine interoperability."""
     body = b'{"codes":["usAAPL"]}'
     nonce = "0198f7a0-2222-7777-8222-222222222299"
-    canonical = canonical_hmac_v1(
+    actor_id = "nexus-provider-worker"
+    request_id = "0198f7a0-2222-7777-8222-222222222298"
+    canonical = canonical_hmac_v2(
         "POST",
         "/internal/v1/read-only/fosun_get_quotes?tag=z&tag=a&space=%20",
         1787371200,
         nonce,
+        actor_id,
+        request_id,
         body,
     )
     signature = (
@@ -46,26 +50,32 @@ def test_gateway_hmac_v1_canonical_vector_matches_engine_semantics() -> None:
 
     assert canonical == "\n".join(
         (
+            "hmac-v2",
             "POST",
             "/internal/v1/read-only/fosun_get_quotes?space=%20&tag=a&tag=z",
             "1787371200",
             nonce,
+            actor_id,
+            request_id,
             "0652d23dbda3876a0be6b1d11dd1d1f54f602729dfd48192253fbcca453a7796",
         )
     )
-    assert signature == "JRGjN1VT_SLz6hH9BICxPmJ1Fd2hTWmq9w8c22M14LE"
-
+    assert signature == "9qIRmdspTkUqSILGnKytUmbioqQf547-S3oDjxlbFMQ"
 
 
 def test_current_and_previous_gateway_key_domains_authenticate(
     gateway_client: TestClient,
 ) -> None:
     """Dropping either configured rotation identity breaks zero-downtime rotation."""
-    current = _post_signed(gateway_client, "fosun_capabilities", {})
+    current = _post_signed(
+        gateway_client,
+        "fosun_sync_portfolio",
+        {"account_id": "synthetic-account-001", "read_kind": "cash"},
+    )
     previous = _post_signed(
         gateway_client,
-        "fosun_capabilities",
-        {},
+        "fosun_sync_portfolio",
+        {"account_id": "synthetic-account-001", "read_kind": "cash"},
         key_id=PREVIOUS_KEY_ID,
         secret=PREVIOUS_SECRET,
         nonce="0198f7a0-2222-7777-8222-222222222223",
@@ -73,7 +83,8 @@ def test_current_and_previous_gateway_key_domains_authenticate(
 
     assert current.status_code == 200
     assert previous.status_code == 200
-    assert current.json()["items"][0]["mode"] == "fixture"
+    assert current.json()["source_request_id"]
+    assert previous.json()["source_request_id"]
 
 
 def test_read_only_routes_reject_non_json_before_authentication(
@@ -140,12 +151,13 @@ def test_invalid_secret_configuration_cannot_initialize_hmac_authentication(
 
 def test_replay_and_expired_signatures_fail_closed(gateway_client: TestClient) -> None:
     """A replay or stale call must never reach the provider transport."""
-    first = _post_signed(gateway_client, "fosun_capabilities", {})
-    replay = _post_signed(gateway_client, "fosun_capabilities", {})
+    payload = {"account_id": "synthetic-account-001", "read_kind": "cash"}
+    first = _post_signed(gateway_client, "fosun_sync_portfolio", payload)
+    replay = _post_signed(gateway_client, "fosun_sync_portfolio", payload)
     expired = _post_signed(
         gateway_client,
-        "fosun_capabilities",
-        {},
+        "fosun_sync_portfolio",
+        payload,
         nonce="0198f7a0-2222-7777-8222-222222222224",
         timestamp=int(time.time()) - 61,
     )
@@ -158,17 +170,18 @@ def test_replay_and_expired_signatures_fail_closed(gateway_client: TestClient) -
 
 def test_bad_signature_does_not_consume_nonce(gateway_client: TestClient) -> None:
     """Failing before replay reservation lets a correctly signed retry use its nonce."""
+    payload = {"account_id": "synthetic-account-001", "read_kind": "cash"}
     bad = _post_signed(
         gateway_client,
-        "fosun_capabilities",
-        {},
+        "fosun_sync_portfolio",
+        payload,
         nonce="0198f7a0-2222-7777-8222-222222222225",
         signature="invalid",
     )
     good = _post_signed(
         gateway_client,
-        "fosun_capabilities",
-        {},
+        "fosun_sync_portfolio",
+        payload,
         nonce="0198f7a0-2222-7777-8222-222222222225",
     )
 
@@ -188,28 +201,29 @@ def test_replay_cache_capacity_rejects_churn_without_evicting_live_nonce() -> No
     )
 
     with TestClient(app) as client:
+        payload = {"account_id": "synthetic-account-001", "read_kind": "cash"}
         first = _post_signed(
             client,
-            "fosun_capabilities",
-            {},
+            "fosun_sync_portfolio",
+            payload,
             nonce="0198f7a0-2222-7777-8222-222222222251",
         )
         second = _post_signed(
             client,
-            "fosun_capabilities",
-            {},
+            "fosun_sync_portfolio",
+            payload,
             nonce="0198f7a0-2222-7777-8222-222222222252",
         )
         saturated = _post_signed(
             client,
-            "fosun_capabilities",
-            {},
+            "fosun_sync_portfolio",
+            payload,
             nonce="0198f7a0-2222-7777-8222-222222222253",
         )
         replay = _post_signed(
             client,
-            "fosun_capabilities",
-            {},
+            "fosun_sync_portfolio",
+            payload,
             nonce="0198f7a0-2222-7777-8222-222222222251",
         )
 
@@ -218,6 +232,7 @@ def test_replay_cache_capacity_rejects_churn_without_evicting_live_nonce() -> No
     assert saturated.status_code == 401
     assert replay.status_code == 401
     assert recording.calls == 2
+
 
 def test_unverified_request_id_header_is_not_reflected(gateway_client: TestClient) -> None:
     """A caller-controlled header must not cross the safe error envelope unchanged."""

@@ -242,7 +242,18 @@ def _assert_independent_signature(request: httpx.Request) -> None:
     timestamp = request.headers["X-Nexus-Timestamp"]
     nonce = request.headers["X-Nexus-Nonce"]
     body_hash = hashlib.sha256(request.content).hexdigest()
-    canonical = "\n".join(("POST", request.url.raw_path.decode(), timestamp, nonce, body_hash))
+    canonical = "\n".join(
+        (
+            "hmac-v2",
+            "POST",
+            request.url.raw_path.decode(),
+            timestamp,
+            nonce,
+            "nexus-broker-worker",
+            str(REQUEST_ID),
+            body_hash,
+        )
+    )
     signature = (
         base64.urlsafe_b64encode(
             hmac.new(HMAC_SECRET.encode(), canonical.encode(), hashlib.sha256).digest()
@@ -251,6 +262,7 @@ def _assert_independent_signature(request: httpx.Request) -> None:
         .decode()
     )
     assert request.headers["X-Nexus-Key-Id"] == "synthetic-gateway-current"
+    assert request.headers["X-Nexus-Signature-Version"] == "hmac-v2"
     assert request.headers["X-Nexus-Body-SHA256"] == body_hash
     assert request.headers["X-Nexus-Signature"] == signature
     assert request.headers["X-Nexus-Actor-Id"] == "nexus-broker-worker"

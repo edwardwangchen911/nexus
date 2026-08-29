@@ -35,10 +35,13 @@ def build_transport(settings: GatewaySettings) -> FosunTransport:
         or settings.activation_contract_hash is None
     ):
         raise _sdk_not_admitted()
-    activation = evaluate_activation_paths(
-        settings.provider_manifest,
-        settings.activation_probe_artifact,
-    )
+    try:
+        activation = evaluate_activation_paths(
+            settings.provider_manifest,
+            settings.activation_probe_artifact,
+        )
+    except (OSError, ValueError):
+        raise _sdk_not_admitted() from None
     if (
         activation.status != "activated_read_only"
         or activation.capability_expires_at is None

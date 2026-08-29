@@ -193,6 +193,10 @@ def _production_settings(material: dict[str, Path]) -> GatewaySettings:
             "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
             "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-current",
             "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret-32-bytes",
+            "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-market-current",
+            "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET": (
+                "synthetic-market-current-secret-32-bytes"
+            ),
             "FOSUN_GATEWAY_SERVER_CERT": material["server_cert"],
             "FOSUN_GATEWAY_SERVER_KEY": material["server_key"],
             "FOSUN_GATEWAY_SERVER_CLIENT_CA": material["ca_cert"],

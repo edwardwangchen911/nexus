@@ -42,16 +42,11 @@ def normalize_provider_response(
             items = tuple(_cash_flow(item) for item in rows)
             return _list_page(items, data, request_id, received_at, payload)
         if operation == "fosun_get_quotes":
-            items = _quotes(data, received_at)
-            quality: Literal["PASS", "PARTIAL"] = (
-                "PARTIAL"
-                if any(isinstance(item, QuoteItem) and item.price is None for item in items)
-                else "PASS"
-            )
-            return _page(items, request_id, received_at, quality=quality)
+            items = _quotes(data, received_at, payload)
+            return _page(items, request_id, received_at, quality="PARTIAL")
         if operation == "fosun_get_bars":
-            items = _bars(data, payload)
-            return _page(items, request_id, received_at)
+            items = _bars(data, payload, received_at)
+            return _page(items, request_id, received_at, quality="PARTIAL")
     except (KeyError, TypeError, ValueError, InvalidOperation):
         raise _malformed() from None
     raise _malformed()
@@ -210,21 +205,31 @@ def _cash_flow(item: Mapping[str, object]) -> CashFlowItem:
     )
 
 
-def _quotes(data: Mapping[str, object], received_at: datetime) -> tuple[GatewayItem, ...]:
-    return tuple(
-        QuoteItem(
-            instrument_code=code,
-            price=_scaled_optional(quote.get("price"), quote.get("power")),
-            as_of=received_at,
-        )
-        for code, quote in data.items()
-        if isinstance(code, str) and isinstance(quote, Mapping)
-    )
+def _quotes(
+    data: Mapping[str, object],
+    received_at: datetime,
+    context: Mapping[str, object],
+) -> tuple[GatewayItem, ...]:
+    requested = _required_strings(context, "codes")
+    if set(data) - set(requested):
+        raise ValueError
+    items: list[GatewayItem] = []
+    for code in requested:
+        quote = data.get(code)
+        if quote is None:
+            price = None
+        elif isinstance(quote, Mapping):
+            price = _scaled_optional(quote.get("price"), quote.get("power"))
+        else:
+            raise ValueError
+        items.append(QuoteItem(instrument_code=code, price=price, as_of=received_at))
+    return tuple(items)
 
 
 def _bars(
     data: Mapping[str, object],
     context: Mapping[str, object],
+    received_at: datetime,
 ) -> tuple[GatewayItem, ...]:
     rows = data.get("data")
     if not isinstance(rows, list):
@@ -232,7 +237,10 @@ def _bars(
     power = data.get("power")
     code = _required_str(context, "code")
     interval = _required_str(context, "ktype")
-    return tuple(
+    limit = _context_limit(context)
+    if len(rows) > limit:
+        raise ValueError
+    items = tuple(
         BarItem(
             instrument_code=code,
             interval=interval,
@@ -245,6 +253,29 @@ def _bars(
         )
         for item in _mappings(rows)
     )
+    start = _optional_context_datetime(context.get("start_time"))
+    end = _optional_context_datetime(context.get("end_time"))
+    if (start is None) != (end is None):
+        raise ValueError
+    previous: datetime | None = None
+    for item in items:
+        if previous is not None and item.timestamp <= previous:
+            raise ValueError
+        if item.timestamp > received_at:
+            raise ValueError
+        if start is not None and end is not None and not start <= item.timestamp <= end:
+            raise ValueError
+        if not all(
+            value.is_finite() and value > 0
+            for value in (item.open, item.high, item.low, item.close)
+        ):
+            raise ValueError
+        if not item.volume.is_finite() or item.volume < 0:
+            raise ValueError
+        if item.low > min(item.open, item.close) or item.high < max(item.open, item.close):
+            raise ValueError
+        previous = item.timestamp
+    return items
 
 
 def _page(
@@ -356,6 +387,19 @@ def _required_str(item: Mapping[str, object], name: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError
     return value
+
+
+def _required_strings(item: Mapping[str, object], name: str) -> tuple[str, ...]:
+    value = item.get(name)
+    if not isinstance(value, tuple | list) or not value:
+        raise ValueError
+    if not all(isinstance(element, str) and element for element in value):
+        raise ValueError
+    return tuple(cast("tuple[str, ...] | list[str]", value))
+
+
+def _optional_context_datetime(value: object) -> datetime | None:
+    return None if value is None else _aware_datetime(value)
 
 
 def _decimal(item: Mapping[str, object], name: str) -> Decimal:

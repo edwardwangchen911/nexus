@@ -8,7 +8,7 @@ from read_only_transport_cases import (
     test_current_and_previous_gateway_key_domains_authenticate as test_current_and_previous_gateway_key_domains_authenticate,  # noqa: E501
 )
 from read_only_transport_cases import (
-    test_gateway_hmac_v1_canonical_vector_matches_engine_semantics as test_gateway_hmac_v1_canonical_vector_matches_engine_semantics,  # noqa: E501
+    test_gateway_hmac_v2_binds_actor_and_request_id as test_gateway_hmac_v2_binds_actor_and_request_id,  # noqa: E501
 )
 from read_only_transport_cases import (
     test_invalid_secret_configuration_cannot_initialize_hmac_authentication as test_invalid_secret_configuration_cannot_initialize_hmac_authentication,  # noqa: E501

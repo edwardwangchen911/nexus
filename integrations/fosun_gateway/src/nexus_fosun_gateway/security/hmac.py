@@ -1,4 +1,4 @@
-"""Gateway-local HMAC v1 verification with bounded in-process replay protection."""
+"""Gateway-local HMAC v2 verification with principal-bound authorization."""
 
 import asyncio
 import base64
@@ -14,17 +14,24 @@ from uuid import UUID
 from fastapi import Request
 
 from nexus_fosun_gateway.domain import GatewayError
+from nexus_fosun_gateway.policy.operations import (
+    BROKER_OPERATIONS,
+    MARKET_OPERATIONS,
+    GatewayOperation,
+)
 from nexus_fosun_gateway.settings import GatewaySettings
 
 _SIGNATURE_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _MAX_HMAC_AGE_SECONDS = 60
 
 
-def canonical_hmac_v1(
+def canonical_hmac_v2(
     method: str,
     path_and_query: str,
     timestamp: int,
     nonce: str,
+    actor_id: str,
+    request_id: str,
     body: bytes,
 ) -> str:
     parsed = urlsplit(path_and_query)
@@ -38,7 +45,16 @@ def canonical_hmac_v1(
     query = "&".join(f"{key}={value}" for key, value in pairs)
     normalized = parsed.path if not query else f"{parsed.path}?{query}"
     return "\n".join(
-        (method.upper(), normalized, str(timestamp), nonce, hashlib.sha256(body).hexdigest())
+        (
+            "hmac-v2",
+            method.upper(),
+            normalized,
+            str(timestamp),
+            nonce,
+            actor_id,
+            request_id,
+            hashlib.sha256(body).hexdigest(),
+        )
     )
 
 
@@ -47,6 +63,14 @@ class VerifiedGatewayActor:
     actor_id: str
     request_id: UUID
     key_id: str
+    allowed_operations: frozenset[GatewayOperation]
+
+
+@dataclass(frozen=True)
+class _VerificationIdentity:
+    actor_id: str
+    secret: str
+    allowed_operations: frozenset[GatewayOperation]
 
 
 class ReplayCache:
@@ -79,6 +103,7 @@ class GatewayHmacVerifier:
 
     async def verify(self, request: Request, body: bytes) -> VerifiedGatewayActor:
         required = (
+            "X-Nexus-Signature-Version",
             "X-Nexus-Key-Id",
             "X-Nexus-Timestamp",
             "X-Nexus-Nonce",
@@ -90,6 +115,8 @@ class GatewayHmacVerifier:
         values = {name: request.headers.get(name) for name in required}
         if any(value is None or value == "" for value in values.values()):
             raise _unauthenticated()
+        if values["X-Nexus-Signature-Version"] != "hmac-v2":
+            raise _unauthenticated()
         timestamp = _parse_timestamp(values["X-Nexus-Timestamp"])
         now = time.time()
         if timestamp is None or abs(int(now) - timestamp) > _MAX_HMAC_AGE_SECONDS:
@@ -99,8 +126,11 @@ class GatewayHmacVerifier:
         if nonce is None or request_id is None:
             raise _unauthenticated()
         key_id = values["X-Nexus-Key-Id"]
-        secret = self._verification_secret(key_id)
-        if key_id is None or secret is None:
+        identity = self._verification_identity(key_id)
+        if key_id is None or identity is None:
+            raise _unauthenticated()
+        actor_id = values["X-Nexus-Actor-Id"]
+        if actor_id is None or not hmac.compare_digest(actor_id, identity.actor_id):
             raise _unauthenticated()
         supplied_hash = values["X-Nexus-Body-SHA256"]
         body_hash = hashlib.sha256(body).hexdigest()
@@ -113,35 +143,69 @@ class GatewayHmacVerifier:
         if path_and_query is None:
             raise _unauthenticated()
         try:
-            canonical = canonical_hmac_v1(
+            canonical = canonical_hmac_v2(
                 request.method,
                 path_and_query,
                 timestamp,
                 str(nonce),
+                actor_id,
+                str(request_id),
                 body,
             )
         except ValueError:
             raise _unauthenticated() from None
-        expected = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).digest()
+        expected = hmac.new(identity.secret.encode(), canonical.encode(), hashlib.sha256).digest()
         if not hmac.compare_digest(signature, expected):
             raise _unauthenticated()
         if not await self._replay_cache.reserve(key_id, str(nonce), now):
             raise _unauthenticated()
-        actor_id = values["X-Nexus-Actor-Id"]
-        if actor_id is None:
-            raise _unauthenticated()
-        return VerifiedGatewayActor(actor_id=actor_id, request_id=request_id, key_id=key_id)
+        return VerifiedGatewayActor(
+            actor_id=identity.actor_id,
+            request_id=request_id,
+            key_id=key_id,
+            allowed_operations=identity.allowed_operations,
+        )
 
-    def _verification_secret(self, key_id: str | None) -> str | None:
+    def _verification_identity(self, key_id: str | None) -> _VerificationIdentity | None:
         settings = self._settings
-        current_secret = settings.gateway_hmac_current_secret
-        if key_id == settings.gateway_hmac_current_key_id and current_secret is not None:
-            return current_secret.get_secret_value()
-        if (
-            key_id == settings.gateway_hmac_previous_key_id
-            and settings.gateway_hmac_previous_secret is not None
-        ):
-            return settings.gateway_hmac_previous_secret.get_secret_value()
+        principals = (
+            (
+                "nexus-broker-worker",
+                BROKER_OPERATIONS,
+                settings.gateway_hmac_current_key_id,
+                settings.gateway_hmac_current_secret,
+                settings.gateway_hmac_previous_key_id,
+                settings.gateway_hmac_previous_secret,
+            ),
+            (
+                "nexus-provider-worker",
+                MARKET_OPERATIONS,
+                settings.market_gateway_hmac_current_key_id,
+                settings.market_gateway_hmac_current_secret,
+                settings.market_gateway_hmac_previous_key_id,
+                settings.market_gateway_hmac_previous_secret,
+            ),
+        )
+        for (
+            actor_id,
+            operations,
+            current_key_id,
+            current_secret,
+            previous_key_id,
+            previous_secret,
+        ) in principals:
+            if key_id == current_key_id and current_secret is not None:
+                return _VerificationIdentity(
+                    actor_id,
+                    current_secret.get_secret_value(),
+                    operations,
+                )
+            if key_id == previous_key_id and previous_secret is not None:
+                return _VerificationIdentity(
+                    actor_id,
+                    previous_secret.get_secret_value(),
+                    operations,
+                )
         return None
 
 

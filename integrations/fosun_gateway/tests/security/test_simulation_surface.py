@@ -22,7 +22,19 @@ def _headers(path: str, body: bytes, *, nonce: int = 1) -> dict[str, str]:
     nonce_value = str(UUID(f"0198f7a0-2222-7777-8222-{nonce:012d}"))
     request_id = "0198f7a0-2222-7777-8222-222222222222"
     body_hash = hashlib.sha256(body).hexdigest()
-    canonical = "\n".join(("POST", path, str(issued_at), nonce_value, body_hash))
+    actor_id = "nexus-broker-worker"
+    canonical = "\n".join(
+        (
+            "hmac-v2",
+            "POST",
+            path,
+            str(issued_at),
+            nonce_value,
+            actor_id,
+            request_id,
+            body_hash,
+        )
+    )
     signature = (
         base64.urlsafe_b64encode(
             hmac.new(_SECRET.encode(), canonical.encode(), hashlib.sha256).digest()
@@ -32,12 +44,13 @@ def _headers(path: str, body: bytes, *, nonce: int = 1) -> dict[str, str]:
     )
     return {
         "Content-Type": "application/json",
+        "X-Nexus-Signature-Version": "hmac-v2",
         "X-Nexus-Key-Id": _KEY_ID,
         "X-Nexus-Timestamp": str(issued_at),
         "X-Nexus-Nonce": nonce_value,
         "X-Nexus-Body-SHA256": body_hash,
         "X-Nexus-Signature": signature,
-        "X-Nexus-Actor-Id": "nexus-broker-worker",
+        "X-Nexus-Actor-Id": actor_id,
         "X-Request-Id": request_id,
     }
 
@@ -104,9 +117,7 @@ def test_simulation_surface_requires_hmac_and_enforces_request_limit() -> None:
         GatewaySettings.for_test(), FixtureSimulationGatewayScript(case="acknowledged")
     )
     with TestClient(app) as client:
-        unauthenticated = client.post(
-            "/internal/v1/fosun-simulation/capabilities", json={}
-        )
+        unauthenticated = client.post("/internal/v1/fosun-simulation/capabilities", json={})
         oversized = _post(client, "capabilities", {"padding": "x" * 70_000}, nonce=2)
 
     assert unauthenticated.status_code == 401

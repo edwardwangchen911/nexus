@@ -26,6 +26,10 @@ CURRENT_KEY_ID = "fixture-gateway-current"
 CURRENT_SECRET = "fixture-gateway-current-secret-32-bytes"
 PREVIOUS_KEY_ID = "fixture-gateway-previous"
 PREVIOUS_SECRET = "fixture-gateway-previous-secret-32-bytes"
+MARKET_CURRENT_KEY_ID = "fixture-market-gateway-current"
+MARKET_CURRENT_SECRET = "fixture-market-gateway-current-secret-32-bytes"
+MARKET_PREVIOUS_KEY_ID = "fixture-market-gateway-previous"
+MARKET_PREVIOUS_SECRET = "fixture-market-gateway-previous-secret-32-bytes"
 NONCE = "0198f7a0-2222-7777-8222-222222222221"
 REQUEST_ID = "0198f7a0-2222-7777-8222-222222222222"
 
@@ -34,7 +38,6 @@ REQUEST_ID = "0198f7a0-2222-7777-8222-222222222222"
 def gateway_client() -> Iterator[TestClient]:
     with TestClient(create_gateway_app(GatewaySettings.for_test())) as client:
         yield client
-
 
 
 def _signed_headers(
@@ -46,10 +49,24 @@ def _signed_headers(
     nonce: str = NONCE,
     timestamp: int | None = None,
     signature: str | None = None,
+    actor_id: str = "nexus-broker-worker",
+    request_id: str = REQUEST_ID,
+    signature_version: str = "hmac-v2",
 ) -> dict[str, str]:
     issued_at = int(time.time()) if timestamp is None else timestamp
     body_hash = hashlib.sha256(body).hexdigest()
-    canonical = "\n".join(("POST", path, str(issued_at), nonce, body_hash))
+    canonical = "\n".join(
+        (
+            signature_version,
+            "POST",
+            path,
+            str(issued_at),
+            nonce,
+            actor_id,
+            request_id,
+            body_hash,
+        )
+    )
     calculated = (
         base64.urlsafe_b64encode(
             hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).digest()
@@ -59,13 +76,14 @@ def _signed_headers(
     )
     return {
         "Content-Type": "application/json",
+        "X-Nexus-Signature-Version": signature_version,
         "X-Nexus-Key-Id": key_id,
         "X-Nexus-Timestamp": str(issued_at),
         "X-Nexus-Nonce": nonce,
         "X-Nexus-Body-SHA256": body_hash,
         "X-Nexus-Signature": signature or calculated,
-        "X-Nexus-Actor-Id": "nexus-engine",
-        "X-Request-Id": REQUEST_ID,
+        "X-Nexus-Actor-Id": actor_id,
+        "X-Request-Id": request_id,
     }
 
 
@@ -77,8 +95,14 @@ def _post_signed(
 ):
     path = f"/internal/v1/read-only/{operation}"
     body = json.dumps(payload, separators=(",", ":")).encode()
+    if not ({"key_id", "secret", "actor_id"} & auth.keys()):
+        if operation in {"fosun_get_quotes", "fosun_get_bars"}:
+            auth.update(
+                key_id=MARKET_CURRENT_KEY_ID,
+                secret=MARKET_CURRENT_SECRET,
+                actor_id="nexus-provider-worker",
+            )
     return client.post(path, content=body, headers=_signed_headers(path, body, **auth))
-
 
 
 class RecordingTransport:

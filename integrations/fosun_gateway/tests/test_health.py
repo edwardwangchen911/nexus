@@ -55,6 +55,8 @@ def test_gateway_rejects_non_read_only_capability(capability: str) -> None:
         "FOSUN_GATEWAY_SERVER_CLIENT_CA",
         "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID",
         "FOSUN_GATEWAY_HMAC_CURRENT_SECRET",
+        "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID",
+        "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET",
         "FSOPENAPI_BASE_URL",
         "FSOPENAPI_API_KEY",
         "FSOPENAPI_CLIENT_PRIVATE_KEY",
@@ -121,12 +123,7 @@ def test_production_rejects_equal_current_and_previous_hmac_secrets() -> None:
 def test_development_read_only_mode_does_not_receive_fixture_hmac_defaults() -> None:
     """Switching transport mode must not carry fixture authentication into an SDK process."""
     with pytest.raises(ValidationError):
-        GatewaySettings.model_validate(
-            {
-                "NEXUS_ENV": "development",
-                "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
-            }
-        )
+        GatewaySettings.model_validate({**_production_settings(), "NEXUS_ENV": "development"})
 
 
 def _production_settings() -> dict[str, object]:
@@ -136,6 +133,8 @@ def _production_settings() -> dict[str, object]:
         "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
         "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "gateway-current",
         "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret-32-bytes",
+        "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID": "market-gateway-current",
+        "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET": ("synthetic-market-current-secret-32-bytes"),
         "FOSUN_GATEWAY_SERVER_CERT": "/run/secrets/synthetic-server-cert",
         "FOSUN_GATEWAY_SERVER_KEY": "/run/secrets/synthetic-server-key",
         "FOSUN_GATEWAY_SERVER_CLIENT_CA": "/run/secrets/synthetic-client-ca",

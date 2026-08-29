@@ -1,6 +1,9 @@
 {
   "case": "price_power",
   "operation": "fosun_get_quotes",
+  "request_payload": {
+    "codes": ["usAAPL"]
+  },
   "provider_response": {
     "code": 0,
     "requestId": "synthetic-request-price-power",

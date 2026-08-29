@@ -350,6 +350,7 @@ class SdkFosunTransport:
                 )
                 await self._sleeper(delay)
                 continue
+            self._require_active_capability()
             _LOGGER.info(
                 "provider_call",
                 extra={"operation": operation, "attempt": attempt, "outcome": "success"},

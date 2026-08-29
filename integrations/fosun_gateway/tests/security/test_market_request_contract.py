@@ -1,0 +1,86 @@
+"""Market routes accept only canonical bounded Fosun request shapes."""
+
+from collections.abc import Iterator
+
+import pytest
+from fastapi.testclient import TestClient
+from nexus_fosun_gateway.main import create_gateway_app
+from nexus_fosun_gateway.settings import GatewaySettings
+from read_only_helpers import _post_signed
+
+
+@pytest.fixture(name="gateway_client")
+def _gateway_client() -> Iterator[TestClient]:
+    with TestClient(create_gateway_app(GatewaySettings.for_test())) as client:
+        yield client
+
+
+@pytest.mark.parametrize(
+    ("codes", "nonce"),
+    [
+        (["AAPL"], "0198f7a0-2222-7777-8222-222222222301"),
+        (["usaapl"], "0198f7a0-2222-7777-8222-222222222302"),
+        (["usAAPL", "usAAPL"], "0198f7a0-2222-7777-8222-222222222303"),
+        (["usMSFT", "usAAPL"], "0198f7a0-2222-7777-8222-222222222304"),
+    ],
+)
+def test_quotes_require_unique_canonical_sorted_us_codes(
+    gateway_client: TestClient,
+    codes: list[str],
+    nonce: str,
+) -> None:
+    response = _post_signed(
+        gateway_client,
+        "fosun_get_quotes",
+        {"codes": codes},
+        nonce=nonce,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize(
+    ("payload", "nonce"),
+    [
+        (
+            {"code": "AAPL", "ktype": "day"},
+            "0198f7a0-2222-7777-8222-222222222311",
+        ),
+        (
+            {
+                "code": "usAAPL",
+                "ktype": "day",
+                "start_time": "2026-08-01T00:00:00Z",
+            },
+            "0198f7a0-2222-7777-8222-222222222312",
+        ),
+        (
+            {
+                "code": "usAAPL",
+                "ktype": "day",
+                "start_time": "2026-08-22T00:00:00Z",
+                "end_time": "2026-08-01T00:00:00Z",
+            },
+            "0198f7a0-2222-7777-8222-222222222313",
+        ),
+        (
+            {"code": "usAAPL", "ktype": "minute", "limit": True},
+            "0198f7a0-2222-7777-8222-222222222314",
+        ),
+    ],
+)
+def test_bars_require_canonical_code_paired_window_and_strict_limit(
+    gateway_client: TestClient,
+    payload: dict[str, object],
+    nonce: str,
+) -> None:
+    response = _post_signed(
+        gateway_client,
+        "fosun_get_bars",
+        payload,
+        nonce=nonce,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"

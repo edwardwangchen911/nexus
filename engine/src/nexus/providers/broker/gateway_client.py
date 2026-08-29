@@ -36,6 +36,8 @@ _PATHS: dict[GatewayOperation, str] = {
     "fosun_list_orders": "/internal/v1/read-only/fosun_list_orders",
     "fosun_list_cash_flows": "/internal/v1/read-only/fosun_list_cash_flows",
 }
+
+
 class FosunGatewayClient:
     """Expose only broker reads with compile-time operation paths and payloads."""
 
@@ -151,7 +153,19 @@ class FosunGatewayClient:
         if nonce.version != 7 or request_id.version != 7:
             raise GatewayClientError("gateway request identity generation failed")
         body_hash = hashlib.sha256(body).hexdigest()
-        canonical = "\n".join(("POST", path, str(timestamp), str(nonce), body_hash))
+        actor_id = "nexus-broker-worker"
+        canonical = "\n".join(
+            (
+                "hmac-v2",
+                "POST",
+                path,
+                str(timestamp),
+                str(nonce),
+                actor_id,
+                str(request_id),
+                body_hash,
+            )
+        )
         signature = base64.urlsafe_b64encode(
             hmac.new(
                 self._secret.encode("utf-8"),
@@ -162,12 +176,13 @@ class FosunGatewayClient:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "X-Nexus-Signature-Version": "hmac-v2",
             "X-Nexus-Key-Id": self._key_id,
             "X-Nexus-Timestamp": str(timestamp),
             "X-Nexus-Nonce": str(nonce),
             "X-Nexus-Body-SHA256": body_hash,
             "X-Nexus-Signature": signature.decode("ascii"),
-            "X-Nexus-Actor-Id": "nexus-broker-worker",
+            "X-Nexus-Actor-Id": actor_id,
             "X-Request-Id": str(request_id),
         }
         try:

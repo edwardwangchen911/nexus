@@ -80,6 +80,7 @@ flowchart LR
 现有 HMAC v1 未把 `actor_id` 与 `request_id` 纳入签名，不能作为 principal 授权依据。由于真实 SDK 尚未激活，本次直接关闭 v1 并使用 v2：
 
 ```text
+hmac-v2\n
 POST\n
 canonical_path_and_query\n
 unix_timestamp\n

@@ -31,14 +31,7 @@ def test_fixture_mode_never_imports_or_instantiates_fsopenapi(
 
 def test_read_only_mode_without_admission_returns_stable_error() -> None:
     """An unadmitted SDK must fail closed rather than fall back to fixtures."""
-    settings = GatewaySettings.model_validate(
-        {
-            "NEXUS_ENV": "development",
-            "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
-            "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-current",
-            "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret-32-bytes",
-        }
-    )
+    settings = _read_only_settings(MANIFEST_PATH)
 
     with pytest.raises(GatewayError) as exc_info:
         build_transport(settings)
@@ -226,16 +219,12 @@ def test_read_only_sdk_construction_forces_all_sdk_logging_off(
 
     class FakeSession:
         def request(self, *_args: object, **kwargs: object) -> object:
-            tls_calls.append(
-                ("request", kwargs.get("verify"), kwargs.get("allow_redirects"))
-            )
+            tls_calls.append(("request", kwargs.get("verify"), kwargs.get("allow_redirects")))
             return object()
 
     class FakeRequests:
         def post(self, *_args: object, **kwargs: object) -> object:
-            tls_calls.append(
-                ("session", kwargs.get("verify"), kwargs.get("allow_redirects"))
-            )
+            tls_calls.append(("session", kwargs.get("verify"), kwargs.get("allow_redirects")))
             return object()
 
     class FakeSdkClient:
@@ -321,14 +310,54 @@ async def test_activation_expiry_is_rechecked_after_queueing_before_provider_cal
     assert called is False
 
 
+@pytest.mark.asyncio
+async def test_activation_expiry_is_rechecked_after_provider_response() -> None:
+    expires_at = datetime(2026, 8, 27, 8, 0, tzinfo=UTC)
+    times = iter(
+        (
+            expires_at - timedelta(seconds=2),
+            expires_at - timedelta(seconds=1),
+            expires_at,
+        )
+    )
+    called = False
+
+    def list_accounts() -> object:
+        nonlocal called
+        called = True
+        return {"code": 0, "data": {"subAccounts": []}, "requestId": "synthetic"}
+
+    transport = SdkFosunTransport(
+        SimpleNamespace(account=SimpleNamespace(list_accounts=list_accounts)),
+        capability_expires_at=expires_at,
+        utc_clock=lambda: next(times),
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        await transport.execute("fosun_sync_accounts", {})
+
+    assert exc_info.value.code == "ACTIVATION_EXPIRED"
+    assert called is True
+
+
 def _read_only_settings(manifest_path: Path) -> GatewaySettings:
     return GatewaySettings.model_validate(
         {
-            "NEXUS_ENV": "development",
+            "NEXUS_ENV": "production",
+            "FOSUN_GATEWAY_CAPABILITY": "READ_ONLY",
             "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
             "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-current",
             "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret-32-bytes",
+            "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-market-current",
+            "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET": (
+                "synthetic-market-current-secret-32-bytes"
+            ),
+            "FOSUN_GATEWAY_SERVER_CERT": "/synthetic/server.crt",
+            "FOSUN_GATEWAY_SERVER_KEY": "/synthetic/server.key",
+            "FOSUN_GATEWAY_SERVER_CLIENT_CA": "/synthetic/client-ca.crt",
             "FOSUN_SDK_ADMITTED": True,
+            "FOSUN_ACTIVATION_PROBE_ARTIFACT": "/synthetic/missing-probe.json",
+            "FOSUN_ACTIVATION_CONTRACT_HASH": "a" * 64,
             "FSOPENAPI_BASE_URL": "https://provider.invalid",
             "FSOPENAPI_API_KEY": "synthetic-api-key",
             "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key",
@@ -402,10 +431,16 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
     activation = evaluate_activation(manifest_bytes, probe_bytes, checked_at=captured_at)
     assert activation.status == "activated_read_only"
     return {
-        "NEXUS_ENV": "development",
+        "NEXUS_ENV": "production",
+        "FOSUN_GATEWAY_CAPABILITY": "READ_ONLY",
         "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
         "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-current",
         "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret-32-bytes",
+        "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-market-current",
+        "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET": ("synthetic-market-current-secret-32-bytes"),
+        "FOSUN_GATEWAY_SERVER_CERT": "/synthetic/server.crt",
+        "FOSUN_GATEWAY_SERVER_KEY": "/synthetic/server.key",
+        "FOSUN_GATEWAY_SERVER_CLIENT_CA": "/synthetic/client-ca.crt",
         "FOSUN_SDK_ADMITTED": True,
         "FOSUN_ACTIVATION_PROBE_ARTIFACT": probe_path,
         "FOSUN_ACTIVATION_CONTRACT_HASH": activation.contract_hash,
