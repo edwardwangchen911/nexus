@@ -9,7 +9,7 @@
 
 ## 决策
 
-复星适配器运行为独立 `fosun-gateway` 进程，只有 `broker-worker` 可以通过独立 mTLS 客户端身份和 gateway HMAC 调用。Web/Agent/API 不持有 Provider 凭据、gateway server 证书、broker external-ID 密钥或任意网关路径选择能力。
+复星适配器运行为独立 `fosun-gateway` 进程。只有两个职责分离的调用方可以通过各自的 mTLS 客户端身份和 gateway HMAC v2 调用：`broker-worker` 消费账户域只读事实，`provider-worker` 消费美股行情域只读事实。Web/Agent/API 不持有 Provider 凭据、gateway server 证书、broker external-ID 密钥或任意网关路径选择能力。
 
 网关编译期只注册七个 `POST /internal/v1/read-only/*` 操作：
 
@@ -21,16 +21,24 @@
 6. `fosun_get_quotes`；
 7. `fosun_get_bars`。
 
-调用方不能传 URL、HTTP method、SDK method 名或任意 operation。不编入 generic proxy、订单创建/撤销/修改、模拟账户变更、订阅 CRUD 或 Webhook handler。当前 Engine gateway client 还进一步只消费组合、订单列表和现金流三个 broker 读取操作；行情操作由各自数据 authority 边界消费。
+调用方不能传 URL、HTTP method、SDK method 名或任意 operation。不编入 generic proxy、订单创建/撤销/修改、模拟账户变更、订阅 CRUD 或 Webhook handler。Gateway 由 HMAC key ID 派生固定 principal，并在 transport 前执行 operation allowlist：
+
+- `nexus-broker-worker` 只允许组合、订单列表和现金流三个 broker 读取操作；
+- `nexus-provider-worker` 只允许 quotes 与 bars 两个 market 读取操作；
+- capabilities 与 account discovery 不授予常驻 worker，未来需要时使用独立 bootstrap 身份。
+
+越权操作返回统一 404，不能到达 Provider transport。Engine 为两个 principal 使用互不复用的固定路径 client；行情调用还受 Provider capability、source policy 与调用前后 authority 复验约束。
 
 ## 密钥与运行域
 
-- Engine HMAC 与 gateway HMAC 是两组独立 current/previous 域；
-- broker-worker 持有 mTLS client cert/key/CA，gateway 持有 server cert/key/client CA；
+- Engine HMAC、broker gateway HMAC 与 market gateway HMAC 是三个独立轮换域；
+- broker-worker 与 provider-worker 各持有不同的 mTLS client cert/key/CA 和 current/previous HMAC 身份，gateway 持有 server cert/key/client CA；
+- HMAC v2 的签名覆盖 actor ID 与 request ID；actor 必须与 key ID 注册的 principal 完全一致，不能由请求头自报；
 - broker external-ID AEAD/blind-index 只在 broker-worker；
 - `FSOPENAPI_*` 与 provider manifest/admission 只在 gateway；
-- `app` Compose profile 不含 broker 代码与 secret，`broker` 必须显式选择；
+- `app` Compose profile 不含 broker/market gateway secret；`broker` 或 `provider` profile 必须显式选择；
 - production 不得在 SDK/gateway 失败时回退到 fixture。
+- `read_only` transport 只能在 production 且完整 mTLS 下启动；development/test 只能 fixture。
 
 ## 后果
 

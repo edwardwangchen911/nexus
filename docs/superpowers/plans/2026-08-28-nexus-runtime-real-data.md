@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12, Pydantic 2, httpx, FastAPI worker composition, PostgreSQL 17, MinIO, Docker Compose v2, pytest/respx/Hypothesis, Ruff, Mypy.
 
-**Spec:** `docs/superpowers/specs/2026-08-28-nexus-phase-3-broker-simulation-design.md`
+**Spec:** `docs/superpowers/specs/2026-08-22-nexus-ai-investment-platform-design.md`（本计划实现的是 Alpaca/SEC/FRED transport 基线；最终市场来源选择与复星主源运行时由 `docs/superpowers/specs/2026-08-29-nexus-fosun-market-primary-design.md` 冻结。）
 
 ## Global Constraints
 
