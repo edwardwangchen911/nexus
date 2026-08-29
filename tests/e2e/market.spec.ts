@@ -8,24 +8,24 @@ const item = {
   instrument_id: instrumentId,
   symbol: "AAPL",
   price: "227.160000000000",
-  source: "alpaca",
-  feed: "iex",
-  delivery_mode: "real_time",
+  source: "fosun",
+  feed: "l1",
+  delivery_mode: "unknown",
   as_of: "2026-08-21T20:00:00Z",
-  quality: "PASS",
-  quality_reasons: [],
+  quality: "PARTIAL",
+  quality_reasons: ["FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE"],
   watchlisted: false,
 };
 
 const selectedSeries = {
   instrument_id: instrumentId,
-  source: "alpaca",
-  feed: "sip",
-  delivery_mode: "delayed",
+  source: "fosun",
+  feed: "l1",
+  delivery_mode: "unknown",
   adjustment: "raw",
   interval: "1Day",
-  quality: "PASS",
-  quality_reasons: [],
+  quality: "PARTIAL",
+  quality_reasons: ["FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE"],
   bars: [
     {
       session: "2026-08-20",
@@ -54,13 +54,13 @@ const selectedSeries = {
 
 const intradayMonitor = {
   instrument_id: instrumentId,
-  status: "ready",
-  source: "alpaca",
-  feed: "iex",
-  delivery_mode: "real_time",
+  status: "partial",
+  source: "fosun",
+  feed: "l1",
+  delivery_mode: "unknown",
   last: "227.160000000000",
-  bid: "227.110000000000",
-  ask: "227.210000000000",
+  bid: null,
+  ask: null,
   trade_as_of: "2026-08-21T20:00:02Z",
   quote_as_of: "2026-08-21T20:00:01Z",
   bar_as_of: "2026-08-21T20:00:00Z",
@@ -71,7 +71,11 @@ const intradayMonitor = {
   quote_age_seconds: 14,
   bar_age_seconds: 15,
   sample_count: 4,
-  quality_reasons: [],
+  quality_reasons: [
+    "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",
+    "INTRADAY_BID_ASK_UNAVAILABLE",
+    "INTRADAY_DELIVERY_UNVERIFIED",
+  ],
   bars: ["19:57", "19:58", "19:59", "20:00"].map((time, index) => ({
     observed_at: `2026-08-21T${time}:00Z`,
     available_at: `2026-08-21T${time}:00Z`,
@@ -93,18 +97,24 @@ for (const viewport of [
     await installMarketFixtures(page);
     await page.goto("/market");
 
-    await expect(page.getByRole("region", { name: "AAPL 报价证据" })).toContainText("ALPACA");
-    await expect(page.getByRole("region", { name: "AAPL 报价证据" })).toContainText("实时");
-    await expect(page.getByRole("region", { name: "AAPL 盘中证据" })).toContainText("实时 IEX（仅 IEX）");
+    await expect(page.getByRole("region", { name: "AAPL 报价证据" })).toContainText("复星 L1（只读）");
+    await expect(page.getByRole("region", { name: "AAPL 报价证据" })).toContainText("实时性未获证明");
+    await expect(page.getByRole("region", { name: "AAPL 报价证据" })).toContainText("网关接收时间");
+    await expect(page.getByRole("region", { name: "AAPL 盘中证据" })).toContainText("复星 L1（只读）");
+    await expect(page.getByRole("region", { name: "AAPL 盘中证据" })).toContainText("盘口未提供");
+    await expect(page.getByRole("region", { name: "AAPL 盘中证据" })).not.toContainText("4.40 bps");
+    await expect(page.getByText("上游报价未提供成交时间").first()).toBeVisible();
+    await expect(page.getByText("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE").first()).toBeVisible();
     await expect(page.getByRole("table", { name: "AAPL 1 分钟行情数据" })).toContainText("227.500000000000");
     const intradayTableRight = page.getByRole("button", { name: "向右浏览 AAPL 盘中表格" });
     await intradayTableRight.focus();
     await expect(intradayTableRight).toBeFocused();
-    await expect(page.getByRole("region", { name: "AAPL OHLCV 证据" })).toContainText("ALPACA");
-    await expect(page.getByRole("region", { name: "AAPL OHLCV 证据" })).toContainText("延迟");
+    await expect(page.getByRole("region", { name: "AAPL OHLCV 证据" })).toContainText("复星 L1（只读）");
+    await expect(page.getByRole("region", { name: "AAPL OHLCV 证据" })).toContainText("实时性未获证明");
     await expect(page.getByRole("region", { name: "AAPL 价格图表" })).toBeVisible();
     await expect(page.locator(".price-chart__canvas canvas").first()).toBeVisible();
     await expect(page.getByRole("table", { name: "AAPL OHLCV 数据" })).toContainText("227.160000000000");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 
     const previous = page.getByRole("button", { name: "上一根 K 线" });
     await previous.focus();

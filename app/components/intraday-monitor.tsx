@@ -4,6 +4,11 @@ import { Activity, ChevronLeft, ChevronRight, Clock3, TriangleAlert } from "luci
 import { useRef } from "react";
 
 import type { components } from "../lib/generated/schema";
+import {
+  marketDeliveryModeLabel,
+  marketSourceLabel,
+} from "../lib/market-evidence-labels";
+import { MarketQualityReasons } from "./market-quality-reasons";
 
 export type IntradayMonitorData = components["schemas"]["IntradayMonitorResponse"];
 
@@ -44,9 +49,12 @@ export function IntradayMonitor({ symbol, monitor }: IntradayMonitorProps): Reac
 
       <div className="intraday-monitor__trace" aria-label="盘中来源与时效">
         <Activity aria-hidden="true" size={18} />
-        <strong>{intradaySourceLabel(monitor)}</strong>
-        <span>{deliveryModeLabel(monitor.delivery_mode)}</span>
+        <strong>{marketSourceLabel(monitor.source, monitor.feed)}</strong>
+        <span>{intradayDeliveryModeLabel(monitor)}</span>
         <span className="numeric-data">分钟截止 {formatUtc(monitor.bar_as_of)}</span>
+        {usesGatewayReceiptTime(monitor) ? (
+          <span className="numeric-data">网关接收时间 {formatUtc(gatewayReceiptTime(monitor))}</span>
+        ) : null}
         <span className="numeric-data">分钟年龄 {formatAge(monitor.bar_age_seconds)}</span>
         <span className="numeric-data">报价年龄 {formatAge(monitor.quote_age_seconds)}</span>
       </div>
@@ -55,15 +63,13 @@ export function IntradayMonitor({ symbol, monitor }: IntradayMonitorProps): Reac
         <Metric term="5 分钟变化" value={formatPercent(monitor.return_5m, true)} />
         <Metric term="30 分钟变化" value={formatPercent(monitor.return_30m, true)} />
         <Metric term="30 分钟振幅" value={formatPercent(monitor.range_30m, false)} />
-        <Metric term="买卖价差" value={formatBps(monitor.spread_bps)} />
+        <Metric term="买卖价差" value={formatSpread(monitor)} />
       </dl>
 
       {monitor.quality_reasons.length > 0 ? (
         <div className="intraday-monitor__reasons" aria-label={`${symbol} 盘中质量原因`}>
           <TriangleAlert aria-hidden="true" size={18} />
-          <ul>
-            {monitor.quality_reasons.map((reason) => <li key={reason}>{reason}</li>)}
-          </ul>
+          <MarketQualityReasons reasons={monitor.quality_reasons} />
         </div>
       ) : null}
 
@@ -145,9 +151,8 @@ function Metric({ term, value }: { term: string; value: string }): React.ReactEl
   return <div><dt>{term}</dt><dd className="numeric-data">{value}</dd></div>;
 }
 
-function intradaySourceLabel(monitor: IntradayMonitorData): string {
+function intradayDeliveryModeLabel(monitor: IntradayMonitorData): string {
   const { source, feed, delivery_mode: deliveryMode } = monitor;
-  if (!source || !feed) return "来源未选定";
   if (source === "alpaca" && feed === "iex" && deliveryMode === "real_time") {
     return "实时 IEX（仅 IEX）";
   }
@@ -155,16 +160,7 @@ function intradaySourceLabel(monitor: IntradayMonitorData): string {
     return "实时 SIP（全市场）";
   }
   if (source === "alpaca" && feed === "delayed_sip") return "延迟 SIP";
-  if (source === "fosun") return `FOSUN · ${feed.toUpperCase()}（只读）`;
-  if (source === "fixture") return `FIXTURE · ${feed.toUpperCase()}`;
-  return `${source.toUpperCase()} · ${feed.toUpperCase()}`;
-}
-
-function deliveryModeLabel(mode: IntradayMonitorData["delivery_mode"]): string {
-  if (mode === "real_time") return "实时口径";
-  if (mode === "delayed") return "延迟口径";
-  if (mode === "fixture") return "离线 Fixture";
-  return "实时性未声明";
+  return marketDeliveryModeLabel(deliveryMode);
 }
 
 function statusLabel(status: IntradayMonitorData["status"]): string {
@@ -196,6 +192,20 @@ function formatBps(value: string | null): string {
   if (value === null) return "证据不足";
   const parsed = Number(value);
   return Number.isFinite(parsed) ? `${parsed.toFixed(2)} bps` : "证据不足";
+}
+
+function formatSpread(monitor: IntradayMonitorData): string {
+  if (monitor.bid === null || monitor.ask === null) return "盘口未提供";
+  return formatBps(monitor.spread_bps);
+}
+
+function usesGatewayReceiptTime(monitor: IntradayMonitorData): boolean {
+  return monitor.source === "fosun"
+    && monitor.quality_reasons.includes("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE");
+}
+
+function gatewayReceiptTime(monitor: IntradayMonitorData): string | null {
+  return monitor.trade_as_of ?? monitor.quote_as_of ?? monitor.bar_as_of;
 }
 
 function formatAge(value: number | null | undefined): string {

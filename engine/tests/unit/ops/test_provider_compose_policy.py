@@ -39,6 +39,20 @@ def test_provider_worker_is_a_separate_explicit_profile_and_secret_domain() -> N
     assert "AGENT_RUNTIME_MODE" not in provider
     assert "OPENAI_" not in provider
     assert "NEXUS_ENGINE_HMAC" not in provider
+    assert "NEXUS_MARKET_PROVIDER=${NEXUS_MARKET_PROVIDER:-fosun}" in provider
+    assert "NEXUS_ALPACA_MARKET_MODE=${NEXUS_ALPACA_MARKET_MODE:-disabled}" in provider
+    for name in (
+        "FOSUN_MARKET_GATEWAY_BASE_URL",
+        "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID",
+        "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET",
+        "FOSUN_MARKET_GATEWAY_CLIENT_CERT",
+        "FOSUN_MARKET_GATEWAY_CLIENT_KEY",
+        "FOSUN_MARKET_GATEWAY_CLIENT_CA",
+    ):
+        assert f"- {name}" in provider
+    assert "NEXUS_BROKER_EXTERNAL_ID_" not in provider
+    assert "- FOSUN_GATEWAY_BASE_URL" not in provider
+    assert "- FOSUN_GATEWAY_CLIENT_CERT" not in provider
     for name in (
         "ALPACA_API_KEY_ID",
         "ALPACA_API_SECRET_KEY",
@@ -48,6 +62,30 @@ def test_provider_worker_is_a_separate_explicit_profile_and_secret_domain() -> N
         "FRED_API_KEY",
     ):
         assert f"- {name}" in provider
+
+
+def test_fosun_gateway_serves_provider_and_broker_profiles_with_separate_principals() -> None:
+    compose = (ROOT / "infra/compose.yaml").read_text()
+    gateway = _service_block(compose, "fosun-gateway")
+
+    assert 'profiles: ["provider", "broker"]' in gateway
+    for name in (
+        "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID",
+        "FOSUN_GATEWAY_HMAC_CURRENT_SECRET",
+        "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID",
+        "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET",
+        "FOSUN_MARKET_GATEWAY_HMAC_PREVIOUS_KEY_ID",
+        "FOSUN_MARKET_GATEWAY_HMAC_PREVIOUS_SECRET",
+    ):
+        assert f"- {name}" in gateway
+
+    for service in ("api", "worker"):
+        block = _service_block(compose, service)
+        assert "FOSUN_MARKET_GATEWAY_" not in block
+        assert "FOSUN_GATEWAY_CLIENT_" not in block
+
+    broker = _service_block(compose, "broker-worker")
+    assert "FOSUN_MARKET_GATEWAY_" not in broker
 
 
 def test_provider_worker_cannot_materialize_a_second_daily_root() -> None:

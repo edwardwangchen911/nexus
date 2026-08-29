@@ -5,8 +5,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
 import { IntradayMonitor, type IntradayMonitorData } from "../../components/intraday-monitor";
+import { MarketQualityReasons } from "../../components/market-quality-reasons";
 import { PriceChart } from "../../components/price-chart";
 import type { components } from "../../lib/generated/schema";
+import {
+  marketDeliveryModeLabel,
+  marketSourceLabel,
+} from "../../lib/market-evidence-labels";
 
 export type MarketItem = components["schemas"]["MarketItemResponse"];
 export type SelectedMarketSeries = components["schemas"]["SelectedMarketSeriesResponse"];
@@ -365,10 +370,10 @@ export function MarketPanel({
                     <h2>{selectedItem.symbol}</h2>
                   </div>
                   <dl>
-                    <EvidenceFact term="报价来源" value={selectedItem.source?.toUpperCase() ?? "未选定"} />
+                    <EvidenceFact term="报价来源" value={marketSourceLabel(selectedItem.source, selectedItem.feed)} />
                     <EvidenceFact term="Feed" value={selectedItem.feed?.toUpperCase() ?? "未选定"} />
-                    <EvidenceFact term="报价截止" value={formatUtc(selectedItem.as_of)} />
-                    <EvidenceFact term="实时性口径" value={deliveryModeLabel(selectedItem.delivery_mode)} />
+                    <EvidenceFact term={quoteEvidenceTimeTerm(selectedItem)} value={formatUtc(selectedItem.as_of)} />
+                    <EvidenceFact term="实时性口径" value={marketDeliveryModeLabel(selectedItem.delivery_mode)} />
                     <EvidenceFact term="报价质量" value={selectedItem.quality} />
                   </dl>
                   <div className="market-evidence-actions">
@@ -393,7 +398,7 @@ export function MarketPanel({
                 {qualityReasons(selectedSeriesForItem, selectedItem).length > 0 ? (
                   <div className="market-reasons" aria-label={`${selectedItem.symbol} 质量原因`}>
                     <TriangleAlert aria-hidden="true" size={18} />
-                    <ul>{qualityReasons(selectedSeriesForItem, selectedItem).map((reason) => <li key={reason}>{reason}</li>)}</ul>
+                    <MarketQualityReasons reasons={qualityReasons(selectedSeriesForItem, selectedItem)} />
                   </div>
                 ) : null}
 
@@ -498,7 +503,14 @@ function isSelectedEvidenceStale(series: SelectedMarketSeries | null, item: Mark
 }
 
 function sourceLabel(source: string | null, feed: string | null): string {
-  return source && feed ? `${source.toUpperCase()} · ${feed.toUpperCase()}` : "来源未选定";
+  return marketSourceLabel(source, feed);
+}
+
+function quoteEvidenceTimeTerm(item: MarketItem): string {
+  return item.source === "fosun"
+    && item.quality_reasons.includes("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE")
+    ? "网关接收时间"
+    : "报价截止";
 }
 
 type MarketLocationState = {
@@ -545,16 +557,6 @@ function saveMarketScrollY(scrollY: number): void {
   globalThis.history.replaceState(state, "", globalThis.location.href);
 }
 
-function deliveryModeLabel(mode: MarketItem["delivery_mode"]): string {
-  const labels: Record<MarketItem["delivery_mode"], string> = {
-    real_time: "实时",
-    delayed: "延迟（具体时长未声明）",
-    fixture: "离线 Fixture",
-    unknown: "未声明",
-  };
-  return labels[mode];
-}
-
 function formatUtc(value: string | null): string {
   if (!value) return "无";
   const parsed = new Date(value);
@@ -575,9 +577,9 @@ function HistoryEvidence({ symbol, series }: { symbol: string; series: SelectedM
         <h2>{symbol} 历史序列</h2>
       </div>
       <dl>
-        <EvidenceFact term="序列来源" value={series.source?.toUpperCase() ?? "未选定"} />
+        <EvidenceFact term="序列来源" value={marketSourceLabel(series.source, series.feed)} />
         <EvidenceFact term="Feed" value={series.feed?.toUpperCase() ?? "未选定"} />
-        <EvidenceFact term="实时性口径" value={series.delivery_mode ? deliveryModeLabel(series.delivery_mode) : "未声明"} />
+        <EvidenceFact term="实时性口径" value={marketDeliveryModeLabel(series.delivery_mode)} />
         <EvidenceFact term="周期" value={series.interval ?? "未选定"} />
         <EvidenceFact term="最新可用时间" value={formatUtc(latestBar?.available_at ?? null)} />
         <EvidenceFact term="最新观测时间" value={formatUtc(latestBar?.observed_at ?? null)} />

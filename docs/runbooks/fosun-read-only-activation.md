@@ -43,6 +43,26 @@ The configured provider base URL must be an absolute HTTPS URL without embedded 
 query, fragment, or redirect dependence; the admitted adapter forces certificate verification and
 rejects redirects on both frozen-SDK HTTP surfaces.
 
+## Runtime topology after admission
+
+Admission does not change the committed defaults or start any process. A later separately approved
+activation keeps `NEXUS_MARKET_PROVIDER=fosun`, `NEXUS_ALPACA_MARKET_MODE=disabled`, and uses two
+non-interchangeable gateway principals:
+
+- `provider-worker` receives only `FOSUN_MARKET_GATEWAY_*` client mTLS/HMAC settings and may call
+  `fosun_get_quotes` plus `fosun_get_bars`; it has no broker identity or account-ID encryption key;
+- `broker-worker` receives only the existing `FOSUN_GATEWAY_*` broker client identity and may call
+  the fixed portfolio/order/cash-flow read operations; it has no Provider queue or market identity;
+- `fosun-gateway` is available only in the explicit `provider` and `broker` Compose profiles and is
+  the sole process that receives `FSOPENAPI_*`, activation evidence, and the TLS server identity;
+- Web, API, the general worker and Agent receive neither client identity. Gateway route
+  authorization derives the principal from the signed key ID; an unsigned role claim cannot expand
+  operations.
+
+The tracked environment template contains names and safe-disabled defaults only. Populating those
+names, mounting certificates, changing permissions, starting the gateway against the real provider,
+or executing a probe remains approval-gated. There is no automatic fallback to Alpaca or fixture.
+
 ## Closed operation set and request budget
 
 The probe must cover exactly these eight metadata labels and no others:

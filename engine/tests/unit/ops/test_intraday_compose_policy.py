@@ -28,7 +28,7 @@ def test_intraday_monitor_is_only_configurable_in_provider_worker() -> None:
 
     assert "NEXUS_INTRADAY_MONITOR_MODE=${NEXUS_INTRADAY_MONITOR_MODE:-disabled}" in provider
     assert "NEXUS_INTRADAY_POLL_SECONDS=${NEXUS_INTRADAY_POLL_SECONDS:-15}" in provider
-    assert "NEXUS_INTRADAY_MAX_SYMBOLS=${NEXUS_INTRADAY_MAX_SYMBOLS:-30}" in provider
+    assert "NEXUS_INTRADAY_MAX_SYMBOLS=${NEXUS_INTRADAY_MAX_SYMBOLS:-10}" in provider
     assert "- ALPACA_INTRADAY_FEED" in provider
     assert "- ALPACA_INTRADAY_DELIVERY_MODE" in provider
 
@@ -49,7 +49,7 @@ def test_intraday_defaults_are_disabled_and_do_not_contain_credentials() -> None
 
     assert "NEXUS_INTRADAY_MONITOR_MODE=disabled" in environment
     assert "NEXUS_INTRADAY_POLL_SECONDS=15" in environment
-    assert "NEXUS_INTRADAY_MAX_SYMBOLS=30" in environment
+    assert "NEXUS_INTRADAY_MAX_SYMBOLS=10" in environment
     for key in INTRADAY_ENVIRONMENT_KEYS:
         assert environment.count(f"{key}=") == 1
     assert "NEXUS_INTRADAY_API_KEY" not in environment

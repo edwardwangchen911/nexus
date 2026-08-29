@@ -50,7 +50,7 @@ def test_compose_profiles_keep_broker_capability_out_of_the_app_profile() -> Non
     assert _service_profiles(compose, "api") == {"app"}
     assert _service_profiles(compose, "worker") == {"app"}
     assert _service_profiles(compose, "broker-worker") == {"broker"}
-    assert _service_profiles(compose, "fosun-gateway") == {"broker"}
+    assert _service_profiles(compose, "fosun-gateway") == {"provider", "broker"}
 
 
 def test_compose_worker_defaults_to_offline_fixture_runtime_but_is_overridable() -> None:
@@ -128,7 +128,12 @@ def _service_block(compose: str, service: str) -> str:
 
 
 def _service_environment(compose: str, service: str) -> set[str]:
-    return set(re.findall(r"(?m)^      - ([A-Z0-9_]+)$", _service_block(compose, service)))
+    return set(
+        re.findall(
+            r"(?m)^      - ([A-Z0-9_]+)(?:=.*)?$",
+            _service_block(compose, service),
+        )
+    )
 
 
 def _service_profiles(compose: str, service: str) -> set[str]:

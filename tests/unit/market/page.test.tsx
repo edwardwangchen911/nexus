@@ -196,7 +196,7 @@ describe("market vertical slice", () => {
     const historySeries = {
       ...selectedSeries,
       source: "fosun",
-      feed: "regular",
+      feed: "l1",
       delivery_mode: "real_time" as const,
     };
     render(
@@ -227,7 +227,7 @@ describe("market vertical slice", () => {
     expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent(
       "实时",
     );
-    expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("FOSUN");
+    expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("复星 L1（只读）");
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("实时");
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("2026-08-22 00:01:00 UTC");
     expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent("2026-08-21 20:00:00 UTC");
@@ -289,10 +289,48 @@ describe("market vertical slice", () => {
       />,
     );
 
+    expect(screen.getAllByText("来源数据相互冲突").length).toBeGreaterThan(0);
     expect(screen.getAllByText("SOURCE_CONFLICT").length).toBeGreaterThan(0);
     expect(screen.getByText("无法选定可靠价格")).toBeVisible();
     expect(screen.queryByRole("region", { name: "AAPL 价格图表" })).not.toBeInTheDocument();
     expect(onToggleWatchlist).not.toHaveBeenCalled();
+  });
+
+  it("labels a Fosun quote timestamp as gateway receipt evidence", () => {
+    const fosunItem: MarketItem = {
+      ...item,
+      source: "fosun",
+      feed: "l1",
+      delivery_mode: "unknown",
+      quality: "PARTIAL",
+      quality_reasons: ["FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE"],
+    };
+
+    render(
+      <MarketPanel
+        state="partial"
+        items={[fosunItem]}
+        selectedSeries={null}
+        selectedInstrumentId={fosunItem.instrument_id}
+        watchlistOnly={false}
+        nextCursor={null}
+        refreshing={false}
+        pendingInstrumentId={null}
+        notice={null}
+        onRefresh={vi.fn()}
+        onSelect={vi.fn()}
+        onToggleWatchlist={vi.fn()}
+        onToggleWatchlistOnly={vi.fn()}
+        onNextPage={vi.fn()}
+      />,
+    );
+
+    const quote = screen.getByRole("region", { name: "AAPL 报价证据" });
+    expect(quote).toHaveTextContent("复星 L1（只读）");
+    expect(quote).toHaveTextContent("网关接收时间");
+    expect(quote).toHaveTextContent("实时性未获证明");
+    expect(screen.getByText("上游报价未提供成交时间")).toBeVisible();
+    expect(screen.getByText("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE")).toBeVisible();
   });
 
   it("keeps stale data visible without causing a business action", () => {

@@ -83,6 +83,7 @@ describe("IntradayMonitor", () => {
 
     expect(screen.getByText("证据不足，暂不绘制趋势图。")).toBeVisible();
     expect(screen.getAllByText("证据不足").length).toBeGreaterThan(0);
+    expect(screen.getByText("实时性不可用")).toBeVisible();
     expect(screen.getByText("INSUFFICIENT_CONTIGUOUS_BARS")).toBeVisible();
     expect(screen.queryByTestId("intraday-chart")).not.toBeInTheDocument();
   });
@@ -102,5 +103,37 @@ describe("IntradayMonitor", () => {
     expect(region).toHaveTextContent("延迟 SIP");
     expect(region).toHaveTextContent("非交易时段");
     expect(region).not.toHaveTextContent(/交易建议|买入信号|卖出信号|加仓|减仓/);
+  });
+
+  it("labels Fosun receipt-time evidence and never invents a bid/ask spread", () => {
+    render(<IntradayMonitor
+      symbol="AAPL"
+      monitor={{
+        ...monitor,
+        status: "partial",
+        source: "fosun",
+        feed: "l1",
+        delivery_mode: "unknown",
+        bid: null,
+        ask: null,
+        spread_bps: "4.402300000000",
+        trade_as_of: "2026-08-21T20:00:03Z",
+        quality_reasons: [
+          "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",
+          "INTRADAY_BID_ASK_UNAVAILABLE",
+          "INTRADAY_DELIVERY_UNVERIFIED",
+        ],
+      }}
+    />);
+
+    const region = screen.getByRole("region", { name: "AAPL 盘中证据" });
+    expect(region).toHaveTextContent("复星 L1（只读）");
+    expect(region).toHaveTextContent("实时性未获证明");
+    expect(region).toHaveTextContent("盘口未提供");
+    expect(region).not.toHaveTextContent("4.40 bps");
+    expect(region).toHaveTextContent("分钟截止 2026-08-21 20:00:00 UTC");
+    expect(region).toHaveTextContent("网关接收时间 2026-08-21 20:00:03 UTC");
+    expect(region).toHaveTextContent("上游报价未提供成交时间");
+    expect(region).toHaveTextContent("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE");
   });
 });
