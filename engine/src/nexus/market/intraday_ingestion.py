@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.canonical import canonical_json
 from nexus.domain.ids import new_uuid7
+from nexus.jobs.market_authority import ProviderMarketBinding
 from nexus.market.ingestion import MarketObjectStore, serialize_price_bars
 from nexus.market.intraday_authority import finalize_intraday_bar_set
 from nexus.persistence.models.data import (
@@ -66,6 +68,7 @@ def canonical_quote_observation(
     available_at: datetime,
     received_at: datetime,
     revision: str,
+    quality_flags: tuple[str, ...] = (),
 ) -> bytes:
     """Return the exact canonical bytes covered by one observation hash."""
     return canonical_json(
@@ -82,6 +85,7 @@ def canonical_quote_observation(
             "available_at": _utc_text(available_at),
             "received_at": _utc_text(received_at),
             "revision": revision,
+            "quality_flags": sorted(quality_flags),
         }
     ).encode("utf-8")
 
@@ -92,11 +96,20 @@ async def ingest_intraday_snapshot(
     batch: SnapshotBatch,
     *,
     raw_artifact: DataArtifact | None = None,
+    quote_binding: ProviderMarketBinding | None = None,
+    bar_binding: ProviderMarketBinding | None = None,
+    bar_bindings: Mapping[UUID, ProviderMarketBinding] | None = None,
     commit: bool = True,
 ) -> IntradayIngestionResult:
     """Archive raw bytes, publish normalized objects, then expose DB authorities."""
     if not batch.raw_payload:
         raise ValueError("intraday batch must retain its raw payload")
+    _validate_bindings(
+        batch,
+        quote_binding=quote_binding,
+        bar_binding=bar_binding,
+        bar_bindings=bar_bindings,
+    )
     raw_digest = sha256(batch.raw_payload).hexdigest()
     date_path = batch.received_at.astimezone(UTC).strftime("%Y/%m/%d")
     temporary_keys: list[str] = []
@@ -153,7 +166,7 @@ async def ingest_intraday_snapshot(
                     source=batch.provenance.source,
                     feed=batch.provenance.feed,
                     delivery_mode=batch.provenance.delivery_mode,
-                    event_kind="trade",
+                    event_kind=snapshot.trade.event_kind,
                     bid=None,
                     ask=None,
                     last=snapshot.trade.price,
@@ -161,6 +174,8 @@ async def ingest_intraday_snapshot(
                     available_at=batch.received_at,
                     received_at=batch.received_at,
                     revision=revision,
+                    quality_flags=snapshot.trade.quality_flags,
+                    provider_binding=quote_binding,
                 )
                 created_trade += int(created)
                 replayed += int(not created)
@@ -180,17 +195,25 @@ async def ingest_intraday_snapshot(
                     available_at=batch.received_at,
                     received_at=batch.received_at,
                     revision=raw_digest,
+                    quality_flags=(),
+                    provider_binding=quote_binding,
                 )
                 created_quote += int(created)
                 replayed += int(not created)
 
         for item in published:
+            current_bar_binding = (
+                None
+                if bar_bindings is None
+                else bar_bindings.get(item.bar.instrument_id)
+            )
             created = await _persist_bar_authority(
                 session,
                 item=item,
                 source=batch.provenance.source,
                 feed=batch.provenance.feed,
                 delivery_mode=batch.provenance.delivery_mode,
+                provider_binding=current_bar_binding or bar_binding,
             )
             created_bars += int(created)
             replayed += int(not created)
@@ -231,7 +254,11 @@ async def archive_intraday_snapshot_raw(
             digest=raw_digest,
             byte_size=len(envelope.raw_payload),
             mime_type="application/json",
-            schema_version="alpaca_stock_snapshots_v1",
+            schema_version=(
+                "fosun_gateway_market_snapshot_v1"
+                if envelope.provenance.source == "fosun"
+                else "alpaca_stock_snapshots_v1"
+            ),
             source=envelope.provenance.source,
             observed_at=envelope.received_at,
             available_at=envelope.received_at,
@@ -261,6 +288,8 @@ async def _insert_observation(
     available_at: datetime,
     received_at: datetime,
     revision: str,
+    quality_flags: tuple[str, ...],
+    provider_binding: ProviderMarketBinding | None,
 ) -> bool:
     canonical = canonical_quote_observation(
         instrument_id=instrument_id,
@@ -275,6 +304,7 @@ async def _insert_observation(
         available_at=available_at,
         received_at=received_at,
         revision=revision,
+        quality_flags=quality_flags,
     )
     content_hash = sha256(canonical).hexdigest()
     fixture = source == "fixture"
@@ -291,11 +321,12 @@ async def _insert_observation(
         "available_at": available_at,
         "received_at": received_at,
         "revision": revision,
-        "quality_flags": [],
+        "quality_flags": list(quality_flags),
         "event_kind": event_kind,
         "content_hash": content_hash,
         "evidence_status": "fixture" if fixture else "verified",
         "data_artifact_id": None if fixture else raw_artifact.id,
+        **_binding_values(provider_binding),
     }
     inserted_id = await session.scalar(
         pg_insert(LatestQuote)
@@ -338,6 +369,7 @@ async def _persist_bar_authority(
     source: str,
     feed: str,
     delivery_mode: str,
+    provider_binding: ProviderMarketBinding | None,
 ) -> bool:
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended('intraday-manifest:' || :digest, 0))"),
@@ -399,6 +431,7 @@ async def _persist_bar_authority(
         start_at=observed_at,
         end_at=observed_at,
         row_count=1,
+        **_binding_values(provider_binding),
     )
     session.add(manifest)
     await session.flush()
@@ -479,3 +512,44 @@ async def _safe_delete_temporary(store: MarketObjectStore, key: str) -> None:
         await store.delete_temporary(key)
     except Exception:
         return
+
+
+def _validate_bindings(
+    batch: SnapshotBatch,
+    *,
+    quote_binding: ProviderMarketBinding | None,
+    bar_binding: ProviderMarketBinding | None,
+    bar_bindings: Mapping[UUID, ProviderMarketBinding] | None,
+) -> None:
+    if bar_binding is not None and bar_bindings is not None:
+        raise ValueError("FOSUN_BAR_BINDING_AMBIGUOUS")
+    if batch.provenance.source == "fosun":
+        if quote_binding is None:
+            raise ValueError("FOSUN_QUOTE_BINDING_REQUIRED")
+        bar_instruments = {
+            snapshot.instrument_id
+            for snapshot in batch.snapshots
+            if snapshot.minute_bar is not None
+        }
+        if bar_instruments:
+            if bar_binding is None and (
+                bar_bindings is None or set(bar_bindings) != bar_instruments
+            ):
+                raise ValueError("FOSUN_BAR_BINDING_REQUIRED")
+        elif bar_bindings:
+            raise ValueError("FOSUN_BAR_BINDING_FORBIDDEN")
+        return
+    if quote_binding is not None or bar_binding is not None or bar_bindings is not None:
+        raise ValueError("FOSUN_MARKET_BINDING_FORBIDDEN")
+
+
+def _binding_values(binding: ProviderMarketBinding | None) -> dict[str, object | None]:
+    if binding is None:
+        return {
+            "provider_capability_id": None,
+            "provider_status_id": None,
+            "provider_status_version": None,
+            "provider_contract_hash": None,
+            "provider_authorized_at": None,
+        }
+    return binding.model_dump()

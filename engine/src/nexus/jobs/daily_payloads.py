@@ -7,6 +7,8 @@ from datetime import UTC, date, datetime, timedelta
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from nexus.jobs.market_authority import FrozenFosunMarketAuthority
+
 ROOT_SCHEMA = "daily_pipeline_root_v1"
 STAGE_SCHEMA = "daily_pipeline_stage_v1"
 PROFILE_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
@@ -49,6 +51,8 @@ class DailyPipelinePayload(BaseModel):
     profile_id: str = Field(pattern=PROFILE_PATTERN.pattern)
     universe_snapshot_id: str | None = Field(default=None, pattern=_UUID.pattern)
     universe_content_hash: str | None = Field(default=None, pattern=_HASH64.pattern)
+    market_source: str | None = Field(default=None, pattern=r"^(fosun|alpaca)$")
+    market_authority: FrozenFosunMarketAuthority | None = None
 
     @field_validator("session", "next_session")
     @classmethod
@@ -79,6 +83,7 @@ class DailyPipelinePayload(BaseModel):
             self.universe_content_hash is None
         ):
             raise ValueError("universe snapshot identity and hash must be present together")
+        _validate_market_authority(self.market_source, self.market_authority)
         return self
 
 
@@ -97,6 +102,8 @@ class DailyStagePayload(BaseModel):
     target_id: str | None = Field(default=None, pattern=_UUID.pattern)
     universe_snapshot_id: str | None = Field(default=None, pattern=_UUID.pattern)
     universe_content_hash: str | None = Field(default=None, pattern=_HASH64.pattern)
+    market_source: str | None = Field(default=None, pattern=r"^(fosun|alpaca)$")
+    market_authority: FrozenFosunMarketAuthority | None = None
 
     @field_validator("session")
     @classmethod
@@ -116,4 +123,17 @@ class DailyStagePayload(BaseModel):
             self.universe_content_hash is None
         ):
             raise ValueError("universe snapshot identity and hash must be present together")
+        _validate_market_authority(self.market_source, self.market_authority)
         return self
+
+
+def _validate_market_authority(
+    source: str | None,
+    authority: FrozenFosunMarketAuthority | None,
+) -> None:
+    if source == "fosun":
+        if authority is not None and authority.operation != "fosun_get_bars":
+            raise ValueError("daily market authority operation mismatch")
+        return
+    if authority is not None:
+        raise ValueError("daily Fosun authority requires Fosun source")

@@ -14,6 +14,10 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.canonical import canonical_json
+from nexus.jobs.market_authority import (
+    FrozenFosunMarketAuthority,
+    load_frozen_fosun_market_authority,
+)
 from nexus.jobs.models import (
     JobKeyV1,
     JobType,
@@ -33,9 +37,9 @@ from nexus.persistence.models.market import (
     WatchlistMember,
 )
 from nexus.persistence.models.runtime import Job
-from nexus.providers.settings import IntradayMonitorMode, ProviderSettings
+from nexus.providers.settings import IntradayMonitorMode, MarketProvider, ProviderSettings
 
-_SCHEMA = "intraday_snapshot_job_v1"
+_SCHEMA = "intraday_snapshot_job_v2"
 _DEFAULT_WATCHLIST_ID = UUID("8c7cc45f-9420-5ea5-a75e-7df8a8a63b58")
 _DEFAULT_WATCHLIST_NAME = "default_private"
 _US_EXCHANGES = frozenset({"AMEX", "ARCA", "NASDAQ", "NYSE", "NYSEARCA", "XNYS"})
@@ -43,7 +47,8 @@ _SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 _CONTRACT_DOCUMENT = {
     "schema": _SCHEMA,
     "bucket_seconds": 15,
-    "max_symbols": 30,
+    "source": "fosun",
+    "max_symbols": 10,
     "exchange": "XNYS",
     "watchlist_id": str(_DEFAULT_WATCHLIST_ID),
     "fields": (
@@ -53,8 +58,12 @@ _CONTRACT_DOCUMENT = {
         "bucket_end",
         "instruments",
         "symbol_set_hash",
+        "source",
         "feed",
         "delivery_mode",
+        "include_minute_bars",
+        "quote_authority",
+        "bars_authority",
         "contract_hash",
     ),
 }
@@ -90,13 +99,13 @@ class IntradaySnapshotInstrumentV1(BaseModel):
         return value
 
 
-class IntradaySnapshotJobPayloadV1(BaseModel):
+class IntradaySnapshotJobPayloadV2(BaseModel):
     """The complete immutable authority consumed by one collection Job."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", serialize_by_alias=True)
 
-    schema_version: Literal["intraday_snapshot_job_v1"] = Field(
-        default="intraday_snapshot_job_v1",
+    schema_version: Literal["intraday_snapshot_job_v2"] = Field(
+        default="intraday_snapshot_job_v2",
         validation_alias="schema",
         serialization_alias="schema",
     )
@@ -106,8 +115,12 @@ class IntradaySnapshotJobPayloadV1(BaseModel):
     bucket_end: str
     instruments: tuple[IntradaySnapshotInstrumentV1, ...]
     symbol_set_hash: str
-    feed: Literal["iex", "sip", "delayed_sip"]
-    delivery_mode: Literal["real_time", "delayed"]
+    source: Literal["fosun"] = "fosun"
+    feed: Literal["l1"] = "l1"
+    delivery_mode: Literal["unknown", "real_time", "delayed"]
+    include_minute_bars: bool
+    quote_authority: FrozenFosunMarketAuthority
+    bars_authority: FrozenFosunMarketAuthority | None
     contract_hash: str
 
     @field_validator("bucket_start", "bucket_end")
@@ -135,8 +148,8 @@ class IntradaySnapshotJobPayloadV1(BaseModel):
             raise ValueError("intraday bucket must span 15 seconds")
         if bucket_for(start).start != start:
             raise ValueError("intraday bucket must align to 15 seconds")
-        if not 1 <= len(self.instruments) <= 30:
-            raise ValueError("intraday instruments must contain 1 to 30 items")
+        if not 1 <= len(self.instruments) <= 10:
+            raise ValueError("intraday instruments must contain 1 to 10 items")
         identities = tuple((item.instrument_id, item.symbol) for item in self.instruments)
         if identities != tuple(sorted(identities, key=lambda item: (item[1], str(item[0])))):
             raise ValueError("intraday instruments must be canonically sorted")
@@ -146,10 +159,27 @@ class IntradaySnapshotJobPayloadV1(BaseModel):
             raise ValueError("intraday instruments must be unique")
         if self.symbol_set_hash != _symbol_set_hash(identities):
             raise ValueError("intraday symbol set hash mismatch")
-        expected_delivery = "delayed" if self.feed == "delayed_sip" else "real_time"
-        if self.delivery_mode != expected_delivery:
-            raise ValueError("intraday feed contradicts delivery mode")
+        minute_boundary = start.second == 0
+        if self.include_minute_bars != minute_boundary:
+            raise ValueError("intraday minute-bar intent contradicts bucket")
+        if (
+            self.quote_authority.operation != "fosun_get_quotes"
+            or self.quote_authority.delivery_mode != self.delivery_mode
+        ):
+            raise ValueError("intraday quote authority mismatch")
+        if self.include_minute_bars:
+            if (
+                self.bars_authority is None
+                or self.bars_authority.operation != "fosun_get_bars"
+                or self.bars_authority.delivery_mode != self.delivery_mode
+            ):
+                raise ValueError("intraday bars authority mismatch")
+        elif self.bars_authority is not None:
+            raise ValueError("intraday bars authority is not allowed off boundary")
         return self
+
+
+IntradaySnapshotJobPayloadV1 = IntradaySnapshotJobPayloadV2
 
 
 def bucket_for(now: datetime) -> IntradayBucket:
@@ -166,11 +196,11 @@ def build_intraday_payload(
     session: date | str,
     bucket: IntradayBucket,
     instruments: tuple[tuple[UUID, str], ...],
-    feed: Literal["iex", "sip", "delayed_sip"],
-    delivery_mode: Literal["real_time", "delayed"],
-) -> IntradaySnapshotJobPayloadV1:
+    quote_authority: FrozenFosunMarketAuthority,
+    bars_authority: FrozenFosunMarketAuthority | None,
+) -> IntradaySnapshotJobPayloadV2:
     ordered = tuple(sorted(instruments, key=lambda item: (item[1], str(item[0]))))
-    return IntradaySnapshotJobPayloadV1(
+    return IntradaySnapshotJobPayloadV2(
         calendar_authority_id=calendar_authority_id,
         session=date.fromisoformat(session) if isinstance(session, str) else session,
         bucket_start=_utc_text(bucket.start),
@@ -180,8 +210,10 @@ def build_intraday_payload(
             for instrument_id, symbol in ordered
         ),
         symbol_set_hash=_symbol_set_hash(ordered),
-        feed=feed,
-        delivery_mode=delivery_mode,
+        delivery_mode=quote_authority.delivery_mode,
+        include_minute_bars=bucket.start.second == 0,
+        quote_authority=quote_authority,
+        bars_authority=bars_authority,
         contract_hash=SNAPSHOT_CONTRACT_HASH,
     )
 
@@ -196,6 +228,8 @@ async def schedule_due_intraday_snapshot(
     scheduled_at = _require_utc(now, field="now")
     if settings.intraday_monitor_mode is not IntradayMonitorMode.PRODUCTION:
         return None
+    if settings.market_provider is not MarketProvider.FOSUN:
+        return None
     authority = await _load_current_intraday_authority(
         session,
         effective_at=scheduled_at,
@@ -203,19 +237,33 @@ async def schedule_due_intraday_snapshot(
     )
     if authority is None:
         return None
-    feed = settings.alpaca_intraday_feed
-    delivery_mode = settings.alpaca_intraday_delivery_mode
-    if feed is None or delivery_mode is None:
-        return None
     bucket = bucket_for(scheduled_at)
+    quote_authority = await load_frozen_fosun_market_authority(
+        session,
+        check_time=scheduled_at,
+        operation="fosun_get_quotes",
+        delivery_mode=settings.fosun_market_delivery_mode,
+    )
+    if quote_authority is None:
+        return None
+    bars_authority = None
+    if bucket.start.second == 0:
+        bars_authority = await load_frozen_fosun_market_authority(
+            session,
+            check_time=scheduled_at,
+            operation="fosun_get_bars",
+            delivery_mode=settings.fosun_market_delivery_mode,
+        )
+        if bars_authority is None:
+            return None
     try:
         payload = build_intraday_payload(
             calendar_authority_id=authority.calendar_authority_id,
             session=authority.session,
             bucket=bucket,
             instruments=authority.instruments,
-            feed=feed,
-            delivery_mode=delivery_mode,
+            quote_authority=quote_authority,
+            bars_authority=bars_authority,
         )
     except ValueError:
         return None
@@ -225,7 +273,7 @@ async def schedule_due_intraday_snapshot(
         key=JobKeyV1(
             job_type=JobType.COLLECT_INTRADAY_SNAPSHOT,
             scope_kind="provider",
-            scope_id="alpaca-intraday",
+            scope_id="fosun-intraday",
             effective_at=bucket.start,
             input_hash=job_input_hash(encoded),
         ),
@@ -240,23 +288,42 @@ async def schedule_due_intraday_snapshot(
 
 async def revalidate_intraday_payload_authority(
     session: AsyncSession,
-    payload: IntradaySnapshotJobPayloadV1,
+    payload: IntradaySnapshotJobPayloadV2,
     *,
     effective_at: datetime,
     settings: ProviderSettings,
 ) -> bool:
     """Recheck every mutable/database authority before any external request."""
     bucket_start = _parse_utc(payload.bucket_start)
+    bucket_end = _parse_utc(payload.bucket_end)
+    check_time = _require_utc(effective_at, field="effective_at")
     if (
         settings.intraday_monitor_mode is not IntradayMonitorMode.PRODUCTION
-        or _require_utc(effective_at, field="effective_at") != bucket_start
-        or settings.alpaca_intraday_feed != payload.feed
-        or settings.alpaca_intraday_delivery_mode != payload.delivery_mode
+        or not bucket_start <= check_time < bucket_end + timedelta(seconds=45)
+        or settings.market_provider is not MarketProvider.FOSUN
+        or settings.fosun_market_delivery_mode != payload.delivery_mode
     ):
         return False
+    quote_authority = await load_frozen_fosun_market_authority(
+        session,
+        check_time=check_time,
+        operation="fosun_get_quotes",
+        delivery_mode=payload.delivery_mode,
+    )
+    if quote_authority != payload.quote_authority:
+        return False
+    if payload.include_minute_bars:
+        bars_authority = await load_frozen_fosun_market_authority(
+            session,
+            check_time=check_time,
+            operation="fosun_get_bars",
+            delivery_mode=payload.delivery_mode,
+        )
+        if bars_authority != payload.bars_authority:
+            return False
     authority = await _load_current_intraday_authority(
         session,
-        effective_at=bucket_start,
+        effective_at=check_time,
         max_symbols=settings.intraday_max_symbols,
     )
     if authority is None:

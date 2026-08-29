@@ -10,11 +10,18 @@ from uuid import UUID
 import pytest
 from nexus.jobs.intraday_collection import build_intraday_collection_registry
 from nexus.jobs.intraday_schedule import bucket_for, build_intraday_payload
+from nexus.jobs.market_authority import FrozenFosunMarketAuthority
 from nexus.jobs.models import JobType
 from nexus.jobs.registry import JobHandlerContext
 from nexus.jobs.repository import ClaimedJob
 from nexus.jobs.worker import UnsafeJobError
 from nexus.providers.base import InstrumentId, MarketDataProvenance
+from nexus.providers.market.alpaca import MarketProviderPayloadError
+from nexus.providers.market.fosun import (
+    FosunSnapshotReadAborted,
+    FosunSnapshotReadGuard,
+)
+from nexus.providers.market.fosun_gateway import RawGatewayResponse
 from nexus.providers.market.snapshot_contracts import (
     IntradaySnapshotRequest,
     MarketSnapshot,
@@ -36,8 +43,12 @@ class _Provider:
     snapshot: MarketSnapshot | None = None
     raw_payload: bytes | None = None
 
-    async def fetch_raw_snapshots(self, request: object) -> RawSnapshotEnvelope:
-        _ = request
+    async def fetch_raw_snapshots(
+        self,
+        request: IntradaySnapshotRequest,
+        *,
+        read_guard: FosunSnapshotReadGuard | None = None,
+    ) -> RawSnapshotEnvelope:
         self.calls += 1
         payload = self.raw_payload
         if payload is None:
@@ -48,30 +59,55 @@ class _Provider:
                 if self.snapshot is not None
                 else b'{"AAPL":{}}'
             )
-        return RawSnapshotEnvelope(
+        envelope = RawSnapshotEnvelope(
             raw_payload=payload,
             received_at=NOW,
             provenance=MarketDataProvenance(
-                source="alpaca",
-                feed="iex",
+                source="fosun",
+                feed="l1",
                 adjustment="raw",
                 interval="1Min",
                 mode="read_only",
-                delivery_mode="real_time",
+                delivery_mode="unknown",
             ),
         )
+        if read_guard is not None:
+            codes = tuple(f"us{item.symbol}" for item in request.instruments)
+            if not await read_guard.before_read("fosun_get_quotes", codes):
+                raise FosunSnapshotReadAborted(
+                    "INTRADAY_AUTHORITY_CHANGED_BEFORE_FETCH",
+                    None,
+                )
+            response = RawGatewayResponse(
+                operation="fosun_get_quotes",
+                gateway_request_id=UUID("019d0000-0000-7000-8000-0000000000f1"),
+                request_body_sha256="a" * 64,
+                raw_payload=payload,
+                received_at=NOW,
+            )
+            if not await read_guard.after_read("fosun_get_quotes", codes, response):
+                raise FosunSnapshotReadAborted(
+                    "INTRADAY_AUTHORITY_CHANGED_AFTER_FETCH",
+                    envelope,
+                )
+        return envelope
 
     def normalize_raw_snapshots(
         self,
         envelope: RawSnapshotEnvelope,
         request: IntradaySnapshotRequest,
     ) -> SnapshotBatch:
-        if self.snapshot is None:
-            from nexus.providers.market.alpaca_snapshot import normalize_snapshot_envelope
-
-            return normalize_snapshot_envelope(envelope, request=request)
+        if self.raw_payload == b'{"AAPL":{},"AAPL":{}}':
+            raise MarketProviderPayloadError("FOSUN_QUOTE_CONTRACT_INVALID")
+        snapshot = self.snapshot or MarketSnapshot(
+            instrument_id=request.instruments[0].instrument_id,
+            symbol=request.instruments[0].symbol,
+            trade=None,
+            quote=None,
+            minute_bar=None,
+        )
         return SnapshotBatch(
-            snapshots=(self.snapshot,),
+            snapshots=(snapshot,),
             raw_payload=envelope.raw_payload,
             received_at=envelope.received_at,
             provenance=envelope.provenance,
@@ -103,8 +139,8 @@ def _payload() -> object:
         session="2026-08-28",
         bucket=bucket_for(NOW),
         instruments=((INSTRUMENT_ID, "AAPL"),),
-        feed="iex",
-        delivery_mode="real_time",
+        quote_authority=_authority("fosun_get_quotes"),
+        bars_authority=None,
     )
 
 
@@ -112,14 +148,35 @@ def _settings() -> ProviderSettings:
     return ProviderSettings(
         runtime_mode="production",
         intraday_monitor_mode="production",
-        alpaca_key_id="key-canary",
-        alpaca_secret_key="secret-canary",
-        alpaca_feed="iex",
-        alpaca_delivery_mode="real_time",
-        alpaca_intraday_feed="iex",
-        alpaca_intraday_delivery_mode="real_time",
+        fosun_market_gateway_origin="https://fosun-gateway.internal:8443",
+        fosun_market_gateway_key_id="synthetic-market-current",
+        fosun_market_gateway_secret="synthetic-market-secret",
+        fosun_market_gateway_client_cert="/synthetic/market.crt",
+        fosun_market_gateway_client_key="/synthetic/market.key",
+        fosun_market_gateway_client_ca="/synthetic/ca.crt",
         sec_contact="owner@example.com",
         fred_api_key="fred-canary",
+    )
+
+
+def _authority(operation: str) -> FrozenFosunMarketAuthority:
+    return FrozenFosunMarketAuthority(
+        operation=operation,
+        delivery_mode="unknown",
+        capability_id=UUID(
+            "019d0000-0000-7000-8000-0000000000e1"
+            if operation == "fosun_get_quotes"
+            else "019d0000-0000-7000-8000-0000000000e2"
+        ),
+        capability_schema_version="1",
+        capability_created_at=datetime(2026, 8, 28, 13, tzinfo=UTC),
+        capability_expires_at=datetime(2026, 8, 29, 13, tzinfo=UTC),
+        status_id=UUID("019d0000-0000-7000-8000-0000000000e0"),
+        status_version=1,
+        status_created_at=datetime(2026, 8, 28, 12, tzinfo=UTC),
+        status_mode_changed_at=datetime(2026, 8, 28, 12, tzinfo=UTC),
+        capability_invalidated_at=None,
+        contract_hash="a" * 64,
     )
 
 
@@ -280,7 +337,7 @@ async def test_authority_drift_after_fetch_archives_raw_without_publishing_facts
             minute_bar=None,
         )
     )
-    validations = iter((True, False))
+    validations = iter((True, True, False))
     ingested: list[SnapshotBatch] = []
 
     async def revalidate(*_: object, **__: object) -> bool:
@@ -316,11 +373,7 @@ async def test_authority_drift_after_fetch_archives_raw_without_publishing_facts
 
     assert result.outcome == "skipped"
     assert result.result_code == "INTRADAY_AUTHORITY_CHANGED_AFTER_FETCH"
-    assert len(ingested) == 1
-    assert all(
-        snapshot.trade is snapshot.quote is snapshot.minute_bar is None
-        for snapshot in ingested[0].snapshots
-    )
+    assert ingested == []
 
 
 @pytest.mark.asyncio

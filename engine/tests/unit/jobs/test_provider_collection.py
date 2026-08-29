@@ -16,8 +16,8 @@ from nexus.jobs.registry import JobHandlerContext
 from nexus.jobs.repository import ClaimedJob
 from nexus.jobs.worker import UnsafeJobError
 from nexus.market.ingestion import MarketObjectStore
-from nexus.providers.composition import build_provider_bundle
-from nexus.providers.settings import ProviderSettings
+from nexus.providers.composition import ProviderBundle, build_provider_bundle
+from nexus.providers.settings import ProviderRuntimeMode, ProviderSettings
 from sqlalchemy.ext.asyncio import AsyncSession
 
 FROZEN_NOW = datetime(2026, 8, 28, 21, tzinfo=UTC)
@@ -191,3 +191,71 @@ async def test_provider_profile_mismatch_fails_before_fixture_or_external_work()
 
     with pytest.raises(UnsafeJobError, match="PROVIDER_PROFILE_MISMATCH"):
         await spec.handler(_context(JobType.COLLECT_MARKET))
+
+
+@pytest.mark.asyncio
+async def test_fosun_missing_frozen_authority_skips_before_provider_construction() -> None:
+    fixture = _fixture_bundle()
+    constructions = 0
+
+    def forbidden_provider(_session: object) -> object:
+        nonlocal constructions
+        constructions += 1
+        raise AssertionError("Fosun provider must not be constructed")
+
+    bundle = ProviderBundle(
+        mode=ProviderRuntimeMode.PRODUCTION,
+        market_source="fosun",
+        market_provider_factory=forbidden_provider,  # type: ignore[arg-type]
+        snapshot_provider_factory=None,
+        sec_client=fixture.sec_client,
+        fred_client=fixture.fred_client,
+    )
+    registry = build_provider_collection_registry(
+        bundle,
+        cast(MarketObjectStore, InMemoryMarketObjectStore()),
+        InMemoryRawEvidenceStore(),
+        lambda: FROZEN_NOW,
+    )
+    spec = registry.resolve(JobType.COLLECT_MARKET.value)
+    assert spec is not None
+
+    result = await spec.handler(_context(JobType.COLLECT_MARKET))
+
+    assert result.outcome == "skipped"
+    assert result.result_code == "FOSUN_MARKET_AUTHORITY_UNAVAILABLE"
+    assert constructions == 0
+
+
+@pytest.mark.asyncio
+async def test_alpaca_rejects_legacy_unstamped_job_before_provider_construction() -> None:
+    fixture = _fixture_bundle()
+    constructions = 0
+
+    def forbidden_provider(_session: object) -> object:
+        nonlocal constructions
+        constructions += 1
+        raise AssertionError("unstamped legacy job must not construct Alpaca provider")
+
+    bundle = ProviderBundle(
+        mode=ProviderRuntimeMode.PRODUCTION,
+        market_source="alpaca",
+        market_provider_factory=forbidden_provider,  # type: ignore[arg-type]
+        snapshot_provider_factory=None,
+        sec_client=fixture.sec_client,
+        fred_client=fixture.fred_client,
+    )
+    registry = build_provider_collection_registry(
+        bundle,
+        cast(MarketObjectStore, InMemoryMarketObjectStore()),
+        InMemoryRawEvidenceStore(),
+        lambda: FROZEN_NOW,
+    )
+    spec = registry.resolve(JobType.COLLECT_MARKET.value)
+    assert spec is not None
+
+    result = await spec.handler(_context(JobType.COLLECT_MARKET))
+
+    assert result.outcome == "skipped"
+    assert result.result_code == "MARKET_SOURCE_MISMATCH"
+    assert constructions == 0

@@ -48,6 +48,8 @@ class IntradaySnapshotRequest(BaseModel):
 
     instruments: tuple[SnapshotInstrument, ...]
     symbol_as_of: date
+    bucket_start: datetime | None = None
+    include_minute_bars: bool = False
     feed: Literal["l1", "iex", "sip", "delayed_sip"]
     delivery_mode: Literal["unknown", "real_time", "delayed"]
 
@@ -60,6 +62,14 @@ class IntradaySnapshotRequest(BaseModel):
         symbols = tuple(item.symbol for item in self.instruments)
         if len(set(ids)) != len(ids) or len(set(symbols)) != len(symbols):
             raise ValueError("snapshot instruments must be unique")
+        if self.bucket_start is not None:
+            require_utc(self.bucket_start)
+            if self.bucket_start.microsecond != 0 or self.bucket_start.second % 15:
+                raise ValueError("snapshot bucket must align to 15 seconds")
+        if self.include_minute_bars and (
+            self.bucket_start is None or self.bucket_start.second != 0
+        ):
+            raise ValueError("minute bars require a minute-boundary bucket")
         if self.feed == "l1":
             if self.delivery_mode not in {"unknown", "real_time", "delayed"}:
                 raise ValueError("snapshot feed contradicts delivery mode")

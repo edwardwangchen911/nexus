@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from hashlib import sha256
 from typing import Protocol, cast
 from uuid import UUID
 
 from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.canonical import canonical_json
 from nexus.domain.evidence import EvidenceRef
 from nexus.jobs.daily_payloads import STAGE_SCHEMA, DailyStagePayload, parse_utc
 from nexus.jobs.errors import UnsafeJobError
+from nexus.jobs.market_authority import (
+    FrozenFosunMarketAuthority,
+    ProviderMarketBinding,
+    binding_at,
+    load_frozen_fosun_market_authority,
+)
 from nexus.jobs.models import JobType, QueueName, RetryPolicy
 from nexus.jobs.registry import (
     JobHandler,
@@ -25,6 +32,7 @@ from nexus.jobs.registry import (
 )
 from nexus.market.ingestion import (
     MarketObjectStore,
+    archive_fosun_price_page_raw,
     ingest_price_page,
     serialize_price_bars,
 )
@@ -32,7 +40,7 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
 )
-from nexus.persistence.models.data import DataArtifact, MacroObservation
+from nexus.persistence.models.data import DataArtifact, MacroObservation, PriceSeriesManifest
 from nexus.persistence.models.market import (
     Instrument,
     InstrumentAlias,
@@ -44,9 +52,11 @@ from nexus.persistence.models.research import (
     FinancialFactRecord,
     ResearchEvidenceRef,
 )
-from nexus.providers.base import BarsRequest, InstrumentId
+from nexus.providers.base import BarsRequest, InstrumentId, PriceBar, ProviderPage
 from nexus.providers.composition import ProviderBundle
 from nexus.providers.fred import FRED_SERIES, normalize_alfred_observation
+from nexus.providers.market.alpaca import MarketProviderPayloadError
+from nexus.providers.market.fosun_gateway import RawGatewayResponse
 from nexus.providers.sec import SecInstrumentIdentity, normalize_company_facts
 from nexus.providers.settings import ProviderRuntimeMode
 
@@ -57,6 +67,32 @@ class RawEvidenceStore(Protocol):
     async def put_if_absent(self, *, key: str, content: bytes) -> str: ...
 
 
+class RawFirstFosunMarketProvider(Protocol):
+    """Narrow Fosun seam that preserves exact bytes before interpretation."""
+
+    async def fetch_raw_bars(
+        self,
+        request: BarsRequest,
+        cursor: str | None = None,
+    ) -> RawGatewayResponse: ...
+
+    async def normalize_bars(
+        self,
+        request: BarsRequest,
+        response: RawGatewayResponse,
+        cursor: str | None = None,
+    ) -> ProviderPage[PriceBar]: ...
+
+
+MarketAuthorityLoader = Callable[
+    ...,
+    Awaitable[FrozenFosunMarketAuthority | None],
+]
+
+_FOSUN_DAILY_MAX_INSTRUMENTS = 10
+_LEGACY_DAILY_MAX_INSTRUMENTS = 100
+
+
 def build_provider_collection_registry(
     bundle: ProviderBundle,
     market_object_store: MarketObjectStore,
@@ -64,6 +100,7 @@ def build_provider_collection_registry(
     now: Callable[[], datetime],
     *,
     expected_profile_id: str | None = None,
+    market_authority_loader: MarketAuthorityLoader = load_frozen_fosun_market_authority,
 ) -> JobRegistry:
     """Build the closed provider collection registry for one runtime mode."""
 
@@ -72,12 +109,32 @@ def build_provider_collection_registry(
         if bundle.mode is ProviderRuntimeMode.FIXTURE:
             return _fixture_skip()
         payload = cast(DailyStagePayload, context.payload)
+        if bundle.market_source == "fosun" and (
+            payload.market_source != "fosun" or payload.market_authority is None
+        ):
+            return JobHandlerResult(
+                outcome="skipped",
+                result_code="FOSUN_MARKET_AUTHORITY_UNAVAILABLE",
+            )
+        if (
+            bundle.market_source != "fosun"
+            and payload.market_source != bundle.market_source
+        ):
+            return JobHandlerResult(
+                outcome="skipped",
+                result_code="MARKET_SOURCE_MISMATCH",
+            )
         universe = await _frozen_universe(context, payload)
         if universe is None:
             return JobHandlerResult(
                 outcome="skipped",
                 result_code="FROZEN_UNIVERSE_MISMATCH",
             )
+        max_instruments = (
+            _FOSUN_DAILY_MAX_INSTRUMENTS
+            if bundle.market_source == "fosun"
+            else _LEGACY_DAILY_MAX_INSTRUMENTS
+        )
         instruments = tuple(
             (
                 await context.session.scalars(
@@ -94,7 +151,7 @@ def build_provider_collection_registry(
                         ),
                     )
                     .order_by(Instrument.id)
-                    .limit(101)
+                    .limit(max_instruments + 1)
                 )
             ).all()
         )
@@ -103,13 +160,23 @@ def build_provider_collection_registry(
                 outcome="skipped",
                 result_code="FROZEN_UNIVERSE_EMPTY",
             )
-        if len(instruments) > 100:
+        if len(instruments) > max_instruments:
             return JobHandlerResult(
                 outcome="skipped",
                 result_code="FROZEN_UNIVERSE_TOO_LARGE",
             )
-        provider = bundle.market_provider(context.session)
         market_close = parse_utc(payload.market_close_at)
+        if bundle.market_source == "fosun":
+            return await _collect_fosun_market(
+                context,
+                payload=payload,
+                bundle=bundle,
+                market_object_store=market_object_store,
+                market_authority_loader=market_authority_loader,
+                instruments=instruments,
+                market_close=market_close,
+            )
+        provider = bundle.market_provider(context.session)
         collected = 0
         replayed = 0
         source_conflict = False
@@ -211,6 +278,214 @@ def build_provider_collection_registry(
             _spec(JobType.COLLECT_MARKET, collect_market),
             _spec(JobType.COLLECT_SEC_MACRO, collect_sec_macro),
         )
+    )
+
+
+async def _collect_fosun_market(
+    context: JobHandlerContext,
+    *,
+    payload: DailyStagePayload,
+    bundle: ProviderBundle,
+    market_object_store: MarketObjectStore,
+    market_authority_loader: MarketAuthorityLoader,
+    instruments: Sequence[Instrument],
+    market_close: datetime,
+) -> JobHandlerResult:
+    """Fetch every response raw-first and publish facts only after all post checks."""
+    frozen = payload.market_authority
+    if frozen is None:
+        return JobHandlerResult(
+            outcome="skipped",
+            result_code="FOSUN_MARKET_AUTHORITY_UNAVAILABLE",
+        )
+    first_check = context.finished_at()
+    if not await _matches_frozen_market_authority(
+        context,
+        loader=market_authority_loader,
+        frozen=frozen,
+        check_time=first_check,
+    ):
+        return JobHandlerResult(
+            outcome="skipped",
+            result_code="FOSUN_MARKET_AUTHORITY_CHANGED_BEFORE_FETCH",
+        )
+    provider = cast(RawFirstFosunMarketProvider, bundle.market_provider(context.session))
+    if not callable(getattr(provider, "fetch_raw_bars", None)) or not callable(
+        getattr(provider, "normalize_bars", None)
+    ):
+        raise RuntimeError("FOSUN_RAW_FIRST_PROVIDER_REQUIRED")
+
+    pending: list[
+        tuple[ProviderPage[PriceBar], ProviderMarketBinding, DataArtifact]
+    ] = []
+    replayed = 0
+    for instrument in instruments:
+        request = BarsRequest(
+            instrument_id=InstrumentId(instrument.id),
+            start=market_close - timedelta(days=400),
+            end=market_close,
+            interval="1Day",
+            adjustment="raw",
+        )
+        pre_check = context.finished_at()
+        if not await _matches_frozen_market_authority(
+            context,
+            loader=market_authority_loader,
+            frozen=frozen,
+            check_time=pre_check,
+        ):
+            return JobHandlerResult(
+                outcome="skipped",
+                result_code="FOSUN_MARKET_AUTHORITY_CHANGED_BEFORE_FETCH",
+            )
+        response = await provider.fetch_raw_bars(request)
+        archived = await archive_fosun_price_page_raw(
+            cast(AsyncSession, context.session),
+            market_object_store,
+            response,
+            commit=False,
+        )
+        post_check = context.finished_at()
+        if not await _matches_frozen_market_authority(
+            context,
+            loader=market_authority_loader,
+            frozen=frozen,
+            check_time=post_check,
+        ):
+            return JobHandlerResult(
+                outcome="skipped",
+                result_code="FOSUN_MARKET_AUTHORITY_CHANGED_AFTER_FETCH",
+            )
+        try:
+            page = await provider.normalize_bars(request, response)
+        except MarketProviderPayloadError:
+            return JobHandlerResult(
+                outcome="skipped",
+                result_code="FOSUN_MARKET_PAYLOAD_INVALID",
+            )
+        if not _fosun_page_matches_authority(page, response, frozen):
+            return JobHandlerResult(
+                outcome="skipped",
+                result_code="FOSUN_MARKET_CONTRACT_MISMATCH",
+            )
+        if page.items:
+            if any(item.instrument_id != instrument.id for item in page.items):
+                raise RuntimeError("MARKET_PROVIDER_IDENTITY_MISMATCH")
+            pending.append(
+                (
+                    page,
+                    binding_at(frozen, authorized_at=post_check),
+                    archived.raw_artifact,
+                )
+            )
+
+    final_check = context.finished_at()
+    if not await _matches_frozen_market_authority(
+        context,
+        loader=market_authority_loader,
+        frozen=frozen,
+        check_time=final_check,
+    ):
+        return JobHandlerResult(
+            outcome="skipped",
+            result_code="FOSUN_MARKET_AUTHORITY_CHANGED_AFTER_FETCH",
+        )
+    replayed = 0
+    publish: list[tuple[ProviderPage[PriceBar], ProviderMarketBinding, DataArtifact]] = []
+    for page, provider_binding, raw_artifact in pending:
+        digest = sha256(serialize_price_bars(page.items)).hexdigest()
+        exact = await context.session.scalar(
+            select(PriceSeriesManifest.id)
+            .join(
+                DataArtifact,
+                DataArtifact.id == PriceSeriesManifest.data_artifact_id,
+            )
+            .where(
+                DataArtifact.sha256 == digest,
+                PriceSeriesManifest.source == "fosun",
+                PriceSeriesManifest.feed == "l1",
+                PriceSeriesManifest.delivery_mode == frozen.delivery_mode,
+                PriceSeriesManifest.adjustment == "raw",
+                PriceSeriesManifest.interval == "1Day",
+                PriceSeriesManifest.provider_capability_id
+                == provider_binding.provider_capability_id,
+                PriceSeriesManifest.provider_status_id
+                == provider_binding.provider_status_id,
+                PriceSeriesManifest.provider_status_version
+                == provider_binding.provider_status_version,
+                PriceSeriesManifest.provider_contract_hash
+                == provider_binding.provider_contract_hash,
+                PriceSeriesManifest.provider_authorized_at
+                == provider_binding.provider_authorized_at,
+            )
+        )
+        if exact is not None:
+            replayed += 1
+        else:
+            any_artifact = await context.session.scalar(
+                select(DataArtifact.id).where(DataArtifact.sha256 == digest)
+            )
+            if any_artifact is not None:
+                return JobHandlerResult(
+                    outcome="skipped",
+                    result_code="FOSUN_MARKET_REPLAY_CONFLICT",
+                )
+            publish.append((page, provider_binding, raw_artifact))
+
+    collected = 0
+    source_conflict = False
+    for page, provider_binding, raw_artifact in publish:
+        result = await ingest_price_page(
+            context.session,
+            market_object_store,
+            page,
+            provider_binding=provider_binding,
+            raw_artifact=raw_artifact,
+            commit=False,
+        )
+        collected += 1
+        source_conflict = source_conflict or result.price_authority is None
+    if source_conflict:
+        return JobHandlerResult(outcome="skipped", result_code="SOURCE_CONFLICT")
+    if collected:
+        return JobHandlerResult(outcome="succeeded", result_code="MARKET_COLLECTED")
+    if replayed:
+        return JobHandlerResult(outcome="succeeded", result_code="MARKET_REPLAYED")
+    return JobHandlerResult(outcome="skipped", result_code="MARKET_NO_DATA")
+
+
+async def _matches_frozen_market_authority(
+    context: JobHandlerContext,
+    *,
+    loader: MarketAuthorityLoader,
+    frozen: FrozenFosunMarketAuthority,
+    check_time: datetime,
+) -> bool:
+    current = await loader(
+        context.session,
+        check_time=check_time,
+        operation="fosun_get_bars",
+        delivery_mode=frozen.delivery_mode,
+    )
+    return current == frozen
+
+
+def _fosun_page_matches_authority(
+    page: ProviderPage[PriceBar],
+    response: RawGatewayResponse,
+    frozen: FrozenFosunMarketAuthority,
+) -> bool:
+    return (
+        response.operation == "fosun_get_bars"
+        and page.raw_payload == response.raw_payload
+        and page.next_cursor is None
+        and page.as_of == response.received_at
+        and page.provenance.source == "fosun"
+        and page.provenance.feed == "l1"
+        and page.provenance.delivery_mode == frozen.delivery_mode
+        and page.provenance.adjustment == "raw"
+        and page.provenance.interval == "1Day"
+        and page.provenance.mode == "read_only"
     )
 
 

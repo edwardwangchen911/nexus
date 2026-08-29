@@ -28,7 +28,8 @@ def test_canonical_quote_observation_is_exact_and_stable() -> None:
         b'"bid":"227.140000000000","delivery_mode":"real_time",'
         b'"event_kind":"quote","feed":"iex",'
         b'"instrument_id":"019d0000-0000-7000-8000-0000000000a1","last":null,'
-        b'"observed_at":"2026-08-28T14:30:14.000000Z","received_at":'
+        b'"observed_at":"2026-08-28T14:30:14.000000Z","quality_flags":[],'
+        b'"received_at":'
         b'"2026-08-28T14:30:15.000000Z","revision":"raw-sha256","source":"alpaca"}'
     )
 

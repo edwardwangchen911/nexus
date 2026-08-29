@@ -14,7 +14,7 @@ from nexus.jobs.daily_local import (
     LOCAL_SAFE_DAILY_PROFILE,
     build_local_daily_pipeline_registry,
 )
-from nexus.jobs.daily_payloads import DailyStagePayload
+from nexus.jobs.daily_payloads import DailyPipelinePayload, DailyStagePayload
 from nexus.jobs.daily_pipeline import (
     build_daily_pipeline_registry,
     schedule_due_daily_pipeline,
@@ -26,8 +26,9 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
 )
+from nexus.persistence.models.data import ProviderCapability
 from nexus.persistence.models.market import UniverseSnapshot
-from nexus.persistence.models.runtime import Job, JobDependency, JobLease
+from nexus.persistence.models.runtime import IntegrationStatus, Job, JobDependency, JobLease
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import func, select
@@ -267,7 +268,7 @@ async def test_scheduler_is_idempotent_and_materializes_strict_weekly_dag(
         factory,
         now=now,
         executor=_successful_executor(executed),
-    ) == 12
+    ) == 11
 
     parent = aliased(Job)
     child = aliased(Job)
@@ -295,6 +296,11 @@ async def test_scheduler_is_idempotent_and_materializes_strict_weekly_dag(
     assert root.queue == QueueName.GENERAL.value
     assert by_type[JobType.BROKER_SYNC.value].status == "skipped"
     assert by_type[JobType.BROKER_SYNC.value].result_code == "SKIPPED_CAPABILITY"
+    assert by_type[JobType.COLLECT_MARKET.value].status == "skipped"
+    assert (
+        by_type[JobType.COLLECT_MARKET.value].result_code
+        == "FOSUN_MARKET_AUTHORITY_UNAVAILABLE"
+    )
     assert broker_leases == 0
     assert by_type[JobType.PAPER_EXECUTE_DUE.value].status == "queued"
     assert by_type[JobType.PAPER_EXECUTE_DUE.value].effective_at == datetime(
@@ -319,6 +325,120 @@ async def test_scheduler_is_idempotent_and_materializes_strict_weekly_dag(
     assert executed.index(JobType.OPTIMIZATION_PROPOSE) > executed.index(
         JobType.AGENT_RESEARCH
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delivery_mode", ("real_time", "delayed"))
+async def test_scheduler_freezes_actual_fosun_delivery_authority_at_schedule_time(
+    migrated_database_url: str,
+    delivery_mode: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_calendar(factory)
+    now = _FRIDAY_CLOSE + timedelta(minutes=31)
+    capability_id = UUID("0198d500-1000-7000-8000-000000002221")
+    status_id = UUID("0198d500-1000-7000-8000-000000002222")
+    async with factory() as session, session.begin():
+        session.add(
+            ProviderCapability(
+                id=capability_id,
+                provider="fosun",
+                capability="READ_ONLY",
+                contract_hash="b" * 64,
+                expires_at=now + timedelta(hours=1),
+                schema_version="1",
+                payload={
+                    "operation": "fosun_get_bars",
+                    "market_scope": "US",
+                    "delivery_mode": delivery_mode,
+                },
+                created_at=now - timedelta(hours=1),
+            )
+        )
+        session.add(
+            IntegrationStatus(
+                id=status_id,
+                provider="fosun",
+                status="read_only",
+                last_success_at=now,
+                version=1,
+                mode_changed_at=now - timedelta(hours=2),
+                capability_invalidated_at=None,
+                admitted_contract_hash="b" * 64,
+                created_at=now - timedelta(hours=2),
+            )
+        )
+    async with factory() as session, session.begin():
+        root = await schedule_due_daily_pipeline(
+            session,
+            now=now,
+            profile_id=_PROFILE,
+        )
+
+    assert root is not None
+    payload = DailyPipelinePayload.model_validate(root.payload)
+    assert payload.market_source == "fosun"
+    assert payload.market_authority is not None
+    assert payload.market_authority.capability_id == capability_id
+    assert payload.market_authority.status_id == status_id
+    assert payload.market_authority.delivery_mode == delivery_mode
+
+
+@pytest.mark.asyncio
+async def test_missing_fosun_authority_terminal_skips_only_market_collection(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_calendar(factory)
+    now = _FRIDAY_CLOSE + timedelta(minutes=31)
+    async with factory() as session, session.begin():
+        root = await schedule_due_daily_pipeline(
+            session,
+            now=now,
+            profile_id=_PROFILE,
+        )
+    assert root is not None
+    assert root.payload["market_authority"] is None
+
+    registry = build_daily_pipeline_registry(
+        profile_id=_PROFILE,
+        stage_executor=_successful_executor([]),
+    )
+    assert await run_job_worker_once(
+        factory,
+        registry=registry,
+        queue=QueueName.GENERAL,
+        worker_id="daily-no-market-authority-worker",
+        worker_started_at=now,
+        process_version="test-v1",
+        migration_head="0027_fosun_market_authority",
+        clock=lambda: now,
+        claim_registered_only=True,
+    )
+
+    async with factory() as session:
+        collection_rows = tuple(
+            (
+                await session.execute(
+                    select(Job.job_type, Job.status, Job.result_code).where(
+                        Job.job_type.in_(
+                            (
+                                JobType.COLLECT_MARKET.value,
+                                JobType.COLLECT_SEC_MACRO.value,
+                            )
+                        )
+                    )
+                )
+            ).tuples()
+        )
+    assert set(collection_rows) == {
+        (
+            JobType.COLLECT_MARKET.value,
+            "skipped",
+            "FOSUN_MARKET_AUTHORITY_UNAVAILABLE",
+        ),
+        (JobType.COLLECT_SEC_MACRO.value, "queued", None),
+    }
 
 
 @pytest.mark.asyncio
@@ -402,7 +522,7 @@ async def test_quality_cutoff_skips_decision_chain_but_completes_audit_tail(
             result_code=f"{job_type.name}_OK",
         )
 
-    assert await _drain_daily_queues(factory, now=now, executor=cutoff_executor) == 11
+    assert await _drain_daily_queues(factory, now=now, executor=cutoff_executor) == 10
     async with factory() as session:
         rows = tuple(
             (
@@ -557,7 +677,14 @@ async def test_general_root_materializes_provider_children_without_registering_h
         JobType.COLLECT_SEC_MACRO.value,
     ]
     assert all(child.queue == QueueName.PROVIDER.value for child in children)
-    assert all(child.status == "queued" for child in children)
+    assert {(child.job_type, child.status, child.result_code) for child in children} == {
+        (
+            JobType.COLLECT_MARKET.value,
+            "skipped",
+            "FOSUN_MARKET_AUTHORITY_UNAVAILABLE",
+        ),
+        (JobType.COLLECT_SEC_MACRO.value, "queued", None),
+    }
 
 
 @pytest.mark.asyncio

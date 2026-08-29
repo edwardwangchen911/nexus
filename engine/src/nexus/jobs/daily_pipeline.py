@@ -23,6 +23,7 @@ from nexus.jobs.daily_payloads import (
     parse_utc,
 )
 from nexus.jobs.daily_schedule import build_daily_session_schedule
+from nexus.jobs.market_authority import load_frozen_fosun_market_authority
 from nexus.jobs.models import (
     BROKER_JOB_TYPES,
     JOB_PRIORITIES,
@@ -152,6 +153,12 @@ async def schedule_due_daily_pipeline(
         profile_id=profile_id,
         universe_snapshot_id=None if universe is None else str(universe.id),
         universe_content_hash=None if universe is None else universe.content_hash,
+        market_source="fosun",
+        market_authority=await load_frozen_fosun_market_authority(
+            session,
+            check_time=now,
+            operation="fosun_get_bars",
+        ),
     )
     document = payload.model_dump(mode="json")
     return await enqueue_job(
@@ -502,6 +509,22 @@ async def _enqueue_or_skip_stage(
             scheduled_for=scheduled_for,
             target_id=target_id,
         )
+    if (
+        job_type is JobType.COLLECT_MARKET
+        and root.market_source == "fosun"
+        and root.market_authority is None
+    ):
+        return await _record_terminal_skip(
+            session,
+            root=root,
+            root_job_id=root_job_id,
+            job_type=job_type,
+            dependencies=dependencies,
+            finished_at=finished_at,
+            result_code="FOSUN_MARKET_AUTHORITY_UNAVAILABLE",
+            scheduled_for=scheduled_for,
+            target_id=target_id,
+        )
     if job_type in enabled_stage_types:
         return await _enqueue_stage(
             session,
@@ -584,6 +607,8 @@ def _stage_payload(
         target_id=None if target_id is None else str(target_id),
         universe_snapshot_id=root.universe_snapshot_id,
         universe_content_hash=root.universe_content_hash,
+        market_source=root.market_source,
+        market_authority=root.market_authority,
     )
 
 

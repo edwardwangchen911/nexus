@@ -10,9 +10,12 @@ from uuid import uuid4
 
 import pyarrow as pa  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.ids import new_uuid7
+from nexus.jobs.market_authority import ProviderMarketBinding
 from nexus.market.price_bar_authority import finalize_price_bar_set
 from nexus.persistence.models.data import (
     DataArtifact,
@@ -22,6 +25,7 @@ from nexus.persistence.models.data import (
 )
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
+from nexus.providers.market.fosun_gateway import RawGatewayResponse
 
 
 class MarketObjectStore(Protocol):
@@ -47,6 +51,76 @@ class MarketIngestionResult:
     provenance: MarketDataProvenance
     price_authority: PriceBarSetAuthority | None
     price_evidence_ref: ResearchEvidenceRef | None
+    raw_artifact: DataArtifact | None = None
+
+
+@dataclass(frozen=True)
+class MarketRawArchive:
+    raw_uri: str
+    raw_artifact: DataArtifact
+
+
+async def archive_fosun_price_page_raw(
+    session: AsyncSession,
+    object_store: MarketObjectStore,
+    response: RawGatewayResponse,
+    *,
+    commit: bool = True,
+) -> MarketRawArchive:
+    """Archive exact Fosun gateway bytes before any bar interpretation."""
+    if response.operation != "fosun_get_bars":
+        raise ValueError("FOSUN_BAR_RESPONSE_REQUIRED")
+    digest = sha256(response.raw_payload).hexdigest()
+    date_path = response.received_at.astimezone(UTC).strftime("%Y/%m/%d")
+    key = f"raw/market/fosun/{date_path}/{response.gateway_request_id}/{digest}.json"
+    try:
+        uri = await object_store.archive_raw(key, response.raw_payload)
+        values = {
+            "id": new_uuid7(),
+            "uri": uri,
+            "sha256": digest,
+            "byte_size": len(response.raw_payload),
+            "mime_type": "application/json",
+            "schema_version": "fosun_gateway_market_bars_v1",
+            "source": "fosun",
+            "observed_at": response.received_at,
+            "available_at": response.received_at,
+            "received_at": response.received_at,
+        }
+        inserted_id = await session.scalar(
+            pg_insert(DataArtifact)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=[DataArtifact.sha256])
+            .returning(DataArtifact.id)
+        )
+        artifact = (
+            await session.get(DataArtifact, inserted_id)
+            if inserted_id is not None
+            else await session.scalar(
+                select(DataArtifact).where(DataArtifact.sha256 == digest)
+            )
+        )
+        identity = (
+            "uri",
+            "sha256",
+            "byte_size",
+            "mime_type",
+            "schema_version",
+            "source",
+            "observed_at",
+            "available_at",
+            "received_at",
+        )
+        if artifact is None or any(
+            getattr(artifact, field) != values[field] for field in identity
+        ):
+            raise RuntimeError("FOSUN_MARKET_RAW_REPLAY_CONFLICT")
+        if commit:
+            await session.commit()
+        return MarketRawArchive(raw_uri=artifact.uri, raw_artifact=artifact)
+    except Exception:
+        await session.rollback()
+        raise
 
 
 async def ingest_price_page(
@@ -54,6 +128,8 @@ async def ingest_price_page(
     object_store: MarketObjectStore,
     page: ProviderPage[PriceBar],
     *,
+    provider_binding: ProviderMarketBinding | None = None,
+    raw_artifact: DataArtifact | None = None,
     commit: bool = True,
 ) -> MarketIngestionResult:
     """Archive raw, atomically publish Parquet, then flush or commit metadata."""
@@ -64,6 +140,7 @@ async def ingest_price_page(
     instrument_ids = {bar.instrument_id for bar in page.items}
     if len(instrument_ids) != 1:
         raise ValueError("one market page cannot mix instruments")
+    _validate_provider_binding(page.provenance.source, provider_binding)
 
     received_at = max(bar.received_at or bar.available_at for bar in page.items)
     date_path = received_at.astimezone(UTC).strftime("%Y/%m/%d")
@@ -73,7 +150,17 @@ async def ingest_price_page(
     temporary_key: str | None = None
     final_key: str | None = None
     try:
-        raw_uri = await object_store.archive_raw(raw_key, page.raw_payload)
+        if raw_artifact is None:
+            raw_uri = await object_store.archive_raw(raw_key, page.raw_payload)
+        else:
+            if (
+                raw_artifact.sha256 != raw_digest
+                or raw_artifact.byte_size != len(page.raw_payload)
+                or raw_artifact.source != page.provenance.source
+                or raw_artifact.schema_version != "fosun_gateway_market_bars_v1"
+            ):
+                raise RuntimeError("FOSUN_MARKET_RAW_ARCHIVE_MISMATCH")
+            raw_uri = raw_artifact.uri
         parquet_payload = serialize_price_bars(page.items)
         parquet_digest = sha256(parquet_payload).hexdigest()
         instrument_id = next(iter(instrument_ids))
@@ -123,6 +210,7 @@ async def ingest_price_page(
             start_at=min(observed),
             end_at=max(observed),
             row_count=len(page.items),
+            **_binding_values(provider_binding),
         )
         session.add(manifest)
         await session.flush()
@@ -156,6 +244,7 @@ async def ingest_price_page(
             provenance=page.provenance,
             price_authority=None if finalized is None else finalized[0],
             price_evidence_ref=None if finalized is None else finalized[1],
+            raw_artifact=raw_artifact,
         )
     except Exception:
         await session.rollback()
@@ -237,3 +326,23 @@ async def _safe_delete_temporary(store: MarketObjectStore, key: str) -> None:
         await store.delete_temporary(key)
     except Exception:
         return
+
+
+def _validate_provider_binding(
+    source: str,
+    binding: ProviderMarketBinding | None,
+) -> None:
+    if (source == "fosun") != (binding is not None):
+        raise ValueError("FOSUN_MARKET_BINDING_REQUIRED")
+
+
+def _binding_values(binding: ProviderMarketBinding | None) -> dict[str, object | None]:
+    if binding is None:
+        return {
+            "provider_capability_id": None,
+            "provider_status_id": None,
+            "provider_status_version": None,
+            "provider_contract_hash": None,
+            "provider_authorized_at": None,
+        }
+    return binding.model_dump()

@@ -6,6 +6,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
+from nexus.jobs.market_authority import ProviderMarketBinding
 from nexus.market.intraday_ingestion import (
     archive_intraday_snapshot_raw,
     ingest_intraday_snapshot,
@@ -15,9 +16,11 @@ from nexus.persistence.models.data import (
     IntradayBarSetAuthority,
     PriceBarRecord,
     PriceSeriesManifest,
+    ProviderCapability,
 )
 from nexus.persistence.models.market import Instrument, LatestQuote
 from nexus.persistence.models.research import ResearchEvidenceRef
+from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.persistence.session import session_factory
 from nexus.providers.base import InstrumentId, MarketDataProvenance, PriceBar
 from nexus.providers.market.snapshot_contracts import (
@@ -210,6 +213,147 @@ async def test_malformed_raw_envelope_is_archived_without_business_facts(
         assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 1
         assert await session.scalar(select(func.count()).select_from(LatestQuote)) == 0
         assert await session.scalar(select(func.count()).select_from(IntradayBarSetAuthority)) == 0
+
+
+@pytest.mark.asyncio
+async def test_fosun_intraday_facts_persist_exact_binding_and_v2_authority(
+    migrated_database_url: str,
+) -> None:
+    await _seed_instruments(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    status_id = UUID("019d0000-0000-7000-8000-0000000000f0")
+    quote_capability_id = UUID("019d0000-0000-7000-8000-0000000000f1")
+    bars_capability_id = UUID("019d0000-0000-7000-8000-0000000000f2")
+    contract_hash = "a" * 64
+    created_at = RECEIVED_AT - timedelta(days=1)
+    authorized_at = RECEIVED_AT + timedelta(seconds=1)
+    async with factory() as session, session.begin():
+        session.add(
+            IntegrationStatus(
+                id=status_id,
+                provider="fosun",
+                status="read_only",
+                last_success_at=created_at,
+                version=1,
+                mode_changed_at=created_at,
+                capability_invalidated_at=None,
+                admitted_contract_hash=contract_hash,
+                created_at=created_at,
+            )
+        )
+        session.add_all(
+            ProviderCapability(
+                id=capability_id,
+                provider="fosun",
+                capability="READ_ONLY",
+                contract_hash=contract_hash,
+                expires_at=datetime(2027, 1, 1, tzinfo=UTC),
+                schema_version="1",
+                payload={
+                    "operation": operation,
+                    "market_scope": "US",
+                    "delivery_mode": "unknown",
+                },
+                created_at=created_at,
+            )
+            for capability_id, operation in (
+                (quote_capability_id, "fosun_get_quotes"),
+                (bars_capability_id, "fosun_get_bars"),
+            )
+        )
+
+    price = Decimal("227.16")
+    observed = RECEIVED_AT.replace(second=0, microsecond=0) - timedelta(minutes=1)
+    batch = SnapshotBatch(
+        snapshots=(
+            MarketSnapshot(
+                instrument_id=AAPL_ID,
+                symbol="AAPL",
+                trade=SnapshotTrade(
+                    price=price,
+                    observed_at=RECEIVED_AT,
+                    event_kind="snapshot",
+                    quality_flags=(
+                        "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",
+                        "INTRADAY_BID_ASK_UNAVAILABLE",
+                    ),
+                ),
+                quote=None,
+                minute_bar=SnapshotMinuteBar(
+                    bar=PriceBar(
+                        instrument_id=AAPL_ID,
+                        session=observed.date(),
+                        open=price,
+                        high=price,
+                        low=price,
+                        close=price,
+                        volume=Decimal("1"),
+                        observed_at=observed,
+                        available_at=RECEIVED_AT,
+                        received_at=RECEIVED_AT,
+                        revision="b" * 64,
+                    )
+                ),
+            ),
+        ),
+        raw_payload=b'{"schema":"fosun_gateway_market_snapshot_v1"}',
+        received_at=RECEIVED_AT,
+        provenance=MarketDataProvenance(
+            source="fosun",
+            feed="l1",
+            adjustment="raw",
+            interval="1Min",
+            mode="read_only",
+            delivery_mode="unknown",
+        ),
+    )
+    quote_binding = ProviderMarketBinding(
+        provider_capability_id=quote_capability_id,
+        provider_status_id=status_id,
+        provider_status_version=1,
+        provider_contract_hash=contract_hash,
+        provider_authorized_at=authorized_at,
+    )
+    bars_binding = quote_binding.model_copy(
+        update={"provider_capability_id": bars_capability_id}
+    )
+
+    async with factory() as session, session.begin():
+        result = await ingest_intraday_snapshot(
+            session,
+            _ObjectStore(),
+            batch,
+            quote_binding=quote_binding,
+            bar_binding=bars_binding,
+            commit=False,
+        )
+
+    assert result.created_trade_observations == 1
+    assert result.created_quote_observations == 0
+    assert result.created_bar_authorities == 1
+    async with factory() as session:
+        quote = await session.scalar(select(LatestQuote).where(LatestQuote.source == "fosun"))
+        manifest = await session.scalar(
+            select(PriceSeriesManifest).where(PriceSeriesManifest.source == "fosun")
+        )
+        authority = await session.scalar(
+            select(IntradayBarSetAuthority).where(IntradayBarSetAuthority.source == "fosun")
+        )
+        raw = await session.scalar(
+            select(DataArtifact).where(
+                DataArtifact.schema_version == "fosun_gateway_market_snapshot_v1"
+            )
+        )
+    assert quote is not None and manifest is not None and authority is not None and raw is not None
+    assert quote.event_kind == "snapshot"
+    assert quote.quality_flags == [
+        "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",
+        "INTRADAY_BID_ASK_UNAVAILABLE",
+    ]
+    assert quote.provider_capability_id == quote_capability_id
+    assert manifest.provider_capability_id == bars_capability_id
+    assert authority.hash_version == "intraday_bar_set_sha256_v2"
+    assert authority.policy_version == "intraday_monitor_authority_v2"
 
 
 @pytest.mark.asyncio
