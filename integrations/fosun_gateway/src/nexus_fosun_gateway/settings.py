@@ -16,6 +16,10 @@ class Environment(StrEnum):
     PRODUCTION = "production"
 
 
+BROKER_LISTENER_PORT = 8081
+MARKET_LISTENER_PORT = 8082
+
+
 class GatewaySettings(BaseSettings):
     """Only configuration names are modeled; no provider client is created here."""
 
@@ -87,9 +91,13 @@ class GatewaySettings(BaseSettings):
         default=None,
         validation_alias="FOSUN_GATEWAY_SERVER_KEY",
     )
-    server_client_ca: Path | None = Field(
+    server_broker_client_ca: Path | None = Field(
         default=None,
-        validation_alias="FOSUN_GATEWAY_SERVER_CLIENT_CA",
+        validation_alias="FOSUN_GATEWAY_SERVER_BROKER_CLIENT_CA",
+    )
+    server_market_client_ca: Path | None = Field(
+        default=None,
+        validation_alias="FOSUN_GATEWAY_SERVER_MARKET_CLIENT_CA",
     )
     sdk_admitted: bool = Field(default=False, validation_alias="FOSUN_SDK_ADMITTED")
     provider_manifest: Path = Field(
@@ -168,7 +176,8 @@ class GatewaySettings(BaseSettings):
                 or self.market_gateway_hmac_current_secret is None
                 or self.server_cert is None
                 or self.server_key is None
-                or self.server_client_ca is None
+                or self.server_broker_client_ca is None
+                or self.server_market_client_ca is None
                 or not self.sdk_admitted
                 or self.activation_probe_artifact is None
                 or self.activation_contract_hash is None
@@ -182,6 +191,8 @@ class GatewaySettings(BaseSettings):
                     "identity, an activation contract, provider config, and a current gateway "
                     "broker and market HMAC identities"
                 )
+            if self.server_broker_client_ca == self.server_market_client_ca:
+                raise ValueError("production listeners require distinct client CA paths")
         elif self.capability is None:
             self.capability = "READ_ONLY"
         if self.replay_store_path is not None and not self.replay_store_path.is_absolute():

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from pydantic import ValidationError
@@ -31,6 +31,7 @@ from nexus.jobs.repository import (
 )
 
 Clock = Callable[[], datetime]
+PreclaimGuard = Callable[[AsyncSession], Awaitable[None]]
 
 
 def _authority_matches(claim: ClaimedJob, spec: JobHandlerSpec) -> bool:
@@ -93,10 +94,13 @@ async def run_job_worker_once(
     migration_head: str,
     clock: Clock,
     claim_registered_only: bool = False,
+    preclaim_guard: PreclaimGuard | None = None,
 ) -> bool:
     """Heartbeat, reclaim, claim, and terminalize at most one durable Job."""
     claim_time = clock()
     async with factory() as session, session.begin():
+        if preclaim_guard is not None:
+            await preclaim_guard(session)
         await upsert_worker_heartbeat(
             session,
             queue=queue,
@@ -113,9 +117,7 @@ async def run_job_worker_once(
             worker_id=worker_id,
             now=claim_time,
             lease_seconds=60,
-            job_types=(
-                tuple(sorted(registry.job_types)) if claim_registered_only else None
-            ),
+            job_types=(tuple(sorted(registry.job_types)) if claim_registered_only else None),
         )
     if claim is None:
         return False
@@ -170,8 +172,10 @@ async def run_job_worker_once(
         )
         return True
 
+    loop = asyncio.get_running_loop()
+    handler_deadline = loop.time() + spec.timeout_seconds
     try:
-        async with asyncio.timeout(spec.timeout_seconds):
+        async with asyncio.timeout_at(handler_deadline):
             async with factory() as session, session.begin():
 
                 async def execute(target_session: AsyncSession) -> JobCompletion:
@@ -180,6 +184,7 @@ async def run_job_worker_once(
                         claim=claim,
                         payload=payload,
                         _clock=clock,
+                        _monotonic_deadline=handler_deadline,
                     )
                     result = await spec.handler(context)
                     return JobCompletion(

@@ -1,5 +1,6 @@
 """Closed intraday collection handler result mapping."""
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -7,15 +8,21 @@ from types import SimpleNamespace
 from typing import cast
 from uuid import UUID
 
+import nexus.jobs.intraday_collection as intraday_collection_module
 import pytest
 from nexus.jobs.intraday_collection import build_intraday_collection_registry
-from nexus.jobs.intraday_schedule import bucket_for, build_intraday_payload
+from nexus.jobs.intraday_schedule import (
+    bucket_for,
+    build_alpaca_intraday_payload,
+    build_intraday_payload,
+)
 from nexus.jobs.market_authority import FrozenFosunMarketAuthority
-from nexus.jobs.models import JobType
+from nexus.jobs.models import JobType, RetryPolicy
 from nexus.jobs.registry import JobHandlerContext
 from nexus.jobs.repository import ClaimedJob
 from nexus.jobs.worker import UnsafeJobError
-from nexus.providers.base import InstrumentId, MarketDataProvenance
+from nexus.market.object_store import ProviderObjectIOUnavailable
+from nexus.providers.base import InstrumentId, MarketDataProvenance, PriceBar
 from nexus.providers.market.alpaca import MarketProviderPayloadError
 from nexus.providers.market.fosun import (
     FosunSnapshotReadAborted,
@@ -27,6 +34,7 @@ from nexus.providers.market.snapshot_contracts import (
     MarketSnapshot,
     RawSnapshotEnvelope,
     SnapshotBatch,
+    SnapshotMinuteBar,
     SnapshotQuote,
     SnapshotTrade,
 )
@@ -79,17 +87,13 @@ class _Provider:
                     assert await read_guard.before_read("fosun_get_bars", bar_codes)
                     bar_response = RawGatewayResponse(
                         operation="fosun_get_bars",
-                        gateway_request_id=UUID(
-                            "019d0000-0000-7000-8000-0000000000f2"
-                        ),
+                        gateway_request_id=UUID("019d0000-0000-7000-8000-0000000000f2"),
                         request_body_sha256="b" * 64,
                         raw_payload=payload,
                         sent_at=NOW - timedelta(milliseconds=250),
                         received_at=NOW,
                     )
-                    assert await read_guard.after_read(
-                        "fosun_get_bars", bar_codes, bar_response
-                    )
+                    assert await read_guard.after_read("fosun_get_bars", bar_codes, bar_response)
             if not await read_guard.before_read("fosun_get_quotes", codes):
                 raise FosunSnapshotReadAborted(
                     "INTRADAY_AUTHORITY_CHANGED_BEFORE_FETCH",
@@ -132,19 +136,73 @@ class _Provider:
         )
 
 
+@dataclass
+class _AlpacaProvider:
+    calls: int = 0
+    snapshot: MarketSnapshot | None = None
+
+    async def fetch_raw_snapshots(
+        self,
+        request: IntradaySnapshotRequest,
+    ) -> RawSnapshotEnvelope:
+        self.calls += 1
+        return RawSnapshotEnvelope(
+            raw_payload=b'{"AAPL":{}}',
+            received_at=NOW,
+            provenance=MarketDataProvenance(
+                source="alpaca",
+                feed=request.feed,
+                adjustment="raw",
+                interval="1Min",
+                mode="read_only",
+                delivery_mode=request.delivery_mode,
+            ),
+        )
+
+    def normalize_raw_snapshots(
+        self,
+        envelope: RawSnapshotEnvelope,
+        request: IntradaySnapshotRequest,
+    ) -> SnapshotBatch:
+        snapshot = self.snapshot or MarketSnapshot(
+            instrument_id=request.instruments[0].instrument_id,
+            symbol=request.instruments[0].symbol,
+            trade=None,
+            quote=None,
+            minute_bar=None,
+        )
+        return SnapshotBatch(
+            snapshots=(snapshot,),
+            raw_payload=envelope.raw_payload,
+            received_at=envelope.received_at,
+            provenance=envelope.provenance,
+        )
+
+
 async def _archive_raw(*_: object, **__: object) -> object:
     return SimpleNamespace(raw_artifact=SimpleNamespace())
 
 
-def _context(payload: object, *, now: datetime = NOW) -> JobHandlerContext:
+def _context(
+    payload: object,
+    *,
+    now: datetime = NOW,
+    attempt_no: int = 1,
+    effective_at: datetime | None = None,
+) -> JobHandlerContext:
+    class _Session:
+        async def execute(self, _statement: object, _params: object) -> None:
+            return None
+
     claim = cast(
         ClaimedJob,
         SimpleNamespace(
-            effective_at=bucket_for(now).start,
+            effective_at=effective_at or bucket_for(now).start,
+            attempt_no=attempt_no,
         ),
     )
     return JobHandlerContext(
-        session=cast(object, SimpleNamespace()),
+        session=cast(object, _Session()),
         claim=claim,
         payload=cast(object, payload),
         _clock=lambda: now,
@@ -163,9 +221,18 @@ def _payload(
         bucket=bucket_for(bucket_time),
         instruments=((INSTRUMENT_ID, "AAPL"),),
         quote_authority=_authority("fosun_get_quotes"),
-        bars_authority=(
-            _authority("fosun_get_bars") if include_minute_bars else None
-        ),
+        bars_authority=(_authority("fosun_get_bars") if include_minute_bars else None),
+    )
+
+
+def _alpaca_payload() -> object:
+    return build_alpaca_intraday_payload(
+        calendar_authority_id=CALENDAR_ID,
+        session="2026-08-28",
+        bucket=bucket_for(NOW),
+        instruments=((INSTRUMENT_ID, "AAPL"),),
+        feed="iex",
+        delivery_mode="real_time",
     )
 
 
@@ -179,6 +246,24 @@ def _settings() -> ProviderSettings:
         fosun_market_gateway_client_cert="/synthetic/market.crt",
         fosun_market_gateway_client_key="/synthetic/market.key",
         fosun_market_gateway_client_ca="/synthetic/ca.crt",
+        sec_contact="owner@example.com",
+        fred_api_key="fred-canary",
+    )
+
+
+def _alpaca_settings() -> ProviderSettings:
+    return ProviderSettings(
+        runtime_mode="production",
+        market_provider="alpaca",
+        alpaca_market_mode="enabled",
+        alpaca_key_id="key-id-canary",
+        alpaca_secret_key="secret-canary",
+        alpaca_feed="iex",
+        alpaca_delivery_mode="real_time",
+        intraday_monitor_mode="production",
+        intraday_max_symbols=30,
+        alpaca_intraday_feed="iex",
+        alpaca_intraday_delivery_mode="real_time",
         sec_contact="owner@example.com",
         fred_api_key="fred-canary",
     )
@@ -207,6 +292,610 @@ def _authority(operation: str) -> FrozenFosunMarketAuthority:
 
 async def _authority_valid(*_: object, **__: object) -> bool:
     return True
+
+
+def test_collection_registry_is_one_shot() -> None:
+    registry = build_intraday_collection_registry(
+        lambda _session: _Provider(),
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        archive_raw=_archive_raw,
+        revalidate=_authority_valid,
+    )
+
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+
+    assert spec is not None
+    assert spec.retry_policy is RetryPolicy.NEVER
+    assert spec.max_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_fosun_fetch_timeout_archives_partial_evidence_before_terminal_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    partial = RawSnapshotEnvelope(
+        raw_payload=b'{"partial":"first-completed-read"}',
+        received_at=NOW,
+        provenance=MarketDataProvenance(
+            source="fosun",
+            feed="l1",
+            adjustment="raw",
+            interval="1Min",
+            mode="read_only",
+            delivery_mode="unknown",
+        ),
+    )
+
+    class _CancelledProvider(_Provider):
+        async def fetch_raw_snapshots(
+            self,
+            request: IntradaySnapshotRequest,
+            *,
+            read_guard: FosunSnapshotReadGuard | None = None,
+        ) -> RawSnapshotEnvelope:
+            del request, read_guard
+            self.calls += 1
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise FosunSnapshotReadAborted(
+                    "INTRADAY_SNAPSHOT_READ_CANCELLED",
+                    partial,
+                ) from None
+            raise AssertionError("unreachable")
+
+    provider = _CancelledProvider()
+    archived: list[bytes] = []
+    ingestions = 0
+
+    async def archive(
+        _session: object,
+        _store: object,
+        envelope: RawSnapshotEnvelope,
+        **__: object,
+    ) -> object:
+        archived.append(envelope.raw_payload)
+        return SimpleNamespace(raw_artifact=SimpleNamespace())
+
+    async def ingest(*_: object, **__: object) -> object:
+        nonlocal ingestions
+        ingestions += 1
+        raise AssertionError("cancelled evidence must never be normalized")
+
+    monkeypatch.setattr(
+        intraday_collection_module,
+        "_FOSUN_FETCH_TIMEOUT_SECONDS",
+        0.01,
+    )
+    registry = build_intraday_collection_registry(
+        lambda _session: provider,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        ingest=ingest,
+        archive_raw=archive,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    result = await spec.handler(_context(_payload()))
+
+    assert result.outcome == "skipped"
+    assert result.result_code == "INTRADAY_SNAPSHOT_READ_CANCELLED"
+    assert provider.calls == 1
+    assert archived == [partial.raw_payload]
+    assert ingestions == 0
+
+
+@pytest.mark.asyncio
+async def test_fosun_fetch_budget_includes_preflight_and_preserves_archive_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    partial = RawSnapshotEnvelope(
+        raw_payload=b'{"partial":"budgeted-read"}',
+        received_at=NOW,
+        provenance=MarketDataProvenance(
+            source="fosun",
+            feed="l1",
+            adjustment="raw",
+            interval="1Min",
+            mode="read_only",
+            delivery_mode="unknown",
+        ),
+    )
+
+    class _CancelledProvider(_Provider):
+        async def fetch_raw_snapshots(
+            self,
+            request: IntradaySnapshotRequest,
+            *,
+            read_guard: FosunSnapshotReadGuard | None = None,
+        ) -> RawSnapshotEnvelope:
+            del request, read_guard
+            self.calls += 1
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise FosunSnapshotReadAborted(
+                    "INTRADAY_SNAPSHOT_READ_CANCELLED",
+                    partial,
+                ) from None
+            raise AssertionError("unreachable")
+
+    async def slow_preflight(*_: object, **__: object) -> bool:
+        await asyncio.sleep(0.02)
+        return True
+
+    archived: list[bytes] = []
+
+    async def slow_archive(
+        _session: object,
+        _store: object,
+        envelope: RawSnapshotEnvelope,
+        **__: object,
+    ) -> object:
+        await asyncio.sleep(0.045)
+        archived.append(envelope.raw_payload)
+        return SimpleNamespace(raw_artifact=SimpleNamespace())
+
+    monkeypatch.setattr(intraday_collection_module, "_FOSUN_FETCH_TIMEOUT_SECONDS", 0.24)
+    monkeypatch.setattr(
+        intraday_collection_module,
+        "_FOSUN_HANDLER_INTERNAL_TIMEOUT_SECONDS",
+        0.29,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        intraday_collection_module,
+        "_FOSUN_HANDLER_SAFETY_MARGIN_SECONDS",
+        0.01,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        intraday_collection_module,
+        "_FOSUN_ABORT_ARCHIVE_TIMEOUT_SECONDS",
+        0.05,
+    )
+    provider = _CancelledProvider()
+    registry = build_intraday_collection_registry(
+        lambda _session: provider,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        archive_raw=slow_archive,
+        revalidate=slow_preflight,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    async with asyncio.timeout(0.30):
+        result = await spec.handler(_context(_payload()))
+
+    assert result.outcome == "skipped"
+    assert result.result_code == "INTRADAY_SNAPSHOT_READ_CANCELLED"
+    assert provider.calls == 1
+    assert archived == [partial.raw_payload]
+
+
+@pytest.mark.asyncio
+async def test_operator_cancellation_is_not_converted_to_terminal_skip() -> None:
+    entered = asyncio.Event()
+
+    class _CancelledProvider(_Provider):
+        async def fetch_raw_snapshots(
+            self,
+            request: IntradaySnapshotRequest,
+            *,
+            read_guard: FosunSnapshotReadGuard | None = None,
+        ) -> RawSnapshotEnvelope:
+            del request, read_guard
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise FosunSnapshotReadAborted(
+                    "INTRADAY_SNAPSHOT_READ_CANCELLED",
+                    None,
+                ) from None
+            raise AssertionError("unreachable")
+
+    registry = build_intraday_collection_registry(
+        lambda _session: _CancelledProvider(),
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        archive_raw=_archive_raw,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    task = asyncio.create_task(spec.handler(_context(_payload())))
+    await entered.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_same_tick_fetch_timeout_and_operator_cancel_propagates_operator_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    partial = RawSnapshotEnvelope(
+        raw_payload=b'{"partial":"same-tick-cancel"}',
+        received_at=NOW,
+        provenance=MarketDataProvenance(
+            source="fosun",
+            feed="l1",
+            adjustment="raw",
+            interval="1Min",
+            mode="read_only",
+            delivery_mode="unknown",
+        ),
+    )
+
+    class _CancelledProvider(_Provider):
+        async def fetch_raw_snapshots(
+            self,
+            request: IntradaySnapshotRequest,
+            *,
+            read_guard: FosunSnapshotReadGuard | None = None,
+        ) -> RawSnapshotEnvelope:
+            del request, read_guard
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise FosunSnapshotReadAborted(
+                    "INTRADAY_SNAPSHOT_READ_CANCELLED",
+                    partial,
+                ) from None
+            raise AssertionError("unreachable")
+
+    archived: list[bytes] = []
+
+    async def archive(
+        _session: object,
+        _store: object,
+        envelope: RawSnapshotEnvelope,
+        **__: object,
+    ) -> object:
+        archived.append(envelope.raw_payload)
+        return SimpleNamespace(raw_artifact=SimpleNamespace())
+
+    real_timeout_at = asyncio.timeout_at
+    operator_cancel_scheduled = False
+
+    def timeout_at_with_same_tick_operator_cancel(when: float | None) -> asyncio.Timeout:
+        nonlocal operator_cancel_scheduled
+        if not operator_cancel_scheduled:
+            task = asyncio.current_task()
+            assert task is not None
+            assert when is not None
+            asyncio.get_running_loop().call_at(when, task.cancel)
+            operator_cancel_scheduled = True
+        return real_timeout_at(when)
+
+    monkeypatch.setattr(intraday_collection_module, "_FOSUN_FETCH_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        intraday_collection_module.asyncio,
+        "timeout_at",
+        timeout_at_with_same_tick_operator_cancel,
+    )
+    registry = build_intraday_collection_registry(
+        lambda _session: _CancelledProvider(),
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        archive_raw=archive,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    task = asyncio.create_task(spec.handler(_context(_payload())))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert task.cancelled()
+    assert archived == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("aborted", [False, True])
+@pytest.mark.parametrize(
+    "error_code",
+    ["OBJECT_IO_SATURATED", "OBJECT_IO_DEADLINE_EXCEEDED"],
+)
+async def test_object_io_failure_preserves_stop_code_for_normal_and_aborted_archive(
+    aborted: bool,
+    error_code: str,
+) -> None:
+    envelope = RawSnapshotEnvelope(
+        raw_payload=b'{"partial":"object-io-stop"}',
+        received_at=NOW,
+        provenance=MarketDataProvenance(
+            source="fosun",
+            feed="l1",
+            adjustment="raw",
+            interval="1Min",
+            mode="read_only",
+            delivery_mode="unknown",
+        ),
+    )
+
+    class _ObjectIOProvider(_Provider):
+        async def fetch_raw_snapshots(
+            self,
+            request: IntradaySnapshotRequest,
+            *,
+            read_guard: FosunSnapshotReadGuard | None = None,
+        ) -> RawSnapshotEnvelope:
+            del request, read_guard
+            self.calls += 1
+            if aborted:
+                raise FosunSnapshotReadAborted(
+                    "INTRADAY_AUTHORITY_REVALIDATION_FAILED",
+                    envelope,
+                )
+            return envelope
+
+        def normalize_raw_snapshots(
+            self,
+            raw: RawSnapshotEnvelope,
+            request: IntradaySnapshotRequest,
+        ) -> SnapshotBatch:
+            del raw, request
+            raise AssertionError("failed raw archive must not be normalized")
+
+    async def unavailable_archive(*_: object, **__: object) -> object:
+        raise ProviderObjectIOUnavailable(error_code)
+
+    provider = _ObjectIOProvider()
+    registry = build_intraday_collection_registry(
+        lambda _session: provider,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        archive_raw=unavailable_archive,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    with pytest.raises(UnsafeJobError, match=error_code):
+        await spec.handler(_context(_payload()))
+
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_code",
+    ["OBJECT_IO_SATURATED", "OBJECT_IO_DEADLINE_EXCEEDED"],
+)
+async def test_object_io_failure_during_normalized_ingest_preserves_stop_code(
+    error_code: str,
+) -> None:
+    provider = _Provider()
+    archived: list[bytes] = []
+
+    async def archive(
+        _session: object,
+        _store: object,
+        envelope: RawSnapshotEnvelope,
+        **__: object,
+    ) -> object:
+        archived.append(envelope.raw_payload)
+        return SimpleNamespace(raw_artifact=SimpleNamespace())
+
+    async def unavailable_ingest(*_: object, **__: object) -> object:
+        raise ProviderObjectIOUnavailable(error_code)
+
+    registry = build_intraday_collection_registry(
+        lambda _session: provider,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        ingest=unavailable_ingest,
+        archive_raw=archive,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    with pytest.raises(UnsafeJobError, match=error_code):
+        await spec.handler(_context(_payload()))
+
+    assert provider.calls == 1
+    assert archived == [b'{"AAPL":{}}']
+
+
+@pytest.mark.asyncio
+async def test_raw_archive_phase_deadline_is_terminal_before_worker_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        intraday_collection_module,
+        "_FOSUN_HANDLER_INTERNAL_TIMEOUT_SECONDS",
+        0.06,
+    )
+    monkeypatch.setattr(
+        intraday_collection_module,
+        "_FOSUN_HANDLER_SAFETY_MARGIN_SECONDS",
+        0.005,
+    )
+    monkeypatch.setattr(
+        intraday_collection_module,
+        "_FOSUN_ABORT_ARCHIVE_TIMEOUT_SECONDS",
+        0.01,
+    )
+    provider = _Provider()
+
+    async def blocked_archive(*_: object, **__: object) -> object:
+        await asyncio.Event().wait()
+
+    registry = build_intraday_collection_registry(
+        lambda _session: provider,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        archive_raw=blocked_archive,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    with pytest.raises(UnsafeJobError, match="INTRADAY_RAW_ARCHIVE_DEADLINE_EXCEEDED"):
+        await spec.handler(_context(_payload()))
+
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ingest_phase_deadline_preserves_archived_raw_and_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        intraday_collection_module,
+        "_FOSUN_HANDLER_INTERNAL_TIMEOUT_SECONDS",
+        0.06,
+    )
+    monkeypatch.setattr(
+        intraday_collection_module,
+        "_FOSUN_HANDLER_SAFETY_MARGIN_SECONDS",
+        0.005,
+    )
+    monkeypatch.setattr(
+        intraday_collection_module,
+        "_FOSUN_ABORT_ARCHIVE_TIMEOUT_SECONDS",
+        0.01,
+    )
+    provider = _Provider()
+    archived: list[bytes] = []
+
+    async def archive(
+        _session: object,
+        _store: object,
+        envelope: RawSnapshotEnvelope,
+        **__: object,
+    ) -> object:
+        archived.append(envelope.raw_payload)
+        return SimpleNamespace(raw_artifact=SimpleNamespace())
+
+    async def blocked_ingest(*_: object, **__: object) -> object:
+        await asyncio.Event().wait()
+
+    registry = build_intraday_collection_registry(
+        lambda _session: provider,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        ingest=blocked_ingest,
+        archive_raw=archive,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    with pytest.raises(UnsafeJobError, match="INTRADAY_INGEST_DEADLINE_EXCEEDED"):
+        await spec.handler(_context(_payload()))
+
+    assert provider.calls == 1
+    assert archived == [b'{"AAPL":{}}']
+
+
+@pytest.mark.asyncio
+async def test_operator_cancellation_during_ingest_is_not_phase_timeout() -> None:
+    provider = _Provider()
+    ingest_started = asyncio.Event()
+
+    async def blocked_ingest(*_: object, **__: object) -> object:
+        ingest_started.set()
+        await asyncio.Event().wait()
+
+    registry = build_intraday_collection_registry(
+        lambda _session: provider,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        ingest=blocked_ingest,
+        archive_raw=_archive_raw,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+    task = asyncio.create_task(spec.handler(_context(_payload())))
+    await ingest_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert task.cancelled()
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_attempt_is_terminal_without_provider_construction() -> None:
+    constructions = 0
+
+    def factory(_session: object) -> _Provider:
+        nonlocal constructions
+        constructions += 1
+        return _Provider()
+
+    registry = build_intraday_collection_registry(
+        factory,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        archive_raw=_archive_raw,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    result = await spec.handler(_context(_payload(), attempt_no=2))
+
+    assert result.outcome == "skipped"
+    assert result.result_code == "INTRADAY_ONE_SHOT_ALREADY_ATTEMPTED"
+    assert constructions == 0
+
+
+@pytest.mark.asyncio
+async def test_claim_bucket_mismatch_is_terminal_without_provider_construction() -> None:
+    constructions = 0
+
+    def factory(_session: object) -> _Provider:
+        nonlocal constructions
+        constructions += 1
+        return _Provider()
+
+    registry = build_intraday_collection_registry(
+        factory,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        archive_raw=_archive_raw,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    result = await spec.handler(
+        _context(
+            _payload(),
+            effective_at=bucket_for(NOW).start + timedelta(microseconds=1),
+        )
+    )
+
+    assert result.outcome == "skipped"
+    assert result.result_code == "INTRADAY_BUCKET_AUTHORITY_MISMATCH"
+    assert constructions == 0
 
 
 @pytest.mark.asyncio
@@ -250,6 +939,120 @@ async def test_collection_archives_raw_when_all_normalized_facts_are_missing() -
 
 
 @pytest.mark.asyncio
+async def test_alpaca_collection_uses_plain_fetch_and_never_injects_fosun_bindings() -> None:
+    provider = _AlpacaProvider()
+    bindings: list[tuple[object, object, object]] = []
+
+    async def record_ingest(*_: object, **kwargs: object) -> object:
+        bindings.append(
+            (
+                kwargs["quote_binding"],
+                kwargs.get("bar_binding"),
+                kwargs["bar_bindings"],
+            )
+        )
+        return SimpleNamespace(
+            created_trade_observations=0,
+            created_quote_observations=0,
+            created_bar_authorities=0,
+            replayed=0,
+        )
+
+    registry = build_intraday_collection_registry(
+        lambda _session: cast(object, provider),
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_alpaca_settings(),
+        ingest=record_ingest,
+        archive_raw=_archive_raw,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    result = await spec.handler(_context(_alpaca_payload()))
+
+    assert result.result_code == "INTRADAY_SNAPSHOT_PARTIAL"
+    assert provider.calls == 1
+    assert bindings == [(None, None, None)]
+
+
+@pytest.mark.asyncio
+async def test_alpaca_non_bar_bucket_drops_provider_injected_minute_bar() -> None:
+    observed = NOW.replace(second=0, microsecond=0) - timedelta(minutes=1)
+    provider = _AlpacaProvider(
+        snapshot=MarketSnapshot(
+            instrument_id=InstrumentId(INSTRUMENT_ID),
+            symbol="AAPL",
+            trade=SnapshotTrade(price=Decimal("100"), observed_at=NOW),
+            quote=SnapshotQuote(
+                bid=Decimal("99.99"),
+                ask=Decimal("100.01"),
+                observed_at=NOW,
+            ),
+            minute_bar=SnapshotMinuteBar(
+                bar=PriceBar(
+                    instrument_id=InstrumentId(INSTRUMENT_ID),
+                    session=NOW.date(),
+                    open=Decimal("99.90"),
+                    high=Decimal("100.10"),
+                    low=Decimal("99.80"),
+                    close=Decimal("100"),
+                    volume=Decimal("1200"),
+                    observed_at=observed,
+                    available_at=NOW,
+                    received_at=NOW,
+                    revision="snapshot-v1",
+                )
+            ),
+        )
+    )
+    ingested: list[SnapshotBatch] = []
+    bindings: list[tuple[object, object, object]] = []
+
+    async def record_ingest(
+        _session: object,
+        _store: object,
+        batch: SnapshotBatch,
+        **kwargs: object,
+    ) -> object:
+        ingested.append(batch)
+        bindings.append(
+            (
+                kwargs["quote_binding"],
+                kwargs.get("bar_binding"),
+                kwargs["bar_bindings"],
+            )
+        )
+        return SimpleNamespace(
+            created_trade_observations=1,
+            created_quote_observations=1,
+            created_bar_authorities=0,
+            replayed=0,
+        )
+
+    registry = build_intraday_collection_registry(
+        lambda _session: cast(object, provider),
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_alpaca_settings(),
+        ingest=record_ingest,
+        archive_raw=_archive_raw,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    result = await spec.handler(_context(_alpaca_payload()))
+
+    assert result.outcome == "succeeded"
+    assert result.result_code == "INTRADAY_SNAPSHOT_COLLECTED"
+    assert len(ingested) == 1
+    assert ingested[0].snapshots[0].minute_bar is None
+    assert bindings == [(None, None, None)]
+
+
+@pytest.mark.asyncio
 async def test_expired_bucket_stops_before_provider_construction() -> None:
     constructions = 0
 
@@ -270,7 +1073,13 @@ async def test_expired_bucket_stops_before_provider_construction() -> None:
     assert spec is not None
     expired = datetime(2026, 8, 28, 14, 31, 31, tzinfo=UTC)
 
-    result = await spec.handler(_context(_payload(), now=expired))
+    result = await spec.handler(
+        _context(
+            _payload(),
+            now=expired,
+            effective_at=bucket_for(NOW).start,
+        )
+    )
 
     assert result.outcome == "skipped"
     assert result.result_code == "INTRADAY_BUCKET_EXPIRED"
@@ -307,7 +1116,7 @@ async def test_authority_mismatch_stops_before_provider_construction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_any_missing_snapshot_category_is_partial_after_ingesting_available_facts() -> None:
+async def test_non_bar_bucket_with_trade_and_quote_is_complete() -> None:
     snapshot = MarketSnapshot(
         instrument_id=InstrumentId(INSTRUMENT_ID),
         symbol="AAPL",
@@ -342,8 +1151,8 @@ async def test_any_missing_snapshot_category_is_partial_after_ingesting_availabl
 
     result = await spec.handler(_context(_payload()))
 
-    assert result.outcome == "skipped"
-    assert result.result_code == "INTRADAY_SNAPSHOT_PARTIAL"
+    assert result.outcome == "succeeded"
+    assert result.result_code == "INTRADAY_SNAPSHOT_COLLECTED"
     assert ingestions == 1
 
 

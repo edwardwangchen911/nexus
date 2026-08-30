@@ -45,7 +45,7 @@ def test_0024_is_single_head_over_0023() -> None:
     config = Config("engine/alembic.ini")
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0029_fosun_bar_lineage"]
+    assert script.get_heads() == ["0032_ticker_alias_authority"]
     revision = script.get_revision("0024_broker_simulation")
     assert revision is not None
     assert revision.down_revision == "0023_evolution_authority"
@@ -56,10 +56,7 @@ async def _table_names(database_url: str) -> set[str]:
     try:
         async with engine.connect() as connection:
             result = await connection.execute(
-                text(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema='public'"
-                )
+                text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
             )
             return {str(row.table_name) for row in result}
     finally:

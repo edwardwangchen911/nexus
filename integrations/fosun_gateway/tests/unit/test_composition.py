@@ -1,5 +1,7 @@
 import hashlib
 import json
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -314,6 +316,9 @@ async def test_expired_activation_stops_every_sdk_operation_before_client_call()
     transport = SdkFosunTransport(
         SimpleNamespace(account=SimpleNamespace(list_accounts=list_accounts)),
         capability_expires_at=expired_at,
+        activation_checked_at=expired_at,
+        activation_monotonic_anchor=100.0,
+        clock=lambda: 100.0,
         utc_clock=lambda: expired_at,
     )
 
@@ -322,6 +327,36 @@ async def test_expired_activation_stops_every_sdk_operation_before_client_call()
 
     assert exc_info.value.code == "ACTIVATION_EXPIRED"
     assert called is False
+
+
+def test_activation_expiry_makes_sdk_transport_unready() -> None:
+    expires_at = datetime(2026, 8, 27, 8, 0, tzinfo=UTC)
+    checked_at = expires_at - timedelta(seconds=1)
+    current = [checked_at]
+    monotonic = [100.0]
+    expired: list[datetime] = []
+    transport = SdkFosunTransport(
+        SimpleNamespace(),
+        capability_expires_at=expires_at,
+        activation_checked_at=checked_at,
+        activation_monotonic_anchor=100.0,
+        utc_clock=lambda: current[0],
+        clock=lambda: monotonic[0],
+        on_activation_expired=expired.append,
+    )
+
+    assert transport.is_ready()
+    assert transport.readiness_expires_at() == expires_at
+    current[0] = checked_at - timedelta(hours=1)
+    monotonic[0] = 100.999
+    assert transport.is_ready()
+    monotonic[0] = 101.0
+    assert not transport.is_ready()
+    assert expired == [expires_at]
+
+    current[0] = checked_at
+    assert not transport.is_ready()
+    assert expired == [expires_at]
 
 
 @pytest.mark.asyncio
@@ -338,6 +373,9 @@ async def test_activation_expiry_is_rechecked_after_queueing_before_provider_cal
     transport = SdkFosunTransport(
         SimpleNamespace(account=SimpleNamespace(list_accounts=list_accounts)),
         capability_expires_at=expires_at,
+        activation_checked_at=expires_at - timedelta(seconds=1),
+        activation_monotonic_anchor=100.0,
+        clock=lambda: 100.0,
         utc_clock=lambda: next(times),
     )
 
@@ -353,6 +391,8 @@ async def test_activation_expiry_is_rechecked_after_provider_response() -> None:
     expires_at = datetime(2026, 8, 27, 8, 0, tzinfo=UTC)
     times = iter(
         (
+            expires_at - timedelta(seconds=4),
+            expires_at - timedelta(seconds=3),
             expires_at - timedelta(seconds=2),
             expires_at - timedelta(seconds=1),
             expires_at,
@@ -368,6 +408,9 @@ async def test_activation_expiry_is_rechecked_after_provider_response() -> None:
     transport = SdkFosunTransport(
         SimpleNamespace(account=SimpleNamespace(list_accounts=list_accounts)),
         capability_expires_at=expires_at,
+        activation_checked_at=expires_at - timedelta(seconds=4),
+        activation_monotonic_anchor=100.0,
+        clock=lambda: 100.0,
         utc_clock=lambda: next(times),
     )
 
@@ -376,6 +419,95 @@ async def test_activation_expiry_is_rechecked_after_provider_response() -> None:
 
     assert exc_info.value.code == "ACTIVATION_EXPIRED"
     assert called is True
+
+
+def test_monotonic_watchdog_expires_without_a_wall_clock_observation() -> None:
+    expires_at = datetime(2026, 8, 27, 8, 0, tzinfo=UTC)
+    checked_at = expires_at - timedelta(milliseconds=30)
+    expired = threading.Event()
+    callback_threads: list[str] = []
+
+    def on_expired(_expires_at: datetime) -> None:
+        callback_threads.append(threading.current_thread().name)
+        expired.set()
+
+    anchor = time.monotonic()
+    transport = SdkFosunTransport(
+        SimpleNamespace(),
+        capability_expires_at=expires_at,
+        activation_checked_at=checked_at,
+        activation_monotonic_anchor=anchor,
+        utc_clock=lambda: checked_at - timedelta(hours=1),
+        on_activation_expired=on_expired,
+    )
+
+    assert expired.wait(timeout=1)
+    assert not transport.is_ready()
+    assert callback_threads == ["nexus-fosun-activation-expiry"]
+
+
+def test_expiry_persistence_failure_permanently_poisons_transport() -> None:
+    expires_at = datetime(2026, 8, 27, 8, 0, tzinfo=UTC)
+    checked_at = expires_at - timedelta(seconds=1)
+    current = [checked_at]
+    poisoned = threading.Event()
+
+    def fail_persistence(_expires_at: datetime) -> None:
+        raise RuntimeError("synthetic persistence failure")
+
+    transport = SdkFosunTransport(
+        SimpleNamespace(),
+        capability_expires_at=expires_at,
+        activation_checked_at=checked_at,
+        activation_monotonic_anchor=100.0,
+        clock=lambda: 100.0,
+        utc_clock=lambda: current[0],
+        on_poison=poisoned.set,
+        on_activation_expired=fail_persistence,
+    )
+
+    current[0] = expires_at
+    assert not transport.is_ready()
+    current[0] = checked_at
+    assert not transport.is_ready()
+    assert poisoned.is_set()
+
+
+@pytest.mark.asyncio
+async def test_sdk_daemon_thread_can_irreversibly_latch_activation_expiry() -> None:
+    expires_at = datetime(2026, 8, 27, 8, 0, tzinfo=UTC)
+    checked_at = expires_at - timedelta(hours=1)
+    callback_threads: list[str] = []
+    called = False
+
+    def utc_clock() -> datetime:
+        if threading.current_thread().name == "nexus-fosun-sdk":
+            return expires_at
+        return checked_at
+
+    def list_accounts() -> object:
+        nonlocal called
+        called = True
+        return {}
+
+    transport = SdkFosunTransport(
+        SimpleNamespace(account=SimpleNamespace(list_accounts=list_accounts)),
+        capability_expires_at=expires_at,
+        activation_checked_at=checked_at,
+        activation_monotonic_anchor=time.monotonic(),
+        utc_clock=utc_clock,
+        on_activation_expired=lambda _expiry: callback_threads.append(
+            threading.current_thread().name
+        ),
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        await transport.execute("fosun_sync_accounts", {})
+
+    assert exc_info.value.code == "ACTIVATION_EXPIRED"
+    assert called is False
+    assert callback_threads == ["nexus-fosun-sdk"]
+    assert not transport.is_ready()
 
 
 def _read_only_settings(manifest_path: Path) -> GatewaySettings:
@@ -393,7 +525,8 @@ def _read_only_settings(manifest_path: Path) -> GatewaySettings:
             ),
             "FOSUN_GATEWAY_SERVER_CERT": "/synthetic/server.crt",
             "FOSUN_GATEWAY_SERVER_KEY": "/synthetic/server.key",
-            "FOSUN_GATEWAY_SERVER_CLIENT_CA": "/synthetic/client-ca.crt",
+            "FOSUN_GATEWAY_SERVER_BROKER_CLIENT_CA": "/synthetic/broker-client-ca.crt",
+            "FOSUN_GATEWAY_SERVER_MARKET_CLIENT_CA": "/synthetic/market-client-ca.crt",
             "FOSUN_SDK_ADMITTED": True,
             "FOSUN_ACTIVATION_PROBE_ARTIFACT": "/synthetic/missing-probe.json",
             "FOSUN_ACTIVATION_CONTRACT_HASH": "a" * 64,
@@ -480,7 +613,8 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
         "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET": ("synthetic-market-current-secret-32-bytes"),
         "FOSUN_GATEWAY_SERVER_CERT": "/synthetic/server.crt",
         "FOSUN_GATEWAY_SERVER_KEY": "/synthetic/server.key",
-        "FOSUN_GATEWAY_SERVER_CLIENT_CA": "/synthetic/client-ca.crt",
+        "FOSUN_GATEWAY_SERVER_BROKER_CLIENT_CA": "/synthetic/broker-client-ca.crt",
+        "FOSUN_GATEWAY_SERVER_MARKET_CLIENT_CA": "/synthetic/market-client-ca.crt",
         "FOSUN_SDK_ADMITTED": True,
         "FOSUN_ACTIVATION_PROBE_ARTIFACT": probe_path,
         "FOSUN_ACTIVATION_CONTRACT_HASH": activation.contract_hash,

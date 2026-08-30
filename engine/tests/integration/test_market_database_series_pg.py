@@ -53,6 +53,10 @@ class _ObjectStore:
         self.objects.setdefault(key, payload)
         return f"memory://{key}"
 
+    async def put_normalized(self, key: str, payload: bytes) -> str:
+        self.objects.setdefault(key, payload)
+        return f"memory://{key}"
+
     async def put_temporary(self, key: str, payload: bytes) -> None:
         self.temporary[key] = payload
 
@@ -212,9 +216,7 @@ async def test_current_database_loaders_preserve_frozen_fosun_v2_bindings_after_
         provider_contract_hash=contract_hash,
         provider_authorized_at=checked_at,
     )
-    bars_binding = quote_binding.model_copy(
-        update={"provider_capability_id": bars_capability_id}
-    )
+    bars_binding = quote_binding.model_copy(update={"provider_capability_id": bars_capability_id})
     daily_bar = PriceBar(
         instrument_id=InstrumentId(INSTRUMENT_ID),
         session=date(2026, 8, 28),
@@ -295,9 +297,7 @@ async def test_current_database_loaders_preserve_frozen_fosun_v2_bindings_after_
             gateway_request_end_at=request_end_at,
             commit=False,
         )
-    minute_observed = received_at.replace(second=0, microsecond=0) - timedelta(
-        minutes=1
-    )
+    minute_observed = received_at.replace(second=0, microsecond=0) - timedelta(minutes=1)
     intraday_batch = SnapshotBatch(
         snapshots=(
             MarketSnapshot(
@@ -382,12 +382,8 @@ async def test_current_database_loaders_preserve_frozen_fosun_v2_bindings_after_
             },
         )
     async with factory() as session:
-        replayed_daily = await load_daily_series(
-            session, INSTRUMENT_ID, decision_time
-        )
-        replayed_intraday = await load_intraday_series(
-            session, INSTRUMENT_ID, decision_time
-        )
+        replayed_daily = await load_daily_series(session, INSTRUMENT_ID, decision_time)
+        replayed_intraday = await load_intraday_series(session, INSTRUMENT_ID, decision_time)
 
     assert replayed_daily == daily
     assert replayed_intraday == intraday

@@ -3,6 +3,7 @@
 import { ChevronLeft, ChevronRight, RotateCcw } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { components } from "../lib/generated/schema";
+import { marketAdjustmentLabel } from "../lib/market-evidence-labels";
 
 export type PriceChartBar = components["schemas"]["MarketBarResponse"];
 
@@ -10,6 +11,7 @@ export type PriceChartSeries = {
   symbol: string;
   source: string;
   feed: string;
+  adjustment: string | null;
   interval: "1Day";
   bars: PriceChartBar[];
 };
@@ -117,7 +119,7 @@ export function PriceChart({ series }: { series: PriceChartSeries }): React.Reac
           <p className="eyebrow">OHLC / {series.source.toUpperCase()} · {series.feed.toUpperCase()}</p>
           <h2>{series.symbol} 日线</h2>
           <p className="price-chart__summary">
-            共 {series.bars.length} 个交易日；图形为辅助视图，下方表格提供同口径精确值。
+            复权口径：{marketAdjustmentLabel(series.adjustment)}；共 {series.bars.length} 个交易日；图形为辅助视图，下方表格提供同口径精确值。
           </p>
         </div>
         <div className="price-chart__controls" aria-label="K 线键盘控制">

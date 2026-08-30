@@ -113,3 +113,9 @@ class RecordingTransport:
     async def execute(self, operation, payload):
         self.calls += 1
         return await self._delegate.execute(operation, payload)
+
+    def is_ready(self) -> bool:
+        return self._delegate.is_ready()
+
+    async def aclose(self) -> None:
+        await self._delegate.aclose()

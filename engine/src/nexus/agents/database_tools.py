@@ -54,9 +54,7 @@ async def database_read_only_tools(
     allow_fixture_price_evidence: bool = False,
 ) -> ReadOnlyTools:
     """Build all fixed executors from immutable run authority, never caller authority."""
-    frozen_evidence = _frozen_evidence_authority(
-        run, allow_fixture_evidence=allow_fixture_evidence
-    )
+    frozen_evidence = _frozen_evidence_authority(run, allow_fixture_evidence=allow_fixture_evidence)
     if frozen_evidence is None:
         raise ToolInputError("frozen evidence authority is unavailable")
     evidence = await load_frozen_evidence(
@@ -252,6 +250,8 @@ class _BoundDatabaseExecutors:
             PriceSeriesManifest.provider_status_version.is_not(None),
             PriceSeriesManifest.provider_contract_hash.is_not(None),
             PriceSeriesManifest.provider_authorized_at.is_not(None),
+            PriceSeriesManifest.provider_authorized_at
+            <= AgentDataSnapshotEvidenceRecord.selected_at,
         )
         fixture_source = and_(
             PriceSeriesManifest.source == "fixture",
@@ -312,8 +312,7 @@ class _BoundDatabaseExecutors:
                     )
                     .join(
                         ResearchEvidenceRef,
-                        ResearchEvidenceRef.id
-                        == AgentDataSnapshotEvidenceRecord.evidence_ref_id,
+                        ResearchEvidenceRef.id == AgentDataSnapshotEvidenceRecord.evidence_ref_id,
                     )
                     .join(
                         PriceBarSetAuthority,
@@ -321,48 +320,38 @@ class _BoundDatabaseExecutors:
                     )
                     .join(
                         PriceSeriesManifest,
-                        PriceSeriesManifest.id
-                        == PriceBarSetAuthority.price_series_manifest_id,
+                        PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
                     )
                     .join(
                         SourcePolicyRecord,
                         SourcePolicyRecord.id == PriceBarSetAuthority.source_policy_id,
                     )
                     .where(
-                        AgentDataSnapshotEvidenceRecord.data_snapshot_id
-                        == self._snapshot_id,
-                        AgentDataSnapshotEvidenceRecord.instrument_id
-                        == self._instrument_id,
+                        AgentDataSnapshotEvidenceRecord.data_snapshot_id == self._snapshot_id,
+                        AgentDataSnapshotEvidenceRecord.instrument_id == self._instrument_id,
                         AgentDataSnapshotEvidenceRecord.authority_kind == "price",
                         AgentDataSnapshotEvidenceRecord.evidence_ref_id == expected.id,
                         AgentDataSnapshotEvidenceRecord.selected_at.is_not(None),
-                        AgentDataSnapshotEvidenceRecord.selected_at
-                        <= self._decision_time,
+                        AgentDataSnapshotEvidenceRecord.selected_at <= self._decision_time,
                         AgentDataSnapshotEvidenceRecord.source == expected.source,
                         AgentDataSnapshotEvidenceRecord.provider_object_id
                         == expected.provider_object_id,
                         AgentDataSnapshotEvidenceRecord.revision == expected.revision,
-                        AgentDataSnapshotEvidenceRecord.available_at
-                        == expected.available_at,
+                        AgentDataSnapshotEvidenceRecord.available_at == expected.available_at,
                         AgentDataSnapshotEvidenceRecord.location == expected.location,
-                        AgentDataSnapshotEvidenceRecord.content_hash
-                        == expected.content_hash,
-                        AgentDataSnapshotEvidenceRecord.source
-                        == ResearchEvidenceRef.source,
+                        AgentDataSnapshotEvidenceRecord.content_hash == expected.content_hash,
+                        AgentDataSnapshotEvidenceRecord.source == ResearchEvidenceRef.source,
                         AgentDataSnapshotEvidenceRecord.provider_object_id
                         == ResearchEvidenceRef.provider_object_id,
-                        AgentDataSnapshotEvidenceRecord.revision
-                        == ResearchEvidenceRef.revision,
+                        AgentDataSnapshotEvidenceRecord.revision == ResearchEvidenceRef.revision,
                         AgentDataSnapshotEvidenceRecord.available_at
                         == ResearchEvidenceRef.available_at,
-                        AgentDataSnapshotEvidenceRecord.location
-                        == ResearchEvidenceRef.location,
+                        AgentDataSnapshotEvidenceRecord.location == ResearchEvidenceRef.location,
                         AgentDataSnapshotEvidenceRecord.content_hash
                         == ResearchEvidenceRef.content_hash,
                         ResearchEvidenceRef.id == expected.id,
                         ResearchEvidenceRef.source == expected.source,
-                        ResearchEvidenceRef.provider_object_id
-                        == expected.provider_object_id,
+                        ResearchEvidenceRef.provider_object_id == expected.provider_object_id,
                         ResearchEvidenceRef.revision == expected.revision,
                         ResearchEvidenceRef.available_at == expected.available_at,
                         ResearchEvidenceRef.location == expected.location,
@@ -372,14 +361,10 @@ class _BoundDatabaseExecutors:
                         PriceBarSetAuthority.provider_object_id
                         == ResearchEvidenceRef.provider_object_id,
                         PriceBarSetAuthority.revision == ResearchEvidenceRef.revision,
-                        PriceBarSetAuthority.revision
-                        == PriceBarSetAuthority.content_hash,
-                        PriceBarSetAuthority.available_at
-                        == ResearchEvidenceRef.available_at,
-                        PriceBarSetAuthority.content_hash
-                        == ResearchEvidenceRef.content_hash,
-                        PriceBarSetAuthority.byte_length
-                        == ResearchEvidenceRef.byte_length,
+                        PriceBarSetAuthority.revision == PriceBarSetAuthority.content_hash,
+                        PriceBarSetAuthority.available_at == ResearchEvidenceRef.available_at,
+                        PriceBarSetAuthority.content_hash == ResearchEvidenceRef.content_hash,
+                        PriceBarSetAuthority.byte_length == ResearchEvidenceRef.byte_length,
                         SourcePolicyRecord.created_at
                         <= AgentDataSnapshotEvidenceRecord.selected_at,
                         PriceSeriesManifest.instrument == str(self._instrument_id),
@@ -389,8 +374,7 @@ class _BoundDatabaseExecutors:
                         <= AgentDataSnapshotEvidenceRecord.selected_at,
                         ResearchEvidenceRef.available_at
                         <= AgentDataSnapshotEvidenceRecord.selected_at,
-                        PriceSeriesManifest.end_at
-                        <= AgentDataSnapshotEvidenceRecord.selected_at,
+                        PriceSeriesManifest.end_at <= AgentDataSnapshotEvidenceRecord.selected_at,
                     )
                     .limit(2)
                     .execution_options(populate_existing=True)
@@ -411,6 +395,17 @@ class _BoundDatabaseExecutors:
             or binding.content_hash != evidence.content_hash
         ):
             return self._invalid_price_authority()
+
+        requested_features = cast(tuple[str, ...], payload["features"])
+        if manifest.adjustment == "raw" and any(
+            feature != "close" for feature in requested_features
+        ):
+            return self._result(
+                "get_price_features",
+                [],
+                status="unavailable",
+                reason="adjusted_price_authority_unavailable",
+            )
 
         flagged_bar = await self._session.scalar(
             select(PriceBarRecord.id)
@@ -464,9 +459,7 @@ class _BoundDatabaseExecutors:
         if not descending_bars:
             return self._invalid_price_authority()
         bars = tuple(reversed(descending_bars))
-        features = compute_price_features(
-            bars, cast(tuple[str, ...], payload["features"])
-        )
+        features = compute_price_features(bars, requested_features)
         item: dict[str, object] = {
             "evidence_ref_id": str(evidence.id),
             "source": manifest.source,
@@ -563,21 +556,15 @@ class _BoundDatabaseExecutors:
             reason=None if items else "no_frozen_macro_authority",
         )
 
-    async def portfolio_exposure(
-        self, payload: Mapping[str, object]
-    ) -> Mapping[str, object]:
+    async def portfolio_exposure(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_common_scope(payload)
         return self._capability_unavailable("get_portfolio_exposure")
 
-    async def portfolio_diagnostics(
-        self, payload: Mapping[str, object]
-    ) -> Mapping[str, object]:
+    async def portfolio_diagnostics(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_common_scope(payload)
         return self._capability_unavailable("get_portfolio_diagnostics")
 
-    async def proposal_comparison(
-        self, payload: Mapping[str, object]
-    ) -> Mapping[str, object]:
+    async def proposal_comparison(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_common_scope(payload)
         return self._capability_unavailable("get_proposal_comparison")
 
@@ -626,9 +613,7 @@ class _BoundDatabaseExecutors:
                     ResearchEvidenceRef.location,
                     ResearchEvidenceRef.content_hash,
                 ).where(
-                    ResearchEvidenceRef.id.in_(
-                        tuple(record.id for record in self._frozen_evidence)
-                    )
+                    ResearchEvidenceRef.id.in_(tuple(record.id for record in self._frozen_evidence))
                 )
             )
         ).all()

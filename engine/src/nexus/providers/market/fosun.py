@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -30,6 +31,7 @@ from nexus.providers.market.fosun_gateway import (
     FosunMarketGatewayClient,
     FosunMarketGatewayError,
     RawGatewayResponse,
+    fosun_bars_request_body_sha256,
     parse_bar_page,
     parse_quote_page,
 )
@@ -231,13 +233,38 @@ class FosunMarketDataProvider:
         self,
         request: BarsRequest,
         cursor: str | None = None,
+        *,
+        symbol: str | None = None,
     ) -> RawGatewayResponse:
         limit = _validate_bar_request(request, cursor)
-        symbol = await self._symbol_resolver.resolve(
-            request.instrument_id,
-            request.end.date(),
-        )
+        if symbol is None:
+            symbol = await self._symbol_resolver.resolve(
+                request.instrument_id,
+                request.end.date(),
+            )
         return await self._gateway.read_bars_raw(
+            code=_provider_code(symbol),
+            ktype="day" if request.interval == "1Day" else "minute",
+            start_time=request.start,
+            end_time=request.end,
+            limit=limit,
+        )
+
+    async def expected_bars_request_body_sha256(
+        self,
+        request: BarsRequest,
+        cursor: str | None = None,
+        *,
+        symbol: str | None = None,
+    ) -> str:
+        """Return the digest of the exact gateway body for a frozen bar request."""
+        limit = _validate_bar_request(request, cursor)
+        if symbol is None:
+            symbol = await self._symbol_resolver.resolve(
+                request.instrument_id,
+                request.end.date(),
+            )
+        return fosun_bars_request_body_sha256(
             code=_provider_code(symbol),
             ktype="day" if request.interval == "1Day" else "minute",
             start_time=request.start,
@@ -250,16 +277,17 @@ class FosunMarketDataProvider:
         request: BarsRequest,
         response: RawGatewayResponse,
         cursor: str | None = None,
+        *,
+        symbol: str | None = None,
     ) -> ProviderPage[PriceBar]:
         limit = _validate_bar_request(request, cursor)
-        symbol = await self._symbol_resolver.resolve(
-            request.instrument_id,
-            request.end.date(),
-        )
+        if symbol is None:
+            symbol = await self._symbol_resolver.resolve(
+                request.instrument_id,
+                request.end.date(),
+            )
         code = _provider_code(symbol)
-        ktype: Literal["day", "minute"] = (
-            "day" if request.interval == "1Day" else "minute"
-        )
+        ktype: Literal["day", "minute"] = "day" if request.interval == "1Day" else "minute"
         try:
             page = parse_bar_page(
                 response,
@@ -354,84 +382,150 @@ class FosunSnapshotProvider:
             codes.append(_provider_code(symbol))
         ordered_codes = tuple(sorted(codes))
         bar_responses: list[tuple[tuple[str, ...], RawGatewayResponse]] = []
-        if request.include_minute_bars:
-            assert request.bucket_start is not None
-            for code in ordered_codes:
-                codes_for_read = (code,)
-                if read_guard is not None and not await read_guard.before_read(
-                    "fosun_get_bars", codes_for_read
-                ):
-                    raise self._aborted(
-                        "INTRADAY_AUTHORITY_CHANGED_BEFORE_FETCH",
-                        bar_responses=bar_responses,
-                    )
-                try:
-                    bar_response = await self._gateway.read_bars_raw(
-                        code=code,
-                        ktype="minute",
-                        start_time=request.bucket_start - timedelta(minutes=2),
-                        end_time=request.bucket_start,
-                        limit=2,
-                    )
-                except Exception:
-                    raise self._aborted(
-                        "INTRADAY_SNAPSHOT_TRANSPORT_FAILED",
-                        bar_responses=bar_responses,
-                    ) from None
-                bar_responses.append(((code,), bar_response))
-                if read_guard is not None and not await read_guard.after_read(
-                    "fosun_get_bars", codes_for_read, bar_response
-                ):
-                    raise self._aborted(
-                        "INTRADAY_AUTHORITY_CHANGED_AFTER_FETCH",
-                        bar_responses=bar_responses,
-                    )
-        if read_guard is not None and not await read_guard.before_read(
-            "fosun_get_quotes", ordered_codes
-        ):
-            raise self._aborted(
-                "INTRADAY_AUTHORITY_CHANGED_BEFORE_FETCH",
-                bar_responses=bar_responses,
-            )
+        quote_responses: list[tuple[tuple[str, ...], RawGatewayResponse]] = []
         try:
-            quote_response = await self._gateway.read_quotes_raw(ordered_codes)
+            if request.include_minute_bars:
+                assert request.bucket_start is not None
+                for code in ordered_codes:
+                    codes_for_read = (code,)
+                    if read_guard is not None and not await self._guard_before_read(
+                        read_guard,
+                        "fosun_get_bars",
+                        codes_for_read,
+                        bar_responses=bar_responses,
+                    ):
+                        raise self._aborted(
+                            "INTRADAY_AUTHORITY_CHANGED_BEFORE_FETCH",
+                            bar_responses=bar_responses,
+                        )
+                    try:
+                        bar_response = await self._gateway.read_bars_raw(
+                            code=code,
+                            ktype="minute",
+                            start_time=request.bucket_start - timedelta(minutes=2),
+                            end_time=request.bucket_start,
+                            limit=2,
+                        )
+                    except Exception:
+                        raise self._aborted(
+                            "INTRADAY_SNAPSHOT_TRANSPORT_FAILED",
+                            bar_responses=bar_responses,
+                        ) from None
+                    bar_responses.append(((code,), bar_response))
+                    if read_guard is not None and not await self._guard_after_read(
+                        read_guard,
+                        "fosun_get_bars",
+                        codes_for_read,
+                        bar_response,
+                        bar_responses=bar_responses,
+                    ):
+                        raise self._aborted(
+                            "INTRADAY_AUTHORITY_CHANGED_AFTER_FETCH",
+                            bar_responses=bar_responses,
+                        )
+            if read_guard is not None and not await self._guard_before_read(
+                read_guard,
+                "fosun_get_quotes",
+                ordered_codes,
+                bar_responses=bar_responses,
+            ):
+                raise self._aborted(
+                    "INTRADAY_AUTHORITY_CHANGED_BEFORE_FETCH",
+                    bar_responses=bar_responses,
+                )
+            try:
+                quote_response = await self._gateway.read_quotes_raw(ordered_codes)
+            except Exception:
+                raise self._aborted(
+                    "INTRADAY_SNAPSHOT_TRANSPORT_FAILED",
+                    bar_responses=bar_responses,
+                ) from None
+            frozen_quote_response = (ordered_codes, quote_response)
+            quote_responses.append(frozen_quote_response)
+            if read_guard is not None and not await self._guard_after_read(
+                read_guard,
+                "fosun_get_quotes",
+                ordered_codes,
+                quote_response,
+                bar_responses=bar_responses,
+                quote_response=frozen_quote_response,
+            ):
+                raise self._aborted(
+                    "INTRADAY_AUTHORITY_CHANGED_AFTER_FETCH",
+                    bar_responses=bar_responses,
+                    quote_response=frozen_quote_response,
+                )
+            if any(
+                response.received_at > quote_response.received_at
+                for _, response in bar_responses
+            ):
+                raise self._aborted(
+                    "INTRADAY_SNAPSHOT_EVIDENCE_INVALID",
+                    bar_responses=bar_responses,
+                    quote_response=frozen_quote_response,
+                )
+            responses = [frozen_quote_response, *bar_responses]
+            raw_payload = encode_fosun_snapshot_evidence(tuple(responses))
+            received_at = max(response.received_at for _, response in responses)
+            return RawSnapshotEnvelope(
+                raw_payload=raw_payload,
+                received_at=received_at,
+                provenance=MarketDataProvenance(
+                    source="fosun",
+                    feed="l1",
+                    adjustment="raw",
+                    interval="1Min",
+                    mode="read_only",
+                    delivery_mode=self._delivery_mode,
+                ),
+            )
+        except asyncio.CancelledError:
+            raise self._aborted(
+                "INTRADAY_SNAPSHOT_READ_CANCELLED",
+                bar_responses=bar_responses,
+                quote_response=(quote_responses[0] if quote_responses else None),
+            ) from None
+
+    async def _guard_before_read(
+        self,
+        guard: FosunSnapshotReadGuard,
+        operation: Literal["fosun_get_quotes", "fosun_get_bars"],
+        instrument_codes: tuple[str, ...],
+        *,
+        bar_responses: list[tuple[tuple[str, ...], RawGatewayResponse]],
+        quote_response: tuple[tuple[str, ...], RawGatewayResponse] | None = None,
+    ) -> bool:
+        try:
+            return await guard.before_read(operation, instrument_codes)
+        except FosunSnapshotReadAborted:
+            raise
         except Exception:
             raise self._aborted(
-                "INTRADAY_SNAPSHOT_TRANSPORT_FAILED",
+                "INTRADAY_AUTHORITY_REVALIDATION_FAILED",
                 bar_responses=bar_responses,
+                quote_response=quote_response,
             ) from None
-        if read_guard is not None and not await read_guard.after_read(
-            "fosun_get_quotes", ordered_codes, quote_response
-        ):
+
+    async def _guard_after_read(
+        self,
+        guard: FosunSnapshotReadGuard,
+        operation: Literal["fosun_get_quotes", "fosun_get_bars"],
+        instrument_codes: tuple[str, ...],
+        response: RawGatewayResponse,
+        *,
+        bar_responses: list[tuple[tuple[str, ...], RawGatewayResponse]],
+        quote_response: tuple[tuple[str, ...], RawGatewayResponse] | None = None,
+    ) -> bool:
+        try:
+            return await guard.after_read(operation, instrument_codes, response)
+        except FosunSnapshotReadAborted:
+            raise
+        except Exception:
             raise self._aborted(
-                "INTRADAY_AUTHORITY_CHANGED_AFTER_FETCH",
+                "INTRADAY_AUTHORITY_REVALIDATION_FAILED",
                 bar_responses=bar_responses,
-                quote_response=(ordered_codes, quote_response),
-            )
-        if any(
-            response.received_at > quote_response.received_at
-            for _, response in bar_responses
-        ):
-            raise self._aborted(
-                "INTRADAY_SNAPSHOT_EVIDENCE_INVALID",
-                bar_responses=bar_responses,
-                quote_response=(ordered_codes, quote_response),
-            )
-        responses = [(ordered_codes, quote_response), *bar_responses]
-        raw_payload = encode_fosun_snapshot_evidence(tuple(responses))
-        received_at = max(response.received_at for _, response in responses)
-        return RawSnapshotEnvelope(
-            raw_payload=raw_payload,
-            received_at=received_at,
-            provenance=MarketDataProvenance(
-                source="fosun",
-                feed="l1",
-                adjustment="raw",
-                interval="1Min",
-                mode="read_only",
-                delivery_mode=self._delivery_mode,
-            ),
-        )
+                quote_response=quote_response,
+            ) from None
 
     def _aborted(
         self,
@@ -474,9 +568,7 @@ class FosunSnapshotProvider:
             or envelope.provenance.delivery_mode != self._delivery_mode
         ):
             raise MarketProviderPayloadError("FOSUN_INTRADAY_AUTHORITY_MISMATCH")
-        expected_codes = tuple(
-            sorted(_provider_code(item.symbol) for item in request.instruments)
-        )
+        expected_codes = tuple(sorted(_provider_code(item.symbol) for item in request.instruments))
         evidence = decode_fosun_snapshot_evidence(
             envelope.raw_payload,
             expected_codes=expected_codes,
@@ -622,8 +714,7 @@ def _validate_evidence_shape(
         len(evidence) != expected_count
         or quote.operation != "fosun_get_quotes"
         or quote_codes != expected_codes
-        or quote.request_body_sha256
-        != _request_digest({"codes": list(expected_codes)})
+        or quote.request_body_sha256 != _request_digest({"codes": list(expected_codes)})
     ):
         raise ValueError
     if not include_minute_bars:

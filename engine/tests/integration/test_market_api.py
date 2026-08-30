@@ -395,7 +395,12 @@ async def test_market_never_uses_fixture_or_future_alpaca_as_current_fallback(
     migrated_database_url: str,
 ) -> None:
     """Float conversion, future aliases, future quotes, or missing provenance break this."""
-    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    await _seed_instrument(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        symbol="AAPL",
+        valid_to=_DECISION_TIME.date(),
+    )
     await _seed_instrument(
         migrated_database_url,
         instrument_id=_MSFT_ID,

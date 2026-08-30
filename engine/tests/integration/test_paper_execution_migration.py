@@ -99,7 +99,7 @@ async def _mutation_is_rejected(database_url: str) -> bool:
 def test_0020_is_the_single_head_after_task19() -> None:
     scripts = ScriptDirectory.from_config(_config())
 
-    assert scripts.get_heads() == ["0029_fosun_bar_lineage"]
+    assert scripts.get_heads() == ["0032_ticker_alias_authority"]
     revision = scripts.get_revision("0015_paper_execution")
     assert revision is not None
     assert revision.down_revision == "0014_paper"
@@ -189,9 +189,7 @@ def test_execution_migration_seeds_authority_backfills_calendar_and_round_trips(
             "'trg_paper_execution_window_authorities_chain' AND NOT tgisinternal",
         )
     )
-    assert window_chain_trigger == [
-        ("trg_paper_execution_window_authorities_chain",)
-    ]
+    assert window_chain_trigger == [("trg_paper_execution_window_authorities_chain",)]
     performance_chain_trigger = asyncio.run(
         _rows(
             temporary_database_url,

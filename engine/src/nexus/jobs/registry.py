@@ -56,10 +56,15 @@ class JobHandlerContext:
     claim: ClaimedJob
     payload: BaseModel
     _clock: Clock
+    _monotonic_deadline: float | None = None
 
     def finished_at(self) -> datetime:
         """Return the injected worker clock without exposing runtime configuration."""
         return self._clock()
+
+    def monotonic_deadline(self) -> float | None:
+        """Return the worker-owned absolute deadline when invoked by a real worker."""
+        return self._monotonic_deadline
 
 
 JobHandler = Callable[[JobHandlerContext], Awaitable[JobHandlerResult]]

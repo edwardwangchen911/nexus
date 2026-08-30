@@ -5,7 +5,12 @@ from uuid import UUID
 
 import pytest
 from nexus.market import price_bar_authority
-from nexus.market.ingestion import ingest_price_page, serialize_price_bars
+from nexus.market.ingestion import (
+    ingest_price_page,
+    object_uri_matches_key,
+    prepare_price_page,
+    serialize_price_bars,
+)
 from nexus.persistence.models.data import (
     DataArtifact,
     PriceBarRecord,
@@ -81,6 +86,13 @@ class FakeObjectStore:
         self.objects[key] = payload
         return f"memory://{key}"
 
+    async def put_normalized(self, key: str, payload: bytes) -> str:
+        self.events.append(("put_normalized", key))
+        if self.fail_at == "put_normalized":
+            raise OSError("normalized write failure")
+        self.objects[key] = payload
+        return f"memory://{key}"
+
     async def put_temporary(self, key: str, payload: bytes) -> None:
         self.events.append(("put_temporary", key))
         if self.fail_at == "put_temporary":
@@ -103,6 +115,99 @@ class FakeObjectStore:
         self.objects.pop(key, None)
 
 
+class QueryClaimingObjectStore(FakeObjectStore):
+    async def put_normalized(self, key: str, payload: bytes) -> str:
+        await super().put_normalized(key, payload)
+        return f"memory://wrong-object?claimed={key}"
+
+
+class RawQueryClaimingObjectStore(FakeObjectStore):
+    async def archive_raw(self, key: str, payload: bytes) -> str:
+        await super().archive_raw(key, payload)
+        return f"memory://wrong-object?claimed={key}"
+
+
+@pytest.mark.asyncio
+async def test_prepare_rejects_normalized_uri_that_only_claims_key_in_query() -> None:
+    with pytest.raises(RuntimeError, match="MARKET_NORMALIZED_OBJECT_URI_MISMATCH"):
+        await prepare_price_page(QueryClaimingObjectStore(), _page())
+
+
+@pytest.mark.asyncio
+async def test_prepare_rejects_raw_uri_that_only_claims_key_in_query() -> None:
+    with pytest.raises(RuntimeError, match="MARKET_RAW_OBJECT_URI_MISMATCH"):
+        await prepare_price_page(RawQueryClaimingObjectStore(), _page())
+
+
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        ("memory://normalized/market/date/id/digest.parquet", True),
+        (
+            "s3://bucket/provider/market/normalized/market/date/id/digest.parquet?versionId=v%2F1",
+            True,
+        ),
+        ("memory://prefix/normalized/market/date/id/digest.parquet", False),
+        (
+            "memory://wrong?claimed=normalized/market/date/id/digest.parquet",
+            False,
+        ),
+        (
+            "s3://bucket/provider/market/wrong.parquet"
+            "?claimed=normalized/market/date/id/digest.parquet",
+            False,
+        ),
+        (
+            "s3://user@bucket/provider/market/normalized/market/date/id/digest.parquet"
+            "?versionId=v1",
+            False,
+        ),
+        (
+            "s3://bucket/provider/market/normalized/market/date/id/digest.parquet"
+            "?versionId=v1#fragment",
+            False,
+        ),
+        (
+            "s3://bucket/provider/market/normalized/market/date/id/digest.parquet?versionId=v1#",
+            False,
+        ),
+        (
+            "s3://bucket/provider/market/normalized/market/date/id/digest.parquet"
+            "?versionId=v1&extra=1",
+            False,
+        ),
+        (
+            "s3://bucket/provider/market/normalized/market/date/id/digest.parquet?versionId=%ZZ",
+            False,
+        ),
+        (
+            "s3://bucket/provider/market/normalized/market/date/id/digest.parquet"
+            "?versionId=null",
+            False,
+        ),
+        (
+            "s3://bucket/provider/market/normalized/market/date/id/digest.parquet"
+            "?versionId=%6Eull",
+            False,
+        ),
+        (
+            "s3://bucket/provider/../normalized/market/date/id/digest.parquet?versionId=v1",
+            False,
+        ),
+        (
+            "https://bucket/normalized/market/date/id/digest.parquet?versionId=v1",
+            False,
+        ),
+    ],
+)
+def test_normalized_object_uri_contract_requires_exact_structured_key(
+    uri: str,
+    expected: bool,
+) -> None:
+    key = "normalized/market/date/id/digest.parquet"
+    assert object_uri_matches_key(uri, key) is expected
+
+
 @pytest.mark.asyncio
 async def test_ingestion_archives_raw_then_promotes_parquet_before_metadata_commit(
     migrated_database_url: str,
@@ -116,10 +221,9 @@ async def test_ingestion_archives_raw_then_promotes_parquet_before_metadata_comm
             _page(),
         )
 
-    assert [event for event, _ in store.events[:3]] == [
+    assert [event for event, _ in store.events[:2]] == [
         "archive_raw",
-        "put_temporary",
-        "promote",
+        "put_normalized",
     ]
     assert result.raw_uri.startswith("memory://raw/market/")
     assert result.artifact.uri.startswith("memory://normalized/market/")
@@ -165,8 +269,7 @@ async def test_clean_ingestion_atomically_finalizes_db_bar_set_evidence(
     assert result.evidence_ref.content_hash == result.artifact.sha256
     assert result.price_evidence_ref.content_hash == result.price_authority.content_hash
     assert result.price_evidence_ref.location == (
-        f"db://price-bar-set/{result.manifest.id}"
-        f"@sha256:{result.price_authority.content_hash}"
+        f"db://price-bar-set/{result.manifest.id}@sha256:{result.price_authority.content_hash}"
     )
     assert result.price_evidence_ref.content_hash != result.artifact.sha256
 
@@ -204,7 +307,7 @@ async def test_authority_constraint_failure_rolls_back_ingestion_metadata(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fail_at", ["archive_raw", "put_temporary", "promote"])
+@pytest.mark.parametrize("fail_at", ["archive_raw", "put_normalized"])
 async def test_object_failure_rolls_back_metadata_and_safely_cleans_temporary_objects(
     migrated_database_url: str,
     fail_at: str,

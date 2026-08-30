@@ -111,6 +111,8 @@ for (const viewport of [
     await expect(intradayTableRight).toBeFocused();
     await expect(page.getByRole("region", { name: "AAPL OHLCV 证据" })).toContainText("复星 L1（只读）");
     await expect(page.getByRole("region", { name: "AAPL OHLCV 证据" })).toContainText("实时性未获证明");
+    await expect(page.getByRole("region", { name: "AAPL OHLCV 证据" })).toContainText("未复权（raw）");
+    await expect(page.getByText("未复权价格不可直接用于跨期收益、动量或回撤判断。")).toBeVisible();
     await expect(page.getByRole("region", { name: "AAPL 价格图表" })).toBeVisible();
     await expect(page.locator(".price-chart__canvas canvas").first()).toBeVisible();
     await expect(page.getByRole("table", { name: "AAPL OHLCV 数据" })).toContainText("227.160000000000");

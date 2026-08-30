@@ -126,8 +126,7 @@ def test_fosun_gateway_serves_provider_and_broker_profiles_with_separate_princip
     assert "replicas: 1" in gateway
     assert "- FOSUN_GATEWAY_REPLICA_COUNT=1" in gateway
     assert (
-        "- FOSUN_GATEWAY_REPLAY_STORE_PATH="
-        "/var/lib/nexus-fosun-gateway/replay.sqlite3"
+        "- FOSUN_GATEWAY_REPLAY_STORE_PATH=/var/lib/nexus-fosun-gateway/replay.sqlite3"
     ) in gateway
     assert "nexus-fosun-gateway-ready" in gateway
     assert "fosun-gateway-replay:/var/lib/nexus-fosun-gateway" in gateway
@@ -166,9 +165,7 @@ def test_provider_worker_cannot_materialize_a_second_daily_root() -> None:
 
 
 def test_provider_database_grant_template_is_force_scoped_and_secret_free() -> None:
-    grants = (ROOT / "infra/postgres/provider-runtime-grants.sql").read_text(
-        encoding="utf-8"
-    )
+    grants = (ROOT / "infra/postgres/provider-runtime-grants.sql").read_text(encoding="utf-8")
 
     assert "PASSWORD" not in grants.upper()
     assert "SET LOCAL search_path TO pg_catalog, public, pg_temp;" in grants
@@ -179,11 +176,18 @@ def test_provider_database_grant_template_is_force_scoped_and_secret_free() -> N
         "job_attempts",
         "job_dependencies",
         "worker_heartbeats",
+        "fosun_daily_bar_staging",
     ):
         assert f"ALTER TABLE public.{table_name} FORCE ROW LEVEL SECURITY" in grants
     assert "p_job_type = 'daily.pipeline'" in grants
+    assert "'collect.fosun_daily_instrument'" in grants
+    assert "'publish.fosun_daily'" in grants
+    assert "('alembic_version')" in grants
     assert "nexus_provider_job_writable(queue, job_type)" in grants
     assert "nexus_provider_job_owned(job_id)" in grants
+    assert "nexus_provider_job_owned(fetch_job_id)" in grants
+    assert "nexus_provider_fosun_daily_bar_staging_scope" in grants
+    assert "nexus_non_provider_fosun_daily_bar_staging_bypass" in grants
     assert "SELECT EXISTS (SELECT 1 FROM public.jobs AS job" in grants
     assert "nexus_provider_queue(queue)" in grants
     assert "unexpected shared-runtime RLS policy requires manual review" in grants
@@ -194,15 +198,11 @@ def test_provider_database_grant_template_is_force_scoped_and_secret_free() -> N
     assert grants.count("provider role must be a direct login role") == 2
     assert grants.count("provider role has database CREATE privilege") == 2
     assert grants.count("NOT provider.rolcanlogin") == 2
-    assert grants.count(
-        "has_database_privilege(provider.oid, current_database(), 'CREATE')"
-    ) == 2
+    assert grants.count("has_database_privilege(provider.oid, current_database(), 'CREATE')") == 2
     assert "provider role must not own the shared runtime schema" in grants
     assert "pg_roles%%ROWTYPE" in grants
     assert "membership.member = provider.oid OR membership.roleid = provider.oid" in grants
-    assert (
-        "REVOKE SET, ALTER SYSTEM ON PARAMETER session_replication_role" in grants
-    )
+    assert "REVOKE SET, ALTER SYSTEM ON PARAMETER session_replication_role" in grants
     assert "provider role has forbidden parameter privileges" in grants
     assert "provider role has forbidden parameter defaults" in grants
     assert "provider role has forbidden grant options" in grants

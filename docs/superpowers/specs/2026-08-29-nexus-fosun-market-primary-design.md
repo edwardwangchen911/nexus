@@ -74,8 +74,13 @@ flowchart LR
 - `fosun-gateway` 是唯一持有 `FSOPENAPI_*`、SDK admission、Provider base URL 和出站网络能力的进程。
 - `provider-worker` 只持有 market-only 网关 mTLS 客户端证书、HMAC 身份、Provider 数据库角色，
   以及独立的 market-prefix 对象存储 principal；不持有账户 ID 加密密钥。对象键被运行时固定在
-  `provider/market`，永久证据只 Put/Get，Delete 仅限 `temporary/market` 子树。
+  `provider/market`，只授予 PutObject、用于条件创建冲突复核的 key-scoped GetObject，
+  以及用于冻结证据重放的 GetObjectVersion；不授予 ListBucket 或 DeleteObject。
 - Provider 数据库角色对 status/capability/已有 artifact/manifest 只有读取权；authority 校验与这些输入的变更使用同名事务级 advisory lock 串行，不以 `SELECT FOR SHARE` 换取隐含 `UPDATE` 权限。
+- Provider 数据库会话固定为 `READ COMMITTED`；启动角色探针以及每轮 schedule/preclaim/claim
+  均校验实际 transaction isolation。加锁后的 `populate_existing` 必须取得新的 statement
+  snapshot，其他隔离级别一律 fail closed。应用锁序固定为按 operation 排序的 capability
+  scope、按 UUID 排序的 integration status、按 UUID 排序的 raw `DataArtifact`。
 - Provider 数据库凭据必须直接认证为独立 login role；`SET ROLE`、出入两个方向的 membership、任意非系统 schema 权限、Provider 或 `PUBLIC` 的 column/sequence ACL，以及 allowlist 外 table/partition/view/materialized-view/foreign-table 权限或 grant option 均使启动失败。RLS helper 固定 `search_path=pg_catalog, public, pg_temp`，bypass policy 还核对其绑定的 catalog `pg_has_role` OID。
 - `broker-worker` 使用另一组 mTLS/HMAC 身份，只能调用组合、订单列表和现金流水读取；它不拥有行情采集队列。
 - Web、BFF、API、general worker、Agent 和 Strategy R&D 均不持有任一网关客户端身份。
@@ -89,8 +94,10 @@ Provider 不能直接写该标记表，也不得因 bar INSERT 获得回测成�
 mark；price-bar guard 只接受 `price_bar_records` 的无条件 `BEFORE INSERT FOR EACH ROW`
 trigger，并仅判断对应 manifest 是否已被回测冻结。Provider、`PUBLIC` 和其他非 owner 均无直接
 `EXECUTE`；startup probe 对全部非系统 schema 的 definer 精确集合、精确源码/owner/ACL、三个
-owner-rights trigger，以及 Provider 可写表上 60 个非内部应用 trigger 的启用状态、时机、函数归属、
-配置与函数体摘要 fail closed。
+owner-rights trigger，以及 63 个 Provider 可写表 trigger 和 5 个 authority-input mutation
+trigger（共 68 个）的启用状态、时机、函数归属、配置与函数体摘要任一漂移都 fail closed。
+输入侧集合明确包含 integration-status Fosun 锁、capability scope 锁、capability append-only
+以及两张表的 created-at guard。
 
 ### 4.2 HMAC v2
 
@@ -148,6 +155,7 @@ Worker”纳入威胁模型，必须先单独设计 gateway-only 响应签名、
 
 - `read_only` transport 只允许 `NEXUS_ENV=production` 且 server mTLS 配置完整；development/test 只能 fixture。
 - Gateway client 固定 HTTPS origin、证书/私钥/CA、`trust_env=False`、禁重定向、10 秒绝对 deadline 和响应字节上限。
+- 绝对 deadline 覆盖入队、限速、共享 SDK 槽与真实调用。真实同步 SDK 超时/取消会永久 poison 当前 transport，撤销 HTTP 及共享 marker readiness，两个 principal 后续快速失败；只能停机审查后整进程重启。daemon 线程不阻塞进程退出，晚到 Provider 异常不得格式化或输出日志。
 - mTLS 负责连接认证，HMAC principal 负责 operation 授权；任一成功都不能替代另一项。
 
 ## 5. Provider 运行配置
@@ -171,6 +179,9 @@ PROVIDER_OBJECT_STORE_PREFIX=provider/market
 - 禁止配置错误时回退 fixture 或另一 Provider；
 - SEC/FRED 配置与 Alpaca 市场模式独立；
 - `repr`、验证错误和日志不能包含 secret、证书路径内容、URL query 或原始 body。
+固定来源 HTTP client 在构造和每次请求边界都封闭 `httpx`/`httpcore` 依赖日志，
+只输出 NEXUS 自有的 provider/attempt/status-class/elapsed-bucket/result 脱敏事件。root 或
+依赖 logger 被调到 DEBUG/INFO 不得使 FRED query key、授权 header、host/path 或 body 进入日志。
 
 Fosun 首期固定：
 
@@ -200,6 +211,10 @@ quotes 必须与请求 code 集合完全一致；缺价以 `price=null` 和 `PAR
 bars 必须匹配请求 code/window/limit，严格按 timestamp 升序且无重复；价格必须为有限正 Decimal、volume 非负、OHLC 关系有效。未来时间、窗口外行、数量超限或乱序拒绝整页业务事实。
 
 Gateway 在 SDK 调用前与返回后都检查 activation expiry；调用跨过 expiry 时返回失败，不发布响应事实。
+生产进程还从证据评估前的单调时钟锚点建立不可延长的 deadline，墙钟或单调钟任一到期
+都会永久 latch 并由 watchdog 主动撤销 readiness。SQLite replay clock floor 至少推进到
+`ceil(expiry)`，原子 expiry tombstone 跨重启保留；未清洁关闭遗留的 ready marker 必须阻止
+启动并进入审查，不能由启动或 healthcheck 静默删除。
 
 ## 7. 冻结 Provider authority
 
@@ -235,6 +250,11 @@ Job payload 冻结 capability ID、created_at、expires_at、contract hash、sta
 
 Fosun 新事实必须全部非空，非 Fosun 必须全部为空。数据库 INSERT trigger 读取 capability/status 并验证 operation、market scope、版本、hash、时间和 read-only 状态。字段被现有不可变边界覆盖，旧事实不能被后来的新授权重新合法化。
 
+`DataArtifact.sha256` 只覆盖精确对象字节。`raw_artifact_identity_sha256` 是独立的全身份摘要，
+对 `id/uri/sha256/byte_size/mime_type/schema_version/source/observed_at/available_at/received_at/created_at`
+的 canonical JSON 求 SHA-256。日线 fetched staging 冻结该值；聚合发布和盘中 ingestion 在事务中
+按 UUID 加锁、`populate_existing` 重载并重新计算，任一字段漂移均整批零发布。
+
 ### 8.2 不可变政策 v2
 
 新增而非修改以下记录：
@@ -256,6 +276,11 @@ Agent price v2 只接受：
 - 所有 bars `quality_flags=[]`；
 - 一个 session 恰好一条 bar，时间顺序、instrument、行数与 manifest 一致。
 
+`adjustment=raw` 只能为 Agent 提供最新 `close` 的可追溯展示值。在公司行动与
+adjusted-price authority 尚未完成前，`sma_20`/`sma_200`/`rsi_14`/`volatility_20`
+等跨 session 派生特征必须返回
+`adjusted_price_authority_unavailable`，不得把拆股、分红或其他公司行动解释为收益或波动。
+
 Gateway bars 顶层 `quality=PARTIAL` 是因为网关不持有决策时点的 XNYS 日历 authority，
 因而使用的保守 transport marker，不是对每根 bar 的质量通过证明。Engine 只有在重新校验
 精确 instrument/区间/顺序，且实际 session 与冻结日历集合完全一致后，才为日线生成空
@@ -263,7 +288,7 @@ Gateway bars 顶层 `quality=PARTIAL` 是因为网关不持有决策时点的 XN
 manifest/bar/authority。因此这一转换是 Engine 基于独立冻结 authority 的确定性重评估，
 不是将 Gateway 的 `PARTIAL` 盲目提升为 `PASS`。
 
-因此首期以 `delivery_mode=unknown` 激活时可以安全展示/归档，但 Agent、回测、paper 与订单价格 authority 继续 abstain，直到真实 activation 证据证明交付口径。这是预期的 fail-closed 行为。
+因此首期以 `delivery_mode=unknown` 激活时可以安全展示/归档，但 Agent、回测、paper 与订单价格 authority 继续 abstain，直到真实 activation 证据证明交付口径。这是预期的 fail-closed 行为。当前 proposal-to-order 路由在读取 proposal 或写入任何 Broker intent 前就检查该 authority；不可用时稳定返回 `PRICE_AUTHORITY_UNAVAILABLE`，不得用仅供展示的 `LatestQuote` 定仓或持久化订单意图。
 
 ### 8.3 PIT 读取
 
@@ -271,17 +296,83 @@ manifest/bar/authority。因此这一转换是 Engine 基于独立冻结 authori
 
 ## 9. 盘中采集
 
-Job schema 升为 `intraday_snapshot_job_v2`，保留 job type。每 15 秒最多一个 bucket：
+Job schema 按来源显式分流，保留 job type。每 15 秒全局只有一个持久化 v2 Job：
 
 - 每个 bucket 一次批量 quote；
-- 仅 `bucket_start.second == 0` 时读取每个 symbol 的最近两根 minute bars，并只发布已完整结束的 bar；
-- Fosun 最多 10 个 symbol，确保在 gateway 的 2 QPS / 30 RPM 保守预算内；
-- handler deadline 30 秒，bucket 结束后 45 秒失效；
-- Alpaca 显式启用时保留既有最多 30 symbol 的单 Snapshot 请求。
+- Fosun 仅在 `bucket_start.second == 0` 时逐标的读取最近两根 minute bars，并只发布已完整结束的 bar；
+- Fosun 最多 10 个 symbol，确保在 gateway 的 2 QPS 总上限和 market lane
+  24 RPM 保守预算内；
+- handler deadline 30 秒；Fosun acquisition 从 handler 入口起最多 24 秒（包含首次
+  数据库重验），为 partial raw 独立事务保留 5 秒并为 worker 外层保留 1 秒；
+  bucket 结束后 45 秒失效；
+- Alpaca 显式启用时每个 bucket 始终只有一次最多 30 symbol 的批量 Snapshot，用于 trade/quote，
+  不增加独立 bars 请求；非分钟边界设置 `include_minute_bars=false`，normalizer 与 handler 都会
+  清除响应中多余的 `minuteBar`，不创建 normalized bar/authority。
+
+该 Job 固定为 `retry_policy=never` / `max_attempts=1`，payload 的 `bucket_start` /
+`bucket_end` 必须精确等于对齐的 `effective_at` /
+`effective_at + 15s`。Scheduler 在分桶 advisory lock 内按 `effective_at` 复用第一个
+已持久化 Job 及其冻结 payload，后续 watchlist、来源、feed 或 authority 漂移不得为
+同 bucket 创建第二个逻辑任务。数据库 partial unique index 是最终并发防线；自动/手动
+retry、`attempt_no > 1`、payload/claim bucket 不一致都必须在 Provider 调用前终止。Gateway 内部
+quotes 的有界 transport retry 仍属于这一个签名逻辑操作，每次真实 SDK 尝试都单独消耗
+24 RPM/1 QPS 预算，它不会创建第二个 Job 或 Job attempt；`fosun_get_bars` 始终只有一次 SDK
+`kline` 尝试。
+
+acquisition 截止点取消 provider 时，provider 必须把取消前已完整收到的
+bars/quote 响应编码为确定性有界 partial envelope，handler 用独立
+session/transaction 提交精确 raw bytes，然后以
+`skipped / INTRADAY_SNAPSHOT_READ_CANCELLED` 终态化。该路径不 normalization、不发布事实、
+不重试且不创建第二 attempt；无已完成响应时不伪造 artifact。已收响应后
+guard/数据库异常以 `INTRADAY_AUTHORITY_REVALIDATION_FAILED` 走同一归档路径。归档失败或
+超时继续 fail closed；operator shutdown 或 worker 外层取消必须原样传播，不得冒充
+内部 acquisition timeout。
+正常 raw 归档、异常 partial raw 归档和数据库 ingest 都受同一 handler-owned
+总截止点约束，分别使用稳定的 `INTRADAY_RAW_ARCHIVE_DEADLINE_EXCEEDED` 与
+`INTRADAY_INGEST_DEADLINE_EXCEEDED`；分钟栏直接 create-only 写入最终 digest key，所有对象
+写成功前不进入数据库发布。
+
+升级前必须停止旧 Provider Worker，并在旧版本内排空所有列或 payload schema 不兼容的
+actionable intraday Job；`0031_intraday_schema_admission` 不承担旧 Job 转换。新迁移以数据库
+trigger 原子拒绝任何非精确 v2 的新 INSERT 和 legacy terminal requeue；`source` 与 `feed`
+没有默认值，持久 payload 必须显式冻结合法的 `fosun/l1` 或
+`alpaca/{iex,sip,delayed_sip}` 组合。新 worker 在启动及每轮 poll 时直接校验唯一 Alembic
+head，并同时检查列 schema、payload schema 和 source/feed；缺失或非法组合都按不兼容队列
+处理；非法 bucket 时间文本也必须稳定归类为 `INTRADAY_V1_QUEUE_DRAIN_REQUIRED`，不得泄漏数据库 cast 异常。调度事务先取
+共享 schema-admission advisory lock，0031 downgrade 先取匹配的独占锁，防止首轮调度与
+降级 guard 交错通过；同一共享锁与 head/queue guard 还必须在 heartbeat/reclaim/claim 事务
+最前执行并持有至 claim 提交。监控 disabled 时仍注册无网络 v2 drain handler，只将已有
+queued v2 终态化为 `INTRADAY_MONITOR_DISABLED`，不创建新快照。任一不符都 fail closed，
+不得将旧任务静默 dead-letter。Fosun 与
+Alpaca 各自使用其固定
+payload/normalizer/authority 路径，不进行
+字段级拼接，也不互相自动 fallback。
 
 Fosun last 使用 `event_kind=snapshot`，bid/ask 保持 null；绝不能设置 `bid=ask=last`。缺盘口时 `spread_bps=null`，质量原因包含 `INTRADAY_BID_ASK_UNAVAILABLE`。quote timestamp 缺失、delivery unknown、minute window 不完整或任何 quality flag 都使状态至少为 `partial`。
 
 批次原始证据 schema 按来源区分：`fosun_gateway_market_snapshot_v1` 或 `alpaca_stock_snapshots_v1`。同一批多次 gateway 响应以有界、确定性的 envelope 保存每个 operation、request ID、body digest 和精确 body bytes。
+raw 与 normalized 对象返回的 URI 必须用同一严格 matcher 绑定完整 content-addressed key；
+locator/key 必须是 ASCII 且无控制字符或 fragment delimiter，`memory://` 必须精确等于 key，
+`s3://` 必须具备非空 bucket、无 userinfo、未编码且无空/`.`/`..` 段的完整 path，以及唯一非空、
+合法百分号编码的 `versionId`，且解码后不得等于 S3 哨兵值 `null`（包含
+百分号编码等价形式）。bucket versioning 必须精确为 `Enabled`；缺失、`Suspended`、
+PUT/冲突复核/冻结 URI/读回响应中的 `VersionId=null` 都 fail closed。只在 query 或其他
+substring 中出现 key 一律拒绝。
+日线聚合器读取已锁定 raw artifact 时必须传入该 artifact 的完整 URI；S3 实现还要将
+bucket、固定 `provider/market` prefix、完整 key 和解码后的 `versionId` 同时绑定到
+GetObjectVersion，并核对响应版本。只有当条件 create 返回 409/412 且尚无 versionId 时，
+才允许对该精确 content-addressed key 做一次 current-version GetObject；必须比对完整字节、
+取得非 `null` VersionId 并立即冻结 locator。该读取不构成普通证据重放。
+对象 key 还必须符合 ASCII 安全字符白名单 `[A-Za-z0-9._/-]+`，拒绝控制字符、
+`%?#`、反斜线和歧义路径段。SEC submissions/companyfacts 的 accession 必须是精确
+`^[0-9]{10}-[0-9]{2}-[0-9]{6}$`；collector 在首个对象写入前完成全部 accession 与
+accession-content 交叉验证，非规范值产生零对象、零财务事实。
+所有 raw/normalized 对象直接以 create-only 方式写入最终 digest key，不存在
+temporary/promote/delete 路径。并发 publisher 在首个实际完成的异常后立即停止新的
+排队 I/O、取消并收割同伴任务，不能等待全部完成后再按输入顺序选错。
+每次 Fosun intraday 外调前在 handler 事务中获取与 integration-status 变更 trigger 同名的
+advisory lock，并在锁下重验冻结 authority；锁持有至外调返回和 handler 事务结束，
+使撤权与真实 read 互斥。
 
 ## 10. 日线采集
 
@@ -290,9 +381,60 @@ Fosun last 使用 `event_kind=snapshot`，bid/ask 保持 null；绝不能设置 
 - Fosun 使用 `adjustment=raw`、limit 500、最多 400 天窗口；
 - Alpaca 保持现有显式 feed/delivery；
 - 复星 bars 请求前后冻结并比较 authority；
+- Engine/Gateway 将日线 `end_time` 定义为包含边界；真实 SDK admission 必须证明返回集包含指定的已完成目标交易日。排他或含糊边界一律拒绝激活；未版本化新的 requested/returned-window lineage 与边界测试前，不得静默改为“下一日”。
 - 每页 raw-first 归档，严格规范化后才创建 manifest/authority；
 - 响应为空、部分、窗口外、contract mismatch 或 authority 漂移时不发布序列；
 - 不自动调用 Alpaca 补洞。
+
+typed 对象 I/O 停止码按 Job 重试权限映射：日线子 Job 与盘中 `never/1` 路径终态化；
+日线聚合 publisher、SEC/FRED 和显式 Alpaca 日线路径保留精确码进入 automatic-safe
+重试。在对象写发生于任何数据库变更之前的 helper 中，不得用无意义的 rollback
+异常覆盖精确码。
+
+同一 XNYS session、daily profile 和 market source 只有一个逻辑 root。Scheduler
+先以该逻辑身份取 PostgreSQL transaction advisory lock，再从持久 Job payload
+查找并严格复用已有 root；只有不存在时才读取当前 Universe/Provider authority
+并首次冻结。Authority 在同一交易日内从 active 变为 expired/disabled 或替换
+不得新建 root 和整套下游 DAG；未来重跑必须引入显式、受控的 generation，
+不能借当前 authority 漂移隐式触发。
+
+`0032_ticker_alias_authority` 把 ticker 的时点身份提升为数据库合同：同一时点一个
+instrument 只能有一个 ticker，同一大小写不敏感 symbol 也只能属于一个 instrument；两个
+`NOT DEFERRABLE` GiST exclusion constraint 在并发写入时同样生效。迁移前的歧义使升级原子
+失败，Provider Worker 启动时精确证明约束名称、定义、验证和索引状态。日线 materializer
+另外只接受 `^[A-Z][A-Z0-9.-]{0,14}$` 的规范美股 ticker，不做静默大写或字符替换；非规范、
+多义或缺失 alias 统一生成 `FROZEN_INSTRUMENT_ALIAS_INVALID` terminal skip，不能让 payload
+校验异常把 root 留在无审计的重试循环中。
+0032 downgrade 还纳入 broker worker heartbeat 与 actionable
+`broker.simulation.dispatch`；broker heartbeat/reclaim/claim 在同一 READ COMMITTED 事务中
+持共享 admission lock 并验证 exact head，防止约束移除后模拟券商从歧义 alias 任选 symbol。
+
+Fosun 的 bars 是单标的读请求，网关保守上限为 30 次/60 秒，因此日线 Universe 的
+硬准入上限是 49 标的；第 50 个标的在创建任何外部读取子 Job 前以
+`FROZEN_UNIVERSE_TOO_LARGE` 终止。合格 Universe 也不得在单个 45 秒 handler 中串行抓取。
+调度器为每个标的创建最多一次
+外部读的有界子 Job，按不高于 10 次/分钟的节奏错峰，为分配给 market lane 的
+24 次/分钟上限中预留最多 14 次/分钟盘中读预算。
+数据库全局 call gate 必须先完成 alias、Universe 和 Provider authority 的可能慢复核，再在
+紧邻真实 Gateway 调用前提交 one-shot reservation；七秒节流以该 reservation/真实 call 时点
+为准。复核失败不占用 reservation，已提交 reservation 则保证该 child 不会再次外调。
+盘中快照 Job 优先级为 290，高于日线子 Job/聚合 Job 的 280、低于券商安全任务的 300；即使默认只有一个 Provider Worker，连续就绪的 49 个日线子 Job 也不得使 15 秒快照超过 45 秒有效窗口。
+每个 45 秒、`never/1` 的日线子 Job 从 handler 入口建立最晚第 44 秒的内部总截止点，
+为最终 staging 保留 3 秒、为独立 raw 归档保留 6 秒，Gateway fetch 本身最多 10 秒。
+preflight、节流、authority 重验、reservation 与真实外调共享一次性 acquisition 预算；
+已完整收到的响应在 acquisition 或 permit-exit 异常时仍先由独立 session 归档，再以稳定
+deadline 码终态化，不进行第二次 Provider 读取。
+每个 `fosun_daily_instrument_v2` 子 Job 和 `fosun_daily_publish_v2` 聚合输入还冻结 ticker alias ID、symbol 及其完整行身份摘要；网关请求摘要与归一化均使用该冻结 symbol，外调前和聚合前重验当日 ticker 权威，多义或身份漂移零发布。
+子 Job 只归档 raw evidence 并写入不可变 staging；只有全部预期标的子 Job 成功、
+Universe/日历/Provider authority 在聚合前后均与冻结输入一致时，聚合 Job 才能在
+单一数据库事务中发布全部 manifest/bar/authority。任一部分失败、缺失、重复或
+hash 不符都是整批零发布。发布事务的锁序是 capability scope、status、按 UUID 排序的所有
+raw artifact；`price_series_manifests` 的 `BEFORE INSERT` 按名称先执行 binding guard
+（status → 新 normalized artifact），再执行 `trg_price_series_manifests_z_fosun_transport`
+（raw artifact → calendar）。该触发器名称顺序属于数据库合同。全部 normalized object prepare
+完成后，聚合器取 PostgreSQL `clock_timestamp()`、Worker 时钟和最新 staging 时点的最大值，
+在持锁状态下再次复核 authority，并把这个全批唯一时点写入所有 manifest 的
+`provider_authorized_at`；任何更早的历史 as-of 都必须看不到该批中的任一标的。
 
 ## 11. API 与页面
 
@@ -303,6 +445,7 @@ Fosun last 使用 `event_kind=snapshot`，bid/ask 保持 null；绝不能设置 
 - 无 bid/ask 时显示“盘口未提供”，而不是笼统的数值错误；
 - 质量 reason 映射为可读中文，同时保留机器码用于审计；
 - 显示 gateway evidence 的接收时点，不把它标成 Provider 成交时点；
+- 历史证据和图表摘要显示复权口径；`raw` 常驻提示不得直接用于跨期收益、动量或回撤判断；
 - 无合格主源且 Alpaca disabled 时显示 unavailable，不显示 fixture 或陈旧数据作为替代。
 
 页面和 API 只读；盘中事实仍不进入硬风控或订单创建。Agent 只能消费通过 authority v2 冻结的日线集合。
@@ -322,6 +465,9 @@ Fosun last 使用 `event_kind=snapshot`，bid/ask 保持 null；绝不能设置 
 | SEC/FRED | 独立来源健康 | 与 Alpaca 市场开关无关 |
 
 Alpaca 首次真实启用继续遵循既有有界 probe：1 symbol、最多 2 GET、最长 10 分钟，并要求 entitlement、费用、保留、RLS、停止与回滚证据。
+此外，启用前必须为 Alpaca 盘中单次读取补齐与 Fosun 同等的 handler-owned
+acquisition/raw/archive/ingest 分阶段截止证据，并通过精确停止码与取消回归；
+当前默认关闭状态不构成该生产准入证据。
 
 ## 13. 失败语义
 
@@ -344,13 +490,16 @@ Alpaca 首次真实启用继续遵循既有有界 probe：1 symbol、最多 2 GE
 - 非 production read_only gateway 拒绝启动；
 - Provider Worker 不含 broker external-ID key，broker 不含 market-only key，app/general worker 两者都没有；
 - Provider 角色无需 authority 输入的 `UPDATE` 权限，不能直接写 publication mark 或执行其最小 definer；startup probe 对 advisory-lock、`PUBLIC`/column/sequence ACL、definer 与全部 Provider 写入 trigger 边界的任何漂移 fail closed；
+- startup probe 还必须拒绝 status/capability mutation lock、capability append-only 或其函数摘要的禁用、改名与漂移，并拒绝非 `READ COMMITTED` 会话；
 - Fosun production 配置不要求或构造 Alpaca client；Alpaca disabled 零访问 secret。
+- root/httpx/httpcore 即使被调到 DEBUG/INFO，真实 FixedOrigin FRED 请求的 key/query/URL/header 仍不得出现在日志；自有脱敏结果日志仍可见。
 - Provider Worker 被明确纳入行情真实性 TCB；它的凭据域不能访问 broker/order 写面，疑似 compromise 时按运行手册人工停机，且不声称现版能自动检测或撤销已冻结事实。
 
 ### 14.2 合同与证据
 
 - symbol、集合、bars 窗口/排序/数量/OHLC/volume 的正反例通过；
 - gateway 精确响应字节被 content-addressed 保存，schema/source 正确；
+- 对 DataArtifact 全身份的每一字段变异和只在 query/substring 声称对象 key 的 locator 均零事实发布；
 - authority 在调用前创建时间、调用中失效、响应后 version/hash 漂移都 fail closed；
 - 漂移路径只增加 raw artifact，LatestQuote/manifest/authority 为零；
 - Fosun fact/manifest 缺任一 binding 或 hash 不符时，应用和直接 SQL 都失败；
@@ -360,15 +509,18 @@ Alpaca 首次真实启用继续遵循既有有界 probe：1 symbol、最多 2 GE
 
 - Fosun quote 仅产生 snapshot-last，bid/ask/spread 保持 null；
 - receipt-only timestamp 与 unknown delivery 必须 partial；
-- minute bar 只有完整结束后可见；无前视、无跨源字段拼接；
+- minute bar 只有完整结束后可见；Alpaca 非分钟 bucket 即使返回 bar 也必须丢弃；无前视、无跨源字段拼接；
+- Fosun/Alpaca 分钟栏的 `revision` 都必须等于该批精确 raw SHA-256；不同 raw、相同 OHLCV 不得归并为同一 authority；
+- 49 标的日线聚合的 `provider_authorized_at` 全部相同、不早于对象准备和 staging，发布前 as-of 返回空；
 - 有效复星是第一来源；Alpaca disabled 时不出现自动 fallback；
 - Agent 仅接受满足 v2 且 delivery 已证明的干净日线；否则 abstain；
 - API、页面、OpenAPI、类型生成、可访问性和窄屏 E2E 通过。
+- raw 日线的复权口径和跨期判断警示保持可见，不能只存在于 API 字段中。
 
 ### 14.4 完成证据
 
 - Python offline suite、PostgreSQL integration suite、gateway suite、Web unit、lint、typecheck、build 和 E2E 全部通过；
-- 独立代码审查与安全审查无未处理的 Critical/Important；
+- 独立代码审查与安全审查无未处理的 P0–P2，且无当前范围内 actionable finding；
 - secret scan 不含真实 key、凭据内容或认证文件；
 - 工作树只含目标改动并完成本地提交；
 - 不执行真实 Provider 调用、部署或任何订单。
@@ -377,7 +529,7 @@ Alpaca 首次真实启用继续遵循既有有界 probe：1 symbol、最多 2 GE
 
 - 运行回滚：保持 `NEXUS_INTRADAY_MONITOR_MODE=disabled`，停止 provider profile；普通 app 不受影响。
 - 来源回滚：把 production market mode 置为 disabled/fixture 需要显式运维变更；不能自动切到 Alpaca。
-- 数据库回滚：只允许按 `0029 -> 0028 -> 0027` 逆序执行；0029 在存在 transport lineage/freshness 引用时、0028 在存在 Fosun v2 事实或受限 Provider writer 时、0027 在存在 v2 Fosun 事实/authority/引用时分别 fail closed。历史不可变证据不删除，也不能跳过中间 guard。
+- 数据库回滚：只允许按当前 migration head 逆序执行；0031 先取得与调度和 claim 事务共享的独占 advisory lock，再依序对 `worker_heartbeats`、`jobs` 取 `ACCESS EXCLUSIVE`，关闭绕过 advisory 协议的直接 SQL writer 竞态；在存在近期 Provider heartbeat 或 actionable v2 intraday Job（`queued`/`running`/`failed`）时以 `P3D01` 拒绝；不可重试的 `dead_letter` 是终态历史记录，不会永久锁死回滚，但回滚前仍必须先停止 Worker；0030 先对 staging 取 `ACCESS EXCLUSIVE`，在同一事务中检查数据/runtime 授权并保持到 DROP，任一存在都 fail closed；0029 在存在 transport lineage/freshness 引用时、0028 在存在 Fosun v2 事实或受限 Provider writer 时、0027 在存在 v2 Fosun 事实/authority/引用时分别 fail closed。历史不可变证据不删除，也不能跳过中间 guard。
 - 代码回滚：revert 本次提交；不修改历史迁移或 Git 历史。
 
 ## 16. 实施裁决

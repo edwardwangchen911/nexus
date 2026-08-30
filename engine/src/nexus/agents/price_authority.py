@@ -96,6 +96,7 @@ def _authority_statement(
         PriceSeriesManifest.provider_status_version.is_not(None),
         PriceSeriesManifest.provider_contract_hash.is_not(None),
         PriceSeriesManifest.provider_authorized_at.is_not(None),
+        PriceSeriesManifest.provider_authorized_at <= selected_at,
         PriceSeriesManifest.gateway_transport_artifact_id.is_not(None),
         PriceSeriesManifest.daily_calendar_authority_id.is_not(None),
         PriceSeriesManifest.gateway_request_start_at.is_not(None),
@@ -217,6 +218,8 @@ def _valid_owner(
         and policy.schema_version == "2"
         and policy.payload == SOURCE_POLICY_V2_PAYLOAD
         and _runtime_eligible(manifest, allow_fixture=False)
+        and manifest.provider_authorized_at is not None
+        and manifest.provider_authorized_at <= selected_at
     )
     return (
         authority.price_series_manifest_id == manifest.id
@@ -231,8 +234,7 @@ def _valid_owner(
         and authority.available_at <= selected_at
         and authority.content_hash == evidence.content_hash
         and authority.byte_length == evidence.byte_length
-        and evidence.location
-        == f"db://price-bar-set/{manifest.id}@sha256:{authority.content_hash}"
+        and evidence.location == f"db://price-bar-set/{manifest.id}@sha256:{authority.content_hash}"
         and manifest.instrument == str(instrument_id)
     )
 
@@ -317,14 +319,16 @@ async def revalidate_frozen_price_authority(
         populate_existing=True,
     )
     binding = await session.scalar(
-        select(AgentDataSnapshotEvidenceRecord).where(
+        select(AgentDataSnapshotEvidenceRecord)
+        .where(
             AgentDataSnapshotEvidenceRecord.data_snapshot_id == run.data_snapshot_id,
             AgentDataSnapshotEvidenceRecord.instrument_id == run.instrument_id,
             AgentDataSnapshotEvidenceRecord.evidence_ref_id == evidence.id,
             AgentDataSnapshotEvidenceRecord.authority_kind == "price",
             AgentDataSnapshotEvidenceRecord.selected_at.is_not(None),
             AgentDataSnapshotEvidenceRecord.selected_at <= run.decision_time,
-        ).execution_options(populate_existing=True)
+        )
+        .execution_options(populate_existing=True)
     )
     if (
         snapshot is None
@@ -440,10 +444,7 @@ async def freeze_price_authority(
                         selected_at=existing.selected_at,
                         allow_fixture=None,
                     )
-                    .where(
-                        PriceBarSetAuthority.evidence_ref_id
-                        == existing.evidence_ref_id
-                    )
+                    .where(PriceBarSetAuthority.evidence_ref_id == existing.evidence_ref_id)
                     .limit(2)
                     .execution_options(populate_existing=True)
                 )
@@ -486,8 +487,7 @@ async def freeze_price_authority(
                 instrument_id=instrument_id,
                 selected_at=selected_at,
                 allow_fixture=allow_fixture,
-            )
-            .limit(1)
+            ).limit(1)
         )
     ).one_or_none()
     if selected is None and not allow_fixture:

@@ -1,10 +1,15 @@
 """HTTP API process entry point for the isolated Fosun gateway."""
 
+import asyncio
 import hmac
 import importlib
 import math
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from threading import Event
+from typing import cast
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -20,8 +25,8 @@ from nexus_fosun_gateway.domain import GatewayError
 from nexus_fosun_gateway.routes.read_only import router as read_only_router
 from nexus_fosun_gateway.security.hmac import GatewayHmacVerifier, VerifiedGatewayActor
 from nexus_fosun_gateway.security.provider_tls import enforce_sdk_tls_verification
-from nexus_fosun_gateway.security.tls import production_uvicorn_kwargs
-from nexus_fosun_gateway.settings import Environment, GatewaySettings
+from nexus_fosun_gateway.security.tls import production_listener_configs
+from nexus_fosun_gateway.settings import BROKER_LISTENER_PORT, Environment, GatewaySettings
 
 
 @asynccontextmanager
@@ -34,9 +39,23 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if isinstance(verifier, GatewayHmacVerifier):
             verifier.close()
+        await _close_transport(app)
 
 
-def build_transport(settings: GatewaySettings) -> FosunTransport:
+async def _close_transport(app: FastAPI) -> None:
+    """Close admission without waiting for an already poisoned SDK daemon."""
+    transport = cast(FosunTransport, app.state.transport)
+    await transport.aclose()
+
+
+def build_transport(
+    settings: GatewaySettings,
+    *,
+    on_poison: Callable[[], None] | None = None,
+    on_activation_expired: Callable[[datetime], None] | None = None,
+    activation_checked_at: datetime | None = None,
+    activation_monotonic_anchor: float | None = None,
+) -> FosunTransport:
     """Create only the explicitly configured transport; never fall back across modes."""
     if settings.transport_mode == "fixture":
         return FixtureFosunTransport()
@@ -50,10 +69,15 @@ def build_transport(settings: GatewaySettings) -> FosunTransport:
         or settings.activation_contract_hash is None
     ):
         raise _sdk_not_admitted()
+    if activation_monotonic_anchor is None:
+        activation_monotonic_anchor = time.monotonic()
+    if activation_checked_at is None:
+        activation_checked_at = datetime.now(UTC)
     try:
         activation = evaluate_activation_paths(
             settings.provider_manifest,
             settings.activation_probe_artifact,
+            checked_at=activation_checked_at,
         )
     except (OSError, ValueError):
         raise _sdk_not_admitted() from None
@@ -85,6 +109,10 @@ def build_transport(settings: GatewaySettings) -> FosunTransport:
     return SdkFosunTransport(
         client,
         capability_expires_at=activation.capability_expires_at,
+        activation_checked_at=activation.checked_at,
+        activation_monotonic_anchor=activation_monotonic_anchor,
+        on_poison=on_poison,
+        on_activation_expired=on_activation_expired,
     )
 
 
@@ -106,9 +134,35 @@ def create_gateway_app(settings: GatewaySettings | None = None) -> FastAPI:
         lifespan=_gateway_lifespan,
     )
     app.state.settings = resolved_settings
+    shutdown_requested = Event()
+    app.state.shutdown_requested = shutdown_requested
     verifier = GatewayHmacVerifier(resolved_settings)
+
+    def mark_activation_expired(expires_at: datetime) -> None:
+        try:
+            verifier.mark_activation_expired(expires_at)
+        finally:
+            shutdown_requested.set()
+
     try:
-        app.state.transport = build_transport(resolved_settings)
+        if resolved_settings.transport_mode == "fixture":
+            transport = build_transport(
+                resolved_settings,
+                on_poison=verifier.mark_not_ready,
+                on_activation_expired=mark_activation_expired,
+            )
+        else:
+            activation_monotonic_anchor = time.monotonic()
+            activation_checked_at = verifier.trusted_activation_checked_at()
+            transport = build_transport(
+                resolved_settings,
+                on_poison=verifier.mark_not_ready,
+                on_activation_expired=mark_activation_expired,
+                activation_checked_at=activation_checked_at,
+                activation_monotonic_anchor=activation_monotonic_anchor,
+            )
+        verifier.bind_readiness_expiry(transport.readiness_expires_at())
+        app.state.transport = transport
     except BaseException:
         verifier.close()
         raise
@@ -120,9 +174,7 @@ def create_gateway_app(settings: GatewaySettings | None = None) -> FastAPI:
         request_id = _safe_request_id(request)
         headers = None
         if error.retry_after_seconds is not None:
-            headers = {
-                "Retry-After": str(max(1, math.ceil(error.retry_after_seconds)))
-            }
+            headers = {"Retry-After": str(max(1, math.ceil(error.retry_after_seconds)))}
         return JSONResponse(
             status_code=error.status_code,
             headers=headers,
@@ -165,7 +217,8 @@ def create_gateway_app(settings: GatewaySettings | None = None) -> FastAPI:
 
     @app.get("/health/ready")
     async def readiness() -> JSONResponse:
-        if app.state.hmac_verifier.is_ready():
+        transport = cast(FosunTransport, app.state.transport)
+        if app.state.hmac_verifier.is_ready() and transport.is_ready():
             return JSONResponse(
                 status_code=200,
                 content={"status": "ready", "service": "nexus-fosun-gateway"},
@@ -189,11 +242,49 @@ def run() -> None:
     settings = GatewaySettings()
     app = create_gateway_app(settings)
     if settings.environment is Environment.PRODUCTION:
-        uvicorn.run(
-            app,
-            host="0.0.0.0",
-            port=8081,
-            **production_uvicorn_kwargs(settings),
-        )
+        asyncio.run(_serve_production(app, settings))
         return
-    uvicorn.run(app, host="0.0.0.0", port=8081)
+    uvicorn.run(app, host="0.0.0.0", port=BROKER_LISTENER_PORT)
+
+
+async def _serve_production(app: FastAPI, settings: GatewaySettings) -> None:
+    """Serve both client-CA domains while sharing one SDK and replay journal."""
+    verifier = app.state.hmac_verifier
+    if not isinstance(verifier, GatewayHmacVerifier):
+        raise RuntimeError("GATEWAY_HMAC_VERIFIER_REQUIRED")
+    servers = tuple(
+        uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host="0.0.0.0",
+                port=listener.port,
+                lifespan="off",
+                **listener.tls_kwargs,
+            )
+        )
+        for listener in production_listener_configs(settings)
+    )
+    verifier.mark_serving()
+    tasks = tuple(asyncio.create_task(server.serve()) for server in servers)
+    shutdown_task = asyncio.create_task(_wait_for_shutdown(app.state.shutdown_requested))
+    results: list[object] | tuple[object, ...] = ()
+    try:
+        await asyncio.wait((*tasks, shutdown_task), return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for server in servers:
+            server.should_exit = True
+        shutdown_task.cancel()
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            await asyncio.gather(shutdown_task, return_exceptions=True)
+            verifier.close()
+            await _close_transport(app)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+
+
+async def _wait_for_shutdown(shutdown_requested: Event) -> None:
+    while not shutdown_requested.is_set():
+        await asyncio.sleep(0.1)

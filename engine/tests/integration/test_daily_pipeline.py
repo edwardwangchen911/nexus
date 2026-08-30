@@ -30,7 +30,12 @@ from nexus.persistence.models.backtest import (
     ExchangeCalendarSessionRecord,
 )
 from nexus.persistence.models.data import ProviderCapability
-from nexus.persistence.models.market import UniverseSnapshot
+from nexus.persistence.models.market import (
+    Instrument,
+    InstrumentAlias,
+    UniverseMember,
+    UniverseSnapshot,
+)
 from nexus.persistence.models.paper import (
     PaperExecutionWindowAuthorityRecord,
     PaperFillRecord,
@@ -65,7 +70,7 @@ from nexus.persistence.models.shadow import (
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from nexus.shadow.service import advance_shadow_session
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
@@ -140,8 +145,7 @@ async def _paper_execution_domain_counts(
                     .select_from(PaperLedgerEntryRecord)
                     .join(
                         PaperLedgerTransactionRecord,
-                        PaperLedgerTransactionRecord.id
-                        == PaperLedgerEntryRecord.transaction_id,
+                        PaperLedgerTransactionRecord.id == PaperLedgerEntryRecord.transaction_id,
                     )
                     .where(PaperLedgerTransactionRecord.order_id == order_id)
                 )
@@ -191,9 +195,7 @@ async def _paper_performance_fact_counts(session: AsyncSession) -> tuple[int, in
         PaperPositionSnapshotRecord,
         PaperPerformanceAttributionRecord,
     ):
-        counts.append(
-            int(await session.scalar(select(func.count()).select_from(model)) or 0)
-        )
+        counts.append(int(await session.scalar(select(func.count()).select_from(model)) or 0))
     return cast(tuple[int, int, int], tuple(counts))
 
 
@@ -227,8 +229,7 @@ async def _shadow_session_fact_counts(
                 select(func.count())
                 .select_from(AuditEvent)
                 .where(
-                    AuditEvent.payload["shadow_group_id"].as_string()
-                    == str(shadow_group_id),
+                    AuditEvent.payload["shadow_group_id"].as_string() == str(shadow_group_id),
                     AuditEvent.action.in_(
                         ("shadow.session_applied", "shadow.session_failed", "shadow.sealed")
                     ),
@@ -319,6 +320,213 @@ async def _seed_calendar(
                     published_at=datetime(2026, 8, 1, tzinfo=UTC),
                 )
             )
+
+
+async def _seed_us_universe_members(
+    factory: async_sessionmaker[AsyncSession], *, count: int
+) -> None:
+    async with factory() as session, session.begin():
+        snapshot = UniverseSnapshot(
+            id=_UNIVERSE_ID,
+            key="us_liquid",
+            version="daily-pipeline-fixture-v1",
+            effective_from=_THURSDAY,
+            source="fixture",
+            content_hash="a" * 64,
+            published_at=None,
+        )
+        instruments = tuple(
+            Instrument(
+                id=UUID(int=10_000 + index),
+                asset_type="equity",
+                exchange="XNYS",
+                currency="USD",
+                tick_size=Decimal("0.01"),
+                risk_bucket="equity",
+            )
+            for index in range(count)
+        )
+        session.add(snapshot)
+        session.add_all(instruments)
+        await session.flush()
+        session.add_all(
+            InstrumentAlias(
+                instrument_id=instrument.id,
+                symbol=f"TST{index}",
+                alias_type="ticker",
+                valid_from=date(2020, 1, 1),
+                valid_to=None,
+            )
+            for index, instrument in enumerate(instruments)
+        )
+        session.add_all(
+            UniverseMember(
+                universe_snapshot_id=_UNIVERSE_ID,
+                instrument_id=instrument.id,
+                inclusion_reason="daily-shard-test",
+            )
+            for instrument in instruments
+        )
+        await session.flush()
+        snapshot.published_at = datetime(2026, 8, 1, tzinfo=UTC)
+
+
+async def _seed_fosun_daily_authority(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    now: datetime,
+) -> None:
+    async with factory() as session, session.begin():
+        session.add(
+            ProviderCapability(
+                id=UUID("0198d500-1000-7000-8000-000000002231"),
+                provider="fosun",
+                capability="READ_ONLY",
+                contract_hash="b" * 64,
+                expires_at=now + timedelta(hours=2),
+                schema_version="1",
+                payload={
+                    "operation": "fosun_get_bars",
+                    "market_scope": "US",
+                    "delivery_mode": "real_time",
+                },
+                created_at=now - timedelta(hours=1),
+            )
+        )
+        session.add(
+            IntegrationStatus(
+                id=UUID("0198d500-1000-7000-8000-000000002232"),
+                provider="fosun",
+                status="read_only",
+                last_success_at=now,
+                version=1,
+                mode_changed_at=now - timedelta(hours=2),
+                capability_invalidated_at=None,
+                admitted_contract_hash="b" * 64,
+                created_at=now - timedelta(hours=2),
+            )
+        )
+
+
+async def _seed_us_universe_with_duplicate_ticker_symbol(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session, session.begin():
+        await session.execute(
+            text(
+                "ALTER TABLE instrument_aliases DROP CONSTRAINT IF EXISTS "
+                "ex_instrument_aliases_ticker_instrument_period"
+            )
+        )
+        await session.execute(
+            text(
+                "ALTER TABLE instrument_aliases DROP CONSTRAINT IF EXISTS "
+                "ex_instrument_aliases_ticker_symbol_period"
+            )
+        )
+        snapshot = UniverseSnapshot(
+            id=_UNIVERSE_ID,
+            key="us_liquid",
+            version="daily-duplicate-ticker-fixture-v1",
+            effective_from=_THURSDAY,
+            source="fixture",
+            content_hash="a" * 64,
+            published_at=None,
+        )
+        instruments = (
+            Instrument(
+                id=UUID(int=19_001),
+                asset_type="equity",
+                exchange="XNYS",
+                currency="USD",
+                tick_size=Decimal("0.01"),
+                risk_bucket="equity",
+            ),
+            Instrument(
+                id=UUID(int=19_002),
+                asset_type="equity",
+                exchange="XNYS",
+                currency="USD",
+                tick_size=Decimal("0.01"),
+                risk_bucket="equity",
+            ),
+        )
+        session.add(snapshot)
+        session.add_all(instruments)
+        await session.flush()
+        session.add_all(
+            (
+                InstrumentAlias(
+                    instrument_id=instruments[0].id,
+                    symbol="AAPL",
+                    alias_type="ticker",
+                    valid_from=date(2020, 1, 1),
+                    valid_to=None,
+                ),
+                InstrumentAlias(
+                    instrument_id=instruments[1].id,
+                    symbol="AAPL",
+                    alias_type="ticker",
+                    valid_from=date(2021, 1, 1),
+                    valid_to=None,
+                ),
+            )
+        )
+        session.add_all(
+            UniverseMember(
+                universe_snapshot_id=_UNIVERSE_ID,
+                instrument_id=instrument.id,
+                inclusion_reason="duplicate-ticker-authority-test",
+            )
+            for instrument in instruments
+        )
+        await session.flush()
+        snapshot.published_at = datetime(2026, 8, 1, tzinfo=UTC)
+
+
+async def _seed_us_universe_with_noncanonical_ticker_symbol(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    symbol: str,
+) -> None:
+    async with factory() as session, session.begin():
+        snapshot = UniverseSnapshot(
+            id=_UNIVERSE_ID,
+            key="us_liquid",
+            version="daily-noncanonical-ticker-fixture-v1",
+            effective_from=_THURSDAY,
+            source="fixture",
+            content_hash="a" * 64,
+            published_at=None,
+        )
+        instrument = Instrument(
+            id=UUID(int=19_101),
+            asset_type="equity",
+            exchange="XNYS",
+            currency="USD",
+            tick_size=Decimal("0.01"),
+            risk_bucket="equity",
+        )
+        session.add_all((snapshot, instrument))
+        await session.flush()
+        session.add_all(
+            (
+                InstrumentAlias(
+                    instrument_id=instrument.id,
+                    symbol=symbol,
+                    alias_type="ticker",
+                    valid_from=date(2020, 1, 1),
+                    valid_to=None,
+                ),
+                UniverseMember(
+                    universe_snapshot_id=_UNIVERSE_ID,
+                    instrument_id=instrument.id,
+                    inclusion_reason="noncanonical-ticker-authority-test",
+                ),
+            )
+        )
+        await session.flush()
+        snapshot.published_at = datetime(2026, 8, 1, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
@@ -469,11 +677,14 @@ async def test_scheduler_is_idempotent_and_materializes_strict_weekly_dag(
     assert first.payload["universe_content_hash"] == "a" * 64
 
     executed: list[JobType] = []
-    assert await _drain_daily_queues(
-        factory,
-        now=now,
-        executor=_successful_executor(executed),
-    ) == 11
+    assert (
+        await _drain_daily_queues(
+            factory,
+            now=now,
+            executor=_successful_executor(executed),
+        )
+        == 11
+    )
 
     parent = aliased(Job)
     child = aliased(Job)
@@ -502,10 +713,7 @@ async def test_scheduler_is_idempotent_and_materializes_strict_weekly_dag(
     assert by_type[JobType.BROKER_SYNC.value].status == "skipped"
     assert by_type[JobType.BROKER_SYNC.value].result_code == "SKIPPED_CAPABILITY"
     assert by_type[JobType.COLLECT_MARKET.value].status == "skipped"
-    assert (
-        by_type[JobType.COLLECT_MARKET.value].result_code
-        == "FOSUN_MARKET_AUTHORITY_UNAVAILABLE"
-    )
+    assert by_type[JobType.COLLECT_MARKET.value].result_code == "FOSUN_MARKET_AUTHORITY_UNAVAILABLE"
     assert broker_leases == 0
     assert by_type[JobType.PAPER_EXECUTE_DUE.value].status == "queued"
     assert by_type[JobType.PAPER_EXECUTE_DUE.value].effective_at == datetime(
@@ -521,15 +729,9 @@ async def test_scheduler_is_idempotent_and_materializes_strict_weekly_dag(
     assert (JobType.PAPER_ADMIT_ORDERS.value, JobType.OPTIMIZATION_PROPOSE.value) in edges
     assert (JobType.DAILY_BRIEF.value, JobType.PAPER_PERFORMANCE.value) in edges
     assert (JobType.AUDIT_MANIFEST.value, JobType.DAILY_BRIEF.value) in edges
-    assert executed.index(JobType.QUALITY_FREEZE) > executed.index(
-        JobType.SHADOW_ADVANCE_DUE
-    )
-    assert executed.index(JobType.DIAGNOSTICS_RUN) > executed.index(
-        JobType.QUALITY_FREEZE
-    )
-    assert executed.index(JobType.OPTIMIZATION_PROPOSE) > executed.index(
-        JobType.AGENT_RESEARCH
-    )
+    assert executed.index(JobType.QUALITY_FREEZE) > executed.index(JobType.SHADOW_ADVANCE_DUE)
+    assert executed.index(JobType.DIAGNOSTICS_RUN) > executed.index(JobType.QUALITY_FREEZE)
+    assert executed.index(JobType.OPTIMIZATION_PROPOSE) > executed.index(JobType.AGENT_RESEARCH)
 
 
 @pytest.mark.asyncio
@@ -587,6 +789,405 @@ async def test_scheduler_freezes_actual_fosun_delivery_authority_at_schedule_tim
     assert payload.market_authority.capability_id == capability_id
     assert payload.market_authority.status_id == status_id
     assert payload.market_authority.delivery_mode == delivery_mode
+
+
+@pytest.mark.asyncio
+async def test_scheduler_reuses_session_root_after_fosun_authority_expires(
+    migrated_database_url: str,
+) -> None:
+    """Authority drift must not generate a second full DAG for one session/profile."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_calendar(factory)
+    now = _FRIDAY_CLOSE + timedelta(minutes=31)
+    capability_id = UUID("0198d500-1000-7000-8000-000000002241")
+    status_id = UUID("0198d500-1000-7000-8000-000000002242")
+    async with factory() as session, session.begin():
+        session.add(
+            ProviderCapability(
+                id=capability_id,
+                provider="fosun",
+                capability="READ_ONLY",
+                contract_hash="d" * 64,
+                expires_at=now + timedelta(hours=1),
+                schema_version="1",
+                payload={
+                    "operation": "fosun_get_bars",
+                    "market_scope": "US",
+                    "delivery_mode": "real_time",
+                },
+                created_at=now - timedelta(hours=1),
+            )
+        )
+        session.add(
+            IntegrationStatus(
+                id=status_id,
+                provider="fosun",
+                status="read_only",
+                last_success_at=now,
+                version=1,
+                mode_changed_at=now - timedelta(hours=2),
+                capability_invalidated_at=None,
+                admitted_contract_hash="d" * 64,
+                created_at=now - timedelta(hours=2),
+            )
+        )
+
+    async with factory() as session, session.begin():
+        first = await schedule_due_daily_pipeline(
+            session,
+            now=now,
+            profile_id=_PROFILE,
+        )
+    async with factory() as session, session.begin():
+        after_expiry = await schedule_due_daily_pipeline(
+            session,
+            now=now + timedelta(hours=2),
+            profile_id=_PROFILE,
+        )
+
+    assert first is not None and after_expiry is not None
+    assert first.id == after_expiry.id
+    assert first.payload["market_authority"] is not None
+    async with factory() as session:
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Job)
+                .where(Job.job_type == JobType.DAILY_PIPELINE.value)
+            )
+            == 1
+        )
+
+
+@pytest.mark.asyncio
+async def test_fosun_daily_materializes_one_rate_limited_job_per_instrument(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_calendar(factory, include_universe=False)
+    await _seed_us_universe_members(factory, count=49)
+    now = _FRIDAY_CLOSE + timedelta(minutes=31)
+    capability_id = UUID("0198d500-1000-7000-8000-000000002231")
+    status_id = UUID("0198d500-1000-7000-8000-000000002232")
+    async with factory() as session, session.begin():
+        session.add(
+            ProviderCapability(
+                id=capability_id,
+                provider="fosun",
+                capability="READ_ONLY",
+                contract_hash="b" * 64,
+                expires_at=now + timedelta(hours=2),
+                schema_version="1",
+                payload={
+                    "operation": "fosun_get_bars",
+                    "market_scope": "US",
+                    "delivery_mode": "real_time",
+                },
+                created_at=now - timedelta(hours=1),
+            )
+        )
+        session.add(
+            IntegrationStatus(
+                id=status_id,
+                provider="fosun",
+                status="read_only",
+                last_success_at=now,
+                version=1,
+                mode_changed_at=now - timedelta(hours=2),
+                capability_invalidated_at=None,
+                admitted_contract_hash="b" * 64,
+                created_at=now - timedelta(hours=2),
+            )
+        )
+    async with factory() as session, session.begin():
+        root = await schedule_due_daily_pipeline(
+            session,
+            now=now,
+            profile_id=_PROFILE,
+        )
+    assert root is not None
+
+    registry = build_daily_pipeline_registry(
+        profile_id=_PROFILE,
+        stage_executor=_successful_executor([]),
+    )
+    assert await run_job_worker_once(
+        factory,
+        registry=registry,
+        queue=QueueName.GENERAL,
+        worker_id="daily-fosun-sharding-materializer",
+        worker_started_at=now,
+        process_version="test-v1",
+        migration_head="0029_fosun_bar_lineage",
+        clock=lambda: now,
+        claim_registered_only=True,
+    )
+
+    async with factory() as session:
+        children = tuple(
+            (
+                await session.scalars(
+                    select(Job)
+                    .where(Job.job_type == JobType.COLLECT_FOSUN_DAILY_INSTRUMENT.value)
+                    .order_by(Job.available_at, Job.id)
+                )
+            ).all()
+        )
+        publish = await session.scalar(
+            select(Job).where(Job.job_type == JobType.PUBLISH_FOSUN_DAILY.value)
+        )
+        assert publish is not None
+        dependencies = tuple(
+            (
+                await session.execute(
+                    select(
+                        JobDependency.depends_on_job_id,
+                        JobDependency.required_outcome,
+                    ).where(JobDependency.job_id == publish.id)
+                )
+            ).tuples()
+        )
+        quality_job = aliased(Job)
+        quality_parent = aliased(Job)
+        quality_parent_types = set(
+            (
+                await session.scalars(
+                    select(quality_parent.job_type)
+                    .select_from(JobDependency)
+                    .join(quality_job, quality_job.id == JobDependency.job_id)
+                    .join(
+                        quality_parent,
+                        quality_parent.id == JobDependency.depends_on_job_id,
+                    )
+                    .where(quality_job.job_type == JobType.QUALITY_FREEZE.value)
+                )
+            ).all()
+        )
+
+    assert len(children) == 49
+    assert all(child.max_attempts == 1 for child in children)
+    assert all(child.queue == QueueName.PROVIDER.value for child in children)
+    assert all(
+        right.available_at - left.available_at >= timedelta(seconds=7)
+        for left, right in zip(children, children[1:], strict=False)
+    )
+    for index, child in enumerate(children):
+        window_end = child.available_at + timedelta(seconds=60)
+        assert sum(candidate.available_at < window_end for candidate in children[index:]) <= 9
+    assert set(dependencies) == {(child.id, "succeeded") for child in children}
+    assert JobType.PUBLISH_FOSUN_DAILY.value in quality_parent_types
+    assert JobType.COLLECT_MARKET.value not in quality_parent_types
+
+
+@pytest.mark.asyncio
+async def test_fosun_daily_rejects_unverified_fiftieth_instrument(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_calendar(factory, include_universe=False)
+    await _seed_us_universe_members(factory, count=50)
+    now = _FRIDAY_CLOSE + timedelta(minutes=31)
+    await _seed_fosun_daily_authority(factory, now=now)
+    async with factory() as session, session.begin():
+        root = await schedule_due_daily_pipeline(session, now=now, profile_id=_PROFILE)
+    assert root is not None
+
+    registry = build_daily_pipeline_registry(
+        profile_id=_PROFILE,
+        stage_executor=_successful_executor([]),
+    )
+    assert await run_job_worker_once(
+        factory,
+        registry=registry,
+        queue=QueueName.GENERAL,
+        worker_id="daily-fosun-50-fail-closed",
+        worker_started_at=now,
+        process_version="test-v1",
+        migration_head="0032_ticker_alias_authority",
+        clock=lambda: now,
+        claim_registered_only=True,
+    )
+
+    async with factory() as session:
+        market_stage = await session.scalar(
+            select(Job).where(Job.job_type == JobType.COLLECT_MARKET.value)
+        )
+        child_count = await session.scalar(
+            select(func.count())
+            .select_from(Job)
+            .where(Job.job_type == JobType.COLLECT_FOSUN_DAILY_INSTRUMENT.value)
+        )
+        publish_count = await session.scalar(
+            select(func.count())
+            .select_from(Job)
+            .where(Job.job_type == JobType.PUBLISH_FOSUN_DAILY.value)
+        )
+
+    assert market_stage is not None
+    assert (market_stage.status, market_stage.result_code) == (
+        "skipped",
+        "FROZEN_UNIVERSE_TOO_LARGE",
+    )
+    assert child_count == 0
+    assert publish_count == 0
+
+
+@pytest.mark.asyncio
+async def test_fosun_daily_materializer_rejects_two_instruments_with_one_ticker(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_calendar(factory, include_universe=False)
+    await _seed_us_universe_with_duplicate_ticker_symbol(factory)
+    now = _FRIDAY_CLOSE + timedelta(minutes=31)
+    async with factory() as session, session.begin():
+        session.add(
+            ProviderCapability(
+                id=UUID("0198d500-1000-7000-8000-000000002241"),
+                provider="fosun",
+                capability="READ_ONLY",
+                contract_hash="b" * 64,
+                expires_at=now + timedelta(hours=2),
+                schema_version="1",
+                payload={
+                    "operation": "fosun_get_bars",
+                    "market_scope": "US",
+                    "delivery_mode": "real_time",
+                },
+                created_at=now - timedelta(hours=1),
+            )
+        )
+        session.add(
+            IntegrationStatus(
+                id=UUID("0198d500-1000-7000-8000-000000002242"),
+                provider="fosun",
+                status="read_only",
+                last_success_at=now,
+                version=1,
+                mode_changed_at=now - timedelta(hours=2),
+                capability_invalidated_at=None,
+                admitted_contract_hash="b" * 64,
+                created_at=now - timedelta(hours=2),
+            )
+        )
+    async with factory() as session, session.begin():
+        root = await schedule_due_daily_pipeline(session, now=now, profile_id=_PROFILE)
+    assert root is not None
+
+    registry = build_daily_pipeline_registry(
+        profile_id=_PROFILE,
+        stage_executor=_successful_executor([]),
+    )
+    assert await run_job_worker_once(
+        factory,
+        registry=registry,
+        queue=QueueName.GENERAL,
+        worker_id="daily-duplicate-ticker-materializer",
+        worker_started_at=now,
+        process_version="test-v1",
+        migration_head="0029_fosun_bar_lineage",
+        clock=lambda: now,
+        claim_registered_only=True,
+    )
+
+    async with factory() as session:
+        refreshed = await session.get(Job, root.id)
+        market_stage = await session.scalar(
+            select(Job).where(Job.job_type == JobType.COLLECT_MARKET.value)
+        )
+        child_count = await session.scalar(
+            select(func.count())
+            .select_from(Job)
+            .where(Job.job_type == JobType.COLLECT_FOSUN_DAILY_INSTRUMENT.value)
+        )
+    assert refreshed is not None
+    assert (refreshed.status, refreshed.result_code) == (
+        "succeeded",
+        "PIPELINE_MATERIALIZED",
+    )
+    assert market_stage is not None
+    assert (market_stage.status, market_stage.result_code) == (
+        "skipped",
+        "FROZEN_INSTRUMENT_ALIAS_INVALID",
+    )
+    assert child_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ("aapl", "AA/PL"))
+async def test_fosun_daily_materializer_terminally_skips_noncanonical_ticker(
+    migrated_database_url: str,
+    symbol: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_calendar(factory, include_universe=False)
+    await _seed_us_universe_with_noncanonical_ticker_symbol(factory, symbol=symbol)
+    now = _FRIDAY_CLOSE + timedelta(minutes=31)
+    async with factory() as session, session.begin():
+        session.add(
+            ProviderCapability(
+                id=UUID("0198d500-1000-7000-8000-000000002251"),
+                provider="fosun",
+                capability="READ_ONLY",
+                contract_hash="b" * 64,
+                expires_at=now + timedelta(hours=2),
+                schema_version="1",
+                payload={
+                    "operation": "fosun_get_bars",
+                    "market_scope": "US",
+                    "delivery_mode": "real_time",
+                },
+                created_at=now - timedelta(hours=1),
+            )
+        )
+        session.add(
+            IntegrationStatus(
+                id=UUID("0198d500-1000-7000-8000-000000002252"),
+                provider="fosun",
+                status="read_only",
+                last_success_at=now,
+                version=1,
+                mode_changed_at=now - timedelta(hours=2),
+                capability_invalidated_at=None,
+                admitted_contract_hash="b" * 64,
+                created_at=now - timedelta(hours=2),
+            )
+        )
+    async with factory() as session, session.begin():
+        root = await schedule_due_daily_pipeline(session, now=now, profile_id=_PROFILE)
+    assert root is not None
+
+    registry = build_daily_pipeline_registry(
+        profile_id=_PROFILE,
+        stage_executor=_successful_executor([]),
+    )
+    assert await run_job_worker_once(
+        factory,
+        registry=registry,
+        queue=QueueName.GENERAL,
+        worker_id=f"daily-noncanonical-ticker-{symbol}",
+        worker_started_at=now,
+        process_version="test-v1",
+        migration_head="0032_ticker_alias_authority",
+        clock=lambda: now,
+        claim_registered_only=True,
+    )
+
+    async with factory() as session:
+        market_stage = await session.scalar(
+            select(Job).where(Job.job_type == JobType.COLLECT_MARKET.value)
+        )
+        child_count = await session.scalar(
+            select(func.count())
+            .select_from(Job)
+            .where(Job.job_type == JobType.COLLECT_FOSUN_DAILY_INSTRUMENT.value)
+        )
+    assert market_stage is not None
+    assert (market_stage.status, market_stage.result_code) == (
+        "skipped",
+        "FROZEN_INSTRUMENT_ALIAS_INVALID",
+    )
+    assert child_count == 0
 
 
 @pytest.mark.asyncio
@@ -891,10 +1492,14 @@ async def test_general_root_materializes_provider_children_without_registering_h
             (
                 await session.scalars(
                     select(Job)
-                    .where(Job.job_type.in_((
-                        JobType.COLLECT_MARKET.value,
-                        JobType.COLLECT_SEC_MACRO.value,
-                    )))
+                    .where(
+                        Job.job_type.in_(
+                            (
+                                JobType.COLLECT_MARKET.value,
+                                JobType.COLLECT_SEC_MACRO.value,
+                            )
+                        )
+                    )
                     .order_by(Job.job_type)
                 )
             ).all()
@@ -1075,9 +1680,7 @@ async def test_preexisting_unpriced_paper_order_never_fills_and_is_released_at_c
             for row in (await session.scalars(select(Job).order_by(Job.created_at))).all()
         )
         reservation = await session.scalar(
-            select(PaperReservationRecord).where(
-                PaperReservationRecord.order_id == seed.order_id
-            )
+            select(PaperReservationRecord).where(PaperReservationRecord.order_id == seed.order_id)
         )
         assert reservation is not None
         reservation_events = tuple(
@@ -1111,8 +1714,7 @@ async def test_preexisting_unpriced_paper_order_never_fills_and_is_released_at_c
         "PAPER_CANCELLED",
     ]
     assert [job.effective_at for job in execution_jobs] == [
-        FIRST_EVALUATION + timedelta(minutes=offset)
-        for offset in (0, 5, 10, 15, 20)
+        FIRST_EVALUATION + timedelta(minutes=offset) for offset in (0, 5, 10, 15, 20)
     ]
     assert after_counts[0] == before_counts[0] + 1
     assert after_counts[1] == before_counts[1] == 0
@@ -1128,10 +1730,7 @@ async def test_preexisting_unpriced_paper_order_never_fills_and_is_released_at_c
         "released",
     ]
     assert order_events[-1].to_status == "cancelled"
-    assert (
-        order_events[-1].reason_code
-        == "paper_execution_price_authority_unavailable"
-    )
+    assert order_events[-1].reason_code == "paper_execution_price_authority_unavailable"
     assert order_events[-1].actor_kind == "task19"
 
 

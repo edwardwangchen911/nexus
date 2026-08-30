@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import json
+import re
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -46,6 +47,12 @@ _SEC_TAG_TO_CANONICAL_FACT = {
     ("us-gaap", "WeightedAverageNumberOfDilutedSharesOutstanding"): "diluted_shares",
 }
 _MAX_BOOTSTRAP_CIKS = 100
+_SEC_ACCESSION_NUMBER = re.compile(r"^[0-9]{10}-[0-9]{2}-[0-9]{6}$")
+
+
+def is_canonical_sec_accession_number(value: object) -> bool:
+    """Return whether one untrusted SEC accession is safe and canonical."""
+    return isinstance(value, str) and _SEC_ACCESSION_NUMBER.fullmatch(value) is not None
 
 
 def canonical_fact_for_raw_tag(taxonomy: str, tag: str) -> str:
@@ -340,6 +347,8 @@ def _normalize_company_fact_entry(
     evidence_by_accession: Mapping[str, EvidenceRef],
 ) -> FinancialFact:
     accession = _required_string(entry, "accn", "MISSING_ACCESSION")
+    if not is_canonical_sec_accession_number(accession):
+        raise SecNormalizationError("INVALID_ACCESSION_NUMBER")
     metadata = accepted_by_accession.get(accession)
     if metadata is None:
         raise SecNormalizationError("MISSING_ACCEPTANCE_TIME")
@@ -437,6 +446,8 @@ def _submission_records(records: Mapping[str, object]) -> Iterable[tuple[str, da
             or not isinstance(form, str)
         ):
             raise SecNormalizationError("MISSING_ACCEPTANCE_TIME")
+        if not is_canonical_sec_accession_number(accession):
+            raise SecNormalizationError("INVALID_ACCESSION_NUMBER")
         try:
             accepted_at = require_utc(datetime.fromisoformat(accepted.replace("Z", "+00:00")))
         except ValueError as error:

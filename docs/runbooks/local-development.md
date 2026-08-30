@@ -95,7 +95,8 @@ ACL、精确 `search_path`，以及 Provider 可写表上 60 个非内部应用 
 Provider 对象存储同样是独立权限域：`PROVIDER_OBJECT_STORE_*` 不能复用 app/general
 worker 的 `OBJECT_STORE_*` principal。bucket 必须预先启用版本控制；运行时固定
 `PROVIDER_OBJECT_STORE_PREFIX=provider/market`，IAM 必须拒绝 bucket 根/List 和其他前缀，
-只允许该前缀内 Put/Get，并只允许删除 `provider/market/temporary/market`。两个 Provider
+只允许该前缀内 PutObject、条件创建冲突复核用的 key-scoped GetObject 和冻结证据
+重放用的 GetObjectVersion，不授予 ListBucket 或 DeleteObject。两个 Provider
 profile 都不会自动运行通用 `object-store-init`；缺少上述权限证据时不得启动真实 Provider。
 
 生产数据模式仍只保留一个由通用 worker 管理的 `daily.pipeline` 根。激活时，通用

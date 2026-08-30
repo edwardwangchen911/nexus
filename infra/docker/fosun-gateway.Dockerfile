@@ -18,5 +18,6 @@ RUN uv sync --frozen --no-dev --package nexus-fosun-gateway \
     && chmod 0700 /var/lib/nexus-fosun-gateway
 
 ENV PATH="/app/.venv/bin:$PATH"
+EXPOSE 8081 8082
 USER nexus
 CMD ["nexus-fosun-gateway"]

@@ -38,15 +38,17 @@ class _SnapshotSymbolResolver:
         return {AAPL_ID: "AAPL", MSFT_ID: "MSFT"}[instrument_id]
 
 
-def _request() -> IntradaySnapshotRequest:
+def _request(*, include_minute_bars: bool = True) -> IntradaySnapshotRequest:
     return IntradaySnapshotRequest(
         instruments=(
             SnapshotInstrument(instrument_id=AAPL_ID, symbol="AAPL"),
             SnapshotInstrument(instrument_id=MSFT_ID, symbol="MSFT"),
         ),
         symbol_as_of=date(2026, 8, 28),
+        bucket_start=RECEIVED_AT.replace(second=0, microsecond=0),
         feed="iex",
         delivery_mode="real_time",
+        include_minute_bars=include_minute_bars,
     )
 
 
@@ -118,11 +120,20 @@ async def test_snapshot_received_at_is_captured_after_transport_returns() -> Non
 
 @pytest.mark.asyncio
 async def test_snapshot_does_not_publish_an_in_progress_minute_bar() -> None:
-    provider, _ = _provider(
-        received_at=datetime(2026, 8, 28, 14, 30, 59, 999_999, tzinfo=UTC)
-    )
+    provider, _ = _provider(received_at=datetime(2026, 8, 28, 14, 30, 59, 999_999, tzinfo=UTC))
 
     batch = await provider.fetch_snapshots(_request())
+
+    assert batch.snapshots[0].trade is not None
+    assert batch.snapshots[0].quote is not None
+    assert batch.snapshots[0].minute_bar is None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_drops_completed_minute_bar_when_bucket_does_not_request_it() -> None:
+    provider, _ = _provider()
+
+    batch = await provider.fetch_snapshots(_request(include_minute_bars=False))
 
     assert batch.snapshots[0].trade is not None
     assert batch.snapshots[0].quote is not None

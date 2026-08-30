@@ -163,9 +163,7 @@ class FosunBarItem(BaseModel):
 
     @model_validator(mode="after")
     def _valid_ohlc(self) -> FosunBarItem:
-        if self.low > min(self.open, self.close) or self.high < max(
-            self.open, self.close
-        ):
+        if self.low > min(self.open, self.close) or self.high < max(self.open, self.close):
             raise ValueError("bar OHLC is invalid")
         return self
 
@@ -254,22 +252,15 @@ class FosunMarketGatewayClient:
         end_time: datetime,
         limit: int,
     ) -> RawGatewayResponse:
-        _validated_code(code)
-        if ktype not in {"day", "minute"}:
-            raise FosunMarketGatewayError("gateway bars request rejected")
-        start_time = _aware_utc(start_time)
-        end_time = _aware_utc(end_time)
-        if start_time > end_time or isinstance(limit, bool) or not 1 <= limit <= 500:
-            raise FosunMarketGatewayError("gateway bars request rejected")
         return await self._post(
             "fosun_get_bars",
-            {
-                "code": code,
-                "ktype": ktype,
-                "start_time": _format_utc(start_time),
-                "end_time": _format_utc(end_time),
-                "limit": limit,
-            },
+            _bars_request_payload(
+                code=code,
+                ktype=ktype,
+                start_time=start_time,
+                end_time=end_time,
+                limit=limit,
+            ),
         )
 
     async def aclose(self) -> None:
@@ -282,7 +273,7 @@ class FosunMarketGatewayClient:
         payload: dict[str, object],
     ) -> RawGatewayResponse:
         path = _PATHS[operation]
-        body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        body = _canonical_request_body(payload)
         timestamp = int(self._wall_time())
         nonce = self._uuid_factory()
         request_id = self._uuid_factory()
@@ -360,6 +351,53 @@ class FosunMarketGatewayClient:
             sent_at=sent_at,
             received_at=self._now(),
         )
+
+
+def fosun_bars_request_body_sha256(
+    *,
+    code: str,
+    ktype: FosunBarType,
+    start_time: datetime,
+    end_time: datetime,
+    limit: int,
+) -> str:
+    """Hash the exact canonical JSON body used by the bars gateway POST."""
+    payload = _bars_request_payload(
+        code=code,
+        ktype=ktype,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+    )
+    return hashlib.sha256(_canonical_request_body(payload)).hexdigest()
+
+
+def _bars_request_payload(
+    *,
+    code: str,
+    ktype: FosunBarType,
+    start_time: datetime,
+    end_time: datetime,
+    limit: int,
+) -> dict[str, object]:
+    _validated_code(code)
+    if ktype not in {"day", "minute"}:
+        raise FosunMarketGatewayError("gateway bars request rejected")
+    start_time = _aware_utc(start_time)
+    end_time = _aware_utc(end_time)
+    if start_time > end_time or isinstance(limit, bool) or not 1 <= limit <= 500:
+        raise FosunMarketGatewayError("gateway bars request rejected")
+    return {
+        "code": code,
+        "ktype": ktype,
+        "start_time": _format_utc(start_time),
+        "end_time": _format_utc(end_time),
+        "limit": limit,
+    }
+
+
+def _canonical_request_body(payload: dict[str, object]) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
 
 
 def parse_quote_page(
@@ -475,11 +513,7 @@ def _reject_json_constant(value: str) -> object:
 
 
 def _validate_codes(codes: tuple[str, ...]) -> None:
-    if (
-        not 1 <= len(codes) <= 50
-        or len(set(codes)) != len(codes)
-        or codes != tuple(sorted(codes))
-    ):
+    if not 1 <= len(codes) <= 50 or len(set(codes)) != len(codes) or codes != tuple(sorted(codes)):
         raise FosunMarketGatewayError("gateway quote codes rejected")
     for code in codes:
         _validated_code(code)

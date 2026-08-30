@@ -403,9 +403,7 @@ def test_0013_is_single_head_and_round_trips_from_0012(
 ) -> None:
     """The Shadow release is one reversible successor of deterministic backtests."""
     config = _config(monkeypatch, temporary_database_url)
-    assert ScriptDirectory.from_config(config).get_heads() == [
-        "0029_fosun_bar_lineage"
-    ]
+    assert ScriptDirectory.from_config(config).get_heads() == ["0032_ticker_alias_authority"]
 
     command.upgrade(config, "0012_backtests")
     assert SHADOW_TABLES.isdisjoint(_table_names(temporary_database_url))

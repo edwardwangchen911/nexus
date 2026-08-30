@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -219,10 +220,12 @@ def test_restart_drain_rejects_requests_until_old_signatures_are_stale(
             "replay_store_path": tmp_path / "replay.sqlite3",
         }
     )
-    app.state.hmac_verifier = GatewayHmacVerifier(
+    verifier = GatewayHmacVerifier(
         production_settings,
         clock=lambda: next(clock),
     )
+    verifier.bind_readiness_expiry(datetime.fromtimestamp(2_000, tz=UTC))
+    app.state.hmac_verifier = verifier
 
     with TestClient(app) as client:
         payload = {"account_id": "synthetic-account-001", "read_kind": "cash"}
@@ -312,6 +315,50 @@ def test_replay_cache_capacity_rejects_churn_without_evicting_live_nonce() -> No
     assert saturated.status_code == 401
     assert replay.status_code == 401
     assert recording.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_replay_capacity_is_reserved_independently_per_hmac_key() -> None:
+    """One principal's valid nonce churn must not consume another key's quota."""
+    cache = ReplayCache(max_entries=2, ttl_seconds=60)
+
+    assert await cache.reserve("broker-key", "broker-nonce-1", 1_000)
+    assert await cache.reserve("broker-key", "broker-nonce-2", 1_000)
+    assert await cache.reserve("market-key", "market-nonce-1", 1_000)
+    assert not await cache.reserve("broker-key", "broker-nonce-3", 1_000)
+
+
+def test_unauthorized_operation_does_not_consume_principal_replay_quota() -> None:
+    """Route authorization must precede nonce reservation under capacity pressure."""
+    settings = GatewaySettings.for_test()
+    app = create_gateway_app(settings)
+    recording = RecordingTransport()
+    app.state.transport = recording
+    app.state.hmac_verifier = GatewayHmacVerifier(
+        settings,
+        replay_cache=ReplayCache(max_entries=1, ttl_seconds=60),
+    )
+
+    with TestClient(app) as client:
+        denied = _post_signed(
+            client,
+            "fosun_sync_portfolio",
+            {"account_id": "synthetic-account-001", "read_kind": "cash"},
+            key_id="fixture-market-gateway-current",
+            secret="fixture-market-gateway-current-secret-32-bytes",
+            actor_id="nexus-provider-worker",
+            nonce="0198f7a0-2222-7777-8222-222222222270",
+        )
+        allowed = _post_signed(
+            client,
+            "fosun_get_quotes",
+            {"codes": ["usAAPL"]},
+            nonce="0198f7a0-2222-7777-8222-222222222271",
+        )
+
+    assert denied.status_code == 404
+    assert allowed.status_code == 200
+    assert recording.calls == 1
 
 
 def test_unverified_request_id_header_is_not_reflected(gateway_client: TestClient) -> None:

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -16,8 +16,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.audit.canonical import canonical_json
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.market_authority import ProviderMarketBinding
-from nexus.market.ingestion import MarketObjectStore, serialize_price_bars
+from nexus.market.artifact_authority import (
+    data_artifact_identity_sha256,
+    lock_and_load_data_artifacts,
+)
+from nexus.market.ingestion import (
+    MarketObjectStore,
+    object_uri_matches_key,
+    serialize_price_bars,
+)
 from nexus.market.intraday_authority import finalize_intraday_bar_set
+from nexus.market.object_store import ProviderObjectIOUnavailable
 from nexus.persistence.models.data import (
     DataArtifact,
     IntradayBarSetAuthority,
@@ -112,8 +121,10 @@ async def ingest_intraday_snapshot(
     )
     raw_digest = sha256(batch.raw_payload).hexdigest()
     date_path = batch.received_at.astimezone(UTC).strftime("%Y/%m/%d")
-    temporary_keys: list[str] = []
     try:
+        frozen_raw_identity = (
+            None if raw_artifact is None else data_artifact_identity_sha256(raw_artifact)
+        )
         if raw_artifact is None:
             archived = await archive_intraday_snapshot_raw(
                 session,
@@ -126,28 +137,56 @@ async def ingest_intraday_snapshot(
                 commit=False,
             )
             raw_artifact = archived.raw_artifact
+            frozen_raw_identity = data_artifact_identity_sha256(raw_artifact)
         elif (
             raw_artifact.sha256 != raw_digest
             or raw_artifact.byte_size != len(batch.raw_payload)
             or raw_artifact.source != batch.provenance.source
         ):
             raise RuntimeError("INTRADAY_RAW_ARCHIVE_MISMATCH")
+        locked = await lock_and_load_data_artifacts(session, (raw_artifact.id,))
+        current_raw_artifact = locked.get(raw_artifact.id)
+        expected_raw_key = _intraday_raw_key(raw_digest)
+        expected_raw_schema = (
+            "fosun_gateway_market_snapshot_v1"
+            if batch.provenance.source == "fosun"
+            else "alpaca_stock_snapshots_v1"
+        )
+        if (
+            current_raw_artifact is None
+            or frozen_raw_identity is None
+            or data_artifact_identity_sha256(current_raw_artifact) != frozen_raw_identity
+            or current_raw_artifact.sha256 != raw_digest
+            or current_raw_artifact.byte_size != len(batch.raw_payload)
+            or current_raw_artifact.mime_type != "application/json"
+            or current_raw_artifact.schema_version != expected_raw_schema
+            or current_raw_artifact.source != batch.provenance.source
+            or not (
+                current_raw_artifact.observed_at
+                <= current_raw_artifact.available_at
+                <= current_raw_artifact.received_at
+                <= batch.received_at
+            )
+            or not object_uri_matches_key(current_raw_artifact.uri, expected_raw_key)
+        ):
+            raise RuntimeError("INTRADAY_RAW_ARCHIVE_MISMATCH")
+        raw_artifact = current_raw_artifact
         published: list[_PublishedBar] = []
         for snapshot in batch.snapshots:
             if snapshot.minute_bar is None:
                 continue
-            bar = snapshot.minute_bar.bar
-            if batch.provenance.source == "fosun":
-                bar = bar.model_copy(update={"revision": raw_digest})
+            # The published normalized identity must name the exact transport
+            # response for every admitted provider. Otherwise two distinct raw
+            # snapshots with the same OHLCV collapse into one unauditable bar.
+            bar = snapshot.minute_bar.bar.model_copy(update={"revision": raw_digest})
             payload = serialize_price_bars((bar,))
             digest = sha256(payload).hexdigest()
             final_key = (
                 f"normalized/market/intraday/{date_path}/{snapshot.instrument_id}/{digest}.parquet"
             )
-            temporary_key = f"temporary/market/{uuid4()}.parquet"
-            temporary_keys.append(temporary_key)
-            await object_store.put_temporary(temporary_key, payload)
-            uri = await object_store.promote(temporary_key, final_key)
+            uri = await object_store.put_normalized(final_key, payload)
+            if not object_uri_matches_key(uri, final_key):
+                raise RuntimeError("INTRADAY_NORMALIZED_OBJECT_URI_MISMATCH")
             published.append(_PublishedBar(bar=bar, payload=payload, digest=digest, uri=uri))
 
         created_trade = 0
@@ -205,9 +244,7 @@ async def ingest_intraday_snapshot(
 
         for item in published:
             current_bar_binding = (
-                None
-                if bar_bindings is None
-                else bar_bindings.get(item.bar.instrument_id)
+                None if bar_bindings is None else bar_bindings.get(item.bar.instrument_id)
             )
             created = await _persist_bar_authority(
                 session,
@@ -231,12 +268,16 @@ async def ingest_intraday_snapshot(
             created_bar_authorities=created_bars,
             replayed=replayed,
         )
+    except ProviderObjectIOUnavailable:
+        # The worker passes commit=False and owns rollback on unwind, preserving
+        # its one-shot deadline. Standalone commit=True callers retain the
+        # function's rollback-before-error contract.
+        if commit:
+            await session.rollback()
+        raise
     except Exception:
         await session.rollback()
         raise
-    finally:
-        for temporary_key in temporary_keys:
-            await _safe_delete_temporary(object_store, temporary_key)
 
 
 async def archive_intraday_snapshot_raw(
@@ -248,9 +289,11 @@ async def archive_intraday_snapshot_raw(
 ) -> IntradayRawArchive:
     """Persist exact response bytes and database provenance before parsing them."""
     raw_digest = sha256(envelope.raw_payload).hexdigest()
-    raw_key = f"raw/market/intraday/sha256/{raw_digest[:2]}/{raw_digest}.json"
+    raw_key = _intraday_raw_key(raw_digest)
     try:
         raw_uri = await object_store.archive_raw(raw_key, envelope.raw_payload)
+        if not object_uri_matches_key(raw_uri, raw_key):
+            raise RuntimeError("INTRADAY_RAW_OBJECT_URI_MISMATCH")
         raw_artifact, _ = await _get_or_create_artifact(
             session,
             uri=raw_uri,
@@ -270,6 +313,10 @@ async def archive_intraday_snapshot_raw(
         if commit:
             await session.commit()
         return IntradayRawArchive(raw_uri=raw_artifact.uri, raw_artifact=raw_artifact)
+    except ProviderObjectIOUnavailable:
+        # The raw object write precedes all database access. Do not let an
+        # unrelated rollback failure replace the deterministic object stop code.
+        raise
     except Exception:
         await session.rollback()
         raise
@@ -375,6 +422,8 @@ async def _persist_bar_authority(
     provider_binding: ProviderMarketBinding | None,
     raw_artifact: DataArtifact,
 ) -> bool:
+    if item.bar.revision != raw_artifact.sha256 or raw_artifact.source != source:
+        raise RuntimeError("INTRADAY_BAR_RAW_REVISION_MISMATCH")
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended('intraday-manifest:' || :digest, 0))"),
         {"digest": item.digest},
@@ -426,9 +475,7 @@ async def _persist_bar_authority(
         id=manifest_id,
         evidence_ref_id=evidence.id,
         data_artifact_id=artifact.id,
-        gateway_transport_artifact_id=(
-            raw_artifact.id if source == "fosun" else None
-        ),
+        gateway_transport_artifact_id=(raw_artifact.id if source == "fosun" else None),
         daily_calendar_authority_id=None,
         gateway_request_start_at=None,
         gateway_request_end_at=None,
@@ -505,7 +552,14 @@ async def _get_or_create_artifact(
         if inserted_id is not None
         else await session.scalar(select(DataArtifact).where(DataArtifact.sha256 == digest))
     )
-    content_identity = ("sha256", "byte_size", "mime_type", "schema_version", "source")
+    content_identity = (
+        "uri",
+        "sha256",
+        "byte_size",
+        "mime_type",
+        "schema_version",
+        "source",
+    )
     if artifact is None or any(
         getattr(artifact, field) != values[field] for field in content_identity
     ):
@@ -513,15 +567,12 @@ async def _get_or_create_artifact(
     return artifact, inserted_id is not None
 
 
+def _intraday_raw_key(digest: str) -> str:
+    return f"raw/market/intraday/sha256/{digest[:2]}/{digest}.json"
+
+
 def _utc_text(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
-async def _safe_delete_temporary(store: MarketObjectStore, key: str) -> None:
-    try:
-        await store.delete_temporary(key)
-    except Exception:
-        return
 
 
 def _validate_bindings(

@@ -72,11 +72,11 @@ async def _seed_legacy_runtime(database_url: str) -> None:
                     "VALUES "
                     "('72000000-0000-0000-0000-000000000001', 'agent-research:legacy', "
                     ":first_hash, 'QUEUED', 'agent_research_job_v1', "
-                    "'{\"run_id\":\"72000000-0000-0000-0000-000000000011\"}'::jsonb, "
+                    '\'{"run_id":"72000000-0000-0000-0000-000000000011"}\'::jsonb, '
                     "'2026-08-27T01:00:00Z'), "
                     "('72000000-0000-0000-0000-000000000002', "
                     "'optimization-proposal:legacy', :second_hash, 'COMPLETED', '1', "
-                    "'{\"portfolio_snapshot_id\":\"72000000-0000-0000-0000-000000000012\"}'"
+                    '\'{"portfolio_snapshot_id":"72000000-0000-0000-0000-000000000012"}\''
                     "::jsonb, '2026-08-27T01:01:00Z')"
                 ),
                 {"first_hash": "a" * 64, "second_hash": "b" * 64},
@@ -116,10 +116,7 @@ async def _audit_mutations_are_rejected(database_url: str) -> tuple[bool, bool]:
         with pytest.raises(DBAPIError, match="audit"):
             async with engine.begin() as connection:
                 await connection.execute(
-                    text(
-                        "UPDATE audit_events SET action = 'rewritten' "
-                        "WHERE event_seq = 1"
-                    )
+                    text("UPDATE audit_events SET action = 'rewritten' WHERE event_seq = 1")
                 )
         with pytest.raises(DBAPIError, match="audit"):
             async with engine.begin() as connection:
@@ -230,7 +227,7 @@ async def _runtime_mutations_are_rejected(database_url: str) -> None:
 def test_0020_is_the_single_head_after_task19() -> None:
     scripts = ScriptDirectory.from_config(_config())
 
-    assert scripts.get_heads() == ["0029_fosun_bar_lineage"]
+    assert scripts.get_heads() == ["0032_ticker_alias_authority"]
     automation = scripts.get_revision("0020_resilient_automation_audit")
     retry_allowance = scripts.get_revision("0021_manual_job_retry_allowance")
     assert automation is not None
@@ -254,8 +251,7 @@ def test_0020_backfills_runtime_authorities_guards_audit_and_round_trips(
         for row in asyncio.run(
             _rows(
                 temporary_database_url,
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'public'",
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
             )
         )
     }
@@ -366,8 +362,7 @@ def test_0020_backfills_runtime_authorities_guards_audit_and_round_trips(
         for row in asyncio.run(
             _rows(
                 temporary_database_url,
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'public'",
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
             )
         )
     }
@@ -404,4 +399,4 @@ def test_0020_backfills_runtime_authorities_guards_audit_and_round_trips(
     command.upgrade(config, "head")
     assert asyncio.run(
         _rows(temporary_database_url, "SELECT version_num FROM alembic_version")
-    ) == [("0029_fosun_bar_lineage",)]
+    ) == [("0032_ticker_alias_authority",)]

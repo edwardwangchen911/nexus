@@ -19,6 +19,12 @@ from pydantic import (
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
 from nexus_fosun_gateway.domain import GatewayError, GatewayItem, GatewayPage
 from nexus_fosun_gateway.policy.operations import GatewayOperation
+from nexus_fosun_gateway.settings import (
+    BROKER_LISTENER_PORT,
+    MARKET_LISTENER_PORT,
+    Environment,
+    GatewaySettings,
+)
 
 router = APIRouter(prefix="/internal/v1/read-only")
 _MAX_REQUEST_BYTES = 64 * 1024
@@ -144,7 +150,12 @@ async def _execute(
             raise _request_too_large()
         chunks.append(chunk)
     body = b"".join(chunks)
-    actor = await request.app.state.hmac_verifier.verify(request, body)
+    actor = await request.app.state.hmac_verifier.verify(
+        request,
+        body,
+        operation=operation,
+        expected_actor_id=_listener_actor(request),
+    )
     request.state.verified_gateway_actor = actor
     if operation not in actor.allowed_operations:
         raise GatewayError(
@@ -167,6 +178,24 @@ async def _execute(
         ) from error
     transport = cast("FosunTransport", request.app.state.transport)
     return await transport.execute(operation, payload.model_dump(mode="json"))
+
+
+def _listener_actor(request: Request) -> str | None:
+    server = request.scope.get("server")
+    port = server[1] if isinstance(server, tuple | list) and len(server) == 2 else None
+    if port == BROKER_LISTENER_PORT:
+        return "nexus-broker-worker"
+    if port == MARKET_LISTENER_PORT:
+        return "nexus-provider-worker"
+    settings = cast("GatewaySettings", request.app.state.settings)
+    if settings.environment is Environment.PRODUCTION:
+        raise GatewayError(
+            "LISTENER_IDENTITY_UNAVAILABLE",
+            "Gateway listener identity is unavailable.",
+            status_code=503,
+            next_action="REVIEW_DEPLOYMENT_CONFIG",
+        )
+    return None
 
 
 def _is_json_media_type(value: str | None) -> bool:

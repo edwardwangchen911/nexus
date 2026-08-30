@@ -74,9 +74,7 @@ class AlpacaSnapshotProvider:
         """Use the provider-owned normalizer selected by composition."""
         return normalize_snapshot_envelope(envelope, request=request)
 
-    async def fetch_raw_snapshots(
-        self, request: IntradaySnapshotRequest
-    ) -> RawSnapshotEnvelope:
+    async def fetch_raw_snapshots(self, request: IntradaySnapshotRequest) -> RawSnapshotEnvelope:
         """Return bounded transport bytes without parsing provider-controlled JSON."""
         if request.feed != self._feed or request.delivery_mode != self._delivery_mode:
             raise MarketProviderPayloadError("ALPACA_INTRADAY_AUTHORITY_MISMATCH")
@@ -183,17 +181,18 @@ def normalize_snapshot_payload(
             value = raw_snapshot.get(ignored)
             if value is not None and not isinstance(value, Mapping):
                 raise MarketProviderPayloadError("ALPACA_SNAPSHOT_DAILY_BAR_INVALID")
+        minute_bar = _minute_bar(
+            raw_snapshot.get("minuteBar"),
+            instrument_id=instrument.instrument_id,
+            received_at=received_at,
+        )
         snapshots.append(
             MarketSnapshot(
                 instrument_id=instrument.instrument_id,
                 symbol=symbol,
                 trade=_trade(raw_snapshot.get("latestTrade")),
                 quote=_quote(raw_snapshot.get("latestQuote")),
-                minute_bar=_minute_bar(
-                    raw_snapshot.get("minuteBar"),
-                    instrument_id=instrument.instrument_id,
-                    received_at=received_at,
-                ),
+                minute_bar=minute_bar,
             )
         )
     if any(
@@ -207,6 +206,8 @@ def normalize_snapshot_payload(
         if observed_at is not None
     ):
         raise MarketProviderPayloadError("ALPACA_SNAPSHOT_FUTURE_FACT")
+    if not request.include_minute_bars:
+        snapshots = [snapshot.model_copy(update={"minute_bar": None}) for snapshot in snapshots]
     mode: Literal["delayed", "read_only"] = (
         "delayed" if request.delivery_mode == "delayed" else "read_only"
     )

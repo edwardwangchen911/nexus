@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -82,6 +83,15 @@ class Job(ImmutableCreatedAt, Base):
             "available_at",
             "created_at",
             "id",
+        ),
+        Index(
+            "uq_jobs_intraday_v2_bucket",
+            "effective_at",
+            unique=True,
+            postgresql_where=text(
+                "job_type = 'collect.intraday_snapshot' "
+                "AND schema_version = 'intraday_snapshot_job_v2'"
+            ),
         ),
     )
 

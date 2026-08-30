@@ -9,6 +9,7 @@ import { MarketQualityReasons } from "../../components/market-quality-reasons";
 import { PriceChart } from "../../components/price-chart";
 import type { components } from "../../lib/generated/schema";
 import {
+  marketAdjustmentLabel,
   marketDeliveryModeLabel,
   marketSourceLabel,
 } from "../../lib/market-evidence-labels";
@@ -421,6 +422,7 @@ export function MarketPanel({
                       symbol: selectedItem.symbol,
                       source: selectedSeriesForItem.source,
                       feed: selectedSeriesForItem.feed,
+                      adjustment: selectedSeriesForItem.adjustment,
                       interval: selectedSeriesForItem.interval,
                       bars: selectedSeriesForItem.bars,
                     }} />
@@ -580,11 +582,18 @@ function HistoryEvidence({ symbol, series }: { symbol: string; series: SelectedM
         <EvidenceFact term="序列来源" value={marketSourceLabel(series.source, series.feed)} />
         <EvidenceFact term="Feed" value={series.feed?.toUpperCase() ?? "未选定"} />
         <EvidenceFact term="实时性口径" value={marketDeliveryModeLabel(series.delivery_mode)} />
+        <EvidenceFact term="复权口径" value={marketAdjustmentLabel(series.adjustment)} />
         <EvidenceFact term="周期" value={series.interval ?? "未选定"} />
         <EvidenceFact term="最新可用时间" value={formatUtc(latestBar?.available_at ?? null)} />
         <EvidenceFact term="最新观测时间" value={formatUtc(latestBar?.observed_at ?? null)} />
         <EvidenceFact term="序列质量" value={series.quality} />
       </dl>
+      {series.adjustment === "raw" ? (
+        <p className="market-adjustment-warning">
+          <TriangleAlert aria-hidden="true" size={18} />
+          未复权价格不可直接用于跨期收益、动量或回撤判断。
+        </p>
+      ) : null}
     </section>
   );
 }

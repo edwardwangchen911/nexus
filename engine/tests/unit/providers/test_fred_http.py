@@ -2,12 +2,51 @@
 
 from __future__ import annotations
 
+import logging
+
+import httpx
 import pytest
 from nexus.providers.fred import FredValidationError
 from nexus.providers.fred_http import FredHttpTransport
+from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
 from pydantic import SecretStr
 
 from tests.support.provider_fakes import RecordingFixedOriginClient
+
+
+@pytest.mark.asyncio
+async def test_real_fred_request_never_reaches_dependency_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "fred-log-secret-canary"
+    observed_urls: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        observed_urls.append(str(request.url))
+        return httpx.Response(200, content=b"{}")
+
+    fixed = FixedOriginHttpClient(
+        provider_name="fred",
+        origin=AllowedOrigin(scheme="https", host="api.stlouisfed.org"),
+        policy=HttpRequestPolicy(max_attempts=1),
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(respond),
+            follow_redirects=False,
+        ),
+    )
+    transport = FredHttpTransport(fixed, SecretStr(secret))
+    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="httpx")
+    caplog.set_level(logging.DEBUG, logger="httpcore")
+
+    assert await transport.get("/fred/series/observations?series_id=DFF") == b"{}"
+    assert observed_urls and secret in observed_urls[0]
+    rendered = caplog.text
+    assert secret not in rendered
+    assert "api_key=" not in rendered
+    assert "api.stlouisfed.org" not in rendered
+    assert "Authorization" not in rendered
+    await fixed.aclose()
 
 
 @pytest.mark.asyncio

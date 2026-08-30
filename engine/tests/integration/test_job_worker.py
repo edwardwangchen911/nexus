@@ -176,6 +176,41 @@ def _spec(
     )
 
 
+@pytest.mark.asyncio
+async def test_preclaim_guard_fails_before_heartbeat_reclaim_or_claim(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    job_id = await _enqueue(
+        factory,
+        job_type=JobType.AGENT_RESEARCH,
+        payload={"value": "guarded"},
+    )
+
+    async def reject(_session: AsyncSession) -> None:
+        raise RuntimeError("PRECLAIM_GUARD_REJECTED")
+
+    with pytest.raises(RuntimeError, match="PRECLAIM_GUARD_REJECTED"):
+        await run_job_worker_once(
+            factory,
+            registry=JobRegistry((_spec(lambda _: None),)),
+            queue=QueueName.GENERAL,
+            worker_id="worker-preclaim-guard",
+            worker_started_at=_NOW,
+            process_version="test-v1",
+            migration_head="0032_ticker_alias_authority",
+            clock=lambda: _NOW + timedelta(seconds=1),
+            preclaim_guard=reject,
+        )
+
+    async with factory() as session:
+        job = await session.get(Job, job_id)
+        heartbeat_count = await session.scalar(select(func.count()).select_from(WorkerHeartbeat))
+    assert job is not None
+    assert (job.status, job.attempt_count) == ("queued", 0)
+    assert heartbeat_count == 0
+
+
 def test_registry_rejects_duplicate_and_non_strict_payload_model() -> None:
     async def handler(context: JobHandlerContext) -> JobHandlerResult:
         del context
@@ -186,6 +221,40 @@ def test_registry_rejects_duplicate_and_non_strict_payload_model() -> None:
         registry.register(_spec(handler))
     with pytest.raises(ValueError, match="extra='forbid'"):
         _spec(handler, payload_model=_UnsafePayload)
+
+
+@pytest.mark.asyncio
+async def test_worker_passes_one_absolute_deadline_into_handler(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _enqueue(
+        factory,
+        job_type=JobType.AGENT_RESEARCH,
+        payload={"value": "deadline"},
+    )
+    seen_remaining: list[float] = []
+
+    async def handler(context: JobHandlerContext) -> JobHandlerResult:
+        deadline = context.monotonic_deadline()
+        assert deadline is not None
+        seen_remaining.append(deadline - asyncio.get_running_loop().time())
+        return JobHandlerResult(outcome="succeeded", result_code="DEADLINE_OBSERVED")
+
+    assert await run_job_worker_once(
+        factory,
+        registry=JobRegistry((_spec(handler, timeout_seconds=2),)),
+        queue=QueueName.GENERAL,
+        worker_id="worker-deadline",
+        worker_started_at=_NOW,
+        process_version="test-v1",
+        migration_head="0032_ticker_alias_authority",
+        clock=lambda: _NOW + timedelta(seconds=1),
+        claim_registered_only=True,
+    )
+
+    assert len(seen_remaining) == 1
+    assert 0 < seen_remaining[0] <= 2
 
 
 @pytest.mark.asyncio

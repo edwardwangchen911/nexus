@@ -24,11 +24,12 @@ from nexus.persistence.models.broker_simulation import (
     BrokerExecutionIntentRecord,
     BrokerSimulationAdmissionRecord,
 )
-from nexus.persistence.models.runtime import Job
+from nexus.persistence.models.runtime import Job, WorkerHeartbeat
 from nexus.persistence.session import session_factory
 from nexus.providers.broker.settings import BrokerWorkerSettings
 from nexus.providers.broker.simulation_gateway import FixtureSimulationGatewayClient
 from nexus.settings import EngineSettings
+from sqlalchemy import select, text
 
 _NOW = datetime(2026, 8, 28, 14, 1, tzinfo=UTC)
 
@@ -108,9 +109,22 @@ async def test_offline_broker_worker_executes_fixture_dispatch_once(
         }
     )
     runtime = build_broker_runtime(settings, simulation_gateway=gateway)
+    now = [_NOW]
+    worker_id = "nexus-broker-lifecycle-test"
     try:
-        worked = await run_broker_worker_once(runtime, clock=lambda: _NOW)
-        replay = await run_broker_worker_once(runtime, clock=lambda: _NOW)
+        worked = await run_broker_worker_once(
+            runtime,
+            clock=lambda: now[0],
+            worker_id=worker_id,
+            worker_started_at=_NOW,
+        )
+        now[0] = datetime(2026, 8, 28, 14, 1, 1, tzinfo=UTC)
+        replay = await run_broker_worker_once(
+            runtime,
+            clock=lambda: now[0],
+            worker_id=worker_id,
+            worker_started_at=_NOW,
+        )
     finally:
         await runtime.aclose()
 
@@ -120,8 +134,54 @@ async def test_offline_broker_worker_executes_fixture_dispatch_once(
     async with factory() as session:
         job = await session.get(Job, job_id)
         intent = await session.get(BrokerExecutionIntentRecord, intent_id)
+        heartbeats = list(
+            (
+                await session.scalars(
+                    select(WorkerHeartbeat).where(
+                        WorkerHeartbeat.queue == QueueName.BROKER.value,
+                        WorkerHeartbeat.worker_id == worker_id,
+                    )
+                )
+            ).all()
+        )
     assert job is not None and job.status == JobStatus.SUCCEEDED.value
     assert intent is not None and intent.status == "completed"
+    assert len(heartbeats) == 1
+    assert heartbeats[0].started_at == _NOW
+    assert heartbeats[0].seen_at == now[0]
+
+
+@pytest.mark.asyncio
+async def test_broker_worker_rejects_noncurrent_ticker_head_before_claim(
+    migrated_database_url: str,
+) -> None:
+    factory, _, job_id = await _enqueue_dispatch(migrated_database_url)
+    async with factory() as session, session.begin():
+        await session.execute(
+            text(
+                "UPDATE public.alembic_version "
+                "SET version_num='0031_intraday_schema_admission'"
+            )
+        )
+    gateway = FixtureSimulationGatewayClient(outcomes=("acknowledged",))
+    settings = BrokerWorkerSettings.model_validate(
+        {
+            "NEXUS_ENV": "test",
+            "DATABASE_URL": migrated_database_url,
+            "NEXUS_BROKER_SIMULATION_MODE": "offline_fixture",
+        }
+    )
+    runtime = build_broker_runtime(settings, simulation_gateway=gateway)
+    try:
+        with pytest.raises(RuntimeError, match="BROKER_DATABASE_MIGRATION_HEAD_MISMATCH"):
+            await run_broker_worker_once(runtime, clock=lambda: _NOW)
+    finally:
+        await runtime.aclose()
+
+    assert gateway.call_count == 0
+    async with factory() as session:
+        job = await session.get(Job, job_id)
+    assert job is not None and job.status == JobStatus.QUEUED.value
 
 
 @pytest.mark.asyncio

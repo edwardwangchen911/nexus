@@ -104,9 +104,10 @@ async def test_fixture_worker_persists_exact_lifecycle_roles_evidence_and_usage(
     assert (result.intent.stance, result.intent.exposure_action) == ("watch", "none")
     assert result.intent.quality_status == "partial"
     assert "Price authority is unavailable." in result.intent.uncertainties
-    assert next(
-        vote.vote for vote in result.intent.role_votes if vote.role == "market_state"
-    ) == "abstain"
+    assert (
+        next(vote.vote for vote in result.intent.role_votes if vote.role == "market_state")
+        == "abstain"
+    )
     assert result.intent.counter_theses
     assert result.intent.invalidation_conditions
     assert result.intent.entry_conditions
@@ -827,9 +828,7 @@ async def test_database_tools_are_complete_and_reject_authority_escape(
                 "filed_to": "2026-08-24",
             },
         )
-        assert [item["accession_number"] for item in filings["items"]] == [
-            "0000000001-26-000001"
-        ]
+        assert [item["accession_number"] for item in filings["items"]] == ["0000000001-26-000001"]
         price = await tools.execute(
             "get_price_features",
             {
@@ -856,9 +855,7 @@ async def test_database_tools_are_complete_and_reject_authority_escape(
                 },
             }
         ]
-        assert price["items"][0]["evidence_ref_id"] != str(
-            _PARQUET_PRICE_EVIDENCE_ID
-        )
+        assert price["items"][0]["evidence_ref_id"] != str(_PARQUET_PRICE_EVIDENCE_ID)
         macro = await tools.execute(
             "get_macro_snapshot",
             {
@@ -955,7 +952,7 @@ async def test_database_price_tool_accepts_exact_fosun_v2_authority_without_fixt
                 "instrument_id": str(_INSTRUMENT_ID),
                 "data_snapshot_id": str(_SNAPSHOT_ID),
                 "as_of": "2026-08-24T12:00:00Z",
-                "features": ["close", "sma_20", "sma_200"],
+                "features": ["close"],
             },
         )
 
@@ -1060,9 +1057,7 @@ async def _assert_empty_admission_scope(
                 )
             ),
             await session.scalar(
-                select(func.count()).select_from(Job).where(
-                    Job.input_hash == request_hash
-                )
+                select(func.count()).select_from(Job).where(Job.input_hash == request_hash)
             ),
             await session.scalar(
                 select(func.count())
@@ -1224,8 +1219,7 @@ async def _corrupt_price_evidence_content(factory) -> None:
                 {
                     "content_hash": corrupted_hash,
                     "location": (
-                        f"db://price-bar-set/{_PRICE_MANIFEST_ID}"
-                        f"@sha256:{corrupted_hash}"
+                        f"db://price-bar-set/{_PRICE_MANIFEST_ID}@sha256:{corrupted_hash}"
                     ),
                     "manifest_id": _PRICE_MANIFEST_ID,
                 },
@@ -1307,10 +1301,9 @@ async def test_evidence_backed_tools_fail_closed_when_current_evidence_drifts(
             ),
         )
         price = await tools.execute("get_price_features", _price_tool_payload())
-    assert {
-        (result["status"], result["reason"], tuple(result["items"]))
-        for result in results
-    } == {("unavailable", "invalid_frozen_evidence_authority", ())}
+    assert {(result["status"], result["reason"], tuple(result["items"])) for result in results} == {
+        ("unavailable", "invalid_frozen_evidence_authority", ())
+    }
     assert (price["status"], price["reason"], price["items"]) == (
         "unavailable",
         "invalid_price_bar_set_authority",
@@ -1427,9 +1420,7 @@ async def test_price_tool_treats_missing_expected_binding_as_corruption(
 ) -> None:
     factory, run = await _prepared_price_run(migrated_database_url)
     async with factory() as session, session.begin():
-        await session.execute(
-            text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER")
-        )
+        await session.execute(text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER"))
         try:
             await session.execute(text(damage_statement))
         finally:
@@ -1598,13 +1589,9 @@ async def test_fixture_price_authority_requires_explicit_fixture_admission(
     await _seed_database_tool_authority(factory, link_price=False, price_source="fixture")
     with pytest.raises(ValueError, match="price authority"):
         async with factory() as session, session.begin():
-            await _admit_price_run(
-                session, prompt_ids, allow_fixture_price_authority=False
-            )
+            await _admit_price_run(session, prompt_ids, allow_fixture_price_authority=False)
     async with factory() as session, session.begin():
-        admission = await _admit_price_run(
-            session, prompt_ids, allow_fixture_price_authority=True
-        )
+        admission = await _admit_price_run(session, prompt_ids, allow_fixture_price_authority=True)
     assert any(
         item["provider_object_id"].startswith("price-bar-set:")
         for item in admission.run.evidence_manifest
@@ -1620,14 +1607,9 @@ async def test_existing_fixture_price_authority_is_revalidated_for_runtime(
     await _seed_database_tool_authority(factory, price_source="fixture")
     with pytest.raises(ValueError, match="existing price authority is invalid"):
         async with factory() as session, session.begin():
-            await _admit_price_run(
-                session, prompt_ids, allow_fixture_price_authority=False
-            )
+            await _admit_price_run(session, prompt_ids, allow_fixture_price_authority=False)
     async with factory() as session:
-        assert (
-            await session.scalar(select(func.count()).select_from(AgentResearchRunRecord))
-            == 0
-        )
+        assert await session.scalar(select(func.count()).select_from(AgentResearchRunRecord)) == 0
         assert await session.scalar(select(func.count()).select_from(Job)) == 0
         assert (
             await session.scalar(
@@ -1844,9 +1826,7 @@ async def test_existing_price_link_rejects_copied_owner_tamper(
             )
         )
         assert price_binding is not None
-        await session.execute(
-            text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER")
-        )
+        await session.execute(text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER"))
         try:
             price_binding.evidence_ref_id = copied_owner_id
             await session.flush()
@@ -1891,10 +1871,7 @@ async def test_admission_rejects_retained_price_binding_copied_field_drift(
             drifted_hash = "0" * 64
             assert original_hash != drifted_hash
             await session.execute(
-                text(
-                    "ALTER TABLE agent_data_snapshot_evidence "
-                    "DISABLE TRIGGER USER"
-                )
+                text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER")
             )
             try:
                 await session.execute(
@@ -1929,10 +1906,7 @@ async def test_admission_rejects_retained_price_binding_copied_field_drift(
                 assert held_binding.content_hash == original_hash
             finally:
                 await session.execute(
-                    text(
-                        "ALTER TABLE agent_data_snapshot_evidence "
-                        "ENABLE TRIGGER USER"
-                    )
+                    text("ALTER TABLE agent_data_snapshot_evidence ENABLE TRIGGER USER")
                 )
             await _admit_scoped_price_run(
                 session,
@@ -1972,8 +1946,7 @@ async def test_admission_rejects_retained_snapshot_pit_drift(
             assert original_timestamp <= _NOW < drifted_timestamp
             await session.execute(
                 text(
-                    f"UPDATE data_snapshots SET {timestamp_column}=:timestamp "
-                    "WHERE id=:snapshot_id"
+                    f"UPDATE data_snapshots SET {timestamp_column}=:timestamp WHERE id=:snapshot_id"
                 ),
                 {
                     "timestamp": drifted_timestamp,
@@ -1981,10 +1954,7 @@ async def test_admission_rejects_retained_snapshot_pit_drift(
                 },
             )
             raw_timestamp = await session.scalar(
-                text(
-                    f"SELECT {timestamp_column} FROM data_snapshots "
-                    "WHERE id=:snapshot_id"
-                ),
+                text(f"SELECT {timestamp_column} FROM data_snapshots WHERE id=:snapshot_id"),
                 {"snapshot_id": held_snapshot.id},
             )
             assert raw_timestamp == drifted_timestamp
@@ -2030,16 +2000,12 @@ async def test_admission_rejects_retained_price_owner_copied_field_drift(
             original_hash = held_evidence.content_hash
             original_location = held_evidence.location
             drifted_hash = "0" * 64
-            drifted_location = (
-                f"db://price-bar-set/{_PRICE_MANIFEST_ID}@sha256:{drifted_hash}"
-            )
+            drifted_location = f"db://price-bar-set/{_PRICE_MANIFEST_ID}@sha256:{drifted_hash}"
             assert (original_hash, original_location) != (
                 drifted_hash,
                 drifted_location,
             )
-            await session.execute(
-                text("ALTER TABLE research_evidence_refs DISABLE TRIGGER USER")
-            )
+            await session.execute(text("ALTER TABLE research_evidence_refs DISABLE TRIGGER USER"))
             try:
                 await session.execute(
                     text(
@@ -2117,10 +2083,7 @@ async def test_admission_rejects_research_shaped_existing_price_binding(
             assert held_binding is not None
             assert held_binding.selected_at is not None
             await session.execute(
-                text(
-                    "ALTER TABLE agent_data_snapshot_evidence "
-                    "DISABLE TRIGGER USER"
-                )
+                text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER")
             )
             try:
                 await session.execute(
@@ -2165,10 +2128,7 @@ async def test_admission_rejects_research_shaped_existing_price_binding(
                 assert held_binding.selected_at is not None
             finally:
                 await session.execute(
-                    text(
-                        "ALTER TABLE agent_data_snapshot_evidence "
-                        "ENABLE TRIGGER USER"
-                    )
+                    text("ALTER TABLE agent_data_snapshot_evidence ENABLE TRIGGER USER")
                 )
             await _admit_scoped_price_run(
                 session,
@@ -2258,9 +2218,7 @@ async def test_disguised_research_price_link_cannot_create_positive_intent(
         )
         session.add(evidence)
         await session.flush()
-        await session.execute(
-            text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER")
-        )
+        await session.execute(text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER"))
         try:
             session.add(
                 AgentDataSnapshotEvidenceRecord(
@@ -2297,11 +2255,7 @@ async def test_disguised_research_price_link_cannot_create_positive_intent(
     assert result.intent is None or (
         result.intent.stance,
         result.intent.exposure_action,
-        next(
-            vote.vote
-            for vote in result.intent.role_votes
-            if vote.role == "market_state"
-        ),
+        next(vote.vote for vote in result.intent.role_votes if vote.role == "market_state"),
         result.intent.quality_status,
     ) == ("watch", "none", "abstain", "partial")
 
@@ -2334,9 +2288,7 @@ async def test_corrupted_frozen_price_bar_set_cannot_create_positive_intent(
                 {"manifest_id": _PRICE_MANIFEST_ID},
             )
         finally:
-            await session.execute(
-                text("ALTER TABLE price_bar_records ENABLE TRIGGER USER")
-            )
+            await session.execute(text("ALTER TABLE price_bar_records ENABLE TRIGGER USER"))
     async with factory() as session, session.begin():
         result = await execute_research_run(
             session,
@@ -2346,11 +2298,7 @@ async def test_corrupted_frozen_price_bar_set_cannot_create_positive_intent(
     assert result.intent is None or (
         result.intent.stance,
         result.intent.exposure_action,
-        next(
-            vote.vote
-            for vote in result.intent.role_votes
-            if vote.role == "market_state"
-        ),
+        next(vote.vote for vote in result.intent.role_votes if vote.role == "market_state"),
         result.intent.quality_status,
     ) == ("watch", "none", "abstain", "partial")
 
@@ -2400,10 +2348,7 @@ async def test_price_binding_drift_before_final_synthesis_cannot_create_positive
                     )
                 finally:
                     await self._session.execute(
-                        text(
-                            "ALTER TABLE agent_data_snapshot_evidence "
-                            "ENABLE TRIGGER USER"
-                        )
+                        text("ALTER TABLE agent_data_snapshot_evidence ENABLE TRIGGER USER")
                     )
                 self._tampered = True
             return await self._fixture.analyze(
@@ -2422,11 +2367,7 @@ async def test_price_binding_drift_before_final_synthesis_cannot_create_positive
     assert result.intent is None or (
         result.intent.stance,
         result.intent.exposure_action,
-        next(
-            vote.vote
-            for vote in result.intent.role_votes
-            if vote.role == "market_state"
-        ),
+        next(vote.vote for vote in result.intent.role_votes if vote.role == "market_state"),
         result.intent.quality_status,
     ) == ("watch", "none", "abstain", "partial")
 
@@ -2436,16 +2377,12 @@ async def test_retained_price_binding_drift_abstains_without_emitting_positive_i
     migrated_database_url: str,
 ) -> None:
     """A retained stale price binding must not survive current-state revalidation."""
-    factory, admission = await _prepared_production_price_admission(
-        migrated_database_url
-    )
+    factory, admission = await _prepared_production_price_admission(migrated_database_url)
     async with factory() as session, session.begin():
         held_binding = await session.scalar(
             select(AgentDataSnapshotEvidenceRecord).where(
-                AgentDataSnapshotEvidenceRecord.data_snapshot_id
-                == admission.run.data_snapshot_id,
-                AgentDataSnapshotEvidenceRecord.instrument_id
-                == admission.run.instrument_id,
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id == admission.run.data_snapshot_id,
+                AgentDataSnapshotEvidenceRecord.instrument_id == admission.run.instrument_id,
                 AgentDataSnapshotEvidenceRecord.authority_kind == "price",
             )
         )
@@ -2455,10 +2392,7 @@ async def test_retained_price_binding_drift_abstains_without_emitting_positive_i
 
         async def tamper() -> None:
             await session.execute(
-                text(
-                    "ALTER TABLE agent_data_snapshot_evidence "
-                    "DISABLE TRIGGER USER"
-                )
+                text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER")
             )
             try:
                 await session.execute(
@@ -2503,10 +2437,7 @@ async def test_retained_price_binding_drift_abstains_without_emitting_positive_i
                 assert held_binding.selected_at is not None
             finally:
                 await session.execute(
-                    text(
-                        "ALTER TABLE agent_data_snapshot_evidence "
-                        "ENABLE TRIGGER USER"
-                    )
+                    text("ALTER TABLE agent_data_snapshot_evidence ENABLE TRIGGER USER")
                 )
 
         committee = _SingleTamperingCommittee(tamper)
@@ -2529,9 +2460,7 @@ async def test_retained_run_identity_drift_abstains_without_emitting_positive_in
     migrated_database_url: str,
 ) -> None:
     """A retained stale run must not redefine the current persisted execution scope."""
-    factory, admission = await _prepared_production_price_admission(
-        migrated_database_url
-    )
+    factory, admission = await _prepared_production_price_admission(migrated_database_url)
     async with factory() as session, session.begin():
         session.add(
             Instrument(
@@ -2550,9 +2479,7 @@ async def test_retained_run_identity_drift_abstains_without_emitting_positive_in
         assert held_run.instrument_id == _INSTRUMENT_ID
 
         async def tamper() -> None:
-            await session.execute(
-                text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER")
-            )
+            await session.execute(text("ALTER TABLE agent_research_runs DISABLE TRIGGER USER"))
             try:
                 await session.execute(
                     text(
@@ -2567,10 +2494,7 @@ async def test_retained_run_identity_drift_abstains_without_emitting_positive_in
                 raw_run = (
                     (
                         await session.execute(
-                            text(
-                                "SELECT instrument_id FROM agent_research_runs "
-                                "WHERE id=:run_id"
-                            ),
+                            text("SELECT instrument_id FROM agent_research_runs WHERE id=:run_id"),
                             {"run_id": held_run.id},
                         )
                     )
@@ -2580,9 +2504,7 @@ async def test_retained_run_identity_drift_abstains_without_emitting_positive_in
                 assert raw_run["instrument_id"] == _DRIFT_INSTRUMENT_ID
                 assert held_run.instrument_id == _INSTRUMENT_ID
             finally:
-                await session.execute(
-                    text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER")
-                )
+                await session.execute(text("ALTER TABLE agent_research_runs ENABLE TRIGGER USER"))
 
         committee = _SingleTamperingCommittee(tamper)
         result = await execute_research_run(
@@ -2597,11 +2519,7 @@ async def test_retained_run_identity_drift_abstains_without_emitting_positive_in
         positive_summary = (
             result.intent.stance,
             result.intent.exposure_action,
-            next(
-                vote.vote
-                for vote in result.intent.role_votes
-                if vote.role == "market_state"
-            ),
+            next(vote.vote for vote in result.intent.role_votes if vote.role == "market_state"),
         )
     assert committee.tampered is True
     assert result.status == "abstained", (
@@ -2617,16 +2535,12 @@ async def test_retained_price_binding_copied_field_drift_abstains_without_intent
     migrated_database_url: str,
 ) -> None:
     """Refreshing the retained binding must expose drift in copied evidence fields."""
-    factory, admission = await _prepared_production_price_admission(
-        migrated_database_url
-    )
+    factory, admission = await _prepared_production_price_admission(migrated_database_url)
     async with factory() as session, session.begin():
         held_binding = await session.scalar(
             select(AgentDataSnapshotEvidenceRecord).where(
-                AgentDataSnapshotEvidenceRecord.data_snapshot_id
-                == admission.run.data_snapshot_id,
-                AgentDataSnapshotEvidenceRecord.instrument_id
-                == admission.run.instrument_id,
+                AgentDataSnapshotEvidenceRecord.data_snapshot_id == admission.run.data_snapshot_id,
+                AgentDataSnapshotEvidenceRecord.instrument_id == admission.run.instrument_id,
                 AgentDataSnapshotEvidenceRecord.authority_kind == "price",
             )
         )
@@ -2637,10 +2551,7 @@ async def test_retained_price_binding_copied_field_drift_abstains_without_intent
 
         async def tamper() -> None:
             await session.execute(
-                text(
-                    "ALTER TABLE agent_data_snapshot_evidence "
-                    "DISABLE TRIGGER USER"
-                )
+                text("ALTER TABLE agent_data_snapshot_evidence DISABLE TRIGGER USER")
             )
             try:
                 await session.execute(
@@ -2677,10 +2588,7 @@ async def test_retained_price_binding_copied_field_drift_abstains_without_intent
                 assert held_binding.selected_at is not None
             finally:
                 await session.execute(
-                    text(
-                        "ALTER TABLE agent_data_snapshot_evidence "
-                        "ENABLE TRIGGER USER"
-                    )
+                    text("ALTER TABLE agent_data_snapshot_evidence ENABLE TRIGGER USER")
                 )
 
         committee = _SingleTamperingCommittee(tamper)
@@ -2703,9 +2611,7 @@ async def test_retained_snapshot_drift_abstains_without_emitting_positive_intent
     migrated_database_url: str,
 ) -> None:
     """Refreshing the retained snapshot must expose invalid selection-time drift."""
-    factory, admission = await _prepared_production_price_admission(
-        migrated_database_url
-    )
+    factory, admission = await _prepared_production_price_admission(migrated_database_url)
     async with factory() as session, session.begin():
         held_snapshot = await session.get(DataSnapshot, admission.run.data_snapshot_id)
         assert held_snapshot is not None
@@ -2717,8 +2623,7 @@ async def test_retained_snapshot_drift_abstains_without_emitting_positive_intent
             try:
                 await session.execute(
                     text(
-                        "UPDATE data_snapshots SET available_at=:available_at "
-                        "WHERE id=:snapshot_id"
+                        "UPDATE data_snapshots SET available_at=:available_at WHERE id=:snapshot_id"
                     ),
                     {
                         "available_at": drifted_available_at,
@@ -2732,9 +2637,7 @@ async def test_retained_snapshot_drift_abstains_without_emitting_positive_intent
                 assert raw_available_at == drifted_available_at
                 assert held_snapshot.available_at == original_available_at
             finally:
-                await session.execute(
-                    text("ALTER TABLE data_snapshots ENABLE TRIGGER USER")
-                )
+                await session.execute(text("ALTER TABLE data_snapshots ENABLE TRIGGER USER"))
 
         committee = _SingleTamperingCommittee(tamper)
         result = await execute_research_run(
@@ -2758,9 +2661,7 @@ async def test_current_snapshot_pit_drift_abstains_without_emitting_positive_int
     timestamp_column: str,
 ) -> None:
     """A current snapshot later than decision time must invalidate final execution."""
-    factory, admission = await _prepared_production_price_admission(
-        migrated_database_url
-    )
+    factory, admission = await _prepared_production_price_admission(migrated_database_url)
     async with factory() as session, session.begin():
         held_snapshot = await session.get(DataSnapshot, admission.run.data_snapshot_id)
         assert held_snapshot is not None
@@ -2771,8 +2672,7 @@ async def test_current_snapshot_pit_drift_abstains_without_emitting_positive_int
         async def tamper() -> None:
             await session.execute(
                 text(
-                    f"UPDATE data_snapshots SET {timestamp_column}=:timestamp "
-                    "WHERE id=:snapshot_id"
+                    f"UPDATE data_snapshots SET {timestamp_column}=:timestamp WHERE id=:snapshot_id"
                 ),
                 {
                     "timestamp": drifted_timestamp,
@@ -2780,10 +2680,7 @@ async def test_current_snapshot_pit_drift_abstains_without_emitting_positive_int
                 },
             )
             raw_timestamp = await session.scalar(
-                text(
-                    f"SELECT {timestamp_column} FROM data_snapshots "
-                    "WHERE id=:snapshot_id"
-                ),
+                text(f"SELECT {timestamp_column} FROM data_snapshots WHERE id=:snapshot_id"),
                 {"snapshot_id": held_snapshot.id},
             )
             assert raw_timestamp == drifted_timestamp
@@ -2802,11 +2699,7 @@ async def test_current_snapshot_pit_drift_abstains_without_emitting_positive_int
         positive_summary = (
             result.intent.stance,
             result.intent.exposure_action,
-            next(
-                vote.vote
-                for vote in result.intent.role_votes
-                if vote.role == "market_state"
-            ),
+            next(vote.vote for vote in result.intent.role_votes if vote.role == "market_state"),
             result.intent.quality_status,
         )
     assert committee.tampered is True
@@ -2874,9 +2767,7 @@ async def test_price_owner_trigger_rejects_a_future_bar(
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     await _seed_authority(factory)
-    await _seed_database_tool_authority(
-        factory, link_price=False, future_last_bar=True
-    )
+    await _seed_database_tool_authority(factory, link_price=False, future_last_bar=True)
     async with factory() as session:
         price_authority = await session.scalar(select(PriceBarSetAuthority))
         assert price_authority is not None
@@ -2902,14 +2793,12 @@ async def test_price_owner_trigger_rejects_a_future_bar(
 
 
 @pytest.mark.asyncio
-async def test_nonfixture_price_features_use_only_frozen_postgres_without_transport(
+async def test_nonfixture_raw_fosun_prices_expose_close_but_reject_return_features(
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     prompt_ids = await _seed_authority(factory, include_base_evidence=False)
-    await _seed_database_tool_authority(
-        factory, link_price=False, price_source="fosun"
-    )
+    await _seed_database_tool_authority(factory, link_price=False, price_source="fosun")
     async with factory() as session, session.begin():
         admission = await admit_research_run(
             session,
@@ -2927,24 +2816,39 @@ async def test_nonfixture_price_features_use_only_frozen_postgres_without_transp
             daily_limit_usd=Decimal("3.00"),
             now=_NOW,
         )
-        tools = await database_read_only_tools(
-            session, admission.run, allow_fixture_evidence=False
-        )
-        result = await tools.execute(
+        tools = await database_read_only_tools(session, admission.run, allow_fixture_evidence=False)
+        close = await tools.execute(
             "get_price_features",
             {
                 "instrument_id": str(_INSTRUMENT_ID),
                 "data_snapshot_id": str(_SNAPSHOT_ID),
                 "as_of": _NOW,
-                "features": ["close", "sma_20"],
+                "features": ["close"],
             },
         )
-    assert result["status"] == "ok"
-    assert result["items"][0]["source"] == "fosun"
-    assert result["items"][0]["features"] == {
-        "close": "100.000000000000",
-        "sma_20": "100.000000000000",
-    }
+        derived = await tools.execute(
+            "get_price_features",
+            {
+                "instrument_id": str(_INSTRUMENT_ID),
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "as_of": _NOW,
+                "features": ["close", "sma_20", "rsi_14", "volatility_20"],
+            },
+        )
+    assert close["status"] == "ok"
+    assert close["items"][0]["source"] == "fosun"
+    assert close["items"][0]["features"] == {"close": "100.000000000000"}
+    assert (
+        derived["tool"],
+        derived["status"],
+        derived["reason"],
+        derived["items"],
+    ) == (
+        "get_price_features",
+        "unavailable",
+        "adjusted_price_authority_unavailable",
+        [],
+    )
 
 
 @pytest.mark.asyncio
@@ -2977,9 +2881,7 @@ async def test_frozen_price_series_rejects_late_bar_growth(
         async with factory() as session, session.begin():
             session.add(
                 PriceBarRecord(
-                    price_series_manifest_id=UUID(
-                        "0198d500-1000-7000-8000-000000001707"
-                    ),
+                    price_series_manifest_id=UUID("0198d500-1000-7000-8000-000000001707"),
                     instrument_id=_INSTRUMENT_ID,
                     session=observed_at.date(),
                     open=Decimal("100"),
@@ -3000,10 +2902,8 @@ async def test_frozen_price_series_rejects_late_bar_growth(
         "WHERE id = '0198d500-1000-7000-8000-000000001707'",
         "UPDATE data_artifacts SET byte_size = byte_size + 1 "
         "WHERE id = '0198d500-1000-7000-8000-000000001706'",
-        "DELETE FROM price_series_manifests "
-        "WHERE id = '0198d500-1000-7000-8000-000000001707'",
-        "DELETE FROM data_artifacts "
-        "WHERE id = '0198d500-1000-7000-8000-000000001706'",
+        "DELETE FROM price_series_manifests WHERE id = '0198d500-1000-7000-8000-000000001707'",
+        "DELETE FROM data_artifacts WHERE id = '0198d500-1000-7000-8000-000000001706'",
     )
     for statement in authority_mutations:
         with pytest.raises(DBAPIError, match="frozen price authority is immutable"):
@@ -3310,45 +3210,45 @@ async def _seed_authority(
     }
     async with factory() as session, session.begin():
         records: list[object] = [
-                Instrument(
-                    id=_INSTRUMENT_ID,
-                    asset_type="equity",
-                    exchange="NASDAQ",
-                    currency="USD",
-                    tick_size=Decimal("0.01"),
-                    risk_bucket="equity",
-                ),
-                InstrumentAlias(
-                    instrument_id=_INSTRUMENT_ID,
-                    symbol=symbol,
-                    alias_type="ticker",
-                    valid_from=date(2020, 1, 1),
-                    valid_to=None,
-                ),
-                DataSnapshot(
-                    id=_SNAPSHOT_ID,
-                    source="fixture",
-                    provider_object_id="execution-snapshot",
-                    revision="v1",
-                    observed_at=_NOW,
-                    available_at=_NOW,
-                    received_at=_NOW,
-                    schema_version="1",
-                    payload={},
-                ),
-                AgentModelConfigRecord(
-                    id=_MODEL_ID,
-                    model_id="fixture-model",
-                    version="fixture-pricing-v1",
-                    config_hash="2" * 64,
-                    max_input_tokens=1_000_000,
-                    max_tool_calls=8,
-                    max_output_tokens=10_000,
-                    input_usd_per_million=Decimal("1.00"),
-                    output_usd_per_million=Decimal("2.00"),
-                    pricing_available_at=_NOW - timedelta(days=1),
-                    pricing_expires_at=_NOW + timedelta(days=30),
-                ),
+            Instrument(
+                id=_INSTRUMENT_ID,
+                asset_type="equity",
+                exchange="NASDAQ",
+                currency="USD",
+                tick_size=Decimal("0.01"),
+                risk_bucket="equity",
+            ),
+            InstrumentAlias(
+                instrument_id=_INSTRUMENT_ID,
+                symbol=symbol,
+                alias_type="ticker",
+                valid_from=date(2020, 1, 1),
+                valid_to=None,
+            ),
+            DataSnapshot(
+                id=_SNAPSHOT_ID,
+                source="fixture",
+                provider_object_id="execution-snapshot",
+                revision="v1",
+                observed_at=_NOW,
+                available_at=_NOW,
+                received_at=_NOW,
+                schema_version="1",
+                payload={},
+            ),
+            AgentModelConfigRecord(
+                id=_MODEL_ID,
+                model_id="fixture-model",
+                version="fixture-pricing-v1",
+                config_hash="2" * 64,
+                max_input_tokens=1_000_000,
+                max_tool_calls=8,
+                max_output_tokens=10_000,
+                input_usd_per_million=Decimal("1.00"),
+                output_usd_per_million=Decimal("2.00"),
+                pricing_available_at=_NOW - timedelta(days=1),
+                pricing_expires_at=_NOW + timedelta(days=30),
+            ),
         ]
         if include_base_evidence:
             records.append(
@@ -3490,9 +3390,7 @@ async def _seed_database_tool_authority(
             ResearchEvidenceRef(
                 id=price_evidence_id,
                 source=price_source,
-                provider_object_id=(
-                    "price-series-manifest:0198d500-1000-7000-8000-000000001707"
-                ),
+                provider_object_id=("price-series-manifest:0198d500-1000-7000-8000-000000001707"),
                 revision="e" * 64,
                 available_at=_NOW - timedelta(minutes=1),
                 location=f"memory://sha256/{'e' * 64}",
@@ -3631,14 +3529,10 @@ async def _seed_database_tool_authority(
             start_at=_NOW - timedelta(days=bar_count),
             end_at=bar_time(bar_count - 1),
             row_count=bar_count,
-            provider_capability_id=(
-                fosun_capability_id if price_source == "fosun" else None
-            ),
+            provider_capability_id=(fosun_capability_id if price_source == "fosun" else None),
             provider_status_id=fosun_status_id if price_source == "fosun" else None,
             provider_status_version=1 if price_source == "fosun" else None,
-            provider_contract_hash=(
-                fosun_contract_hash if price_source == "fosun" else None
-            ),
+            provider_contract_hash=(fosun_contract_hash if price_source == "fosun" else None),
             provider_authorized_at=(
                 _NOW - timedelta(seconds=30) if price_source == "fosun" else None
             ),
@@ -3646,9 +3540,7 @@ async def _seed_database_tool_authority(
                 fosun_lineage.raw_artifact.id if fosun_lineage is not None else None
             ),
             daily_calendar_authority_id=(
-                fosun_lineage.calendar_authority_id
-                if fosun_lineage is not None
-                else None
+                fosun_lineage.calendar_authority_id if fosun_lineage is not None else None
             ),
             gateway_request_start_at=(
                 fosun_lineage.request_start_at if fosun_lineage is not None else None
@@ -3661,9 +3553,7 @@ async def _seed_database_tool_authority(
         await session.flush()
         session.add_all(
             PriceBarRecord(
-                price_series_manifest_id=UUID(
-                    "0198d500-1000-7000-8000-000000001707"
-                ),
+                price_series_manifest_id=UUID("0198d500-1000-7000-8000-000000001707"),
                 instrument_id=_INSTRUMENT_ID,
                 session=bar_time(index).date(),
                 open=Decimal("100"),
@@ -3674,11 +3564,7 @@ async def _seed_database_tool_authority(
                 observed_at=bar_time(index),
                 available_at=bar_time(index) + timedelta(minutes=1),
                 received_at=bar_time(index) + timedelta(minutes=2),
-                revision=(
-                    fosun_lineage.raw_digest
-                    if fosun_lineage is not None
-                    else "fixture-r1"
-                ),
+                revision=(fosun_lineage.raw_digest if fosun_lineage is not None else "fixture-r1"),
                 quality_flags=list(price_quality_flags),
             )
             for index in range(bar_count)

@@ -38,7 +38,7 @@ INTRADAY_SOURCE_POLICY_PAYLOAD = {
 
 def test_0026_is_single_head_over_0025_and_metadata_matches() -> None:
     scripts = ScriptDirectory.from_config(Config("engine/alembic.ini"))
-    assert scripts.get_heads() == ["0029_fosun_bar_lineage"]
+    assert scripts.get_heads() == ["0032_ticker_alias_authority"]
     revision = scripts.get_revision("0026_intraday_review_hardening")
     assert revision is not None
     assert revision.down_revision == "0025_intraday_market_monitor"
@@ -73,7 +73,7 @@ def test_0026_upgrade_accepts_legacy_delayed_sip_snapshot(
     command.upgrade(config, "0024_broker_simulation")
     legacy = asyncio.run(_seed_legacy_quotes(temporary_database_url))
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "0026_intraday_review_hardening")
 
     snapshot = asyncio.run(_schema_snapshot(temporary_database_url))
     assert [row["id"] for row in snapshot["quotes"]] == legacy
@@ -90,7 +90,10 @@ def test_0026_moves_legacy_provider_jobs_without_stranding_retries(
     command.upgrade(config, "0025_intraday_market_monitor")
     asyncio.run(_seed_legacy_provider_job(temporary_database_url))
 
-    command.upgrade(config, "head")
+    # This is a 0026 round-trip contract. Later revisions intentionally fence
+    # actionable Provider jobs against downgrade, so crossing those revisions
+    # would test their fail-closed policy instead of the 0026 queue migration.
+    command.upgrade(config, "0026_intraday_review_hardening")
     assert asyncio.run(_job_queue(temporary_database_url)) == "provider"
 
     command.downgrade(config, "0025_intraday_market_monitor")
@@ -111,7 +114,7 @@ def test_0026_preserves_terminal_legacy_job_execution_queue(
         )
     )
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "0026_intraday_review_hardening")
     assert asyncio.run(_job_queue(temporary_database_url)) == "general"
 
     command.downgrade(config, "0025_intraday_market_monitor")
@@ -344,14 +347,18 @@ async def _schema_snapshot(database_url: str) -> dict[str, object]:
                 ).scalars()
             )
             policy_row = (
-                await connection.execute(
-                    text(
-                        "SELECT id,key,version,schema_version,payload FROM source_policies "
-                        "WHERE id=:id"
-                    ),
-                    {"id": INTRADAY_SOURCE_POLICY_ID},
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT id,key,version,schema_version,payload FROM source_policies "
+                            "WHERE id=:id"
+                        ),
+                        {"id": INTRADAY_SOURCE_POLICY_ID},
+                    )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
             quote_columns = schema["quote_columns"]
             optional = (
                 ",event_kind,content_hash,evidence_status,data_artifact_id"
@@ -359,10 +366,14 @@ async def _schema_snapshot(database_url: str) -> dict[str, object]:
                 else ""
             )
             quotes = (
-                await connection.execute(
-                    text(f"SELECT id{optional} FROM latest_quotes ORDER BY source DESC")
+                (
+                    await connection.execute(
+                        text(f"SELECT id{optional} FROM latest_quotes ORDER BY source DESC")
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             return {
                 **schema,
                 "triggers": triggers,
@@ -506,9 +517,7 @@ async def _seed_legacy_provider_job(
                     "status": status,
                     "started_at": None if status == "queued" else now,
                     "finished_at": (
-                        now
-                        if status in {"succeeded", "failed", "skipped", "dead_letter"}
-                        else None
+                        now if status in {"succeeded", "failed", "skipped", "dead_letter"} else None
                     ),
                     "result_code": "LEGACY_SUCCEEDED" if status == "succeeded" else None,
                 },
@@ -553,10 +562,7 @@ async def _mutate_alpaca_artifact(database_url: str) -> None:
     try:
         async with engine.begin() as connection:
             await connection.execute(
-                text(
-                    "UPDATE data_artifacts SET uri='memory://tampered' "
-                    "WHERE source='alpaca'"
-                )
+                text("UPDATE data_artifacts SET uri='memory://tampered' WHERE source='alpaca'")
             )
     finally:
         await engine.dispose()

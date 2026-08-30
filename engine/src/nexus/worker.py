@@ -34,7 +34,10 @@ from nexus.jobs.daily_local import (
     LOCAL_SAFE_DAILY_PROFILE,
     build_local_daily_pipeline_registry,
 )
-from nexus.jobs.daily_pipeline import schedule_due_daily_pipeline
+from nexus.jobs.daily_pipeline import (
+    assert_daily_pipeline_schema_ready,
+    schedule_due_daily_pipeline,
+)
 from nexus.jobs.models import JobType, QueueName, RetryPolicy
 from nexus.jobs.registry import (
     JobHandlerContext,
@@ -137,6 +140,7 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
             migration_head=_MIGRATION_HEAD,
             clock=lambda: datetime.now(UTC),
             claim_registered_only=True,
+            preclaim_guard=assert_daily_pipeline_schema_ready,
         )
         if not worked:
             await asyncio.sleep(0.5)
@@ -274,9 +278,7 @@ async def _committee(
         session,
         run,
         allow_fixture_evidence=allow_fixture_evidence,
-        allow_fixture_price_evidence=(
-            settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE
-        ),
+        allow_fixture_price_evidence=(settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE),
     )
     return ResponsesCommittee(
         client=cast(ResponsesClient, client),

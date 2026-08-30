@@ -57,6 +57,15 @@ export function marketDeliveryModeLabel(mode: string | null): string {
   return "实时性未获证明";
 }
 
+export function marketAdjustmentLabel(adjustment: string | null): string {
+  if (adjustment === "raw") return "未复权（raw）";
+  if (adjustment === "all") return "全复权（all）";
+  if (adjustment === "split") return "拆股复权（split）";
+  if (adjustment === "dividend") return "分红复权（dividend）";
+  if (adjustment === null) return "未选定";
+  return `未知口径（${adjustment}）`;
+}
+
 export function qualityReasonLabel(reason: string): string {
   return QUALITY_REASON_LABELS[reason] ?? "存在未分类的数据质量问题";
 }

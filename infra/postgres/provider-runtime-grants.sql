@@ -20,7 +20,8 @@ DO $$ BEGIN
     SELECT 1 FROM pg_policies AS policy
     WHERE policy.schemaname = 'public'
       AND policy.tablename IN (
-        'jobs','job_leases','job_attempts','job_dependencies','worker_heartbeats'
+        'jobs','job_leases','job_attempts','job_dependencies','worker_heartbeats',
+        'fosun_daily_bar_staging'
       )
       AND (policy.tablename, policy.policyname) NOT IN (
         ('jobs', 'nexus_provider_jobs_scope'),
@@ -32,7 +33,9 @@ DO $$ BEGIN
         ('job_dependencies', 'nexus_provider_job_dependencies_scope'),
         ('job_dependencies', 'nexus_non_provider_job_dependencies_bypass'),
         ('worker_heartbeats', 'nexus_provider_worker_heartbeats_scope'),
-        ('worker_heartbeats', 'nexus_non_provider_worker_heartbeats_bypass')
+        ('worker_heartbeats', 'nexus_non_provider_worker_heartbeats_bypass'),
+        ('fosun_daily_bar_staging', 'nexus_provider_fosun_daily_bar_staging_scope'),
+        ('fosun_daily_bar_staging', 'nexus_non_provider_fosun_daily_bar_staging_bypass')
       )
   ) THEN
     RAISE EXCEPTION 'unexpected shared-runtime RLS policy requires manual review';
@@ -302,6 +305,7 @@ SELECT format(
   :'provider_role'
 )
 FROM (VALUES
+  ('alembic_version'),
   ('jobs'), ('job_leases'), ('job_attempts'), ('job_dependencies'),
   ('worker_heartbeats'), ('integration_status'), ('provider_capabilities'),
   ('source_policies'), ('instruments'), ('instrument_aliases'),
@@ -311,7 +315,8 @@ FROM (VALUES
   ('research_evidence_refs'), ('price_series_manifests'),
   ('price_bar_records'), ('price_bar_set_authorities'),
   ('intraday_bar_set_authorities'), ('latest_quotes'), ('filings'),
-  ('financial_facts'), ('corporate_actions'), ('macro_observations')
+  ('financial_facts'), ('corporate_actions'), ('macro_observations'),
+  ('fosun_daily_bar_staging')
 ) AS allowed(table_name)
 \gexec
 
@@ -325,7 +330,8 @@ FROM (VALUES
   ('data_artifacts'), ('research_evidence_refs'), ('price_series_manifests'),
   ('price_bar_records'), ('price_bar_set_authorities'),
   ('intraday_bar_set_authorities'), ('latest_quotes'), ('filings'),
-  ('financial_facts'), ('corporate_actions'), ('macro_observations')
+  ('financial_facts'), ('corporate_actions'), ('macro_observations'),
+  ('fosun_daily_bar_staging')
 ) AS allowed(table_name)
 \gexec
 
@@ -417,7 +423,8 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE SECURITY INVOKER
 SET search_path = pg_catalog, public, pg_temp
 AS $$
   SELECT (p_queue = 'provider' AND p_job_type IN
-    ('collect.market','collect.sec_macro','collect.intraday_snapshot'))
+    ('collect.market','collect.sec_macro','collect.intraday_snapshot',
+     'collect.fosun_daily_instrument','publish.fosun_daily'))
     OR (p_queue = 'general' AND p_job_type = 'daily.pipeline')
 $$;
 CREATE OR REPLACE FUNCTION public.nexus_provider_job_writable(
@@ -427,7 +434,8 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE SECURITY INVOKER
 SET search_path = pg_catalog, public, pg_temp
 AS $$
   SELECT p_queue = 'provider' AND p_job_type IN
-    ('collect.market','collect.sec_macro','collect.intraday_snapshot')
+    ('collect.market','collect.sec_macro','collect.intraday_snapshot',
+     'collect.fosun_daily_instrument','publish.fosun_daily')
 $$;
 CREATE OR REPLACE FUNCTION public.nexus_provider_job_owned(
   p_job_id uuid
@@ -540,18 +548,20 @@ ALTER TABLE public.job_dependencies ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.job_dependencies FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.worker_heartbeats ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.worker_heartbeats FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.fosun_daily_bar_staging ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.fosun_daily_bar_staging FORCE ROW LEVEL SECURITY;
 
 SELECT format(
   'DROP POLICY IF EXISTS nexus_provider_%1$I_scope ON public.%1$I', table_name
 )
 FROM (VALUES ('jobs'), ('job_leases'), ('job_attempts'), ('job_dependencies'),
-             ('worker_heartbeats')) AS scoped(table_name)
+             ('worker_heartbeats'), ('fosun_daily_bar_staging')) AS scoped(table_name)
 \gexec
 SELECT format(
   'DROP POLICY IF EXISTS nexus_non_provider_%1$I_bypass ON public.%1$I', table_name
 )
 FROM (VALUES ('jobs'), ('job_leases'), ('job_attempts'), ('job_dependencies'),
-             ('worker_heartbeats')) AS scoped(table_name)
+             ('worker_heartbeats'), ('fosun_daily_bar_staging')) AS scoped(table_name)
 \gexec
 
 SELECT format(
@@ -584,6 +594,23 @@ SELECT format(
   table_name, :'provider_role'
 )
 FROM (VALUES ('job_leases'), ('job_attempts'), ('job_dependencies')) AS scoped(table_name)
+\gexec
+
+SELECT format(
+  'CREATE POLICY nexus_non_provider_fosun_daily_bar_staging_bypass '
+  'ON public.fosun_daily_bar_staging TO PUBLIC '
+  'USING (NOT pg_catalog.pg_has_role(current_user, %L, ''MEMBER'')) '
+  'WITH CHECK (NOT pg_catalog.pg_has_role(current_user, %L, ''MEMBER''))',
+  :'provider_role', :'provider_role'
+)
+\gexec
+SELECT format(
+  'CREATE POLICY nexus_provider_fosun_daily_bar_staging_scope '
+  'ON public.fosun_daily_bar_staging TO %I '
+  'USING (public.nexus_provider_job_owned(fetch_job_id)) '
+  'WITH CHECK (public.nexus_provider_job_owned(fetch_job_id))',
+  :'provider_role'
+)
 \gexec
 
 SELECT format(

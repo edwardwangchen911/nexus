@@ -2,22 +2,30 @@
 
 from datetime import UTC, date, datetime
 from hashlib import sha256
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
-from helpers.price_bar_authority import seed_fosun_price_candidate
+from helpers.price_bar_authority import INSTRUMENT_ID, seed_fosun_price_candidate
+from nexus.jobs.daily_payloads import instrument_alias_identity_sha256
+from nexus.jobs.provider_collection import _require_frozen_instrument_alias
 from nexus.market.price_bar_authority import (
     HASH_VERSION_V2,
     POLICY_VERSION_V2,
     SOURCE_POLICY_V2_ID,
     prepare_price_bar_set,
 )
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.data import PriceSeriesManifest
+from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.session import session_factory
 from nexus.provider_worker import (
     _PROVIDER_PRIVILEGES,
     _assert_provider_database_role,
+    _assert_provider_intraday_bucket_index,
+    _assert_provider_migration_head,
+    _assert_provider_ticker_alias_constraints,
     _load_provider_trigger_rows,
     _provider_trigger_topology_violation,
 )
@@ -64,30 +72,20 @@ async def test_provider_role_probe_rejects_login_or_database_create_drift(
     provider_engine = create_async_engine(provider_url)
     try:
         async with admin_engine.begin() as connection:
-            await connection.execute(
-                text(f"CREATE ROLE {quoted_role} LOGIN PASSWORD '{password}'")
-            )
-            await connection.execute(
-                text(f"GRANT USAGE ON SCHEMA public TO {quoted_role}")
-            )
+            await connection.execute(text(f"CREATE ROLE {quoted_role} LOGIN PASSWORD '{password}'"))
+            await connection.execute(text(f"GRANT USAGE ON SCHEMA public TO {quoted_role}"))
 
         async with provider_engine.connect() as provider_connection:
             await provider_connection.execute(text("SELECT 1"))
             async with admin_engine.begin() as admin_connection:
                 if role_mutation == "NOLOGIN":
-                    await admin_connection.execute(
-                        text(f"ALTER ROLE {quoted_role} NOLOGIN")
-                    )
+                    await admin_connection.execute(text(f"ALTER ROLE {quoted_role} NOLOGIN"))
                 else:
-                    database_name = await admin_connection.scalar(
-                        text("SELECT current_database()")
-                    )
+                    database_name = await admin_connection.scalar(text("SELECT current_database()"))
                     assert isinstance(database_name, str)
                     quoted_database = '"' + database_name.replace('"', '""') + '"'
                     await admin_connection.execute(
-                        text(
-                            f"GRANT CREATE ON DATABASE {quoted_database} TO {quoted_role}"
-                        )
+                        text(f"GRANT CREATE ON DATABASE {quoted_database} TO {quoted_role}")
                     )
 
             async with AsyncSession(bind=provider_connection) as session:
@@ -115,6 +113,203 @@ async def test_fresh_migration_matches_frozen_provider_trigger_topology(
     for row in rows:
         row["provider_is_owner_member"] = False
     assert _provider_trigger_topology_violation(rows) is None
+
+
+@pytest.mark.asyncio
+async def test_provider_probe_accepts_exact_ticker_alias_exclusion_constraints(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+
+    async with factory() as session:
+        await _assert_provider_ticker_alias_constraints(session)
+
+
+@pytest.mark.asyncio
+async def test_provider_probe_rejects_a_dropped_ticker_alias_exclusion_constraint(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        await session.execute(
+            text(
+                "ALTER TABLE instrument_aliases DROP CONSTRAINT "
+                "ex_instrument_aliases_ticker_symbol_period"
+            )
+        )
+
+    async with factory() as session:
+        with pytest.raises(
+            RuntimeError,
+            match="PROVIDER_DATABASE_TICKER_ALIAS_CONSTRAINT_INVALID",
+        ):
+            await _assert_provider_ticker_alias_constraints(session)
+
+
+@pytest.mark.asyncio
+async def test_provider_probe_accepts_exact_intraday_bucket_index(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+
+    async with factory() as session:
+        await _assert_provider_intraday_bucket_index(session)
+
+
+@pytest.mark.asyncio
+async def test_provider_probe_rejects_a_dropped_intraday_bucket_index(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        await session.execute(text("DROP INDEX public.uq_jobs_intraday_v2_bucket"))
+
+    async with factory() as session:
+        with pytest.raises(
+            RuntimeError,
+            match="PROVIDER_DATABASE_INTRADAY_BUCKET_INDEX_INVALID",
+        ):
+            await _assert_provider_intraday_bucket_index(session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    ("disable_status_lock", "rename_capability_lock", "drift_append_only_source"),
+)
+async def test_provider_trigger_probe_rejects_authority_input_trigger_drift(
+    migrated_database_url: str,
+    mutation: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    statements = {
+        "disable_status_lock": (
+            "ALTER TABLE integration_status DISABLE TRIGGER "
+            "trg_00_integration_status_fosun_authority_lock"
+        ),
+        "rename_capability_lock": (
+            "ALTER TRIGGER trg_provider_capabilities_scope_lock "
+            "ON provider_capabilities RENAME TO trg_unreviewed_capability_scope_lock"
+        ),
+        "drift_append_only_source": (
+            "CREATE OR REPLACE FUNCTION nexus_prevent_provider_capability_change() "
+            "RETURNS trigger LANGUAGE plpgsql "
+            "SET search_path TO pg_catalog, public, pg_temp AS $$ "
+            "BEGIN RETURN OLD; END; $$"
+        ),
+    }
+    async with factory() as session, session.begin():
+        await session.execute(text(statements[mutation]))
+    async with factory() as session:
+        rows = await _load_provider_trigger_rows(session)
+
+    for row in rows:
+        row["provider_is_owner_member"] = False
+    assert (
+        _provider_trigger_topology_violation(rows) == "PROVIDER_DATABASE_TRIGGER_TOPOLOGY_INVALID"
+    )
+
+
+@pytest.mark.asyncio
+async def test_restricted_provider_role_can_only_select_alembic_head(
+    migrated_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_database_url)
+    role_name = f"nexus_provider_head_{uuid4().hex}"
+    quoted_role = f'"{role_name}"'
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text(f"CREATE ROLE {quoted_role} NOLOGIN"))
+            await connection.execute(text(f"GRANT USAGE ON SCHEMA public TO {quoted_role}"))
+            await connection.execute(
+                text(f"GRANT SELECT ON TABLE public.alembic_version TO {quoted_role}")
+            )
+
+        async with engine.begin() as connection:
+            await connection.execute(text(f"SET LOCAL ROLE {quoted_role}"))
+            await _assert_provider_migration_head(connection)  # type: ignore[arg-type]
+            assert (
+                await connection.scalar(text("SELECT version_num FROM public.alembic_version"))
+                == CURRENT_MIGRATION_HEAD
+            )
+            for statement in (
+                "INSERT INTO public.alembic_version(version_num) VALUES ('forbidden')",
+                "UPDATE public.alembic_version SET version_num=version_num",
+                "DELETE FROM public.alembic_version",
+            ):
+                with pytest.raises(DBAPIError) as denied:
+                    async with connection.begin_nested():
+                        await connection.execute(text(statement))
+                assert denied.value.orig.sqlstate == "42501"
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(text(f"DROP OWNED BY {quoted_role}"))
+            await connection.execute(text(f"DROP ROLE {quoted_role}"))
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_restricted_provider_role_can_revalidate_frozen_daily_alias(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await seed_fosun_price_candidate(factory)
+    alias_id = uuid4()
+    created_at = datetime(2026, 8, 24, 19, tzinfo=UTC)
+    async with factory() as session, session.begin():
+        session.add(
+            InstrumentAlias(
+                id=alias_id,
+                instrument_id=INSTRUMENT_ID,
+                symbol="AAPL",
+                alias_type="ticker",
+                valid_from=date(2020, 1, 1),
+                valid_to=None,
+                created_at=created_at,
+            )
+        )
+
+    identity = instrument_alias_identity_sha256(
+        alias_id=str(alias_id),
+        instrument_id=str(INSTRUMENT_ID),
+        symbol="AAPL",
+        alias_type="ticker",
+        valid_from=date(2020, 1, 1),
+        valid_to=None,
+        created_at=created_at,
+    )
+    engine = create_async_engine(migrated_database_url)
+    role_name = f"nexus_provider_alias_{uuid4().hex}"
+    quoted_role = f'"{role_name}"'
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text(f"CREATE ROLE {quoted_role} NOLOGIN"))
+            await connection.execute(text(f"GRANT USAGE ON SCHEMA public TO {quoted_role}"))
+            await connection.execute(
+                text(f"GRANT SELECT ON public.instrument_aliases TO {quoted_role}")
+            )
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+            try:
+                await connection.execute(text(f"SET LOCAL ROLE {quoted_role}"))
+                async with AsyncSession(bind=connection) as session:
+                    await _require_frozen_instrument_alias(
+                        session,
+                        SimpleNamespace(
+                            session="2026-08-28",
+                            instrument_id=str(INSTRUMENT_ID),
+                            instrument_alias_id=str(alias_id),
+                            instrument_symbol="AAPL",
+                            instrument_alias_identity_sha256=identity,
+                        ),  # type: ignore[arg-type]
+                    )
+            finally:
+                await transaction.rollback()
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(text(f"DROP OWNED BY {quoted_role}"))
+            await connection.execute(text(f"DROP ROLE {quoted_role}"))
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -181,15 +376,12 @@ async def test_restricted_provider_role_publishes_only_trigger_scoped_marks(
     try:
         async with engine.begin() as connection:
             await connection.execute(text(f"CREATE ROLE {quoted_role} NOLOGIN"))
-            await connection.execute(
-                text(f"GRANT USAGE ON SCHEMA public TO {quoted_role}")
-            )
+            await connection.execute(text(f"GRANT USAGE ON SCHEMA public TO {quoted_role}"))
             await connection.execute(
                 text(
                     "GRANT SELECT ON TABLE "
                     + ",".join(
-                        f"public.{table_name}"
-                        for table_name in sorted(_PROVIDER_PRIVILEGES)
+                        f"public.{table_name}" for table_name in sorted(_PROVIDER_PRIVILEGES)
                     )
                     + f" TO {quoted_role}"
                 )
@@ -306,35 +498,43 @@ async def test_restricted_provider_role_publishes_only_trigger_scoped_marks(
 
         async with engine.connect() as connection:
             marks = (
-                await connection.execute(
-                    text(
-                        "SELECT domain,record_id FROM "
-                        "public.backtest_authority_publication_marks "
-                        "WHERE record_id IN (:first,:second,:action) "
-                        "ORDER BY domain,record_id"
-                    ),
-                    {
-                        "first": first["id"],
-                        "second": second["id"],
-                        "action": action_id,
-                    },
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT domain,record_id FROM "
+                            "public.backtest_authority_publication_marks "
+                            "WHERE record_id IN (:first,:second,:action) "
+                            "ORDER BY domain,record_id"
+                        ),
+                        {
+                            "first": first["id"],
+                            "second": second["id"],
+                            "action": action_id,
+                        },
+                    )
                 )
-            ).tuples().all()
+                .tuples()
+                .all()
+            )
             assert set(marks) == {
                 ("price", first["id"]),
                 ("price", second["id"]),
                 ("corporate_action", action_id),
             }
-            assert await connection.scalar(
-                text(
-                    "SELECT count(*) FROM public.price_series_manifests WHERE id=:id"
-                ),
-                {"id": provider_manifest_id},
-            ) == 1
-            assert await connection.scalar(
-                text("SELECT count(*) FROM public.price_bar_records WHERE id=:id"),
-                {"id": provider_bar_id},
-            ) == 1
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM public.price_series_manifests WHERE id=:id"),
+                    {"id": provider_manifest_id},
+                )
+                == 1
+            )
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM public.price_bar_records WHERE id=:id"),
+                    {"id": provider_bar_id},
+                )
+                == 1
+            )
     finally:
         async with engine.begin() as connection:
             await connection.execute(text(f"DROP OWNED BY {quoted_role}"))
@@ -360,9 +560,7 @@ async def _prepare_price_authority(
             provider_object_id=f"price-bar-set:{manifest_id}",
             revision=prepared.content_hash,
             available_at=prepared.available_at,
-            location=(
-                f"db://price-bar-set/{manifest_id}@sha256:{prepared.content_hash}"
-            ),
+            location=(f"db://price-bar-set/{manifest_id}@sha256:{prepared.content_hash}"),
             content_hash=prepared.content_hash,
             byte_length=prepared.byte_length,
         )

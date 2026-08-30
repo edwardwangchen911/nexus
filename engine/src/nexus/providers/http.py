@@ -7,12 +7,26 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from threading import RLock
 from time import monotonic
 from typing import Literal
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+class _DropHttpDependencyRecord(logging.Filter):
+    """Block dependency records whose URL/header formatting is not secret-safe."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        del record
+        return False
+
+
+_HTTP_DEPENDENCY_NAMESPACES = ("httpx", "httpcore")
+_HTTP_DEPENDENCY_FILTER = _DropHttpDependencyRecord()
+_HTTP_DEPENDENCY_LOG_LOCK = RLock()
 
 _HOST = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -77,6 +91,7 @@ class FixedOriginHttpClient:
             raise ValueError("PROVIDER_NAME_INVALID")
         if client.follow_redirects:
             raise ValueError("REDIRECTS_MUST_BE_DISABLED")
+        _enforce_http_dependency_log_boundary()
         self._provider_name = provider_name
         self._origin = origin
         self._policy = policy
@@ -91,6 +106,10 @@ class FixedOriginHttpClient:
         headers: tuple[tuple[str, str], ...],
     ) -> bytes:
         """Return bounded bytes or raise one sanitized policy code."""
+        # Common root/httpx DEBUG configuration must never expose a provider
+        # query credential or signed header. Repeat at the request boundary in
+        # case logging was reconfigured after client construction.
+        _enforce_http_dependency_log_boundary()
         path = _canonical_path(path_segments)
         url = httpx.URL(
             scheme=self._origin.scheme,
@@ -204,6 +223,32 @@ class FixedOriginHttpClient:
             elapsed_bucket,
             result,
         )
+
+
+def _enforce_http_dependency_log_boundary() -> None:
+    """Route httpx/httpcore diagnostics to a closed sink; use sanitized logs above."""
+    with _HTTP_DEPENDENCY_LOG_LOCK:
+        names = set(_HTTP_DEPENDENCY_NAMESPACES)
+        names.update(
+            name
+            for name in logging.Logger.manager.loggerDict
+            if isinstance(name, str)
+            and any(
+                name.startswith(f"{namespace}.")
+                for namespace in _HTTP_DEPENDENCY_NAMESPACES
+            )
+        )
+        for name in names:
+            dependency_logger = logging.getLogger(name)
+            if _HTTP_DEPENDENCY_FILTER not in dependency_logger.filters:
+                dependency_logger.addFilter(_HTTP_DEPENDENCY_FILTER)
+            if name in _HTTP_DEPENDENCY_NAMESPACES:
+                if not any(
+                    isinstance(handler, logging.NullHandler)
+                    for handler in dependency_logger.handlers
+                ):
+                    dependency_logger.addHandler(logging.NullHandler())
+                dependency_logger.propagate = False
 
 
 def _canonical_path(segments: tuple[str, ...]) -> str:

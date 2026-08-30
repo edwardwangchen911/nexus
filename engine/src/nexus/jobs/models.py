@@ -50,6 +50,8 @@ class JobType(StrEnum):
     BROKER_SIMULATION_DISPATCH = "broker.simulation.dispatch"
     BROKER_SIMULATION_RECONCILE = "broker.simulation.reconcile"
     COLLECT_MARKET = "collect.market"
+    COLLECT_FOSUN_DAILY_INSTRUMENT = "collect.fosun_daily_instrument"
+    PUBLISH_FOSUN_DAILY = "publish.fosun_daily"
     COLLECT_SEC_MACRO = "collect.sec_macro"
     COLLECT_INTRADAY_SNAPSHOT = "collect.intraday_snapshot"
     QUALITY_FREEZE = "quality.freeze"
@@ -82,8 +84,10 @@ JOB_PRIORITIES: dict[JobType, int] = {
     JobType.PAPER_ADMIT_ORDERS: 180,
     JobType.DAILY_PIPELINE: 280,
     JobType.COLLECT_MARKET: 280,
+    JobType.COLLECT_FOSUN_DAILY_INSTRUMENT: 280,
+    JobType.PUBLISH_FOSUN_DAILY: 280,
     JobType.COLLECT_SEC_MACRO: 280,
-    JobType.COLLECT_INTRADAY_SNAPSHOT: 160,
+    JobType.COLLECT_INTRADAY_SNAPSHOT: 290,
     JobType.STRATEGY_RND: 20,
 }
 
@@ -99,6 +103,8 @@ BROKER_JOB_TYPES = frozenset(
 PROVIDER_JOB_TYPES = frozenset(
     {
         JobType.COLLECT_MARKET,
+        JobType.COLLECT_FOSUN_DAILY_INSTRUMENT,
+        JobType.PUBLISH_FOSUN_DAILY,
         JobType.COLLECT_SEC_MACRO,
         JobType.COLLECT_INTRADAY_SNAPSHOT,
     }

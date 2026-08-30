@@ -169,6 +169,28 @@ def test_actor_and_request_id_tampering_invalidates_signature(
     assert recording.calls == 0
 
 
+def test_listener_port_binds_hmac_identity_to_market_principal(
+    authorized_client: tuple[TestClient, RecordingTransport],
+) -> None:
+    """A broker HMAC must not authenticate on the Provider certificate listener."""
+    _, recording = authorized_client
+    settings = GatewaySettings.for_test()
+    app = create_gateway_app(settings)
+    app.state.transport = recording
+    app.state.hmac_verifier = GatewayHmacVerifier(settings)
+
+    with TestClient(app, base_url="https://testserver:8082") as market_listener:
+        response = _post_signed(
+            market_listener,
+            "fosun_sync_portfolio",
+            {"account_id": "synthetic-account-001", "read_kind": "cash"},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "UNAUTHENTICATED"
+    assert recording.calls == 0
+
+
 def test_signature_version_is_mandatory(
     authorized_client: tuple[TestClient, RecordingTransport],
 ) -> None:

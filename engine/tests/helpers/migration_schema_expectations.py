@@ -63,6 +63,7 @@ EXPECTED_TABLES = {
     "agent_daily_budget_reservations",
 }
 EXPECTED_TABLES = EXPECTED_TABLES | {"price_bar_set_authorities"}
+EXPECTED_TABLES = EXPECTED_TABLES | {"fosun_daily_bar_staging"}
 EXPECTED_TABLES = EXPECTED_TABLES | {
     "backtest_authority_publication_marks",
     "exchange_calendar_authorities",
@@ -267,9 +268,19 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
     frozenset(EVOLUTION_TABLES),
     frozenset(BROKER_SIMULATION_TABLES),
     frozenset(INTRADAY_MARKET_TABLES),
+    frozenset({"fosun_daily_bar_staging"}),
 )
 
 EXPECTED_FOREIGN_KEYS = {
+    "fosun_daily_bar_staging": {
+        "fk_fosun_daily_staging_root_job",
+        "fk_fosun_daily_staging_instrument",
+        "fk_fosun_daily_staging_calendar",
+        "fk_fosun_daily_staging_universe",
+        "fk_fosun_daily_staging_raw_artifact",
+        "fk_fosun_daily_staging_provider_capability",
+        "fk_fosun_daily_staging_provider_status",
+    },
     "quality_reports": "fk_quality_reports_data_snapshot_id_data_snapshots",
     "price_series_manifests": {
         "fk_price_series_manifests_data_artifact_id_data_artifacts",

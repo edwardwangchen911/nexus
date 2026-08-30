@@ -1,5 +1,6 @@
 """Provider worker capability and queue isolation."""
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,10 @@ from nexus.provider_worker import (
     _PROVIDER_PUBLICATION_TRIGGERS,
     _PROVIDER_TRIGGER_FUNCTIONS,
     _PROVIDER_TRIGGER_TOPOLOGY,
+    _ROW_SCOPED_PROVIDER_TABLES,
+    _assert_intraday_job_queue_drained,
+    _assert_provider_migration_head,
+    _assert_provider_transaction_isolation,
     _provider_http_client,
     _provider_policy_function_violation,
     _provider_policy_violation,
@@ -65,6 +70,351 @@ def test_provider_worker_http_client_does_not_trust_environment(
 
 
 @pytest.mark.asyncio
+async def test_intraday_queue_gate_fails_closed_on_actionable_v1_jobs() -> None:
+    class _Session:
+        async def scalar(self, _statement: object) -> int:
+            return 1
+
+    with pytest.raises(RuntimeError, match="INTRADAY_V1_QUEUE_DRAIN_REQUIRED"):
+        await _assert_intraday_job_queue_drained(_Session())  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_provider_worker_checks_legacy_intraday_queue_even_when_monitor_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gates = 0
+    migration_checks = 0
+    startup_order: list[str] = []
+
+    class _Engine:
+        async def dispose(self) -> None:
+            return None
+
+    class _SessionContext:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    class _Factory:
+        def __call__(self) -> _SessionContext:
+            return _SessionContext()
+
+    async def database_role_ok(_session: object) -> None:
+        startup_order.append("role")
+
+    async def record_gate(_session: object) -> None:
+        nonlocal gates
+        gates += 1
+        startup_order.append("gate")
+
+    async def record_migration_check(_session: object) -> None:
+        nonlocal migration_checks
+        migration_checks += 1
+        startup_order.append("head")
+
+    monkeypatch.setattr(
+        "nexus.provider_worker.create_async_engine",
+        lambda *_args, **_kwargs: _Engine(),
+    )
+    monkeypatch.setattr(
+        "nexus.provider_worker.async_sessionmaker",
+        lambda *_args, **_kwargs: _Factory(),
+    )
+    monkeypatch.setattr(
+        "nexus.provider_worker._assert_provider_database_role",
+        database_role_ok,
+    )
+    monkeypatch.setattr(
+        "nexus.provider_worker._assert_intraday_job_queue_drained",
+        record_gate,
+    )
+    monkeypatch.setattr(
+        "nexus.provider_worker._assert_provider_migration_head",
+        record_migration_check,
+    )
+
+    await run_provider_worker(
+        ProviderWorkerSettings.model_validate(
+            {
+                "PROVIDER_DATABASE_URL": "postgresql+asyncpg://provider.invalid/nexus",
+                "PROVIDER_OBJECT_STORE_ENDPOINT": "https://provider-store.invalid",
+                "PROVIDER_OBJECT_STORE_REGION": "us-east-1",
+                "PROVIDER_OBJECT_STORE_BUCKET": "provider-evidence",
+                "PROVIDER_OBJECT_STORE_ACCESS_KEY_ID": "provider-access-canary",
+                "PROVIDER_OBJECT_STORE_SECRET_ACCESS_KEY": "provider-secret-canary",
+                "PROVIDER_OBJECT_STORE_PREFIX": "provider/market",
+            }
+        ),
+        _settings(intraday=False),
+        run_forever=False,
+    )
+
+    assert gates == 1
+    assert migration_checks == 1
+    assert startup_order == ["role", "head", "gate"]
+
+
+@pytest.mark.asyncio
+async def test_provider_worker_rechecks_head_before_intraday_scheduling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migration_checks = 0
+    scheduler_calls = 0
+    admission_lock_keys: list[object] = []
+
+    class _Engine:
+        async def dispose(self) -> None:
+            return None
+
+    class _Session:
+        async def __aenter__(self) -> "_Session":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        def begin(self) -> "_Session":
+            return self
+
+        async def execute(self, _statement: object, _params: object) -> None:
+            admission_lock_keys.append(_params)
+
+        async def scalar(self, _statement: object) -> str:
+            return "read committed"
+
+    class _Factory:
+        def __call__(self) -> _Session:
+            return _Session()
+
+    async def database_role_ok(_session: object) -> None:
+        return None
+
+    async def head_changes_after_startup(_session: object) -> None:
+        nonlocal migration_checks
+        migration_checks += 1
+        if migration_checks == 2:
+            raise RuntimeError("PROVIDER_DATABASE_MIGRATION_HEAD_MISMATCH")
+
+    async def queue_drained(_session: object) -> None:
+        return None
+
+    async def schedule_never_reached(*_args: object, **_kwargs: object) -> None:
+        nonlocal scheduler_calls
+        scheduler_calls += 1
+
+    @asynccontextmanager
+    async def fake_http_client():
+        yield object()
+
+    @asynccontextmanager
+    async def fake_registry(**_kwargs: object):
+        yield object()
+
+    monkeypatch.setattr(
+        "nexus.provider_worker.create_async_engine",
+        lambda *_args, **_kwargs: _Engine(),
+    )
+    monkeypatch.setattr(
+        "nexus.provider_worker.async_sessionmaker",
+        lambda *_args, **_kwargs: _Factory(),
+    )
+    monkeypatch.setattr(
+        "nexus.provider_worker._assert_provider_database_role",
+        database_role_ok,
+    )
+    monkeypatch.setattr(
+        "nexus.provider_worker._assert_provider_migration_head",
+        head_changes_after_startup,
+    )
+    monkeypatch.setattr(
+        "nexus.provider_worker._assert_intraday_job_queue_drained",
+        queue_drained,
+    )
+    monkeypatch.setattr(
+        "nexus.provider_worker.schedule_due_intraday_snapshot",
+        schedule_never_reached,
+    )
+    monkeypatch.setattr(
+        "nexus.provider_worker.S3ProviderEvidenceStore",
+        lambda _runtime: object(),
+    )
+    monkeypatch.setattr("nexus.provider_worker._provider_http_client", fake_http_client)
+    monkeypatch.setattr("nexus.provider_worker._provider_registry", fake_registry)
+
+    with pytest.raises(
+        RuntimeError,
+        match="PROVIDER_DATABASE_MIGRATION_HEAD_MISMATCH",
+    ):
+        await run_provider_worker(
+            ProviderWorkerSettings.model_validate(
+                {
+                    "PROVIDER_DATABASE_URL": "postgresql+asyncpg://provider.invalid/nexus",
+                    "PROVIDER_OBJECT_STORE_ENDPOINT": "https://provider-store.invalid",
+                    "PROVIDER_OBJECT_STORE_REGION": "us-east-1",
+                    "PROVIDER_OBJECT_STORE_BUCKET": "provider-evidence",
+                    "PROVIDER_OBJECT_STORE_ACCESS_KEY_ID": "provider-access-canary",
+                    "PROVIDER_OBJECT_STORE_SECRET_ACCESS_KEY": "provider-secret-canary",
+                    "PROVIDER_OBJECT_STORE_PREFIX": "provider/market",
+                }
+            ),
+            _settings(intraday=True),
+            run_forever=True,
+        )
+
+    assert migration_checks == 2
+    assert scheduler_calls == 0
+    assert admission_lock_keys == [{"key": "nexus:intraday-schema-admission:v1"}]
+
+
+@pytest.mark.asyncio
+async def test_provider_worker_runs_the_schema_guard_inside_the_claim_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _Engine:
+        async def dispose(self) -> None:
+            return None
+
+    class _Session:
+        async def __aenter__(self) -> "_Session":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        def begin(self) -> "_Session":
+            return self
+
+        async def execute(self, _statement: object, _params: object) -> None:
+            events.append("schema-lock")
+
+        async def scalar(self, _statement: object) -> str:
+            return "read committed"
+
+    class _Factory:
+        def __call__(self) -> _Session:
+            return _Session()
+
+    async def role_ok(_session: object) -> None:
+        events.append("role")
+
+    async def head_ok(_session: object) -> None:
+        events.append("head")
+
+    async def queue_ok(_session: object) -> None:
+        events.append("queue")
+
+    async def fake_worker_once(_factory: object, **kwargs: object) -> bool:
+        events.append("claim-transaction")
+        guard = kwargs.get("preclaim_guard")
+        assert callable(guard)
+        await guard(_Session())
+        raise RuntimeError("CLAIM_GUARD_OBSERVED")
+
+    @asynccontextmanager
+    async def fake_http_client():
+        yield object()
+
+    @asynccontextmanager
+    async def fake_registry(**_kwargs: object):
+        yield object()
+
+    monkeypatch.setattr(
+        "nexus.provider_worker.create_async_engine",
+        lambda *_args, **_kwargs: _Engine(),
+    )
+    monkeypatch.setattr(
+        "nexus.provider_worker.async_sessionmaker",
+        lambda *_args, **_kwargs: _Factory(),
+    )
+    monkeypatch.setattr("nexus.provider_worker._assert_provider_database_role", role_ok)
+    monkeypatch.setattr("nexus.provider_worker._assert_provider_migration_head", head_ok)
+    monkeypatch.setattr("nexus.provider_worker._assert_intraday_job_queue_drained", queue_ok)
+    monkeypatch.setattr("nexus.provider_worker.run_job_worker_once", fake_worker_once)
+    monkeypatch.setattr(
+        "nexus.provider_worker.S3ProviderEvidenceStore",
+        lambda _runtime: object(),
+    )
+    monkeypatch.setattr("nexus.provider_worker._provider_http_client", fake_http_client)
+    monkeypatch.setattr("nexus.provider_worker._provider_registry", fake_registry)
+
+    with pytest.raises(RuntimeError, match="CLAIM_GUARD_OBSERVED"):
+        await run_provider_worker(
+            ProviderWorkerSettings.model_validate(
+                {
+                    "PROVIDER_DATABASE_URL": "postgresql+asyncpg://provider.invalid/nexus",
+                    "PROVIDER_OBJECT_STORE_ENDPOINT": "https://provider-store.invalid",
+                    "PROVIDER_OBJECT_STORE_REGION": "us-east-1",
+                    "PROVIDER_OBJECT_STORE_BUCKET": "provider-evidence",
+                    "PROVIDER_OBJECT_STORE_ACCESS_KEY_ID": "provider-access-canary",
+                    "PROVIDER_OBJECT_STORE_SECRET_ACCESS_KEY": "provider-secret-canary",
+                    "PROVIDER_OBJECT_STORE_PREFIX": "provider/market",
+                }
+            ),
+            _settings(intraday=False),
+            run_forever=True,
+        )
+
+    assert events == [
+        "role",
+        "head",
+        "queue",
+        "schema-lock",
+        "head",
+        "queue",
+        "claim-transaction",
+        "schema-lock",
+        "head",
+        "queue",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_provider_worker_requires_the_exact_database_migration_head() -> None:
+    class _Session:
+        def __init__(self, head: str | None) -> None:
+            self.head = head
+
+        async def scalar(self, _statement: object) -> str | None:
+            return self.head
+
+    await _assert_provider_migration_head(  # type: ignore[arg-type]
+        _Session("0032_ticker_alias_authority")
+    )
+    for head in (None, "0030_fosun_daily_staging", "unexpected"):
+        with pytest.raises(
+            RuntimeError,
+            match="PROVIDER_DATABASE_MIGRATION_HEAD_MISMATCH",
+        ):
+            await _assert_provider_migration_head(_Session(head))  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_provider_worker_requires_read_committed_transactions() -> None:
+    class _Session:
+        def __init__(self, isolation: str) -> None:
+            self.isolation = isolation
+
+        async def scalar(self, _statement: object) -> str:
+            return self.isolation
+
+    await _assert_provider_transaction_isolation(  # type: ignore[arg-type]
+        _Session("read committed")
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="PROVIDER_DATABASE_TRANSACTION_ISOLATION_INVALID",
+    ):
+        await _assert_provider_transaction_isolation(  # type: ignore[arg-type]
+            _Session("repeatable read")
+        )
+
+
+@pytest.mark.asyncio
 async def test_provider_registry_contains_only_provider_capabilities_without_http() -> None:
     requests = 0
     gateway = _NoopGateway()
@@ -83,6 +433,8 @@ async def test_provider_registry_contains_only_provider_capabilities_without_htt
         ) as registry:
             assert registry.job_types == {
                 JobType.COLLECT_MARKET.value,
+                JobType.COLLECT_FOSUN_DAILY_INSTRUMENT.value,
+                JobType.PUBLISH_FOSUN_DAILY.value,
                 JobType.COLLECT_SEC_MACRO.value,
                 JobType.COLLECT_INTRADAY_SNAPSHOT.value,
             }
@@ -91,6 +443,87 @@ async def test_provider_registry_contains_only_provider_capabilities_without_htt
 
     assert requests == 0
     assert gateway.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_disabled_intraday_registry_safely_drains_v2_jobs_without_provider_read() -> None:
+    requests = 0
+    gateway = _NoopGateway()
+
+    def fail_if_requested(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(599)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fail_if_requested)) as client:
+        async with _provider_registry(
+            provider_settings=_settings(intraday=False),
+            provider_http_client=client,
+            store=SimpleNamespace(),
+            fosun_gateway_factory=lambda _identity: gateway,
+        ) as registry:
+            spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+            assert spec is not None
+            result = await spec.handler(SimpleNamespace())  # type: ignore[arg-type]
+
+    assert (result.outcome, result.result_code) == (
+        "skipped",
+        "INTRADAY_MONITOR_DISABLED",
+    )
+    assert requests == 0
+    assert gateway.close_calls == 1
+
+
+def test_provider_contract_includes_fosun_daily_jobs_and_staging() -> None:
+    assert _PROVIDER_PRIVILEGES["alembic_version"] == frozenset({"SELECT"})
+    assert _PROVIDER_PRIVILEGES["fosun_daily_bar_staging"] == frozenset({"SELECT", "INSERT"})
+    assert "fosun_daily_bar_staging" in _ROW_SCOPED_PROVIDER_TABLES
+    assert _PROVIDER_POLICY_EXPRESSIONS["fosun_daily_bar_staging"] == (
+        "nexus_provider_job_owned(fetch_job_id)",
+        "nexus_provider_job_owned(fetch_job_id)",
+    )
+    for job_type in (
+        JobType.COLLECT_FOSUN_DAILY_INSTRUMENT.value,
+        JobType.PUBLISH_FOSUN_DAILY.value,
+    ):
+        assert job_type in _PROVIDER_POLICY_FUNCTIONS["nexus_provider_job_visible"].source
+        assert job_type in _PROVIDER_POLICY_FUNCTIONS["nexus_provider_job_writable"].source
+    assert _PROVIDER_TRIGGER_TOPOLOGY[
+        (
+            "fosun_daily_bar_staging",
+            "trg_fosun_daily_bar_staging_immutable",
+        )
+    ] == ("nexus_prevent_fosun_daily_staging_change", 27)
+    assert _PROVIDER_TRIGGER_TOPOLOGY[
+        (
+            "fosun_daily_bar_staging",
+            "trg_fosun_daily_bar_staging_created_at_immutable",
+        )
+    ] == ("nexus_prevent_created_at_change", 19)
+    assert _PROVIDER_TRIGGER_TOPOLOGY[("jobs", "trg_jobs_intraday_schema_admission")] == (
+        "nexus_guard_intraday_job_schema_admission",
+        23,
+    )
+    assert (
+        _PROVIDER_TRIGGER_FUNCTIONS["nexus_guard_intraday_job_schema_admission"].source_sha256
+        == "532d7cdb9bf48ddb50fe129dfda5845ea9ad62b63771d0611ecfc18e25fb916f"
+    )
+
+
+def test_provider_contract_attests_authority_input_mutation_triggers() -> None:
+    assert _PROVIDER_TRIGGER_TOPOLOGY[
+        (
+            "integration_status",
+            "trg_00_integration_status_fosun_authority_lock",
+        )
+    ] == ("nexus_lock_fosun_market_input_change", 27)
+    assert _PROVIDER_TRIGGER_TOPOLOGY[
+        ("provider_capabilities", "trg_provider_capabilities_scope_lock")
+    ] == ("nexus_lock_provider_capability_scope", 7)
+    assert _PROVIDER_TRIGGER_TOPOLOGY[
+        ("provider_capabilities", "trg_provider_capabilities_append_only")
+    ] == ("nexus_prevent_provider_capability_change", 27)
+    assert len(_PROVIDER_TRIGGER_TOPOLOGY) == 68
 
 
 @pytest.mark.asyncio
@@ -349,6 +782,20 @@ def test_provider_database_role_rejects_superuser_broad_access_and_missing_rls()
             create_db=False,
             create_role=False,
             replication=False,
+            transaction_isolation="repeatable read",
+            schema_usage=True,
+            schema_create=False,
+            rows=[],
+        )
+        == "PROVIDER_DATABASE_TRANSACTION_ISOLATION_INVALID"
+    )
+    assert (
+        _provider_privilege_violation(
+            superuser=False,
+            bypass_rls=False,
+            create_db=False,
+            create_role=False,
+            replication=False,
             session_replication_role="replica",
             schema_usage=True,
             schema_create=False,
@@ -476,7 +923,8 @@ def test_provider_database_role_rejects_superuser_broad_access_and_missing_rls()
     )
     rows[0]["has_provider_column_privilege"] = False
 
-    rows[0]["relation_kind"] = "p"
+    writable_row = next(row for row in rows if row["table_name"] == "jobs")
+    writable_row["relation_kind"] = "p"
     assert (
         _provider_privilege_violation(
             superuser=False,
@@ -490,7 +938,7 @@ def test_provider_database_role_rejects_superuser_broad_access_and_missing_rls()
         )
         == "PROVIDER_DATABASE_RELATION_KIND_INVALID"
     )
-    rows[0]["relation_kind"] = "r"
+    writable_row["relation_kind"] = "r"
 
     rows[0]["has_table_grant_option"] = True
     assert (
@@ -612,6 +1060,7 @@ def _valid_policy_rows(provider_role: str = "provider_runtime") -> list[dict[str
         "job_attempts": ("public.nexus_provider_job_owned",),
         "job_dependencies": ("public.nexus_provider_job_owned",),
         "worker_heartbeats": ("public.nexus_provider_queue",),
+        "fosun_daily_bar_staging": ("public.nexus_provider_job_owned",),
     }
     for table_name, (using, with_check) in _PROVIDER_POLICY_EXPRESSIONS.items():
         rows.extend(
@@ -667,9 +1116,7 @@ def test_provider_database_role_rejects_extra_or_mutated_applicable_policy() -> 
     )
 
     rows = _valid_policy_rows(provider_role)
-    bypass = next(
-        row for row in rows if row["policy_name"] == "nexus_non_provider_jobs_bypass"
-    )
+    bypass = next(row for row in rows if row["policy_name"] == "nexus_non_provider_jobs_bypass")
     bypass["function_dependencies"] = ("public.pg_has_role",)
     assert (
         _provider_policy_violation(rows, provider_role=provider_role)
@@ -677,9 +1124,7 @@ def test_provider_database_role_rejects_extra_or_mutated_applicable_policy() -> 
     )
 
     rows = _valid_policy_rows(provider_role)
-    bypass = next(
-        row for row in rows if row["policy_name"] == "nexus_non_provider_jobs_bypass"
-    )
+    bypass = next(row for row in rows if row["policy_name"] == "nexus_non_provider_jobs_bypass")
     bypass["builtin_binding_valid"] = False
     assert (
         _provider_policy_violation(rows, provider_role=provider_role)
@@ -687,21 +1132,15 @@ def test_provider_database_role_rejects_extra_or_mutated_applicable_policy() -> 
     )
 
     rows = _valid_policy_rows(provider_role)
-    provider_scope = next(
-        row for row in rows if row["policy_name"] == "nexus_provider_jobs_scope"
-    )
-    provider_scope["qual"] = (
-        'public."NEXUS_PROVIDER_JOB_VISIBLE"(queue, job_type)'
-    )
+    provider_scope = next(row for row in rows if row["policy_name"] == "nexus_provider_jobs_scope")
+    provider_scope["qual"] = 'public."NEXUS_PROVIDER_JOB_VISIBLE"(queue, job_type)'
     assert (
         _provider_policy_violation(rows, provider_role=provider_role)
         == "PROVIDER_DATABASE_POLICY_SET_INVALID"
     )
 
     rows = _valid_policy_rows(provider_role)
-    bypass = next(
-        row for row in rows if row["policy_name"] == "nexus_non_provider_jobs_bypass"
-    )
+    bypass = next(row for row in rows if row["policy_name"] == "nexus_non_provider_jobs_bypass")
     bypass["qual"] = str(bypass["qual"]).replace(provider_role, provider_role.upper())
     assert (
         _provider_policy_violation(rows, provider_role=provider_role)
@@ -742,42 +1181,23 @@ def test_provider_database_role_rejects_mutated_policy_function() -> None:
     assert _provider_policy_function_violation(rows) is None
 
     rows[0]["source"] = "SELECT true"
-    assert (
-        _provider_policy_function_violation(rows)
-        == "PROVIDER_DATABASE_POLICY_FUNCTION_INVALID"
-    )
+    assert _provider_policy_function_violation(rows) == "PROVIDER_DATABASE_POLICY_FUNCTION_INVALID"
 
-    rows[0]["source"] = _PROVIDER_POLICY_FUNCTIONS[
-        str(rows[0]["function_name"])
-    ].source
+    rows[0]["source"] = _PROVIDER_POLICY_FUNCTIONS[str(rows[0]["function_name"])].source
     rows[0]["source"] = str(rows[0]["source"]).replace("'provider'", "'PROVIDER'")
-    assert (
-        _provider_policy_function_violation(rows)
-        == "PROVIDER_DATABASE_POLICY_FUNCTION_INVALID"
-    )
+    assert _provider_policy_function_violation(rows) == "PROVIDER_DATABASE_POLICY_FUNCTION_INVALID"
 
-    rows[0]["source"] = _PROVIDER_POLICY_FUNCTIONS[
-        str(rows[0]["function_name"])
-    ].source
+    rows[0]["source"] = _PROVIDER_POLICY_FUNCTIONS[str(rows[0]["function_name"])].source
     rows[0]["trusted_owner"] = False
-    assert (
-        _provider_policy_function_violation(rows)
-        == "PROVIDER_DATABASE_POLICY_FUNCTION_INVALID"
-    )
+    assert _provider_policy_function_violation(rows) == "PROVIDER_DATABASE_POLICY_FUNCTION_INVALID"
 
     rows[0]["trusted_owner"] = True
     rows[0]["acl_only_owner_and_provider"] = False
-    assert (
-        _provider_policy_function_violation(rows)
-        == "PROVIDER_DATABASE_POLICY_FUNCTION_INVALID"
-    )
+    assert _provider_policy_function_violation(rows) == "PROVIDER_DATABASE_POLICY_FUNCTION_INVALID"
 
     rows[0]["acl_only_owner_and_provider"] = True
     rows[0]["provider_execute_grantable"] = True
-    assert (
-        _provider_policy_function_violation(rows)
-        == "PROVIDER_DATABASE_POLICY_FUNCTION_INVALID"
-    )
+    assert _provider_policy_function_violation(rows) == "PROVIDER_DATABASE_POLICY_FUNCTION_INVALID"
 
     rows[0]["provider_execute_grantable"] = False
     rows.append(
@@ -786,10 +1206,7 @@ def test_provider_database_role_rejects_mutated_policy_function() -> None:
             "identity_arguments": "p_queue character varying, p_job_type character varying",
         }
     )
-    assert (
-        _provider_policy_function_violation(rows)
-        == "PROVIDER_DATABASE_POLICY_FUNCTION_INVALID"
-    )
+    assert _provider_policy_function_violation(rows) == "PROVIDER_DATABASE_POLICY_FUNCTION_INVALID"
 
 
 def _valid_publication_function_rows() -> list[dict[str, object]]:
@@ -918,9 +1335,7 @@ def test_provider_database_role_rejects_mutated_publication_definer(
 def test_provider_database_role_rejects_mutated_price_bar_guard_definer() -> None:
     functions = _valid_publication_function_rows()
     guard = next(
-        row
-        for row in functions
-        if row["function_name"] == _PROVIDER_PRICE_BAR_GUARD_FUNCTION.name
+        row for row in functions if row["function_name"] == _PROVIDER_PRICE_BAR_GUARD_FUNCTION.name
     )
     guard["source"] = str(guard["source"]).replace(
         "backtest-authority-global", "BACKTEST-AUTHORITY-GLOBAL"
@@ -1053,15 +1468,12 @@ def test_provider_database_role_rejects_mutated_insert_trigger_topology(
 ) -> None:
     rows = _valid_provider_trigger_rows()
     candidate = next(
-        row
-        for row in rows
-        if row["function_name"] == "nexus_validate_fosun_bar_transport"
+        row for row in rows if row["function_name"] == "nexus_validate_fosun_bar_transport"
     )
     candidate[field] = mutated
 
     assert (
-        _provider_trigger_topology_violation(rows)
-        == "PROVIDER_DATABASE_TRIGGER_TOPOLOGY_INVALID"
+        _provider_trigger_topology_violation(rows) == "PROVIDER_DATABASE_TRIGGER_TOPOLOGY_INVALID"
     )
 
 
@@ -1080,8 +1492,7 @@ def test_provider_database_role_rejects_missing_or_late_insert_trigger() -> None
         }
     )
     assert (
-        _provider_trigger_topology_violation(rows)
-        == "PROVIDER_DATABASE_TRIGGER_TOPOLOGY_INVALID"
+        _provider_trigger_topology_violation(rows) == "PROVIDER_DATABASE_TRIGGER_TOPOLOGY_INVALID"
     )
 
     triggers = _valid_publication_trigger_rows()

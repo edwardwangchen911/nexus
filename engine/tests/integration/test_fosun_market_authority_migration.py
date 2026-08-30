@@ -25,10 +25,16 @@ QUOTE_POLICY_V2_ID = UUID("15afb077-46c6-5eea-8307-a7d203d11c2d")
 INTRADAY_POLICY_V2_ID = UUID("9bd1eb52-5486-5f40-a3d8-06bd56f80b8d")
 
 
-def test_0029_is_single_head_and_metadata_exposes_complete_binding() -> None:
+def test_0031_is_single_head_and_metadata_exposes_complete_binding() -> None:
     scripts = ScriptDirectory.from_config(Config("engine/alembic.ini"))
 
-    assert scripts.get_heads() == ["0029_fosun_bar_lineage"]
+    assert scripts.get_heads() == ["0032_ticker_alias_authority"]
+    admission = scripts.get_revision("0031_intraday_schema_admission")
+    assert admission is not None
+    assert admission.down_revision == "0030_fosun_daily_staging"
+    staging = scripts.get_revision("0030_fosun_daily_staging")
+    assert staging is not None
+    assert staging.down_revision == "0029_fosun_bar_lineage"
     lineage = scripts.get_revision("0029_fosun_bar_lineage")
     assert lineage is not None
     assert lineage.down_revision == "0028_fosun_authority_hardening"
@@ -55,6 +61,15 @@ def test_0029_is_single_head_and_metadata_exposes_complete_binding() -> None:
         Base.metadata.tables["price_series_manifests"].columns.keys()
     )
     assert provider_binding <= set(Base.metadata.tables["latest_quotes"].columns.keys())
+    assert {
+        "root_job_id",
+        "fetch_job_id",
+        "instrument_id",
+        "record_kind",
+        "raw_artifact_id",
+        "raw_artifact_identity_sha256",
+        "provider_authorized_at",
+    } <= set(Base.metadata.tables["fosun_daily_bar_staging"].columns.keys())
 
 
 def test_0028_pins_authority_function_search_paths(
@@ -63,9 +78,7 @@ def test_0028_pins_authority_function_search_paths(
     configurations = asyncio.run(_authority_function_configurations(migrated_database_url))
 
     assert configurations
-    assert set(configurations.values()) == {
-        ("search_path=pg_catalog, public, pg_temp",)
-    }
+    assert set(configurations.values()) == {("search_path=pg_catalog, public, pg_temp",)}
 
 
 def test_0028_installs_two_minimal_provider_trigger_definers(
@@ -439,13 +452,16 @@ def test_0029_daily_calendar_rejects_append_after_fosun_publication(
         asyncio.run(_append_fosun_calendar_session(migrated_database_url, seeded))
 
     assert error.value.orig.sqlstate == "23514"
-    assert asyncio.run(
-        _fosun_bar_valid_at(
-            migrated_database_url,
-            manifest_id=seeded["manifest_id"],
-            as_of=seeded["provider_authorized_at"],  # type: ignore[arg-type]
+    assert (
+        asyncio.run(
+            _fosun_bar_valid_at(
+                migrated_database_url,
+                manifest_id=seeded["manifest_id"],
+                as_of=seeded["provider_authorized_at"],  # type: ignore[arg-type]
+            )
         )
-    ) is True
+        is True
+    )
 
 
 def test_0029_daily_validation_serializes_with_calendar_append(
@@ -817,9 +833,7 @@ async def _authority_function_configurations(
                     {"names": list(names)},
                 )
             ).tuples()
-            return {
-                name: tuple(configuration or ()) for name, configuration in rows
-            }
+            return {name: tuple(configuration or ()) for name, configuration in rows}
     finally:
         await engine.dispose()
 
@@ -848,62 +862,70 @@ async def _provider_publication_security_snapshot(database_url: str) -> dict[str
     try:
         async with engine.connect() as connection:
             function_rows = (
-                await connection.execute(
-                    text(
-                        "SELECT procedure.proname AS function_name, "
-                        "pg_get_function_identity_arguments(procedure.oid) "
-                        "AS identity_arguments, procedure.prosecdef AS security_definer, "
-                        "procedure.proleakproof AS leakproof, "
-                        "procedure.proconfig AS configuration, "
-                        "procedure.proowner = marks.relowner AS trusted_owner, "
-                        "EXISTS (SELECT 1 FROM aclexplode(COALESCE(procedure.proacl,"
-                        "acldefault('f',procedure.proowner))) AS public_acl "
-                        "WHERE public_acl.privilege_type='EXECUTE' "
-                        "AND public_acl.grantee=0) AS public_execute, "
-                        "EXISTS (SELECT 1 FROM aclexplode(COALESCE("
-                        "procedure.proacl,acldefault('f',procedure.proowner))) AS acl "
-                        "WHERE acl.privilege_type='EXECUTE' "
-                        "AND acl.grantee NOT IN (0,procedure.proowner)) AS non_owner_execute, "
-                        "language.lanname AS language, "
-                        "procedure.prorettype='trigger'::regtype AS returns_trigger, "
-                        "procedure.provolatile::text AS volatility, "
-                        "procedure.proparallel::text AS parallel_safety "
-                        "FROM pg_proc AS procedure "
-                        "JOIN pg_language AS language ON language.oid=procedure.prolang "
-                        "JOIN pg_class AS marks ON marks.oid="
-                        "'public.backtest_authority_publication_marks'::regclass "
-                        "WHERE procedure.pronamespace='public'::regnamespace "
-                        "AND procedure.prosecdef ORDER BY procedure.proname"
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT procedure.proname AS function_name, "
+                            "pg_get_function_identity_arguments(procedure.oid) "
+                            "AS identity_arguments, procedure.prosecdef AS security_definer, "
+                            "procedure.proleakproof AS leakproof, "
+                            "procedure.proconfig AS configuration, "
+                            "procedure.proowner = marks.relowner AS trusted_owner, "
+                            "EXISTS (SELECT 1 FROM aclexplode(COALESCE(procedure.proacl,"
+                            "acldefault('f',procedure.proowner))) AS public_acl "
+                            "WHERE public_acl.privilege_type='EXECUTE' "
+                            "AND public_acl.grantee=0) AS public_execute, "
+                            "EXISTS (SELECT 1 FROM aclexplode(COALESCE("
+                            "procedure.proacl,acldefault('f',procedure.proowner))) AS acl "
+                            "WHERE acl.privilege_type='EXECUTE' "
+                            "AND acl.grantee NOT IN (0,procedure.proowner)) AS non_owner_execute, "
+                            "language.lanname AS language, "
+                            "procedure.prorettype='trigger'::regtype AS returns_trigger, "
+                            "procedure.provolatile::text AS volatility, "
+                            "procedure.proparallel::text AS parallel_safety "
+                            "FROM pg_proc AS procedure "
+                            "JOIN pg_language AS language ON language.oid=procedure.prolang "
+                            "JOIN pg_class AS marks ON marks.oid="
+                            "'public.backtest_authority_publication_marks'::regclass "
+                            "WHERE procedure.pronamespace='public'::regnamespace "
+                            "AND procedure.prosecdef ORDER BY procedure.proname"
+                        )
                     )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             trigger_rows = (
-                await connection.execute(
-                    text(
-                        "SELECT trigger.tgname AS trigger_name, "
-                        "namespace.nspname AS schema_name, relation.relname AS table_name, "
-                        "trigger.tgtype AS trigger_type, "
-                        "trigger.tgenabled::text AS enabled, "
-                        "trigger.tgisinternal AS internal, "
-                        "trigger.tgqual IS NULL AS unconditional, "
-                        "trigger.tgconstraint = 0 AS non_constraint, "
-                        "NOT trigger.tgdeferrable AS non_deferrable, "
-                        "NOT trigger.tginitdeferred AS initially_immediate, "
-                        "trigger.tgnargs = 0 AS no_arguments, "
-                        "trigger.tgparentid = 0 AS not_partition_clone "
-                        "FROM pg_trigger AS trigger "
-                        "JOIN pg_proc AS procedure ON procedure.oid=trigger.tgfoid "
-                        "JOIN pg_class AS relation ON relation.oid=trigger.tgrelid "
-                        "JOIN pg_namespace AS namespace "
-                        "ON namespace.oid=relation.relnamespace "
-                        "WHERE procedure.pronamespace='public'::regnamespace "
-                        "AND procedure.proname IN ("
-                        "'nexus_mark_provider_backtest_authority_publication',"
-                        "'nexus_guard_provider_price_bar_frozen_insert') "
-                        "ORDER BY relation.relname,trigger.tgname"
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT trigger.tgname AS trigger_name, "
+                            "namespace.nspname AS schema_name, relation.relname AS table_name, "
+                            "trigger.tgtype AS trigger_type, "
+                            "trigger.tgenabled::text AS enabled, "
+                            "trigger.tgisinternal AS internal, "
+                            "trigger.tgqual IS NULL AS unconditional, "
+                            "trigger.tgconstraint = 0 AS non_constraint, "
+                            "NOT trigger.tgdeferrable AS non_deferrable, "
+                            "NOT trigger.tginitdeferred AS initially_immediate, "
+                            "trigger.tgnargs = 0 AS no_arguments, "
+                            "trigger.tgparentid = 0 AS not_partition_clone "
+                            "FROM pg_trigger AS trigger "
+                            "JOIN pg_proc AS procedure ON procedure.oid=trigger.tgfoid "
+                            "JOIN pg_class AS relation ON relation.oid=trigger.tgrelid "
+                            "JOIN pg_namespace AS namespace "
+                            "ON namespace.oid=relation.relnamespace "
+                            "WHERE procedure.pronamespace='public'::regnamespace "
+                            "AND procedure.proname IN ("
+                            "'nexus_mark_provider_backtest_authority_publication',"
+                            "'nexus_guard_provider_price_bar_frozen_insert') "
+                            "ORDER BY relation.relname,trigger.tgname"
+                        )
                     )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             return {
                 "functions": [_publication_function_dict(row) for row in function_rows],
                 "triggers": [dict(row) for row in trigger_rows],
@@ -938,8 +960,7 @@ async def _attempt_pg_temp_shadow_binding_bypass(database_url: str) -> None:
             ):
                 await connection.execute(
                     text(
-                        f"CREATE TEMP TABLE {table_name} AS "
-                        f"TABLE public.{table_name} WITH NO DATA"
+                        f"CREATE TEMP TABLE {table_name} AS TABLE public.{table_name} WITH NO DATA"
                     )
                 )
             await connection.execute(
@@ -951,8 +972,7 @@ async def _attempt_pg_temp_shadow_binding_bypass(database_url: str) -> None:
             )
             await connection.execute(
                 text(
-                    "UPDATE pg_temp.integration_status SET status='read_only' "
-                    "WHERE id=:status_id"
+                    "UPDATE pg_temp.integration_status SET status='read_only' WHERE id=:status_id"
                 ),
                 {"status_id": status_id},
             )
@@ -971,10 +991,7 @@ async def _attempt_pg_temp_shadow_binding_bypass(database_url: str) -> None:
                 {"artifact_id": artifact_id},
             )
             await connection.execute(
-                text(
-                    "INSERT INTO pg_temp.source_policies "
-                    "SELECT * FROM public.source_policies"
-                )
+                text("INSERT INTO pg_temp.source_policies SELECT * FROM public.source_policies")
             )
             await connection.execute(text("SET LOCAL search_path = pg_temp, public"))
             await connection.execute(
@@ -987,7 +1004,7 @@ async def _attempt_pg_temp_shadow_binding_bypass(database_url: str) -> None:
                     "created_at) VALUES "
                     "(:id,:instrument_id,'fosun','l1','unknown',NULL,NULL,200,:received,"
                     ":received,:received,repeat('b',64),"
-                    "'[\"FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE\","
+                    '\'["FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",'
                     "\"INTRADAY_BID_ASK_UNAVAILABLE\"]'::jsonb,'snapshot',repeat('c',64),"
                     "'verified',:artifact_id,:capability_id,:status_id,1,repeat('a',64),"
                     ":authorized,:received)"
@@ -1020,8 +1037,7 @@ async def _attempt_pg_temp_shadow_bar_growth(
             ):
                 await connection.execute(
                     text(
-                        f"CREATE TEMP TABLE {table_name} AS "
-                        f"TABLE public.{table_name} WITH NO DATA"
+                        f"CREATE TEMP TABLE {table_name} AS TABLE public.{table_name} WITH NO DATA"
                     )
                 )
             await connection.execute(text("SET LOCAL search_path = pg_temp, public"))
@@ -1071,10 +1087,7 @@ async def _attempt_pg_temp_shadow_alpaca_raw_artifact_bypass(
                 {"id": artifact_id, "observed_at": observed_at},
             )
             await connection.execute(
-                text(
-                    "CREATE TEMP TABLE data_artifacts AS "
-                    "TABLE public.data_artifacts WITH NO DATA"
-                )
+                text("CREATE TEMP TABLE data_artifacts AS TABLE public.data_artifacts WITH NO DATA")
             )
             await connection.execute(
                 text(
@@ -1200,13 +1213,15 @@ async def _attempt_pg_temp_shadow_intraday_review_bypass(
                 },
             )
             prepared = (
-                await connection.execute(
-                    text(
-                        "SELECT * FROM public.nexus_prepare_intraday_bar_set(:manifest_id)"
-                    ),
-                    {"manifest_id": manifest_id},
+                (
+                    await connection.execute(
+                        text("SELECT * FROM public.nexus_prepare_intraday_bar_set(:manifest_id)"),
+                        {"manifest_id": manifest_id},
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             await connection.execute(
                 text(
                     "INSERT INTO public.research_evidence_refs "
@@ -1401,7 +1416,7 @@ async def _insert_fosun_quote(
                     "created_at) VALUES "
                     "(:id,:instrument_id,'fosun','l1','unknown',NULL,NULL,200,:received,"
                     ":received,:received,repeat('b',64),"
-                    "'[\"FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE\","
+                    '\'["FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",'
                     "\"INTRADAY_BID_ASK_UNAVAILABLE\"]'::jsonb,'snapshot',repeat('c',64),"
                     "'verified',:artifact_id,:provider_capability_id,:provider_status_id,"
                     ":provider_status_version,:provider_contract_hash,"
@@ -1425,8 +1440,10 @@ async def _mutate_capability(database_url: str, capability_id: UUID) -> None:
     try:
         async with engine.begin() as connection:
             await connection.execute(
-                text("UPDATE provider_capabilities SET expires_at=expires_at + interval '1 hour' "
-                     "WHERE id=:id"),
+                text(
+                    "UPDATE provider_capabilities SET expires_at=expires_at + interval '1 hour' "
+                    "WHERE id=:id"
+                ),
                 {"id": capability_id},
             )
     finally:
@@ -1438,10 +1455,7 @@ async def _mutate_bound_manifest(database_url: str, manifest_id: object) -> None
     try:
         async with engine.begin() as connection:
             await connection.execute(
-                text(
-                    "UPDATE price_series_manifests SET row_count=row_count + 1 "
-                    "WHERE id=:id"
-                ),
+                text("UPDATE price_series_manifests SET row_count=row_count + 1 WHERE id=:id"),
                 {"id": manifest_id},
             )
     finally:
@@ -1500,7 +1514,7 @@ async def _contend_with_quote_artifact_lock(database_url: str) -> None:
                         "created_at) VALUES "
                         "(:id,:instrument_id,'fosun','l1','unknown',NULL,NULL,200,:received,"
                         ":received,:received,repeat('b',64),"
-                        "'[\"FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE\","
+                        '\'["FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",'
                         "\"INTRADAY_BID_ASK_UNAVAILABLE\"]'::jsonb,'snapshot',repeat('c',64),"
                         "'verified',:artifact_id,:capability_id,:status_id,1,repeat('a',64),"
                         ":authorized,:received)"
@@ -1542,19 +1556,13 @@ async def _contend_with_fosun_manifest_mutation_lock(
             transaction = await holder.begin()
             try:
                 await holder.execute(
-                    text(
-                        "SELECT pg_advisory_xact_lock(hashtextextended("
-                        ":lock_scope, 0))"
-                    ),
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_scope, 0))"),
                     {"lock_scope": f"{lock_prefix}{manifest_id}"},
                 )
                 async with engine.connect() as contender:
                     await contender.execute(text("SET lock_timeout='1ms'"))
                     await contender.execute(
-                        text(
-                            "UPDATE price_series_manifests SET row_count=row_count "
-                            "WHERE id=:id"
-                        ),
+                        text("UPDATE price_series_manifests SET row_count=row_count WHERE id=:id"),
                         {"id": manifest_id},
                     )
             finally:
@@ -1586,13 +1594,10 @@ async def _seed_fosun_bar_candidate(
     authorized_at = authorized_at_override or datetime.now(UTC) - timedelta(seconds=1)
     received_at = authorized_at - timedelta(seconds=1)
     observed_at = observed_at_override or (
-        received_at
-        - (timedelta(days=1) if interval == "1Day" else timedelta(minutes=2))
+        received_at - (timedelta(days=1) if interval == "1Day" else timedelta(minutes=2))
     )
     artifact_created_at = artifact_created_at or received_at
-    artifact_schema = (
-        "price_bars_v1" if interval == "1Day" else "intraday_price_bars_v1"
-    )
+    artifact_schema = "price_bars_v1" if interval == "1Day" else "intraday_price_bars_v1"
     artifact_digest = "d" * 64
     raw_digest = "e" * 64
     contract_hash = "a" * 64
@@ -1775,17 +1780,13 @@ async def _seed_fosun_bar_candidate(
                     "status_id": status_id,
                     "hash": contract_hash,
                     "authorized": authorized_at,
-                    "raw_artifact_id": (
-                        None if lineage_case == "missing_raw" else raw_artifact_id
-                    ),
+                    "raw_artifact_id": (None if lineage_case == "missing_raw" else raw_artifact_id),
                     "calendar_id": (
                         calendar_id
                         if interval == "1Day" and lineage_case != "missing_calendar"
                         else None
                     ),
-                    "request_start": (
-                        request_start_at if interval == "1Day" else None
-                    ),
+                    "request_start": (request_start_at if interval == "1Day" else None),
                     "request_end": (
                         request_end_at
                         if interval == "1Day" and lineage_case != "missing_request_end"
@@ -1810,9 +1811,7 @@ async def _seed_fosun_bar_candidate(
                     "session": observed_at.date(),
                     "observed": observed_at,
                     "received": received_at,
-                    "revision": (
-                        "0" * 64 if lineage_case == "revision_mismatch" else raw_digest
-                    ),
+                    "revision": ("0" * 64 if lineage_case == "revision_mismatch" else raw_digest),
                 },
             )
         return {
@@ -1822,9 +1821,7 @@ async def _seed_fosun_bar_candidate(
             "provider_status_id": status_id,
             "provider_authorized_at": authorized_at,
             "gateway_transport_artifact_id": raw_artifact_id,
-            "daily_calendar_authority_id": (
-                calendar_id if interval == "1Day" else None
-            ),
+            "daily_calendar_authority_id": (calendar_id if interval == "1Day" else None),
             "interval": interval,
         }
     finally:
@@ -1927,10 +1924,7 @@ async def _contend_fosun_calendar_validation_and_append(
         async with engine.connect() as validator:
             async with validator.begin():
                 valid = await validator.scalar(
-                    text(
-                        "SELECT nexus_fosun_price_bar_set_valid_at("
-                        ":manifest_id,:as_of)"
-                    ),
+                    text("SELECT nexus_fosun_price_bar_set_valid_at(:manifest_id,:as_of)"),
                     {
                         "manifest_id": seeded["manifest_id"],
                         "as_of": seeded["provider_authorized_at"],
@@ -1974,22 +1968,14 @@ async def _insert_fosun_bar_authority(
     )
     daily = interval == "1Day"
     prepare_function = (
-        "nexus_prepare_price_bar_set_v2"
-        if daily
-        else "nexus_prepare_intraday_bar_set_v2"
+        "nexus_prepare_price_bar_set_v2" if daily else "nexus_prepare_intraday_bar_set_v2"
     )
     canonical_function = (
-        "nexus_price_bar_set_canonical_v2"
-        if daily
-        else "nexus_intraday_bar_set_canonical_v2"
+        "nexus_price_bar_set_canonical_v2" if daily else "nexus_intraday_bar_set_canonical_v2"
     )
-    authority_table = (
-        "price_bar_set_authorities" if daily else "intraday_bar_set_authorities"
-    )
+    authority_table = "price_bar_set_authorities" if daily else "intraday_bar_set_authorities"
     source_policy_id = SOURCE_POLICY_V2_ID if daily else INTRADAY_POLICY_V2_ID
-    hash_version = (
-        "price_bar_set_sha256_v2" if daily else "intraday_bar_set_sha256_v2"
-    )
+    hash_version = "price_bar_set_sha256_v2" if daily else "intraday_bar_set_sha256_v2"
     expected_policy_version = (
         "agent_price_authority_v2" if daily else "intraday_monitor_authority_v2"
     )
@@ -2000,11 +1986,15 @@ async def _insert_fosun_bar_authority(
     try:
         async with engine.begin() as connection:
             prepared = (
-                await connection.execute(
-                    text(f"SELECT * FROM {prepare_function}(:manifest_id)"),
-                    {"manifest_id": seeded["manifest_id"]},
+                (
+                    await connection.execute(
+                        text(f"SELECT * FROM {prepare_function}(:manifest_id)"),
+                        {"manifest_id": seeded["manifest_id"]},
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             digest = str(prepared["content_hash"])
             provider_object_id = f"{provider_object_prefix}:{seeded['manifest_id']}"
             location = f"db://price-bar-set/{seeded['manifest_id']}@sha256:{digest}"

@@ -170,6 +170,12 @@ class NoopRateLimiter:
     async def acquire(self) -> None:
         return None
 
+    async def try_acquire(self) -> float | None:
+        return None
+
+    def try_acquire_at_call_edge(self) -> float | None:
+        return None
+
 
 class FakeClock:
     def __init__(self) -> None:

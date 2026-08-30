@@ -1183,60 +1183,31 @@ async def test_writer_persists_same_session_price_revisions_without_lookahead(
 
 
 @pytest.mark.asyncio
-async def test_writer_rejects_ambiguous_spy_alias_authority(
+async def test_database_rejects_ambiguous_spy_alias_authority(
     migrated_database_url: str,
 ) -> None:
-    strategy, bars, sessions, protocol = _raw_inputs()
+    _strategy, bars, sessions, _protocol = _raw_inputs()
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    price_authorities = await _seed_upstream_authorities(factory, bars, sessions)
+    await _seed_upstream_authorities(factory, bars, sessions)
     forged_alias_id = uuid4()
     forged_valid_from = sessions[0] + timedelta(days=1)
     forged_created_at = datetime.combine(sessions[0], time(20), tzinfo=UTC)
-    async with factory() as session, session.begin():
-        await session.execute(
-            text(
-                "INSERT INTO instrument_aliases "
-                "(id, instrument_id, symbol, alias_type, valid_from, valid_to, created_at) "
-                "VALUES (:id, :instrument, 'SPY', 'ticker', :valid_from, NULL, :created_at)"
-            ),
-            {
-                "id": forged_alias_id,
-                "instrument": INSTRUMENT_ID,
-                "valid_from": forged_valid_from,
-                "created_at": forged_created_at,
-            },
-        )
-    data = _dataset(bars, sessions, price_authorities)
-    forged_data = data.model_copy(
-        update={
-            "authority": data.authority.model_copy(
-                update={
-                    "spy_benchmark": data.authority.spy_benchmark.model_copy(
-                        update={
-                            "alias_id": forged_alias_id,
-                            "valid_from": forged_valid_from,
-                            "created_at": forged_created_at,
-                        }
-                    )
-                }
-            )
-        }
-    )
-    result = run_backtest(strategy, forged_data, protocol)
-    await _seed_data_snapshot(factory, forged_data, protocol, result)
-    authority = BacktestPersistenceAuthority(
-        authority_bundle_id=AUTHORITY_BUNDLE_ID,
-        data_snapshot_id=DATA_SNAPSHOT_ID,
-        source_policy_id=SOURCE_POLICY_ID,
-        cost_policy_id=BACKTEST_COST_POLICY_ID,
-        completed_at=COMPLETED_AT,
-    )
-
-    async with factory() as session, session.begin():
-        with pytest.raises(ValueError, match="SPY benchmark alias authority"):
-            await persist_backtest_result(
-                session, strategy, forged_data, protocol, result, authority
-            )
+    async with factory() as session:
+        with pytest.raises(DBAPIError, match="ex_instrument_aliases_ticker_instrument_period"):
+            async with session.begin():
+                await session.execute(
+                    text(
+                        "INSERT INTO instrument_aliases "
+                        "(id, instrument_id, symbol, alias_type, valid_from, valid_to, created_at) "
+                        "VALUES (:id, :instrument, 'SPY', 'ticker', :valid_from, NULL, :created_at)"
+                    ),
+                    {
+                        "id": forged_alias_id,
+                        "instrument": INSTRUMENT_ID,
+                        "valid_from": forged_valid_from,
+                        "created_at": forged_created_at,
+                    },
+                )
 
 
 @pytest.mark.asyncio

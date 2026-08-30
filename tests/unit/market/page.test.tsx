@@ -229,7 +229,9 @@ describe("market vertical slice", () => {
     );
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("复星 L1（只读）");
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("实时");
+    expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("未复权（raw）");
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("2026-08-22 00:01:00 UTC");
+    expect(screen.getByText("未复权价格不可直接用于跨期收益、动量或回撤判断。")).toBeVisible();
     expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent("2026-08-21 20:00:00 UTC");
     expect(screen.getByRole("link", { name: "打开 AAPL 个股研究" })).toHaveAttribute(
       "href",
@@ -394,6 +396,7 @@ describe("market vertical slice", () => {
       symbol: item.symbol,
       source: selectedSeries.source!,
       feed: selectedSeries.feed!,
+      adjustment: selectedSeries.adjustment,
       interval: "1Day",
       bars: selectedSeries.bars,
     }} />);
@@ -403,6 +406,7 @@ describe("market vertical slice", () => {
       "227.160000000000",
     );
     expect(screen.getByText(/共 2 个交易日/)).toBeVisible();
+    expect(screen.getByText(/复权口径：未复权（raw）/)).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "上一根 K 线" }));
     const activeDetail = screen.getByLabelText("当前 K 线详情");
     expect(activeDetail).toHaveTextContent("2026-08-20");

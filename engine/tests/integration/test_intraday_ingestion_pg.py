@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from uuid import UUID, uuid4
 
 import pytest
@@ -11,6 +12,7 @@ from nexus.market.intraday_ingestion import (
     archive_intraday_snapshot_raw,
     ingest_intraday_snapshot,
 )
+from nexus.market.object_store import ProviderObjectIOUnavailable
 from nexus.persistence.models.data import (
     DataArtifact,
     IntradayBarSetAuthority,
@@ -43,9 +45,12 @@ RECEIVED_AT = datetime(2026, 8, 28, 14, 30, 16, tzinfo=UTC)
 @dataclass
 class _ObjectStore:
     fail_at: str | None = None
+    claim_wrong_uri_at: str | None = None
     objects: dict[str, bytes] = field(default_factory=dict)
     temporary: dict[str, bytes] = field(default_factory=dict)
     archived_payloads: list[bytes] = field(default_factory=list)
+    normalized_writes: list[str] = field(default_factory=list)
+    temporary_writes: int = 0
 
     async def archive_raw(self, key: str, payload: bytes) -> str:
         if self.fail_at == "archive_raw":
@@ -53,9 +58,12 @@ class _ObjectStore:
         if key not in self.objects:
             self.objects[key] = payload
             self.archived_payloads.append(payload)
+        if self.claim_wrong_uri_at == "archive_raw":
+            return f"memory://wrong-object?claimed={key}"
         return f"memory://{key}"
 
     async def put_temporary(self, key: str, payload: bytes) -> None:
+        self.temporary_writes += 1
         if self.fail_at == "put_temporary":
             raise OSError("fixture temporary failure")
         self.temporary[key] = payload
@@ -64,10 +72,21 @@ class _ObjectStore:
         if self.fail_at == "promote":
             raise OSError("fixture promotion failure")
         self.objects.setdefault(final_key, self.temporary[temporary_key])
+        if self.claim_wrong_uri_at == "promote":
+            return f"memory://wrong-object?claimed={final_key}"
         return f"memory://{final_key}"
 
     async def delete_temporary(self, key: str) -> None:
         self.temporary.pop(key, None)
+
+    async def put_normalized(self, key: str, payload: bytes) -> str:
+        if self.fail_at == "put_normalized":
+            raise OSError("fixture normalized failure")
+        self.objects.setdefault(key, payload)
+        self.normalized_writes.append(key)
+        if self.claim_wrong_uri_at == "put_normalized":
+            return f"memory://wrong-object?claimed={key}"
+        return f"memory://{key}"
 
 
 def _batch(
@@ -171,6 +190,8 @@ async def test_intraday_ingestion_is_raw_first_and_replay_idempotent(
     assert replay.replayed == 6
     assert store.archived_payloads == [_batch().raw_payload]
     assert store.temporary == {}
+    assert store.temporary_writes == 0
+    assert len(store.normalized_writes) == 4
 
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(LatestQuote)) == 4
@@ -178,6 +199,35 @@ async def test_intraday_ingestion_is_raw_first_and_replay_idempotent(
         assert await session.scalar(select(func.count()).select_from(PriceSeriesManifest)) == 2
         assert await session.scalar(select(func.count()).select_from(PriceBarRecord)) == 2
         assert await session.scalar(select(func.count()).select_from(IntradayBarSetAuthority)) == 2
+
+
+@pytest.mark.asyncio
+async def test_alpaca_distinct_raw_snapshots_do_not_collapse_identical_minute_bars(
+    migrated_database_url: str,
+) -> None:
+    await _seed_instruments(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    store = _ObjectStore()
+    first_batch = _batch()
+    second_batch = first_batch.model_copy(
+        update={"raw_payload": b'{"fixture":"intraday","quote_revision":2}'}
+    )
+    first_raw_digest = sha256(first_batch.raw_payload).hexdigest()
+    second_raw_digest = sha256(second_batch.raw_payload).hexdigest()
+    assert first_raw_digest != second_raw_digest
+
+    async with factory() as session, session.begin():
+        first = await ingest_intraday_snapshot(session, store, first_batch, commit=False)
+    async with factory() as session, session.begin():
+        second = await ingest_intraday_snapshot(session, store, second_batch, commit=False)
+
+    assert first.created_bar_authorities == 2
+    assert second.created_bar_authorities == 2
+    async with factory() as session:
+        revisions = set(await session.scalars(select(PriceBarRecord.revision)))
+        assert revisions == {first_raw_digest, second_raw_digest}
+        assert await session.scalar(select(func.count()).select_from(PriceSeriesManifest)) == 4
+        assert await session.scalar(select(func.count()).select_from(IntradayBarSetAuthority)) == 4
 
 
 @pytest.mark.asyncio
@@ -314,9 +364,7 @@ async def test_fosun_intraday_facts_persist_exact_binding_and_v2_authority(
         provider_contract_hash=contract_hash,
         provider_authorized_at=authorized_at,
     )
-    bars_binding = quote_binding.model_copy(
-        update={"provider_capability_id": bars_capability_id}
-    )
+    bars_binding = quote_binding.model_copy(update={"provider_capability_id": bars_capability_id})
 
     async with factory() as session, session.begin():
         result = await ingest_intraday_snapshot(
@@ -357,7 +405,7 @@ async def test_fosun_intraday_facts_persist_exact_binding_and_v2_authority(
 
 
 @pytest.mark.asyncio
-async def test_same_minute_revision_creates_new_authority_without_rewrite(
+async def test_changed_snapshot_raw_creates_new_batch_bar_authorities_without_rewrite(
     migrated_database_url: str,
 ) -> None:
     await _seed_instruments(migrated_database_url)
@@ -370,7 +418,9 @@ async def test_same_minute_revision_creates_new_authority_without_rewrite(
             session, store, _batch(aapl_close="227.17"), commit=False
         )
 
-    assert changed.created_bar_authorities == 1
+    # One raw Snapshot envelope is the lineage root for every bar in the batch,
+    # so a new envelope revision creates a new immutable authority for each.
+    assert changed.created_bar_authorities == 2
     async with factory() as session:
         rows = (
             await session.scalars(
@@ -380,8 +430,8 @@ async def test_same_minute_revision_creates_new_authority_without_rewrite(
                 )
             )
         ).all()
-        assert len(rows) == 3
-        assert len({row.content_hash for row in rows}) == 3
+        assert len(rows) == 4
+        assert len({row.content_hash for row in rows}) == 4
 
 
 @pytest.mark.asyncio
@@ -448,9 +498,7 @@ async def test_published_intraday_manifest_rejects_late_bar_append(
     with pytest.raises(DBAPIError, match="authority record is immutable"):
         async with factory() as session, session.begin():
             await session.execute(
-                text(
-                    "UPDATE price_series_manifests SET feed='tampered' WHERE id=:id"
-                ),
+                text("UPDATE price_series_manifests SET feed='tampered' WHERE id=:id"),
                 {"id": manifest.id},
             )
 
@@ -478,9 +526,7 @@ async def test_intraday_authority_rejects_incomplete_or_unbounded_bar_facts(
     invalid_snapshot = first.model_copy(
         update={"minute_bar": first.minute_bar.model_copy(update={"bar": invalid_bar})}
     )
-    invalid_batch = batch.model_copy(
-        update={"snapshots": (invalid_snapshot, *batch.snapshots[1:])}
-    )
+    invalid_batch = batch.model_copy(update={"snapshots": (invalid_snapshot, *batch.snapshots[1:])})
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
 
     with pytest.raises(DBAPIError, match="intraday bar review authority is invalid"):
@@ -566,9 +612,7 @@ async def test_intraday_authority_rejects_non_array_quality_flags_deterministica
                 "received_at": RECEIVED_AT,
             },
         )
-        with pytest.raises(
-            DBAPIError, match="intraday bar review authority is invalid"
-        ) as error:
+        with pytest.raises(DBAPIError, match="intraday bar review authority is invalid") as error:
             async with session.begin_nested():
                 await session.execute(
                     text(
@@ -596,7 +640,7 @@ async def test_intraday_authority_rejects_non_array_quality_flags_deterministica
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fail_at", ("archive_raw", "put_temporary", "promote"))
+@pytest.mark.parametrize("fail_at", ("archive_raw", "put_normalized"))
 async def test_object_store_failure_leaves_no_readable_intraday_authority(
     migrated_database_url: str,
     fail_at: str,
@@ -608,7 +652,114 @@ async def test_object_store_failure_leaves_no_readable_intraday_authority(
         with pytest.raises(OSError):
             await ingest_intraday_snapshot(session, store, _batch())
 
+    assert store.temporary_writes == 0
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(LatestQuote)) == 0
+        assert await session.scalar(select(func.count()).select_from(IntradayBarSetAuthority)) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_code",
+    ["OBJECT_IO_SATURATED", "OBJECT_IO_DEADLINE_EXCEEDED"],
+)
+async def test_typed_normalized_write_rolls_back_before_error(
+    migrated_database_url: str,
+    error_code: str,
+) -> None:
+    await _seed_instruments(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+
+    class _NormalizedUnavailableStore(_ObjectStore):
+        async def put_normalized(self, key: str, payload: bytes) -> str:
+            del key, payload
+            raise ProviderObjectIOUnavailable(error_code)
+
+    store = _NormalizedUnavailableStore()
+    async with factory() as session:
+        with pytest.raises(ProviderObjectIOUnavailable, match=error_code):
+            await ingest_intraday_snapshot(session, store, _batch())
+        # Prove the public commit=True path cleaned its failed transaction;
+        # catching the error and reusing the same session cannot leak facts.
+        await session.commit()
+        assert await session.scalar(select(func.count()).select_from(LatestQuote)) == 0
+        assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 0
+        assert await session.scalar(select(func.count()).select_from(PriceSeriesManifest)) == 0
+        assert await session.scalar(select(func.count()).select_from(PriceBarRecord)) == 0
+        assert await session.scalar(select(func.count()).select_from(IntradayBarSetAuthority)) == 0
+
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(LatestQuote)) == 0
+        assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("claim_at", "error_code"),
+    (
+        ("archive_raw", "INTRADAY_RAW_OBJECT_URI_MISMATCH"),
+        ("put_normalized", "INTRADAY_NORMALIZED_OBJECT_URI_MISMATCH"),
+    ),
+)
+async def test_query_only_object_uri_claim_publishes_zero_intraday_facts(
+    migrated_database_url: str,
+    claim_at: str,
+    error_code: str,
+) -> None:
+    await _seed_instruments(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    store = _ObjectStore(claim_wrong_uri_at=claim_at)
+
+    async with factory() as session:
+        with pytest.raises(RuntimeError, match=error_code):
+            await ingest_intraday_snapshot(session, store, _batch())
+
     assert store.temporary == {}
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(LatestQuote)) == 0
+        assert await session.scalar(select(func.count()).select_from(PriceSeriesManifest)) == 0
+        assert await session.scalar(select(func.count()).select_from(PriceBarRecord)) == 0
+        assert await session.scalar(select(func.count()).select_from(IntradayBarSetAuthority)) == 0
+
+
+@pytest.mark.asyncio
+async def test_detached_raw_artifact_identity_drift_publishes_zero_intraday_facts(
+    migrated_database_url: str,
+) -> None:
+    await _seed_instruments(migrated_database_url)
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    store = _ObjectStore()
+    batch = _batch()
+    envelope = RawSnapshotEnvelope(
+        raw_payload=batch.raw_payload,
+        received_at=batch.received_at,
+        provenance=batch.provenance,
+    )
+    async with factory() as session:
+        archived = await archive_intraday_snapshot_raw(session, store, envelope)
+
+    async with factory() as session, session.begin():
+        await session.execute(text("ALTER TABLE data_artifacts DISABLE TRIGGER USER"))
+        await session.execute(
+            text("UPDATE data_artifacts SET uri = :uri WHERE id = :artifact_id"),
+            {
+                "artifact_id": archived.raw_artifact.id,
+                "uri": "memory://raw/market/intraday/sha256/00/" + "0" * 64 + ".json",
+            },
+        )
+        await session.execute(text("ALTER TABLE data_artifacts ENABLE TRIGGER USER"))
+
+    async with factory() as session:
+        with pytest.raises(RuntimeError, match="INTRADAY_RAW_ARCHIVE_MISMATCH"):
+            await ingest_intraday_snapshot(
+                session,
+                store,
+                batch,
+                raw_artifact=archived.raw_artifact,
+            )
+
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(LatestQuote)) == 0
+        assert await session.scalar(select(func.count()).select_from(PriceSeriesManifest)) == 0
+        assert await session.scalar(select(func.count()).select_from(PriceBarRecord)) == 0
         assert await session.scalar(select(func.count()).select_from(IntradayBarSetAuthority)) == 0

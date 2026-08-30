@@ -5,9 +5,11 @@ from uuid import UUID
 
 import pytest
 from nexus.jobs.intraday_schedule import (
+    ALPACA_SNAPSHOT_CONTRACT_HASH,
     SNAPSHOT_CONTRACT_HASH,
     IntradaySnapshotJobPayloadV2,
     bucket_for,
+    build_alpaca_intraday_payload,
     build_intraday_payload,
 )
 from nexus.jobs.market_authority import FrozenFosunMarketAuthority
@@ -76,6 +78,74 @@ def test_payload_freezes_sorted_symbol_authority() -> None:
         "bars_authority": None,
         "contract_hash": SNAPSHOT_CONTRACT_HASH,
     }
+
+
+def test_alpaca_payload_freezes_an_explicit_source_without_fosun_authority() -> None:
+    bucket = bucket_for(datetime(2026, 8, 28, 14, 30, 29, tzinfo=UTC))
+    payload = build_alpaca_intraday_payload(
+        calendar_authority_id=CALENDAR_ID,
+        session="2026-08-28",
+        bucket=bucket,
+        instruments=((MSFT_ID, "MSFT"), (AAPL_ID, "AAPL")),
+        feed="iex",
+        delivery_mode="real_time",
+    )
+
+    assert payload.model_dump(mode="json") == {
+        "schema": "intraday_snapshot_job_v2",
+        "calendar_authority_id": str(CALENDAR_ID),
+        "session": "2026-08-28",
+        "bucket_start": "2026-08-28T14:30:15.000000Z",
+        "bucket_end": "2026-08-28T14:30:30.000000Z",
+        "instruments": [
+            {"instrument_id": str(AAPL_ID), "symbol": "AAPL"},
+            {"instrument_id": str(MSFT_ID), "symbol": "MSFT"},
+        ],
+        "symbol_set_hash": payload.symbol_set_hash,
+        "source": "alpaca",
+        "feed": "iex",
+        "delivery_mode": "real_time",
+        "include_minute_bars": False,
+        "quote_authority": None,
+        "bars_authority": None,
+        "contract_hash": ALPACA_SNAPSHOT_CONTRACT_HASH,
+    }
+
+
+def test_payload_rejects_cross_source_authority_smuggling() -> None:
+    payload = build_intraday_payload(
+        calendar_authority_id=CALENDAR_ID,
+        session="2026-08-28",
+        bucket=bucket_for(datetime(2026, 8, 28, 14, 30, 29, tzinfo=UTC)),
+        instruments=((AAPL_ID, "AAPL"),),
+        quote_authority=_authority("fosun_get_quotes"),
+        bars_authority=None,
+    ).model_dump(mode="json")
+    payload.update(
+        source="alpaca",
+        feed="iex",
+        delivery_mode="real_time",
+        contract_hash=ALPACA_SNAPSHOT_CONTRACT_HASH,
+    )
+
+    with pytest.raises(ValidationError):
+        IntradaySnapshotJobPayloadV2.model_validate(payload)
+
+
+@pytest.mark.parametrize("missing", ("source", "feed"))
+def test_payload_requires_explicit_source_and_feed(missing: str) -> None:
+    payload = build_intraday_payload(
+        calendar_authority_id=CALENDAR_ID,
+        session="2026-08-28",
+        bucket=bucket_for(datetime(2026, 8, 28, 14, 30, 29, tzinfo=UTC)),
+        instruments=((AAPL_ID, "AAPL"),),
+        quote_authority=_authority("fosun_get_quotes"),
+        bars_authority=None,
+    ).model_dump(mode="json")
+    payload.pop(missing)
+
+    with pytest.raises(ValidationError):
+        IntradaySnapshotJobPayloadV2.model_validate(payload)
 
 
 @pytest.mark.parametrize(

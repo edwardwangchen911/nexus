@@ -9,5 +9,9 @@ def session_factory(settings: EngineSettings) -> async_sessionmaker[AsyncSession
     """Create sessions bound to the configured PostgreSQL database."""
     if settings.database_url is None:
         raise ValueError("database_url is required")
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = create_async_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        isolation_level="READ COMMITTED",
+    )
     return async_sessionmaker(engine, expire_on_commit=False)

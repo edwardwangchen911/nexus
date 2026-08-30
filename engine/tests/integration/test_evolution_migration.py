@@ -155,7 +155,7 @@ async def _seed_legacy_decision(database_url: str) -> UUID:
 def test_0023_precedes_the_broker_simulation_head() -> None:
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0029_fosun_bar_lineage"]
+    assert script.get_heads() == ["0032_ticker_alias_authority"]
     revision = script.get_revision("0023_evolution_authority")
     assert revision is not None
     assert revision.down_revision == "0022_strategy_evolution"
@@ -174,15 +174,9 @@ def test_0023_adds_authority_facts_and_round_trips(
 
     command.upgrade(config, "0023_evolution_authority")
 
-    assert EVOLUTION_AUTHORITY_0023_TABLES <= asyncio.run(
-        _table_names(temporary_database_url)
-    )
-    event_columns = asyncio.run(
-        _columns(temporary_database_url, "strategy_experiment_events")
-    )
-    family_columns = asyncio.run(
-        _columns(temporary_database_url, "strategy_experiment_families")
-    )
+    assert EVOLUTION_AUTHORITY_0023_TABLES <= asyncio.run(_table_names(temporary_database_url))
+    event_columns = asyncio.run(_columns(temporary_database_url, "strategy_experiment_events"))
+    family_columns = asyncio.run(_columns(temporary_database_url, "strategy_experiment_families"))
     assert event_columns["experiment_id"] == "YES"
     assert family_columns["baseline_backtest_run_id"] == "YES"
     constraints = asyncio.run(
@@ -201,9 +195,7 @@ def test_0023_adds_authority_facts_and_round_trips(
         "uq_strategy_registry_activations_event",
         "uq_strategy_registry_activations_hash",
     } <= names
-    definitions = {
-        str(row["conname"]): str(row["definition"]) for row in constraints
-    }
+    definitions = {str(row["conname"]): str(row["definition"]) for row in constraints}
     assert definitions["uq_strategy_oos_exposures_lineage_expression"] == (
         "UNIQUE (research_lineage_id, expression_hash)"
     )
@@ -219,9 +211,7 @@ def test_0023_adds_authority_facts_and_round_trips(
         _columns(temporary_database_url, "strategy_experiment_families")
     )
     command.upgrade(config, "0023_evolution_authority")
-    assert EVOLUTION_AUTHORITY_0023_TABLES <= asyncio.run(
-        _table_names(temporary_database_url)
-    )
+    assert EVOLUTION_AUTHORITY_0023_TABLES <= asyncio.run(_table_names(temporary_database_url))
 
 
 def test_0023_downgrade_refuses_lineage_trial_facts(
@@ -303,8 +293,7 @@ def test_0022_creates_exact_authorities_genesis_and_round_trips(
     constraints = asyncio.run(
         _rows(
             temporary_database_url,
-            "SELECT conname FROM pg_constraint "
-            "WHERE conrelid='strategy_decisions'::regclass",
+            "SELECT conname FROM pg_constraint WHERE conrelid='strategy_decisions'::regclass",
         )
     )
     names = {str(row["conname"]) for row in constraints}

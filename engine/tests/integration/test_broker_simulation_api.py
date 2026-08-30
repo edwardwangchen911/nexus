@@ -9,7 +9,9 @@ from helpers.hmac import (
     TEST_HMAC_SECRET,
     build_test_hmac_headers,
 )
-from nexus.broker_simulation.intents import prepare_execution_intent
+from nexus.api.routes.broker_simulation import _preparation_from_proposal
+from nexus.api.schemas.broker_simulation import BrokerIntentPrepareRequest
+from nexus.broker_simulation.intents import BrokerIntentError, prepare_execution_intent
 from nexus.domain.ids import new_uuid7
 from nexus.main import create_engine_app
 from nexus.persistence.session import session_factory
@@ -48,6 +50,23 @@ def _headers(
     if if_match is not None:
         headers["If-Match"] = if_match
     return headers
+
+
+@pytest.mark.asyncio
+async def test_prepare_rejects_display_only_prices_before_loading_proposal_data() -> None:
+    class _NoQuerySession:
+        async def get(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("display-only price policy must fail before database lookup")
+
+    with pytest.raises(BrokerIntentError, match="^PRICE_AUTHORITY_UNAVAILABLE$"):
+        await _preparation_from_proposal(
+            _NoQuerySession(),  # type: ignore[arg-type]
+            payload=BrokerIntentPrepareRequest(
+                proposal_group_id="00000000-0000-0000-0000-000000000001",
+                proposal_id="00000000-0000-0000-0000-000000000002",
+            ),
+            now=_NOW,
+        )
 
 
 def test_broker_simulation_openapi_is_exact_and_closed() -> None:

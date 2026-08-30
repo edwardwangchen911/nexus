@@ -29,7 +29,13 @@ from read_only_transport_cases import (
     test_replay_cache_capacity_rejects_churn_without_evicting_live_nonce as test_replay_cache_capacity_rejects_churn_without_evicting_live_nonce,  # noqa: E501
 )
 from read_only_transport_cases import (
+    test_replay_capacity_is_reserved_independently_per_hmac_key as test_replay_capacity_is_reserved_independently_per_hmac_key,  # noqa: E501
+)
+from read_only_transport_cases import (
     test_restart_drain_rejects_requests_until_old_signatures_are_stale as test_restart_drain_rejects_requests_until_old_signatures_are_stale,  # noqa: E501
+)
+from read_only_transport_cases import (
+    test_unauthorized_operation_does_not_consume_principal_replay_quota as test_unauthorized_operation_does_not_consume_principal_replay_quota,  # noqa: E501
 )
 from read_only_transport_cases import (
     test_unverified_request_id_header_is_not_reflected as test_unverified_request_id_header_is_not_reflected,  # noqa: E501

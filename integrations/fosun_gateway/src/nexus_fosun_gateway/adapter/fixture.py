@@ -23,12 +23,24 @@ class FixtureFosunTransport:
 
     def __init__(self, fixture_dir: Path | None = None) -> None:
         self._fixture_dir = fixture_dir
+        self._closed = False
+
+    def is_ready(self) -> bool:
+        return not self._closed
+
+    def readiness_expires_at(self) -> datetime | None:
+        return None
+
+    async def aclose(self) -> None:
+        self._closed = True
 
     async def execute(
         self,
         operation: GatewayOperation,
         payload: Mapping[str, object],
     ) -> GatewayPage[GatewayItem]:
+        if self._closed:
+            raise RuntimeError("FIXTURE_TRANSPORT_CLOSED")
         fixture_case = payload.get("fixture_case")
         if self._fixture_dir is not None and isinstance(fixture_case, str):
             if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", fixture_case) is None:

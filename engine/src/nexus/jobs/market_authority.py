@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.time import require_utc
@@ -126,6 +128,25 @@ async def load_frozen_fosun_market_authority(
         capability_invalidated_at=admission.capability_invalidated_at,
         contract_hash=admission.contract_hash,
     )
+
+
+async def acquire_fosun_market_authority_locks(
+    session: AsyncSession,
+    authorities: Sequence[FrozenFosunMarketAuthority],
+) -> None:
+    """Serialize frozen reads with capability-scope and status mutations."""
+    if not authorities:
+        raise ValueError("at least one Fosun market authority is required")
+    for operation in sorted({authority.operation for authority in authorities}):
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": (f"provider-capability-scope:v1:fosun:READ_ONLY:{operation}:US")},
+        )
+    for status_id in sorted({str(authority.status_id) for authority in authorities}):
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"fosun-integration-status:{status_id}"},
+        )
 
 
 def binding_at(

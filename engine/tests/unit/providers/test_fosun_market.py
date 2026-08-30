@@ -1,5 +1,6 @@
 """Provider-owned Fosun market normalization and PIT symbol authority."""
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -555,6 +556,123 @@ async def test_post_read_drift_returns_partial_exact_evidence_and_stops_calls() 
     assert evidence[0][0] == ("usAAPL",)
     assert evidence[0][1].raw_payload == gateway.bar_payload
     assert [call["code"] for call in gateway.bar_calls] == ["usAAPL"]
+    assert gateway.quote_calls == []
+
+
+@pytest.mark.asyncio
+async def test_guard_failure_after_read_returns_partial_exact_evidence() -> None:
+    class _FailingGuard(_ReadGuard):
+        async def after_read(
+            self,
+            operation: str,
+            instrument_codes: tuple[str, ...],
+            response: RawGatewayResponse,
+        ) -> bool:
+            await super().after_read(operation, instrument_codes, response)
+            raise RuntimeError("synthetic database outage")
+
+    gateway = _gateway(bar_timestamp=datetime(2026, 8, 29, 14, 29, tzinfo=UTC))
+    provider = FosunSnapshotProvider(
+        gateway,
+        symbol_resolver=_Resolver(),
+        delivery_mode="unknown",
+    )
+
+    with pytest.raises(FosunSnapshotReadAborted) as raised:
+        await provider.fetch_raw_snapshots(
+            _snapshot_request(
+                bucket_start=datetime(2026, 8, 29, 14, 30, tzinfo=UTC),
+                include_minute_bars=True,
+            ),
+            read_guard=_FailingGuard(),
+        )
+
+    assert raised.value.result_code == "INTRADAY_AUTHORITY_REVALIDATION_FAILED"
+    assert raised.value.envelope is not None
+    evidence = decode_fosun_snapshot_evidence(raised.value.envelope.raw_payload)
+    assert [(codes, response.operation) for codes, response in evidence] == [
+        (("usAAPL",), "fosun_get_bars")
+    ]
+    assert [call["code"] for call in gateway.bar_calls] == ["usAAPL"]
+    assert gateway.quote_calls == []
+
+
+@pytest.mark.asyncio
+async def test_guard_failure_before_next_read_returns_prior_exact_evidence() -> None:
+    class _FailingGuard(_ReadGuard):
+        before_count = 0
+
+        async def before_read(
+            self,
+            operation: str,
+            instrument_codes: tuple[str, ...],
+        ) -> bool:
+            self.before_count += 1
+            if self.before_count == 2:
+                raise RuntimeError("synthetic database outage")
+            return await super().before_read(operation, instrument_codes)
+
+    gateway = _gateway(bar_timestamp=datetime(2026, 8, 29, 14, 29, tzinfo=UTC))
+    provider = FosunSnapshotProvider(
+        gateway,
+        symbol_resolver=_Resolver(),
+        delivery_mode="unknown",
+    )
+
+    with pytest.raises(FosunSnapshotReadAborted) as raised:
+        await provider.fetch_raw_snapshots(
+            _snapshot_request(
+                bucket_start=datetime(2026, 8, 29, 14, 30, tzinfo=UTC),
+                include_minute_bars=True,
+            ),
+            read_guard=_FailingGuard(),
+        )
+
+    assert raised.value.result_code == "INTRADAY_AUTHORITY_REVALIDATION_FAILED"
+    assert raised.value.envelope is not None
+    evidence = decode_fosun_snapshot_evidence(raised.value.envelope.raw_payload)
+    assert [(codes, response.operation) for codes, response in evidence] == [
+        (("usAAPL",), "fosun_get_bars")
+    ]
+    assert [call["code"] for call in gateway.bar_calls] == ["usAAPL"]
+    assert gateway.quote_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancellation_returns_every_already_received_bar_response() -> None:
+    gateway = _gateway(bar_timestamp=datetime(2026, 8, 29, 14, 29, tzinfo=UTC))
+    original_read_bars = gateway.read_bars_raw
+    attempts = 0
+
+    async def cancel_second_read(**kwargs: object) -> RawGatewayResponse:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise asyncio.CancelledError
+        return await original_read_bars(**kwargs)
+
+    gateway.read_bars_raw = cancel_second_read  # type: ignore[method-assign]
+    provider = FosunSnapshotProvider(
+        gateway,
+        symbol_resolver=_Resolver(),
+        delivery_mode="unknown",
+    )
+
+    with pytest.raises(FosunSnapshotReadAborted) as raised:
+        await provider.fetch_raw_snapshots(
+            _snapshot_request(
+                bucket_start=datetime(2026, 8, 29, 14, 30, tzinfo=UTC),
+                include_minute_bars=True,
+            )
+        )
+
+    assert raised.value.result_code == "INTRADAY_SNAPSHOT_READ_CANCELLED"
+    assert raised.value.envelope is not None
+    evidence = decode_fosun_snapshot_evidence(raised.value.envelope.raw_payload)
+    assert [(codes, response.operation) for codes, response in evidence] == [
+        (("usAAPL",), "fosun_get_bars")
+    ]
+    assert attempts == 2
     assert gateway.quote_calls == []
 
 

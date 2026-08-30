@@ -16,12 +16,14 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nexus.domain.ids import new_uuid7
+from nexus.market.limits import FOSUN_DAILY_MAX_INSTRUMENTS
 from nexus.persistence.base import Base, ImmutableCreatedAt, UTCDateTime
 
 
@@ -124,6 +126,145 @@ class DataArtifact(ImmutableCreatedAt, Base):
     observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
     available_at: Mapped[datetime] = mapped_column(UTCDateTime())
     received_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class FosunDailyBarStaging(ImmutableCreatedAt, Base):
+    """Append-only reservation and fetched-raw records for one daily shard."""
+
+    __tablename__ = "fosun_daily_bar_staging"
+    __table_args__ = (
+        UniqueConstraint(
+            "fetch_job_id",
+            "record_kind",
+            name="uq_fosun_daily_staging_fetch_kind",
+        ),
+        UniqueConstraint(
+            "root_job_id",
+            "instrument_id",
+            "record_kind",
+            name="uq_fosun_daily_staging_root_instrument_kind",
+        ),
+        CheckConstraint(
+            "record_kind IN ('reservation','fetched')",
+            name="record_kind_allowed",
+        ),
+        CheckConstraint(
+            "schema_version = 'fosun_daily_staging_v1'",
+            name="schema_version_allowed",
+        ),
+        CheckConstraint(
+            "child_input_hash ~ '^[0-9a-f]{64}$' AND universe_content_hash ~ '^[0-9a-f]{64}$'",
+            name="hashes_canonical",
+        ),
+        CheckConstraint(
+            "ordinal >= 0 AND total_instruments BETWEEN 1 AND "
+            f"{FOSUN_DAILY_MAX_INSTRUMENTS} AND ordinal < total_instruments",
+            name="shard_bounds",
+        ),
+        CheckConstraint(
+            "request_start_at < request_end_at",
+            name="request_window_order",
+        ),
+        CheckConstraint(
+            "(record_kind = 'reservation' AND "
+            "num_nonnulls(raw_artifact_id,raw_artifact_identity_sha256,gateway_request_id,request_body_sha256,"
+            "sent_at,received_at,provider_capability_id,provider_status_id,"
+            "provider_status_version,provider_contract_hash,provider_authorized_at,"
+            "delivery_mode) = 0) OR "
+            "(record_kind = 'fetched' AND "
+            "num_nonnulls(raw_artifact_id,raw_artifact_identity_sha256,gateway_request_id,request_body_sha256,"
+            "sent_at,received_at,provider_capability_id,provider_status_id,"
+            "provider_status_version,provider_contract_hash,provider_authorized_at,"
+            "delivery_mode) = 12)",
+            name="record_shape",
+        ),
+        CheckConstraint(
+            "raw_artifact_identity_sha256 IS NULL OR "
+            "raw_artifact_identity_sha256 ~ '^[0-9a-f]{64}$'",
+            name="raw_artifact_identity_hash_canonical",
+        ),
+        CheckConstraint(
+            "request_body_sha256 IS NULL OR request_body_sha256 ~ '^[0-9a-f]{64}$'",
+            name="request_hash_canonical",
+        ),
+        CheckConstraint(
+            "provider_contract_hash IS NULL OR provider_contract_hash ~ '^[0-9a-f]{64}$'",
+            name="contract_hash_canonical",
+        ),
+        CheckConstraint(
+            "provider_status_version IS NULL OR provider_status_version > 0",
+            name="status_version_positive",
+        ),
+        CheckConstraint(
+            "delivery_mode IS NULL OR delivery_mode IN ('unknown','real_time','delayed')",
+            name="delivery_mode_allowed",
+        ),
+        CheckConstraint(
+            "sent_at IS NULL OR (received_at >= sent_at AND provider_authorized_at >= received_at)",
+            name="transport_time_order",
+        ),
+        Index("ix_fosun_daily_staging_root", "root_job_id", "record_kind"),
+        Index("ix_fosun_daily_staging_artifact", "raw_artifact_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
+    root_job_id: Mapped[UUID] = mapped_column(
+        ForeignKey("jobs.id", name="fk_fosun_daily_staging_root_job")
+    )
+    # Deliberately not an FK: the worker holds a row lock on its Job while the
+    # independently committed reservation is inserted. The RLS policy and
+    # handler validate this identity against jobs without taking an FK key lock.
+    fetch_job_id: Mapped[UUID]
+    instrument_id: Mapped[UUID] = mapped_column(
+        ForeignKey("instruments.id", name="fk_fosun_daily_staging_instrument")
+    )
+    record_kind: Mapped[str] = mapped_column(String(20))
+    schema_version: Mapped[str] = mapped_column(String(32))
+    child_input_hash: Mapped[str] = mapped_column(String(64))
+    calendar_authority_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "exchange_calendar_authorities.id",
+            name="fk_fosun_daily_staging_calendar",
+        )
+    )
+    universe_snapshot_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "universe_snapshots.id",
+            name="fk_fosun_daily_staging_universe",
+        )
+    )
+    universe_content_hash: Mapped[str] = mapped_column(String(64))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    total_instruments: Mapped[int] = mapped_column(Integer)
+    recorded_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.clock_timestamp()
+    )
+    request_start_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    request_end_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    raw_artifact_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("data_artifacts.id", name="fk_fosun_daily_staging_raw_artifact")
+    )
+    raw_artifact_identity_sha256: Mapped[str | None] = mapped_column(String(64))
+    gateway_request_id: Mapped[UUID | None]
+    request_body_sha256: Mapped[str | None] = mapped_column(String(64))
+    sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    received_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    provider_capability_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "provider_capabilities.id",
+            name="fk_fosun_daily_staging_provider_capability",
+        )
+    )
+    provider_status_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "integration_status.id",
+            name="fk_fosun_daily_staging_provider_status",
+        )
+    )
+    provider_status_version: Mapped[int | None] = mapped_column(Integer)
+    provider_contract_hash: Mapped[str | None] = mapped_column(String(64))
+    provider_authorized_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    delivery_mode: Mapped[str | None] = mapped_column(String(20))
 
 
 class PriceSeriesManifest(ImmutableCreatedAt, Base):
@@ -348,9 +489,7 @@ class IntradayBarSetAuthority(ImmutableCreatedAt, Base):
             ],
             name="fk_intraday_bar_set_authorities_evidence_owner",
         ),
-        UniqueConstraint(
-            "price_series_manifest_id", name="uq_intraday_bar_set_authority_manifest"
-        ),
+        UniqueConstraint("price_series_manifest_id", name="uq_intraday_bar_set_authority_manifest"),
         UniqueConstraint("evidence_ref_id", name="uq_intraday_bar_set_authority_evidence"),
         UniqueConstraint(
             "id",
@@ -368,16 +507,12 @@ class IntradayBarSetAuthority(ImmutableCreatedAt, Base):
         CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_canonical"),
         CheckConstraint("byte_length > 0", name="byte_length_positive"),
         CheckConstraint("bar_count BETWEEN 1 AND 90", name="bar_count_bounded"),
-        CheckConstraint(
-            "first_observed_at <= last_observed_at", name="observation_time_ordered"
-        ),
+        CheckConstraint("first_observed_at <= last_observed_at", name="observation_time_ordered"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
     price_series_manifest_id: Mapped[UUID] = mapped_column(
-        ForeignKey(
-            "price_series_manifests.id", name="fk_intraday_bar_set_authorities_manifest"
-        )
+        ForeignKey("price_series_manifests.id", name="fk_intraday_bar_set_authorities_manifest")
     )
     evidence_ref_id: Mapped[UUID]
     source_policy_id: Mapped[UUID] = mapped_column(
@@ -386,12 +521,8 @@ class IntradayBarSetAuthority(ImmutableCreatedAt, Base):
     source: Mapped[str] = mapped_column(String(100))
     provider_object_id: Mapped[str] = mapped_column(String(255))
     revision: Mapped[str] = mapped_column(String(255))
-    hash_version: Mapped[str] = mapped_column(
-        String(64), default="intraday_bar_set_sha256_v1"
-    )
-    policy_version: Mapped[str] = mapped_column(
-        String(64), default="intraday_monitor_authority_v1"
-    )
+    hash_version: Mapped[str] = mapped_column(String(64), default="intraday_bar_set_sha256_v1")
+    policy_version: Mapped[str] = mapped_column(String(64), default="intraday_monitor_authority_v1")
     content_hash: Mapped[str] = mapped_column(String(64))
     byte_length: Mapped[int] = mapped_column(BigInteger)
     bar_count: Mapped[int] = mapped_column(Integer)

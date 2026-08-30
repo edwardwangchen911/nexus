@@ -8,18 +8,26 @@ from datetime import datetime, timedelta
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.ids import new_uuid7
 from nexus.evolution.jobs import StrategyRNDJobPayloadV1, enqueue_strategy_rnd_job
 from nexus.jobs.daily_payloads import (
+    FOSUN_DAILY_INSTRUMENT_SCHEMA,
+    FOSUN_DAILY_MAX_INSTRUMENTS,
+    FOSUN_DAILY_PUBLISH_SCHEMA,
     PROFILE_PATTERN,
     ROOT_SCHEMA,
     STAGE_SCHEMA,
     DailyPipelinePayload,
     DailyStagePayload,
+    FosunDailyChildRef,
+    FosunDailyInstrumentPayload,
+    FosunDailyPublishPayload,
     format_utc,
+    instrument_alias_identity_sha256,
+    is_canonical_us_ticker_symbol,
     parse_utc,
 )
 from nexus.jobs.daily_schedule import build_daily_session_schedule
@@ -42,11 +50,18 @@ from nexus.jobs.registry import (
     JobRegistry,
 )
 from nexus.jobs.repository import JobDependencyInput, enqueue_job
+from nexus.market.scope import US_EQUITY_EXCHANGES
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
 )
-from nexus.persistence.models.market import UniverseSnapshot
+from nexus.persistence.models.market import (
+    Instrument,
+    InstrumentAlias,
+    UniverseMember,
+    UniverseSnapshot,
+)
 from nexus.persistence.models.runtime import Job, JobDependency
 
 DailyStageExecutor = Callable[
@@ -70,6 +85,23 @@ DailyTargetResolver = Callable[
     Awaitable[DailyTargetSet],
 ]
 
+_FOSUN_DAILY_SHARD_SPACING = timedelta(seconds=7)
+
+
+async def assert_daily_pipeline_schema_ready(session: AsyncSession) -> None:
+    """Fence daily scheduling and claims against schema rollback."""
+    await session.execute(
+        text(
+            "SELECT pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended(:key, 0))"
+        ),
+        {"key": SCHEMA_ADMISSION_LOCK_KEY},
+    )
+    head = await session.scalar(
+        text("SELECT CASE WHEN COUNT(*) = 1 THEN MIN(version_num) END FROM public.alembic_version")
+    )
+    if head != CURRENT_MIGRATION_HEAD:
+        raise RuntimeError("DAILY_PIPELINE_DATABASE_HEAD_MISMATCH")
+
 
 async def schedule_due_daily_pipeline(
     session: AsyncSession,
@@ -82,6 +114,7 @@ async def schedule_due_daily_pipeline(
     now = parse_utc(format_utc(now))
     if PROFILE_PATTERN.fullmatch(profile_id) is None:
         raise ValueError("daily pipeline profile_id is invalid")
+    await assert_daily_pipeline_schema_ready(session)
     calendar = await session.scalar(
         select(ExchangeCalendarSessionRecord)
         .join(
@@ -93,8 +126,7 @@ async def schedule_due_daily_pipeline(
             ExchangeCalendarAuthorityRecord.exchange == "XNYS",
             ExchangeCalendarAuthorityRecord.completeness_status == "complete",
             ExchangeCalendarAuthorityRecord.published_at <= now,
-            ExchangeCalendarSessionRecord.market_close_at
-            <= now - timedelta(minutes=30),
+            ExchangeCalendarSessionRecord.market_close_at <= now - timedelta(minutes=30),
         )
         .order_by(
             ExchangeCalendarSessionRecord.market_close_at.desc(),
@@ -108,8 +140,7 @@ async def schedule_due_daily_pipeline(
     next_session = await session.scalar(
         select(ExchangeCalendarSessionRecord.session)
         .where(
-            ExchangeCalendarSessionRecord.calendar_authority_id
-            == calendar.calendar_authority_id,
+            ExchangeCalendarSessionRecord.calendar_authority_id == calendar.calendar_authority_id,
             ExchangeCalendarSessionRecord.session > calendar.session,
         )
         .order_by(ExchangeCalendarSessionRecord.session)
@@ -124,6 +155,50 @@ async def schedule_due_daily_pipeline(
     )
     if schedule is None:
         return None
+    root_scope_id = f"XNYS.{schedule.session.isoformat()}"
+    logical_identity = ":".join(("daily-pipeline-root", root_scope_id, profile_id, market_source))
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:identity, 0))"),
+        {"identity": logical_identity},
+    )
+    existing_roots = tuple(
+        (
+            await session.scalars(
+                select(Job)
+                .where(
+                    Job.job_type == JobType.DAILY_PIPELINE.value,
+                    Job.payload["session"].as_string() == schedule.session.isoformat(),
+                    Job.payload["profile_id"].as_string() == profile_id,
+                    Job.payload["market_source"].as_string() == market_source,
+                )
+                .order_by(Job.created_at, Job.id)
+                .limit(2)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+    )
+    if len(existing_roots) > 1:
+        raise RuntimeError("daily pipeline logical root is duplicated")
+    if existing_roots:
+        existing = existing_roots[0]
+        try:
+            frozen_payload = DailyPipelinePayload.model_validate(existing.payload)
+        except ValueError as error:
+            raise RuntimeError("daily pipeline logical root is invalid") from error
+        if (
+            existing.schema_version != ROOT_SCHEMA
+            or existing.queue != QueueName.GENERAL.value
+            or existing.scope_kind != "global"
+            or existing.scope_id != root_scope_id
+            or existing.effective_at != schedule.planned_at
+            or existing.retry_policy != RetryPolicy.AUTOMATIC_SAFE.value
+            or existing.max_attempts != 3
+            or frozen_payload.session != schedule.session.isoformat()
+            or frozen_payload.profile_id != profile_id
+            or frozen_payload.market_source != market_source
+        ):
+            raise RuntimeError("daily pipeline logical root is invalid")
+        return existing
     universe = await session.scalar(
         select(UniverseSnapshot)
         .where(
@@ -171,7 +246,7 @@ async def schedule_due_daily_pipeline(
         key=JobKeyV1(
             job_type=JobType.DAILY_PIPELINE,
             scope_kind="global",
-            scope_id=f"XNYS.{schedule.session.isoformat()}",
+            scope_id=root_scope_id,
             effective_at=schedule.planned_at,
             input_hash=job_input_hash(document),
         ),
@@ -204,9 +279,7 @@ def build_daily_pipeline_registry(
             context,
             payload,
             enabled_stage_types=(
-                _GENERAL_STAGE_TYPES
-                if enabled_stage_types is None
-                else enabled_stage_types
+                _GENERAL_STAGE_TYPES if enabled_stage_types is None else enabled_stage_types
             ),
             target_resolver=target_resolver,
         )
@@ -225,9 +298,7 @@ def build_daily_pipeline_registry(
             handler=materialize,
         )
     ]
-    registered_stages = (
-        _GENERAL_STAGE_TYPES if enabled_stage_types is None else enabled_stage_types
-    )
+    registered_stages = _GENERAL_STAGE_TYPES if enabled_stage_types is None else enabled_stage_types
     provided_specs = {spec.job_type: spec for spec in stage_specs}
     if len(provided_specs) != len(stage_specs):
         raise ValueError("duplicate daily stage handler")
@@ -240,9 +311,7 @@ def build_daily_pipeline_registry(
             or spec.payload_model is not DailyStagePayload
             or spec.queue
             is not (
-                QueueName.PROVIDER
-                if spec.job_type in PROVIDER_JOB_TYPES
-                else QueueName.GENERAL
+                QueueName.PROVIDER if spec.job_type in PROVIDER_JOB_TYPES else QueueName.GENERAL
             )
         ):
             raise ValueError("daily stage handler authority is invalid")
@@ -273,11 +342,7 @@ def build_daily_pipeline_registry(
                 job_type=job_type,
                 schema_version=STAGE_SCHEMA,
                 payload_model=DailyStagePayload,
-                queue=(
-                    QueueName.PROVIDER
-                    if job_type in PROVIDER_JOB_TYPES
-                    else QueueName.GENERAL
-                ),
+                queue=(QueueName.PROVIDER if job_type in PROVIDER_JOB_TYPES else QueueName.GENERAL),
                 timeout_seconds=45,
                 retry_policy=RetryPolicy.AUTOMATIC_SAFE,
                 max_attempts=3,
@@ -304,6 +369,7 @@ _GENERAL_STAGE_TYPES = frozenset(
         JobType.AUDIT_MANIFEST,
     }
 )
+
 
 async def _materialize_daily_dag(
     context: JobHandlerContext,
@@ -332,14 +398,11 @@ async def _materialize_daily_dag(
         finished_at=context.finished_at(),
         result_code="SKIPPED_CAPABILITY",
     )
-    market = await _enqueue_or_skip_stage(
-        context.session,
+    market = await _enqueue_daily_market(
+        context,
         root=root,
-        root_job_id=context.claim.job_id,
-        job_type=JobType.COLLECT_MARKET,
         dependencies=root_dependency,
         enabled_stage_types=enabled_stage_types,
-        finished_at=context.finished_at(),
     )
     sec_macro = await _enqueue_or_skip_stage(
         context.session,
@@ -425,10 +488,7 @@ async def _materialize_daily_dag(
         target_ids=targets.performance,
         dependencies=(
             JobDependencyInput(quality.id, "succeeded_or_skipped"),
-            *(
-                JobDependencyInput(job.id, "succeeded_or_skipped")
-                for job in shadow_nodes
-            ),
+            *(JobDependencyInput(job.id, "succeeded_or_skipped") for job in shadow_nodes),
             JobDependencyInput(
                 optimization.id if admission is None else admission.id,
                 "succeeded_or_skipped",
@@ -444,10 +504,7 @@ async def _materialize_daily_dag(
         dependencies=(
             JobDependencyInput(quality.id, "succeeded_or_skipped"),
             JobDependencyInput(research.id, "succeeded_or_skipped"),
-            *(
-                JobDependencyInput(job.id, "succeeded_or_skipped")
-                for job in performance_nodes
-            ),
+            *(JobDependencyInput(job.id, "succeeded_or_skipped") for job in performance_nodes),
         ),
         enabled_stage_types=enabled_stage_types,
         finished_at=context.finished_at(),
@@ -472,8 +529,7 @@ async def _materialize_daily_dag(
         root_job_id=context.claim.job_id,
         job_type=JobType.AUDIT_MANIFEST,
         dependencies=tuple(
-            JobDependencyInput(job.id, "succeeded_or_skipped")
-            for job in audit_parents
+            JobDependencyInput(job.id, "succeeded_or_skipped") for job in audit_parents
         ),
         enabled_stage_types=enabled_stage_types,
         finished_at=context.finished_at(),
@@ -485,6 +541,229 @@ async def _materialize_daily_dag(
             effective_at=parse_utc(root.planned_at),
             dependencies=(JobDependencyInput(audit.id, "succeeded_or_skipped"),),
         )
+
+
+async def _enqueue_daily_market(
+    context: JobHandlerContext,
+    *,
+    root: DailyPipelinePayload,
+    dependencies: Sequence[JobDependencyInput],
+    enabled_stage_types: frozenset[JobType],
+) -> Job:
+    """Materialize Fosun as single-call shards; keep other sources unchanged."""
+    if (
+        root.market_source != "fosun"
+        or root.market_authority is None
+        or root.universe_snapshot_id is None
+        or root.universe_content_hash is None
+        or JobType.COLLECT_MARKET not in enabled_stage_types
+    ):
+        return await _enqueue_or_skip_stage(
+            context.session,
+            root=root,
+            root_job_id=context.claim.job_id,
+            job_type=JobType.COLLECT_MARKET,
+            dependencies=dependencies,
+            enabled_stage_types=enabled_stage_types,
+            finished_at=context.finished_at(),
+        )
+
+    snapshot = await context.session.get(
+        UniverseSnapshot,
+        UUID(root.universe_snapshot_id),
+    )
+    session_date = datetime.fromisoformat(root.session).date()
+    planned_at = parse_utc(root.planned_at)
+    if (
+        snapshot is None
+        or snapshot.content_hash != root.universe_content_hash
+        or snapshot.effective_from > session_date
+        or snapshot.published_at is None
+        or snapshot.published_at > planned_at
+    ):
+        return await _record_terminal_skip(
+            context.session,
+            root=root,
+            root_job_id=context.claim.job_id,
+            job_type=JobType.COLLECT_MARKET,
+            dependencies=dependencies,
+            finished_at=context.finished_at(),
+            result_code="FROZEN_UNIVERSE_MISMATCH",
+        )
+    instruments = tuple(
+        (
+            await context.session.scalars(
+                select(Instrument)
+                .join(UniverseMember, UniverseMember.instrument_id == Instrument.id)
+                .where(
+                    UniverseMember.universe_snapshot_id == snapshot.id,
+                    Instrument.currency == "USD",
+                    Instrument.exchange.in_(US_EQUITY_EXCHANGES),
+                )
+                .order_by(Instrument.id)
+                .limit(FOSUN_DAILY_MAX_INSTRUMENTS + 1)
+            )
+        ).all()
+    )
+    if not instruments or len(instruments) > FOSUN_DAILY_MAX_INSTRUMENTS:
+        return await _record_terminal_skip(
+            context.session,
+            root=root,
+            root_job_id=context.claim.job_id,
+            job_type=JobType.COLLECT_MARKET,
+            dependencies=dependencies,
+            finished_at=context.finished_at(),
+            result_code=(
+                "FROZEN_UNIVERSE_EMPTY" if not instruments else "FROZEN_UNIVERSE_TOO_LARGE"
+            ),
+        )
+
+    alias_rows = tuple(
+        (
+            await context.session.scalars(
+                select(InstrumentAlias)
+                .where(
+                    InstrumentAlias.instrument_id.in_(item.id for item in instruments),
+                    InstrumentAlias.alias_type == "ticker",
+                    InstrumentAlias.valid_from <= session_date,
+                    or_(
+                        InstrumentAlias.valid_to.is_(None),
+                        InstrumentAlias.valid_to >= session_date,
+                    ),
+                )
+                .order_by(InstrumentAlias.instrument_id, InstrumentAlias.id)
+            )
+        ).all()
+    )
+    aliases_by_instrument: dict[UUID, list[InstrumentAlias]] = {}
+    for alias in alias_rows:
+        aliases_by_instrument.setdefault(alias.instrument_id, []).append(alias)
+    if (
+        any(len(aliases_by_instrument.get(item.id, ())) != 1 for item in instruments)
+        or len({alias.symbol.upper() for alias in alias_rows}) != len(instruments)
+        or any(not is_canonical_us_ticker_symbol(alias.symbol) for alias in alias_rows)
+    ):
+        return await _record_terminal_skip(
+            context.session,
+            root=root,
+            root_job_id=context.claim.job_id,
+            job_type=JobType.COLLECT_MARKET,
+            dependencies=dependencies,
+            finished_at=context.finished_at(),
+            result_code="FROZEN_INSTRUMENT_ALIAS_INVALID",
+        )
+
+    # Anchor at materialization time, not the possibly stale root planned_at. Seven
+    # seconds yields at most nine daily calls in any half-open rolling 60s window.
+    anchor = parse_utc(format_utc(context.finished_at()))
+    child_jobs: list[Job] = []
+    child_refs: list[FosunDailyChildRef] = []
+    for ordinal, instrument in enumerate(instruments):
+        alias = aliases_by_instrument[instrument.id][0]
+        alias_identity = instrument_alias_identity_sha256(
+            alias_id=str(alias.id),
+            instrument_id=str(alias.instrument_id),
+            symbol=alias.symbol,
+            alias_type=alias.alias_type,
+            valid_from=alias.valid_from,
+            valid_to=alias.valid_to,
+            created_at=alias.created_at,
+        )
+        available_at = anchor + ordinal * _FOSUN_DAILY_SHARD_SPACING
+        payload = FosunDailyInstrumentPayload(
+            root_job_id=str(context.claim.job_id),
+            calendar_authority_id=root.calendar_authority_id,
+            session=root.session,
+            market_close_at=root.market_close_at,
+            scheduled_for=format_utc(available_at),
+            profile_id=root.profile_id,
+            universe_snapshot_id=root.universe_snapshot_id,
+            universe_content_hash=root.universe_content_hash,
+            instrument_id=str(instrument.id),
+            instrument_alias_id=str(alias.id),
+            instrument_symbol=alias.symbol,
+            instrument_alias_identity_sha256=alias_identity,
+            ordinal=ordinal,
+            total_instruments=len(instruments),
+            market_authority=root.market_authority,
+        ).model_dump(mode="json")
+        authority_hash = job_input_hash(
+            {
+                "payload": payload,
+                "dependencies": sorted(
+                    (str(item.depends_on_job_id), item.required_outcome) for item in dependencies
+                ),
+            }
+        )
+        child = await enqueue_job(
+            context.session,
+            key=JobKeyV1(
+                job_type=JobType.COLLECT_FOSUN_DAILY_INSTRUMENT,
+                scope_kind="instrument",
+                scope_id=str(instrument.id),
+                effective_at=available_at,
+                input_hash=authority_hash,
+            ),
+            schema_version=FOSUN_DAILY_INSTRUMENT_SCHEMA,
+            payload=payload,
+            queue=QueueName.PROVIDER,
+            retry_policy=RetryPolicy.NEVER,
+            max_attempts=1,
+            available_at=available_at,
+            dependencies=dependencies,
+        )
+        child_jobs.append(child)
+        child_refs.append(
+            FosunDailyChildRef(
+                job_id=str(child.id),
+                instrument_id=str(instrument.id),
+                instrument_alias_id=str(alias.id),
+                instrument_symbol=alias.symbol,
+                instrument_alias_identity_sha256=alias_identity,
+                input_hash=authority_hash,
+                ordinal=ordinal,
+            )
+        )
+
+    publish_dependencies = tuple(JobDependencyInput(child.id, "succeeded") for child in child_jobs)
+    publish_payload = FosunDailyPublishPayload(
+        root_job_id=str(context.claim.job_id),
+        calendar_authority_id=root.calendar_authority_id,
+        session=root.session,
+        market_close_at=root.market_close_at,
+        scheduled_for=format_utc(anchor),
+        profile_id=root.profile_id,
+        universe_snapshot_id=root.universe_snapshot_id,
+        universe_content_hash=root.universe_content_hash,
+        market_authority=root.market_authority,
+        children=tuple(child_refs),
+    ).model_dump(mode="json")
+    publish_hash = job_input_hash(
+        {
+            "payload": publish_payload,
+            "dependencies": sorted(
+                (str(item.depends_on_job_id), item.required_outcome)
+                for item in publish_dependencies
+            ),
+        }
+    )
+    return await enqueue_job(
+        context.session,
+        key=JobKeyV1(
+            job_type=JobType.PUBLISH_FOSUN_DAILY,
+            scope_kind="global",
+            scope_id=f"XNYS.{root.session}",
+            effective_at=anchor,
+            input_hash=publish_hash,
+        ),
+        schema_version=FOSUN_DAILY_PUBLISH_SCHEMA,
+        payload=publish_payload,
+        queue=QueueName.PROVIDER,
+        retry_policy=RetryPolicy.AUTOMATIC_SAFE,
+        max_attempts=3,
+        available_at=child_jobs[-1].available_at,
+        dependencies=publish_dependencies,
+    )
 
 
 async def _enqueue_or_skip_stage(
@@ -627,9 +906,7 @@ async def _enqueue_stage(
     scheduled_for: datetime | None = None,
     target_id: UUID | None = None,
 ) -> Job:
-    effective_at = (
-        parse_utc(root.planned_at) if scheduled_for is None else scheduled_for
-    )
+    effective_at = parse_utc(root.planned_at) if scheduled_for is None else scheduled_for
     payload = _stage_payload(
         root=root,
         root_job_id=root_job_id,
@@ -639,9 +916,7 @@ async def _enqueue_stage(
     dependency_authority = sorted(
         (str(item.depends_on_job_id), item.required_outcome) for item in dependencies
     )
-    authority_hash = job_input_hash(
-        {"payload": payload, "dependencies": dependency_authority}
-    )
+    authority_hash = job_input_hash({"payload": payload, "dependencies": dependency_authority})
     queue = (
         QueueName.STRATEGY_RND
         if job_type is JobType.STRATEGY_RND
@@ -654,9 +929,7 @@ async def _enqueue_stage(
         key=JobKeyV1(
             job_type=job_type,
             scope_kind="global" if target_id is None else "portfolio",
-            scope_id=(
-                f"XNYS.{root.session}" if target_id is None else str(target_id)
-            ),
+            scope_id=(f"XNYS.{root.session}" if target_id is None else str(target_id)),
             effective_at=effective_at,
             input_hash=authority_hash,
         ),
@@ -683,9 +956,7 @@ async def _record_terminal_skip(
     target_id: UUID | None = None,
 ) -> Job:
     """Record a scheduler-known skip without claiming a disabled queue."""
-    effective_at = (
-        parse_utc(root.planned_at) if scheduled_for is None else scheduled_for
-    )
+    effective_at = parse_utc(root.planned_at) if scheduled_for is None else scheduled_for
     finished_at = parse_utc(format_utc(finished_at))
     payload = _stage_payload(
         root=root,
@@ -697,8 +968,7 @@ async def _record_terminal_skip(
         {
             "payload": payload,
             "dependencies": sorted(
-                (str(item.depends_on_job_id), item.required_outcome)
-                for item in dependencies
+                (str(item.depends_on_job_id), item.required_outcome) for item in dependencies
             ),
             "result_code": result_code,
         }

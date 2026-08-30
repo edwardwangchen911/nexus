@@ -71,6 +71,7 @@ from nexus.persistence.models.optimization import (
 )
 from nexus.persistence.models.portfolio import CashSnapshot, PositionSnapshot
 from nexus.persistence.models.runtime import IdempotencyRecord
+from nexus.quality.source_policy import current_paper_order_price_authority_available
 from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.reconciliation.persistence_errors import (
     BrokerSyncPersistenceError,
@@ -520,6 +521,8 @@ async def _intent_response(session: AsyncSession, intent_id: UUID) -> BrokerInte
 async def _preparation_from_proposal(
     session: AsyncSession, *, payload: BrokerIntentPrepareRequest, now: datetime
 ) -> BrokerIntentPreparation:
+    if not current_paper_order_price_authority_available():
+        raise BrokerIntentError("PRICE_AUTHORITY_UNAVAILABLE")
     group = await session.get(OptimizationProposalGroupRecord, payload.proposal_group_id)
     proposal = await session.get(OptimizationProposalRecord, payload.proposal_id)
     if (

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import socket
 import warnings
 from datetime import UTC, datetime
@@ -226,6 +227,19 @@ def test_sec_normalization_rejects_missing_authoritative_acceptance_metadata() -
         normalize_company_facts(
             (FIXTURES / "companyfacts.json").read_bytes(),
             b'{"filings":{"recent":{"accessionNumber":["0000320193-26-000001"]}}}',
+            instrument=_identity(),
+            evidence_by_accession={ACCESSION: _evidence()},
+        )
+
+
+def test_sec_normalization_rejects_noncanonical_accession_number() -> None:
+    submissions = json.loads((FIXTURES / "submissions.json").read_bytes())
+    submissions["filings"]["recent"]["accessionNumber"][0] = f"{ACCESSION}?query"
+
+    with pytest.raises(SecNormalizationError, match="INVALID_ACCESSION_NUMBER"):
+        normalize_company_facts(
+            (FIXTURES / "companyfacts.json").read_bytes(),
+            json.dumps(submissions).encode(),
             instrument=_identity(),
             evidence_by_accession={ACCESSION: _evidence()},
         )

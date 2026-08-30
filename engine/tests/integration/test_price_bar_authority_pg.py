@@ -1,7 +1,7 @@
 """Real-PostgreSQL tests for canonical price-Bar set authority."""
 
 import asyncio
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -20,7 +20,7 @@ from helpers.price_bar_authority import (
     seed_price_candidate,
     seed_price_candidate_in_reverse,
 )
-from nexus.agents.price_authority import freeze_price_authority
+from nexus.agents.price_authority import _authority_statement, freeze_price_authority
 from nexus.domain.ids import new_uuid7
 from nexus.market.price_bar_authority import finalize_price_bar_set
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
@@ -80,10 +80,7 @@ async def _wait_for_advisory_wait(
         while True:
             async with factory() as observer:
                 wait_event = await observer.scalar(
-                    text(
-                        "SELECT wait_event FROM pg_stat_activity "
-                        "WHERE pid=:backend_pid"
-                    ),
+                    text("SELECT wait_event FROM pg_stat_activity WHERE pid=:backend_pid"),
                     {"backend_pid": backend_pid},
                 )
             if wait_event == "advisory":
@@ -95,8 +92,9 @@ async def _selected_price_manifest(
     factory: async_sessionmaker[AsyncSession],
     *,
     allow_fixture: bool,
+    selected_at: datetime | None = None,
 ) -> UUID:
-    selected_at = RECEIVED_AT + timedelta(days=2)
+    selected_at = selected_at or RECEIVED_AT + timedelta(days=2)
     async with factory() as session, session.begin():
         snapshot = DataSnapshot(
             id=SELECTION_SNAPSHOT_ID,
@@ -328,10 +326,7 @@ async def test_qualified_minute_price_bar_set_can_be_frozen_but_not_mutated(
     with pytest.raises(DBAPIError) as raised:
         async with factory() as session, session.begin():
             await session.execute(
-                text(
-                    "UPDATE price_bar_records SET close = close + 1 "
-                    "WHERE id = :bar_id"
-                ),
+                text("UPDATE price_bar_records SET close = close + 1 WHERE id = :bar_id"),
                 {"bar_id": seeded.bar_ids[0]},
             )
     assert getattr(raised.value.orig, "sqlstate", None) == "23514"
@@ -414,9 +409,53 @@ async def test_price_authority_selection_uses_available_at_desc_before_manifest_
         },
     )
     await insert_fosun_authority_from_prepare(factory, MUTATED_MANIFEST_ID)
+    assert await _selected_price_manifest(factory, allow_fixture=False) == MUTATED_MANIFEST_ID
+
+
+@pytest.mark.asyncio
+async def test_price_authority_selection_falls_back_to_fosun_batch_visible_at_decision(
+    migrated_database_url: str,
+) -> None:
+    """A later-published batch must not hide the newest point-in-time-visible batch."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await seed_fosun_price_candidate(
+        factory,
+        manifest_id=MANIFEST_ID,
+        provider_authorized_at=FOSUN_AUTHORIZED_AT,
+    )
+    await insert_fosun_authority_from_prepare(factory, MANIFEST_ID)
+    await seed_fosun_price_candidate(
+        factory,
+        manifest_id=MUTATED_MANIFEST_ID,
+        provider_authorized_at=FOSUN_AUTHORIZED_AT + timedelta(hours=1),
+        bar_overrides={
+            "available_at": AVAILABLE_AT + timedelta(hours=1),
+            "received_at": RECEIVED_AT + timedelta(hours=1),
+        },
+    )
+    await insert_fosun_authority_from_prepare(factory, MUTATED_MANIFEST_ID)
+
+    selected_at = FOSUN_AUTHORIZED_AT + timedelta(minutes=30)
+    async with factory() as session:
+        ordered = tuple(
+            (
+                await session.execute(
+                    _authority_statement(
+                        instrument_id=INSTRUMENT_ID,
+                        selected_at=selected_at,
+                        allow_fixture=False,
+                    )
+                )
+            ).all()
+        )
+    assert tuple(row[2].id for row in ordered) == (MANIFEST_ID,)
     assert (
-        await _selected_price_manifest(factory, allow_fixture=False)
-        == MUTATED_MANIFEST_ID
+        await _selected_price_manifest(
+            factory,
+            allow_fixture=False,
+            selected_at=selected_at,
+        )
+        == MANIFEST_ID
     )
 
 
@@ -429,10 +468,7 @@ async def test_price_authority_selection_uses_manifest_id_desc_as_final_tie_brea
     await insert_fosun_authority_from_prepare(factory, MANIFEST_ID)
     await seed_fosun_price_candidate(factory, manifest_id=MUTATED_MANIFEST_ID)
     await insert_fosun_authority_from_prepare(factory, MUTATED_MANIFEST_ID)
-    assert (
-        await _selected_price_manifest(factory, allow_fixture=False)
-        == MUTATED_MANIFEST_ID
-    )
+    assert await _selected_price_manifest(factory, allow_fixture=False) == MUTATED_MANIFEST_ID
 
 
 @pytest.mark.asyncio
@@ -524,9 +560,7 @@ async def test_concurrent_writer_first_serializes_finalizer_after_the_new_bar(
     async def writer_first() -> int:
         async with factory() as session:
             async with session.begin():
-                session.add(
-                    clean_bar(manifest_id=MANIFEST_ID, session=date(2026, 8, 25))
-                )
+                session.add(clean_bar(manifest_id=MANIFEST_ID, session=date(2026, 8, 25)))
                 await session.flush()
                 writer_locked.set()
                 await release_writer.wait()
@@ -536,9 +570,7 @@ async def test_concurrent_writer_first_serializes_finalizer_after_the_new_bar(
         await writer_locked.wait()
         async with factory() as session:
             async with session.begin():
-                finalizer_pid.set_result(
-                    int(await session.scalar(text("SELECT pg_backend_pid()")))
-                )
+                finalizer_pid.set_result(int(await session.scalar(text("SELECT pg_backend_pid()"))))
                 manifest = await session.get(PriceSeriesManifest, MANIFEST_ID)
                 assert manifest is not None
                 finalized = await finalize_price_bar_set(session, manifest)
@@ -564,10 +596,7 @@ async def test_concurrent_writer_first_serializes_finalizer_after_the_new_bar(
                 fresh_prepared = (
                     (
                         await session.execute(
-                            text(
-                                "SELECT * FROM "
-                                "nexus_prepare_price_bar_set(:manifest_id)"
-                            ),
+                            text("SELECT * FROM nexus_prepare_price_bar_set(:manifest_id)"),
                             {"manifest_id": MANIFEST_ID},
                         )
                     )
@@ -607,9 +636,7 @@ async def test_concurrent_authority_first_serializes_and_rejects_the_late_writer
                     writer_pid.set_result(
                         int(await session.scalar(text("SELECT pg_backend_pid()")))
                     )
-                    session.add(
-                        clean_bar(manifest_id=MANIFEST_ID, session=date(2026, 8, 25))
-                    )
+                    session.add(clean_bar(manifest_id=MANIFEST_ID, session=date(2026, 8, 25)))
                     await session.flush()
             except DBAPIError:
                 assert await session.scalar(text("SELECT 1")) == 1
