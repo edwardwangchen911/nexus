@@ -8,6 +8,9 @@ from read_only_transport_cases import (
     test_current_and_previous_gateway_key_domains_authenticate as test_current_and_previous_gateway_key_domains_authenticate,  # noqa: E501
 )
 from read_only_transport_cases import (
+    test_future_dated_signature_is_rejected_without_consuming_nonce as test_future_dated_signature_is_rejected_without_consuming_nonce,  # noqa: E501
+)
+from read_only_transport_cases import (
     test_gateway_hmac_v2_binds_actor_and_request_id as test_gateway_hmac_v2_binds_actor_and_request_id,  # noqa: E501
 )
 from read_only_transport_cases import (
@@ -24,6 +27,9 @@ from read_only_transport_cases import (
 )
 from read_only_transport_cases import (
     test_replay_cache_capacity_rejects_churn_without_evicting_live_nonce as test_replay_cache_capacity_rejects_churn_without_evicting_live_nonce,  # noqa: E501
+)
+from read_only_transport_cases import (
+    test_restart_drain_rejects_requests_until_old_signatures_are_stale as test_restart_drain_rejects_requests_until_old_signatures_are_stale,  # noqa: E501
 )
 from read_only_transport_cases import (
     test_unverified_request_id_header_is_not_reflected as test_unverified_request_id_header_is_not_reflected,  # noqa: E501

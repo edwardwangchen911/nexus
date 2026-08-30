@@ -274,6 +274,10 @@ EXPECTED_FOREIGN_KEYS = {
     "price_series_manifests": {
         "fk_price_series_manifests_data_artifact_id_data_artifacts",
         "fk_price_series_evidence_ref",
+        "fk_price_series_manifests_provider_capability",
+        "fk_price_series_manifests_provider_status",
+        "fk_price_series_manifests_gateway_transport_artifact",
+        "fk_price_series_manifests_daily_calendar_authority",
     },
     "price_bar_records": "fk_price_bar_records_manifest",
     "job_leases": "fk_job_leases_job_id_jobs",
@@ -292,6 +296,8 @@ EXPECTED_FOREIGN_KEYS = {
     "latest_quotes": {
         "fk_latest_quotes_instrument_id_instruments",
         "fk_latest_quotes_data_artifact",
+        "fk_latest_quotes_provider_capability",
+        "fk_latest_quotes_provider_status",
     },
     "watchlist_members": {
         "fk_watchlist_members_instrument_id_instruments",

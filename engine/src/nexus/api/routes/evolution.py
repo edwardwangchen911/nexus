@@ -642,6 +642,7 @@ def _generation_error(reason: str) -> NexusError:
         "STRATEGY_REGISTRY_INCOMPLETE",
         "LINEAGE_AUTHORITY_INCOMPLETE",
         "EVIDENCE_INCOMPLETE",
+        "BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE",
     }
     return NexusError(
         ErrorCode.AUTHORITY_UNAVAILABLE if reason in unavailable else ErrorCode.EVOLUTION_BLOCKED,

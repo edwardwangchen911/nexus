@@ -4,12 +4,15 @@ import base64
 import hashlib
 import hmac
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 from nexus_fosun_gateway.main import create_gateway_app
+from nexus_fosun_gateway.security import hmac as gateway_hmac
 from nexus_fosun_gateway.security.hmac import GatewayHmacVerifier, ReplayCache, canonical_hmac_v2
-from nexus_fosun_gateway.settings import GatewaySettings
+from nexus_fosun_gateway.settings import Environment, GatewaySettings
 from pydantic import ValidationError
 from read_only_helpers import (
     PREVIOUS_KEY_ID,
@@ -166,6 +169,83 @@ def test_replay_and_expired_signatures_fail_closed(gateway_client: TestClient) -
     assert replay.status_code == 401
     assert expired.status_code == 401
     assert replay.json()["error"]["next_action"] == "REAUTHENTICATE"
+
+
+def test_future_dated_signature_is_rejected_without_consuming_nonce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rejecting future signatures closes restart replay without burning the nonce."""
+    clock = iter((1_000.0, 1_120.0))
+    monkeypatch.setattr(gateway_hmac, "time", SimpleNamespace(time=lambda: next(clock)))
+    settings = GatewaySettings.for_test()
+    app = create_gateway_app(settings)
+    recording = RecordingTransport()
+    app.state.transport = recording
+
+    with TestClient(app) as client:
+        payload = {"account_id": "synthetic-account-001", "read_kind": "cash"}
+        future = _post_signed(
+            client,
+            "fosun_sync_portfolio",
+            payload,
+            nonce="0198f7a0-2222-7777-8222-222222222250",
+            timestamp=1_060,
+        )
+        retry = _post_signed(
+            client,
+            "fosun_sync_portfolio",
+            payload,
+            nonce="0198f7a0-2222-7777-8222-222222222250",
+            timestamp=1_120,
+        )
+
+    assert future.status_code == 401
+    assert retry.status_code == 200
+    assert recording.calls == 1
+
+
+def test_restart_drain_rejects_requests_until_old_signatures_are_stale(
+    tmp_path: Path,
+) -> None:
+    """The production constructor must expose the persisted first-start drain boundary."""
+    clock = iter((1_000.0, 1_060.0, 1_061.0))
+    settings = GatewaySettings.for_test()
+    app = create_gateway_app(settings)
+    recording = RecordingTransport()
+    app.state.transport = recording
+    production_settings = settings.model_copy(
+        update={
+            "environment": Environment.PRODUCTION,
+            "replay_store_path": tmp_path / "replay.sqlite3",
+        }
+    )
+    app.state.hmac_verifier = GatewayHmacVerifier(
+        production_settings,
+        clock=lambda: next(clock),
+    )
+
+    with TestClient(app) as client:
+        payload = {"account_id": "synthetic-account-001", "read_kind": "cash"}
+        draining = _post_signed(
+            client,
+            "fosun_sync_portfolio",
+            payload,
+            nonce="0198f7a0-2222-7777-8222-222222222260",
+            timestamp=1_060,
+        )
+        accepted = _post_signed(
+            client,
+            "fosun_sync_portfolio",
+            payload,
+            nonce="0198f7a0-2222-7777-8222-222222222261",
+            timestamp=1_061,
+        )
+
+    assert draining.status_code == 503
+    assert draining.headers["Retry-After"] == "1"
+    assert draining.json()["error"]["code"] == "GATEWAY_REPLAY_DRAINING"
+    assert accepted.status_code == 200
+    assert recording.calls == 1
 
 
 def test_bad_signature_does_not_consume_nonce(gateway_client: TestClient) -> None:

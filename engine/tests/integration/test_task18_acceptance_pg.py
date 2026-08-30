@@ -3,6 +3,7 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Literal, cast
 
+import pytest
 from helpers.paper_batch import seed_paper_batch
 from nexus.paper.models import LedgerEntry, LedgerTransaction
 from nexus.paper.projection import load_paper_projection
@@ -48,6 +49,15 @@ from nexus.risk.policy import RiskPolicy
 from nexus.strategy.forward import load_forward_strategy_decision
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+
+@pytest.fixture(autouse=True)
+def _historical_order_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise the historical Task 18 fact graph behind the test-only gate."""
+    monkeypatch.setattr(
+        "nexus.paper.service.current_paper_order_price_authority_available",
+        lambda: True,
+    )
 
 
 def _policy(row: RiskPolicyRecord) -> RiskPolicy:

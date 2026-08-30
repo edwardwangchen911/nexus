@@ -144,7 +144,9 @@ class RecordingRawFosunProvider:
     raw_archived: Callable[[], bool] | None = None
     allow_normalize: bool = False
     normalize_error: bool = False
+    unexpected_normalize_error: bool = False
     delivery_mode: Literal["unknown", "real_time", "delayed"] = "unknown"
+    bar_session: date = date(2026, 8, 28)
 
     async def fetch_raw_bars(
         self,
@@ -161,6 +163,7 @@ class RecordingRawFosunProvider:
             gateway_request_id=UUID("019d0000-0000-7000-8000-0000000000f1"),
             request_body_sha256="b" * 64,
             raw_payload=b'{"items":[],"source_request_id":"safe","has_more":false,"next_cursor":null}',
+            sent_at=self.received_at - timedelta(milliseconds=250),
             received_at=self.received_at,
         )
 
@@ -172,6 +175,8 @@ class RecordingRawFosunProvider:
     ) -> ProviderPage[PriceBar]:
         del request, response, cursor
         self.normalized += 1
+        if self.unexpected_normalize_error:
+            raise RuntimeError("synthetic normalize failure")
         if self.normalize_error:
             raise MarketProviderPayloadError("FOSUN_BAR_CONTRACT_INVALID")
         if not self.allow_normalize:
@@ -179,7 +184,7 @@ class RecordingRawFosunProvider:
         assert self.raw_archived is not None and self.raw_archived()
         bar = PriceBar(
             instrument_id=self.calls[-1].instrument_id,
-            session=date(2026, 8, 28),
+            session=self.bar_session,
             open=Decimal("100"),
             high=Decimal("101"),
             low=Decimal("99"),
@@ -504,7 +509,7 @@ async def _seed_universe(
             exchange="XNYS",
             version="provider-collection-v1",
             source="exchange_calendars",
-            range_start=date(2026, 8, 28),
+            range_start=(MARKET_CLOSE - timedelta(days=400)).date(),
             range_end=date(2026, 8, 31),
             query_parameters={},
             completeness_status="complete",
@@ -698,6 +703,105 @@ async def test_fosun_malformed_response_is_archived_before_stable_skip(
 
 
 @pytest.mark.asyncio
+async def test_fosun_missing_calendar_session_is_archived_without_market_facts(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        await _seed_universe(session)
+    frozen = _fosun_authority()
+    store = InMemoryMarketObjectStore()
+    provider = RecordingRawFosunProvider(
+        allow_normalize=True,
+        bar_session=date(2026, 8, 27),
+        raw_archived=lambda: any(
+            key.startswith("raw/market/fosun/") for key in store.objects
+        ),
+    )
+
+    async def loader(*_: object, **__: object) -> FrozenFosunMarketAuthority:
+        return frozen
+
+    registry = build_provider_collection_registry(
+        _fosun_bundle(provider),
+        cast(MarketObjectStore, store),
+        InMemoryRawEvidenceStore(),
+        lambda: NOW,
+        market_authority_loader=loader,
+    )
+    spec = registry.resolve(JobType.COLLECT_MARKET.value)
+    assert spec is not None
+
+    async with factory() as session, session.begin():
+        result = await spec.handler(
+            _context(
+                session,
+                _payload(market_source="fosun", market_authority=frozen),
+            )
+        )
+
+    assert result.outcome == "skipped"
+    assert result.result_code == "FOSUN_MARKET_PAGE_INCOMPLETE"
+    assert provider.normalized == 1
+    async with factory() as session:
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(DataArtifact)
+                .where(DataArtifact.schema_version == "fosun_gateway_market_bars_v1")
+            )
+            == 1
+        )
+        assert await session.scalar(select(func.count()).select_from(PriceSeriesManifest)) == 0
+        assert await session.scalar(select(func.count()).select_from(PriceBarRecord)) == 0
+
+
+@pytest.mark.asyncio
+async def test_fosun_raw_metadata_survives_outer_job_rollback(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        await _seed_universe(session)
+    frozen = _fosun_authority()
+    provider = RecordingRawFosunProvider(unexpected_normalize_error=True)
+
+    async def loader(*_: object, **__: object) -> FrozenFosunMarketAuthority:
+        return frozen
+
+    registry = build_provider_collection_registry(
+        _fosun_bundle(provider),
+        cast(MarketObjectStore, InMemoryMarketObjectStore()),
+        InMemoryRawEvidenceStore(),
+        lambda: NOW,
+        raw_archive_session_factory=factory,
+        market_authority_loader=loader,
+    )
+    spec = registry.resolve(JobType.COLLECT_MARKET.value)
+    assert spec is not None
+
+    with pytest.raises(RuntimeError, match="synthetic normalize failure"):
+        async with factory() as session, session.begin():
+            await spec.handler(
+                _context(
+                    session,
+                    _payload(market_source="fosun", market_authority=frozen),
+                )
+            )
+
+    async with factory() as session:
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(DataArtifact)
+                .where(DataArtifact.schema_version == "fosun_gateway_market_bars_v1")
+            )
+            == 1
+        )
+        assert await session.scalar(select(func.count()).select_from(PriceSeriesManifest)) == 0
+
+
+@pytest.mark.asyncio
 async def test_fosun_unknown_delivery_persists_exact_binding_after_raw_archive(
     migrated_database_url: str,
 ) -> None:
@@ -807,6 +911,9 @@ async def test_fosun_proven_delivery_creates_bound_v2_price_authority(
 
     assert result.outcome == "succeeded"
     assert result.result_code == "MARKET_COLLECTED"
+    assert len(provider.calls) == 1
+    assert provider.calls[0].start == datetime(2025, 7, 24, tzinfo=UTC)
+    assert provider.calls[0].end == datetime(2026, 8, 28, tzinfo=UTC)
     async with factory() as session:
         manifest = await session.scalar(select(PriceSeriesManifest))
         authority = await session.scalar(select(PriceBarSetAuthority))
@@ -817,6 +924,8 @@ async def test_fosun_proven_delivery_creates_bound_v2_price_authority(
         assert manifest.provider_status_version == frozen.status_version
         assert manifest.provider_contract_hash == frozen.contract_hash
         assert manifest.provider_authorized_at == checked_at
+        assert manifest.gateway_request_start_at == provider.calls[0].start
+        assert manifest.gateway_request_end_at == provider.calls[0].end
         assert authority.hash_version == "price_bar_set_sha256_v2"
         assert authority.policy_version == "agent_price_authority_v2"
 

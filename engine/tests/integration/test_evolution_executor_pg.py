@@ -77,6 +77,17 @@ from engine.tests.integration.test_evolution_admission_pg import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _legacy_adjusted_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep legacy executor mechanics covered while the current gate is closed."""
+    for target in (
+        "nexus.evolution.jobs.current_strategy_rnd_adjusted_authority_available",
+        "nexus.evolution.authority.current_strategy_rnd_adjusted_authority_available",
+        "nexus.evolution.executor.current_strategy_rnd_adjusted_authority_available",
+    ):
+        monkeypatch.setattr(target, lambda: True)
+
+
 @pytest.mark.asyncio
 async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidates(
     migrated_database_url: str,

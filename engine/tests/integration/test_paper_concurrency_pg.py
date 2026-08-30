@@ -1,10 +1,20 @@
 import asyncio
 
+import pytest
 from helpers.paper_batch import seed_paper_batch
 from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.paper import PaperOrderBatchRecord, PaperOrderRecord
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+
+@pytest.fixture(autouse=True)
+def _historical_order_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise legacy concurrency mechanics behind the historical test gate."""
+    monkeypatch.setattr(
+        "nexus.paper.service.current_paper_order_price_authority_available",
+        lambda: True,
+    )
 
 
 async def _create_concurrently(database_url: str):

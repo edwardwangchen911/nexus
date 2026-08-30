@@ -15,12 +15,21 @@ from nexus.persistence.session import session_factory
 from nexus.providers.base import PriceBar, PriceSeries
 from nexus.quality.source_policy import (
     INTRADAY_SOURCE_POLICY_V2_ID,
+    INTRADAY_SOURCE_POLICY_V2_PAYLOAD,
     QUOTE_SOURCE_POLICY_V2_ID,
+    SOURCE_POLICY_ID,
     SOURCE_POLICY_V2_ID,
+    SOURCE_POLICY_V2_PAYLOAD,
+    current_paper_execution_price_authority_available,
+    current_paper_order_price_authority_available,
+    current_paper_performance_price_authority_available,
+    current_proposal_shadow_price_authority_available,
+    current_strategy_rnd_adjusted_authority_available,
     load_fosun_market_admission,
     load_intraday_source_policy_v2,
     load_quote_source_policy_v2,
     load_source_policy_v2,
+    price_manifest_admissible_under_source_policy_v1,
     select_price_series,
 )
 from nexus.settings import EngineSettings
@@ -28,6 +37,30 @@ from sqlalchemy import select
 
 INSTRUMENT_ID = UUID("29e18e7a-78fb-5fc1-a65a-6641fbc1cc64")
 DECISION_TIME = datetime(2026, 8, 21, 22, tzinfo=UTC)
+
+
+def test_descriptive_payload_mutation_cannot_open_decision_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fosun = SOURCE_POLICY_V2_PAYLOAD["fosun"]
+    assert isinstance(fosun, dict)
+    monkeypatch.setitem(fosun, "adjustment", "all")
+    monkeypatch.setitem(INTRADAY_SOURCE_POLICY_V2_PAYLOAD, "purpose", "paper_execution")
+
+    assert current_strategy_rnd_adjusted_authority_available() is False
+    assert current_paper_order_price_authority_available() is False
+    assert current_paper_execution_price_authority_available() is False
+    assert current_paper_performance_price_authority_available() is False
+    assert current_proposal_shadow_price_authority_available(SOURCE_POLICY_ID) is False
+    assert current_proposal_shadow_price_authority_available(SOURCE_POLICY_V2_ID) is False
+
+
+def test_legacy_v1_manifest_contract_rejects_unbound_fosun() -> None:
+    assert not price_manifest_admissible_under_source_policy_v1(
+        source="fosun",
+        feed="US",
+        delivery_mode="delayed",
+    )
 
 
 @pytest.mark.asyncio

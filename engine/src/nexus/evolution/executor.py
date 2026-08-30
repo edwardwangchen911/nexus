@@ -69,9 +69,24 @@ from nexus.persistence.models.evolution import (
     StrategyShadowGroupRecord,
     StrategyShadowSessionAuthorityRecord,
 )
+from nexus.quality.source_policy import current_strategy_rnd_adjusted_authority_available
 from nexus.settings import AgentRuntimeMode, EngineSettings, Environment
 
 _NEW_YORK = ZoneInfo("America/New_York")
+_ADJUSTED_AUTHORITY_UNAVAILABLE = "BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE"
+
+
+def _authority_error_result(error: StrategyRNDAuthorityError) -> JobHandlerResult:
+    if error.reason_code == _ADJUSTED_AUTHORITY_UNAVAILABLE:
+        return JobHandlerResult(
+            outcome="skipped",
+            result_code=_ADJUSTED_AUTHORITY_UNAVAILABLE,
+        )
+    return JobHandlerResult(
+        outcome="failed",
+        result_code=None,
+        error_code=error.reason_code,
+    )
 
 
 class StrategyRNDExecutor:
@@ -95,6 +110,11 @@ class StrategyRNDExecutor:
         context: JobHandlerContext,
         payload: StrategyRNDJobPayloadV1,
     ) -> JobHandlerResult:
+        if not current_strategy_rnd_adjusted_authority_available():
+            return JobHandlerResult(
+                outcome="skipped",
+                result_code=_ADJUSTED_AUTHORITY_UNAVAILABLE,
+            )
         if payload.operation == "generate_family":
             return await self._generate_family(context, payload)
         if payload.operation == "evaluate_candidate":
@@ -169,9 +189,7 @@ class StrategyRNDExecutor:
                 ),
             )
         except StrategyRNDAuthorityError as error:
-            return JobHandlerResult(
-                outcome="failed", result_code=None, error_code=error.reason_code
-            )
+            return _authority_error_result(error)
         except EvolutionAdmissionError as error:
             return JobHandlerResult(
                 outcome="failed", result_code=None, error_code=error.reason_code
@@ -230,7 +248,9 @@ class StrategyRNDExecutor:
             if authority.projection.current_state == "OOS_RESERVED":
                 return await self._run_oos(context, authority)
             return JobHandlerResult(outcome="skipped", result_code="CANDIDATE_ALREADY_EVALUATED")
-        except (StrategyRNDAuthorityError, EvolutionEvaluationError) as error:
+        except StrategyRNDAuthorityError as error:
+            return _authority_error_result(error)
+        except EvolutionEvaluationError as error:
             return JobHandlerResult(
                 outcome="failed",
                 result_code=None,

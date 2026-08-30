@@ -1,7 +1,7 @@
 """Generic worker registry, timeout, retry, and dead-letter contracts."""
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -44,6 +44,21 @@ class _Payload(BaseModel):
 
 class _UnsafePayload(BaseModel):
     value: str
+
+
+class _NestedStrictPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    authority_id: UUID
+    session_date: date
+    observed_at: datetime
+    sequence: int
+
+
+class _StrictJsonPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    nested: _NestedStrictPayload
 
 
 async def _enqueue(
@@ -249,6 +264,109 @@ async def test_registered_handler_commits_business_fact_and_terminal_job_atomica
         "succeeded",
         "HANDLER_OK",
         1,
+        1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_registered_handler_strictly_parses_nested_jsonb_types(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    authority_id = UUID("0198d500-1000-7000-8000-000000002102")
+    job_id = await _enqueue(
+        factory,
+        job_type=JobType.AGENT_RESEARCH,
+        payload={
+            "nested": {
+                "authority_id": str(authority_id),
+                "session_date": "2026-08-27",
+                "observed_at": "2026-08-27T02:00:00Z",
+                "sequence": 1,
+            }
+        },
+    )
+    observed: tuple[UUID, date, datetime, int] | None = None
+
+    async def handler(context: JobHandlerContext) -> JobHandlerResult:
+        nonlocal observed
+        assert isinstance(context.payload, _StrictJsonPayload)
+        nested = context.payload.nested
+        observed = (
+            nested.authority_id,
+            nested.session_date,
+            nested.observed_at,
+            nested.sequence,
+        )
+        return JobHandlerResult(outcome="succeeded", result_code="STRICT_JSON_OK")
+
+    assert await run_job_worker_once(
+        factory,
+        registry=JobRegistry((_spec(handler, payload_model=_StrictJsonPayload),)),
+        queue=QueueName.GENERAL,
+        worker_id="worker-strict-json",
+        worker_started_at=_NOW,
+        process_version="test-v1",
+        migration_head="0021_manual_job_retry_allowance",
+        clock=lambda: _NOW + timedelta(seconds=1),
+        claim_registered_only=True,
+    )
+    async with factory() as session:
+        job = await session.get(Job, job_id)
+
+    assert observed == (authority_id, date(2026, 8, 27), _NOW, 1)
+    assert job is not None
+    assert (job.status, job.result_code, job.attempt_count) == (
+        "succeeded",
+        "STRICT_JSON_OK",
+        1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_registered_handler_dead_letters_string_for_strict_nested_integer(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    job_id = await _enqueue(
+        factory,
+        job_type=JobType.AGENT_RESEARCH,
+        payload={
+            "nested": {
+                "authority_id": "0198d500-1000-7000-8000-000000002102",
+                "session_date": "2026-08-27",
+                "observed_at": "2026-08-27T02:00:00Z",
+                "sequence": "1",
+            }
+        },
+    )
+    executed = False
+
+    async def handler(context: JobHandlerContext) -> JobHandlerResult:
+        nonlocal executed
+        del context
+        executed = True
+        return JobHandlerResult(outcome="succeeded", result_code="UNREACHABLE")
+
+    assert await run_job_worker_once(
+        factory,
+        registry=JobRegistry((_spec(handler, payload_model=_StrictJsonPayload),)),
+        queue=QueueName.GENERAL,
+        worker_id="worker-strict-json-invalid",
+        worker_started_at=_NOW,
+        process_version="test-v1",
+        migration_head="0021_manual_job_retry_allowance",
+        clock=lambda: _NOW + timedelta(seconds=1),
+        claim_registered_only=True,
+    )
+    async with factory() as session:
+        job = await session.get(Job, job_id)
+
+    assert executed is False
+    assert job is not None
+    assert (job.status, job.last_error_code, job.attempt_count) == (
+        "dead_letter",
+        "HANDLER_PAYLOAD_INVALID",
         1,
     )
 

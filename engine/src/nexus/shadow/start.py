@@ -16,6 +16,7 @@ from nexus.optimizer.repository import has_executable_shadow_authority
 from nexus.persistence.models.optimization import CostPolicyRecord
 from nexus.persistence.models.runtime import OutboxEvent
 from nexus.persistence.models.shadow import ShadowGroupRecord, ShadowPortfolioRecord
+from nexus.quality.source_policy import current_proposal_shadow_price_authority_available
 from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
 from nexus.shadow.canonical import (
@@ -81,6 +82,8 @@ async def start_proposal_shadow(
         raise ValueError("VERSION_CONFLICT")
     if group.status != "compared":
         raise ValueError("PROPOSAL_STATE_INVALID")
+    if not current_proposal_shadow_price_authority_available(group.source_policy_id):
+        raise ValueError("PROPOSAL_NOT_EXECUTABLE")
 
     started_at = await session.scalar(select(func.transaction_timestamp()))
     if not isinstance(started_at, datetime):

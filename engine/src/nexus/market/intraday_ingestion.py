@@ -137,6 +137,8 @@ async def ingest_intraday_snapshot(
             if snapshot.minute_bar is None:
                 continue
             bar = snapshot.minute_bar.bar
+            if batch.provenance.source == "fosun":
+                bar = bar.model_copy(update={"revision": raw_digest})
             payload = serialize_price_bars((bar,))
             digest = sha256(payload).hexdigest()
             final_key = (
@@ -214,6 +216,7 @@ async def ingest_intraday_snapshot(
                 feed=batch.provenance.feed,
                 delivery_mode=batch.provenance.delivery_mode,
                 provider_binding=current_bar_binding or bar_binding,
+                raw_artifact=raw_artifact,
             )
             created_bars += int(created)
             replayed += int(not created)
@@ -370,6 +373,7 @@ async def _persist_bar_authority(
     feed: str,
     delivery_mode: str,
     provider_binding: ProviderMarketBinding | None,
+    raw_artifact: DataArtifact,
 ) -> bool:
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended('intraday-manifest:' || :digest, 0))"),
@@ -422,6 +426,12 @@ async def _persist_bar_authority(
         id=manifest_id,
         evidence_ref_id=evidence.id,
         data_artifact_id=artifact.id,
+        gateway_transport_artifact_id=(
+            raw_artifact.id if source == "fosun" else None
+        ),
+        daily_calendar_authority_id=None,
+        gateway_request_start_at=None,
+        gateway_request_end_at=None,
         instrument=str(item.bar.instrument_id),
         source=source,
         feed=feed,

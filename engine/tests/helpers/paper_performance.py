@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from unittest.mock import patch
 from uuid import UUID
 
 from helpers.paper_batch import CALENDAR_ID, EXECUTION_SESSION
@@ -44,12 +45,16 @@ async def seed_paper_performance(
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:
         async with sessions.begin() as session:
-            await advance_internal_paper_order(
-                session,
-                order_id=execution.order_id,
-                evaluated_at=execution.evaluation_times[0],
-                idempotency_key="task19-performance-fill",
-            )
+            with patch(
+                "nexus.paper.execution_service._paper_execution_authority_available",
+                return_value=True,
+            ):
+                await advance_internal_paper_order(
+                    session,
+                    order_id=execution.order_id,
+                    evaluated_at=execution.evaluation_times[0],
+                    idempotency_key="task19-performance-fill",
+                )
         async with sessions.begin() as session:
             if close is not None:
                 artifact_id = UUID("66000000-0000-0000-0000-000000000001")

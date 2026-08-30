@@ -13,6 +13,14 @@ from nexus.shadow.service import advance_shadow_session
 from sqlalchemy import text
 
 
+@pytest.fixture(autouse=True)
+def _legacy_shadow_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "nexus.shadow.service.current_proposal_shadow_price_authority_available",
+        lambda _source_policy_id: True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_not_started_is_distinct_from_partial_data(
     migrated_database_url: str,

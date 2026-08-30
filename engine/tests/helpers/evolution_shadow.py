@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from hashlib import sha256
+from unittest.mock import patch
 from uuid import UUID
 
 from helpers.evolution_evaluation import SeededEvaluationPair, seed_evaluation_pair
@@ -114,11 +115,15 @@ async def seed_strategy_shadow_ready(
             requested_at=performance.as_of - timedelta(seconds=1),
         )
     async with factory() as session, session.begin():
-        publication = await publish_paper_performance_snapshot(
-            session,
-            account_id=performance.execution.account_id,
-            as_of=performance.as_of,
-        )
+        with patch(
+            "nexus.paper.performance.current_paper_performance_price_authority_available",
+            return_value=True,
+        ):
+            publication = await publish_paper_performance_snapshot(
+                session,
+                account_id=performance.execution.account_id,
+                as_of=performance.as_of,
+            )
         calendar = await seed_shadow_calendar(
             session,
             database_time=START_NOW,

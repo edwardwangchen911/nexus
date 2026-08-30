@@ -251,9 +251,9 @@ nexus_prepare_price_bar_set(manifest_id uuid)
 
 ## 8. 并发与不可变性
 
-### 8.1 唯一锁键
+### 8.1 Manifest 写入锁键
 
-所有相关事务使用同一锁语句：
+Manifest finalize、authority prepare 与 bar-record mutation 使用同一 manifest 级锁语句：
 
 ```sql
 SELECT pg_advisory_xact_lock(
@@ -261,7 +261,9 @@ SELECT pg_advisory_xact_lock(
 );
 ```
 
-锁只覆盖单个 manifest，不使用表锁或全局锁。
+该路径只覆盖单个 manifest，不使用表锁。后续迁移为 intraday manifest 增加配对锁，并为
+publication mark 与 frozen-backtest authority 使用独立的全局 advisory lock；这些全局锁保护
+跨 manifest 审计/发布不变量，不替代本节的单 manifest 串行。
 
 ### 8.2 写入规则
 

@@ -7,6 +7,11 @@ only after the user explicitly approves one bounded probe and every prerequisite
 evidenced. It never authorizes an order, simulation-account mutation, subscription, Webhook, or
 generic provider request.
 
+This boundary treats `provider-worker` as the trusted market normalization/writer TCB. The gateway
+isolates provider credentials, egress, and the fixed read-only operation surface; it does not attest
+responses against a hostile provider worker. Immutable evidence means append-only after acceptance,
+not that an already-compromised writer cannot fabricate an internally consistent fact graph.
+
 The local decision command reads only the committed provider manifest and an optional sanitized
 probe artifact. It has no provider transport, does not import the SDK, and does not read gateway
 credentials:
@@ -37,6 +42,40 @@ Do not ask for or execute a real probe until all of these are independently evid
    offline gateway suite, route-surface policy and secret scan all pass.
 6. A probe owner, UTC window, stop conditions and rollback owner are recorded. Only then request one
    explicit user confirmation for that exact network probe.
+7. The reviewed `provider-worker` source/image identity and the exact Provider runtime grant template
+   are recorded. The database credential must authenticate directly as the Provider login role:
+   `SET ROLE`, outbound memberships and any role that can inherit or assume the Provider role are
+   forbidden. Any unknown image, role-membership edge, writable shared schema, or unexplained
+   runtime drift is a stop because this worker is part of the market-data TCB. Both the grant
+   template preflight/postflight and every worker startup require a direct session on a `LOGIN`
+   Provider role with no effective `CREATE` privilege on the current database.
+8. The database startup probe confirms the Provider role remains read-only for authority inputs,
+   cannot read backtest-member tables, and has no direct access to the publication-mark table or
+   either minimal trigger-only `SECURITY DEFINER`. The probe must match the exact two-function set,
+   source, owner, ACL, search path, two non-deferred publication `AFTER INSERT FOR EACH ROW`
+   triggers, and one frozen-bar `BEFORE INSERT FOR EACH ROW` trigger. It also rejects effective
+   privileges in any non-system schema, any non-allowlisted table/view/materialized-view/foreign
+   table privilege or grant option, any Provider or `PUBLIC` column ACL, any Provider or `PUBLIC`
+   sequence privilege, and any extra non-system `SECURITY DEFINER`. It also matches all 60
+   non-internal application triggers on Provider-insertable tables, including enabled state,
+   timing/events, function owner/configuration and function-body digest. RLS helpers use a
+   `pg_catalog`-first fixed search path, and bypass policies are bound to the catalog
+   `pg_has_role` OID. Advisory locks, not table `UPDATE`, serialize authority validation against
+   status/artifact/manifest mutation. Every Provider-writable relation must remain a plain table
+   (`relkind='r'`); every frozen trigger must have an empty `tgattr` (`UPDATE OF` is forbidden) and
+   must not be a partition clone or inherited topology expansion.
+9. Object-store admission records a Provider-only IAM principal distinct from the app/general
+   worker principal, a pre-provisioned versioned bucket, and the fixed `provider/market` prefix.
+   Effective-policy evidence must deny bucket-root/list access and every other prefix; allow
+   Put/Get only below `provider/market`; and allow Delete only below
+   `provider/market/temporary/market`. Missing, broader, inherited, or unreviewed access is a stop.
+10. Pre-provision the external `nexus-fosun-gateway-replay-v1` volume on the one supported gateway
+    host. It must be mounted at `/var/lib/nexus-fosun-gateway`, writable only by the gateway user,
+    durable across container replacement, and support cross-process POSIX advisory locks. Never
+    mount a different replay volume into an overlapping replacement. Loss, recreation, or snapshot
+    rollback of this volume is a security event: stop both workers and investigate before resuming.
+    Every Gateway process start independently enforces a new 61-second drain/readiness gate; do not
+    delete the volume during ordinary Compose cleanup.
 
 Missing evidence is a stop, not permission to reduce checks or fall back to unreviewed data.
 The configured provider base URL must be an absolute HTTPS URL without embedded credentials,
@@ -50,11 +89,22 @@ activation keeps `NEXUS_MARKET_PROVIDER=fosun`, `NEXUS_ALPACA_MARKET_MODE=disabl
 non-interchangeable gateway principals:
 
 - `provider-worker` receives only `FOSUN_MARKET_GATEWAY_*` client mTLS/HMAC settings and may call
-  `fosun_get_quotes` plus `fosun_get_bars`; it has no broker identity or account-ID encryption key;
+  `fosun_get_quotes` plus `fosun_get_bars`; it has no broker identity or account-ID encryption key.
+  Its `PROVIDER_OBJECT_STORE_*` identity is separate from `OBJECT_STORE_*` and all runtime keys are
+  forced below `provider/market`;
 - `broker-worker` receives only the existing `FOSUN_GATEWAY_*` broker client identity and may call
   the fixed portfolio/order/cash-flow read operations; it has no Provider queue or market identity;
 - `fosun-gateway` is available only in the explicit `provider` and `broker` Compose profiles and is
-  the sole process that receives `FSOPENAPI_*`, activation evidence, and the TLS server identity;
+  the sole process that receives `FSOPENAPI_*`, activation evidence, and the TLS server identity.
+  Its deployment and runtime setting are both fixed to exactly one replica. A durable SQLite nonce
+  journal survives normal restart; an exclusive lease on the same named volume rejects a second
+  process. Every production process start drains authentication for 61 seconds, including ordinary
+  restart and replacement, so a restored older volume snapshot cannot become immediately usable.
+  A persisted clock high-water mark keeps authentication and readiness closed while local wall time
+  is behind observed time. Compose health additionally requires the lifespan owner PID and actual
+  Gateway TCP listener, so both workers wait. Future timestamps are rejected.
+  External orchestration is unsupported unless every candidate mounts the same POSIX-lock-capable
+  journal volume; rolling overlap then fails closed because only one process can hold the lease;
 - Web, API, the general worker and Agent receive neither client identity. Gateway route
   authorization derives the principal from the signed key ID; an unsigned role claim cannot expand
   operations.
@@ -131,7 +181,8 @@ seven internal gateway routes POST-only and authenticated with mTLS plus HMAC, a
 deterministic risk/approval boundary. Never add a generic proxy or write route.
 
 On any outage, stale capability, reconciliation mismatch, unexpected field, permission expansion,
-or hash mismatch: stop the gateway workload, disable the integration, revoke provider credentials
+trigger-topology drift, hash mismatch, or suspected `provider-worker` compromise: stop both the provider worker and gateway
+workloads, disable/invalidate the integration, revoke provider credentials
 through the secret manager, retain only sanitized audit metadata, and return the platform to
 fixture research/paper-trading state. Do not substitute fixture facts into a live-provider view and
 do not send a compensating broker operation.

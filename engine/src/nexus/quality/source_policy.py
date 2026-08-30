@@ -113,6 +113,53 @@ INTRADAY_SOURCE_POLICY_V2_PAYLOAD: dict[str, object] = {
 _PRIORITY = ("fosun", "alpaca", "fixture")
 
 
+def source_policy_v2_supports_adjusted_prices() -> bool:
+    """Return whether the immutable current policy can authorize adjusted history."""
+    # v2 is frozen as raw-only. A future adjusted policy must be a new immutable
+    # database authority; mutating this module's descriptive payload cannot open it.
+    return False
+
+
+def current_strategy_rnd_adjusted_authority_available() -> bool:
+    """Return whether current immutable policy authorizes Strategy R&D prices.
+
+    Keep this semantic selector separate from the frozen v2 payload so a future
+    adjusted-price policy can be admitted as a new version without mutating v2.
+    """
+    return source_policy_v2_supports_adjusted_prices()
+
+
+def current_paper_order_price_authority_available() -> bool:
+    """Return whether current policy can authorize new paper-order decisions."""
+    return source_policy_v2_supports_adjusted_prices()
+
+
+def current_paper_execution_price_authority_available() -> bool:
+    """Return whether the current immutable intraday policy authorizes paper fills."""
+    # The current intraday authority is display-only. A new persisted authority
+    # version is required before paper fills can consume it.
+    return False
+
+
+def current_paper_performance_price_authority_available() -> bool:
+    """Return whether current price authority can mark nonzero paper positions."""
+    return source_policy_v2_supports_adjusted_prices()
+
+
+def current_proposal_shadow_price_authority_available(
+    source_policy_id: UUID,
+) -> bool:
+    """Return whether a current policy may create new Proposal Shadow facts.
+
+    The only admitted Proposal Shadow policy is the legacy v1 raw-bar contract.
+    It remains replayable but cannot authorize new sessions or new Shadow roots.
+    A future implementation must bind a new immutable policy and its frozen data
+    authority instead of opening this static fail-closed boundary.
+    """
+    del source_policy_id
+    return False
+
+
 def price_manifest_admissible_under_source_policy_v1(
     *,
     source: str,

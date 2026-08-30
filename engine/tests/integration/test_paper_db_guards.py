@@ -83,6 +83,15 @@ TASK19_TABLES = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _historical_order_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise legacy database guards behind the historical test gate."""
+    monkeypatch.setattr(
+        "nexus.paper.service.current_paper_order_price_authority_available",
+        lambda: True,
+    )
+
+
 async def _execute(connection: AsyncConnection, statements: Iterable[str]) -> None:
     for statement in statements:
         await connection.execute(text(statement))

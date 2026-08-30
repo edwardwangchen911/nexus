@@ -215,17 +215,52 @@ def test_read_only_sdk_construction_forces_all_sdk_logging_off(
 ) -> None:
     """Production composition must never enable SDK summary or body logging."""
     captured: dict[str, object] = {}
-    tls_calls: list[tuple[str, object, object]] = []
+    tls_calls: list[tuple[str, object, object, object, object, object]] = []
+
+    class FakeResponse:
+        headers: dict[str, str] = {}
+
+        def iter_content(self, *, chunk_size: int) -> tuple[bytes, ...]:
+            assert chunk_size > 0
+            return (b'{"code":0}',)
+
+        def close(self) -> None:
+            return None
 
     class FakeSession:
+        trust_env = True
+
         def request(self, *_args: object, **kwargs: object) -> object:
-            tls_calls.append(("request", kwargs.get("verify"), kwargs.get("allow_redirects")))
-            return object()
+            tls_calls.append(
+                (
+                    "request",
+                    kwargs.get("verify"),
+                    kwargs.get("allow_redirects"),
+                    kwargs.get("timeout"),
+                    kwargs.get("stream"),
+                    self.trust_env,
+                )
+            )
+            return FakeResponse()
+
+        def post(self, *_args: object, **kwargs: object) -> object:
+            tls_calls.append(
+                (
+                    "session",
+                    kwargs.get("verify"),
+                    kwargs.get("allow_redirects"),
+                    kwargs.get("timeout"),
+                    kwargs.get("stream"),
+                    self.trust_env,
+                )
+            )
+            return FakeResponse()
 
     class FakeRequests:
+        Session = FakeSession
+
         def post(self, *_args: object, **kwargs: object) -> object:
-            tls_calls.append(("session", kwargs.get("verify"), kwargs.get("allow_redirects")))
-            return object()
+            pytest.fail("module-level requests.post must not be used")
 
     class FakeSdkClient:
         def __init__(self, **kwargs: object) -> None:
@@ -260,7 +295,10 @@ def test_read_only_sdk_construction_forces_all_sdk_logging_off(
         "POST", "https://provider.invalid", verify=False
     )
     auth_module.requests.post("https://provider.invalid", verify=False)
-    assert tls_calls == [("request", True, False), ("session", True, False)]
+    assert tls_calls == [
+        ("request", True, False, (5.0, 5.0), True, False),
+        ("session", True, False, (5.0, 5.0), True, False),
+    ]
 
 
 @pytest.mark.asyncio
@@ -346,6 +384,7 @@ def _read_only_settings(manifest_path: Path) -> GatewaySettings:
             "NEXUS_ENV": "production",
             "FOSUN_GATEWAY_CAPABILITY": "READ_ONLY",
             "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
+            "FOSUN_GATEWAY_REPLAY_STORE_PATH": "/synthetic/fosun-gateway/replay.sqlite3",
             "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-current",
             "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret-32-bytes",
             "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-market-current",
@@ -434,6 +473,7 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
         "NEXUS_ENV": "production",
         "FOSUN_GATEWAY_CAPABILITY": "READ_ONLY",
         "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
+        "FOSUN_GATEWAY_REPLAY_STORE_PATH": tmp_path / "replay.sqlite3",
         "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-current",
         "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret-32-bytes",
         "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-market-current",

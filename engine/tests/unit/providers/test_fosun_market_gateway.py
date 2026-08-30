@@ -1,12 +1,13 @@
 """Fixed, raw-first Fosun market gateway client contracts."""
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID
 
 import httpx
@@ -42,7 +43,7 @@ def _identity(
     )
 
 
-def _quote_payload() -> bytes:
+def _quote_payload(*, as_of: datetime = NOW) -> bytes:
     return json.dumps(
         {
             "items": [
@@ -50,26 +51,31 @@ def _quote_payload() -> bytes:
                     "kind": "quote",
                     "instrument_code": "usAAPL",
                     "price": "227.1600",
-                    "as_of": NOW.isoformat(),
+                    "as_of": as_of.isoformat(),
                 },
                 {
                     "kind": "quote",
                     "instrument_code": "usMSFT",
                     "price": None,
-                    "as_of": NOW.isoformat(),
+                    "as_of": as_of.isoformat(),
                 },
             ],
             "source_request_id": "synthetic-provider-request",
             "has_more": False,
             "next_cursor": None,
-            "as_of": NOW.isoformat(),
+            "as_of": as_of.isoformat(),
             "quality": "PARTIAL",
         },
         separators=(",", ":"),
     ).encode()
 
 
-def _bar_payload(*, interval: str = "day") -> bytes:
+def _bar_payload(
+    *,
+    interval: str = "day",
+    as_of: datetime = NOW,
+    timestamp: str = "2026-08-28T20:00:00+00:00",
+) -> bytes:
     return json.dumps(
         {
             "items": [
@@ -77,7 +83,7 @@ def _bar_payload(*, interval: str = "day") -> bytes:
                     "kind": "bar",
                     "instrument_code": "usAAPL",
                     "interval": interval,
-                    "timestamp": "2026-08-28T20:00:00+00:00",
+                    "timestamp": timestamp,
                     "open": "100.10",
                     "high": "103.20",
                     "low": "99.90",
@@ -88,7 +94,7 @@ def _bar_payload(*, interval: str = "day") -> bytes:
             "source_request_id": "synthetic-provider-request",
             "has_more": False,
             "next_cursor": None,
-            "as_of": NOW.isoformat(),
+            "as_of": as_of.isoformat(),
             "quality": "PARTIAL",
         },
         separators=(",", ":"),
@@ -277,13 +283,45 @@ async def test_transport_rejects_redirect_media_type_and_oversize(
     await http_client.aclose()
 
 
-def test_quote_parser_preserves_decimal_and_requires_exact_set_and_receipt_time() -> None:
+@pytest.mark.asyncio
+async def test_transport_enforces_one_absolute_response_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SlowChunks(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"{"
+            await asyncio.sleep(0.05)
+            yield b"}"
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=SlowChunks(),
+        )
+
+    monkeypatch.setattr(
+        "nexus.providers.market.fosun_gateway._MAX_REQUEST_SECONDS",
+        0.01,
+        raising=False,
+    )
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FosunMarketGatewayClient(_identity(tmp_path), client=http_client)
+
+    with pytest.raises(FosunMarketGatewayError, match="request failed"):
+        await client.read_quotes_raw(("usAAPL",))
+    await http_client.aclose()
+
+
+def test_quote_parser_preserves_decimal_and_accepts_bounded_gateway_receipt_time() -> None:
     raw = RawGatewayResponse(
         operation="fosun_get_quotes",
         gateway_request_id=REQUEST_ID,
         request_body_sha256="a" * 64,
         raw_payload=_quote_payload(),
-        received_at=NOW,
+        sent_at=NOW,
+        received_at=NOW + timedelta(milliseconds=250),
     )
 
     page = parse_quote_page(raw, expected_codes=("usAAPL", "usMSFT"))
@@ -292,6 +330,60 @@ def test_quote_parser_preserves_decimal_and_requires_exact_set_and_receipt_time(
     assert page.items[1].price is None
     with pytest.raises(FosunMarketGatewayError, match="contract rejected"):
         parse_quote_page(raw, expected_codes=("usAAPL",))
+
+
+@pytest.mark.parametrize("operation", ("fosun_get_quotes", "fosun_get_bars"))
+def test_market_parser_rejects_gateway_receipt_time_outside_hmac_window(
+    operation: Literal["fosun_get_quotes", "fosun_get_bars"],
+) -> None:
+    gateway_as_of = NOW - timedelta(seconds=61)
+    raw = RawGatewayResponse(
+        operation=operation,
+        gateway_request_id=REQUEST_ID,
+        request_body_sha256="a" * 64,
+        raw_payload=(
+            _quote_payload(as_of=gateway_as_of)
+            if operation == "fosun_get_quotes"
+            else _bar_payload(as_of=gateway_as_of)
+        ),
+        sent_at=NOW,
+        received_at=NOW + timedelta(seconds=1),
+    )
+
+    with pytest.raises(FosunMarketGatewayError, match="contract rejected"):
+        if operation == "fosun_get_quotes":
+            parse_quote_page(raw, expected_codes=("usAAPL", "usMSFT"))
+        else:
+            parse_bar_page(
+                raw,
+                expected_code="usAAPL",
+                expected_ktype="day",
+                start=datetime(2026, 8, 1, tzinfo=UTC),
+                end=datetime(2026, 8, 29, tzinfo=UTC),
+                limit=10,
+            )
+
+
+def test_daily_parser_uses_session_date_for_request_window() -> None:
+    raw = RawGatewayResponse(
+        operation="fosun_get_bars",
+        gateway_request_id=REQUEST_ID,
+        request_body_sha256="a" * 64,
+        raw_payload=_bar_payload(timestamp="2026-08-21T00:00:00+00:00"),
+        sent_at=NOW - timedelta(milliseconds=250),
+        received_at=NOW,
+    )
+
+    page = parse_bar_page(
+        raw,
+        expected_code="usAAPL",
+        expected_ktype="day",
+        start=datetime(2026, 8, 21, 20, tzinfo=UTC),
+        end=datetime(2026, 8, 22, 20, tzinfo=UTC),
+        limit=10,
+    )
+
+    assert page.items[0].timestamp.date().isoformat() == "2026-08-21"
 
 
 @pytest.mark.parametrize(
@@ -310,6 +402,7 @@ def test_quote_parser_rejects_duplicate_keys_and_json_constants(payload: bytes) 
         gateway_request_id=REQUEST_ID,
         request_body_sha256="a" * 64,
         raw_payload=payload,
+        sent_at=NOW - timedelta(milliseconds=250),
         received_at=NOW,
     )
 
@@ -323,7 +416,8 @@ def test_bar_parser_revalidates_operation_code_interval_window_and_ohlcv() -> No
         gateway_request_id=REQUEST_ID,
         request_body_sha256="a" * 64,
         raw_payload=_bar_payload(),
-        received_at=NOW,
+        sent_at=NOW,
+        received_at=NOW + timedelta(milliseconds=250),
     )
 
     page = parse_bar_page(

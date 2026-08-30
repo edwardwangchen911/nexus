@@ -152,7 +152,7 @@ jobs:
           --inventory-output "$RUNNER_TEMP/nexus-dependency-inventory.json"
       - run: npm audit --audit-level=high
       - run: uv run pip-audit --local --skip-editable
-      - name: Validate both Compose profiles
+      - name: Validate all Compose capability profiles
         env:
           NEXUS_ENV: test
           DATABASE_URL: postgresql+asyncpg://nexus_ci:synthetic_ci_only@postgres:5432/nexus_ci
@@ -169,3 +169,5 @@ jobs:
         run: |
           docker compose -f infra/compose.yaml --profile app config --quiet
           docker compose -f infra/compose.yaml --profile broker config --quiet
+          docker compose -f infra/compose.yaml --profile provider config --quiet
+          docker compose -f infra/compose.yaml --profile provider-alpaca config --quiet

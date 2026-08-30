@@ -21,6 +21,7 @@ from nexus.market.price_bar_authority import (
     SOURCE_POLICY_V2_ID,
     prepare_price_bar_set,
 )
+from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -59,7 +60,6 @@ from nexus.risk.models import (
 from nexus.strategy.forward import ForwardStrategyDecision
 
 _QUERY_KINDS = frozenset(("corporate_action", "suspension", "delisting"))
-_US_EXCHANGES = frozenset(("AMEX", "ARCX", "NASDAQ", "NYSE", "NYSE_ARCA", "XNAS", "XNYS"))
 
 
 def _valid_source_policy(policy: SourcePolicy) -> bool:
@@ -133,23 +133,23 @@ def _valid_v2_provider_authority(
     if manifest.source != "fosun":
         return capability is None
     authorized_at = manifest.provider_authorized_at
+    payload = {} if capability is None else capability.payload
     return (
         capability is not None
         and manifest.provider_capability_id == capability.id
         and manifest.provider_status_id is not None
         and manifest.provider_status_version is not None
         and manifest.provider_status_version > 0
-        and manifest.provider_contract_hash is not None
+        and manifest.provider_contract_hash == capability.contract_hash
         and authorized_at is not None
+        and capability.schema_version == "1"
         and capability.provider == "fosun"
         and capability.capability == "READ_ONLY"
-        and capability.schema_version == "1"
-        and capability.contract_hash == manifest.provider_contract_hash
-        and capability.created_at <= authorized_at <= decision_time
-        and capability.expires_at > decision_time
-        and capability.payload.get("operation") == "fosun_get_bars"
-        and capability.payload.get("market_scope") == "US"
-        and capability.payload.get("delivery_mode") == manifest.delivery_mode
+        and payload.get("operation") == "fosun_get_bars"
+        and payload.get("market_scope") == "US"
+        and payload.get("delivery_mode") == manifest.delivery_mode
+        and capability.created_at <= authorized_at < capability.expires_at
+        and authorized_at <= decision_time
     )
 
 
@@ -381,7 +381,11 @@ async def _load_prices(
         if bar.instrument_id in observed_ids:
             raise ValueError("risk prices contain duplicate instruments")
         observed_ids.add(bar.instrument_id)
-        prepared = await prepare_price_bar_set(session, manifest.id)
+        prepared = await prepare_price_bar_set(
+            session,
+            manifest.id,
+            as_of=decision.decision_time,
+        )
         if (
             prepared is None
             or prepared.content_hash != authority.content_hash
@@ -392,14 +396,14 @@ async def _load_prices(
             or prepared.available_at != authority.available_at
             or not _valid_price_protocol(authority, manifest)
             or not _valid_price_evidence(authority, manifest, evidence)
-            or not _valid_v2_provider_authority(
-                manifest,
-                capability,
-                decision.decision_time,
-            )
+                or not _valid_v2_provider_authority(
+                    manifest,
+                    capability,
+                    decision.decision_time,
+                )
             or instrument.currency != "USD"
             or instrument.asset_type not in {"ETF", "common_stock"}
-            or instrument.exchange not in _US_EXCHANGES
+            or instrument.exchange not in US_EQUITY_EXCHANGES
             or authority.available_at > decision.decision_time
             or bar.available_at > decision.decision_time
         ):

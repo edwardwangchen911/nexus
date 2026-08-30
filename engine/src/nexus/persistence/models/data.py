@@ -161,6 +161,31 @@ class PriceSeriesManifest(ImmutableCreatedAt, Base):
             "provider_contract_hash IS NULL OR provider_contract_hash ~ '^[0-9a-f]{64}$'",
             name="provider_contract_hash_canonical",
         ),
+        CheckConstraint(
+            "(source = 'fosun' AND gateway_transport_artifact_id IS NOT NULL AND "
+            "((interval = '1Day' AND daily_calendar_authority_id IS NOT NULL AND "
+            "gateway_request_start_at IS NOT NULL AND gateway_request_end_at IS NOT NULL) OR "
+            "(interval = '1Min' AND daily_calendar_authority_id IS NULL AND "
+            "gateway_request_start_at IS NULL AND gateway_request_end_at IS NULL))) OR "
+            "(source <> 'fosun' AND gateway_transport_artifact_id IS NULL AND "
+            "daily_calendar_authority_id IS NULL AND gateway_request_start_at IS NULL AND "
+            "gateway_request_end_at IS NULL)",
+            name="fosun_transport_lineage_complete",
+        ),
+        Index(
+            "ix_price_series_manifests_provider_binding",
+            "provider_capability_id",
+            "provider_status_id",
+            "provider_authorized_at",
+        ),
+        Index(
+            "ix_price_series_manifests_gateway_transport",
+            "gateway_transport_artifact_id",
+        ),
+        Index(
+            "ix_price_series_manifests_daily_calendar",
+            "daily_calendar_authority_id",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
@@ -174,6 +199,20 @@ class PriceSeriesManifest(ImmutableCreatedAt, Base):
             name="fk_price_series_manifests_data_artifact_id_data_artifacts",
         )
     )
+    gateway_transport_artifact_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "data_artifacts.id",
+            name="fk_price_series_manifests_gateway_transport_artifact",
+        )
+    )
+    daily_calendar_authority_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "exchange_calendar_authorities.id",
+            name="fk_price_series_manifests_daily_calendar_authority",
+        )
+    )
+    gateway_request_start_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    gateway_request_end_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     instrument: Mapped[str] = mapped_column(String(100))
     source: Mapped[str] = mapped_column(String(100))
     feed: Mapped[str] = mapped_column(String(100))

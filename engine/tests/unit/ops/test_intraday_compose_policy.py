@@ -25,12 +25,18 @@ def _service_block(compose: str, service: str) -> str:
 def test_intraday_monitor_is_only_configurable_in_provider_worker() -> None:
     compose = (ROOT / "infra/compose.yaml").read_text(encoding="utf-8")
     provider = _service_block(compose, "provider-worker")
+    alpaca_provider = _service_block(compose, "provider-worker-alpaca")
 
     assert "NEXUS_INTRADAY_MONITOR_MODE=${NEXUS_INTRADAY_MONITOR_MODE:-disabled}" in provider
     assert "NEXUS_INTRADAY_POLL_SECONDS=${NEXUS_INTRADAY_POLL_SECONDS:-15}" in provider
     assert "NEXUS_INTRADAY_MAX_SYMBOLS=${NEXUS_INTRADAY_MAX_SYMBOLS:-10}" in provider
-    assert "- ALPACA_INTRADAY_FEED" in provider
-    assert "- ALPACA_INTRADAY_DELIVERY_MODE" in provider
+    assert "- ALPACA_INTRADAY_FEED" not in provider
+    assert "- ALPACA_INTRADAY_DELIVERY_MODE" not in provider
+    assert "NEXUS_INTRADAY_MONITOR_MODE=${NEXUS_INTRADAY_MONITOR_MODE:-disabled}" in alpaca_provider
+    assert "NEXUS_INTRADAY_POLL_SECONDS=${NEXUS_INTRADAY_POLL_SECONDS:-15}" in alpaca_provider
+    assert "NEXUS_INTRADAY_MAX_SYMBOLS=${NEXUS_INTRADAY_MAX_SYMBOLS:-30}" in alpaca_provider
+    assert "- ALPACA_INTRADAY_FEED" in alpaca_provider
+    assert "- ALPACA_INTRADAY_DELIVERY_MODE" in alpaca_provider
 
     for service in (
         "api",
@@ -63,3 +69,5 @@ def test_intraday_runbook_preserves_external_activation_stop_boundary() -> None:
     assert "GET https://data.alpaca.markets/v2/stocks/snapshots" in runbook
     assert "逐次批准" in runbook
     assert "真实订单" in runbook
+    assert "复星最多 10" in runbook
+    assert "Alpaca 最多 30" in runbook

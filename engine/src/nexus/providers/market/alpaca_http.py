@@ -13,11 +13,11 @@ from pydantic import SecretStr
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.providers.base import BarsRequest, InstrumentId
 from nexus.providers.market.alpaca import AlpacaRawResponse, MarketProviderPayloadError
 
-_US_EXCHANGES = frozenset({"AMEX", "ARCA", "NASDAQ", "NYSE", "NYSEARCA"})
 _SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 _CURSOR = re.compile(r"^[A-Za-z0-9._~=-]{1,512}$")
 
@@ -61,7 +61,7 @@ class SqlInstrumentSymbolResolver:
         if len(rows) != 1:
             raise MarketProviderPayloadError("INSTRUMENT_SYMBOL_AUTHORITY_INVALID")
         symbol, exchange, currency = rows[0]
-        if exchange.upper() not in _US_EXCHANGES or currency.upper() != "USD":
+        if exchange.upper() not in US_EQUITY_EXCHANGES or currency.upper() != "USD":
             raise MarketProviderPayloadError("US_INSTRUMENT_REQUIRED")
         return _validated_us_symbol(symbol)
 

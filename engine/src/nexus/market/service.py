@@ -34,6 +34,7 @@ from nexus.market.intraday_metrics import (
     IntradayMetrics,
     compute_intraday_metrics,
 )
+from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.persistence.models.data import DataArtifact, ProviderCapability
 from nexus.persistence.models.market import (
     Instrument,
@@ -61,7 +62,6 @@ _STALE_AFTER = timedelta(seconds=45)
 _SELECTED_SERIES_BAR_LIMIT = 500
 _UNIVERSE_KEY = "us_liquid"
 _UNIVERSE_VERSION = "us_liquid_v1"
-_US_EXCHANGES = ("XNYS", "XNAS", "ARCX")
 
 
 class PriceSeriesLoader(Protocol):
@@ -232,7 +232,7 @@ class MarketService:
                 UniverseSnapshot.effective_from <= decision_time.date(),
                 UniverseSnapshot.published_at.is_not(None),
                 UniverseSnapshot.published_at <= decision_time,
-                Instrument.exchange.in_(_US_EXCHANGES),
+                Instrument.exchange.in_(US_EQUITY_EXCHANGES),
                 Instrument.currency == "USD",
             )
             .order_by(aliases.c.symbol.asc(), Instrument.id.asc())
@@ -323,7 +323,7 @@ class MarketService:
                 ProviderCapability.contract_hash
                 == LatestQuote.provider_contract_hash,
                 ProviderCapability.created_at <= LatestQuote.provider_authorized_at,
-                ProviderCapability.expires_at > decision_time,
+                ProviderCapability.expires_at > LatestQuote.provider_authorized_at,
                 ProviderCapability.payload["operation"].as_string()
                 == "fosun_get_quotes",
                 ProviderCapability.payload["market_scope"].as_string() == "US",
@@ -620,7 +620,7 @@ class MarketService:
                     UniverseSnapshot.effective_from <= decision_time.date(),
                     UniverseSnapshot.published_at.is_not(None),
                     UniverseSnapshot.published_at <= decision_time,
-                    Instrument.exchange.in_(_US_EXCHANGES),
+                    Instrument.exchange.in_(US_EQUITY_EXCHANGES),
                     Instrument.currency == "USD",
                 )
                 .limit(1)

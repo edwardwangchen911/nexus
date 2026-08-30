@@ -259,6 +259,12 @@ class _BoundDatabaseExecutors:
             PriceSeriesManifest.delivery_mode == "fixture",
             PriceSeriesManifest.interval == "1Day",
         )
+        historical_alpaca_source = and_(
+            PriceSeriesManifest.source == "alpaca",
+            PriceSeriesManifest.feed == "sip",
+            PriceSeriesManifest.delivery_mode == "delayed",
+            PriceSeriesManifest.interval == "1Day",
+        )
         fosun_v2_protocol = and_(
             fosun_source,
             PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_V2_ID,
@@ -281,11 +287,20 @@ class _BoundDatabaseExecutors:
             SourcePolicyRecord.schema_version == "1",
             SourcePolicyRecord.payload == SOURCE_POLICY_PAYLOAD,
         )
-        price_protocol = (
-            or_(fosun_v2_protocol, fixture_v1_protocol)
-            if self._allow_fixture_price_evidence
-            else fosun_v2_protocol
+        historical_alpaca_v1_protocol = and_(
+            historical_alpaca_source,
+            PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
+            PriceBarSetAuthority.hash_version == HASH_VERSION,
+            PriceBarSetAuthority.policy_version == POLICY_VERSION,
+            SourcePolicyRecord.id == SOURCE_POLICY_ID,
+            SourcePolicyRecord.key == SOURCE_POLICY_KEY,
+            SourcePolicyRecord.version == SOURCE_POLICY_VERSION,
+            SourcePolicyRecord.schema_version == "1",
+            SourcePolicyRecord.payload == SOURCE_POLICY_PAYLOAD,
         )
+        price_protocol = or_(fosun_v2_protocol, historical_alpaca_v1_protocol)
+        if self._allow_fixture_price_evidence:
+            price_protocol = or_(price_protocol, fixture_v1_protocol)
         authority_rows = tuple(
             (
                 await self._session.execute(
@@ -413,7 +428,11 @@ class _BoundDatabaseExecutors:
                 reason="flagged_price_bars",
             )
 
-        prepared = await prepare_price_bar_set(self._session, manifest.id)
+        prepared = await prepare_price_bar_set(
+            self._session,
+            manifest.id,
+            as_of=binding.selected_at,
+        )
         if prepared is None or (
             prepared.content_hash,
             prepared.byte_length,

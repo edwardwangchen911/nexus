@@ -13,6 +13,13 @@ def test_gateway_liveness_is_minimal() -> None:
     assert response.json() == {"status": "alive", "service": "nexus-fosun-gateway"}
 
 
+def test_fixture_gateway_is_immediately_ready() -> None:
+    response = TestClient(create_gateway_app(GatewaySettings.for_test())).get("/health/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready", "service": "nexus-fosun-gateway"}
+
+
 def test_gateway_settings_never_render_fixture_secrets() -> None:
     settings = GatewaySettings.for_test()
 
@@ -47,6 +54,18 @@ def test_gateway_rejects_non_read_only_capability(capability: str) -> None:
         )
 
 
+@pytest.mark.parametrize("replica_count", [0, 2, 3, -1])
+def test_gateway_rejects_more_or_fewer_than_one_replica(replica_count: int) -> None:
+    """An in-memory replay cache is safe only under the fixed single-replica topology."""
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(
+            {
+                **_production_settings(),
+                "FOSUN_GATEWAY_REPLICA_COUNT": replica_count,
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "missing",
     [
@@ -55,6 +74,7 @@ def test_gateway_rejects_non_read_only_capability(capability: str) -> None:
         "FOSUN_GATEWAY_SERVER_CLIENT_CA",
         "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID",
         "FOSUN_GATEWAY_HMAC_CURRENT_SECRET",
+        "FOSUN_GATEWAY_REPLAY_STORE_PATH",
         "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID",
         "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET",
         "FSOPENAPI_BASE_URL",
@@ -133,6 +153,7 @@ def _production_settings() -> dict[str, object]:
         "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
         "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "gateway-current",
         "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret-32-bytes",
+        "FOSUN_GATEWAY_REPLAY_STORE_PATH": "/synthetic/fosun-gateway/replay.sqlite3",
         "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID": "market-gateway-current",
         "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET": ("synthetic-market-current-secret-32-bytes"),
         "FOSUN_GATEWAY_SERVER_CERT": "/run/secrets/synthetic-server-cert",

@@ -31,21 +31,38 @@ class PriceBarSetPreparation:
 
 
 async def prepare_price_bar_set(
-    session: AsyncSession, manifest_id: UUID
+    session: AsyncSession,
+    manifest_id: UUID,
+    *,
+    as_of: datetime | None = None,
 ) -> PriceBarSetPreparation | None:
     """Ask PostgreSQL whether a manifest can become price authority evidence."""
-    source = await session.scalar(
-        select(PriceSeriesManifest.source).where(PriceSeriesManifest.id == manifest_id)
-    )
-    function = (
-        "nexus_prepare_price_bar_set_v2"
-        if source == "fosun"
-        else "nexus_prepare_price_bar_set"
-    )
+    manifest_identity = (
+        await session.execute(
+            select(
+                PriceSeriesManifest.source,
+                PriceSeriesManifest.provider_authorized_at,
+            ).where(PriceSeriesManifest.id == manifest_id)
+        )
+    ).one_or_none()
+    if manifest_identity is None:
+        return None
+    source, provider_authorized_at = manifest_identity
+    if source == "fosun":
+        effective_at = as_of or provider_authorized_at
+        if effective_at is None:
+            return None
+        statement = text(
+            "SELECT * FROM nexus_prepare_price_bar_set_v2_at(:manifest_id,:as_of)"
+        )
+        parameters = {"manifest_id": manifest_id, "as_of": effective_at}
+    else:
+        statement = text("SELECT * FROM nexus_prepare_price_bar_set(:manifest_id)")
+        parameters = {"manifest_id": manifest_id}
     row = (
         await session.execute(
-            text(f"SELECT * FROM {function}(:manifest_id)"),
-            {"manifest_id": manifest_id},
+            statement,
+            parameters,
         )
     ).mappings().one_or_none()
     return None if row is None else PriceBarSetPreparation(**dict(row))
@@ -55,7 +72,11 @@ async def finalize_price_bar_set(
     session: AsyncSession, manifest: PriceSeriesManifest
 ) -> tuple[PriceBarSetAuthority, ResearchEvidenceRef] | None:
     """Persist the database-prepared authority and its owned evidence in this transaction."""
-    prepared = await prepare_price_bar_set(session, manifest.id)
+    prepared = await prepare_price_bar_set(
+        session,
+        manifest.id,
+        as_of=manifest.provider_authorized_at,
+    )
     if prepared is None:
         return None
 

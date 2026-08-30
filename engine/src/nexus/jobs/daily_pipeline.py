@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -76,6 +76,7 @@ async def schedule_due_daily_pipeline(
     *,
     now: datetime,
     profile_id: str,
+    market_source: Literal["fosun", "alpaca"] = "fosun",
 ) -> Job | None:
     """Idempotently enqueue the latest due XNYS session from frozen authority."""
     now = parse_utc(format_utc(now))
@@ -153,11 +154,15 @@ async def schedule_due_daily_pipeline(
         profile_id=profile_id,
         universe_snapshot_id=None if universe is None else str(universe.id),
         universe_content_hash=None if universe is None else universe.content_hash,
-        market_source="fosun",
-        market_authority=await load_frozen_fosun_market_authority(
-            session,
-            check_time=now,
-            operation="fosun_get_bars",
+        market_source=market_source,
+        market_authority=(
+            await load_frozen_fosun_market_authority(
+                session,
+                check_time=now,
+                operation="fosun_get_bars",
+            )
+            if market_source == "fosun"
+            else None
         ),
     )
     document = payload.model_dump(mode="json")

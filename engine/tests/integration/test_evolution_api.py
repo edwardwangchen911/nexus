@@ -247,7 +247,7 @@ async def test_overview_returns_latest_registry_window_in_authority_order(
 
 
 @pytest.mark.asyncio
-async def test_start_experiment_accepts_no_parameters_and_queues_only_strategy_job(
+async def test_start_experiment_abstains_until_adjusted_authority_is_available(
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(_settings(migrated_database_url))
@@ -314,16 +314,17 @@ async def test_start_experiment_accepts_no_parameters_and_queues_only_strategy_j
         )
 
     assert forbidden.status_code == 422
-    assert queued.status_code == replay.status_code == 202
-    assert queued.json() == replay.json()
-    assert queued.json()["data"]["status"] == "QUEUED"
-    assert queued.json()["data"]["live_execution_enabled"] is False
-    assert queued.headers["location"].startswith("/internal/v1/strategy-evolution")
+    assert queued.status_code == replay.status_code == 503
+    assert queued.json()["error"]["code"] == "AUTHORITY_UNAVAILABLE"
+    assert queued.json()["error"]["details"]["reason_code"] == (
+        "BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE"
+    )
+    assert replay.json()["error"]["details"]["reason_code"] == (
+        "BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE"
+    )
     async with factory() as session:
         jobs = tuple(await session.scalars(select(Job)))
-    assert len(jobs) == 1
-    assert jobs[0].queue == "strategy_rnd"
-    assert jobs[0].payload["operation"] == "generate_family"
+    assert jobs == ()
 
 
 @pytest.mark.asyncio
@@ -394,8 +395,10 @@ async def test_veto_appends_verified_events_and_never_changes_champion(
             headers=_action_headers(path, body, key="veto-first", etag='"g1-v1"'),
         )
 
-    assert active_family.status_code == 422
-    assert active_family.json()["error"]["details"]["reason_code"] == ("ACTIVE_FAMILY_EXISTS")
+    assert active_family.status_code == 503
+    assert active_family.json()["error"]["details"]["reason_code"] == (
+        "BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE"
+    )
     assert detail.status_code == 200
     assert detail.json()["data"]["integrity_status"] == "verified"
     assert vetoed.status_code == 200

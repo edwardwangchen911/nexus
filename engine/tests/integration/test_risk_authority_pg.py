@@ -1,9 +1,12 @@
 import asyncio
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 import pytest
+from helpers.fosun_lineage import seed_fosun_daily_lineage
+from nexus.integrations.service import IntegrationStatusService
 from nexus.market.price_bar_authority import (
     SOURCE_POLICY_ID,
     SOURCE_POLICY_V2_ID,
@@ -114,6 +117,7 @@ async def _seed_authority(
     price_source: str = "fixture",
     capability_expires_at: datetime = datetime(2027, 1, 1, tzinfo=UTC),
     decision_time: datetime = DECISION_TIME,
+    exchange: str = "NASDAQ",
 ) -> ForwardStrategyDecision:
     source_policy_id = (
         SOURCE_POLICY_V2_ID if price_source == "fosun" else SOURCE_POLICY_ID
@@ -158,7 +162,7 @@ async def _seed_authority(
                 Instrument(
                     id=INSTRUMENT_ID,
                     asset_type="common_stock",
-                    exchange="NASDAQ",
+                    exchange=exchange,
                     currency="USD",
                     tick_size=Decimal("0.01"),
                     risk_bucket="technology",
@@ -238,6 +242,17 @@ async def _seed_authority(
                 )
             )
             await session.flush()
+            fosun_lineage = None
+            if price_source == "fosun":
+                fosun_lineage = await seed_fosun_daily_lineage(
+                    session,
+                    manifest_id=MANIFEST_ID,
+                    provider_authorized_at=provider_authorized_at,
+                    sessions=(DECISION_SESSION,),
+                    raw_payload=b'{"fixture":"paper-risk"}',
+                    received_at=AVAILABLE_AT,
+                    calendar_range_end=EXECUTION_SESSION,
+                )
             session.add(
                 UniverseMember(
                     id=UUID(int=500),
@@ -287,6 +302,24 @@ async def _seed_authority(
                 provider_authorized_at=(
                     provider_authorized_at if price_source == "fosun" else None
                 ),
+                gateway_transport_artifact_id=(
+                    fosun_lineage.raw_artifact.id if fosun_lineage is not None else None
+                ),
+                daily_calendar_authority_id=(
+                    fosun_lineage.calendar_authority_id
+                    if fosun_lineage is not None
+                    else None
+                ),
+                gateway_request_start_at=(
+                    fosun_lineage.request_start_at
+                    if fosun_lineage is not None
+                    else None
+                ),
+                gateway_request_end_at=(
+                    fosun_lineage.request_end_at
+                    if fosun_lineage is not None
+                    else None
+                ),
             )
             session.add(manifest)
             await session.flush()
@@ -304,7 +337,11 @@ async def _seed_authority(
                     observed_at=AVAILABLE_AT,
                     available_at=AVAILABLE_AT,
                     received_at=AVAILABLE_AT,
-                    revision="v1",
+                    revision=(
+                        fosun_lineage.raw_digest
+                        if fosun_lineage is not None
+                        else "v1"
+                    ),
                     quality_flags=[],
                 )
             )
@@ -431,6 +468,30 @@ async def _load(database_url: str, decision: ForwardStrategyDecision):
         await engine.dispose()
 
 
+async def _advance_fosun_status(
+    database_url: str,
+    *,
+    mode: Literal["disabled", "read_only"],
+) -> tuple[int, str]:
+    engine = create_async_engine(database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            status = await IntegrationStatusService(
+                session,
+                datetime(2026, 8, 21, 20, 45, tzinfo=UTC),
+            ).write_status(
+                "fosun",
+                mode=mode,
+                expected_version=1,
+                last_success_at=None,
+                admitted_contract_hash="9" * 64 if mode == "read_only" else None,
+            )
+            return status.version, status.status
+    finally:
+        await engine.dispose()
+
+
 def test_pg_loader_reconstructs_the_exact_bound_authority(
     migrated_database_url: str,
 ) -> None:
@@ -443,11 +504,17 @@ def test_pg_loader_reconstructs_the_exact_bound_authority(
     assert market.whitelisted_instrument_ids == (INSTRUMENT_ID,)
 
 
-def test_pg_loader_accepts_exact_fosun_v2_price_authority(
+@pytest.mark.parametrize("exchange", ("ARCA", "NYSEARCA"))
+def test_pg_loader_accepts_collection_supported_fosun_v2_exchange_aliases(
     migrated_database_url: str,
+    exchange: str,
 ) -> None:
     decision = asyncio.run(
-        _seed_authority(migrated_database_url, price_source="fosun")
+        _seed_authority(
+            migrated_database_url,
+            price_source="fosun",
+            exchange=exchange,
+        )
     )
     market = asyncio.run(_load(migrated_database_url, decision))
 
@@ -456,7 +523,27 @@ def test_pg_loader_accepts_exact_fosun_v2_price_authority(
     assert market.prices[0].delivery_mode == "real_time"
 
 
-def test_pg_loader_rejects_fosun_capability_expired_at_decision_time(
+@pytest.mark.parametrize("mode", ("read_only", "disabled"))
+def test_pg_loader_replays_frozen_fosun_after_current_status_changes(
+    migrated_database_url: str,
+    mode: Literal["disabled", "read_only"],
+) -> None:
+    decision = asyncio.run(
+        _seed_authority(migrated_database_url, price_source="fosun")
+    )
+    version, status = asyncio.run(
+        _advance_fosun_status(migrated_database_url, mode=mode)
+    )
+
+    assert version == 2
+    assert status == mode
+    market = asyncio.run(_load(migrated_database_url, decision))
+
+    assert market.prices[0].source == "fosun"
+    assert market.prices[0].authority_id is not None
+
+
+def test_pg_loader_rejects_fosun_price_outside_calendar_freshness(
     migrated_database_url: str,
 ) -> None:
     decision = asyncio.run(

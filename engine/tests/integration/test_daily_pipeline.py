@@ -7,8 +7,11 @@ from decimal import Decimal
 from typing import cast
 from uuid import UUID
 
+import nexus.jobs.daily_local as daily_local_module
 import pytest
 from helpers.paper_execution import FIRST_EVALUATION, seed_paper_execution
+from helpers.paper_performance import seed_paper_performance, seed_second_paper_close
+from helpers.shadow import seed_complete_shadow_session_inputs, seed_started_shadow
 from nexus.audit.service import append_audit_event
 from nexus.jobs.daily_local import (
     LOCAL_SAFE_DAILY_PROFILE,
@@ -28,9 +31,40 @@ from nexus.persistence.models.backtest import (
 )
 from nexus.persistence.models.data import ProviderCapability
 from nexus.persistence.models.market import UniverseSnapshot
-from nexus.persistence.models.runtime import IntegrationStatus, Job, JobDependency, JobLease
+from nexus.persistence.models.paper import (
+    PaperExecutionWindowAuthorityRecord,
+    PaperFillRecord,
+    PaperLedgerEntryRecord,
+    PaperLedgerTransactionRecord,
+    PaperOrderEventRecord,
+    PaperPerformanceAttributionRecord,
+    PaperPerformanceSnapshotRecord,
+    PaperPositionAdjustmentEventRecord,
+    PaperPositionSnapshotRecord,
+    PaperRequestIdempotencyRecord,
+    PaperReservationEventRecord,
+    PaperReservationRecord,
+)
+from nexus.persistence.models.runtime import (
+    AuditEvent,
+    IntegrationStatus,
+    Job,
+    JobDependency,
+    JobLease,
+    OutboxEvent,
+)
+from nexus.persistence.models.shadow import (
+    ShadowAdvanceAttemptRecord,
+    ShadowCheckpointRecord,
+    ShadowPortfolioStateRecord,
+    ShadowSealRecord,
+    ShadowSessionAuthorityRecord,
+    ShadowSimulatedFillRecord,
+    ShadowSimulatedOutcomeRecord,
+)
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
+from nexus.shadow.service import advance_shadow_session
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
@@ -48,6 +82,177 @@ StageExecutor = Callable[
     [JobType, JobHandlerContext, DailyStagePayload],
     Awaitable[JobHandlerResult],
 ]
+
+
+async def _paper_execution_domain_counts(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    order_id: UUID,
+) -> tuple[int, ...]:
+    counts: list[int] = []
+    for model in (
+        PaperOrderEventRecord,
+        PaperExecutionWindowAuthorityRecord,
+        PaperFillRecord,
+        PaperRequestIdempotencyRecord,
+    ):
+        counts.append(
+            int(
+                await session.scalar(
+                    select(func.count()).select_from(model).where(model.order_id == order_id)
+                )
+                or 0
+            )
+        )
+    reservation_ids = select(PaperReservationRecord.id).where(
+        PaperReservationRecord.order_id == order_id
+    )
+    counts.extend(
+        (
+            int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(PaperReservationRecord)
+                    .where(PaperReservationRecord.order_id == order_id)
+                )
+                or 0
+            ),
+            int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(PaperReservationEventRecord)
+                    .where(PaperReservationEventRecord.reservation_id.in_(reservation_ids))
+                )
+                or 0
+            ),
+            int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(PaperLedgerTransactionRecord)
+                    .where(PaperLedgerTransactionRecord.order_id == order_id)
+                )
+                or 0
+            ),
+            int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(PaperLedgerEntryRecord)
+                    .join(
+                        PaperLedgerTransactionRecord,
+                        PaperLedgerTransactionRecord.id
+                        == PaperLedgerEntryRecord.transaction_id,
+                    )
+                    .where(PaperLedgerTransactionRecord.order_id == order_id)
+                )
+                or 0
+            ),
+            int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(AuditEvent)
+                    .where(
+                        AuditEvent.schema_version == "paper_execution_v1",
+                        AuditEvent.payload["order_id"].as_string() == str(order_id),
+                    )
+                )
+                or 0
+            ),
+            int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(OutboxEvent)
+                    .where(
+                        OutboxEvent.schema_version == "paper_execution_v1",
+                        OutboxEvent.aggregate_id == order_id,
+                    )
+                )
+                or 0
+            ),
+        )
+    )
+    counts.append(
+        int(
+            await session.scalar(
+                select(func.count())
+                .select_from(PaperPositionAdjustmentEventRecord)
+                .where(PaperPositionAdjustmentEventRecord.account_id == account_id)
+            )
+            or 0
+        )
+    )
+    return tuple(counts)
+
+
+async def _paper_performance_fact_counts(session: AsyncSession) -> tuple[int, int, int]:
+    counts: list[int] = []
+    for model in (
+        PaperPerformanceSnapshotRecord,
+        PaperPositionSnapshotRecord,
+        PaperPerformanceAttributionRecord,
+    ):
+        counts.append(
+            int(await session.scalar(select(func.count()).select_from(model)) or 0)
+        )
+    return cast(tuple[int, int, int], tuple(counts))
+
+
+async def _shadow_session_fact_counts(
+    session: AsyncSession,
+    *,
+    shadow_group_id: UUID,
+) -> tuple[int, ...]:
+    counts = [
+        int(
+            await session.scalar(
+                select(func.count())
+                .select_from(model)
+                .where(model.shadow_group_id == shadow_group_id)
+            )
+            or 0
+        )
+        for model in (
+            ShadowSessionAuthorityRecord,
+            ShadowPortfolioStateRecord,
+            ShadowSimulatedOutcomeRecord,
+            ShadowSimulatedFillRecord,
+            ShadowAdvanceAttemptRecord,
+            ShadowCheckpointRecord,
+            ShadowSealRecord,
+        )
+    ]
+    counts.append(
+        int(
+            await session.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(
+                    AuditEvent.payload["shadow_group_id"].as_string()
+                    == str(shadow_group_id),
+                    AuditEvent.action.in_(
+                        ("shadow.session_applied", "shadow.session_failed", "shadow.sealed")
+                    ),
+                )
+            )
+            or 0
+        )
+    )
+    counts.append(
+        int(
+            await session.scalar(
+                select(func.count())
+                .select_from(OutboxEvent)
+                .where(
+                    OutboxEvent.aggregate_id == shadow_group_id,
+                    OutboxEvent.event_type.in_(
+                        ("shadow.session_applied", "shadow.session_failed", "shadow.sealed")
+                    ),
+                )
+            )
+            or 0
+        )
+    )
+    return tuple(counts)
 
 
 class _AuditStore:
@@ -181,7 +386,7 @@ async def _drain_daily_queues(
                 worker_id=f"daily-fixture-{queue.value}-worker",
                 worker_started_at=now,
                 process_version="test-v1",
-                migration_head="0027_fosun_market_authority",
+                migration_head="0029_fosun_bar_lineage",
                 clock=lambda: now,
                 claim_registered_only=True,
             )
@@ -385,6 +590,28 @@ async def test_scheduler_freezes_actual_fosun_delivery_authority_at_schedule_tim
 
 
 @pytest.mark.asyncio
+async def test_scheduler_preserves_explicit_alpaca_market_mode(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_calendar(factory)
+    now = _FRIDAY_CLOSE + timedelta(minutes=31)
+
+    async with factory() as session, session.begin():
+        root = await schedule_due_daily_pipeline(
+            session,
+            now=now,
+            profile_id=_PROFILE,
+            market_source="alpaca",
+        )
+
+    assert root is not None
+    payload = DailyPipelinePayload.model_validate(root.payload)
+    assert payload.market_source == "alpaca"
+    assert payload.market_authority is None
+
+
+@pytest.mark.asyncio
 async def test_missing_fosun_authority_terminal_skips_only_market_collection(
     migrated_database_url: str,
 ) -> None:
@@ -411,7 +638,7 @@ async def test_missing_fosun_authority_terminal_skips_only_market_collection(
         worker_id="daily-no-market-authority-worker",
         worker_started_at=now,
         process_version="test-v1",
-        migration_head="0027_fosun_market_authority",
+        migration_head="0029_fosun_bar_lineage",
         clock=lambda: now,
         claim_registered_only=True,
     )
@@ -654,7 +881,7 @@ async def test_general_root_materializes_provider_children_without_registering_h
         worker_id="daily-provider-materializer",
         worker_started_at=now,
         process_version="test-v1",
-        migration_head="0027_fosun_market_authority",
+        migration_head="0029_fosun_bar_lineage",
         clock=lambda: now,
         claim_registered_only=True,
     )
@@ -736,13 +963,24 @@ async def test_local_audit_manifest_runs_only_with_injected_object_store(
     assert b"must-not-export" not in content
 
 
+@pytest.mark.parametrize("legacy_market_policy", (False, True))
 @pytest.mark.asyncio
-async def test_local_safe_profile_advances_due_internal_paper_order(
+async def test_preexisting_unpriced_paper_order_never_fills_and_is_released_at_cutoff(
     migrated_database_url: str,
+    legacy_market_policy: bool,
 ) -> None:
-    seed = await seed_paper_execution(migrated_database_url)
+    seed = await seed_paper_execution(
+        migrated_database_url,
+        legacy_market_policy=legacy_market_policy,
+    )
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
     planned_tick = datetime(2026, 8, 26, 20, 31, tzinfo=UTC)
+    async with factory() as session:
+        before_counts = await _paper_execution_domain_counts(
+            session,
+            account_id=seed.account_id,
+            order_id=seed.order_id,
+        )
     async with factory() as session, session.begin():
         root = await schedule_due_daily_pipeline(
             session,
@@ -769,68 +1007,52 @@ async def test_local_safe_profile_advances_due_internal_paper_order(
                 Job.payload["target_id"].as_string() == str(seed.order_id),
             )
         )
-    assert execution_job is not None
-    assert execution_job.effective_at == FIRST_EVALUATION
-    assert await run_job_worker_once(
-        factory,
-        registry=registry,
-        queue=QueueName.GENERAL,
-        worker_id="daily-paper-worker",
-        worker_started_at=planned_tick,
-        process_version="test-v1",
-        migration_head="0021_manual_job_retry_allowance",
-        clock=lambda: FIRST_EVALUATION,
-        claim_registered_only=True,
-    )
-    async with factory() as session:
-        completed = await session.get(Job, execution_job.id)
-    assert completed is not None
-    assert completed.status == "succeeded"
-    assert completed.result_code is not None
-    assert completed.result_code.startswith("PAPER_")
-
-
-@pytest.mark.asyncio
-async def test_nonterminal_paper_execution_enqueues_next_five_minute_window(
-    migrated_database_url: str,
-) -> None:
-    seed = await seed_paper_execution(
-        migrated_database_url,
-        window_bar_volumes=(Decimal("10"), Decimal("10")),
-    )
-    factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    planned_tick = datetime(2026, 8, 26, 20, 31, tzinfo=UTC)
-    async with factory() as session, session.begin():
-        assert await schedule_due_daily_pipeline(
-            session,
-            now=planned_tick,
-            profile_id=LOCAL_SAFE_DAILY_PROFILE,
+        observed_jobs = tuple(
+            (
+                row.job_type,
+                row.status,
+                row.result_code,
+                row.last_error_code,
+                row.payload.get("target_id"),
+            )
+            for row in (await session.scalars(select(Job).order_by(Job.created_at))).all()
         )
-    registry = build_local_daily_pipeline_registry()
-    assert await run_job_worker_once(
-        factory,
-        registry=registry,
-        queue=QueueName.GENERAL,
-        worker_id="daily-partial-worker",
-        worker_started_at=planned_tick,
-        process_version="test-v1",
-        migration_head="0021_manual_job_retry_allowance",
-        clock=lambda: planned_tick,
-        claim_registered_only=True,
-    )
-    assert await run_job_worker_once(
-        factory,
-        registry=registry,
-        queue=QueueName.GENERAL,
-        worker_id="daily-partial-worker",
-        worker_started_at=planned_tick,
-        process_version="test-v1",
-        migration_head="0021_manual_job_retry_allowance",
-        clock=lambda: FIRST_EVALUATION,
-        claim_registered_only=True,
-    )
+    assert execution_job is not None, observed_jobs
+    assert execution_job.effective_at == FIRST_EVALUATION
+    cutoff = FIRST_EVALUATION + timedelta(minutes=20)
+    for _ in range(64):
+        async with factory() as session:
+            completed = await session.scalar(
+                select(Job)
+                .where(
+                    Job.job_type == JobType.PAPER_EXECUTE_DUE.value,
+                    Job.payload["target_id"].as_string() == str(seed.order_id),
+                    Job.result_code == "PAPER_CANCELLED",
+                )
+                .limit(1)
+            )
+        if completed is not None:
+            break
+        worked = await run_job_worker_once(
+            factory,
+            registry=registry,
+            queue=QueueName.GENERAL,
+            worker_id="daily-paper-worker",
+            worker_started_at=planned_tick,
+            process_version="test-v1",
+            migration_head="0021_manual_job_retry_allowance",
+            clock=lambda: cutoff,
+            claim_registered_only=True,
+        )
+        if not worked:
+            break
     async with factory() as session:
-        jobs = tuple(
+        after_counts = await _paper_execution_domain_counts(
+            session,
+            account_id=seed.account_id,
+            order_id=seed.order_id,
+        )
+        execution_jobs = tuple(
             (
                 await session.scalars(
                     select(Job)
@@ -842,7 +1064,251 @@ async def test_nonterminal_paper_execution_enqueues_next_five_minute_window(
                 )
             ).all()
         )
-    assert len(jobs) == 2
-    assert jobs[0].result_code == "PAPER_NO_CAPACITY"
-    assert jobs[1].status == "queued"
-    assert jobs[1].effective_at == FIRST_EVALUATION + timedelta(minutes=5)
+        stage_jobs = tuple(
+            (
+                row.job_type,
+                row.status,
+                row.result_code,
+                row.last_error_code,
+                row.effective_at,
+            )
+            for row in (await session.scalars(select(Job).order_by(Job.created_at))).all()
+        )
+        reservation = await session.scalar(
+            select(PaperReservationRecord).where(
+                PaperReservationRecord.order_id == seed.order_id
+            )
+        )
+        assert reservation is not None
+        reservation_events = tuple(
+            (
+                await session.scalars(
+                    select(PaperReservationEventRecord)
+                    .where(PaperReservationEventRecord.reservation_id == reservation.id)
+                    .order_by(PaperReservationEventRecord.event_seq)
+                )
+            ).all()
+        )
+        order_events = tuple(
+            (
+                await session.scalars(
+                    select(PaperOrderEventRecord)
+                    .where(PaperOrderEventRecord.order_id == seed.order_id)
+                    .order_by(PaperOrderEventRecord.event_seq)
+                )
+            ).all()
+        )
+    assert completed is not None, stage_jobs
+    assert (completed.status, completed.result_code) == (
+        "succeeded",
+        "PAPER_CANCELLED",
+    )
+    assert [job.result_code for job in execution_jobs] == [
+        "PAPER_NO_DATA",
+        "PAPER_NO_DATA",
+        "PAPER_NO_DATA",
+        "PAPER_NO_DATA",
+        "PAPER_CANCELLED",
+    ]
+    assert [job.effective_at for job in execution_jobs] == [
+        FIRST_EVALUATION + timedelta(minutes=offset)
+        for offset in (0, 5, 10, 15, 20)
+    ]
+    assert after_counts[0] == before_counts[0] + 1
+    assert after_counts[1] == before_counts[1] == 0
+    assert after_counts[2] == before_counts[2] == 0
+    assert after_counts[3] == before_counts[3] + 5
+    assert after_counts[4] == before_counts[4]
+    assert after_counts[5] == before_counts[5] + 1
+    assert after_counts[6] == before_counts[6] + 1
+    assert after_counts[7] == before_counts[7] + 2
+    assert after_counts[10] == before_counts[10] == 0
+    assert [event.event_type for event in reservation_events] == [
+        "reserved",
+        "released",
+    ]
+    assert order_events[-1].to_status == "cancelled"
+    assert (
+        order_events[-1].reason_code
+        == "paper_execution_price_authority_unavailable"
+    )
+    assert order_events[-1].actor_kind == "task19"
+
+
+@pytest.mark.parametrize("existing_session", (False, True))
+@pytest.mark.asyncio
+async def test_daily_shadow_preserves_replay_but_skips_new_unpriced_session(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_session: bool,
+) -> None:
+    started = await seed_started_shadow(migrated_database_url)
+    observed_at = await seed_complete_shadow_session_inputs(
+        migrated_database_url,
+        started=started,
+        ordinal=1,
+    )
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session:
+        calendar = await session.get(
+            ExchangeCalendarSessionRecord,
+            (
+                started.eligible.calendar_id,
+                started.start.start_session,
+            ),
+        )
+    assert calendar is not None
+    planned_tick = calendar.market_close_at + timedelta(minutes=31)
+    if existing_session:
+        with monkeypatch.context() as legacy_authority:
+            legacy_authority.setattr(
+                "nexus.shadow.service.current_proposal_shadow_price_authority_available",
+                lambda _source_policy_id: True,
+            )
+            async with factory() as session, session.begin():
+                applied = await advance_shadow_session(
+                    session,
+                    group_id=started.eligible.group_id,
+                    session_date=started.start.start_session,
+                    observed_at=observed_at,
+                )
+        assert applied.result == "applied"
+    async with factory() as session:
+        before_counts = await _shadow_session_fact_counts(
+            session,
+            shadow_group_id=started.start.shadow_group_id,
+        )
+    monkeypatch.setattr(
+        daily_local_module,
+        "current_proposal_shadow_price_authority_available",
+        lambda _source_policy_id: False,
+        raising=False,
+    )
+
+    async with factory() as session, session.begin():
+        root = await schedule_due_daily_pipeline(
+            session,
+            now=planned_tick,
+            profile_id=LOCAL_SAFE_DAILY_PROFILE,
+        )
+    assert root is not None
+    assert root.payload["session"] == started.start.start_session.isoformat()
+    registry = build_local_daily_pipeline_registry()
+    assert await run_job_worker_once(
+        factory,
+        registry=registry,
+        queue=QueueName.GENERAL,
+        worker_id="daily-shadow-root-worker",
+        worker_started_at=planned_tick,
+        process_version="test-v1",
+        migration_head="0029_fosun_bar_lineage",
+        clock=lambda: planned_tick,
+        claim_registered_only=True,
+    )
+    assert await run_job_worker_once(
+        factory,
+        registry=registry,
+        queue=QueueName.GENERAL,
+        worker_id="daily-shadow-stage-worker",
+        worker_started_at=planned_tick,
+        process_version="test-v1",
+        migration_head="0029_fosun_bar_lineage",
+        clock=lambda: planned_tick,
+        claim_registered_only=True,
+    )
+
+    async with factory() as session:
+        shadow_job = await session.scalar(
+            select(Job).where(
+                Job.job_type == JobType.SHADOW_ADVANCE_DUE.value,
+                Job.payload["target_id"].as_string() == str(started.eligible.group_id),
+            )
+        )
+        after_counts = await _shadow_session_fact_counts(
+            session,
+            shadow_group_id=started.start.shadow_group_id,
+        )
+
+    assert shadow_job is not None
+    assert (shadow_job.status, shadow_job.result_code) == (
+        ("succeeded", "SHADOW_REPLAYED")
+        if existing_session
+        else ("skipped", "SHADOW_PRICE_AUTHORITY_UNAVAILABLE")
+    )
+    assert after_counts == before_counts
+    if existing_session:
+        assert before_counts[0] == 1
+    else:
+        assert before_counts == (0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_daily_performance_skips_open_position_without_current_price_authority(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_performance(migrated_database_url)
+    await seed_second_paper_close(
+        migrated_database_url,
+        execution=seed.execution,
+        close=Decimal("111"),
+    )
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    planned_tick = datetime(2026, 8, 27, 20, 31, tzinfo=UTC)
+    async with factory() as session:
+        before_counts = await _paper_performance_fact_counts(session)
+    async with factory() as session, session.begin():
+        root = await schedule_due_daily_pipeline(
+            session,
+            now=planned_tick,
+            profile_id=LOCAL_SAFE_DAILY_PROFILE,
+        )
+    assert root is not None and root.payload["session"] == "2026-08-27"
+    registry = build_local_daily_pipeline_registry()
+    assert await run_job_worker_once(
+        factory,
+        registry=registry,
+        queue=QueueName.GENERAL,
+        worker_id="daily-performance-worker",
+        worker_started_at=planned_tick,
+        process_version="test-v1",
+        migration_head="0021_manual_job_retry_allowance",
+        clock=lambda: planned_tick,
+        claim_registered_only=True,
+    )
+    async with factory() as session:
+        performance_job = await session.scalar(
+            select(Job).where(
+                Job.job_type == JobType.PAPER_PERFORMANCE.value,
+                Job.payload["target_id"].as_string() == str(seed.execution.account_id),
+            )
+        )
+    assert performance_job is not None
+    for _ in range(8):
+        async with factory() as session:
+            current = await session.get(Job, performance_job.id)
+        assert current is not None
+        if current.status != "queued":
+            break
+        worked = await run_job_worker_once(
+            factory,
+            registry=registry,
+            queue=QueueName.GENERAL,
+            worker_id="daily-performance-worker",
+            worker_started_at=planned_tick,
+            process_version="test-v1",
+            migration_head="0021_manual_job_retry_allowance",
+            clock=lambda: planned_tick,
+            claim_registered_only=True,
+        )
+        if not worked:
+            break
+    async with factory() as session:
+        completed = await session.get(Job, performance_job.id)
+        after_counts = await _paper_performance_fact_counts(session)
+
+    assert completed is not None
+    assert (completed.status, completed.result_code) == (
+        "skipped",
+        "PERFORMANCE_PRICE_AUTHORITY_UNAVAILABLE",
+    )
+    assert after_counts == before_counts

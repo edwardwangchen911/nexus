@@ -675,7 +675,6 @@ async def test_market_legacy_comparison_boundaries_cannot_enable_fallback(
     ("admission_state", "expected_quality_reason"),
     [
         ("missing", "QUOTE_UNAVAILABLE"),
-        ("expired", "QUOTE_UNAVAILABLE"),
         ("valid", None),
     ],
 )
@@ -684,19 +683,16 @@ async def test_fosun_quote_requires_its_own_valid_operation_admission(
     admission_state: str,
     expected_quality_reason: str | None,
 ) -> None:
-    """Bars authority, expiry, or a different admitted hash cannot authorize quotes."""
+    """A missing or wrong-operation admission cannot authorize quotes."""
     await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
-    expiry = _DECISION_TIME
     if admission_state != "missing":
-        _, status_id, _, expiry = await _seed_fosun_quote_v2(
+        await _seed_fosun_quote_v2(
             migrated_database_url,
             instrument_id=_AAPL_ID,
             last=Decimal("123.45"),
         )
     path = "/internal/v1/market"
     app = _app(migrated_database_url)
-    if admission_state == "expired":
-        app.state.utc_clock = lambda: expiry
     async with _client(app) as client:
         response = await client.get(path, headers=_headers("GET", path))
 
@@ -716,6 +712,29 @@ async def test_fosun_quote_requires_its_own_valid_operation_admission(
         assert item["source"] is None
         assert item["quality"] == "FAIL"
         assert item["quality_reasons"] == [expected_quality_reason]
+
+
+@pytest.mark.asyncio
+async def test_fosun_quote_replays_after_its_frozen_capability_expires(
+    migrated_database_url: str,
+) -> None:
+    """Current capability expiry must not rewrite an already-authorized quote."""
+    await _seed_instrument(migrated_database_url, instrument_id=_AAPL_ID, symbol="AAPL")
+    _, _, _, expiry = await _seed_fosun_quote_v2(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        last=Decimal("123.45"),
+    )
+    path = "/internal/v1/market"
+    app = _app(migrated_database_url)
+    app.state.utc_clock = lambda: expiry
+
+    async with _client(app) as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    item = response.json()["data"]["items"][0]
+    assert item["price"] == "123.450000000000"
+    assert item["source"] == "fosun"
 
 
 @pytest.mark.asyncio

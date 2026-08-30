@@ -287,10 +287,31 @@ def _assert_reflected_schema(connection: Connection) -> None:
         expected_names = (
             foreign_key_names if isinstance(foreign_key_names, set) else {foreign_key_names}
         )
+        column_names = {
+            column["name"] for column in inspector.get_columns(table_name)
+        }
         if table_name == "price_series_manifests" and "price_bar_records" not in actual_tables:
             expected_names = expected_names - {"fk_price_series_evidence_ref"}
+        if table_name == "price_series_manifests" and "provider_capability_id" not in column_names:
+            expected_names = expected_names - {
+                "fk_price_series_manifests_provider_capability",
+                "fk_price_series_manifests_provider_status",
+            }
+        if (
+            table_name == "price_series_manifests"
+            and "gateway_transport_artifact_id" not in column_names
+        ):
+            expected_names = expected_names - {
+                "fk_price_series_manifests_gateway_transport_artifact",
+                "fk_price_series_manifests_daily_calendar_authority",
+            }
         if table_name == "latest_quotes" and "intraday_bar_set_authorities" not in actual_tables:
             expected_names = expected_names - {"fk_latest_quotes_data_artifact"}
+        if table_name == "latest_quotes" and "provider_capability_id" not in column_names:
+            expected_names = expected_names - {
+                "fk_latest_quotes_provider_capability",
+                "fk_latest_quotes_provider_status",
+            }
         assert {
             foreign_key["name"] for foreign_key in inspector.get_foreign_keys(table_name)
         } == expected_names

@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from helpers.diagnostic_artifacts import FixtureArtifactReader
+from helpers.fosun_lineage import seed_fosun_daily_lineage
 from helpers.portfolio_api import settings
 from nexus.diagnostics.assembler import load_diagnostic_source_policy
 from nexus.diagnostics.series_authority import select_authoritative_series
@@ -25,8 +26,10 @@ from sqlalchemy import update
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("exchange", ("ARCA", "NYSEARCA"))
 async def test_current_diagnostic_series_uses_exact_fosun_v2_and_replays_status_change(
     migrated_database_url: str,
+    exchange: str,
 ) -> None:
     factory = session_factory(settings(migrated_database_url))
     instrument_id = UUID("019d0000-0000-7000-8000-0000000001a1")
@@ -37,6 +40,9 @@ async def test_current_diagnostic_series_uses_exact_fosun_v2_and_replays_status_
     authorized_at = as_of - timedelta(minutes=1)
     observed_at = authorized_at - timedelta(minutes=3)
     available_at = authorized_at - timedelta(minutes=2)
+    manifest_id = uuid4()
+    raw_payload = f'{{"manifest_id":"{manifest_id}"}}'.encode()
+    raw_digest = sha256(raw_payload).hexdigest()
     bar = PriceBar(
         instrument_id=InstrumentId(instrument_id),
         session=as_of.date(),
@@ -48,7 +54,7 @@ async def test_current_diagnostic_series_uses_exact_fosun_v2_and_replays_status_
         observed_at=observed_at,
         available_at=available_at,
         received_at=available_at,
-        revision="fosun-v2-r1",
+        revision=raw_digest,
     )
     payload = serialize_price_bars((bar,))
     digest = sha256(payload).hexdigest()
@@ -59,7 +65,7 @@ async def test_current_diagnostic_series_uses_exact_fosun_v2_and_replays_status_
                 Instrument(
                     id=instrument_id,
                     asset_type="common_stock",
-                    exchange="XNAS",
+                    exchange=exchange,
                     currency="USD",
                     tick_size=Decimal("0.01"),
                     risk_bucket="technology",
@@ -105,7 +111,15 @@ async def test_current_diagnostic_series_uses_exact_fosun_v2_and_replays_status_
         )
         session.add(artifact)
         await session.flush()
-        manifest_id = uuid4()
+        lineage = await seed_fosun_daily_lineage(
+            session,
+            manifest_id=manifest_id,
+            provider_authorized_at=authorized_at,
+            sessions=(bar.session,),
+            raw_payload=raw_payload,
+            received_at=available_at,
+            calendar_range_end=(as_of + timedelta(hours=2)).date(),
+        )
         artifact_evidence = ResearchEvidenceRef(
             source="fosun",
             provider_object_id=f"price-series-manifest:{manifest_id}",
@@ -135,6 +149,10 @@ async def test_current_diagnostic_series_uses_exact_fosun_v2_and_replays_status_
             provider_status_version=1,
             provider_contract_hash=contract_hash,
             provider_authorized_at=authorized_at,
+            gateway_transport_artifact_id=lineage.raw_artifact.id,
+            daily_calendar_authority_id=lineage.calendar_authority_id,
+            gateway_request_start_at=lineage.request_start_at,
+            gateway_request_end_at=lineage.request_end_at,
         )
         session.add(manifest)
         await session.flush()
@@ -182,12 +200,22 @@ async def test_current_diagnostic_series_uses_exact_fosun_v2_and_replays_status_
             FixtureArtifactReader({uri: payload}),
             policy,
         )
+        expired_capability_replay = await select_authoritative_series(
+            session,
+            instrument_id,
+            as_of + timedelta(hours=2),
+            FixtureArtifactReader({uri: payload}),
+            policy,
+        )
 
     assert first.selected is not None
     assert first.selected[0].source == "fosun"
     assert first.selected[0].contract_hash == contract_hash
     assert second.selected == first.selected
     assert second.canonical_input == first.canonical_input
+    assert expired_capability_replay.selected is not None
+    assert expired_capability_replay.selected[0].source == "fosun"
+    assert expired_capability_replay.selected[0].contract_hash == contract_hash
     candidate = first.canonical_input["candidates"][0]  # type: ignore[index]
     assert candidate["manifest"]["provider_contract_hash"] == contract_hash
     assert candidate["price_bar_set_authority"]["policy_version"] == (

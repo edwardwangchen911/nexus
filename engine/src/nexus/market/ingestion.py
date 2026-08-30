@@ -2,11 +2,11 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime
 from hashlib import sha256
 from io import BytesIO
 from typing import Protocol
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pyarrow as pa  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
@@ -130,6 +130,9 @@ async def ingest_price_page(
     *,
     provider_binding: ProviderMarketBinding | None = None,
     raw_artifact: DataArtifact | None = None,
+    calendar_authority_id: UUID | None = None,
+    gateway_request_start_at: datetime | None = None,
+    gateway_request_end_at: datetime | None = None,
     commit: bool = True,
 ) -> MarketIngestionResult:
     """Archive raw, atomically publish Parquet, then flush or commit metadata."""
@@ -141,10 +144,38 @@ async def ingest_price_page(
     if len(instrument_ids) != 1:
         raise ValueError("one market page cannot mix instruments")
     _validate_provider_binding(page.provenance.source, provider_binding)
+    if page.provenance.source == "fosun":
+        if raw_artifact is None or (
+            page.provenance.interval == "1Day"
+            and (
+                calendar_authority_id is None
+                or gateway_request_start_at is None
+                or gateway_request_end_at is None
+            )
+        ):
+            raise ValueError("FOSUN_MARKET_LINEAGE_REQUIRED")
+    elif any(
+        value is not None
+        for value in (
+            raw_artifact,
+            calendar_authority_id,
+            gateway_request_start_at,
+            gateway_request_end_at,
+        )
+    ):
+        raise ValueError("FOSUN_MARKET_LINEAGE_FORBIDDEN")
 
-    received_at = max(bar.received_at or bar.available_at for bar in page.items)
-    date_path = received_at.astimezone(UTC).strftime("%Y/%m/%d")
     raw_digest = sha256(page.raw_payload).hexdigest()
+    bars = (
+        tuple(
+            bar.model_copy(update={"revision": raw_digest})
+            for bar in page.items
+        )
+        if page.provenance.source == "fosun"
+        else page.items
+    )
+    received_at = max(bar.received_at or bar.available_at for bar in bars)
+    date_path = received_at.astimezone(UTC).strftime("%Y/%m/%d")
     request_id = page.source_request_id or raw_digest[:16]
     raw_key = f"raw/market/{date_path}/{request_id}/{raw_digest}.json"
     temporary_key: str | None = None
@@ -161,7 +192,7 @@ async def ingest_price_page(
             ):
                 raise RuntimeError("FOSUN_MARKET_RAW_ARCHIVE_MISMATCH")
             raw_uri = raw_artifact.uri
-        parquet_payload = serialize_price_bars(page.items)
+        parquet_payload = serialize_price_bars(bars)
         parquet_digest = sha256(parquet_payload).hexdigest()
         instrument_id = next(iter(instrument_ids))
         final_key = (
@@ -171,7 +202,7 @@ async def ingest_price_page(
         await object_store.put_temporary(temporary_key, parquet_payload)
         parquet_uri = await object_store.promote(temporary_key, final_key)
 
-        observed = [bar.observed_at or bar.available_at for bar in page.items]
+        observed = [bar.observed_at or bar.available_at for bar in bars]
         artifact = DataArtifact(
             uri=parquet_uri,
             sha256=parquet_digest,
@@ -180,7 +211,7 @@ async def ingest_price_page(
             schema_version="price_bars_v1",
             source=page.provenance.source,
             observed_at=min(observed),
-            available_at=max(bar.available_at for bar in page.items),
+            available_at=max(bar.available_at for bar in bars),
             received_at=received_at,
         )
         session.add(artifact)
@@ -201,6 +232,12 @@ async def ingest_price_page(
             id=manifest_id,
             evidence_ref_id=evidence_ref.id,
             data_artifact_id=artifact.id,
+            gateway_transport_artifact_id=(
+                None if raw_artifact is None else raw_artifact.id
+            ),
+            daily_calendar_authority_id=calendar_authority_id,
+            gateway_request_start_at=gateway_request_start_at,
+            gateway_request_end_at=gateway_request_end_at,
             instrument=str(instrument_id),
             source=page.provenance.source,
             feed=page.provenance.feed,
@@ -209,7 +246,7 @@ async def ingest_price_page(
             interval=page.provenance.interval,
             start_at=min(observed),
             end_at=max(observed),
-            row_count=len(page.items),
+            row_count=len(bars),
             **_binding_values(provider_binding),
         )
         session.add(manifest)
@@ -230,7 +267,7 @@ async def ingest_price_page(
                 revision=bar.revision,
                 quality_flags=list(bar.quality_flags),
             )
-            for bar in page.items
+            for bar in bars
         )
         await session.flush()
         finalized = await finalize_price_bar_set(session, manifest)

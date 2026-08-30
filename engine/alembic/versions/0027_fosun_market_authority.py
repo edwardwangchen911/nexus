@@ -379,7 +379,7 @@ def _create_price_v2_functions() -> None:
             hashtextextended('price-series-manifest:' || p_manifest_id::text, 0)
           );
           SELECT * INTO manifest FROM price_series_manifests
-          WHERE id = p_manifest_id FOR SHARE;
+          WHERE id = p_manifest_id;
           IF NOT FOUND THEN RETURN; END IF;
           SELECT count(*), min(bar.observed_at), max(bar.observed_at),
                  count(DISTINCT bar.session), min(bar.session), max(bar.session),
@@ -528,7 +528,7 @@ def _create_intraday_v2_functions() -> None:
             hashtextextended('intraday-price-series-manifest:' || p_manifest_id::text, 0)
           );
           SELECT * INTO manifest FROM price_series_manifests
-          WHERE id = p_manifest_id FOR SHARE;
+          WHERE id = p_manifest_id;
           IF NOT FOUND THEN RETURN; END IF;
           SELECT count(*), count(DISTINCT observed_at), min(observed_at),
                  max(observed_at), max(received_at)
@@ -986,12 +986,18 @@ def _create_market_binding_guard() -> None:
               USING ERRCODE = '23514';
           END IF;
 
+          PERFORM pg_advisory_xact_lock(hashtextextended(
+            'fosun-integration-status:' || NEW.provider_status_id::text, 0
+          ));
+          PERFORM pg_advisory_xact_lock(hashtextextended(
+            'fosun-data-artifact:' || NEW.data_artifact_id::text, 0
+          ));
           SELECT * INTO provider_status FROM integration_status
-          WHERE id = NEW.provider_status_id FOR SHARE;
+          WHERE id = NEW.provider_status_id;
           SELECT * INTO capability FROM provider_capabilities
           WHERE id = NEW.provider_capability_id;
           SELECT * INTO artifact FROM data_artifacts
-          WHERE id = NEW.data_artifact_id FOR SHARE;
+          WHERE id = NEW.data_artifact_id;
           checked_at := clock_timestamp();
 
           IF TG_TABLE_NAME = 'price_series_manifests' THEN

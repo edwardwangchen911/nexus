@@ -224,6 +224,12 @@ class LatestQuote(ImmutableCreatedAt, Base):
             "observed_at",
             "available_at",
         ),
+        Index(
+            "ix_latest_quotes_provider_binding",
+            "provider_capability_id",
+            "provider_status_id",
+            "provider_authorized_at",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)

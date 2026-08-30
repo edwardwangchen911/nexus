@@ -17,7 +17,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.ids import new_uuid7
@@ -36,6 +36,11 @@ from nexus.persistence.models.paper import (
     PaperAccountRecord,
     StrategyDecisionRecord,
     StrategyDecisionTargetRecord,
+)
+from nexus.quality.source_policy import (
+    SOURCE_POLICY_V2_ID,
+    load_source_policy_v2,
+    source_policy_v2_supports_adjusted_prices,
 )
 
 Hash64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -515,6 +520,15 @@ async def persist_forward_strategy_decision(
             raise ForwardDecisionConflictError("forward decision content conflict")
         return existing
 
+    if decision.source_policy_id != SOURCE_POLICY_V2_ID:
+        raise ValueError("new forward decision requires exact source_policy_v2")
+    await load_source_policy_v2(
+        session,
+        instrument_tick_size=None,
+        decision_time=decision.decision_time,
+    )
+    if not source_policy_v2_supports_adjusted_prices():
+        raise ValueError("adjusted price authority is unavailable")
     await _authority_is_valid(session, decision)
     registry = await session.get(StrategyRegistryHeadRecord, "internal_paper")
     if registry is None:
@@ -537,6 +551,25 @@ async def persist_forward_strategy_decision(
         or active_event.id != decision.registry_event_id
     ):
         raise ValueError("forward decision registry binding is stale or invalid")
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 1709))"),
+        {
+            "lock_key": (
+                f"forward-strategy-decision:{decision.account_id}:"
+                f"{decision.decision_session.isoformat()}"
+            )
+        },
+    )
+    concurrent = await load_forward_strategy_decision(
+        session,
+        account_id=decision.account_id,
+        strategy_version=decision.strategy_version,
+        decision_session=decision.decision_session,
+    )
+    if concurrent is not None:
+        if concurrent.decision.decision_hash != decision.decision_hash:
+            raise ForwardDecisionConflictError("forward decision content conflict")
+        return concurrent
     decision_id = new_uuid7()
     session.add(
         StrategyDecisionRecord(

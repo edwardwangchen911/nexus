@@ -16,6 +16,7 @@
 - 页面只轮询 NEXUS 数据库，浏览器不直连 Alpaca，也不创建采集 Job。
 - 采集只由 `nexus-engine-provider-worker` 从独立 `provider` 队列执行；通用 Agent worker 不加载 Provider handler、配置或凭据。
 - Provider worker 必须使用独立 `PROVIDER_DATABASE_URL`；启动时拒绝 superuser、`BYPASSRLS`、任何角色继承、过宽表/列权限、缺失强制 RLS，或队列 policy 完整集合、角色、命令、`USING/WITH CHECK` 谓词及受控函数签名、源码、owner、ACL 不精确的角色。
+- Provider 对 authority 输入保持 `SELECT`-only，且不读回测成员表；输入变更与事实提交由配对 transaction advisory lock 串行。两个最小 trigger-only `SECURITY DEFINER` 分别服务两个 publication `AFTER INSERT` trigger 和一个 frozen-bar `BEFORE INSERT` trigger；Provider/`PUBLIC` 不可直接执行或写发布标记，函数或 trigger topology 漂移即启动失败。
 - 全平台只有通用 worker 创建 `daily.pipeline` 根；启用日线 Provider 子任务时，由它显式设置 `NEXUS_PROVIDER_JOBS_ENABLED=true` 后跨队列物化，Provider worker 不创建第二个根。
 - `iex` 或 `sip` 必须标记为 `real_time`；`delayed_sip` 必须标记为 `delayed`。
 - 页面显示 `实时 IEX（仅 IEX）`、`实时 SIP（全市场）` 或 `延迟 SIP`，不能把 IEX 表示为全市场实时行情。
@@ -73,12 +74,16 @@ approver: <user approval evidence>
 uv run --package nexus-engine pytest engine/tests/unit/ops/test_intraday_compose_policy.py -q
 docker compose --env-file infra/env.example -f infra/compose.yaml --profile app config --quiet
 docker compose --env-file infra/env.example -f infra/compose.yaml --profile provider config --quiet
+docker compose --env-file infra/env.example -f infra/compose.yaml --profile provider-alpaca config --quiet
 ```
 
 确认解析结果满足：
 
 - `api` 与普通 `worker` 不含 `NEXUS_INTRADAY_*`、`ALPACA_INTRADAY_*` 或 Alpaca secret；
-- 只有 `provider-worker` 接收盘中配置，且模板值仍为 `disabled/15/30`；
+- 复星 `provider-worker` 与 Alpaca `provider-worker-alpaca` 互斥，不得同时领取
+  `provider` 队列；复星最多 10 个标的，Alpaca 最多 30 个标的；
+- 复星 worker 不接收任何 `ALPACA_*` 配置，Alpaca worker 不接收任何
+  `FOSUN_MARKET_*` 网关身份；两者的默认盘中配置均为 `disabled/15`；
 - `provider-worker` 只接收 `PROVIDER_DATABASE_URL`，不接收通用 `DATABASE_URL`；模板
   `NEXUS_PROVIDER_JOBS_ENABLED=false`，普通启动不会物化 Provider 日任务；
 - broker、broker-simulation 和 Fosun Gateway 不含盘中配置；

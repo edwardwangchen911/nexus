@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
+import pytest
 from helpers.paper_batch import seed_paper_batch
 from nexus.paper.projection import load_paper_projection
 from nexus.paper.service import create_paper_order_batch
@@ -11,6 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 PAPER_ACCOUNT_ID = UUID("d31672c0-3922-5ebd-8fdb-cd3174266731")
 PORTFOLIO_ID = UUID("ee2ff673-eaf6-5076-bbab-f4c9cedfc74e")
+
+
+@pytest.fixture(autouse=True)
+def _historical_order_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep legacy projection mechanics explicit behind the historical test gate."""
+    monkeypatch.setattr(
+        "nexus.paper.service.current_paper_order_price_authority_available",
+        lambda: True,
+    )
 
 
 async def _load_seeded_projection(database_url: str):

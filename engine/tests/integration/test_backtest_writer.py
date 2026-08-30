@@ -882,7 +882,6 @@ async def test_writer_rejects_self_consistent_but_false_collection_contracts(
         ("evil", "test", "delayed"),
         ("alpaca", "iex", "delayed"),
         ("alpaca", "sip", "real_time"),
-        ("fosun", "US", "delayed"),
     ),
 )
 async def test_writer_rejects_price_sources_not_proven_by_source_policy_v1(

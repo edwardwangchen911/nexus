@@ -9,6 +9,10 @@ from uuid import UUID
 
 from nexus.domain.ids import new_uuid7
 from nexus.market.price_bar_authority import finalize_price_bar_set
+from nexus.persistence.models.backtest import (
+    ExchangeCalendarAuthorityRecord,
+    ExchangeCalendarSessionRecord,
+)
 from nexus.persistence.models.data import (
     DataArtifact,
     PriceBarRecord,
@@ -53,6 +57,7 @@ async def seed_price_candidate(
     bar_count: int = 1,
     manifest_overrides: Mapping[str, object] | None = None,
     bar_overrides: Mapping[str, object] | None = None,
+    bar_revision: str = "1",
 ) -> SeededPriceCandidate:
     """Insert one manifest whose stored boundaries exactly match its Bars."""
     return await _seed_price_candidate(
@@ -68,6 +73,7 @@ async def seed_price_candidate(
         manifest_overrides=manifest_overrides,
         bar_overrides=bar_overrides,
         reverse_bar_insertion=False,
+        bar_revision=bar_revision,
     )
 
 
@@ -79,6 +85,11 @@ async def seed_fosun_price_candidate(
     bar_overrides: Mapping[str, object] | None = None,
 ) -> SeededPriceCandidate:
     """Insert one authority-bound Fosun daily candidate for runtime-selection tests."""
+    raw_artifact_id = new_uuid7()
+    calendar_authority_id = new_uuid7()
+    raw_digest = sha256(f"fosun-raw:{manifest_id}".encode()).hexdigest()
+    request_end_at = datetime.combine(OBSERVED_AT.date(), time.min, tzinfo=UTC)
+    request_start_at = request_end_at - timedelta(days=400)
     async with factory() as session, session.begin():
         if await session.get(ProviderCapability, FOSUN_CAPABILITY_ID) is None:
             session.add(
@@ -94,6 +105,7 @@ async def seed_fosun_price_candidate(
                         "market_scope": "US",
                         "delivery_mode": "real_time",
                     },
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
         if await session.get(IntegrationStatus, FOSUN_STATUS_ID) is None:
@@ -107,6 +119,49 @@ async def seed_fosun_price_candidate(
                     mode_changed_at=datetime(2026, 1, 1, tzinfo=UTC),
                     capability_invalidated_at=None,
                     admitted_contract_hash=FOSUN_CONTRACT_HASH,
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                )
+            )
+        session.add(
+            DataArtifact(
+                id=raw_artifact_id,
+                uri=f"memory://raw/fosun/{raw_digest}.json",
+                sha256=raw_digest,
+                byte_size=64,
+                mime_type="application/json",
+                schema_version="fosun_gateway_market_bars_v1",
+                source="fosun",
+                observed_at=RECEIVED_AT,
+                available_at=RECEIVED_AT,
+                received_at=RECEIVED_AT,
+                created_at=RECEIVED_AT,
+            )
+        )
+        session.add(
+            ExchangeCalendarAuthorityRecord(
+                id=calendar_authority_id,
+                exchange="XNYS",
+                version=f"fosun-price-candidate-{manifest_id}",
+                source="fixture",
+                range_start=request_start_at.date(),
+                range_end=date(2027, 1, 1),
+                query_parameters={},
+                completeness_status="complete",
+                content_hash=sha256(f"calendar:{manifest_id}".encode()).hexdigest(),
+                published_at=datetime(2026, 1, 1, tzinfo=UTC),
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        )
+        for index in range(1):
+            observed_at = OBSERVED_AT - timedelta(days=index)
+            session.add(
+                ExchangeCalendarSessionRecord(
+                    calendar_authority_id=calendar_authority_id,
+                    session=observed_at.date(),
+                    decision_at=observed_at + timedelta(minutes=15),
+                    market_open_at=observed_at - timedelta(hours=6, minutes=30),
+                    market_close_at=observed_at,
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
     return await seed_price_candidate(
@@ -122,8 +177,13 @@ async def seed_fosun_price_candidate(
             "provider_status_version": 1,
             "provider_contract_hash": FOSUN_CONTRACT_HASH,
             "provider_authorized_at": provider_authorized_at,
+            "gateway_transport_artifact_id": raw_artifact_id,
+            "daily_calendar_authority_id": calendar_authority_id,
+            "gateway_request_start_at": request_start_at,
+            "gateway_request_end_at": request_end_at,
         },
         bar_overrides=bar_overrides,
+        bar_revision=raw_digest,
     )
 
 
@@ -164,6 +224,7 @@ async def _seed_price_candidate(
     manifest_overrides: Mapping[str, object] | None,
     bar_overrides: Mapping[str, object] | None,
     reverse_bar_insertion: bool,
+    bar_revision: str = "1",
 ) -> SeededPriceCandidate:
     manifest_overrides = dict(manifest_overrides or {})
     bar_overrides = dict(bar_overrides or {})
@@ -188,7 +249,7 @@ async def _seed_price_candidate(
             "observed_at": observed_at,
             "available_at": AVAILABLE_AT - timedelta(days=days_back),
             "received_at": RECEIVED_AT - timedelta(days=days_back),
-            "revision": "1",
+            "revision": bar_revision,
             "quality_flags": list(quality_flags),
         }
         if index == bar_count - 1:

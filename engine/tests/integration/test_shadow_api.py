@@ -3,6 +3,8 @@
 import json
 
 import httpx
+import nexus.shadow.service as shadow_service_module
+import nexus.shadow.start as shadow_start_module
 import pytest
 from helpers.portfolio_api import app, headers, settings
 from helpers.shadow import (
@@ -14,6 +16,21 @@ from helpers.shadow import (
 from nexus.persistence.session import session_factory
 from nexus.shadow.service import advance_shadow_session
 from sqlalchemy import text
+
+
+@pytest.fixture(autouse=True)
+def _historical_shadow_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise legacy Proposal Shadow writes only behind an explicit test gate."""
+    monkeypatch.setattr(
+        shadow_start_module,
+        "current_proposal_shadow_price_authority_available",
+        lambda _source_policy_id: True,
+    )
+    monkeypatch.setattr(
+        shadow_service_module,
+        "current_proposal_shadow_price_authority_available",
+        lambda _source_policy_id: True,
+    )
 
 
 def _post_headers(path: str, body: bytes, *, key: str, version: int) -> dict[str, str]:

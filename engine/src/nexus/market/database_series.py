@@ -110,7 +110,8 @@ async def load_daily_series(
                 == PriceSeriesManifest.provider_contract_hash,
                 ProviderCapability.created_at
                 <= PriceSeriesManifest.provider_authorized_at,
-                ProviderCapability.expires_at > decision,
+                PriceSeriesManifest.provider_authorized_at
+                < ProviderCapability.expires_at,
                 ProviderCapability.payload["operation"].as_string()
                 == "fosun_get_bars",
                 ProviderCapability.payload["market_scope"].as_string() == "US",
@@ -126,7 +127,11 @@ async def load_daily_series(
     ).all()
     loaded: list[PriceSeries] = []
     for authority, manifest, evidence in candidates:
-        prepared = await prepare_price_bar_set(session, manifest.id)
+        prepared = await prepare_price_bar_set(
+            session,
+            manifest.id,
+            as_of=decision,
+        )
         if prepared is None or not _daily_authority_valid(
             authority,
             manifest,
@@ -229,7 +234,8 @@ async def load_intraday_series(
                 == PriceSeriesManifest.provider_contract_hash,
                 ProviderCapability.created_at
                 <= PriceSeriesManifest.provider_authorized_at,
-                ProviderCapability.expires_at > decision,
+                ProviderCapability.expires_at
+                > PriceSeriesManifest.provider_authorized_at,
                 ProviderCapability.payload["operation"].as_string()
                 == "fosun_get_bars",
                 ProviderCapability.payload["market_scope"].as_string() == "US",
@@ -546,7 +552,7 @@ async def _latest_intraday_observations(
             ProviderCapability.schema_version == "1",
             ProviderCapability.contract_hash == LatestQuote.provider_contract_hash,
             ProviderCapability.created_at <= LatestQuote.provider_authorized_at,
-            ProviderCapability.expires_at > decision_time,
+            ProviderCapability.expires_at > LatestQuote.provider_authorized_at,
             ProviderCapability.payload["operation"].as_string()
             == "fosun_get_quotes",
             ProviderCapability.payload["market_scope"].as_string() == "US",

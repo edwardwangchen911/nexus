@@ -35,6 +35,7 @@ from nexus.persistence.models.shadow import (
     ShadowSimulatedFillRecord,
     ShadowSimulatedOutcomeRecord,
 )
+from nexus.quality.source_policy import current_proposal_shadow_price_authority_available
 from nexus.shadow.authority import (
     LockedShadowRoot,
     ShadowSessionInput,
@@ -179,6 +180,8 @@ async def advance_shadow_session(
         )
     if group.status != "shadowing":
         raise ValueError("SHADOW_LIFECYCLE_MISMATCH")
+    if not current_proposal_shadow_price_authority_available(shadow.source_policy_id):
+        raise ValueError("SHADOW_PRICE_AUTHORITY_UNAVAILABLE")
 
     authorities = tuple(
         await session.scalars(

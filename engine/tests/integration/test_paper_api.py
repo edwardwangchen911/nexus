@@ -13,6 +13,15 @@ from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.persistence.session import session_factory
 
 
+@pytest.fixture(autouse=True)
+def _historical_execution_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise the legacy paper API state machine behind its test-only gate."""
+    monkeypatch.setattr(
+        "nexus.paper.execution_service._paper_execution_authority_available",
+        lambda _source_policy_id: True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_paper_endpoints_require_hmac_and_bound_queries(
     migrated_database_url: str,

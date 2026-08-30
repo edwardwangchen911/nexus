@@ -26,6 +26,7 @@ from nexus.jobs.models import (
     job_input_hash,
 )
 from nexus.jobs.repository import enqueue_job
+from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -42,7 +43,6 @@ from nexus.providers.settings import IntradayMonitorMode, MarketProvider, Provid
 _SCHEMA = "intraday_snapshot_job_v2"
 _DEFAULT_WATCHLIST_ID = UUID("8c7cc45f-9420-5ea5-a75e-7df8a8a63b58")
 _DEFAULT_WATCHLIST_NAME = "default_private"
-_US_EXCHANGES = frozenset({"AMEX", "ARCA", "NASDAQ", "NYSE", "NYSEARCA", "XNYS"})
 _SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,14}$")
 _CONTRACT_DOCUMENT = {
     "schema": _SCHEMA,
@@ -416,7 +416,7 @@ async def _load_current_intraday_authority(
     if len(rows) != member_count:
         return None
     if any(
-        exchange.upper() not in _US_EXCHANGES or currency.upper() != "USD"
+        exchange.upper() not in US_EQUITY_EXCHANGES or currency.upper() != "USD"
         for _instrument_id, _symbol, exchange, currency in rows
     ):
         return None

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
+from unittest.mock import patch
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -248,15 +249,20 @@ async def seed_started_shadow(
     """Create and atomically start one executable Shadow root."""
     eligible = await seed_shadow_eligible_group(database_url, all_cash_variant=all_cash_variant)
     factory = session_factory(settings(database_url))
-    async with factory() as session, session.begin():
-        started = await start_proposal_shadow(
-            session,
-            actor_id="shadow-authority-fixture",
-            idempotency_key=f"start-{uuid4()}",
-            request_hash="9" * 64,
-            group_id=eligible.group_id,
-            expected_version=1,
-        )
+    with patch(
+        "nexus.shadow.start.current_proposal_shadow_price_authority_available",
+        return_value=True,
+        create=True,
+    ):
+        async with factory() as session, session.begin():
+            started = await start_proposal_shadow(
+                session,
+                actor_id="shadow-authority-fixture",
+                idempotency_key=f"start-{uuid4()}",
+                request_hash="9" * 64,
+                group_id=eligible.group_id,
+                expected_version=1,
+            )
     return ShadowStartedSeed(eligible=eligible, start=started)
 
 

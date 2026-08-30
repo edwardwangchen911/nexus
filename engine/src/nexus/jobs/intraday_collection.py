@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol, cast
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nexus.jobs.errors import UnsafeJobError
 from nexus.jobs.intraday_schedule import (
@@ -200,6 +200,7 @@ def build_intraday_collection_registry(
     ingest: IngestSnapshot = ingest_intraday_snapshot,
     archive_raw: ArchiveRawSnapshot = archive_intraday_snapshot_raw,
     revalidate: RevalidateAuthority = revalidate_intraday_payload_authority,
+    raw_archive_session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> JobRegistry:
     """Build the one-handler registry without constructing an external provider."""
     _ = now
@@ -250,21 +251,23 @@ def build_intraday_collection_registry(
             )
         except FosunSnapshotReadAborted as exc:
             if exc.envelope is not None:
-                await archive_raw(
+                await _archive_snapshot_raw(
                     cast(AsyncSession, context.session),
                     store,
                     exc.envelope,
-                    commit=False,
+                    archive=archive_raw,
+                    session_factory=raw_archive_session_factory,
                 )
             return JobHandlerResult(
                 outcome="skipped",
                 result_code=exc.result_code,
             )
-        archived = await archive_raw(
+        archived = await _archive_snapshot_raw(
             cast(AsyncSession, context.session),
             store,
             envelope,
-            commit=False,
+            archive=archive_raw,
+            session_factory=raw_archive_session_factory,
         )
         try:
             batch = provider.normalize_raw_snapshots(envelope, request)
@@ -273,6 +276,11 @@ def build_intraday_collection_registry(
                 outcome="skipped",
                 result_code="INTRADAY_SNAPSHOT_PAYLOAD_INVALID",
             )
+        published_bar_ids = {
+            UUID(str(snapshot.instrument_id))
+            for snapshot in batch.snapshots
+            if snapshot.minute_bar is not None
+        }
         contract_matches = _batch_matches_payload(batch, request)
         post_check_at = context.finished_at()
         authority_still_valid = await revalidate(
@@ -281,9 +289,22 @@ def build_intraday_collection_registry(
             effective_at=post_check_at,
             settings=settings,
         )
+        bars_authority = payload.bars_authority
+        published_bar_bindings = (
+            {}
+            if bars_authority is None
+            else {
+                instrument_id: binding_at(
+                    bars_authority,
+                    authorized_at=post_check_at,
+                )
+                for instrument_id in read_guard.bar_bindings
+                if instrument_id in published_bar_ids
+            }
+        )
         binding_complete = read_guard.quote_binding is not None and (
             not payload.include_minute_bars
-            or len(read_guard.bar_bindings) == len(request.instruments)
+            or set(published_bar_bindings) == published_bar_ids
         )
         if not contract_matches or not authority_still_valid or not binding_complete:
             return JobHandlerResult(
@@ -309,7 +330,9 @@ def build_intraday_collection_registry(
                 raw_artifact=archived.raw_artifact,
                 quote_binding=read_guard.quote_binding,
                 bar_bindings=(
-                    None if not payload.include_minute_bars else read_guard.bar_bindings
+                    None
+                    if not payload.include_minute_bars
+                    else published_bar_bindings
                 ),
                 commit=False,
             ),
@@ -354,6 +377,28 @@ def build_intraday_collection_registry(
             ),
         )
     )
+
+
+async def _archive_snapshot_raw(
+    session: AsyncSession,
+    store: MarketObjectStore,
+    envelope: RawSnapshotEnvelope,
+    *,
+    archive: ArchiveRawSnapshot,
+    session_factory: async_sessionmaker[AsyncSession] | None,
+) -> IntradayRawArchive:
+    if session_factory is None:
+        return await archive(session, store, envelope, commit=False)
+    async with session_factory() as archive_session:
+        archived = await archive(
+            archive_session,
+            store,
+            envelope,
+            commit=True,
+        )
+        await archive_session.refresh(archived.raw_artifact)
+        archive_session.expunge(archived.raw_artifact)
+        return archived
 
 
 def _batch_matches_payload(

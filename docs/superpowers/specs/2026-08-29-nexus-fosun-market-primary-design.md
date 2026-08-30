@@ -1,8 +1,10 @@
 # NEXUS 复星美股行情主源运行时设计规格
 
-**日期：** 2026-08-29  
-**状态：** 已冻结，允许直接实施  
-**范围：** 复星美股 L1 行情通过隔离网关进入 Provider Worker、不可变证据、PIT/质量门禁、Agent 日线价格 authority v2、盘中监控和市场页面  
+**日期：** 2026-08-29
+
+**状态：** 已冻结，允许直接实施
+
+**范围：** 复星美股 L1 行情通过隔离网关进入 Provider Worker、不可变证据、PIT/质量门禁、Agent 日线价格 authority v2、盘中监控和市场页面
 **明确排除：** 真实凭据注入、真实 Provider/账户探测、复星或 Alpaca 外部调用、付费订阅、部署、券商写操作、模拟券商写入和实盘订单
 
 ## 1. 结论
@@ -70,14 +72,38 @@ flowchart LR
 ### 4.1 进程权限
 
 - `fosun-gateway` 是唯一持有 `FSOPENAPI_*`、SDK admission、Provider base URL 和出站网络能力的进程。
-- `provider-worker` 只持有 market-only 网关 mTLS 客户端证书、HMAC 身份、Provider 数据库角色和 create-only 对象存储权限；不持有账户 ID 加密密钥。
+- `provider-worker` 只持有 market-only 网关 mTLS 客户端证书、HMAC 身份、Provider 数据库角色，
+  以及独立的 market-prefix 对象存储 principal；不持有账户 ID 加密密钥。对象键被运行时固定在
+  `provider/market`，永久证据只 Put/Get，Delete 仅限 `temporary/market` 子树。
+- Provider 数据库角色对 status/capability/已有 artifact/manifest 只有读取权；authority 校验与这些输入的变更使用同名事务级 advisory lock 串行，不以 `SELECT FOR SHARE` 换取隐含 `UPDATE` 权限。
+- Provider 数据库凭据必须直接认证为独立 login role；`SET ROLE`、出入两个方向的 membership、任意非系统 schema 权限、Provider 或 `PUBLIC` 的 column/sequence ACL，以及 allowlist 外 table/partition/view/materialized-view/foreign-table 权限或 grant option 均使启动失败。RLS helper 固定 `search_path=pg_catalog, public, pg_temp`，bypass policy 还核对其绑定的 catalog `pg_has_role` OID。
 - `broker-worker` 使用另一组 mTLS/HMAC 身份，只能调用组合、订单列表和现金流水读取；它不拥有行情采集队列。
 - Web、BFF、API、general worker、Agent 和 Strategy R&D 均不持有任一网关客户端身份。
 - 复星 gateway profile 可由 `provider` 或 `broker` 显式启动；普通 `app` profile 不启动它。
 
+既有回测审计要求 authority/corporate-action INSERT 同事务写入 publication mark，而受限
+Provider 不能直接写该标记表，也不得因 bar INSERT 获得回测成员表读权。迁移因此保留
+两个 owner-controlled、trigger-only `SECURITY DEFINER` bridge，都固定
+`search_path=pg_catalog, public, pg_temp`：publication bridge 只接受两张允许表的无条件、
+非约束、非延迟、无参数 `AFTER INSERT FOR EACH ROW` trigger 并只追加 public-qualified
+mark；price-bar guard 只接受 `price_bar_records` 的无条件 `BEFORE INSERT FOR EACH ROW`
+trigger，并仅判断对应 manifest 是否已被回测冻结。Provider、`PUBLIC` 和其他非 owner 均无直接
+`EXECUTE`；startup probe 对全部非系统 schema 的 definer 精确集合、精确源码/owner/ACL、三个
+owner-rights trigger，以及 Provider 可写表上 60 个非内部应用 trigger 的启用状态、时机、函数归属、
+配置与函数体摘要 fail closed。
+
 ### 4.2 HMAC v2
 
 现有 HMAC v1 未把 `actor_id` 与 `request_id` 纳入签名，不能作为 principal 授权依据。由于真实 SDK 尚未激活，本次直接关闭 v1 并使用 v2：
+
+nonce 保留期以签名时间戳的最晚有效时点计算，而不是首次到达时点。
+服务端不接受未来时间戳。生产 nonce 写入持久 SQLite journal，正常重启继续拒绝
+已用 nonce；同一持久卷的排他 lease 使第二个 Gateway 进程在启动时失败。每次生产
+进程启动都进入新的 61 秒认证拒绝窗口，覆盖旧 snapshot 无法由卷内状态自证的问题；
+持久化 clock high-water mark 使墙钟回拨期间持续拒绝认证。readiness/Compose health
+还要求 lifespan owner PID 存活且 TCP listener 已建立。支持的部署固定一副本；任何
+外部编排也必须让所有候选进程挂载同一个支持 POSIX lock 的 journal 卷，不得使用
+独立 replay state 重叠运行。
 
 ```text
 hmac-v2\n
@@ -101,7 +127,24 @@ sha256(body)
 
 `fosun_capabilities` 与 `fosun_sync_accounts` 不授予常驻 worker；未来若需要，使用独立 bootstrap 身份。越权统一返回 404，transport 调用计数为零。broker/provider 的 current/previous key ID、secret 和客户端证书必须独立；所有配置 key ID/secret 跨角色唯一。
 
-### 4.3 TLS
+### 4.3 数据真实性 TCB 与非目标
+
+`provider-worker` 是受信任的数据接入根（normalization/writer TCB），不是需要由
+`fosun-gateway` 防御的敌对租户。它负责校验 gateway 合同、保存收到的字节、规范化事实并以
+Provider 数据库角色发布 authority；因此其进程完整性、已审查镜像和运行身份是行情真实性的
+前提。`fosun-gateway` 的隔离目标是把 Provider 凭据、出站网络与固定只读 operation 面从
+Web、Agent、general worker 和 broker 域中剥离，不是对已攻陷的 `provider-worker` 提供
+gateway-origin 的密码学证明。
+
+本阶段的 `immutable` 只表示事实提交后不能更新或删除，血缘哈希可检测已提交数据的漂移；它
+不表示能够阻止一个已获得 Provider 数据库写权限和 market-prefix 对象存储权限的恶意 worker
+自造一套内部自洽的行情事实。该进程一旦完整性未知，运维必须进入人工 incident stop：停止
+provider profile、禁用集成，并禁止平台继续作出依赖这些事实的新决策。现版本不能自动检测
+worker compromise，也不能自动撤销此前冻结的事实；恢复前必须单独处置并重建信任。若未来把“抵御被攻陷的 Provider
+Worker”纳入威胁模型，必须先单独设计 gateway-only 响应签名、独立验证/authority writer、
+重放约束和新的密钥域；不能把现有 HMAC 请求签名或 create-only 存储宣称为 origin attestation。
+
+### 4.4 TLS
 
 - `read_only` transport 只允许 `NEXUS_ENV=production` 且 server mTLS 配置完整；development/test 只能 fixture。
 - Gateway client 固定 HTTPS origin、证书/私钥/CA、`trust_env=False`、禁重定向、10 秒绝对 deadline 和响应字节上限。
@@ -114,6 +157,7 @@ sha256(body)
 ```text
 NEXUS_MARKET_PROVIDER=fosun|alpaca
 NEXUS_ALPACA_MARKET_MODE=disabled|enabled
+PROVIDER_OBJECT_STORE_PREFIX=provider/market
 ```
 
 默认 `fosun + disabled`。规则：
@@ -121,6 +165,9 @@ NEXUS_ALPACA_MARKET_MODE=disabled|enabled
 - fixture 模式不构造任何生产 client，也不读取 secret value；
 - production + Fosun 只要求复星 market gateway、SEC 和 FRED 配置，不要求 Alpaca key；
 - production + Alpaca 必须同时显式 `ALPACA_MARKET_MODE=enabled` 并满足现有 feed/delivery/credential 门禁；
+- Provider 的 `PROVIDER_OBJECT_STORE_*` principal 必须与 app/general worker 的
+  `OBJECT_STORE_*` 不同；bucket/versioning/prefix/IAM 由激活流程预置，Provider profile
+  不运行通用 `object-store-init`；
 - 禁止配置错误时回退 fixture 或另一 Provider；
 - SEC/FRED 配置与 Alpaca 市场模式独立；
 - `repr`、验证错误和日志不能包含 secret、证书路径内容、URL query 或原始 body。
@@ -142,7 +189,7 @@ Fosun 首期固定：
 
 ### 6.2 响应
 
-Gateway 只返回脱敏、严格、gateway-owned JSON；Provider 原始账户或 transport 对象永不跨边界。Provider Worker 保存收到的精确 gateway HTTP JSON 字节，名称固定为 **gateway transport evidence**，不能误称为 Provider raw body。
+Gateway 只返回脱敏、严格、gateway-owned JSON；Provider 原始账户或 transport 对象永不跨边界。Provider Worker 保存收到的精确 gateway HTTP JSON 字节，名称固定为 **gateway transport evidence**，不能误称为 Provider raw body。这里的 `gateway-owned` 描述响应合同的生产责任，不构成对敌对 Provider Worker 的独立密码学来源证明。
 
 quotes 必须与请求 code 集合完全一致；缺价以 `price=null` 和 `PARTIAL` 表达，额外 code 拒绝整批。由于当前冻结 SDK 合同未提供可靠 Provider quote timestamp：
 
@@ -209,11 +256,18 @@ Agent price v2 只接受：
 - 所有 bars `quality_flags=[]`；
 - 一个 session 恰好一条 bar，时间顺序、instrument、行数与 manifest 一致。
 
+Gateway bars 顶层 `quality=PARTIAL` 是因为网关不持有决策时点的 XNYS 日历 authority，
+因而使用的保守 transport marker，不是对每根 bar 的质量通过证明。Engine 只有在重新校验
+精确 instrument/区间/顺序，且实际 session 与冻结日历集合完全一致后，才为日线生成空
+`quality_flags`；缺任一 session 稳定返回 `FOSUN_MARKET_PAGE_INCOMPLETE`、仅保留原始证据且不创建
+manifest/bar/authority。因此这一转换是 Engine 基于独立冻结 authority 的确定性重评估，
+不是将 Gateway 的 `PARTIAL` 盲目提升为 `PASS`。
+
 因此首期以 `delivery_mode=unknown` 激活时可以安全展示/归档，但 Agent、回测、paper 与订单价格 authority 继续 abstain，直到真实 activation 证据证明交付口径。这是预期的 fail-closed 行为。
 
 ### 8.3 PIT 读取
 
-读取端只使用事实自身冻结的 capability/status 版本和 `provider_authorized_at`，不以未来新授权补签旧事实。当前 Provider 被禁用后不再产生新事实；历史事实仍可审计，但超过 stale/数据窗口后不能支持当前决策。
+读取端只使用事实自身冻结的 capability/status 版本和 `provider_authorized_at`，capability 生效/过期窗口也对该冻结时点校验，不以查询时刻或未来新授权补签旧事实。当前 Provider 被禁用后不再产生新事实；历史事实仍可审计，但超过 stale/数据窗口后不能支持当前决策。所有 `timestamptz` 到交易日的转换显式使用 UTC，不依赖数据库 session `TimeZone`。
 
 ## 9. 盘中采集
 
@@ -286,9 +340,12 @@ Alpaca 首次真实启用继续遵循既有有界 probe：1 symbol、最多 2 GE
 
 - broker/provider current/previous key × operation 授权矩阵测试通过；越权 404 且 transport 零调用；
 - actor/request ID 篡改导致 HMAC v2 失败；v1 请求拒绝；
+- 未来时间戳、每次生产启动后 61 秒内请求、墙钟回拨、重放 nonce、第二个持锁进程和非单副本配置均失败；
 - 非 production read_only gateway 拒绝启动；
 - Provider Worker 不含 broker external-ID key，broker 不含 market-only key，app/general worker 两者都没有；
+- Provider 角色无需 authority 输入的 `UPDATE` 权限，不能直接写 publication mark 或执行其最小 definer；startup probe 对 advisory-lock、`PUBLIC`/column/sequence ACL、definer 与全部 Provider 写入 trigger 边界的任何漂移 fail closed；
 - Fosun production 配置不要求或构造 Alpaca client；Alpaca disabled 零访问 secret。
+- Provider Worker 被明确纳入行情真实性 TCB；它的凭据域不能访问 broker/order 写面，疑似 compromise 时按运行手册人工停机，且不声称现版能自动检测或撤销已冻结事实。
 
 ### 14.2 合同与证据
 
@@ -320,7 +377,7 @@ Alpaca 首次真实启用继续遵循既有有界 probe：1 symbol、最多 2 GE
 
 - 运行回滚：保持 `NEXUS_INTRADAY_MONITOR_MODE=disabled`，停止 provider profile；普通 app 不受影响。
 - 来源回滚：把 production market mode 置为 disabled/fixture 需要显式运维变更；不能自动切到 Alpaca。
-- 数据库回滚：0027 downgrade 仅在没有 v2 Fosun事实、authority 或引用时允许；否则 fail closed，历史不可变证据不删除。
+- 数据库回滚：只允许按 `0029 -> 0028 -> 0027` 逆序执行；0029 在存在 transport lineage/freshness 引用时、0028 在存在 Fosun v2 事实或受限 Provider writer 时、0027 在存在 v2 Fosun 事实/authority/引用时分别 fail closed。历史不可变证据不删除，也不能跳过中间 guard。
 - 代码回滚：revert 本次提交；不修改历史迁移或 Git 历史。
 
 ## 16. 实施裁决
@@ -329,3 +386,4 @@ Alpaca 首次真实启用继续遵循既有有界 probe：1 symbol、最多 2 GE
 2. **HMAC v2 直接替换未激活的 v1。** 代价是所有内部 client/fixture 必须同步升级；收益是 principal 与 request correlation 真正受签名保护。
 3. **unknown 先展示、Agent 继续 abstain。** 代价是首次本地接线后不会立刻产生 Agent 可用价格；收益是不把未证明实时性误当作交易权威。
 4. **不自动 fallback。** 代价是主源故障时页面可能 unavailable；收益是不会在未批准 entitlement、费用或数据合同下悄悄切换 Provider。
+5. **Provider Worker 是数据真实性 TCB。** 当前隔离防止行情进程接触账户/订单能力，但不声称抵御已攻陷的行情写入进程；扩大到该威胁需要新的响应 attestation 与独立 writer 设计，不在本阶段暗中引入新密钥域。

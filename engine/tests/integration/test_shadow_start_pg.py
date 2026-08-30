@@ -35,6 +35,45 @@ _REQUEST_HASH = "1" * 64
 _NEW_YORK = ZoneInfo("America/New_York")
 
 
+@pytest.fixture(autouse=True)
+def _historical_shadow_start_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise legacy Proposal Shadow mechanics only behind an explicit test gate."""
+    monkeypatch.setattr(
+        shadow_start_module,
+        "current_proposal_shadow_price_authority_available",
+        lambda _source_policy_id: True,
+        raising=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_new_shadow_start_fails_closed_without_current_price_authority(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = await seed_shadow_eligible_group(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    monkeypatch.setattr(
+        shadow_start_module,
+        "current_proposal_shadow_price_authority_available",
+        lambda _source_policy_id: False,
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="PROPOSAL_NOT_EXECUTABLE"):
+        async with factory() as session, session.begin():
+            await start_proposal_shadow(
+                session,
+                actor_id="shadow-fail-closed",
+                idempotency_key="shadow-fail-closed",
+                request_hash=_REQUEST_HASH,
+                group_id=seed.group_id,
+                expected_version=1,
+            )
+
+    await _assert_start_rolled_back(migrated_database_url, seed.group_id)
+
+
 @pytest.mark.asyncio
 async def test_start_creates_exact_three_normalized_portfolios_and_audit(
     migrated_database_url: str,
@@ -180,6 +219,7 @@ async def test_start_rejects_calendar_whose_member_hash_does_not_match(
 @pytest.mark.asyncio
 async def test_start_replays_same_key_and_rejects_body_mismatch(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = await seed_shadow_eligible_group(migrated_database_url)
     factory = session_factory(settings(migrated_database_url))
@@ -193,6 +233,12 @@ async def test_start_replays_same_key_and_rejects_body_mismatch(
             group_id=seed.group_id,
             expected_version=1,
         )
+    monkeypatch.setattr(
+        shadow_start_module,
+        "current_proposal_shadow_price_authority_available",
+        lambda _source_policy_id: False,
+        raising=False,
+    )
     async with factory() as session, session.begin():
         replay = await start_proposal_shadow(
             session,
@@ -584,8 +630,20 @@ async def _assert_start_rolled_back(
         claim_count = await session.scalar(
             select(func.count()).select_from(IdempotencyRecord)
         )
+        audit_count = await session.scalar(
+            select(func.count()).select_from(AuditEvent).where(
+                AuditEvent.action == "shadow.started"
+            )
+        )
+        outbox_count = await session.scalar(
+            select(func.count()).select_from(OutboxEvent).where(
+                OutboxEvent.event_type == "shadow.started"
+            )
+        )
     assert group is not None
     assert group.status in {"draft", "compared"} and group.version == 1
     assert shadow_count == 0
     assert portfolio_count == 0
     assert claim_count == 0
+    assert audit_count == 0
+    assert outbox_count == 0

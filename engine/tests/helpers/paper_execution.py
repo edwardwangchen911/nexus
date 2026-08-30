@@ -6,16 +6,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
+from unittest.mock import patch
 from uuid import UUID
 
 from helpers.paper_batch import EXECUTION_SESSION, INSTRUMENTS, seed_paper_batch
 from nexus.market.intraday_ingestion import canonical_quote_observation
-from nexus.market.price_bar_authority import finalize_price_bar_set
+from nexus.market.price_bar_authority import SOURCE_POLICY_ID, finalize_price_bar_set
 from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.data import DataArtifact, PriceBarRecord, PriceSeriesManifest
 from nexus.persistence.models.market import LatestQuote
 from nexus.persistence.models.paper import PaperOrderRecord
-from sqlalchemy import select
+from nexus.risk.canonical import canonical_forward_strategy_decision_hash
+from nexus.strategy.forward import load_forward_strategy_decision
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 MARKET_OPEN = datetime(2026, 8, 27, 13, 30, tzinfo=UTC)
@@ -40,6 +43,7 @@ async def seed_paper_execution(
     feeds: tuple[str, ...] | None = None,
     with_quote: bool = False,
     market_close_at: datetime | None = None,
+    legacy_market_policy: bool = True,
 ) -> PaperExecutionSeed:
     """Create one submitted buy order plus zero or more exact five-minute authorities."""
     seed = await seed_paper_batch(
@@ -50,14 +54,63 @@ async def seed_paper_execution(
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:
         async with sessions.begin() as session:
-            await create_paper_order_batch(
-                session,
-                account_id=seed.account_id,
-                strategy_decision_id=seed.decision_id,
-                idempotency_key="task19-execution-seed",
-                request_time=seed.request_time,
-            )
+            with patch(
+                "nexus.paper.service.current_paper_order_price_authority_available",
+                return_value=True,
+            ):
+                await create_paper_order_batch(
+                    session,
+                    account_id=seed.account_id,
+                    strategy_decision_id=seed.decision_id,
+                    idempotency_key="task19-execution-seed",
+                    request_time=seed.request_time,
+                )
         async with sessions.begin() as session:
+            if legacy_market_policy:
+                persisted = await load_forward_strategy_decision(
+                    session,
+                    account_id=seed.account_id,
+                    strategy_version="baseline_v1",
+                    decision_session=seed.decision_time.date(),
+                )
+                assert persisted is not None
+                legacy = persisted.decision.model_copy(
+                    update={"source_policy_id": SOURCE_POLICY_ID}
+                )
+                legacy = legacy.model_copy(
+                    update={
+                        "decision_hash": canonical_forward_strategy_decision_hash(legacy)
+                    }
+                )
+                for trigger_name in (
+                    "trg_strategy_decisions_created_at_immutable",
+                    "trg_strategy_decisions_immutable",
+                ):
+                    await session.execute(
+                        text(
+                            f"ALTER TABLE strategy_decisions DISABLE TRIGGER {trigger_name}"
+                        )
+                    )
+                await session.execute(
+                    text(
+                        "UPDATE strategy_decisions SET source_policy_id = :policy_id, "
+                        "decision_hash = :decision_hash WHERE id = :decision_id"
+                    ),
+                    {
+                        "policy_id": SOURCE_POLICY_ID,
+                        "decision_hash": legacy.decision_hash,
+                        "decision_id": seed.decision_id,
+                    },
+                )
+                for trigger_name in (
+                    "trg_strategy_decisions_created_at_immutable",
+                    "trg_strategy_decisions_immutable",
+                ):
+                    await session.execute(
+                        text(
+                            f"ALTER TABLE strategy_decisions ENABLE TRIGGER {trigger_name}"
+                        )
+                    )
             order = await session.scalar(
                 select(PaperOrderRecord).where(PaperOrderRecord.instrument_id == INSTRUMENTS[0][0])
             )

@@ -33,6 +33,9 @@ The refreshed `main` has the same behavior in
 No current-main evidence resolves the TLS gate. NEXUS now has a gateway-owned candidate remediation
 that wraps both exact v1.2.0 HTTP surfaces and unconditionally replaces `verify=False` with
 `verify=True` while disabling redirects so provider headers cannot cross to a redirected host.
+Both wrappers also force streamed reads and materialize at most 4 MiB before the frozen SDK can
+call `response.json()`; an oversized declared or chunked response is closed and rejected without
+JSON parsing.
 `FSOPENAPI_BASE_URL` must be an absolute credential-free HTTPS URL with no query/fragment; any
 surface drift blocks SDK construction before a network call, and repository policy prevents either
 wrapper from being removed. This code and its two-surface tests still need

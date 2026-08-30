@@ -20,6 +20,17 @@ from sqlalchemy import select
 _NOW = datetime(2026, 8, 27, 23, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def _legacy_adjusted_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the v1 worker failure-path coverage behind the historical test gate."""
+    for target in (
+        "nexus.evolution.jobs.current_strategy_rnd_adjusted_authority_available",
+        "nexus.evolution.authority.current_strategy_rnd_adjusted_authority_available",
+        "nexus.evolution.executor.current_strategy_rnd_adjusted_authority_available",
+    ):
+        monkeypatch.setattr(target, lambda: True)
+
+
 @pytest.mark.asyncio
 async def test_dedicated_worker_claims_only_strategy_queue_with_real_executor(
     migrated_database_url: str,

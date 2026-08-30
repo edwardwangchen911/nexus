@@ -38,18 +38,28 @@ class ProviderWorkerSettings(BaseSettings):
         env_ignore_empty=True,
         extra="ignore",
         hide_input_in_errors=True,
-        populate_by_name=True,
+        populate_by_name=False,
     )
 
     database_url: str = Field(validation_alias="PROVIDER_DATABASE_URL")
-    object_store_endpoint: str = Field(validation_alias="OBJECT_STORE_ENDPOINT")
-    object_store_region: str = Field(validation_alias="OBJECT_STORE_REGION")
-    object_store_bucket: str = Field(validation_alias="OBJECT_STORE_BUCKET")
+    object_store_endpoint: str = Field(
+        validation_alias="PROVIDER_OBJECT_STORE_ENDPOINT"
+    )
+    object_store_region: str = Field(
+        validation_alias="PROVIDER_OBJECT_STORE_REGION"
+    )
+    object_store_bucket: str = Field(
+        validation_alias="PROVIDER_OBJECT_STORE_BUCKET"
+    )
     object_store_access_key_id: SecretStr = Field(
-        validation_alias="OBJECT_STORE_ACCESS_KEY_ID"
+        validation_alias="PROVIDER_OBJECT_STORE_ACCESS_KEY_ID"
     )
     object_store_secret_access_key: SecretStr = Field(
-        validation_alias="OBJECT_STORE_SECRET_ACCESS_KEY"
+        validation_alias="PROVIDER_OBJECT_STORE_SECRET_ACCESS_KEY"
+    )
+    object_store_prefix: Literal["provider/market"] = Field(
+        default="provider/market",
+        validation_alias="PROVIDER_OBJECT_STORE_PREFIX",
     )
 
     def __repr_args__(self) -> list[tuple[str | None, object]]:
@@ -64,6 +74,7 @@ class ProviderWorkerSettings(BaseSettings):
             self.object_store_bucket,
             self.object_store_access_key_id,
             self.object_store_secret_access_key,
+            self.object_store_prefix,
         )
         if any(_missing(value) for value in values):
             raise ValueError("PROVIDER_WORKER_STORAGE_SETTINGS_REQUIRED")

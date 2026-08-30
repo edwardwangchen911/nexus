@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from datetime import datetime
 
@@ -156,7 +157,10 @@ async def run_job_worker_once(
         )
         return True
     try:
-        payload = spec.payload_model.model_validate(claim.payload, strict=True)
+        payload = spec.payload_model.model_validate_json(
+            json.dumps(claim.payload, separators=(",", ":")),
+            strict=True,
+        )
     except ValidationError:
         await _dead_letter(
             factory,

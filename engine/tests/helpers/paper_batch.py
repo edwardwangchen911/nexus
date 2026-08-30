@@ -1,9 +1,11 @@
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 from uuid import UUID
 
-from nexus.market.price_bar_authority import SOURCE_POLICY_ID, finalize_price_bar_set
+from helpers.fosun_lineage import seed_fosun_daily_lineage
+from nexus.market.price_bar_authority import SOURCE_POLICY_V2_ID, finalize_price_bar_set
 from nexus.paper.projection import load_paper_projection
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
@@ -15,6 +17,7 @@ from nexus.persistence.models.data import (
     DataSnapshot,
     PriceBarRecord,
     PriceSeriesManifest,
+    ProviderCapability,
     QualityReport,
 )
 from nexus.persistence.models.evolution import StrategyRegistryHeadRecord
@@ -25,6 +28,7 @@ from nexus.persistence.models.market import (
     UniverseSnapshot,
 )
 from nexus.persistence.models.paper import RiskQueryAuthorityRecord
+from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.risk.authority import (
     build_risk_market_snapshot,
     canonical_query_authority_hash,
@@ -46,6 +50,10 @@ EXECUTION_SESSION = date(2026, 8, 27)
 DECISION_TIME = datetime(2026, 8, 26, 21, tzinfo=UTC)
 AVAILABLE_AT = datetime(2026, 8, 26, 20, tzinfo=UTC)
 REQUEST_TIME = datetime(2026, 8, 26, 21, 0, 1, tzinfo=UTC)
+PROVIDER_AUTHORIZED_AT = datetime(2026, 8, 26, 20, 30, tzinfo=UTC)
+FOSUN_CAPABILITY_ID = UUID("51000000-0000-0000-0000-000000000005")
+FOSUN_STATUS_ID = UUID("51000000-0000-0000-0000-000000000006")
+FOSUN_CONTRACT_HASH = "f" * 64
 CALENDAR_ID = UUID("51000000-0000-0000-0000-000000000001")
 UNIVERSE_ID = UUID("51000000-0000-0000-0000-000000000002")
 DATA_SNAPSHOT_ID = UUID("51000000-0000-0000-0000-000000000003")
@@ -99,6 +107,35 @@ async def seed_paper_batch(
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:
         async with sessions.begin() as session:
+            session.add_all(
+                (
+                    ProviderCapability(
+                        id=FOSUN_CAPABILITY_ID,
+                        provider="fosun",
+                        capability="READ_ONLY",
+                        contract_hash=FOSUN_CONTRACT_HASH,
+                        expires_at=datetime(2027, 1, 1, tzinfo=UTC),
+                        schema_version="1",
+                        payload={
+                            "operation": "fosun_get_bars",
+                            "market_scope": "US",
+                            "delivery_mode": "real_time",
+                        },
+                        created_at=AVAILABLE_AT - timedelta(hours=1),
+                    ),
+                    IntegrationStatus(
+                        id=FOSUN_STATUS_ID,
+                        provider="fosun",
+                        status="read_only",
+                        last_success_at=PROVIDER_AUTHORIZED_AT,
+                        version=1,
+                        mode_changed_at=AVAILABLE_AT - timedelta(hours=1),
+                        capability_invalidated_at=None,
+                        admitted_contract_hash=FOSUN_CONTRACT_HASH,
+                        created_at=AVAILABLE_AT - timedelta(hours=1),
+                    ),
+                )
+            )
             session.add(
                 ExchangeCalendarAuthorityRecord(
                     id=CALENDAR_ID,
@@ -192,30 +229,48 @@ async def seed_paper_batch(
                 session.add(
                     DataArtifact(
                         id=artifact_id,
-                        uri=f"memory://paper-batch/{index}",
+                        uri=f"memory://sha256/{f'{index}' * 64}",
                         sha256=f"{index}" * 64,
                         byte_size=100,
-                        mime_type="application/x-parquet",
-                        schema_version="v1",
-                        source="fixture",
+                        mime_type="application/vnd.apache.parquet",
+                        schema_version="price_bars_v1",
+                        source="fosun",
                         observed_at=AVAILABLE_AT,
                         available_at=AVAILABLE_AT,
                         received_at=AVAILABLE_AT,
                     )
+                )
+                lineage = await seed_fosun_daily_lineage(
+                    session,
+                    manifest_id=manifest_id,
+                    provider_authorized_at=PROVIDER_AUTHORIZED_AT,
+                    sessions=(DECISION_SESSION,),
+                    raw_payload=f'{{"paper_batch":{index}}}'.encode(),
+                    received_at=AVAILABLE_AT,
+                    calendar_range_end=EXECUTION_SESSION,
                 )
                 manifest = PriceSeriesManifest(
                     id=manifest_id,
                     evidence_ref_id=None,
                     data_artifact_id=artifact_id,
                     instrument=str(instrument_id),
-                    source="fixture",
-                    feed="fixture",
-                    delivery_mode="fixture",
+                    source="fosun",
+                    feed="l1",
+                    delivery_mode="real_time",
                     adjustment="raw",
                     interval="1Day",
                     start_at=AVAILABLE_AT,
                     end_at=AVAILABLE_AT,
                     row_count=1,
+                    provider_capability_id=FOSUN_CAPABILITY_ID,
+                    provider_status_id=FOSUN_STATUS_ID,
+                    provider_status_version=1,
+                    provider_contract_hash=FOSUN_CONTRACT_HASH,
+                    provider_authorized_at=PROVIDER_AUTHORIZED_AT,
+                    gateway_transport_artifact_id=lineage.raw_artifact.id,
+                    daily_calendar_authority_id=lineage.calendar_authority_id,
+                    gateway_request_start_at=lineage.request_start_at,
+                    gateway_request_end_at=lineage.request_end_at,
                 )
                 session.add(manifest)
                 await session.flush()
@@ -233,7 +288,7 @@ async def seed_paper_batch(
                         observed_at=AVAILABLE_AT,
                         available_at=AVAILABLE_AT,
                         received_at=AVAILABLE_AT,
-                        revision="v1",
+                        revision=lineage.raw_digest,
                         quality_flags=[],
                     )
                 )
@@ -262,9 +317,9 @@ async def seed_paper_batch(
                         currency="USD",
                         asset_type="common_stock",
                         close=close,
-                        source="fixture",
-                        delivery_mode="fixture",
-                        available_at=AVAILABLE_AT,
+                        source="fosun",
+                        delivery_mode="real_time",
+                        available_at=PROVIDER_AUTHORIZED_AT,
                         content_hash=authority.content_hash,
                     )
                 )
@@ -301,7 +356,7 @@ async def seed_paper_batch(
             for index, kind in enumerate(("corporate_action", "suspension", "delisting"), start=1):
                 authority_id = UUID(int=0x51000000000000000000000000000600 + index)
                 content_hash = canonical_query_authority_hash(
-                    source_policy_id=SOURCE_POLICY_ID,
+                    source_policy_id=SOURCE_POLICY_V2_ID,
                     universe_snapshot_id=UNIVERSE_ID,
                     decision_session=DECISION_SESSION,
                     kind=kind,
@@ -315,7 +370,7 @@ async def seed_paper_batch(
                     session.add(
                         RiskQueryAuthorityRecord(
                             id=authority_id,
-                            source_policy_id=SOURCE_POLICY_ID,
+                            source_policy_id=SOURCE_POLICY_V2_ID,
                             universe_snapshot_id=UNIVERSE_ID,
                             decision_session=DECISION_SESSION,
                             kind=kind,
@@ -371,7 +426,7 @@ async def seed_paper_batch(
                 decision_session=DECISION_SESSION,
                 decision_time=DECISION_TIME,
                 execution_session=EXECUTION_SESSION,
-                source_policy_id=SOURCE_POLICY_ID,
+                source_policy_id=SOURCE_POLICY_V2_ID,
                 calendar_authority_id=CALENDAR_ID,
                 universe_snapshot_id=UNIVERSE_ID,
                 quality_report_id=QUALITY_REPORT_ID,
@@ -395,7 +450,11 @@ async def seed_paper_batch(
             decision = decision.model_copy(
                 update={"decision_hash": canonical_forward_strategy_decision_hash(decision)}
             )
-            persisted = await persist_forward_strategy_decision(session, decision)
+            with patch(
+                "nexus.strategy.forward.source_policy_v2_supports_adjusted_prices",
+                return_value=True,
+            ):
+                persisted = await persist_forward_strategy_decision(session, decision)
         return PaperBatchSeed(
             account_id=PAPER_ACCOUNT_ID,
             portfolio_id=PORTFOLIO_ID,

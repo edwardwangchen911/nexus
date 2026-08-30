@@ -30,6 +30,7 @@ from nexus.jobs.registry import (
     JobRegistry,
 )
 from nexus.jobs.repository import JobDependencyInput, enqueue_job
+from nexus.paper.errors import PaperPerformanceError
 from nexus.paper.execution_service import advance_internal_paper_order
 from nexus.paper.performance import publish_paper_performance_snapshot
 from nexus.persistence.models.backtest import ExchangeCalendarSessionRecord
@@ -41,7 +42,11 @@ from nexus.persistence.models.paper import (
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.runtime import Job
-from nexus.persistence.models.shadow import ShadowGroupRecord
+from nexus.persistence.models.shadow import (
+    ShadowGroupRecord,
+    ShadowSessionAuthorityRecord,
+)
+from nexus.quality.source_policy import current_proposal_shadow_price_authority_available
 from nexus.shadow.service import advance_shadow_session
 
 LOCAL_SAFE_DAILY_PROFILE = PRIMARY_DAILY_PROFILE
@@ -232,6 +237,29 @@ async def _execute_local_daily_stage(
             result_code=f"PAPER_{paper_result.action.upper()}",
         )
     if job_type is JobType.SHADOW_ADVANCE_DUE:
+        shadow = await context.session.scalar(
+            select(ShadowGroupRecord).where(
+                ShadowGroupRecord.proposal_group_id == target_id
+            )
+        )
+        if shadow is None:
+            raise ValueError("SHADOW_NOT_STARTED")
+        existing_session = await context.session.scalar(
+            select(ShadowSessionAuthorityRecord.id).where(
+                ShadowSessionAuthorityRecord.shadow_group_id == shadow.id,
+                ShadowSessionAuthorityRecord.session == date.fromisoformat(payload.session),
+            )
+        )
+        if (
+            existing_session is None
+            and not current_proposal_shadow_price_authority_available(
+                shadow.source_policy_id
+            )
+        ):
+            return JobHandlerResult(
+                outcome="skipped",
+                result_code="SHADOW_PRICE_AUTHORITY_UNAVAILABLE",
+            )
         shadow_result = await advance_shadow_session(
             context.session,
             group_id=target_id,
@@ -249,11 +277,19 @@ async def _execute_local_daily_stage(
             result_code=f"SHADOW_{shadow_result.result.upper()}",
         )
     if job_type is JobType.PAPER_PERFORMANCE:
-        performance_result = await publish_paper_performance_snapshot(
-            context.session,
-            account_id=target_id,
-            as_of=parse_utc(payload.market_close_at),
-        )
+        try:
+            performance_result = await publish_paper_performance_snapshot(
+                context.session,
+                account_id=target_id,
+                as_of=parse_utc(payload.market_close_at),
+            )
+        except PaperPerformanceError as error:
+            if error.code != "PAPER_PERFORMANCE_PRICE_INCOMPLETE":
+                raise
+            return JobHandlerResult(
+                outcome="skipped",
+                result_code="PERFORMANCE_PRICE_AUTHORITY_UNAVAILABLE",
+            )
         return JobHandlerResult(
             outcome="succeeded",
             result_code=(

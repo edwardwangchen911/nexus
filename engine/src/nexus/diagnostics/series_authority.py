@@ -21,6 +21,7 @@ from nexus.market.price_bar_authority import (
     PriceBarSetPreparation,
     prepare_price_bar_set,
 )
+from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.persistence.models.data import (
     DataArtifact,
     PriceBarSetAuthority,
@@ -35,8 +36,6 @@ from nexus.quality.source_policy import (
     SourcePolicyV2,
     apply_source_policy_v1,
 )
-
-_US_EXCHANGES = frozenset(("AMEX", "ARCX", "NASDAQ", "NYSE", "NYSE_ARCA", "XNAS", "XNYS"))
 
 type CandidateDisposition = Literal[
     "selected", "superseded", "superseded_revision", "ineligible", "conflicting"
@@ -90,7 +89,10 @@ async def select_authoritative_series(
             },
         )
     if policy_authority.version == "source_policy_v2":
-        if instrument.currency != "USD" or instrument.exchange not in _US_EXCHANGES:
+        if (
+            instrument.currency != "USD"
+            or instrument.exchange not in US_EQUITY_EXCHANGES
+        ):
             return _unavailable_series(
                 instrument_id,
                 policy_ref,
@@ -270,7 +272,8 @@ async def _select_v2_series(
                 == PriceSeriesManifest.provider_contract_hash,
                 ProviderCapability.created_at
                 <= PriceSeriesManifest.provider_authorized_at,
-                ProviderCapability.expires_at > as_of,
+                PriceSeriesManifest.provider_authorized_at
+                < ProviderCapability.expires_at,
                 ProviderCapability.payload["operation"].as_string()
                 == "fosun_get_bars",
                 ProviderCapability.payload["market_scope"].as_string() == "US",
@@ -300,7 +303,7 @@ async def _select_v2_series(
         parsed_artifact_ref = _research_ref(artifact_ref)
         parsed_authority_ref = _research_ref(authority_ref)
         relevant_refs.extend((parsed_artifact_ref, parsed_authority_ref))
-        prepared = await prepare_price_bar_set(session, manifest.id)
+        prepared = await prepare_price_bar_set(session, manifest.id, as_of=as_of)
         if (
             prepared is None
             or not _valid_v2_final_authority(
@@ -475,7 +478,7 @@ def _valid_v2_final_authority(
         and manifest.provider_status_version > 0
         and manifest.provider_contract_hash == capability.contract_hash
         and capability.created_at <= authorized_at <= as_of
-        and capability.expires_at > as_of
+        and authorized_at < capability.expires_at
         and artifact_evidence.id == manifest.evidence_ref_id
         and artifact_evidence.source == artifact.source == manifest.source
         and artifact_evidence.provider_object_id == f"price-series-manifest:{manifest.id}"

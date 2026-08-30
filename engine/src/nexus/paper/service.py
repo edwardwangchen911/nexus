@@ -42,6 +42,11 @@ from nexus.persistence.models.paper import (
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.runtime import IdempotencyRecord, OutboxEvent
+from nexus.quality.source_policy import (
+    SOURCE_POLICY_V2_ID,
+    current_paper_order_price_authority_available,
+    load_source_policy_v2,
+)
 from nexus.risk.authority import load_risk_market_snapshot
 from nexus.risk.canonical import (
     canonical_paper_order_batch_hash,
@@ -1034,25 +1039,23 @@ async def create_paper_order_batch(
         account_id=account_id,
         hooks=hooks,
     )
-    idempotency, idempotency_is_new = await _claim_idempotency(
-        session,
-        account_id=account_id,
-        idempotency_key=idempotency_key,
-        request_hash=request_hash,
-    )
-    _observe(hooks, "idempotency_claimed")
     existing = await _existing_batch_result(
         session,
         account_id=account_id,
         strategy_decision_id=strategy_decision_id,
     )
     if existing is not None:
+        idempotency, idempotency_is_new = await _claim_idempotency(
+            session,
+            account_id=account_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+        )
+        _observe(hooks, "idempotency_claimed")
         if idempotency_is_new:
             idempotency.response_payload = existing.model_dump(mode="json")
             await session.flush()
         return existing
-    if not idempotency_is_new:
-        raise PaperBatchError("PAPER_BATCH_CONFLICT")
 
     decision_record = await session.get(StrategyDecisionRecord, strategy_decision_id)
     if decision_record is None or decision_record.account_id != account_id:
@@ -1078,6 +1081,29 @@ async def create_paper_order_batch(
     decision = persisted.decision
     if request_time < decision.decision_time or account.portfolio_id != decision.portfolio_id:
         raise PaperBatchError("STRATEGY_DECISION_INVALID")
+    if decision.source_policy_id != SOURCE_POLICY_V2_ID:
+        raise PaperBatchError("STRATEGY_DECISION_INVALID")
+    try:
+        source_policy = await load_source_policy_v2(
+            session,
+            instrument_tick_size=None,
+            decision_time=decision.decision_time,
+        )
+    except ValueError as error:
+        raise PaperBatchError("STRATEGY_DECISION_INVALID") from error
+    if source_policy.record_id != decision.source_policy_id:
+        raise PaperBatchError("STRATEGY_DECISION_INVALID")
+    if not current_paper_order_price_authority_available():
+        raise PaperBatchError("STRATEGY_DECISION_INVALID")
+    idempotency, idempotency_is_new = await _claim_idempotency(
+        session,
+        account_id=account_id,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+    )
+    _observe(hooks, "idempotency_claimed")
+    if not idempotency_is_new:
+        raise PaperBatchError("PAPER_BATCH_CONFLICT")
     try:
         projection = await load_paper_projection(
             session,

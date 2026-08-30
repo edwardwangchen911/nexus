@@ -54,6 +54,7 @@ class _Gateway:
             ),
             request_body_sha256=_request_hash({"codes": list(codes)}),
             raw_payload=self.quote_payload,
+            sent_at=self.quote_received_at - timedelta(milliseconds=250),
             received_at=self.quote_received_at,
         )
 
@@ -76,6 +77,7 @@ class _Gateway:
                 }
             ),
             raw_payload=payload,
+            sent_at=self.bar_received_at - timedelta(milliseconds=250),
             received_at=self.bar_received_at,
         )
 
@@ -237,6 +239,28 @@ async def test_daily_provider_resolves_pit_code_and_preserves_exact_bar_values()
 
 
 @pytest.mark.asyncio
+async def test_daily_provider_preserves_gateway_session_date_at_utc_midnight() -> None:
+    gateway = _gateway(bar_timestamp=datetime(2026, 8, 21, tzinfo=UTC))
+    gateway.bar_payload = gateway.bar_payload.replace(b'"interval":"minute"', b'"interval":"day"')
+    provider = FosunMarketDataProvider(
+        gateway,
+        symbol_resolver=_Resolver(),
+        delivery_mode="unknown",
+    )
+
+    page = await provider.normalize_bars(_daily_request(), await gateway.read_bars_raw(
+        code="usAAPL",
+        ktype="day",
+        start_time=datetime(2026, 8, 1, tzinfo=UTC),
+        end_time=datetime(2026, 8, 29, tzinfo=UTC),
+        limit=500,
+    ))
+
+    assert page.items[0].observed_at == datetime(2026, 8, 21, tzinfo=UTC)
+    assert page.items[0].session == date(2026, 8, 21)
+
+
+@pytest.mark.asyncio
 async def test_daily_raw_fetch_precedes_contract_parsing() -> None:
     gateway = _gateway()
     gateway.bar_payload = b'{"items":[],"items":[]}'
@@ -317,6 +341,7 @@ async def test_minute_provider_only_publishes_completed_bars(
         gateway_request_id=REQUEST_ID,
         request_body_sha256="b" * 64,
         raw_payload=gateway.bar_payload,
+        sent_at=received_at - timedelta(milliseconds=250),
         received_at=received_at,
     )
 
@@ -431,6 +456,51 @@ async def test_minute_boundary_archives_quote_and_one_bar_response_per_symbol() 
     assert [call["code"] for call in gateway.bar_calls] == ["usAAPL", "usMSFT"]
     assert all(snapshot.minute_bar is not None for snapshot in batch.snapshots)
     assert envelope.received_at == RECEIVED_AT
+
+
+@pytest.mark.asyncio
+async def test_snapshot_bar_completion_uses_its_own_receipt_not_later_quote() -> None:
+    bar_timestamp = datetime(2026, 8, 29, 14, 30, tzinfo=UTC)
+    gateway = _gateway(
+        bar_timestamp=bar_timestamp,
+        bar_received_at=bar_timestamp + timedelta(seconds=59),
+        quote_received_at=bar_timestamp + timedelta(minutes=1),
+    )
+    provider = FosunSnapshotProvider(
+        gateway,
+        symbol_resolver=_Resolver(),
+        delivery_mode="unknown",
+    )
+    request = _snapshot_request(
+        bucket_start=bar_timestamp,
+        include_minute_bars=True,
+    )
+
+    envelope = await provider.fetch_raw_snapshots(request)
+    batch = provider.normalize_raw_snapshots(envelope, request)
+
+    assert all(snapshot.minute_bar is None for snapshot in batch.snapshots)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rejects_non_boundary_minute_bar() -> None:
+    gateway = _gateway(
+        bar_timestamp=datetime(2026, 8, 29, 14, 29, 30, tzinfo=UTC)
+    )
+    provider = FosunSnapshotProvider(
+        gateway,
+        symbol_resolver=_Resolver(),
+        delivery_mode="unknown",
+    )
+    request = _snapshot_request(
+        bucket_start=datetime(2026, 8, 29, 14, 30, tzinfo=UTC),
+        include_minute_bars=True,
+    )
+
+    envelope = await provider.fetch_raw_snapshots(request)
+
+    with pytest.raises(MarketProviderPayloadError, match="FOSUN_BAR_CONTRACT_INVALID"):
+        provider.normalize_raw_snapshots(envelope, request)
 
 
 @pytest.mark.asyncio

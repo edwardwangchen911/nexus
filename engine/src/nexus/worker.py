@@ -125,6 +125,7 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
                 session,
                 now=now,
                 profile_id=LOCAL_SAFE_DAILY_PROFILE,
+                market_source=configured.market_provider,
             )
         worked = await run_job_worker_once(
             factory,

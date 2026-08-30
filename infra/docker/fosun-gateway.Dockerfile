@@ -12,7 +12,10 @@ COPY contracts/providers/fosun/manifest.json contracts/providers/fosun/manifest.
 RUN uv sync --frozen --no-dev --package nexus-fosun-gateway \
     && groupadd --system nexus \
     && useradd --system --gid nexus --home-dir /app --shell /usr/sbin/nologin nexus \
-    && chown --recursive nexus:nexus /app
+    && chown --recursive nexus:nexus /app \
+    && mkdir -p /var/lib/nexus-fosun-gateway \
+    && chown nexus:nexus /var/lib/nexus-fosun-gateway \
+    && chmod 0700 /var/lib/nexus-fosun-gateway
 
 ENV PATH="/app/.venv/bin:$PATH"
 USER nexus

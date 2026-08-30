@@ -31,6 +31,7 @@ from nexus.backtest.engine import (
 from nexus.backtest.metrics import BacktestMetrics
 from nexus.domain.ids import new_uuid7
 from nexus.domain.time import require_utc
+from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.persistence.models.backtest import (
     BacktestAuthorityBundleRecord,
     BacktestAuthorityCollectionRecord,
@@ -82,7 +83,6 @@ from nexus.strategy.dsl import (
     evolution_feature_registry_v1,
 )
 
-_SUPPORTED_US_EXCHANGES = frozenset({"XNYS", "XNAS", "ARCX"})
 _BACKTEST_ASSET_TYPE_BY_MASTER = {
     "common_stock": "stock",
     "equity_etf": "equity_etf",
@@ -1163,7 +1163,7 @@ async def _validate_price_authorities(
             or instrument is None
             or _BACKTEST_ASSET_TYPE_BY_MASTER.get(instrument.asset_type)
             != data.asset_types[expected.instrument_id]
-            or instrument.exchange not in _SUPPORTED_US_EXCHANGES
+            or instrument.exchange not in US_EQUITY_EXCHANGES
             or instrument.currency != "USD"
             or instrument.risk_bucket != data.risk_buckets[expected.instrument_id]
             or manifest is None

@@ -51,6 +51,7 @@ from nexus.evolution.shadow.models import (
     StrategyShadowLegMetricsV1,
     StrategyShadowStateV1,
 )
+from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.optimizer.cost_policy import load_cost_policy_v1
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
@@ -78,7 +79,10 @@ from nexus.persistence.models.evolution import (
 )
 from nexus.persistence.models.market import Instrument
 from nexus.persistence.models.paper import PaperDrawdownLockEventRecord, RiskPolicyRecord
-from nexus.quality.source_policy import load_source_policy_v1
+from nexus.quality.source_policy import (
+    current_strategy_rnd_adjusted_authority_available,
+    load_source_policy_v1,
+)
 from nexus.risk.policy import RiskPolicy
 from nexus.strategy.dsl import (
     CompiledStrategy,
@@ -133,6 +137,10 @@ class DatabaseStrategyRNDAuthorityResolver:
         as_of: datetime,
     ) -> LoadedCandidateAuthority:
         cutoff = require_utc(as_of)
+        if not current_strategy_rnd_adjusted_authority_available():
+            raise StrategyRNDAuthorityError(
+                "BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE"
+            )
         try:
             authority = await load_verified_experiment_authority(session, family_id, lock=True)
         except ValueError as error:
@@ -197,6 +205,10 @@ class DatabaseStrategyRNDAuthorityResolver:
     ) -> LoadedGenerationAuthority:
         """Resolve generation exclusively from the effective registry and sealed facts."""
         cutoff = require_utc(as_of)
+        if not current_strategy_rnd_adjusted_authority_available():
+            raise StrategyRNDAuthorityError(
+                "BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE"
+            )
         head = await session.get(StrategyRegistryHeadRecord, "internal_paper")
         lineages = tuple(
             await session.scalars(
@@ -683,7 +695,7 @@ async def build_strategy_handover_evaluation(
         if (
             asset_type is None
             or master.currency != "USD"
-            or master.exchange not in {"XNYS", "XNAS", "NASDAQ", "NYSE", "ARCA"}
+            or master.exchange not in US_EQUITY_EXCHANGES
             or not snapshot.sector_exposures
             or len(snapshot.dollar_volumes) < 20
         ):

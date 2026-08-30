@@ -10,7 +10,7 @@ from typing import Protocol, cast
 from uuid import UUID
 
 from sqlalchemy import or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from nexus.audit.canonical import canonical_json
 from nexus.domain.evidence import EvidenceRef
@@ -32,10 +32,12 @@ from nexus.jobs.registry import (
 )
 from nexus.market.ingestion import (
     MarketObjectStore,
+    MarketRawArchive,
     archive_fosun_price_page_raw,
     ingest_price_page,
     serialize_price_bars,
 )
+from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -100,6 +102,7 @@ def build_provider_collection_registry(
     now: Callable[[], datetime],
     *,
     expected_profile_id: str | None = None,
+    raw_archive_session_factory: async_sessionmaker[AsyncSession] | None = None,
     market_authority_loader: MarketAuthorityLoader = load_frozen_fosun_market_authority,
 ) -> JobRegistry:
     """Build the closed provider collection registry for one runtime mode."""
@@ -146,9 +149,7 @@ def build_provider_collection_registry(
                     .where(
                         UniverseMember.universe_snapshot_id == universe.id,
                         Instrument.currency == "USD",
-                        Instrument.exchange.in_(
-                            ("AMEX", "ARCA", "NASDAQ", "NYSE", "NYSEARCA", "XNYS")
-                        ),
+                        Instrument.exchange.in_(US_EQUITY_EXCHANGES),
                     )
                     .order_by(Instrument.id)
                     .limit(max_instruments + 1)
@@ -166,6 +167,7 @@ def build_provider_collection_registry(
                 result_code="FROZEN_UNIVERSE_TOO_LARGE",
             )
         market_close = parse_utc(payload.market_close_at)
+        request_start_at, request_end_at = _daily_request_window(market_close)
         if bundle.market_source == "fosun":
             return await _collect_fosun_market(
                 context,
@@ -173,6 +175,7 @@ def build_provider_collection_registry(
                 bundle=bundle,
                 market_object_store=market_object_store,
                 market_authority_loader=market_authority_loader,
+                raw_archive_session_factory=raw_archive_session_factory,
                 instruments=instruments,
                 market_close=market_close,
             )
@@ -187,8 +190,8 @@ def build_provider_collection_registry(
                 page = await provider.fetch_bars(
                     BarsRequest(
                         instrument_id=InstrumentId(instrument.id),
-                        start=market_close - timedelta(days=400),
-                        end=market_close,
+                        start=request_start_at,
+                        end=request_end_at,
                         interval="1Day",
                         adjustment="all",
                     ),
@@ -288,6 +291,7 @@ async def _collect_fosun_market(
     bundle: ProviderBundle,
     market_object_store: MarketObjectStore,
     market_authority_loader: MarketAuthorityLoader,
+    raw_archive_session_factory: async_sessionmaker[AsyncSession] | None,
     instruments: Sequence[Instrument],
     market_close: datetime,
 ) -> JobHandlerResult:
@@ -315,6 +319,7 @@ async def _collect_fosun_market(
     ):
         raise RuntimeError("FOSUN_RAW_FIRST_PROVIDER_REQUIRED")
 
+    request_start_at, request_end_at = _daily_request_window(market_close)
     pending: list[
         tuple[ProviderPage[PriceBar], ProviderMarketBinding, DataArtifact]
     ] = []
@@ -322,8 +327,8 @@ async def _collect_fosun_market(
     for instrument in instruments:
         request = BarsRequest(
             instrument_id=InstrumentId(instrument.id),
-            start=market_close - timedelta(days=400),
-            end=market_close,
+            start=request_start_at,
+            end=request_end_at,
             interval="1Day",
             adjustment="raw",
         )
@@ -339,11 +344,11 @@ async def _collect_fosun_market(
                 result_code="FOSUN_MARKET_AUTHORITY_CHANGED_BEFORE_FETCH",
             )
         response = await provider.fetch_raw_bars(request)
-        archived = await archive_fosun_price_page_raw(
+        archived = await _archive_fosun_price_raw(
             cast(AsyncSession, context.session),
             market_object_store,
             response,
-            commit=False,
+            session_factory=raw_archive_session_factory,
         )
         post_check = context.finished_at()
         if not await _matches_frozen_market_authority(
@@ -367,6 +372,24 @@ async def _collect_fosun_market(
             return JobHandlerResult(
                 outcome="skipped",
                 result_code="FOSUN_MARKET_CONTRACT_MISMATCH",
+            )
+        page = page.model_copy(
+            update={
+                "items": tuple(
+                    bar.model_copy(update={"revision": archived.raw_artifact.sha256})
+                    for bar in page.items
+                )
+            }
+        )
+        if not await _fosun_daily_page_is_complete(
+            context,
+            payload=payload,
+            request=request,
+            page=page,
+        ):
+            return JobHandlerResult(
+                outcome="skipped",
+                result_code="FOSUN_MARKET_PAGE_INCOMPLETE",
             )
         if page.items:
             if any(item.instrument_id != instrument.id for item in page.items):
@@ -441,6 +464,9 @@ async def _collect_fosun_market(
             page,
             provider_binding=provider_binding,
             raw_artifact=raw_artifact,
+            calendar_authority_id=UUID(payload.calendar_authority_id),
+            gateway_request_start_at=request_start_at,
+            gateway_request_end_at=request_end_at,
             commit=False,
         )
         collected += 1
@@ -452,6 +478,38 @@ async def _collect_fosun_market(
     if replayed:
         return JobHandlerResult(outcome="succeeded", result_code="MARKET_REPLAYED")
     return JobHandlerResult(outcome="skipped", result_code="MARKET_NO_DATA")
+
+
+def _daily_request_window(market_close: datetime) -> tuple[datetime, datetime]:
+    """Return the exact UTC date bounds sent for a daily-bar request."""
+    request_end_at = datetime.combine(market_close.date(), time.min, tzinfo=UTC)
+    return request_end_at - timedelta(days=400), request_end_at
+
+
+async def _archive_fosun_price_raw(
+    session: AsyncSession,
+    object_store: MarketObjectStore,
+    response: RawGatewayResponse,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None,
+) -> MarketRawArchive:
+    if session_factory is None:
+        return await archive_fosun_price_page_raw(
+            session,
+            object_store,
+            response,
+            commit=False,
+        )
+    async with session_factory() as archive_session:
+        archived = await archive_fosun_price_page_raw(
+            archive_session,
+            object_store,
+            response,
+            commit=True,
+        )
+        await archive_session.refresh(archived.raw_artifact)
+        archive_session.expunge(archived.raw_artifact)
+        return archived
 
 
 async def _matches_frozen_market_authority(
@@ -468,6 +526,29 @@ async def _matches_frozen_market_authority(
         delivery_mode=frozen.delivery_mode,
     )
     return current == frozen
+
+
+async def _fosun_daily_page_is_complete(
+    context: JobHandlerContext,
+    *,
+    payload: DailyStagePayload,
+    request: BarsRequest,
+    page: ProviderPage[PriceBar],
+) -> bool:
+    expected = tuple(
+        await context.session.scalars(
+            select(ExchangeCalendarSessionRecord.session)
+            .where(
+                ExchangeCalendarSessionRecord.calendar_authority_id
+                == UUID(payload.calendar_authority_id),
+                ExchangeCalendarSessionRecord.session >= request.start.date(),
+                ExchangeCalendarSessionRecord.session <= request.end.date(),
+            )
+            .order_by(ExchangeCalendarSessionRecord.session)
+        )
+    )
+    actual = tuple(item.session for item in page.items)
+    return bool(expected) and actual == expected
 
 
 def _fosun_page_matches_authority(
@@ -543,9 +624,7 @@ async def _sec_instruments(
                 .where(
                     UniverseMember.universe_snapshot_id == universe.id,
                     Instrument.currency == "USD",
-                    Instrument.exchange.in_(
-                        ("AMEX", "ARCA", "NASDAQ", "NYSE", "NYSEARCA", "XNYS")
-                    ),
+                    Instrument.exchange.in_(US_EQUITY_EXCHANGES),
                 )
                 .order_by(Instrument.id)
                 .limit(101)

@@ -39,6 +39,14 @@ class GatewaySettings(BaseSettings):
         default="fixture",
         validation_alias="FOSUN_GATEWAY_TRANSPORT_MODE",
     )
+    replica_count: Literal[1] = Field(
+        default=1,
+        validation_alias="FOSUN_GATEWAY_REPLICA_COUNT",
+    )
+    replay_store_path: Path | None = Field(
+        default=None,
+        validation_alias="FOSUN_GATEWAY_REPLAY_STORE_PATH",
+    )
     gateway_hmac_current_key_id: str | None = Field(
         default=None,
         validation_alias="FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID",
@@ -153,6 +161,7 @@ class GatewaySettings(BaseSettings):
             if (
                 self.capability is None
                 or self.transport_mode != "read_only"
+                or self.replay_store_path is None
                 or self.gateway_hmac_current_key_id is None
                 or self.gateway_hmac_current_secret is None
                 or self.market_gateway_hmac_current_key_id is None
@@ -175,6 +184,8 @@ class GatewaySettings(BaseSettings):
                 )
         elif self.capability is None:
             self.capability = "READ_ONLY"
+        if self.replay_store_path is not None and not self.replay_store_path.is_absolute():
+            raise ValueError("gateway replay store path must be absolute")
         if self.transport_mode == "fixture" and self.gateway_hmac_current_key_id is None:
             self.gateway_hmac_current_key_id = "fixture-gateway-current"
         if self.transport_mode == "fixture" and self.gateway_hmac_current_secret is None:

@@ -23,6 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.audit.service import append_audit_event
 from nexus.domain.ids import new_uuid7
+from nexus.market.price_bar_authority import (
+    HASH_VERSION,
+    POLICY_VERSION,
+    SOURCE_POLICY_ID,
+    SOURCE_POLICY_V2_ID,
+)
 from nexus.paper.errors import PaperExecutionError
 from nexus.paper.fills import (
     EXECUTION_MODEL_V1,
@@ -84,8 +90,16 @@ from nexus.persistence.models.paper import (
     StrategyDecisionRecord,
 )
 from nexus.persistence.models.runtime import OutboxEvent
+from nexus.quality.source_policy import current_paper_execution_price_authority_available
 
 _SOURCE_PRIORITY = {"fosun": 0, "alpaca": 1, "fixture": 2}
+
+
+def _paper_execution_authority_available(source_policy_id: UUID) -> bool:
+    return (
+        source_policy_id == SOURCE_POLICY_V2_ID
+        and current_paper_execution_price_authority_available()
+    )
 
 
 @dataclass(frozen=True)
@@ -552,12 +566,19 @@ async def _qualified_window(
     session: AsyncSession,
     *,
     order: PaperOrderRecord,
+    source_policy_id: UUID,
     calendar: ExecutionCalendarSession,
     model: ExecutionModel,
     window_seq: int,
     evaluated_at: datetime,
     prior_window: PaperExecutionWindowAuthorityRecord | None,
 ) -> tuple[QualifiedExecutionWindow, PriceBarSetAuthority] | None:
+    if source_policy_id == SOURCE_POLICY_V2_ID:
+        # Fosun v2 currently proves daily bars only. The separate intraday
+        # authority is display-only and cannot authorize simulated fills.
+        return None
+    if source_policy_id != SOURCE_POLICY_ID:
+        return None
     window_start = calendar.market_open_at + timedelta(
         minutes=(window_seq - 1) * model.window_minutes
     )
@@ -575,6 +596,11 @@ async def _qualified_window(
             PriceSeriesManifest.end_at == window_end - timedelta(minutes=1),
             PriceSeriesManifest.row_count == model.window_minutes,
             PriceBarSetAuthority.available_at <= evaluated_at,
+            PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
+            PriceBarSetAuthority.hash_version == HASH_VERSION,
+            PriceBarSetAuthority.policy_version == POLICY_VERSION,
+            PriceSeriesManifest.source.in_(("alpaca", "fixture")),
+            PriceSeriesManifest.adjustment == "raw",
         )
     )
     if prior_window is not None:
@@ -592,6 +618,15 @@ async def _qualified_window(
     if candidate is None:
         return None
     authority, manifest = candidate
+    if not (
+        (
+            manifest.source == "alpaca"
+            and manifest.feed == "sip"
+            and manifest.delivery_mode == "delayed"
+        )
+        or (manifest.source == "fixture" and manifest.delivery_mode == "fixture")
+    ):
+        return None
     bar_rows = tuple(
         (
             await session.scalars(
@@ -1134,6 +1169,7 @@ async def advance_internal_paper_order(
         return result
     if status not in {"submitted", "partially_filled", "reconciling"}:
         raise PaperExecutionError("PAPER_EXECUTION_INVALID")
+    price_authority_available = _paper_execution_authority_available(decision.source_policy_id)
 
     reservation = await session.scalar(
         select(PaperReservationRecord)
@@ -1208,9 +1244,13 @@ async def advance_internal_paper_order(
 
     if evaluated_at >= calendar.market_close_at:
         reason = (
-            "missing_fill_data"
-            if filled_before == 0 and prior_window is None
-            else "paper_eod_remainder"
+            "paper_execution_price_authority_unavailable"
+            if not price_authority_available
+            else (
+                "missing_fill_data"
+                if filled_before == 0 and prior_window is None
+                else "paper_eod_remainder"
+            )
         )
         event = await _cancel(
             session,
@@ -1247,14 +1287,19 @@ async def advance_internal_paper_order(
         return result
 
     window_seq = 1 if prior_window is None else prior_window.window_seq + 1
-    qualified = await _qualified_window(
-        session,
-        order=order,
-        calendar=calendar,
-        model=model,
-        window_seq=window_seq,
-        evaluated_at=evaluated_at,
-        prior_window=prior_window,
+    qualified = (
+        await _qualified_window(
+            session,
+            order=order,
+            source_policy_id=decision.source_policy_id,
+            calendar=calendar,
+            model=model,
+            window_seq=window_seq,
+            evaluated_at=evaluated_at,
+            prior_window=prior_window,
+        )
+        if price_authority_available
+        else None
     )
     if qualified is None:
         if evaluated_at >= missing_cancel_at and filled_before == 0 and prior_window is None:
@@ -1267,7 +1312,11 @@ async def advance_internal_paper_order(
                 reservation_events=reservation_events,
                 outstanding=outstanding,
                 occurred_at=evaluated_at,
-                reason_code="missing_fill_data",
+                reason_code=(
+                    "paper_execution_price_authority_unavailable"
+                    if not price_authority_available
+                    else "missing_fill_data"
+                ),
                 ledger=ledger,
                 ledger_accounts=ledger_accounts,
             )

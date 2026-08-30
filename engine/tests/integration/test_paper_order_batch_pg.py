@@ -5,6 +5,7 @@ from uuid import UUID
 
 import pytest
 from helpers.paper_batch import NO_CHANGE_INSTRUMENT, seed_paper_batch
+from nexus.market.price_bar_authority import SOURCE_POLICY_ID
 from nexus.paper.errors import PaperBatchError
 from nexus.paper.service import create_paper_order_batch
 from nexus.persistence.models.paper import (
@@ -20,11 +21,22 @@ from nexus.persistence.models.paper import (
 )
 from nexus.persistence.models.runtime import AuditEvent, OutboxEvent
 from nexus.risk.canonical import (
+    canonical_forward_strategy_decision_hash,
     canonical_paper_order_batch_hash,
     canonical_risk_evaluation_result_hash,
 )
+from nexus.strategy.forward import load_forward_strategy_decision
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+
+@pytest.fixture(autouse=True)
+def _historical_order_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise historical paper-order mechanics behind an explicit test gate."""
+    monkeypatch.setattr(
+        "nexus.paper.service.current_paper_order_price_authority_available",
+        lambda: True,
+    )
 
 
 async def _create_and_inspect(database_url: str):
@@ -278,6 +290,148 @@ def test_missing_exact_query_authority_fails_closed_before_any_order(
     )
 
     assert code == "RISK_AUTHORITY_INCOMPLETE"
+    assert counts == (0, 0, 0)
+
+
+async def _legacy_decision_batch_attempt(database_url: str) -> tuple[str, int, int]:
+    seed = await seed_paper_batch(database_url)
+    engine = create_async_engine(database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            persisted = await load_forward_strategy_decision(
+                session,
+                account_id=seed.account_id,
+                strategy_version="baseline_v1",
+                decision_session=date(2026, 8, 26),
+            )
+            assert persisted is not None
+            legacy = persisted.decision.model_copy(
+                update={"source_policy_id": SOURCE_POLICY_ID}
+            )
+            legacy = legacy.model_copy(
+                update={
+                    "decision_hash": canonical_forward_strategy_decision_hash(legacy)
+                }
+            )
+            for trigger_name in (
+                "trg_strategy_decisions_created_at_immutable",
+                "trg_strategy_decisions_immutable",
+            ):
+                await session.execute(
+                    text(
+                        f"ALTER TABLE strategy_decisions DISABLE TRIGGER {trigger_name}"
+                    )
+                )
+            await session.execute(
+                text(
+                    "UPDATE strategy_decisions SET source_policy_id = :policy_id, "
+                    "decision_hash = :decision_hash WHERE id = :decision_id"
+                ),
+                {
+                    "policy_id": SOURCE_POLICY_ID,
+                    "decision_hash": legacy.decision_hash,
+                    "decision_id": seed.decision_id,
+                },
+            )
+            for trigger_name in (
+                "trg_strategy_decisions_created_at_immutable",
+                "trg_strategy_decisions_immutable",
+            ):
+                await session.execute(
+                    text(
+                        f"ALTER TABLE strategy_decisions ENABLE TRIGGER {trigger_name}"
+                    )
+                )
+
+        async with sessions.begin() as session:
+            try:
+                await create_paper_order_batch(
+                    session,
+                    account_id=seed.account_id,
+                    strategy_decision_id=seed.decision_id,
+                    idempotency_key="legacy-policy-must-not-write",
+                    request_time=seed.request_time,
+                )
+            except PaperBatchError as error:
+                error_code = error.code
+            else:
+                raise AssertionError("legacy decision unexpectedly created a paper batch")
+
+        async with sessions() as session:
+            idempotency_count = int(
+                await session.scalar(
+                    text(
+                        "SELECT count(*) FROM idempotency_records "
+                        "WHERE idempotency_key = 'legacy-policy-must-not-write'"
+                    )
+                )
+                or 0
+            )
+            batch_count = int(
+                await session.scalar(text("SELECT count(*) FROM paper_order_batches"))
+                or 0
+            )
+        return error_code, idempotency_count, batch_count
+    finally:
+        await engine.dispose()
+
+
+def test_new_paper_batch_rejects_legacy_policy_without_persisting_claim(
+    migrated_database_url: str,
+) -> None:
+    error_code, idempotency_count, batch_count = asyncio.run(
+        _legacy_decision_batch_attempt(migrated_database_url)
+    )
+    assert error_code == "STRATEGY_DECISION_INVALID"
+    assert idempotency_count == 0
+    assert batch_count == 0
+
+
+@pytest.mark.asyncio
+async def test_new_paper_batch_rejects_raw_only_v2_before_domain_writes(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = await seed_paper_batch(migrated_database_url)
+    monkeypatch.setattr(
+        "nexus.paper.service.current_paper_order_price_authority_available",
+        lambda: False,
+    )
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        with pytest.raises(PaperBatchError) as captured:
+            async with sessions.begin() as session:
+                await create_paper_order_batch(
+                    session,
+                    account_id=seed.account_id,
+                    strategy_decision_id=seed.decision_id,
+                    idempotency_key="raw-v2-must-not-write",
+                    request_time=seed.request_time,
+                )
+        async with sessions() as session:
+            counts = tuple(
+                int(value or 0)
+                for value in (
+                    await session.scalar(
+                        text(
+                            "SELECT count(*) FROM idempotency_records "
+                            "WHERE idempotency_key = 'raw-v2-must-not-write'"
+                        )
+                    ),
+                    await session.scalar(
+                        select(func.count()).select_from(PaperOrderRecord)
+                    ),
+                    await session.scalar(
+                        text("SELECT count(*) FROM paper_order_batches")
+                    ),
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    assert captured.value.code == "STRATEGY_DECISION_INVALID"
     assert counts == (0, 0, 0)
 
 

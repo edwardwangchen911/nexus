@@ -55,6 +55,10 @@ def _runtime_eligible(manifest: PriceSeriesManifest, *, allow_fixture: bool) -> 
                 manifest.provider_status_version,
                 manifest.provider_contract_hash,
                 manifest.provider_authorized_at,
+                manifest.gateway_transport_artifact_id,
+                manifest.daily_calendar_authority_id,
+                manifest.gateway_request_start_at,
+                manifest.gateway_request_end_at,
             )
         )
     ):
@@ -92,6 +96,10 @@ def _authority_statement(
         PriceSeriesManifest.provider_status_version.is_not(None),
         PriceSeriesManifest.provider_contract_hash.is_not(None),
         PriceSeriesManifest.provider_authorized_at.is_not(None),
+        PriceSeriesManifest.gateway_transport_artifact_id.is_not(None),
+        PriceSeriesManifest.daily_calendar_authority_id.is_not(None),
+        PriceSeriesManifest.gateway_request_start_at.is_not(None),
+        PriceSeriesManifest.gateway_request_end_at.is_not(None),
     )
     historical_alpaca = and_(
         PriceSeriesManifest.source == "alpaca",
@@ -177,6 +185,19 @@ def _valid_owner(
     selected_at: datetime,
     allow_fixture: bool,
 ) -> bool:
+    historical_alpaca_v1 = (
+        manifest.source == "alpaca"
+        and manifest.feed == "sip"
+        and manifest.delivery_mode == "delayed"
+        and manifest.interval == "1Day"
+    )
+    fixture_v1 = (
+        allow_fixture
+        and manifest.source == "fixture"
+        and bool(manifest.feed)
+        and manifest.delivery_mode == "fixture"
+        and manifest.interval == "1Day"
+    )
     v1_protocol = (
         authority.source_policy_id == policy.id == SOURCE_POLICY_ID
         and authority.hash_version == HASH_VERSION
@@ -185,11 +206,7 @@ def _valid_owner(
         and policy.version == SOURCE_POLICY_VERSION
         and policy.schema_version == "1"
         and policy.payload == SOURCE_POLICY_PAYLOAD
-        and allow_fixture
-        and manifest.source == "fixture"
-        and bool(manifest.feed)
-        and manifest.delivery_mode == "fixture"
-        and manifest.interval == "1Day"
+        and (historical_alpaca_v1 or fixture_v1)
     )
     v2_protocol = (
         authority.source_policy_id == policy.id == SOURCE_POLICY_V2_ID
@@ -356,21 +373,11 @@ async def revalidate_frozen_price_authority(
         and evidence.content_hash == current_evidence.content_hash
     ):
         return FrozenPriceAuthorityStatus.INVALID
-    prepared = await prepare_price_bar_set(session, manifest.id)
-    if prepared is None or (
-        prepared.content_hash,
-        prepared.byte_length,
-        prepared.bar_count,
-        prepared.first_session,
-        prepared.last_session,
-        prepared.available_at,
-    ) != (
-        authority.content_hash,
-        authority.byte_length,
-        authority.bar_count,
-        authority.first_session,
-        authority.last_session,
-        authority.available_at,
+    if not await _prepared_owner_matches(
+        session,
+        authority=authority,
+        manifest=manifest,
+        selected_at=binding.selected_at,
     ):
         return FrozenPriceAuthorityStatus.INVALID
     return FrozenPriceAuthorityStatus.VALID
@@ -462,6 +469,13 @@ async def freeze_price_authority(
             )
         ):
             raise ValueError("existing price authority is invalid")
+        if not await _prepared_owner_matches(
+            session,
+            authority=authority,
+            manifest=manifest,
+            selected_at=existing.selected_at,
+        ):
+            raise ValueError("existing price authority is invalid")
         return
     if not snapshot_is_current or current_snapshot is None:
         return
@@ -514,6 +528,13 @@ async def freeze_price_authority(
         allow_fixture=allow_fixture,
     ):
         raise ValueError("price authority is invalid")
+    if not await _prepared_owner_matches(
+        session,
+        authority=authority,
+        manifest=manifest,
+        selected_at=selected_at,
+    ):
+        return
     await session.execute(
         pg_insert(AgentDataSnapshotEvidenceRecord)
         .values(
@@ -530,4 +551,33 @@ async def freeze_price_authority(
             content_hash=evidence.content_hash,
         )
         .on_conflict_do_nothing()
+    )
+
+
+async def _prepared_owner_matches(
+    session: AsyncSession,
+    *,
+    authority: PriceBarSetAuthority,
+    manifest: PriceSeriesManifest,
+    selected_at: datetime,
+) -> bool:
+    prepared = await prepare_price_bar_set(
+        session,
+        manifest.id,
+        as_of=selected_at,
+    )
+    return prepared is not None and (
+        prepared.content_hash,
+        prepared.byte_length,
+        prepared.bar_count,
+        prepared.first_session,
+        prepared.last_session,
+        prepared.available_at,
+    ) == (
+        authority.content_hash,
+        authority.byte_length,
+        authority.bar_count,
+        authority.first_session,
+        authority.last_session,
+        authority.available_at,
     )

@@ -11,6 +11,7 @@ from nexus.jobs.intraday_schedule import (
     revalidate_intraday_payload_authority,
     schedule_due_intraday_snapshot,
 )
+from nexus.jobs.market_authority import FrozenFosunMarketAuthority
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -38,14 +39,48 @@ def _settings() -> ProviderSettings:
     return ProviderSettings(
         runtime_mode="production",
         intraday_monitor_mode="production",
-        alpaca_key_id="key-canary",
-        alpaca_secret_key="secret-canary",
-        alpaca_feed="sip",
-        alpaca_delivery_mode="delayed",
-        alpaca_intraday_feed="iex",
-        alpaca_intraday_delivery_mode="real_time",
+        fosun_market_gateway_origin="https://fosun-gateway.internal:8443",
+        fosun_market_gateway_key_id="synthetic-market-current",
+        fosun_market_gateway_secret="synthetic-market-secret",
+        fosun_market_gateway_client_cert="/synthetic/market.crt",
+        fosun_market_gateway_client_key="/synthetic/market.key",
+        fosun_market_gateway_client_ca="/synthetic/ca.crt",
         sec_contact="owner@example.com",
         fred_api_key="fred-canary",
+    )
+
+
+def _authority(operation: str) -> FrozenFosunMarketAuthority:
+    return FrozenFosunMarketAuthority(
+        operation=operation,  # type: ignore[arg-type]
+        delivery_mode="unknown",
+        capability_id=UUID(
+            "019d0000-0000-7000-8000-0000000000e1"
+            if operation == "fosun_get_quotes"
+            else "019d0000-0000-7000-8000-0000000000e2"
+        ),
+        capability_schema_version="1",
+        capability_created_at=datetime(2026, 8, 28, 13, tzinfo=UTC),
+        capability_expires_at=datetime(2026, 8, 29, 13, tzinfo=UTC),
+        status_id=UUID("019d0000-0000-7000-8000-0000000000e0"),
+        status_version=1,
+        status_created_at=datetime(2026, 8, 28, 12, tzinfo=UTC),
+        status_mode_changed_at=datetime(2026, 8, 28, 12, tzinfo=UTC),
+        capability_invalidated_at=None,
+        contract_hash="a" * 64,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _frozen_provider_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the scheduler tests focused on their database/watchlist authority."""
+
+    async def load(*_args: object, operation: str, **_kwargs: object):
+        return _authority(operation)
+
+    monkeypatch.setattr(
+        "nexus.jobs.intraday_schedule.load_frozen_fosun_market_authority",
+        load,
     )
 
 

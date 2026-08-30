@@ -38,7 +38,7 @@ INTRADAY_SOURCE_POLICY_PAYLOAD = {
 
 def test_0026_is_single_head_over_0025_and_metadata_matches() -> None:
     scripts = ScriptDirectory.from_config(Config("engine/alembic.ini"))
-    assert scripts.get_heads() == ["0027_fosun_market_authority"]
+    assert scripts.get_heads() == ["0029_fosun_bar_lineage"]
     revision = scripts.get_revision("0026_intraday_review_hardening")
     assert revision is not None
     assert revision.down_revision == "0025_intraday_market_monitor"

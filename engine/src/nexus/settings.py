@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 from enum import StrEnum
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -91,6 +91,10 @@ class EngineSettings(_SafeSettings):
     provider_jobs_enabled: bool = Field(
         default=False,
         validation_alias="NEXUS_PROVIDER_JOBS_ENABLED",
+    )
+    market_provider: Literal["fosun", "alpaca"] = Field(
+        default="fosun",
+        validation_alias="NEXUS_MARKET_PROVIDER",
     )
 
     @model_validator(mode="after")

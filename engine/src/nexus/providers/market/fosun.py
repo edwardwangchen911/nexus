@@ -60,6 +60,7 @@ class _FosunEvidenceItem(BaseModel):
     gateway_request_id: UUID
     request_body_sha256: str
     response_body_sha256: str
+    sent_at: datetime
     received_at: datetime
     body_base64: str
 
@@ -70,7 +71,7 @@ class _FosunEvidenceItem(BaseModel):
             raise ValueError("snapshot evidence digest is invalid")
         return value
 
-    @field_validator("received_at")
+    @field_validator("sent_at", "received_at")
     @classmethod
     def _received_utc(cls, value: datetime) -> datetime:
         return require_utc(value)
@@ -96,6 +97,7 @@ def encode_fosun_snapshot_evidence(
                 "gateway_request_id": str(response.gateway_request_id),
                 "request_body_sha256": response.request_body_sha256,
                 "response_body_sha256": hashlib.sha256(response.raw_payload).hexdigest(),
+                "sent_at": _utc_text(response.sent_at),
                 "received_at": _utc_text(response.received_at),
                 "body_base64": base64.b64encode(response.raw_payload).decode("ascii"),
             }
@@ -137,6 +139,7 @@ def decode_fosun_snapshot_evidence(
                 gateway_request_id=item.gateway_request_id,
                 request_body_sha256=item.request_body_sha256,
                 raw_payload=body,
+                sent_at=item.sent_at,
                 received_at=item.received_at,
             )
             decoded.append((item.instrument_codes, response))
@@ -272,7 +275,11 @@ class FosunMarketDataProvider:
         bars = tuple(
             PriceBar(
                 instrument_id=request.instrument_id,
-                session=item.timestamp.astimezone(_NEW_YORK).date(),
+                session=(
+                    item.timestamp.date()
+                    if request.interval == "1Day"
+                    else item.timestamp.astimezone(_NEW_YORK).date()
+                ),
                 open=item.open,
                 high=item.high,
                 low=item.low,
@@ -555,7 +562,7 @@ class FosunSnapshotProvider:
             complete = tuple(
                 item
                 for item in page.items
-                if item.timestamp + timedelta(minutes=1) <= envelope_receipt(evidence)
+                if item.timestamp + timedelta(minutes=1) <= response.received_at
             )
             if not complete:
                 continue
@@ -596,12 +603,6 @@ def _provider_code(symbol: object) -> str:
     if not isinstance(symbol, str) or _SYMBOL.fullmatch(symbol) is None:
         raise MarketProviderPayloadError("FOSUN_SYMBOL_INVALID")
     return f"us{symbol}"
-
-
-def envelope_receipt(
-    evidence: tuple[tuple[tuple[str, ...], RawGatewayResponse], ...],
-) -> datetime:
-    return max(response.received_at for _, response in evidence)
 
 
 def _validate_evidence_shape(

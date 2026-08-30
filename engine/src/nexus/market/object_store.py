@@ -1,4 +1,4 @@
-"""Create-only S3/MinIO storage for provider evidence and normalized market data."""
+"""Prefix-scoped S3/MinIO storage for provider evidence and market data."""
 
 from __future__ import annotations
 
@@ -31,6 +31,9 @@ class ObjectStoreSettings(Protocol):
 
     @property
     def object_store_secret_access_key(self) -> SecretStr | None: ...
+
+    @property
+    def object_store_prefix(self) -> str | None: ...
 
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -69,9 +72,10 @@ class S3ProviderEvidenceStore:
         bucket = settings.object_store_bucket
         access_key = settings.object_store_access_key_id
         secret_key = settings.object_store_secret_access_key
+        prefix = settings.object_store_prefix
         if any(
             value is None
-            for value in (endpoint, region, bucket, access_key, secret_key)
+            for value in (endpoint, region, bucket, access_key, secret_key, prefix)
         ):
             raise ValueError("object-store settings are incomplete")
         assert endpoint is not None
@@ -79,7 +83,9 @@ class S3ProviderEvidenceStore:
         assert bucket is not None
         assert access_key is not None
         assert secret_key is not None
+        assert prefix is not None
         self._bucket = bucket
+        self._prefix = prefix
         self._client = client or cast(
             _S3Client,
             boto3.client(
@@ -112,7 +118,7 @@ class S3ProviderEvidenceStore:
         await asyncio.to_thread(
             self._client.put_object,
             Bucket=self._bucket,
-            Key=key,
+            Key=self._storage_key(key),
             Body=payload,
             ContentType="application/vnd.apache.parquet",
             IfNoneMatch="*",
@@ -133,7 +139,7 @@ class S3ProviderEvidenceStore:
         await asyncio.to_thread(
             self._client.delete_object,
             Bucket=self._bucket,
-            Key=key,
+            Key=self._storage_key(key),
         )
 
     async def _put_create_only(
@@ -142,11 +148,12 @@ class S3ProviderEvidenceStore:
         content: bytes,
         digest: str,
     ) -> str:
+        storage_key = self._storage_key(key)
         try:
             response = await asyncio.to_thread(
                 self._client.put_object,
                 Bucket=self._bucket,
-                Key=key,
+                Key=storage_key,
                 Body=content,
                 IfNoneMatch="*",
                 Metadata={"sha256": digest},
@@ -157,12 +164,12 @@ class S3ProviderEvidenceStore:
                 raise
             version = await asyncio.to_thread(
                 self._verify_existing,
-                key,
+                storage_key,
                 content,
             )
         if not isinstance(version, str) or not version:
             raise RuntimeError("PROVIDER_OBJECT_VERSION_UNAVAILABLE")
-        return f"s3://{self._bucket}/{key}?versionId={quote(version, safe='')}"
+        return f"s3://{self._bucket}/{storage_key}?versionId={quote(version, safe='')}"
 
     def _verify_existing(self, key: str, expected: bytes) -> str:
         response = self._client.get_object(Bucket=self._bucket, Key=key)
@@ -182,7 +189,10 @@ class S3ProviderEvidenceStore:
         return version
 
     def _read_bounded(self, key: str) -> bytes:
-        response = self._client.get_object(Bucket=self._bucket, Key=key)
+        response = self._client.get_object(
+            Bucket=self._bucket,
+            Key=self._storage_key(key),
+        )
         body = cast(_ReadableBody | None, response.get("Body"))
         if body is None or not callable(getattr(body, "read", None)):
             raise RuntimeError("PROVIDER_OBJECT_BODY_UNAVAILABLE")
@@ -194,6 +204,9 @@ class S3ProviderEvidenceStore:
         if not payload or len(payload) > _MAX_OBJECT_BYTES:
             raise RuntimeError("PROVIDER_OBJECT_SIZE_INVALID")
         return payload
+
+    def _storage_key(self, key: str) -> str:
+        return f"{self._prefix}/{key}"
 
 
 def _validate_content_key(key: str, content: bytes) -> str:

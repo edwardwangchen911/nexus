@@ -234,6 +234,14 @@ def _bars(
     rows = data.get("data")
     if not isinstance(rows, list):
         raise ValueError
+    total = data.get("total")
+    if (
+        not isinstance(total, int)
+        or isinstance(total, bool)
+        or total < 0
+        or total != len(rows)
+    ):
+        raise ValueError
     power = data.get("power")
     code = _required_str(context, "code")
     interval = _required_str(context, "ktype")
@@ -263,8 +271,14 @@ def _bars(
             raise ValueError
         if item.timestamp > received_at:
             raise ValueError
-        if start is not None and end is not None and not start <= item.timestamp <= end:
-            raise ValueError
+        if start is not None and end is not None:
+            in_window = (
+                start.date() <= item.timestamp.date() <= end.date()
+                if interval == "day"
+                else start <= item.timestamp <= end
+            )
+            if not in_window:
+                raise ValueError
         if not all(
             value.is_finite() and value > 0
             for value in (item.open, item.high, item.low, item.close)

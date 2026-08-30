@@ -25,6 +25,15 @@ MANIFEST_ID = UUID("63000000-0000-0000-0000-000000000002")
 WINDOW_ID = UUID("63000000-0000-0000-0000-000000000003")
 
 
+@pytest.fixture(autouse=True)
+def _historical_order_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise legacy execution DB guards behind the historical test gate."""
+    monkeypatch.setattr(
+        "nexus.paper.service.current_paper_order_price_authority_available",
+        lambda: True,
+    )
+
+
 async def _seed_valid_window(database_url: str) -> tuple[UUID, tuple[UUID, ...]]:
     seed = await seed_paper_batch(database_url)
     engine = create_async_engine(database_url)

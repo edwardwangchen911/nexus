@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -10,7 +11,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
@@ -39,6 +40,8 @@ _PATHS: dict[FosunMarketOperation, str] = {
 _US_CODE = re.compile(r"^us[A-Z][A-Z0-9.-]{0,14}$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _MAX_RESPONSE_BYTES = 1024 * 1024
+_MAX_REQUEST_SECONDS = 10.0
+_MAX_GATEWAY_CLOCK_SKEW_SECONDS = 60
 
 
 class FosunMarketGatewayError(RuntimeError):
@@ -66,6 +69,7 @@ class RawGatewayResponse(BaseModel):
     gateway_request_id: UUID
     request_body_sha256: str
     raw_payload: bytes
+    sent_at: datetime
     received_at: datetime
 
     @field_validator("request_body_sha256")
@@ -82,10 +86,17 @@ class RawGatewayResponse(BaseModel):
             raise ValueError("gateway response bytes are invalid")
         return value
 
-    @field_validator("received_at")
+    @field_validator("sent_at", "received_at")
     @classmethod
-    def _received_utc(cls, value: datetime) -> datetime:
+    def _transport_time_utc(cls, value: datetime) -> datetime:
         return require_utc(value)
+
+    @model_validator(mode="after")
+    def _bounded_transport_envelope(self) -> RawGatewayResponse:
+        elapsed = (self.received_at - self.sent_at).total_seconds()
+        if elapsed < 0 or elapsed > _MAX_REQUEST_SECONDS + 1:
+            raise ValueError("gateway transport envelope is invalid")
+        return self
 
 
 class FosunQuoteItem(BaseModel):
@@ -310,29 +321,33 @@ class FosunMarketGatewayClient:
             "X-Nexus-Actor-Id": actor_id,
             "X-Request-Id": str(request_id),
         }
+        sent_at = self._now()
         try:
-            async with self._client.stream(
-                "POST",
-                f"{self._origin}{path}",
-                content=body,
-                headers=headers,
-                follow_redirects=False,
-            ) as response:
-                if response.status_code != 200 or not _is_exact_json_media_type(
-                    response.headers.get("content-type")
-                ):
-                    raise FosunMarketGatewayError("gateway response rejected")
-                _validate_content_length(response.headers.get("content-length"))
-                chunks: list[bytes] = []
-                size = 0
-                async for chunk in response.aiter_bytes():
-                    size += len(chunk)
-                    if size > _MAX_RESPONSE_BYTES:
+            async with asyncio.timeout(_MAX_REQUEST_SECONDS):
+                async with self._client.stream(
+                    "POST",
+                    f"{self._origin}{path}",
+                    content=body,
+                    headers=headers,
+                    follow_redirects=False,
+                ) as response:
+                    if response.status_code != 200 or not _is_exact_json_media_type(
+                        response.headers.get("content-type")
+                    ):
                         raise FosunMarketGatewayError("gateway response rejected")
-                    chunks.append(chunk)
-                raw_payload = b"".join(chunks)
+                    _validate_content_length(response.headers.get("content-length"))
+                    chunks: list[bytes] = []
+                    size = 0
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > _MAX_RESPONSE_BYTES:
+                            raise FosunMarketGatewayError("gateway response rejected")
+                        chunks.append(chunk)
+                    raw_payload = b"".join(chunks)
         except FosunMarketGatewayError:
             raise
+        except TimeoutError:
+            raise FosunMarketGatewayError("gateway request failed") from None
         except httpx.HTTPError:
             raise FosunMarketGatewayError("gateway request failed") from None
         if not raw_payload:
@@ -342,6 +357,7 @@ class FosunMarketGatewayClient:
             gateway_request_id=request_id,
             request_body_sha256=body_hash,
             raw_payload=raw_payload,
+            sent_at=sent_at,
             received_at=self._now(),
         )
 
@@ -359,8 +375,12 @@ def parse_quote_page(
         page = FosunQuotePage.model_validate(_load_exact_json(response.raw_payload))
         if (
             tuple(item.instrument_code for item in page.items) != expected_codes
-            or page.as_of != response.received_at
-            or any(item.as_of != response.received_at for item in page.items)
+            or not _gateway_time_is_plausible(
+                page.as_of,
+                sent_at=response.sent_at,
+                received_at=response.received_at,
+            )
+            or any(item.as_of != page.as_of for item in page.items)
         ):
             raise ValueError
         return page
@@ -391,15 +411,31 @@ def parse_bar_page(
         raise FosunMarketGatewayError("gateway bar contract rejected")
     try:
         page = FosunBarPage.model_validate(_load_exact_json(response.raw_payload))
-        if page.as_of != response.received_at or len(page.items) > limit:
+        if (
+            not _gateway_time_is_plausible(
+                page.as_of,
+                sent_at=response.sent_at,
+                received_at=response.received_at,
+            )
+            or len(page.items) > limit
+        ):
             raise ValueError
         previous: datetime | None = None
         for item in page.items:
+            in_window = (
+                start.date() <= item.timestamp.date() <= end.date()
+                if expected_ktype == "day"
+                else start <= item.timestamp <= end
+            )
             if (
                 item.instrument_code != expected_code
                 or item.interval != expected_ktype
-                or not start <= item.timestamp <= end
-                or item.timestamp > response.received_at
+                or (
+                    expected_ktype == "minute"
+                    and (item.timestamp.second != 0 or item.timestamp.microsecond != 0)
+                )
+                or not in_window
+                or item.timestamp > page.as_of
                 or (previous is not None and item.timestamp <= previous)
             ):
                 raise ValueError
@@ -509,6 +545,17 @@ def _validate_content_length(value: str | None) -> None:
         return
     if not value.isascii() or not value.isdecimal() or int(value) > _MAX_RESPONSE_BYTES:
         raise FosunMarketGatewayError("gateway response rejected")
+
+
+def _gateway_time_is_plausible(
+    gateway_as_of: datetime,
+    *,
+    sent_at: datetime,
+    received_at: datetime,
+) -> bool:
+    """Accept only gateway time inside the measured request envelope plus skew."""
+    skew = timedelta(seconds=_MAX_GATEWAY_CLOCK_SKEW_SECONDS)
+    return sent_at - skew <= gateway_as_of <= received_at + skew
 
 
 def _validated_origin(value: str) -> str:

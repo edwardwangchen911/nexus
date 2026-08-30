@@ -15,8 +15,12 @@ from helpers.price_bar_authority import (
 )
 from nexus.jobs.market_authority import ProviderMarketBinding
 from nexus.market.database_series import load_daily_series, load_intraday_series
-from nexus.market.ingestion import ingest_price_page
+from nexus.market.ingestion import archive_fosun_price_page_raw, ingest_price_page
 from nexus.market.intraday_ingestion import ingest_intraday_snapshot
+from nexus.persistence.models.backtest import (
+    ExchangeCalendarAuthorityRecord,
+    ExchangeCalendarSessionRecord,
+)
 from nexus.persistence.models.data import ProviderCapability
 from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.persistence.session import session_factory
@@ -26,6 +30,7 @@ from nexus.providers.base import (
     PriceBar,
     ProviderPage,
 )
+from nexus.providers.market.fosun_gateway import RawGatewayResponse
 from nexus.providers.market.snapshot_contracts import (
     MarketSnapshot,
     SnapshotBatch,
@@ -144,7 +149,7 @@ async def test_current_database_loaders_exclude_legacy_alpaca_and_fixture_author
 
 
 @pytest.mark.asyncio
-async def test_current_database_loaders_return_only_exact_fosun_v2_bindings(
+async def test_current_database_loaders_preserve_frozen_fosun_v2_bindings_after_expiry(
     migrated_database_url: str,
 ) -> None:
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
@@ -164,7 +169,7 @@ async def test_current_database_loaders_return_only_exact_fosun_v2_bindings(
                     provider="fosun",
                     capability="READ_ONLY",
                     contract_hash=contract_hash,
-                    expires_at=checked_at + timedelta(hours=1),
+                    expires_at=checked_at + timedelta(milliseconds=500),
                     schema_version="1",
                     payload={
                         "operation": "fosun_get_quotes",
@@ -178,7 +183,7 @@ async def test_current_database_loaders_return_only_exact_fosun_v2_bindings(
                     provider="fosun",
                     capability="READ_ONLY",
                     contract_hash=contract_hash,
-                    expires_at=checked_at + timedelta(hours=1),
+                    expires_at=checked_at + timedelta(milliseconds=500),
                     schema_version="1",
                     payload={
                         "operation": "fosun_get_bars",
@@ -224,14 +229,54 @@ async def test_current_database_loaders_return_only_exact_fosun_v2_bindings(
         revision="fosun-daily-v2",
     )
     store = _ObjectStore()
+    raw_payload = b'{"bars":"fosun"}'
+    calendar_authority_id = uuid4()
+    request_end_at = datetime(2026, 8, 28, tzinfo=UTC)
+    request_start_at = request_end_at - timedelta(days=400)
     async with factory() as session, session.begin():
+        session.add(
+            ExchangeCalendarAuthorityRecord(
+                id=calendar_authority_id,
+                exchange="XNYS",
+                version=f"market-database-series-{calendar_authority_id}",
+                source="fixture",
+                range_start=request_start_at.date(),
+                range_end=decision_time.date(),
+                query_parameters={},
+                completeness_status="complete",
+                content_hash="c" * 64,
+                published_at=received_at - timedelta(days=2),
+            )
+        )
+        session.add(
+            ExchangeCalendarSessionRecord(
+                calendar_authority_id=calendar_authority_id,
+                session=daily_bar.session,
+                decision_at=daily_bar.observed_at,
+                market_open_at=daily_bar.observed_at - timedelta(hours=6, minutes=30),
+                market_close_at=daily_bar.observed_at,
+            )
+        )
+        archived = await archive_fosun_price_page_raw(
+            session,
+            store,
+            RawGatewayResponse(
+                operation="fosun_get_bars",
+                gateway_request_id=uuid4(),
+                request_body_sha256="b" * 64,
+                raw_payload=raw_payload,
+                sent_at=received_at - timedelta(milliseconds=250),
+                received_at=received_at,
+            ),
+            commit=False,
+        )
         await ingest_price_page(
             session,
             store,
             ProviderPage(
                 items=(daily_bar,),
                 next_cursor=None,
-                raw_payload=b'{"bars":"fosun"}',
+                raw_payload=raw_payload,
                 source_request_id="fosun-daily-v2",
                 as_of=received_at,
                 provenance=MarketDataProvenance(
@@ -244,6 +289,10 @@ async def test_current_database_loaders_return_only_exact_fosun_v2_bindings(
                 ),
             ),
             provider_binding=bars_binding,
+            raw_artifact=archived.raw_artifact,
+            calendar_authority_id=calendar_authority_id,
+            gateway_request_start_at=request_start_at,
+            gateway_request_end_at=request_end_at,
             commit=False,
         )
     minute_observed = received_at.replace(second=0, microsecond=0) - timedelta(

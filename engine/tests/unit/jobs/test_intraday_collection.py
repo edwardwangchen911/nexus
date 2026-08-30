@@ -1,7 +1,7 @@
 """Closed intraday collection handler result mapping."""
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import cast
@@ -73,6 +73,23 @@ class _Provider:
         )
         if read_guard is not None:
             codes = tuple(f"us{item.symbol}" for item in request.instruments)
+            if request.include_minute_bars:
+                for code in codes:
+                    bar_codes = (code,)
+                    assert await read_guard.before_read("fosun_get_bars", bar_codes)
+                    bar_response = RawGatewayResponse(
+                        operation="fosun_get_bars",
+                        gateway_request_id=UUID(
+                            "019d0000-0000-7000-8000-0000000000f2"
+                        ),
+                        request_body_sha256="b" * 64,
+                        raw_payload=payload,
+                        sent_at=NOW - timedelta(milliseconds=250),
+                        received_at=NOW,
+                    )
+                    assert await read_guard.after_read(
+                        "fosun_get_bars", bar_codes, bar_response
+                    )
             if not await read_guard.before_read("fosun_get_quotes", codes):
                 raise FosunSnapshotReadAborted(
                     "INTRADAY_AUTHORITY_CHANGED_BEFORE_FETCH",
@@ -83,6 +100,7 @@ class _Provider:
                 gateway_request_id=UUID("019d0000-0000-7000-8000-0000000000f1"),
                 request_body_sha256="a" * 64,
                 raw_payload=payload,
+                sent_at=NOW - timedelta(milliseconds=250),
                 received_at=NOW,
             )
             if not await read_guard.after_read("fosun_get_quotes", codes, response):
@@ -122,7 +140,7 @@ def _context(payload: object, *, now: datetime = NOW) -> JobHandlerContext:
     claim = cast(
         ClaimedJob,
         SimpleNamespace(
-            effective_at=bucket_for(NOW).start,
+            effective_at=bucket_for(now).start,
         ),
     )
     return JobHandlerContext(
@@ -133,14 +151,21 @@ def _context(payload: object, *, now: datetime = NOW) -> JobHandlerContext:
     )
 
 
-def _payload() -> object:
+def _payload(
+    *,
+    include_minute_bars: bool = False,
+    at: datetime = NOW,
+) -> object:
+    bucket_time = at.replace(second=1) if include_minute_bars else at
     return build_intraday_payload(
         calendar_authority_id=CALENDAR_ID,
         session="2026-08-28",
-        bucket=bucket_for(NOW),
+        bucket=bucket_for(bucket_time),
         instruments=((INSTRUMENT_ID, "AAPL"),),
         quote_authority=_authority("fosun_get_quotes"),
-        bars_authority=None,
+        bars_authority=(
+            _authority("fosun_get_bars") if include_minute_bars else None
+        ),
     )
 
 
@@ -320,6 +345,52 @@ async def test_any_missing_snapshot_category_is_partial_after_ingesting_availabl
     assert result.outcome == "skipped"
     assert result.result_code == "INTRADAY_SNAPSHOT_PARTIAL"
     assert ingestions == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_completed_minute_bar_does_not_bind_unpublished_bar() -> None:
+    provider = _Provider(
+        snapshot=MarketSnapshot(
+            instrument_id=InstrumentId(INSTRUMENT_ID),
+            symbol="AAPL",
+            trade=SnapshotTrade(price=Decimal("100"), observed_at=NOW),
+            quote=None,
+            minute_bar=None,
+        )
+    )
+    observed_bar_bindings: list[object] = []
+
+    async def record_ingest(*_: object, **kwargs: object) -> object:
+        observed_bar_bindings.append(kwargs["bar_bindings"])
+        return SimpleNamespace(
+            created_trade_observations=1,
+            created_quote_observations=0,
+            created_bar_authorities=0,
+            replayed=0,
+        )
+
+    registry = build_intraday_collection_registry(
+        lambda _session: provider,
+        cast(object, SimpleNamespace()),
+        lambda: NOW,
+        settings=_settings(),
+        ingest=record_ingest,
+        archive_raw=_archive_raw,
+        revalidate=_authority_valid,
+    )
+    spec = registry.resolve(JobType.COLLECT_INTRADAY_SNAPSHOT.value)
+    assert spec is not None
+
+    boundary_now = NOW.replace(second=1)
+    result = await spec.handler(
+        _context(
+            _payload(include_minute_bars=True, at=boundary_now),
+            now=boundary_now,
+        )
+    )
+
+    assert result.result_code == "INTRADAY_SNAPSHOT_PARTIAL"
+    assert observed_bar_bindings == [{}]
 
 
 @pytest.mark.asyncio

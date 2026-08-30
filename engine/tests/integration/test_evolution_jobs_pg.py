@@ -37,6 +37,15 @@ from sqlalchemy import func, select, text
 _NOW = datetime(2026, 8, 27, 22, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def _legacy_adjusted_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep v1 orchestration coverage isolated from the current Fosun gate."""
+    monkeypatch.setattr(
+        "nexus.evolution.jobs.current_strategy_rnd_adjusted_authority_available",
+        lambda: True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_same_candidate_job_is_idempotent_and_executes_only_on_strategy_queue(
     migrated_database_url: str,

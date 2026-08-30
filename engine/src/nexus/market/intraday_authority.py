@@ -35,7 +35,7 @@ async def prepare_intraday_bar_set(
         select(PriceSeriesManifest.source).where(PriceSeriesManifest.id == manifest_id)
     )
     function = (
-        "nexus_prepare_intraday_bar_set_v2"
+        "nexus_prepare_intraday_bar_set_v2_bound"
         if source == "fosun"
         else "nexus_prepare_intraday_bar_set"
     )

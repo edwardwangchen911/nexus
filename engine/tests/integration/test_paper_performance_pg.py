@@ -11,9 +11,11 @@ from helpers.paper_performance import (
     seed_paper_performance,
     seed_second_paper_close,
 )
+from nexus.market.price_bar_authority import SOURCE_POLICY_V2_ID
 from nexus.paper.errors import PaperPerformanceError
 from nexus.paper.performance import (
     PaperPerformanceHooks,
+    _select_mark,
     publish_paper_performance_snapshot,
 )
 from nexus.persistence.models.paper import (
@@ -24,6 +26,77 @@ from nexus.persistence.models.paper import (
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+
+@pytest.fixture(autouse=True)
+def _historical_performance_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise historical publication mechanics behind an explicit test gate."""
+    monkeypatch.setattr(
+        "nexus.paper.performance.current_paper_performance_price_authority_available",
+        lambda: True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_v2_mark_selection_never_falls_back_to_legacy_close(
+    migrated_database_url: str,
+) -> None:
+    seed = await seed_paper_performance(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions() as session:
+            mark = await _select_mark(
+                session,
+                instrument_id=seed.execution.instrument_id,
+                session_date=seed.as_of.date(),
+                as_of=seed.as_of,
+                source_policy_id=SOURCE_POLICY_V2_ID,
+            )
+    finally:
+        await engine.dispose()
+
+    assert mark is None
+
+
+@pytest.mark.asyncio
+async def test_new_performance_publication_rejects_open_position_without_current_authority(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = await seed_paper_performance(migrated_database_url)
+    monkeypatch.setattr(
+        "nexus.paper.performance.current_paper_performance_price_authority_available",
+        lambda: False,
+    )
+    engine = create_async_engine(migrated_database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        with pytest.raises(
+            PaperPerformanceError,
+            match="PAPER_PERFORMANCE_PRICE_INCOMPLETE",
+        ):
+            async with sessions.begin() as session:
+                await publish_paper_performance_snapshot(
+                    session,
+                    account_id=seed.execution.account_id,
+                    as_of=seed.as_of,
+                )
+        async with sessions() as session:
+            observed: list[int] = []
+            for model in (
+                PaperPerformanceSnapshotRecord,
+                PaperPositionSnapshotRecord,
+                PaperPerformanceAttributionRecord,
+            ):
+                observed.append(
+                    int(await session.scalar(select(func.count()).select_from(model)) or 0)
+                )
+            counts = tuple(observed)
+    finally:
+        await engine.dispose()
+
+    assert counts == (0, 0, 0)
 
 
 @pytest.mark.asyncio
@@ -118,8 +191,9 @@ async def test_publish_performance_fails_closed_without_visible_complete_close(
 
 
 @pytest.mark.asyncio
-async def test_publish_performance_is_idempotent_for_account_and_close(
+async def test_publish_performance_exact_replay_survives_authority_gate_closure(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = await seed_paper_performance(migrated_database_url)
     engine = create_async_engine(migrated_database_url)
@@ -131,6 +205,24 @@ async def test_publish_performance_is_idempotent_for_account_and_close(
                 account_id=seed.execution.account_id,
                 as_of=seed.as_of,
             )
+        async with sessions() as session:
+            before_counts = tuple(
+                [
+                    int(
+                        await session.scalar(select(func.count()).select_from(model))
+                        or 0
+                    )
+                    for model in (
+                        PaperPerformanceSnapshotRecord,
+                        PaperPositionSnapshotRecord,
+                        PaperPerformanceAttributionRecord,
+                    )
+                ]
+            )
+        monkeypatch.setattr(
+            "nexus.paper.performance.current_paper_performance_price_authority_available",
+            lambda: False,
+        )
         async with sessions.begin() as session:
             replay = await publish_paper_performance_snapshot(
                 session,
@@ -138,26 +230,27 @@ async def test_publish_performance_is_idempotent_for_account_and_close(
                 as_of=seed.as_of,
             )
 
+        assert first.replayed is False
         assert replay.replayed is True
         assert replay.snapshot_id == first.snapshot_id
-        assert replay.performance.content_hash == first.performance.content_hash
+        assert replay.performance == first.performance
+        assert replay.positions == first.positions
+        assert replay.attributions == first.attributions
         async with sessions() as session:
-            assert (
-                await session.scalar(
-                    select(func.count()).select_from(PaperPerformanceSnapshotRecord)
-                )
-                == 1
+            after_counts = tuple(
+                [
+                    int(
+                        await session.scalar(select(func.count()).select_from(model))
+                        or 0
+                    )
+                    for model in (
+                        PaperPerformanceSnapshotRecord,
+                        PaperPositionSnapshotRecord,
+                        PaperPerformanceAttributionRecord,
+                    )
+                ]
             )
-            assert (
-                await session.scalar(select(func.count()).select_from(PaperPositionSnapshotRecord))
-                == 1
-            )
-            assert (
-                await session.scalar(
-                    select(func.count()).select_from(PaperPerformanceAttributionRecord)
-                )
-                == 3
-            )
+        assert after_counts == before_counts == (1, 1, 3)
     finally:
         await engine.dispose()
 

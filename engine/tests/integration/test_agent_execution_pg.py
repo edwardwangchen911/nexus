@@ -9,6 +9,7 @@ from uuid import UUID
 
 import httpx
 import pytest
+from helpers.fosun_lineage import seed_fosun_daily_lineage
 from helpers.portfolio_api import app, headers
 from nexus.agents.committee import (
     ROLE_ORDER,
@@ -1082,12 +1083,12 @@ async def _assert_empty_admission_scope(
 
 
 @pytest.mark.asyncio
-async def test_current_admission_rejects_retained_legacy_alpaca_v1_authority(
+async def test_retained_legacy_alpaca_v1_authority_replays_run_and_price_tool(
     migrated_database_url: str,
 ) -> None:
-    """Historical Alpaca v1 evidence must not be reused by a current run."""
+    """A frozen Alpaca v1 run remains replayable without enabling new Alpaca use."""
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
-    prompt_ids = await _seed_authority(factory)
+    prompt_ids = await _seed_authority(factory, include_base_evidence=False)
     await _seed_database_tool_authority(
         factory,
         link_price=True,
@@ -1096,20 +1097,66 @@ async def test_current_admission_rejects_retained_legacy_alpaca_v1_authority(
     scope = "retained-legacy-alpaca-v1-admission"
     request_hash = "1" * 64
 
-    with pytest.raises(ValueError, match="existing price authority is invalid"):
-        async with factory() as session, session.begin():
-            await _admit_scoped_price_run(
-                session,
-                prompt_ids,
-                scope=scope,
-                request_hash=request_hash,
-            )
+    async with factory() as session, session.begin():
+        admission = await _admit_scoped_price_run(
+            session,
+            prompt_ids,
+            scope=scope,
+            request_hash=request_hash,
+        )
+        tools = await database_read_only_tools(
+            session,
+            admission.run,
+            allow_fixture_evidence=False,
+            allow_fixture_price_evidence=False,
+        )
+        price = await tools.execute("get_price_features", _price_tool_payload())
+        result = await execute_research_run(
+            session,
+            run_id=admission.run_id,
+            committee=FixtureCommittee(),
+            allow_fixture_evidence=False,
+            allow_fixture_price_authority=False,
+        )
 
-    await _assert_empty_admission_scope(
+    assert result.status == "completed"
+    assert result.intent is not None
+    assert price["status"] == "ok"
+    assert price["items"][0]["source"] == "alpaca"
+    assert price["items"][0]["feed"] == "sip"
+
+
+@pytest.mark.asyncio
+async def test_unbound_legacy_alpaca_v1_authority_is_not_newly_frozen(
+    migrated_database_url: str,
+) -> None:
+    """Production admission must not create a new binding from retained Alpaca v1."""
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    prompt_ids = await _seed_authority(factory)
+    await _seed_database_tool_authority(
         factory,
-        scope=scope,
-        request_hash=request_hash,
+        link_price=False,
+        price_source="alpaca",
     )
+
+    async with factory() as session, session.begin():
+        admission = await _admit_scoped_price_run(
+            session,
+            prompt_ids,
+            scope="unbound-legacy-alpaca-v1-admission",
+            request_hash="2" * 64,
+        )
+        price_binding_count = await session.scalar(
+            select(func.count())
+            .select_from(AgentDataSnapshotEvidenceRecord)
+            .where(AgentDataSnapshotEvidenceRecord.authority_kind == "price")
+        )
+
+    assert not any(
+        item["provider_object_id"].startswith("price-bar-set:")
+        for item in admission.run.evidence_manifest
+    )
+    assert price_binding_count == 0
 
 
 def _price_tool_payload() -> dict[str, object]:
@@ -3549,6 +3596,16 @@ async def _seed_database_tool_authority(
             )
         )
         await session.flush()
+        fosun_lineage = None
+        if price_source == "fosun":
+            fosun_lineage = await seed_fosun_daily_lineage(
+                session,
+                manifest_id=_PRICE_MANIFEST_ID,
+                provider_authorized_at=_NOW - timedelta(seconds=30),
+                sessions=tuple(bar_time(index).date() for index in range(bar_count)),
+                raw_payload=b'{"fixture":"agent-database-tool"}',
+                received_at=_NOW - timedelta(minutes=1),
+            )
         manifest = PriceSeriesManifest(
             id=UUID("0198d500-1000-7000-8000-000000001707"),
             evidence_ref_id=price_evidence_id,
@@ -3585,6 +3642,20 @@ async def _seed_database_tool_authority(
             provider_authorized_at=(
                 _NOW - timedelta(seconds=30) if price_source == "fosun" else None
             ),
+            gateway_transport_artifact_id=(
+                fosun_lineage.raw_artifact.id if fosun_lineage is not None else None
+            ),
+            daily_calendar_authority_id=(
+                fosun_lineage.calendar_authority_id
+                if fosun_lineage is not None
+                else None
+            ),
+            gateway_request_start_at=(
+                fosun_lineage.request_start_at if fosun_lineage is not None else None
+            ),
+            gateway_request_end_at=(
+                fosun_lineage.request_end_at if fosun_lineage is not None else None
+            ),
         )
         session.add(manifest)
         await session.flush()
@@ -3603,7 +3674,11 @@ async def _seed_database_tool_authority(
                 observed_at=bar_time(index),
                 available_at=bar_time(index) + timedelta(minutes=1),
                 received_at=bar_time(index) + timedelta(minutes=2),
-                revision="fixture-r1",
+                revision=(
+                    fosun_lineage.raw_digest
+                    if fosun_lineage is not None
+                    else "fixture-r1"
+                ),
                 quality_flags=list(price_quality_flags),
             )
             for index in range(bar_count)

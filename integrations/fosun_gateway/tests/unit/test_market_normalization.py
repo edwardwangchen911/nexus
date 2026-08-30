@@ -93,7 +93,7 @@ def test_bars_reject_order_ohlc_and_volume_contract_violations(
     with pytest.raises(GatewayError) as error:
         normalize_provider_response(
             "fosun_get_bars",
-            _raw({"data": rows, "power": 0}),
+            _raw({"data": rows, "power": 0, "total": len(rows)}),
             received_at=RECEIVED_AT,
             context={
                 "code": "usAAPL",
@@ -125,6 +125,7 @@ def test_bars_reject_rows_outside_window_or_after_receipt() -> None:
                             }
                         ],
                         "power": 0,
+                        "total": 1,
                     }
                 ),
                 received_at=RECEIVED_AT,
@@ -136,3 +137,67 @@ def test_bars_reject_rows_outside_window_or_after_receipt() -> None:
                     "limit": 10,
                 },
             )
+
+
+def test_daily_bar_window_uses_provider_session_date_not_intraday_clock() -> None:
+    page = normalize_provider_response(
+        "fosun_get_bars",
+        _raw(
+            {
+                "data": [
+                    {
+                        "time": 20260821,
+                        "open": 100,
+                        "high": 110,
+                        "low": 90,
+                        "close": 105,
+                        "vol": 10,
+                    }
+                ],
+                "power": 0,
+                "total": 1,
+            }
+        ),
+        received_at=RECEIVED_AT,
+        context={
+            "code": "usAAPL",
+            "ktype": "day",
+            "start_time": "2026-08-21T20:00:00Z",
+            "end_time": "2026-08-22T20:00:00Z",
+            "limit": 10,
+        },
+    )
+
+    assert page.items[0].timestamp == datetime(2026, 8, 21, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("total", (2, -1, True, "1", None))
+def test_bars_reject_partial_or_noncanonical_total(total: object) -> None:
+    with pytest.raises(GatewayError, match="reviewed contract"):
+        normalize_provider_response(
+            "fosun_get_bars",
+            _raw(
+                {
+                    "data": [
+                        {
+                            "time": 20260821,
+                            "open": 100,
+                            "high": 110,
+                            "low": 90,
+                            "close": 105,
+                            "vol": 10,
+                        }
+                    ],
+                    "power": 0,
+                    "total": total,
+                }
+            ),
+            received_at=RECEIVED_AT,
+            context={
+                "code": "usAAPL",
+                "ktype": "day",
+                "start_time": "2026-08-01T00:00:00Z",
+                "end_time": "2026-08-22T00:00:00Z",
+                "limit": 10,
+            },
+        )

@@ -15,9 +15,9 @@
 - Never read, print, reuse, or request the revoked key or any real credential value.
 - No real Fosun/Alpaca/account call, permission grant, paid activation, deployment, broker write, simulation write, or order.
 - Live trading remains off and Agent/LLM code never receives provider/gateway credentials or order capability.
-- Root agent is the sole writer for `.worktrees/nexus-fosun-market-primary`; parallel agents are read-only reviewers.
+- Root agent owns integration for `.worktrees/nexus-fosun-market-primary`; scoped agents may write only explicitly assigned, non-overlapping files and never commit.
 - Every production behavior begins with one focused failing test, the expected failure is observed, then the minimum implementation is added.
-- Historical migrations and v1 policy rows/functions are never edited; 0027 adds v2 behavior and preserves v1 replay.
+- Pre-0027 historical migrations and v1 policy rows/functions are never edited; 0027 adds v2 behavior and preserves v1 replay, while forward-only 0028/0029 harden authority execution and transport lineage without rewriting v1 facts.
 - Existing user work and sibling worktrees are untouched.
 - Each task ends with focused tests and a local commit. No push or deployment.
 
@@ -70,7 +70,7 @@
 
 - [ ] RED: migration tests require the five binding columns on manifests/quotes, immutable v2 policy rows, complete tuple constraints, Provider binding triggers, and unchanged v1 replay.
 - [ ] RED: direct SQL tests reject missing/mismatched capability, status, operation, hash, version, scope, future-created/expired authority and post-invalidation binding.
-- [ ] GREEN: add 0027 only; create `source_policy_v2`, `quote_source_policy_v2`, `intraday_monitor_policy_v2`, price/intraday canonical/prepare/validate v2 functions and fail-closed downgrade guards.
+- [ ] GREEN: add 0027 for the v2 contract; create `source_policy_v2`, `quote_source_policy_v2`, `intraday_monitor_policy_v2`, price/intraday canonical/prepare/validate v2 functions and fail-closed downgrade guards. Add forward-only 0028/0029 remediation for pinned authority schemas, restricted-role publication marking, advisory-lock symmetry, gateway transport lineage and freshness; do not rewrite pre-0027 migrations.
 - [ ] GREEN: update ORM and finalizers to select v1 for existing Alpaca/fixture and v2 for Fosun only.
 - [ ] Update Agent snapshot validation to accept exact v2 Fosun price authority while retaining every existing research and v1 guard.
 - [ ] Run migration/schema/authority/PIT integration tests with PostgreSQL.
@@ -167,5 +167,6 @@
 
 - Ruling: gateway normalized HTTP bytes are transport evidence, not Provider raw — preserves the secret/privacy boundary; if later true Provider raw is required, the gateway contract must version separately.
 - Ruling: HMAC v2 replaces unactivated v1 — internal fixtures and clients must upgrade together; no deployed compatibility is assumed.
+- Ruling: production replay state is a durable SQLite journal on one external named volume; a POSIX singleton lease rejects overlap, every process start drains 61 seconds, a persisted clock floor rejects rollback, readiness requires the owning process/listener, and future timestamps fail.
 - Ruling: unknown delivery may support partial display but not Agent/price authority — initial activation may abstain until entitlement evidence exists.
 - Ruling: no automatic fallback — availability is lower during a Fosun outage, but unapproved Alpaca network/fees cannot be triggered silently.

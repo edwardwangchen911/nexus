@@ -74,6 +74,8 @@ def test_gateway_image_contains_machine_readable_provider_manifest() -> None:
         "COPY contracts/providers/fosun/manifest.json "
         "contracts/providers/fosun/manifest.json"
     ) in dockerfile
+    assert "/var/lib/nexus-fosun-gateway" in dockerfile
+    assert "chmod 0700" in dockerfile
 
 
 def test_fixture_corpus_is_synthetic_and_covers_required_contract_cases() -> None:

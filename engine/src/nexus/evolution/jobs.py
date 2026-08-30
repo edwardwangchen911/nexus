@@ -48,8 +48,10 @@ from nexus.persistence.models.evolution import (
     StrategyShadowSessionAuthorityRecord,
 )
 from nexus.persistence.models.runtime import Job, OutboxEvent
+from nexus.quality.source_policy import current_strategy_rnd_adjusted_authority_available
 
 STRATEGY_RND_JOB_SCHEMA = "strategy_rnd_job_v1"
+_ADJUSTED_AUTHORITY_UNAVAILABLE = "BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE"
 StrategyRNDOperation = Literal[
     "generate_family",
     "evaluate_candidate",
@@ -70,6 +72,7 @@ StrategyGenerationReason = Literal[
     "EVIDENCE_INCOMPLETE",
     "EXPERIMENT_COOLDOWN_ACTIVE",
     "EXPERIMENT_ALREADY_QUEUED",
+    "BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE",
 ]
 _NEW_YORK = ZoneInfo("America/New_York")
 _TERMINAL_FAMILY_STATES = (
@@ -276,6 +279,8 @@ async def resolve_due_strategy_rnd_jobs(
     now = _utc(now)
     head = await session.get(StrategyRegistryHeadRecord, "internal_paper")
     if head is None:
+        return ()
+    if not current_strategy_rnd_adjusted_authority_available():
         return ()
     targets: list[StrategyRNDJobPayloadV1] = []
     targets.extend(await _due_candidate_jobs(session, generation=head.active_generation))
@@ -514,6 +519,13 @@ async def strategy_generation_eligibility(
             registry_version=head.version,
         )
     lineage = active_lineages[0]
+    if not current_strategy_rnd_adjusted_authority_available():
+        return StrategyGenerationEligibilityV1(
+            eligible=False,
+            reason_code="BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE",
+            champion_generation=head.active_generation,
+            registry_version=head.version,
+        )
     reusable_family_context = (
         known_family_context
         if known_family_context is not None
@@ -826,7 +838,11 @@ async def strategy_rnd_handler(
         now=context.finished_at(),
     )
     if terminal is not None:
-        if payload.operation in {"generate_family", "evaluate_candidate"}:
+        if (
+            terminal.result_code != _ADJUSTED_AUTHORITY_UNAVAILABLE
+            and terminal.error_code != _ADJUSTED_AUTHORITY_UNAVAILABLE
+            and payload.operation in {"generate_family", "evaluate_candidate"}
+        ):
             await _append_strategy_operation_audit(
                 context,
                 payload=payload,
@@ -834,7 +850,11 @@ async def strategy_rnd_handler(
             )
         return terminal
     result = await executor(context, payload)
-    if payload.operation in {"generate_family", "evaluate_candidate"}:
+    if (
+        result.result_code != _ADJUSTED_AUTHORITY_UNAVAILABLE
+        and result.error_code != _ADJUSTED_AUTHORITY_UNAVAILABLE
+        and payload.operation in {"generate_family", "evaluate_candidate"}
+    ):
         await _append_strategy_operation_audit(context, payload=payload, result=result)
     return result
 
@@ -904,6 +924,11 @@ async def _preflight_strategy_rnd_job(
     if head.active_generation != payload.expected_champion_generation:
         return JobHandlerResult(outcome="skipped", result_code="STALE_CHAMPION_GENERATION")
     if payload.operation == "generate_family":
+        if not current_strategy_rnd_adjusted_authority_available():
+            return JobHandlerResult(
+                outcome="skipped",
+                result_code="BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE",
+            )
         if not await _generation_is_due(
             session,
             head=head,
@@ -966,6 +991,11 @@ async def _preflight_strategy_rnd_job(
             return JobHandlerResult(outcome="skipped", result_code="PROMOTION_GATE_NOT_PASSED")
         if group.status != "running":
             return JobHandlerResult(outcome="skipped", result_code="SHADOW_NOT_RUNNING")
+    if not current_strategy_rnd_adjusted_authority_available():
+        return JobHandlerResult(
+            outcome="skipped",
+            result_code="BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE",
+        )
     return None
 
 

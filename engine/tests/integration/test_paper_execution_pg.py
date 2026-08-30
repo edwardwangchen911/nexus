@@ -40,6 +40,112 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 
 
+@pytest.fixture(autouse=True)
+def _historical_execution_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise the historical execution state machine behind an explicit test gate."""
+    monkeypatch.setattr(
+        "nexus.paper.execution_service._paper_execution_authority_available",
+        lambda _source_policy_id: True,
+    )
+
+
+@pytest.mark.parametrize("legacy_market_policy", (False, True))
+@pytest.mark.parametrize(
+    "cancel_at",
+    (
+        FIRST_EVALUATION + timedelta(minutes=20),
+        FIRST_EVALUATION + timedelta(hours=7),
+    ),
+    ids=("ten-fifteen", "end-of-day"),
+)
+@pytest.mark.asyncio
+async def test_order_without_current_execution_authority_never_fills_and_releases_at_cutoff(
+    migrated_database_url: str,
+    legacy_market_policy: bool,
+    cancel_at,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = await seed_paper_execution(
+        migrated_database_url,
+        legacy_market_policy=legacy_market_policy,
+    )
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    monkeypatch.setattr(
+        "nexus.paper.execution_service._paper_execution_authority_available",
+        lambda _source_policy_id: False,
+    )
+    async with factory.begin() as session:
+        unavailable = await advance_internal_paper_order(
+            session,
+            order_id=seed.order_id,
+            evaluated_at=seed.evaluation_times[0],
+            idempotency_key="unavailable-price-authority",
+        )
+    async with factory.begin() as session:
+        cancelled = await advance_internal_paper_order(
+            session,
+            order_id=seed.order_id,
+            evaluated_at=cancel_at,
+            idempotency_key="unavailable-price-authority-cutoff",
+        )
+    async with factory() as session:
+        window_count = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(PaperExecutionWindowAuthorityRecord)
+                .where(PaperExecutionWindowAuthorityRecord.order_id == seed.order_id)
+            )
+            or 0
+        )
+        fill_count = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(PaperFillRecord)
+                .where(PaperFillRecord.order_id == seed.order_id)
+            )
+            or 0
+        )
+        idempotency_count = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(PaperRequestIdempotencyRecord)
+                .where(PaperRequestIdempotencyRecord.order_id == seed.order_id)
+            )
+            or 0
+        )
+        reservation = await session.scalar(
+            select(PaperReservationRecord).where(PaperReservationRecord.order_id == seed.order_id)
+        )
+        assert reservation is not None
+        reservation_events = tuple(
+            await session.scalars(
+                select(PaperReservationEventRecord)
+                .where(PaperReservationEventRecord.reservation_id == reservation.id)
+                .order_by(PaperReservationEventRecord.event_seq)
+            )
+        )
+        order_events = tuple(
+            await session.scalars(
+                select(PaperOrderEventRecord)
+                .where(PaperOrderEventRecord.order_id == seed.order_id)
+                .order_by(PaperOrderEventRecord.event_seq)
+            )
+        )
+
+    assert (unavailable.action, unavailable.status) == ("no_data", "submitted")
+    assert (cancelled.action, cancelled.status) == ("cancelled", "cancelled")
+    assert window_count == 0
+    assert fill_count == 0
+    assert idempotency_count == 2
+    assert [event.event_type for event in reservation_events] == [
+        "reserved",
+        "released",
+    ]
+    assert sum(event.amount for event in reservation_events) == reservation.amount * 2
+    assert order_events[-1].reason_code == "paper_execution_price_authority_unavailable"
+    assert order_events[-1].actor_kind == "task19"
+
+
 @pytest.mark.asyncio
 async def test_first_unquoted_window_fills_and_atomically_reconciles_all_facts(
     migrated_database_url: str,

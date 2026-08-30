@@ -17,6 +17,12 @@ from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.ids import new_uuid7
+from nexus.market.price_bar_authority import (
+    HASH_VERSION,
+    POLICY_VERSION,
+    SOURCE_POLICY_ID,
+    SOURCE_POLICY_V2_ID,
+)
 from nexus.paper.errors import PaperPerformanceError
 from nexus.paper.ledger import balance_ledger
 from nexus.paper.models import (
@@ -50,7 +56,9 @@ from nexus.persistence.models.paper import (
     PaperPositionSnapshotRecord,
     PaperReservationEventRecord,
     PaperReservationRecord,
+    StrategyDecisionRecord,
 )
+from nexus.quality.source_policy import current_paper_performance_price_authority_available
 
 _QUANTUM = Decimal("0.000000000001")
 _SOURCE_PRIORITY = {"fosun": 0, "alpaca": 1, "fixture": 2}
@@ -645,7 +653,15 @@ async def _select_mark(
     instrument_id: UUID,
     session_date: object,
     as_of: datetime,
+    source_policy_id: UUID,
 ) -> tuple[PriceBarRecord, PriceBarSetAuthority, PriceSeriesManifest] | None:
+    if source_policy_id == SOURCE_POLICY_V2_ID:
+        # Current v2 positions cannot be valued from legacy closes. Until the
+        # paper flow has a complete corporate-action-safe v2 mark contract,
+        # publication remains incomplete.
+        return None
+    if source_policy_id != SOURCE_POLICY_ID:
+        return None
     statement = (
         select(PriceBarRecord, PriceBarSetAuthority, PriceSeriesManifest)
         .join(
@@ -664,6 +680,11 @@ async def _select_mark(
             PriceBarSetAuthority.available_at <= as_of,
             PriceSeriesManifest.instrument == str(instrument_id),
             PriceSeriesManifest.interval == "1Day",
+            PriceBarSetAuthority.source_policy_id == SOURCE_POLICY_ID,
+            PriceBarSetAuthority.hash_version == HASH_VERSION,
+            PriceBarSetAuthority.policy_version == POLICY_VERSION,
+            PriceSeriesManifest.source.in_(("alpaca", "fixture")),
+            PriceSeriesManifest.adjustment == "raw",
         )
         .order_by(
             case(_SOURCE_PRIORITY, value=PriceSeriesManifest.source, else_=99),
@@ -677,7 +698,17 @@ async def _select_mark(
     candidate = (await session.execute(statement)).one_or_none()
     if candidate is None:
         return None
-    return candidate[0], candidate[1], candidate[2]
+    bar, authority, manifest = candidate
+    if not (
+        (
+            manifest.source == "alpaca"
+            and manifest.feed == "sip"
+            and manifest.delivery_mode == "delayed"
+        )
+        or (manifest.source == "fixture" and manifest.delivery_mode == "fixture")
+    ):
+        return None
+    return bar, authority, manifest
 
 
 def _attribution(
@@ -1021,6 +1052,29 @@ async def publish_paper_performance_snapshot(
     except (KeyError, ValueError) as error:
         raise PaperPerformanceError("PAPER_PERFORMANCE_PROJECTION_INVALID") from error
 
+    has_open_positions = any(
+        projection.quantity != 0 for projection in projections.values()
+    )
+    if has_open_positions and not current_paper_performance_price_authority_available():
+        raise PaperPerformanceError("PAPER_PERFORMANCE_PRICE_INCOMPLETE")
+
+    source_policy_id: UUID | None = None
+    if has_open_positions:
+        source_policy_id = await session.scalar(
+            select(StrategyDecisionRecord.source_policy_id)
+            .where(
+                StrategyDecisionRecord.account_id == account_id,
+                StrategyDecisionRecord.decision_time <= effective_at,
+            )
+            .order_by(
+                StrategyDecisionRecord.decision_time.desc(),
+                StrategyDecisionRecord.id.desc(),
+            )
+            .limit(1)
+        )
+        if source_policy_id is None:
+            raise PaperPerformanceError("PAPER_PERFORMANCE_PRICE_INCOMPLETE")
+
     marked_positions: list[MarkedPosition] = []
     published_positions: list[PublishedPaperPosition] = []
     for instrument_id, projection in sorted(projections.items(), key=lambda pair: pair[0].int):
@@ -1028,11 +1082,14 @@ async def publish_paper_performance_snapshot(
             if reserved.get(instrument_id, Decimal(0)) != 0:
                 raise PaperPerformanceError("PAPER_PERFORMANCE_PROJECTION_INVALID")
             continue
+        if source_policy_id is None:
+            raise PaperPerformanceError("PAPER_PERFORMANCE_PRICE_INCOMPLETE")
         mark = await _select_mark(
             session,
             instrument_id=instrument_id,
             session_date=calendar.session,
             as_of=effective_at,
+            source_policy_id=source_policy_id,
         )
         if mark is None:
             raise PaperPerformanceError("PAPER_PERFORMANCE_PRICE_INCOMPLETE")

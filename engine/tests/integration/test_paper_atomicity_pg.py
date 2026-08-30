@@ -28,6 +28,15 @@ PERSISTENCE_PHASES = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _historical_order_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise legacy atomicity mechanics behind the historical test gate."""
+    monkeypatch.setattr(
+        "nexus.paper.service.current_paper_order_price_authority_available",
+        lambda: True,
+    )
+
+
 async def _fail_and_count(database_url: str, fail_phase: str):
     seed = await seed_paper_batch(database_url)
     engine = create_async_engine(database_url)

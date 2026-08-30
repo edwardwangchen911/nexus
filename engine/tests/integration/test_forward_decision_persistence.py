@@ -3,7 +3,9 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
+import nexus.strategy.forward as forward_module
 import pytest
+from nexus.quality.source_policy import SOURCE_POLICY_V2_ID
 from nexus.risk.canonical import canonical_forward_strategy_decision_hash
 from nexus.strategy.baseline import StrategyDecision, StrategyTarget
 from nexus.strategy.forward import (
@@ -17,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 PAPER_ACCOUNT_ID = UUID("d31672c0-3922-5ebd-8fdb-cd3174266731")
 PORTFOLIO_ID = UUID("ee2ff673-eaf6-5076-bbab-f4c9cedfc74e")
-SOURCE_POLICY_ID = UUID("30000000-0000-0000-0000-000000000001")
+LEGACY_SOURCE_POLICY_ID = UUID("30000000-0000-0000-0000-000000000001")
 CALENDAR_ID = UUID("30000000-0000-0000-0000-000000000002")
 UNIVERSE_ID = UUID("30000000-0000-0000-0000-000000000003")
 DATA_SNAPSHOT_ID = UUID("30000000-0000-0000-0000-000000000004")
@@ -29,6 +31,14 @@ DECISION_TIME = datetime(2026, 8, 21, 20, tzinfo=UTC)
 BASELINE_DEFINITION_ID = UUID("019d0000-0000-7000-8000-000000002200")
 GENESIS_EVENT_ID = UUID("019d0000-0000-7000-8000-000000002201")
 BASELINE_EXPRESSION_HASH = "f643694ad6d31f0dd504061fbd06068a93f9fb679aba9ba5b75337e2e169d13d"
+
+
+@pytest.fixture
+def adjusted_v2_authority_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "nexus.strategy.forward.source_policy_v2_supports_adjusted_prices",
+        lambda: True,
+    )
 
 
 async def _seed_authority(database_url: str, *, published_at: datetime) -> None:
@@ -50,7 +60,7 @@ async def _seed_authority(database_url: str, *, published_at: datetime) -> None:
                     "(id, key, version, schema_version, payload) "
                     "VALUES (:id, 'paper-forward', 'v1', 'v1', '{}'::jsonb)"
                 ),
-                {"id": SOURCE_POLICY_ID},
+                {"id": LEGACY_SOURCE_POLICY_ID},
             )
             await connection.execute(
                 text(
@@ -120,7 +130,7 @@ async def _seed_authority(database_url: str, *, published_at: datetime) -> None:
         await engine.dispose()
 
 
-def _decision():
+def _decision(*, source_policy_id: UUID = SOURCE_POLICY_V2_ID):
     return build_forward_strategy_decision(
         StrategyDecision(
             decision_session=date(2026, 8, 21),
@@ -148,7 +158,7 @@ def _decision():
         whitelisted_instrument_ids=(CURRENT_ID, NEW_ID, EXIT_ID),
         decision_time=DECISION_TIME,
         execution_session=date(2026, 8, 24),
-        source_policy_id=SOURCE_POLICY_ID,
+        source_policy_id=source_policy_id,
         calendar_authority_id=CALENDAR_ID,
         universe_snapshot_id=UNIVERSE_ID,
         quality_report_id=QUALITY_REPORT_ID,
@@ -182,7 +192,9 @@ async def _persist_and_reload(database_url: str):
 
 def test_forward_decision_persists_exactly_and_is_idempotent(
     migrated_database_url: str,
+    adjusted_v2_authority_available: None,
 ) -> None:
+    del adjusted_v2_authority_available
     asyncio.run(
         _seed_authority(
             migrated_database_url,
@@ -214,7 +226,9 @@ async def _persist_conflict(database_url: str) -> None:
 
 def test_same_decision_key_with_different_content_conflicts(
     migrated_database_url: str,
+    adjusted_v2_authority_available: None,
 ) -> None:
+    del adjusted_v2_authority_available
     asyncio.run(
         _seed_authority(
             migrated_database_url,
@@ -223,6 +237,103 @@ def test_same_decision_key_with_different_content_conflicts(
     )
     with pytest.raises(ForwardDecisionConflictError, match="content conflict"):
         asyncio.run(_persist_conflict(migrated_database_url))
+
+
+async def _persist_concurrently(
+    database_url: str,
+    decisions,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    engine = create_async_engine(database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    original_authority_check = forward_module._authority_is_valid
+    all_validated = asyncio.Event()
+    validated = 0
+
+    async def synchronized_authority_check(session, decision):
+        nonlocal validated
+        await original_authority_check(session, decision)
+        validated += 1
+        if validated == len(decisions):
+            all_validated.set()
+        await asyncio.wait_for(all_validated.wait(), timeout=5)
+
+    monkeypatch.setattr(
+        forward_module,
+        "_authority_is_valid",
+        synchronized_authority_check,
+    )
+
+    async def persist(decision):
+        async with sessions.begin() as session:
+            return await persist_forward_strategy_decision(session, decision)
+
+    try:
+        return await asyncio.gather(
+            *(persist(decision) for decision in decisions),
+            return_exceptions=True,
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_decision_key_replays_one_fact(
+    migrated_database_url: str,
+    adjusted_v2_authority_available: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del adjusted_v2_authority_available
+    await _seed_authority(
+        migrated_database_url,
+        published_at=datetime(2026, 8, 21, 19, tzinfo=UTC),
+    )
+
+    first, second = await _persist_concurrently(
+        migrated_database_url,
+        (_decision(), _decision()),
+        monkeypatch,
+    )
+
+    assert not isinstance(first, BaseException)
+    assert not isinstance(second, BaseException)
+    assert first.decision_id == second.decision_id
+    assert await _count_decisions(migrated_database_url) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_different_decision_key_returns_typed_conflict(
+    migrated_database_url: str,
+    adjusted_v2_authority_available: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del adjusted_v2_authority_available
+    await _seed_authority(
+        migrated_database_url,
+        published_at=datetime(2026, 8, 21, 19, tzinfo=UTC),
+    )
+    changed = _decision().model_copy(update={"authority_hash": "e" * 64})
+    changed = changed.model_copy(
+        update={"decision_hash": canonical_forward_strategy_decision_hash(changed)}
+    )
+
+    results = await _persist_concurrently(
+        migrated_database_url,
+        (_decision(), changed),
+        monkeypatch,
+    )
+
+    persisted = [item for item in results if not isinstance(item, BaseException)]
+    conflicts = [item for item in results if isinstance(item, ForwardDecisionConflictError)]
+    unexpected = [
+        item
+        for item in results
+        if isinstance(item, BaseException) and not isinstance(item, ForwardDecisionConflictError)
+    ]
+    assert len(persisted) == len(conflicts) == 1
+    assert unexpected == []
+    assert str(conflicts[0]) == "forward decision content conflict"
+    assert await _count_decisions(migrated_database_url) == 1
 
 
 async def _persist_late_authority(database_url: str) -> None:
@@ -237,7 +348,9 @@ async def _persist_late_authority(database_url: str) -> None:
 
 def test_authority_published_after_decision_time_is_rejected(
     migrated_database_url: str,
+    adjusted_v2_authority_available: None,
 ) -> None:
+    del adjusted_v2_authority_available
     asyncio.run(
         _seed_authority(
             migrated_database_url,
@@ -246,6 +359,52 @@ def test_authority_published_after_decision_time_is_rejected(
     )
     with pytest.raises(ValueError, match="available after decision time"):
         asyncio.run(_persist_late_authority(migrated_database_url))
+
+
+async def _persist_legacy_policy_decision(database_url: str) -> None:
+    engine = create_async_engine(database_url)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with sessions.begin() as session:
+            await persist_forward_strategy_decision(
+                session,
+                _decision(source_policy_id=LEGACY_SOURCE_POLICY_ID),
+            )
+    finally:
+        await engine.dispose()
+
+
+def test_new_forward_decision_rejects_legacy_source_policy(
+    migrated_database_url: str,
+) -> None:
+    asyncio.run(
+        _seed_authority(
+            migrated_database_url,
+            published_at=datetime(2026, 8, 21, 19, tzinfo=UTC),
+        )
+    )
+    with pytest.raises(ValueError, match="source_policy_v2"):
+        asyncio.run(_persist_legacy_policy_decision(migrated_database_url))
+    assert asyncio.run(_count_decisions(migrated_database_url)) == 0
+
+
+def test_current_raw_only_v2_cannot_persist_new_forward_decision(
+    migrated_database_url: str,
+) -> None:
+    asyncio.run(
+        _seed_authority(
+            migrated_database_url,
+            published_at=datetime(2026, 8, 21, 19, tzinfo=UTC),
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="adjusted price authority is unavailable",
+    ):
+        asyncio.run(_persist_late_authority(migrated_database_url))
+
+    assert asyncio.run(_count_decisions(migrated_database_url)) == 0
 
 
 async def _count_decisions(database_url: str) -> int:
@@ -276,7 +435,7 @@ def test_not_week_end_produces_no_strategy_decision_row(
             whitelisted_instrument_ids=(),
             decision_time=DECISION_TIME,
             execution_session=date(2026, 8, 21),
-            source_policy_id=SOURCE_POLICY_ID,
+            source_policy_id=LEGACY_SOURCE_POLICY_ID,
             calendar_authority_id=CALENDAR_ID,
             universe_snapshot_id=UNIVERSE_ID,
             quality_report_id=QUALITY_REPORT_ID,

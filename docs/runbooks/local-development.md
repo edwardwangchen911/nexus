@@ -53,11 +53,14 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app r
 docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app up -d api worker
 ```
 
-`object-store-init` 只操作配置的单一 bucket；development/test 缺失时创建，随后启用并复核对象版本控制，production 则要求 bucket 与版本控制均已预置。重复执行应返回 `existing`。Provider 原始证据采用内容寻址键与 `versionId`，同一摘要只能复核，不能覆盖。
+`object-store-init` 只服务普通 `app` profile 并操作其配置的单一 bucket；development/test
+缺失时创建，随后启用并复核对象版本控制，production 则要求 bucket 与版本控制均已预置。
+重复执行应返回 `existing`。Provider profile 不依赖也不运行这个通用初始化器；它的独立
+bucket/principal/policy 必须在单独批准的权限流程中预置。
 
 ## 可选的真实美股只读数据
 
-真实美股行情、SEC 财报与 FRED/ALFRED 宏观数据属于独立的 `provider`
+真实美股行情、SEC 财报与 FRED/ALFRED 宏观数据属于独立的 Provider
 profile，不属于默认本地启动流程。首选市场源固定为复星：
 `NEXUS_MARKET_PROVIDER=fosun`、`NEXUS_ALPACA_MARKET_MODE=disabled`。启用前需要在批准的
 密钥域注入 market-only 的复星网关 mTLS/HMAC 身份、`FRED_API_KEY` 与带联系方式的
@@ -66,13 +69,34 @@ profile，不属于默认本地启动流程。首选市场源固定为复星：
 费用、留存和数据合同核验时，不得改为 `NEXUS_MARKET_PROVIDER=alpaca` 或启用
 `NEXUS_ALPACA_MARKET_MODE=enabled`。
 
-先确保数据库迁移和 object-store init 已完成，并为 Provider 创建独立的非
+Compose 中 `provider` 是固定的复星密钥域，`provider-alpaca` 是固定的
+Alpaca 密钥域；两者不得同时启动。切源时必须先停止旧 Provider Worker，
+确认旧 lease 已释放，再让通用 worker 与新 Provider Worker 使用同一个
+`NEXUS_MARKET_PROVIDER`。当前队列没有 source-bound claim，因此本拆分不声称支持并发
+双源交叉验证；该能力需要未来独立的 Job/queue 协议。
+
+先确保数据库迁移已完成，并为 Provider 创建独立的非
 superuser、非 `BYPASSRLS` 数据库角色。`infra/postgres/provider-runtime-grants.sql`
 是待审批的授权模板：它不创建角色或凭据，只授予固定表/列权限，并对共享 Job 表启用
 强制 RLS。受控 policy 函数把父 daily root 的只读可见性与 Provider 子任务的写权限分开，
 startup probe 会校验 policy 的实际 `USING/WITH CHECK` 谓词及函数定义，而不只检查名称。
+Provider 对 integration status、capability、既有 artifact/manifest 等 authority 输入保持
+`SELECT`-only；校验函数与输入变更 trigger 使用相同的 transaction advisory lock，而不是要求
+Provider 取得 `UPDATE` 行锁权限。模板还撤销 Provider/`PUBLIC` 对两个最小 trigger-only
+`SECURITY DEFINER` 的直接执行权；publication 函数只能由两个受控 `AFTER INSERT` trigger
+追加回测发布标记，price-bar guard 只能由一个受控 `BEFORE INSERT` trigger 在不授予
+Provider 回测表读权的前提下守住冻结事实。模板和 startup probe 还拒绝 Provider/`PUBLIC`
+的意外 relation/column/sequence ACL；startup probe 会逐项校验精确函数集合、源码、owner、
+ACL、精确 `search_path`，以及 Provider 可写表上 60 个非内部应用 trigger 的完整 topology
+与函数体摘要。
 执行该模板、创建角色及注入 `PROVIDER_DATABASE_URL` 都属于权限变更，不能
 在普通本地启动中自动执行。
+
+Provider 对象存储同样是独立权限域：`PROVIDER_OBJECT_STORE_*` 不能复用 app/general
+worker 的 `OBJECT_STORE_*` principal。bucket 必须预先启用版本控制；运行时固定
+`PROVIDER_OBJECT_STORE_PREFIX=provider/market`，IAM 必须拒绝 bucket 根/List 和其他前缀，
+只允许该前缀内 Put/Get，并只允许删除 `provider/market/temporary/market`。两个 Provider
+profile 都不会自动运行通用 `object-store-init`；缺少上述权限证据时不得启动真实 Provider。
 
 生产数据模式仍只保留一个由通用 worker 管理的 `daily.pipeline` 根。激活时，通用
 worker 使用原 `DATABASE_URL` 并显式设置 `NEXUS_PROVIDER_JOBS_ENABLED=true`，只负责将
@@ -81,8 +105,19 @@ worker 使用原 `DATABASE_URL` 并显式设置 `NEXUS_PROVIDER_JOBS_ENABLED=tru
 worker创建第二个日任务根。以下仅是批准后的启动形态，不是本地默认命令：
 
 ```bash
-NEXUS_PROVIDER_JOBS_ENABLED=true docker compose --env-file infra/.env.local \
+NEXUS_MARKET_PROVIDER=fosun NEXUS_PROVIDER_JOBS_ENABLED=true \
+  docker compose --env-file infra/.env.local \
   -f infra/compose.yaml --profile app --profile provider up -d worker fosun-gateway provider-worker
+```
+
+经单独批准的 Alpaca 替代形态不启动复星 Gateway，且只能在先停止
+`provider-worker` 后使用：
+
+```bash
+NEXUS_MARKET_PROVIDER=alpaca NEXUS_PROVIDER_JOBS_ENABLED=true \
+  docker compose --env-file infra/.env.local \
+  -f infra/compose.yaml --profile app --profile provider-alpaca up -d \
+  worker provider-worker-alpaca
 ```
 
 `provider-worker` 强制 `NEXUS_PROVIDER_RUNTIME_MODE=production`。在默认配置中，美股日线和
@@ -90,8 +125,11 @@ NEXUS_PROVIDER_JOBS_ENABLED=true docker compose --env-file infra/.env.local \
 FRED/ALFRED 的 8 个白名单序列继续使用各自固定 HTTPS origin。Provider Worker 不接收
 broker 网关身份、账户 ID 加密密钥或交易写能力，也不会构造或读取 Alpaca client；复星
 Gateway 同时属于显式 `provider`/`broker` profile，但由不同的 HMAC principal 派生固定操作
-权限。Provider 数据库角色只能读写
-`provider` 队列及只读查看其 `daily.pipeline` 父任务，并在进程启动时复核精确权限、
+权限。生产 Gateway 使用外部命名卷 `nexus-fosun-gateway-replay-v1` 保存 nonce journal
+并持有 singleton lease；不得在普通 `down -v` 或清理脚本中删除该卷。在 Job 域，Provider 数据库角色只能读写
+`provider` 队列及只读查看其 `daily.pipeline` 父任务；在 market 数据域，它仅能 INSERT
+批准的 evidence、manifest、bar/quote、authority、filing/fact、corporate-action 与宏观事实表，
+不能 UPDATE/DELETE authority 输入或直接写 publication mark。进程启动时会复核精确权限、
 强制 RLS、策略实际谓词和受控函数定义。每日 Job 只读取调度时冻结并绑定哈希的
 美股 universe（上限 100 个）；不存在、哈希不匹配、数据冲突或证据不完整时均跳过，
 不会临时扩展股票池。

@@ -84,7 +84,7 @@ def test_compose_initializes_only_the_object_store_before_app_processes() -> Non
     init = _service_block(compose, "object-store-init")
 
     assert 'command: ["nexus-engine-object-store-init"]' in init
-    assert _service_profiles(compose, "object-store-init") == {"app", "provider"}
+    assert _service_profiles(compose, "object-store-init") == {"app"}
     assert _service_environment(compose, "object-store-init") == {
         "NEXUS_ENV",
         "OBJECT_STORE_ENDPOINT",
@@ -98,6 +98,8 @@ def test_compose_initializes_only_the_object_store_before_app_processes() -> Non
         block = _service_block(compose, service)
         assert "object-store-init:" in block
         assert "condition: service_completed_successfully" in block
+    for service in ("provider-worker", "provider-worker-alpaca"):
+        assert "object-store-init:" not in _service_block(compose, service)
 
 
 def test_engine_image_contains_migrations_and_packaged_contract_assets() -> None:

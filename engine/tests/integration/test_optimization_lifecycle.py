@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime
 from uuid import UUID
 
 import httpx
+import nexus.shadow.start as shadow_start_module
 import pytest
 from helpers.optimization import complete_comparison_metrics
 from helpers.portfolio_api import (
@@ -44,6 +45,16 @@ from sqlalchemy.exc import IntegrityError
 _BASELINE_ID = UUID("0198d500-1000-7000-8000-000000000041")
 _POLICY_ID = UUID("e690b91d-1e24-5de3-b2b2-566a463fca25")
 _CLOCK = datetime(2026, 8, 24, 3, 59, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _historical_shadow_start_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise legacy Proposal Shadow mechanics only behind an explicit test gate."""
+    monkeypatch.setattr(
+        shadow_start_module,
+        "current_proposal_shadow_price_authority_available",
+        lambda _source_policy_id: True,
+    )
 
 
 @pytest.mark.asyncio

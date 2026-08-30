@@ -30,6 +30,14 @@ from nexus.shadow.service import advance_shadow_session
 from sqlalchemy import func, select
 
 
+@pytest.fixture(autouse=True)
+def _legacy_shadow_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "nexus.shadow.service.current_proposal_shadow_price_authority_available",
+        lambda _source_policy_id: True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_first_session_persists_one_authority_three_states_and_fills(
     migrated_database_url: str,
@@ -76,6 +84,7 @@ async def test_first_session_persists_one_authority_three_states_and_fills(
 @pytest.mark.asyncio
 async def test_successful_session_replay_is_write_free(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     started = await seed_started_shadow(migrated_database_url)
     observed_at = await seed_complete_shadow_session_inputs(
@@ -90,6 +99,10 @@ async def test_successful_session_replay_is_write_free(
             observed_at=observed_at,
         )
     async with factory() as session, session.begin():
+        monkeypatch.setattr(
+            "nexus.shadow.service.current_proposal_shadow_price_authority_available",
+            lambda _source_policy_id: False,
+        )
         replay = await advance_shadow_session(
             session,
             group_id=started.eligible.group_id,
@@ -105,6 +118,46 @@ async def test_successful_session_replay_is_write_free(
 
 
 @pytest.mark.asyncio
+async def test_new_session_fails_closed_without_current_price_authority(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = await seed_started_shadow(migrated_database_url)
+    observed_at = await seed_complete_shadow_session_inputs(
+        migrated_database_url, started=started, ordinal=1
+    )
+    factory = session_factory(settings(migrated_database_url))
+    monkeypatch.setattr(
+        "nexus.shadow.service.current_proposal_shadow_price_authority_available",
+        lambda _source_policy_id: False,
+    )
+
+    with pytest.raises(ValueError, match="^SHADOW_PRICE_AUTHORITY_UNAVAILABLE$"):
+        async with factory() as session, session.begin():
+            await advance_shadow_session(
+                session,
+                group_id=started.eligible.group_id,
+                session_date=started.start.start_session,
+                observed_at=observed_at,
+            )
+
+    async with factory() as session:
+        fact_counts = tuple(
+            [
+                await session.scalar(select(func.count()).select_from(model))
+                for model in (
+                    ShadowSessionAuthorityRecord,
+                    ShadowPortfolioStateRecord,
+                    ShadowSimulatedOutcomeRecord,
+                    ShadowSimulatedFillRecord,
+                    ShadowAdvanceAttemptRecord,
+                )
+            ]
+        )
+    assert fact_counts == (0, 0, 0, 0, 0)
+
+
+@pytest.mark.asyncio
 async def test_gap_and_incomplete_authority_write_only_sanitized_attempts(
     migrated_database_url: str,
 ) -> None:
@@ -113,8 +166,7 @@ async def test_gap_and_incomplete_authority_write_only_sanitized_attempts(
     async with factory() as session:
         observed_at = await session.scalar(
             select(ExchangeCalendarSessionRecord.decision_at).where(
-                ExchangeCalendarSessionRecord.calendar_authority_id
-                == started.eligible.calendar_id,
+                ExchangeCalendarSessionRecord.calendar_authority_id == started.eligible.calendar_id,
                 ExchangeCalendarSessionRecord.session == started.start.start_session,
             )
         )
@@ -208,6 +260,7 @@ async def test_all_cash_variant_creates_no_initial_outcome(
 @pytest.mark.asyncio
 async def test_sixty_three_sessions_create_checkpoints_and_auto_validate(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from nexus.persistence.models.backtest import (
         BacktestFillRecord,
@@ -302,6 +355,10 @@ async def test_sixty_three_sessions_create_checkpoints_and_auto_validate(
     assert audit_actions.count("shadow.checkpoint_created") == 3
     assert audit_actions.count("shadow.validated") == 1
     assert outbox_types == audit_actions
+    monkeypatch.setattr(
+        "nexus.shadow.service.current_proposal_shadow_price_authority_available",
+        lambda _source_policy_id: False,
+    )
     async with factory() as session, session.begin():
         sealed = await advance_shadow_session(
             session,
@@ -323,8 +380,7 @@ async def test_initial_missing_execution_expires_after_complete_window(
     async with factory() as session:
         first_decision = await session.scalar(
             select(ExchangeCalendarSessionRecord.decision_at).where(
-                ExchangeCalendarSessionRecord.calendar_authority_id
-                == started.eligible.calendar_id,
+                ExchangeCalendarSessionRecord.calendar_authority_id == started.eligible.calendar_id,
                 ExchangeCalendarSessionRecord.session == started.start.start_session,
             )
         )

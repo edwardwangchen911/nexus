@@ -9,8 +9,7 @@ from typing import cast
 import pytest
 from botocore.exceptions import ClientError
 from nexus.market.object_store import S3ProviderEvidenceStore
-from nexus.settings import EngineSettings
-from pydantic import SecretStr
+from nexus.providers.settings import ProviderWorkerSettings
 
 
 class FakeS3Client:
@@ -49,14 +48,16 @@ class FakeS3Client:
         return {}
 
 
-def _settings() -> EngineSettings:
-    return EngineSettings.for_test().model_copy(
-        update={
-            "object_store_endpoint": "http://minio.invalid:9000",
-            "object_store_region": "us-east-1",
-            "object_store_bucket": "nexus-fixtures",
-            "object_store_access_key_id": SecretStr("fixture-access"),
-            "object_store_secret_access_key": SecretStr("fixture-secret"),
+def _settings() -> ProviderWorkerSettings:
+    return ProviderWorkerSettings.model_validate(
+        {
+            "PROVIDER_DATABASE_URL": "postgresql+asyncpg://provider.invalid/nexus",
+            "PROVIDER_OBJECT_STORE_ENDPOINT": "http://minio.invalid:9000",
+            "PROVIDER_OBJECT_STORE_REGION": "us-east-1",
+            "PROVIDER_OBJECT_STORE_BUCKET": "nexus-fixtures",
+            "PROVIDER_OBJECT_STORE_ACCESS_KEY_ID": "fixture-access",
+            "PROVIDER_OBJECT_STORE_SECRET_ACCESS_KEY": "fixture-secret",
+            "PROVIDER_OBJECT_STORE_PREFIX": "provider/market",
         }
     )
 
@@ -72,8 +73,9 @@ async def test_put_if_absent_returns_versioned_content_addressed_uri() -> None:
     first = await store.put_if_absent(key=key, content=payload)
     replay = await store.put_if_absent(key=key, content=payload)
 
-    assert first == replay == f"s3://nexus-fixtures/{key}?versionId=version-1"
-    assert client.objects[key] == payload
+    storage_key = f"provider/market/{key}"
+    assert first == replay == f"s3://nexus-fixtures/{storage_key}?versionId=version-1"
+    assert client.objects[storage_key] == payload
     assert all(call.get("IfNoneMatch") == "*" for call in client.put_calls)
 
 
@@ -84,8 +86,9 @@ async def test_existing_digest_with_different_bytes_is_rejected() -> None:
     payload = b"expected"
     digest = sha256(payload).hexdigest()
     key = f"evidence/sec/accession/{digest}.json"
-    client.objects[key] = b"tampered"
-    client.versions[key] = "existing-version"
+    storage_key = f"provider/market/{key}"
+    client.objects[storage_key] = b"tampered"
+    client.versions[storage_key] = "existing-version"
 
     with pytest.raises(RuntimeError, match="PROVIDER_OBJECT_CONTENT_MISMATCH"):
         await store.put_if_absent(key=key, content=payload)
@@ -104,6 +107,8 @@ async def test_market_promotion_is_create_only_and_deletes_only_temporary_key() 
     uri = await store.promote(temporary, final)
     await store.delete_temporary(temporary)
 
-    assert uri == f"s3://nexus-fixtures/{final}?versionId=version-2"
-    assert client.objects[final] == payload
-    assert temporary not in client.objects
+    storage_temporary = f"provider/market/{temporary}"
+    storage_final = f"provider/market/{final}"
+    assert uri == f"s3://nexus-fixtures/{storage_final}?versionId=version-2"
+    assert client.objects[storage_final] == payload
+    assert storage_temporary not in client.objects

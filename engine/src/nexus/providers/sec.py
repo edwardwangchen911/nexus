@@ -14,6 +14,7 @@ from uuid import UUID
 
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
+from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.research.financial_facts import FinancialFact
 
 
@@ -44,7 +45,6 @@ _SEC_TAG_TO_CANONICAL_FACT = {
     ("us-gaap", "EarningsPerShareDiluted"): "diluted_eps",
     ("us-gaap", "WeightedAverageNumberOfDilutedSharesOutstanding"): "diluted_shares",
 }
-_US_EXCHANGES = frozenset({"AMEX", "ARCA", "NASDAQ", "NYSE", "NYSEARCA"})
 _MAX_BOOTSTRAP_CIKS = 100
 
 
@@ -72,7 +72,7 @@ class SecInstrumentIdentity:
             or len(self.cik) > 10
             or self.symbol.upper() == "00656.HK"
             or self.symbol.upper().endswith(".HK")
-            or self.exchange.upper() not in _US_EXCHANGES
+            or self.exchange.upper() not in US_EQUITY_EXCHANGES
             or self.currency.upper() != "USD"
         ):
             raise SecNormalizationError("US_INSTRUMENT_REQUIRED")
