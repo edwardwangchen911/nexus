@@ -187,8 +187,8 @@
 - [x] Dispatch independent code and security reviewers with the full branch diff; fix every P0–P2 or otherwise actionable in-scope finding using TDD and re-review.
 - [x] Run `git diff --check`, verify exact commit ancestry and a clean worktree.
 - [x] Locally fast-forward `main` only if it still equals the recorded base; otherwise stop before merge and report the concurrent change.
-- [ ] Remove only this task's linked worktree after verified local integration; do not touch siblings.
-- [ ] Mark the Codex goal complete only after all required evidence above exists.
+- [x] Remove only this task's linked worktree after verified local integration; do not touch siblings.
+- [x] Mark the Codex goal complete only after all required evidence above exists.
 
 **Local acceptance evidence (2026-08-31, final-review remediation snapshot):**
 
@@ -201,6 +201,7 @@
 - Initial independent review of `ac96b2a` found one P1 downgrade race and one P2 SDK dependency-log gap; the first remediation commit closed both. Code re-review of that commit found the equivalent 0028 downgrade race and an implicit Alembic isolation-level assumption. Both additional P1 findings were reproduced as three failing tests and fixed with the complete 0028 lock set plus a fail-closed `READ COMMITTED` migration boundary.
 - Independent code and security re-reviews of exact SHA `f569584` covered the complete `ed2666d..f569584` branch diff, closed every prior P1/P2, found no remaining P0–P2 or other merge blocker, and both returned `Ready to locally merge: Yes`.
 - The clean task branch fast-forwarded local `main` from the recorded base `ed2666d` to accepted SHA `8f03b99`; no push, deployment or external activation was performed.
+- The merged task worktree was removed without force after its clean state was verified; unrelated sibling and stale/prunable worktrees were left untouched.
 - No real Provider, account, broker, order, deployment, permission, credential or paid-data action was performed. Fosun SDK/external activation remains blocked and Alpaca remains disabled.
 
 ## Rulings Ledger
