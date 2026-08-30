@@ -190,13 +190,14 @@
 - [ ] Remove only this task's linked worktree after verified local integration; do not touch siblings.
 - [ ] Mark the Codex goal complete only after all required evidence above exists.
 
-**Local acceptance evidence (2026-08-31, stable pre-review snapshot):**
+**Local acceptance evidence (2026-08-31, post-review remediation snapshot):**
 
-- Engine offline socket guard: `1396 passed, 1002 skipped`; an earlier run under parallel Web/Gateway load tripped only the unchanged backtest performance gate, while the final exclusive full run passed without weakening the 25-second threshold.
-- PostgreSQL integration: `1089 passed, 6 warnings` from empty isolated databases; all temporary databases were reaped after the run.
-- Fosun Gateway under the offline socket guard: `282 passed`; Ruff and Mypy passed for 25 source files.
+- Engine offline socket guard: `1398 passed, 1004 skipped`; an earlier run under parallel Web/Gateway load tripped only the unchanged backtest performance gate, while both exclusive full runs passed without weakening the 25-second threshold.
+- PostgreSQL integration: `1093 passed, 6 warnings` from empty isolated databases; all temporary databases were reaped after the run. The complete Fosun migration file passed `55/55`, including deterministic 0027/0029 schema-owner write races that require `P3D01`, not deadlock, after lock contention.
+- Fosun Gateway under the offline socket guard: `284 passed`; the real `requests`/`urllib3` no-socket canary path and construction/call-edge logger reconfiguration tests passed. Ruff and Mypy passed for 26 source files.
 - Web: lint, typecheck, generated-contract check and all build targets passed; two complete Vitest reruns passed `482/482`, the previously slow pagination case passed in isolation, and Playwright passed `85/85`.
-- Compose validation passed for the explicit Provider, Alpaca-Provider and Broker profiles using only the committed empty fixture template. Repository secret-signature scan covered 992 tracked/untracked text files with zero findings.
+- Compose validation passed for the explicit Provider, Alpaca-Provider and Broker profiles using only the committed empty fixture template. Repository secret-signature scan covered 993 tracked/untracked text files with zero findings.
+- Initial independent review of `ac96b2a` found one P1 downgrade race and one P2 SDK dependency-log gap. Both were reproduced as failing tests before implementation, fixed without weakening assertions, and require final re-review on the committed remediation SHA.
 - No real Provider, account, broker, order, deployment, permission, credential or paid-data action was performed. Fosun SDK/external activation remains blocked and Alpaca remains disabled.
 
 ## Rulings Ledger
@@ -215,6 +216,8 @@
 - Ruling: each max-attempt-one Fosun daily child uses one derived monotonic budget: a 44-second internal ceiling under the 45-second worker limit, 3 seconds reserved for final staging, 6 seconds for independent raw archive, and a 10-second fetch cap. A completed response is archived even when acquisition or permit exit fails; no phase may borrow from its successor or trigger a second external read.
 - Ruling: Provider objects are direct create-only writes to immutable final digest keys; no production temporary/promote/delete seam or DeleteObject permission remains. Concurrent publisher I/O fails on the first completed error, stops queued work, cancels siblings, and preserves typed object stop codes according to each Job's retry authority.
 - Ruling: object-store client construction and every actual PUT/GET worker call re-establish a closed boto3/botocore/s3transfer/urllib3 logging boundary; signed authorization, access-key identity, endpoint and raw payload diagnostics cannot propagate into common DEBUG handlers.
+- Ruling: 0027 and 0029 downgrade acquire their complete fact/protection relation sets in one shared global `ACCESS EXCLUSIVE` order before inspection and hold them through DDL; an in-flight schema-owner fact commits before a fresh READ COMMITTED guard snapshot and forces `P3D01` instead of losing authority or lineage.
+- Ruling: the frozen Fosun SDK import, construction, adapter call and both requests wire surfaces re-establish a closed fsopenapi/requests/urllib3 logger boundary and reset `http.client` wire debugging; dependency reconfiguration cannot expose Provider URL/query/header/body/certificate/account material.
 - Ruling: explicit Alpaca remains disabled and is not production-admitted until its intraday path has equivalent one-shot phase-budget, raw-reserve, exact-stop-code and cancellation evidence; this does not make Alpaca a Phase 1 prerequisite.
 - Ruling: fixed-origin Provider HTTP disables unsanitized httpx/httpcore dependency records at construction and every request boundary; only NEXUS-owned bounded result logs remain, so a common root/HTTP DEBUG configuration cannot persist FRED query credentials.
 - Ruling: provider object keys use a strict URI-safe ASCII allowlist, and SEC accession identifiers are validated in both normalization and collection before any object write; malformed identifiers publish neither objects nor facts.

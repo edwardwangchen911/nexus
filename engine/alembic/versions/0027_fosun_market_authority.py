@@ -95,6 +95,22 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Remove v2 only while no bound fact or v2 authority exists."""
+    # Acquire every fact/protection relation in one stable global order before
+    # the guard snapshot. The locks remain held through the destructive DDL, so
+    # a schema-owner writer that was already in flight commits first and is then
+    # visible to the READ COMMITTED guard instead of racing column removal.
+    op.execute(
+        "LOCK TABLE "
+        "public.data_artifacts, "
+        "public.integration_status, "
+        "public.intraday_bar_set_authorities, "
+        "public.latest_quotes, "
+        "public.price_bar_set_authorities, "
+        "public.price_series_manifests, "
+        "public.provider_capabilities, "
+        "public.source_policies "
+        "IN ACCESS EXCLUSIVE MODE"
+    )
     op.execute(
         """
         DO $$ BEGIN

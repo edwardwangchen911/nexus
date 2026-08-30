@@ -1,5 +1,8 @@
 import hashlib
+import http.client
+import io
 import json
+import logging
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -301,6 +304,127 @@ def test_read_only_sdk_construction_forces_all_sdk_logging_off(
         ("request", True, False, (5.0, 5.0), True, False),
         ("session", True, False, (5.0, 5.0), True, False),
     ]
+
+
+@pytest.mark.asyncio
+async def test_sdk_dependency_logs_are_suppressed_at_construction_and_call_edges(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    canaries = (
+        "https://provider.invalid/private?api_key=synthetic-secret",
+        "Authorization=Bearer synthetic-token",
+        "body=synthetic-body",
+        "cert=/private/synthetic-client.pem",
+        "account=synthetic-account-001",
+    )
+    dependency_names = (
+        "fsopenapi",
+        "fsopenapi.auth",
+        "fsopenapi.transport",
+        "requests",
+        "requests.sessions",
+        "urllib3",
+        "urllib3.connectionpool",
+        "http.client",
+    )
+    captured = io.StringIO()
+    handler = logging.StreamHandler(captured)
+    for name in dependency_names:
+        logger = logging.getLogger(name)
+        monkeypatch.setattr(logger, "filters", [])
+        monkeypatch.setattr(logger, "handlers", [handler])
+        monkeypatch.setattr(logger, "propagate", True)
+        monkeypatch.setattr(logger, "disabled", False)
+        monkeypatch.setattr(logger, "level", logging.DEBUG)
+    monkeypatch.setattr(http.client.HTTPConnection, "debuglevel", 1)
+    monkeypatch.setattr(http.client.HTTPSConnection, "debuglevel", 1)
+
+    def emit_dependency_canaries() -> None:
+        assert http.client.HTTPConnection.debuglevel == 0
+        assert http.client.HTTPSConnection.debuglevel == 0
+        for name in dependency_names:
+            logging.getLogger(name).debug(" ".join(canaries))
+
+    class FakeResponse:
+        headers: dict[str, str] = {}
+
+        def iter_content(self, *, chunk_size: int) -> tuple[bytes, ...]:
+            assert chunk_size > 0
+            return (b'{"code":0}',)
+
+        def close(self) -> None:
+            return None
+
+    class FakeSession:
+        trust_env = True
+
+        def request(self, *_args: object, **_kwargs: object) -> object:
+            return FakeResponse()
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            return FakeResponse()
+
+    class FakeRequests:
+        Session = FakeSession
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            pytest.fail("module-level requests.post must not be used")
+
+    class FakeSdkClient:
+        def __init__(self, **_kwargs: object) -> None:
+            emit_dependency_canaries()
+            self._http_session = FakeSession()
+            self.market = SimpleNamespace(quote=self.quote)
+
+        def quote(self, *, codes: list[str]) -> object:
+            assert codes == ["usAAPL"]
+            emit_dependency_canaries()
+            return {
+                "code": 0,
+                "data": {},
+                "requestId": "synthetic-logging-request",
+            }
+
+    auth_module = SimpleNamespace(requests=FakeRequests())
+
+    def sdk_module(name: str) -> object:
+        if name == "fsopenapi":
+            return SimpleNamespace(SDKClient=FakeSdkClient)
+        if name == "fsopenapi.auth":
+            return auth_module
+        raise AssertionError(f"unexpected import: {name}")
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.main.importlib.import_module",
+        sdk_module,
+    )
+    transport = build_transport(
+        GatewaySettings.model_validate(_activated_read_only_values(tmp_path))
+    )
+    assert isinstance(transport, SdkFosunTransport)
+    assert captured.getvalue() == ""
+
+    # Simulate a runtime logging reconfiguration after construction. The
+    # transport must restore the closed dependency boundary at every SDK call.
+    for name in dependency_names:
+        logger = logging.getLogger(name)
+        logger.filters.clear()
+        logger.handlers[:] = [handler]
+        logger.disabled = False
+        logger.propagate = True
+        logger.setLevel(logging.DEBUG)
+    http.client.HTTPConnection.debuglevel = 1
+    http.client.HTTPSConnection.debuglevel = 1
+    try:
+        page = await transport.execute("fosun_get_quotes", {"codes": ("usAAPL",)})
+    finally:
+        await transport.aclose()
+
+    assert page.source_request_id == "synthetic-logging-request"
+    logged = captured.getvalue()
+    for canary in canaries:
+        assert canary not in logged
 
 
 @pytest.mark.asyncio

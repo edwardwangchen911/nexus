@@ -5,6 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from nexus_fosun_gateway.security.dependency_logging import (
+    enforce_sdk_dependency_log_boundary,
+)
+
 _SDK_SOCKET_TIMEOUT_SECONDS = (5.0, 5.0)
 _MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 _PROVIDER_RESPONSE_CHUNK_BYTES = 64 * 1024
@@ -16,6 +20,7 @@ class _VerifiedSessionProxy:
         self._request = request
 
     def request(self, *args: object, **kwargs: object) -> object:
+        enforce_sdk_dependency_log_boundary()
         kwargs["verify"] = True
         kwargs["allow_redirects"] = False
         kwargs["timeout"] = _SDK_SOCKET_TIMEOUT_SECONDS
@@ -32,6 +37,7 @@ class _VerifiedRequestsProxy:
         self._post = post
 
     def post(self, *args: object, **kwargs: object) -> object:
+        enforce_sdk_dependency_log_boundary()
         kwargs["verify"] = True
         kwargs["allow_redirects"] = False
         kwargs["timeout"] = _SDK_SOCKET_TIMEOUT_SECONDS
@@ -44,6 +50,7 @@ class _VerifiedRequestsProxy:
 
 def enforce_sdk_tls_verification(client: object, auth_module: object) -> None:
     """Patch the exact v1.2.0 surfaces or reject the SDK before any network call."""
+    enforce_sdk_dependency_log_boundary()
     session = getattr(client, "_http_session", None)
     session_request = getattr(session, "request", None)
     requests_module = getattr(auth_module, "requests", None)
@@ -55,6 +62,7 @@ def enforce_sdk_tls_verification(client: object, auth_module: object) -> None:
     ):
         raise RuntimeError("reviewed SDK TLS verification surface is unavailable")
     isolated_auth_session = session_factory()
+    enforce_sdk_dependency_log_boundary()
     isolated_auth_post = getattr(isolated_auth_session, "post", None)
     if not callable(isolated_auth_post) or not hasattr(
         isolated_auth_session, "trust_env"

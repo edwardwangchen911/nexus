@@ -67,6 +67,22 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Remove lineage only before any new binding has been persisted."""
+    # Match the cross-migration lock order used by the authority downgrade and
+    # take final DDL-strength locks before inspecting facts. Waiting writers
+    # therefore commit before the guard is evaluated; no protected lineage can
+    # appear between the guard and trigger/column removal.
+    op.execute(
+        "LOCK TABLE "
+        "public.agent_data_snapshot_evidence, "
+        "public.data_artifacts, "
+        "public.exchange_calendar_authorities, "
+        "public.intraday_bar_set_authorities, "
+        "public.latest_quotes, "
+        "public.price_bar_records, "
+        "public.price_bar_set_authorities, "
+        "public.price_series_manifests "
+        "IN ACCESS EXCLUSIVE MODE"
+    )
     op.execute(
         """
         DO $$ BEGIN

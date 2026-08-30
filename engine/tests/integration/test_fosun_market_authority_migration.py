@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import threading
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -15,7 +17,7 @@ from nexus.persistence.models import data as data_models
 from nexus.persistence.models import market as market_models
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 assert data_models is not None
 assert market_models is not None
@@ -23,6 +25,92 @@ assert market_models is not None
 SOURCE_POLICY_V2_ID = UUID("f780fa7f-9135-5004-ab21-d665ae7be24b")
 QUOTE_POLICY_V2_ID = UUID("15afb077-46c6-5eea-8307-a7d203d11c2d")
 INTRADAY_POLICY_V2_ID = UUID("9bd1eb52-5486-5f40-a3d8-06bd56f80b8d")
+
+
+@pytest.mark.parametrize(
+    ("revision", "tables"),
+    (
+        pytest.param(
+            "0027_fosun_market_authority.py",
+            (
+                "data_artifacts",
+                "integration_status",
+                "intraday_bar_set_authorities",
+                "latest_quotes",
+                "price_bar_set_authorities",
+                "price_series_manifests",
+                "provider_capabilities",
+                "source_policies",
+            ),
+            id="0027",
+        ),
+        pytest.param(
+            "0029_fosun_bar_transport_freshness.py",
+            (
+                "agent_data_snapshot_evidence",
+                "data_artifacts",
+                "exchange_calendar_authorities",
+                "intraday_bar_set_authorities",
+                "latest_quotes",
+                "price_bar_records",
+                "price_bar_set_authorities",
+                "price_series_manifests",
+            ),
+            id="0029",
+        ),
+    ),
+)
+def test_fosun_authority_downgrades_lock_fact_tables_before_inspection(
+    revision: str,
+    tables: tuple[str, ...],
+) -> None:
+    source = Path(f"engine/alembic/versions/{revision}").read_text()
+    downgrade = source.split("def downgrade() -> None:", maxsplit=1)[1]
+    inspection = downgrade.index("DO $$ BEGIN")
+    lock_prefix = downgrade[:inspection]
+
+    assert "LOCK TABLE" in lock_prefix
+    assert "IN ACCESS EXCLUSIVE MODE" in lock_prefix
+    positions = [lock_prefix.index(f"public.{table}") for table in tables]
+    assert positions == sorted(positions)
+
+
+@pytest.mark.parametrize(
+    ("upgrade_revision", "downgrade_revision", "contention_table"),
+    (
+        pytest.param(
+            "0027_fosun_market_authority",
+            "0026_intraday_review_hardening",
+            "data_artifacts",
+            id="0027",
+        ),
+        pytest.param(
+            "0029_fosun_bar_lineage",
+            "0028_fosun_authority_hardening",
+            "agent_data_snapshot_evidence",
+            id="0029",
+        ),
+    ),
+)
+def test_fosun_authority_downgrade_rechecks_after_concurrent_bound_quote(
+    temporary_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    upgrade_revision: str,
+    downgrade_revision: str,
+    contention_table: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    command.upgrade(Config("engine/alembic.ini"), upgrade_revision)
+
+    error_code = asyncio.run(
+        _race_bound_quote_against_downgrade(
+            temporary_database_url,
+            downgrade_revision=downgrade_revision,
+            contention_table=contention_table,
+        )
+    )
+
+    assert error_code == "P3D01"
 
 
 def test_0031_is_single_head_and_metadata_exposes_complete_binding() -> None:
@@ -1402,35 +1490,154 @@ async def _insert_fosun_quote(
     }
     if missing is not None:
         binding[missing] = None
-    quote_id = uuid4()
     engine = create_async_engine(database_url)
     try:
         async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    "INSERT INTO latest_quotes "
-                    "(id,instrument_id,source,feed,delivery_mode,bid,ask,last,observed_at,"
-                    "available_at,received_at,revision,quality_flags,event_kind,content_hash,"
-                    "evidence_status,data_artifact_id,provider_capability_id,provider_status_id,"
-                    "provider_status_version,provider_contract_hash,provider_authorized_at,"
-                    "created_at) VALUES "
-                    "(:id,:instrument_id,'fosun','l1','unknown',NULL,NULL,200,:received,"
-                    ":received,:received,repeat('b',64),"
-                    '\'["FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",'
-                    "\"INTRADAY_BID_ASK_UNAVAILABLE\"]'::jsonb,'snapshot',repeat('c',64),"
-                    "'verified',:artifact_id,:provider_capability_id,:provider_status_id,"
-                    ":provider_status_version,:provider_contract_hash,"
-                    ":provider_authorized_at,:received)"
-                ),
-                {
-                    "id": quote_id,
-                    "instrument_id": instrument_id,
-                    "artifact_id": artifact_id,
-                    "received": received_at,
-                    **binding,
-                },
+            quote_id = await _insert_fosun_quote_on_connection(
+                connection,
+                capability_id=capability_id,
+                status_id=status_id,
+                artifact_id=artifact_id,
+                instrument_id=instrument_id,
+                authorized_at=authorized_at,
+                received_at=received_at,
+                binding=binding,
             )
         return quote_id
+    finally:
+        await engine.dispose()
+
+
+async def _insert_fosun_quote_on_connection(
+    connection: AsyncConnection,
+    *,
+    capability_id: UUID,
+    status_id: UUID,
+    artifact_id: UUID,
+    instrument_id: UUID,
+    authorized_at: datetime,
+    received_at: datetime,
+    binding: Mapping[str, object | None] | None = None,
+) -> UUID:
+    quote_id = uuid4()
+    resolved_binding: Mapping[str, object | None] = binding or {
+        "provider_capability_id": capability_id,
+        "provider_status_id": status_id,
+        "provider_status_version": 1,
+        "provider_contract_hash": "a" * 64,
+        "provider_authorized_at": authorized_at,
+    }
+    await connection.execute(
+        text(
+            "INSERT INTO latest_quotes "
+            "(id,instrument_id,source,feed,delivery_mode,bid,ask,last,observed_at,"
+            "available_at,received_at,revision,quality_flags,event_kind,content_hash,"
+            "evidence_status,data_artifact_id,provider_capability_id,provider_status_id,"
+            "provider_status_version,provider_contract_hash,provider_authorized_at,"
+            "created_at) VALUES "
+            "(:id,:instrument_id,'fosun','l1','unknown',NULL,NULL,200,:received,"
+            ":received,:received,repeat('b',64),"
+            '\'["FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",'
+            "\"INTRADAY_BID_ASK_UNAVAILABLE\"]'::jsonb,'snapshot',repeat('c',64),"
+            "'verified',:artifact_id,:provider_capability_id,:provider_status_id,"
+            ":provider_status_version,:provider_contract_hash,"
+            ":provider_authorized_at,:received)"
+        ),
+        {
+            "id": quote_id,
+            "instrument_id": instrument_id,
+            "artifact_id": artifact_id,
+            "received": received_at,
+            **resolved_binding,
+        },
+    )
+    return quote_id
+
+
+async def _race_bound_quote_against_downgrade(
+    database_url: str,
+    *,
+    downgrade_revision: str,
+    contention_table: str,
+) -> str | None:
+    (
+        capability_id,
+        status_id,
+        artifact_id,
+        instrument_id,
+        authorized_at,
+        received_at,
+    ) = await _seed_fosun_authority(database_url)
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as writer:
+            transaction = await writer.begin()
+            await writer.execute(
+                text(f"LOCK TABLE public.{contention_table} IN ROW EXCLUSIVE MODE")
+            )
+            downgrade_started = threading.Event()
+
+            def downgrade() -> str | None:
+                downgrade_started.set()
+                try:
+                    command.downgrade(Config("engine/alembic.ini"), downgrade_revision)
+                except DBAPIError as error:
+                    return error.orig.sqlstate
+                return None
+
+            downgrade_task = asyncio.create_task(asyncio.to_thread(downgrade))
+            try:
+                for _ in range(500):
+                    if downgrade_started.is_set():
+                        break
+                    if downgrade_task.done():
+                        return await downgrade_task
+                    await asyncio.sleep(0.01)
+                else:
+                    raise AssertionError("Fosun authority downgrade worker did not start")
+
+                async with engine.connect() as observer:
+                    for _ in range(500):
+                        downgrade_lock_is_waiting = await observer.scalar(
+                            text(
+                                "SELECT EXISTS ("
+                                "SELECT 1 FROM pg_catalog.pg_locks "
+                                "WHERE database = ("
+                                "SELECT oid FROM pg_catalog.pg_database "
+                                "WHERE datname = pg_catalog.current_database()"
+                                ") AND relation = CAST(:relation AS pg_catalog.regclass) "
+                                "AND mode = 'AccessExclusiveLock' AND NOT granted"
+                                ")"
+                            ),
+                            {"relation": f"public.{contention_table}"},
+                        )
+                        if downgrade_lock_is_waiting:
+                            break
+                        if downgrade_task.done():
+                            return await downgrade_task
+                        await asyncio.sleep(0.01)
+                    else:
+                        raise AssertionError(
+                            "Fosun authority downgrade did not reach the fact-table lock"
+                        )
+
+                await _insert_fosun_quote_on_connection(
+                    writer,
+                    capability_id=capability_id,
+                    status_id=status_id,
+                    artifact_id=artifact_id,
+                    instrument_id=instrument_id,
+                    authorized_at=authorized_at,
+                    received_at=received_at,
+                )
+                await transaction.commit()
+                return await asyncio.wait_for(downgrade_task, timeout=5)
+            finally:
+                if transaction.is_active:
+                    await transaction.rollback()
+                if not downgrade_task.done():
+                    downgrade_task.cancel()
+                    await asyncio.gather(downgrade_task, return_exceptions=True)
     finally:
         await engine.dispose()
 

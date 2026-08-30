@@ -1,10 +1,18 @@
+import contextlib
+import http.client
+import io
+import logging
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+import requests
 from nexus_fosun_gateway.security.provider_tls import (
     _MAX_PROVIDER_RESPONSE_BYTES,
     enforce_sdk_tls_verification,
 )
+from urllib3.connectionpool import HTTPSConnectionPool
+from urllib3.response import HTTPResponse
 
 
 def test_frozen_sdk_http_paths_force_tls_no_proxy_no_redirect_and_socket_timeout() -> None:
@@ -77,6 +85,102 @@ def test_frozen_sdk_http_paths_force_tls_no_proxy_no_redirect_and_socket_timeout
         ("request", True, False, (5.0, 5.0), True, False),
         ("auth", True, False, (5.0, 5.0), True, False),
     ]
+
+
+def test_real_requests_and_urllib3_wire_edges_never_log_provider_canaries(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    canaries = {
+        "host": "sdk-wire-log-canary.invalid",
+        "query": "api_key=synthetic-wire-secret",
+        "authorization": "Bearer synthetic-wire-token",
+        "body": "synthetic-wire-body",
+        "account": "synthetic-account-001",
+    }
+    observed: list[tuple[str, str, object, object]] = []
+
+    def fake_make_request(
+        pool: HTTPSConnectionPool,
+        connection: object,
+        method: str,
+        url: str,
+        body: object = None,
+        headers: object = None,
+        **_kwargs: object,
+    ) -> HTTPResponse:
+        assert http.client.HTTPConnection.debuglevel == 0
+        assert http.client.HTTPSConnection.debuglevel == 0
+        observed.append((method, url, body, headers))
+        payload = b'{"code":0}'
+        return HTTPResponse(
+            body=BytesIO(payload),
+            headers={"Content-Length": str(len(payload))},
+            status=200,
+            preload_content=False,
+            decode_content=False,
+            pool=pool,
+            connection=connection,  # type: ignore[arg-type]
+            request_method=method,
+            request_url=url,
+        )
+
+    monkeypatch.setattr(HTTPSConnectionPool, "_make_request", fake_make_request)
+    monkeypatch.setattr(
+        "urllib3.util.connection.create_connection",
+        lambda *_args, **_kwargs: pytest.fail("real socket must not be opened"),
+    )
+
+    client = SimpleNamespace(_http_session=requests.Session())
+    auth_module = SimpleNamespace(requests=requests)
+    enforce_sdk_tls_verification(client, auth_module)
+
+    captured = io.StringIO()
+    direct_handler = logging.StreamHandler(captured)
+    dependency_names = (
+        "fsopenapi",
+        "fsopenapi.auth",
+        "requests",
+        "requests.sessions",
+        "urllib3",
+        "urllib3.connectionpool",
+    )
+    for name in dependency_names:
+        logger = logging.getLogger(name)
+        monkeypatch.setattr(logger, "filters", [])
+        monkeypatch.setattr(logger, "handlers", [direct_handler])
+        monkeypatch.setattr(logger, "disabled", False)
+        monkeypatch.setattr(logger, "propagate", True)
+        monkeypatch.setattr(logger, "level", logging.DEBUG)
+    monkeypatch.setattr(http.client.HTTPConnection, "debuglevel", 1)
+    monkeypatch.setattr(http.client.HTTPSConnection, "debuglevel", 1)
+    caplog.set_level(logging.DEBUG)
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    headers = {
+        "Authorization": canaries["authorization"],
+        "X-Account": canaries["account"],
+    }
+    url = f"https://{canaries['host']}/private?{canaries['query']}"
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        client._http_session.request(
+            "POST",
+            url,
+            headers=headers,
+            data=canaries["body"],
+        )
+        auth_module.requests.post(
+            url,
+            headers=headers,
+            data=canaries["body"],
+        )
+
+    assert len(observed) == 2
+    assert all(canaries["query"] in request[1] for request in observed)
+    assert all(request[2] == canaries["body"] for request in observed)
+    rendered = "\n".join((captured.getvalue(), caplog.text, stdout.getvalue(), stderr.getvalue()))
+    for canary in canaries.values():
+        assert canary not in rendered
 
 
 @pytest.mark.parametrize("surface", ["request", "auth"])

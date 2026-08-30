@@ -23,6 +23,9 @@ from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
 from nexus_fosun_gateway.admission import sdk_admission_is_valid
 from nexus_fosun_gateway.domain import GatewayError
 from nexus_fosun_gateway.routes.read_only import router as read_only_router
+from nexus_fosun_gateway.security.dependency_logging import (
+    enforce_sdk_dependency_log_boundary,
+)
 from nexus_fosun_gateway.security.hmac import GatewayHmacVerifier, VerifiedGatewayActor
 from nexus_fosun_gateway.security.provider_tls import enforce_sdk_tls_verification
 from nexus_fosun_gateway.security.tls import production_listener_configs
@@ -91,10 +94,12 @@ def build_transport(
     ):
         raise _sdk_not_admitted()
     try:
+        enforce_sdk_dependency_log_boundary()
         module = importlib.import_module("fsopenapi")
         auth_module = importlib.import_module("fsopenapi.auth")
         client_type = getattr(module, "SDKClient")
-    except (ImportError, AttributeError):
+        enforce_sdk_dependency_log_boundary()
+    except (ImportError, AttributeError, RuntimeError):
         raise _sdk_not_admitted() from None
     try:
         client = client_type(

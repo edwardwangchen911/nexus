@@ -22,6 +22,9 @@ from nexus_fosun_gateway.policy.operations import (
     READ_ONLY_OPERATIONS,
     GatewayOperation,
 )
+from nexus_fosun_gateway.security.dependency_logging import (
+    enforce_sdk_dependency_log_boundary,
+)
 
 _LOGGER = logging.getLogger("nexus_fosun_gateway.provider")
 _MAX_ATTEMPTS = 3
@@ -129,6 +132,7 @@ class SdkFosunTransport:
         on_poison: Callable[[], None] | None = None,
         on_activation_expired: Callable[[datetime], None] | None = None,
     ) -> None:
+        enforce_sdk_dependency_log_boundary()
         if capability_expires_at is not None and (
             capability_expires_at.tzinfo is None or capability_expires_at.utcoffset() is None
         ):
@@ -598,6 +602,7 @@ class SdkFosunTransport:
         attempt: int,
     ) -> None:
         try:
+            enforce_sdk_dependency_log_boundary()
             _LOGGER.info(
                 "provider_call",
                 extra={
