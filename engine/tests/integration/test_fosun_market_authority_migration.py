@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import threading
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -16,6 +17,7 @@ from nexus.persistence.base import Base
 from nexus.persistence.models import data as data_models
 from nexus.persistence.models import market as market_models
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
@@ -43,6 +45,23 @@ INTRADAY_POLICY_V2_ID = UUID("9bd1eb52-5486-5f40-a3d8-06bd56f80b8d")
                 "source_policies",
             ),
             id="0027",
+        ),
+        pytest.param(
+            "0028_fosun_authority_hardening.py",
+            (
+                "agent_data_snapshot_evidence",
+                "corporate_actions",
+                "data_artifacts",
+                "integration_status",
+                "intraday_bar_set_authorities",
+                "latest_quotes",
+                "price_bar_records",
+                "price_bar_set_authorities",
+                "price_series_manifests",
+                "provider_capabilities",
+                "source_policies",
+            ),
+            id="0028",
         ),
         pytest.param(
             "0029_fosun_bar_transport_freshness.py",
@@ -76,18 +95,21 @@ def test_fosun_authority_downgrades_lock_fact_tables_before_inspection(
 
 
 @pytest.mark.parametrize(
-    ("upgrade_revision", "downgrade_revision", "contention_table"),
+    ("upgrade_revision", "downgrade_revision"),
     (
         pytest.param(
             "0027_fosun_market_authority",
             "0026_intraday_review_hardening",
-            "data_artifacts",
             id="0027",
+        ),
+        pytest.param(
+            "0028_fosun_authority_hardening",
+            "0027_fosun_market_authority",
+            id="0028",
         ),
         pytest.param(
             "0029_fosun_bar_lineage",
             "0028_fosun_authority_hardening",
-            "agent_data_snapshot_evidence",
             id="0029",
         ),
     ),
@@ -97,7 +119,6 @@ def test_fosun_authority_downgrade_rechecks_after_concurrent_bound_quote(
     monkeypatch: pytest.MonkeyPatch,
     upgrade_revision: str,
     downgrade_revision: str,
-    contention_table: str,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", temporary_database_url)
     command.upgrade(Config("engine/alembic.ini"), upgrade_revision)
@@ -106,7 +127,30 @@ def test_fosun_authority_downgrade_rechecks_after_concurrent_bound_quote(
         _race_bound_quote_against_downgrade(
             temporary_database_url,
             downgrade_revision=downgrade_revision,
-            contention_table=contention_table,
+        )
+    )
+
+    assert error_code == "P3D01"
+
+
+def test_alembic_downgrade_forces_read_committed_over_database_default(
+    temporary_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    asyncio.run(
+        _set_database_default_isolation(
+            temporary_database_url,
+            "repeatable read",
+        )
+    )
+    assert asyncio.run(_connection_isolation(temporary_database_url)) == "repeatable read"
+    command.upgrade(Config("engine/alembic.ini"), "0027_fosun_market_authority")
+
+    error_code = asyncio.run(
+        _race_bound_quote_against_downgrade(
+            temporary_database_url,
+            downgrade_revision="0026_intraday_review_hardening",
         )
     )
 
@@ -1558,7 +1602,6 @@ async def _race_bound_quote_against_downgrade(
     database_url: str,
     *,
     downgrade_revision: str,
-    contention_table: str,
 ) -> str | None:
     (
         capability_id,
@@ -1572,8 +1615,14 @@ async def _race_bound_quote_against_downgrade(
     try:
         async with engine.connect() as writer:
             transaction = await writer.begin()
-            await writer.execute(
-                text(f"LOCK TABLE public.{contention_table} IN ROW EXCLUSIVE MODE")
+            await _insert_fosun_quote_on_connection(
+                writer,
+                capability_id=capability_id,
+                status_id=status_id,
+                artifact_id=artifact_id,
+                instrument_id=instrument_id,
+                authorized_at=authorized_at,
+                received_at=received_at,
             )
             downgrade_started = threading.Event()
 
@@ -1605,11 +1654,15 @@ async def _race_bound_quote_against_downgrade(
                                 "WHERE database = ("
                                 "SELECT oid FROM pg_catalog.pg_database "
                                 "WHERE datname = pg_catalog.current_database()"
-                                ") AND relation = CAST(:relation AS pg_catalog.regclass) "
+                                ") AND relation IN ("
+                                "'public.data_artifacts'::pg_catalog.regclass,"
+                                "'public.integration_status'::pg_catalog.regclass,"
+                                "'public.latest_quotes'::pg_catalog.regclass,"
+                                "'public.price_series_manifests'::pg_catalog.regclass"
+                                ") "
                                 "AND mode = 'AccessExclusiveLock' AND NOT granted"
                                 ")"
-                            ),
-                            {"relation": f"public.{contention_table}"},
+                            )
                         )
                         if downgrade_lock_is_waiting:
                             break
@@ -1621,15 +1674,6 @@ async def _race_bound_quote_against_downgrade(
                             "Fosun authority downgrade did not reach the fact-table lock"
                         )
 
-                await _insert_fosun_quote_on_connection(
-                    writer,
-                    capability_id=capability_id,
-                    status_id=status_id,
-                    artifact_id=artifact_id,
-                    instrument_id=instrument_id,
-                    authorized_at=authorized_at,
-                    received_at=received_at,
-                )
                 await transaction.commit()
                 return await asyncio.wait_for(downgrade_task, timeout=5)
             finally:
@@ -1638,6 +1682,38 @@ async def _race_bound_quote_against_downgrade(
                 if not downgrade_task.done():
                     downgrade_task.cancel()
                     await asyncio.gather(downgrade_task, return_exceptions=True)
+    finally:
+        await engine.dispose()
+
+
+async def _set_database_default_isolation(database_url: str, isolation: str) -> None:
+    if isolation not in {"read committed", "repeatable read"}:
+        raise ValueError("unsupported test isolation")
+    parsed = make_url(database_url)
+    database_name = parsed.database
+    if database_name is None or re.fullmatch(r"nexus_test_[0-9a-f]{32}", database_name) is None:
+        raise ValueError("unexpected temporary database name")
+    engine = create_async_engine(
+        parsed.set(database="postgres"),
+        isolation_level="AUTOCOMMIT",
+    )
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(
+                text(
+                    f'ALTER DATABASE "{database_name}" '
+                    f"SET default_transaction_isolation TO '{isolation}'"
+                )
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _connection_isolation(database_url: str) -> str:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            return str(await connection.scalar(text("SHOW transaction_isolation")))
     finally:
         await engine.dispose()
 

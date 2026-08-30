@@ -73,9 +73,16 @@ async def run_migrations_online() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        isolation_level="READ COMMITTED",
     )
     try:
         async with connectable.connect() as connection:
+            actual_isolation = await connection.get_isolation_level()
+            if actual_isolation != "READ COMMITTED":
+                raise RuntimeError(
+                    "Alembic migrations require READ COMMITTED isolation; "
+                    f"received {actual_isolation!r}"
+                )
             await connection.run_sync(do_run_migrations)
     finally:
         await connectable.dispose()

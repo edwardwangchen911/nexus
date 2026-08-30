@@ -51,6 +51,25 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Restore the function configuration owned by the preceding revisions."""
+    # Lock every relation whose facts or protection DDL participate in this
+    # downgrade, using the same global order as adjacent authority revisions.
+    # Under the migration runner's READ COMMITTED isolation this ensures that a
+    # writer already in flight commits before the guard takes its fresh snapshot.
+    op.execute(
+        "LOCK TABLE "
+        "public.agent_data_snapshot_evidence, "
+        "public.corporate_actions, "
+        "public.data_artifacts, "
+        "public.integration_status, "
+        "public.intraday_bar_set_authorities, "
+        "public.latest_quotes, "
+        "public.price_bar_records, "
+        "public.price_bar_set_authorities, "
+        "public.price_series_manifests, "
+        "public.provider_capabilities, "
+        "public.source_policies "
+        "IN ACCESS EXCLUSIVE MODE"
+    )
     op.execute(
         """
         DO $$ BEGIN
