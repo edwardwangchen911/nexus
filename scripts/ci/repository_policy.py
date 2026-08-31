@@ -273,6 +273,7 @@ class GitRepositoryState(str, Enum):
 class GitArtifactIdentity:
     repository_state: GitRepositoryState
     mode: str | None
+    object_id: str | None
 
 
 @dataclass(frozen=True, order=True)
@@ -1431,8 +1432,11 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
     workflow_path = root / _REAL_E2E_WORKFLOW_PATH
     package_script_declared, package_script = _real_e2e_package_script(package_path)
     workflow_present = workflow_path.exists() or workflow_path.is_symlink()
-    workflow_artifact_safe = workflow_present and _real_e2e_artifact_is_safe(
-        root, workflow_path, _REAL_E2E_WORKFLOW_PATH
+    workflow_artifact_safe = workflow_present and _frozen_artifact_is_safe(
+        root,
+        workflow_path,
+        _REAL_E2E_WORKFLOW_PATH,
+        _EXPECTED_REAL_E2E_WORKFLOW_SHA256,
     )
     workflow_job = (
         _real_e2e_workflow_job_block(workflow_path)
@@ -1458,7 +1462,7 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
                 "real fixture E2E requires its dedicated Playwright configuration",
             )
         )
-    elif not _real_e2e_config_is_safe(config_path):
+    elif not _real_e2e_config_is_safe(root, config_path):
         findings.append(
             PolicyFinding(
                 "real_e2e_config_invalid",
@@ -1556,7 +1560,10 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
                 "real fixture E2E CI job must preserve its fixed local-only execution",
             )
         )
-    if test_directory.is_dir():
+    can_scan_real_e2e_source = _frozen_artifact_path_is_safe(
+        root, root / _REAL_E2E_TEST_PATH
+    )
+    if test_directory.is_dir() and can_scan_real_e2e_source:
         for path in sorted(test_directory.rglob("*")):
             if not path.is_file():
                 continue
@@ -1607,21 +1614,32 @@ def _real_e2e_has_package_lifecycle_script(package_path: Path) -> bool:
     )
 
 
-def _real_e2e_config_is_safe(config_path: Path) -> bool:
+def _real_e2e_config_is_safe(root: Path, config_path: Path) -> bool:
+    if not _frozen_artifact_is_safe(
+        root,
+        config_path,
+        _REAL_E2E_CONFIG_PATH,
+        _EXPECTED_REAL_E2E_CONFIG_SHA256,
+    ):
+        return False
     try:
         content = _read_text(config_path)
     except OSError:
         return False
     return (
-        _path_matches_sha256(config_path, _EXPECTED_REAL_E2E_CONFIG_SHA256)
-        and all(required in content for required in _REAL_E2E_CONFIG_REQUIRED)
+        all(required in content for required in _REAL_E2E_CONFIG_REQUIRED)
         and content.count("reuseExistingServer: false") == 2
         and "reuseExistingServer: true" not in content
     )
 
 
 def _real_e2e_workflow_is_safe(root: Path, workflow_path: Path, job: str) -> bool:
-    if not _real_e2e_artifact_is_safe(root, workflow_path, _REAL_E2E_WORKFLOW_PATH):
+    if not _frozen_artifact_is_safe(
+        root,
+        workflow_path,
+        _REAL_E2E_WORKFLOW_PATH,
+        _EXPECTED_REAL_E2E_WORKFLOW_SHA256,
+    ):
         return False
     try:
         workflow = _read_text(workflow_path)
@@ -1738,11 +1756,34 @@ def _real_e2e_workflow_job_block(workflow_path: Path) -> str | None:
 
 def _path_matches_sha256(path: Path, expected: str) -> bool:
     try:
-        content = path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError):
+        digest = _normalized_text_sha256(path.read_bytes())
+    except OSError:
         return False
-    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest() == expected
+    return digest == expected
+
+
+def _normalized_text_sha256(content: bytes) -> str | None:
+    try:
+        decoded = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    normalized = decoded.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _git_blob_sha256(root: Path, object_id: str) -> str | None:
+    try:
+        blob = subprocess.run(
+            ["git", "cat-file", "blob", object_id],
+            cwd=root,
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        return None
+    if blob.returncode != 0:
+        return None
+    return _normalized_text_sha256(blob.stdout)
 
 
 def _real_e2e_test_directory_is_safe(test_directory: Path) -> bool:
@@ -1755,23 +1796,60 @@ def _real_e2e_test_directory_is_safe(test_directory: Path) -> bool:
 
 def _real_e2e_test_artifact_is_safe(root: Path) -> bool:
     test_path = root / _REAL_E2E_TEST_PATH
-    return _real_e2e_artifact_is_safe(root, test_path, _REAL_E2E_TEST_PATH)
+    return _frozen_artifact_is_safe(
+        root,
+        test_path,
+        _REAL_E2E_TEST_PATH,
+        _EXPECTED_REAL_E2E_TEST_SHA256,
+    )
 
 
-def _real_e2e_artifact_is_safe(root: Path, path: Path, relative_path: str) -> bool:
-    if not path.is_file() or path.is_symlink():
+def _frozen_artifact_is_safe(
+    root: Path, path: Path, relative_path: str, expected_digest: str
+) -> bool:
+    if not _frozen_artifact_path_is_safe(root, path):
         return False
     identity = _git_artifact_identity(root, relative_path)
-    return identity.repository_state is GitRepositoryState.NON_REPOSITORY or (
-        identity.repository_state is GitRepositoryState.VALID
-        and identity.mode in {"100644", "100755"}
-    )
+    try:
+        working_digest = _normalized_text_sha256(path.read_bytes())
+    except OSError:
+        return False
+    if working_digest != expected_digest:
+        return False
+    if identity.repository_state is GitRepositoryState.NON_REPOSITORY:
+        return True
+    if (
+        identity.repository_state is not GitRepositoryState.VALID
+        or identity.mode not in {"100644", "100755"}
+        or identity.object_id is None
+    ):
+        return False
+    blob_digest = _git_blob_sha256(root, identity.object_id)
+    return blob_digest == working_digest == expected_digest
+
+
+def _frozen_artifact_path_is_safe(root: Path, path: Path) -> bool:
+    try:
+        relative_path = path.relative_to(root)
+        resolved_root = root.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    current = root
+    for component in relative_path.parts:
+        current = current / component
+        if current.is_symlink():
+            return False
+    try:
+        path.resolve(strict=True).relative_to(resolved_root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return path.is_file()
 
 
 def _git_artifact_identity(root: Path, relative_path: str) -> GitArtifactIdentity:
     repository_state = _git_repository_state(root)
     if repository_state is not GitRepositoryState.VALID:
-        return GitArtifactIdentity(repository_state, None)
+        return GitArtifactIdentity(repository_state, None, None)
     try:
         indexed = subprocess.run(
             ["git", "ls-files", "--stage", "--", relative_path],
@@ -1781,21 +1859,23 @@ def _git_artifact_identity(root: Path, relative_path: str) -> GitArtifactIdentit
             text=True,
         )
     except OSError:
-        return GitArtifactIdentity(GitRepositoryState.ERROR, None)
+        return GitArtifactIdentity(GitRepositoryState.ERROR, None, None)
     lines = indexed.stdout.splitlines()
     if indexed.returncode != 0:
-        return GitArtifactIdentity(GitRepositoryState.ERROR, None)
+        return GitArtifactIdentity(GitRepositoryState.ERROR, None, None)
     if len(lines) != 1:
-        return GitArtifactIdentity(GitRepositoryState.VALID, "")
+        return GitArtifactIdentity(GitRepositoryState.VALID, "", None)
     fields = lines[0].split(maxsplit=3)
-    if len(fields) != 4 or fields[2] != "0":
-        return GitArtifactIdentity(GitRepositoryState.VALID, "")
-    return GitArtifactIdentity(GitRepositoryState.VALID, fields[0])
+    if (
+        len(fields) != 4
+        or fields[2] != "0"
+        or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", fields[1]) is None
+    ):
+        return GitArtifactIdentity(GitRepositoryState.VALID, "", None)
+    return GitArtifactIdentity(GitRepositoryState.VALID, fields[0], fields[1])
 
 
 def _git_repository_state(root: Path) -> GitRepositoryState:
-    metadata = root / ".git"
-    metadata_detected = metadata.exists() or metadata.is_symlink()
     try:
         repository = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
@@ -1810,9 +1890,21 @@ def _git_repository_state(root: Path) -> GitRepositoryState:
         return GitRepositoryState.VALID
     return (
         GitRepositoryState.ERROR
-        if metadata_detected or repository.returncode == 0
+        if _git_metadata_exists_on_ancestor_chain(root) or repository.returncode == 0
         else GitRepositoryState.NON_REPOSITORY
     )
+
+
+def _git_metadata_exists_on_ancestor_chain(root: Path) -> bool:
+    try:
+        current = root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return True
+    for candidate in (current, *current.parents):
+        metadata = candidate / ".git"
+        if metadata.exists() or metadata.is_symlink():
+            return True
+    return False
 
 
 def _workflow_job_has_body(lines: list[str], job_index: int, job_indent: int) -> bool:

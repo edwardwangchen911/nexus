@@ -936,8 +936,10 @@ def test_committed_workflow_has_minimal_permissions_and_offline_jobs() -> None:
     assert check_workflow(root) == []
 
 
-def _write_real_e2e_adoption(root: Path) -> None:
-    subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+def _write_real_e2e_adoption(root: Path, *, initialize_git: bool = True) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    if initialize_git:
+        subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
     source_root = Path(__file__).resolve().parents[2]
     (root / "playwright.real.config.ts").write_bytes(
         (source_root / "playwright.real.config.ts").read_bytes()
@@ -954,16 +956,18 @@ def _write_real_e2e_adoption(root: Path) -> None:
     workflow.write_bytes(
         (source_root / ".github/workflows/ci.yml").read_bytes()
     )
-    subprocess.run(
-        [
-            "git",
-            "add",
-            ".github/workflows/ci.yml",
-            "tests/e2e-real/integrations-real.spec.ts",
-        ],
-        cwd=root,
-        check=True,
-    )
+    if initialize_git:
+        subprocess.run(
+            [
+                "git",
+                "add",
+                "playwright.real.config.ts",
+                ".github/workflows/ci.yml",
+                "tests/e2e-real/integrations-real.spec.ts",
+            ],
+            cwd=root,
+            check=True,
+        )
 
 
 def test_real_e2e_boundary_allows_a_repository_before_real_e2e_adoption(
@@ -1077,7 +1081,7 @@ def test_real_e2e_boundary_rejects_partial_adoption(
     elif missing_marker == "package":
         (tmp_path / "package.json").write_text(json.dumps({"scripts": {}}))
     else:
-        (tmp_path / ".github/workflows/ci.yml").write_text("jobs:\n")
+        (tmp_path / ".github/workflows/ci.yml").unlink()
 
     checker = getattr(repository_policy, "check_real_e2e_boundary", None)
 
@@ -1247,6 +1251,7 @@ def test_real_e2e_boundary_requires_a_deliberate_digest_update_for_artifact_chan
         constant,
         hashlib.sha256(artifact.read_bytes()).hexdigest(),
     )
+    subprocess.run(["git", "add", relative_path], cwd=tmp_path, check=True)
     assert expected_rule not in {
         finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
     }
@@ -1272,6 +1277,9 @@ def test_real_e2e_boundary_requires_a_deliberate_digest_update_for_ci_job_change
         repository_policy,
         "_EXPECTED_REAL_E2E_WORKFLOW_SHA256",
         hashlib.sha256(workflow.read_bytes()).hexdigest(),
+    )
+    subprocess.run(
+        ["git", "add", ".github/workflows/ci.yml"], cwd=tmp_path, check=True
     )
     assert "real_e2e_ci_job_invalid" not in {
         finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
@@ -1404,6 +1412,79 @@ def test_real_e2e_boundary_fails_closed_for_broken_git_metadata(
 
     assert "real_e2e_ci_job_invalid" in rules
     assert "real_e2e_test_artifact_invalid" in rules
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "expected_rule"),
+    [
+        ("playwright.real.config.ts", "real_e2e_config_invalid"),
+        (".github/workflows/ci.yml", "real_e2e_ci_job_invalid"),
+        (
+            "tests/e2e-real/integrations-real.spec.ts",
+            "real_e2e_test_artifact_invalid",
+        ),
+    ],
+)
+def test_real_e2e_boundary_rejects_index_blob_and_working_tree_mismatch(
+    tmp_path: Path,
+    relative_path: str,
+    expected_rule: str,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    artifact = tmp_path / relative_path
+    approved_bytes = artifact.read_bytes()
+    artifact.write_text("malicious staged artifact\n")
+    subprocess.run(["git", "add", relative_path], cwd=tmp_path, check=True)
+    artifact.write_bytes(approved_bytes)
+
+    assert expected_rule in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+def test_real_e2e_boundary_rejects_a_workflow_symlink_ancestor(
+    tmp_path: Path,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    workflow_directory = tmp_path / ".github"
+    approved_tree = tmp_path.parent / f"{tmp_path.name}-approved-github"
+    workflow_directory.rename(approved_tree)
+    workflow_directory.symlink_to(approved_tree)
+
+    assert "real_e2e_ci_job_invalid" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+def test_real_e2e_boundary_fails_closed_for_broken_ancestor_git_metadata(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    nested_root = parent / "nested-root"
+    parent.mkdir()
+    (parent / ".git").write_text("gitdir: missing-git-directory\n")
+    _write_real_e2e_adoption(nested_root, initialize_git=False)
+
+    rules = {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(nested_root)
+    }
+
+    assert "real_e2e_config_invalid" in rules
+    assert "real_e2e_ci_job_invalid" in rules
+    assert "real_e2e_test_artifact_invalid" in rules
+
+
+def test_real_e2e_boundary_accepts_a_valid_parent_repository_for_nested_root(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    nested_root = parent / "nested-root"
+    parent.mkdir()
+    subprocess.run(["git", "init", "--quiet"], cwd=parent, check=True)
+    _write_real_e2e_adoption(nested_root, initialize_git=False)
+    subprocess.run(["git", "add", "nested-root"], cwd=parent, check=True)
+
+    assert repository_policy.check_real_e2e_boundary(nested_root) == []
 
 
 @pytest.mark.parametrize("lifecycle", ["pretest:e2e:real", "posttest:e2e:real"])
