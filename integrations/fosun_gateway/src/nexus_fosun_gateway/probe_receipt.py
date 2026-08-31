@@ -54,6 +54,10 @@ class _ProbeSuccessFrame(BaseModel):
 
     status: Literal["probe_published"]
     code: Literal["OK"]
+    failure_stage: None
+    failure_operation: None
+    failure_category: None
+    physical_request_count: None
     artifact_sha256: _Hex64
     byte_length: StrictInt = Field(ge=1, le=MAX_ARTIFACT_BYTES)
     capability_expires_at: _UtcTimestamp

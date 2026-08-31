@@ -202,6 +202,10 @@ def _evidence(
     frame = {
         "status": "probe_published",
         "code": "OK",
+        "failure_stage": None,
+        "failure_operation": None,
+        "failure_category": None,
+        "physical_request_count": None,
         "artifact_sha256": artifact_sha256,
         "byte_length": len(artifact_bytes),
         "capability_expires_at": "2026-08-31T09:00:00Z",
