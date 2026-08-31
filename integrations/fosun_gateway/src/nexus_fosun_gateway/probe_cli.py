@@ -9,6 +9,7 @@ import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import cast
 
 from pydantic import ValidationError
 
@@ -19,6 +20,7 @@ from nexus_fosun_gateway.activation import (
 )
 from nexus_fosun_gateway.adapter.probe_sdk import (
     PhysicalHttpBudget,
+    ProbeErrorCode,
     ProbeSdkError,
     SdkProbeExecutor,
     build_probe_transport,
@@ -84,7 +86,7 @@ def failure_result(error: str | ProbeSdkError) -> dict[str, object]:
             else 0
         )
     else:
-        code = error
+        code = cast(ProbeErrorCode, error)
         operation = "unknown"
         category = "unknown"
         physical_request_count = 0
@@ -155,6 +157,7 @@ def main(argv: Sequence[str] | None = None, *, output_fd: int = 1) -> int:
 
 async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
     prepared: PreparedProbeArtifact | None = None
+    budget: PhysicalHttpBudget | None = None
     publication_complete = False
     publication_path: Path | None = None
     try:
@@ -241,23 +244,48 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
             )
             == prepared.artifact_bytes
         ):
-            return failure_result("PROBE_OUTPUT_QUARANTINE_REQUIRED")
+            return failure_result(_with_budget("PROBE_OUTPUT_QUARANTINE_REQUIRED", budget))
         raise
     except (UnsafeProviderEnvironmentError, ValidationError):
-        return failure_result("PROBE_SETTINGS_INVALID")
+        return failure_result(_with_budget("PROBE_SETTINGS_INVALID", budget))
     except ProbeSdkError as error:
         if publication_complete and error.code != "PROBE_OUTPUT_QUARANTINE_REQUIRED":
-            return failure_result("PROBE_OUTPUT_QUARANTINE_REQUIRED")
-        return failure_result(error)
+            return failure_result(_with_budget("PROBE_OUTPUT_QUARANTINE_REQUIRED", budget))
+        return failure_result(_with_budget(error, budget))
     except Exception:
         return failure_result(
-            "PROBE_OUTPUT_QUARANTINE_REQUIRED"
-            if publication_complete
-            else "PROBE_FAILED"
+            _with_budget(
+                "PROBE_OUTPUT_QUARANTINE_REQUIRED"
+                if publication_complete
+                else "PROBE_FAILED",
+                budget,
+            )
         )
     finally:
         if prepared is not None:
             prepared.dispose_signing_key()
+
+
+def _with_budget(
+    error: str | ProbeSdkError,
+    budget: PhysicalHttpBudget | None,
+) -> ProbeSdkError:
+    """Preserve only the already-dispatched physical facts across local failures."""
+    if isinstance(error, ProbeSdkError):
+        code = error.code
+        category = error.category
+    else:
+        code = cast(ProbeErrorCode, error)
+        category = "unknown"
+    if budget is None:
+        return ProbeSdkError(code, category=category)
+    snapshot = budget.snapshot()
+    return ProbeSdkError(
+        code,
+        operation=budget.last_dispatched_label() or "unknown",
+        category=category,
+        physical_request_count=snapshot.total,
+    )
 
 
 def _parse_manifest_argument(arguments: tuple[str, ...]) -> tuple[str, Path]:
