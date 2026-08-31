@@ -24,6 +24,7 @@ from nexus_fosun_gateway.adapter.probe_sdk import (
 from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
 from nexus_fosun_gateway.domain import (
     AccountItem,
+    GatewayError,
     GatewayItem,
     GatewayPage,
 )
@@ -725,6 +726,74 @@ def test_probe_factory_lazily_constructs_counted_no_retry_sdk(
     with budget.operation("Accounts"):
         assert budget.try_acquire_at_call_edge() is None
     asyncio.run(bundle.aclose())
+
+
+@pytest.mark.asyncio
+async def test_probe_factory_disables_adapter_level_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sdk_calls = 0
+
+    class FakeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self._adapters = {"https://": requests.adapters.HTTPAdapter(max_retries=2)}
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            self._adapters[prefix] = adapter
+
+        def get_adapter(self, prefix: str) -> object:
+            return self._adapters[prefix]
+
+        def request(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("the synthetic SDK method fails before HTTP")
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("the synthetic SDK method fails before HTTP")
+
+        def close(self) -> None:
+            return None
+
+    class FakeRequests:
+        adapters = requests.adapters
+        Session = FakeSession
+
+    def list_accounts() -> object:
+        nonlocal sdk_calls
+        sdk_calls += 1
+        raise RuntimeError("synthetic retryable provider failure")
+
+    class FakeSdkClient:
+        def __init__(self, **_kwargs: object) -> None:
+            self._http_session = FakeSession()
+            self.account = SimpleNamespace(list_accounts=list_accounts)
+
+    auth_module = SimpleNamespace(requests=FakeRequests())
+
+    def module_import(name: str) -> object:
+        if name == "fsopenapi":
+            return SimpleNamespace(SDKClient=FakeSdkClient)
+        if name == "fsopenapi.auth":
+            return auth_module
+        raise AssertionError(name)
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.adapter.probe_sdk.importlib.import_module",
+        module_import,
+    )
+    settings = ProbeProviderSettings.model_validate(_settings_values(tmp_path))
+    budget = PhysicalHttpBudget()
+    bundle = build_probe_transport(_admitted_document(), settings, budget)
+
+    try:
+        with budget.operation("Accounts"), pytest.raises(GatewayError):
+            await bundle.transport.execute("fosun_sync_accounts", {})
+    finally:
+        await bundle.aclose()
+
+    assert sdk_calls == 1
 
 
 def test_probe_settings_require_exact_fosun_base_url_before_sdk_import(

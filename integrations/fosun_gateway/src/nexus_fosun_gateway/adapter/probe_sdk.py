@@ -459,7 +459,7 @@ def build_probe_transport(
             https_proxy_url=settings.probe_https_proxy_url,
         )
         budget.bind_http_controls()
-        transport = SdkFosunTransport(client, rate_limiter=budget)
+        transport = SdkFosunTransport(client, rate_limiter=budget, max_attempts=1)
         return ProbeTransportBundle(
             transport=transport,
             controls=controls,

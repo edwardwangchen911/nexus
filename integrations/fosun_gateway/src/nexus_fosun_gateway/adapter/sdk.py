@@ -132,8 +132,15 @@ class SdkFosunTransport:
         utc_clock: Callable[[], datetime] = _utc_now,
         on_poison: Callable[[], None] | None = None,
         on_activation_expired: Callable[[datetime], None] | None = None,
+        max_attempts: int = _MAX_ATTEMPTS,
     ) -> None:
         enforce_sdk_dependency_log_boundary()
+        if (
+            not isinstance(max_attempts, int)
+            or isinstance(max_attempts, bool)
+            or not 1 <= max_attempts <= _MAX_ATTEMPTS
+        ):
+            raise ValueError("provider attempt budget is invalid")
         if capability_expires_at is not None and (
             capability_expires_at.tzinfo is None or capability_expires_at.utcoffset() is None
         ):
@@ -199,6 +206,7 @@ class SdkFosunTransport:
         self._poisoned = Event()
         self._closed = Event()
         self._on_poison = on_poison
+        self._max_attempts = max_attempts
         if self._activation_deadline is not None:
             timer = Timer(
                 max(self._activation_deadline - self._clock(), 0.0),
@@ -459,7 +467,7 @@ class SdkFosunTransport:
         deadline: float,
         **kwargs: object,
     ) -> object:
-        max_attempts = 1 if operation == "fosun_get_bars" else _MAX_ATTEMPTS
+        max_attempts = 1 if operation == "fosun_get_bars" else self._max_attempts
         for attempt in range(1, max_attempts + 1):
             self._require_transport_ready()
             remaining = deadline - self._clock()
