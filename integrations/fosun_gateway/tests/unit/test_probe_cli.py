@@ -556,6 +556,45 @@ def test_success_publishes_before_signing_and_emits_receipt_last(
     assert captured.err == ""
 
 
+def test_post_sequence_local_failure_keeps_only_physical_probe_facts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_bytes(_json_bytes(_admitted_manifest()))
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    private_key_path = tmp_path / "publisher-private.b64u"
+    public_key_b64u = _b64u(
+        TEST_KEY.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
+    _set_probe_environment(
+        monkeypatch, manifest_path, output_dir, private_key_path, public_key_b64u
+    )
+    budget = probe_cli.PhysicalHttpBudget()
+    budget._counts = {name: 1 for name in REQUIRED_PROBE_OPERATIONS}
+    budget._total = 8
+    budget._last_dispatched_label = "kline_minimal"
+    monkeypatch.setattr(probe_cli, "PhysicalHttpBudget", lambda: budget)
+    monkeypatch.setattr(probe_cli, "build_probe_transport", lambda *_args: object())
+    monkeypatch.setattr(probe_cli, "SdkProbeExecutor", lambda *_args: object())
+
+    async def fail_after_sequence(*_args: object, **_kwargs: object) -> object:
+        raise ProbeSdkError("PROBE_FAILED")
+
+    monkeypatch.setattr(probe_cli, "run_sanitized_probe", fail_after_sequence)
+
+    assert probe_cli.main(_arguments(manifest_path)) == 2
+    frame = json.loads(capfd.readouterr().out)
+    assert frame["failure_operation"] == "kline_minimal"
+    assert frame["physical_request_count"] == 8
+    assert "publisher-private" not in json.dumps(frame)
+
+
 def test_interrupt_after_artifact_publication_requires_quarantine(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
