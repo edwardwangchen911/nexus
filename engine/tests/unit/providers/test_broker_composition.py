@@ -52,11 +52,11 @@ def test_activation_bundle_uses_separate_read_only_evidence_and_control_configs(
     evidence_mounts = {
         "FOSUN_ACTIVATION_PROBE_ARTIFACT_HOST_FILE": (
             "../.secrets/fosun-activation/probe-artifact.json",
-            "/run/nexus/fosun-activation/probe-artifact.json"
+            "/run/nexus/fosun-activation/probe-artifact.json",
         ),
         "FOSUN_ACTIVATION_PROBE_RECEIPT_HOST_FILE": (
             "../.secrets/fosun-activation/publication-receipt.json",
-            "/run/nexus/fosun-activation/publication-receipt.json"
+            "/run/nexus/fosun-activation/publication-receipt.json",
         ),
     }
     for source_variable, (default_source, target) in evidence_mounts.items():
@@ -72,22 +72,25 @@ def test_activation_bundle_uses_separate_read_only_evidence_and_control_configs(
 
     control_configs = {
         "fosun-activation-publisher-key": (
-            "FOSUN_ACTIVATION_PUBLISHER_KEY_CONFIG_FILE",
+            "../.secrets/fosun-control/publisher-public-key.b64u",
             "/run/nexus/fosun-control/publisher-public-key.b64u",
         ),
         "fosun-activation-contract-hash": (
-            "FOSUN_ACTIVATION_CONTRACT_HASH_CONFIG_FILE",
+            "../.secrets/fosun-control/activation-contract.sha256",
             "/run/nexus/fosun-control/activation-contract.sha256",
         ),
     }
-    for source, (source_variable, target) in control_configs.items():
+    for source, (fixed_source, target) in control_configs.items():
         attachment = (
             f"      - source: {source}\n"
             f"        target: {target}\n"
             "        mode: 0444\n"
         )
         assert gateway.count(attachment) == 1
-        assert f"  {source}:\n    file: ${{{source_variable}:-../.secrets/" in compose
+        assert compose.count(f"  {source}:\n    file: {fixed_source}\n") == 1
+
+    assert "FOSUN_ACTIVATION_PUBLISHER_KEY_CONFIG_FILE" not in compose
+    assert "FOSUN_ACTIVATION_CONTRACT_HASH_CONFIG_FILE" not in compose
 
     environment = _service_environment(compose, "fosun-gateway")
     assert "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U" not in environment
