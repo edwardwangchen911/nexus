@@ -113,6 +113,29 @@ def test_failure_frame_preserves_only_closed_probe_diagnostics() -> None:
     assert "synthetic-provider-secret" not in json.dumps(frame)
 
 
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("operation", "untrusted-operation"),
+        ("category", "untrusted-category"),
+        ("physical_request_count", -1),
+        ("physical_request_count", True),
+        ("physical_request_count", 25),
+    ],
+)
+def test_failure_frame_fails_closed_for_invalid_diagnostics(
+    attribute: str, value: object
+) -> None:
+    error = ProbeSdkError("PROBE_FAILED")
+    setattr(error, attribute, value)
+
+    frame = probe_cli.failure_result(error)
+
+    assert frame["failure_operation"] == "unknown"
+    assert frame["failure_category"] == "unknown"
+    assert frame["physical_request_count"] == 0
+
+
 def test_probe_cli_subprocess_is_one_frame_and_offline_without_secret_settings() -> None:
     completed = subprocess.run(
         [

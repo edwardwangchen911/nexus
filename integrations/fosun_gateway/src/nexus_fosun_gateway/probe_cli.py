@@ -30,7 +30,11 @@ from nexus_fosun_gateway.probe import (
     run_sanitized_probe,
     validate_sanitized_probe_artifact,
 )
-from nexus_fosun_gateway.probe_contract import PROBE_CLI_ARGUMENT_NAMES
+from nexus_fosun_gateway.probe_contract import (
+    PROBE_CLI_ARGUMENT_NAMES,
+    PROBE_FAILURE_CATEGORIES,
+    PROBE_FAILURE_OPERATIONS,
+)
 from nexus_fosun_gateway.probe_settings import ProbeProviderSettings
 from nexus_fosun_gateway.publication import (
     load_probe_signing_key,
@@ -62,9 +66,23 @@ def failure_result(error: str | ProbeSdkError) -> dict[str, object]:
     code: str
     if isinstance(error, ProbeSdkError):
         code = error.code
-        operation = error.operation
-        category = error.category
-        physical_request_count = error.physical_request_count
+        operation = (
+            error.operation
+            if error.operation in PROBE_FAILURE_OPERATIONS
+            else "unknown"
+        )
+        category = (
+            error.category
+            if error.category in PROBE_FAILURE_CATEGORIES
+            else "unknown"
+        )
+        physical_request_count = (
+            error.physical_request_count
+            if isinstance(error.physical_request_count, int)
+            and not isinstance(error.physical_request_count, bool)
+            and 0 <= error.physical_request_count <= 24
+            else 0
+        )
     else:
         code = error
         operation = "unknown"

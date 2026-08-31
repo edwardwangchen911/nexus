@@ -558,6 +558,23 @@ def test_rate_limited_gateway_error_has_a_closed_rate_limit_category() -> None:
     assert mapped.category == "rate_limit"
 
 
+@pytest.mark.asyncio
+async def test_executor_reports_rate_limit_at_the_dispatched_operation() -> None:
+    clock = FakeClock()
+    budget = PhysicalHttpBudget(clock=clock, sleeper=clock.sleep)
+    transport = InstrumentedTransport(budget, gateway_error_at=1)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        await SdkProbeExecutor(
+            _probe_bundle(transport, RecordingControls(), budget), budget
+        ).run(_plan())
+
+    assert exc_info.value.operation == "CashSummary"
+    assert exc_info.value.category == "rate_limit"
+    assert exc_info.value.physical_request_count == 3
+    assert len(transport.calls) == 2
+
+
 @pytest.mark.parametrize("auth_statuses", [(), (200, 200)])
 @pytest.mark.asyncio
 async def test_executor_requires_exactly_one_successful_session(
@@ -1023,6 +1040,7 @@ class InstrumentedTransport:
         wrong_bar: bool = False,
         malformed_bar: bool = False,
         cached_at: int | None = None,
+        gateway_error_at: int | None = None,
     ) -> None:
         del budget
         self._empty_accounts = empty_accounts
@@ -1032,6 +1050,7 @@ class InstrumentedTransport:
         self._wrong_bar = wrong_bar
         self._malformed_bar = malformed_bar
         self._cached_at = cached_at
+        self._gateway_error_at = gateway_error_at
         self._external_controls: RecordingControls | FailingControls | None = None
         self._bundle: ProbeTransportBundle | None = None
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -1087,6 +1106,13 @@ class InstrumentedTransport:
         self.client._http_session.request("POST", "https://provider.invalid/read")
         if call_index == self._cancel_at:
             raise asyncio.CancelledError
+        if call_index == self._gateway_error_at:
+            raise GatewayError(
+                "PROVIDER_RATE_LIMITED",
+                "synthetic",
+                status_code=429,
+                next_action="RETRY_LATER",
+            )
         if call_index == self._fail_at:
             raise PermissionError("synthetic-provider-secret")
 
