@@ -38,6 +38,8 @@ export function validateRealFixtureInput(env) {
     || !loopbackHost
     || !databaseName.startsWith("nexus_e2e_")
     || databaseName.includes("/")
+    || url.search !== ""
+    || url.hash !== ""
   ) {
     throw new RealFixtureRunnerError("INVALID_DATABASE_URL", "real fixture E2E database URL is invalid");
   }
@@ -66,7 +68,7 @@ export function buildRealFixtureEnvironment(env) {
 
 /** @param {string[]} args */
 export function validatePlaywrightArguments(args) {
-  if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string" || arg === "--config" || arg.startsWith("--config=") || arg === "-c" || arg.startsWith("-c="))) {
+  if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string" || arg === "--config" || arg.startsWith("--config=") || arg.startsWith("-c"))) {
     throw new RealFixtureRunnerError("INVALID_ARGUMENTS", "real fixture E2E arguments are invalid");
   }
   return [...args];

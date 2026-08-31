@@ -54,6 +54,20 @@ describe("real fixture runner", () => {
     }
   });
 
+  it("rejects database query routing overrides before a child process", async () => {
+    const calls: string[] = [];
+    const unsafeUrl = "postgresql+asyncpg://fixture:fixture@127.0.0.1:55432/nexus_e2e_unit?host=remote.example:5432";
+
+    await expect(runRealFixture({
+      env: { NEXUS_REAL_E2E_DATABASE_URL: unsafeUrl },
+      run: async (executable) => {
+        calls.push(executable);
+        return 0;
+      },
+    })).rejects.toThrow("real fixture E2E database URL is invalid");
+    expect(calls).toEqual([]);
+  });
+
   it("constructs a narrow synthetic environment that drops credential canaries", () => {
     const child = buildRealFixtureEnvironment({
       PATH: "/safe/bin",
@@ -151,6 +165,11 @@ describe("real fixture runner", () => {
     await expect(runRealFixture({
       env: { NEXUS_REAL_E2E_DATABASE_URL: safeUrl },
       args: ["-c=playwright.config.ts"],
+      run,
+    })).rejects.toThrow("real fixture E2E arguments are invalid");
+    await expect(runRealFixture({
+      env: { NEXUS_REAL_E2E_DATABASE_URL: safeUrl },
+      args: ["-cplaywright.config.ts"],
       run,
     })).rejects.toThrow("real fixture E2E arguments are invalid");
   });
