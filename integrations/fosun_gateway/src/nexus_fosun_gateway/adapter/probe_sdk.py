@@ -15,6 +15,7 @@ from threading import Lock
 from typing import Literal
 
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
+from nexus_fosun_gateway.adapter.refusal import NonRetryableTransportRefusal
 from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
 from nexus_fosun_gateway.admission import admitted_sdk_subject
 from nexus_fosun_gateway.domain import (
@@ -30,6 +31,7 @@ from nexus_fosun_gateway.domain import (
     QuoteItem,
 )
 from nexus_fosun_gateway.policy.operations import GatewayOperation
+from nexus_fosun_gateway.probe_contract import MAX_BROKER_REQUESTS
 from nexus_fosun_gateway.probe_settings import ProbeProviderSettings
 from nexus_fosun_gateway.security.dependency_logging import (
     enforce_sdk_dependency_log_boundary,
@@ -87,7 +89,7 @@ _BROKER_COUNT_LABELS: tuple[ProbeLabel, ...] = (
 _MARKET_COUNT_LABELS: tuple[ProbeLabel, ...] = ("quote", "kline_minimal")
 _MAX_PER_LABEL = 3
 _MAX_TOTAL = 24
-_MAX_BROKER = 6
+_MAX_BROKER = MAX_BROKER_REQUESTS
 _MAX_MARKET = 24
 _WINDOW_SECONDS = 60.0
 _MIN_DISPATCH_INTERVAL_SECONDS = 1.0
@@ -99,7 +101,7 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-class ProbeBudgetError(RuntimeError):
+class ProbeBudgetError(NonRetryableTransportRefusal):
     """Fixed, value-free refusal raised before a provider delegate is called."""
 
     def __init__(self) -> None:
@@ -117,6 +119,7 @@ ProbeErrorCode = Literal[
     "PROBE_RESPONSE_INVALID",
     "PROBE_WINDOW_MISMATCH",
     "PROBE_CAPABILITY_EXPIRED",
+    "PROBE_OUTPUT_EXISTS",
     "PROBE_OUTPUT_INVALID",
     "PROBE_OUTPUT_QUARANTINE_REQUIRED",
     "PROBE_RECEIPT_DELIVERY_UNCERTAIN",
@@ -621,7 +624,7 @@ class SdkProbeExecutor:
             or type(plan.cash_flow_date_to) is not date
             or plan.session_date >= now.astimezone(UTC).date()
             or plan.cash_flow_date_from > plan.cash_flow_date_to
-            or (plan.cash_flow_date_to - plan.cash_flow_date_from).days > 7
+            or (plan.cash_flow_date_to - plan.cash_flow_date_from).days >= 7
         ):
             raise ProbeSdkError("INVALID_PROBE_PLAN")
 
@@ -633,13 +636,34 @@ class SdkProbeExecutor:
     ) -> GatewayPage[GatewayItem]:
         if not self._bundle.is_bound_to(self._budget):
             raise ProbeSdkError("SDK_CONTRACT_MISMATCH")
+        before = self._budget.snapshot()
         try:
             with self._budget.operation(label):
                 page = await self._bundle.transport.execute(operation, payload)
         except GatewayError as error:
-            if label == "kline_minimal" and error.code == "PROVIDER_MALFORMED_RESPONSE":
+            if label == "kline_minimal" and error.code == "PROVIDER_WINDOW_MISMATCH":
                 raise ProbeSdkError("PROBE_WINDOW_MISMATCH") from None
             raise
+        after = self._budget.snapshot()
+        allowed_changed_labels: frozenset[ProbeLabel] = (
+            frozenset((label, "Session"))
+            if label == "Accounts"
+            else frozenset((label,))
+        )
+        if (
+            after.count(label) <= before.count(label)
+            or any(
+                after.count(candidate) != before.count(candidate)
+                for candidate in _LABELS
+                if candidate not in allowed_changed_labels
+            )
+            or after.total - before.total
+            != sum(
+                after.count(candidate) - before.count(candidate)
+                for candidate in allowed_changed_labels
+            )
+        ):
+            raise ProbeSdkError("SDK_CONTRACT_MISMATCH")
         if not isinstance(page, GatewayPage):
             raise ProbeSdkError("PROBE_RESPONSE_INVALID")
         return page
@@ -668,7 +692,11 @@ def _require_page_contract(
 def _map_gateway_error(error: GatewayError) -> ProbeSdkError:
     if error.code == "SDK_CONTRACT_MISMATCH":
         return ProbeSdkError("SDK_CONTRACT_MISMATCH")
-    if error.code in {"VALIDATION_ERROR", "PROVIDER_CONTRACT_ERROR"}:
+    if error.code in {
+        "VALIDATION_ERROR",
+        "PROVIDER_CONTRACT_ERROR",
+        "PROVIDER_MALFORMED_RESPONSE",
+    }:
         return ProbeSdkError("PROBE_RESPONSE_INVALID")
     return ProbeSdkError("PROBE_FAILED")
 

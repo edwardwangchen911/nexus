@@ -195,8 +195,10 @@ Ruff, Mypy, existing Fosun Gateway adapters and offline socket guard.
 3. Run fresh acceptance:
 
    ```bash
+   install -d -m 700 "$PWD/.nexus-pytest"
    NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
-     uv run pytest integrations/fosun_gateway/tests -q
+     uv run pytest integrations/fosun_gateway/tests -q \
+       --basetemp="$PWD/.nexus-pytest/gateway"
    uv run ruff check integrations/fosun_gateway/src integrations/fosun_gateway/tests
    uv run mypy integrations/fosun_gateway/src
    uv run pytest tests/policy -q

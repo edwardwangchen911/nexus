@@ -11,6 +11,7 @@ from scripts.ci.repository_policy import (
     check_container_hardening,
     check_container_pins,
     check_forbidden_gateway_surface,
+    check_probe_runtime_isolation,
     check_provider_tls_remediation,
     check_sdk_lock_admission,
     check_workflow,
@@ -106,6 +107,27 @@ def test_gateway_requires_both_frozen_sdk_tls_remediation_surfaces(tmp_path: Pat
     assert {finding.rule for finding in check_provider_tls_remediation(tmp_path)} == {
         "provider_tls_remediation_missing"
     }
+
+
+def test_long_running_gateway_cannot_import_probe_only_construction(tmp_path: Path) -> None:
+    main_path = tmp_path / "integrations/fosun_gateway/src/nexus_fosun_gateway/main.py"
+    main_path.parent.mkdir(parents=True)
+    main_path.write_text(
+        "from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport\n"
+    )
+
+    assert check_probe_runtime_isolation(tmp_path) == []
+
+    main_path.write_text(
+        "from nexus_fosun_gateway.adapter.probe_sdk import build_probe_transport\n"
+    )
+    findings = check_probe_runtime_isolation(tmp_path)
+    assert [(finding.rule, finding.path) for finding in findings] == [
+        (
+            "probe_runtime_isolation_missing",
+            "integrations/fosun_gateway/src/nexus_fosun_gateway/main.py",
+        )
+    ]
 
 
 def test_sdk_lock_requires_complete_machine_readable_admission(tmp_path: Path) -> None:

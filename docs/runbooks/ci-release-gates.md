@@ -25,9 +25,11 @@ NEXUS_OFFLINE_SOCKET_GUARD=1 \
 PYTHONPATH="$PWD/scripts/offline_guard" \
 uv run python scripts/offline_guard/selftest.py
 
+install -d -m 700 "$PWD/.nexus-pytest"
 NEXUS_OFFLINE_SOCKET_GUARD=1 \
 PYTHONPATH="$PWD/scripts/offline_guard" \
-uv run pytest integrations/fosun_gateway/tests -q
+uv run pytest integrations/fosun_gateway/tests -q \
+  --basetemp="$PWD/.nexus-pytest/gateway"
 
 uv run pytest tests/policy -q
 uv run python scripts/ci/repository_policy.py \

@@ -2,13 +2,16 @@ import contextlib
 import http.client
 import io
 import logging
+import threading
 from io import BytesIO
 from types import SimpleNamespace
 
+import nexus_fosun_gateway.security.provider_tls as provider_tls_module
 import pytest
 import requests
 from nexus_fosun_gateway.security.provider_tls import (
     _MAX_PROVIDER_RESPONSE_BYTES,
+    ProbeTlsControls,
     ProviderHttpObserver,
     enforce_probe_tls_controls,
     enforce_sdk_tls_verification,
@@ -189,6 +192,237 @@ def test_probe_tls_controls_count_physical_edges_and_disable_adapter_retries() -
     client._http_session = business_session
     assert controls.attests(client, observer) is False
     client._http_session = installed_proxy
+
+
+def test_probe_tls_controls_close_both_sessions_when_first_close_is_interrupted() -> None:
+    closed: list[str] = []
+
+    class InterruptingSession:
+        def close(self) -> None:
+            closed.append("business")
+            raise KeyboardInterrupt
+
+    class RecordingSession:
+        def close(self) -> None:
+            closed.append("auth")
+
+    observer = _RecordingObserver([])
+    client = SimpleNamespace(_http_session=object())
+    auth_module = SimpleNamespace(requests=object())
+    controls = ProbeTlsControls(
+        InterruptingSession(),
+        RecordingSession(),
+        client=client,
+        auth_module=auth_module,
+        business_proxy=client._http_session,
+        auth_proxy=auth_module.requests,
+        observer=observer,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        controls.close()
+
+    assert closed == ["business", "auth"]
+
+
+def test_probe_tls_construction_failure_closes_every_created_session() -> None:
+    closed: list[str] = []
+
+    class BusinessSession:
+        trust_env = True
+
+        def request(self) -> None:
+            return None
+
+        def close(self) -> None:
+            closed.append("business")
+
+    class InvalidAuthSession:
+        trust_env = True
+
+        def close(self) -> None:
+            closed.append("auth")
+
+    class FakeRequests:
+        Session = InvalidAuthSession
+
+    client = SimpleNamespace(_http_session=BusinessSession())
+    auth_module = SimpleNamespace(requests=FakeRequests())
+
+    with pytest.raises(RuntimeError, match="probe HTTP surface"):
+        enforce_probe_tls_controls(
+            client,
+            auth_module,
+            observer=_RecordingObserver([]),
+        )
+
+    assert closed == ["business", "auth"]
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    ["auth_trust_env", "auth_surface", "controls_construction"],
+)
+def test_probe_tls_installation_failure_restores_surfaces_and_closes_sessions(
+    failure_stage: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[str] = []
+
+    class BusinessSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self._adapters = {
+                "https://": requests.adapters.HTTPAdapter(max_retries=2)
+            }
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            self._adapters[prefix] = adapter
+
+        def get_adapter(self, prefix: str) -> object:
+            return self._adapters[prefix]
+
+        def request(self) -> None:
+            return None
+
+        def close(self) -> None:
+            closed.append("business")
+
+    class AuthSession(BusinessSession):
+        def __init__(self) -> None:
+            self._trust_env = True
+            super().__init__()
+
+        @property
+        def trust_env(self) -> bool:
+            return self._trust_env
+
+        @trust_env.setter
+        def trust_env(self, value: bool) -> None:
+            self._trust_env = value
+            if failure_stage == "auth_trust_env" and value is False:
+                raise RuntimeError("synthetic setter drift")
+
+        def post(self) -> None:
+            return None
+
+        def close(self) -> None:
+            closed.append("auth")
+
+    class FakeRequests:
+        adapters = requests.adapters
+        Session = AuthSession
+
+    class AuthModule:
+        def __init__(self) -> None:
+            self._requests = FakeRequests()
+            self.original_requests = self._requests
+
+        @property
+        def requests(self) -> object:
+            return self._requests
+
+        @requests.setter
+        def requests(self, value: object) -> None:
+            self._requests = value
+            if failure_stage == "auth_surface" and value is not self.original_requests:
+                raise RuntimeError("synthetic surface drift")
+
+    business_session = BusinessSession()
+    client = SimpleNamespace(_http_session=business_session)
+    auth_module = AuthModule()
+    if failure_stage == "controls_construction":
+        def fail_controls(*_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("synthetic controls drift")
+
+        monkeypatch.setattr(provider_tls_module, "ProbeTlsControls", fail_controls)
+
+    with pytest.raises(RuntimeError, match="probe HTTP surface"):
+        enforce_probe_tls_controls(
+            client,
+            auth_module,
+            observer=_RecordingObserver([]),
+        )
+
+    assert client._http_session is business_session
+    assert auth_module.requests is auth_module.original_requests
+    assert business_session.trust_env is True
+    assert closed == ["business", "auth"]
+
+
+def test_probe_tls_close_revokes_dispatch_waiting_inside_observer() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    delegated = False
+    sessions: list[object] = []
+    errors: list[BaseException] = []
+
+    class BlockingObserver:
+        def before_dispatch(self, surface: str) -> None:
+            assert surface == "business"
+            entered.set()
+            assert release.wait(timeout=2)
+
+        def after_response(self, surface: str, status_code: int) -> None:
+            raise AssertionError((surface, status_code))
+
+    class FakeProbeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self.closed = False
+            self._adapters = {
+                "https://": requests.adapters.HTTPAdapter(max_retries=2)
+            }
+            sessions.append(self)
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            self._adapters[prefix] = adapter
+
+        def get_adapter(self, prefix: str) -> object:
+            return self._adapters[prefix]
+
+        def request(self, *_args: object, **_kwargs: object) -> object:
+            nonlocal delegated
+            delegated = True
+            raise AssertionError("revoked probe must not reach delegate")
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("unused")
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeRequests:
+        adapters = requests.adapters
+        Session = FakeProbeSession
+
+    client = SimpleNamespace(_http_session=FakeProbeSession())
+    auth_module = SimpleNamespace(requests=FakeRequests())
+    controls = enforce_probe_tls_controls(
+        client,
+        auth_module,
+        observer=BlockingObserver(),
+    )
+
+    def invoke() -> None:
+        try:
+            client._http_session.request("POST", "https://provider.invalid")
+        except BaseException as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=invoke)
+    thread.start()
+    assert entered.wait(timeout=1)
+    controls.close()
+    release.set()
+    thread.join(timeout=2)
+
+    assert thread.is_alive() is False
+    assert delegated is False
+    assert len(errors) == 1
+    assert all(session.closed for session in sessions)
 
 
 def test_probe_tls_observer_refusal_prevents_delegate_call() -> None:

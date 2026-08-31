@@ -83,6 +83,10 @@ def test_probe_runner_requires_an_explicit_publisher_signing_key_factory() -> No
             "cash_flow_date_from": date(2026, 8, 1),
             "cash_flow_date_to": date(2026, 8, 21),
         },
+        {
+            "cash_flow_date_from": date(2026, 8, 1),
+            "cash_flow_date_to": date(2026, 8, 8),
+        },
     ],
 )
 def test_probe_plan_rejects_invalid_values(changes: dict[str, object]) -> None:
@@ -220,6 +224,18 @@ def test_contract_only_validator_rejects_modified_digest_and_sensitive_extra() -
     assert extra_error.value.code == "PROBE_RESPONSE_INVALID"
 
 
+def test_contract_only_validator_rejects_broker_domain_request_overage() -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    prepared = _prepared(manifest_bytes)
+    document = json.loads(prepared.artifact_bytes)
+    document["operations"][0]["request_count"] = 2
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        validate_sanitized_probe_artifact(manifest_bytes, _json_bytes(document))
+
+    assert exc_info.value.code == "PROBE_RESPONSE_INVALID"
+
+
 def test_receipt_signs_only_the_exact_durable_artifact_and_activates_it(
     tmp_path,
 ) -> None:
@@ -338,7 +354,15 @@ def test_probe_finishing_at_capability_expiry_creates_no_artifact() -> None:
 
 @pytest.mark.parametrize(
     "mutation",
-    ["auth", "auth_bool", "history", "history_int", "labels", "count"],
+    [
+        "auth",
+        "auth_bool",
+        "history",
+        "history_int",
+        "labels",
+        "count",
+        "broker_count",
+    ],
 )
 def test_invalid_execution_evidence_never_creates_an_artifact(
     mutation: str,
@@ -354,11 +378,19 @@ def test_invalid_execution_evidence_never_creates_an_artifact(
         evidence = replace(evidence, history_window=1)
     elif mutation == "labels":
         evidence = replace(evidence, request_counts=(("Session", 1),))
-    else:
+    elif mutation == "count":
         evidence = replace(
             evidence,
             request_counts=tuple(
                 (name, 4 if name == "quote" else count)
+                for name, count in evidence.request_counts
+            ),
+        )
+    else:
+        evidence = replace(
+            evidence,
+            request_counts=tuple(
+                (name, 2 if name == "Session" else count)
                 for name, count in evidence.request_counts
             ),
         )

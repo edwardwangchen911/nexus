@@ -47,6 +47,7 @@ yarn-error.log*
 /.secrets/
 /.minio/
 .pytest_cache/
+.nexus-pytest/
 .hypothesis/
 .mypy_cache/
 .ruff_cache/

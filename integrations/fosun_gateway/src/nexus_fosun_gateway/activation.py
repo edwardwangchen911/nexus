@@ -27,6 +27,12 @@ from pydantic import (
 )
 
 from nexus_fosun_gateway.admission import sdk_admission_document_is_valid
+from nexus_fosun_gateway.probe_contract import (
+    BROKER_PROBE_OPERATIONS,
+    MAX_BROKER_REQUESTS,
+    REQUIRED_PROBE_OPERATIONS,
+    probe_response_contract_sha256,
+)
 
 RESULT_SCHEMA_VERSION = "nexus.fosun.activation-result.v1"
 PROBE_SCHEMA_VERSION = "nexus.fosun.sanitized-probe.v2"
@@ -38,17 +44,6 @@ MAX_CAPABILITY_TTL = timedelta(hours=24)
 MAX_ARTIFACT_BYTES = 1024 * 1024
 MAX_PUBLICATION_RECEIPT_BYTES = 16 * 1024
 MAX_TRUSTED_PUBLISHER_KEY_BYTES = 43
-REQUIRED_PROBE_OPERATIONS = (
-    "Session",
-    "Accounts",
-    "CashSummary",
-    "Holdings",
-    "OrderList",
-    "CashFlows",
-    "quote",
-    "kline_minimal",
-)
-
 _Hex40 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
 _Hex64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 _Base64Url32 = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{43}$")]
@@ -262,9 +257,23 @@ def evaluate_activation(
         REQUIRED_PROBE_OPERATIONS
     ):
         return _blocked(contract_hash, now, "FIX_PROBE_OPERATION_SET")
+    if operation_names != REQUIRED_PROBE_OPERATIONS:
+        return _blocked(contract_hash, now, "FIX_PROBE_OPERATION_SEQUENCE")
+    if any(
+        (expected := probe_response_contract_sha256(operation.name)) is None
+        or not hmac.compare_digest(operation.response_contract_sha256, expected)
+        for operation in probe.operations
+    ):
+        return _blocked(contract_hash, now, "REVIEW_PROBE_RESPONSE_CONTRACT")
     if (
         any(operation.request_count > MAX_REQUESTS_PER_OPERATION for operation in probe.operations)
         or sum(operation.request_count for operation in probe.operations) > MAX_PROBE_REQUESTS
+        or sum(
+            operation.request_count
+            for operation in probe.operations
+            if operation.name in BROKER_PROBE_OPERATIONS
+        )
+        > MAX_BROKER_REQUESTS
     ):
         return _blocked(contract_hash, now, "REDUCE_PROBE_REQUEST_COUNT")
     if not probe.checks.all_passed() or not all(operation.passed for operation in probe.operations):
@@ -462,7 +471,7 @@ def _read_bounded_or_empty(path: Path, *, max_bytes: int) -> bytes:
         ):
             return b""
         return content
-    except OSError:
+    except (OSError, ValueError):
         return b""
     finally:
         if file_descriptor is not None:
@@ -488,6 +497,13 @@ def _open_evidence_file(path: Path) -> int:
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
         )
     try:
+        starting_directory = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(starting_directory.st_mode)
+            or starting_directory.st_uid not in {0, os.geteuid()}
+            or starting_directory.st_mode & 0o022
+        ):
+            raise OSError("untrusted evidence root")
         if not components or any(component in {"", ".", ".."} for component in components):
             raise OSError("invalid evidence path")
         for component in components[:-1]:

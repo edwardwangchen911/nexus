@@ -16,6 +16,7 @@ from nexus_fosun_gateway.adapter.normalization import (
     normalize_holdings_response,
     normalize_provider_response,
 )
+from nexus_fosun_gateway.adapter.refusal import NonRetryableTransportRefusal
 from nexus_fosun_gateway.domain import CapabilityItem, GatewayError, GatewayItem, GatewayPage
 from nexus_fosun_gateway.policy.operations import (
     MARKET_OPERATIONS,
@@ -480,6 +481,8 @@ class SdkFosunTransport:
                     self._require_transport_ready()
                 raise _provider_unavailable() from None
             except GatewayError:
+                raise
+            except NonRetryableTransportRefusal:
                 raise
             except Exception as error:
                 if type(error).__name__ == "PermissionError":

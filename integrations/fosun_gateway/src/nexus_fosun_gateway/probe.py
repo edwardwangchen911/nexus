@@ -6,11 +6,10 @@ import base64
 import hashlib
 import hmac
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from threading import Lock
-from types import MappingProxyType
-from typing import Annotated, cast
+from typing import Annotated
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -29,7 +28,6 @@ from nexus_fosun_gateway.activation import (
     MAX_PROBE_REQUESTS,
     MAX_REQUESTS_PER_OPERATION,
     PUBLICATION_SIGNING_DOMAIN,
-    REQUIRED_PROBE_OPERATIONS,
     ProbeChecks,
     ProbeOperationEvidence,
     ProbePublicationReceipt,
@@ -37,12 +35,17 @@ from nexus_fosun_gateway.activation import (
 )
 from nexus_fosun_gateway.adapter.probe_sdk import (
     ProbeExecutionEvidence,
-    ProbeLabel,
     ProbeRequestPlan,
     ProbeSdkError,
     SdkProbeExecutor,
 )
 from nexus_fosun_gateway.admission import admitted_sdk_subject
+from nexus_fosun_gateway.probe_contract import (
+    BROKER_PROBE_OPERATIONS,
+    MAX_BROKER_REQUESTS,
+    REQUIRED_PROBE_OPERATIONS,
+    probe_response_contract_sha256,
+)
 from nexus_fosun_gateway.publication import DurableProbePublication
 
 _Symbol = Annotated[str, StringConstraints(pattern=r"^us[A-Z][A-Z0-9.]{0,14}$")]
@@ -50,118 +53,15 @@ _OutputBasename = Annotated[
     str,
     StringConstraints(pattern=r"^[a-z0-9][a-z0-9._-]{0,62}\.json$"),
 ]
-_CONTRACT_SCHEMA_VERSION = "nexus.fosun.probe-response-contract.v1"
-_REQUIRED_LABELS = cast("tuple[ProbeLabel, ...]", REQUIRED_PROBE_OPERATIONS)
-
-_PAGE_FIELDS: tuple[tuple[str, str], ...] = (
-    ("items", "tuple[expected-item]"),
-    ("source_request_id", "nonempty-string-discarded-after-validation"),
-    ("has_more", "boolean"),
-    ("next_cursor", "null-or-nonempty-string"),
-    ("as_of", "aware-utc-datetime"),
-    ("quality", "PASS-or-PARTIAL"),
-)
-_ITEM_FIELDS: Mapping[str, tuple[tuple[str, str], ...]] = MappingProxyType({
-    "Session": (
-        ("http_status", "integer-2xx"),
-        ("response_body", "bounded-and-discarded"),
-    ),
-    "Accounts": (
-        ("kind", "literal-account"),
-        ("external_account_id", "nonempty-string-in-memory-only"),
-        ("status", "string"),
-        ("base_currency", "null-or-string"),
-    ),
-    "CashSummary": (
-        ("kind", "literal-cash"),
-        ("external_account_id", "nonempty-string-in-memory-only"),
-        ("currency", "string"),
-        ("cash_balance", "finite-decimal"),
-        ("available_cash", "finite-decimal"),
-        ("provider_as_of", "null-or-aware-utc-datetime"),
-    ),
-    "Holdings": (
-        ("kind", "literal-position"),
-        ("external_account_id", "nonempty-string-in-memory-only"),
-        ("instrument_code", "string"),
-        ("currency", "string"),
-        ("quantity", "finite-decimal"),
-        ("available_quantity", "finite-decimal"),
-        ("frozen_quantity", "finite-decimal"),
-        ("average_cost", "null-or-finite-decimal"),
-        ("diluted_cost", "null-or-finite-decimal"),
-        ("current_price", "null-or-finite-decimal"),
-        ("provider_as_of", "null-or-aware-utc-datetime"),
-    ),
-    "OrderList": (
-        ("kind", "literal-order"),
-        ("external_order_id", "nonempty-string"),
-        ("instrument_code", "string"),
-        ("side", "buy-or-sell"),
-        ("quantity", "finite-decimal"),
-        ("filled_quantity", "finite-decimal"),
-        ("price", "null-or-finite-decimal"),
-        ("status", "string"),
-        ("submitted_at", "aware-utc-datetime"),
-        ("updated_at", "null-or-aware-utc-datetime"),
-    ),
-    "CashFlows": (
-        ("kind", "literal-cash-flow"),
-        ("external_cash_flow_id", "nonempty-string"),
-        ("currency", "string"),
-        ("amount", "finite-decimal"),
-        ("occurred_at", "aware-utc-datetime"),
-        ("flow_type", "string"),
-    ),
-    "quote": (
-        ("kind", "literal-quote"),
-        ("instrument_code", "requested-symbol"),
-        ("price", "null-or-finite-decimal"),
-        ("as_of", "aware-utc-datetime"),
-    ),
-    "kline_minimal": (
-        ("kind", "literal-bar"),
-        ("instrument_code", "requested-symbol"),
-        ("interval", "literal-day"),
-        ("timestamp", "requested-provider-day-utc"),
-        ("open", "positive-finite-decimal"),
-        ("high", "positive-finite-decimal"),
-        ("low", "positive-finite-decimal"),
-        ("close", "positive-finite-decimal"),
-        ("volume", "nonnegative-finite-decimal"),
-    ),
-})
 
 
 def _canonical_json(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
-def _contract_material(label: str) -> dict[str, object]:
-    item_fields = _ITEM_FIELDS.get(label)
-    if item_fields is None or label not in _REQUIRED_LABELS:
-        raise ProbeSdkError("PROBE_RESPONSE_INVALID")
-    return {
-        "contract_schema_version": _CONTRACT_SCHEMA_VERSION,
-        "item_fields": item_fields,
-        "logical_label": label,
-        "page_fields": (
-            (("authentication", "bounded-physical-http-result"),)
-            if label == "Session"
-            else _PAGE_FIELDS
-        ),
-    }
-
-
-_RESPONSE_CONTRACT_SHA256: Mapping[str, str] = MappingProxyType({
-    label: hashlib.sha256(_canonical_json(_contract_material(label))).hexdigest()
-    for label in _REQUIRED_LABELS
-})
-
-
 def response_contract_sha256(label: str) -> str:
     """Return a code-owned digest that never sees runtime values or model metadata."""
-    digest = _RESPONSE_CONTRACT_SHA256.get(label)
+    digest = probe_response_contract_sha256(label)
     if digest is None:
         raise ProbeSdkError("PROBE_RESPONSE_INVALID")
     return digest
@@ -189,7 +89,7 @@ class ProbePlan(BaseModel):
     def _validate_closed_ranges(self) -> ProbePlan:
         if (
             self.cash_flow_date_from > self.cash_flow_date_to
-            or (self.cash_flow_date_to - self.cash_flow_date_from).days > 7
+            or (self.cash_flow_date_to - self.cash_flow_date_from).days >= 7
             or ".." in self.output_basename
         ):
             raise ValueError("probe plan range is invalid")
@@ -355,7 +255,7 @@ def _build_prepared_probe(
     except Exception:
         raise ProbeSdkError("PROBE_FAILED") from None
 
-    counts = dict(evidence.request_counts)
+    counts: dict[str, int] = dict(evidence.request_counts)
     artifact = SanitizedProbeArtifact(
         schema_version="nexus.fosun.sanitized-probe.v2",
         provider="fosun",
@@ -372,7 +272,7 @@ def _build_prepared_probe(
                 passed=True,
                 response_contract_sha256=response_contract_sha256(label),
             )
-            for label in _REQUIRED_LABELS
+            for label in REQUIRED_PROBE_OPERATIONS
         ),
         checks=ProbeChecks(
             permission_read_only=True,
@@ -420,6 +320,12 @@ def validate_sanitized_probe_artifact(
         )
         or sum(item.request_count for item in artifact.operations)
         > MAX_PROBE_REQUESTS
+        or sum(
+            item.request_count
+            for item in artifact.operations
+            if item.name in BROKER_PROBE_OPERATIONS
+        )
+        > MAX_BROKER_REQUESTS
         or not artifact.checks.all_passed()
         or any(
             item.response_contract_sha256
@@ -444,6 +350,12 @@ def _validate_execution_evidence(evidence: ProbeExecutionEvidence) -> None:
             for _name, count in counts
         )
         or sum(count for _name, count in counts) > MAX_PROBE_REQUESTS
+        or sum(
+            count
+            for name, count in counts
+            if name in BROKER_PROBE_OPERATIONS
+        )
+        > MAX_BROKER_REQUESTS
         or not isinstance(evidence.auth_successes, int)
         or isinstance(evidence.auth_successes, bool)
         or evidence.auth_successes != 1

@@ -18,6 +18,18 @@ class Environment(StrEnum):
 
 BROKER_LISTENER_PORT = 8081
 MARKET_LISTENER_PORT = 8082
+_MAX_CONFIG_PATH_BYTES = 4096
+
+
+def _require_bounded_config_path(value: Path) -> Path:
+    text = str(value)
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeError:
+        raise ValueError("configuration path is invalid") from None
+    if not text or "\x00" in text or len(encoded) > _MAX_CONFIG_PATH_BYTES:
+        raise ValueError("configuration path is invalid")
+    return value
 
 
 class GatewaySettings(BaseSettings):
@@ -149,8 +161,9 @@ class GatewaySettings(BaseSettings):
     def provider_base_url_requires_https(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        stripped = value.strip()
-        parsed = urlsplit(stripped)
+        if value != value.strip() or value != value.rstrip("/"):
+            raise ValueError("provider base URL must be exact")
+        parsed = urlsplit(value)
         try:
             parsed.port
         except ValueError as error:
@@ -164,7 +177,12 @@ class GatewaySettings(BaseSettings):
             or parsed.fragment
         ):
             raise ValueError("provider base URL must be an unambiguous HTTPS URL")
-        return stripped.rstrip("/")
+        return value
+
+    @field_validator("provider_manifest")
+    @classmethod
+    def provider_manifest_path_is_bounded(cls, value: Path) -> Path:
+        return _require_bounded_config_path(value)
 
     @field_validator("sdk_admitted", mode="before")
     @classmethod
@@ -183,8 +201,10 @@ class GatewaySettings(BaseSettings):
     )
     @classmethod
     def activation_receipt_path_is_absolute(cls, value: Path | None) -> Path | None:
-        if value is not None and not value.is_absolute():
-            raise ValueError("activation probe paths must be absolute")
+        if value is not None:
+            _require_bounded_config_path(value)
+            if not value.is_absolute():
+                raise ValueError("activation probe paths must be absolute")
         return value
 
     @model_validator(mode="after")

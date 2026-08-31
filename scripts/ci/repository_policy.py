@@ -20,6 +20,10 @@ _FORBIDDEN_GATEWAY = re.compile(
     r"(?:place|create|modify|cancel|submit)_order",
     re.IGNORECASE,
 )
+_PROBE_ONLY_RUNTIME = re.compile(
+    r"\bnexus_fosun_gateway\.(?:adapter\.probe_sdk|probe_cli|probe)\b|"
+    r"\b(?:build_probe_transport|enforce_probe_tls_controls|run_sanitized_probe)\b"
+)
 _REVIEWED_OFFLINE_SIMULATION_PATHS = frozenset(
     {
         "integrations/fosun_gateway/src/nexus_fosun_gateway/adapter/simulation_fixture.py",
@@ -127,6 +131,28 @@ def check_provider_tls_remediation(root: Path) -> list[PolicyFinding]:
                 "provider_tls_remediation_missing",
                 _relative(root, remediation_path),
                 "both reviewed SDK HTTP surfaces must force certificate verification",
+            )
+        ]
+    return []
+
+
+def check_probe_runtime_isolation(root: Path) -> list[PolicyFinding]:
+    """Keep the one-shot no-activation constructor out of the long-running Gateway."""
+    main_path = root / "integrations/fosun_gateway/src/nexus_fosun_gateway/main.py"
+    if not main_path.is_file():
+        return [
+            PolicyFinding(
+                "probe_runtime_isolation_missing",
+                _relative(root, main_path),
+                "long-running gateway entry point is unavailable",
+            )
+        ]
+    if _PROBE_ONLY_RUNTIME.search(_read_text(main_path)) is not None:
+        return [
+            PolicyFinding(
+                "probe_runtime_isolation_missing",
+                _relative(root, main_path),
+                "long-running gateway imports a probe-only construction surface",
             )
         ]
     return []
@@ -523,6 +549,7 @@ def run_all(root: Path) -> tuple[list[PolicyFinding], list[DependencyRecord]]:
     findings = scan_secret_material(repository_texts(root))
     findings.extend(check_forbidden_gateway_surface(root))
     findings.extend(check_provider_tls_remediation(root))
+    findings.extend(check_probe_runtime_isolation(root))
     findings.extend(check_sdk_lock_admission(root))
     findings.extend(check_container_pins(root))
     findings.extend(check_container_hardening(root))

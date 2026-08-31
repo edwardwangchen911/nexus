@@ -57,6 +57,7 @@ _PROBE_ENVIRONMENT_NAMES = (
     "FSOPENAPI_CLIENT_PRIVATE_KEY",
     "FSOPENAPI_SERVER_PUBLIC_KEY",
 )
+_MAX_MANIFEST_PATH_BYTES = 4096
 
 
 def failure_result(code: str) -> dict[str, object]:
@@ -112,7 +113,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except BaseException:
         result = failure_result("PROBE_FAILED")
         exit_code = 2
-    if not write_result_frame(result):
+    try:
+        delivered = write_result_frame(result)
+    except BaseException:
+        return 2
+    if not delivered:
         return 2
     return exit_code
 
@@ -120,8 +125,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
     prepared: PreparedProbeArtifact | None = None
     publication_complete = False
+    publication_path: Path | None = None
     try:
-        manifest_path, plan = _parse_arguments(arguments)
+        manifest_spelling, manifest_path = _parse_manifest_argument(arguments)
         manifest_bytes = _read_bounded_or_empty(
             manifest_path,
             max_bytes=MAX_ARTIFACT_BYTES,
@@ -129,16 +135,16 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
         manifest_document = _load_manifest(manifest_bytes)
         if admitted_sdk_subject(manifest_document) is None:
             raise ProbeSdkError("COMPLETE_SDK_ADMISSION")
+        plan = _parse_probe_plan(arguments, manifest_spelling)
 
-        settings = ProbeProviderSettings.model_validate(
-            {
-                name: os.environ[name]
-                for name in _PROBE_ENVIRONMENT_NAMES
-                if name in os.environ
-            }
-        )
-        if settings.provider_manifest != manifest_path:
+        environment_values = {
+            name: os.environ[name]
+            for name in _PROBE_ENVIRONMENT_NAMES
+            if name in os.environ
+        }
+        if environment_values.get("FOSUN_PROVIDER_MANIFEST") != manifest_spelling:
             raise ProbeSdkError("PROBE_SETTINGS_INVALID")
+        settings = ProbeProviderSettings.model_validate(environment_values)
         started_at = datetime.now(UTC)
         plan.validate_for_start(started_at)
         budget = PhysicalHttpBudget()
@@ -156,6 +162,7 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
             utc_clock=lambda: datetime.now(UTC),
         )
         validate_sanitized_probe_artifact(manifest_bytes, prepared.artifact_bytes)
+        publication_path = settings.output_dir / plan.output_basename
         publication = publish_probe_artifact(
             settings.output_dir,
             plan.output_basename,
@@ -189,6 +196,16 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
             "publication_receipt": receipt,
         }
     except (KeyboardInterrupt, asyncio.CancelledError):
+        if publication_complete or (
+            publication_path is not None
+            and prepared is not None
+            and _read_bounded_or_empty(
+                publication_path,
+                max_bytes=MAX_ARTIFACT_BYTES,
+            )
+            == prepared.artifact_bytes
+        ):
+            return failure_result("PROBE_OUTPUT_QUARANTINE_REQUIRED")
         raise
     except ValidationError:
         return failure_result("PROBE_SETTINGS_INVALID")
@@ -207,7 +224,32 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
             prepared.dispose_signing_key()
 
 
-def _parse_arguments(arguments: tuple[str, ...]) -> tuple[Path, ProbePlan]:
+def _parse_manifest_argument(arguments: tuple[str, ...]) -> tuple[str, Path]:
+    if not arguments or len(arguments) % 2 != 0:
+        raise ProbeSdkError("INVALID_PROBE_PLAN")
+    manifest_values: list[str] = []
+    for index in range(0, len(arguments), 2):
+        if arguments[index] == "--manifest":
+            manifest_values.append(arguments[index + 1])
+    if len(manifest_values) != 1:
+        raise ProbeSdkError("INVALID_PROBE_PLAN")
+    try:
+        manifest_spelling = manifest_values[0]
+        if (
+            not manifest_spelling
+            or "\x00" in manifest_spelling
+            or len(manifest_spelling.encode("utf-8")) > _MAX_MANIFEST_PATH_BYTES
+        ):
+            raise ValueError
+        manifest_path = Path(manifest_spelling)
+        if not manifest_path.is_absolute():
+            raise ValueError
+    except (TypeError, UnicodeError, ValueError):
+        raise ProbeSdkError("INVALID_PROBE_PLAN") from None
+    return manifest_spelling, manifest_path
+
+
+def _parse_probe_plan(arguments: tuple[str, ...], manifest_spelling: str) -> ProbePlan:
     if len(arguments) != len(_ARGUMENT_NAMES) * 2:
         raise ProbeSdkError("INVALID_PROBE_PLAN")
     values: dict[str, str] = {}
@@ -217,12 +259,9 @@ def _parse_arguments(arguments: tuple[str, ...]) -> tuple[Path, ProbePlan]:
         if name not in _ARGUMENT_NAMES or name in values:
             raise ProbeSdkError("INVALID_PROBE_PLAN")
         values[name] = value
-    if set(values) != set(_ARGUMENT_NAMES):
+    if set(values) != set(_ARGUMENT_NAMES) or values["--manifest"] != manifest_spelling:
         raise ProbeSdkError("INVALID_PROBE_PLAN")
     try:
-        manifest_path = Path(values["--manifest"])
-        if not manifest_path.is_absolute():
-            raise ValueError
         plan = ProbePlan(
             symbol=values["--symbol"],
             session_date=_exact_date(values["--session-date"]),
@@ -236,7 +275,7 @@ def _parse_arguments(arguments: tuple[str, ...]) -> tuple[Path, ProbePlan]:
         )
     except (KeyError, TypeError, ValueError, ValidationError):
         raise ProbeSdkError("INVALID_PROBE_PLAN") from None
-    return manifest_path, plan
+    return plan
 
 
 def _exact_date(value: str) -> date:

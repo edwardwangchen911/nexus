@@ -57,7 +57,10 @@ jobs:
         env:
           NEXUS_OFFLINE_SOCKET_GUARD: "1"
           PYTHONPATH: ${{ github.workspace }}/scripts/offline_guard
-        run: uv run pytest integrations/fosun_gateway/tests -q
+        run: |
+          install -d -m 700 "${{ github.workspace }}/.nexus-pytest"
+          uv run pytest integrations/fosun_gateway/tests -q \
+            --basetemp="${{ github.workspace }}/.nexus-pytest/gateway"
       - run: uv run ruff check integrations/fosun_gateway scripts/offline_guard
       - run: uv run mypy integrations/fosun_gateway/src
 

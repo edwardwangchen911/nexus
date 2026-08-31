@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Literal, Protocol
 
+from nexus_fosun_gateway.adapter.refusal import NonRetryableTransportRefusal
 from nexus_fosun_gateway.security.dependency_logging import (
     enforce_sdk_dependency_log_boundary,
 )
@@ -14,6 +16,7 @@ _SDK_SOCKET_TIMEOUT_SECONDS = (5.0, 5.0)
 _MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 _PROVIDER_RESPONSE_CHUNK_BYTES = 64 * 1024
 HttpSurface = Literal["auth", "business"]
+_MISSING_ATTRIBUTE = object()
 
 
 class ProviderHttpObserver(Protocol):
@@ -22,6 +25,33 @@ class ProviderHttpObserver(Protocol):
     def before_dispatch(self, surface: HttpSurface) -> None: ...
 
     def after_response(self, surface: HttpSurface, status_code: int) -> None: ...
+
+
+class _ProbeDispatchGate:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._revoked = False
+
+    def require_open(self) -> None:
+        with self._lock:
+            if self._revoked:
+                raise NonRetryableTransportRefusal("probe HTTP dispatch is revoked")
+
+    def revoke(self) -> None:
+        with self._lock:
+            self._revoked = True
+
+
+@dataclass(frozen=True, slots=True)
+class _InstalledTlsSurfaces:
+    business_session: object
+    auth_session: object
+    requests_module: object
+    business_proxy: object
+    auth_proxy: object
+    business_trust_env: object
+    auth_trust_env: object
+    dispatch_gate: _ProbeDispatchGate | None
 
 
 class ProbeTlsControls:
@@ -37,6 +67,7 @@ class ProbeTlsControls:
         business_proxy: object,
         auth_proxy: object,
         observer: ProviderHttpObserver,
+        dispatch_gate: _ProbeDispatchGate | None = None,
     ) -> None:
         self._business_session = business_session
         self._auth_session = auth_session
@@ -45,6 +76,7 @@ class ProbeTlsControls:
         self._business_proxy = business_proxy
         self._auth_proxy = auth_proxy
         self._observer = observer
+        self._dispatch_gate = dispatch_gate
         self._lock = Lock()
         self._closed = False
 
@@ -57,6 +89,10 @@ class ProbeTlsControls:
             and getattr(self._auth_module, "requests", None) is self._auth_proxy
             and getattr(self._business_proxy, "_observer", None) is observer
             and getattr(self._auth_proxy, "_observer", None) is observer
+            and getattr(self._business_proxy, "_dispatch_gate", None)
+            is self._dispatch_gate
+            and getattr(self._auth_proxy, "_dispatch_gate", None)
+            is self._dispatch_gate
         )
 
     def close(self) -> None:
@@ -64,17 +100,23 @@ class ProbeTlsControls:
             if self._closed:
                 return
             self._closed = True
-        failed = False
+        if self._dispatch_gate is not None:
+            self._dispatch_gate.revoke()
+        failure: BaseException | None = None
         for session in (self._business_session, self._auth_session):
             close = getattr(session, "close", None)
             if not callable(close):
-                failed = True
+                if failure is None:
+                    failure = RuntimeError("probe HTTP session is not closable")
                 continue
             try:
                 close()
-            except Exception:
-                failed = True
-        if failed:
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+        if isinstance(failure, KeyboardInterrupt | SystemExit):
+            raise failure
+        if failure is not None:
             raise RuntimeError("probe HTTP sessions could not be closed")
 
 
@@ -84,10 +126,12 @@ class _VerifiedSessionProxy:
         delegate: object,
         request: Callable[..., object],
         observer: ProviderHttpObserver | None = None,
+        dispatch_gate: _ProbeDispatchGate | None = None,
     ) -> None:
         self._delegate = delegate
         self._request = request
         self._observer = observer
+        self._dispatch_gate = dispatch_gate
 
     def request(self, *args: object, **kwargs: object) -> object:
         enforce_sdk_dependency_log_boundary()
@@ -95,7 +139,9 @@ class _VerifiedSessionProxy:
         kwargs["allow_redirects"] = False
         kwargs["timeout"] = _SDK_SOCKET_TIMEOUT_SECONDS
         kwargs["stream"] = True
+        _require_dispatch_open(self._dispatch_gate)
         _before_dispatch(self._observer, "business")
+        _require_dispatch_open(self._dispatch_gate)
         response = _read_bounded_response(self._request(*args, **kwargs))
         _after_response(self._observer, "business", response)
         return response
@@ -110,10 +156,12 @@ class _VerifiedRequestsProxy:
         delegate: object,
         post: Callable[..., object],
         observer: ProviderHttpObserver | None = None,
+        dispatch_gate: _ProbeDispatchGate | None = None,
     ) -> None:
         self._delegate = delegate
         self._post = post
         self._observer = observer
+        self._dispatch_gate = dispatch_gate
 
     def post(self, *args: object, **kwargs: object) -> object:
         enforce_sdk_dependency_log_boundary()
@@ -121,7 +169,9 @@ class _VerifiedRequestsProxy:
         kwargs["allow_redirects"] = False
         kwargs["timeout"] = _SDK_SOCKET_TIMEOUT_SECONDS
         kwargs["stream"] = True
+        _require_dispatch_open(self._dispatch_gate)
         _before_dispatch(self._observer, "auth")
+        _require_dispatch_open(self._dispatch_gate)
         response = _read_bounded_response(self._post(*args, **kwargs))
         _after_response(self._observer, "auth", response)
         return response
@@ -142,21 +192,28 @@ def enforce_probe_tls_controls(
     observer: ProviderHttpObserver,
 ) -> ProbeTlsControls:
     """Install counted, no-retry, closable TLS surfaces for one probe only."""
-    business_session, auth_session = _install_sdk_tls_verification(
+    installation = _install_sdk_tls_verification(
         client,
         auth_module,
         observer=observer,
         probe_mode=True,
     )
-    return ProbeTlsControls(
-        business_session,
-        auth_session,
-        client=client,
-        auth_module=auth_module,
-        business_proxy=getattr(client, "_http_session"),
-        auth_proxy=getattr(auth_module, "requests"),
-        observer=observer,
-    )
+    try:
+        return ProbeTlsControls(
+            installation.business_session,
+            installation.auth_session,
+            client=client,
+            auth_module=auth_module,
+            business_proxy=installation.business_proxy,
+            auth_proxy=installation.auth_proxy,
+            observer=observer,
+            dispatch_gate=installation.dispatch_gate,
+        )
+    except BaseException as error:
+        _rollback_complete_installation(installation, client, auth_module)
+        if isinstance(error, KeyboardInterrupt | SystemExit):
+            raise
+        raise RuntimeError("reviewed SDK probe HTTP surface is unavailable") from None
 
 
 def _install_sdk_tls_verification(
@@ -165,42 +222,99 @@ def _install_sdk_tls_verification(
     *,
     observer: ProviderHttpObserver | None,
     probe_mode: bool,
-) -> tuple[object, object]:
+) -> _InstalledTlsSurfaces:
     enforce_sdk_dependency_log_boundary()
-    session = getattr(client, "_http_session", None)
-    session_request = getattr(session, "request", None)
-    requests_module = getattr(auth_module, "requests", None)
-    session_factory = getattr(requests_module, "Session", None)
-    if (
-        not callable(session_request)
-        or not hasattr(session, "trust_env")
-        or not callable(session_factory)
-    ):
-        raise RuntimeError("reviewed SDK TLS verification surface is unavailable")
-    isolated_auth_session = session_factory()
-    enforce_sdk_dependency_log_boundary()
-    isolated_auth_post = getattr(isolated_auth_session, "post", None)
-    if not callable(isolated_auth_post) or not hasattr(
-        isolated_auth_session, "trust_env"
-    ):
-        raise RuntimeError("reviewed SDK TLS verification surface is unavailable")
-    if probe_mode:
-        try:
+    session: object | None = None
+    requests_module: object | None = None
+    isolated_auth_session: object | None = None
+    session_trust_env: object = _MISSING_ATTRIBUTE
+    auth_trust_env: object = _MISSING_ATTRIBUTE
+    try:
+        session = getattr(client, "_http_session", None)
+        session_request = getattr(session, "request", None)
+        requests_module = getattr(auth_module, "requests", None)
+        session_factory = getattr(requests_module, "Session", None)
+        if (
+            not callable(session_request)
+            or not hasattr(session, "trust_env")
+            or not callable(session_factory)
+        ):
+            raise RuntimeError("reviewed SDK TLS verification surface is unavailable")
+        isolated_auth_session = session_factory()
+        enforce_sdk_dependency_log_boundary()
+        isolated_auth_post = getattr(isolated_auth_session, "post", None)
+        if not callable(isolated_auth_post) or not hasattr(
+            isolated_auth_session, "trust_env"
+        ):
+            raise RuntimeError("reviewed SDK TLS verification surface is unavailable")
+        if probe_mode:
             _force_zero_https_retries(session, requests_module)
             _force_zero_https_retries(isolated_auth_session, requests_module)
             _require_closable(session)
             _require_closable(isolated_auth_session)
-        except Exception:
+        session_trust_env = getattr(session, "trust_env")
+        auth_trust_env = getattr(isolated_auth_session, "trust_env")
+        dispatch_gate = _ProbeDispatchGate() if probe_mode else None
+        setattr(session, "trust_env", False)
+        setattr(isolated_auth_session, "trust_env", False)
+        business_proxy = _VerifiedSessionProxy(
+            session,
+            session_request,
+            observer,
+            dispatch_gate,
+        )
+        auth_proxy = _VerifiedRequestsProxy(
+            requests_module,
+            isolated_auth_post,
+            observer,
+            dispatch_gate,
+        )
+        setattr(client, "_http_session", business_proxy)
+        setattr(auth_module, "requests", auth_proxy)
+    except BaseException as error:
+        if session is not None:
+            _restore_attribute_quietly(client, "_http_session", session)
+        if requests_module is not None:
+            _restore_attribute_quietly(auth_module, "requests", requests_module)
+        if session is not None and session_trust_env is not _MISSING_ATTRIBUTE:
+            _restore_attribute_quietly(session, "trust_env", session_trust_env)
+        if (
+            isolated_auth_session is not None
+            and auth_trust_env is not _MISSING_ATTRIBUTE
+        ):
+            _restore_attribute_quietly(
+                isolated_auth_session,
+                "trust_env",
+                auth_trust_env,
+            )
+        if probe_mode:
             _close_quietly(session)
             _close_quietly(isolated_auth_session)
+        elif isolated_auth_session is not None:
+            _close_quietly(isolated_auth_session)
+        if isinstance(error, KeyboardInterrupt | SystemExit):
+            raise
+        if probe_mode:
             raise RuntimeError("reviewed SDK probe HTTP surface is unavailable") from None
-    setattr(session, "trust_env", False)
-    setattr(isolated_auth_session, "trust_env", False)
-    business_proxy = _VerifiedSessionProxy(session, session_request, observer)
-    auth_proxy = _VerifiedRequestsProxy(requests_module, isolated_auth_post, observer)
-    setattr(client, "_http_session", business_proxy)
-    setattr(auth_module, "requests", auth_proxy)
-    return session, isolated_auth_session
+        raise
+    assert isolated_auth_session is not None
+    assert session is not None
+    assert requests_module is not None
+    return _InstalledTlsSurfaces(
+        business_session=session,
+        auth_session=isolated_auth_session,
+        requests_module=requests_module,
+        business_proxy=business_proxy,
+        auth_proxy=auth_proxy,
+        business_trust_env=session_trust_env,
+        auth_trust_env=auth_trust_env,
+        dispatch_gate=dispatch_gate,
+    )
+
+
+def _require_dispatch_open(dispatch_gate: _ProbeDispatchGate | None) -> None:
+    if dispatch_gate is not None:
+        dispatch_gate.require_open()
 
 
 def _force_zero_https_retries(session: object, requests_module: object) -> None:
@@ -253,8 +367,46 @@ def _close_quietly(session: object) -> None:
     if callable(close):
         try:
             close()
-        except Exception:
+        except BaseException:
             pass
+
+
+def _restore_attribute_quietly(target: object, name: str, value: object) -> None:
+    try:
+        setattr(target, name, value)
+    except BaseException:
+        pass
+
+
+def _rollback_complete_installation(
+    installation: _InstalledTlsSurfaces,
+    client: object,
+    auth_module: object,
+) -> None:
+    if installation.dispatch_gate is not None:
+        installation.dispatch_gate.revoke()
+    _restore_attribute_quietly(
+        client,
+        "_http_session",
+        installation.business_session,
+    )
+    _restore_attribute_quietly(
+        auth_module,
+        "requests",
+        installation.requests_module,
+    )
+    _restore_attribute_quietly(
+        installation.business_session,
+        "trust_env",
+        installation.business_trust_env,
+    )
+    _restore_attribute_quietly(
+        installation.auth_session,
+        "trust_env",
+        installation.auth_trust_env,
+    )
+    _close_quietly(installation.business_session)
+    _close_quietly(installation.auth_session)
 
 
 def _before_dispatch(
@@ -278,7 +430,7 @@ def _after_response(
         raise RuntimeError("reviewed SDK probe HTTP response is unavailable")
     try:
         observer.after_response(surface, status_code)
-    except Exception:
+    except BaseException:
         _close_quietly(response)
         raise
 
@@ -311,7 +463,7 @@ def _read_bounded_response(response: object) -> object:
             payload.extend(chunk)
             if len(payload) > _MAX_PROVIDER_RESPONSE_BYTES:
                 raise RuntimeError("provider response exceeded bounded size")
-    except Exception:
+    except BaseException:
         close()
         raise
     setattr(response, "_content", bytes(payload))

@@ -20,6 +20,10 @@ from nexus_fosun_gateway.domain import (
 from nexus_fosun_gateway.policy.operations import GatewayOperation
 
 
+class _BarWindowMismatch(ValueError):
+    """Internal marker for a valid bar whose date is outside the requested window."""
+
+
 def normalize_provider_response(
     operation: GatewayOperation,
     raw: object,
@@ -47,6 +51,8 @@ def normalize_provider_response(
         if operation == "fosun_get_bars":
             items = _bars(data, payload, received_at)
             return _page(items, request_id, received_at, quality="PARTIAL")
+    except _BarWindowMismatch:
+        raise _window_mismatch() from None
     except (KeyError, TypeError, ValueError, InvalidOperation):
         raise _malformed() from None
     raise _malformed()
@@ -278,7 +284,7 @@ def _bars(
                 else start <= item.timestamp <= end
             )
             if not in_window:
-                raise ValueError
+                raise _BarWindowMismatch
         if not all(
             value.is_finite() and value > 0
             for value in (item.open, item.high, item.low, item.close)
@@ -496,4 +502,13 @@ def _malformed() -> GatewayError:
         "Provider response did not match the reviewed contract.",
         status_code=502,
         next_action="REVIEW_PROVIDER_CONTRACT",
+    )
+
+
+def _window_mismatch() -> GatewayError:
+    return GatewayError(
+        "PROVIDER_WINDOW_MISMATCH",
+        "Provider response did not match the requested time window.",
+        status_code=502,
+        next_action="REVIEW_PROVIDER_WINDOW",
     )

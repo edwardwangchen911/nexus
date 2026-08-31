@@ -19,6 +19,7 @@ from nexus_fosun_gateway.activation import (
 from nexus_fosun_gateway.activation import (
     evaluate_activation as _evaluate_activation,
 )
+from nexus_fosun_gateway.probe_contract import probe_response_contract_sha256
 
 MANIFEST_PATH = Path(__file__).parents[4] / "contracts" / "providers" / "fosun" / "manifest.json"
 CHECKED_AT = datetime(2026, 8, 27, 8, 0, tzinfo=UTC)
@@ -233,6 +234,43 @@ def test_probe_operation_set_must_be_exact_and_closed(mutation: str) -> None:
     assert result.next_action == "FIX_PROBE_OPERATION_SET"
 
 
+def test_probe_operation_sequence_must_match_the_fixed_runner_plan() -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    probe = _probe_document(manifest_bytes)
+    probe["operations"][0], probe["operations"][1] = (
+        probe["operations"][1],
+        probe["operations"][0],
+    )
+    probe_bytes = _json_bytes(probe)
+
+    result = evaluate_activation(
+        manifest_bytes,
+        probe_bytes,
+        _receipt_bytes(probe_bytes),
+        checked_at=CHECKED_AT,
+    )
+
+    assert result.status == "fixture_with_next_action"
+    assert result.next_action == "FIX_PROBE_OPERATION_SEQUENCE"
+
+
+def test_probe_response_contract_digests_are_code_owned() -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    probe = _probe_document(manifest_bytes)
+    probe["operations"][0]["response_contract_sha256"] = "0" * 64
+    probe_bytes = _json_bytes(probe)
+
+    result = evaluate_activation(
+        manifest_bytes,
+        probe_bytes,
+        _receipt_bytes(probe_bytes),
+        checked_at=CHECKED_AT,
+    )
+
+    assert result.status == "fixture_with_next_action"
+    assert result.next_action == "REVIEW_PROBE_RESPONSE_CONTRACT"
+
+
 @pytest.mark.parametrize(
     "write_operation",
     ["PlaceOrder", "CancelOrder", "SimulationTrade", "WebhookSubscription"],
@@ -297,6 +335,23 @@ def test_request_cap_and_all_probe_checks_must_pass() -> None:
 
     assert cap_result.next_action == "REDUCE_PROBE_REQUEST_COUNT"
     assert check_result.next_action == "REVIEW_PROBE_EVIDENCE"
+
+
+def test_signed_probe_cannot_exceed_the_broker_domain_request_cap() -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    probe = _probe_document(manifest_bytes)
+    probe["operations"][0]["request_count"] = 2
+    probe_bytes = _json_bytes(probe)
+
+    result = evaluate_activation(
+        manifest_bytes,
+        probe_bytes,
+        _receipt_bytes(probe_bytes),
+        checked_at=CHECKED_AT,
+    )
+
+    assert result.status == "fixture_with_next_action"
+    assert result.next_action == "REDUCE_PROBE_REQUEST_COUNT"
 
 
 def test_future_dated_probe_cannot_activate() -> None:
@@ -712,6 +767,27 @@ def test_bounded_evidence_reader_rejects_metadata_change_during_read(
     assert fstat_calls == 2
 
 
+def test_relative_evidence_reader_rejects_untrusted_starting_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    unsafe_cwd = tmp_path / "unsafe-cwd"
+    unsafe_cwd.mkdir(mode=0o700)
+    evidence_path = unsafe_cwd / "evidence.json"
+    evidence_path.write_bytes(b'{"synthetic":true}')
+    evidence_path.chmod(0o600)
+    unsafe_cwd.chmod(0o777)
+    monkeypatch.chdir(unsafe_cwd)
+
+    assert (
+        activation_module._read_bounded_or_empty(
+            Path("evidence.json"),
+            max_bytes=1024,
+        )
+        == b""
+    )
+
+
 def test_cli_activates_only_with_matching_publication_receipt(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -852,11 +928,12 @@ def _probe_document(manifest_bytes: bytes) -> dict[str, object]:
 
 
 def _operation(name: str) -> dict[str, object]:
+    response_contract = probe_response_contract_sha256(name) or "0" * 64
     return {
         "name": name,
         "request_count": 1,
         "passed": True,
-        "response_contract_sha256": hashlib.sha256(name.encode()).hexdigest(),
+        "response_contract_sha256": response_contract,
     }
 
 

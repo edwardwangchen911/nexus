@@ -26,8 +26,10 @@ npm run test:unit
 npm run test:e2e -- --workers=3
 npm run build
 uv run pytest engine/tests -q --import-mode=importlib
+install -d -m 700 "$PWD/.nexus-pytest"
 NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
-  uv run pytest integrations/fosun_gateway/tests -q
+  uv run pytest integrations/fosun_gateway/tests -q \
+    --basetemp="$PWD/.nexus-pytest/gateway"
 ```
 
 ## 本地运行与运维

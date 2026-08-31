@@ -19,6 +19,7 @@ from nexus_fosun_gateway.adapter.probe_sdk import (
     _require_page_contract,
     build_probe_transport,
 )
+from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
 from nexus_fosun_gateway.domain import (
     AccountItem,
     GatewayItem,
@@ -76,6 +77,42 @@ def test_budget_refuses_before_http_controls_or_without_active_label() -> None:
         budget.try_acquire_at_call_edge()
     with pytest.raises(ProbeBudgetError):
         budget.before_dispatch("business")
+
+
+@pytest.mark.asyncio
+async def test_probe_budget_refusal_crosses_sdk_adapter_without_retry() -> None:
+    class RefusingLimiter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def acquire(self) -> None:
+            raise AssertionError("unused")
+
+        async def try_acquire(self) -> float | None:
+            raise AssertionError("unused")
+
+        def try_acquire_at_call_edge(self) -> float | None:
+            self.calls += 1
+            raise ProbeBudgetError()
+
+    limiter = RefusingLimiter()
+    sdk_calls = 0
+
+    def list_accounts() -> object:
+        nonlocal sdk_calls
+        sdk_calls += 1
+        raise AssertionError("budget refusal must precede the SDK call")
+
+    transport = SdkFosunTransport(
+        SimpleNamespace(account=SimpleNamespace(list_accounts=list_accounts)),
+        rate_limiter=limiter,
+    )
+
+    with pytest.raises(ProbeBudgetError):
+        await transport.execute("fosun_sync_accounts", {})
+
+    assert limiter.calls == 1
+    assert sdk_calls == 0
 
 
 def test_auth_is_allowed_only_during_accounts_and_labels_cannot_overlap() -> None:
@@ -140,6 +177,43 @@ def test_broker_domain_cap_includes_session_and_refuses_seventh_delegate() -> No
 
     assert delegated == 6
     assert budget.snapshot().total == 6
+
+
+def test_total_hard_cap_refuses_before_twenty_fifth_delegate() -> None:
+    budget = _bound_budget()
+    budget._total = 24
+
+    with budget.operation("quote"), pytest.raises(ProbeBudgetError):
+        budget.before_dispatch("business")
+
+    assert budget.snapshot().total == 24
+
+
+def test_market_rolling_minute_cap_keeps_open_boundary_and_prunes_closed_boundary() -> None:
+    clock = FakeClock()
+    clock.value = 60.0
+    budget = _bound_budget(clock=clock)
+    budget._market_timestamps.extend([0.0001] * 24)
+
+    with budget.operation("quote"), pytest.raises(ProbeBudgetError):
+        budget.before_dispatch("business")
+
+    budget._market_timestamps.clear()
+    budget._market_timestamps.extend([0.0] * 24)
+    with budget.operation("quote"):
+        budget.before_dispatch("business")
+
+    assert budget.snapshot().count("quote") == 1
+
+
+def test_total_rolling_minute_cap_refuses_twenty_fifth_start() -> None:
+    budget = _bound_budget()
+    budget._total_timestamps.extend([0.0] * 24)
+
+    with budget.operation("quote"), pytest.raises(ProbeBudgetError):
+        budget.before_dispatch("business")
+
+    assert budget.snapshot().total == 0
 
 
 def test_budget_protocol_async_methods_are_assertion_only() -> None:
@@ -220,6 +294,21 @@ async def test_executor_runs_exact_sequence_and_returns_only_value_free_evidence
     assert transport.close_calls == 1
 
 
+@pytest.mark.asyncio
+async def test_executor_stops_immediately_when_sdk_returns_without_http_dispatch() -> None:
+    budget = _new_budget()
+    transport = InstrumentedTransport(budget, cached_at=1)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        await SdkProbeExecutor(
+            _probe_bundle(transport, RecordingControls(), budget),
+            budget,
+        ).run(_plan())
+
+    assert exc_info.value.code == "SDK_CONTRACT_MISMATCH"
+    assert len(transport.calls) == 2
+
+
 def test_probe_bundle_rejects_manual_unattested_construction() -> None:
     budget = _bound_budget()
 
@@ -281,6 +370,10 @@ async def test_executor_rejects_a_different_budget_before_any_provider_call() ->
         {
             "cash_flow_date_from": date(2026, 8, 1),
             "cash_flow_date_to": date(2026, 8, 21),
+        },
+        {
+            "cash_flow_date_from": date(2026, 8, 1),
+            "cash_flow_date_to": date(2026, 8, 8),
         },
         {"session_date": date(2026, 8, 31)},
     ],
@@ -379,6 +472,20 @@ async def test_executor_rejects_wrong_bar_identity_without_exposing_it() -> None
 
     assert exc_info.value.code == "PROBE_WINDOW_MISMATCH"
     assert "usSECRET" not in repr(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_executor_classifies_malformed_bar_as_response_not_window() -> None:
+    budget = _new_budget()
+    transport = InstrumentedTransport(budget, malformed_bar=True)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        await SdkProbeExecutor(
+            _probe_bundle(transport, RecordingControls(), budget),
+            budget,
+        ).run(_plan())
+
+    assert exc_info.value.code == "PROBE_RESPONSE_INVALID"
 
 
 def test_executor_rejects_malformed_pagination_as_response_contract() -> None:
@@ -641,6 +748,8 @@ class InstrumentedTransport:
         cancel_at: int | None = None,
         auth_statuses: tuple[int, ...] = (200,),
         wrong_bar: bool = False,
+        malformed_bar: bool = False,
+        cached_at: int | None = None,
     ) -> None:
         del budget
         self._empty_accounts = empty_accounts
@@ -648,6 +757,8 @@ class InstrumentedTransport:
         self._cancel_at = cancel_at
         self._auth_statuses = auth_statuses
         self._wrong_bar = wrong_bar
+        self._malformed_bar = malformed_bar
+        self._cached_at = cached_at
         self._external_controls: RecordingControls | FailingControls | None = None
         self._bundle: ProbeTransportBundle | None = None
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -695,6 +806,8 @@ class InstrumentedTransport:
     def _record(self, operation: str, payload: dict[str, object]) -> None:
         self.calls.append((operation, payload))
         call_index = len(self.calls) - 1
+        if call_index == self._cached_at:
+            return
         if operation == "fosun_sync_accounts":
             for _ in self._auth_statuses:
                 self.auth_module.requests.post("https://provider.invalid/session")
@@ -888,7 +1001,7 @@ class InstrumentedTransport:
                 "data": [
                     {
                         "time": 20260820 if self._wrong_bar else 20260821,
-                        "open": 100,
+                        "open": "not-a-number" if self._malformed_bar else 100,
                         "high": 100,
                         "low": 100,
                         "close": 100,

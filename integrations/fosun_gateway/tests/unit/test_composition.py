@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import nexus_fosun_gateway.main as main_module
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -18,6 +19,7 @@ from nexus_fosun_gateway.adapter.fixture import FixtureFosunTransport
 from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
 from nexus_fosun_gateway.domain import GatewayError
 from nexus_fosun_gateway.main import build_transport
+from nexus_fosun_gateway.probe_contract import probe_response_contract_sha256
 from nexus_fosun_gateway.settings import GatewaySettings
 from pydantic import ValidationError
 
@@ -263,6 +265,9 @@ def test_activation_control_files_fail_closed_before_sdk_import(
         "https://provider.invalid?redirect=elsewhere",
         "https://provider.invalid:notaport",
         "provider.invalid",
+        " https://provider.invalid",
+        "https://provider.invalid ",
+        "https://provider.invalid/",
     ],
 )
 def test_provider_base_url_requires_unambiguous_https(
@@ -271,6 +276,27 @@ def test_provider_base_url_requires_unambiguous_https(
 ) -> None:
     values = _activated_read_only_values(tmp_path)
     values["FSOPENAPI_BASE_URL"] = unsafe_url
+
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(values)
+
+
+@pytest.mark.parametrize(
+    "path_setting",
+    [
+        "FOSUN_PROVIDER_MANIFEST",
+        "FOSUN_ACTIVATION_PROBE_ARTIFACT",
+        "FOSUN_ACTIVATION_PROBE_RECEIPT",
+        "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE",
+        "FOSUN_ACTIVATION_CONTRACT_HASH_FILE",
+    ],
+)
+def test_production_evidence_paths_reject_nul_before_runtime_read(
+    tmp_path: Path,
+    path_setting: str,
+) -> None:
+    values = _activated_read_only_values(tmp_path)
+    values[path_setting] = "/run/nexus/invalid\x00path"
 
     with pytest.raises(ValidationError):
         GatewaySettings.model_validate(values)
@@ -304,25 +330,24 @@ def test_manifest_is_read_once_for_admission_activation_and_base_url_binding(
 ) -> None:
     values = _activated_read_only_values(tmp_path)
     manifest_path = Path(str(values["FOSUN_PROVIDER_MANIFEST"]))
-    configured_url = "https://configured-provider.invalid"
-    values["FSOPENAPI_BASE_URL"] = configured_url
-    first_read_document = json.loads(manifest_path.read_text())
-    first_read_document["admission"]["provider_base_url"] = configured_url
-    first_read_text = json.dumps(first_read_document)
-    real_read_text = Path.read_text
+    manifest_bytes = manifest_path.read_bytes()
+    real_reader = main_module._read_bounded_or_empty
+    manifest_reads = 0
     imported = False
 
-    def changing_read_text(path: Path, *args, **kwargs) -> str:
+    def changing_reader(path: Path, *, max_bytes: int) -> bytes:
+        nonlocal manifest_reads
         if path == manifest_path:
-            return first_read_text
-        return real_read_text(path, *args, **kwargs)
+            manifest_reads += 1
+            return manifest_bytes if manifest_reads == 1 else b"{}"
+        return real_reader(path, max_bytes=max_bytes)
 
     def forbidden_import(_name: str) -> object:
         nonlocal imported
         imported = True
         raise ModuleNotFoundError
 
-    monkeypatch.setattr(Path, "read_text", changing_read_text)
+    monkeypatch.setattr(main_module, "_read_bounded_or_empty", changing_reader)
     monkeypatch.setattr(
         "nexus_fosun_gateway.main.importlib.import_module",
         forbidden_import,
@@ -332,7 +357,8 @@ def test_manifest_is_read_once_for_admission_activation_and_base_url_binding(
         build_transport(GatewaySettings.model_validate(values))
 
     assert exc_info.value.code == "SDK_NOT_ADMITTED"
-    assert imported is False
+    assert imported is True
+    assert manifest_reads == 1
 
 
 @pytest.mark.parametrize(
@@ -886,7 +912,7 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
                 "name": name,
                 "request_count": 1,
                 "passed": True,
-                "response_contract_sha256": hashlib.sha256(name.encode()).hexdigest(),
+                "response_contract_sha256": probe_response_contract_sha256(name),
             }
             for name in REQUIRED_PROBE_OPERATIONS
         ],

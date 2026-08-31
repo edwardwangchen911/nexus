@@ -39,6 +39,51 @@ def test_publisher_create_only_fsyncs_value_free_bytes_and_returns_attestation(
     assert "output" not in repr(publication).lower()
 
 
+def test_publication_stages_file_link_and_directory_durability_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_link = os.link
+    real_unlink = os.unlink
+
+    def recording_fsync(file_descriptor: int) -> None:
+        kind = "dir" if stat.S_ISDIR(os.fstat(file_descriptor).st_mode) else "file"
+        events.append(f"fsync:{kind}")
+        real_fsync(file_descriptor)
+
+    def recording_link(*args: object, **kwargs: object) -> None:
+        events.append("link:final")
+        real_link(*args, **kwargs)
+
+    def recording_unlink(path: str, *, dir_fd: int | None = None) -> None:
+        events.append("unlink:temp" if path.startswith(".nexus-probe-") else "unlink:final")
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    monkeypatch.setattr(os, "link", recording_link)
+    monkeypatch.setattr(os, "unlink", recording_unlink)
+
+    publish_probe_artifact(
+        output_dir,
+        "probe.json",
+        b"new",
+        expected_sha256=hashlib.sha256(b"new").hexdigest(),
+        expected_byte_length=3,
+    )
+
+    assert events == [
+        "fsync:file",
+        "link:final",
+        "fsync:dir",
+        "unlink:temp",
+        "fsync:dir",
+    ]
+
+
 def test_durable_publication_cannot_be_constructed_by_a_caller() -> None:
     with pytest.raises(ProbeSdkError) as exc_info:
         DurableProbePublication(
@@ -64,7 +109,7 @@ def test_publisher_rejects_existing_final_and_untrusted_output_directory(
             expected_sha256=hashlib.sha256(b"new").hexdigest(),
             expected_byte_length=3,
         )
-    assert existing.value.code == "PROBE_OUTPUT_INVALID"
+    assert existing.value.code == "PROBE_OUTPUT_EXISTS"
     assert (output_dir / "probe.json").read_bytes() == b"existing"
 
     unsafe_dir = tmp_path / "unsafe"
@@ -120,6 +165,127 @@ def test_publisher_never_follows_intermediate_output_directory_symlink(
 
     assert exc_info.value.code == "PROBE_OUTPUT_INVALID"
     assert not (output_dir / "probe.json").exists()
+
+
+@pytest.mark.parametrize("parent_mode", [0o770, 0o777])
+def test_publisher_rejects_writable_ancestor_directory(
+    tmp_path: Path,
+    parent_mode: int,
+) -> None:
+    writable_parent = tmp_path / "writable-parent"
+    writable_parent.mkdir(mode=0o700)
+    output_dir = writable_parent / "output"
+    output_dir.mkdir(mode=0o700)
+    writable_parent.chmod(parent_mode)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        publish_probe_artifact(
+            output_dir,
+            "probe.json",
+            b"new",
+            expected_sha256=hashlib.sha256(b"new").hexdigest(),
+            expected_byte_length=3,
+        )
+
+    assert exc_info.value.code == "PROBE_OUTPUT_INVALID"
+    assert not (output_dir / "probe.json").exists()
+
+
+def test_publisher_refuses_output_directory_rename_before_attestation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    moved_dir = tmp_path / "moved-output"
+    real_fsync = os.fsync
+    directory_fsyncs = 0
+
+    def swap_after_link(file_descriptor: int) -> None:
+        nonlocal directory_fsyncs
+        metadata = os.fstat(file_descriptor)
+        real_fsync(file_descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            return
+        directory_fsyncs += 1
+        if directory_fsyncs == 1:
+            output_dir.rename(moved_dir)
+            output_dir.mkdir(mode=0o700)
+
+    monkeypatch.setattr(os, "fsync", swap_after_link)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        publish_probe_artifact(
+            output_dir,
+            "probe.json",
+            b"new",
+            expected_sha256=hashlib.sha256(b"new").hexdigest(),
+            expected_byte_length=3,
+        )
+
+    assert exc_info.value.code == "PROBE_OUTPUT_INVALID"
+    assert not (output_dir / "probe.json").exists()
+    assert not (moved_dir / "probe.json").exists()
+
+
+def test_interrupted_link_is_cleaned_when_the_final_was_created(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    real_link = os.link
+
+    def link_then_interrupt(*args: object, **kwargs: object) -> None:
+        real_link(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "link", link_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        publish_probe_artifact(
+            output_dir,
+            "probe.json",
+            b"new",
+            expected_sha256=hashlib.sha256(b"new").hexdigest(),
+            expected_byte_length=3,
+        )
+
+    assert list(output_dir.iterdir()) == []
+
+
+def test_uncertain_interrupted_link_cleanup_requires_quarantine(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    real_link = os.link
+    real_unlink = os.unlink
+
+    def link_then_interrupt(*args: object, **kwargs: object) -> None:
+        real_link(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    def refuse_final_cleanup(path: str, *, dir_fd: int | None = None) -> None:
+        if path == "probe.json":
+            raise OSError("synthetic-cleanup-canary")
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "link", link_then_interrupt)
+    monkeypatch.setattr(os, "unlink", refuse_final_cleanup)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        publish_probe_artifact(
+            output_dir,
+            "probe.json",
+            b"new",
+            expected_sha256=hashlib.sha256(b"new").hexdigest(),
+            expected_byte_length=3,
+        )
+
+    assert exc_info.value.code == "PROBE_OUTPUT_QUARANTINE_REQUIRED"
+    assert (output_dir / "probe.json").exists()
 
 
 def test_post_link_failure_removes_unsigned_final(
