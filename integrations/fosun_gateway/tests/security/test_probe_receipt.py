@@ -133,6 +133,35 @@ def test_receipt_publisher_requires_exact_owner_only_frame_mode(
     assert not (artifact_dir / "publication-receipt.json").exists()
 
 
+@pytest.mark.parametrize("failure", [OSError("short-summary"), KeyboardInterrupt()])
+def test_receipt_summary_failure_after_publication_is_nonzero_and_quarantined(
+    failure: BaseException,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    frame_dir, artifact_dir, artifact_name, receipt, _sha256 = _evidence(tmp_path)
+
+    def fail_summary(_file_descriptor: int, _content: bytes) -> None:
+        raise failure
+
+    monkeypatch.setattr(probe_receipt, "_write_all", fail_summary)
+
+    exit_code = probe_receipt.main(
+        _arguments(frame_dir, artifact_dir, artifact_name)
+    )
+
+    captured = capfd.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert captured.err == ""
+    assert (artifact_dir / "publication-receipt.json").read_bytes() == json.dumps(
+        receipt,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
 def _arguments(
     frame_dir: Path,
     artifact_dir: Path,

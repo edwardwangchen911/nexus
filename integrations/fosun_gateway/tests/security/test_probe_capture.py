@@ -206,6 +206,12 @@ def test_runbook_uses_lowercase_plan_names_and_secure_capture_command() -> None:
     assert "nexus-fosun-publish-probe-receipt" in runbook
     assert 'if [ "$probe_exit" -ne 0 ]; then' in runbook
     assert '--capture-exit "$probe_exit"' in runbook
+    assert 'if [ "$receipt_exit" -ne 0 ]; then' in runbook
+    assert "receipt publication uncertain; quarantine this run and stop" in runbook
+    assert (
+        'env -u PYTHONHOME -u PYTHONPATH -u SSLKEYLOGFILE "$probe_activation_bin"'
+        in runbook
+    )
     assert "<<'PY'" not in runbook
     future_procedure = runbook.split("## Future one-shot probe procedure", 1)[1].split(
         "## Activation and rollback",

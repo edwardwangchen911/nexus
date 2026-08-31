@@ -14,7 +14,7 @@ CI 不部署、不发布镜像、不改变权限，也不构成复星 SDK admiss
 | `gateway-offline` | guard 自测、guard 下全部 gateway 测试、Ruff、Mypy |
 | `engine-postgres` | 固定 digest PostgreSQL、空库迁移到 head、全部 Engine 测试、隔离 PostgreSQL＋MinIO fixture 恢复演练、Ruff、Mypy |
 | `e2e` | Playwright 锁定 Chromium、3 workers、64 项 synthetic E2E |
-| `policy` | 全部策略测试、密钥/禁止路由/TLS 修复/SDK lock/容器/CI 策略、依赖许可证清单、npm/Python 漏洞审计、两 Compose profile |
+| `policy` | 全部策略测试、密钥/精确只读面/TLS 修复/SDK lock/容器/CI 策略、依赖许可证清单、npm/Python 漏洞审计、四个 Compose profile |
 
 第三方 Actions 使用完整 commit SHA；容器引用同时保留可读 tag 和不可变 SHA-256 digest。两个运行镜像最终都声明非 root 用户，`.dockerignore` 排除 VCS、secret、env、依赖缓存和测试产物域。
 
@@ -52,7 +52,7 @@ uv run pip-audit --local --skip-editable
 
 1. 从官方发行来源确认目标版本和安全修复；更新直接约束并重新生成 `uv.lock`/`package-lock.json`。
 2. 运行 npm/Python 漏洞审计、许可证 inventory 和全量受影响测试；任何强 copyleft 或无许可证元数据必须有单独书面准入，不能只改 allowlist。
-3. 镜像升级同时更新可读 tag 与 registry digest，运行两个 Dockerfile `--check`、两 Compose profile config 和一次本地空库迁移。
+3. 镜像升级同时更新可读 tag 与 registry digest，运行两个 Dockerfile `--check`、四个 Compose profile config 和一次本地空库迁移。
 4. 复星 SDK 仍由独立 machine-readable admission 控制；当前 `uv.lock` 必须不含 `fsopenapi`。不要借普通依赖升级绕过该门禁。
 
 ## 当前本地证据（2026-08-27）

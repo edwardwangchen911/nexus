@@ -339,6 +339,33 @@ async def test_executor_runs_exact_sequence_and_returns_only_value_free_evidence
 
 
 @pytest.mark.asyncio
+async def test_executor_accepts_exactly_seven_calendar_days_of_cash_flows() -> None:
+    budget = _new_budget()
+    transport = InstrumentedTransport(budget)
+    plan = replace(
+        _plan(),
+        cash_flow_date_from=date(2026, 8, 15),
+        cash_flow_date_to=date(2026, 8, 21),
+    )
+
+    await SdkProbeExecutor(
+        _probe_bundle(transport, RecordingControls(), budget),
+        budget,
+    ).run(plan)
+
+    assert transport.calls[4] == (
+        "fosun_list_cash_flows",
+        {
+            "account_id": "synthetic-account-canary",
+            "cursor": None,
+            "date_from": "2026-08-15",
+            "date_to": "2026-08-21",
+            "limit": 1,
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_executor_stops_immediately_when_sdk_returns_without_http_dispatch() -> None:
     budget = _new_budget()
     transport = InstrumentedTransport(budget, cached_at=1)

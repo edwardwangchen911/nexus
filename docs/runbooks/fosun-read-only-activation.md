@@ -502,12 +502,20 @@ if [ "$probe_exit" -ne 0 ]; then
   exit "$probe_exit"
 fi
 
+set +e
 env -u PYTHONHOME -u PYTHONPATH -u SSLKEYLOGFILE "$probe_receipt_bin" \
   --capture-exit "$probe_exit" \
   --frame-dir "$probe_operator_dir" \
   --frame-basename "$probe_frame_basename" \
   --artifact-dir "$probe_output_dir" \
   --artifact-basename "$probe_output_basename"
+receipt_exit=$?
+set -e
+
+if [ "$receipt_exit" -ne 0 ]; then
+  printf '%s\n' 'receipt publication uncertain; quarantine this run and stop' >&2
+  exit "$receipt_exit"
+fi
 ```
 
 The fixed receipt publisher independently requires the exact capture outcome `0`, a protected
@@ -515,6 +523,9 @@ single-link `0600` frame and artifact, their stable exact bytes, the fixed succe
 order, and matching digest/length/receipt subject. A nonzero capture result cannot be converted
 into a receipt even if a complete-looking success frame or artifact exists. It emits only the two
 recomputed hashes and publishes `publication-receipt.json` create-only.
+Any nonzero receipt-publisher exit means the receipt may already be durable while its summary was
+not delivered. Quarantine both run directories, do not retry the create-only publisher, do not
+reconstruct a summary, and do not run activation for that run.
 
 Never automatically retry after any physical request or reuse an output directory/name. Apply the
 following fixed disposition:
@@ -525,7 +536,7 @@ following fixed disposition:
 | `SDK_CONTRACT_MISMATCH`, `PROBE_ACCOUNT_UNAVAILABLE`, `PROBE_BUDGET_EXCEEDED`, `PROBE_RESPONSE_INVALID`, `PROBE_WINDOW_MISMATCH`, `PROBE_CAPABILITY_EXPIRED`, `PROBE_FAILED` | Treat the approved window as consumed regardless of observed counts. Stop, retain only sanitized audit metadata, review request counts, and obtain a new explicit window before any new probe. |
 | `PROBE_INTERRUPTED` / exit 130 | Treat the run as consumed; verify both sessions closed and do not retry automatically. |
 | `PROBE_OUTPUT_EXISTS` | Treat the window as consumed because artifact publication follows Provider reads. Preserve the existing file, investigate the run ID collision, and use a newly approved run ID. Never overwrite. |
-| `PROBE_OUTPUT_INVALID`, `PROBE_OUTPUT_QUARANTINE_REQUIRED`, `PROBE_RECEIPT_DELIVERY_UNCERTAIN`, malformed/partial frame, or capture-wrapper failure | Treat the window as consumed and isolate both staging and operator run directories. Do not reconstruct a frame or receipt, rerun the signer, activate, or promote any file. |
+| `PROBE_OUTPUT_INVALID`, `PROBE_OUTPUT_QUARANTINE_REQUIRED`, malformed/partial/absent frame plus exit 2 (operationally `PROBE_RECEIPT_DELIVERY_UNCERTAIN`), or capture-wrapper failure | Treat the window as consumed and isolate both staging and operator run directories. Do not reconstruct a frame or receipt, rerun the signer, activate, or promote any file. |
 
 After receipt extraction, run the transport-free activation gate shown below against the exact
 staged bytes. A zero exit and `activated_read_only` are evidence for review, not permission to
@@ -534,7 +545,7 @@ deploy.
 After a separately approved probe, evaluate the artifact locally:
 
 ```bash
-"$probe_activation_bin" \
+env -u PYTHONHOME -u PYTHONPATH -u SSLKEYLOGFILE "$probe_activation_bin" \
   --manifest "$probe_manifest" \
   --probe-artifact "$probe_output_dir/$probe_output_basename" \
   --publication-receipt "$probe_output_dir/publication-receipt.json" \

@@ -211,6 +211,25 @@ def test_expired_probe_cannot_activate_read_only() -> None:
     assert result.next_action == "REFRESH_GUARDED_READ_ONLY_PROBE"
 
 
+def test_probe_at_exact_capability_expiry_cannot_activate_read_only() -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    probe = _probe_document(manifest_bytes)
+    probe["captured_at"] = _utc_text(CHECKED_AT - timedelta(hours=1))
+    probe["capability_expires_at"] = _utc_text(CHECKED_AT)
+    probe_bytes = _json_bytes(probe)
+
+    result = evaluate_activation(
+        manifest_bytes,
+        probe_bytes,
+        _receipt_bytes(probe_bytes),
+        checked_at=CHECKED_AT,
+    )
+
+    assert result.status == "fixture_with_next_action"
+    assert result.capability_expires_at == CHECKED_AT
+    assert result.next_action == "REFRESH_GUARDED_READ_ONLY_PROBE"
+
+
 @pytest.mark.parametrize("mutation", ["missing", "extra", "duplicate"])
 def test_probe_operation_set_must_be_exact_and_closed(mutation: str) -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())

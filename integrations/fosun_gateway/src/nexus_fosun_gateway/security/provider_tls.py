@@ -31,6 +31,9 @@ class _ProbeDispatchGate:
     def __init__(self) -> None:
         self._lock = Lock()
         self._revoked = False
+        self._last_linearized_attempt = 0
+        self._inflight_attempts: set[int] = set()
+        self._revoked_after_attempt: int | None = None
 
     def require_open(self) -> None:
         with self._lock:
@@ -38,15 +41,35 @@ class _ProbeDispatchGate:
                 raise NonRetryableTransportRefusal("probe HTTP dispatch is revoked")
 
     def dispatch(self, operation: Callable[[], object]) -> object:
-        """Linearize one delegate-through-response-headers against revocation."""
-        with self._lock:
-            if self._revoked:
-                raise NonRetryableTransportRefusal("probe HTTP dispatch is revoked")
+        """Grant and record one attempt under a short lock, then run it unlocked."""
+        attempt = self._linearize_attempt()
+        try:
             return operation()
+        finally:
+            self._complete_attempt(attempt)
 
-    def revoke(self) -> None:
+    def _linearize_attempt(self) -> int:
+        with self._lock:
+            if (
+                self._revoked
+                or self._inflight_attempts
+            ):
+                raise NonRetryableTransportRefusal("probe HTTP dispatch is revoked")
+            self._last_linearized_attempt += 1
+            attempt = self._last_linearized_attempt
+            self._inflight_attempts.add(attempt)
+            return attempt
+
+    def _complete_attempt(self, attempt: int) -> None:
+        with self._lock:
+            self._inflight_attempts.discard(attempt)
+
+    def revoke(self) -> bool:
+        """Revoke admission and report whether one granted attempt remains in flight."""
         with self._lock:
             self._revoked = True
+            self._revoked_after_attempt = self._last_linearized_attempt
+            return bool(self._inflight_attempts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +109,7 @@ class ProbeTlsControls:
         self._dispatch_gate = dispatch_gate
         self._lock = Lock()
         self._closed = False
+        self._close_failed = False
 
     def attests(self, client: object, observer: ProviderHttpObserver) -> bool:
         """Prove both currently installed proxies are bound to this exact observer."""
@@ -105,10 +129,13 @@ class ProbeTlsControls:
     def close(self) -> None:
         with self._lock:
             if self._closed:
+                if self._close_failed:
+                    raise RuntimeError("probe HTTP sessions could not be closed")
                 return
             self._closed = True
+            had_inflight_attempt = False
             if self._dispatch_gate is not None:
-                self._dispatch_gate.revoke()
+                had_inflight_attempt = self._dispatch_gate.revoke()
             failure: BaseException | None = None
             for session in (self._business_session, self._auth_session):
                 close = getattr(session, "close", None)
@@ -122,8 +149,10 @@ class ProbeTlsControls:
                     if failure is None:
                         failure = error
             if isinstance(failure, KeyboardInterrupt | SystemExit):
+                self._close_failed = True
                 raise failure
-            if failure is not None:
+            if failure is not None or had_inflight_attempt:
+                self._close_failed = True
                 raise RuntimeError("probe HTTP sessions could not be closed")
 
 
@@ -340,17 +369,14 @@ def _dispatch_verified_request(
     observer: ProviderHttpObserver | None,
     surface: HttpSurface,
 ) -> object:
-    def start_dispatch() -> object:
-        return delegate(*args, **kwargs)
+    def run_verified_request() -> object:
+        response = _read_bounded_response(delegate(*args, **kwargs))
+        _after_response(observer, surface, response)
+        return response
 
-    raw_response = (
-        start_dispatch()
-        if dispatch_gate is None
-        else dispatch_gate.dispatch(start_dispatch)
-    )
-    response = _read_bounded_response(raw_response)
-    _after_response(observer, surface, response)
-    return response
+    if dispatch_gate is None:
+        return run_verified_request()
+    return dispatch_gate.dispatch(run_verified_request)
 
 
 def _force_zero_https_retries(session: object, requests_module: object) -> None:

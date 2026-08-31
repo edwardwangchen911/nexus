@@ -244,8 +244,9 @@ fields (`extra=forbid`):
 The receipt exists only inside the final success result. A failure or interruption before signing
 destroys the process-local private key without producing a receipt. Once signature bytes have begun
 writing to stdout they cannot be revoked; a later stdout failure is therefore reported as
-`PROBE_RECEIPT_DELIVERY_UNCERTAIN`, and the already durable artifact is not automatically configured
-or activated. Any complete receipt recoverable from that single frame can validate only that exact
+exit 2 plus a partial/absent frame, classified operationally as
+`PROBE_RECEIPT_DELIVERY_UNCERTAIN`. The already durable artifact is not automatically configured or
+activated. Any complete receipt recoverable from that single frame can validate only that exact
 durable artifact, never a quarantined or different artifact.
 
 ### CLI and output
@@ -283,17 +284,25 @@ mapped to fixed codes without formatting or logging the exception. The CLI disab
 default usage/error rendering and never echoes an operator string. It builds exactly one canonical
 compact fixed-field-order JSON frame in memory, with `publication_receipt` physically last, and sends
 it through a low-level EINTR-aware write loop. No later stdout byte is permitted.
-Exit 0 occurs only after the complete frame is written; a short/error write exits 2 as
-`PROBE_RECEIPT_DELIVERY_UNCERTAIN` through the process status (without attempting a second stdout
-frame), and stderr stays empty. `KeyboardInterrupt`/cancellation is the sole ordinary error
+Exit 0 occurs only after the complete frame is written. A short/error write exits 2 with the
+partial or absent frame itself defining `PROBE_RECEIPT_DELIVERY_UNCERTAIN`; no safe code can be
+delivered on that same failed channel and no second frame is attempted. Stderr stays empty.
+`KeyboardInterrupt`/cancellation is the sole ordinary error
 contract exception. Each physical attempt is linearized under a gate after its budget check; the
-gate remains held only through the `stream=True` delegate returning response headers, then releases
-before bounded body materialization. Revocation that wins rejects the attempt; revocation after a
-delegate starts waits for that response-header boundary, so no close caller can return while a new
-physical delegate can still start. Session revocation runs in one daemon close worker behind an
-independent 11-second monotonic deadline. If DNS or response headers outlive that deadline, the CLI
-fails and exits without joining the worker; same-process capture makes process exit the final abort
-boundary. The CLI otherwise emits fixed code `PROBE_INTERRUPTED` and exits 130.
+gate lock only checks the revoke-request event and records a monotonically numbered in-flight
+attempt; the real `stream=True` delegate and bounded body materialization both execute outside it.
+The permit grant is the authorization linearization point: at most one permitted attempt remains in-flight
+even if its thread is descheduled immediately before the Python delegate call. A revoke request
+and revoke compete on that same short lock, so exactly one wins the next position in the total
+order. Revoke rejects every attempt not already permitted and never waits for DNS or response
+headers. A clean `close()` return attests that revoke observed no in-flight ticket and that no new
+attempt can be authorized. If revoke observes an in-flight ticket, both the first and every repeated
+`close()` return the same fixed failure; the probe cannot produce a success artifact. This failure
+does not claim that the already permitted attempt has physically started or finished. Session close
+runs in one daemon worker behind an independent 11-second monotonic deadline. The SDK's 10-second
+operation deadline stops the asyncio waiter but cannot cancel its daemon Python call; same-process
+exit is the only physical termination boundary for a stuck DNS, header, or body operation. The CLI
+otherwise emits fixed code `PROBE_INTERRUPTED` and exits 130.
 
 Before any SDK/client/TLS-context construction, both the probe and production composition reject
 `PYTHONHOME`, `PYTHONPATH`, and `SSLKEYLOGFILE`. The reviewed one-shot launcher also removes those
@@ -427,11 +436,12 @@ return `2` with one of these safe codes:
 - `PROBE_OUTPUT_EXISTS`
 - `PROBE_OUTPUT_INVALID`
 - `PROBE_OUTPUT_QUARANTINE_REQUIRED`
-- `PROBE_RECEIPT_DELIVERY_UNCERTAIN`
 - `PROBE_FAILED`
 
-The status payload has no free-form message or exception field. `PROBE_INTERRUPTED` exits 130 and is
-not one of the ordinary exit-2 failures.
+The status payload has no free-form message or exception field. A low-level output failure is the
+only exit-2 path that may leave a partial or absent frame and therefore cannot carry a safe code;
+that malformed/absent frame is itself quarantined as `PROBE_RECEIPT_DELIVERY_UNCERTAIN`.
+`PROBE_INTERRUPTED` exits 130 and is not one of the ordinary exit-2 failures.
 
 ## Verification
 

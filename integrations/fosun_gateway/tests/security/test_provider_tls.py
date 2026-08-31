@@ -189,6 +189,10 @@ def test_probe_tls_controls_count_physical_edges_and_disable_adapter_retries() -
     controls.close()
     controls.close()
     assert all(session.closed for session in sessions)
+    with pytest.raises(NonRetryableTransportRefusal):
+        client._http_session.request("POST", "https://provider.invalid")
+    with pytest.raises(NonRetryableTransportRefusal):
+        auth_module.requests.post("https://provider.invalid")
 
     installed_proxy = client._http_session
     client._http_session = business_session
@@ -510,12 +514,13 @@ def test_probe_tls_close_wins_race_before_atomic_delegate_dispatch(
     assert len(errors) == 1
 
 
-def test_probe_tls_close_waits_for_a_linearized_inflight_dispatch() -> None:
-    delegate_started = threading.Event()
-    release_delegate = threading.Event()
-    close_attempted = threading.Event()
-    close_finished = threading.Event()
-    errors: list[BaseException] = []
+def test_probe_tls_close_reports_failure_for_ticket_granted_before_delegate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticket_registered = threading.Event()
+    release_ticket = threading.Event()
+    delegate_calls = 0
+    request_errors: list[BaseException] = []
 
     class FakeResponse:
         headers: dict[str, str] = {}
@@ -543,8 +548,8 @@ def test_probe_tls_close_waits_for_a_linearized_inflight_dispatch() -> None:
             return self._adapters[prefix]
 
         def request(self, *_args: object, **_kwargs: object) -> object:
-            delegate_started.set()
-            assert release_delegate.wait(timeout=2)
+            nonlocal delegate_calls
+            delegate_calls += 1
             return FakeResponse()
 
         def post(self, *_args: object, **_kwargs: object) -> object:
@@ -563,6 +568,100 @@ def test_probe_tls_close_waits_for_a_linearized_inflight_dispatch() -> None:
         SimpleNamespace(requests=FakeRequests()),
         observer=_RecordingObserver([]),
     )
+    gate = client._http_session._dispatch_gate
+    real_linearize = gate._linearize_attempt
+
+    def pause_after_ticket() -> int:
+        attempt = real_linearize()
+        ticket_registered.set()
+        assert release_ticket.wait(timeout=2)
+        return attempt
+
+    monkeypatch.setattr(gate, "_linearize_attempt", pause_after_ticket)
+
+    def invoke() -> None:
+        try:
+            client._http_session.request("POST", "https://provider.invalid")
+        except BaseException as error:
+            request_errors.append(error)
+
+    request_thread = threading.Thread(target=invoke)
+    request_thread.start()
+    assert ticket_registered.wait(timeout=1)
+
+    with pytest.raises(RuntimeError, match="sessions could not be closed"):
+        controls.close()
+    assert delegate_calls == 0
+    with pytest.raises(NonRetryableTransportRefusal):
+        client._http_session.request("POST", "https://provider.invalid")
+
+    release_ticket.set()
+    request_thread.join(timeout=2)
+
+    assert request_thread.is_alive() is False
+    assert delegate_calls == 1
+    assert request_errors == []
+    assert gate._inflight_attempts == set()
+
+
+def test_probe_tls_close_does_not_wait_for_linearized_response_headers() -> None:
+    delegate_started = threading.Event()
+    release_delegate = threading.Event()
+    close_attempted = threading.Event()
+    close_finished = threading.Event()
+    errors: list[BaseException] = []
+    close_errors: list[BaseException] = []
+    sessions: list[object] = []
+
+    class FakeResponse:
+        headers: dict[str, str] = {}
+        status_code = 200
+
+        def iter_content(self, *, chunk_size: int) -> tuple[bytes, ...]:
+            del chunk_size
+            return (b"{}",)
+
+        def close(self) -> None:
+            return None
+
+    class FakeProbeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self.closed = False
+            self._adapters = {
+                "https://": requests.adapters.HTTPAdapter(max_retries=2)
+            }
+            sessions.append(self)
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            self._adapters[prefix] = adapter
+
+        def get_adapter(self, prefix: str) -> object:
+            return self._adapters[prefix]
+
+        def request(self, *_args: object, **_kwargs: object) -> object:
+            delegate_started.set()
+            assert release_delegate.wait(timeout=2)
+            return FakeResponse()
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("unused")
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeRequests:
+        adapters = requests.adapters
+        Session = FakeProbeSession
+
+    client = SimpleNamespace(_http_session=FakeProbeSession())
+    controls = enforce_probe_tls_controls(
+        client,
+        SimpleNamespace(requests=FakeRequests()),
+        observer=_RecordingObserver([]),
+    )
+    gate = client._http_session._dispatch_gate
 
     def invoke() -> None:
         try:
@@ -572,16 +671,25 @@ def test_probe_tls_close_waits_for_a_linearized_inflight_dispatch() -> None:
 
     def close() -> None:
         close_attempted.set()
-        controls.close()
-        close_finished.set()
+        try:
+            controls.close()
+        except BaseException as error:
+            close_errors.append(error)
+        finally:
+            close_finished.set()
 
     request_thread = threading.Thread(target=invoke)
     request_thread.start()
     assert delegate_started.wait(timeout=1)
+    assert gate._last_linearized_attempt == 1
+    assert gate._inflight_attempts == {1}
     close_thread = threading.Thread(target=close)
     close_thread.start()
     assert close_attempted.wait(timeout=1)
-    assert close_finished.wait(timeout=0.1) is False
+    assert close_finished.wait(timeout=0.2)
+    assert gate._revoked_after_attempt == 1
+    with pytest.raises(NonRetryableTransportRefusal):
+        client._http_session.request("POST", "https://provider.invalid")
     release_delegate.set()
     request_thread.join(timeout=2)
     close_thread.join(timeout=2)
@@ -589,7 +697,13 @@ def test_probe_tls_close_waits_for_a_linearized_inflight_dispatch() -> None:
     assert request_thread.is_alive() is False
     assert close_thread.is_alive() is False
     assert close_finished.is_set()
+    assert gate._inflight_attempts == set()
     assert errors == []
+    assert len(close_errors) == 1
+    assert isinstance(close_errors[0], RuntimeError)
+    assert all(session.closed for session in sessions)
+    with pytest.raises(RuntimeError, match="sessions could not be closed"):
+        controls.close()
 
 
 def test_probe_tls_close_does_not_wait_for_a_stuck_streamed_body() -> None:
@@ -598,6 +712,8 @@ def test_probe_tls_close_does_not_wait_for_a_stuck_streamed_body() -> None:
     close_finished = threading.Event()
     delegate_calls = 0
     errors: list[BaseException] = []
+    close_errors: list[BaseException] = []
+    sessions: list[object] = []
 
     class BlockingBodyResponse:
         headers: dict[str, str] = {}
@@ -616,9 +732,11 @@ def test_probe_tls_close_does_not_wait_for_a_stuck_streamed_body() -> None:
         trust_env = True
 
         def __init__(self) -> None:
+            self.closed = False
             self._adapters = {
                 "https://": requests.adapters.HTTPAdapter(max_retries=2)
             }
+            sessions.append(self)
 
         def mount(self, prefix: str, adapter: object) -> None:
             self._adapters[prefix] = adapter
@@ -635,7 +753,7 @@ def test_probe_tls_close_does_not_wait_for_a_stuck_streamed_body() -> None:
             raise AssertionError("unused")
 
         def close(self) -> None:
-            return None
+            self.closed = True
 
     class FakeRequests:
         adapters = requests.adapters
@@ -658,9 +776,15 @@ def test_probe_tls_close_does_not_wait_for_a_stuck_streamed_body() -> None:
     request_thread.start()
     assert body_started.wait(timeout=1)
 
-    close_thread = threading.Thread(
-        target=lambda: (controls.close(), close_finished.set())
-    )
+    def close() -> None:
+        try:
+            controls.close()
+        except BaseException as error:
+            close_errors.append(error)
+        finally:
+            close_finished.set()
+
+    close_thread = threading.Thread(target=close)
     close_thread.start()
     assert close_finished.wait(timeout=0.2)
     with pytest.raises(NonRetryableTransportRefusal):
@@ -673,6 +797,29 @@ def test_probe_tls_close_does_not_wait_for_a_stuck_streamed_body() -> None:
     assert close_thread.is_alive() is False
     assert delegate_calls == 1
     assert errors == []
+    assert len(close_errors) == 1
+    assert isinstance(close_errors[0], RuntimeError)
+    assert all(session.closed for session in sessions)
+    with pytest.raises(RuntimeError, match="sessions could not be closed"):
+        controls.close()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("fixed"), KeyboardInterrupt()])
+def test_probe_dispatch_ticket_is_released_for_every_delegate_exit(
+    failure: BaseException,
+) -> None:
+    gate = provider_tls_module._ProbeDispatchGate()
+
+    def fail() -> object:
+        raise failure
+
+    with pytest.raises(type(failure)):
+        gate.dispatch(fail)
+
+    assert gate._inflight_attempts == set()
+    assert gate.revoke() is False
+    with pytest.raises(NonRetryableTransportRefusal):
+        gate.dispatch(lambda: object())
 
 
 def test_concurrent_probe_tls_close_waits_for_revocation_and_session_close(

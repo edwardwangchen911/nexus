@@ -432,6 +432,39 @@ def test_blocked_manifest_is_rejected_before_key_generation() -> None:
     assert generated is False
 
 
+@pytest.mark.asyncio
+async def test_executor_close_failure_never_loads_signing_material(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generated = False
+
+    async def failed_close(
+        _executor: SdkProbeExecutor,
+        _request: object,
+    ) -> ProbeExecutionEvidence:
+        raise ProbeSdkError("PROBE_FAILED")
+
+    def forbidden_key_factory() -> Ed25519PrivateKey:
+        nonlocal generated
+        generated = True
+        raise AssertionError
+
+    monkeypatch.setattr(SdkProbeExecutor, "run", failed_close)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        await run_sanitized_probe(
+            _json_bytes(_admitted_manifest()),
+            _plan(),
+            object.__new__(SdkProbeExecutor),
+            started_at=STARTED_AT,
+            private_key_factory=forbidden_key_factory,
+            utc_clock=lambda: CAPTURED_AT,
+        )
+
+    assert exc_info.value.code == "PROBE_FAILED"
+    assert generated is False
+
+
 def test_signing_key_configuration_error_remains_actionable() -> None:
     def invalid_key_configuration() -> Ed25519PrivateKey:
         raise ProbeSdkError("PROBE_SETTINGS_INVALID")

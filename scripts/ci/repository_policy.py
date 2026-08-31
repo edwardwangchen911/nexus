@@ -29,6 +29,8 @@ _FORBIDDEN_GATEWAY = re.compile(
     r"(?i:\b(?:create|modify|cancel|submit|replace|delete|update)_subscription)|"
     r"(?i:\bsubscription_(?:create|modify|cancel|submit|replace|delete|update))|"
     r"\b(?:subscribe|unsubscribe)(?:Market|Quote|Order|Trade|Topic)|"
+    r"(?i:\bwealth\s*\.)|"
+    r"(?i:\b(?:redeem[_]?fund|fund[_]?purchase|withdraw[_]?cash|transfer[_]?assets))|"
     r"(?i:/webhooks?(?:/|[\"'])))"
 )
 _PROBE_ONLY_RUNTIME = re.compile(
@@ -90,6 +92,33 @@ _REQUIRED_SDK_EVIDENCE = (
     "tls_verification_remediation",
 )
 _LOCAL_PYTHON_PACKAGES = {"nexus-engine", "nexus-fosun-gateway", "nexus-workspace"}
+_EXPECTED_GATEWAY_OPERATIONS = frozenset(
+    {
+        "fosun_capabilities",
+        "fosun_sync_accounts",
+        "fosun_sync_portfolio",
+        "fosun_list_orders",
+        "fosun_list_cash_flows",
+        "fosun_get_quotes",
+        "fosun_get_bars",
+    }
+)
+_EXPECTED_GATEWAY_ROUTES = frozenset(
+    (f"/{operation}", operation, ("POST",))
+    for operation in _EXPECTED_GATEWAY_OPERATIONS
+)
+_EXPECTED_GATEWAY_ROUTE_PREFIX = "/internal/v1/read-only"
+_EXPECTED_SDK_READ_METHODS = frozenset(
+    {
+        ("account", "list_accounts"),
+        ("portfolio", "get_assets_summary"),
+        ("portfolio", "get_holdings"),
+        ("trade", "list_orders"),
+        ("trade", "get_cash_flows"),
+        ("market", "quote"),
+        ("market", "kline"),
+    }
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -206,6 +235,143 @@ def check_probe_runtime_isolation(root: Path) -> list[PolicyFinding]:
     return []
 
 
+def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
+    """Require the exact seven operations, routes, and Provider SDK read methods."""
+    package = root / "integrations/fosun_gateway/src/nexus_fosun_gateway"
+    operations_path = package / "policy/operations.py"
+    routes_path = package / "routes/read_only.py"
+    adapter_path = package / "adapter/sdk.py"
+    try:
+        operations_tree = ast.parse(_read_text(operations_path))
+        routes_tree = ast.parse(_read_text(routes_path))
+        adapter_tree = ast.parse(_read_text(adapter_path))
+    except (OSError, SyntaxError):
+        return [_gateway_read_allowlist_finding(root, package)]
+
+    operations: set[str] | None = None
+    for node in operations_tree.body:
+        if isinstance(node, ast.Assign):
+            matches = any(
+                isinstance(target, ast.Name) and target.id == "READ_ONLY_OPERATIONS"
+                for target in node.targets
+            )
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            matches = (
+                isinstance(node.target, ast.Name)
+                and node.target.id == "READ_ONLY_OPERATIONS"
+            )
+            value = node.value
+        else:
+            continue
+        if matches and value is not None:
+            operations = {
+                item.value
+                for item in ast.walk(value)
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            }
+    routes: set[tuple[str, str, tuple[str, ...]]] = set()
+    malformed_route = False
+    route_prefix: str | None = None
+    for node in routes_tree.body:
+        if not (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "router"
+                for target in node.targets
+            )
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "APIRouter"
+        ):
+            continue
+        prefix_keyword = next(
+            (keyword.value for keyword in node.value.keywords if keyword.arg == "prefix"),
+            None,
+        )
+        if (
+            isinstance(prefix_keyword, ast.Constant)
+            and isinstance(prefix_keyword.value, str)
+        ):
+            route_prefix = prefix_keyword.value
+        else:
+            malformed_route = True
+    for node in ast.walk(routes_tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_api_route"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "router"
+        ):
+            continue
+        methods_keyword = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "methods"),
+            None,
+        )
+        if (
+            len(node.args) < 2
+            or not isinstance(node.args[0], ast.Constant)
+            or not isinstance(node.args[0].value, str)
+            or not isinstance(node.args[1], ast.Name)
+            or not isinstance(methods_keyword, ast.List | ast.Tuple)
+            or any(
+                not isinstance(item, ast.Constant) or not isinstance(item.value, str)
+                for item in methods_keyword.elts
+            )
+        ):
+            malformed_route = True
+            continue
+        routes.add(
+            (
+                node.args[0].value,
+                node.args[1].id,
+                tuple(item.value for item in methods_keyword.elts),  # type: ignore[misc]
+            )
+        )
+
+    sdk_methods: set[tuple[str, str]] = set()
+    malformed_sdk_method = False
+    for node in ast.walk(adapter_tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_method"
+        ):
+            continue
+        if (
+            len(node.args) != 2
+            or node.keywords
+            or any(
+                not isinstance(argument, ast.Constant)
+                or not isinstance(argument.value, str)
+                for argument in node.args
+            )
+        ):
+            malformed_sdk_method = True
+            continue
+        sdk_methods.add((node.args[0].value, node.args[1].value))  # type: ignore[arg-type]
+
+    if (
+        operations != set(_EXPECTED_GATEWAY_OPERATIONS)
+        or malformed_route
+        or route_prefix != _EXPECTED_GATEWAY_ROUTE_PREFIX
+        or routes != set(_EXPECTED_GATEWAY_ROUTES)
+        or malformed_sdk_method
+        or sdk_methods != set(_EXPECTED_SDK_READ_METHODS)
+    ):
+        return [_gateway_read_allowlist_finding(root, package)]
+    return []
+
+
+def _gateway_read_allowlist_finding(root: Path, package: Path) -> PolicyFinding:
+    return PolicyFinding(
+        "gateway_read_allowlist_mismatch",
+        _relative(root, package),
+        "production operation, route, and SDK method surfaces must match the exact read allowlist",
+    )
+
+
 def check_gateway_entrypoint_isolation(root: Path) -> list[PolicyFinding]:
     """Freeze both packaged and Compose production entry points to Gateway main."""
     pyproject_path = root / "integrations/fosun_gateway/pyproject.toml"
@@ -225,12 +391,19 @@ def check_gateway_entrypoint_isolation(root: Path) -> list[PolicyFinding]:
     except OSError:
         compose = ""
         dockerfile = ""
+    gateway_service = _compose_service_block(compose, "fosun-gateway")
+    compose_commands = re.findall(r"(?m)^    command:\s*(.*?)\s*$", gateway_service)
+    compose_entrypoints = re.findall(
+        r"(?m)^    entrypoint:\s*(.*?)\s*$", gateway_service
+    )
+    docker_instructions = _docker_final_stage_process_instructions(dockerfile)
     if (
         packaged_entrypoint != "nexus_fosun_gateway.main:run"
-        or 'command: ["nexus-fosun-gateway"]' not in compose
-        or 'CMD ["nexus-fosun-gateway"]' not in dockerfile
+        or compose_commands != ['["nexus-fosun-gateway"]']
+        or compose_entrypoints
+        or docker_instructions != [("CMD", '["nexus-fosun-gateway"]')]
         or any(
-            marker in compose or marker in dockerfile
+            marker in gateway_service or marker in dockerfile
             for marker in ("PYTHONHOME", "PYTHONPATH", "SSLKEYLOGFILE")
         )
     ):
@@ -244,6 +417,44 @@ def check_gateway_entrypoint_isolation(root: Path) -> list[PolicyFinding]:
             )
         ]
     return []
+
+
+def _compose_service_block(compose: str, service: str) -> str:
+    lines = compose.splitlines()
+    marker = f"  {service}:"
+    try:
+        start = next(index for index, line in enumerate(lines) if line == marker)
+    except StopIteration:
+        return ""
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if re.fullmatch(r"  [A-Za-z0-9_.-]+:\s*", lines[index]):
+            end = index
+            break
+        if lines[index] and not lines[index].startswith(" "):
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
+def _docker_final_stage_process_instructions(
+    dockerfile: str,
+) -> list[tuple[str, str]]:
+    """Return effective process directives from only the final Docker stage."""
+    lines = dockerfile.splitlines()
+    from_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if re.match(r"(?i)^\s*FROM\s+", line) and not line.lstrip().startswith("#")
+    ]
+    if not from_indexes:
+        return []
+    instructions: list[tuple[str, str]] = []
+    for line in lines[from_indexes[-1] + 1 :]:
+        match = re.match(r"(?i)^\s*(CMD|ENTRYPOINT)\s+(.+?)\s*$", line)
+        if match is not None and not line.lstrip().startswith("#"):
+            instructions.append((match.group(1).upper(), match.group(2)))
+    return instructions
 
 
 def _runtime_import_graph_reaches_probe_only(main_path: Path) -> bool:
@@ -314,6 +525,20 @@ def _local_imports(
                 prefix = ".".join(package_parts[:keep])
                 module = f"{prefix}.{module}" if module else prefix
             imports.append((module, {alias.name for alias in node.names}))
+        elif (
+            isinstance(node, ast.Call)
+            and len(node.args) == 1
+            and not node.keywords
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+            and (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "import_module"
+                or isinstance(node.func, ast.Attribute)
+                and node.func.attr == "import_module"
+            )
+        ):
+            imports.append((node.args[0].value, set()))
     return imports
 
 
@@ -661,6 +886,10 @@ def check_workflow(root: Path) -> list[PolicyFinding]:
         "nexus-engine-backup-restore-drill",
         "npm audit --audit-level=high",
         "pip-audit",
+        "docker compose -f infra/compose.yaml --profile app config --quiet",
+        "docker compose -f infra/compose.yaml --profile broker config --quiet",
+        "docker compose -f infra/compose.yaml --profile provider config --quiet",
+        "docker compose -f infra/compose.yaml --profile provider-alpaca config --quiet",
     )
     if any(marker not in content for marker in required_markers):
         findings.append(
@@ -715,6 +944,7 @@ def run_all(root: Path) -> tuple[list[PolicyFinding], list[DependencyRecord]]:
     findings.extend(check_forbidden_gateway_surface(root))
     findings.extend(check_provider_tls_remediation(root))
     findings.extend(check_probe_runtime_isolation(root))
+    findings.extend(check_gateway_read_allowlist(root))
     findings.extend(check_gateway_entrypoint_isolation(root))
     findings.extend(check_sdk_lock_admission(root))
     findings.extend(check_container_pins(root))

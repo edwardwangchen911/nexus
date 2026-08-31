@@ -14,6 +14,7 @@ from scripts.ci.repository_policy import (
     check_container_pins,
     check_forbidden_gateway_surface,
     check_gateway_entrypoint_isolation,
+    check_gateway_read_allowlist,
     check_probe_runtime_isolation,
     check_provider_tls_remediation,
     check_sdk_lock_admission,
@@ -81,6 +82,10 @@ def test_gateway_source_forbids_write_and_webhook_surface(tmp_path: Path) -> Non
         "replaceOrderPayload",
         "OrderCreateRequest",
         "SimAccountCreateRequest",
+        "wealth.redeem_fund",
+        "fund_purchase",
+        "withdraw_cash",
+        "transfer_assets",
     ],
 )
 def test_gateway_policy_covers_provider_write_token_variants(
@@ -207,6 +212,82 @@ def test_long_running_gateway_cannot_import_probe_only_construction(tmp_path: Pa
         "probe_runtime_isolation_missing"
     }
 
+    bridge_path.write_text(
+        'import importlib\nimportlib.import_module("nexus_fosun_gateway.probe_receipt")\n'
+    )
+    findings = check_probe_runtime_isolation(tmp_path)
+    assert {finding.rule for finding in findings} == {
+        "probe_runtime_isolation_missing"
+    }
+
+
+def test_gateway_read_surface_is_an_exact_operation_route_and_sdk_allowlist(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "integrations/fosun_gateway/src/nexus_fosun_gateway"
+    adapter = package / "adapter"
+    policy = package / "policy"
+    routes = package / "routes"
+    adapter.mkdir(parents=True)
+    policy.mkdir()
+    routes.mkdir()
+    operations = (
+        "fosun_capabilities",
+        "fosun_sync_accounts",
+        "fosun_sync_portfolio",
+        "fosun_list_orders",
+        "fosun_list_cash_flows",
+        "fosun_get_quotes",
+        "fosun_get_bars",
+    )
+    (policy / "operations.py").write_text(
+        "READ_ONLY_OPERATIONS = frozenset(" + repr(set(operations)) + ")\n"
+    )
+    route_lines = ['router = APIRouter(prefix="/internal/v1/read-only")']
+    for operation in operations:
+        route_lines.append(f"def {operation}(): pass")
+        route_lines.append(
+            f'router.add_api_route("/{operation}", {operation}, methods=["POST"])'
+        )
+    route_source = "\n".join(route_lines) + "\n"
+    (routes / "read_only.py").write_text(route_source)
+    sdk_pairs = (
+        ("account", "list_accounts"),
+        ("portfolio", "get_assets_summary"),
+        ("portfolio", "get_holdings"),
+        ("trade", "list_orders"),
+        ("trade", "get_cash_flows"),
+        ("market", "quote"),
+        ("market", "kline"),
+    )
+    (adapter / "sdk.py").write_text(
+        "class Adapter:\n"
+        "    def bind(self):\n"
+        + "".join(
+            f'        self._method("{section}", "{method}")\n'
+            for section, method in sdk_pairs
+        )
+    )
+
+    assert check_gateway_read_allowlist(tmp_path) == []
+
+    (routes / "read_only.py").write_text(
+        route_source.replace(
+            'router = APIRouter(prefix="/internal/v1/read-only")',
+            'router = object()\ndecoy = APIRouter(prefix="/internal/v1/read-only")',
+        )
+    )
+    assert {
+        finding.rule for finding in check_gateway_read_allowlist(tmp_path)
+    } == {"gateway_read_allowlist_mismatch"}
+
+    (routes / "read_only.py").write_text(route_source)
+    with (adapter / "sdk.py").open("a") as stream:
+        stream.write('        self._method("wealth", "redeem_fund")\n')
+    assert {
+        finding.rule for finding in check_gateway_read_allowlist(tmp_path)
+    } == {"gateway_read_allowlist_mismatch"}
+
 
 def test_gateway_entrypoints_are_frozen_away_from_probe_runtime(tmp_path: Path) -> None:
     pyproject = tmp_path / "integrations/fosun_gateway/pyproject.toml"
@@ -221,13 +302,58 @@ def test_gateway_entrypoints_are_frozen_away_from_probe_runtime(tmp_path: Path) 
     compose.write_text(
         'services:\n  fosun-gateway:\n    command: ["nexus-fosun-gateway"]\n'
     )
-    dockerfile.write_text('CMD ["nexus-fosun-gateway"]\n')
+    dockerfile.write_text('FROM synthetic\nCMD ["nexus-fosun-gateway"]\n')
 
     assert check_gateway_entrypoint_isolation(tmp_path) == []
 
     compose.write_text(
         'services:\n  fosun-gateway:\n'
         '    command: ["nexus-fosun-read-only-probe"]\n'
+    )
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
+    compose.write_text(
+        'services:\n  fosun-gateway:\n'
+        '    command: ["nexus-fosun-read-only-probe"]\n'
+        '  decoy:\n    # command: ["nexus-fosun-gateway"]\n'
+    )
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
+    compose.write_text(
+        'services:\n  fosun-gateway:\n    command: ["nexus-fosun-gateway"]\n'
+    )
+    dockerfile.write_text(
+        'FROM synthetic\nCMD ["nexus-fosun-gateway"]\n'
+        'CMD ["nexus-fosun-read-only-probe"]\n'
+    )
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
+    dockerfile.write_text(
+        'FROM synthetic\ncmd ["nexus-fosun-read-only-probe"]\n'
+    )
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
+    dockerfile.write_text(
+        'FROM synthetic\nENTRYPOINT ["nexus-fosun-read-only-probe"]\n'
+        'CMD ["nexus-fosun-gateway"]\n'
+    )
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
+    dockerfile.write_text('FROM synthetic\nCMD ["nexus-fosun-gateway"]\n')
+    compose.write_text(
+        'services:\n  fosun-gateway:\n'
+        '    entrypoint: ["nexus-fosun-read-only-probe"]\n'
+        '    command: ["nexus-fosun-gateway"]\n'
     )
     assert {
         finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
