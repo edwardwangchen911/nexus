@@ -2,6 +2,8 @@
 
 > Authority: `docs/superpowers/specs/2026-08-31-nexus-real-fixture-e2e-design.md` remains binding. This follow-up exists only because the scoped re-review of `26b3d9b..2b122a7` reproduced four load-bearing residual findings.
 
+> Convergence addendum (user decision, 2026-08-31): Task 1's repository-policy authority gaps are closed and independently approved. Task 2 is deferred because its remaining abnormal-process and exotic-PostgreSQL-object cases affect only a caller-created disposable local `nexus_e2e_*` database and no account, funds, orders, Provider, or production path. Proceed directly to the bounded Task 3 acceptance and local integration; do not reopen policy hardening without a new production-relevant failure.
+
 ## Goal
 
 Close the four reproduced residual findings without changing the NEXUS product boundary: the fixture gate must remain local-only, credential-free, deterministic, mock-free, backed by a caller-provided dedicated empty PostgreSQL database, and unable to reach Fosun, an account, a Provider, production, deployment, or an order path.
