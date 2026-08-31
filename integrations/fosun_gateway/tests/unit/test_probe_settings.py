@@ -86,6 +86,7 @@ def test_probe_settings_require_explicit_admission_and_hide_secrets(
 
     rendered = repr(settings)
     assert settings.sdk_admitted is True
+    assert settings.probe_https_proxy_url == "http://127.0.0.1:9090"
     assert settings.provider_manifest.is_absolute()
     assert settings.output_dir.is_absolute()
     assert "synthetic-api-key-canary" not in rendered
@@ -94,6 +95,28 @@ def test_probe_settings_require_explicit_admission_and_hide_secrets(
     assert "synthetic-publisher-private-key-canary" not in rendered
 
     values["FOSUN_SDK_ADMITTED"] = False
+    with pytest.raises(ValidationError):
+        ProbeProviderSettings.model_validate(values)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "http://127.0.0.1:9091",
+        "http://localhost:9090",
+        "https://127.0.0.1:9090",
+        "http://104.153.109.103:9090",
+        "http://user:secret@127.0.0.1:9090",
+    ],
+)
+def test_probe_settings_accept_only_the_whitelisted_local_https_proxy_path(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    values = _settings_values(tmp_path)
+    values["FOSUN_PROBE_HTTPS_PROXY_URL"] = value
+
     with pytest.raises(ValidationError):
         ProbeProviderSettings.model_validate(values)
 
@@ -179,6 +202,7 @@ def _settings_values(tmp_path: Path) -> dict[str, object]:
             tmp_path / "synthetic-publisher-private-key-canary"
         ),
         "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U": "A" * 43,
+        "FOSUN_PROBE_HTTPS_PROXY_URL": "http://127.0.0.1:9090",
         "FSOPENAPI_BASE_URL": "https://openapi.fosunxcz.com",
         "FSOPENAPI_API_KEY": "synthetic-api-key-canary",
         "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key-canary",

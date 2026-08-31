@@ -15,6 +15,8 @@ from nexus_fosun_gateway.security.dependency_logging import (
 _SDK_SOCKET_TIMEOUT_SECONDS = (5.0, 5.0)
 _MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 _PROVIDER_RESPONSE_CHUNK_BYTES = 64 * 1024
+_LOCAL_PROBE_HTTPS_PROXY_URL = "http://127.0.0.1:9090"
+_FOSUN_HTTPS_PROXY_KEY = "https://openapi.fosunxcz.com"
 HttpSurface = Literal["auth", "business"]
 _MISSING_ATTRIBUTE = object()
 
@@ -124,6 +126,12 @@ class ProbeTlsControls:
             is self._dispatch_gate
             and getattr(self._auth_proxy, "_dispatch_gate", None)
             is self._dispatch_gate
+            and getattr(self._business_proxy, "_https_proxy_url", None)
+            == _LOCAL_PROBE_HTTPS_PROXY_URL
+            and getattr(self._auth_proxy, "_https_proxy_url", None)
+            == _LOCAL_PROBE_HTTPS_PROXY_URL
+            and _session_proxies_are_empty(self._business_session)
+            and _session_proxies_are_empty(self._auth_session)
         )
 
     def close(self) -> None:
@@ -163,11 +171,13 @@ class _VerifiedSessionProxy:
         request: Callable[..., object],
         observer: ProviderHttpObserver | None = None,
         dispatch_gate: _ProbeDispatchGate | None = None,
+        https_proxy_url: str | None = None,
     ) -> None:
         self._delegate = delegate
         self._request = request
         self._observer = observer
         self._dispatch_gate = dispatch_gate
+        self._https_proxy_url = https_proxy_url
 
     def request(self, *args: object, **kwargs: object) -> object:
         enforce_sdk_dependency_log_boundary()
@@ -175,6 +185,9 @@ class _VerifiedSessionProxy:
         kwargs["allow_redirects"] = False
         kwargs["timeout"] = _SDK_SOCKET_TIMEOUT_SECONDS
         kwargs["stream"] = True
+        if self._https_proxy_url is not None:
+            _pin_empty_session_proxies(self._delegate)
+            kwargs["proxies"] = _https_proxy_configuration(self._https_proxy_url)
         _require_dispatch_open(self._dispatch_gate)
         _before_dispatch(self._observer, "business")
         return _dispatch_verified_request(
@@ -195,13 +208,17 @@ class _VerifiedRequestsProxy:
         self,
         delegate: object,
         post: Callable[..., object],
+        session: object,
         observer: ProviderHttpObserver | None = None,
         dispatch_gate: _ProbeDispatchGate | None = None,
+        https_proxy_url: str | None = None,
     ) -> None:
         self._delegate = delegate
         self._post = post
+        self._session = session
         self._observer = observer
         self._dispatch_gate = dispatch_gate
+        self._https_proxy_url = https_proxy_url
 
     def post(self, *args: object, **kwargs: object) -> object:
         enforce_sdk_dependency_log_boundary()
@@ -209,6 +226,9 @@ class _VerifiedRequestsProxy:
         kwargs["allow_redirects"] = False
         kwargs["timeout"] = _SDK_SOCKET_TIMEOUT_SECONDS
         kwargs["stream"] = True
+        if self._https_proxy_url is not None:
+            _pin_empty_session_proxies(self._session)
+            kwargs["proxies"] = _https_proxy_configuration(self._https_proxy_url)
         _require_dispatch_open(self._dispatch_gate)
         _before_dispatch(self._observer, "auth")
         return _dispatch_verified_request(
@@ -226,7 +246,13 @@ class _VerifiedRequestsProxy:
 
 def enforce_sdk_tls_verification(client: object, auth_module: object) -> None:
     """Patch the exact v1.2.0 surfaces or reject the SDK before any network call."""
-    _install_sdk_tls_verification(client, auth_module, observer=None, probe_mode=False)
+    _install_sdk_tls_verification(
+        client,
+        auth_module,
+        observer=None,
+        probe_mode=False,
+        https_proxy_url=None,
+    )
 
 
 def enforce_probe_tls_controls(
@@ -234,13 +260,17 @@ def enforce_probe_tls_controls(
     auth_module: object,
     *,
     observer: ProviderHttpObserver,
+    https_proxy_url: str = _LOCAL_PROBE_HTTPS_PROXY_URL,
 ) -> ProbeTlsControls:
     """Install counted, no-retry, closable TLS surfaces for one probe only."""
+    if https_proxy_url != _LOCAL_PROBE_HTTPS_PROXY_URL:
+        raise RuntimeError("reviewed SDK probe HTTPS proxy is unavailable")
     installation = _install_sdk_tls_verification(
         client,
         auth_module,
         observer=observer,
         probe_mode=True,
+        https_proxy_url=https_proxy_url,
     )
     try:
         return ProbeTlsControls(
@@ -266,6 +296,7 @@ def _install_sdk_tls_verification(
     *,
     observer: ProviderHttpObserver | None,
     probe_mode: bool,
+    https_proxy_url: str | None,
 ) -> _InstalledTlsSurfaces:
     enforce_sdk_dependency_log_boundary()
     session: object | None = None
@@ -301,17 +332,23 @@ def _install_sdk_tls_verification(
         dispatch_gate = _ProbeDispatchGate() if probe_mode else None
         setattr(session, "trust_env", False)
         setattr(isolated_auth_session, "trust_env", False)
+        if https_proxy_url is not None:
+            _pin_empty_session_proxies(session)
+            _pin_empty_session_proxies(isolated_auth_session)
         business_proxy = _VerifiedSessionProxy(
             session,
             session_request,
             observer,
             dispatch_gate,
+            https_proxy_url,
         )
         auth_proxy = _VerifiedRequestsProxy(
             requests_module,
             isolated_auth_post,
+            isolated_auth_session,
             observer,
             dispatch_gate,
+            https_proxy_url,
         )
         setattr(client, "_http_session", business_proxy)
         setattr(auth_module, "requests", auth_proxy)
@@ -354,6 +391,31 @@ def _install_sdk_tls_verification(
         auth_trust_env=auth_trust_env,
         dispatch_gate=dispatch_gate,
     )
+
+
+def _https_proxy_configuration(https_proxy_url: str | None) -> dict[str, str]:
+    if https_proxy_url is None:
+        return {}
+    return {
+        "https": https_proxy_url,
+        _FOSUN_HTTPS_PROXY_KEY: https_proxy_url,
+    }
+
+
+def _pin_empty_session_proxies(session: object) -> None:
+    try:
+        setattr(session, "proxies", {})
+    except BaseException as error:
+        if isinstance(error, KeyboardInterrupt | SystemExit):
+            raise
+        raise RuntimeError("reviewed SDK probe HTTPS proxy is unavailable") from None
+    if not _session_proxies_are_empty(session):
+        raise RuntimeError("reviewed SDK probe HTTPS proxy is unavailable")
+
+
+def _session_proxies_are_empty(session: object) -> bool:
+    proxies = getattr(session, "proxies", None)
+    return isinstance(proxies, dict) and not proxies
 
 
 def _require_dispatch_open(dispatch_gate: _ProbeDispatchGate | None) -> None:

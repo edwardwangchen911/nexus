@@ -155,6 +155,7 @@ def _settings(tmp_path: Path) -> ProbeProviderSettings:
                 tmp_path / "synthetic-private-key-canary"
             ),
             "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U": "A" * 43,
+            "FOSUN_PROBE_HTTPS_PROXY_URL": "http://127.0.0.1:9090",
             "FSOPENAPI_BASE_URL": "https://openapi.fosunxcz.com",
             "FSOPENAPI_API_KEY": "synthetic-api-secret-canary",
             "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key-canary",

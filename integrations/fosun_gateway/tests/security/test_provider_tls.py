@@ -18,6 +18,8 @@ from nexus_fosun_gateway.security.provider_tls import (
     enforce_probe_tls_controls,
     enforce_sdk_tls_verification,
 )
+from requests.sessions import merge_setting
+from requests.utils import select_proxy
 from urllib3.connectionpool import HTTPSConnectionPool
 from urllib3.response import HTTPResponse
 
@@ -34,7 +36,7 @@ class _RecordingObserver(ProviderHttpObserver):
 
 
 def test_frozen_sdk_http_paths_force_tls_no_proxy_no_redirect_and_socket_timeout() -> None:
-    observed: list[tuple[str, object, object, object, object, object]] = []
+    observed: list[tuple[str, object, object, object, object, object, object]] = []
 
     class FakeResponse:
         headers: dict[str, str] = {}
@@ -62,6 +64,7 @@ def test_frozen_sdk_http_paths_force_tls_no_proxy_no_redirect_and_socket_timeout
                     kwargs.get("timeout"),
                     kwargs.get("stream"),
                     self.trust_env,
+                    kwargs.get("proxies", "absent"),
                 )
             )
             return FakeResponse()
@@ -75,6 +78,7 @@ def test_frozen_sdk_http_paths_force_tls_no_proxy_no_redirect_and_socket_timeout
                     kwargs.get("timeout"),
                     kwargs.get("stream"),
                     self.trust_env,
+                    kwargs.get("proxies", "absent"),
                 )
             )
             return FakeResponse()
@@ -100,13 +104,15 @@ def test_frozen_sdk_http_paths_force_tls_no_proxy_no_redirect_and_socket_timeout
     )
 
     assert observed == [
-        ("request", True, False, (5.0, 5.0), True, False),
-        ("auth", True, False, (5.0, 5.0), True, False),
+        ("request", True, False, (5.0, 5.0), True, False, "absent"),
+        ("auth", True, False, (5.0, 5.0), True, False, "absent"),
     ]
 
 
 def test_probe_tls_controls_count_physical_edges_and_disable_adapter_retries() -> None:
     events: list[tuple[str, object]] = []
+    proxy_arguments: list[object] = []
+    selected_proxies: list[str | None] = []
     sessions: list[object] = []
 
     class FakeResponse:
@@ -125,6 +131,9 @@ def test_probe_tls_controls_count_physical_edges_and_disable_adapter_retries() -
 
         def __init__(self) -> None:
             self.closed = False
+            self.proxies = {
+                "https://openapi.fosunxcz.com": "http://attacker.invalid:8080"
+            }
             self._adapters = {
                 "https://": requests.adapters.HTTPAdapter(max_retries=3),
             }
@@ -136,11 +145,17 @@ def test_probe_tls_controls_count_physical_edges_and_disable_adapter_retries() -
         def get_adapter(self, prefix: str) -> object:
             return self._adapters[prefix]
 
-        def request(self, *_args: object, **_kwargs: object) -> object:
+        def request(self, _method: str, url: str, **kwargs: object) -> object:
+            proxy_arguments.append(kwargs.get("proxies"))
+            merged = merge_setting(kwargs.get("proxies"), self.proxies)
+            selected_proxies.append(select_proxy(url, merged))
             events.append(("delegate", "business"))
             return FakeResponse()
 
-        def post(self, *_args: object, **_kwargs: object) -> object:
+        def post(self, url: str, **kwargs: object) -> object:
+            proxy_arguments.append(kwargs.get("proxies"))
+            merged = merge_setting(kwargs.get("proxies"), self.proxies)
+            selected_proxies.append(select_proxy(url, merged))
             events.append(("delegate", "auth"))
             return FakeResponse()
 
@@ -159,13 +174,26 @@ def test_probe_tls_controls_count_physical_edges_and_disable_adapter_retries() -
         client,
         auth_module,
         observer=observer,
+        https_proxy_url="http://127.0.0.1:9090",
     )
 
     assert controls.attests(client, observer) is True
     assert controls.attests(client, _RecordingObserver([])) is False
+    assert all(session.proxies == {} for session in sessions)
+    business_session.proxies["https://openapi.fosunxcz.com"] = (
+        "http://attacker.invalid:8080"
+    )
+    assert controls.attests(client, observer) is False
 
-    client._http_session.request("POST", "https://provider.invalid")
-    auth_module.requests.post("https://provider.invalid")
+    client._http_session.request(
+        "POST",
+        "https://openapi.fosunxcz.com/api/v1/portfolio/Accounts",
+        proxies={"https": "http://attacker.invalid:8080"},
+    )
+    auth_module.requests.post(
+        "https://openapi.fosunxcz.com/api/v1/auth/SessionCreate",
+        proxies={"https": "http://attacker.invalid:8080"},
+    )
 
     assert events == [
         ("before", "business"),
@@ -175,6 +203,21 @@ def test_probe_tls_controls_count_physical_edges_and_disable_adapter_retries() -
         ("delegate", "auth"),
         ("after", ("auth", 200)),
     ]
+    assert proxy_arguments == [
+        {
+            "https": "http://127.0.0.1:9090",
+            "https://openapi.fosunxcz.com": "http://127.0.0.1:9090",
+        },
+        {
+            "https": "http://127.0.0.1:9090",
+            "https://openapi.fosunxcz.com": "http://127.0.0.1:9090",
+        },
+    ]
+    assert selected_proxies == [
+        "http://127.0.0.1:9090",
+        "http://127.0.0.1:9090",
+    ]
+    assert all(session.proxies == {} for session in sessions)
     for session in sessions:
         retries = session.get_adapter("https://").max_retries
         assert (

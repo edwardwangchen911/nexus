@@ -716,6 +716,7 @@ def _set_probe_environment(
         "FOSUN_PROBE_OUTPUT_DIR": str(output_dir),
         "FOSUN_PROBE_PUBLISHER_PRIVATE_KEY_FILE": str(private_key_path),
         "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U": public_key_b64u,
+        "FOSUN_PROBE_HTTPS_PROXY_URL": "http://127.0.0.1:9090",
         "FSOPENAPI_BASE_URL": "https://openapi.fosunxcz.com",
         "FSOPENAPI_API_KEY": "synthetic-api-key-canary",
         "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-client-private-key-canary",

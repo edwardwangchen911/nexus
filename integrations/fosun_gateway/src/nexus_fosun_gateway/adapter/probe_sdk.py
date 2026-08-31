@@ -456,6 +456,7 @@ def build_probe_transport(
             client,
             auth_module,
             observer=budget,
+            https_proxy_url=settings.probe_https_proxy_url,
         )
         budget.bind_http_controls()
         transport = SdkFosunTransport(client, rate_limiter=budget)

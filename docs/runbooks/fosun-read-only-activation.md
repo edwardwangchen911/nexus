@@ -446,8 +446,14 @@ export FOSUN_SDK_ADMITTED=true
 export FOSUN_PROBE_OUTPUT_DIR="$probe_output_dir"
 export FOSUN_PROBE_PUBLISHER_PRIVATE_KEY_FILE='/approved/secrets/probe-publisher.seed'
 export FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U='<approved-non-secret-pin>'
+export FOSUN_PROBE_HTTPS_PROXY_URL='http://127.0.0.1:9090'
 export FSOPENAPI_BASE_URL='https://openapi.fosunxcz.com'
 ```
+
+The local pilot accepts only that exact loopback HTTP proxy for HTTPS CONNECT traffic. Both SDK
+sessions keep `trust_env=false`, override caller-supplied proxy values, retain end-to-end TLS
+verification, and cannot use a remote or credential-bearing proxy URL. The proxy's observed public
+egress must match the Provider allowlist immediately before the approved probe.
 
 `probe_session_date` must be a completed Provider session strictly before the UTC start date. The
 cash-flow range is inclusive and may span at most seven dates (`to - from <= 6 days`). The child

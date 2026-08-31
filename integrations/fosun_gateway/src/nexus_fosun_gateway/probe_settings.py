@@ -10,6 +10,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from nexus_fosun_gateway.settings import FOSUN_REST_BASE_URL
 
+FOSUN_LOCAL_PROBE_HTTPS_PROXY_URL = "http://127.0.0.1:9090"
+
 
 class ProbeProviderSettings(BaseSettings):
     """Minimal one-shot provider settings with hidden validation inputs."""
@@ -33,6 +35,9 @@ class ProbeProviderSettings(BaseSettings):
         max_length=43,
         pattern=r"^[A-Za-z0-9_-]{43}$",
         validation_alias="FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U",
+    )
+    probe_https_proxy_url: str = Field(
+        validation_alias="FOSUN_PROBE_HTTPS_PROXY_URL"
     )
     fsopenapi_base_url: str = Field(validation_alias="FSOPENAPI_BASE_URL")
     fsopenapi_api_key: SecretStr = Field(validation_alias="FSOPENAPI_API_KEY")
@@ -74,6 +79,13 @@ class ProbeProviderSettings(BaseSettings):
     def provider_base_url_is_exact_https(cls, value: str) -> str:
         if value != FOSUN_REST_BASE_URL:
             raise ValueError("provider base URL must be the reviewed Fosun REST origin")
+        return value
+
+    @field_validator("probe_https_proxy_url")
+    @classmethod
+    def probe_https_proxy_is_exact_loopback(cls, value: str) -> str:
+        if value != FOSUN_LOCAL_PROBE_HTTPS_PROXY_URL:
+            raise ValueError("probe HTTPS proxy must be the reviewed local endpoint")
         return value
 
     @field_validator(
