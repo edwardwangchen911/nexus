@@ -18,6 +18,26 @@ npm --version
 
 前两条必须同时显示可用的 client 和 server/Compose。仅安装 `docker` CLI 而没有可达 daemon 不足以运行本项目。
 
+## 真实本地 fixture E2E（不使用 Compose）
+
+synthetic browser E2E 可在浏览器层替换 API 响应，以覆盖页面契约；真实本地 fixture E2E
+不替换网络响应，启动 loopback Engine 与 Vinext 同源 BFF，并将状态写入调用者提供的专用空
+PostgreSQL 数据库。它只验证本地软件链路，不读取或构造真实行情、账户、订单或 Provider 证据。
+
+调用者必须先提供一个专用、空的 PostgreSQL 数据库，名称以 `nexus_e2e_` 开头。例如，使用
+loopback 地址的 URL（占位符必须替换为仅用于该测试数据库的 synthetic 凭据）：
+
+```bash
+export NEXUS_REAL_E2E_DATABASE_URL='postgresql+asyncpg://<synthetic-user>:<synthetic-password>@127.0.0.1:<port>/nexus_e2e_local'
+export NEXUS_E2E_BROWSER_CHANNEL=chromium
+npm run test:e2e:real
+```
+
+运行器只会校验该 URL、迁移这个调用者提供的专用库并启动本地测试进程；它不会创建、删除、
+清空或重置数据库。若初始状态并非空库所需的 fixture `version=0`，测试会失败而不会清理。
+默认不运行 Provider、交易 Gateway、任何 worker 或 MinIO；不要把本命令视为复星 SDK admission、
+复星激活、真实行情/财报、账户同步或订单可用性的证据。
+
 ## 本地环境文件
 
 ```bash

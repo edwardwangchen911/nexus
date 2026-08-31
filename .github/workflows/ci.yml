@@ -129,6 +129,53 @@ jobs:
           retention-days: 3
           include-hidden-files: false
 
+  real-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17@sha256:e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449
+        env:
+          POSTGRES_DB: nexus_e2e_ci
+          POSTGRES_USER: nexus_e2e_ci
+          POSTGRES_PASSWORD: synthetic_real_e2e_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nexus_e2e_ci -d nexus_e2e_ci"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      NEXUS_REAL_E2E_DATABASE_URL: postgresql+asyncpg://nexus_e2e_ci:synthetic_real_e2e_only@127.0.0.1:5432/nexus_e2e_ci
+      NEXUS_E2E_BROWSER_CHANNEL: chromium
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          package-manager-cache: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - run: npm ci
+      - run: uv sync --frozen --package nexus-engine
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e:real
+      - name: Upload real fixture failure evidence only
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nexus-real-e2e-failure-${{ github.run_id }}
+          path: test-results/**
+          if-no-files-found: ignore
+          retention-days: 3
+          include-hidden-files: false
+
   policy:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
