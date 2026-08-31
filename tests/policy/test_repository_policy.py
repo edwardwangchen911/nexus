@@ -553,10 +553,15 @@ def test_gateway_entrypoints_are_frozen_away_from_probe_runtime(
     dockerfile = tmp_path / "infra/docker/fosun-gateway.Dockerfile"
     pyproject.parent.mkdir(parents=True)
     dockerfile.parent.mkdir(parents=True)
-    pyproject.write_text(
+    safe_pyproject = (
         '[project]\nname="synthetic"\n[project.scripts]\n'
         'nexus-fosun-gateway="nexus_fosun_gateway.main:run"\n'
+        '[build-system]\nrequires=["hatchling"]\n'
+        'build-backend="hatchling.build"\n'
+        '[tool.hatch.build.targets.wheel]\n'
+        'packages=["src/nexus_fosun_gateway"]\n'
     )
+    pyproject.write_text(safe_pyproject)
     safe_compose = 'services:\n  fosun-gateway:\n    command: ["nexus-fosun-gateway"]\n'
     safe_dockerfile = (
         "FROM synthetic:test@sha256:" + "a" * 64 + "\n"
@@ -566,8 +571,14 @@ def test_gateway_entrypoints_are_frozen_away_from_probe_runtime(
     dockerfile.write_text(safe_dockerfile)
 
     def approve_current_composition_for_semantic_check() -> None:
+        pyproject_content = pyproject.read_text()
         compose_content = compose.read_text()
         dockerfile_content = dockerfile.read_text()
+        monkeypatch.setattr(
+            repository_policy,
+            "_EXPECTED_FOSUN_GATEWAY_PYPROJECT_SHA256",
+            hashlib.sha256(pyproject_content.encode()).hexdigest(),
+        )
         monkeypatch.setattr(
             repository_policy,
             "_EXPECTED_COMPOSE_SHA256",
@@ -592,6 +603,26 @@ def test_gateway_entrypoints_are_frozen_away_from_probe_runtime(
     approve_current_composition_for_semantic_check()
 
     assert check_gateway_entrypoint_isolation(tmp_path) == []
+
+    with pyproject.open("a") as stream:
+        stream.write(
+            '[tool.hatch.build.targets.wheel.force-include]\n'
+            '"src/nexus_fosun_gateway/probe_cli.py"="sitecustomize.py"\n'
+        )
+    approve_current_composition_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+    pyproject.write_text(safe_pyproject)
+    approve_current_composition_for_semantic_check()
+
+    with pyproject.open("a") as stream:
+        stream.write("# unreviewed packaging metadata change\n")
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+    pyproject.write_text(safe_pyproject)
+    approve_current_composition_for_semantic_check()
 
     compose.write_text(
         safe_compose

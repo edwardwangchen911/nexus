@@ -141,6 +141,9 @@ _EXPECTED_GATEWAY_SOURCE_SHA256 = {
 _EXPECTED_GATEWAY_INSTALLABLE_SRC_SHA256 = (
     "84a5ef06e98d362371ef9ce2afcd209cdf0bae8216fbe62f234729fc946455ad"
 )
+_EXPECTED_FOSUN_GATEWAY_PYPROJECT_SHA256 = (
+    "ac872ba669920971eca0b0c98b7c5cb9b8058d29756c15b044d1518db5221c38"
+)
 _EXPECTED_COMPOSE_SHA256 = (
     "9a4a462f8eb0588c399427908f88144bc9213023f18764c5a808b00ce698420c"
 )
@@ -690,10 +693,16 @@ def check_gateway_entrypoint_isolation(root: Path) -> list[PolicyFinding]:
     compose_path = root / "infra/compose.yaml"
     dockerfile_path = root / "infra/docker/fosun-gateway.Dockerfile"
     try:
-        pyproject = tomllib.loads(_read_text(pyproject_path))
+        pyproject_text = _read_text(pyproject_path)
+        pyproject = tomllib.loads(pyproject_text)
         scripts = pyproject["project"]["scripts"]
+        build_system = pyproject["build-system"]
+        hatch_build = pyproject["tool"]["hatch"]["build"]
     except (KeyError, OSError, tomllib.TOMLDecodeError, TypeError):
+        pyproject_text = ""
         scripts = None
+        build_system = None
+        hatch_build = None
     packaged_entrypoint = (
         scripts.get("nexus-fosun-gateway") if isinstance(scripts, dict) else None
     )
@@ -712,6 +721,12 @@ def check_gateway_entrypoint_isolation(root: Path) -> list[PolicyFinding]:
     docker_instructions = _docker_final_stage_process_instructions(dockerfile)
     if (
         packaged_entrypoint != "nexus_fosun_gateway.main:run"
+        or hashlib.sha256(pyproject_text.encode()).hexdigest()
+        != _EXPECTED_FOSUN_GATEWAY_PYPROJECT_SHA256
+        or build_system
+        != {"requires": ["hatchling"], "build-backend": "hatchling.build"}
+        or hatch_build
+        != {"targets": {"wheel": {"packages": ["src/nexus_fosun_gateway"]}}}
         or hashlib.sha256(compose.encode()).hexdigest() != _EXPECTED_COMPOSE_SHA256
         or hashlib.sha256(gateway_service.encode()).hexdigest()
         != _EXPECTED_FOSUN_GATEWAY_SERVICE_SHA256
@@ -743,8 +758,8 @@ def check_gateway_entrypoint_isolation(root: Path) -> list[PolicyFinding]:
                 "gateway_entrypoint_isolation_missing",
                 "integrations/fosun_gateway/pyproject.toml|infra/compose.yaml|"
                 "infra/docker/fosun-gateway.Dockerfile",
-                "production must use the fixed Gateway entry point without probe or "
-                "interpreter-injection environment",
+                "production packaging and runtime must use the fixed Gateway entry "
+                "point without probe or interpreter-injection surfaces",
             )
         ]
     return []
