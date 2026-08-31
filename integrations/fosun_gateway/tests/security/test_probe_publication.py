@@ -1,7 +1,10 @@
 import base64
 import hashlib
+import json
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +40,65 @@ def test_publisher_create_only_fsyncs_value_free_bytes_and_returns_attestation(
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert publication.attests(artifact_sha256, len(artifact_bytes))
     assert "output" not in repr(publication).lower()
+
+
+def test_runbook_receipt_extraction_snippet_is_executable(tmp_path: Path) -> None:
+    repository_root = Path(__file__).parents[4]
+    runbook = (
+        repository_root / "docs/runbooks/fosun-read-only-activation.md"
+    ).read_text()
+    marker = "<<'PY'\n"
+    snippet_start = runbook.index(marker) + len(marker)
+    snippet = runbook[snippet_start:runbook.index("\nPY\n", snippet_start)]
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    artifact_name = "synthetic-probe.json"
+    artifact_bytes = b'{"schema_version":"synthetic"}'
+    artifact_path = output_dir / artifact_name
+    artifact_path.write_bytes(artifact_bytes)
+    artifact_path.chmod(0o600)
+    artifact_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
+    receipt = {
+        "schema_version": "nexus.fosun.probe-publication.v1",
+        "artifact_sha256": artifact_sha256,
+        "signature_b64u": base64.urlsafe_b64encode(bytes(64)).rstrip(b"=").decode(),
+    }
+    frame = {
+        "status": "probe_published",
+        "code": "OK",
+        "artifact_sha256": artifact_sha256,
+        "byte_length": len(artifact_bytes),
+        "capability_expires_at": "2026-08-31T09:00:00Z",
+        "activation_contract_hash": "1" * 64,
+        "publication_receipt": receipt,
+    }
+    frame_path = tmp_path / "frame.json"
+    frame_path.write_text(json.dumps(frame, separators=(",", ":")) + "\n")
+    frame_path.chmod(0o600)
+
+    completed = subprocess.run(
+        [sys.executable, "-", str(frame_path), str(output_dir), artifact_name],
+        input=snippet,
+        text=True,
+        capture_output=True,
+        cwd=repository_root,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    summary = json.loads(completed.stdout)
+    receipt_bytes = json.dumps(
+        receipt,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    assert summary == {
+        "artifact_sha256": artifact_sha256,
+        "receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+        "activation_contract_hash": "1" * 64,
+    }
+    assert (output_dir / "publication-receipt.json").read_bytes() == receipt_bytes
 
 
 def test_publication_stages_file_link_and_directory_durability_in_order(

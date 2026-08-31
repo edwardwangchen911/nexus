@@ -3,4 +3,3 @@
 
 class NonRetryableTransportRefusal(RuntimeError):
     """A local call-edge refusal that must never enter provider retry logic."""
-

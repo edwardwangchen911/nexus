@@ -511,7 +511,7 @@ publication = publish_probe_artifact(
 )
 print(json.dumps({
     "artifact_sha256": artifact_sha256,
-    "receipt_sha256": publication.sha256,
+    "receipt_sha256": publication.artifact_sha256,
     "activation_contract_hash": frame["activation_contract_hash"],
 }, separators=(",", ":")))
 PY
