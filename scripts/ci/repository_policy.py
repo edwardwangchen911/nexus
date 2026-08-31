@@ -198,19 +198,23 @@ _EXPECTED_FOSUN_GATEWAY_DOCKERFILE_SHA256 = (
 )
 _REAL_E2E_CONFIG_PATH = "playwright.real.config.ts"
 _REAL_E2E_TEST_DIRECTORY = "tests/e2e-real"
+_REAL_E2E_TEST_PATH = f"{_REAL_E2E_TEST_DIRECTORY}/integrations-real.spec.ts"
 _REAL_E2E_PACKAGE_SCRIPT = "test:e2e:real"
 _REAL_E2E_PACKAGE_COMMAND = "node scripts/e2e/run-real-fixture.mjs"
 _REAL_E2E_WORKFLOW_PATH = ".github/workflows/ci.yml"
 _REAL_E2E_JOBS_SECTION = re.compile(r"^jobs\s*:\s*(?:#.*)?$")
 _REAL_E2E_WORKFLOW_JOB = re.compile(r"^(?:real-e2e|['\"]real-e2e['\"])\s*:")
+_REAL_E2E_YAML_INDIRECTION = re.compile(
+    r"(?m)^\s*(?:<<\s*:\s*\*|[^#\n]*:\s*[&*][A-Za-z_][A-Za-z0-9_-]*)"
+)
 _REAL_E2E_NETWORK_MOCK = re.compile(
-    r"\b(?:page|context|browserContext)\s*\.\s*(?:route|routeFromHAR|addInitScript)\s*\(|"
-    r"\broute\s*\.\s*fulfill\s*\(|"
-    r"\bnavigator\s*\.\s*serviceWorker\s*\.\s*register\s*\(|"
-    r"\b(?:window|globalThis)\s*\.\s*fetch\s*="
+    r"\b(?:page|context|browserContext)\s*(?:\.\s*|\[\s*['\"])(?:route|routeFromHAR|addInitScript)(?:['\"]\s*\])?\s*\(|"
+    r"\broute\s*(?:\.\s*|\[\s*['\"])fulfill(?:['\"]\s*\])?\s*\(|"
+    r"\bnavigator\s*\.\s*serviceWorker\s*(?:\.\s*|\[\s*['\"])register(?:['\"]\s*\])?\s*\(|"
+    r"\b(?:window|globalThis)\s*(?:\.\s*fetch|\[\s*['\"]fetch['\"]\s*\])\s*="
 )
 _REAL_E2E_IMPORT = re.compile(
-    r"(?:\bfrom\s*|\bimport\s*\(\s*)['\"]([^'\"]+)['\"]"
+    r"(?:\bfrom\s*|\bimport\s*(?:\(\s*)?)['\"]([^'\"]+)['\"]"
 )
 _REAL_E2E_CONFIG_REQUIRED = (
     'const engineUrl = "http://127.0.0.1:8100";',
@@ -224,6 +228,18 @@ _REAL_E2E_CONFIG_REQUIRED = (
     'serviceWorkers: "block"',
     'CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false"',
     'CLOUDFLARE_INCLUDE_PROCESS_ENV: "false"',
+)
+# These hashes freeze the approved, reviewed real-fixture execution boundary.
+# Unlike positive string matching, they reject comments, dead YAML, or source
+# syntax variants until a reviewer deliberately updates this contract.
+_EXPECTED_REAL_E2E_CONFIG_SHA256 = (
+    "a7f53f775f634015c31952c6cf9f20d15ee44c6919038da03c3b5183d53d11aa"
+)
+_EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256 = (
+    "a9f765040dd2916c8950991854944b5a78501c57db87047bcb6e02a3768a2d66"
+)
+_EXPECTED_REAL_E2E_TEST_SHA256 = (
+    "4814a5d221a2dec347afd2b544df97620b4ff20b18b00d6c1c0a160889c2e001"
 )
 _REAL_E2E_POSTGRES_IMAGE = (
     "postgres:17@sha256:"
@@ -1433,6 +1449,24 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
                 "real fixture E2E requires its dedicated test directory",
             )
         )
+    elif not _real_e2e_test_directory_is_safe(test_directory):
+        findings.append(
+            PolicyFinding(
+                "real_e2e_test_boundary_invalid",
+                _REAL_E2E_TEST_DIRECTORY,
+                "real fixture E2E must contain only its approved integration journey",
+            )
+        )
+    else:
+        test_path = root / _REAL_E2E_TEST_PATH
+        if not _path_matches_sha256(test_path, _EXPECTED_REAL_E2E_TEST_SHA256):
+            findings.append(
+                PolicyFinding(
+                    "real_e2e_test_artifact_invalid",
+                    _REAL_E2E_TEST_PATH,
+                    "real fixture E2E journey must match its reviewed artifact digest",
+                )
+            )
     if not package_script_declared:
         findings.append(
             PolicyFinding(
@@ -1507,7 +1541,8 @@ def _real_e2e_config_is_safe(config_path: Path) -> bool:
     except OSError:
         return False
     return (
-        all(required in content for required in _REAL_E2E_CONFIG_REQUIRED)
+        _path_matches_sha256(config_path, _EXPECTED_REAL_E2E_CONFIG_SHA256)
+        and all(required in content for required in _REAL_E2E_CONFIG_REQUIRED)
         and content.count("reuseExistingServer: false") == 2
         and "reuseExistingServer: true" not in content
     )
@@ -1525,12 +1560,17 @@ def _real_e2e_workflow_job_is_safe(job: str) -> bool:
     )
     exact_run = re.findall(r"(?m)^\s*-\s+run:\s*(.+?)\s*$", job)
     return (
-        all(value in job for value in required)
+        hashlib.sha256(job.encode("utf-8")).hexdigest()
+        == _EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256
+        and all(value in job for value in required)
         and exact_run.count("npm run test:e2e:real") == 1
         and not any(
             "test:e2e:real" in command and command != "npm run test:e2e:real"
             for command in exact_run
         )
+        and re.search(r"(?m)^ {4}if\s*:", job) is None
+        and re.search(r"(?m)^\s*-\s+if\s*:", job) is None
+        and "continue-on-error:" not in job
         and "secrets." not in job
         and "NEXUS_ENV: production" not in job
     )
@@ -1560,38 +1600,65 @@ def _real_e2e_workflow_job_block(workflow_path: Path) -> str | None:
         lines = _read_text(workflow_path).splitlines()
     except OSError:
         return None
-    jobs_section = False
-    job_indent: int | None = None
+    jobs_section_index: int | None = None
     for index, line in enumerate(lines):
-        if not jobs_section:
-            if line == line.lstrip(" ") and _REAL_E2E_JOBS_SECTION.fullmatch(line):
-                jobs_section = True
-            continue
+        if line == line.lstrip(" ") and _REAL_E2E_JOBS_SECTION.fullmatch(line):
+            jobs_section_index = index
+            break
+    if jobs_section_index is None:
+        return None
+
+    job_indent: int | None = None
+    job_indices: list[int] = []
+    for index in range(jobs_section_index + 1, len(lines)):
+        line = lines[index]
         stripped = line.lstrip(" ")
         if not stripped or stripped.startswith("#"):
             continue
         indent = len(line) - len(stripped)
         if indent == 0:
-            return None
+            break
         if job_indent is None:
             job_indent = indent
         if indent < job_indent:
-            return None
+            break
         if indent == job_indent and _REAL_E2E_WORKFLOW_JOB.match(stripped):
-            if not _workflow_job_has_body(lines, index, job_indent):
-                return ""
-            end = len(lines)
-            for candidate_index in range(index + 1, len(lines)):
-                candidate = lines[candidate_index]
-                candidate_stripped = candidate.lstrip(" ")
-                if not candidate_stripped or candidate_stripped.startswith("#"):
-                    continue
-                candidate_indent = len(candidate) - len(candidate_stripped)
-                if candidate_indent <= job_indent:
-                    end = candidate_index
-                    break
-            return "\n".join(lines[index:end])
-    return None
+            job_indices.append(index)
+    if not job_indices:
+        return None
+    if len(job_indices) != 1 or job_indent is None:
+        return ""
+
+    job_index = job_indices[0]
+    if not _workflow_job_has_body(lines, job_index, job_indent):
+        return ""
+    end = len(lines)
+    for candidate_index in range(job_index + 1, len(lines)):
+        candidate = lines[candidate_index]
+        candidate_stripped = candidate.lstrip(" ")
+        if not candidate_stripped or candidate_stripped.startswith("#"):
+            continue
+        candidate_indent = len(candidate) - len(candidate_stripped)
+        if candidate_indent <= job_indent:
+            end = candidate_index
+            break
+    job = "\n".join(lines[job_index:end])
+    return "" if _REAL_E2E_YAML_INDIRECTION.search(job) is not None else job
+
+
+def _path_matches_sha256(path: Path, expected: str) -> bool:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest() == expected
+    except OSError:
+        return False
+
+
+def _real_e2e_test_directory_is_safe(test_directory: Path) -> bool:
+    return [
+        path.relative_to(test_directory).as_posix()
+        for path in sorted(test_directory.rglob("*"))
+        if path.is_file()
+    ] == ["integrations-real.spec.ts"]
 
 
 def _workflow_job_has_body(lines: list[str], job_index: int, job_indent: int) -> bool:
