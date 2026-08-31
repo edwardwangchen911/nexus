@@ -205,16 +205,20 @@ _REAL_E2E_WORKFLOW_PATH = ".github/workflows/ci.yml"
 _REAL_E2E_JOBS_SECTION = re.compile(r"^jobs\s*:\s*(?:#.*)?$")
 _REAL_E2E_WORKFLOW_JOB = re.compile(r"^(?:real-e2e|['\"]real-e2e['\"])\s*:")
 _REAL_E2E_YAML_INDIRECTION = re.compile(
-    r"(?m)^\s*(?:<<\s*:\s*\*|[^#\n]*:\s*[&*][A-Za-z_][A-Za-z0-9_-]*)"
+    r"(?m)(?:^\s*<<\s*:|(?:^|[\s:\[,])[&*][A-Za-z_][A-Za-z0-9_-]*)"
+)
+_REAL_E2E_WORKFLOW_RUN_SHELL = re.compile(
+    r"(?ms)^defaults:\s*$.*?^  run:\s*$.*?^    shell\s*:"
 )
 _REAL_E2E_NETWORK_MOCK = re.compile(
-    r"\b(?:page|context|browserContext)\s*(?:\.\s*|\[\s*['\"])(?:route|routeFromHAR|addInitScript)(?:['\"]\s*\])?\s*\(|"
-    r"\broute\s*(?:\.\s*|\[\s*['\"])fulfill(?:['\"]\s*\])?\s*\(|"
-    r"\bnavigator\s*\.\s*serviceWorker\s*(?:\.\s*|\[\s*['\"])register(?:['\"]\s*\])?\s*\(|"
-    r"\b(?:window|globalThis)\s*(?:\.\s*fetch|\[\s*['\"]fetch['\"]\s*\])\s*="
+    r"\b(?:page|context|browserContext)\s*(?:\.\s*|\[\s*['\"`])(?:route|routeFromHAR|addInitScript)(?:['\"`]\s*\])?\s*\(|"
+    r"\broute\s*(?:\.\s*|\[\s*['\"`])fulfill(?:['\"`]\s*\])?\s*\(|"
+    r"\bnavigator\s*(?:\.\s*serviceWorker|\[\s*['\"`]serviceWorker['\"`]\s*\])\s*(?:\.\s*|\[\s*['\"`])register(?:['\"`]\s*\])?\s*\(|"
+    r"\b(?:window|globalThis)\s*(?:\.\s*fetch|\[\s*['\"`]fetch['\"`]\s*\])\s*="
 )
 _REAL_E2E_IMPORT = re.compile(
-    r"(?:\bfrom\s*|\bimport\s*(?:\(\s*)?)['\"]([^'\"]+)['\"]"
+    r"(?:\bfrom\s*|\bimport\s*(?:/\*.*?\*/\s*)?(?:\(\s*(?:/\*.*?\*/\s*)?)?)[\"'`]([^\"'`]+)[\"'`]",
+    re.DOTALL,
 )
 _REAL_E2E_CONFIG_REQUIRED = (
     'const engineUrl = "http://127.0.0.1:8100";',
@@ -235,8 +239,8 @@ _REAL_E2E_CONFIG_REQUIRED = (
 _EXPECTED_REAL_E2E_CONFIG_SHA256 = (
     "a7f53f775f634015c31952c6cf9f20d15ee44c6919038da03c3b5183d53d11aa"
 )
-_EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256 = (
-    "a9f765040dd2916c8950991854944b5a78501c57db87047bcb6e02a3768a2d66"
+_EXPECTED_REAL_E2E_WORKFLOW_SHA256 = (
+    "ac19e02d3282d4132f2fed4842b434ed591d85e4720164cd5ce3117e3bebee9f"
 )
 _EXPECTED_REAL_E2E_TEST_SHA256 = (
     "4814a5d221a2dec347afd2b544df97620b4ff20b18b00d6c1c0a160889c2e001"
@@ -1457,6 +1461,14 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
                 "real fixture E2E must contain only its approved integration journey",
             )
         )
+    elif not _real_e2e_test_artifact_is_safe(root):
+        findings.append(
+            PolicyFinding(
+                "real_e2e_test_artifact_invalid",
+                _REAL_E2E_TEST_PATH,
+                "real fixture E2E journey must be a tracked regular file",
+            )
+        )
     else:
         test_path = root / _REAL_E2E_TEST_PATH
         if not _path_matches_sha256(test_path, _EXPECTED_REAL_E2E_TEST_SHA256):
@@ -1483,6 +1495,14 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
                 "real fixture E2E package script must invoke only its fixed runner",
             )
         )
+    elif _real_e2e_has_package_lifecycle_script(package_path):
+        findings.append(
+            PolicyFinding(
+                "real_e2e_package_lifecycle_forbidden",
+                "package.json",
+                "real fixture E2E package script must not have npm lifecycle wrappers",
+            )
+        )
     if not workflow_job_present:
         findings.append(
             PolicyFinding(
@@ -1491,7 +1511,7 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
                 "real fixture E2E requires the real-e2e CI job",
             )
         )
-    elif not _real_e2e_workflow_job_is_safe(workflow_job):
+    elif not _real_e2e_workflow_is_safe(workflow_path, workflow_job):
         findings.append(
             PolicyFinding(
                 "real_e2e_ci_job_invalid",
@@ -1535,6 +1555,21 @@ def _real_e2e_package_script(package_path: Path) -> tuple[bool, str | None]:
     return True, script if isinstance(script, str) else None
 
 
+def _real_e2e_has_package_lifecycle_script(package_path: Path) -> bool:
+    try:
+        package = json.loads(_read_text(package_path))
+    except (OSError, json.JSONDecodeError):
+        return False
+    scripts = package.get("scripts") if isinstance(package, dict) else None
+    return isinstance(scripts, dict) and any(
+        lifecycle in scripts
+        for lifecycle in (
+            f"pre{_REAL_E2E_PACKAGE_SCRIPT}",
+            f"post{_REAL_E2E_PACKAGE_SCRIPT}",
+        )
+    )
+
+
 def _real_e2e_config_is_safe(config_path: Path) -> bool:
     try:
         content = _read_text(config_path)
@@ -1545,6 +1580,24 @@ def _real_e2e_config_is_safe(config_path: Path) -> bool:
         and all(required in content for required in _REAL_E2E_CONFIG_REQUIRED)
         and content.count("reuseExistingServer: false") == 2
         and "reuseExistingServer: true" not in content
+    )
+
+
+def _real_e2e_workflow_is_safe(workflow_path: Path, job: str) -> bool:
+    try:
+        workflow = _read_text(workflow_path)
+    except OSError:
+        return False
+    run_commands = re.findall(r"(?m)^\s*-\s+run:\s*(.+?)\s*$", workflow)
+    real_e2e_commands = [
+        command for command in run_commands if "npm run test:e2e:real" in command
+    ]
+    return (
+        _path_matches_sha256(workflow_path, _EXPECTED_REAL_E2E_WORKFLOW_SHA256)
+        and _REAL_E2E_YAML_INDIRECTION.search(workflow) is None
+        and _REAL_E2E_WORKFLOW_RUN_SHELL.search(workflow) is None
+        and real_e2e_commands == ["npm run test:e2e:real"]
+        and _real_e2e_workflow_job_is_safe(job)
     )
 
 
@@ -1560,9 +1613,7 @@ def _real_e2e_workflow_job_is_safe(job: str) -> bool:
     )
     exact_run = re.findall(r"(?m)^\s*-\s+run:\s*(.+?)\s*$", job)
     return (
-        hashlib.sha256(job.encode("utf-8")).hexdigest()
-        == _EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256
-        and all(value in job for value in required)
+        all(value in job for value in required)
         and exact_run.count("npm run test:e2e:real") == 1
         and not any(
             "test:e2e:real" in command and command != "npm run test:e2e:real"
@@ -1648,17 +1699,49 @@ def _real_e2e_workflow_job_block(workflow_path: Path) -> str | None:
 
 def _path_matches_sha256(path: Path, expected: str) -> bool:
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest() == expected
-    except OSError:
+        content = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
         return False
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest() == expected
 
 
 def _real_e2e_test_directory_is_safe(test_directory: Path) -> bool:
-    return [
-        path.relative_to(test_directory).as_posix()
+    return all(
+        path.relative_to(test_directory).as_posix() == "integrations-real.spec.ts"
         for path in sorted(test_directory.rglob("*"))
         if path.is_file()
-    ] == ["integrations-real.spec.ts"]
+    )
+
+
+def _real_e2e_test_artifact_is_safe(root: Path) -> bool:
+    test_path = root / _REAL_E2E_TEST_PATH
+    if not test_path.is_file() or test_path.is_symlink():
+        return False
+    index_mode = _git_index_mode(root, _REAL_E2E_TEST_PATH)
+    return index_mode is None or index_mode in {"100644", "100755"}
+
+
+def _git_index_mode(root: Path, relative_path: str) -> str | None:
+    repository = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if repository.returncode != 0 or repository.stdout.strip() != "true":
+        return None
+    indexed = subprocess.run(
+        ["git", "ls-files", "--stage", "--", relative_path],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if indexed.returncode != 0 or not indexed.stdout.strip():
+        return ""
+    return indexed.stdout.split(maxsplit=1)[0]
 
 
 def _workflow_job_has_body(lines: list[str], job_index: int, job_indent: int) -> bool:

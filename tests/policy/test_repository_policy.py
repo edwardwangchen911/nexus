@@ -937,6 +937,7 @@ def test_committed_workflow_has_minimal_permissions_and_offline_jobs() -> None:
 
 
 def _write_real_e2e_adoption(root: Path) -> None:
+    subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
     source_root = Path(__file__).resolve().parents[2]
     (root / "playwright.real.config.ts").write_bytes(
         (source_root / "playwright.real.config.ts").read_bytes()
@@ -952,6 +953,11 @@ def _write_real_e2e_adoption(root: Path) -> None:
     workflow.parent.mkdir(parents=True)
     workflow.write_bytes(
         (source_root / ".github/workflows/ci.yml").read_bytes()
+    )
+    subprocess.run(
+        ["git", "add", "tests/e2e-real/integrations-real.spec.ts"],
+        cwd=root,
+        check=True,
     )
 
 
@@ -1257,12 +1263,10 @@ def test_real_e2e_boundary_requires_a_deliberate_digest_update_for_ci_job_change
         finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
     }
 
-    job = repository_policy._real_e2e_workflow_job_block(workflow)
-    assert job is not None
     monkeypatch.setattr(
         repository_policy,
-        "_EXPECTED_REAL_E2E_WORKFLOW_JOB_SHA256",
-        hashlib.sha256(job.encode("utf-8")).hexdigest(),
+        "_EXPECTED_REAL_E2E_WORKFLOW_SHA256",
+        hashlib.sha256(workflow.read_bytes()).hexdigest(),
     )
     assert "real_e2e_ci_job_invalid" not in {
         finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
@@ -1313,6 +1317,217 @@ def test_real_e2e_boundary_rejects_indirected_or_non_exact_ci_jobs(
     assert "real_e2e_ci_job_invalid" in {
         finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
     }
+
+
+def test_real_e2e_boundary_freezes_workflow_level_run_shell_defaults(
+    tmp_path: Path,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    workflow.write_text(
+        "defaults:\n  run:\n    shell: bash -c '{0}; exit 0'\n"
+        + workflow.read_text()
+    )
+
+    assert "real_e2e_ci_job_invalid" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+@pytest.mark.parametrize("lifecycle", ["pretest:e2e:real", "posttest:e2e:real"])
+def test_real_e2e_boundary_forbids_package_lifecycle_scripts(
+    tmp_path: Path,
+    lifecycle: str,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    package = tmp_path / "package.json"
+    package.write_text(
+        json.dumps(
+            {
+                "scripts": {
+                    "test:e2e:real": "node scripts/e2e/run-real-fixture.mjs",
+                    lifecycle: "echo intercepted",
+                }
+            }
+        )
+    )
+
+    assert "real_e2e_package_lifecycle_forbidden" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+@pytest.mark.parametrize("position", ["before", "after"])
+def test_real_e2e_boundary_rejects_sibling_real_e2e_invocations(
+    tmp_path: Path,
+    position: str,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    sibling = (
+        "  sibling-real-e2e:\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    steps:\n"
+        "      - run: npm run test:e2e:real -- --pass-with-no-tests\n"
+    )
+    source = workflow.read_text()
+    if position == "before":
+        workflow.write_text(source.replace("  real-e2e:\n", sibling + "  real-e2e:\n", 1))
+    else:
+        workflow.write_text(source.replace("  policy:\n", sibling + "  policy:\n", 1))
+
+    assert "real_e2e_ci_job_invalid" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+@pytest.mark.parametrize("mutation", ["escaped_duplicate", "second_jobs", "workflow_alias"])
+def test_real_e2e_boundary_rejects_workflow_wide_yaml_indirection(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    source = workflow.read_text()
+    if mutation == "escaped_duplicate":
+        job = repository_policy._real_e2e_workflow_job_block(workflow)
+        assert job is not None
+        workflow.write_text(source + "\n" + job.replace("  real-e2e:", '  "real\\x2de2e":', 1))
+    elif mutation == "second_jobs":
+        workflow.write_text(
+            source
+            + "\njobs:\n"
+            + "  real-e2e:\n"
+            + "    runs-on: ubuntu-24.04\n"
+            + "    steps:\n"
+            + "      - run: npm run test:e2e:real -- --pass-with-no-tests\n"
+        )
+    else:
+        workflow.write_text("defaults: &real-e2e-defaults {}\n" + source)
+
+    assert "real_e2e_ci_job_invalid" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+@pytest.mark.parametrize("mode", ["untracked", "symlink", "submodule"])
+def test_real_e2e_boundary_requires_a_tracked_regular_real_spec(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    spec = tmp_path / "tests/e2e-real/integrations-real.spec.ts"
+    if mode == "untracked":
+        subprocess.run(
+            ["git", "rm", "--cached", spec.relative_to(tmp_path)],
+            cwd=tmp_path,
+            check=True,
+        )
+    elif mode == "symlink":
+        target = tmp_path / "approved-source.ts"
+        target.write_bytes(spec.read_bytes())
+        spec.unlink()
+        spec.symlink_to("../../approved-source.ts")
+        subprocess.run(["git", "add", "-f", spec.relative_to(tmp_path)], cwd=tmp_path, check=True)
+    else:
+        spec.unlink()
+        subprocess.run(
+            [
+                "git",
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000," + "a" * 40 + ",tests/e2e-real/integrations-real.spec.ts",
+            ],
+            cwd=tmp_path,
+            check=True,
+        )
+
+    assert "real_e2e_test_artifact_invalid" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+@pytest.mark.parametrize(
+    "network_replacement",
+    [
+        'await page[`route`]("**/api", handler)\n',
+        'navigator[`serviceWorker`][`register`]("/fixture.js")\n',
+        'window[`fetch`] = async () => new Response("{}")\n',
+    ],
+)
+def test_real_e2e_semantic_scan_survives_an_approved_digest_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    network_replacement: str,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    spec = tmp_path / "tests/e2e-real/integrations-real.spec.ts"
+    spec.write_text(network_replacement)
+    monkeypatch.setattr(
+        repository_policy,
+        "_EXPECTED_REAL_E2E_TEST_SHA256",
+        hashlib.sha256(spec.read_bytes()).hexdigest(),
+        raising=False,
+    )
+
+    assert "real_e2e_network_mock_forbidden" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+@pytest.mark.parametrize(
+    "external_import",
+    [
+        'import(/* reviewed */ `../helpers/network-mock`);\n',
+        'import /* reviewed */ `../helpers/network-mock`;\n',
+    ],
+)
+def test_real_e2e_import_scan_survives_an_approved_digest_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    external_import: str,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    spec = tmp_path / "tests/e2e-real/integrations-real.spec.ts"
+    spec.write_text(external_import)
+    monkeypatch.setattr(
+        repository_policy,
+        "_EXPECTED_REAL_E2E_TEST_SHA256",
+        hashlib.sha256(spec.read_bytes()).hexdigest(),
+        raising=False,
+    )
+
+    assert "real_e2e_external_import_forbidden" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "playwright.real.config.ts",
+        ".github/workflows/ci.yml",
+        "tests/e2e-real/integrations-real.spec.ts",
+    ],
+)
+def test_real_e2e_boundary_accepts_lf_equivalent_crlf_artifacts(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    artifact = tmp_path / relative_path
+    artifact.write_bytes(artifact.read_bytes().replace(b"\n", b"\r\n"))
+
+    assert {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }.isdisjoint(
+        {
+            "real_e2e_config_invalid",
+            "real_e2e_ci_job_invalid",
+            "real_e2e_test_artifact_invalid",
+        }
+    )
 
 
 @pytest.mark.parametrize(
