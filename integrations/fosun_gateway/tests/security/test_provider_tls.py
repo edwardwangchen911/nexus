@@ -9,10 +9,23 @@ import pytest
 import requests
 from nexus_fosun_gateway.security.provider_tls import (
     _MAX_PROVIDER_RESPONSE_BYTES,
+    ProviderHttpObserver,
+    enforce_probe_tls_controls,
     enforce_sdk_tls_verification,
 )
 from urllib3.connectionpool import HTTPSConnectionPool
 from urllib3.response import HTTPResponse
+
+
+class _RecordingObserver(ProviderHttpObserver):
+    def __init__(self, events: list[tuple[str, object]]) -> None:
+        self._events = events
+
+    def before_dispatch(self, surface: str) -> None:
+        self._events.append(("before", surface))
+
+    def after_response(self, surface: str, status_code: int) -> None:
+        self._events.append(("after", (surface, status_code)))
 
 
 def test_frozen_sdk_http_paths_force_tls_no_proxy_no_redirect_and_socket_timeout() -> None:
@@ -85,6 +98,155 @@ def test_frozen_sdk_http_paths_force_tls_no_proxy_no_redirect_and_socket_timeout
         ("request", True, False, (5.0, 5.0), True, False),
         ("auth", True, False, (5.0, 5.0), True, False),
     ]
+
+
+def test_probe_tls_controls_count_physical_edges_and_disable_adapter_retries() -> None:
+    events: list[tuple[str, object]] = []
+    sessions: list[object] = []
+
+    class FakeResponse:
+        headers: dict[str, str] = {}
+        status_code = 200
+
+        def iter_content(self, *, chunk_size: int) -> tuple[bytes, ...]:
+            assert chunk_size > 0
+            return (b'{"code":0}',)
+
+        def close(self) -> None:
+            events.append(("response_close", "called"))
+
+    class FakeProbeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self.closed = False
+            self._adapters = {
+                "https://": requests.adapters.HTTPAdapter(max_retries=3),
+            }
+            sessions.append(self)
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            self._adapters[prefix] = adapter
+
+        def get_adapter(self, prefix: str) -> object:
+            return self._adapters[prefix]
+
+        def request(self, *_args: object, **_kwargs: object) -> object:
+            events.append(("delegate", "business"))
+            return FakeResponse()
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            events.append(("delegate", "auth"))
+            return FakeResponse()
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeRequests:
+        adapters = requests.adapters
+        Session = FakeProbeSession
+
+    business_session = FakeProbeSession()
+    client = SimpleNamespace(_http_session=business_session)
+    auth_module = SimpleNamespace(requests=FakeRequests())
+    controls = enforce_probe_tls_controls(
+        client,
+        auth_module,
+        observer=_RecordingObserver(events),
+    )
+
+    client._http_session.request("POST", "https://provider.invalid")
+    auth_module.requests.post("https://provider.invalid")
+
+    assert events == [
+        ("before", "business"),
+        ("delegate", "business"),
+        ("after", ("business", 200)),
+        ("before", "auth"),
+        ("delegate", "auth"),
+        ("after", ("auth", 200)),
+    ]
+    for session in sessions:
+        retries = session.get_adapter("https://").max_retries
+        assert (
+            retries.total,
+            retries.connect,
+            retries.read,
+            retries.redirect,
+            retries.status,
+            retries.other,
+        ) == (0, 0, 0, 0, 0, 0)
+
+    controls.close()
+    controls.close()
+    assert all(session.closed for session in sessions)
+
+
+def test_probe_tls_observer_refusal_prevents_delegate_call() -> None:
+    delegated = False
+
+    class RefusingObserver:
+        def before_dispatch(self, surface: str) -> None:
+            del surface
+            raise RuntimeError("fixed refusal")
+
+        def after_response(self, surface: str, status_code: int) -> None:
+            raise AssertionError((surface, status_code))
+
+    class FakeResponse:
+        headers: dict[str, str] = {}
+        status_code = 200
+
+        def iter_content(self, *, chunk_size: int) -> tuple[bytes, ...]:
+            del chunk_size
+            return (b'{"code":0}',)
+
+        def close(self) -> None:
+            return None
+
+    class FakeProbeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self._adapters = {"https://": requests.adapters.HTTPAdapter(max_retries=2)}
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            self._adapters[prefix] = adapter
+
+        def get_adapter(self, prefix: str) -> object:
+            return self._adapters[prefix]
+
+        def request(self, *_args: object, **_kwargs: object) -> object:
+            nonlocal delegated
+            delegated = True
+            return FakeResponse()
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            nonlocal delegated
+            delegated = True
+            return FakeResponse()
+
+        def close(self) -> None:
+            return None
+
+    class FakeRequests:
+        adapters = requests.adapters
+        Session = FakeProbeSession
+
+    client = SimpleNamespace(_http_session=FakeProbeSession())
+    auth_module = SimpleNamespace(requests=FakeRequests())
+    controls = enforce_probe_tls_controls(
+        client,
+        auth_module,
+        observer=RefusingObserver(),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="fixed refusal"):
+            client._http_session.request("POST", "https://provider.invalid")
+    finally:
+        controls.close()
+
+    assert delegated is False
 
 
 def test_real_requests_and_urllib3_wire_edges_never_log_provider_canaries(

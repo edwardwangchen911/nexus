@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from threading import Lock
+from typing import Any, Literal, Protocol
 
 from nexus_fosun_gateway.security.dependency_logging import (
     enforce_sdk_dependency_log_boundary,
@@ -12,12 +13,55 @@ from nexus_fosun_gateway.security.dependency_logging import (
 _SDK_SOCKET_TIMEOUT_SECONDS = (5.0, 5.0)
 _MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 _PROVIDER_RESPONSE_CHUNK_BYTES = 64 * 1024
+HttpSurface = Literal["auth", "business"]
+
+
+class ProviderHttpObserver(Protocol):
+    """Value-free hooks at the two reviewed physical HTTP surfaces."""
+
+    def before_dispatch(self, surface: HttpSurface) -> None: ...
+
+    def after_response(self, surface: HttpSurface, status_code: int) -> None: ...
+
+
+class ProbeTlsControls:
+    """Idempotently close both fresh sessions owned by one probe process."""
+
+    def __init__(self, business_session: object, auth_session: object) -> None:
+        self._business_session = business_session
+        self._auth_session = auth_session
+        self._lock = Lock()
+        self._closed = False
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        failed = False
+        for session in (self._business_session, self._auth_session):
+            close = getattr(session, "close", None)
+            if not callable(close):
+                failed = True
+                continue
+            try:
+                close()
+            except Exception:
+                failed = True
+        if failed:
+            raise RuntimeError("probe HTTP sessions could not be closed")
 
 
 class _VerifiedSessionProxy:
-    def __init__(self, delegate: object, request: Callable[..., object]) -> None:
+    def __init__(
+        self,
+        delegate: object,
+        request: Callable[..., object],
+        observer: ProviderHttpObserver | None = None,
+    ) -> None:
         self._delegate = delegate
         self._request = request
+        self._observer = observer
 
     def request(self, *args: object, **kwargs: object) -> object:
         enforce_sdk_dependency_log_boundary()
@@ -25,16 +69,25 @@ class _VerifiedSessionProxy:
         kwargs["allow_redirects"] = False
         kwargs["timeout"] = _SDK_SOCKET_TIMEOUT_SECONDS
         kwargs["stream"] = True
-        return _read_bounded_response(self._request(*args, **kwargs))
+        _before_dispatch(self._observer, "business")
+        response = _read_bounded_response(self._request(*args, **kwargs))
+        _after_response(self._observer, "business", response)
+        return response
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._delegate, name)
 
 
 class _VerifiedRequestsProxy:
-    def __init__(self, delegate: object, post: Callable[..., object]) -> None:
+    def __init__(
+        self,
+        delegate: object,
+        post: Callable[..., object],
+        observer: ProviderHttpObserver | None = None,
+    ) -> None:
         self._delegate = delegate
         self._post = post
+        self._observer = observer
 
     def post(self, *args: object, **kwargs: object) -> object:
         enforce_sdk_dependency_log_boundary()
@@ -42,7 +95,10 @@ class _VerifiedRequestsProxy:
         kwargs["allow_redirects"] = False
         kwargs["timeout"] = _SDK_SOCKET_TIMEOUT_SECONDS
         kwargs["stream"] = True
-        return _read_bounded_response(self._post(*args, **kwargs))
+        _before_dispatch(self._observer, "auth")
+        response = _read_bounded_response(self._post(*args, **kwargs))
+        _after_response(self._observer, "auth", response)
+        return response
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._delegate, name)
@@ -50,6 +106,32 @@ class _VerifiedRequestsProxy:
 
 def enforce_sdk_tls_verification(client: object, auth_module: object) -> None:
     """Patch the exact v1.2.0 surfaces or reject the SDK before any network call."""
+    _install_sdk_tls_verification(client, auth_module, observer=None, probe_mode=False)
+
+
+def enforce_probe_tls_controls(
+    client: object,
+    auth_module: object,
+    *,
+    observer: ProviderHttpObserver,
+) -> ProbeTlsControls:
+    """Install counted, no-retry, closable TLS surfaces for one probe only."""
+    business_session, auth_session = _install_sdk_tls_verification(
+        client,
+        auth_module,
+        observer=observer,
+        probe_mode=True,
+    )
+    return ProbeTlsControls(business_session, auth_session)
+
+
+def _install_sdk_tls_verification(
+    client: object,
+    auth_module: object,
+    *,
+    observer: ProviderHttpObserver | None,
+    probe_mode: bool,
+) -> tuple[object, object]:
     enforce_sdk_dependency_log_boundary()
     session = getattr(client, "_http_session", None)
     session_request = getattr(session, "request", None)
@@ -68,14 +150,109 @@ def enforce_sdk_tls_verification(client: object, auth_module: object) -> None:
         isolated_auth_session, "trust_env"
     ):
         raise RuntimeError("reviewed SDK TLS verification surface is unavailable")
+    if probe_mode:
+        try:
+            _force_zero_https_retries(session, requests_module)
+            _force_zero_https_retries(isolated_auth_session, requests_module)
+            _require_closable(session)
+            _require_closable(isolated_auth_session)
+        except Exception:
+            _close_quietly(session)
+            _close_quietly(isolated_auth_session)
+            raise RuntimeError("reviewed SDK probe HTTP surface is unavailable") from None
     setattr(session, "trust_env", False)
     setattr(isolated_auth_session, "trust_env", False)
-    setattr(client, "_http_session", _VerifiedSessionProxy(session, session_request))
+    setattr(
+        client,
+        "_http_session",
+        _VerifiedSessionProxy(session, session_request, observer),
+    )
     setattr(
         auth_module,
         "requests",
-        _VerifiedRequestsProxy(requests_module, isolated_auth_post),
+        _VerifiedRequestsProxy(requests_module, isolated_auth_post, observer),
     )
+    return session, isolated_auth_session
+
+
+def _force_zero_https_retries(session: object, requests_module: object) -> None:
+    mount = getattr(session, "mount", None)
+    get_adapter = getattr(session, "get_adapter", None)
+    adapters = getattr(requests_module, "adapters", None)
+    adapter_type = getattr(adapters, "HTTPAdapter", None)
+    if not callable(mount) or not callable(get_adapter) or not callable(adapter_type):
+        raise RuntimeError("reviewed SDK probe HTTP surface is unavailable")
+    existing_adapter = get_adapter("https://")
+    existing_retries = getattr(existing_adapter, "max_retries", None)
+    retry_factory = getattr(existing_retries, "new", None)
+    if not callable(retry_factory):
+        raise RuntimeError("reviewed SDK probe HTTP surface is unavailable")
+    try:
+        zero_retries = retry_factory(
+            total=0,
+            connect=0,
+            read=0,
+            redirect=0,
+            status=0,
+            other=0,
+        )
+        replacement = adapter_type(max_retries=zero_retries)
+        mount("https://", replacement)
+        installed_retries = getattr(get_adapter("https://"), "max_retries", None)
+    except Exception:
+        raise RuntimeError("reviewed SDK probe HTTP surface is unavailable") from None
+    if not _all_retry_dimensions_are_zero(installed_retries):
+        raise RuntimeError("reviewed SDK probe HTTP surface is unavailable")
+    old_close = getattr(existing_adapter, "close", None)
+    if callable(old_close):
+        old_close()
+
+
+def _all_retry_dimensions_are_zero(retries: object) -> bool:
+    return all(
+        getattr(retries, name, None) == 0
+        for name in ("total", "connect", "read", "redirect", "status", "other")
+    )
+
+
+def _require_closable(session: object) -> None:
+    if not callable(getattr(session, "close", None)):
+        raise RuntimeError("reviewed SDK probe HTTP surface is unavailable")
+
+
+def _close_quietly(session: object) -> None:
+    close = getattr(session, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+def _before_dispatch(
+    observer: ProviderHttpObserver | None,
+    surface: HttpSurface,
+) -> None:
+    if observer is not None:
+        observer.before_dispatch(surface)
+
+
+def _after_response(
+    observer: ProviderHttpObserver | None,
+    surface: HttpSurface,
+    response: object,
+) -> None:
+    if observer is None:
+        return
+    status_code = getattr(response, "status_code", None)
+    if not isinstance(status_code, int) or isinstance(status_code, bool):
+        _close_quietly(response)
+        raise RuntimeError("reviewed SDK probe HTTP response is unavailable")
+    try:
+        observer.after_response(surface, status_code)
+    except Exception:
+        _close_quietly(response)
+        raise
 
 
 def _read_bounded_response(response: object) -> object:
