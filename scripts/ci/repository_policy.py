@@ -144,6 +144,49 @@ _EXPECTED_GATEWAY_INSTALLABLE_SRC_SHA256 = (
 _EXPECTED_FOSUN_GATEWAY_PYPROJECT_SHA256 = (
     "ac872ba669920971eca0b0c98b7c5cb9b8058d29756c15b044d1518db5221c38"
 )
+_EXPECTED_FOSUN_GATEWAY_PROJECT = {
+    "name": "nexus-fosun-gateway",
+    "version": "0.1.0",
+    "description": "NEXUS isolated Fosun read-only gateway",
+    "requires-python": ">=3.12,<3.13",
+    "dependencies": [
+        "cryptography>=50,<51",
+        "fastapi>=0.116,<0.141",
+        "httpx>=0.28,<0.29",
+        "limits>=5.4,<6",
+        "pydantic-settings>=2.10,<3",
+        "uvicorn>=0.35,<1",
+    ],
+    "scripts": {
+        "nexus-fosun-gateway": "nexus_fosun_gateway.main:run",
+        "nexus-fosun-gateway-ready": "nexus_fosun_gateway.readiness:main",
+        "nexus-fosun-activation-gate": "nexus_fosun_gateway.activation:main",
+        "nexus-fosun-read-only-probe": "nexus_fosun_gateway.probe_cli:run",
+        "nexus-fosun-capture-read-only-probe": (
+            "nexus_fosun_gateway.probe_capture:run"
+        ),
+        "nexus-fosun-probe-publisher-key-preflight": (
+            "nexus_fosun_gateway.probe_capture:key_preflight_run"
+        ),
+        "nexus-fosun-publish-probe-receipt": (
+            "nexus_fosun_gateway.probe_receipt:run"
+        ),
+        "nexus-fosun-simulation-fixture": (
+            "nexus_fosun_gateway.simulation_main:run_fixture"
+        ),
+    },
+}
+_EXPECTED_FOSUN_GATEWAY_BUILD_SYSTEM = {
+    "requires": ["hatchling"],
+    "build-backend": "hatchling.build",
+}
+_EXPECTED_FOSUN_GATEWAY_TOOL = {
+    "hatch": {
+        "build": {
+            "targets": {"wheel": {"packages": ["src/nexus_fosun_gateway"]}}
+        }
+    }
+}
 _EXPECTED_COMPOSE_SHA256 = (
     "9a4a462f8eb0588c399427908f88144bc9213023f18764c5a808b00ce698420c"
 )
@@ -695,14 +738,16 @@ def check_gateway_entrypoint_isolation(root: Path) -> list[PolicyFinding]:
     try:
         pyproject_text = _read_text(pyproject_path)
         pyproject = tomllib.loads(pyproject_text)
-        scripts = pyproject["project"]["scripts"]
+        project_config = pyproject["project"]
+        scripts = project_config["scripts"]
         build_system = pyproject["build-system"]
-        hatch_build = pyproject["tool"]["hatch"]["build"]
+        tool_config = pyproject["tool"]
     except (KeyError, OSError, tomllib.TOMLDecodeError, TypeError):
         pyproject_text = ""
+        project_config = None
         scripts = None
         build_system = None
-        hatch_build = None
+        tool_config = None
     packaged_entrypoint = (
         scripts.get("nexus-fosun-gateway") if isinstance(scripts, dict) else None
     )
@@ -723,10 +768,9 @@ def check_gateway_entrypoint_isolation(root: Path) -> list[PolicyFinding]:
         packaged_entrypoint != "nexus_fosun_gateway.main:run"
         or hashlib.sha256(pyproject_text.encode()).hexdigest()
         != _EXPECTED_FOSUN_GATEWAY_PYPROJECT_SHA256
-        or build_system
-        != {"requires": ["hatchling"], "build-backend": "hatchling.build"}
-        or hatch_build
-        != {"targets": {"wheel": {"packages": ["src/nexus_fosun_gateway"]}}}
+        or project_config != _EXPECTED_FOSUN_GATEWAY_PROJECT
+        or build_system != _EXPECTED_FOSUN_GATEWAY_BUILD_SYSTEM
+        or tool_config != _EXPECTED_FOSUN_GATEWAY_TOOL
         or hashlib.sha256(compose.encode()).hexdigest() != _EXPECTED_COMPOSE_SHA256
         or hashlib.sha256(gateway_service.encode()).hexdigest()
         != _EXPECTED_FOSUN_GATEWAY_SERVICE_SHA256
@@ -841,8 +885,26 @@ def _runtime_import_graph_reaches_probe_only(main_path: Path) -> bool:
         module = ".".join(("nexus_fosun_gateway", *parts))
         module_paths[module] = path
 
-    pending = ["nexus_fosun_gateway.main"]
+    pending: list[str] = []
     visited: set[str] = set()
+
+    def schedule_with_package_initializers(module: str) -> None:
+        parts = module.split(".")
+        for length in range(1, len(parts)):
+            package = ".".join(parts[:length])
+            package_path = module_paths.get(package)
+            if (
+                package_path is not None
+                and package_path.name == "__init__.py"
+                and package not in visited
+                and package not in pending
+            ):
+                pending.append(package)
+        if module in module_paths and module not in visited and module not in pending:
+            pending.append(module)
+
+    schedule_with_package_initializers("nexus_fosun_gateway.main")
+    schedule_with_package_initializers("nexus_fosun_gateway.readiness")
     while pending:
         module = pending.pop()
         if module in visited:
@@ -869,8 +931,7 @@ def _runtime_import_graph_reaches_probe_only(main_path: Path) -> bool:
             )):
                 if _is_probe_only_module(candidate):
                     return True
-                if candidate in module_paths and candidate not in visited:
-                    pending.append(candidate)
+                schedule_with_package_initializers(candidate)
     return False
 
 

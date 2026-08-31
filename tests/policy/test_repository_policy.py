@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -172,6 +173,33 @@ def test_long_running_gateway_cannot_import_probe_only_construction(
     approve_current_source_for_semantic_check()
 
     assert check_probe_runtime_isolation(tmp_path) == []
+
+    package_init = main_path.with_name("__init__.py")
+    package_init.write_text("from . import probe_cli\n")
+    approve_current_source_for_semantic_check()
+    assert {finding.rule for finding in check_probe_runtime_isolation(tmp_path)} == {
+        "probe_runtime_isolation_missing"
+    }
+    package_init.unlink()
+
+    adapter_dir = main_path.parent / "adapter"
+    adapter_dir.mkdir()
+    adapter_init = adapter_dir / "__init__.py"
+    (adapter_dir / "sdk.py").write_text("class SdkFosunTransport: pass\n")
+    adapter_init.write_text("from .. import probe_capture\n")
+    approve_current_source_for_semantic_check()
+    assert {finding.rule for finding in check_probe_runtime_isolation(tmp_path)} == {
+        "probe_runtime_isolation_missing"
+    }
+    adapter_init.unlink()
+
+    readiness_path = main_path.with_name("readiness.py")
+    readiness_path.write_text("from . import probe_receipt\n")
+    approve_current_source_for_semantic_check()
+    assert {finding.rule for finding in check_probe_runtime_isolation(tmp_path)} == {
+        "probe_runtime_isolation_missing"
+    }
+    readiness_path.unlink()
 
     main_path.write_text(
         "from nexus_fosun_gateway.adapter.probe_sdk import build_probe_transport\n"
@@ -561,6 +589,22 @@ def test_gateway_entrypoints_are_frozen_away_from_probe_runtime(
         '[tool.hatch.build.targets.wheel]\n'
         'packages=["src/nexus_fosun_gateway"]\n'
     )
+    safe_packaging = tomllib.loads(safe_pyproject)
+    monkeypatch.setattr(
+        repository_policy,
+        "_EXPECTED_FOSUN_GATEWAY_PROJECT",
+        safe_packaging["project"],
+    )
+    monkeypatch.setattr(
+        repository_policy,
+        "_EXPECTED_FOSUN_GATEWAY_BUILD_SYSTEM",
+        safe_packaging["build-system"],
+    )
+    monkeypatch.setattr(
+        repository_policy,
+        "_EXPECTED_FOSUN_GATEWAY_TOOL",
+        safe_packaging["tool"],
+    )
     pyproject.write_text(safe_pyproject)
     safe_compose = 'services:\n  fosun-gateway:\n    command: ["nexus-fosun-gateway"]\n'
     safe_dockerfile = (
@@ -608,6 +652,18 @@ def test_gateway_entrypoints_are_frozen_away_from_probe_runtime(
         stream.write(
             '[tool.hatch.build.targets.wheel.force-include]\n'
             '"src/nexus_fosun_gateway/probe_cli.py"="sitecustomize.py"\n'
+        )
+    approve_current_composition_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+    pyproject.write_text(safe_pyproject)
+    approve_current_composition_for_semantic_check()
+
+    with pyproject.open("a") as stream:
+        stream.write(
+            '[project.gui-scripts]\n'
+            'nexus-fosun-gateway="nexus_fosun_gateway.probe_cli:run"\n'
         )
     approve_current_composition_for_semantic_check()
     assert {
