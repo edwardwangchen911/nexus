@@ -955,7 +955,12 @@ def _write_real_e2e_adoption(root: Path) -> None:
         (source_root / ".github/workflows/ci.yml").read_bytes()
     )
     subprocess.run(
-        ["git", "add", "tests/e2e-real/integrations-real.spec.ts"],
+        [
+            "git",
+            "add",
+            ".github/workflows/ci.yml",
+            "tests/e2e-real/integrations-real.spec.ts",
+        ],
         cwd=root,
         check=True,
     )
@@ -1332,6 +1337,73 @@ def test_real_e2e_boundary_freezes_workflow_level_run_shell_defaults(
     assert "real_e2e_ci_job_invalid" in {
         finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
     }
+
+
+@pytest.mark.parametrize("mode", ["symlink", "untracked", "gitlink"])
+def test_real_e2e_boundary_requires_a_tracked_regular_workflow(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    if mode == "symlink":
+        target = tmp_path / "approved-ci.yml"
+        target.write_bytes(workflow.read_bytes())
+        workflow.unlink()
+        workflow.symlink_to("../../approved-ci.yml")
+        subprocess.run(
+            ["git", "add", "-f", ".github/workflows/ci.yml"],
+            cwd=tmp_path,
+            check=True,
+        )
+    elif mode == "untracked":
+        subprocess.run(
+            ["git", "rm", "--cached", ".github/workflows/ci.yml"],
+            cwd=tmp_path,
+            check=True,
+        )
+    else:
+        subprocess.run(
+            [
+                "git",
+                "update-index",
+                "--cacheinfo",
+                "160000," + "a" * 40 + ",.github/workflows/ci.yml",
+            ],
+            cwd=tmp_path,
+            check=True,
+        )
+
+    assert "real_e2e_ci_job_invalid" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+def test_real_e2e_boundary_preserves_missing_workflow_partial_adoption(
+    tmp_path: Path,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    (tmp_path / ".github/workflows/ci.yml").unlink()
+
+    assert "real_e2e_ci_job_missing" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+def test_real_e2e_boundary_fails_closed_for_broken_git_metadata(
+    tmp_path: Path,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    metadata = tmp_path / ".git"
+    metadata.rename(tmp_path / ".git-valid")
+    metadata.write_text("gitdir: missing-git-directory\n")
+
+    rules = {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+    assert "real_e2e_ci_job_invalid" in rules
+    assert "real_e2e_test_artifact_invalid" in rules
 
 
 @pytest.mark.parametrize("lifecycle", ["pretest:e2e:real", "posttest:e2e:real"])

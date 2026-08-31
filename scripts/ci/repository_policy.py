@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tomllib
 from dataclasses import asdict, dataclass
+from enum import Enum
 from importlib.metadata import distributions
 from pathlib import Path
 from typing import Any
@@ -260,6 +261,18 @@ class PolicyFinding:
     rule: str
     path: str
     message: str
+
+
+class GitRepositoryState(str, Enum):
+    VALID = "valid"
+    NON_REPOSITORY = "non_repository"
+    ERROR = "error"
+
+
+@dataclass(frozen=True)
+class GitArtifactIdentity:
+    repository_state: GitRepositoryState
+    mode: str | None
 
 
 @dataclass(frozen=True, order=True)
@@ -1417,13 +1430,21 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
     package_path = root / "package.json"
     workflow_path = root / _REAL_E2E_WORKFLOW_PATH
     package_script_declared, package_script = _real_e2e_package_script(package_path)
-    workflow_job = _real_e2e_workflow_job_block(workflow_path)
+    workflow_present = workflow_path.exists() or workflow_path.is_symlink()
+    workflow_artifact_safe = workflow_present and _real_e2e_artifact_is_safe(
+        root, workflow_path, _REAL_E2E_WORKFLOW_PATH
+    )
+    workflow_job = (
+        _real_e2e_workflow_job_block(workflow_path)
+        if workflow_artifact_safe
+        else None
+    )
     workflow_job_present = workflow_job is not None
     adopted = (
         config_path.exists()
         or test_directory.exists()
         or package_script_declared
-        or workflow_job_present
+        or workflow_present
     )
     if not adopted:
         return []
@@ -1503,7 +1524,7 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
                 "real fixture E2E package script must not have npm lifecycle wrappers",
             )
         )
-    if not workflow_job_present:
+    if not workflow_present:
         findings.append(
             PolicyFinding(
                 "real_e2e_ci_job_missing",
@@ -1511,7 +1532,23 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
                 "real fixture E2E requires the real-e2e CI job",
             )
         )
-    elif not _real_e2e_workflow_is_safe(workflow_path, workflow_job):
+    elif not workflow_artifact_safe:
+        findings.append(
+            PolicyFinding(
+                "real_e2e_ci_job_invalid",
+                _REAL_E2E_WORKFLOW_PATH,
+                "real fixture E2E workflow must be a tracked regular file",
+            )
+        )
+    elif not workflow_job_present:
+        findings.append(
+            PolicyFinding(
+                "real_e2e_ci_job_missing",
+                _REAL_E2E_WORKFLOW_PATH,
+                "real fixture E2E requires the real-e2e CI job",
+            )
+        )
+    elif not _real_e2e_workflow_is_safe(root, workflow_path, workflow_job):
         findings.append(
             PolicyFinding(
                 "real_e2e_ci_job_invalid",
@@ -1583,7 +1620,9 @@ def _real_e2e_config_is_safe(config_path: Path) -> bool:
     )
 
 
-def _real_e2e_workflow_is_safe(workflow_path: Path, job: str) -> bool:
+def _real_e2e_workflow_is_safe(root: Path, workflow_path: Path, job: str) -> bool:
+    if not _real_e2e_artifact_is_safe(root, workflow_path, _REAL_E2E_WORKFLOW_PATH):
+        return False
     try:
         workflow = _read_text(workflow_path)
     except OSError:
@@ -1716,32 +1755,64 @@ def _real_e2e_test_directory_is_safe(test_directory: Path) -> bool:
 
 def _real_e2e_test_artifact_is_safe(root: Path) -> bool:
     test_path = root / _REAL_E2E_TEST_PATH
-    if not test_path.is_file() or test_path.is_symlink():
+    return _real_e2e_artifact_is_safe(root, test_path, _REAL_E2E_TEST_PATH)
+
+
+def _real_e2e_artifact_is_safe(root: Path, path: Path, relative_path: str) -> bool:
+    if not path.is_file() or path.is_symlink():
         return False
-    index_mode = _git_index_mode(root, _REAL_E2E_TEST_PATH)
-    return index_mode is None or index_mode in {"100644", "100755"}
+    identity = _git_artifact_identity(root, relative_path)
+    return identity.repository_state is GitRepositoryState.NON_REPOSITORY or (
+        identity.repository_state is GitRepositoryState.VALID
+        and identity.mode in {"100644", "100755"}
+    )
 
 
-def _git_index_mode(root: Path, relative_path: str) -> str | None:
-    repository = subprocess.run(
-        ["git", "rev-parse", "--is-inside-work-tree"],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
+def _git_artifact_identity(root: Path, relative_path: str) -> GitArtifactIdentity:
+    repository_state = _git_repository_state(root)
+    if repository_state is not GitRepositoryState.VALID:
+        return GitArtifactIdentity(repository_state, None)
+    try:
+        indexed = subprocess.run(
+            ["git", "ls-files", "--stage", "--", relative_path],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return GitArtifactIdentity(GitRepositoryState.ERROR, None)
+    lines = indexed.stdout.splitlines()
+    if indexed.returncode != 0:
+        return GitArtifactIdentity(GitRepositoryState.ERROR, None)
+    if len(lines) != 1:
+        return GitArtifactIdentity(GitRepositoryState.VALID, "")
+    fields = lines[0].split(maxsplit=3)
+    if len(fields) != 4 or fields[2] != "0":
+        return GitArtifactIdentity(GitRepositoryState.VALID, "")
+    return GitArtifactIdentity(GitRepositoryState.VALID, fields[0])
+
+
+def _git_repository_state(root: Path) -> GitRepositoryState:
+    metadata = root / ".git"
+    metadata_detected = metadata.exists() or metadata.is_symlink()
+    try:
+        repository = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return GitRepositoryState.ERROR
+    if repository.returncode == 0 and repository.stdout.strip() == "true":
+        return GitRepositoryState.VALID
+    return (
+        GitRepositoryState.ERROR
+        if metadata_detected or repository.returncode == 0
+        else GitRepositoryState.NON_REPOSITORY
     )
-    if repository.returncode != 0 or repository.stdout.strip() != "true":
-        return None
-    indexed = subprocess.run(
-        ["git", "ls-files", "--stage", "--", relative_path],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if indexed.returncode != 0 or not indexed.stdout.strip():
-        return ""
-    return indexed.stdout.split(maxsplit=1)[0]
 
 
 def _workflow_job_has_body(lines: list[str], job_index: int, job_indent: int) -> bool:
