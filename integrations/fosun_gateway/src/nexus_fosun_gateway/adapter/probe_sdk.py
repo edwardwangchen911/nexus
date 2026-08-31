@@ -17,7 +17,7 @@ from typing import Literal
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
 from nexus_fosun_gateway.adapter.refusal import NonRetryableTransportRefusal
 from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
-from nexus_fosun_gateway.admission import admitted_sdk_subject
+from nexus_fosun_gateway.admission import probe_ready_sdk_subject
 from nexus_fosun_gateway.domain import (
     AccountItem,
     BarItem,
@@ -421,7 +421,7 @@ def build_probe_transport(
     budget: PhysicalHttpBudget,
 ) -> ProbeTransportBundle:
     """Construct the sole admitted, counted, no-retry probe transport."""
-    subject = admitted_sdk_subject(manifest_document)
+    subject = probe_ready_sdk_subject(manifest_document)
     if subject is None:
         raise ProbeSdkError("COMPLETE_SDK_ADMISSION")
     if subject.provider_base_url != settings.fsopenapi_base_url:
@@ -630,8 +630,8 @@ class SdkProbeExecutor:
             request_counts=final.counts,
             auth_successes=final.auth_successes,
             history_window=True,
-            pagination=True,
-            adjustment_semantics=True,
+            pagination=False,
+            adjustment_semantics=False,
             response_contract=True,
         )
 

@@ -39,7 +39,7 @@ from nexus_fosun_gateway.adapter.probe_sdk import (
     ProbeSdkError,
     SdkProbeExecutor,
 )
-from nexus_fosun_gateway.admission import admitted_sdk_subject
+from nexus_fosun_gateway.admission import probe_ready_sdk_subject
 from nexus_fosun_gateway.probe_contract import (
     BROKER_PROBE_OPERATIONS,
     MAX_BROKER_REQUESTS,
@@ -244,7 +244,7 @@ def _build_prepared_probe(
         raise ProbeSdkError("PROBE_CAPABILITY_EXPIRED")
 
     manifest_document = _load_manifest(manifest_bytes)
-    subject = admitted_sdk_subject(manifest_document)
+    subject = probe_ready_sdk_subject(manifest_document)
     if subject is None:
         raise ProbeSdkError("COMPLETE_SDK_ADMISSION")
     _validate_execution_evidence(evidence)
@@ -284,11 +284,11 @@ def _build_prepared_probe(
             for label in REQUIRED_PROBE_OPERATIONS
         ),
         checks=ProbeChecks(
-            permission_read_only=True,
+            permission_read_only=False,
             history_window=evidence.history_window,
             adjustment_semantics=evidence.adjustment_semantics,
             pagination=evidence.pagination,
-            rate_limit=True,
+            rate_limit=False,
             response_contract=evidence.response_contract,
         ),
     )
@@ -307,7 +307,7 @@ def validate_sanitized_probe_artifact(
 ) -> SanitizedProbeArtifact:
     """Validate v2 bytes and static contracts without granting activation."""
     manifest_document = _load_manifest(manifest_bytes)
-    subject = admitted_sdk_subject(manifest_document)
+    subject = probe_ready_sdk_subject(manifest_document)
     if subject is None:
         raise ProbeSdkError("COMPLETE_SDK_ADMISSION")
     try:
@@ -335,7 +335,7 @@ def validate_sanitized_probe_artifact(
             if item.name in BROKER_PROBE_OPERATIONS
         )
         > MAX_BROKER_REQUESTS
-        or not artifact.checks.all_passed()
+        or not artifact.checks.one_shot_observations_are_exact()
         or any(
             item.response_contract_sha256
             != response_contract_sha256(item.name)
@@ -368,15 +368,10 @@ def _validate_execution_evidence(evidence: ProbeExecutionEvidence) -> None:
         or not isinstance(evidence.auth_successes, int)
         or isinstance(evidence.auth_successes, bool)
         or evidence.auth_successes != 1
-        or not all(
-            type(value) is bool and value
-            for value in (
-                evidence.history_window,
-                evidence.pagination,
-                evidence.adjustment_semantics,
-                evidence.response_contract,
-            )
-        )
+        or evidence.history_window is not True
+        or evidence.pagination is not False
+        or evidence.adjustment_semantics is not False
+        or evidence.response_contract is not True
     ):
         raise ProbeSdkError("PROBE_RESPONSE_INVALID")
 

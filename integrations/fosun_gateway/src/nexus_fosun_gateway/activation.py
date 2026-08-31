@@ -10,6 +10,7 @@ import json
 import os
 import re
 import stat
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
@@ -26,7 +27,10 @@ from pydantic import (
     model_validator,
 )
 
-from nexus_fosun_gateway.admission import sdk_admission_document_is_valid
+from nexus_fosun_gateway.admission import (
+    sdk_admission_document_is_valid,
+    sdk_probe_ready_document_is_valid,
+)
 from nexus_fosun_gateway.probe_contract import (
     BROKER_PROBE_OPERATIONS,
     MAX_BROKER_REQUESTS,
@@ -125,6 +129,17 @@ class ProbeChecks(BaseModel):
             )
         )
 
+    def one_shot_observations_are_exact(self) -> bool:
+        """Accept only checks the current pilot actually observes."""
+        return (
+            not self.permission_read_only
+            and self.history_window
+            and not self.adjustment_semantics
+            and not self.pagination
+            and not self.rate_limit
+            and self.response_contract
+        )
+
 
 class SanitizedProbeArtifact(BaseModel):
     """Metadata-only proof; it has no fields for account or response data."""
@@ -176,7 +191,57 @@ def evaluate_activation(
     trusted_publication_public_key_bytes: bytes | None = None,
     checked_at: datetime | None = None,
 ) -> FosunActivationResult:
-    """Evaluate only supplied metadata; this function has no provider transport."""
+    """Evaluate continuous-runtime activation without provider transport."""
+    return _evaluate_evidence(
+        manifest_bytes,
+        probe_bytes,
+        publication_receipt_bytes,
+        trusted_publication_public_key_bytes=(
+            trusted_publication_public_key_bytes
+        ),
+        checked_at=checked_at,
+        document_is_valid=sdk_admission_document_is_valid,
+        invalid_manifest_action="COMPLETE_SDK_ADMISSION",
+        require_complete_checks=True,
+    )
+
+
+def verify_probe_publication(
+    manifest_bytes: bytes,
+    probe_bytes: bytes,
+    publication_receipt_bytes: bytes,
+    *,
+    trusted_publication_public_key_bytes: bytes,
+    checked_at: datetime | None = None,
+) -> str | None:
+    """Verify one probe publication without granting continuous runtime access."""
+    result = _evaluate_evidence(
+        manifest_bytes,
+        probe_bytes,
+        publication_receipt_bytes,
+        trusted_publication_public_key_bytes=(
+            trusted_publication_public_key_bytes
+        ),
+        checked_at=checked_at,
+        document_is_valid=sdk_probe_ready_document_is_valid,
+        invalid_manifest_action="COMPLETE_PROBE_READINESS",
+        require_complete_checks=False,
+    )
+    return result.contract_hash if result.status == "activated_read_only" else None
+
+
+def _evaluate_evidence(
+    manifest_bytes: bytes,
+    probe_bytes: bytes | None,
+    publication_receipt_bytes: bytes | None,
+    *,
+    trusted_publication_public_key_bytes: bytes | None,
+    checked_at: datetime | None,
+    document_is_valid: Callable[[object], bool],
+    invalid_manifest_action: str,
+    require_complete_checks: bool,
+) -> FosunActivationResult:
+    """Evaluate supplied metadata under one explicit admission predicate."""
     now = checked_at or datetime.now(UTC)
     _require_aware(now, "checked_at")
     manifest_sha256 = _sha256(manifest_bytes)
@@ -206,8 +271,8 @@ def evaluate_activation(
 
     if manifest_document is None:
         return _blocked(contract_hash, now, "REVIEW_PROVIDER_MANIFEST")
-    if not sdk_admission_document_is_valid(manifest_document):
-        return _blocked(contract_hash, now, "COMPLETE_SDK_ADMISSION")
+    if not document_is_valid(manifest_document):
+        return _blocked(contract_hash, now, invalid_manifest_action)
     if trusted_publication_public_key_bytes is None:
         return _blocked(contract_hash, now, "PROVIDE_TRUSTED_PROBE_PUBLISHER")
     trusted_publisher = _load_trusted_publication_key(
@@ -276,7 +341,14 @@ def evaluate_activation(
         > MAX_BROKER_REQUESTS
     ):
         return _blocked(contract_hash, now, "REDUCE_PROBE_REQUEST_COUNT")
-    if not probe.checks.all_passed() or not all(operation.passed for operation in probe.operations):
+    checks_are_valid = (
+        probe.checks.all_passed()
+        if require_complete_checks
+        else probe.checks.one_shot_observations_are_exact()
+    )
+    if not checks_are_valid or not all(
+        operation.passed for operation in probe.operations
+    ):
         return _blocked(contract_hash, now, "REVIEW_PROBE_EVIDENCE")
     if publication_receipt_bytes is None:
         return _blocked(contract_hash, now, "PROVIDE_PROBE_PUBLICATION_RECEIPT")

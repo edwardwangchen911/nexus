@@ -28,6 +28,7 @@ from nexus_fosun_gateway.domain import (
     GatewayPage,
 )
 from nexus_fosun_gateway.probe_settings import ProbeProviderSettings
+from pydantic import ValidationError
 from test_probe_settings import _admitted_document, _settings_values
 
 
@@ -324,6 +325,8 @@ async def test_executor_runs_exact_sequence_and_returns_only_value_free_evidence
     ))
     assert evidence.auth_successes == 1
     assert evidence.history_window is True
+    assert evidence.pagination is False
+    assert evidence.adjustment_semantics is False
     assert controls.close_calls == 1
     assert transport.close_calls == 1
     assert "synthetic-account-canary" not in repr(evidence)
@@ -714,7 +717,7 @@ def test_probe_factory_lazily_constructs_counted_no_retry_sdk(
     bundle = build_probe_transport(_admitted_document(), settings, budget)
 
     assert captured == {
-        "base_url": "https://provider.invalid",
+        "base_url": "https://openapi.fosunxcz.com",
         "api_key": "synthetic-api-key-canary",
         "logging_enable": False,
         "log_body": False,
@@ -724,7 +727,7 @@ def test_probe_factory_lazily_constructs_counted_no_retry_sdk(
     asyncio.run(bundle.aclose())
 
 
-def test_probe_factory_requires_exact_admitted_base_url_before_sdk_import(
+def test_probe_settings_require_exact_fosun_base_url_before_sdk_import(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -741,12 +744,9 @@ def test_probe_factory_requires_exact_admitted_base_url_before_sdk_import(
     )
     values = _settings_values(tmp_path)
     values["FSOPENAPI_BASE_URL"] = "https://different.invalid"
-    settings = ProbeProviderSettings.model_validate(values)
+    with pytest.raises(ValidationError):
+        ProbeProviderSettings.model_validate(values)
 
-    with pytest.raises(ProbeSdkError) as exc_info:
-        build_probe_transport(_admitted_document(), settings, PhysicalHttpBudget())
-
-    assert exc_info.value.code == "PROBE_SETTINGS_INVALID"
     assert imported is False
 
 

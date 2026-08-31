@@ -45,7 +45,7 @@ def test_capture_cli_creates_one_protected_frame_without_console_output(
     assert completed.stderr == b""
     assert stat.S_IMODE(frame_path.stat().st_mode) == 0o600
     assert frame_path.read_bytes().count(b"\n") == 1
-    assert json.loads(frame_path.read_bytes())["code"] == "COMPLETE_SDK_ADMISSION"
+    assert json.loads(frame_path.read_bytes())["code"] == "PROBE_SETTINGS_INVALID"
 
 
 def test_capture_is_create_only_and_never_invokes_probe_for_existing_name(
@@ -208,10 +208,8 @@ def test_runbook_uses_lowercase_plan_names_and_secure_capture_command() -> None:
     assert '--capture-exit "$probe_exit"' in runbook
     assert 'if [ "$receipt_exit" -ne 0 ]; then' in runbook
     assert "receipt publication uncertain; quarantine this run and stop" in runbook
-    assert (
-        'env -u PYTHONHOME -u PYTHONPATH -u SSLKEYLOGFILE "$probe_activation_bin"'
-        in runbook
-    )
+    assert '"$probe_activation_bin"' not in runbook
+    assert "continuous runtime deliberately" in runbook
     assert "<<'PY'" not in runbook
     future_procedure = runbook.split("## Future one-shot probe procedure", 1)[1].split(
         "## Activation and rollback",

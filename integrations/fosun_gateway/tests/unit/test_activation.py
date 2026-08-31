@@ -102,7 +102,7 @@ def test_artifact_self_signed_by_untrusted_key_cannot_activate() -> None:
     assert result.next_action == "REVIEW_PROBE_PUBLISHER_BINDING"
 
 
-def test_committed_manifest_can_only_report_fixture_with_next_action() -> None:
+def test_committed_probe_ready_manifest_cannot_activate_continuous_runtime() -> None:
     result = evaluate_activation(MANIFEST_PATH.read_bytes(), checked_at=CHECKED_AT)
 
     assert result == FosunActivationResult(
@@ -115,19 +115,22 @@ def test_committed_manifest_can_only_report_fixture_with_next_action() -> None:
     assert len(result.contract_hash) == 64
 
 
-def test_complete_probe_cannot_override_committed_blocked_manifest() -> None:
+def test_complete_probe_can_verify_the_committed_one_shot_subject() -> None:
     manifest_bytes = MANIFEST_PATH.read_bytes()
-    probe_bytes = _probe_bytes(manifest_bytes)
+    probe_bytes = _probe_bytes(manifest_bytes, one_shot=True)
 
-    result = evaluate_activation(
+    verifier = getattr(activation_module, "verify_probe_publication", None)
+    assert callable(verifier)
+    contract_hash = verifier(
         manifest_bytes,
         probe_bytes,
         _receipt_bytes(probe_bytes),
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
         checked_at=CHECKED_AT,
     )
 
-    assert result.status == "fixture_with_next_action"
-    assert result.next_action == "COMPLETE_SDK_ADMISSION"
+    assert isinstance(contract_hash, str)
+    assert len(contract_hash) == 64
 
 
 @pytest.mark.parametrize(
@@ -887,7 +890,7 @@ def test_contract_hash_binds_exact_probe_artifact_bytes() -> None:
     assert canonical.contract_hash != with_trailing_newline.contract_hash
 
 
-def test_cli_reports_current_block_without_requiring_probe(
+def test_activation_cli_keeps_continuous_runtime_closed_for_probe_ready_manifest(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     exit_code = main(["--manifest", str(MANIFEST_PATH)])
@@ -907,9 +910,9 @@ def test_cli_reports_current_block_without_requiring_probe(
 
 def _admitted_manifest() -> dict[str, object]:
     manifest = json.loads(MANIFEST_PATH.read_text())
-    manifest["sdk"]["license"] = "WRITTEN-PERMISSION"
+    manifest["sdk"]["license"] = "PROVIDER-AUTHORIZED-PRIVATE-USE"
     manifest["admission"]["status"] = "admitted"
-    manifest["admission"]["provider_base_url"] = "https://provider.invalid"
+    manifest["admission"]["provider_base_url"] = "https://openapi.fosunxcz.com"
     manifest["admission"]["evidence"] = {
         "written_permission": "evidence/written-permission.sha256",
         "provider_test_vector": "evidence/provider-test-vector.sha256",
@@ -919,11 +922,15 @@ def _admitted_manifest() -> dict[str, object]:
     return manifest
 
 
-def _probe_bytes(manifest_bytes: bytes) -> bytes:
-    return _json_bytes(_probe_document(manifest_bytes))
+def _probe_bytes(manifest_bytes: bytes, *, one_shot: bool = False) -> bytes:
+    return _json_bytes(_probe_document(manifest_bytes, one_shot=one_shot))
 
 
-def _probe_document(manifest_bytes: bytes) -> dict[str, object]:
+def _probe_document(
+    manifest_bytes: bytes,
+    *,
+    one_shot: bool = False,
+) -> dict[str, object]:
     manifest = json.loads(manifest_bytes)
     return {
         "schema_version": "nexus.fosun.sanitized-probe.v2",
@@ -936,11 +943,11 @@ def _probe_document(manifest_bytes: bytes) -> dict[str, object]:
         "publication_public_key_b64u": _public_key_b64u(),
         "operations": [_operation(name) for name in REQUIRED_PROBE_OPERATIONS],
         "checks": {
-            "permission_read_only": True,
+            "permission_read_only": not one_shot,
             "history_window": True,
-            "adjustment_semantics": True,
-            "pagination": True,
-            "rate_limit": True,
+            "adjustment_semantics": not one_shot,
+            "pagination": not one_shot,
+            "rate_limit": not one_shot,
             "response_contract": True,
         },
     }

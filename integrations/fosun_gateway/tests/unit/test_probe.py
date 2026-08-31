@@ -13,6 +13,7 @@ from nexus_fosun_gateway.activation import (
     ProbePublicationReceipt,
     SanitizedProbeArtifact,
     evaluate_activation,
+    verify_probe_publication,
 )
 from nexus_fosun_gateway.adapter.probe_sdk import (
     ProbeExecutionEvidence,
@@ -156,7 +157,16 @@ def test_prepared_artifact_contains_only_static_contract_and_value_free_evidence
     assert tuple(item.name for item in artifact.operations) == REQUIRED_PROBE_OPERATIONS
     assert tuple(item.request_count for item in artifact.operations) == (1,) * 8
     assert all(item.passed for item in artifact.operations)
-    assert artifact.checks.all_passed() is True
+    assert artifact.checks.all_passed() is False
+    assert artifact.checks.one_shot_observations_are_exact() is True
+    assert artifact.checks.model_dump() == {
+        "permission_read_only": False,
+        "history_window": True,
+        "adjustment_semantics": False,
+        "pagination": False,
+        "rate_limit": False,
+        "response_contract": True,
+    }
     assert prepared.artifact_bytes == json.dumps(
         artifact.model_dump(mode="json"),
         sort_keys=True,
@@ -238,7 +248,7 @@ def test_contract_only_validator_rejects_broker_domain_request_overage() -> None
     assert exc_info.value.code == "PROBE_RESPONSE_INVALID"
 
 
-def test_receipt_signs_only_the_exact_durable_artifact_and_activates_it(
+def test_receipt_signs_only_the_exact_durable_pilot_artifact(
     tmp_path,
 ) -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
@@ -247,7 +257,7 @@ def test_receipt_signs_only_the_exact_durable_artifact_and_activates_it(
 
     receipt_bytes = prepared.sign_publication_receipt(publication)
     receipt = ProbePublicationReceipt.model_validate_json(receipt_bytes)
-    result = evaluate_activation(
+    activation = evaluate_activation(
         manifest_bytes,
         prepared.artifact_bytes,
         receipt_bytes,
@@ -256,7 +266,17 @@ def test_receipt_signs_only_the_exact_durable_artifact_and_activates_it(
     )
 
     assert receipt.artifact_sha256 == prepared.artifact_sha256
-    assert result.status == "activated_read_only"
+    verification_hash = verify_probe_publication(
+        manifest_bytes,
+        prepared.artifact_bytes,
+        receipt_bytes,
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CAPTURED_AT,
+    )
+
+    assert activation.status == "fixture_with_next_action"
+    assert activation.next_action == "REVIEW_PROBE_EVIDENCE"
+    assert isinstance(verification_hash, str)
     assert receipt_bytes == json.dumps(
         receipt.model_dump(mode="json"),
         sort_keys=True,
@@ -364,6 +384,7 @@ def test_probe_finishing_at_capability_expiry_creates_no_artifact() -> None:
         "labels",
         "count",
         "broker_count",
+        "unobserved_claim",
     ],
 )
 def test_invalid_execution_evidence_never_creates_an_artifact(
@@ -388,7 +409,7 @@ def test_invalid_execution_evidence_never_creates_an_artifact(
                 for name, count in evidence.request_counts
             ),
         )
-    else:
+    elif mutation == "broker_count":
         evidence = replace(
             evidence,
             request_counts=tuple(
@@ -396,6 +417,8 @@ def test_invalid_execution_evidence_never_creates_an_artifact(
                 for name, count in evidence.request_counts
             ),
         )
+    else:
+        evidence = replace(evidence, pagination=True)
 
     with pytest.raises(ProbeSdkError) as exc_info:
         _build_prepared_probe(
@@ -527,8 +550,8 @@ def _evidence() -> ProbeExecutionEvidence:
         request_counts=tuple((name, 1) for name in REQUIRED_PROBE_OPERATIONS),
         auth_successes=1,
         history_window=True,
-        pagination=True,
-        adjustment_semantics=True,
+        pagination=False,
+        adjustment_semantics=False,
         response_contract=True,
     )
 

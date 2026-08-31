@@ -3,14 +3,13 @@
 ## Boundary and current result
 
 Real-provider probing is not part of autonomous local implementation. This runbook may be used
-only after the user explicitly approves one bounded probe and every prerequisite below is already
+only after the user explicitly approves one bounded probe and the six pilot prerequisites below are
 evidenced. It never authorizes an order, simulation-account mutation, subscription, Webhook, or
 generic provider request.
 
-This boundary treats `provider-worker` as the trusted market normalization/writer TCB. The gateway
-isolates provider credentials, egress, and the fixed read-only operation surface; it does not attest
-responses against a hostile provider worker. Immutable evidence means append-only after acceptance,
-not that an already-compromised writer cannot fabricate an internally consistent fact graph.
+The one-shot probe does not start `provider-worker`, PostgreSQL writes, object storage, Compose, or
+a long-running Gateway. Those components become part of the trusted boundary only in the later
+continuous-ingestion stage.
 
 The local decision command reads only the provider manifest and optional sanitized artifact,
 detached receipt, and explicitly supplied non-secret publisher pin. It has no provider transport,
@@ -20,18 +19,21 @@ does not import the SDK, and does not read gateway credentials:
 uv run --package nexus-fosun-gateway nexus-fosun-activation-gate
 ```
 
-With the current blocked manifest the only valid result is
-`fixture_with_next_action / COMPLETE_SDK_ADMISSION`. `--require-activated` exits 2 for that result;
-the ordinary command exits 0 after emitting the decision contract so Phase 0 offline verification
-can remain independent from Phase 1 provider activation.
+The committed manifest is deliberately `probe_ready`, not production `admitted`. Therefore the
+continuous-runtime activation command remains
+`fixture_with_next_action / COMPLETE_SDK_ADMISSION`; it cannot activate Provider access.
 
-Fresh public-contract verification on 2026-08-31 produced Trade OpenAPI SHA-256
-`87e4e6601b8da122a504239a1922d8742ecd4072e2d10c30c0d6a97f896fb808`, while the reviewed manifest
-still pins `379561548be045c8e531f31e88ee76c8cbdb7bda5b59e12a9b9d5c9040abd204`. This drift is a hard
-admission stop; this implementation does not refresh the manifest or infer that the new bytes are
-safe. `fsopenapi` also remains absent from the workspace lock.
+Fresh public-contract verification on 2026-08-31 is now reflected in the manifest, including
+Trade OpenAPI SHA-256
+`87e4e6601b8da122a504239a1922d8742ecd4072e2d10c30c0d6a97f896fb808`.
+The production REST base URL is bound to `https://openapi.fosunxcz.com`.
+`fsopenapi` is locked to the exact reviewed SDK commit for the bounded probe.
 
-## Preconditions before requesting probe confirmation
+The first activation is REST pull-only. The separately confirmed push endpoint
+`wss://openapi-push.fosunxcz.com/msg/v1/push` is deferred and is not a prerequisite for account,
+cash, holdings, quote, or bar reads.
+
+## Minimum preconditions before requesting probe confirmation
 
 Do not ask for or execute a real probe until all of these are independently evidenced:
 
@@ -41,13 +43,18 @@ Do not ask for or execute a real probe until all of these are independently evid
    only in the gateway's secret manager and are scoped read-only.
 3. The fixed production egress IP has been added to the provider allowlist and the intended target
    environment is recorded.
-4. `docs/runbooks/fosun-sdk-admission.md` has attached written permission, provider test vector,
-   security review, TLS-verification remediation, and exact provider base URL for the pinned
-   SDK/OpenAPI subject.
-5. The manifest is reviewed to `admission.status: admitted`, and the runtime admission tests,
+4. `docs/runbooks/fosun-sdk-admission.md` records the private-use basis, probe vector,
+   security/TLS review and exact provider base URL for this one-shot SDK/OpenAPI subject.
+5. The manifest is reviewed to `admission.status: probe_ready`, and the probe admission tests,
    offline gateway suite, route-surface policy and secret scan all pass.
 6. A probe owner, UTC window, stop conditions and rollback owner are recorded. Only then request one
    explicit user confirmation for that exact network probe.
+
+## Deferred continuous-runtime gates
+
+The following controls remain relevant before sustained Provider collection or deployment, but
+they do not block the first one-shot REST probe:
+
 7. The reviewed `provider-worker` source/image identity and the exact Provider runtime grant template
    are recorded. The database credential must authenticate directly as the Provider login role:
    `SET ROLE`, outbound memberships and any role that can inherit or assume the Provider role are
@@ -383,7 +390,9 @@ The probe runner serializes only canonical `nexus.fosun.sanitized-probe.v2` meta
 - one record per allowed operation: label, request count, pass/fail, and normalized response-contract
   SHA-256;
 - six booleans for read-only permission, history window, adjustment semantics, pagination,
-  rate-limit behavior and response contract.
+  rate-limit behavior and response contract. This pilot can directly observe only the requested
+  history-window match and response shape, so only those two are `true`; credential write denial,
+  multi-page traversal, adjustment semantics and Provider rate-limit behavior remain `false`.
 - the publication signer's public identity. This declaration is never trusted by itself;
   activation compares it with an independently change-controlled public-key pin.
 
@@ -403,7 +412,7 @@ The non-secret base URL comes from the admission record. The publisher seed stay
 current-user `0600` regular, single-link file under a protected current-user `0700` directory and
 trusted ancestors. It is exactly 43 bytes with no newline: canonical unpadded base64url that
 decodes to a 32-byte Ed25519 seed. Its derived public key must match the independently approved
-43-byte public pin. All paths below are absolute, and the admitted base URL must byte-for-byte
+43-byte public pin. All paths below are absolute, and the probe-ready base URL must byte-for-byte
 match the manifest.
 
 Set only the non-secret, approval-record values locally (the sample dates are deliberately
@@ -426,20 +435,18 @@ probe_runtime='/approved/runtime/nexus-fosun-gateway/bin'
 probe_capture_bin="${probe_runtime}/nexus-fosun-capture-read-only-probe"
 probe_key_preflight_bin="${probe_runtime}/nexus-fosun-probe-publisher-key-preflight"
 probe_receipt_bin="${probe_runtime}/nexus-fosun-publish-probe-receipt"
-probe_activation_bin="${probe_runtime}/nexus-fosun-activation-gate"
 
 umask 077
 mkdir -m 700 -- "$probe_output_dir" "$probe_operator_dir"
 test -x "$probe_capture_bin"
 test -x "$probe_key_preflight_bin"
 test -x "$probe_receipt_bin"
-test -x "$probe_activation_bin"
 export FOSUN_PROVIDER_MANIFEST="$probe_manifest"
 export FOSUN_SDK_ADMITTED=true
 export FOSUN_PROBE_OUTPUT_DIR="$probe_output_dir"
 export FOSUN_PROBE_PUBLISHER_PRIVATE_KEY_FILE='/approved/secrets/probe-publisher.seed'
 export FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U='<approved-non-secret-pin>'
-export FSOPENAPI_BASE_URL='<exact-admitted-https-base-url>'
+export FSOPENAPI_BASE_URL='https://openapi.fosunxcz.com'
 ```
 
 `probe_session_date` must be a completed Provider session strictly before the UTC start date. The
@@ -477,7 +484,7 @@ probe_exit=$?
 set -e
 ```
 
-All four binaries must come from the already reviewed and preinstalled immutable runtime. Do not use a
+All three binaries must come from the already reviewed and preinstalled immutable runtime. Do not use a
 package manager, dependency resolver, environment sync, download, or source checkout during the
 approved network window. `mkdir` is intentionally create-only: if either run directory already
 exists or either runtime binary is missing, stop and obtain a new run ID before any Provider call.
@@ -538,64 +545,18 @@ following fixed disposition:
 | `PROBE_OUTPUT_EXISTS` | Treat the window as consumed because artifact publication follows Provider reads. Preserve the existing file, investigate the run ID collision, and use a newly approved run ID. Never overwrite. |
 | `PROBE_OUTPUT_INVALID`, `PROBE_OUTPUT_QUARANTINE_REQUIRED`, malformed/partial/absent frame plus exit 2 (operationally `PROBE_RECEIPT_DELIVERY_UNCERTAIN`), or capture-wrapper failure | Treat the window as consumed and isolate both staging and operator run directories. Do not reconstruct a frame or receipt, rerun the signer, activate, or promote any file. |
 
-After receipt extraction, run the transport-free activation gate shown below against the exact
-staged bytes. A zero exit and `activated_read_only` are evidence for review, not permission to
-deploy.
+The one-shot runner verifies the exact manifest, artifact, detached receipt and publisher pin before
+it can emit `probe_published`; its returned contract hash binds those bytes. Do not feed a
+`probe_ready` artifact into the production activation command: continuous runtime deliberately
+remains closed until a later, separately reviewed `admitted` manifest exists. The probe result
+cannot change transport mode, permissions, deployment state, or secrets.
 
-After a separately approved probe, evaluate the artifact locally:
-
-```bash
-env -u PYTHONHOME -u PYTHONPATH -u SSLKEYLOGFILE "$probe_activation_bin" \
-  --manifest "$probe_manifest" \
-  --probe-artifact "$probe_output_dir/$probe_output_basename" \
-  --publication-receipt "$probe_output_dir/publication-receipt.json" \
-  --trusted-publisher-public-key-b64u \
-    "$FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U" \
-  --require-activated
-```
-
-The supplied public key makes this a local evaluation, not publisher provenance, deployment
-approval, or authority to configure production. `contract_hash` binds the result schema version,
-exact provider-manifest bytes, SDK subject, artifact bytes, detached-receipt bytes, and trusted-key
-digest. Only an admitted manifest plus an unexpired,
-subject-matched, exact closed operation set with every check passing returns
-`activated_read_only`. Every other path returns `fixture_with_next_action` with a stable action.
-The result itself cannot change transport mode, permissions, deployment state, or secrets.
-
-For a later separately approved deployment, promote the exact artifact and detached receipt into a
-new versioned host directory; never overwrite a prior version. Runner output is current-user-owned
-`0600`, while the Linux image runs as the distinct system user `nexus`. Native bind/config mounts
-preserve host ownership and mode, so directly binding runner output is forbidden: it will either be
-unreadable or fail the Gateway owner check. The deployment principal must make exact-byte copies
-owned by root, regular, single-link and non-writable (`0444` is the supported shared-read mode),
-then verify byte equality and SHA-256 before changing Compose source paths. The two control files
-must likewise be root-owned `0444`; the publisher pin is exactly 43 bytes and the contract hash is
-exactly 64 lowercase hexadecimal bytes, with no newline.
-
-Before startup, a no-network container smoke check must prove that the four in-container files are
-regular, owned by root, not group/world writable, readable by the image's `nexus` euid, have the
-expected exact lengths/hashes, and match the reviewed host bytes. Any ownership, mode, inode,
-length, digest or Compose source mismatch stops deployment. Only then may the separately approved
-deployment mount the exact artifact and detached receipt as
-protected regular read-only files into the gateway config domain, set their absolute in-container
-paths as `FOSUN_ACTIVATION_PROBE_ARTIFACT` and `FOSUN_ACTIVATION_PROBE_RECEIPT`, configure the
-canonical non-secret trust root in the exact file referenced by
-`FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE`, and write the separately recorded
-64-character result to the exact file referenced by `FOSUN_ACTIVATION_CONTRACT_HASH_FILE`. Neither
-file may contain a trailing newline. Compose mounts artifact and receipt as separate read-only file
-binds with `create_host_path: false` and mounts the two control values as separate file-backed
-configs; the control sources are fixed at `.secrets/fosun-control/publisher-public-key.b64u` and
-`.secrets/fosun-control/activation-contract.sha256` relative to the repository and cannot be
-redirected by environment variables. It does not accept raw pin/hash environment values. These
-inputs are not available to the
-API, research worker, broker worker, or one-shot probe process. Gateway startup reads each input by
-held descriptor, recomputes and compares the
-contract before SDK import; the SDK adapter checks the artifact expiry at operation entry and again
-after queue/rate-limit waits before every Provider attempt, so a long-running process fails closed
-when the capability window ends. The configuration principal controlling the public pin is an
-explicit trust root; pin rotation requires a new artifact, receipt, contract hash, review, and
-restart. Re-probing, promoting either evidence file, changing either control config, or
-restarting/deploying the gateway remains approval-gated.
+This pilot artifact is review evidence only and must never be promoted into the continuous Gateway.
+It binds the exact `probe_ready` manifest SHA and deliberately records four unobserved checks as
+`false`; changing the manifest to `admitted` also changes that SHA. Future sustained collection
+therefore requires a separately designed evidence runner that actually exercises the missing
+semantics, a fresh `admitted` manifest-bound artifact/receipt/hash, independent review, and explicit
+deployment approval. None of that is part of this first probe.
 
 ## Activation and rollback
 

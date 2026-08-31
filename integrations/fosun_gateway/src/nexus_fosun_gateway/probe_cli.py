@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from nexus_fosun_gateway.activation import (
     MAX_ARTIFACT_BYTES,
     _read_bounded_or_empty,
-    evaluate_activation,
+    verify_probe_publication,
 )
 from nexus_fosun_gateway.adapter.probe_sdk import (
     PhysicalHttpBudget,
@@ -23,7 +23,7 @@ from nexus_fosun_gateway.adapter.probe_sdk import (
     SdkProbeExecutor,
     build_probe_transport,
 )
-from nexus_fosun_gateway.admission import admitted_sdk_subject
+from nexus_fosun_gateway.admission import probe_ready_sdk_subject
 from nexus_fosun_gateway.probe import (
     PreparedProbeArtifact,
     ProbePlan,
@@ -131,7 +131,7 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
             max_bytes=MAX_ARTIFACT_BYTES,
         )
         manifest_document = _load_manifest(manifest_bytes)
-        if admitted_sdk_subject(manifest_document) is None:
+        if probe_ready_sdk_subject(manifest_document) is None:
             raise ProbeSdkError("COMPLETE_SDK_ADMISSION")
         plan = _parse_probe_plan(arguments, manifest_spelling)
 
@@ -170,7 +170,7 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
         )
         publication_complete = True
         receipt_bytes = prepared.sign_publication_receipt(publication)
-        activation = evaluate_activation(
+        verification_hash = verify_probe_publication(
             manifest_bytes,
             prepared.artifact_bytes,
             receipt_bytes,
@@ -179,7 +179,7 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
             ),
             checked_at=datetime.now(UTC),
         )
-        if activation.status != "activated_read_only":
+        if verification_hash is None:
             raise ProbeSdkError("PROBE_OUTPUT_INVALID")
         receipt = json.loads(receipt_bytes)
         return {
@@ -190,7 +190,7 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
             "capability_expires_at": prepared.capability_expires_at.isoformat().replace(
                 "+00:00", "Z"
             ),
-            "activation_contract_hash": activation.contract_hash,
+            "activation_contract_hash": verification_hash,
             "publication_receipt": receipt,
         }
     except (KeyboardInterrupt, asyncio.CancelledError):

@@ -15,9 +15,36 @@ from enum import Enum
 from importlib.metadata import distributions
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
-_SDK_PACKAGE = re.compile(r'(?im)^name\s*=\s*["\']fsopenapi["\']|openapi-python-sdk')
+_SDK_PACKAGE_NAME = "fsopenapi"
+_SDK_PACKAGE_VERSION = "0.1.0"
+_SDK_GIT_REPOSITORY = "https://github.com/fosunwealth/openapi-python-sdk.git"
+_SDK_TAG = "v1.2.0"
+_SDK_COMMIT = "891d95fb4967efaa682387c1b35966ceea38fb21"
+_SDK_LOCK_SOURCE = f"{_SDK_GIT_REPOSITORY}?rev={_SDK_COMMIT}#{_SDK_COMMIT}"
+_SDK_PRIVATE_USE_BASIS = "PROVIDER-AUTHORIZED-PRIVATE-USE"
+_FOSUN_REST_BASE_URL = "https://openapi.fosunxcz.com"
+_FOSUN_READ_ONLY_OPENAPI = {
+    "market": (
+        "https://openapi-docs.fosunxcz.com/specs/public/market/market/openapi.yaml",
+        "f35cfaa3484d8507723729b68a2b8d60fa85d4d28d06991b4a434995cbfac22a",
+    ),
+    "trade": (
+        "https://openapi-docs.fosunxcz.com/specs/public/trade/openapi.yaml",
+        "87e4e6601b8da122a504239a1922d8742ecd4072e2d10c30c0d6a97f896fb808",
+    ),
+}
+_EXPECTED_SDK_EVIDENCE = {
+    "written_permission": "docs/runbooks/fosun-sdk-admission.md#private-use-basis",
+    "provider_test_vector": "integrations/fosun_gateway/tests/fixtures/fosun",
+    "security_review": (
+        "docs/superpowers/reviews/"
+        "2026-08-27-task-21-final-operational-gates-review.md"
+    ),
+    "tls_verification_remediation": (
+        "integrations/fosun_gateway/tests/security/test_provider_tls.py"
+    ),
+}
 _SHA256_IMAGE = re.compile(r"^[^\s@]+:[^\s@]+@sha256:[0-9a-f]{64}$")
 _FORBIDDEN_GATEWAY = re.compile(
     r"(?:\bSimAccount(?:Create|Reset)|"
@@ -87,12 +114,6 @@ _SECRET_PATTERNS = {
     "npm_token": re.compile(r"\bnpm_[A-Za-z0-9]{20,}\b"),
     "openai_token": re.compile(r"\bsk-[A-Za-z0-9_-]{24,}\b"),
 }
-_REQUIRED_SDK_EVIDENCE = (
-    "written_permission",
-    "provider_test_vector",
-    "security_review",
-    "tls_verification_remediation",
-)
 _LOCAL_PYTHON_PACKAGES = {"nexus-engine", "nexus-fosun-gateway", "nexus-workspace"}
 _EXPECTED_GATEWAY_OPERATIONS = frozenset(
     {
@@ -140,10 +161,10 @@ _EXPECTED_GATEWAY_SOURCE_SHA256 = {
     "main.py": "afa5c173c7f3f6de27e36634725cf3ea65b6b22372156ba1bbc2c1e37ed277b0",
 }
 _EXPECTED_GATEWAY_INSTALLABLE_SRC_SHA256 = (
-    "84a5ef06e98d362371ef9ce2afcd209cdf0bae8216fbe62f234729fc946455ad"
+    "be74950fa68fac2eb8fd3bd14dd01e260f17a0bbb50c5cb563292029172a80f4"
 )
 _EXPECTED_FOSUN_GATEWAY_PYPROJECT_SHA256 = (
-    "ac872ba669920971eca0b0c98b7c5cb9b8058d29756c15b044d1518db5221c38"
+    "45219579669dcad16afa35eae91913c180dd295141fae8679b15cc0c39468026"
 )
 _EXPECTED_FOSUN_GATEWAY_PROJECT = {
     "name": "nexus-fosun-gateway",
@@ -153,6 +174,7 @@ _EXPECTED_FOSUN_GATEWAY_PROJECT = {
     "dependencies": [
         "cryptography>=50,<51",
         "fastapi>=0.116,<0.141",
+        "fsopenapi",
         "httpx>=0.28,<0.29",
         "limits>=5.4,<6",
         "pydantic-settings>=2.10,<3",
@@ -186,7 +208,15 @@ _EXPECTED_FOSUN_GATEWAY_TOOL = {
         "build": {
             "targets": {"wheel": {"packages": ["src/nexus_fosun_gateway"]}}
         }
-    }
+    },
+    "uv": {
+        "sources": {
+            "fsopenapi": {
+                "git": "https://github.com/fosunwealth/openapi-python-sdk.git",
+                "rev": "891d95fb4967efaa682387c1b35966ceea38fb21",
+            }
+        }
+    },
 }
 _EXPECTED_COMPOSE_SHA256 = (
     "9a4a462f8eb0588c399427908f88144bc9213023f18764c5a808b00ce698420c"
@@ -1155,7 +1185,16 @@ def check_sdk_lock_admission(root: Path) -> list[PolicyFinding]:
                 "SDK admission requires both lock and provider manifest",
             )
         ]
-    lock_text = _read_text(lock_path)
+    try:
+        lock_document = tomllib.loads(_read_text(lock_path))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return [
+            PolicyFinding(
+                "sdk_lock_invalid",
+                _relative(root, lock_path),
+                "provider SDK lock must be valid TOML",
+            )
+        ]
     try:
         manifest = json.loads(_read_text(manifest_path))
     except json.JSONDecodeError:
@@ -1175,11 +1214,10 @@ def check_sdk_lock_admission(root: Path) -> list[PolicyFinding]:
             )
         ]
     admission = manifest.get("admission")
-    sdk = manifest.get("sdk")
     status = admission.get("status") if isinstance(admission, dict) else None
-    sdk_locked = _SDK_PACKAGE.search(lock_text) is not None
-    if not sdk_locked:
-        if status == "admitted":
+    sdk_packages = _sdk_lock_packages(lock_document)
+    if not sdk_packages:
+        if status in {"probe_ready", "admitted"}:
             return [
                 PolicyFinding(
                     "admitted_sdk_missing_from_lock",
@@ -1188,7 +1226,7 @@ def check_sdk_lock_admission(root: Path) -> list[PolicyFinding]:
                 )
             ]
         return []
-    if not _complete_sdk_admission(admission, sdk):
+    if not _complete_sdk_admission(manifest):
         return [
             PolicyFinding(
                 "sdk_not_admitted",
@@ -1196,8 +1234,7 @@ def check_sdk_lock_admission(root: Path) -> list[PolicyFinding]:
                 "provider SDK is locked without complete admission evidence",
             )
         ]
-    commit = sdk.get("commit")
-    if not isinstance(commit, str) or commit not in lock_text:
+    if len(sdk_packages) != 1 or not _sdk_lock_package_is_exact(sdk_packages[0]):
         return [
             PolicyFinding(
                 "sdk_lock_not_exact",
@@ -1208,56 +1245,107 @@ def check_sdk_lock_admission(root: Path) -> list[PolicyFinding]:
     return []
 
 
-def _complete_sdk_admission(admission: object, sdk: object) -> bool:
-    if not isinstance(admission, dict) or not isinstance(sdk, dict):
+def _complete_sdk_admission(document: object) -> bool:
+    if not isinstance(document, dict) or document.get("provider") != "fosun":
         return False
-    if admission.get("status") != "admitted":
+    admission = document.get("admission")
+    sdk = document.get("sdk")
+    openapi = document.get("openapi")
+    if (
+        not isinstance(admission, dict)
+        or not isinstance(sdk, dict)
+        or not isinstance(openapi, dict)
+    ):
         return False
-    commit = sdk.get("commit")
-    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+    if admission.get("status") not in {"probe_ready", "admitted"}:
         return False
-    if admission.get("sdk_commit") != commit:
+    if sdk.get("tag") != _SDK_TAG or sdk.get("commit") != _SDK_COMMIT:
+        return False
+    if admission.get("sdk_commit") != _SDK_COMMIT:
         return False
     if not _valid_provider_base_url(admission.get("provider_base_url")):
         return False
-    license_name = sdk.get("license")
-    if not isinstance(license_name, str) or license_name.upper() in {"", "UNRESOLVED"}:
+    if sdk.get("license") != _SDK_PRIVATE_USE_BASIS:
         return False
+    admission_hashes = admission.get("openapi_sha256")
+    if not isinstance(admission_hashes, dict):
+        return False
+    for name, (url, digest) in _FOSUN_READ_ONLY_OPENAPI.items():
+        contract = openapi.get(name)
+        if (
+            not isinstance(contract, dict)
+            or contract.get("url") != url
+            or contract.get("sha256") != digest
+            or admission_hashes.get(name) != digest
+        ):
+            return False
     evidence = admission.get("evidence")
-    return isinstance(evidence, dict) and all(
-        isinstance(evidence.get(name), str) and bool(evidence[name].strip())
-        for name in _REQUIRED_SDK_EVIDENCE
-    )
+    return evidence == _EXPECTED_SDK_EVIDENCE
 
 
 def _valid_provider_base_url(value: object) -> bool:
-    if (
-        not isinstance(value, str)
-        or value != value.strip()
-        or value != value.rstrip("/")
-    ):
-        return False
-    parsed = urlsplit(value)
-    try:
-        parsed.port
-    except ValueError:
-        return False
+    return value == _FOSUN_REST_BASE_URL
+
+
+def _sdk_lock_packages(document: object) -> list[dict[str, object]]:
+    if not isinstance(document, dict):
+        return []
+    packages = document.get("package")
+    if not isinstance(packages, list):
+        return []
+    return [
+        package
+        for package in packages
+        if isinstance(package, dict) and package.get("name") == _SDK_PACKAGE_NAME
+    ]
+
+
+def _sdk_lock_package_is_exact(package: dict[str, object]) -> bool:
+    source = package.get("source")
     return (
-        parsed.scheme.lower() == "https"
-        and bool(parsed.hostname)
-        and parsed.username is None
-        and parsed.password is None
-        and not parsed.query
-        and not parsed.fragment
+        package.get("name") == _SDK_PACKAGE_NAME
+        and package.get("version") == _SDK_PACKAGE_VERSION
+        and isinstance(source, dict)
+        and source == {"git": _SDK_LOCK_SOURCE}
     )
 
 
-def license_findings(records: list[DependencyRecord]) -> list[PolicyFinding]:
+def _private_sdk_subject_is_exact(root: Path) -> bool:
+    try:
+        lock_document = tomllib.loads(_read_text(root / "uv.lock"))
+        manifest = json.loads(
+            _read_text(root / "contracts/providers/fosun/manifest.json")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, tomllib.TOMLDecodeError):
+        return False
+    sdk_packages = _sdk_lock_packages(lock_document)
+    if len(sdk_packages) != 1 or not _sdk_lock_package_is_exact(sdk_packages[0]):
+        return False
+    if not isinstance(manifest, dict):
+        return False
+    return _complete_sdk_admission(manifest)
+
+
+def license_findings(
+    records: list[DependencyRecord],
+    *,
+    root: Path | None = None,
+) -> list[PolicyFinding]:
+    exact_private_sdk = root is not None and _private_sdk_subject_is_exact(root)
     findings: list[PolicyFinding] = []
     for record in sorted(records):
         identifier = f"{record.ecosystem}:{record.name}@{record.version}"
         normalized = record.license.strip().upper()
         if not normalized:
+            if exact_private_sdk and (
+                record.ecosystem,
+                record.name.lower(),
+                record.version,
+            ) == ("python", _SDK_PACKAGE_NAME, _SDK_PACKAGE_VERSION):
+                # The provider repository publishes no standard license metadata.
+                # Its exact Git commit and private-use basis are separately bound by
+                # the Fosun admission manifest and SDK lock policy.
+                continue
             findings.append(
                 PolicyFinding(
                     "missing_license_metadata",
@@ -2043,7 +2131,7 @@ def run_all(root: Path) -> tuple[list[PolicyFinding], list[DependencyRecord]]:
     findings.extend(check_container_hardening(root))
     findings.extend(check_real_e2e_boundary(root))
     findings.extend(check_workflow(root))
-    findings.extend(license_findings(inventory))
+    findings.extend(license_findings(inventory, root=root))
     return sorted(set(findings)), inventory
 
 

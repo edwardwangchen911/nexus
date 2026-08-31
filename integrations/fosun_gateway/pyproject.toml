@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "cryptography>=50,<51",
     "fastapi>=0.116,<0.141",
+    "fsopenapi",
     "httpx>=0.28,<0.29",
     "limits>=5.4,<6",
     "pydantic-settings>=2.10,<3",
@@ -39,3 +40,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nexus_fosun_gateway"]
+
+[tool.uv.sources]
+fsopenapi = { git = "https://github.com/fosunwealth/openapi-python-sdk.git", rev = "891d95fb4967efaa682387c1b35966ceea38fb21" }

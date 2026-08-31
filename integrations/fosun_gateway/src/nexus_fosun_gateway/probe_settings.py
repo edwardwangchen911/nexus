@@ -4,10 +4,11 @@ import base64
 import hmac
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from nexus_fosun_gateway.settings import FOSUN_REST_BASE_URL
 
 
 class ProbeProviderSettings(BaseSettings):
@@ -71,22 +72,8 @@ class ProbeProviderSettings(BaseSettings):
     @field_validator("fsopenapi_base_url")
     @classmethod
     def provider_base_url_is_exact_https(cls, value: str) -> str:
-        if value != value.strip() or value != value.rstrip("/"):
-            raise ValueError("provider base URL must be exact")
-        parsed = urlsplit(value)
-        try:
-            parsed.port
-        except ValueError as error:
-            raise ValueError("provider base URL port is invalid") from error
-        if (
-            parsed.scheme.lower() != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ValueError("provider base URL must be an unambiguous HTTPS URL")
+        if value != FOSUN_REST_BASE_URL:
+            raise ValueError("provider base URL must be the reviewed Fosun REST origin")
         return value
 
     @field_validator(

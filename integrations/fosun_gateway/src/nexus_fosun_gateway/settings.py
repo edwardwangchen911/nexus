@@ -4,7 +4,6 @@ import hmac
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Self
-from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,6 +17,7 @@ class Environment(StrEnum):
 
 BROKER_LISTENER_PORT = 8081
 MARKET_LISTENER_PORT = 8082
+FOSUN_REST_BASE_URL = "https://openapi.fosunxcz.com"
 _MAX_CONFIG_PATH_BYTES = 4096
 
 
@@ -161,22 +161,8 @@ class GatewaySettings(BaseSettings):
     def provider_base_url_requires_https(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        if value != value.strip() or value != value.rstrip("/"):
-            raise ValueError("provider base URL must be exact")
-        parsed = urlsplit(value)
-        try:
-            parsed.port
-        except ValueError as error:
-            raise ValueError("provider base URL port is invalid") from error
-        if (
-            parsed.scheme.lower() != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ValueError("provider base URL must be an unambiguous HTTPS URL")
+        if value != FOSUN_REST_BASE_URL:
+            raise ValueError("provider base URL must be the reviewed Fosun REST origin")
         return value
 
     @field_validator("provider_manifest")

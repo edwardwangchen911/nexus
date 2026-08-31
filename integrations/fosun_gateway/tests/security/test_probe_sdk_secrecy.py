@@ -155,7 +155,7 @@ def _settings(tmp_path: Path) -> ProbeProviderSettings:
                 tmp_path / "synthetic-private-key-canary"
             ),
             "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U": "A" * 43,
-            "FSOPENAPI_BASE_URL": "https://provider.invalid",
+            "FSOPENAPI_BASE_URL": "https://openapi.fosunxcz.com",
             "FSOPENAPI_API_KEY": "synthetic-api-secret-canary",
             "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key-canary",
             "FSOPENAPI_SERVER_PUBLIC_KEY": "synthetic-server-key-canary",
@@ -165,9 +165,9 @@ def _settings(tmp_path: Path) -> ProbeProviderSettings:
 
 def _admitted_document() -> dict[str, object]:
     document = json.loads(_MANIFEST_PATH.read_bytes())
-    document["sdk"]["license"] = "WRITTEN-PERMISSION"
+    document["sdk"]["license"] = "PROVIDER-AUTHORIZED-PRIVATE-USE"
     document["admission"]["status"] = "admitted"
-    document["admission"]["provider_base_url"] = "https://provider.invalid"
+    document["admission"]["provider_base_url"] = "https://openapi.fosunxcz.com"
     document["admission"]["evidence"] = {
         "written_permission": "synthetic/permission",
         "provider_test_vector": "synthetic/test-vector",

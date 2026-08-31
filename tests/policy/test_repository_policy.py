@@ -855,7 +855,10 @@ def test_sdk_lock_requires_complete_machine_readable_admission(tmp_path: Path) -
 
     assert check_sdk_lock_admission(tmp_path) == []
 
-    (tmp_path / "uv.lock").write_text('name = "fsopenapi"\n')
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\n[[package]]\nname = "fsopenapi"\nversion = "0.1.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+    )
     assert {finding.rule for finding in check_sdk_lock_admission(tmp_path)} == {
         "sdk_not_admitted"
     }
@@ -866,6 +869,58 @@ def test_sdk_lock_requires_complete_machine_readable_admission(tmp_path: Path) -
     assert {finding.rule for finding in check_sdk_lock_admission(tmp_path)} == {
         "admitted_sdk_missing_from_lock"
     }
+
+
+@pytest.mark.parametrize(
+    "lock_text",
+    [
+        (
+            'version = 1\n[[package]]\nname = "fsopenapi"\nversion = "0.1.0"\n'
+            'source = { git = "https://attacker.invalid/sdk.git?rev='
+            + "891d95fb4967efaa682387c1b35966ceea38fb21"
+            + "#891d95fb4967efaa682387c1b35966ceea38fb21\" }\n"
+        ),
+        (
+            'version = 1\n[[package]]\nname = "fsopenapi"\nversion = "0.1.0"\n'
+            'source = { registry = "https://pypi.org/simple" }\n'
+            '[[package]]\nname = "unrelated"\nversion = "1.0.0"\n'
+            'source = { git = "https://example.invalid/repo.git#'
+            + "891d95fb4967efaa682387c1b35966ceea38fb21"
+            + "\" }\n"
+        ),
+        (
+            'version = 1\n[[package]]\nname = "fsopenapi"\nversion = "0.1.0"\n'
+            'source = { git = "https://github.com/fosunwealth/openapi-python-sdk.git?rev='
+            + "891d95fb4967efaa682387c1b35966ceea38fb21"
+            + "#0000000000000000000000000000000000000000\" }\n"
+        ),
+        (
+            'version = 1\n[[package]]\nname = "fsopenapi"\nversion = "0.1.0"\n'
+            'source = { git = "https://github.com/fosunwealth/openapi-python-sdk.git?rev='
+            + "891d95fb4967efaa682387c1b35966ceea38fb21"
+            + "#891d95fb4967efaa682387c1b35966ceea38fb21\" }\n"
+            '[[package]]\nname = "fsopenapi"\nversion = "0.1.0"\n'
+            'source = { git = "https://github.com/fosunwealth/openapi-python-sdk.git?rev='
+            + "891d95fb4967efaa682387c1b35966ceea38fb21"
+            + "#891d95fb4967efaa682387c1b35966ceea38fb21\" }\n"
+        ),
+    ],
+)
+def test_sdk_lock_binds_the_unique_fsopenapi_package_to_the_exact_git_subject(
+    tmp_path: Path,
+    lock_text: str,
+) -> None:
+    _write_sdk_admission_inputs(tmp_path, lock_text=lock_text)
+
+    assert {finding.rule for finding in check_sdk_lock_admission(tmp_path)} == {
+        "sdk_lock_not_exact"
+    }
+
+
+def test_probe_ready_manifest_may_pin_only_the_exact_reviewed_sdk(tmp_path: Path) -> None:
+    _write_sdk_admission_inputs(tmp_path, status="probe_ready")
+
+    assert check_sdk_lock_admission(tmp_path) == []
 
 
 def test_license_policy_blocks_strong_copyleft_but_inventories_lgpl() -> None:
@@ -880,6 +935,170 @@ def test_license_policy_blocks_strong_copyleft_but_inventories_lgpl() -> None:
     assert [(finding.rule, finding.path) for finding in findings] == [
         ("strong_copyleft_license", "python:unsafe@1.0.0")
     ]
+
+
+def test_license_policy_accepts_only_the_exact_provider_authorized_private_sdk() -> None:
+    records = [
+        DependencyRecord("python", "fsopenapi", "0.1.0", ""),
+        DependencyRecord("python", "fsopenapi", "0.2.0", ""),
+    ]
+
+    findings = license_findings(records)
+
+    assert [(finding.rule, finding.path) for finding in findings] == [
+        ("missing_license_metadata", "python:fsopenapi@0.1.0"),
+        ("missing_license_metadata", "python:fsopenapi@0.2.0")
+    ]
+
+
+def test_private_sdk_license_exception_requires_the_exact_root_subject(
+    tmp_path: Path,
+) -> None:
+    records = [DependencyRecord("python", "fsopenapi", "0.1.0", "")]
+    _write_sdk_admission_inputs(tmp_path, status="probe_ready")
+
+    assert license_findings(records, root=tmp_path) == []
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text(
+        lock_path.read_text().replace("github.com/fosunwealth", "attacker.invalid")
+    )
+    assert [finding.rule for finding in license_findings(records, root=tmp_path)] == [
+        "missing_license_metadata"
+    ]
+
+
+def test_private_sdk_license_exception_rejects_an_arbitrary_basis(
+    tmp_path: Path,
+) -> None:
+    records = [DependencyRecord("python", "fsopenapi", "0.1.0", "")]
+    _write_sdk_admission_inputs(tmp_path, status="probe_ready")
+    manifest_path = tmp_path / "contracts/providers/fosun/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["sdk"]["license"] = "SYNTHETIC-NONEMPTY-LABEL"
+    manifest_path.write_text(json.dumps(manifest))
+
+    assert {finding.rule for finding in check_sdk_lock_admission(tmp_path)} == {
+        "sdk_not_admitted"
+    }
+    assert [finding.rule for finding in license_findings(records, root=tmp_path)] == [
+        "missing_license_metadata"
+    ]
+
+
+def test_private_sdk_subject_requires_the_complete_frozen_manifest(
+    tmp_path: Path,
+) -> None:
+    records = [DependencyRecord("python", "fsopenapi", "0.1.0", "")]
+    _write_sdk_admission_inputs(tmp_path, status="probe_ready")
+    manifest_path = tmp_path / "contracts/providers/fosun/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["provider"] = "attacker"
+    manifest["sdk"].pop("tag", None)
+    manifest.pop("openapi", None)
+    manifest["admission"].pop("openapi_sha256", None)
+    manifest["admission"]["evidence"] = {
+        name: "x"
+        for name in (
+            "written_permission",
+            "provider_test_vector",
+            "security_review",
+            "tls_verification_remediation",
+        )
+    }
+    manifest_path.write_text(json.dumps(manifest))
+
+    assert {finding.rule for finding in check_sdk_lock_admission(tmp_path)} == {
+        "sdk_not_admitted"
+    }
+    assert [finding.rule for finding in license_findings(records, root=tmp_path)] == [
+        "missing_license_metadata"
+    ]
+
+
+def _write_sdk_admission_inputs(
+    tmp_path: Path,
+    *,
+    status: str = "admitted",
+    lock_text: str | None = None,
+) -> None:
+    commit = "891d95fb4967efaa682387c1b35966ceea38fb21"
+    manifest_path = tmp_path / "contracts/providers/fosun/manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "provider": "fosun",
+                "sdk": {
+                    "tag": "v1.2.0",
+                    "commit": commit,
+                    "license": "PROVIDER-AUTHORIZED-PRIVATE-USE",
+                },
+                "admission": {
+                    "status": status,
+                    "provider_base_url": "https://openapi.fosunxcz.com",
+                    "sdk_commit": commit,
+                    "openapi_sha256": {
+                        "market": (
+                            "f35cfaa3484d8507723729b68a2b8d60"
+                            "fa85d4d28d06991b4a434995cbfac22a"
+                        ),
+                        "trade": (
+                            "87e4e6601b8da122a504239a1922d874"
+                            "2ecd4072e2d10c30c0d6a97f896fb808"
+                        ),
+                    },
+                    "evidence": {
+                        "written_permission": (
+                            "docs/runbooks/fosun-sdk-admission.md#private-use-basis"
+                        ),
+                        "provider_test_vector": (
+                            "integrations/fosun_gateway/tests/fixtures/fosun"
+                        ),
+                        "security_review": (
+                            "docs/superpowers/reviews/"
+                            "2026-08-27-task-21-final-operational-gates-review.md"
+                        ),
+                        "tls_verification_remediation": (
+                            "integrations/fosun_gateway/tests/security/"
+                            "test_provider_tls.py"
+                        ),
+                    },
+                },
+                "openapi": {
+                    "market": {
+                        "url": (
+                            "https://openapi-docs.fosunxcz.com/specs/public/"
+                            "market/market/openapi.yaml"
+                        ),
+                        "sha256": (
+                            "f35cfaa3484d8507723729b68a2b8d60"
+                            "fa85d4d28d06991b4a434995cbfac22a"
+                        ),
+                    },
+                    "trade": {
+                        "url": (
+                            "https://openapi-docs.fosunxcz.com/specs/public/"
+                            "trade/openapi.yaml"
+                        ),
+                        "sha256": (
+                            "87e4e6601b8da122a504239a1922d874"
+                            "2ecd4072e2d10c30c0d6a97f896fb808"
+                        ),
+                    },
+                },
+            }
+        )
+    )
+    exact_lock = (
+        'version = 1\n[[package]]\nname = "fsopenapi"\nversion = "0.1.0"\n'
+        'source = { git = "https://github.com/fosunwealth/openapi-python-sdk.git?rev='
+        + commit
+        + "#"
+        + commit
+        + "\" }\n"
+    )
+    (tmp_path / "uv.lock").write_text(lock_text or exact_lock)
 
 
 def test_container_references_require_tag_and_sha256_digest(tmp_path: Path) -> None:
@@ -1831,7 +2050,7 @@ def test_run_all_includes_the_real_e2e_boundary(
         "check_workflow",
         "license_findings",
     ):
-        monkeypatch.setattr(repository_policy, name, lambda *args: [])
+        monkeypatch.setattr(repository_policy, name, lambda *args, **kwargs: [])
     monkeypatch.setattr(repository_policy, "check_real_e2e_boundary", lambda root: [expected])
 
     findings, inventory = repository_policy.run_all(tmp_path)

@@ -3,24 +3,20 @@
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from urllib.parse import urlsplit
 
-from nexus_fosun_gateway.settings import GatewaySettings
+from nexus_fosun_gateway.settings import FOSUN_REST_BASE_URL, GatewaySettings
 
 _SDK_TAG = "v1.2.0"
 _SDK_COMMIT = "891d95fb4967efaa682387c1b35966ceea38fb21"
-_OPENAPI: dict[str, tuple[str, str]] = {
+_SDK_PRIVATE_USE_BASIS = "PROVIDER-AUTHORIZED-PRIVATE-USE"
+_READ_ONLY_OPENAPI: dict[str, tuple[str, str]] = {
     "market": (
         "https://openapi-docs.fosunxcz.com/specs/public/market/market/openapi.yaml",
         "f35cfaa3484d8507723729b68a2b8d60fa85d4d28d06991b4a434995cbfac22a",
     ),
     "trade": (
         "https://openapi-docs.fosunxcz.com/specs/public/trade/openapi.yaml",
-        "379561548be045c8e531f31e88ee76c8cbdb7bda5b59e12a9b9d5c9040abd204",
-    ),
-    "push": (
-        "https://openapi-docs.fosunxcz.com/specs/public/market/push/openapi.yaml",
-        "15f5416f268c9c47cdcef6a2ff7eaaa89ab4b61f1c9927074969b1e3fef32c05",
+        "87e4e6601b8da122a504239a1922d8742ecd4072e2d10c30c0d6a97f896fb808",
     ),
 }
 _REQUIRED_EVIDENCE = (
@@ -55,6 +51,17 @@ def sdk_admission_is_valid(settings: GatewaySettings) -> bool:
 
 def sdk_admission_document_is_valid(document: object) -> bool:
     """Validate admission evidence without reading settings, credentials, or provider state."""
+    return _sdk_subject_document_is_valid(document, status="admitted")
+
+
+def sdk_probe_ready_document_is_valid(document: object) -> bool:
+    """Validate the exact subject allowed only for one explicit, bounded probe."""
+    return _sdk_subject_document_is_valid(
+        document, status="probe_ready"
+    ) or _sdk_subject_document_is_valid(document, status="admitted")
+
+
+def _sdk_subject_document_is_valid(document: object, *, status: str) -> bool:
     if not isinstance(document, Mapping) or document.get("provider") != "fosun":
         return False
     sdk = document.get("sdk")
@@ -62,24 +69,19 @@ def sdk_admission_document_is_valid(document: object) -> bool:
         return False
     if sdk.get("tag") != _SDK_TAG or sdk.get("commit") != _SDK_COMMIT:
         return False
-    license_name = sdk.get("license")
-    if (
-        not isinstance(license_name, str)
-        or not license_name.strip()
-        or license_name.strip().upper() == "UNRESOLVED"
-    ):
+    if sdk.get("license") != _SDK_PRIVATE_USE_BASIS:
         return False
     openapi = document.get("openapi")
     if not isinstance(openapi, Mapping):
         return False
-    for name, (url, digest) in _OPENAPI.items():
+    for name, (url, digest) in _READ_ONLY_OPENAPI.items():
         contract = openapi.get(name)
         if not isinstance(contract, Mapping):
             return False
         if contract.get("url") != url or contract.get("sha256") != digest:
             return False
     admission = document.get("admission")
-    if not isinstance(admission, Mapping) or admission.get("status") != "admitted":
+    if not isinstance(admission, Mapping) or admission.get("status") != status:
         return False
     if _provider_base_url(document) is None:
         return False
@@ -87,7 +89,8 @@ def sdk_admission_document_is_valid(document: object) -> bool:
         return False
     admission_hashes = admission.get("openapi_sha256")
     if not isinstance(admission_hashes, Mapping) or any(
-        admission_hashes.get(name) != digest for name, (_, digest) in _OPENAPI.items()
+        admission_hashes.get(name) != digest
+        for name, (_, digest) in _READ_ONLY_OPENAPI.items()
     ):
         return False
     evidence = admission.get("evidence")
@@ -98,7 +101,25 @@ def sdk_admission_document_is_valid(document: object) -> bool:
 
 def admitted_sdk_subject(document: object) -> AdmittedSdkSubject | None:
     """Return the exact safe subject only after the complete document is admitted."""
-    if not sdk_admission_document_is_valid(document) or not isinstance(document, Mapping):
+    return _validated_sdk_subject(document, status="admitted")
+
+
+def probe_ready_sdk_subject(document: object) -> AdmittedSdkSubject | None:
+    """Return the exact subject permitted only to the one-shot probe runner."""
+    return _validated_sdk_subject(
+        document, status="probe_ready"
+    ) or _validated_sdk_subject(document, status="admitted")
+
+
+def _validated_sdk_subject(
+    document: object,
+    *,
+    status: str,
+) -> AdmittedSdkSubject | None:
+    if (
+        not _sdk_subject_document_is_valid(document, status=status)
+        or not isinstance(document, Mapping)
+    ):
         return None
     sdk = document.get("sdk")
     admission = document.get("admission")
@@ -131,24 +152,4 @@ def _provider_base_url(document: Mapping[object, object]) -> str | None:
     if not isinstance(admission, Mapping):
         return None
     value = admission.get("provider_base_url")
-    if (
-        not isinstance(value, str)
-        or value != value.strip()
-        or value != value.rstrip("/")
-    ):
-        return None
-    parsed = urlsplit(value)
-    try:
-        parsed.port
-    except ValueError:
-        return None
-    if (
-        parsed.scheme.lower() != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        return None
-    return value
+    return FOSUN_REST_BASE_URL if value == FOSUN_REST_BASE_URL else None

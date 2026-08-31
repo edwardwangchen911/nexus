@@ -31,7 +31,7 @@ SUBPROCESS_SUCCESS_RESULT = {
 }
 
 
-def test_blocked_manifest_stops_before_settings_or_sdk_import(
+def test_admitted_manifest_still_validates_plan_before_settings_or_sdk_import(
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
@@ -59,13 +59,13 @@ def test_blocked_manifest_stops_before_settings_or_sdk_import(
     output = json.loads(captured.out)
     assert exit_code == 2
     assert output["status"] == "probe_failed"
-    assert output["code"] == "COMPLETE_SDK_ADMISSION"
+    assert output["code"] == "PROBE_SETTINGS_INVALID"
     assert output["publication_receipt"] is None
     assert settings_constructed is False
     assert captured.err == ""
 
 
-def test_blocked_manifest_precedes_nonsecret_plan_validation(
+def test_admitted_manifest_requires_a_valid_nonsecret_probe_plan(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
     arguments = _arguments(MANIFEST_PATH)
@@ -75,11 +75,11 @@ def test_blocked_manifest_precedes_nonsecret_plan_validation(
 
     captured = capfd.readouterr()
     assert exit_code == 2
-    assert json.loads(captured.out)["code"] == "COMPLETE_SDK_ADMISSION"
+    assert json.loads(captured.out)["code"] == "INVALID_PROBE_PLAN"
     assert captured.err == ""
 
 
-def test_probe_cli_subprocess_is_one_frame_and_offline_for_blocked_manifest() -> None:
+def test_probe_cli_subprocess_is_one_frame_and_offline_without_secret_settings() -> None:
     completed = subprocess.run(
         [
             sys.executable,
@@ -96,7 +96,7 @@ def test_probe_cli_subprocess_is_one_frame_and_offline_for_blocked_manifest() ->
     assert completed.returncode == 2
     assert completed.stderr == b""
     assert completed.stdout.count(b"\n") == 1
-    assert json.loads(completed.stdout)["code"] == "COMPLETE_SDK_ADMISSION"
+    assert json.loads(completed.stdout)["code"] == "PROBE_SETTINGS_INVALID"
 
 
 def test_probe_cli_success_contract_holds_in_a_real_subprocess() -> None:
@@ -460,8 +460,8 @@ def test_success_publishes_before_signing_and_emits_receipt_last(
                 ),
                 auth_successes=1,
                 history_window=True,
-                pagination=True,
-                adjustment_semantics=True,
+                pagination=False,
+                adjustment_semantics=False,
                 response_contract=True,
             ),
             started_at=started_at,
@@ -546,8 +546,8 @@ def test_interrupt_after_artifact_publication_requires_quarantine(
                 ),
                 auth_successes=1,
                 history_window=True,
-                pagination=True,
-                adjustment_semantics=True,
+                pagination=False,
+                adjustment_semantics=False,
                 response_contract=True,
             ),
             started_at=started_at,
@@ -716,7 +716,7 @@ def _set_probe_environment(
         "FOSUN_PROBE_OUTPUT_DIR": str(output_dir),
         "FOSUN_PROBE_PUBLISHER_PRIVATE_KEY_FILE": str(private_key_path),
         "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U": public_key_b64u,
-        "FSOPENAPI_BASE_URL": "https://provider.invalid",
+        "FSOPENAPI_BASE_URL": "https://openapi.fosunxcz.com",
         "FSOPENAPI_API_KEY": "synthetic-api-key-canary",
         "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-client-private-key-canary",
         "FSOPENAPI_SERVER_PUBLIC_KEY": "synthetic-server-public-key-canary",
@@ -727,9 +727,9 @@ def _set_probe_environment(
 
 def _admitted_manifest() -> dict[str, object]:
     manifest = json.loads(MANIFEST_PATH.read_bytes())
-    manifest["sdk"]["license"] = "WRITTEN-PERMISSION"
+    manifest["sdk"]["license"] = "PROVIDER-AUTHORIZED-PRIVATE-USE"
     manifest["admission"]["status"] = "admitted"
-    manifest["admission"]["provider_base_url"] = "https://provider.invalid"
+    manifest["admission"]["provider_base_url"] = "https://openapi.fosunxcz.com"
     manifest["admission"]["evidence"] = {
         "written_permission": "synthetic/permission",
         "provider_test_vector": "synthetic/test-vector",

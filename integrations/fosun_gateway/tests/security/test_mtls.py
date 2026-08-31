@@ -365,7 +365,7 @@ def _production_settings(material: dict[str, Path]) -> GatewaySettings:
                 "/synthetic/fosun-activation-contract.sha256"
             ),
             "FOSUN_PROVIDER_MANIFEST": "/synthetic/fosun-provider-manifest.json",
-            "FSOPENAPI_BASE_URL": "https://provider.invalid",
+            "FSOPENAPI_BASE_URL": "https://openapi.fosunxcz.com",
             "FSOPENAPI_API_KEY": "synthetic-api-key",
             "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key",
             "FSOPENAPI_SERVER_PUBLIC_KEY": "synthetic-public-key",

@@ -56,7 +56,8 @@ uv run pip-audit --local --skip-editable
 1. 从官方发行来源确认目标版本和安全修复；更新直接约束并重新生成 `uv.lock`/`package-lock.json`。
 2. 运行 npm/Python 漏洞审计、许可证 inventory 和全量受影响测试；任何强 copyleft 或无许可证元数据必须有单独书面准入，不能只改 allowlist。
 3. 镜像升级同时更新可读 tag 与 registry digest，运行两个 Dockerfile `--check`、四个 Compose profile config 和一次本地空库迁移。
-4. 复星 SDK 仍由独立 machine-readable admission 控制；当前 `uv.lock` 必须不含 `fsopenapi`。不要借普通依赖升级绕过该门禁。
+4. 复星 SDK 仍由独立 machine-readable admission 控制；`uv.lock` 只允许官方 Git URL、
+   `fsopenapi==0.1.0` 与已审核 requested/resolved commit 完全一致的唯一条目。不要借普通依赖升级绕过该门禁。
 
 ## 历史本地证据（2026-08-27）
 

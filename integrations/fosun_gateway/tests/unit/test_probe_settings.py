@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import nexus_fosun_gateway.admission as admission
 import pytest
 from nexus_fosun_gateway.admission import admitted_sdk_subject
 from nexus_fosun_gateway.probe_settings import ProbeProviderSettings
@@ -9,8 +10,14 @@ from pydantic import ValidationError
 MANIFEST_PATH = Path(__file__).parents[4] / "contracts" / "providers" / "fosun" / "manifest.json"
 
 
-def test_blocked_manifest_has_no_admitted_subject() -> None:
-    assert admitted_sdk_subject(json.loads(MANIFEST_PATH.read_bytes())) is None
+def test_committed_manifest_is_ready_only_for_the_one_shot_probe() -> None:
+    document = json.loads(MANIFEST_PATH.read_bytes())
+
+    assert document["admission"]["status"] == "probe_ready"
+    assert admitted_sdk_subject(document) is None
+    subject = admission.probe_ready_sdk_subject(document)
+    assert subject is not None
+    assert subject.provider_base_url == "https://openapi.fosunxcz.com"
 
 
 def test_admitted_subject_is_parsed_only_after_complete_validation() -> None:
@@ -19,7 +26,7 @@ def test_admitted_subject_is_parsed_only_after_complete_validation() -> None:
     subject = admitted_sdk_subject(document)
 
     assert subject is not None
-    assert subject.provider_base_url == "https://provider.invalid"
+    assert subject.provider_base_url == "https://openapi.fosunxcz.com"
     assert subject.sdk_tag == "v1.2.0"
     assert subject.sdk_commit == "891d95fb4967efaa682387c1b35966ceea38fb21"
     assert subject.evidence_references == (
@@ -28,6 +35,46 @@ def test_admitted_subject_is_parsed_only_after_complete_validation() -> None:
         "synthetic/security-review",
         "synthetic/tls-review",
     )
+
+
+def test_pull_only_admission_does_not_depend_on_deferred_push_contract() -> None:
+    document = _admitted_document()
+    document["openapi"]["push"] = {
+        "url": "https://deferred-push.invalid/openapi.yaml",
+        "sha256": "0" * 64,
+    }
+    document["admission"]["openapi_sha256"]["push"] = "0" * 64
+
+    subject = admitted_sdk_subject(document)
+
+    assert subject is not None
+    assert subject.provider_base_url == "https://openapi.fosunxcz.com"
+
+
+@pytest.mark.parametrize(
+    "provider_base_url",
+    [
+        "https://provider.invalid",
+        "https://openapi.fosunxcz.com:443",
+        "https://openapi.fosunxcz.com/path",
+        "https://OPENAPI.FOSUNXCZ.COM",
+    ],
+)
+def test_admission_rejects_every_noncanonical_rest_origin(
+    provider_base_url: str,
+) -> None:
+    document = _admitted_document()
+    document["admission"]["provider_base_url"] = provider_base_url
+
+    assert admitted_sdk_subject(document) is None
+
+
+def test_admission_rejects_an_arbitrary_private_use_label() -> None:
+    document = _admitted_document()
+    document["sdk"]["license"] = "SYNTHETIC-NONEMPTY-LABEL"
+
+    assert admitted_sdk_subject(document) is None
+    assert admission.probe_ready_sdk_subject(document) is None
 
 
 def test_probe_settings_require_explicit_admission_and_hide_secrets(
@@ -73,6 +120,9 @@ def test_probe_settings_reject_nonexact_admission_switch(
         ("FSOPENAPI_BASE_URL", "https://user:secret@provider.invalid"),
         ("FSOPENAPI_BASE_URL", "https://provider.invalid/path?query=1"),
         ("FSOPENAPI_BASE_URL", "https://provider.invalid/"),
+        ("FSOPENAPI_BASE_URL", "https://provider.invalid"),
+        ("FSOPENAPI_BASE_URL", "https://openapi.fosunxcz.com:443"),
+        ("FSOPENAPI_BASE_URL", "https://OPENAPI.FOSUNXCZ.COM"),
     ],
 )
 def test_probe_settings_reject_ambiguous_paths_and_provider_urls(
@@ -129,7 +179,7 @@ def _settings_values(tmp_path: Path) -> dict[str, object]:
             tmp_path / "synthetic-publisher-private-key-canary"
         ),
         "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U": "A" * 43,
-        "FSOPENAPI_BASE_URL": "https://provider.invalid",
+        "FSOPENAPI_BASE_URL": "https://openapi.fosunxcz.com",
         "FSOPENAPI_API_KEY": "synthetic-api-key-canary",
         "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key-canary",
         "FSOPENAPI_SERVER_PUBLIC_KEY": "synthetic-server-key-canary",
@@ -138,9 +188,9 @@ def _settings_values(tmp_path: Path) -> dict[str, object]:
 
 def _admitted_document() -> dict[str, object]:
     document = json.loads(MANIFEST_PATH.read_bytes())
-    document["sdk"]["license"] = "WRITTEN-PERMISSION"
+    document["sdk"]["license"] = "PROVIDER-AUTHORIZED-PRIVATE-USE"
     document["admission"]["status"] = "admitted"
-    document["admission"]["provider_base_url"] = "https://provider.invalid"
+    document["admission"]["provider_base_url"] = "https://openapi.fosunxcz.com"
     document["admission"]["evidence"] = {
         "written_permission": "synthetic/permission",
         "provider_test_vector": "synthetic/test-vector",

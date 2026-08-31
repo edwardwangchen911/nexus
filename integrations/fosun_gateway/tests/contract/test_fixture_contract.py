@@ -27,27 +27,36 @@ def test_provider_manifest_pins_reviewed_public_contracts_and_sdk_source() -> No
 
     assert manifest == {
         "provider": "fosun",
-        "reviewed_at": "2026-08-22",
+        "reviewed_at": "2026-08-31",
         "admission": {
-            "status": "blocked",
-            "provider_base_url": None,
+            "status": "probe_ready",
+            "provider_base_url": "https://openapi.fosunxcz.com",
             "sdk_commit": "891d95fb4967efaa682387c1b35966ceea38fb21",
             "openapi_sha256": {
                 "market": "f35cfaa3484d8507723729b68a2b8d60fa85d4d28d06991b4a434995cbfac22a",
-                "trade": "379561548be045c8e531f31e88ee76c8cbdb7bda5b59e12a9b9d5c9040abd204",
+                "trade": "87e4e6601b8da122a504239a1922d8742ecd4072e2d10c30c0d6a97f896fb808",
                 "push": "15f5416f268c9c47cdcef6a2ff7eaaa89ab4b61f1c9927074969b1e3fef32c05",
             },
             "evidence": {
-                "written_permission": None,
-                "provider_test_vector": None,
-                "security_review": None,
-                "tls_verification_remediation": None,
+                "written_permission": (
+                    "docs/runbooks/fosun-sdk-admission.md#private-use-basis"
+                ),
+                "provider_test_vector": (
+                    "integrations/fosun_gateway/tests/fixtures/fosun"
+                ),
+                "security_review": (
+                    "docs/superpowers/reviews/"
+                    "2026-08-27-task-21-final-operational-gates-review.md"
+                ),
+                "tls_verification_remediation": (
+                    "integrations/fosun_gateway/tests/security/test_provider_tls.py"
+                ),
             },
         },
         "sdk": {
             "tag": "v1.2.0",
             "commit": "891d95fb4967efaa682387c1b35966ceea38fb21",
-            "license": "UNRESOLVED",
+            "license": "PROVIDER-AUTHORIZED-PRIVATE-USE",
         },
         "openapi": {
             "market": {
@@ -56,7 +65,7 @@ def test_provider_manifest_pins_reviewed_public_contracts_and_sdk_source() -> No
             },
             "trade": {
                 "url": "https://openapi-docs.fosunxcz.com/specs/public/trade/openapi.yaml",
-                "sha256": "379561548be045c8e531f31e88ee76c8cbdb7bda5b59e12a9b9d5c9040abd204",
+                "sha256": "87e4e6601b8da122a504239a1922d8742ecd4072e2d10c30c0d6a97f896fb808",
             },
             "push": {
                 "url": "https://openapi-docs.fosunxcz.com/specs/public/market/push/openapi.yaml",

@@ -118,6 +118,31 @@ def test_runtime_boolean_cannot_override_committed_blocked_manifest(
     assert imported is False
 
 
+def test_probe_ready_manifest_cannot_unlock_the_continuous_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    values = _activated_read_only_values(tmp_path)
+    values["FOSUN_PROVIDER_MANIFEST"] = MANIFEST_PATH
+    imported = False
+
+    def forbidden_import(name: str) -> object:
+        nonlocal imported
+        imported = True
+        return SimpleNamespace(SDKClient=object)
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.main.importlib.import_module",
+        forbidden_import,
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        build_transport(GatewaySettings.model_validate(values))
+
+    assert exc_info.value.code == "SDK_NOT_ADMITTED"
+    assert imported is False
+
+
 def test_admitted_manifest_without_activation_probe_cannot_import_sdk(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -328,7 +353,7 @@ def test_production_evidence_paths_reject_nul_before_runtime_read(
         GatewaySettings.model_validate(values)
 
 
-def test_runtime_provider_base_url_must_match_the_admitted_manifest(
+def test_runtime_provider_base_url_must_be_the_reviewed_fosun_origin(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -343,10 +368,9 @@ def test_runtime_provider_base_url_must_match_the_admitted_manifest(
 
     monkeypatch.setattr("nexus_fosun_gateway.main.importlib.import_module", forbidden_import)
 
-    with pytest.raises(GatewayError) as exc_info:
-        build_transport(GatewaySettings.model_validate(values))
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(values)
 
-    assert exc_info.value.code == "SDK_NOT_ADMITTED"
     assert imported is False
 
 
@@ -508,7 +532,7 @@ def test_read_only_sdk_construction_forces_all_sdk_logging_off(
 
     assert isinstance(transport, SdkFosunTransport)
     assert captured == {
-        "base_url": "https://provider.invalid",
+        "base_url": "https://openapi.fosunxcz.com",
         "api_key": "synthetic-api-key",
         "logging_enable": False,
         "log_body": False,
@@ -877,7 +901,7 @@ def _read_only_settings(manifest_path: Path) -> GatewaySettings:
             "FOSUN_ACTIVATION_CONTRACT_HASH_FILE": (
                 "/synthetic/missing-activation-contract.sha256"
             ),
-            "FSOPENAPI_BASE_URL": "https://provider.invalid",
+            "FSOPENAPI_BASE_URL": "https://openapi.fosunxcz.com",
             "FSOPENAPI_API_KEY": "synthetic-api-key",
             "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key",
             "FSOPENAPI_SERVER_PUBLIC_KEY": "synthetic-public-key",
@@ -893,11 +917,11 @@ def _write_admitted_manifest(
     mismatched_subject: bool = False,
 ) -> Path:
     document = json.loads(MANIFEST_PATH.read_text())
-    document["sdk"]["license"] = "WRITTEN-PERMISSION"
+    document["sdk"]["license"] = "PROVIDER-AUTHORIZED-PRIVATE-USE"
     admission = document["admission"]
     assert isinstance(admission, dict)
     admission["status"] = "admitted"
-    admission["provider_base_url"] = "https://provider.invalid"
+    admission["provider_base_url"] = "https://openapi.fosunxcz.com"
     admission["evidence"] = {
         "written_permission": "synthetic-evidence/permission",
         "provider_test_vector": "synthetic-evidence/test-vector",
@@ -1003,7 +1027,7 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
         "FOSUN_ACTIVATION_PROBE_RECEIPT": receipt_path,
         "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE": trusted_key_path,
         "FOSUN_ACTIVATION_CONTRACT_HASH_FILE": activation_contract_path,
-        "FSOPENAPI_BASE_URL": "https://provider.invalid",
+        "FSOPENAPI_BASE_URL": "https://openapi.fosunxcz.com",
         "FSOPENAPI_API_KEY": "synthetic-api-key",
         "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key",
         "FSOPENAPI_SERVER_PUBLIC_KEY": "synthetic-public-key",

@@ -46,8 +46,8 @@ def test_artifact_error_logs_and_repr_never_contain_live_or_secret_canaries(
         request_counts=tuple((name, 1) for name in REQUIRED_PROBE_OPERATIONS),
         auth_successes=1,
         history_window=True,
-        pagination=True,
-        adjustment_semantics=True,
+        pagination=False,
+        adjustment_semantics=False,
         response_contract=True,
     )
 
@@ -102,8 +102,8 @@ def test_exception_from_key_generation_is_sanitized(
                 ),
                 auth_successes=1,
                 history_window=True,
-                pagination=True,
-                adjustment_semantics=True,
+                pagination=False,
+                adjustment_semantics=False,
                 response_contract=True,
             ),
             started_at=datetime(2026, 8, 31, 8, 0, tzinfo=UTC),
@@ -122,9 +122,9 @@ def test_exception_from_key_generation_is_sanitized(
 
 def _admitted_manifest() -> dict[str, object]:
     manifest = json.loads(_MANIFEST_PATH.read_bytes())
-    manifest["sdk"]["license"] = "WRITTEN-PERMISSION"
+    manifest["sdk"]["license"] = "PROVIDER-AUTHORIZED-PRIVATE-USE"
     manifest["admission"]["status"] = "admitted"
-    manifest["admission"]["provider_base_url"] = "https://provider.invalid"
+    manifest["admission"]["provider_base_url"] = "https://openapi.fosunxcz.com"
     manifest["admission"]["evidence"] = {
         "written_permission": "synthetic/permission",
         "provider_test_vector": "synthetic/test-vector",
