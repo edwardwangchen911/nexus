@@ -138,7 +138,7 @@ jobs:
         env:
           POSTGRES_DB: nexus_e2e_ci
           POSTGRES_USER: nexus_e2e_ci
-          POSTGRES_PASSWORD: synthetic_real_e2e_only
+          POSTGRES_PASSWORD: nexus_e2e_synthetic_ci_only
         ports:
           - 5432:5432
         options: >-
@@ -147,7 +147,7 @@ jobs:
           --health-timeout 3s
           --health-retries 20
     env:
-      NEXUS_REAL_E2E_DATABASE_URL: postgresql+asyncpg://nexus_e2e_ci:synthetic_real_e2e_only@127.0.0.1:5432/nexus_e2e_ci
+      NEXUS_REAL_E2E_DATABASE_URL: postgresql+asyncpg://nexus_e2e_ci:nexus_e2e_synthetic_ci_only@127.0.0.1:5432/nexus_e2e_ci
       NEXUS_E2E_BROWSER_CHANNEL: chromium
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
