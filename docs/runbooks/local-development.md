@@ -33,8 +33,10 @@ export NEXUS_E2E_BROWSER_CHANNEL=chromium
 npm run test:e2e:real
 ```
 
-运行器只会校验该 URL、迁移这个调用者提供的专用库并启动本地测试进程；它不会创建、删除、
-清空或重置数据库。若初始状态并非空库所需的 fixture `version=0`，测试会失败而不会清理。
+运行器只接受无附加参数的固定命令；项目根目录存在 `.env*` 或 `.dev.vars*` 时会在连接数据库前
+失败。它会先确认目标库没有非系统 schema 或用户对象，并在迁移、浏览器旅程和结果验证期间
+持有 PostgreSQL advisory lock。运行器不会创建、删除、清空或重置数据库；若目标库非空、已被
+另一门禁占用或最终结果不是恰好一个固定旅程通过，测试会失败而不会清理。
 默认不运行 Provider、交易 Gateway、任何 worker 或 MinIO；不要把本命令视为复星 SDK admission、
 复星激活、真实行情/财报、账户同步或订单可用性的证据。
 

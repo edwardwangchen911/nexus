@@ -937,14 +937,54 @@ def test_committed_workflow_has_minimal_permissions_and_offline_jobs() -> None:
 
 
 def _write_real_e2e_adoption(root: Path) -> None:
-    (root / "playwright.real.config.ts").write_text("export default {};\n")
+    (root / "playwright.real.config.ts").write_text(
+        'const engineUrl = "http://127.0.0.1:8100";\n'
+        'const webUrl = "http://127.0.0.1:4174";\n'
+        "export default defineConfig({\n"
+        '  testDir: "./tests/e2e-real",\n'
+        '  testMatch: "integrations-real.spec.ts",\n'
+        "  fullyParallel: false,\n"
+        "  retries: 0,\n"
+        "  workers: 1,\n"
+        '  reporter: [["json", { outputFile: "test-results/real-e2e-results.json" }]],\n'
+        '  CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false",\n'
+        '  CLOUDFLARE_INCLUDE_PROCESS_ENV: "false",\n'
+        '  use: { baseURL: webUrl, serviceWorkers: "block" },\n'
+        "  webServer: [\n"
+        "    { url: `${engineUrl}/health/live`, reuseExistingServer: false },\n"
+        "    { url: `${webUrl}/__debug`, reuseExistingServer: false },\n"
+        "  ],\n"
+        "});\n"
+    )
     (root / "tests/e2e-real").mkdir(parents=True)
+    (root / "tests/e2e-real/integrations-real.spec.ts").write_text(
+        'import { test } from "@playwright/test";\n'
+        'test("proves the real BFF fixture CAS replay and persisted integration state", '
+        "async () => {});\n"
+    )
     (root / "package.json").write_text(
-        json.dumps({"scripts": {"test:e2e:real": "playwright test -c playwright.real.config.ts"}})
+        json.dumps({"scripts": {"test:e2e:real": "node scripts/e2e/run-real-fixture.mjs"}})
     )
     workflow = root / ".github/workflows/ci.yml"
     workflow.parent.mkdir(parents=True)
-    workflow.write_text("jobs:\n  real-e2e:\n    runs-on: ubuntu-24.04\n")
+    workflow.write_text(
+        "jobs:\n"
+        "  real-e2e:\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    timeout-minutes: 25\n"
+        "    services:\n"
+        "      postgres:\n"
+        "        image: postgres:17@sha256:"
+        "e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449\n"
+        "        env:\n"
+        "          POSTGRES_DB: nexus_e2e_ci\n"
+        "          POSTGRES_USER: nexus_e2e_ci\n"
+        "          POSTGRES_PASSWORD: nexus_e2e_synthetic_ci_only\n"
+        "    env:\n"
+        "      NEXUS_REAL_E2E_DATABASE_URL: postgresql+asyncpg://nexus_e2e_ci:nexus_e2e_synthetic_ci_only@127.0.0.1:5432/nexus_e2e_ci\n"
+        "    steps:\n"
+        "      - run: npm run test:e2e:real\n"
+    )
 
 
 def test_real_e2e_boundary_allows_a_repository_before_real_e2e_adoption(
@@ -961,7 +1001,24 @@ def test_real_e2e_boundary_recognizes_a_valid_indented_ci_job_as_its_only_anchor
 ) -> None:
     workflow = tmp_path / ".github/workflows/ci.yml"
     workflow.parent.mkdir(parents=True)
-    workflow.write_text("jobs:\n    real-e2e:\n      runs-on: ubuntu-24.04\n")
+    workflow.write_text(
+        "jobs:\n"
+        "    real-e2e:\n"
+        "      runs-on: ubuntu-24.04\n"
+        "      timeout-minutes: 25\n"
+        "      services:\n"
+        "        postgres:\n"
+        "          image: postgres:17@sha256:"
+        "e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449\n"
+        "          env:\n"
+        "            POSTGRES_DB: nexus_e2e_ci\n"
+        "            POSTGRES_USER: nexus_e2e_ci\n"
+        "            POSTGRES_PASSWORD: nexus_e2e_synthetic_ci_only\n"
+        "      env:\n"
+        "        NEXUS_REAL_E2E_DATABASE_URL: postgresql+asyncpg://nexus_e2e_ci:nexus_e2e_synthetic_ci_only@127.0.0.1:5432/nexus_e2e_ci\n"
+        "      steps:\n"
+        "        - run: npm run test:e2e:real\n"
+    )
     checker = getattr(repository_policy, "check_real_e2e_boundary", None)
 
     assert callable(checker)
@@ -970,6 +1027,50 @@ def test_real_e2e_boundary_recognizes_a_valid_indented_ci_job_as_its_only_anchor
         ("real_e2e_test_directory_missing", "tests/e2e-real"),
         ("real_e2e_package_script_missing", "package.json"),
     ]
+
+
+@pytest.mark.parametrize("anchor", ["config", "test_dir", "package", "workflow"])
+def test_real_e2e_boundary_activates_for_each_single_adoption_anchor(
+    tmp_path: Path,
+    anchor: str,
+) -> None:
+    complete = tmp_path / "complete"
+    complete.mkdir()
+    _write_real_e2e_adoption(complete)
+    if anchor == "config":
+        (tmp_path / "playwright.real.config.ts").write_text(
+            (complete / "playwright.real.config.ts").read_text()
+        )
+    elif anchor == "test_dir":
+        (tmp_path / "tests/e2e-real").mkdir(parents=True)
+        (tmp_path / "tests/e2e-real/integrations-real.spec.ts").write_text(
+            (complete / "tests/e2e-real/integrations-real.spec.ts").read_text()
+        )
+    elif anchor == "package":
+        (tmp_path / "package.json").write_text((complete / "package.json").read_text())
+    else:
+        workflow = tmp_path / ".github/workflows/ci.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text((complete / ".github/workflows/ci.yml").read_text())
+
+    findings = repository_policy.check_real_e2e_boundary(tmp_path)
+
+    missing_rules = {finding.rule for finding in findings if finding.rule.endswith("_missing")}
+    expected_missing = {
+        "real_e2e_config_missing",
+        "real_e2e_test_directory_missing",
+        "real_e2e_package_script_missing",
+        "real_e2e_ci_job_missing",
+    }
+    expected_missing.remove(
+        {
+            "config": "real_e2e_config_missing",
+            "test_dir": "real_e2e_test_directory_missing",
+            "package": "real_e2e_package_script_missing",
+            "workflow": "real_e2e_ci_job_missing",
+        }[anchor]
+    )
+    assert missing_rules == expected_missing
 
 
 @pytest.mark.parametrize(
@@ -991,6 +1092,7 @@ def test_real_e2e_boundary_rejects_partial_adoption(
     if missing_marker == "config":
         (tmp_path / "playwright.real.config.ts").unlink()
     elif missing_marker == "test_dir":
+        (tmp_path / "tests/e2e-real/integrations-real.spec.ts").unlink()
         (tmp_path / "tests/e2e-real").rmdir()
     elif missing_marker == "package":
         (tmp_path / "package.json").write_text(json.dumps({"scripts": {}}))
@@ -1031,6 +1133,113 @@ def test_real_e2e_boundary_forbids_network_response_replacement(
     assert [(finding.rule, finding.path) for finding in checker(tmp_path)] == [
         ("real_e2e_network_mock_forbidden", "tests/e2e-real/network.spec.ts")
     ]
+
+
+@pytest.mark.parametrize(
+    "network_replacement",
+    [
+        "await page.routeFromHAR('fixture.har')\n",
+        "await context.routeFromHAR('fixture.har')\n",
+        "await browserContext.routeFromHAR('fixture.har')\n",
+        "await page.addInitScript(() => {})\n",
+        "navigator.serviceWorker.register('/fixture.js')\n",
+        "window.fetch = async () => new Response('{}')\n",
+        "globalThis.fetch = async () => new Response('{}')\n",
+    ],
+)
+def test_real_e2e_boundary_forbids_additional_network_replacement_paths(
+    tmp_path: Path,
+    network_replacement: str,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    (tmp_path / "tests/e2e-real/integrations-real.spec.ts").write_text(network_replacement)
+
+    assert "real_e2e_network_mock_forbidden" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+def test_real_e2e_boundary_forbids_importing_helpers_from_outside_the_boundary(
+    tmp_path: Path,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    (tmp_path / "tests/e2e-real/integrations-real.spec.ts").write_text(
+        'import { installMock } from "../helpers/network-mock";\n'
+    )
+
+    assert "real_e2e_external_import_forbidden" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+def test_real_e2e_boundary_requires_the_exact_package_runner(
+    tmp_path: Path,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"test:e2e:real": "echo ok"}})
+    )
+
+    assert "real_e2e_package_script_invalid" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+def test_real_e2e_boundary_rejects_a_noop_or_parameterized_ci_step(
+    tmp_path: Path,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    workflow.write_text(
+        workflow.read_text().replace(
+            "- run: npm run test:e2e:real",
+            "- run: npm run test:e2e:real -- --pass-with-no-tests",
+        )
+    )
+
+    assert "real_e2e_ci_job_invalid" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    [
+        ('testDir: "./tests/e2e-real"', 'testDir: "./tests/e2e"'),
+        ('testMatch: "integrations-real.spec.ts"', 'testMatch: "*.spec.ts"'),
+        ("fullyParallel: false", "fullyParallel: true"),
+        ("retries: 0", "retries: 2"),
+        ("workers: 1", "workers: 4"),
+        ('serviceWorkers: "block"', 'serviceWorkers: "allow"'),
+        (
+            'CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false"',
+            'CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "true"',
+        ),
+        (
+            'CLOUDFLARE_INCLUDE_PROCESS_ENV: "false"',
+            'CLOUDFLARE_INCLUDE_PROCESS_ENV: "true"',
+        ),
+        ("reuseExistingServer: false", "reuseExistingServer: true"),
+        (
+            'reporter: [["json", { outputFile: "test-results/real-e2e-results.json" }]]',
+            'reporter: "line"',
+        ),
+        ('http://127.0.0.1:8100', 'https://engine.example.test'),
+        ('http://127.0.0.1:4174', 'https://web.example.test'),
+    ],
+)
+def test_real_e2e_boundary_freezes_safety_critical_playwright_semantics(
+    tmp_path: Path,
+    needle: str,
+    replacement: str,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    config = tmp_path / "playwright.real.config.ts"
+    config.write_text(config.read_text().replace(needle, replacement, 1))
+
+    assert "real_e2e_config_invalid" in {
+        finding.rule for finding in repository_policy.check_real_e2e_boundary(tmp_path)
+    }
 
 
 def test_real_e2e_boundary_scans_for_network_mocks_during_partial_adoption(

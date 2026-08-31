@@ -199,12 +199,39 @@ _EXPECTED_FOSUN_GATEWAY_DOCKERFILE_SHA256 = (
 _REAL_E2E_CONFIG_PATH = "playwright.real.config.ts"
 _REAL_E2E_TEST_DIRECTORY = "tests/e2e-real"
 _REAL_E2E_PACKAGE_SCRIPT = "test:e2e:real"
+_REAL_E2E_PACKAGE_COMMAND = "node scripts/e2e/run-real-fixture.mjs"
 _REAL_E2E_WORKFLOW_PATH = ".github/workflows/ci.yml"
 _REAL_E2E_JOBS_SECTION = re.compile(r"^jobs\s*:\s*(?:#.*)?$")
 _REAL_E2E_WORKFLOW_JOB = re.compile(r"^(?:real-e2e|['\"]real-e2e['\"])\s*:")
 _REAL_E2E_NETWORK_MOCK = re.compile(
-    r"\b(?:page|context|browserContext)\s*\.\s*route\s*\(|"
-    r"\broute\s*\.\s*fulfill\s*\("
+    r"\b(?:page|context|browserContext)\s*\.\s*(?:route|routeFromHAR|addInitScript)\s*\(|"
+    r"\broute\s*\.\s*fulfill\s*\(|"
+    r"\bnavigator\s*\.\s*serviceWorker\s*\.\s*register\s*\(|"
+    r"\b(?:window|globalThis)\s*\.\s*fetch\s*="
+)
+_REAL_E2E_IMPORT = re.compile(
+    r"(?:\bfrom\s*|\bimport\s*\(\s*)['\"]([^'\"]+)['\"]"
+)
+_REAL_E2E_CONFIG_REQUIRED = (
+    'const engineUrl = "http://127.0.0.1:8100";',
+    'const webUrl = "http://127.0.0.1:4174";',
+    'testDir: "./tests/e2e-real"',
+    'testMatch: "integrations-real.spec.ts"',
+    "fullyParallel: false",
+    "retries: 0",
+    "workers: 1",
+    'reporter: [["json", { outputFile: "test-results/real-e2e-results.json" }]]',
+    'serviceWorkers: "block"',
+    'CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false"',
+    'CLOUDFLARE_INCLUDE_PROCESS_ENV: "false"',
+)
+_REAL_E2E_POSTGRES_IMAGE = (
+    "postgres:17@sha256:"
+    "e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449"
+)
+_REAL_E2E_DATABASE_URL = (
+    "postgresql+asyncpg://nexus_e2e_ci:nexus_e2e_synthetic_ci_only@"
+    "127.0.0.1:5432/nexus_e2e_ci"
 )
 
 
@@ -1369,12 +1396,13 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
     test_directory = root / _REAL_E2E_TEST_DIRECTORY
     package_path = root / "package.json"
     workflow_path = root / _REAL_E2E_WORKFLOW_PATH
-    package_script_present = _real_e2e_package_script_present(package_path)
-    workflow_job_present = _real_e2e_workflow_job_present(workflow_path)
+    package_script_declared, package_script = _real_e2e_package_script(package_path)
+    workflow_job = _real_e2e_workflow_job_block(workflow_path)
+    workflow_job_present = workflow_job is not None
     adopted = (
         config_path.exists()
         or test_directory.exists()
-        or package_script_present
+        or package_script_declared
         or workflow_job_present
     )
     if not adopted:
@@ -1389,6 +1417,14 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
                 "real fixture E2E requires its dedicated Playwright configuration",
             )
         )
+    elif not _real_e2e_config_is_safe(config_path):
+        findings.append(
+            PolicyFinding(
+                "real_e2e_config_invalid",
+                _REAL_E2E_CONFIG_PATH,
+                "real fixture E2E Playwright safety semantics must remain fixed",
+            )
+        )
     if not test_directory.is_dir():
         findings.append(
             PolicyFinding(
@@ -1397,12 +1433,20 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
                 "real fixture E2E requires its dedicated test directory",
             )
         )
-    if not package_script_present:
+    if not package_script_declared:
         findings.append(
             PolicyFinding(
                 "real_e2e_package_script_missing",
                 "package.json",
                 "real fixture E2E requires the test:e2e:real package script",
+            )
+        )
+    elif package_script != _REAL_E2E_PACKAGE_COMMAND:
+        findings.append(
+            PolicyFinding(
+                "real_e2e_package_script_invalid",
+                "package.json",
+                "real fixture E2E package script must invoke only its fixed runner",
             )
         )
     if not workflow_job_present:
@@ -1413,9 +1457,20 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
                 "real fixture E2E requires the real-e2e CI job",
             )
         )
+    elif not _real_e2e_workflow_job_is_safe(workflow_job):
+        findings.append(
+            PolicyFinding(
+                "real_e2e_ci_job_invalid",
+                _REAL_E2E_WORKFLOW_PATH,
+                "real fixture E2E CI job must preserve its fixed local-only execution",
+            )
+        )
     if test_directory.is_dir():
         for path in sorted(test_directory.rglob("*")):
-            if path.is_file() and _REAL_E2E_NETWORK_MOCK.search(_read_text(path)):
+            if not path.is_file():
+                continue
+            content = _read_text(path)
+            if _REAL_E2E_NETWORK_MOCK.search(content):
                 findings.append(
                     PolicyFinding(
                         "real_e2e_network_mock_forbidden",
@@ -1423,24 +1478,88 @@ def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
                         "real fixture E2E must not replace network responses",
                     )
                 )
+            if _real_e2e_has_external_import(path, test_directory, content):
+                findings.append(
+                    PolicyFinding(
+                        "real_e2e_external_import_forbidden",
+                        _relative(root, path),
+                        "real fixture E2E must not import helpers from outside its boundary",
+                    )
+                )
     return findings
 
 
-def _real_e2e_package_script_present(package_path: Path) -> bool:
+def _real_e2e_package_script(package_path: Path) -> tuple[bool, str | None]:
     try:
         package = json.loads(_read_text(package_path))
     except (OSError, json.JSONDecodeError):
-        return False
+        return False, None
     scripts = package.get("scripts") if isinstance(package, dict) else None
-    script = scripts.get(_REAL_E2E_PACKAGE_SCRIPT) if isinstance(scripts, dict) else None
-    return isinstance(script, str) and bool(script.strip())
+    if not isinstance(scripts, dict) or _REAL_E2E_PACKAGE_SCRIPT not in scripts:
+        return False, None
+    script = scripts.get(_REAL_E2E_PACKAGE_SCRIPT)
+    return True, script if isinstance(script, str) else None
+
+
+def _real_e2e_config_is_safe(config_path: Path) -> bool:
+    try:
+        content = _read_text(config_path)
+    except OSError:
+        return False
+    return (
+        all(required in content for required in _REAL_E2E_CONFIG_REQUIRED)
+        and content.count("reuseExistingServer: false") == 2
+        and "reuseExistingServer: true" not in content
+    )
+
+
+def _real_e2e_workflow_job_is_safe(job: str) -> bool:
+    required = (
+        "runs-on: ubuntu-24.04",
+        "timeout-minutes: 25",
+        f"image: {_REAL_E2E_POSTGRES_IMAGE}",
+        "POSTGRES_DB: nexus_e2e_ci",
+        "POSTGRES_USER: nexus_e2e_ci",
+        "POSTGRES_PASSWORD: nexus_e2e_synthetic_ci_only",
+        f"NEXUS_REAL_E2E_DATABASE_URL: {_REAL_E2E_DATABASE_URL}",
+    )
+    exact_run = re.findall(r"(?m)^\s*-\s+run:\s*(.+?)\s*$", job)
+    return (
+        all(value in job for value in required)
+        and exact_run.count("npm run test:e2e:real") == 1
+        and not any(
+            "test:e2e:real" in command and command != "npm run test:e2e:real"
+            for command in exact_run
+        )
+        and "secrets." not in job
+        and "NEXUS_ENV: production" not in job
+    )
+
+
+def _real_e2e_has_external_import(path: Path, test_directory: Path, content: str) -> bool:
+    boundary = test_directory.resolve()
+    for match in _REAL_E2E_IMPORT.finditer(content):
+        specifier = match.group(1)
+        if specifier == "@playwright/test":
+            continue
+        if not specifier.startswith("."):
+            return True
+        try:
+            (path.parent / specifier).resolve().relative_to(boundary)
+        except ValueError:
+            return True
+    return False
 
 
 def _real_e2e_workflow_job_present(workflow_path: Path) -> bool:
+    return _real_e2e_workflow_job_block(workflow_path) is not None
+
+
+def _real_e2e_workflow_job_block(workflow_path: Path) -> str | None:
     try:
         lines = _read_text(workflow_path).splitlines()
     except OSError:
-        return False
+        return None
     jobs_section = False
     job_indent: int | None = None
     for index, line in enumerate(lines):
@@ -1453,14 +1572,26 @@ def _real_e2e_workflow_job_present(workflow_path: Path) -> bool:
             continue
         indent = len(line) - len(stripped)
         if indent == 0:
-            return False
+            return None
         if job_indent is None:
             job_indent = indent
         if indent < job_indent:
-            return False
+            return None
         if indent == job_indent and _REAL_E2E_WORKFLOW_JOB.match(stripped):
-            return _workflow_job_has_body(lines, index, job_indent)
-    return False
+            if not _workflow_job_has_body(lines, index, job_indent):
+                return ""
+            end = len(lines)
+            for candidate_index in range(index + 1, len(lines)):
+                candidate = lines[candidate_index]
+                candidate_stripped = candidate.lstrip(" ")
+                if not candidate_stripped or candidate_stripped.startswith("#"):
+                    continue
+                candidate_indent = len(candidate) - len(candidate_stripped)
+                if candidate_indent <= job_indent:
+                    end = candidate_index
+                    break
+            return "\n".join(lines[index:end])
+    return None
 
 
 def _workflow_job_has_body(lines: list[str], job_index: int, job_indent: int) -> bool:

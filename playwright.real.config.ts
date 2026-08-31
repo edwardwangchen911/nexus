@@ -8,15 +8,21 @@ const realFixtureEnvironment = {
   NEXUS_PROVIDER_JOBS_ENABLED: "false",
   NEXUS_ENGINE_HMAC_CURRENT_KEY_ID: "real-fixture",
   NEXUS_ENGINE_HMAC_CURRENT_SECRET: "nexus-real-e2e-synthetic-hmac-secret-32-bytes",
+  CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false",
+  CLOUDFLARE_INCLUDE_PROCESS_ENV: "false",
 };
 
 export default defineConfig({
   testDir: "./tests/e2e-real",
+  testMatch: "integrations-real.spec.ts",
+  fullyParallel: false,
   retries: 0,
   workers: 1,
+  reporter: [["json", { outputFile: "test-results/real-e2e-results.json" }]],
   use: {
     baseURL: webUrl,
     browserName: "chromium",
+    serviceWorkers: "block",
     viewport: { width: 390, height: 844 },
     extraHTTPHeaders: {
       "oai-authenticated-user-id": "real-fixture-e2e-user",

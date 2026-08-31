@@ -71,12 +71,18 @@ E2E 通过前实施，故障归因也更困难，暂缓。
 
 - URL 不满足 test-only 规则时在任何数据库或子进程动作前失败；错误不得回显 URL、用户名、
   密码或环境值；
-- 禁止通过参数替换 Playwright config；只透传普通测试筛选参数；
+- 拒绝全部 CLI 参数，避免通过筛选、分片、重试、worker 或空测试选项削弱固定门禁；调试需直接
+  使用底层 Playwright 命令，不得冒充本门禁结果；
+- 在任何数据库动作前拒绝项目根目录的 `.env*` 与 `.dev.vars*`，同时关闭 Cloudflare/Vinext
+  隐式环境文件与进程环境继承；
+- 迁移前由独立 guard 确认数据库没有非系统 schema 或用户对象，并持有非阻塞 PostgreSQL
+  advisory lock；连接与锁覆盖迁移、Playwright 和结果验证的完整生命周期；
 - 迁移失败即停止，不启动浏览器；Playwright 返回码原样传递；
 - 子进程环境从明确 allowlist 构造，再覆盖 synthetic test 配置，避免把调用 shell 中的 Provider
   或交易凭据继承给 Engine/Web；
 - 不运行 `docker compose down -v`、DROP/TRUNCATE/DELETE 或其他清理。数据库生命周期属于调用者
   或 CI 的临时 service。
+- 固定 JSON reporter 必须证明恰好一个命名旅程通过；仅有 Playwright 退出码 0 不足以通过门禁。
 
 纯函数放在同一可导入模块中，以 Vitest 覆盖 URL、环境清洗、参数和执行顺序；真实子进程通过
 注入 runner 测试，避免单元测试启动服务。
@@ -85,7 +91,7 @@ E2E 通过前实施，故障归因也更困难，暂缓。
 
 `playwright.real.config.ts` 与现有 synthetic `playwright.config.ts` 隔离：
 
-- `testDir=tests/e2e-real`、Chromium、单 worker、禁止重试；
+- `testDir=tests/e2e-real`、固定单一 spec、Chromium、单 worker、禁止重试和 Service Worker；
 - Engine 只绑定 `127.0.0.1`，Web 只绑定 `127.0.0.1`；
 - Engine 环境固定 `NEXUS_ENV=test`、`AGENT_RUNTIME_MODE=fixture`、
   `NEXUS_PROVIDER_JOBS_ENABLED=false`；

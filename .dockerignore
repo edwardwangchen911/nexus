@@ -4,6 +4,8 @@
 .secrets
 .env
 .env.*
+.dev.vars
+.dev.vars.*
 .next
 .venv
 .wrangler
