@@ -113,6 +113,13 @@ class ProbeBudgetError(NonRetryableTransportRefusal):
         super().__init__("probe HTTP budget rejected request")
 
 
+class ProbeAuthError(NonRetryableTransportRefusal):
+    """Fixed refusal for a non-successful Session response."""
+
+    def __init__(self) -> None:
+        super().__init__("probe Session response was not successful")
+
+
 ProbeErrorCode = Literal[
     "COMPLETE_SDK_ADMISSION",
     "INVALID_PROBE_PLAN",
@@ -297,6 +304,7 @@ class PhysicalHttpBudget:
         self._total = 0
         self._auth_successes = 0
         self._last_dispatch_at: float | None = None
+        self._last_dispatched_label: ProbeLabel | None = None
         self._total_timestamps: deque[float] = deque()
         self._broker_timestamps: deque[float] = deque()
         self._market_timestamps: deque[float] = deque()
@@ -361,6 +369,7 @@ class PhysicalHttpBudget:
                         self._require_available(label, domain)
                         self._counts[label] += 1
                         self._total += 1
+                        self._last_dispatched_label = label
                         self._total_timestamps.append(now)
                         if domain == "broker":
                             self._broker_timestamps.append(now)
@@ -378,7 +387,9 @@ class PhysicalHttpBudget:
             raise ProbeBudgetError()
         with self._state_lock:
             label, _domain = self._request_subject(surface)
-            if surface == "auth" and label == "Session" and 200 <= status_code < 300:
+            if surface == "auth" and label == "Session":
+                if not 200 <= status_code < 300:
+                    raise ProbeAuthError()
                 self._auth_successes += 1
 
     def snapshot(self) -> ProbeBudgetSnapshot:
@@ -388,6 +399,10 @@ class PhysicalHttpBudget:
                 total=self._total,
                 auth_successes=self._auth_successes,
             )
+
+    def last_dispatched_label(self) -> ProbeLabel | None:
+        with self._state_lock:
+            return self._last_dispatched_label
 
     def _request_subject(self, surface: HttpSurface) -> tuple[ProbeLabel, ProbeDomain]:
         if not self._bound or self._active_label is None or self._active_domain is None:
@@ -520,6 +535,8 @@ class SdkProbeExecutor:
             failure = error
         except ProbeBudgetError:
             failure = ProbeSdkError("PROBE_BUDGET_EXCEEDED")
+        except ProbeAuthError:
+            failure = ProbeSdkError("PROBE_FAILED", category="auth")
         except GatewayError as error:
             failure = _map_gateway_error(error)
         except Exception:
@@ -736,7 +753,7 @@ class SdkProbeExecutor:
             operation=(
                 error.operation
                 if error.operation != "unknown"
-                else self._last_started_operation
+                else (self._budget.last_dispatched_label() or "unknown")
             ),
             category=category,
             physical_request_count=self._budget.snapshot().total,

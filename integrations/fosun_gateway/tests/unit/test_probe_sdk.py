@@ -494,6 +494,24 @@ async def test_executor_stops_on_empty_accounts_and_closes_both_surfaces() -> No
     assert transport.close_calls == 1
 
 
+@pytest.mark.asyncio
+async def test_executor_reports_session_when_auth_response_fails_before_accounts() -> None:
+    clock = FakeClock()
+    budget = PhysicalHttpBudget(clock=clock, sleeper=clock.sleep)
+    transport = InstrumentedTransport(budget, auth_statuses=(401,))
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        await SdkProbeExecutor(
+            _probe_bundle(transport, RecordingControls(), budget), budget
+        ).run(_plan())
+
+    assert exc_info.value.code == "PROBE_FAILED"
+    assert exc_info.value.operation == "Session"
+    assert exc_info.value.category == "auth"
+    assert exc_info.value.physical_request_count == 1
+    assert len(transport.calls) == 1
+
+
 @pytest.mark.parametrize("fail_at", range(7))
 @pytest.mark.asyncio
 async def test_executor_stops_after_first_failed_operation(fail_at: int) -> None:

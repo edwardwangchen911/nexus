@@ -42,6 +42,16 @@ PROBE_RESULT_FIELD_NAMES = (
     "activation_contract_hash",
     "publication_receipt",
 )
+PROBE_FAILURE_OPERATIONS = ("unknown", *REQUIRED_PROBE_OPERATIONS)
+PROBE_FAILURE_CATEGORIES = (
+    "auth",
+    "permission",
+    "transport",
+    "rate_limit",
+    "budget",
+    "contract",
+    "unknown",
+)
 
 _CONTRACT_SCHEMA_VERSION = "nexus.fosun.probe-response-contract.v1"
 _PAGE_FIELDS: tuple[tuple[str, str], ...] = (

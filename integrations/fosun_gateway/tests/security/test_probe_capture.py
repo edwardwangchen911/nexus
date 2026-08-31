@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import nexus_fosun_gateway.probe_capture as probe_capture
+import nexus_fosun_gateway.probe_cli as probe_cli
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -188,6 +189,26 @@ def test_capture_requires_the_exact_eight_probe_arguments(tmp_path: Path) -> Non
 
     assert exc_info.value.code == "INVALID_PROBE_PLAN"
     assert list(operator_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("failure_operation", "not-an-operation"),
+        ("failure_category", "not-a-category"),
+        ("physical_request_count", True),
+        ("physical_request_count", 25),
+        ("artifact_sha256", "sensitive-artifact"),
+    ],
+)
+def test_capture_rejects_invalid_or_nonempty_failure_diagnostics(
+    field: str, value: object
+) -> None:
+    frame = probe_cli.failure_result("PROBE_FAILED")
+    frame[field] = value
+    encoded = json.dumps(frame, separators=(",", ":")).encode() + b"\n"
+
+    assert probe_capture._valid_frame_for_exit(encoded, 2) is False
 
 
 def test_runbook_uses_lowercase_plan_names_and_secure_capture_command() -> None:

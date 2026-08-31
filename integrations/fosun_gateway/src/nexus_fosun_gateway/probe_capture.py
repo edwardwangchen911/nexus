@@ -13,6 +13,8 @@ from pathlib import Path
 from nexus_fosun_gateway.adapter.probe_sdk import ProbeSdkError
 from nexus_fosun_gateway.probe_contract import (
     PROBE_CLI_ARGUMENT_NAMES,
+    PROBE_FAILURE_CATEGORIES,
+    PROBE_FAILURE_OPERATIONS,
     PROBE_RESULT_FIELD_NAMES,
 )
 from nexus_fosun_gateway.publication import (
@@ -210,15 +212,47 @@ def _valid_frame_for_exit(frame: bytes, exit_code: int) -> bool:
         document = json.loads(frame)
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
-    if not isinstance(document, dict) or set(document) != set(PROBE_RESULT_FIELD_NAMES):
+    if not isinstance(document, dict) or tuple(document) != PROBE_RESULT_FIELD_NAMES:
         return False
     status = document.get("status")
     code = document.get("code")
     if exit_code == 0:
-        return status == "probe_published" and code == "OK"
+        return (
+            status == "probe_published"
+            and code == "OK"
+            and all(
+                document[name] is None
+                for name in (
+                    "failure_stage",
+                    "failure_operation",
+                    "failure_category",
+                    "physical_request_count",
+                )
+            )
+        )
+    if (
+        status != "probe_failed"
+        or document.get("failure_stage") != "probe"
+        or document.get("failure_operation") not in PROBE_FAILURE_OPERATIONS
+        or document.get("failure_category") not in PROBE_FAILURE_CATEGORIES
+        or not isinstance(document.get("physical_request_count"), int)
+        or isinstance(document.get("physical_request_count"), bool)
+        or not 0 <= document["physical_request_count"] <= 24
+        or any(
+            document[name] is not None
+            for name in (
+                "artifact_sha256",
+                "byte_length",
+                "capability_expires_at",
+                "activation_contract_hash",
+                "publication_receipt",
+            )
+        )
+    ):
+        return False
     if exit_code == 130:
-        return status == "probe_failed" and code == "PROBE_INTERRUPTED"
-    return status == "probe_failed" and isinstance(code, str) and bool(code)
+        return code == "PROBE_INTERRUPTED"
+    return isinstance(code, str) and bool(code)
 
 
 if __name__ == "__main__":
