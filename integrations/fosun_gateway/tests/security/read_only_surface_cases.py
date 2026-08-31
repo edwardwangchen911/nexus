@@ -2,6 +2,7 @@
 
 import pytest
 from fastapi.testclient import TestClient
+from nexus_fosun_gateway.routes.read_only import router as read_only_router
 from read_only_helpers import _post_signed
 
 READ_ONLY_OPERATIONS = (
@@ -27,6 +28,28 @@ def test_gateway_registers_exactly_seven_authenticated_read_only_operations(
         if path.startswith("/internal/v1/read-only/")
     }
     assert registered == set(READ_ONLY_OPERATIONS)
+    expected_paths = {
+        *(f"/internal/v1/read-only/{operation}" for operation in READ_ONLY_OPERATIONS),
+        "/health/live",
+        "/health/ready",
+    }
+    assert set(gateway_client.app.openapi()["paths"]) == expected_paths
+
+    included_routers = [
+        route
+        for route in gateway_client.app.routes
+        if getattr(route, "original_router", None) is not None
+    ]
+    assert len(included_routers) == 1
+    assert included_routers[0].original_router is read_only_router
+    assert {
+        (route.path, frozenset(route.methods))
+        for route in gateway_client.app.routes
+        if getattr(route, "path", None) is not None
+    } == {
+        ("/health/live", frozenset({"GET"})),
+        ("/health/ready", frozenset({"GET"})),
+    }
 
 
 

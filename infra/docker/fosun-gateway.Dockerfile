@@ -9,7 +9,7 @@ COPY engine/pyproject.toml engine/pyproject.toml
 COPY integrations/fosun_gateway/pyproject.toml integrations/fosun_gateway/pyproject.toml
 COPY integrations/fosun_gateway/src integrations/fosun_gateway/src
 COPY contracts/providers/fosun/manifest.json contracts/providers/fosun/manifest.json
-RUN uv sync --frozen --no-dev --package nexus-fosun-gateway \
+RUN uv sync --frozen --no-dev --no-editable --package nexus-fosun-gateway \
     && groupadd --system nexus \
     && useradd --system --gid nexus --home-dir /app --shell /usr/sbin/nologin nexus \
     && chown --recursive nexus:nexus /app \
@@ -23,4 +23,5 @@ RUN uv sync --frozen --no-dev --package nexus-fosun-gateway \
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8081 8082
 USER nexus
+ENTRYPOINT []
 CMD ["nexus-fosun-gateway"]

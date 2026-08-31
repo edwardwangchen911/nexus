@@ -190,6 +190,9 @@ def create_gateway_app(settings: GatewaySettings | None = None) -> FastAPI:
         title="NEXUS Fosun Gateway",
         version="0.1.0",
         lifespan=_gateway_lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
     app.state.settings = resolved_settings
     shutdown_requested = Event()

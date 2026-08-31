@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from scripts.ci import repository_policy
 from scripts.ci.repository_policy import (
     DependencyRecord,
     check_container_hardening,
@@ -148,18 +150,33 @@ def test_gateway_requires_both_frozen_sdk_tls_remediation_surfaces(tmp_path: Pat
     }
 
 
-def test_long_running_gateway_cannot_import_probe_only_construction(tmp_path: Path) -> None:
+def test_long_running_gateway_cannot_import_probe_only_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     main_path = tmp_path / "integrations/fosun_gateway/src/nexus_fosun_gateway/main.py"
     main_path.parent.mkdir(parents=True)
     main_path.write_text(
         "from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport\n"
     )
 
+    def approve_current_source_for_semantic_check() -> None:
+        monkeypatch.setattr(
+            repository_policy,
+            "_EXPECTED_GATEWAY_INSTALLABLE_SRC_SHA256",
+            repository_policy._installable_source_tree_sha256(
+                main_path.parent.parent
+            ),
+        )
+
+    approve_current_source_for_semantic_check()
+
     assert check_probe_runtime_isolation(tmp_path) == []
 
     main_path.write_text(
         "from nexus_fosun_gateway.adapter.probe_sdk import build_probe_transport\n"
     )
+    approve_current_source_for_semantic_check()
     findings = check_probe_runtime_isolation(tmp_path)
     assert [(finding.rule, finding.path) for finding in findings] == [
         (
@@ -169,6 +186,7 @@ def test_long_running_gateway_cannot_import_probe_only_construction(tmp_path: Pa
     ]
 
     main_path.write_text("from .adapter import probe_sdk\n")
+    approve_current_source_for_semantic_check()
     findings = check_probe_runtime_isolation(tmp_path)
     assert [(finding.rule, finding.path) for finding in findings] == [
         (
@@ -178,6 +196,7 @@ def test_long_running_gateway_cannot_import_probe_only_construction(tmp_path: Pa
     ]
 
     main_path.write_text("from . import probe_capture\n")
+    approve_current_source_for_semantic_check()
     findings = check_probe_runtime_isolation(tmp_path)
     assert [(finding.rule, finding.path) for finding in findings] == [
         (
@@ -187,6 +206,7 @@ def test_long_running_gateway_cannot_import_probe_only_construction(tmp_path: Pa
     ]
 
     main_path.write_text("from .publication import load_probe_signing_key\n")
+    approve_current_source_for_semantic_check()
     findings = check_probe_runtime_isolation(tmp_path)
     assert [(finding.rule, finding.path) for finding in findings] == [
         (
@@ -198,6 +218,7 @@ def test_long_running_gateway_cannot_import_probe_only_construction(tmp_path: Pa
     bridge_path = main_path.with_name("bridge.py")
     bridge_path.write_text("from . import probe_settings\n")
     main_path.write_text("from . import bridge\n")
+    approve_current_source_for_semantic_check()
     findings = check_probe_runtime_isolation(tmp_path)
     assert [(finding.rule, finding.path) for finding in findings] == [
         (
@@ -207,6 +228,7 @@ def test_long_running_gateway_cannot_import_probe_only_construction(tmp_path: Pa
     ]
 
     bridge_path.write_text("from . import probe_receipt\n")
+    approve_current_source_for_semantic_check()
     findings = check_probe_runtime_isolation(tmp_path)
     assert {finding.rule for finding in findings} == {
         "probe_runtime_isolation_missing"
@@ -215,14 +237,74 @@ def test_long_running_gateway_cannot_import_probe_only_construction(tmp_path: Pa
     bridge_path.write_text(
         'import importlib\nimportlib.import_module("nexus_fosun_gateway.probe_receipt")\n'
     )
+    approve_current_source_for_semantic_check()
     findings = check_probe_runtime_isolation(tmp_path)
     assert {finding.rule for finding in findings} == {
+        "probe_runtime_isolation_missing"
+    }
+
+    bridge_path.write_text(
+        '__import__("nexus_fosun_gateway.probe_receipt")\n'
+    )
+    approve_current_source_for_semantic_check()
+    assert {finding.rule for finding in check_probe_runtime_isolation(tmp_path)} == {
+        "probe_runtime_isolation_missing"
+    }
+
+    bridge_path.write_text("VALUE = 1\n")
+    approve_current_source_for_semantic_check()
+    bridge_path.write_text(
+        "import importlib\n"
+        "loader = getattr(importlib, ''.join(('import', '_module')))\n"
+        "loader('.'.join(('nexus_fosun_gateway', 'probe_cli')))\n"
+    )
+    assert {finding.rule for finding in check_probe_runtime_isolation(tmp_path)} == {
+        "probe_runtime_isolation_missing"
+    }
+
+    bridge_path.write_text(
+        'import importlib\nname = "nexus_fosun_gateway.probe_" + "cli"\n'
+        "importlib.import_module(name)\n"
+    )
+    approve_current_source_for_semantic_check()
+    assert {finding.rule for finding in check_probe_runtime_isolation(tmp_path)} == {
+        "probe_runtime_isolation_missing"
+    }
+
+    bridge_path.write_text(
+        'import importlib\nloader = importlib.import_module\nname = "safe"\nloader(name)\n'
+    )
+    approve_current_source_for_semantic_check()
+    assert {finding.rule for finding in check_probe_runtime_isolation(tmp_path)} == {
+        "probe_runtime_isolation_missing"
+    }
+
+    bridge_path.write_text(
+        "import importlib\n"
+        "loader: object = importlib.import_module\n"
+        'name = "nexus_fosun_gateway.probe_" + "cli"\n'
+        "loader(name)\n"
+    )
+    approve_current_source_for_semantic_check()
+    assert {finding.rule for finding in check_probe_runtime_isolation(tmp_path)} == {
+        "probe_runtime_isolation_missing"
+    }
+
+    bridge_path.write_text(
+        "import importlib\n"
+        'loader = getattr(importlib, "import_" + "module")\n'
+        'name = "nexus_fosun_gateway.probe_" + "cli"\n'
+        "loader(name)\n"
+    )
+    approve_current_source_for_semantic_check()
+    assert {finding.rule for finding in check_probe_runtime_isolation(tmp_path)} == {
         "probe_runtime_isolation_missing"
     }
 
 
 def test_gateway_read_surface_is_an_exact_operation_route_and_sdk_allowlist(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     package = tmp_path / "integrations/fosun_gateway/src/nexus_fosun_gateway"
     adapter = package / "adapter"
@@ -231,6 +313,7 @@ def test_gateway_read_surface_is_an_exact_operation_route_and_sdk_allowlist(
     adapter.mkdir(parents=True)
     policy.mkdir()
     routes.mkdir()
+    (package / "main.py").write_text("app.include_router(read_only_router)\n")
     operations = (
         "fosun_capabilities",
         "fosun_sync_accounts",
@@ -240,9 +323,25 @@ def test_gateway_read_surface_is_an_exact_operation_route_and_sdk_allowlist(
         "fosun_get_quotes",
         "fosun_get_bars",
     )
-    (policy / "operations.py").write_text(
-        "READ_ONLY_OPERATIONS = frozenset(" + repr(set(operations)) + ")\n"
+    broker_operations = {
+        "fosun_sync_portfolio",
+        "fosun_list_orders",
+        "fosun_list_cash_flows",
+    }
+    market_operations = {"fosun_get_quotes", "fosun_get_bars"}
+    read_line = "READ_ONLY_OPERATIONS = frozenset(" + repr(set(operations)) + ")"
+    operation_source = (
+        "GatewayOperation = Literal["
+        + ",".join(repr(operation) for operation in operations)
+        + "]\n"
+        + read_line
+        + "\nBROKER_OPERATIONS = frozenset("
+        + repr(broker_operations)
+        + ")\nMARKET_OPERATIONS = frozenset("
+        + repr(market_operations)
+        + ")\n"
     )
+    (policy / "operations.py").write_text(operation_source)
     route_lines = ['router = APIRouter(prefix="/internal/v1/read-only")']
     for operation in operations:
         route_lines.append(f"def {operation}(): pass")
@@ -260,14 +359,44 @@ def test_gateway_read_surface_is_an_exact_operation_route_and_sdk_allowlist(
         ("market", "quote"),
         ("market", "kline"),
     )
-    (adapter / "sdk.py").write_text(
+    adapter_source = (
         "class Adapter:\n"
+        "    def __init__(self, client):\n"
+        "        self._client = client\n"
         "    def bind(self):\n"
         + "".join(
             f'        self._method("{section}", "{method}")\n'
             for section, method in sdk_pairs
         )
+        + "    def _method(self, section_name, method_name):\n"
+        "        section = getattr(self._client, section_name, None)\n"
+        "        method = getattr(section, method_name, None)\n"
+        "        return method\n"
     )
+    (adapter / "sdk.py").write_text(adapter_source)
+    reviewed_sources = {
+        "policy/operations.py": policy / "operations.py",
+        "routes/read_only.py": routes / "read_only.py",
+        "adapter/sdk.py": adapter / "sdk.py",
+        "main.py": package / "main.py",
+    }
+
+    def approve_current_source_for_semantic_check() -> None:
+        monkeypatch.setattr(
+            repository_policy,
+            "_EXPECTED_GATEWAY_SOURCE_SHA256",
+            {
+                relative: hashlib.sha256(path.read_bytes()).hexdigest()
+                for relative, path in reviewed_sources.items()
+            },
+        )
+        monkeypatch.setattr(
+            repository_policy,
+            "_EXPECTED_GATEWAY_INSTALLABLE_SRC_SHA256",
+            repository_policy._installable_source_tree_sha256(package.parent),
+        )
+
+    approve_current_source_for_semantic_check()
 
     assert check_gateway_read_allowlist(tmp_path) == []
 
@@ -277,19 +406,148 @@ def test_gateway_read_surface_is_an_exact_operation_route_and_sdk_allowlist(
             'router = object()\ndecoy = APIRouter(prefix="/internal/v1/read-only")',
         )
     )
+    approve_current_source_for_semantic_check()
     assert {
         finding.rule for finding in check_gateway_read_allowlist(tmp_path)
     } == {"gateway_read_allowlist_mismatch"}
 
     (routes / "read_only.py").write_text(route_source)
+    (package / "main.py").write_text(
+        "app.include_router(read_only_router)\napp.include_router(extra_router)\n"
+    )
+    approve_current_source_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_read_allowlist(tmp_path)
+    } == {"gateway_read_allowlist_mismatch"}
+
+    (package / "main.py").write_text("app.include_router(read_only_router)\n")
+    (package / "main.py").write_text(
+        "app.include_router(read_only_router)\n"
+        '@app.post("/internal/v1/read-only/unreviewed")\n'
+        "def unreviewed(): pass\n"
+    )
+    approve_current_source_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_read_allowlist(tmp_path)
+    } == {"gateway_read_allowlist_mismatch"}
+
+    (package / "main.py").write_text("app.include_router(read_only_router)\n")
+    (routes / "read_only.py").write_text(
+        route_source
+        + "def fosun_get_order_book(): pass\n"
+        + "extra_registrar = router.add_api_route\n"
+        + 'extra_registrar("/fosun_get_order_book", fosun_get_order_book, '
+        'methods=["POST"])\n'
+    )
+    approve_current_source_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_read_allowlist(tmp_path)
+    } == {"gateway_read_allowlist_mismatch"}
+
+    (routes / "read_only.py").write_text(
+        route_source + '@router.get("/unreviewed")\ndef unreviewed(): pass\n'
+    )
+    approve_current_source_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_read_allowlist(tmp_path)
+    } == {"gateway_read_allowlist_mismatch"}
+
+    (routes / "read_only.py").write_text(route_source)
+    (policy / "operations.py").write_text(
+        operation_source.replace(
+            read_line,
+            "EXTRA_OPERATIONS = frozenset({'fosun_get_order_book'})\n"
+            + read_line
+            + " | EXTRA_OPERATIONS",
+        )
+    )
+    approve_current_source_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_read_allowlist(tmp_path)
+    } == {"gateway_read_allowlist_mismatch"}
+
+    (policy / "operations.py").write_text(operation_source)
+    (policy / "operations.py").write_text(
+        operation_source
+        + "if True:\n"
+        + "    READ_ONLY_OPERATIONS = READ_ONLY_OPERATIONS | "
+        + "frozenset({'fosun_get_order_book'})\n"
+    )
+    approve_current_source_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_read_allowlist(tmp_path)
+    } == {"gateway_read_allowlist_mismatch"}
+
+    (policy / "operations.py").write_text(operation_source)
+    (adapter / "sdk.py").write_text(
+        adapter_source.replace(
+            '        self._method("market", "kline")\n',
+            '        self._method("market", "kline")\n'
+            "        resolver = self._method\n"
+            '        resolver("market", "order_book")\n',
+        )
+    )
+    approve_current_source_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_read_allowlist(tmp_path)
+    } == {"gateway_read_allowlist_mismatch"}
+
+    (adapter / "sdk.py").write_text(adapter_source)
+    approve_current_source_for_semantic_check()
+    (adapter / "sdk.py").write_text(
+        adapter_source
+        + "def hidden_write(self):\n"
+        + '    client = vars(self)["_" + "client"]\n'
+        + '    section = getattr(client, "wea" + "lth")\n'
+        + '    return getattr(section, "redeem_" + "fund")()\n'
+    )
+    assert {
+        finding.rule for finding in check_gateway_read_allowlist(tmp_path)
+    } == {"gateway_read_allowlist_mismatch"}
+
+    (adapter / "sdk.py").write_text(adapter_source)
+    approve_current_source_for_semantic_check()
+    bridge = package / "security/dependency_logging.py"
+    bridge.parent.mkdir()
+    bridge.write_text(
+        "import importlib\n"
+        "loader = getattr(importlib, ''.join(('import', '_module')))\n"
+        "loader('.'.join(('nexus_fosun_gateway', 'publication')))\n"
+    )
+    assert {
+        finding.rule for finding in check_gateway_read_allowlist(tmp_path)
+    } == {"gateway_read_allowlist_mismatch"}
+    bridge.unlink()
+
+    approve_current_source_for_semantic_check()
+    sitecustomize = package.parent / "sitecustomize.py"
+    sitecustomize.write_text("raise RuntimeError('must never be installable')\n")
+    assert {
+        finding.rule for finding in check_gateway_read_allowlist(tmp_path)
+    } == {"gateway_read_allowlist_mismatch"}
+    sitecustomize.unlink()
+
+    approve_current_source_for_semantic_check()
+    extension_override = package / "main.so"
+    extension_override.write_bytes(b"synthetic-extension-override")
+    assert {
+        finding.rule for finding in check_gateway_read_allowlist(tmp_path)
+    } == {"gateway_read_allowlist_mismatch"}
+    extension_override.unlink()
+
+    approve_current_source_for_semantic_check()
     with (adapter / "sdk.py").open("a") as stream:
         stream.write('        self._method("wealth", "redeem_fund")\n')
+    approve_current_source_for_semantic_check()
     assert {
         finding.rule for finding in check_gateway_read_allowlist(tmp_path)
     } == {"gateway_read_allowlist_mismatch"}
 
 
-def test_gateway_entrypoints_are_frozen_away_from_probe_runtime(tmp_path: Path) -> None:
+def test_gateway_entrypoints_are_frozen_away_from_probe_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pyproject = tmp_path / "integrations/fosun_gateway/pyproject.toml"
     compose = tmp_path / "infra/compose.yaml"
     dockerfile = tmp_path / "infra/docker/fosun-gateway.Dockerfile"
@@ -299,17 +557,59 @@ def test_gateway_entrypoints_are_frozen_away_from_probe_runtime(tmp_path: Path) 
         '[project]\nname="synthetic"\n[project.scripts]\n'
         'nexus-fosun-gateway="nexus_fosun_gateway.main:run"\n'
     )
-    compose.write_text(
-        'services:\n  fosun-gateway:\n    command: ["nexus-fosun-gateway"]\n'
+    safe_compose = 'services:\n  fosun-gateway:\n    command: ["nexus-fosun-gateway"]\n'
+    safe_dockerfile = (
+        "FROM synthetic:test@sha256:" + "a" * 64 + "\n"
+        'ENTRYPOINT []\nCMD ["nexus-fosun-gateway"]\n'
     )
-    dockerfile.write_text('FROM synthetic\nCMD ["nexus-fosun-gateway"]\n')
+    compose.write_text(safe_compose)
+    dockerfile.write_text(safe_dockerfile)
+
+    def approve_current_composition_for_semantic_check() -> None:
+        compose_content = compose.read_text()
+        dockerfile_content = dockerfile.read_text()
+        monkeypatch.setattr(
+            repository_policy,
+            "_EXPECTED_COMPOSE_SHA256",
+            hashlib.sha256(compose_content.encode()).hexdigest(),
+        )
+        monkeypatch.setattr(
+            repository_policy,
+            "_EXPECTED_FOSUN_GATEWAY_SERVICE_SHA256",
+            hashlib.sha256(
+                repository_policy._compose_service_block(
+                    compose_content,
+                    "fosun-gateway",
+                ).encode()
+            ).hexdigest(),
+        )
+        monkeypatch.setattr(
+            repository_policy,
+            "_EXPECTED_FOSUN_GATEWAY_DOCKERFILE_SHA256",
+            hashlib.sha256(dockerfile_content.encode()).hexdigest(),
+        )
+
+    approve_current_composition_for_semantic_check()
 
     assert check_gateway_entrypoint_isolation(tmp_path) == []
+
+    compose.write_text(
+        safe_compose
+        + "configs:\n"
+        + "  fosun-activation-publisher-key:\n"
+        + "    file: /tmp/attacker-controlled-key\n"
+    )
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+    compose.write_text(safe_compose)
+    approve_current_composition_for_semantic_check()
 
     compose.write_text(
         'services:\n  fosun-gateway:\n'
         '    command: ["nexus-fosun-read-only-probe"]\n'
     )
+    approve_current_composition_for_semantic_check()
     assert {
         finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
     } == {"gateway_entrypoint_isolation_missing"}
@@ -319,53 +619,142 @@ def test_gateway_entrypoints_are_frozen_away_from_probe_runtime(tmp_path: Path) 
         '    command: ["nexus-fosun-read-only-probe"]\n'
         '  decoy:\n    # command: ["nexus-fosun-gateway"]\n'
     )
+    approve_current_composition_for_semantic_check()
     assert {
         finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
     } == {"gateway_entrypoint_isolation_missing"}
 
-    compose.write_text(
-        'services:\n  fosun-gateway:\n    command: ["nexus-fosun-gateway"]\n'
-    )
+    compose.write_text(safe_compose)
     dockerfile.write_text(
-        'FROM synthetic\nCMD ["nexus-fosun-gateway"]\n'
+        "FROM synthetic:test@sha256:" + "a" * 64 + "\n"
+        'ENTRYPOINT []\nCMD ["nexus-fosun-gateway"]\n'
         'CMD ["nexus-fosun-read-only-probe"]\n'
     )
+    approve_current_composition_for_semantic_check()
     assert {
         finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
     } == {"gateway_entrypoint_isolation_missing"}
 
     dockerfile.write_text(
-        'FROM synthetic\ncmd ["nexus-fosun-read-only-probe"]\n'
+        "FROM synthetic:test@sha256:" + "a" * 64 + "\n"
+        'ENTRYPOINT []\ncmd ["nexus-fosun-read-only-probe"]\n'
     )
+    approve_current_composition_for_semantic_check()
     assert {
         finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
     } == {"gateway_entrypoint_isolation_missing"}
 
     dockerfile.write_text(
-        'FROM synthetic\nENTRYPOINT ["nexus-fosun-read-only-probe"]\n'
+        "FROM synthetic:test@sha256:" + "a" * 64 + "\n"
+        'ENTRYPOINT ["nexus-fosun-read-only-probe"]\n'
         'CMD ["nexus-fosun-gateway"]\n'
     )
+    approve_current_composition_for_semantic_check()
     assert {
         finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
     } == {"gateway_entrypoint_isolation_missing"}
 
-    dockerfile.write_text('FROM synthetic\nCMD ["nexus-fosun-gateway"]\n')
+    dockerfile.write_text(safe_dockerfile)
     compose.write_text(
         'services:\n  fosun-gateway:\n'
         '    entrypoint: ["nexus-fosun-read-only-probe"]\n'
         '    command: ["nexus-fosun-gateway"]\n'
     )
+    approve_current_composition_for_semantic_check()
     assert {
         finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
     } == {"gateway_entrypoint_isolation_missing"}
 
     compose.write_text(
         'services:\n  fosun-gateway:\n    command: ["nexus-fosun-gateway"]\n'
-        '    environment:\n      - SSLKEYLOGFILE=/tmp/keylog\n'
+        '    entrypoint : ["nexus-fosun-read-only-probe"]\n'
     )
+    approve_current_composition_for_semantic_check()
     assert {
         finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
     } == {"gateway_entrypoint_isolation_missing"}
+
+    compose.write_text(
+        'services:\n  fosun-gateway:\n    "entrypoint": '
+        '["nexus-fosun-read-only-probe"]\n'
+        '    command: ["nexus-fosun-gateway"]\n'
+    )
+    approve_current_composition_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
+    compose.write_text(
+        'x-probe: &probe\n  entrypoint: ["nexus-fosun-read-only-probe"]\n'
+        "  environment:\n    - PYTHONPATH=/unsafe\n"
+        "services:\n  fosun-gateway:\n    <<: *probe\n"
+        '    command: ["nexus-fosun-gateway"]\n'
+    )
+    approve_current_composition_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
+    compose.write_text(
+        "services:\n  fosun-gateway:\n    extends: probe\n"
+        '    command: ["nexus-fosun-gateway"]\n'
+    )
+    approve_current_composition_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
+    compose.write_text(safe_compose)
+    dockerfile.write_text(
+        "FROM synthetic:test@sha256:" + "a" * 64 + " AS unsafe\n"
+        'ENTRYPOINT ["nexus-fosun-read-only-probe"]\n'
+        'FROM unsafe\nENTRYPOINT []\nCMD ["nexus-fosun-gateway"]\n'
+    )
+    approve_current_composition_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
+    dockerfile.write_text(safe_dockerfile)
+    compose.write_text(
+        'services:\n  fosun-gateway:\n    command: ["nexus-fosun-gateway"]\n'
+        '    healthcheck:\n      test: ["CMD", "nexus-fosun-read-only-probe"]\n'
+    )
+    approve_current_composition_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
+    compose.write_text(safe_compose)
+    dockerfile.write_text(
+        "ARG FINAL_BASE=unsafe\n"
+        "FROM ${FINAL_BASE}\n"
+        'ENTRYPOINT []\nCMD ["nexus-fosun-gateway"]\n'
+    )
+    approve_current_composition_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
+    dockerfile.write_text(
+        "FROM synthetic:test@sha256:" + "a" * 64 + "\n"
+        'CMD ["nexus-fosun-gateway"]\n'
+    )
+    approve_current_composition_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
+    dockerfile.write_text(safe_dockerfile)
+    compose.write_text(
+        'services:\n  fosun-gateway:\n    command: ["nexus-fosun-gateway"]\n'
+        '    environment:\n      - SSLKEYLOGFILE=/tmp/keylog\n'
+    )
+    approve_current_composition_for_semantic_check()
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
 
 def test_sdk_lock_requires_complete_machine_readable_admission(tmp_path: Path) -> None:
     manifest_path = tmp_path / "contracts/providers/fosun/manifest.json"

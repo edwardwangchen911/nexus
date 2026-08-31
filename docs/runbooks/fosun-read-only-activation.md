@@ -584,7 +584,10 @@ canonical non-secret trust root in the exact file referenced by
 64-character result to the exact file referenced by `FOSUN_ACTIVATION_CONTRACT_HASH_FILE`. Neither
 file may contain a trailing newline. Compose mounts artifact and receipt as separate read-only file
 binds with `create_host_path: false` and mounts the two control values as separate file-backed
-configs; it does not accept raw pin/hash environment values. These inputs are not available to the
+configs; the control sources are fixed at `.secrets/fosun-control/publisher-public-key.b64u` and
+`.secrets/fosun-control/activation-contract.sha256` relative to the repository and cannot be
+redirected by environment variables. It does not accept raw pin/hash environment values. These
+inputs are not available to the
 API, research worker, broker worker, or one-shot probe process. Gateway startup reads each input by
 held descriptor, recomputes and compares the
 contract before SDK import; the SDK adapter checks the artifact expiry at operation entry and again

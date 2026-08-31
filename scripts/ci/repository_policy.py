@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import re
 import subprocess
@@ -103,6 +104,14 @@ _EXPECTED_GATEWAY_OPERATIONS = frozenset(
         "fosun_get_bars",
     }
 )
+_EXPECTED_BROKER_OPERATIONS = frozenset(
+    {
+        "fosun_sync_portfolio",
+        "fosun_list_orders",
+        "fosun_list_cash_flows",
+    }
+)
+_EXPECTED_MARKET_OPERATIONS = frozenset({"fosun_get_quotes", "fosun_get_bars"})
 _EXPECTED_GATEWAY_ROUTES = frozenset(
     (f"/{operation}", operation, ("POST",))
     for operation in _EXPECTED_GATEWAY_OPERATIONS
@@ -118,6 +127,28 @@ _EXPECTED_SDK_READ_METHODS = frozenset(
         ("market", "quote"),
         ("market", "kline"),
     }
+)
+# These hashes are a deliberate review tripwire, not a substitute for the
+# semantic checks below.  The four files jointly define the production HTTP
+# and Provider-call surface.  Any byte-level change must update this reviewed
+# contract in the same diff instead of relying on an incomplete AST blacklist.
+_EXPECTED_GATEWAY_SOURCE_SHA256 = {
+    "policy/operations.py": "35c9786b7dfd7a53b5eb7d2f690e4149cc5a1a6925c5b24b9a727cbb69b0b85e",
+    "routes/read_only.py": "587e96dc12a06a8f393f071f4761868719130e167feb70d7fd35f0b2d69d5b44",
+    "adapter/sdk.py": "1fa0171e306318d0a5c6264fcfedced7e6b0e524cc59ecc26c5cd1704b2a4f74",
+    "main.py": "afa5c173c7f3f6de27e36634725cf3ea65b6b22372156ba1bbc2c1e37ed277b0",
+}
+_EXPECTED_GATEWAY_INSTALLABLE_SRC_SHA256 = (
+    "84a5ef06e98d362371ef9ce2afcd209cdf0bae8216fbe62f234729fc946455ad"
+)
+_EXPECTED_COMPOSE_SHA256 = (
+    "9a4a462f8eb0588c399427908f88144bc9213023f18764c5a808b00ce698420c"
+)
+_EXPECTED_FOSUN_GATEWAY_SERVICE_SHA256 = (
+    "f22c88598929e7cab2282fab240b0d19791e12a7af4c6ca051df99d7eda9d6f1"
+)
+_EXPECTED_FOSUN_GATEWAY_DOCKERFILE_SHA256 = (
+    "a072e4e4898ea191b807be3f8fdcd7fa4c6c08b4b4e9e4c3ded61897dd37174b"
 )
 
 
@@ -213,26 +244,27 @@ def check_probe_runtime_isolation(root: Path) -> list[PolicyFinding]:
     """Keep the one-shot no-activation constructor out of the long-running Gateway."""
     main_path = root / "integrations/fosun_gateway/src/nexus_fosun_gateway/main.py"
     if not main_path.is_file():
-        return [
-            PolicyFinding(
-                "probe_runtime_isolation_missing",
-                _relative(root, main_path),
-                "long-running gateway entry point is unavailable",
-            )
-        ]
+        return [_probe_runtime_isolation_finding(root, main_path)]
+    try:
+        installable_source_hash = _installable_source_tree_sha256(main_path.parent.parent)
+    except OSError:
+        return [_probe_runtime_isolation_finding(root, main_path)]
     main_source = _read_text(main_path)
     if (
-        _PROBE_ONLY_RUNTIME.search(main_source) is not None
+        installable_source_hash != _EXPECTED_GATEWAY_INSTALLABLE_SRC_SHA256
+        or _PROBE_ONLY_RUNTIME.search(main_source) is not None
         or _runtime_import_graph_reaches_probe_only(main_path)
     ):
-        return [
-            PolicyFinding(
-                "probe_runtime_isolation_missing",
-                _relative(root, main_path),
-                "long-running gateway imports a probe-only construction surface",
-            )
-        ]
+        return [_probe_runtime_isolation_finding(root, main_path)]
     return []
+
+
+def _probe_runtime_isolation_finding(root: Path, main_path: Path) -> PolicyFinding:
+    return PolicyFinding(
+        "probe_runtime_isolation_missing",
+        _relative(root, main_path),
+        "long-running gateway source or import graph reaches an unreviewed runtime surface",
+    )
 
 
 def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
@@ -241,41 +273,67 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
     operations_path = package / "policy/operations.py"
     routes_path = package / "routes/read_only.py"
     adapter_path = package / "adapter/sdk.py"
+    main_path = package / "main.py"
+    reviewed_sources = {
+        "policy/operations.py": operations_path,
+        "routes/read_only.py": routes_path,
+        "adapter/sdk.py": adapter_path,
+        "main.py": main_path,
+    }
     try:
+        installable_source_hash = _installable_source_tree_sha256(package.parent)
+        source_hashes = {
+            relative: hashlib.sha256(path.read_bytes()).hexdigest()
+            for relative, path in reviewed_sources.items()
+        }
         operations_tree = ast.parse(_read_text(operations_path))
         routes_tree = ast.parse(_read_text(routes_path))
         adapter_tree = ast.parse(_read_text(adapter_path))
+        main_tree = ast.parse(_read_text(main_path))
     except (OSError, SyntaxError):
         return [_gateway_read_allowlist_finding(root, package)]
+    if (
+        installable_source_hash != _EXPECTED_GATEWAY_INSTALLABLE_SRC_SHA256
+        or source_hashes != _EXPECTED_GATEWAY_SOURCE_SHA256
+    ):
+        return [_gateway_read_allowlist_finding(root, package)]
 
-    operations: set[str] | None = None
-    for node in operations_tree.body:
-        if isinstance(node, ast.Assign):
-            matches = any(
-                isinstance(target, ast.Name) and target.id == "READ_ONLY_OPERATIONS"
-                for target in node.targets
-            )
-            value = node.value
-        elif isinstance(node, ast.AnnAssign):
-            matches = (
-                isinstance(node.target, ast.Name)
-                and node.target.id == "READ_ONLY_OPERATIONS"
-            )
-            value = node.value
-        else:
-            continue
-        if matches and value is not None:
-            operations = {
-                item.value
-                for item in ast.walk(value)
-                if isinstance(item, ast.Constant) and isinstance(item.value, str)
-            }
+    operation_literal = _literal_type_alias(operations_tree, "GatewayOperation")
+    operations = _exact_frozen_string_assignment(
+        operations_tree,
+        "READ_ONLY_OPERATIONS",
+    )
+    broker_operations = _exact_frozen_string_assignment(
+        operations_tree,
+        "BROKER_OPERATIONS",
+    )
+    market_operations = _exact_frozen_string_assignment(
+        operations_tree,
+        "MARKET_OPERATIONS",
+    )
+    operation_bindings_are_exact = all(
+        sum(
+            isinstance(node, ast.Name)
+            and node.id == name
+            and isinstance(node.ctx, ast.Store)
+            for node in ast.walk(operations_tree)
+        )
+        == 1
+        for name in (
+            "GatewayOperation",
+            "READ_ONLY_OPERATIONS",
+            "BROKER_OPERATIONS",
+            "MARKET_OPERATIONS",
+        )
+    )
     routes: set[tuple[str, str, tuple[str, ...]]] = set()
+    route_calls: list[ast.Call] = []
     malformed_route = False
     route_prefix: str | None = None
     for node in routes_tree.body:
         if not (
             isinstance(node, ast.Assign)
+            and len(node.targets) == 1
             and any(
                 isinstance(target, ast.Name) and target.id == "router"
                 for target in node.targets
@@ -283,6 +341,8 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
             and isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Name)
             and node.value.func.id == "APIRouter"
+            and not node.value.args
+            and len(node.value.keywords) == 1
         ):
             continue
         prefix_keyword = next(
@@ -305,16 +365,18 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
             and node.func.value.id == "router"
         ):
             continue
+        route_calls.append(node)
         methods_keyword = next(
             (keyword.value for keyword in node.keywords if keyword.arg == "methods"),
             None,
         )
         if (
-            len(node.args) < 2
+            len(node.args) != 2
             or not isinstance(node.args[0], ast.Constant)
             or not isinstance(node.args[0].value, str)
             or not isinstance(node.args[1], ast.Name)
             or not isinstance(methods_keyword, ast.List | ast.Tuple)
+            or len(node.keywords) != 1
             or any(
                 not isinstance(item, ast.Constant) or not isinstance(item.value, str)
                 for item in methods_keyword.elts
@@ -330,8 +392,52 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
             )
         )
 
+    route_function_attributes = [
+        node
+        for node in ast.walk(routes_tree)
+        if isinstance(node, ast.Attribute) and node.attr == "add_api_route"
+    ]
+    router_loads = [
+        node
+        for node in ast.walk(routes_tree)
+        if isinstance(node, ast.Name)
+        and node.id == "router"
+        and isinstance(node.ctx, ast.Load)
+    ]
+    router_stores = [
+        node
+        for node in ast.walk(routes_tree)
+        if isinstance(node, ast.Name)
+        and node.id == "router"
+        and isinstance(node.ctx, ast.Store)
+    ]
+    direct_route_functions = {id(node.func) for node in route_calls}
+    direct_router_loads = {
+        id(node.func.value)
+        for node in route_calls
+        if isinstance(node.func, ast.Attribute)
+    }
+    top_level_route_calls = {
+        id(node.value)
+        for node in routes_tree.body
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+    }
+    if (
+        {id(node) for node in route_function_attributes} != direct_route_functions
+        or {id(node) for node in router_loads} != direct_router_loads
+        or len(router_stores) != 1
+        or top_level_route_calls != {id(node) for node in route_calls}
+        or any(
+            isinstance(node, ast.Constant)
+            and node.value in {"add_api_route", "include_router"}
+            for node in ast.walk(routes_tree)
+        )
+    ):
+        malformed_route = True
+
     sdk_methods: set[tuple[str, str]] = set()
     malformed_sdk_method = False
+    sdk_method_calls: list[ast.Call] = []
     for node in ast.walk(adapter_tree):
         if not (
             isinstance(node, ast.Call)
@@ -339,6 +445,7 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
             and node.func.attr == "_method"
         ):
             continue
+        sdk_method_calls.append(node)
         if (
             len(node.args) != 2
             or node.keywords
@@ -352,16 +459,221 @@ def check_gateway_read_allowlist(root: Path) -> list[PolicyFinding]:
             continue
         sdk_methods.add((node.args[0].value, node.args[1].value))  # type: ignore[arg-type]
 
+    sdk_method_attributes = [
+        node
+        for node in ast.walk(adapter_tree)
+        if isinstance(node, ast.Attribute) and node.attr == "_method"
+    ]
+    sdk_client_attributes = [
+        node
+        for node in ast.walk(adapter_tree)
+        if isinstance(node, ast.Attribute) and node.attr == "_client"
+    ]
     if (
-        operations != set(_EXPECTED_GATEWAY_OPERATIONS)
+        {id(node) for node in sdk_method_attributes}
+        != {id(node.func) for node in sdk_method_calls}
+        or len(sdk_client_attributes) != 2
+        or sum(isinstance(node.ctx, ast.Store) for node in sdk_client_attributes) != 1
+        or sum(isinstance(node.ctx, ast.Load) for node in sdk_client_attributes) != 1
+        or any(
+            isinstance(node, ast.Constant) and node.value in {"_client", "_method"}
+            for node in ast.walk(adapter_tree)
+        )
+    ):
+        malformed_sdk_method = True
+
+    main_include_calls = [
+        node
+        for node in ast.walk(main_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "include_router"
+    ]
+    main_include_attributes = [
+        node
+        for node in ast.walk(main_tree)
+        if isinstance(node, ast.Attribute) and node.attr == "include_router"
+    ]
+    main_router_graph_is_exact = (
+        len(main_include_calls) == 1
+        and len(main_include_attributes) == 1
+        and main_include_calls[0].func is main_include_attributes[0]
+        and isinstance(main_include_calls[0].func.value, ast.Name)
+        and main_include_calls[0].func.value.id == "app"
+        and len(main_include_calls[0].args) == 1
+        and isinstance(main_include_calls[0].args[0], ast.Name)
+        and main_include_calls[0].args[0].id == "read_only_router"
+        and not main_include_calls[0].keywords
+        and not any(
+            isinstance(node, ast.Constant) and node.value == "include_router"
+            for node in ast.walk(main_tree)
+        )
+    )
+    allowed_app_registration_calls = {
+        id(node)
+        for node in ast.walk(main_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "app"
+        and (
+            (
+                node.func.attr == "include_router"
+                and len(node.args) == 1
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "read_only_router"
+                and not node.keywords
+            )
+            or (
+                node.func.attr == "get"
+                and len(node.args) == 1
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value in {"/health/live", "/health/ready"}
+                and not node.keywords
+            )
+            or (
+                node.func.attr == "exception_handler"
+                and len(node.args) == 1
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in {"GatewayError", "StarletteHTTPException"}
+                and not node.keywords
+            )
+        )
+    }
+    app_registration_calls = {
+        id(node)
+        for node in ast.walk(main_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "app"
+        and node.func.attr
+        in {
+            "add_api_route",
+            "add_route",
+            "api_route",
+            "delete",
+            "exception_handler",
+            "get",
+            "head",
+            "include_router",
+            "mount",
+            "options",
+            "patch",
+            "post",
+            "put",
+            "route",
+            "websocket",
+            "websocket_route",
+        }
+    }
+    main_registration_surface_is_exact = (
+        app_registration_calls == allowed_app_registration_calls
+    )
+
+    if (
+        operation_literal != set(_EXPECTED_GATEWAY_OPERATIONS)
+        or operations != set(_EXPECTED_GATEWAY_OPERATIONS)
+        or broker_operations != set(_EXPECTED_BROKER_OPERATIONS)
+        or market_operations != set(_EXPECTED_MARKET_OPERATIONS)
+        or not operation_bindings_are_exact
         or malformed_route
         or route_prefix != _EXPECTED_GATEWAY_ROUTE_PREFIX
         or routes != set(_EXPECTED_GATEWAY_ROUTES)
         or malformed_sdk_method
         or sdk_methods != set(_EXPECTED_SDK_READ_METHODS)
+        or not main_router_graph_is_exact
+        or not main_registration_surface_is_exact
     ):
         return [_gateway_read_allowlist_finding(root, package)]
     return []
+
+
+def _top_level_assignment_values(tree: ast.Module, name: str) -> list[ast.AST]:
+    values: list[ast.AST] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
+        ):
+            values.append(node.value)
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+            and node.value is not None
+        ):
+            values.append(node.value)
+    return values
+
+
+def _installable_source_tree_sha256(source_root: Path) -> str:
+    digest = hashlib.sha256()
+    source_count = 0
+    for path in sorted(source_root.rglob("*")):
+        relative_path = path.relative_to(source_root)
+        if "__pycache__" in relative_path.parts:
+            continue
+        if path.is_dir() and not path.is_symlink():
+            continue
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.suffix != ".py"
+            or not relative_path.parts
+            or relative_path.parts[0] != "nexus_fosun_gateway"
+        ):
+            raise OSError("gateway installable source tree is not closed")
+        relative = relative_path.as_posix().encode()
+        content = path.read_bytes()
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+        source_count += 1
+    if source_count == 0:
+        raise OSError("gateway installable source tree is empty")
+    return digest.hexdigest()
+
+
+def _exact_frozen_string_assignment(tree: ast.Module, name: str) -> set[str] | None:
+    values = _top_level_assignment_values(tree, name)
+    if len(values) != 1:
+        return None
+    value = values[0]
+    if not (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == "frozenset"
+        and len(value.args) == 1
+        and not value.keywords
+        and isinstance(value.args[0], ast.Set)
+        and all(
+            isinstance(item, ast.Constant) and isinstance(item.value, str)
+            for item in value.args[0].elts
+        )
+    ):
+        return None
+    return {item.value for item in value.args[0].elts}  # type: ignore[misc]
+
+
+def _literal_type_alias(tree: ast.Module, name: str) -> set[str] | None:
+    values = _top_level_assignment_values(tree, name)
+    if len(values) != 1:
+        return None
+    value = values[0]
+    if not (
+        isinstance(value, ast.Subscript)
+        and isinstance(value.value, ast.Name)
+        and value.value.id == "Literal"
+    ):
+        return None
+    elements = value.slice.elts if isinstance(value.slice, ast.Tuple) else [value.slice]
+    if any(
+        not isinstance(item, ast.Constant) or not isinstance(item.value, str)
+        for item in elements
+    ):
+        return None
+    return {item.value for item in elements}  # type: ignore[misc]
 
 
 def _gateway_read_allowlist_finding(root: Path, package: Path) -> PolicyFinding:
@@ -394,17 +706,36 @@ def check_gateway_entrypoint_isolation(root: Path) -> list[PolicyFinding]:
     gateway_service = _compose_service_block(compose, "fosun-gateway")
     compose_commands = re.findall(r"(?m)^    command:\s*(.*?)\s*$", gateway_service)
     compose_entrypoints = re.findall(
-        r"(?m)^    entrypoint:\s*(.*?)\s*$", gateway_service
+        r"(?m)^    [\"']?entrypoint[\"']?\s*:\s*(.*?)\s*$",
+        gateway_service,
     )
     docker_instructions = _docker_final_stage_process_instructions(dockerfile)
     if (
         packaged_entrypoint != "nexus_fosun_gateway.main:run"
+        or hashlib.sha256(compose.encode()).hexdigest() != _EXPECTED_COMPOSE_SHA256
+        or hashlib.sha256(gateway_service.encode()).hexdigest()
+        != _EXPECTED_FOSUN_GATEWAY_SERVICE_SHA256
+        or hashlib.sha256(dockerfile.encode()).hexdigest()
+        != _EXPECTED_FOSUN_GATEWAY_DOCKERFILE_SHA256
         or compose_commands != ['["nexus-fosun-gateway"]']
         or compose_entrypoints
-        or docker_instructions != [("CMD", '["nexus-fosun-gateway"]')]
+        or _compose_uses_yaml_aliases(compose)
+        or re.search(
+            r"(?m)^    [\"']?(?:extends|env_file)[\"']?\s*:",
+            gateway_service,
+        )
+        is not None
+        or docker_instructions
+        != [("ENTRYPOINT", "[]"), ("CMD", '["nexus-fosun-gateway"]')]
         or any(
             marker in gateway_service or marker in dockerfile
-            for marker in ("PYTHONHOME", "PYTHONPATH", "SSLKEYLOGFILE")
+            for marker in (
+                "PYTHONHOME",
+                "PYTHONPATH",
+                "SSLKEYLOGFILE",
+                "nexus-fosun-read-only-probe",
+                "nexus-fosun-capture-read-only-probe",
+            )
         )
     ):
         return [
@@ -437,20 +768,47 @@ def _compose_service_block(compose: str, service: str) -> str:
     return "\n".join(lines[start:end])
 
 
+def _compose_uses_yaml_aliases(compose: str) -> bool:
+    """Reject anchors, aliases, and merge keys that obscure the effective service."""
+    for raw_line in compose.splitlines():
+        line = raw_line.split("#", 1)[0]
+        if re.search(r"<<\s*:", line) is not None or re.search(
+            r"(?:^|[\s:\[,])[&*][A-Za-z0-9_][A-Za-z0-9_.-]*",
+            line,
+        ) is not None:
+            return True
+    return False
+
+
 def _docker_final_stage_process_instructions(
     dockerfile: str,
 ) -> list[tuple[str, str]]:
     """Return effective process directives from only the final Docker stage."""
     lines = dockerfile.splitlines()
-    from_indexes = [
-        index
-        for index, line in enumerate(lines)
-        if re.match(r"(?i)^\s*FROM\s+", line) and not line.lstrip().startswith("#")
-    ]
-    if not from_indexes:
+    stages: list[tuple[int, str, str | None]] = []
+    for index, line in enumerate(lines):
+        match = re.match(
+            r"(?i)^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)"
+            r"(?:\s+AS\s+([A-Za-z0-9_.-]+))?\s*$",
+            line,
+        )
+        if match is not None and not line.lstrip().startswith("#"):
+            stages.append((index, match.group(1), match.group(2)))
+    if not stages:
         return []
+    prior_aliases = {
+        alias.casefold() for _index, _base, alias in stages[:-1] if alias is not None
+    }
+    final_index, final_base, _final_alias = stages[-1]
+    if (
+        final_base.casefold() in prior_aliases
+        or "$" in final_base
+        or re.fullmatch(r"[^\s@]+:[^\s@]+@sha256:[0-9a-f]{64}", final_base)
+        is None
+    ):
+        return [("INHERITED_STAGE", final_base)]
     instructions: list[tuple[str, str]] = []
-    for line in lines[from_indexes[-1] + 1 :]:
+    for line in lines[final_index + 1 :]:
         match = re.match(r"(?i)^\s*(CMD|ENTRYPOINT)\s+(.+?)\s*$", line)
         if match is not None and not line.lstrip().startswith("#"):
             instructions.append((match.group(1).upper(), match.group(2)))
@@ -511,6 +869,22 @@ def _local_imports(
     current_package = (
         current_module if is_package else current_module.rpartition(".")[0]
     )
+    allowed_dynamic_calls = {
+        id(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _is_allowed_sdk_dynamic_import(current_module, node)
+    }
+    allowed_dynamic_attributes = {
+        id(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and id(node) in allowed_dynamic_calls
+    }
+    if _has_forbidden_dynamic_import_surface(
+        tree,
+        allowed_dynamic_attributes=allowed_dynamic_attributes,
+    ):
+        imports.append(("nexus_fosun_gateway.probe_cli", set()))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imports.extend((alias.name, set()) for alias in node.names)
@@ -525,21 +899,96 @@ def _local_imports(
                 prefix = ".".join(package_parts[:keep])
                 module = f"{prefix}.{module}" if module else prefix
             imports.append((module, {alias.name for alias in node.names}))
-        elif (
-            isinstance(node, ast.Call)
-            and len(node.args) == 1
-            and not node.keywords
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
-            and (
-                isinstance(node.func, ast.Name)
-                and node.func.id == "import_module"
-                or isinstance(node.func, ast.Attribute)
-                and node.func.attr == "import_module"
-            )
-        ):
-            imports.append((node.args[0].value, set()))
+        elif isinstance(node, ast.Call) and id(node) in allowed_dynamic_calls:
+            module = _static_string(node.args[0])
+            assert module is not None
+            imports.append((_resolve_dynamic_module(current_package, module), set()))
     return imports
+
+
+_DYNAMIC_IMPORT_MARKERS = frozenset(
+    {
+        "__import__",
+        "BuiltinImporter",
+        "ExtensionFileLoader",
+        "FrozenImporter",
+        "SourceFileLoader",
+        "SourcelessFileLoader",
+        "exec_module",
+        "find_spec",
+        "import_module",
+        "load_module",
+        "module_from_spec",
+        "run_module",
+        "run_path",
+        "spec_from_file_location",
+    }
+)
+
+
+def _is_allowed_sdk_dynamic_import(current_module: str, node: ast.Call) -> bool:
+    return (
+        current_module == "nexus_fosun_gateway.main"
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "importlib"
+        and node.func.attr == "import_module"
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value in {"fsopenapi", "fsopenapi.auth"}
+    )
+
+
+def _has_forbidden_dynamic_import_surface(
+    tree: ast.AST,
+    *,
+    allowed_dynamic_attributes: set[int],
+) -> bool:
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in _DYNAMIC_IMPORT_MARKERS
+            and id(node) not in allowed_dynamic_attributes
+        ):
+            return True
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and (
+            node.id in _DYNAMIC_IMPORT_MARKERS or node.id in {"compile", "eval", "exec"}
+        ):
+            return True
+        if isinstance(node, ast.ImportFrom) and any(
+            alias.name in _DYNAMIC_IMPORT_MARKERS for alias in node.names
+        ):
+            return True
+        if isinstance(node, ast.Constant | ast.BinOp) and _static_string(
+            node
+        ) in _DYNAMIC_IMPORT_MARKERS:
+            return True
+    return False
+
+
+def _static_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_string(node.left)
+        right = _static_string(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _resolve_dynamic_module(current_package: str, module: str) -> str:
+    if not module.startswith("."):
+        return module
+    level = len(module) - len(module.lstrip("."))
+    package_parts = current_package.split(".")
+    keep = len(package_parts) - level + 1
+    if keep <= 0:
+        return ""
+    suffix = module[level:]
+    prefix = ".".join(package_parts[:keep])
+    return f"{prefix}.{suffix}" if suffix else prefix
 
 
 def _is_probe_only_module(module: str) -> bool:

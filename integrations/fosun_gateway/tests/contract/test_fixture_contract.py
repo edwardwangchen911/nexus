@@ -76,6 +76,7 @@ def test_gateway_image_contains_machine_readable_provider_manifest() -> None:
     ) in dockerfile
     assert "/var/lib/nexus-fosun-gateway" in dockerfile
     assert "chmod 0700" in dockerfile
+    assert "uv sync --frozen --no-dev --no-editable --package nexus-fosun-gateway" in dockerfile
     assert "mkdir -p /run/nexus/fosun-activation /run/nexus/fosun-control" in dockerfile
     assert "chown root:root /run/nexus/fosun-activation /run/nexus/fosun-control" in dockerfile
     assert "chmod 0755 /run/nexus/fosun-activation /run/nexus/fosun-control" in dockerfile
