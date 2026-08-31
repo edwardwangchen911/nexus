@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import subprocess
 import sys
+import tomllib
 from dataclasses import asdict, dataclass
 from importlib.metadata import distributions
 from pathlib import Path
@@ -16,13 +18,55 @@ from urllib.parse import urlsplit
 _SDK_PACKAGE = re.compile(r'(?im)^name\s*=\s*["\']fsopenapi["\']|openapi-python-sdk')
 _SHA256_IMAGE = re.compile(r"^[^\s@]+:[^\s@]+@sha256:[0-9a-f]{64}$")
 _FORBIDDEN_GATEWAY = re.compile(
-    r"OrderCreate|OrderModify|OrderCancel|/webhooks?(?:/|[\"'])|"
-    r"(?:place|create|modify|cancel|submit)_order",
-    re.IGNORECASE,
+    r"(?:\bSimAccount(?:Create|Reset)|"
+    r"\b(?:place|create|modify|cancel|submit|replace|delete|update)Order|"
+    r"\b(?:Place|Create|Modify|Cancel|Submit|Replace|Delete|Update)Order|"
+    r"\bOrder(?:Create|Modify|Cancel|Submit|Replace|Delete|Update)|"
+    r"\b(?:create|modify|cancel|submit|replace|delete|update)Subscription|"
+    r"\bSubscription(?:Create|Modify|Cancel|Submit|Replace|Delete|Update)|"
+    r"(?i:\b(?:place|create|modify|cancel|submit|replace|delete|update)_order)|"
+    r"(?i:\border_(?:place|create|modify|cancel|submit|replace|delete|update))|"
+    r"(?i:\b(?:create|modify|cancel|submit|replace|delete|update)_subscription)|"
+    r"(?i:\bsubscription_(?:create|modify|cancel|submit|replace|delete|update))|"
+    r"\b(?:subscribe|unsubscribe)(?:Market|Quote|Order|Trade|Topic)|"
+    r"(?i:/webhooks?(?:/|[\"'])))"
 )
 _PROBE_ONLY_RUNTIME = re.compile(
-    r"\bnexus_fosun_gateway\.(?:adapter\.probe_sdk|probe_cli|probe)\b|"
-    r"\b(?:build_probe_transport|enforce_probe_tls_controls|run_sanitized_probe)\b"
+    r"\bnexus_fosun_gateway\.(?:adapter\.probe_sdk|probe_capture|probe_cli|"
+    r"probe_receipt|probe_settings|publication|probe)\b|"
+    r"\b(?:build_probe_transport|capture_probe_result_frame|"
+    r"enforce_probe_tls_controls|load_probe_signing_key|publish_probe_artifact|"
+    r"publisher_key_preflight_main|"
+    r"run_sanitized_probe)\b"
+)
+_PROBE_ONLY_MODULES = frozenset(
+    {
+        "nexus_fosun_gateway.adapter.probe_sdk",
+        "nexus_fosun_gateway.probe",
+        "nexus_fosun_gateway.probe_capture",
+        "nexus_fosun_gateway.probe_cli",
+        "nexus_fosun_gateway.probe_receipt",
+        "nexus_fosun_gateway.probe_settings",
+        "nexus_fosun_gateway.publication",
+    }
+)
+_PROBE_ONLY_NAMES = frozenset(
+    {
+        "build_probe_transport",
+        "capture_probe_result_frame",
+        "enforce_probe_tls_controls",
+        "load_probe_signing_key",
+        "probe",
+        "probe_capture",
+        "probe_cli",
+        "probe_receipt",
+        "probe_sdk",
+        "probe_settings",
+        "publish_probe_artifact",
+        "publication",
+        "publisher_key_preflight_main",
+        "run_sanitized_probe",
+    }
 )
 _REVIEWED_OFFLINE_SIMULATION_PATHS = frozenset(
     {
@@ -147,7 +191,11 @@ def check_probe_runtime_isolation(root: Path) -> list[PolicyFinding]:
                 "long-running gateway entry point is unavailable",
             )
         ]
-    if _PROBE_ONLY_RUNTIME.search(_read_text(main_path)) is not None:
+    main_source = _read_text(main_path)
+    if (
+        _PROBE_ONLY_RUNTIME.search(main_source) is not None
+        or _runtime_import_graph_reaches_probe_only(main_path)
+    ):
         return [
             PolicyFinding(
                 "probe_runtime_isolation_missing",
@@ -156,6 +204,123 @@ def check_probe_runtime_isolation(root: Path) -> list[PolicyFinding]:
             )
         ]
     return []
+
+
+def check_gateway_entrypoint_isolation(root: Path) -> list[PolicyFinding]:
+    """Freeze both packaged and Compose production entry points to Gateway main."""
+    pyproject_path = root / "integrations/fosun_gateway/pyproject.toml"
+    compose_path = root / "infra/compose.yaml"
+    dockerfile_path = root / "infra/docker/fosun-gateway.Dockerfile"
+    try:
+        pyproject = tomllib.loads(_read_text(pyproject_path))
+        scripts = pyproject["project"]["scripts"]
+    except (KeyError, OSError, tomllib.TOMLDecodeError, TypeError):
+        scripts = None
+    packaged_entrypoint = (
+        scripts.get("nexus-fosun-gateway") if isinstance(scripts, dict) else None
+    )
+    try:
+        compose = _read_text(compose_path)
+        dockerfile = _read_text(dockerfile_path)
+    except OSError:
+        compose = ""
+        dockerfile = ""
+    if (
+        packaged_entrypoint != "nexus_fosun_gateway.main:run"
+        or 'command: ["nexus-fosun-gateway"]' not in compose
+        or 'CMD ["nexus-fosun-gateway"]' not in dockerfile
+        or any(
+            marker in compose or marker in dockerfile
+            for marker in ("PYTHONHOME", "PYTHONPATH", "SSLKEYLOGFILE")
+        )
+    ):
+        return [
+            PolicyFinding(
+                "gateway_entrypoint_isolation_missing",
+                "integrations/fosun_gateway/pyproject.toml|infra/compose.yaml|"
+                "infra/docker/fosun-gateway.Dockerfile",
+                "production must use the fixed Gateway entry point without probe or "
+                "interpreter-injection environment",
+            )
+        ]
+    return []
+
+
+def _runtime_import_graph_reaches_probe_only(main_path: Path) -> bool:
+    package_root = main_path.parent
+    module_paths: dict[str, Path] = {}
+    for path in sorted(package_root.rglob("*.py")):
+        relative = path.relative_to(package_root)
+        parts = list(relative.with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts.pop()
+        module = ".".join(("nexus_fosun_gateway", *parts))
+        module_paths[module] = path
+
+    pending = ["nexus_fosun_gateway.main"]
+    visited: set[str] = set()
+    while pending:
+        module = pending.pop()
+        if module in visited:
+            continue
+        visited.add(module)
+        path = module_paths.get(module)
+        if path is None:
+            continue
+        try:
+            tree = ast.parse(_read_text(path))
+        except SyntaxError:
+            return True
+        for imported_module, imported_names in _local_imports(
+            module,
+            tree,
+            is_package=path.name == "__init__.py",
+        ):
+            if _is_probe_only_module(imported_module):
+                return True
+            if imported_names & _PROBE_ONLY_NAMES:
+                return True
+            for candidate in (imported_module, *(
+                f"{imported_module}.{name}" for name in imported_names
+            )):
+                if _is_probe_only_module(candidate):
+                    return True
+                if candidate in module_paths and candidate not in visited:
+                    pending.append(candidate)
+    return False
+
+
+def _local_imports(
+    current_module: str,
+    tree: ast.AST,
+    *,
+    is_package: bool,
+) -> list[tuple[str, set[str]]]:
+    imports: list[tuple[str, set[str]]] = []
+    current_package = (
+        current_module if is_package else current_module.rpartition(".")[0]
+    )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.extend((alias.name, set()) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                package_parts = current_package.split(".")
+                keep = len(package_parts) - node.level + 1
+                if keep <= 0:
+                    imports.append(("", {alias.name for alias in node.names}))
+                    continue
+                prefix = ".".join(package_parts[:keep])
+                module = f"{prefix}.{module}" if module else prefix
+            imports.append((module, {alias.name for alias in node.names}))
+    return imports
+
+
+def _is_probe_only_module(module: str) -> bool:
+    return module in _PROBE_ONLY_MODULES or any(
+        module.startswith(f"{name}.") for name in _PROBE_ONLY_MODULES
+    )
 
 
 def check_sdk_lock_admission(root: Path) -> list[PolicyFinding]:
@@ -550,6 +715,7 @@ def run_all(root: Path) -> tuple[list[PolicyFinding], list[DependencyRecord]]:
     findings.extend(check_forbidden_gateway_surface(root))
     findings.extend(check_provider_tls_remediation(root))
     findings.extend(check_probe_runtime_isolation(root))
+    findings.extend(check_gateway_entrypoint_isolation(root))
     findings.extend(check_sdk_lock_admission(root))
     findings.extend(check_container_pins(root))
     findings.extend(check_container_hardening(root))

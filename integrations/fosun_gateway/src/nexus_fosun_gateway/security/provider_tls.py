@@ -37,6 +37,13 @@ class _ProbeDispatchGate:
             if self._revoked:
                 raise NonRetryableTransportRefusal("probe HTTP dispatch is revoked")
 
+    def dispatch(self, operation: Callable[[], object]) -> object:
+        """Linearize one delegate-through-response-headers against revocation."""
+        with self._lock:
+            if self._revoked:
+                raise NonRetryableTransportRefusal("probe HTTP dispatch is revoked")
+            return operation()
+
     def revoke(self) -> None:
         with self._lock:
             self._revoked = True
@@ -100,24 +107,24 @@ class ProbeTlsControls:
             if self._closed:
                 return
             self._closed = True
-        if self._dispatch_gate is not None:
-            self._dispatch_gate.revoke()
-        failure: BaseException | None = None
-        for session in (self._business_session, self._auth_session):
-            close = getattr(session, "close", None)
-            if not callable(close):
-                if failure is None:
-                    failure = RuntimeError("probe HTTP session is not closable")
-                continue
-            try:
-                close()
-            except BaseException as error:
-                if failure is None:
-                    failure = error
-        if isinstance(failure, KeyboardInterrupt | SystemExit):
-            raise failure
-        if failure is not None:
-            raise RuntimeError("probe HTTP sessions could not be closed")
+            if self._dispatch_gate is not None:
+                self._dispatch_gate.revoke()
+            failure: BaseException | None = None
+            for session in (self._business_session, self._auth_session):
+                close = getattr(session, "close", None)
+                if not callable(close):
+                    if failure is None:
+                        failure = RuntimeError("probe HTTP session is not closable")
+                    continue
+                try:
+                    close()
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+            if isinstance(failure, KeyboardInterrupt | SystemExit):
+                raise failure
+            if failure is not None:
+                raise RuntimeError("probe HTTP sessions could not be closed")
 
 
 class _VerifiedSessionProxy:
@@ -141,10 +148,14 @@ class _VerifiedSessionProxy:
         kwargs["stream"] = True
         _require_dispatch_open(self._dispatch_gate)
         _before_dispatch(self._observer, "business")
-        _require_dispatch_open(self._dispatch_gate)
-        response = _read_bounded_response(self._request(*args, **kwargs))
-        _after_response(self._observer, "business", response)
-        return response
+        return _dispatch_verified_request(
+            self._dispatch_gate,
+            self._request,
+            args,
+            kwargs,
+            self._observer,
+            "business",
+        )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._delegate, name)
@@ -171,10 +182,14 @@ class _VerifiedRequestsProxy:
         kwargs["stream"] = True
         _require_dispatch_open(self._dispatch_gate)
         _before_dispatch(self._observer, "auth")
-        _require_dispatch_open(self._dispatch_gate)
-        response = _read_bounded_response(self._post(*args, **kwargs))
-        _after_response(self._observer, "auth", response)
-        return response
+        return _dispatch_verified_request(
+            self._dispatch_gate,
+            self._post,
+            args,
+            kwargs,
+            self._observer,
+            "auth",
+        )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._delegate, name)
@@ -315,6 +330,27 @@ def _install_sdk_tls_verification(
 def _require_dispatch_open(dispatch_gate: _ProbeDispatchGate | None) -> None:
     if dispatch_gate is not None:
         dispatch_gate.require_open()
+
+
+def _dispatch_verified_request(
+    dispatch_gate: _ProbeDispatchGate | None,
+    delegate: Callable[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+    observer: ProviderHttpObserver | None,
+    surface: HttpSurface,
+) -> object:
+    def start_dispatch() -> object:
+        return delegate(*args, **kwargs)
+
+    raw_response = (
+        start_dispatch()
+        if dispatch_gate is None
+        else dispatch_gate.dispatch(start_dispatch)
+    )
+    response = _read_bounded_response(raw_response)
+    _after_response(observer, surface, response)
+    return response
 
 
 def _force_zero_https_retries(session: object, requests_module: object) -> None:

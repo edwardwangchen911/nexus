@@ -68,6 +68,32 @@ def test_admitted_config_with_missing_package_returns_stable_error(
     assert exc_info.value.code == "SDK_NOT_ADMITTED"
 
 
+def test_sdk_mode_rejects_ssl_key_log_before_sdk_import(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    imported = False
+    key_log = tmp_path / "tls-secrets.log"
+    monkeypatch.setenv("SSLKEYLOGFILE", str(key_log))
+
+    def forbidden_import(_name: str) -> object:
+        nonlocal imported
+        imported = True
+        raise AssertionError
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.main.importlib.import_module",
+        forbidden_import,
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        build_transport(GatewaySettings.model_validate(_activated_read_only_values(tmp_path)))
+
+    assert exc_info.value.code == "SDK_NOT_ADMITTED"
+    assert imported is False
+    assert not key_log.exists()
+
+
 def test_runtime_boolean_cannot_override_committed_blocked_manifest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

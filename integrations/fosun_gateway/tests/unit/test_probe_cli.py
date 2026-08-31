@@ -14,7 +14,21 @@ from nexus_fosun_gateway.adapter.probe_sdk import ProbeExecutionEvidence, ProbeS
 from nexus_fosun_gateway.probe import _build_prepared_probe
 
 MANIFEST_PATH = Path(__file__).parents[4] / "contracts" / "providers" / "fosun" / "manifest.json"
+OFFLINE_GUARD_PATH = Path(__file__).parents[4] / "scripts/offline_guard"
 TEST_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33)))
+SUBPROCESS_SUCCESS_RESULT = {
+    "status": "probe_published",
+    "code": "OK",
+    "artifact_sha256": "1" * 64,
+    "byte_length": 123,
+    "capability_expires_at": "2026-08-31T09:00:00Z",
+    "activation_contract_hash": "2" * 64,
+    "publication_receipt": {
+        "schema_version": "nexus.fosun.probe-publication.v1",
+        "artifact_sha256": "1" * 64,
+        "signature_b64u": "A" * 86,
+    },
+}
 
 
 def test_blocked_manifest_stops_before_settings_or_sdk_import(
@@ -75,10 +89,7 @@ def test_probe_cli_subprocess_is_one_frame_and_offline_for_blocked_manifest() ->
         ],
         check=False,
         capture_output=True,
-        env={
-            **os.environ,
-            "NEXUS_OFFLINE_SOCKET_GUARD": "1",
-        },
+        env=_offline_subprocess_environment(),
         timeout=10,
     )
 
@@ -86,6 +97,124 @@ def test_probe_cli_subprocess_is_one_frame_and_offline_for_blocked_manifest() ->
     assert completed.stderr == b""
     assert completed.stdout.count(b"\n") == 1
     assert json.loads(completed.stdout)["code"] == "COMPLETE_SDK_ADMISSION"
+
+
+def test_probe_cli_success_contract_holds_in_a_real_subprocess() -> None:
+    script = """
+import json
+import sys
+import nexus_fosun_gateway.probe_cli as probe_cli
+
+async def execute_once(_arguments):
+    return json.loads(sys.argv[1])
+
+probe_cli._execute_once = execute_once
+raise SystemExit(probe_cli.main([]))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, json.dumps(SUBPROCESS_SUCCESS_RESULT)],
+        check=False,
+        capture_output=True,
+        env=_offline_subprocess_environment(),
+        timeout=10,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stderr == b""
+    assert completed.stdout.count(b"\n") == 1
+    assert json.loads(completed.stdout) == SUBPROCESS_SUCCESS_RESULT
+
+
+def test_probe_cli_interrupt_contract_holds_in_a_real_subprocess() -> None:
+    script = """
+import nexus_fosun_gateway.probe_cli as probe_cli
+
+async def execute_once(_arguments):
+    raise KeyboardInterrupt
+
+probe_cli._execute_once = execute_once
+raise SystemExit(probe_cli.main([]))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        env=_offline_subprocess_environment(),
+        timeout=10,
+    )
+
+    assert completed.returncode == 130
+    assert completed.stderr == b""
+    assert completed.stdout.count(b"\n") == 1
+    assert json.loads(completed.stdout)["code"] == "PROBE_INTERRUPTED"
+
+
+@pytest.mark.parametrize("failure_location", ["before_receipt", "inside_receipt", "end"])
+def test_probe_cli_partial_success_frame_never_retries_in_a_real_subprocess(
+    failure_location: str,
+) -> None:
+    expected = (
+        json.dumps(SUBPROCESS_SUCCESS_RESULT, separators=(",", ":")).encode()
+        + b"\n"
+    )
+    receipt_offset = expected.index(b'"publication_receipt"')
+    fail_after = {
+        "before_receipt": receipt_offset - 1,
+        "inside_receipt": receipt_offset + 5,
+        "end": len(expected) - 1,
+    }[failure_location]
+    script = """
+import json
+import os
+import sys
+import nexus_fosun_gateway.probe_cli as probe_cli
+
+result = json.loads(sys.argv[1])
+fail_after = int(sys.argv[2])
+original_writer = probe_cli.write_result_frame
+delivered = 0
+
+async def execute_once(_arguments):
+    return result
+
+def partial_writer(file_descriptor, content):
+    global delivered
+    remaining = fail_after - delivered
+    if remaining <= 0:
+        raise OSError("synthetic-partial-frame")
+    length = min(7, len(content), remaining)
+    written = os.write(file_descriptor, content[:length])
+    delivered += written
+    return written
+
+def write_once(value, *, file_descriptor=1):
+    return original_writer(
+        value,
+        file_descriptor=file_descriptor,
+        writer=partial_writer,
+    )
+
+probe_cli._execute_once = execute_once
+probe_cli.write_result_frame = write_once
+raise SystemExit(probe_cli.main([]))
+"""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            json.dumps(SUBPROCESS_SUCCESS_RESULT),
+            str(fail_after),
+        ],
+        check=False,
+        capture_output=True,
+        env=_offline_subprocess_environment(),
+        timeout=10,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stderr == b""
+    assert completed.stdout == expected[:fail_after]
 
 
 def test_parser_error_never_echoes_unknown_operator_input(
@@ -120,6 +249,78 @@ def test_manifest_path_length_is_rejected_before_any_evidence_read(
     assert exit_code == 2
     assert json.loads(captured.out)["code"] == "INVALID_PROBE_PLAN"
     assert captured.err == ""
+
+
+def test_receipt_basename_is_rejected_before_transport_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_bytes(_json_bytes(_admitted_manifest()))
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    private_key_path = tmp_path / "publisher-private.b64u"
+    public_key_b64u = _b64u(
+        TEST_KEY.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
+    _set_probe_environment(
+        monkeypatch,
+        manifest_path,
+        output_dir,
+        private_key_path,
+        public_key_b64u,
+    )
+    transport_built = False
+
+    def forbidden_transport(*_args: object) -> object:
+        nonlocal transport_built
+        transport_built = True
+        raise AssertionError
+
+    monkeypatch.setattr(probe_cli, "build_probe_transport", forbidden_transport)
+    arguments = _arguments(manifest_path)
+    arguments[arguments.index("--output-basename") + 1] = (
+        "publication-receipt.json"
+    )
+
+    exit_code = probe_cli.main(arguments)
+
+    captured = capfd.readouterr()
+    assert exit_code == 2
+    assert json.loads(captured.out)["code"] == "INVALID_PROBE_PLAN"
+    assert transport_built is False
+    assert captured.err == ""
+
+
+def test_ssl_key_log_environment_refuses_before_evidence_or_sdk_access(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    key_log = tmp_path / "tls-secrets.log"
+    monkeypatch.setenv("SSLKEYLOGFILE", str(key_log))
+    monkeypatch.setattr(
+        probe_cli,
+        "_read_bounded_or_empty",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError),
+    )
+    monkeypatch.setattr(
+        probe_cli,
+        "build_probe_transport",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError),
+    )
+
+    exit_code = probe_cli.main(_arguments(MANIFEST_PATH))
+
+    captured = capfd.readouterr()
+    assert exit_code == 2
+    assert json.loads(captured.out)["code"] == "PROBE_SETTINGS_INVALID"
+    assert captured.err == ""
+    assert not key_log.exists()
 
 
 def test_manifest_environment_path_must_match_exact_cli_spelling(
@@ -269,6 +470,18 @@ def test_success_publishes_before_signing_and_emits_receipt_last(
         )
 
     monkeypatch.setattr(probe_cli, "run_sanitized_probe", fake_run)
+    real_manifest_reader = probe_cli._read_bounded_or_empty
+    manifest_reads = 0
+
+    def read_manifest_once(path: Path, *, max_bytes: int) -> bytes:
+        nonlocal manifest_reads
+        if path == manifest_path:
+            manifest_reads += 1
+            if manifest_reads > 1:
+                raise OSError("manifest reopened")
+        return real_manifest_reader(path, max_bytes=max_bytes)
+
+    monkeypatch.setattr(probe_cli, "_read_bounded_or_empty", read_manifest_once)
 
     exit_code = probe_cli.main(_arguments(manifest_path))
 
@@ -282,6 +495,7 @@ def test_success_publishes_before_signing_and_emits_receipt_last(
         '"activation_contract_hash"'
     )
     assert (output_dir / "probe-20260831.json").exists()
+    assert manifest_reads == 1
     assert captured.err == ""
 
 
@@ -446,15 +660,24 @@ def test_main_contains_interrupt_from_uncertain_stdout_delivery(
     async def fail(_arguments: tuple[str, ...]) -> dict[str, object]:
         return probe_cli.failure_result("PROBE_FAILED")
 
+    writer_calls = 0
+
+    def interrupt_writer(
+        _result: dict[str, object],
+        *,
+        file_descriptor: int = 1,
+    ) -> bool:
+        nonlocal writer_calls
+        writer_calls += 1
+        assert file_descriptor == 1
+        raise KeyboardInterrupt
+
     monkeypatch.setattr(probe_cli, "_execute_once", fail)
-    monkeypatch.setattr(
-        probe_cli,
-        "write_result_frame",
-        lambda _result: (_ for _ in ()).throw(KeyboardInterrupt),
-    )
+    monkeypatch.setattr(probe_cli, "write_result_frame", interrupt_writer)
 
     assert probe_cli.main([]) == 2
     captured = capfd.readouterr()
+    assert writer_calls == 1
     assert captured.out == ""
     assert captured.err == ""
 
@@ -522,3 +745,11 @@ def _json_bytes(value: object) -> bytes:
 
 def _b64u(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _offline_subprocess_environment() -> dict[str, str]:
+    return {
+        **os.environ,
+        "NEXUS_OFFLINE_SOCKET_GUARD": "1",
+        "PYTHONPATH": str(OFFLINE_GUARD_PATH),
+    }

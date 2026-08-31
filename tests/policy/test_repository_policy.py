@@ -6,11 +6,14 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from scripts.ci.repository_policy import (
     DependencyRecord,
     check_container_hardening,
     check_container_pins,
     check_forbidden_gateway_surface,
+    check_gateway_entrypoint_isolation,
     check_probe_runtime_isolation,
     check_provider_tls_remediation,
     check_sdk_lock_admission,
@@ -59,6 +62,37 @@ def test_gateway_source_forbids_write_and_webhook_surface(tmp_path: Path) -> Non
 
     (source / "unsafe.py").write_text('ROUTE = "/internal/v1/OrderCreate"')
     findings = check_forbidden_gateway_surface(tmp_path)
+    assert [(finding.rule, finding.path) for finding in findings] == [
+        ("forbidden_gateway_surface", "integrations/fosun_gateway/src/unsafe.py")
+    ]
+
+
+@pytest.mark.parametrize(
+    "forbidden_token",
+    [
+        "SimAccountCreate",
+        "SimAccountReset",
+        "createOrder",
+        "cancelOrder",
+        "createSubscription",
+        "subscription_cancel",
+        "order_modify",
+        "REPLACE_ORDER",
+        "replaceOrderPayload",
+        "OrderCreateRequest",
+        "SimAccountCreateRequest",
+    ],
+)
+def test_gateway_policy_covers_provider_write_token_variants(
+    forbidden_token: str,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "integrations/fosun_gateway/src"
+    source.mkdir(parents=True)
+    (source / "unsafe.py").write_text(f'OPERATION = "{forbidden_token}"\n')
+
+    findings = check_forbidden_gateway_surface(tmp_path)
+
     assert [(finding.rule, finding.path) for finding in findings] == [
         ("forbidden_gateway_surface", "integrations/fosun_gateway/src/unsafe.py")
     ]
@@ -129,6 +163,83 @@ def test_long_running_gateway_cannot_import_probe_only_construction(tmp_path: Pa
         )
     ]
 
+    main_path.write_text("from .adapter import probe_sdk\n")
+    findings = check_probe_runtime_isolation(tmp_path)
+    assert [(finding.rule, finding.path) for finding in findings] == [
+        (
+            "probe_runtime_isolation_missing",
+            "integrations/fosun_gateway/src/nexus_fosun_gateway/main.py",
+        )
+    ]
+
+    main_path.write_text("from . import probe_capture\n")
+    findings = check_probe_runtime_isolation(tmp_path)
+    assert [(finding.rule, finding.path) for finding in findings] == [
+        (
+            "probe_runtime_isolation_missing",
+            "integrations/fosun_gateway/src/nexus_fosun_gateway/main.py",
+        )
+    ]
+
+    main_path.write_text("from .publication import load_probe_signing_key\n")
+    findings = check_probe_runtime_isolation(tmp_path)
+    assert [(finding.rule, finding.path) for finding in findings] == [
+        (
+            "probe_runtime_isolation_missing",
+            "integrations/fosun_gateway/src/nexus_fosun_gateway/main.py",
+        )
+    ]
+
+    bridge_path = main_path.with_name("bridge.py")
+    bridge_path.write_text("from . import probe_settings\n")
+    main_path.write_text("from . import bridge\n")
+    findings = check_probe_runtime_isolation(tmp_path)
+    assert [(finding.rule, finding.path) for finding in findings] == [
+        (
+            "probe_runtime_isolation_missing",
+            "integrations/fosun_gateway/src/nexus_fosun_gateway/main.py",
+        )
+    ]
+
+    bridge_path.write_text("from . import probe_receipt\n")
+    findings = check_probe_runtime_isolation(tmp_path)
+    assert {finding.rule for finding in findings} == {
+        "probe_runtime_isolation_missing"
+    }
+
+
+def test_gateway_entrypoints_are_frozen_away_from_probe_runtime(tmp_path: Path) -> None:
+    pyproject = tmp_path / "integrations/fosun_gateway/pyproject.toml"
+    compose = tmp_path / "infra/compose.yaml"
+    dockerfile = tmp_path / "infra/docker/fosun-gateway.Dockerfile"
+    pyproject.parent.mkdir(parents=True)
+    dockerfile.parent.mkdir(parents=True)
+    pyproject.write_text(
+        '[project]\nname="synthetic"\n[project.scripts]\n'
+        'nexus-fosun-gateway="nexus_fosun_gateway.main:run"\n'
+    )
+    compose.write_text(
+        'services:\n  fosun-gateway:\n    command: ["nexus-fosun-gateway"]\n'
+    )
+    dockerfile.write_text('CMD ["nexus-fosun-gateway"]\n')
+
+    assert check_gateway_entrypoint_isolation(tmp_path) == []
+
+    compose.write_text(
+        'services:\n  fosun-gateway:\n'
+        '    command: ["nexus-fosun-read-only-probe"]\n'
+    )
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
+
+    compose.write_text(
+        'services:\n  fosun-gateway:\n    command: ["nexus-fosun-gateway"]\n'
+        '    environment:\n      - SSLKEYLOGFILE=/tmp/keylog\n'
+    )
+    assert {
+        finding.rule for finding in check_gateway_entrypoint_isolation(tmp_path)
+    } == {"gateway_entrypoint_isolation_missing"}
 
 def test_sdk_lock_requires_complete_machine_readable_admission(tmp_path: Path) -> None:
     manifest_path = tmp_path / "contracts/providers/fosun/manifest.json"

@@ -152,20 +152,20 @@ def publish_probe_artifact(
     temporary_name: str | None = None
     temporary_identity: tuple[int, int] | None = None
     final_linked = False
+    final_link_uncertain = False
     try:
         directory_fd = _open_trusted_output_dir(output_dir)
-        temporary_name = f".nexus-probe-{secrets.token_hex(16)}.tmp"
-        temporary_fd = os.open(
-            temporary_name,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | os.O_NOFOLLOW
-            | os.O_CLOEXEC,
-            0o600,
-            dir_fd=directory_fd,
-        )
+        candidate_name = f".nexus-probe-{secrets.token_hex(16)}.tmp"
+        temporary_name = candidate_name
+        try:
+            temporary_fd = _open_temporary_output(directory_fd, candidate_name)
+        except FileExistsError:
+            # This name was never ours; preserve the colliding object and avoid
+            # misclassifying it as uncertain state owned by this transaction.
+            temporary_name = None
+            raise ProbeSdkError("PROBE_OUTPUT_INVALID") from None
         opened = os.fstat(temporary_fd)
+        temporary_identity = (opened.st_dev, opened.st_ino)
         if (
             not stat.S_ISREG(opened.st_mode)
             or opened.st_uid != os.geteuid()
@@ -173,12 +173,10 @@ def publish_probe_artifact(
             or opened.st_nlink != 1
         ):
             raise OSError("invalid temporary output")
-        temporary_identity = (opened.st_dev, opened.st_ino)
         _write_all(temporary_fd, artifact_bytes)
         os.fsync(temporary_fd)
-        os.close(temporary_fd)
-        temporary_fd = None
         try:
+            final_link_uncertain = True
             os.link(
                 temporary_name,
                 output_basename,
@@ -187,13 +185,38 @@ def publish_probe_artifact(
                 follow_symlinks=False,
             )
         except FileExistsError:
+            final_link_uncertain = False
             raise ProbeSdkError("PROBE_OUTPUT_EXISTS") from None
         final_linked = True
+        final_link_uncertain = False
         os.fsync(directory_fd)
         os.unlink(temporary_name, dir_fd=directory_fd)
         temporary_name = None
         os.fsync(directory_fd)
-        if not _directory_path_matches_fd(output_dir, directory_fd):
+        held = os.fstat(temporary_fd)
+        final = os.stat(
+            output_basename,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        os.lseek(temporary_fd, 0, os.SEEK_SET)
+        persisted = _read_exact(temporary_fd, expected_byte_length)
+        if (
+            not _directory_path_matches_fd(output_dir, directory_fd)
+            or (held.st_dev, held.st_ino) != temporary_identity
+            or (final.st_dev, final.st_ino) != temporary_identity
+            or not stat.S_ISREG(held.st_mode)
+            or not stat.S_ISREG(final.st_mode)
+            or held.st_uid != os.geteuid()
+            or final.st_uid != os.geteuid()
+            or stat.S_IMODE(held.st_mode) != 0o600
+            or stat.S_IMODE(final.st_mode) != 0o600
+            or held.st_nlink != 1
+            or final.st_nlink != 1
+            or held.st_size != expected_byte_length
+            or final.st_size != expected_byte_length
+            or not hmac.compare_digest(persisted, artifact_bytes)
+        ):
             raise OSError("output directory path changed during publication")
         return DurableProbePublication(
             artifact_sha256=expected_sha256,
@@ -206,6 +229,7 @@ def publish_probe_artifact(
             output_basename,
             temporary_name,
             final_linked=final_linked,
+            final_link_uncertain=final_link_uncertain,
             temporary_identity=temporary_identity,
         )
         if not cleanup_proven:
@@ -217,6 +241,7 @@ def publish_probe_artifact(
             output_basename,
             temporary_name,
             final_linked=final_linked,
+            final_link_uncertain=final_link_uncertain,
             temporary_identity=temporary_identity,
         )
         if not cleanup_proven:
@@ -228,6 +253,7 @@ def publish_probe_artifact(
             output_basename,
             temporary_name,
             final_linked=final_linked,
+            final_link_uncertain=final_link_uncertain,
             temporary_identity=temporary_identity,
         )
         if not cleanup_proven:
@@ -244,6 +270,19 @@ def publish_probe_artifact(
                 os.close(directory_fd)
             except OSError:
                 pass
+
+
+def _open_temporary_output(directory_fd: int, candidate_name: str) -> int:
+    return os.open(
+        candidate_name,
+        os.O_RDWR
+        | os.O_CREAT
+        | os.O_EXCL
+        | os.O_NOFOLLOW
+        | os.O_CLOEXEC,
+        0o600,
+        dir_fd=directory_fd,
+    )
 
 
 def _open_trusted_output_dir(path: Path) -> int:
@@ -356,6 +395,7 @@ def _cleanup_failed_publication(
     temporary_name: str | None,
     *,
     final_linked: bool,
+    final_link_uncertain: bool,
     temporary_identity: tuple[int, int] | None,
 ) -> bool:
     if directory_fd is None:
@@ -371,7 +411,7 @@ def _cleanup_failed_publication(
                 follow_symlinks=False,
             )
         except FileNotFoundError:
-            if final_linked:
+            if final_linked or final_link_uncertain:
                 proven = False
         except OSError:
             proven = False
@@ -380,9 +420,9 @@ def _cleanup_failed_publication(
                 final_metadata.st_dev,
                 final_metadata.st_ino,
             ) == temporary_identity
-            if final_linked and not final_is_ours:
+            if (final_linked or final_link_uncertain) and not final_is_ours:
                 proven = False
-    elif final_linked:
+    elif final_linked or final_link_uncertain:
         proven = False
     if final_is_ours:
         try:
@@ -391,15 +431,32 @@ def _cleanup_failed_publication(
             proven = False
         else:
             directory_changed = True
-    if temporary_name is not None:
+    if temporary_name is not None and temporary_identity is not None:
         try:
-            os.unlink(temporary_name, dir_fd=directory_fd)
+            temporary_metadata = os.stat(
+                temporary_name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
         except FileNotFoundError:
-            pass
+            proven = False
         except OSError:
             proven = False
         else:
-            directory_changed = True
+            if (
+                temporary_metadata.st_dev,
+                temporary_metadata.st_ino,
+            ) != temporary_identity:
+                proven = False
+            else:
+                try:
+                    os.unlink(temporary_name, dir_fd=directory_fd)
+                except OSError:
+                    proven = False
+                else:
+                    directory_changed = True
+    elif temporary_name is not None:
+        proven = False
     if directory_changed:
         try:
             os.fsync(directory_fd)

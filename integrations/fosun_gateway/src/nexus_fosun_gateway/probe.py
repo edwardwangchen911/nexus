@@ -53,6 +53,7 @@ _OutputBasename = Annotated[
     str,
     StringConstraints(pattern=r"^[a-z0-9][a-z0-9._-]{0,62}\.json$"),
 ]
+_PUBLICATION_RECEIPT_BASENAME = "publication-receipt.json"
 
 
 def _canonical_json(value: object) -> bytes:
@@ -91,6 +92,7 @@ class ProbePlan(BaseModel):
             self.cash_flow_date_from > self.cash_flow_date_to
             or (self.cash_flow_date_to - self.cash_flow_date_from).days >= 7
             or ".." in self.output_basename
+            or self.output_basename == _PUBLICATION_RECEIPT_BASENAME
         ):
             raise ValueError("probe plan range is invalid")
         return self
@@ -205,14 +207,21 @@ async def run_sanitized_probe(
         captured_at = utc_clock()
     except Exception:
         raise ProbeSdkError("PROBE_FAILED") from None
-    return _build_prepared_probe(
-        manifest_bytes,
-        plan,
-        evidence,
-        started_at=started_at,
-        captured_at=captured_at,
-        private_key_factory=private_key_factory,
-    )
+    try:
+        return _build_prepared_probe(
+            manifest_bytes,
+            plan,
+            evidence,
+            started_at=started_at,
+            captured_at=captured_at,
+            private_key_factory=private_key_factory,
+        )
+    except ProbeSdkError as error:
+        # Settings validation occurs before the executor. Once the fixed sequence has
+        # returned, any signer failure must conservatively consume the probe window.
+        if error.code == "PROBE_SETTINGS_INVALID":
+            raise ProbeSdkError("PROBE_FAILED") from None
+        raise
 
 
 def _build_prepared_probe(

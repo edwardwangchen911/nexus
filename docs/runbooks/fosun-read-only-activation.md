@@ -400,25 +400,40 @@ symbol and dates are attached to the approved probe record. The three secret-bea
 `FSOPENAPI_*` credential values must be injected by the approved secret manager into the one-shot
 process; never type them into a command, store them in an env file, or place them in shell history.
 The non-secret base URL comes from the admission record. The publisher seed stays in a separate
-current-user `0600` file under a protected current-user `0700` directory. All paths below are
-absolute, and the admitted base URL must byte-for-byte match the manifest.
+current-user `0600` regular, single-link file under a protected current-user `0700` directory and
+trusted ancestors. It is exactly 43 bytes with no newline: canonical unpadded base64url that
+decodes to a 32-byte Ed25519 seed. Its derived public key must match the independently approved
+43-byte public pin. All paths below are absolute, and the admitted base URL must byte-for-byte
+match the manifest.
 
 Set only the non-secret, approval-record values locally (the sample dates are deliberately
 placeholders and must not be reused blindly):
 
 ```bash
-probe_run_id='fosun-probe-YYYYMMDDTHHMMSSZ'
+set -eu
+probe_run_id='fosun-probe-yyyymmddthhmmssz'
 probe_manifest='/approved/config/fosun-provider-manifest.json'
 probe_output_dir="/approved/staging/${probe_run_id}"
-probe_frame="/approved/operator/${probe_run_id}.frame.json"
+probe_operator_dir="/approved/operator/${probe_run_id}"
+probe_frame_basename="${probe_run_id}.frame.json"
+probe_frame="${probe_operator_dir}/${probe_frame_basename}"
 probe_symbol='usAAPL'
 probe_session_date='YYYY-MM-DD'
 probe_cash_from='YYYY-MM-DD'
 probe_cash_to='YYYY-MM-DD'
 probe_output_basename="${probe_run_id}.json"
+probe_runtime='/approved/runtime/nexus-fosun-gateway/bin'
+probe_capture_bin="${probe_runtime}/nexus-fosun-capture-read-only-probe"
+probe_key_preflight_bin="${probe_runtime}/nexus-fosun-probe-publisher-key-preflight"
+probe_receipt_bin="${probe_runtime}/nexus-fosun-publish-probe-receipt"
+probe_activation_bin="${probe_runtime}/nexus-fosun-activation-gate"
 
-install -d -m 700 "$probe_output_dir"
 umask 077
+mkdir -m 700 -- "$probe_output_dir" "$probe_operator_dir"
+test -x "$probe_capture_bin"
+test -x "$probe_key_preflight_bin"
+test -x "$probe_receipt_bin"
+test -x "$probe_activation_bin"
 export FOSUN_PROVIDER_MANIFEST="$probe_manifest"
 export FOSUN_SDK_ADMITTED=true
 export FOSUN_PROBE_OUTPUT_DIR="$probe_output_dir"
@@ -428,12 +443,28 @@ export FSOPENAPI_BASE_URL='<exact-admitted-https-base-url>'
 ```
 
 `probe_session_date` must be a completed Provider session strictly before the UTC start date. The
-cash-flow range is inclusive and may span at most seven dates (`to - from <= 6 days`). The command
-has exactly eight named arguments and no generic method, URL, account or output-directory input:
+cash-flow range is inclusive and may span at most seven dates (`to - from <= 6 days`). The child
+probe command has exactly eight named arguments and no generic method, URL, account or
+output-directory input.
+
+Immediately before the approved network window, validate the signer in a separate no-network
+process. A failure consumes no Provider request at this step and is a stop; do not weaken the file
+checks or replace the approved pin:
+
+```bash
+env -u PYTHONHOME -u PYTHONPATH -u SSLKEYLOGFILE "$probe_key_preflight_bin"
+```
+
+The capture wrapper opens the result frame create-only with `O_NOFOLLOW` in the protected operator
+directory, then passes that held descriptor to the fixed eight-argument probe in the same process.
+There is no child probe that can outlive the wrapper. It never
+truncates an existing path and emits nothing to its own stdout or stderr:
 
 ```bash
 set +e
-uv run --package nexus-fosun-gateway nexus-fosun-read-only-probe \
+env -u PYTHONHOME -u PYTHONPATH -u SSLKEYLOGFILE "$probe_capture_bin" \
+  --frame-output-dir "$probe_operator_dir" \
+  --frame-basename "$probe_frame_basename" \
   --manifest "$probe_manifest" \
   --symbol "$probe_symbol" \
   --session-date "$probe_session_date" \
@@ -441,92 +472,60 @@ uv run --package nexus-fosun-gateway nexus-fosun-read-only-probe \
   --cash-flow-date-to "$probe_cash_to" \
   --limit 1 \
   --capability-ttl-seconds 3600 \
-  --output-basename "$probe_output_basename" \
-  >"$probe_frame"
+  --output-basename "$probe_output_basename"
 probe_exit=$?
 set -e
 ```
 
-The process writes no routine stderr and exactly one compact stdout frame. Do not parse or promote
-anything unless `probe_exit` is zero, the frame is one newline-terminated JSON object, its status is
-`probe_published`, and the artifact hash and byte length match the create-only file. Publish the
+All four binaries must come from the already reviewed and preinstalled immutable runtime. Do not use a
+package manager, dependency resolver, environment sync, download, or source checkout during the
+approved network window. `mkdir` is intentionally create-only: if either run directory already
+exists or either runtime binary is missing, stop and obtain a new run ID before any Provider call.
+The scrubbed interpreter environment is part of the fixed launcher contract: `PYTHONHOME`,
+`PYTHONPATH`, and `SSLKEYLOGFILE` must be absent before Python starts so an injected module cannot
+shadow the admitted SDK and TLS session secrets cannot be exported.
+
+The probe writes no routine stderr and exactly one compact result frame. Do not parse or
+promote anything unless `probe_exit` is zero, the frame is one newline-terminated JSON object, its
+status is `probe_published`, and the artifact hash and byte length match the create-only file.
+Any partial or malformed frame, wrapper failure, or pre-existing frame name requires quarantine;
+never repair or overwrite it. Publish the
 detached receipt create-only into the same protected staging directory with the repository's
 durable publisher rather than a shell redirection:
 
 ```bash
-uv run --package nexus-fosun-gateway python - \
-  "$probe_frame" "$probe_output_dir" "$probe_output_basename" <<'PY'
-import hashlib
-import json
-import sys
-from pathlib import Path
+unset FSOPENAPI_API_KEY FSOPENAPI_CLIENT_PRIVATE_KEY FSOPENAPI_SERVER_PUBLIC_KEY
+unset FOSUN_PROBE_PUBLISHER_PRIVATE_KEY_FILE FSOPENAPI_BASE_URL
 
-from nexus_fosun_gateway.activation import (
-    MAX_ARTIFACT_BYTES,
-    ProbePublicationReceipt,
-    _read_bounded_or_empty,
-)
-from nexus_fosun_gateway.publication import publish_probe_artifact
+if [ "$probe_exit" -ne 0 ]; then
+  printf '%s\n' 'probe capture failed; quarantine this run and stop' >&2
+  exit "$probe_exit"
+fi
 
-frame_path, output_dir, artifact_name = map(Path, sys.argv[1:])
-raw_frame = frame_path.read_bytes()
-if (
-    len(raw_frame) > 16 * 1024
-    or not raw_frame.endswith(b"\n")
-    or raw_frame.count(b"\n") != 1
-):
-    raise SystemExit("quarantine: incomplete or multiple result frames")
-frame = json.loads(raw_frame)
-expected_fields = {
-    "status", "code", "artifact_sha256", "byte_length",
-    "capability_expires_at", "activation_contract_hash",
-    "publication_receipt",
-}
-if set(frame) != expected_fields or frame["status"] != "probe_published":
-    raise SystemExit("quarantine: probe did not publish")
-artifact_bytes = _read_bounded_or_empty(
-    output_dir / artifact_name,
-    max_bytes=MAX_ARTIFACT_BYTES,
-)
-artifact_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
-if (
-    artifact_sha256 != frame["artifact_sha256"]
-    or len(artifact_bytes) != frame["byte_length"]
-):
-    raise SystemExit("quarantine: artifact metadata mismatch")
-receipt = ProbePublicationReceipt.model_validate(frame["publication_receipt"])
-receipt_bytes = json.dumps(
-    receipt.model_dump(mode="json"),
-    sort_keys=True,
-    separators=(",", ":"),
-).encode()
-if receipt.artifact_sha256 != artifact_sha256:
-    raise SystemExit("quarantine: receipt subject mismatch")
-publication = publish_probe_artifact(
-    output_dir,
-    "publication-receipt.json",
-    receipt_bytes,
-    expected_sha256=hashlib.sha256(receipt_bytes).hexdigest(),
-    expected_byte_length=len(receipt_bytes),
-)
-print(json.dumps({
-    "artifact_sha256": artifact_sha256,
-    "receipt_sha256": publication.artifact_sha256,
-    "activation_contract_hash": frame["activation_contract_hash"],
-}, separators=(",", ":")))
-PY
+env -u PYTHONHOME -u PYTHONPATH -u SSLKEYLOGFILE "$probe_receipt_bin" \
+  --capture-exit "$probe_exit" \
+  --frame-dir "$probe_operator_dir" \
+  --frame-basename "$probe_frame_basename" \
+  --artifact-dir "$probe_output_dir" \
+  --artifact-basename "$probe_output_basename"
 ```
+
+The fixed receipt publisher independently requires the exact capture outcome `0`, a protected
+single-link `0600` frame and artifact, their stable exact bytes, the fixed success-frame field
+order, and matching digest/length/receipt subject. A nonzero capture result cannot be converted
+into a receipt even if a complete-looking success frame or artifact exists. It emits only the two
+recomputed hashes and publishes `publication-receipt.json` create-only.
 
 Never automatically retry after any physical request or reuse an output directory/name. Apply the
 following fixed disposition:
 
 | Result | Required disposition |
 | --- | --- |
-| `COMPLETE_SDK_ADMISSION`, `INVALID_PROBE_PLAN`, `PROBE_SETTINGS_INVALID` | No Provider request is expected; correct the admission/operator record before seeking a new window. |
-| `PROBE_BUDGET_EXCEEDED`, `PROBE_RESPONSE_INVALID`, `PROBE_WINDOW_MISMATCH`, `PROBE_FAILED` | Stop, retain only sanitized audit metadata, review request counts, and obtain a new explicit window before any new probe. |
+| `COMPLETE_SDK_ADMISSION`, `INVALID_PROBE_PLAN`, `PROBE_SETTINGS_INVALID`, `SDK_NOT_AVAILABLE` | No Provider request is expected; correct the admission/runtime/operator record before seeking a new window. The independent signer preflight must precede the probe because a signer race after requests maps conservatively to `PROBE_FAILED`, never this group. |
+| `SDK_CONTRACT_MISMATCH`, `PROBE_ACCOUNT_UNAVAILABLE`, `PROBE_BUDGET_EXCEEDED`, `PROBE_RESPONSE_INVALID`, `PROBE_WINDOW_MISMATCH`, `PROBE_CAPABILITY_EXPIRED`, `PROBE_FAILED` | Treat the approved window as consumed regardless of observed counts. Stop, retain only sanitized audit metadata, review request counts, and obtain a new explicit window before any new probe. |
 | `PROBE_INTERRUPTED` / exit 130 | Treat the run as consumed; verify both sessions closed and do not retry automatically. |
-| `PROBE_OUTPUT_EXISTS` | Preserve the existing file; investigate the run ID collision and use a newly approved run ID. Never overwrite. |
-| `PROBE_OUTPUT_QUARANTINE_REQUIRED` or `PROBE_RECEIPT_DELIVERY_UNCERTAIN` | Isolate the entire staging directory. Do not reconstruct a receipt, rerun the signer, activate, or promote any file. |
+| `PROBE_OUTPUT_EXISTS` | Treat the window as consumed because artifact publication follows Provider reads. Preserve the existing file, investigate the run ID collision, and use a newly approved run ID. Never overwrite. |
+| `PROBE_OUTPUT_INVALID`, `PROBE_OUTPUT_QUARANTINE_REQUIRED`, `PROBE_RECEIPT_DELIVERY_UNCERTAIN`, malformed/partial frame, or capture-wrapper failure | Treat the window as consumed and isolate both staging and operator run directories. Do not reconstruct a frame or receipt, rerun the signer, activate, or promote any file. |
 
 After receipt extraction, run the transport-free activation gate shown below against the exact
 staged bytes. A zero exit and `activated_read_only` are evidence for review, not permission to
@@ -535,7 +534,7 @@ deploy.
 After a separately approved probe, evaluate the artifact locally:
 
 ```bash
-uv run --package nexus-fosun-gateway nexus-fosun-activation-gate \
+"$probe_activation_bin" \
   --manifest "$probe_manifest" \
   --probe-artifact "$probe_output_dir/$probe_output_basename" \
   --publication-receipt "$probe_output_dir/publication-receipt.json" \

@@ -1,10 +1,7 @@
 import base64
 import hashlib
-import json
 import os
 import stat
-import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,65 +37,6 @@ def test_publisher_create_only_fsyncs_value_free_bytes_and_returns_attestation(
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert publication.attests(artifact_sha256, len(artifact_bytes))
     assert "output" not in repr(publication).lower()
-
-
-def test_runbook_receipt_extraction_snippet_is_executable(tmp_path: Path) -> None:
-    repository_root = Path(__file__).parents[4]
-    runbook = (
-        repository_root / "docs/runbooks/fosun-read-only-activation.md"
-    ).read_text()
-    marker = "<<'PY'\n"
-    snippet_start = runbook.index(marker) + len(marker)
-    snippet = runbook[snippet_start:runbook.index("\nPY\n", snippet_start)]
-
-    output_dir = tmp_path / "output"
-    output_dir.mkdir(mode=0o700)
-    artifact_name = "synthetic-probe.json"
-    artifact_bytes = b'{"schema_version":"synthetic"}'
-    artifact_path = output_dir / artifact_name
-    artifact_path.write_bytes(artifact_bytes)
-    artifact_path.chmod(0o600)
-    artifact_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
-    receipt = {
-        "schema_version": "nexus.fosun.probe-publication.v1",
-        "artifact_sha256": artifact_sha256,
-        "signature_b64u": base64.urlsafe_b64encode(bytes(64)).rstrip(b"=").decode(),
-    }
-    frame = {
-        "status": "probe_published",
-        "code": "OK",
-        "artifact_sha256": artifact_sha256,
-        "byte_length": len(artifact_bytes),
-        "capability_expires_at": "2026-08-31T09:00:00Z",
-        "activation_contract_hash": "1" * 64,
-        "publication_receipt": receipt,
-    }
-    frame_path = tmp_path / "frame.json"
-    frame_path.write_text(json.dumps(frame, separators=(",", ":")) + "\n")
-    frame_path.chmod(0o600)
-
-    completed = subprocess.run(
-        [sys.executable, "-", str(frame_path), str(output_dir), artifact_name],
-        input=snippet,
-        text=True,
-        capture_output=True,
-        cwd=repository_root,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    summary = json.loads(completed.stdout)
-    receipt_bytes = json.dumps(
-        receipt,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    assert summary == {
-        "artifact_sha256": artifact_sha256,
-        "receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
-        "activation_contract_hash": "1" * 64,
-    }
-    assert (output_dir / "publication-receipt.json").read_bytes() == receipt_bytes
 
 
 def test_publication_stages_file_link_and_directory_durability_in_order(
@@ -144,6 +82,317 @@ def test_publication_stages_file_link_and_directory_durability_in_order(
         "unlink:temp",
         "fsync:dir",
     ]
+
+
+def test_publisher_retries_partial_writes_until_the_exact_bytes_are_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    content = b"partial-write-loop"
+    real_write = os.write
+    write_calls = 0
+
+    def one_byte_write(file_descriptor: int, chunk: bytes | memoryview) -> int:
+        nonlocal write_calls
+        write_calls += 1
+        return real_write(file_descriptor, chunk[:1])
+
+    monkeypatch.setattr(os, "write", one_byte_write)
+
+    publish_probe_artifact(
+        output_dir,
+        "probe.json",
+        content,
+        expected_sha256=hashlib.sha256(content).hexdigest(),
+        expected_byte_length=len(content),
+    )
+
+    assert write_calls == len(content)
+    assert (output_dir / "probe.json").read_bytes() == content
+
+
+def test_publisher_quarantines_temporary_name_swap_before_link(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    real_link = os.link
+
+    def swap_then_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int,
+        dst_dir_fd: int,
+        follow_symlinks: bool,
+    ) -> None:
+        os.unlink(source, dir_fd=src_dir_fd)
+        replacement_fd = os.open(
+            source,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=src_dir_fd,
+        )
+        try:
+            os.write(replacement_fd, b"replacement")
+        finally:
+            os.close(replacement_fd)
+        real_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(os, "link", swap_then_link)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        publish_probe_artifact(
+            output_dir,
+            "probe.json",
+            b"expected",
+            expected_sha256=hashlib.sha256(b"expected").hexdigest(),
+            expected_byte_length=len(b"expected"),
+        )
+
+    assert exc_info.value.code == "PROBE_OUTPUT_QUARANTINE_REQUIRED"
+    assert (output_dir / "probe.json").read_bytes() == b"replacement"
+
+
+def test_publisher_quarantines_final_name_swap_after_link(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    real_fsync = os.fsync
+    directory_fsyncs = 0
+
+    def swap_after_second_directory_fsync(file_descriptor: int) -> None:
+        nonlocal directory_fsyncs
+        real_fsync(file_descriptor)
+        if not stat.S_ISDIR(os.fstat(file_descriptor).st_mode):
+            return
+        directory_fsyncs += 1
+        if directory_fsyncs != 2:
+            return
+        os.unlink("probe.json", dir_fd=file_descriptor)
+        replacement_fd = os.open(
+            "probe.json",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=file_descriptor,
+        )
+        try:
+            os.write(replacement_fd, b"replacement")
+        finally:
+            os.close(replacement_fd)
+
+    monkeypatch.setattr(os, "fsync", swap_after_second_directory_fsync)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        publish_probe_artifact(
+            output_dir,
+            "probe.json",
+            b"expected",
+            expected_sha256=hashlib.sha256(b"expected").hexdigest(),
+            expected_byte_length=len(b"expected"),
+        )
+
+    assert exc_info.value.code == "PROBE_OUTPUT_QUARANTINE_REQUIRED"
+    assert (output_dir / "probe.json").read_bytes() == b"replacement"
+
+
+def test_publisher_preserves_preexisting_temporary_name_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.publication.secrets.token_hex",
+        lambda _length: "fixed",
+    )
+    collision = output_dir / ".nexus-probe-fixed.tmp"
+    collision.write_bytes(b"preserve")
+    collision.chmod(0o600)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        publish_probe_artifact(
+            output_dir,
+            "probe.json",
+            b"expected",
+            expected_sha256=hashlib.sha256(b"expected").hexdigest(),
+            expected_byte_length=len(b"expected"),
+        )
+
+    assert exc_info.value.code == "PROBE_OUTPUT_INVALID"
+    assert collision.read_bytes() == b"preserve"
+    assert not (output_dir / "probe.json").exists()
+
+
+def test_interrupt_after_temporary_open_before_identity_requires_quarantine(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.publication.secrets.token_hex",
+        lambda _length: "fixed",
+    )
+    real_open = os.open
+
+    def open_then_interrupt(directory_fd: int, candidate_name: str) -> int:
+        real_open(
+            candidate_name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.publication._open_temporary_output",
+        open_then_interrupt,
+    )
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        publish_probe_artifact(
+            output_dir,
+            "probe.json",
+            b"expected",
+            expected_sha256=hashlib.sha256(b"expected").hexdigest(),
+            expected_byte_length=len(b"expected"),
+        )
+
+    assert exc_info.value.code == "PROBE_OUTPUT_QUARANTINE_REQUIRED"
+    assert (output_dir / ".nexus-probe-fixed.tmp").exists()
+    assert not (output_dir / "probe.json").exists()
+
+
+def test_publisher_never_unlinks_swapped_foreign_temporary_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.publication.secrets.token_hex",
+        lambda _length: "fixed",
+    )
+    temporary = output_dir / ".nexus-probe-fixed.tmp"
+    real_fsync = os.fsync
+
+    def swap_then_fail_fsync(file_descriptor: int) -> None:
+        if stat.S_ISREG(os.fstat(file_descriptor).st_mode):
+            temporary.unlink()
+            temporary.write_bytes(b"foreign")
+            temporary.chmod(0o600)
+            raise OSError("synthetic-file-fsync-canary")
+        real_fsync(file_descriptor)
+
+    monkeypatch.setattr(os, "fsync", swap_then_fail_fsync)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        publish_probe_artifact(
+            output_dir,
+            "probe.json",
+            b"expected",
+            expected_sha256=hashlib.sha256(b"expected").hexdigest(),
+            expected_byte_length=len(b"expected"),
+        )
+
+    assert exc_info.value.code == "PROBE_OUTPUT_QUARANTINE_REQUIRED"
+    assert temporary.read_bytes() == b"foreign"
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    [
+        "partial_write",
+        "file_fsync",
+        "link",
+        "unsupported_link_flags",
+        "second_directory_fsync",
+        "temporary_unlink",
+    ],
+)
+def test_recoverable_publication_stage_failure_leaves_no_residual_file(
+    failure_stage: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    real_write = os.write
+    real_fsync = os.fsync
+    real_link = os.link
+    real_unlink = os.unlink
+    writes = 0
+    directory_fsyncs = 0
+    temporary_unlinks = 0
+
+    def injected_write(file_descriptor: int, chunk: bytes | memoryview) -> int:
+        nonlocal writes
+        writes += 1
+        if failure_stage == "partial_write":
+            if writes == 1:
+                return real_write(file_descriptor, chunk[:1])
+            raise OSError("synthetic partial-write failure")
+        return real_write(file_descriptor, chunk)
+
+    def injected_fsync(file_descriptor: int) -> None:
+        nonlocal directory_fsyncs
+        metadata = os.fstat(file_descriptor)
+        if failure_stage == "file_fsync" and stat.S_ISREG(metadata.st_mode):
+            raise OSError("synthetic file-fsync failure")
+        if stat.S_ISDIR(metadata.st_mode):
+            directory_fsyncs += 1
+            if failure_stage == "second_directory_fsync" and directory_fsyncs == 2:
+                raise OSError("synthetic second-directory-fsync failure")
+        real_fsync(file_descriptor)
+
+    def injected_link(*args: object, **kwargs: object) -> None:
+        if failure_stage == "link":
+            raise OSError("synthetic link failure")
+        if failure_stage == "unsupported_link_flags":
+            raise NotImplementedError("synthetic unsupported link flags")
+        real_link(*args, **kwargs)
+
+    def injected_unlink(path: str, *, dir_fd: int | None = None) -> None:
+        nonlocal temporary_unlinks
+        if path.startswith(".nexus-probe-"):
+            temporary_unlinks += 1
+            if failure_stage == "temporary_unlink" and temporary_unlinks == 1:
+                raise OSError("synthetic temporary-unlink failure")
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "write", injected_write)
+    monkeypatch.setattr(os, "fsync", injected_fsync)
+    monkeypatch.setattr(os, "link", injected_link)
+    monkeypatch.setattr(os, "unlink", injected_unlink)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        publish_probe_artifact(
+            output_dir,
+            "probe.json",
+            b"new",
+            expected_sha256=hashlib.sha256(b"new").hexdigest(),
+            expected_byte_length=3,
+        )
+
+    expected_code = (
+        "PROBE_OUTPUT_QUARANTINE_REQUIRED"
+        if failure_stage in {"link", "unsupported_link_flags"}
+        else "PROBE_OUTPUT_INVALID"
+    )
+    assert exc_info.value.code == expected_code
+    assert list(output_dir.iterdir()) == []
 
 
 def test_durable_publication_cannot_be_constructed_by_a_caller() -> None:
@@ -313,6 +562,85 @@ def test_interrupted_link_is_cleaned_when_the_final_was_created(
             expected_byte_length=3,
         )
 
+    assert list(output_dir.iterdir()) == []
+
+
+def test_link_then_raise_with_foreign_final_requires_quarantine(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    real_link = os.link
+
+    def swap_link_then_raise(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int,
+        dst_dir_fd: int,
+        follow_symlinks: bool,
+    ) -> None:
+        os.unlink(source, dir_fd=src_dir_fd)
+        replacement_fd = os.open(
+            source,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=src_dir_fd,
+        )
+        try:
+            os.write(replacement_fd, b"replacement")
+        finally:
+            os.close(replacement_fd)
+        real_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        raise OSError("synthetic-link-return-canary")
+
+    monkeypatch.setattr(os, "link", swap_link_then_raise)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        publish_probe_artifact(
+            output_dir,
+            "probe.json",
+            b"expected",
+            expected_sha256=hashlib.sha256(b"expected").hexdigest(),
+            expected_byte_length=len(b"expected"),
+        )
+
+    assert exc_info.value.code == "PROBE_OUTPUT_QUARANTINE_REQUIRED"
+    assert (output_dir / "probe.json").read_bytes() == b"replacement"
+
+
+def test_link_create_unlink_then_raise_requires_quarantine(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(mode=0o700)
+    real_link = os.link
+
+    def link_unlink_then_raise(*args: object, **kwargs: object) -> None:
+        real_link(*args, **kwargs)
+        os.unlink("probe.json", dir_fd=kwargs["dst_dir_fd"])
+        raise OSError("synthetic-uncertain-link-canary")
+
+    monkeypatch.setattr(os, "link", link_unlink_then_raise)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        publish_probe_artifact(
+            output_dir,
+            "probe.json",
+            b"expected",
+            expected_sha256=hashlib.sha256(b"expected").hexdigest(),
+            expected_byte_length=len(b"expected"),
+        )
+
+    assert exc_info.value.code == "PROBE_OUTPUT_QUARANTINE_REQUIRED"
     assert list(output_dir.iterdir()) == []
 
 

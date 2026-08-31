@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,7 @@ from nexus_fosun_gateway.adapter.probe_sdk import (
     ProbeSdkError,
     ProbeTransportBundle,
     SdkProbeExecutor,
+    _close_probe_controls_bounded,
     _require_page_contract,
     build_probe_transport,
 )
@@ -113,6 +115,48 @@ async def test_probe_budget_refusal_crosses_sdk_adapter_without_retry() -> None:
 
     assert limiter.calls == 1
     assert sdk_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_probe_controls_close_has_an_absolute_one_shot_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = Event()
+    release = Event()
+
+    class BlockingControls:
+        def close(self) -> None:
+            entered.set()
+            assert release.wait(timeout=2)
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.adapter.probe_sdk._PROBE_CONTROLS_CLOSE_TIMEOUT_SECONDS",
+        0.02,
+    )
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        await _close_probe_controls_bounded(BlockingControls())  # type: ignore[arg-type]
+
+    assert exc_info.value.code == "PROBE_FAILED"
+    assert entered.is_set()
+    release.set()
+
+
+@pytest.mark.asyncio
+async def test_http_proxy_budget_refusal_crosses_real_sdk_adapter_without_retry() -> None:
+    budget = _new_budget()
+    harness = InstrumentedTransport(budget)
+    bundle = _probe_bundle(harness, RecordingControls(), budget)
+    budget._counts["Session"] = 3
+
+    with budget.operation("Accounts"), pytest.raises(ProbeBudgetError):
+        await bundle.transport.execute("fosun_sync_accounts", {})
+
+    assert harness.calls == [("fosun_sync_accounts", {})]
+    assert harness.auth_session is not None
+    assert harness.auth_session.post_count == 0
+    assert harness.business_session.request_count == 0
+    await bundle.aclose()
 
 
 def test_auth_is_allowed_only_during_accounts_and_labels_cannot_overlap() -> None:
@@ -725,6 +769,95 @@ def test_probe_factory_rejects_missing_sdk_contract_without_binding_budget(
             budget.try_acquire_at_call_edge()
 
 
+@pytest.mark.parametrize("failure_kind", ["error", "interrupt", "system_exit"])
+def test_probe_factory_closes_both_sessions_when_bundle_attestation_fails(
+    failure_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sessions: list[FakeSession] = []
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self.closed = False
+            self._adapters = {
+                "https://": requests.adapters.HTTPAdapter(max_retries=2)
+            }
+            sessions.append(self)
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            self._adapters[prefix] = adapter
+
+        def get_adapter(self, prefix: str) -> object:
+            return self._adapters[prefix]
+
+        def request(self, *_args: object, **_kwargs: object) -> object:
+            return FakeResponse()
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            return FakeResponse()
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeRequests:
+        adapters = requests.adapters
+        Session = FakeSession
+
+    class FakeSdkClient:
+        def __init__(self, **_kwargs: object) -> None:
+            self._http_session = FakeSession()
+
+    auth_module = SimpleNamespace(requests=FakeRequests())
+
+    def module_import(name: str) -> object:
+        if name == "fsopenapi":
+            return SimpleNamespace(SDKClient=FakeSdkClient)
+        if name == "fsopenapi.auth":
+            return auth_module
+        raise AssertionError(name)
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.adapter.probe_sdk.importlib.import_module",
+        module_import,
+    )
+    def fail_bundle(**_kwargs: object) -> object:
+        if failure_kind == "interrupt":
+            raise KeyboardInterrupt
+        if failure_kind == "system_exit":
+            raise SystemExit(9)
+        raise RuntimeError("synthetic-attestation")
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.adapter.probe_sdk.ProbeTransportBundle",
+        fail_bundle,
+    )
+
+    if failure_kind == "error":
+        with pytest.raises(ProbeSdkError) as exc_info:
+            build_probe_transport(
+                _admitted_document(),
+                ProbeProviderSettings.model_validate(_settings_values(tmp_path)),
+                PhysicalHttpBudget(),
+            )
+        assert exc_info.value.code == "SDK_CONTRACT_MISMATCH"
+    else:
+        expected = KeyboardInterrupt if failure_kind == "interrupt" else SystemExit
+        with pytest.raises(expected):
+            build_probe_transport(
+                _admitted_document(),
+                ProbeProviderSettings.model_validate(_settings_values(tmp_path)),
+                PhysicalHttpBudget(),
+            )
+    assert len(sessions) == 2
+    assert all(session.closed for session in sessions)
+
+
 class RecordingControls:
     def __init__(self) -> None:
         self.close_calls = 0
@@ -1043,6 +1176,8 @@ class _HarnessSession:
         self._on_close = on_close
         self._adapters = {"https://": requests.adapters.HTTPAdapter(max_retries=2)}
         self.close_count = 0
+        self.request_count = 0
+        self.post_count = 0
 
     def mount(self, prefix: str, adapter: object) -> None:
         self._adapters[prefix] = adapter
@@ -1051,9 +1186,11 @@ class _HarnessSession:
         return self._adapters[prefix]
 
     def request(self, *_args: object, **_kwargs: object) -> _HarnessResponse:
+        self.request_count += 1
         return _HarnessResponse(200)
 
     def post(self, *_args: object, **_kwargs: object) -> _HarnessResponse:
+        self.post_count += 1
         if not self._statuses:
             raise AssertionError("unexpected auth request")
         return _HarnessResponse(self._statuses.pop(0))

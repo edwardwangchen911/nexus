@@ -35,6 +35,10 @@ from nexus_fosun_gateway.security.dependency_logging import (
     enforce_sdk_dependency_log_boundary,
 )
 from nexus_fosun_gateway.security.hmac import GatewayHmacVerifier, VerifiedGatewayActor
+from nexus_fosun_gateway.security.provider_environment import (
+    UnsafeProviderEnvironmentError,
+    reject_unsafe_provider_environment,
+)
 from nexus_fosun_gateway.security.provider_tls import enforce_sdk_tls_verification
 from nexus_fosun_gateway.security.tls import production_listener_configs
 from nexus_fosun_gateway.settings import BROKER_LISTENER_PORT, Environment, GatewaySettings
@@ -82,6 +86,10 @@ def build_transport(
         or settings.activation_contract_hash_file is None
     ):
         raise _sdk_not_admitted()
+    try:
+        reject_unsafe_provider_environment()
+    except UnsafeProviderEnvironmentError:
+        raise _sdk_not_admitted() from None
     if activation_monotonic_anchor is None:
         activation_monotonic_anchor = time.monotonic()
     if activation_checked_at is None:

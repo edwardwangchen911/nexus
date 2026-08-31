@@ -19,6 +19,25 @@ REQUIRED_PROBE_OPERATIONS = (
 )
 BROKER_PROBE_OPERATIONS = REQUIRED_PROBE_OPERATIONS[:6]
 MAX_BROKER_REQUESTS = 6
+PROBE_CLI_ARGUMENT_NAMES = (
+    "--manifest",
+    "--symbol",
+    "--session-date",
+    "--cash-flow-date-from",
+    "--cash-flow-date-to",
+    "--limit",
+    "--capability-ttl-seconds",
+    "--output-basename",
+)
+PROBE_RESULT_FIELD_NAMES = (
+    "status",
+    "code",
+    "artifact_sha256",
+    "byte_length",
+    "capability_expires_at",
+    "activation_contract_hash",
+    "publication_receipt",
+)
 
 _CONTRACT_SCHEMA_VERSION = "nexus.fosun.probe-response-contract.v1"
 _PAGE_FIELDS: tuple[tuple[str, str], ...] = (

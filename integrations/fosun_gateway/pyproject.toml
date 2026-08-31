@@ -17,6 +17,9 @@ nexus-fosun-gateway = "nexus_fosun_gateway.main:run"
 nexus-fosun-gateway-ready = "nexus_fosun_gateway.readiness:main"
 nexus-fosun-activation-gate = "nexus_fosun_gateway.activation:main"
 nexus-fosun-read-only-probe = "nexus_fosun_gateway.probe_cli:run"
+nexus-fosun-capture-read-only-probe = "nexus_fosun_gateway.probe_capture:run"
+nexus-fosun-probe-publisher-key-preflight = "nexus_fosun_gateway.probe_capture:key_preflight_run"
+nexus-fosun-publish-probe-receipt = "nexus_fosun_gateway.probe_receipt:run"
 nexus-fosun-simulation-fixture = "nexus_fosun_gateway.simulation_main:run_fixture"
 
 [dependency-groups]

@@ -11,10 +11,10 @@ CI 不部署、不发布镜像、不改变权限，也不构成复星 SDK admiss
 | Job | 门禁 |
 | --- | --- |
 | `web` | npm clean install、lint、typecheck、424 项 unit、generated client、production build |
-| `gateway-offline` | guard 自测、guard 下全部 145 项 gateway 测试、Ruff、Mypy |
+| `gateway-offline` | guard 自测、guard 下全部 gateway 测试、Ruff、Mypy |
 | `engine-postgres` | 固定 digest PostgreSQL、空库迁移到 head、全部 Engine 测试、隔离 PostgreSQL＋MinIO fixture 恢复演练、Ruff、Mypy |
 | `e2e` | Playwright 锁定 Chromium、3 workers、64 项 synthetic E2E |
-| `policy` | 12 项策略测试、密钥/禁止路由/TLS 修复/SDK lock/容器/CI 策略、761 项依赖许可证清单、npm/Python 漏洞审计、两 Compose profile |
+| `policy` | 全部策略测试、密钥/禁止路由/TLS 修复/SDK lock/容器/CI 策略、依赖许可证清单、npm/Python 漏洞审计、两 Compose profile |
 
 第三方 Actions 使用完整 commit SHA；容器引用同时保留可读 tag 和不可变 SHA-256 digest。两个运行镜像最终都声明非 root 用户，`.dockerignore` 排除 VCS、secret、env、依赖缓存和测试产物域。
 

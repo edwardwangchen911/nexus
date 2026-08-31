@@ -17,6 +17,7 @@ from nexus_fosun_gateway.activation import (
 from nexus_fosun_gateway.adapter.probe_sdk import (
     ProbeExecutionEvidence,
     ProbeSdkError,
+    SdkProbeExecutor,
 )
 from nexus_fosun_gateway.probe import (
     ProbePlan,
@@ -75,6 +76,7 @@ def test_probe_runner_requires_an_explicit_publisher_signing_key_factory() -> No
         {"output_basename": ".probe.json"},
         {"output_basename": "Probe.json"},
         {"output_basename": "probe.txt"},
+        {"output_basename": "publication-receipt.json"},
         {
             "cash_flow_date_from": date(2026, 8, 22),
             "cash_flow_date_to": date(2026, 8, 21),
@@ -445,6 +447,34 @@ def test_signing_key_configuration_error_remains_actionable() -> None:
         )
 
     assert exc_info.value.code == "PROBE_SETTINGS_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_signing_key_failure_after_probe_is_reported_as_consumed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def successful_provider_sequence(
+        _executor: SdkProbeExecutor,
+        _request: object,
+    ) -> ProbeExecutionEvidence:
+        return _evidence()
+
+    monkeypatch.setattr(SdkProbeExecutor, "run", successful_provider_sequence)
+    executor = object.__new__(SdkProbeExecutor)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        await run_sanitized_probe(
+            _json_bytes(_admitted_manifest()),
+            _plan(),
+            executor,
+            started_at=STARTED_AT,
+            private_key_factory=lambda: (_ for _ in ()).throw(
+                ProbeSdkError("PROBE_SETTINGS_INVALID")
+            ),
+            utc_clock=lambda: CAPTURED_AT,
+        )
+
+    assert exc_info.value.code == "PROBE_FAILED"
 
 
 def _plan() -> ProbePlan:

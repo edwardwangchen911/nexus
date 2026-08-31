@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Literal
 
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
@@ -35,6 +35,10 @@ from nexus_fosun_gateway.probe_contract import MAX_BROKER_REQUESTS
 from nexus_fosun_gateway.probe_settings import ProbeProviderSettings
 from nexus_fosun_gateway.security.dependency_logging import (
     enforce_sdk_dependency_log_boundary,
+)
+from nexus_fosun_gateway.security.provider_environment import (
+    UnsafeProviderEnvironmentError,
+    reject_unsafe_provider_environment,
 )
 from nexus_fosun_gateway.security.provider_tls import (
     HttpSurface,
@@ -95,6 +99,7 @@ _WINDOW_SECONDS = 60.0
 _MIN_DISPATCH_INTERVAL_SECONDS = 1.0
 _SYMBOL_PATTERN = re.compile(r"us[A-Z][A-Z0-9.]{0,14}")
 _PROBE_BUNDLE_ATTESTATION = object()
+_PROBE_CONTROLS_CLOSE_TIMEOUT_SECONDS = 11.0
 
 
 def _utc_now() -> datetime:
@@ -219,7 +224,7 @@ class ProbeTransportBundle:
         except Exception:
             failed = True
         try:
-            self.controls.close()
+            await _close_probe_controls_bounded(self.controls)
         except (asyncio.CancelledError, KeyboardInterrupt) as error:
             if interrupted is None:
                 interrupted = error
@@ -229,6 +234,35 @@ class ProbeTransportBundle:
             raise interrupted
         if failed:
             raise ProbeSdkError("PROBE_FAILED")
+
+
+async def _close_probe_controls_bounded(controls: ProbeTlsControls) -> None:
+    """Keep synchronous session revocation off-loop and bound one-shot shutdown."""
+    finished = Event()
+    failures: list[BaseException] = []
+
+    def close_controls() -> None:
+        try:
+            controls.close()
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            finished.set()
+
+    closer = Thread(
+        target=close_controls,
+        name="nexus-fosun-probe-close",
+        daemon=True,
+    )
+    closer.start()
+    deadline = time.monotonic() + _PROBE_CONTROLS_CLOSE_TIMEOUT_SECONDS
+    while not finished.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProbeSdkError("PROBE_FAILED")
+        await asyncio.sleep(min(remaining, 0.01))
+    if failures:
+        raise failures[0]
 
 
 class PhysicalHttpBudget:
@@ -395,11 +429,14 @@ def build_probe_transport(
         raise ProbeSdkError("PROBE_SETTINGS_INVALID")
 
     try:
+        reject_unsafe_provider_environment()
         enforce_sdk_dependency_log_boundary()
         sdk_module = importlib.import_module("fsopenapi")
         auth_module = importlib.import_module("fsopenapi.auth")
     except ImportError:
         raise ProbeSdkError("SDK_NOT_AVAILABLE") from None
+    except UnsafeProviderEnvironmentError:
+        raise ProbeSdkError("PROBE_SETTINGS_INVALID") from None
     except Exception:
         raise ProbeSdkError("SDK_NOT_AVAILABLE") from None
 
@@ -408,7 +445,6 @@ def build_probe_transport(
         raise ProbeSdkError("SDK_CONTRACT_MISMATCH")
 
     controls: ProbeTlsControls | None = None
-    transport: SdkFosunTransport | None = None
     try:
         enforce_sdk_dependency_log_boundary()
         client = client_type(
@@ -424,25 +460,19 @@ def build_probe_transport(
         )
         budget.bind_http_controls()
         transport = SdkFosunTransport(client, rate_limiter=budget)
-    except (asyncio.CancelledError, KeyboardInterrupt):
+        return ProbeTransportBundle(
+            transport=transport,
+            controls=controls,
+            budget=budget,
+            client=client,
+            _attestation=_PROBE_BUNDLE_ATTESTATION,
+        )
+    except BaseException as error:
         if controls is not None:
             _close_controls_quietly(controls)
-        raise
-    except Exception:
-        if transport is not None:
-            _close_unstarted_transport(transport)
-        if controls is not None:
-            _close_controls_quietly(controls)
+        if isinstance(error, asyncio.CancelledError | KeyboardInterrupt | SystemExit):
+            raise
         raise ProbeSdkError("SDK_CONTRACT_MISMATCH") from None
-    assert transport is not None
-    assert controls is not None
-    return ProbeTransportBundle(
-        transport=transport,
-        controls=controls,
-        budget=budget,
-        client=client,
-        _attestation=_PROBE_BUNDLE_ATTESTATION,
-    )
 
 
 class SdkProbeExecutor:
@@ -704,13 +734,5 @@ def _map_gateway_error(error: GatewayError) -> ProbeSdkError:
 def _close_controls_quietly(controls: ProbeTlsControls) -> None:
     try:
         controls.close()
-    except Exception:
-        pass
-
-
-def _close_unstarted_transport(transport: FosunTransport) -> None:
-    """Close a transport built before an event loop exists, without leaking failures."""
-    try:
-        asyncio.run(transport.aclose())
     except Exception:
         pass

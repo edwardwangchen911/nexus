@@ -30,22 +30,18 @@ from nexus_fosun_gateway.probe import (
     run_sanitized_probe,
     validate_sanitized_probe_artifact,
 )
+from nexus_fosun_gateway.probe_contract import PROBE_CLI_ARGUMENT_NAMES
 from nexus_fosun_gateway.probe_settings import ProbeProviderSettings
 from nexus_fosun_gateway.publication import (
     load_probe_signing_key,
     publish_probe_artifact,
 )
-
-_ARGUMENT_NAMES = (
-    "--manifest",
-    "--symbol",
-    "--session-date",
-    "--cash-flow-date-from",
-    "--cash-flow-date-to",
-    "--limit",
-    "--capability-ttl-seconds",
-    "--output-basename",
+from nexus_fosun_gateway.security.provider_environment import (
+    UnsafeProviderEnvironmentError,
+    reject_unsafe_provider_environment,
 )
+
+_ARGUMENT_NAMES = PROBE_CLI_ARGUMENT_NAMES
 _PROBE_ENVIRONMENT_NAMES = (
     "FOSUN_PROVIDER_MANIFEST",
     "FOSUN_SDK_ADMITTED",
@@ -76,6 +72,7 @@ def failure_result(code: str) -> dict[str, object]:
 def write_result_frame(
     result: dict[str, object],
     *,
+    file_descriptor: int = 1,
     writer: Callable[[int, bytes | memoryview], int] = os.write,
 ) -> bool:
     """Write exactly one JSON frame; callers must never emit a recovery frame."""
@@ -87,7 +84,7 @@ def write_result_frame(
     offset = 0
     while offset < len(view):
         try:
-            written = writer(1, view[offset:])
+            written = writer(file_descriptor, view[offset:])
         except InterruptedError:
             continue
         except OSError:
@@ -102,7 +99,7 @@ def write_result_frame(
     return True
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, output_fd: int = 1) -> int:
     arguments = tuple(sys.argv[1:] if argv is None else argv)
     try:
         result = asyncio.run(_execute_once(arguments))
@@ -114,7 +111,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = failure_result("PROBE_FAILED")
         exit_code = 2
     try:
-        delivered = write_result_frame(result)
+        delivered = write_result_frame(result, file_descriptor=output_fd)
     except BaseException:
         return 2
     if not delivered:
@@ -127,6 +124,7 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
     publication_complete = False
     publication_path: Path | None = None
     try:
+        reject_unsafe_provider_environment()
         manifest_spelling, manifest_path = _parse_manifest_argument(arguments)
         manifest_bytes = _read_bounded_or_empty(
             manifest_path,
@@ -207,7 +205,7 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
         ):
             return failure_result("PROBE_OUTPUT_QUARANTINE_REQUIRED")
         raise
-    except ValidationError:
+    except (UnsafeProviderEnvironmentError, ValidationError):
         return failure_result("PROBE_SETTINGS_INVALID")
     except ProbeSdkError as error:
         if publication_complete and error.code != "PROBE_OUTPUT_QUARANTINE_REQUIRED":

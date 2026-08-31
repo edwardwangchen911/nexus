@@ -3,12 +3,14 @@ import http.client
 import io
 import logging
 import threading
+from collections.abc import Callable
 from io import BytesIO
 from types import SimpleNamespace
 
 import nexus_fosun_gateway.security.provider_tls as provider_tls_module
 import pytest
 import requests
+from nexus_fosun_gateway.adapter.refusal import NonRetryableTransportRefusal
 from nexus_fosun_gateway.security.provider_tls import (
     _MAX_PROVIDER_RESPONSE_BYTES,
     ProbeTlsControls,
@@ -423,6 +425,325 @@ def test_probe_tls_close_revokes_dispatch_waiting_inside_observer() -> None:
     assert delegated is False
     assert len(errors) == 1
     assert all(session.closed for session in sessions)
+
+
+def test_probe_tls_close_wins_race_before_atomic_delegate_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dispatch_entered = threading.Event()
+    release_dispatch = threading.Event()
+    delegated = False
+    errors: list[BaseException] = []
+
+    class FakeResponse:
+        headers: dict[str, str] = {}
+        status_code = 200
+
+        def iter_content(self, *, chunk_size: int) -> tuple[bytes, ...]:
+            del chunk_size
+            return (b"{}",)
+
+        def close(self) -> None:
+            return None
+
+    class FakeProbeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self._adapters = {
+                "https://": requests.adapters.HTTPAdapter(max_retries=2)
+            }
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            self._adapters[prefix] = adapter
+
+        def get_adapter(self, prefix: str) -> object:
+            return self._adapters[prefix]
+
+        def request(self, *_args: object, **_kwargs: object) -> object:
+            nonlocal delegated
+            delegated = True
+            return FakeResponse()
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("unused")
+
+        def close(self) -> None:
+            return None
+
+    class FakeRequests:
+        adapters = requests.adapters
+        Session = FakeProbeSession
+
+    client = SimpleNamespace(_http_session=FakeProbeSession())
+    auth_module = SimpleNamespace(requests=FakeRequests())
+    controls = enforce_probe_tls_controls(
+        client,
+        auth_module,
+        observer=_RecordingObserver([]),
+    )
+    gate = client._http_session._dispatch_gate
+    real_dispatch = gate.dispatch
+
+    def pause_before_dispatch(operation: Callable[[], object]) -> object:
+        dispatch_entered.set()
+        assert release_dispatch.wait(timeout=2)
+        return real_dispatch(operation)
+
+    monkeypatch.setattr(gate, "dispatch", pause_before_dispatch)
+
+    def invoke() -> None:
+        try:
+            client._http_session.request("POST", "https://provider.invalid")
+        except BaseException as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=invoke)
+    thread.start()
+    assert dispatch_entered.wait(timeout=1)
+    controls.close()
+    release_dispatch.set()
+    thread.join(timeout=2)
+
+    assert thread.is_alive() is False
+    assert delegated is False
+    assert len(errors) == 1
+
+
+def test_probe_tls_close_waits_for_a_linearized_inflight_dispatch() -> None:
+    delegate_started = threading.Event()
+    release_delegate = threading.Event()
+    close_attempted = threading.Event()
+    close_finished = threading.Event()
+    errors: list[BaseException] = []
+
+    class FakeResponse:
+        headers: dict[str, str] = {}
+        status_code = 200
+
+        def iter_content(self, *, chunk_size: int) -> tuple[bytes, ...]:
+            del chunk_size
+            return (b"{}",)
+
+        def close(self) -> None:
+            return None
+
+    class FakeProbeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self._adapters = {
+                "https://": requests.adapters.HTTPAdapter(max_retries=2)
+            }
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            self._adapters[prefix] = adapter
+
+        def get_adapter(self, prefix: str) -> object:
+            return self._adapters[prefix]
+
+        def request(self, *_args: object, **_kwargs: object) -> object:
+            delegate_started.set()
+            assert release_delegate.wait(timeout=2)
+            return FakeResponse()
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("unused")
+
+        def close(self) -> None:
+            return None
+
+    class FakeRequests:
+        adapters = requests.adapters
+        Session = FakeProbeSession
+
+    client = SimpleNamespace(_http_session=FakeProbeSession())
+    controls = enforce_probe_tls_controls(
+        client,
+        SimpleNamespace(requests=FakeRequests()),
+        observer=_RecordingObserver([]),
+    )
+
+    def invoke() -> None:
+        try:
+            client._http_session.request("POST", "https://provider.invalid")
+        except BaseException as error:
+            errors.append(error)
+
+    def close() -> None:
+        close_attempted.set()
+        controls.close()
+        close_finished.set()
+
+    request_thread = threading.Thread(target=invoke)
+    request_thread.start()
+    assert delegate_started.wait(timeout=1)
+    close_thread = threading.Thread(target=close)
+    close_thread.start()
+    assert close_attempted.wait(timeout=1)
+    assert close_finished.wait(timeout=0.1) is False
+    release_delegate.set()
+    request_thread.join(timeout=2)
+    close_thread.join(timeout=2)
+
+    assert request_thread.is_alive() is False
+    assert close_thread.is_alive() is False
+    assert close_finished.is_set()
+    assert errors == []
+
+
+def test_probe_tls_close_does_not_wait_for_a_stuck_streamed_body() -> None:
+    body_started = threading.Event()
+    release_body = threading.Event()
+    close_finished = threading.Event()
+    delegate_calls = 0
+    errors: list[BaseException] = []
+
+    class BlockingBodyResponse:
+        headers: dict[str, str] = {}
+        status_code = 200
+
+        def iter_content(self, *, chunk_size: int) -> tuple[bytes, ...]:
+            del chunk_size
+            body_started.set()
+            assert release_body.wait(timeout=2)
+            return (b"{}",)
+
+        def close(self) -> None:
+            return None
+
+    class FakeProbeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self._adapters = {
+                "https://": requests.adapters.HTTPAdapter(max_retries=2)
+            }
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            self._adapters[prefix] = adapter
+
+        def get_adapter(self, prefix: str) -> object:
+            return self._adapters[prefix]
+
+        def request(self, *_args: object, **_kwargs: object) -> object:
+            nonlocal delegate_calls
+            delegate_calls += 1
+            return BlockingBodyResponse()
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("unused")
+
+        def close(self) -> None:
+            return None
+
+    class FakeRequests:
+        adapters = requests.adapters
+        Session = FakeProbeSession
+
+    client = SimpleNamespace(_http_session=FakeProbeSession())
+    controls = enforce_probe_tls_controls(
+        client,
+        SimpleNamespace(requests=FakeRequests()),
+        observer=_RecordingObserver([]),
+    )
+
+    def invoke() -> None:
+        try:
+            client._http_session.request("POST", "https://provider.invalid")
+        except BaseException as error:
+            errors.append(error)
+
+    request_thread = threading.Thread(target=invoke)
+    request_thread.start()
+    assert body_started.wait(timeout=1)
+
+    close_thread = threading.Thread(
+        target=lambda: (controls.close(), close_finished.set())
+    )
+    close_thread.start()
+    assert close_finished.wait(timeout=0.2)
+    with pytest.raises(NonRetryableTransportRefusal):
+        client._http_session.request("POST", "https://provider.invalid")
+    release_body.set()
+    request_thread.join(timeout=2)
+    close_thread.join(timeout=2)
+
+    assert request_thread.is_alive() is False
+    assert close_thread.is_alive() is False
+    assert delegate_calls == 1
+    assert errors == []
+
+
+def test_concurrent_probe_tls_close_waits_for_revocation_and_session_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revoke_entered = threading.Event()
+    release_revoke = threading.Event()
+    first_finished = threading.Event()
+    second_finished = threading.Event()
+
+    class FakeProbeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self._adapters = {
+                "https://": requests.adapters.HTTPAdapter(max_retries=2)
+            }
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            self._adapters[prefix] = adapter
+
+        def get_adapter(self, prefix: str) -> object:
+            return self._adapters[prefix]
+
+        def request(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("unused")
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("unused")
+
+        def close(self) -> None:
+            return None
+
+    class FakeRequests:
+        adapters = requests.adapters
+        Session = FakeProbeSession
+
+    client = SimpleNamespace(_http_session=FakeProbeSession())
+    controls = enforce_probe_tls_controls(
+        client,
+        SimpleNamespace(requests=FakeRequests()),
+        observer=_RecordingObserver([]),
+    )
+    gate = client._http_session._dispatch_gate
+    real_revoke = gate.revoke
+
+    def pause_revoke() -> None:
+        revoke_entered.set()
+        assert release_revoke.wait(timeout=2)
+        real_revoke()
+
+    monkeypatch.setattr(gate, "revoke", pause_revoke)
+    first = threading.Thread(
+        target=lambda: (controls.close(), first_finished.set())
+    )
+    second = threading.Thread(
+        target=lambda: (controls.close(), second_finished.set())
+    )
+
+    first.start()
+    assert revoke_entered.wait(timeout=1)
+    second.start()
+    assert second_finished.wait(timeout=0.1) is False
+    release_revoke.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert first_finished.is_set()
+    assert second_finished.is_set()
+    with pytest.raises(NonRetryableTransportRefusal):
+        client._http_session.request("POST", "https://provider.invalid")
 
 
 def test_probe_tls_observer_refusal_prevents_delegate_call() -> None:
