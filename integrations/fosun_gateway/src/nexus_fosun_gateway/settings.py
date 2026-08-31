@@ -108,6 +108,10 @@ class GatewaySettings(BaseSettings):
         default=None,
         validation_alias="FOSUN_ACTIVATION_PROBE_ARTIFACT",
     )
+    activation_probe_receipt: Path | None = Field(
+        default=None,
+        validation_alias="FOSUN_ACTIVATION_PROBE_RECEIPT",
+    )
     activation_contract_hash: str | None = Field(
         default=None,
         min_length=64,
@@ -161,6 +165,13 @@ class GatewaySettings(BaseSettings):
             raise ValueError("provider base URL must be an unambiguous HTTPS URL")
         return stripped.rstrip("/")
 
+    @field_validator("activation_probe_receipt")
+    @classmethod
+    def activation_receipt_path_is_absolute(cls, value: Path | None) -> Path | None:
+        if value is not None and not value.is_absolute():
+            raise ValueError("activation probe receipt path must be absolute")
+        return value
+
     @model_validator(mode="after")
     def apply_environment_policy(self) -> Self:
         if self.transport_mode == "read_only" and self.environment is not Environment.PRODUCTION:
@@ -180,6 +191,7 @@ class GatewaySettings(BaseSettings):
                 or self.server_market_client_ca is None
                 or not self.sdk_admitted
                 or self.activation_probe_artifact is None
+                or self.activation_probe_receipt is None
                 or self.activation_contract_hash is None
                 or self.fsopenapi_base_url is None
                 or self.fsopenapi_api_key is None

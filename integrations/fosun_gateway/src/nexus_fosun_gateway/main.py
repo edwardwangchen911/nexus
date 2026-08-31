@@ -69,6 +69,7 @@ def build_transport(
         or settings.fsopenapi_client_private_key is None
         or settings.fsopenapi_server_public_key is None
         or settings.activation_probe_artifact is None
+        or settings.activation_probe_receipt is None
         or settings.activation_contract_hash is None
     ):
         raise _sdk_not_admitted()
@@ -80,6 +81,7 @@ def build_transport(
         activation = evaluate_activation_paths(
             settings.provider_manifest,
             settings.activation_probe_artifact,
+            settings.activation_probe_receipt,
             checked_at=activation_checked_at,
         )
     except (OSError, ValueError):

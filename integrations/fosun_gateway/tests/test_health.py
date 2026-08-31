@@ -164,6 +164,7 @@ def test_gateway_rejects_more_or_fewer_than_one_replica(replica_count: int) -> N
         "FSOPENAPI_API_KEY",
         "FSOPENAPI_CLIENT_PRIVATE_KEY",
         "FSOPENAPI_SERVER_PUBLIC_KEY",
+        "FOSUN_ACTIVATION_PROBE_RECEIPT",
     ],
 )
 def test_gateway_production_settings_fail_closed_when_required_input_is_missing(
@@ -245,6 +246,7 @@ def _production_settings() -> dict[str, object]:
         "FOSUN_GATEWAY_SERVER_MARKET_CLIENT_CA": "/run/secrets/synthetic-market-ca",
         "FOSUN_SDK_ADMITTED": True,
         "FOSUN_ACTIVATION_PROBE_ARTIFACT": "/synthetic/fosun-probe.json",
+        "FOSUN_ACTIVATION_PROBE_RECEIPT": "/synthetic/fosun-probe-receipt.json",
         "FOSUN_ACTIVATION_CONTRACT_HASH": "a" * 64,
         "FSOPENAPI_BASE_URL": "https://provider.invalid",
         "FSOPENAPI_API_KEY": "synthetic-api-key",

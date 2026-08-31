@@ -357,6 +357,7 @@ def _production_settings(material: dict[str, Path]) -> GatewaySettings:
             "FOSUN_GATEWAY_SERVER_MARKET_CLIENT_CA": material["market_ca_cert"],
             "FOSUN_SDK_ADMITTED": True,
             "FOSUN_ACTIVATION_PROBE_ARTIFACT": "/synthetic/fosun-probe.json",
+            "FOSUN_ACTIVATION_PROBE_RECEIPT": "/synthetic/fosun-probe-receipt.json",
             "FOSUN_ACTIVATION_CONTRACT_HASH": "a" * 64,
             "FSOPENAPI_BASE_URL": "https://provider.invalid",
             "FSOPENAPI_API_KEY": "synthetic-api-key",

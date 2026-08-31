@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
+import hmac
 import json
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -23,11 +27,14 @@ from pydantic import (
 from nexus_fosun_gateway.admission import sdk_admission_document_is_valid
 
 RESULT_SCHEMA_VERSION = "nexus.fosun.activation-result.v1"
-PROBE_SCHEMA_VERSION = "nexus.fosun.sanitized-probe.v1"
+PROBE_SCHEMA_VERSION = "nexus.fosun.sanitized-probe.v2"
+PUBLICATION_RECEIPT_SCHEMA_VERSION = "nexus.fosun.probe-publication.v1"
+PUBLICATION_SIGNING_DOMAIN = b"NEXUS-FOSUN-PROBE-PUBLICATION-V1\0"
 MAX_REQUESTS_PER_OPERATION = 3
 MAX_PROBE_REQUESTS = 24
 MAX_CAPABILITY_TTL = timedelta(hours=24)
 MAX_ARTIFACT_BYTES = 1024 * 1024
+MAX_PUBLICATION_RECEIPT_BYTES = 16 * 1024
 REQUIRED_PROBE_OPERATIONS = (
     "Session",
     "Accounts",
@@ -41,6 +48,8 @@ REQUIRED_PROBE_OPERATIONS = (
 
 _Hex40 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
 _Hex64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+_Base64Url32 = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{43}$")]
+_Base64Url64 = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{86}$")]
 _OperationName = Annotated[
     str,
     StringConstraints(pattern=r"^[A-Za-z][A-Za-z0-9_]{0,63}$"),
@@ -124,13 +133,14 @@ class SanitizedProbeArtifact(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["nexus.fosun.sanitized-probe.v1"]
+    schema_version: Literal["nexus.fosun.sanitized-probe.v2"]
     provider: Literal["fosun"]
     captured_at: datetime
     capability_expires_at: datetime
     manifest_sha256: _Hex64
     sdk_tag: Annotated[str, StringConstraints(pattern=r"^v[0-9]+\.[0-9]+\.[0-9]+$")]
     sdk_commit: _Hex40
+    publication_public_key_b64u: _Base64Url32
     operations: tuple[ProbeOperationEvidence, ...] = Field(min_length=1, max_length=32)
     checks: ProbeChecks
 
@@ -141,12 +151,29 @@ class SanitizedProbeArtifact(BaseModel):
         ttl = self.capability_expires_at - self.captured_at
         if ttl <= timedelta(0) or ttl > MAX_CAPABILITY_TTL:
             raise ValueError("capability window must be positive and no longer than 24 hours")
+        _decode_base64url(self.publication_public_key_b64u, expected_bytes=32)
+        return self
+
+
+class ProbePublicationReceipt(BaseModel):
+    """Detached proof produced only after durable probe publication."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["nexus.fosun.probe-publication.v1"]
+    artifact_sha256: _Hex64
+    signature_b64u: _Base64Url64
+
+    @model_validator(mode="after")
+    def _validate_signature_encoding(self) -> ProbePublicationReceipt:
+        _decode_base64url(self.signature_b64u, expected_bytes=64)
         return self
 
 
 def evaluate_activation(
     manifest_bytes: bytes,
     probe_bytes: bytes | None = None,
+    publication_receipt_bytes: bytes | None = None,
     *,
     checked_at: datetime | None = None,
 ) -> FosunActivationResult:
@@ -157,11 +184,17 @@ def evaluate_activation(
     manifest_document = _load_mapping(manifest_bytes)
     sdk_tag, sdk_commit = _sdk_subject(manifest_document)
     probe_sha256 = _sha256(probe_bytes) if probe_bytes is not None else None
+    publication_receipt_sha256 = (
+        _sha256(publication_receipt_bytes)
+        if publication_receipt_bytes is not None
+        else None
+    )
     contract_hash = _contract_hash(
         manifest_sha256=manifest_sha256,
         sdk_tag=sdk_tag,
         sdk_commit=sdk_commit,
         probe_sha256=probe_sha256,
+        publication_receipt_sha256=publication_receipt_sha256,
     )
 
     if manifest_document is None:
@@ -206,6 +239,14 @@ def evaluate_activation(
         return _blocked(contract_hash, now, "REDUCE_PROBE_REQUEST_COUNT")
     if not probe.checks.all_passed() or not all(operation.passed for operation in probe.operations):
         return _blocked(contract_hash, now, "REVIEW_PROBE_EVIDENCE")
+    if publication_receipt_bytes is None:
+        return _blocked(contract_hash, now, "PROVIDE_PROBE_PUBLICATION_RECEIPT")
+    if not _publication_receipt_is_valid(
+        probe,
+        probe_bytes,
+        publication_receipt_bytes,
+    ):
+        return _blocked(contract_hash, now, "REVIEW_PROBE_PUBLICATION_RECEIPT")
 
     return FosunActivationResult(
         status="activated_read_only",
@@ -219,13 +260,26 @@ def evaluate_activation(
 def evaluate_activation_paths(
     manifest_path: Path,
     probe_path: Path | None = None,
+    publication_receipt_path: Path | None = None,
     *,
     checked_at: datetime | None = None,
 ) -> FosunActivationResult:
     """Read bounded local artifacts and evaluate them without provider or credential access."""
     return evaluate_activation(
-        _read_bounded_or_empty(manifest_path),
-        _read_bounded_or_empty(probe_path) if probe_path is not None else None,
+        _read_bounded_or_empty(manifest_path, max_bytes=MAX_ARTIFACT_BYTES),
+        (
+            _read_bounded_or_empty(probe_path, max_bytes=MAX_ARTIFACT_BYTES)
+            if probe_path is not None
+            else None
+        ),
+        (
+            _read_bounded_or_empty(
+                publication_receipt_path,
+                max_bytes=MAX_PUBLICATION_RECEIPT_BYTES,
+            )
+            if publication_receipt_path is not None
+            else None
+        ),
         checked_at=checked_at,
     )
 
@@ -240,10 +294,15 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("contracts/providers/fosun/manifest.json"),
     )
     parser.add_argument("--probe-artifact", type=Path)
+    parser.add_argument("--publication-receipt", type=Path)
     parser.add_argument("--require-activated", action="store_true")
     args = parser.parse_args(argv)
 
-    result = evaluate_activation_paths(args.manifest, args.probe_artifact)
+    result = evaluate_activation_paths(
+        args.manifest,
+        args.probe_artifact,
+        args.publication_receipt,
+    )
     print(result.model_dump_json())
     if args.require_activated and result.status != "activated_read_only":
         return 2
@@ -272,10 +331,12 @@ def _contract_hash(
     sdk_tag: str | None,
     sdk_commit: str | None,
     probe_sha256: str | None,
+    publication_receipt_sha256: str | None,
 ) -> str:
     material = {
         "manifest_sha256": manifest_sha256,
         "probe_artifact_sha256": probe_sha256,
+        "probe_publication_receipt_sha256": publication_receipt_sha256,
         "result_schema_version": RESULT_SCHEMA_VERSION,
         "sdk_subject": {"commit": sdk_commit, "tag": sdk_tag},
     }
@@ -313,13 +374,50 @@ def _is_forbidden_operation(name: str) -> bool:
     return any(marker in normalized for marker in _FORBIDDEN_OPERATION_MARKERS)
 
 
-def _read_bounded_or_empty(path: Path) -> bytes:
+def _read_bounded_or_empty(path: Path, *, max_bytes: int) -> bytes:
     try:
         with path.open("rb") as source:
-            content = source.read(MAX_ARTIFACT_BYTES + 1)
-        return content if len(content) <= MAX_ARTIFACT_BYTES else b""
+            content = source.read(max_bytes + 1)
+        return content if len(content) <= max_bytes else b""
     except OSError:
         return b""
+
+
+def _publication_receipt_is_valid(
+    probe: SanitizedProbeArtifact,
+    probe_bytes: bytes,
+    publication_receipt_bytes: bytes,
+) -> bool:
+    try:
+        receipt = ProbePublicationReceipt.model_validate_json(publication_receipt_bytes)
+        artifact_sha256 = _sha256(probe_bytes)
+        if not hmac.compare_digest(receipt.artifact_sha256, artifact_sha256):
+            return False
+        public_key = Ed25519PublicKey.from_public_bytes(
+            _decode_base64url(
+                probe.publication_public_key_b64u,
+                expected_bytes=32,
+            )
+        )
+        public_key.verify(
+            _decode_base64url(receipt.signature_b64u, expected_bytes=64),
+            PUBLICATION_SIGNING_DOMAIN + bytes.fromhex(artifact_sha256),
+        )
+    except (InvalidSignature, ValidationError, ValueError):
+        return False
+    return True
+
+
+def _decode_base64url(value: str, *, expected_bytes: int) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    try:
+        decoded = base64.b64decode(value + padding, altchars=b"-_", validate=True)
+    except (ValueError, TypeError):
+        raise ValueError("base64url value is invalid") from None
+    canonical = base64.urlsafe_b64encode(decoded).rstrip(b"=").decode()
+    if len(decoded) != expected_bytes or not hmac.compare_digest(canonical, value):
+        raise ValueError("base64url value is invalid")
+    return decoded
 
 
 def _sha256(value: bytes) -> str:

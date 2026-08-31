@@ -191,7 +191,7 @@ Ruff, Mypy, existing Fosun Gateway adapters and offline socket guard.
 
    ```bash
    NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
-     uv run pytest integrations/fosun_gateway/tests --import-mode=importlib -q
+     uv run pytest integrations/fosun_gateway/tests -q
    uv run ruff check integrations/fosun_gateway/src integrations/fosun_gateway/tests
    uv run mypy integrations/fosun_gateway/src
    uv run pytest tests/policy -q
