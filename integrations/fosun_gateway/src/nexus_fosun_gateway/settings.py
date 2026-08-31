@@ -112,12 +112,13 @@ class GatewaySettings(BaseSettings):
         default=None,
         validation_alias="FOSUN_ACTIVATION_PROBE_RECEIPT",
     )
-    activation_contract_hash: str | None = Field(
+    activation_probe_publisher_public_key_b64u_file: Path | None = Field(
         default=None,
-        min_length=64,
-        max_length=64,
-        pattern=r"^[0-9a-f]{64}$",
-        validation_alias="FOSUN_ACTIVATION_CONTRACT_HASH",
+        validation_alias="FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE",
+    )
+    activation_contract_hash_file: Path | None = Field(
+        default=None,
+        validation_alias="FOSUN_ACTIVATION_CONTRACT_HASH_FILE",
     )
     fsopenapi_base_url: str | None = Field(
         default=None,
@@ -165,11 +166,25 @@ class GatewaySettings(BaseSettings):
             raise ValueError("provider base URL must be an unambiguous HTTPS URL")
         return stripped.rstrip("/")
 
-    @field_validator("activation_probe_receipt")
+    @field_validator("sdk_admitted", mode="before")
+    @classmethod
+    def sdk_admission_switch_is_exact(cls, value: object) -> bool:
+        if value is True or value == "true":
+            return True
+        if value is False or value == "false":
+            return False
+        raise ValueError("SDK admission switch must be exactly true or false")
+
+    @field_validator(
+        "activation_probe_artifact",
+        "activation_probe_receipt",
+        "activation_probe_publisher_public_key_b64u_file",
+        "activation_contract_hash_file",
+    )
     @classmethod
     def activation_receipt_path_is_absolute(cls, value: Path | None) -> Path | None:
         if value is not None and not value.is_absolute():
-            raise ValueError("activation probe receipt path must be absolute")
+            raise ValueError("activation probe paths must be absolute")
         return value
 
     @model_validator(mode="after")
@@ -189,10 +204,13 @@ class GatewaySettings(BaseSettings):
                 or self.server_key is None
                 or self.server_broker_client_ca is None
                 or self.server_market_client_ca is None
+                or "provider_manifest" not in self.model_fields_set
+                or not self.provider_manifest.is_absolute()
                 or not self.sdk_admitted
                 or self.activation_probe_artifact is None
                 or self.activation_probe_receipt is None
-                or self.activation_contract_hash is None
+                or self.activation_probe_publisher_public_key_b64u_file is None
+                or self.activation_contract_hash_file is None
                 or self.fsopenapi_base_url is None
                 or self.fsopenapi_api_key is None
                 or self.fsopenapi_client_private_key is None

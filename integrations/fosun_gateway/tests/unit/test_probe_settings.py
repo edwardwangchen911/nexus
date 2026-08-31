@@ -44,8 +44,21 @@ def test_probe_settings_require_explicit_admission_and_hide_secrets(
     assert "synthetic-api-key-canary" not in rendered
     assert "synthetic-private-key-canary" not in rendered
     assert "synthetic-server-key-canary" not in rendered
+    assert "synthetic-publisher-private-key-canary" not in rendered
 
     values["FOSUN_SDK_ADMITTED"] = False
+    with pytest.raises(ValidationError):
+        ProbeProviderSettings.model_validate(values)
+
+
+@pytest.mark.parametrize("value", [False, 1, "1", "TRUE", "True"])
+def test_probe_settings_reject_nonexact_admission_switch(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    values = _settings_values(tmp_path)
+    values["FOSUN_SDK_ADMITTED"] = value
+
     with pytest.raises(ValidationError):
         ProbeProviderSettings.model_validate(values)
 
@@ -55,6 +68,7 @@ def test_probe_settings_require_explicit_admission_and_hide_secrets(
     [
         ("FOSUN_PROVIDER_MANIFEST", "relative/manifest.json"),
         ("FOSUN_PROBE_OUTPUT_DIR", "relative/output"),
+        ("FOSUN_PROBE_PUBLISHER_PRIVATE_KEY_FILE", "relative/publisher.key"),
         ("FSOPENAPI_BASE_URL", "http://provider.invalid"),
         ("FSOPENAPI_BASE_URL", "https://user:secret@provider.invalid"),
         ("FSOPENAPI_BASE_URL", "https://provider.invalid/path?query=1"),
@@ -91,11 +105,30 @@ def test_probe_settings_reject_blank_secret_material(tmp_path: Path, field: str)
     assert "synthetic-" not in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    "publisher_key",
+    ["", "A" * 42, "A" * 44, "A" * 42 + "B", "A" * 42 + "!"],
+)
+def test_probe_settings_require_canonical_publisher_public_key(
+    tmp_path: Path,
+    publisher_key: str,
+) -> None:
+    values = _settings_values(tmp_path)
+    values["FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U"] = publisher_key
+
+    with pytest.raises(ValidationError):
+        ProbeProviderSettings.model_validate(values)
+
+
 def _settings_values(tmp_path: Path) -> dict[str, object]:
     return {
         "FOSUN_PROVIDER_MANIFEST": tmp_path / "manifest.json",
         "FOSUN_SDK_ADMITTED": True,
         "FOSUN_PROBE_OUTPUT_DIR": tmp_path,
+        "FOSUN_PROBE_PUBLISHER_PRIVATE_KEY_FILE": (
+            tmp_path / "synthetic-publisher-private-key-canary"
+        ),
+        "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U": "A" * 43,
         "FSOPENAPI_BASE_URL": "https://provider.invalid",
         "FSOPENAPI_API_KEY": "synthetic-api-key-canary",
         "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key-canary",

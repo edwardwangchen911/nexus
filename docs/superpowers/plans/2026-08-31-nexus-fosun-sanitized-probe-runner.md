@@ -11,8 +11,9 @@ all current SDK, contract, credential, deployment, and trading stops.
 secrets, or SDK import. A probe-only factory installs zero-retry HTTPS adapters plus hooks at the two
 reviewed HTTP surfaces, so authentication and every business attempt are counted before dispatch.
 The fixed executor discards normalized values and emits only static contract hashes. A trusted-dirfd
-publisher writes a v2 artifact create-only; only after complete fsync does an in-memory Ed25519 key
-sign a detached receipt required by both activation evaluation and production composition.
+publisher writes a v2 artifact create-only; only after complete fsync does an explicitly provisioned,
+public-pin-bound Ed25519 key sign a detached receipt required by both activation evaluation and
+production composition. The artifact-declared key is never a trust root.
 
 **Tech Stack:** Python 3.12, Pydantic 2, cryptography Ed25519, asyncio/thread-safe budgets, pytest,
 Ruff, Mypy, existing Fosun Gateway adapters and offline socket guard.
@@ -51,14 +52,18 @@ Ruff, Mypy, existing Fosun Gateway adapters and offline socket guard.
 2. RED: add `ProbePublicationReceipt` tests for the exact v1 schema, 64-byte signature, domain-
    separated signing payload, missing receipt, wrong artifact digest/key/signature, cross-artifact
    replay, and expired/future evidence.
-3. RED: prove the activation contract hash changes with receipt bytes and that
+3. RED: prove the activation contract hash changes with receipt bytes and the independently supplied
+   publisher public-key pin, and that
    `evaluate_activation_paths` reads the receipt with a 16-KiB cap.
 4. GREEN: implement the v2 artifact and strict receipt models, base64url decoding, Ed25519 verify,
-   receipt-bound contract hash, `PROVIDE_PROBE_PUBLICATION_RECEIPT`, and
-   `REVIEW_PROBE_PUBLICATION_RECEIPT`.
-5. RED/GREEN: add absolute `FOSUN_ACTIVATION_PROBE_RECEIPT` to production settings, require it with
-   the artifact, and pass the pair into composition before SDK import. Missing/mismatched receipt
-   must remain `SDK_NOT_ADMITTED` with no import.
+   receipt/pin-bound contract hash, `PROVIDE_PROBE_PUBLICATION_RECEIPT`,
+   `PROVIDE_TRUSTED_PROBE_PUBLISHER`, and the corresponding review actions.
+5. RED/GREEN: add absolute `FOSUN_ACTIVATION_PROBE_RECEIPT`,
+   `FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE`, and
+   `FOSUN_ACTIVATION_CONTRACT_HASH_FILE` to production settings. Require exact protected file bytes
+   with the artifact, bind all values to one immutable manifest read, and pass the independent tuple
+   into composition before SDK import. Missing/mismatched receipt, pin, or hash must remain
+   `SDK_NOT_ADMITTED` with no import.
 6. Run focused activation/composition/health tests, Ruff, and Mypy.
 7. Commit: `feat(fosun): bind activation to publication receipt`.
 
@@ -131,10 +136,10 @@ Ruff, Mypy, existing Fosun Gateway adapters and offline socket guard.
 2. RED: freeze one hand-written canonical response-contract declaration and expected SHA-256 per
    operation. Prove Pydantic metadata/defaults and live cardinality/value mutations cannot alter it.
 3. GREEN: build `SanitizedProbeArtifact` only from manifest subject, static digests, counted attempts,
-   six deterministic checks, completion clock, and ephemeral Ed25519 public key.
+   six deterministic checks, completion clock, and the explicit publisher signer's public key.
 4. RED/GREEN: implement the contract-only validator and receipt signer; prove signing material is
-   exact, the private key never serializes, receipt verification activates only its exact artifact,
-   and signing never occurs before publication success.
+   exact, the private key never serializes, receipt verification uses an independently supplied pin,
+   direct self-signing cannot activate, and signing never occurs before publisher fsync success.
 5. RED: plant unique canaries in response values, account/symbol/URL/request ID, Pydantic metadata,
    exceptions, environment values, and output basename; assert none occur in artifact bytes, receipt,
    stdout/stderr/caplog/traceback.

@@ -358,7 +358,13 @@ def _production_settings(material: dict[str, Path]) -> GatewaySettings:
             "FOSUN_SDK_ADMITTED": True,
             "FOSUN_ACTIVATION_PROBE_ARTIFACT": "/synthetic/fosun-probe.json",
             "FOSUN_ACTIVATION_PROBE_RECEIPT": "/synthetic/fosun-probe-receipt.json",
-            "FOSUN_ACTIVATION_CONTRACT_HASH": "a" * 64,
+            "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE": (
+                "/synthetic/fosun-publisher-public-key.b64u"
+            ),
+            "FOSUN_ACTIVATION_CONTRACT_HASH_FILE": (
+                "/synthetic/fosun-activation-contract.sha256"
+            ),
+            "FOSUN_PROVIDER_MANIFEST": "/synthetic/fosun-provider-manifest.json",
             "FSOPENAPI_BASE_URL": "https://provider.invalid",
             "FSOPENAPI_API_KEY": "synthetic-api-key",
             "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key",

@@ -3,7 +3,9 @@
 import asyncio
 import hmac
 import importlib
+import json
 import math
+import re
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -16,11 +18,17 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from nexus_fosun_gateway.activation import evaluate_activation_paths
+from nexus_fosun_gateway.activation import (
+    MAX_ARTIFACT_BYTES,
+    MAX_PUBLICATION_RECEIPT_BYTES,
+    MAX_TRUSTED_PUBLISHER_KEY_BYTES,
+    _read_bounded_or_empty,
+    evaluate_activation,
+)
 from nexus_fosun_gateway.adapter.fixture import FixtureFosunTransport
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
 from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
-from nexus_fosun_gateway.admission import sdk_admission_is_valid
+from nexus_fosun_gateway.admission import admitted_sdk_subject
 from nexus_fosun_gateway.domain import GatewayError
 from nexus_fosun_gateway.routes.read_only import router as read_only_router
 from nexus_fosun_gateway.security.dependency_logging import (
@@ -63,35 +71,70 @@ def build_transport(
     if settings.transport_mode == "fixture":
         return FixtureFosunTransport()
     if (
-        not sdk_admission_is_valid(settings)
+        not settings.sdk_admitted
         or settings.fsopenapi_base_url is None
         or settings.fsopenapi_api_key is None
         or settings.fsopenapi_client_private_key is None
         or settings.fsopenapi_server_public_key is None
         or settings.activation_probe_artifact is None
         or settings.activation_probe_receipt is None
-        or settings.activation_contract_hash is None
+        or settings.activation_probe_publisher_public_key_b64u_file is None
+        or settings.activation_contract_hash_file is None
     ):
         raise _sdk_not_admitted()
     if activation_monotonic_anchor is None:
         activation_monotonic_anchor = time.monotonic()
     if activation_checked_at is None:
         activation_checked_at = datetime.now(UTC)
+    trusted_publication_key_bytes = _read_bounded_or_empty(
+        settings.activation_probe_publisher_public_key_b64u_file,
+        max_bytes=MAX_TRUSTED_PUBLISHER_KEY_BYTES,
+    )
+    activation_contract_hash_bytes = _read_bounded_or_empty(
+        settings.activation_contract_hash_file,
+        max_bytes=64,
+    )
     try:
-        activation = evaluate_activation_paths(
-            settings.provider_manifest,
-            settings.activation_probe_artifact,
-            settings.activation_probe_receipt,
+        activation_contract_hash = activation_contract_hash_bytes.decode("ascii")
+    except UnicodeError:
+        raise _sdk_not_admitted() from None
+    if re.fullmatch(r"[0-9a-f]{64}", activation_contract_hash) is None:
+        raise _sdk_not_admitted()
+    manifest_bytes = _read_bounded_or_empty(
+        settings.provider_manifest,
+        max_bytes=MAX_ARTIFACT_BYTES,
+    )
+    probe_bytes = _read_bounded_or_empty(
+        settings.activation_probe_artifact,
+        max_bytes=MAX_ARTIFACT_BYTES,
+    )
+    publication_receipt_bytes = _read_bounded_or_empty(
+        settings.activation_probe_receipt,
+        max_bytes=MAX_PUBLICATION_RECEIPT_BYTES,
+    )
+    try:
+        manifest_document = json.loads(manifest_bytes)
+        subject = admitted_sdk_subject(manifest_document)
+        if subject is None or not hmac.compare_digest(
+            subject.provider_base_url,
+            settings.fsopenapi_base_url,
+        ):
+            raise ValueError
+        activation = evaluate_activation(
+            manifest_bytes,
+            probe_bytes,
+            publication_receipt_bytes,
+            trusted_publication_public_key_bytes=trusted_publication_key_bytes,
             checked_at=activation_checked_at,
         )
-    except (OSError, ValueError):
+    except (OSError, UnicodeError, ValueError):
         raise _sdk_not_admitted() from None
     if (
         activation.status != "activated_read_only"
         or activation.capability_expires_at is None
         or not hmac.compare_digest(
             activation.contract_hash,
-            settings.activation_contract_hash,
+            activation_contract_hash,
         )
     ):
         raise _sdk_not_admitted()

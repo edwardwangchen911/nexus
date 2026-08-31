@@ -12,9 +12,9 @@ isolates provider credentials, egress, and the fixed read-only operation surface
 responses against a hostile provider worker. Immutable evidence means append-only after acceptance,
 not that an already-compromised writer cannot fabricate an internally consistent fact graph.
 
-The local decision command reads only the committed provider manifest and an optional sanitized
-probe artifact. It has no provider transport, does not import the SDK, and does not read gateway
-credentials:
+The local decision command reads only the provider manifest and optional sanitized artifact,
+detached receipt, and explicitly supplied non-secret publisher pin. It has no provider transport,
+does not import the SDK, and does not read gateway credentials:
 
 ```bash
 uv run --package nexus-fosun-gateway nexus-fosun-activation-gate
@@ -24,6 +24,12 @@ With the current blocked manifest the only valid result is
 `fixture_with_next_action / COMPLETE_SDK_ADMISSION`. `--require-activated` exits 2 for that result;
 the ordinary command exits 0 after emitting the decision contract so Phase 0 offline verification
 can remain independent from Phase 1 provider activation.
+
+Fresh public-contract verification on 2026-08-31 produced Trade OpenAPI SHA-256
+`87e4e6601b8da122a504239a1922d8742ecd4072e2d10c30c0d6a97f896fb808`, while the reviewed manifest
+still pins `379561548be045c8e531f31e88ee76c8cbdb7bda5b59e12a9b9d5c9040abd204`. This drift is a hard
+admission stop; this implementation does not refresh the manifest or infer that the new bytes are
+safe. `fsopenapi` also remains absent from the workspace lock.
 
 ## Preconditions before requesting probe confirmation
 
@@ -368,13 +374,15 @@ probe can be admitted.
 
 ## Sanitized artifact
 
-The probe runner must serialize only `nexus.fosun.sanitized-probe.v1` metadata:
+The probe runner serializes only canonical `nexus.fosun.sanitized-probe.v2` metadata:
 
 - provider, capture/expiry timestamps, exact manifest SHA-256 and pinned SDK tag/commit;
 - one record per allowed operation: label, request count, pass/fail, and normalized response-contract
   SHA-256;
 - six booleans for read-only permission, history window, adjustment semantics, pagination,
   rate-limit behavior and response contract.
+- the publication signer's public identity. This declaration is never trusted by itself;
+  activation compares it with an independently change-controlled public-key pin.
 
 The schema forbids extra fields. It has no place for API keys, key IDs, account IDs, holdings,
 amounts, prices, symbols, raw/normalized response bodies, request bodies, headers, endpoints,
@@ -386,23 +394,37 @@ After a separately approved probe, evaluate the artifact locally:
 
 ```bash
 uv run --package nexus-fosun-gateway nexus-fosun-activation-gate \
+  --manifest /approved/config/fosun-provider-manifest.json \
   --probe-artifact /approved/sanitized/fosun-probe.json \
+  --publication-receipt /approved/sanitized/fosun-probe-receipt.json \
+  --trusted-publisher-public-key-b64u '<approved-public-key>' \
   --require-activated
 ```
 
-`contract_hash` binds the result schema version, exact provider-manifest bytes, SDK subject and,
-when present, exact sanitized-artifact bytes. Only an admitted manifest plus an unexpired,
+The supplied public key makes this a local evaluation, not publisher provenance, deployment
+approval, or authority to configure production. `contract_hash` binds the result schema version,
+exact provider-manifest bytes, SDK subject, artifact bytes, detached-receipt bytes, and trusted-key
+digest. Only an admitted manifest plus an unexpired,
 subject-matched, exact closed operation set with every check passing returns
 `activated_read_only`. Every other path returns `fixture_with_next_action` with a stable action.
 The result itself cannot change transport mode, permissions, deployment state, or secrets.
 
-For a later separately approved deployment, mount the exact artifact read-only into the gateway
-secret/config domain, set its in-container path as `FOSUN_ACTIVATION_PROBE_ARTIFACT`, and set the
-separately recorded 64-character result as `FOSUN_ACTIVATION_CONTRACT_HASH`. Neither variable is
-available to the API, research worker, or broker worker. Gateway startup recomputes and compares the
+For a later separately approved deployment, mount the exact artifact and detached receipt as
+protected regular read-only files into the gateway config domain, set their absolute in-container
+paths as `FOSUN_ACTIVATION_PROBE_ARTIFACT` and `FOSUN_ACTIVATION_PROBE_RECEIPT`, configure the
+canonical non-secret trust root in the exact file referenced by
+`FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE`, and write the separately recorded
+64-character result to the exact file referenced by `FOSUN_ACTIVATION_CONTRACT_HASH_FILE`. Neither
+file may contain a trailing newline. Compose mounts artifact and receipt as separate read-only file
+binds with `create_host_path: false` and mounts the two control values as separate file-backed
+configs; it does not accept raw pin/hash environment values. These inputs are not available to the
+API, research worker, broker worker, or one-shot probe process. Gateway startup reads each input by
+held descriptor, recomputes and compares the
 contract before SDK import; the SDK adapter checks the artifact expiry at operation entry and again
 after queue/rate-limit waits before every Provider attempt, so a long-running process fails closed
-when the capability window ends. Re-probing, mounting, changing these environment values, or
+when the capability window ends. The configuration principal controlling the public pin is an
+explicit trust root; pin rotation requires a new artifact, receipt, contract hash, review, and
+restart. Re-probing, promoting either evidence file, changing either control config, or
 restarting/deploying the gateway remains approval-gated.
 
 ## Activation and rollback

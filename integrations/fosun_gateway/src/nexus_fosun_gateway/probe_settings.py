@@ -1,5 +1,7 @@
 """Secret-bearing settings constructed only after immutable manifest admission."""
 
+import base64
+import hmac
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -22,6 +24,15 @@ class ProbeProviderSettings(BaseSettings):
     provider_manifest: Path = Field(validation_alias="FOSUN_PROVIDER_MANIFEST")
     sdk_admitted: Literal[True] = Field(validation_alias="FOSUN_SDK_ADMITTED")
     output_dir: Path = Field(validation_alias="FOSUN_PROBE_OUTPUT_DIR")
+    publisher_private_key_file: Path = Field(
+        validation_alias="FOSUN_PROBE_PUBLISHER_PRIVATE_KEY_FILE"
+    )
+    publisher_public_key_b64u: str = Field(
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+        validation_alias="FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U",
+    )
     fsopenapi_base_url: str = Field(validation_alias="FSOPENAPI_BASE_URL")
     fsopenapi_api_key: SecretStr = Field(validation_alias="FSOPENAPI_API_KEY")
     fsopenapi_client_private_key: SecretStr = Field(
@@ -31,11 +42,30 @@ class ProbeProviderSettings(BaseSettings):
         validation_alias="FSOPENAPI_SERVER_PUBLIC_KEY"
     )
 
-    @field_validator("provider_manifest", "output_dir")
+    @field_validator("provider_manifest", "output_dir", "publisher_private_key_file")
     @classmethod
     def probe_paths_are_absolute(cls, value: Path) -> Path:
         if not value.is_absolute():
             raise ValueError("probe paths must be absolute")
+        return value
+
+    @field_validator("sdk_admitted", mode="before")
+    @classmethod
+    def sdk_admitted_accepts_only_exact_true(cls, value: object) -> object:
+        if value is True or value == "true":
+            return True
+        raise ValueError("probe SDK admission switch must be exact true")
+
+    @field_validator("publisher_public_key_b64u")
+    @classmethod
+    def publisher_public_key_is_canonical(cls, value: str) -> str:
+        try:
+            decoded = base64.b64decode(value + "=", altchars=b"-_", validate=True)
+        except (ValueError, TypeError):
+            raise ValueError("publisher public key must be canonical base64url") from None
+        canonical = base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii")
+        if len(decoded) != 32 or not hmac.compare_digest(canonical, value):
+            raise ValueError("publisher public key must be canonical base64url")
         return value
 
     @field_validator("fsopenapi_base_url")

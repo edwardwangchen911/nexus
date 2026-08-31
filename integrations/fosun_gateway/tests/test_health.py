@@ -114,6 +114,15 @@ def test_gateway_reads_nexus_environment_alias_for_production() -> None:
     assert settings.environment is Environment.PRODUCTION
 
 
+@pytest.mark.parametrize("sdk_admitted", ["1", "TRUE", "yes", 1])
+def test_gateway_requires_exact_sdk_admission_switch(sdk_admitted: object) -> None:
+    values = _production_settings()
+    values["FOSUN_SDK_ADMITTED"] = sdk_admitted
+
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(values)
+
+
 def test_gateway_production_validation_hides_input_canary() -> None:
     canary = "synthetic-gateway-validation-canary"
 
@@ -126,6 +135,23 @@ def test_gateway_production_validation_hides_input_canary() -> None:
         )
 
     assert canary not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE",
+        "FOSUN_ACTIVATION_CONTRACT_HASH_FILE",
+    ],
+)
+def test_gateway_requires_absolute_activation_control_file_paths(
+    field_name: str,
+) -> None:
+    values = _production_settings()
+    values[field_name] = "relative/control-file"
+
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(values)
 
 
 @pytest.mark.parametrize("capability", ["LIVE_WRITE", ""])
@@ -164,7 +190,11 @@ def test_gateway_rejects_more_or_fewer_than_one_replica(replica_count: int) -> N
         "FSOPENAPI_API_KEY",
         "FSOPENAPI_CLIENT_PRIVATE_KEY",
         "FSOPENAPI_SERVER_PUBLIC_KEY",
+        "FOSUN_ACTIVATION_PROBE_ARTIFACT",
         "FOSUN_ACTIVATION_PROBE_RECEIPT",
+        "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE",
+        "FOSUN_ACTIVATION_CONTRACT_HASH_FILE",
+        "FOSUN_PROVIDER_MANIFEST",
     ],
 )
 def test_gateway_production_settings_fail_closed_when_required_input_is_missing(
@@ -247,7 +277,13 @@ def _production_settings() -> dict[str, object]:
         "FOSUN_SDK_ADMITTED": True,
         "FOSUN_ACTIVATION_PROBE_ARTIFACT": "/synthetic/fosun-probe.json",
         "FOSUN_ACTIVATION_PROBE_RECEIPT": "/synthetic/fosun-probe-receipt.json",
-        "FOSUN_ACTIVATION_CONTRACT_HASH": "a" * 64,
+        "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE": (
+            "/synthetic/fosun-publisher-public-key.b64u"
+        ),
+        "FOSUN_ACTIVATION_CONTRACT_HASH_FILE": (
+            "/synthetic/fosun-activation-contract.sha256"
+        ),
+        "FOSUN_PROVIDER_MANIFEST": "/synthetic/fosun-provider-manifest.json",
         "FSOPENAPI_BASE_URL": "https://provider.invalid",
         "FSOPENAPI_API_KEY": "synthetic-api-key",
         "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-client-private-key",

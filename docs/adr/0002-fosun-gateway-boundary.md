@@ -89,6 +89,14 @@ trigger 的最小需求，不扩大 Provider 的表权限或网络能力。
 - SDK 调度在 broker 和 market 域各有一个独立入队 lane 和 token bucket（分别最大 6/min 与 24/min，合计不超过 30/min）；绝对 deadline 覆盖 lane、rate wait、共享执行槽与 SDK 调用。两域最终共享容量为一的 daemon SDK 线程槽，retry backoff 不占用它；rate wait 先释放该槽后再在 event loop 睡眠。最终 readiness/capability 检查和可能阻塞的日志都位于令牌线性化点之前；同一 daemon 线程在成功消费令牌后紧邻调用 SDK 方法，从而对 market 强制真实调用起点间隔至少一秒且任一 `(t-60s, t]` 最多 24 次。实际同步 SDK 调用超时或等待者被取消时，该 Gateway 进程的 transport 永久 poison：首个超时请求就返回 `PROVIDER_TRANSPORT_POISONED`，后续两个 lane 入口快速拒绝，HTTP readiness 和共享卷 marker/CLI/Compose health 同时转为不就绪。不在原进程重试、恢复或扩大 deadline；必须停机审查原因后再经批准重启整个 Gateway。底层线程无法在存活进程内强杀，但 daemon 语义不会阻止进程退出；晚到异常只被静默消费，不记录 Provider 错误文本。`fosun_get_bars` 是一次性 SDK 调用，任何失败都立即 fail-closed；quotes 与 broker 读操作仅在 transport 未 poison 时保留有界 transport retry，且每次尝试独立计入同一 QPS/RPM 预算。
 - broker external-ID AEAD/blind-index 只在 broker-worker；
 - `FSOPENAPI_*` 与 provider manifest/admission 只在 gateway；
+- 一次性 probe 进程单独持有受保护的 Ed25519 发布私钥；长驻 gateway 只接收变更受控的
+  公钥 pin。artifact 中声明的公钥不建立信任，只有 pin 匹配且 detached receipt 验签成功
+  才能形成只读 capability；pin 轮换必须连同 artifact、receipt、contract hash 一起复审；
+- Compose 将 artifact/receipt 分别作为 `create_host_path: false` 的只读文件挂载，将发布公钥
+  与 contract hash 作为两个独立 file-backed config；Gateway 仅接受对应 `_FILE` 路径，不接收
+  raw pin/hash 环境值，probe 进程不获得已晋级证据、contract config 或 replay 卷；
+- provider manifest、probe artifact 与 receipt 在 SDK import 前通过 held descriptor、全路径
+  no-follow、regular-file、owner/mode、大小和读前后稳定性校验，任何不确定性 fail closed；
 - Provider 对象存储使用独立于 app/general worker 的 IAM principal，运行时固定在
   `provider/market` 前缀；只授予 PutObject、条件创建冲突复核用的 key-scoped GetObject
   和冻结证据重放用的 GetObjectVersion，不授予 ListBucket 或 DeleteObject。

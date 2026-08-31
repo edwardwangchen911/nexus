@@ -151,6 +151,10 @@ def _settings(tmp_path: Path) -> ProbeProviderSettings:
             "FOSUN_PROVIDER_MANIFEST": tmp_path / "manifest.json",
             "FOSUN_SDK_ADMITTED": True,
             "FOSUN_PROBE_OUTPUT_DIR": tmp_path,
+            "FOSUN_PROBE_PUBLISHER_PRIVATE_KEY_FILE": (
+                tmp_path / "synthetic-private-key-canary"
+            ),
+            "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U": "A" * 43,
             "FSOPENAPI_BASE_URL": "https://provider.invalid",
             "FSOPENAPI_API_KEY": "synthetic-api-secret-canary",
             "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key-canary",

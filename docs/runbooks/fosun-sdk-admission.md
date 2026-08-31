@@ -81,11 +81,20 @@ and files; neither TLS identity nor HMAC keys may be reused from the browser-to-
 The composition root imports `fsopenapi` only after admission and configuration checks. A missing
 or unapproved SDK returns `SDK_NOT_ADMITTED`; it never falls back to fixtures. `admitted` also
 requires `sdk.license` to contain the reviewed license/permission determination rather than
-`UNRESOLVED`. Runtime startup additionally reads the bounded sanitized artifact at
-`FOSUN_ACTIVATION_PROBE_ARTIFACT`, recomputes the activation decision, and compares it in constant
-time with `FOSUN_ACTIVATION_CONTRACT_HASH` before importing the SDK. A missing, changed, expired,
-or subject-mismatched artifact blocks startup, and the adapter rechecks expiry after any queue,
+`UNRESOLVED`. Runtime startup additionally reads the bounded sanitized artifact and detached
+publication receipt at `FOSUN_ACTIVATION_PROBE_ARTIFACT` and
+`FOSUN_ACTIVATION_PROBE_RECEIPT`, verifies the receipt only against the independently managed
+canonical 43-byte file at `FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE`, recomputes the
+activation decision, and compares it in constant time with the exact 64-byte lowercase hex file at
+`FOSUN_ACTIVATION_CONTRACT_HASH_FILE` before importing the SDK.
+Manifest, artifact, and receipt are descriptor-first, no-follow, protected regular files. A
+missing, changed, expired, noncanonical, signer-mismatched, or subject-mismatched bundle blocks
+startup, and the adapter rechecks expiry after any queue,
 rate-limit or retry wait immediately before every Provider attempt.
+Compose fixes the four container targets: artifact and receipt are independent read-only binds with
+`create_host_path: false`; publisher key and contract hash are separate file-backed configs. Raw
+pin/hash environment values are not part of the Gateway settings contract. The probe process never
+receives the approved hash config or promoted evidence paths.
 SDK construction
 forces `logging_enable=false` and `log_body=false`. Gateway logs allow only operation name, attempt,
 outcome, and safe timing/correlation fields—never raw bodies, headers, endpoint strings, external

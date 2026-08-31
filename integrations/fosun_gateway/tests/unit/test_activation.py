@@ -1,18 +1,23 @@
 import base64
 import hashlib
 import json
-from datetime import UTC, datetime, timedelta
+import os
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
+import nexus_fosun_gateway.activation as activation_module
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from nexus_fosun_gateway.activation import (
     REQUIRED_PROBE_OPERATIONS,
     FosunActivationResult,
-    evaluate_activation,
     evaluate_activation_paths,
     main,
+)
+from nexus_fosun_gateway.activation import (
+    evaluate_activation as _evaluate_activation,
 )
 
 MANIFEST_PATH = Path(__file__).parents[4] / "contracts" / "providers" / "fosun" / "manifest.json"
@@ -25,6 +30,75 @@ TEST_PUBLICATION_PUBLIC_KEY_B64U = base64.urlsafe_b64encode(
         format=serialization.PublicFormat.Raw,
     )
 ).rstrip(b"=").decode()
+TRUSTED_PUBLICATION_KEY_BYTES = TEST_PUBLICATION_PUBLIC_KEY_B64U.encode("ascii")
+
+
+def evaluate_activation(
+    manifest_bytes: bytes,
+    probe_bytes: bytes | None = None,
+    publication_receipt_bytes: bytes | None = None,
+    trusted_publication_public_key_bytes: bytes | None = TRUSTED_PUBLICATION_KEY_BYTES,
+    *,
+    checked_at: datetime | None = None,
+) -> FosunActivationResult:
+    """Exercise normal tests with the independently configured test trust anchor."""
+    return _evaluate_activation(
+        manifest_bytes,
+        probe_bytes,
+        publication_receipt_bytes,
+        trusted_publication_public_key_bytes=(
+            trusted_publication_public_key_bytes
+        ),
+        checked_at=checked_at,
+    )
+
+
+def test_admitted_manifest_requires_independent_publisher_trust_anchor() -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    probe_bytes = _probe_bytes(manifest_bytes)
+
+    missing = _evaluate_activation(
+        manifest_bytes,
+        probe_bytes,
+        _receipt_bytes(probe_bytes),
+        checked_at=CHECKED_AT,
+    )
+    malformed = evaluate_activation(
+        manifest_bytes,
+        probe_bytes,
+        _receipt_bytes(probe_bytes),
+        trusted_publication_public_key_bytes=(
+            b"not-a-canonical-ed25519-public-key"
+        ),
+        checked_at=CHECKED_AT,
+    )
+
+    assert missing.next_action == "PROVIDE_TRUSTED_PROBE_PUBLISHER"
+    assert malformed.next_action == "REVIEW_TRUSTED_PROBE_PUBLISHER"
+
+
+def test_artifact_self_signed_by_untrusted_key_cannot_activate() -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    attacker_key = Ed25519PrivateKey.from_private_bytes(bytes(range(33, 65)))
+    probe = _probe_document(manifest_bytes)
+    probe["publication_public_key_b64u"] = _b64u(
+        attacker_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
+    probe_bytes = _json_bytes(probe)
+
+    result = evaluate_activation(
+        manifest_bytes,
+        probe_bytes,
+        _receipt_bytes(probe_bytes, private_key=attacker_key),
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
+
+    assert result.status == "fixture_with_next_action"
+    assert result.next_action == "REVIEW_PROBE_PUBLISHER_BINDING"
 
 
 def test_committed_manifest_can_only_report_fixture_with_next_action() -> None:
@@ -120,8 +194,8 @@ def test_admission_requires_an_exact_https_provider_base_url() -> None:
 def test_expired_probe_cannot_activate_read_only() -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     probe = _probe_document(manifest_bytes)
-    probe["captured_at"] = (CHECKED_AT - timedelta(hours=1)).isoformat()
-    probe["capability_expires_at"] = (CHECKED_AT - timedelta(seconds=1)).isoformat()
+    probe["captured_at"] = _utc_text(CHECKED_AT - timedelta(hours=1))
+    probe["capability_expires_at"] = _utc_text(CHECKED_AT - timedelta(seconds=1))
     probe_bytes = _json_bytes(probe)
 
     result = evaluate_activation(
@@ -228,8 +302,8 @@ def test_request_cap_and_all_probe_checks_must_pass() -> None:
 def test_future_dated_probe_cannot_activate() -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     probe = _probe_document(manifest_bytes)
-    probe["captured_at"] = (CHECKED_AT + timedelta(minutes=1)).isoformat()
-    probe["capability_expires_at"] = (CHECKED_AT + timedelta(hours=1)).isoformat()
+    probe["captured_at"] = _utc_text(CHECKED_AT + timedelta(minutes=1))
+    probe["capability_expires_at"] = _utc_text(CHECKED_AT + timedelta(hours=1))
     probe_bytes = _json_bytes(probe)
 
     result = evaluate_activation(
@@ -241,6 +315,34 @@ def test_future_dated_probe_cannot_activate() -> None:
 
     assert result.status == "fixture_with_next_action"
     assert result.next_action == "REVIEW_PROBE_EVIDENCE"
+
+
+def test_activation_clock_and_probe_timestamps_must_be_utc() -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    probe = _probe_document(manifest_bytes)
+    non_utc = timezone(timedelta(hours=8))
+
+    with pytest.raises(ValueError):
+        evaluate_activation(
+            manifest_bytes,
+            _json_bytes(probe),
+            _receipt_bytes(_json_bytes(probe)),
+            checked_at=CHECKED_AT.astimezone(non_utc),
+        )
+
+    probe["captured_at"] = CHECKED_AT.astimezone(non_utc).isoformat()
+    probe["capability_expires_at"] = (
+        CHECKED_AT + timedelta(hours=1)
+    ).astimezone(non_utc).isoformat()
+    probe_bytes = _json_bytes(probe)
+    result = evaluate_activation(
+        manifest_bytes,
+        probe_bytes,
+        _receipt_bytes(probe_bytes),
+        checked_at=CHECKED_AT,
+    )
+
+    assert result.next_action == "REVIEW_PROBE_ARTIFACT"
 
 
 def test_complete_sanitized_probe_is_the_only_activation_counterexample() -> None:
@@ -324,7 +426,7 @@ def test_publication_receipt_cannot_replay_across_probe_bytes() -> None:
     )
 
     assert result.status == "fixture_with_next_action"
-    assert result.next_action == "REVIEW_PROBE_PUBLICATION_RECEIPT"
+    assert result.next_action == "REVIEW_PROBE_ARTIFACT"
 
 
 @pytest.mark.parametrize(
@@ -374,8 +476,41 @@ def test_contract_hash_binds_exact_publication_receipt_bytes() -> None:
         checked_at=CHECKED_AT,
     )
 
-    assert canonical.status == with_trailing_newline.status == "activated_read_only"
+    assert canonical.status == "activated_read_only"
+    assert with_trailing_newline.status == "fixture_with_next_action"
+    assert with_trailing_newline.next_action == "REVIEW_PROBE_PUBLICATION_RECEIPT"
     assert canonical.contract_hash != with_trailing_newline.contract_hash
+
+
+def test_contract_hash_binds_independent_publisher_trust_anchor() -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    probe_bytes = _probe_bytes(manifest_bytes)
+    receipt_bytes = _receipt_bytes(probe_bytes)
+    alternate_key = Ed25519PrivateKey.from_private_bytes(bytes(range(33, 65)))
+    alternate_public_key = _b64u(
+        alternate_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    ).encode("ascii")
+
+    trusted = evaluate_activation(
+        manifest_bytes,
+        probe_bytes,
+        receipt_bytes,
+        checked_at=CHECKED_AT,
+    )
+    alternate = evaluate_activation(
+        manifest_bytes,
+        probe_bytes,
+        receipt_bytes,
+        trusted_publication_public_key_bytes=alternate_public_key,
+        checked_at=CHECKED_AT,
+    )
+
+    assert trusted.status == "activated_read_only"
+    assert alternate.next_action == "REVIEW_PROBE_PUBLISHER_BINDING"
+    assert trusted.contract_hash != alternate.contract_hash
 
 
 def test_activation_paths_rejects_oversized_publication_receipt(tmp_path: Path) -> None:
@@ -392,11 +527,189 @@ def test_activation_paths_rejects_oversized_publication_receipt(tmp_path: Path) 
         manifest_path,
         probe_path,
         receipt_path,
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
         checked_at=CHECKED_AT,
     )
 
     assert result.status == "fixture_with_next_action"
     assert result.next_action == "REVIEW_PROBE_PUBLICATION_RECEIPT"
+
+
+@pytest.mark.parametrize("linked_input", ["manifest", "probe", "receipt"])
+def test_activation_paths_never_follow_capability_evidence_symlinks(
+    tmp_path: Path,
+    linked_input: str,
+) -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    probe_bytes = _probe_bytes(manifest_bytes)
+    originals = {
+        "manifest": tmp_path / "manifest-original.json",
+        "probe": tmp_path / "probe-original.json",
+        "receipt": tmp_path / "receipt-original.json",
+    }
+    originals["manifest"].write_bytes(manifest_bytes)
+    originals["probe"].write_bytes(probe_bytes)
+    originals["receipt"].write_bytes(_receipt_bytes(probe_bytes))
+    supplied = dict(originals)
+    supplied[linked_input] = tmp_path / f"{linked_input}-link.json"
+    supplied[linked_input].symlink_to(originals[linked_input])
+
+    result = evaluate_activation_paths(
+        supplied["manifest"],
+        supplied["probe"],
+        supplied["receipt"],
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
+
+    assert result.status == "fixture_with_next_action"
+
+
+def test_activation_paths_rejects_group_or_world_writable_evidence(
+    tmp_path: Path,
+) -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    probe_bytes = _probe_bytes(manifest_bytes)
+    manifest_path = tmp_path / "manifest.json"
+    probe_path = tmp_path / "probe.json"
+    receipt_path = tmp_path / "receipt.json"
+    manifest_path.write_bytes(manifest_bytes)
+    probe_path.write_bytes(probe_bytes)
+    receipt_path.write_bytes(_receipt_bytes(probe_bytes))
+    receipt_path.chmod(0o666)
+
+    result = evaluate_activation_paths(
+        manifest_path,
+        probe_path,
+        receipt_path,
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
+
+    assert result.status == "fixture_with_next_action"
+    assert result.next_action == "REVIEW_PROBE_PUBLICATION_RECEIPT"
+
+
+@pytest.mark.parametrize("attacked_input", ["manifest", "probe", "receipt"])
+@pytest.mark.parametrize(
+    ("attack_kind", "writable_parent_mode"),
+    [
+        ("intermediate_symlink", None),
+        ("hard_link", None),
+        ("writable_parent", 0o770),
+        ("writable_parent", 0o777),
+    ],
+)
+def test_activation_paths_rejects_path_capability_attacks_for_every_input(
+    tmp_path: Path,
+    attacked_input: str,
+    attack_kind: str,
+    writable_parent_mode: int | None,
+) -> None:
+    secure_dir = tmp_path / "secure"
+    secure_dir.mkdir(mode=0o700)
+    secure_dir.chmod(0o700)
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    probe_bytes = _probe_bytes(manifest_bytes)
+    contents = {
+        "manifest": manifest_bytes,
+        "probe": probe_bytes,
+        "receipt": _receipt_bytes(probe_bytes),
+    }
+    supplied: dict[str, Path] = {}
+    for name, content in contents.items():
+        path = secure_dir / f"{name}.json"
+        path.write_bytes(content)
+        path.chmod(0o600)
+        supplied[name] = path
+
+    if attack_kind == "intermediate_symlink":
+        actual_parent = secure_dir / "actual-parent"
+        actual_parent.mkdir(mode=0o700)
+        attacked_path = actual_parent / f"{attacked_input}.json"
+        attacked_path.write_bytes(contents[attacked_input])
+        attacked_path.chmod(0o600)
+        linked_parent = secure_dir / "linked-parent"
+        linked_parent.symlink_to(actual_parent, target_is_directory=True)
+        supplied[attacked_input] = linked_parent / attacked_path.name
+    elif attack_kind == "hard_link":
+        attacked_path = secure_dir / f"{attacked_input}-hard-link.json"
+        os.link(supplied[attacked_input], attacked_path)
+        supplied[attacked_input] = attacked_path
+    else:
+        assert writable_parent_mode is not None
+        writable_parent = secure_dir / "writable-parent"
+        writable_parent.mkdir(mode=0o700)
+        attacked_path = writable_parent / f"{attacked_input}.json"
+        attacked_path.write_bytes(contents[attacked_input])
+        attacked_path.chmod(0o600)
+        writable_parent.chmod(writable_parent_mode)
+        supplied[attacked_input] = attacked_path
+
+    result = evaluate_activation_paths(
+        supplied["manifest"],
+        supplied["probe"],
+        supplied["receipt"],
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
+
+    expected_action = {
+        "manifest": "REVIEW_PROVIDER_MANIFEST",
+        "probe": "REVIEW_PROBE_ARTIFACT",
+        "receipt": "REVIEW_PROBE_PUBLICATION_RECEIPT",
+    }
+    assert result.status == "fixture_with_next_action"
+    assert result.next_action == expected_action[attacked_input]
+
+
+def test_bounded_evidence_reader_rejects_metadata_change_during_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_bytes(b'{"synthetic":true}')
+    evidence_path.chmod(0o600)
+    real_fstat = os.fstat
+    fstat_calls = 0
+
+    monkeypatch.setattr(
+        activation_module,
+        "_open_evidence_file",
+        lambda _path: os.open(evidence_path, os.O_RDONLY),
+    )
+
+    def drifting_fstat(file_descriptor: int):
+        nonlocal fstat_calls
+        metadata = real_fstat(file_descriptor)
+        fstat_calls += 1
+        if fstat_calls != 2:
+            return metadata
+        fields = {
+            name: getattr(metadata, name)
+            for name in (
+                "st_dev",
+                "st_ino",
+                "st_uid",
+                "st_mode",
+                "st_nlink",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+        }
+        fields["st_mtime_ns"] += 1
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(activation_module.os, "fstat", drifting_fstat)
+
+    content = activation_module._read_bounded_or_empty(
+        evidence_path,
+        max_bytes=1024,
+    )
+
+    assert content == b""
+    assert fstat_calls == 2
 
 
 def test_cli_activates_only_with_matching_publication_receipt(
@@ -406,8 +719,8 @@ def test_cli_activates_only_with_matching_publication_receipt(
     manifest_bytes = _json_bytes(_admitted_manifest())
     captured_at = datetime.now(UTC)
     probe = _probe_document(manifest_bytes)
-    probe["captured_at"] = captured_at.isoformat()
-    probe["capability_expires_at"] = (captured_at + timedelta(hours=1)).isoformat()
+    probe["captured_at"] = _utc_text(captured_at)
+    probe["capability_expires_at"] = _utc_text(captured_at + timedelta(hours=1))
     probe_bytes = _json_bytes(probe)
     manifest_path = tmp_path / "manifest.json"
     probe_path = tmp_path / "probe.json"
@@ -424,6 +737,8 @@ def test_cli_activates_only_with_matching_publication_receipt(
             str(probe_path),
             "--publication-receipt",
             str(receipt_path),
+            "--trusted-publisher-public-key-b64u",
+            TEST_PUBLICATION_PUBLIC_KEY_B64U,
             "--require-activated",
         ]
     )
@@ -471,7 +786,9 @@ def test_contract_hash_binds_exact_probe_artifact_bytes() -> None:
         checked_at=CHECKED_AT,
     )
 
-    assert canonical.status == with_trailing_newline.status == "activated_read_only"
+    assert canonical.status == "activated_read_only"
+    assert with_trailing_newline.status == "fixture_with_next_action"
+    assert with_trailing_newline.next_action == "REVIEW_PROBE_ARTIFACT"
     assert canonical.contract_hash != with_trailing_newline.contract_hash
 
 
@@ -516,8 +833,8 @@ def _probe_document(manifest_bytes: bytes) -> dict[str, object]:
     return {
         "schema_version": "nexus.fosun.sanitized-probe.v2",
         "provider": "fosun",
-        "captured_at": CHECKED_AT.isoformat(),
-        "capability_expires_at": (CHECKED_AT + timedelta(hours=1)).isoformat(),
+        "captured_at": _utc_text(CHECKED_AT),
+        "capability_expires_at": _utc_text(CHECKED_AT + timedelta(hours=1)),
         "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "sdk_tag": manifest["sdk"]["tag"],
         "sdk_commit": manifest["sdk"]["commit"],
@@ -547,9 +864,18 @@ def _json_bytes(document: dict[str, object]) -> bytes:
     return json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
 
 
-def _receipt_bytes(probe_bytes: bytes) -> bytes:
+def _utc_text(value: datetime) -> str:
+    assert value.utcoffset() == timedelta(0)
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _receipt_bytes(
+    probe_bytes: bytes,
+    *,
+    private_key: Ed25519PrivateKey = TEST_PUBLICATION_KEY,
+) -> bytes:
     artifact_sha256 = hashlib.sha256(probe_bytes).hexdigest()
-    signature = TEST_PUBLICATION_KEY.sign(
+    signature = private_key.sign(
         PUBLICATION_DOMAIN + bytes.fromhex(artifact_sha256)
     )
     return _json_bytes(

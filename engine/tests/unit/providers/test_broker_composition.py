@@ -32,16 +32,66 @@ def test_compose_separates_broker_secrets_from_api_and_research_worker() -> None
     assert "env_file:" not in _service_block(compose, "broker-worker")
 
 
-def test_activation_artifact_is_mounted_only_into_the_provider_gateway_domain() -> None:
+def test_activation_bundle_is_mounted_only_into_the_provider_gateway_domain() -> None:
     compose = (WORKTREE_ROOT / "infra/compose.yaml").read_text()
     activation = {
         "FOSUN_ACTIVATION_PROBE_ARTIFACT",
-        "FOSUN_ACTIVATION_CONTRACT_HASH",
+        "FOSUN_ACTIVATION_PROBE_RECEIPT",
+        "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE",
+        "FOSUN_ACTIVATION_CONTRACT_HASH_FILE",
     }
 
     assert activation <= _service_environment(compose, "fosun-gateway")
     for service in ("api", "worker", "broker-worker"):
         assert _service_environment(compose, service).isdisjoint(activation)
+
+
+def test_activation_bundle_uses_separate_read_only_evidence_and_control_configs() -> None:
+    compose = (WORKTREE_ROOT / "infra/compose.yaml").read_text()
+    gateway = _service_block(compose, "fosun-gateway")
+    evidence_mounts = {
+        "FOSUN_ACTIVATION_PROBE_ARTIFACT_HOST_FILE": (
+            "../.secrets/fosun-activation/probe-artifact.json",
+            "/run/nexus/fosun-activation/probe-artifact.json"
+        ),
+        "FOSUN_ACTIVATION_PROBE_RECEIPT_HOST_FILE": (
+            "../.secrets/fosun-activation/publication-receipt.json",
+            "/run/nexus/fosun-activation/publication-receipt.json"
+        ),
+    }
+    for source_variable, (default_source, target) in evidence_mounts.items():
+        mount = (
+            "      - type: bind\n"
+            f"        source: ${{{source_variable}:-{default_source}}}\n"
+            f"        target: {target}\n"
+            "        read_only: true\n"
+            "        bind:\n"
+            "          create_host_path: false\n"
+        )
+        assert gateway.count(mount) == 1
+
+    control_configs = {
+        "fosun-activation-publisher-key": (
+            "FOSUN_ACTIVATION_PUBLISHER_KEY_CONFIG_FILE",
+            "/run/nexus/fosun-control/publisher-public-key.b64u",
+        ),
+        "fosun-activation-contract-hash": (
+            "FOSUN_ACTIVATION_CONTRACT_HASH_CONFIG_FILE",
+            "/run/nexus/fosun-control/activation-contract.sha256",
+        ),
+    }
+    for source, (source_variable, target) in control_configs.items():
+        attachment = (
+            f"      - source: {source}\n"
+            f"        target: {target}\n"
+            "        mode: 0444\n"
+        )
+        assert gateway.count(attachment) == 1
+        assert f"  {source}:\n    file: ${{{source_variable}:-../.secrets/" in compose
+
+    environment = _service_environment(compose, "fosun-gateway")
+    assert "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U" not in environment
+    assert "FOSUN_ACTIVATION_CONTRACT_HASH" not in environment
 
 
 def test_compose_profiles_keep_broker_capability_out_of_the_app_profile() -> None:

@@ -115,7 +115,7 @@ def test_activation_contract_hash_mismatch_cannot_import_sdk(
     tmp_path: Path,
 ) -> None:
     values = _activated_read_only_values(tmp_path)
-    values["FOSUN_ACTIVATION_CONTRACT_HASH"] = "0" * 64
+    Path(str(values["FOSUN_ACTIVATION_CONTRACT_HASH_FILE"])).write_text("0" * 64)
     imported = False
 
     def forbidden_import(name: str) -> object:
@@ -124,6 +124,54 @@ def test_activation_contract_hash_mismatch_cannot_import_sdk(
         return SimpleNamespace(SDKClient=object)
 
     monkeypatch.setattr("nexus_fosun_gateway.main.importlib.import_module", forbidden_import)
+
+    with pytest.raises(GatewayError) as exc_info:
+        build_transport(GatewaySettings.model_validate(values))
+
+    assert exc_info.value.code == "SDK_NOT_ADMITTED"
+    assert imported is False
+
+
+def test_publisher_pin_mismatch_cannot_import_sdk_even_with_its_contract_hash(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    values = _activated_read_only_values(tmp_path)
+    alternate_key = Ed25519PrivateKey.from_private_bytes(bytes(range(33, 65)))
+    alternate_public_key = _b64u(
+        alternate_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
+    manifest_path = Path(str(values["FOSUN_PROVIDER_MANIFEST"]))
+    probe_path = Path(str(values["FOSUN_ACTIVATION_PROBE_ARTIFACT"]))
+    receipt_path = Path(str(values["FOSUN_ACTIVATION_PROBE_RECEIPT"]))
+    blocked = evaluate_activation(
+        manifest_path.read_bytes(),
+        probe_path.read_bytes(),
+        receipt_path.read_bytes(),
+        trusted_publication_public_key_bytes=alternate_public_key.encode("ascii"),
+        checked_at=datetime.now(UTC),
+    )
+    assert blocked.next_action == "REVIEW_PROBE_PUBLISHER_BINDING"
+    Path(
+        str(values["FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE"])
+    ).write_text(alternate_public_key)
+    Path(str(values["FOSUN_ACTIVATION_CONTRACT_HASH_FILE"])).write_text(
+        blocked.contract_hash
+    )
+    imported = False
+
+    def forbidden_import(_name: str) -> object:
+        nonlocal imported
+        imported = True
+        raise AssertionError
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.main.importlib.import_module",
+        forbidden_import,
+    )
 
     with pytest.raises(GatewayError) as exc_info:
         build_transport(GatewaySettings.model_validate(values))
@@ -147,6 +195,58 @@ def test_missing_publication_receipt_file_cannot_import_sdk(
         return SimpleNamespace(SDKClient=object)
 
     monkeypatch.setattr("nexus_fosun_gateway.main.importlib.import_module", forbidden_import)
+
+    with pytest.raises(GatewayError) as exc_info:
+        build_transport(GatewaySettings.model_validate(values))
+
+    assert exc_info.value.code == "SDK_NOT_ADMITTED"
+    assert imported is False
+
+
+@pytest.mark.parametrize(
+    "attack_kind",
+    [
+        "publisher_symlink",
+        "contract_hard_link",
+        "publisher_writable",
+        "contract_trailing_newline",
+    ],
+)
+def test_activation_control_files_fail_closed_before_sdk_import(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    attack_kind: str,
+) -> None:
+    values = _activated_read_only_values(tmp_path)
+    publisher_path = Path(
+        str(values["FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE"])
+    )
+    contract_path = Path(str(values["FOSUN_ACTIVATION_CONTRACT_HASH_FILE"]))
+    if attack_kind == "publisher_symlink":
+        actual_path = tmp_path / "actual-publisher-public-key.b64u"
+        actual_path.write_bytes(publisher_path.read_bytes())
+        actual_path.chmod(0o600)
+        publisher_path.unlink()
+        publisher_path.symlink_to(actual_path)
+    elif attack_kind == "contract_hard_link":
+        hard_link_path = tmp_path / "hard-linked-activation-contract.sha256"
+        hard_link_path.hardlink_to(contract_path)
+        values["FOSUN_ACTIVATION_CONTRACT_HASH_FILE"] = hard_link_path
+    elif attack_kind == "publisher_writable":
+        publisher_path.chmod(0o666)
+    else:
+        contract_path.write_text(contract_path.read_text() + "\n")
+    imported = False
+
+    def forbidden_import(_name: str) -> object:
+        nonlocal imported
+        imported = True
+        raise AssertionError
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.main.importlib.import_module",
+        forbidden_import,
+    )
 
     with pytest.raises(GatewayError) as exc_info:
         build_transport(GatewaySettings.model_validate(values))
@@ -190,6 +290,43 @@ def test_runtime_provider_base_url_must_match_the_admitted_manifest(
         return SimpleNamespace(SDKClient=object)
 
     monkeypatch.setattr("nexus_fosun_gateway.main.importlib.import_module", forbidden_import)
+
+    with pytest.raises(GatewayError) as exc_info:
+        build_transport(GatewaySettings.model_validate(values))
+
+    assert exc_info.value.code == "SDK_NOT_ADMITTED"
+    assert imported is False
+
+
+def test_manifest_is_read_once_for_admission_activation_and_base_url_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    values = _activated_read_only_values(tmp_path)
+    manifest_path = Path(str(values["FOSUN_PROVIDER_MANIFEST"]))
+    configured_url = "https://configured-provider.invalid"
+    values["FSOPENAPI_BASE_URL"] = configured_url
+    first_read_document = json.loads(manifest_path.read_text())
+    first_read_document["admission"]["provider_base_url"] = configured_url
+    first_read_text = json.dumps(first_read_document)
+    real_read_text = Path.read_text
+    imported = False
+
+    def changing_read_text(path: Path, *args, **kwargs) -> str:
+        if path == manifest_path:
+            return first_read_text
+        return real_read_text(path, *args, **kwargs)
+
+    def forbidden_import(_name: str) -> object:
+        nonlocal imported
+        imported = True
+        raise ModuleNotFoundError
+
+    monkeypatch.setattr(Path, "read_text", changing_read_text)
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.main.importlib.import_module",
+        forbidden_import,
+    )
 
     with pytest.raises(GatewayError) as exc_info:
         build_transport(GatewaySettings.model_validate(values))
@@ -682,7 +819,12 @@ def _read_only_settings(manifest_path: Path) -> GatewaySettings:
             "FOSUN_SDK_ADMITTED": True,
             "FOSUN_ACTIVATION_PROBE_ARTIFACT": "/synthetic/missing-probe.json",
             "FOSUN_ACTIVATION_PROBE_RECEIPT": "/synthetic/missing-receipt.json",
-            "FOSUN_ACTIVATION_CONTRACT_HASH": "a" * 64,
+            "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE": (
+                "/synthetic/missing-publisher-public-key.b64u"
+            ),
+            "FOSUN_ACTIVATION_CONTRACT_HASH_FILE": (
+                "/synthetic/missing-activation-contract.sha256"
+            ),
             "FSOPENAPI_BASE_URL": "https://provider.invalid",
             "FSOPENAPI_API_KEY": "synthetic-api-key",
             "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key",
@@ -731,8 +873,10 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
     probe = {
         "schema_version": "nexus.fosun.sanitized-probe.v2",
         "provider": "fosun",
-        "captured_at": captured_at.isoformat(),
-        "capability_expires_at": (captured_at + timedelta(hours=1)).isoformat(),
+        "captured_at": captured_at.isoformat().replace("+00:00", "Z"),
+        "capability_expires_at": (captured_at + timedelta(hours=1))
+        .isoformat()
+        .replace("+00:00", "Z"),
         "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "sdk_tag": manifest["sdk"]["tag"],
         "sdk_commit": manifest["sdk"]["commit"],
@@ -774,13 +918,21 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
     ).encode()
     receipt_path = tmp_path / "sanitized-probe-receipt.json"
     receipt_path.write_bytes(receipt_bytes)
+    trusted_key_bytes = _b64u(public_key).encode("ascii")
     activation = evaluate_activation(
         manifest_bytes,
         probe_bytes,
         receipt_bytes,
+        trusted_publication_public_key_bytes=trusted_key_bytes,
         checked_at=captured_at,
     )
     assert activation.status == "activated_read_only"
+    trusted_key_path = tmp_path / "publisher-public-key.b64u"
+    trusted_key_path.write_bytes(trusted_key_bytes)
+    trusted_key_path.chmod(0o600)
+    activation_contract_path = tmp_path / "activation-contract.sha256"
+    activation_contract_path.write_text(activation.contract_hash)
+    activation_contract_path.chmod(0o600)
     return {
         "NEXUS_ENV": "production",
         "FOSUN_GATEWAY_CAPABILITY": "READ_ONLY",
@@ -797,7 +949,8 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
         "FOSUN_SDK_ADMITTED": True,
         "FOSUN_ACTIVATION_PROBE_ARTIFACT": probe_path,
         "FOSUN_ACTIVATION_PROBE_RECEIPT": receipt_path,
-        "FOSUN_ACTIVATION_CONTRACT_HASH": activation.contract_hash,
+        "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE": trusted_key_path,
+        "FOSUN_ACTIVATION_CONTRACT_HASH_FILE": activation_contract_path,
         "FSOPENAPI_BASE_URL": "https://provider.invalid",
         "FSOPENAPI_API_KEY": "synthetic-api-key",
         "FSOPENAPI_CLIENT_PRIVATE_KEY": "synthetic-private-key",

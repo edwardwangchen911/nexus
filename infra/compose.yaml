@@ -224,15 +224,36 @@ services:
       - FOSUN_GATEWAY_SERVER_BROKER_CLIENT_CA
       - FOSUN_GATEWAY_SERVER_MARKET_CLIENT_CA
       - FOSUN_SDK_ADMITTED
-      - FOSUN_PROVIDER_MANIFEST
-      - FOSUN_ACTIVATION_PROBE_ARTIFACT
-      - FOSUN_ACTIVATION_CONTRACT_HASH
+      - FOSUN_PROVIDER_MANIFEST=/app/contracts/providers/fosun/manifest.json
+      - FOSUN_ACTIVATION_PROBE_ARTIFACT=/run/nexus/fosun-activation/probe-artifact.json
+      - FOSUN_ACTIVATION_PROBE_RECEIPT=/run/nexus/fosun-activation/publication-receipt.json
+      - FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE=/run/nexus/fosun-control/publisher-public-key.b64u
+      - FOSUN_ACTIVATION_CONTRACT_HASH_FILE=/run/nexus/fosun-control/activation-contract.sha256
       - FSOPENAPI_API_KEY
       - FSOPENAPI_CLIENT_PRIVATE_KEY
       - FSOPENAPI_SERVER_PUBLIC_KEY
       - FSOPENAPI_BASE_URL
     volumes:
       - fosun-gateway-replay:/var/lib/nexus-fosun-gateway
+      - type: bind
+        source: ${FOSUN_ACTIVATION_PROBE_ARTIFACT_HOST_FILE:-../.secrets/fosun-activation/probe-artifact.json}
+        target: /run/nexus/fosun-activation/probe-artifact.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${FOSUN_ACTIVATION_PROBE_RECEIPT_HOST_FILE:-../.secrets/fosun-activation/publication-receipt.json}
+        target: /run/nexus/fosun-activation/publication-receipt.json
+        read_only: true
+        bind:
+          create_host_path: false
+    configs:
+      - source: fosun-activation-publisher-key
+        target: /run/nexus/fosun-control/publisher-public-key.b64u
+        mode: 0444
+      - source: fosun-activation-contract-hash
+        target: /run/nexus/fosun-control/activation-contract.sha256
+        mode: 0444
     healthcheck:
       test: ["CMD", "nexus-fosun-gateway-ready"]
       interval: 2s
@@ -292,3 +313,9 @@ volumes:
   fosun-gateway-replay:
     external: true
     name: nexus-fosun-gateway-replay-v1
+
+configs:
+  fosun-activation-publisher-key:
+    file: ${FOSUN_ACTIVATION_PUBLISHER_KEY_CONFIG_FILE:-../.secrets/fosun-control/publisher-public-key.b64u}
+  fosun-activation-contract-hash:
+    file: ${FOSUN_ACTIVATION_CONTRACT_HASH_CONFIG_FILE:-../.secrets/fosun-control/activation-contract.sha256}
