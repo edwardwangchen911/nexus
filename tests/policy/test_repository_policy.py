@@ -934,3 +934,135 @@ def test_committed_workflow_has_minimal_permissions_and_offline_jobs() -> None:
     root = Path(__file__).resolve().parents[2]
 
     assert check_workflow(root) == []
+
+
+def _write_real_e2e_adoption(root: Path) -> None:
+    (root / "playwright.real.config.ts").write_text("export default {};\n")
+    (root / "tests/e2e-real").mkdir(parents=True)
+    (root / "package.json").write_text(
+        json.dumps({"scripts": {"test:e2e:real": "playwright test -c playwright.real.config.ts"}})
+    )
+    workflow = root / ".github/workflows/ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("jobs:\n  real-e2e:\n    runs-on: ubuntu-24.04\n")
+
+
+def test_real_e2e_boundary_allows_a_repository_before_real_e2e_adoption(
+    tmp_path: Path,
+) -> None:
+    checker = getattr(repository_policy, "check_real_e2e_boundary", None)
+
+    assert callable(checker)
+    assert checker(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("missing_marker", "expected_rule", "expected_path"),
+    [
+        ("config", "real_e2e_config_missing", "playwright.real.config.ts"),
+        ("test_dir", "real_e2e_test_directory_missing", "tests/e2e-real"),
+        ("package", "real_e2e_package_script_missing", "package.json"),
+        ("workflow", "real_e2e_ci_job_missing", ".github/workflows/ci.yml"),
+    ],
+)
+def test_real_e2e_boundary_rejects_partial_adoption(
+    tmp_path: Path,
+    missing_marker: str,
+    expected_rule: str,
+    expected_path: str,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    if missing_marker == "config":
+        (tmp_path / "playwright.real.config.ts").unlink()
+    elif missing_marker == "test_dir":
+        (tmp_path / "tests/e2e-real").rmdir()
+    elif missing_marker == "package":
+        (tmp_path / "package.json").write_text(json.dumps({"scripts": {}}))
+    else:
+        (tmp_path / ".github/workflows/ci.yml").write_text("jobs:\n")
+
+    checker = getattr(repository_policy, "check_real_e2e_boundary", None)
+
+    assert callable(checker)
+    assert [(finding.rule, finding.path) for finding in checker(tmp_path)] == [
+        (expected_rule, expected_path)
+    ]
+
+
+@pytest.mark.parametrize(
+    "network_mock",
+    [
+        "await page.route('**/api', handler)\n",
+        "await context.route('**/api', handler)\n",
+        "await route.fulfill({status: 200})\n",
+    ],
+)
+def test_real_e2e_boundary_forbids_network_response_replacement(
+    tmp_path: Path,
+    network_mock: str,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    real_test = tmp_path / "tests/e2e-real/network.spec.ts"
+    real_test.write_text(network_mock)
+    (tmp_path / "tests/e2e/synthetic.spec.ts").parent.mkdir(parents=True)
+    (tmp_path / "tests/e2e/synthetic.spec.ts").write_text(
+        "await page.route('**/api', handler)\n"
+    )
+
+    checker = getattr(repository_policy, "check_real_e2e_boundary", None)
+
+    assert callable(checker)
+    assert [(finding.rule, finding.path) for finding in checker(tmp_path)] == [
+        ("real_e2e_network_mock_forbidden", "tests/e2e-real/network.spec.ts")
+    ]
+
+
+def test_real_e2e_boundary_scans_for_network_mocks_during_partial_adoption(
+    tmp_path: Path,
+) -> None:
+    _write_real_e2e_adoption(tmp_path)
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": {}}))
+    (tmp_path / "tests/e2e-real/network.spec.ts").write_text(
+        "await page.route('**/api', handler)\n"
+    )
+
+    checker = getattr(repository_policy, "check_real_e2e_boundary", None)
+
+    assert callable(checker)
+    assert [(finding.rule, finding.path) for finding in checker(tmp_path)] == [
+        ("real_e2e_package_script_missing", "package.json"),
+        ("real_e2e_network_mock_forbidden", "tests/e2e-real/network.spec.ts"),
+    ]
+
+
+def test_run_all_includes_the_real_e2e_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = repository_policy.PolicyFinding(
+        "real_e2e_config_missing", "playwright.real.config.ts", "required"
+    )
+    checker = getattr(repository_policy, "check_real_e2e_boundary", None)
+
+    assert callable(checker)
+    monkeypatch.setattr(repository_policy, "dependency_inventory", lambda root: [])
+    monkeypatch.setattr(repository_policy, "repository_texts", lambda root: {})
+    for name in (
+        "check_forbidden_gateway_surface",
+        "check_provider_tls_remediation",
+        "check_probe_runtime_isolation",
+        "check_gateway_read_allowlist",
+        "check_gateway_entrypoint_isolation",
+        "check_sdk_lock_admission",
+        "check_container_pins",
+        "check_container_hardening",
+        "check_workflow",
+        "license_findings",
+    ):
+        monkeypatch.setattr(repository_policy, name, lambda *args: [])
+    monkeypatch.setattr(repository_policy, "check_real_e2e_boundary", lambda root: [expected])
+
+    findings, inventory = repository_policy.run_all(tmp_path)
+
+    assert findings == [expected]
+    assert inventory == []

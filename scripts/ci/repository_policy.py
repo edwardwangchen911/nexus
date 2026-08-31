@@ -196,6 +196,15 @@ _EXPECTED_FOSUN_GATEWAY_SERVICE_SHA256 = (
 _EXPECTED_FOSUN_GATEWAY_DOCKERFILE_SHA256 = (
     "a072e4e4898ea191b807be3f8fdcd7fa4c6c08b4b4e9e4c3ded61897dd37174b"
 )
+_REAL_E2E_CONFIG_PATH = "playwright.real.config.ts"
+_REAL_E2E_TEST_DIRECTORY = "tests/e2e-real"
+_REAL_E2E_PACKAGE_SCRIPT = "test:e2e:real"
+_REAL_E2E_WORKFLOW_PATH = ".github/workflows/ci.yml"
+_REAL_E2E_WORKFLOW_JOB = re.compile(r"(?m)^  real-e2e:\s*$")
+_REAL_E2E_NETWORK_MOCK = re.compile(
+    r"\b(?:page|context|browserContext)\s*\.\s*route\s*\(|"
+    r"\broute\s*\.\s*fulfill\s*\("
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -1353,6 +1362,86 @@ def _container_references(path: Path) -> list[tuple[int, str]]:
     return references
 
 
+def check_real_e2e_boundary(root: Path) -> list[PolicyFinding]:
+    """Fail closed once the dedicated real-fixture E2E suite is adopted."""
+    config_path = root / _REAL_E2E_CONFIG_PATH
+    test_directory = root / _REAL_E2E_TEST_DIRECTORY
+    package_path = root / "package.json"
+    workflow_path = root / _REAL_E2E_WORKFLOW_PATH
+    package_script_present = _real_e2e_package_script_present(package_path)
+    workflow_job_present = _real_e2e_workflow_job_present(workflow_path)
+    adopted = (
+        config_path.exists()
+        or test_directory.exists()
+        or package_script_present
+        or workflow_job_present
+    )
+    if not adopted:
+        return []
+
+    findings: list[PolicyFinding] = []
+    if not config_path.is_file():
+        findings.append(
+            PolicyFinding(
+                "real_e2e_config_missing",
+                _REAL_E2E_CONFIG_PATH,
+                "real fixture E2E requires its dedicated Playwright configuration",
+            )
+        )
+    if not test_directory.is_dir():
+        findings.append(
+            PolicyFinding(
+                "real_e2e_test_directory_missing",
+                _REAL_E2E_TEST_DIRECTORY,
+                "real fixture E2E requires its dedicated test directory",
+            )
+        )
+    if not package_script_present:
+        findings.append(
+            PolicyFinding(
+                "real_e2e_package_script_missing",
+                "package.json",
+                "real fixture E2E requires the test:e2e:real package script",
+            )
+        )
+    if not workflow_job_present:
+        findings.append(
+            PolicyFinding(
+                "real_e2e_ci_job_missing",
+                _REAL_E2E_WORKFLOW_PATH,
+                "real fixture E2E requires the real-e2e CI job",
+            )
+        )
+    if test_directory.is_dir():
+        for path in sorted(test_directory.rglob("*")):
+            if path.is_file() and _REAL_E2E_NETWORK_MOCK.search(_read_text(path)):
+                findings.append(
+                    PolicyFinding(
+                        "real_e2e_network_mock_forbidden",
+                        _relative(root, path),
+                        "real fixture E2E must not replace network responses",
+                    )
+                )
+    return findings
+
+
+def _real_e2e_package_script_present(package_path: Path) -> bool:
+    try:
+        package = json.loads(_read_text(package_path))
+    except (OSError, json.JSONDecodeError):
+        return False
+    scripts = package.get("scripts") if isinstance(package, dict) else None
+    script = scripts.get(_REAL_E2E_PACKAGE_SCRIPT) if isinstance(scripts, dict) else None
+    return isinstance(script, str) and bool(script.strip())
+
+
+def _real_e2e_workflow_job_present(workflow_path: Path) -> bool:
+    try:
+        return _REAL_E2E_WORKFLOW_JOB.search(_read_text(workflow_path)) is not None
+    except OSError:
+        return False
+
+
 def check_workflow(root: Path) -> list[PolicyFinding]:
     path = root / ".github/workflows/ci.yml"
     if not path.is_file():
@@ -1474,6 +1563,7 @@ def run_all(root: Path) -> tuple[list[PolicyFinding], list[DependencyRecord]]:
     findings.extend(check_sdk_lock_admission(root))
     findings.extend(check_container_pins(root))
     findings.extend(check_container_hardening(root))
+    findings.extend(check_real_e2e_boundary(root))
     findings.extend(check_workflow(root))
     findings.extend(license_findings(inventory))
     return sorted(set(findings)), inventory
