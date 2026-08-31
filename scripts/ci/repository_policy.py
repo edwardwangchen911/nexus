@@ -200,7 +200,8 @@ _REAL_E2E_CONFIG_PATH = "playwright.real.config.ts"
 _REAL_E2E_TEST_DIRECTORY = "tests/e2e-real"
 _REAL_E2E_PACKAGE_SCRIPT = "test:e2e:real"
 _REAL_E2E_WORKFLOW_PATH = ".github/workflows/ci.yml"
-_REAL_E2E_WORKFLOW_JOB = re.compile(r"(?m)^  real-e2e:\s*$")
+_REAL_E2E_JOBS_SECTION = re.compile(r"^jobs\s*:\s*(?:#.*)?$")
+_REAL_E2E_WORKFLOW_JOB = re.compile(r"^(?:real-e2e|['\"]real-e2e['\"])\s*:")
 _REAL_E2E_NETWORK_MOCK = re.compile(
     r"\b(?:page|context|browserContext)\s*\.\s*route\s*\(|"
     r"\broute\s*\.\s*fulfill\s*\("
@@ -1437,9 +1438,42 @@ def _real_e2e_package_script_present(package_path: Path) -> bool:
 
 def _real_e2e_workflow_job_present(workflow_path: Path) -> bool:
     try:
-        return _REAL_E2E_WORKFLOW_JOB.search(_read_text(workflow_path)) is not None
+        lines = _read_text(workflow_path).splitlines()
     except OSError:
         return False
+    jobs_section = False
+    job_indent: int | None = None
+    for index, line in enumerate(lines):
+        if not jobs_section:
+            if line == line.lstrip(" ") and _REAL_E2E_JOBS_SECTION.fullmatch(line):
+                jobs_section = True
+            continue
+        stripped = line.lstrip(" ")
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(stripped)
+        if indent == 0:
+            return False
+        if job_indent is None:
+            job_indent = indent
+        if indent < job_indent:
+            return False
+        if indent == job_indent and _REAL_E2E_WORKFLOW_JOB.match(stripped):
+            return _workflow_job_has_body(lines, index, job_indent)
+    return False
+
+
+def _workflow_job_has_body(lines: list[str], job_index: int, job_indent: int) -> bool:
+    job_line = lines[job_index].lstrip(" ")
+    value = job_line.split(":", 1)[1].strip()
+    if value and not value.startswith("#"):
+        return value.startswith("{")
+    for line in lines[job_index + 1 :]:
+        stripped = line.lstrip(" ")
+        if not stripped or stripped.startswith("#"):
+            continue
+        return len(line) - len(stripped) > job_indent
+    return False
 
 
 def check_workflow(root: Path) -> list[PolicyFinding]:

@@ -956,6 +956,22 @@ def test_real_e2e_boundary_allows_a_repository_before_real_e2e_adoption(
     assert checker(tmp_path) == []
 
 
+def test_real_e2e_boundary_recognizes_a_valid_indented_ci_job_as_its_only_anchor(
+    tmp_path: Path,
+) -> None:
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("jobs:\n    real-e2e:\n      runs-on: ubuntu-24.04\n")
+    checker = getattr(repository_policy, "check_real_e2e_boundary", None)
+
+    assert callable(checker)
+    assert [(finding.rule, finding.path) for finding in checker(tmp_path)] == [
+        ("real_e2e_config_missing", "playwright.real.config.ts"),
+        ("real_e2e_test_directory_missing", "tests/e2e-real"),
+        ("real_e2e_package_script_missing", "package.json"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("missing_marker", "expected_rule", "expected_path"),
     [
