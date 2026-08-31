@@ -27,11 +27,37 @@ class ProviderHttpObserver(Protocol):
 class ProbeTlsControls:
     """Idempotently close both fresh sessions owned by one probe process."""
 
-    def __init__(self, business_session: object, auth_session: object) -> None:
+    def __init__(
+        self,
+        business_session: object,
+        auth_session: object,
+        *,
+        client: object,
+        auth_module: object,
+        business_proxy: object,
+        auth_proxy: object,
+        observer: ProviderHttpObserver,
+    ) -> None:
         self._business_session = business_session
         self._auth_session = auth_session
+        self._client = client
+        self._auth_module = auth_module
+        self._business_proxy = business_proxy
+        self._auth_proxy = auth_proxy
+        self._observer = observer
         self._lock = Lock()
         self._closed = False
+
+    def attests(self, client: object, observer: ProviderHttpObserver) -> bool:
+        """Prove both currently installed proxies are bound to this exact observer."""
+        return (
+            client is self._client
+            and observer is self._observer
+            and getattr(self._client, "_http_session", None) is self._business_proxy
+            and getattr(self._auth_module, "requests", None) is self._auth_proxy
+            and getattr(self._business_proxy, "_observer", None) is observer
+            and getattr(self._auth_proxy, "_observer", None) is observer
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -122,7 +148,15 @@ def enforce_probe_tls_controls(
         observer=observer,
         probe_mode=True,
     )
-    return ProbeTlsControls(business_session, auth_session)
+    return ProbeTlsControls(
+        business_session,
+        auth_session,
+        client=client,
+        auth_module=auth_module,
+        business_proxy=getattr(client, "_http_session"),
+        auth_proxy=getattr(auth_module, "requests"),
+        observer=observer,
+    )
 
 
 def _install_sdk_tls_verification(
@@ -162,16 +196,10 @@ def _install_sdk_tls_verification(
             raise RuntimeError("reviewed SDK probe HTTP surface is unavailable") from None
     setattr(session, "trust_env", False)
     setattr(isolated_auth_session, "trust_env", False)
-    setattr(
-        client,
-        "_http_session",
-        _VerifiedSessionProxy(session, session_request, observer),
-    )
-    setattr(
-        auth_module,
-        "requests",
-        _VerifiedRequestsProxy(requests_module, isolated_auth_post, observer),
-    )
+    business_proxy = _VerifiedSessionProxy(session, session_request, observer)
+    auth_proxy = _VerifiedRequestsProxy(requests_module, isolated_auth_post, observer)
+    setattr(client, "_http_session", business_proxy)
+    setattr(auth_module, "requests", auth_proxy)
     return session, isolated_auth_session
 
 

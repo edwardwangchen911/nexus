@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from nexus_fosun_gateway.settings import GatewaySettings
@@ -28,6 +29,14 @@ _REQUIRED_EVIDENCE = (
     "security_review",
     "tls_verification_remediation",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedSdkSubject:
+    provider_base_url: str
+    sdk_tag: str
+    sdk_commit: str
+    evidence_references: tuple[str, ...]
 
 
 def sdk_admission_is_valid(settings: GatewaySettings) -> bool:
@@ -85,6 +94,32 @@ def sdk_admission_document_is_valid(document: object) -> bool:
     if not isinstance(evidence, Mapping):
         return False
     return all(_evidence_reference(evidence.get(name)) for name in _REQUIRED_EVIDENCE)
+
+
+def admitted_sdk_subject(document: object) -> AdmittedSdkSubject | None:
+    """Return the exact safe subject only after the complete document is admitted."""
+    if not sdk_admission_document_is_valid(document) or not isinstance(document, Mapping):
+        return None
+    sdk = document.get("sdk")
+    admission = document.get("admission")
+    if not isinstance(sdk, Mapping) or not isinstance(admission, Mapping):
+        return None
+    evidence = admission.get("evidence")
+    provider_base_url = _provider_base_url(document)
+    if not isinstance(evidence, Mapping) or provider_base_url is None:
+        return None
+    references: list[str] = []
+    for name in _REQUIRED_EVIDENCE:
+        value = evidence.get(name)
+        if not isinstance(value, str):
+            return None
+        references.append(value)
+    return AdmittedSdkSubject(
+        provider_base_url=provider_base_url,
+        sdk_tag=_SDK_TAG,
+        sdk_commit=_SDK_COMMIT,
+        evidence_references=tuple(references),
+    )
 
 
 def _evidence_reference(value: object) -> bool:

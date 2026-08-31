@@ -149,11 +149,15 @@ def test_probe_tls_controls_count_physical_edges_and_disable_adapter_retries() -
     business_session = FakeProbeSession()
     client = SimpleNamespace(_http_session=business_session)
     auth_module = SimpleNamespace(requests=FakeRequests())
+    observer = _RecordingObserver(events)
     controls = enforce_probe_tls_controls(
         client,
         auth_module,
-        observer=_RecordingObserver(events),
+        observer=observer,
     )
+
+    assert controls.attests(client, observer) is True
+    assert controls.attests(client, _RecordingObserver([])) is False
 
     client._http_session.request("POST", "https://provider.invalid")
     auth_module.requests.post("https://provider.invalid")
@@ -180,6 +184,11 @@ def test_probe_tls_controls_count_physical_edges_and_disable_adapter_retries() -
     controls.close()
     controls.close()
     assert all(session.closed for session in sessions)
+
+    installed_proxy = client._http_session
+    client._http_session = business_session
+    assert controls.attests(client, observer) is False
+    client._http_session = installed_proxy
 
 
 def test_probe_tls_observer_refusal_prevents_delegate_call() -> None:
