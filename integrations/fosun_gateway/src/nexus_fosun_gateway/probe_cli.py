@@ -57,11 +57,26 @@ _PROBE_ENVIRONMENT_NAMES = (
 _MAX_MANIFEST_PATH_BYTES = 4096
 
 
-def failure_result(code: str) -> dict[str, object]:
+def failure_result(error: str | ProbeSdkError) -> dict[str, object]:
     """Return a fixed, value-free failure frame with receipt physically last."""
+    code: str
+    if isinstance(error, ProbeSdkError):
+        code = error.code
+        operation = error.operation
+        category = error.category
+        physical_request_count = error.physical_request_count
+    else:
+        code = error
+        operation = "unknown"
+        category = "unknown"
+        physical_request_count = 0
     return {
         "status": "probe_failed",
         "code": code,
+        "failure_stage": "probe",
+        "failure_operation": operation,
+        "failure_category": category,
+        "physical_request_count": physical_request_count,
         "artifact_sha256": None,
         "byte_length": None,
         "capability_expires_at": None,
@@ -186,6 +201,10 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
         return {
             "status": "probe_published",
             "code": "OK",
+            "failure_stage": None,
+            "failure_operation": None,
+            "failure_category": None,
+            "physical_request_count": None,
             "artifact_sha256": prepared.artifact_sha256,
             "byte_length": prepared.byte_length,
             "capability_expires_at": prepared.capability_expires_at.isoformat().replace(
@@ -211,7 +230,7 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
     except ProbeSdkError as error:
         if publication_complete and error.code != "PROBE_OUTPUT_QUARANTINE_REQUIRED":
             return failure_result("PROBE_OUTPUT_QUARANTINE_REQUIRED")
-        return failure_result(error.code)
+        return failure_result(error)
     except Exception:
         return failure_result(
             "PROBE_OUTPUT_QUARANTINE_REQUIRED"

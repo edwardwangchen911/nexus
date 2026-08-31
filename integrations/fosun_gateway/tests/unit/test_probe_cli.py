@@ -79,6 +79,40 @@ def test_admitted_manifest_requires_a_valid_nonsecret_probe_plan(
     assert captured.err == ""
 
 
+def test_failure_frame_contains_only_fixed_diagnostic_fields() -> None:
+    frame = probe_cli.failure_result("PROBE_FAILED")
+
+    assert frame == {
+        "status": "probe_failed",
+        "code": "PROBE_FAILED",
+        "failure_stage": "probe",
+        "failure_operation": "unknown",
+        "failure_category": "unknown",
+        "physical_request_count": 0,
+        "artifact_sha256": None,
+        "byte_length": None,
+        "capability_expires_at": None,
+        "activation_contract_hash": None,
+        "publication_receipt": None,
+    }
+
+
+def test_failure_frame_preserves_only_closed_probe_diagnostics() -> None:
+    frame = probe_cli.failure_result(
+        ProbeSdkError(
+            "PROBE_FAILED",
+            operation="CashSummary",
+            category="permission",
+            physical_request_count=3,
+        )
+    )
+
+    assert frame["failure_operation"] == "CashSummary"
+    assert frame["failure_category"] == "permission"
+    assert frame["physical_request_count"] == 3
+    assert "synthetic-provider-secret" not in json.dumps(frame)
+
+
 def test_probe_cli_subprocess_is_one_frame_and_offline_without_secret_settings() -> None:
     completed = subprocess.run(
         [

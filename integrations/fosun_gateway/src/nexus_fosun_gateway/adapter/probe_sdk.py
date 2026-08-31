@@ -135,9 +135,22 @@ ProbeErrorCode = Literal[
 class ProbeSdkError(RuntimeError):
     """A value-free runner failure suitable for the fixed CLI error contract."""
 
-    def __init__(self, code: ProbeErrorCode) -> None:
+    def __init__(
+        self,
+        code: ProbeErrorCode,
+        *,
+        operation: ProbeLabel | Literal["unknown"] = "unknown",
+        category: Literal[
+            "auth", "permission", "transport", "timeout", "rate_limit", "budget",
+            "contract", "unknown",
+        ] = "unknown",
+        physical_request_count: int = 0,
+    ) -> None:
         super().__init__(code)
         self.code = code
+        self.operation = operation
+        self.category = category
+        self.physical_request_count = physical_request_count
 
 
 @dataclass(frozen=True, slots=True)
@@ -490,6 +503,7 @@ class SdkProbeExecutor:
         self._utc_clock = utc_clock
         self._run_lock = Lock()
         self._started = False
+        self._last_started_operation: ProbeLabel | Literal["unknown"] = "unknown"
 
     async def run(self, plan: ProbeRequestPlan) -> ProbeExecutionEvidence:
         with self._run_lock:
@@ -524,6 +538,8 @@ class SdkProbeExecutor:
                 failure = ProbeSdkError("PROBE_FAILED")
 
         if failure is not None:
+            if isinstance(failure, ProbeSdkError):
+                raise self._with_diagnostic(failure)
             raise failure
         if evidence is None:
             raise ProbeSdkError("PROBE_FAILED")
@@ -666,6 +682,7 @@ class SdkProbeExecutor:
     ) -> GatewayPage[GatewayItem]:
         if not self._bundle.is_bound_to(self._budget):
             raise ProbeSdkError("SDK_CONTRACT_MISMATCH")
+        self._last_started_operation = label
         before = self._budget.snapshot()
         try:
             with self._budget.operation(label):
@@ -698,6 +715,33 @@ class SdkProbeExecutor:
             raise ProbeSdkError("PROBE_RESPONSE_INVALID")
         return page
 
+    def _with_diagnostic(self, error: ProbeSdkError) -> ProbeSdkError:
+        """Attach only closed, value-free facts at the executor boundary."""
+        category: Literal[
+            "auth", "permission", "transport", "timeout", "rate_limit", "budget",
+            "contract", "unknown",
+        ]
+        if error.code == "PROBE_BUDGET_EXCEEDED":
+            category = "budget"
+        elif error.code in {
+            "SDK_CONTRACT_MISMATCH",
+            "PROBE_RESPONSE_INVALID",
+            "PROBE_WINDOW_MISMATCH",
+        }:
+            category = "contract"
+        else:
+            category = error.category
+        return ProbeSdkError(
+            error.code,
+            operation=(
+                error.operation
+                if error.operation != "unknown"
+                else self._last_started_operation
+            ),
+            category=category,
+            physical_request_count=self._budget.snapshot().total,
+        )
+
 
 def _require_page_contract(
     page: GatewayPage[GatewayItem],
@@ -728,6 +772,12 @@ def _map_gateway_error(error: GatewayError) -> ProbeSdkError:
         "PROVIDER_MALFORMED_RESPONSE",
     }:
         return ProbeSdkError("PROBE_RESPONSE_INVALID")
+    if error.code == "PROVIDER_PERMISSION_DENIED":
+        return ProbeSdkError("PROBE_FAILED", category="permission")
+    if error.code == "PROVIDER_RATE_LIMITED":
+        return ProbeSdkError("PROBE_FAILED", category="rate_limit")
+    if error.code == "PROVIDER_UNAVAILABLE":
+        return ProbeSdkError("PROBE_FAILED", category="transport")
     return ProbeSdkError("PROBE_FAILED")
 
 

@@ -32,6 +32,10 @@ PROBE_CLI_ARGUMENT_NAMES = (
 PROBE_RESULT_FIELD_NAMES = (
     "status",
     "code",
+    "failure_stage",
+    "failure_operation",
+    "failure_category",
+    "physical_request_count",
     "artifact_sha256",
     "byte_length",
     "capability_expires_at",

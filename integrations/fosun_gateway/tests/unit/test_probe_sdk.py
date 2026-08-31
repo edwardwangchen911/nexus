@@ -509,9 +509,35 @@ async def test_executor_stops_after_first_failed_operation(fail_at: int) -> None
         ).run(_plan())
 
     assert exc_info.value.code == "PROBE_FAILED"
+    assert exc_info.value.operation == (
+        "Accounts",
+        "CashSummary",
+        "Holdings",
+        "OrderList",
+        "CashFlows",
+        "quote",
+        "kline_minimal",
+    )[fail_at]
+    assert exc_info.value.category == "permission"
+    assert exc_info.value.physical_request_count == fail_at + 2
     assert len(transport.calls) == fail_at + 1
     assert controls.close_calls == 1
     assert transport.close_calls == 1
+
+
+def test_rate_limited_gateway_error_has_a_closed_rate_limit_category() -> None:
+    from nexus_fosun_gateway.adapter.probe_sdk import _map_gateway_error
+
+    mapped = _map_gateway_error(
+        GatewayError(
+            "PROVIDER_RATE_LIMITED",
+            "sanitized",
+            status_code=429,
+            next_action="RETRY_LATER",
+        )
+    )
+
+    assert mapped.category == "rate_limit"
 
 
 @pytest.mark.parametrize("auth_statuses", [(), (200, 200)])
