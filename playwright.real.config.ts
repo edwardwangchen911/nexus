@@ -1,0 +1,48 @@
+import { defineConfig } from "@playwright/test";
+
+const engineUrl = "http://127.0.0.1:8100";
+const webUrl = "http://127.0.0.1:4174";
+const realFixtureEnvironment = {
+  NEXUS_ENV: "test",
+  AGENT_RUNTIME_MODE: "fixture",
+  NEXUS_PROVIDER_JOBS_ENABLED: "false",
+  NEXUS_ENGINE_HMAC_CURRENT_KEY_ID: "real-fixture",
+  NEXUS_ENGINE_HMAC_CURRENT_SECRET: "nexus-real-e2e-synthetic-hmac-secret-32-bytes",
+};
+
+export default defineConfig({
+  testDir: "./tests/e2e-real",
+  retries: 0,
+  workers: 1,
+  use: {
+    baseURL: webUrl,
+    browserName: "chromium",
+    viewport: { width: 390, height: 844 },
+    extraHTTPHeaders: {
+      "oai-authenticated-user-id": "real-fixture-e2e-user",
+      "oai-authenticated-user-email": "real-fixture-e2e@example.test",
+    },
+  },
+  webServer: [
+    {
+      command: "uv run --package nexus-engine uvicorn nexus.main:create_engine_app --factory --host 127.0.0.1 --port 8100",
+      env: {
+        ...realFixtureEnvironment,
+        DATABASE_URL: process.env.DATABASE_URL ?? "",
+      },
+      url: `${engineUrl}/health/live`,
+      reuseExistingServer: false,
+    },
+    {
+      command: "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev --hostname 127.0.0.1 --port 4174",
+      env: {
+        ...realFixtureEnvironment,
+        DATABASE_URL: "",
+        NEXUS_ALLOWED_USER_ID: "real-fixture-e2e-user",
+        NEXUS_ENGINE_BASE_URL: engineUrl,
+      },
+      url: `${webUrl}/__debug`,
+      reuseExistingServer: false,
+    },
+  ],
+});
