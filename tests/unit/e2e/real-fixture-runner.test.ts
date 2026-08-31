@@ -167,10 +167,15 @@ describe("real fixture runner", () => {
       args: ["-c=playwright.config.ts"],
       run,
     })).rejects.toThrow("real fixture E2E arguments are invalid");
+    const attachedShortOptionCalls: string[] = [];
     await expect(runRealFixture({
       env: { NEXUS_REAL_E2E_DATABASE_URL: safeUrl },
       args: ["-cplaywright.config.ts"],
-      run,
+      run: async (executable) => {
+        attachedShortOptionCalls.push(executable);
+        return 0;
+      },
     })).rejects.toThrow("real fixture E2E arguments are invalid");
+    expect(attachedShortOptionCalls).toEqual([]);
   });
 });
