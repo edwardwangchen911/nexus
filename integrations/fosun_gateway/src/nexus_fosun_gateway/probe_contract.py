@@ -84,10 +84,10 @@ BROKER_PROBE_OPERATIONS = REQUIRED_PROBE_OPERATIONS[:6]
 MAX_BROKER_REQUESTS = 6
 PROBE_CLI_ARGUMENT_NAMES = (
     "--manifest",
+    "--run-id",
+    "--scope",
     "--symbol",
     "--session-date",
-    "--cash-flow-date-from",
-    "--cash-flow-date-to",
     "--limit",
     "--capability-ttl-seconds",
     "--output-basename",
@@ -99,6 +99,9 @@ PROBE_RESULT_FIELD_NAMES = (
     "failure_operation",
     "failure_category",
     "physical_request_count",
+    "run_id",
+    "scope",
+    "scope_contract_version",
     "artifact_sha256",
     "byte_length",
     "capability_expires_at",

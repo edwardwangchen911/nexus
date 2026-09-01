@@ -696,7 +696,7 @@ async def test_sdk_dependency_logs_are_suppressed_at_construction_and_call_edges
             emit_dependency_canaries()
             return {
                 "code": 0,
-                "data": {},
+                "data": [],
                 "requestId": "synthetic-logging-request",
             }
 

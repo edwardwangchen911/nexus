@@ -13,12 +13,19 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StringConstraints,
+    model_validator,
+)
 
 from nexus_fosun_gateway.activation import (
     MAX_ARTIFACT_BYTES,
     MAX_PUBLICATION_RECEIPT_BYTES,
-    ProbePublicationReceipt,
+    ScopedProbePublicationReceipt,
     _open_evidence_file,
 )
 from nexus_fosun_gateway.probe_contract import PROBE_RESULT_FIELD_NAMES
@@ -36,6 +43,7 @@ _ARTIFACT_BASENAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}\.json")
 _MAX_FRAME_BYTES = 16 * 1024
 _PUBLICATION_RECEIPT_BASENAME = "publication-receipt.json"
 _Hex64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+_RunId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9-]{15,63}$")]
 _UtcTimestamp = Annotated[
     str,
     StringConstraints(
@@ -58,11 +66,25 @@ class _ProbeSuccessFrame(BaseModel):
     failure_operation: None
     failure_category: None
     physical_request_count: None
+    run_id: _RunId
+    scope: Literal["core"]
+    scope_contract_version: Literal["nexus.fosun.read-only-scope.v1.core"]
     artifact_sha256: _Hex64
     byte_length: StrictInt = Field(ge=1, le=MAX_ARTIFACT_BYTES)
     capability_expires_at: _UtcTimestamp
     activation_contract_hash: _Hex64
-    publication_receipt: ProbePublicationReceipt
+    publication_receipt: ScopedProbePublicationReceipt
+
+    @model_validator(mode="after")
+    def _validate_scope_identity(self) -> _ProbeSuccessFrame:
+        receipt = self.publication_receipt
+        if (
+            receipt.run_id != self.run_id
+            or receipt.scope != self.scope
+            or receipt.scope_contract_version != self.scope_contract_version
+        ):
+            raise ValueError("probe publication scope identity mismatch")
+        return self
 
 
 def main(argv: Sequence[str] | None = None) -> int:

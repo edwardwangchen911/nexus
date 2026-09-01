@@ -195,7 +195,7 @@ async def test_market_backlog_cannot_queue_ahead_of_broker_work() -> None:
         if call_number == 1:
             first_market_started.set()
             release_first_market.wait(timeout=2)
-        return _raw({}, f"synthetic-market-{call_number}")
+        return _raw([], f"synthetic-market-{call_number}")
 
     def list_orders(**kwargs: object) -> object:
         del kwargs
@@ -259,7 +259,7 @@ async def test_capability_expiry_while_cross_lane_waiting_never_invokes_sdk_meth
         del codes
         first_market_started.set()
         release_first_market.wait(timeout=2)
-        return _raw({}, "synthetic-market-capability-queue")
+        return _raw([], "synthetic-market-capability-queue")
 
     def list_orders(**kwargs: object) -> object:
         nonlocal broker_calls
@@ -312,7 +312,7 @@ async def test_market_rate_budget_cannot_delay_broker_budget() -> None:
     def quote(*, codes: list[str]) -> object:
         del codes
         market_starts.append(clock.now)
-        return _raw({}, "synthetic-market-budget")
+        return _raw([], "synthetic-market-budget")
 
     def list_orders(**kwargs: object) -> object:
         del kwargs
@@ -371,7 +371,7 @@ async def test_market_rate_wait_releases_shared_sdk_slot_for_broker() -> None:
     def quote(*, codes: list[str]) -> object:
         del codes
         starts.append(("market", clock.now))
-        return _raw({}, "synthetic-market-rate-wait")
+        return _raw([], "synthetic-market-rate-wait")
 
     def list_orders(**kwargs: object) -> object:
         del kwargs
@@ -424,7 +424,7 @@ async def test_rate_token_is_consumed_after_sdk_slot_wait_at_actual_call_time() 
     def quote(*, codes: list[str]) -> object:
         del codes
         starts.append(clock.now)
-        return _raw({}, f"synthetic-rate-start-{len(starts)}")
+        return _raw([], f"synthetic-rate-start-{len(starts)}")
 
     adapter = SdkFosunTransport(
         SimpleNamespace(market=SimpleNamespace(quote=quote)),
@@ -482,7 +482,7 @@ async def test_rate_token_is_consumed_inside_deferred_sdk_thread(
     def quote(*, codes: list[str]) -> object:
         del codes
         method_starts.append(clock.now)
-        return _raw({}, f"synthetic-deferred-start-{len(method_starts)}")
+        return _raw([], f"synthetic-deferred-start-{len(method_starts)}")
 
     monkeypatch.setattr(sdk_module, "Thread", _DeferredFirstThread)
     adapter = SdkFosunTransport(
@@ -523,7 +523,7 @@ async def test_blocking_log_runs_before_the_rate_call_edge(
     def quote(*, codes: list[str]) -> object:
         del codes
         method_starts.append(clock.now)
-        return _raw({}, f"synthetic-logging-start-{len(method_starts)}")
+        return _raw([], f"synthetic-logging-start-{len(method_starts)}")
 
     monkeypatch.setattr(sdk_module._LOGGER, "info", delayed_info)
     adapter = SdkFosunTransport(
@@ -759,7 +759,7 @@ async def test_timed_out_sdk_call_poisons_cross_lane_requests_until_restart(
         first_started.set()
         release_first.wait(timeout=2)
         first_finished.set()
-        return _raw({}, "synthetic-timeout-market")
+        return _raw([], "synthetic-timeout-market")
 
     def list_orders(**kwargs: object) -> object:
         nonlocal second_method_calls
@@ -864,7 +864,7 @@ async def test_retry_after_is_honored_with_bounded_retries_and_safe_logging(
             raise RateLimited(
                 "synthetic-provider-secret endpoint=/private external-account=synthetic-account-001"
             )
-        return _raw({}, "synthetic-request-retried")
+        return _raw([], "synthetic-request-retried")
 
     sleeps: list[float] = []
 

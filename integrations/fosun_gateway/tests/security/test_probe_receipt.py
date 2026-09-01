@@ -54,6 +54,34 @@ def test_nonzero_capture_outcome_cannot_publish_complete_success_frame(
     assert not (artifact_dir / "publication-receipt.json").exists()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("run_id", "readonly-core-run-0002"),
+        ("scope", "extended"),
+        ("scope_contract_version", "nexus.fosun.read-only-scope.v1.extended"),
+    ],
+)
+def test_receipt_publisher_rejects_scope_identity_mismatch(
+    field: str,
+    value: str,
+    tmp_path: Path,
+) -> None:
+    frame_dir, artifact_dir, artifact_name, _receipt, _sha256 = _evidence(tmp_path)
+    frame_path = frame_dir / "probe.frame.json"
+    frame = json.loads(frame_path.read_bytes())
+    frame[field] = value
+    frame_path.write_text(json.dumps(frame, separators=(",", ":")) + "\n")
+    frame_path.chmod(0o600)
+
+    exit_code = probe_receipt.main(
+        _arguments(frame_dir, artifact_dir, artifact_name)
+    )
+
+    assert exit_code == 2
+    assert not (artifact_dir / "publication-receipt.json").exists()
+
+
 def test_reserved_receipt_name_is_refused_defensively_before_file_access(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -195,8 +223,11 @@ def _evidence(
     artifact_path.chmod(0o600)
     artifact_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
     receipt = {
-        "schema_version": "nexus.fosun.probe-publication.v1",
+        "schema_version": "nexus.fosun.probe-publication.v2",
         "artifact_sha256": artifact_sha256,
+        "run_id": "readonly-core-run-0001",
+        "scope": "core",
+        "scope_contract_version": "nexus.fosun.read-only-scope.v1.core",
         "signature_b64u": base64.urlsafe_b64encode(bytes(64)).rstrip(b"=").decode(),
     }
     frame = {
@@ -206,6 +237,9 @@ def _evidence(
         "failure_operation": None,
         "failure_category": None,
         "physical_request_count": None,
+        "run_id": "readonly-core-run-0001",
+        "scope": "core",
+        "scope_contract_version": "nexus.fosun.read-only-scope.v1.core",
         "artifact_sha256": artifact_sha256,
         "byte_length": len(artifact_bytes),
         "capability_expires_at": "2026-08-31T09:00:00Z",

@@ -428,8 +428,6 @@ probe_frame_basename="${probe_run_id}.frame.json"
 probe_frame="${probe_operator_dir}/${probe_frame_basename}"
 probe_symbol='usAAPL'
 probe_session_date='YYYY-MM-DD'
-probe_cash_from='YYYY-MM-DD'
-probe_cash_to='YYYY-MM-DD'
 probe_output_basename="${probe_run_id}.json"
 probe_runtime='/approved/runtime/nexus-fosun-gateway/bin'
 probe_capture_bin="${probe_runtime}/nexus-fosun-capture-read-only-probe"
@@ -456,8 +454,7 @@ verification, and cannot use a remote or credential-bearing proxy URL. The proxy
 egress must match the Provider allowlist immediately before the approved probe.
 
 `probe_session_date` must be a completed Provider session strictly before the UTC start date. The
-cash-flow range is inclusive and may span at most seven dates (`to - from <= 6 days`). The child
-probe command has exactly eight named arguments and no generic method, URL, account or
+child probe command has exactly eight named arguments and no generic method, URL, account or
 output-directory input.
 
 Immediately before the approved network window, validate the signer in a separate no-network
@@ -479,10 +476,10 @@ env -u PYTHONHOME -u PYTHONPATH -u SSLKEYLOGFILE "$probe_capture_bin" \
   --frame-output-dir "$probe_operator_dir" \
   --frame-basename "$probe_frame_basename" \
   --manifest "$probe_manifest" \
+  --run-id "$probe_run_id" \
+  --scope core \
   --symbol "$probe_symbol" \
   --session-date "$probe_session_date" \
-  --cash-flow-date-from "$probe_cash_from" \
-  --cash-flow-date-to "$probe_cash_to" \
   --limit 1 \
   --capability-ttl-seconds 3600 \
   --output-basename "$probe_output_basename"

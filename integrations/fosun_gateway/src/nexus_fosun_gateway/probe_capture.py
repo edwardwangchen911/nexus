@@ -29,6 +29,8 @@ from nexus_fosun_gateway.security.provider_environment import (
 
 _FRAME_ARGUMENT_NAMES = ("--frame-output-dir", "--frame-basename")
 _FRAME_BASENAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,56}\.frame\.json")
+_RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{15,63}")
+_CORE_SCOPE_CONTRACT_VERSION = "nexus.fosun.read-only-scope.v1.core"
 _MAX_FRAME_BYTES = 16 * 1024
 ProbeRunner = Callable[[int, tuple[str, ...]], int]
 
@@ -220,6 +222,11 @@ def _valid_frame_for_exit(frame: bytes, exit_code: int) -> bool:
         return (
             status == "probe_published"
             and code == "OK"
+            and isinstance(document.get("run_id"), str)
+            and _RUN_ID.fullmatch(document["run_id"]) is not None
+            and document.get("scope") == "core"
+            and document.get("scope_contract_version")
+            == _CORE_SCOPE_CONTRACT_VERSION
             and all(
                 document[name] is None
                 for name in (
@@ -245,6 +252,9 @@ def _valid_frame_for_exit(frame: bytes, exit_code: int) -> bool:
                 "byte_length",
                 "capability_expires_at",
                 "activation_contract_hash",
+                "run_id",
+                "scope",
+                "scope_contract_version",
                 "publication_receipt",
             )
         )
