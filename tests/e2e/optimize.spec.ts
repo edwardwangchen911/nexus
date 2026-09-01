@@ -44,9 +44,31 @@ for (const viewport of [
     await expect(page.getByRole("heading", { name: "值得比较优化方案" })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole("region", { name: "冻结组合事实" })).toContainText("real_advisory_policy_v1");
     if (viewport.width < 768) {
-      await page.locator(".app-shell__drawer > summary").click();
-      await expect(page.getByRole("navigation", { name: "移动主导航" }).getByRole("link", { name: "概览" })).toHaveAttribute("aria-current", "page");
-      await page.locator(".app-shell__drawer > summary").click();
+      const drawer = page.locator(".app-shell__drawer");
+      await drawer.locator(":scope > summary").click();
+      await expect(drawer).toHaveAttribute("open", "");
+      const mobileOverview = page.getByRole("navigation", { name: "移动主导航" }).getByRole("link", { name: "概览" });
+      await expect(mobileOverview).toHaveAttribute("aria-current", "page");
+      await mobileOverview.focus();
+      await expect(mobileOverview).toBeFocused();
+      if (viewport.name === "mobile-landscape") {
+        const navigationPanel = drawer.locator(":scope > .app-shell__navigation-groups");
+        const scrollEvidence = await navigationPanel.evaluate((element) => {
+          const panel = element as HTMLElement;
+          panel.scrollTop = panel.scrollHeight;
+          return {
+            clientHeight: panel.clientHeight,
+            overflowY: getComputedStyle(panel).overflowY,
+            scrollHeight: panel.scrollHeight,
+            scrollTop: panel.scrollTop,
+          };
+        });
+        expect(scrollEvidence.overflowY).toBe("auto");
+        expect(scrollEvidence.scrollHeight).toBeGreaterThan(scrollEvidence.clientHeight);
+        expect(scrollEvidence.scrollTop).toBeGreaterThan(0);
+      }
+      await drawer.locator(":scope > summary").click();
+      await expect(drawer).not.toHaveAttribute("open", "");
     } else {
       await expect(page.getByRole("navigation", { name: "主导航" }).getByRole("link", { name: "概览" })).toHaveAttribute("aria-current", "page");
     }

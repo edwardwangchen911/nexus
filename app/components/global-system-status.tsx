@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef } from "react";
 import { Activity, ChevronDown, RefreshCw } from "lucide-react";
 import { dataStateLabels, type DataStateKind } from "./data-state";
 import { useIntegrationStatuses } from "../lib/integrations/browser";
@@ -34,7 +34,11 @@ export function GlobalSystemStatusView({ state, integrations, refreshing, onRefr
   const sourceCode = selected ? `${selected.provider.toUpperCase()} · ${selected.mode.toUpperCase()}` : "NO SOURCE";
   const sourceLabel = selected ? `${providerLabel(selected.provider)} · ${modeLabel(selected.mode)}` : "尚未连接数据源";
   const shouldOpenEvidence = state === "error" || state === "forbidden" || Boolean(notice);
-  const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+
+  useEffect(() => {
+    if (shouldOpenEvidence && detailsRef.current) detailsRef.current.open = true;
+  }, [shouldOpenEvidence]);
 
   return (
     <section
@@ -63,10 +67,13 @@ export function GlobalSystemStatusView({ state, integrations, refreshing, onRefr
       </div>
       {notice ? <p className="inline-notice inline-notice--error">{notice}</p> : null}
       <details
+        ref={detailsRef}
         className="global-status__details"
-        open={shouldOpenEvidence || evidenceOpen}
+        suppressHydrationWarning
         onToggle={(event) => {
-          if (!shouldOpenEvidence) setEvidenceOpen(event.currentTarget.open);
+          if (shouldOpenEvidence && !event.currentTarget.open) {
+            event.currentTarget.open = true;
+          }
         }}
       >
         <summary>

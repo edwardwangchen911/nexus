@@ -90,9 +90,9 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .decision-path ol { display: grid; grid-template-columns: repeat(5, minmax(8.4rem, 1fr)); min-inline-size: 42rem; margin: 0; padding: 0; list-style: none; }
 .decision-path li { position: relative; display: flex; align-items: center; gap: var(--space-2); min-inline-size: 0; border-block-start: 3px solid var(--color-border); padding: var(--space-3); color: var(--color-text-muted); }
 .decision-path li + li::before { position: absolute; inset-block-start: -6px; inset-inline-start: -3px; inline-size: 6px; block-size: 6px; border-radius: 50%; background: var(--color-border); content: ""; }
-.decision-path li[data-state="complete"] { border-block-start-color: color-mix(in srgb, var(--color-action) 55%, var(--color-border)); }
+.decision-path li[data-state="previous"] { border-block-start-color: color-mix(in srgb, var(--color-text-muted) 45%, var(--color-border)); }
 .decision-path li[data-state="current"] { border-block-start-color: var(--color-action); background: color-mix(in srgb, var(--color-action) 7%, white); color: var(--color-text); }
-.decision-path li[data-state="complete"]::before, .decision-path li[data-state="current"]::before { background: var(--color-action); }
+.decision-path li[data-state="current"]::before { background: var(--color-action); }
 .decision-path__index { color: var(--color-text-muted); font-family: var(--component-numeric-font-family); font-size: 0.6875rem; font-weight: 700; }
 .decision-path__copy { display: grid; min-inline-size: 0; }
 .decision-path__copy strong { font-size: 0.8125rem; white-space: nowrap; }

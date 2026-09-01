@@ -208,12 +208,13 @@ describe("integrations vertical slice", () => {
   });
 
   it("uses one atomic polite live region for global refresh without moving focus", () => {
+    const onRefresh = vi.fn();
     render(
       <GlobalSystemStatusView
         state="partial"
         integrations={[fosunFixture]}
         refreshing={false}
-        onRefresh={vi.fn()}
+        onRefresh={onRefresh}
       />,
     );
 
@@ -224,6 +225,32 @@ describe("integrations vertical slice", () => {
     expect(screen.getByText("FOSUN · FIXTURE")).toBeVisible();
     expect(screen.getByText("复星 · 演示数据")).toBeVisible();
     expect(screen.getByText("查看系统证据")).toBeVisible();
+    const details = liveRegion.querySelector("details")!;
+    expect(details).not.toHaveAttribute("open");
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    expect(details).toHaveAttribute("open");
+    fireEvent.click(screen.getByRole("button", { name: "刷新状态" }));
+    expect(onRefresh).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["error", null],
+    ["forbidden", null],
+    ["partial", "状态证据需要人工核对。"],
+  ] as const)("keeps %s evidence expanded when the system requires attention", (state, notice) => {
+    render(
+      <GlobalSystemStatusView
+        state={state}
+        integrations={[fosunFixture]}
+        refreshing
+        onRefresh={vi.fn()}
+        notice={notice}
+      />,
+    );
+
+    expect(screen.getByRole("status", { name: "全局系统状态" }).querySelector("details")).toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: "正在刷新" })).toBeDisabled();
   });
 
   it("keeps the live approval route visibly locked with no submit surface", () => {

@@ -27,6 +27,8 @@ describe("decision evidence path", () => {
     render(<DecisionPath current="review" />);
 
     expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "center" });
+    expect(screen.getByText("研究证据").closest("li")).toHaveAttribute("data-state", "previous");
+    expect(document.querySelector('[data-state="complete"]')).not.toBeInTheDocument();
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: original });
   });
 });

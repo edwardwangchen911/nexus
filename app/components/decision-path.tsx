@@ -29,7 +29,7 @@ export function DecisionPath({ current }: { current: DecisionStage }): React.Rea
           <li
             key={stage.id}
             ref={index === currentIndex ? currentRef : undefined}
-            data-state={index < currentIndex ? "complete" : index === currentIndex ? "current" : "upcoming"}
+            data-state={index < currentIndex ? "previous" : index === currentIndex ? "current" : "upcoming"}
             aria-current={index === currentIndex ? "step" : undefined}
           >
             <span className="decision-path__index">{String(index + 1).padStart(2, "0")}</span>

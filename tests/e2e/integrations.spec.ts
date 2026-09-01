@@ -19,6 +19,12 @@ for (const viewport of [
 
     await expect(page.getByRole("heading", { name: "数据与能力状态" })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByText("系统能力 · 集成状态", { exact: true })).toBeVisible();
+    const systemEvidence = page.getByRole("status", { name: "全局系统状态" }).locator("details");
+    await expect(systemEvidence).not.toHaveAttribute("open", "");
+    await systemEvidence.locator("summary").click();
+    await expect(systemEvidence).toHaveAttribute("open", "");
+    await systemEvidence.getByRole("button", { name: "刷新状态" }).click();
+    await expect(systemEvidence.getByText("状态证据与权限边界")).toBeVisible();
     const card = page.getByRole("region", { name: "fosun 集成（只读）" });
     await expect(card).toContainText("FOSUN");
     await expect(card).toContainText("FIXTURE");
