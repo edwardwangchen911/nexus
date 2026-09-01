@@ -9,8 +9,9 @@ from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from nexus.domain.time import require_utc
 from nexus.market.intraday_authority import (
@@ -48,6 +49,7 @@ from nexus.persistence.models.data import (
 )
 from nexus.persistence.models.market import LatestQuote
 from nexus.persistence.models.research import ResearchEvidenceRef
+from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.providers.base import InstrumentId, PriceBar, PriceSeries
 from nexus.quality.source_policy import (
     load_intraday_source_policy_v2,
@@ -87,8 +89,7 @@ async def load_daily_series(
             )
             .join(
                 ProviderCapability,
-                ProviderCapability.id
-                == PriceSeriesManifest.provider_capability_id,
+                ProviderCapability.id == PriceSeriesManifest.provider_capability_id,
             )
             .where(
                 PriceSeriesManifest.instrument == str(instrument_id),
@@ -106,14 +107,10 @@ async def load_daily_series(
                 ProviderCapability.provider == "fosun",
                 ProviderCapability.capability == "READ_ONLY",
                 ProviderCapability.schema_version == "1",
-                ProviderCapability.contract_hash
-                == PriceSeriesManifest.provider_contract_hash,
-                ProviderCapability.created_at
-                <= PriceSeriesManifest.provider_authorized_at,
-                PriceSeriesManifest.provider_authorized_at
-                < ProviderCapability.expires_at,
-                ProviderCapability.payload["operation"].as_string()
-                == "fosun_get_bars",
+                ProviderCapability.contract_hash == PriceSeriesManifest.provider_contract_hash,
+                ProviderCapability.created_at <= PriceSeriesManifest.provider_authorized_at,
+                PriceSeriesManifest.provider_authorized_at < ProviderCapability.expires_at,
+                ProviderCapability.payload["operation"].as_string() == "fosun_get_bars",
                 ProviderCapability.payload["market_scope"].as_string() == "US",
                 ProviderCapability.payload["delivery_mode"].as_string()
                 == PriceSeriesManifest.delivery_mode,
@@ -175,6 +172,131 @@ async def load_daily_series(
     return tuple(loaded)
 
 
+async def load_fosun_display_daily_series(
+    session: AsyncSession,
+    instrument_id: UUID,
+    decision_time: datetime,
+) -> tuple[PriceSeries, ...]:
+    """Load an unknown-latency Fosun series for the market page only.
+
+    This path deliberately does not create or consume agent price authority.
+    """
+    decision = require_utc(decision_time)
+    normalized_artifact = aliased(DataArtifact)
+    transport_artifact = aliased(DataArtifact)
+    manifests = tuple(
+        await session.scalars(
+            select(PriceSeriesManifest)
+            .join(
+                normalized_artifact,
+                normalized_artifact.id == PriceSeriesManifest.data_artifact_id,
+            )
+            .join(
+                transport_artifact,
+                transport_artifact.id == PriceSeriesManifest.gateway_transport_artifact_id,
+            )
+            .join(
+                ResearchEvidenceRef,
+                ResearchEvidenceRef.id == PriceSeriesManifest.evidence_ref_id,
+            )
+            .join(
+                ProviderCapability,
+                ProviderCapability.id == PriceSeriesManifest.provider_capability_id,
+            )
+            .join(
+                IntegrationStatus,
+                IntegrationStatus.id == PriceSeriesManifest.provider_status_id,
+            )
+            .where(
+                PriceSeriesManifest.instrument == str(instrument_id),
+                PriceSeriesManifest.source == "fosun",
+                PriceSeriesManifest.feed == "l1",
+                PriceSeriesManifest.adjustment == "raw",
+                PriceSeriesManifest.interval == "1Day",
+                PriceSeriesManifest.delivery_mode == "unknown",
+                PriceSeriesManifest.provider_authorized_at <= decision,
+                PriceSeriesManifest.daily_calendar_authority_id.is_not(None),
+                PriceSeriesManifest.gateway_request_start_at.is_not(None),
+                PriceSeriesManifest.gateway_request_end_at.is_not(None),
+                normalized_artifact.source == "fosun",
+                normalized_artifact.schema_version == "price_bars_v1",
+                normalized_artifact.available_at <= decision,
+                normalized_artifact.received_at <= decision,
+                transport_artifact.source == "fosun",
+                transport_artifact.schema_version == "fosun_gateway_market_bars_v1",
+                transport_artifact.available_at <= decision,
+                transport_artifact.received_at <= decision,
+                ResearchEvidenceRef.source == "fosun",
+                ResearchEvidenceRef.revision == normalized_artifact.sha256,
+                ResearchEvidenceRef.content_hash == normalized_artifact.sha256,
+                ResearchEvidenceRef.location == normalized_artifact.uri,
+                ResearchEvidenceRef.byte_length == normalized_artifact.byte_size,
+                ResearchEvidenceRef.available_at <= decision,
+                ProviderCapability.provider == "fosun",
+                ProviderCapability.capability == "READ_ONLY",
+                ProviderCapability.schema_version == "1",
+                ProviderCapability.contract_hash == PriceSeriesManifest.provider_contract_hash,
+                ProviderCapability.created_at <= PriceSeriesManifest.provider_authorized_at,
+                ProviderCapability.expires_at > PriceSeriesManifest.provider_authorized_at,
+                ProviderCapability.payload["operation"].as_string() == "fosun_get_bars",
+                ProviderCapability.payload["market_scope"].as_string() == "US",
+                ProviderCapability.payload["delivery_mode"].as_string() == "unknown",
+                IntegrationStatus.provider == "fosun",
+                IntegrationStatus.status == "read_only",
+                IntegrationStatus.version == PriceSeriesManifest.provider_status_version,
+                IntegrationStatus.admitted_contract_hash
+                == PriceSeriesManifest.provider_contract_hash,
+                IntegrationStatus.mode_changed_at <= PriceSeriesManifest.provider_authorized_at,
+                or_(
+                    IntegrationStatus.capability_invalidated_at.is_(None),
+                    IntegrationStatus.capability_invalidated_at
+                    > PriceSeriesManifest.provider_authorized_at,
+                ),
+            )
+            .order_by(
+                PriceSeriesManifest.end_at.desc(),
+                PriceSeriesManifest.id.desc(),
+            )
+            .limit(1)
+        )
+    )
+    loaded: list[PriceSeries] = []
+    for manifest in manifests:
+        records = tuple(
+            await session.scalars(
+                select(PriceBarRecord)
+                .where(
+                    PriceBarRecord.price_series_manifest_id == manifest.id,
+                    PriceBarRecord.instrument_id == instrument_id,
+                    PriceBarRecord.available_at <= decision,
+                    PriceBarRecord.received_at <= decision,
+                )
+                .order_by(
+                    PriceBarRecord.session,
+                    PriceBarRecord.observed_at,
+                    PriceBarRecord.revision,
+                    PriceBarRecord.id,
+                )
+            )
+        )
+        if len(records) != manifest.row_count or not records:
+            continue
+        loaded.append(
+            PriceSeries(
+                source="fosun",
+                feed="l1",
+                adjustment="raw",
+                interval="1Day",
+                bars=tuple(_price_bar(record) for record in records),
+                mode="read_only",
+                delivery_mode="unknown",
+                quality="PARTIAL",
+                contract_hash=manifest.provider_contract_hash,
+            )
+        )
+    return tuple(loaded)
+
+
 async def load_intraday_series(
     session: AsyncSession,
     instrument_id: UUID,
@@ -207,8 +329,7 @@ async def load_intraday_series(
             )
             .join(
                 ProviderCapability,
-                ProviderCapability.id
-                == PriceSeriesManifest.provider_capability_id,
+                ProviderCapability.id == PriceSeriesManifest.provider_capability_id,
             )
             .where(
                 PriceSeriesManifest.instrument == str(instrument_id),
@@ -216,12 +337,9 @@ async def load_intraday_series(
                 PriceSeriesManifest.source == "fosun",
                 PriceSeriesManifest.feed == "l1",
                 PriceSeriesManifest.adjustment == "raw",
-                PriceSeriesManifest.delivery_mode.in_(
-                    ("unknown", "real_time", "delayed")
-                ),
+                PriceSeriesManifest.delivery_mode.in_(("unknown", "real_time", "delayed")),
                 PriceSeriesManifest.provider_authorized_at <= decision,
-                IntradayBarSetAuthority.source_policy_id
-                == INTRADAY_SOURCE_POLICY_V2_ID,
+                IntradayBarSetAuthority.source_policy_id == INTRADAY_SOURCE_POLICY_V2_ID,
                 IntradayBarSetAuthority.hash_version == INTRADAY_HASH_VERSION_V2,
                 IntradayBarSetAuthority.policy_version == INTRADAY_POLICY_VERSION_V2,
                 IntradayBarSetAuthority.available_at <= decision,
@@ -230,14 +348,10 @@ async def load_intraday_series(
                 ProviderCapability.provider == "fosun",
                 ProviderCapability.capability == "READ_ONLY",
                 ProviderCapability.schema_version == "1",
-                ProviderCapability.contract_hash
-                == PriceSeriesManifest.provider_contract_hash,
-                ProviderCapability.created_at
-                <= PriceSeriesManifest.provider_authorized_at,
-                ProviderCapability.expires_at
-                > PriceSeriesManifest.provider_authorized_at,
-                ProviderCapability.payload["operation"].as_string()
-                == "fosun_get_bars",
+                ProviderCapability.contract_hash == PriceSeriesManifest.provider_contract_hash,
+                ProviderCapability.created_at <= PriceSeriesManifest.provider_authorized_at,
+                ProviderCapability.expires_at > PriceSeriesManifest.provider_authorized_at,
+                ProviderCapability.payload["operation"].as_string() == "fosun_get_bars",
                 ProviderCapability.payload["market_scope"].as_string() == "US",
                 ProviderCapability.payload["delivery_mode"].as_string()
                 == PriceSeriesManifest.delivery_mode,
@@ -454,9 +568,7 @@ def _provider_mode(
 
 def _intraday_provenance_allowed(source: str, feed: str, delivery_mode: str) -> bool:
     return (
-        source == "fosun"
-        and feed == "l1"
-        and delivery_mode in {"unknown", "real_time", "delayed"}
+        source == "fosun" and feed == "l1" and delivery_mode in {"unknown", "real_time", "delayed"}
     )
 
 
@@ -473,10 +585,7 @@ def _intraday_candidate(
         if previous is None or (item[0], item[1]) > (previous[0], previous[1]):
             latest_by_time[observed] = item
     selected = tuple(
-        item[2]
-        for item in sorted(
-            latest_by_time.values(), key=lambda item: _bar_observed(item[2])
-        )
+        item[2] for item in sorted(latest_by_time.values(), key=lambda item: _bar_observed(item[2]))
     )
     return _IntradayCandidate(
         source=key[0],
@@ -553,11 +662,9 @@ async def _latest_intraday_observations(
             ProviderCapability.contract_hash == LatestQuote.provider_contract_hash,
             ProviderCapability.created_at <= LatestQuote.provider_authorized_at,
             ProviderCapability.expires_at > LatestQuote.provider_authorized_at,
-            ProviderCapability.payload["operation"].as_string()
-            == "fosun_get_quotes",
+            ProviderCapability.payload["operation"].as_string() == "fosun_get_quotes",
             ProviderCapability.payload["market_scope"].as_string() == "US",
-            ProviderCapability.payload["delivery_mode"].as_string()
-            == LatestQuote.delivery_mode,
+            ProviderCapability.payload["delivery_mode"].as_string() == LatestQuote.delivery_mode,
         )
         .subquery()
     )
@@ -580,8 +687,7 @@ def _select_intraday_key(
     observations: tuple[LatestQuote, ...],
 ) -> tuple[str, str, str] | None:
     freshness: dict[tuple[str, str, str], datetime] = {
-        _candidate_key(candidate): candidate.latest_authority_at
-        for candidate in candidates
+        _candidate_key(candidate): candidate.latest_authority_at for candidate in candidates
     }
     for row in observations:
         key = (row.source, row.feed, row.delivery_mode)

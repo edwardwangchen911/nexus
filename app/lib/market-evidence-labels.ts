@@ -12,6 +12,7 @@ const QUALITY_REASON_LABELS: Readonly<Record<string, string>> = {
   NO_DAILY_HISTORY_DATA: "日线历史当前不可用",
   HISTORY_INSTRUMENT_MISMATCH: "历史行情与所选标的不一致",
   HISTORY_TRUNCATED: "历史行情已按页面上限截断",
+  HISTORY_DELIVERY_UNVERIFIED: "K 线实时性尚未获得证明",
   FUTURE_DATA_EXCLUDED: "未来时点数据已排除",
   FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE: "上游报价未提供成交时间",
   INTRADAY_BID_ASK_UNAVAILABLE: "盘口买卖价未提供",

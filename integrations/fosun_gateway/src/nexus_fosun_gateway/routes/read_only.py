@@ -178,21 +178,23 @@ async def _execute(
     if operation == "fosun_capabilities":
         if operation not in actor.allowed_operations:
             raise _operation_not_allowed()
-        if settings.transport_mode == "read_only":
+        if settings.transport_mode in {"read_only", "local_read_only"}:
             runtime_authorization = getattr(
                 request.app.state,
                 "runtime_authorization",
                 None,
             )
-            if not isinstance(runtime_authorization, RuntimeAuthorization):
+            if isinstance(runtime_authorization, RuntimeAuthorization):
+                authorized_operations = runtime_authorization.authorized_operation_set
+            elif isinstance(runtime_authorization, frozenset):
+                authorized_operations = runtime_authorization
+            else:
                 raise _operation_not_allowed()
             return GatewayPage[GatewayItem](
                 items=(
                     CapabilityItem(
                         mode="read_only",
-                        operations=tuple(
-                            sorted(runtime_authorization.authorized_operation_set)
-                        ),
+                        operations=tuple(sorted(authorized_operations)),
                     ),
                 ),
                 source_request_id="gateway-local-capabilities",

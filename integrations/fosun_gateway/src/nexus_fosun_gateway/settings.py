@@ -18,6 +18,7 @@ class Environment(StrEnum):
 BROKER_LISTENER_PORT = 8081
 MARKET_LISTENER_PORT = 8082
 FOSUN_REST_BASE_URL = "https://openapi.fosunxcz.com"
+FOSUN_LOCAL_READ_ONLY_HTTPS_PROXY_URL = "http://127.0.0.1:9090"
 _MAX_CONFIG_PATH_BYTES = 4096
 
 
@@ -51,7 +52,7 @@ class GatewaySettings(BaseSettings):
         default=None,
         validation_alias="FOSUN_GATEWAY_CAPABILITY",
     )
-    transport_mode: Literal["fixture", "read_only"] = Field(
+    transport_mode: Literal["fixture", "read_only", "local_read_only"] = Field(
         default="fixture",
         validation_alias="FOSUN_GATEWAY_TRANSPORT_MODE",
     )
@@ -156,6 +157,10 @@ class GatewaySettings(BaseSettings):
         default=None,
         validation_alias="FSOPENAPI_SERVER_PUBLIC_KEY",
     )
+    fsopenapi_https_proxy_url: str | None = Field(
+        default=None,
+        validation_alias="FSOPENAPI_HTTPS_PROXY_URL",
+    )
 
     def __repr_args__(self) -> "list[tuple[str | None, object]]":
         return [
@@ -171,6 +176,13 @@ class GatewaySettings(BaseSettings):
             return None
         if value != FOSUN_REST_BASE_URL:
             raise ValueError("provider base URL must be the reviewed Fosun REST origin")
+        return value
+
+    @field_validator("fsopenapi_https_proxy_url")
+    @classmethod
+    def local_provider_proxy_is_exact(cls, value: str | None) -> str | None:
+        if value is not None and value != FOSUN_LOCAL_READ_ONLY_HTTPS_PROXY_URL:
+            raise ValueError("local Provider proxy must be the reviewed loopback endpoint")
         return value
 
     @field_validator("provider_manifest")
@@ -204,21 +216,19 @@ class GatewaySettings(BaseSettings):
     @model_validator(mode="after")
     def apply_environment_policy(self) -> Self:
         if self.transport_mode == "read_only" and (
-            self.read_only_scope_contract_version != "v1"
-            or self.read_only_scope is None
+            self.read_only_scope_contract_version != "v1" or self.read_only_scope is None
         ):
             raise ValueError("read_only transport requires one explicit v1 scope")
-        if self.transport_mode == "fixture" and (
-            self.read_only_scope_contract_version is not None
-            or self.read_only_scope is not None
+        if self.transport_mode in {"fixture", "local_read_only"} and (
+            self.read_only_scope_contract_version is not None or self.read_only_scope is not None
         ):
-            raise ValueError("fixture transport cannot select a read_only scope")
-        if self.transport_mode == "read_only" and self.environment is not Environment.PRODUCTION:
-            raise ValueError("read_only transport requires the production mTLS environment")
+            raise ValueError("transport cannot select an activation scope")
+        if self.transport_mode != "fixture" and self.environment is not Environment.PRODUCTION:
+            raise ValueError("SDK transport requires the production mTLS environment")
         if self.environment is Environment.PRODUCTION:
             if (
                 self.capability is None
-                or self.transport_mode != "read_only"
+                or self.transport_mode == "fixture"
                 or self.replay_store_path is None
                 or self.gateway_hmac_current_key_id is None
                 or self.gateway_hmac_current_secret is None
@@ -231,19 +241,31 @@ class GatewaySettings(BaseSettings):
                 or "provider_manifest" not in self.model_fields_set
                 or not self.provider_manifest.is_absolute()
                 or not self.sdk_admitted
-                or self.activation_probe_artifact is None
-                or self.activation_probe_receipt is None
-                or self.activation_probe_publisher_public_key_b64u_file is None
-                or self.activation_contract_hash_file is None
                 or self.fsopenapi_base_url is None
                 or self.fsopenapi_api_key is None
                 or self.fsopenapi_client_private_key is None
                 or self.fsopenapi_server_public_key is None
             ):
                 raise ValueError(
-                    "production settings require admitted read_only transport, TLS server "
-                    "identity, an activation contract, provider config, and a current gateway "
-                    "broker and market HMAC identities"
+                    "production settings require an admitted SDK transport, TLS server identity, "
+                    "provider config, and current gateway broker and market HMAC identities"
+                )
+            if self.transport_mode == "read_only" and (
+                self.activation_probe_artifact is None
+                or self.activation_probe_receipt is None
+                or self.activation_probe_publisher_public_key_b64u_file is None
+                or self.activation_contract_hash_file is None
+            ):
+                raise ValueError("read_only transport requires an activation contract")
+            if self.transport_mode == "local_read_only" and (
+                self.fsopenapi_https_proxy_url != FOSUN_LOCAL_READ_ONLY_HTTPS_PROXY_URL
+                or self.activation_probe_artifact is not None
+                or self.activation_probe_receipt is not None
+                or self.activation_probe_publisher_public_key_b64u_file is not None
+                or self.activation_contract_hash_file is not None
+            ):
+                raise ValueError(
+                    "local_read_only transport requires the reviewed proxy and no activation files"
                 )
             if self.server_broker_client_ca == self.server_market_client_ca:
                 raise ValueError("production listeners require distinct client CA paths")
@@ -261,10 +283,10 @@ class GatewaySettings(BaseSettings):
             self.market_gateway_hmac_current_secret = SecretStr(
                 "fixture-market-gateway-current-secret-32-bytes"
             )
-        if self.transport_mode == "read_only" and (
+        if self.transport_mode in {"read_only", "local_read_only"} and (
             self.gateway_hmac_current_key_id is None or self.gateway_hmac_current_secret is None
         ):
-            raise ValueError("read_only transport requires an explicit gateway HMAC identity")
+            raise ValueError("SDK transport requires an explicit gateway HMAC identity")
         if (
             self.environment is Environment.TEST
             and self.transport_mode == "fixture"

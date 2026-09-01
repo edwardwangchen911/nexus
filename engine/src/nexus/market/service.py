@@ -28,7 +28,11 @@ from nexus.api.schemas.market import (
 )
 from nexus.domain.decimal import DecimalString, decimal_to_string
 from nexus.domain.time import require_utc
-from nexus.market.database_series import load_daily_series, load_intraday_series
+from nexus.market.database_series import (
+    load_daily_series,
+    load_fosun_display_daily_series,
+    load_intraday_series,
+)
 from nexus.market.intraday_metrics import (
     IntradayAuthorityView,
     IntradayMetrics,
@@ -320,12 +324,10 @@ class MarketService:
                 ProviderCapability.provider == "fosun",
                 ProviderCapability.capability == "READ_ONLY",
                 ProviderCapability.schema_version == "1",
-                ProviderCapability.contract_hash
-                == LatestQuote.provider_contract_hash,
+                ProviderCapability.contract_hash == LatestQuote.provider_contract_hash,
                 ProviderCapability.created_at <= LatestQuote.provider_authorized_at,
                 ProviderCapability.expires_at > LatestQuote.provider_authorized_at,
-                ProviderCapability.payload["operation"].as_string()
-                == "fosun_get_quotes",
+                ProviderCapability.payload["operation"].as_string() == "fosun_get_quotes",
                 ProviderCapability.payload["market_scope"].as_string() == "US",
                 ProviderCapability.payload["delivery_mode"].as_string()
                 == LatestQuote.delivery_mode,
@@ -435,9 +437,15 @@ class MarketService:
             raise _instrument_not_found(instrument_id)
         loader = self._price_series_loader
         if loader is None:
-            candidates = tuple(
-                await load_daily_series(self._session, instrument_id, decision_time)
-            )
+            candidates = tuple(await load_daily_series(self._session, instrument_id, decision_time))
+            if not candidates:
+                candidates = tuple(
+                    await load_fosun_display_daily_series(
+                        self._session,
+                        instrument_id,
+                        decision_time,
+                    )
+                )
             database_authority = True
         else:
             candidates = tuple(await loader(instrument_id, decision_time))
@@ -467,7 +475,9 @@ class MarketService:
                 return _empty_series(instrument_id, "SOURCE_POLICY_UNAVAILABLE")
             selected = daily_candidates[0]
             selection_quality: Literal["PASS", "PARTIAL", "FAIL"] = selected.quality
-            selection_reasons: tuple[str, ...] = ()
+            selection_reasons: tuple[str, ...] = (
+                ("HISTORY_DELIVERY_UNVERIFIED",) if selected.delivery_mode == "unknown" else ()
+            )
         else:
             selection = await select_price_series(
                 self._session,

@@ -28,6 +28,42 @@ def settings(tmp_path: Path) -> BrokerWorkerSettings:
 
 
 @pytest.mark.asyncio
+async def test_client_reads_accounts_through_the_fixed_read_only_route(
+    tmp_path: Path,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == (
+            "https://fosun-gateway.internal:8443/internal/v1/read-only/fosun_sync_accounts"
+        )
+        assert json.loads(request.content) == {}
+        _assert_independent_signature(request)
+        return httpx.Response(
+            200,
+            json={
+                "items": [],
+                "source_request_id": "synthetic-accounts-request",
+                "has_more": False,
+                "next_cursor": None,
+                "as_of": NOW.isoformat(),
+                "quality": "PARTIAL",
+            },
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FosunGatewayClient(
+        settings(tmp_path),
+        client=http_client,
+        wall_time=lambda: NOW.timestamp(),
+        uuid_factory=iter((NONCE, REQUEST_ID)).__next__,
+    )
+
+    page = await client.read_accounts()
+    await http_client.aclose()
+
+    assert page.source_request_id == "synthetic-accounts-request"
+
+
+@pytest.mark.asyncio
 async def test_client_uses_only_fixed_origin_path_mtls_hmac_and_exact_payload(
     tmp_path: Path,
 ) -> None:
@@ -128,6 +164,49 @@ async def test_gateway_response_requires_exact_json_media_type(
 
 
 @pytest.mark.asyncio
+async def test_gateway_error_exposes_only_allowlisted_sanitized_code(tmp_path: Path) -> None:
+    responses = iter(
+        (
+            httpx.Response(
+                502,
+                json={
+                    "error": {
+                        "code": "PROVIDER_MALFORMED_RESPONSE",
+                        "message": "must not cross the client boundary",
+                        "next_action": "REVIEW_PROVIDER_CONTRACT",
+                    },
+                    "request_id": "synthetic-request",
+                },
+            ),
+            httpx.Response(
+                502,
+                json={
+                    "error": {"code": "UNREVIEWED_ERROR"},
+                    "secret": "must-not-appear",
+                },
+            ),
+        )
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return next(responses)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = FosunGatewayClient(settings(tmp_path), client=http_client)
+
+    with pytest.raises(
+        GatewayClientError,
+        match=r"^gateway rejected request: PROVIDER_MALFORMED_RESPONSE$",
+    ):
+        await client.read_cash("synthetic-account-001")
+    with pytest.raises(GatewayClientError, match=r"^gateway response rejected$") as error:
+        await client.read_cash("synthetic-account-001")
+    assert "secret" not in str(error.value)
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_content_length_is_rejected_before_stream_and_chunked_body_has_hard_cap(
     tmp_path: Path,
 ) -> None:
@@ -193,15 +272,18 @@ def test_default_transport_is_mtls_bounded_and_does_not_trust_environment(
         captured.update(kwargs)
         return object()
 
+    ssl_context = object()
     monkeypatch.setattr(gateway_client_module.httpx, "AsyncClient", capture_client)
+    monkeypatch.setattr(
+        gateway_client_module,
+        "_mtls_context",
+        lambda *_args: ssl_context,
+    )
 
     FosunGatewayClient(settings(tmp_path))
 
-    assert captured["cert"] == (
-        str(tmp_path / "client.crt"),
-        str(tmp_path / "client.key"),
-    )
-    assert captured["verify"] == str(tmp_path / "ca.crt")
+    assert captured["verify"] is ssl_context
+    assert "cert" not in captured
     assert captured["follow_redirects"] is False
     assert captured["trust_env"] is False
     assert captured["timeout"] == httpx.Timeout(10.0)

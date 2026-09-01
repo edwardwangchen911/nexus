@@ -111,6 +111,64 @@ def test_core_scoped_activation_precedes_sdk_import_and_returns_authorization(
     )
 
 
+def test_local_read_only_skips_activation_and_freezes_one_attempt_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    values = _activated_read_only_values(tmp_path)
+    values["FOSUN_GATEWAY_TRANSPORT_MODE"] = "local_read_only"
+    values["FSOPENAPI_HTTPS_PROXY_URL"] = "http://127.0.0.1:9090"
+    for key in (
+        "FOSUN_READ_ONLY_SCOPE_CONTRACT_VERSION",
+        "FOSUN_READ_ONLY_SCOPE",
+        "FOSUN_ACTIVATION_PROBE_ARTIFACT",
+        "FOSUN_ACTIVATION_PROBE_RECEIPT",
+        "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE",
+        "FOSUN_ACTIVATION_CONTRACT_HASH_FILE",
+    ):
+        values.pop(key)
+    tls_calls: list[dict[str, object]] = []
+
+    class FakeSdkClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    def sdk_module(name: str) -> object:
+        if name == "fsopenapi":
+            return SimpleNamespace(SDKClient=FakeSdkClient)
+        if name == "fsopenapi.auth":
+            return SimpleNamespace()
+        raise AssertionError(name)
+
+    def forbid_activation(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("local read-only mode must not evaluate probe activation")
+
+    monkeypatch.setattr(main_module, "evaluate_scoped_activation", forbid_activation)
+    monkeypatch.setattr(main_module.importlib, "import_module", sdk_module)
+    monkeypatch.setattr(
+        main_module,
+        "enforce_sdk_tls_verification",
+        lambda *_args, **kwargs: tls_calls.append(kwargs),
+    )
+
+    transport, authorization = build_transport(GatewaySettings.model_validate(values))
+
+    assert isinstance(transport, SdkFosunTransport)
+    assert transport._max_attempts == 1
+    assert tls_calls == [{"https_proxy_url": "http://127.0.0.1:9090", "zero_retries": True}]
+    assert authorization == frozenset(
+        {
+            "fosun_sync_accounts",
+            "fosun_sync_portfolio:cash",
+            "fosun_sync_portfolio:holdings",
+            "fosun_get_quotes",
+            "fosun_get_bars",
+        }
+    )
+    assert "fosun_list_orders" not in authorization
+    assert "fosun_list_cash_flows" not in authorization
+
+
 def test_read_only_mode_without_admission_returns_stable_error() -> None:
     """An unadmitted SDK must fail closed rather than fall back to fixtures."""
     settings = _read_only_settings(MANIFEST_PATH)
@@ -280,12 +338,10 @@ def test_publisher_pin_mismatch_cannot_import_sdk_even_with_its_contract_hash(
     )
     assert blocked.next_action == "REVIEW_PROBE_ARTIFACT"
     assert authorization is None
-    Path(
-        str(values["FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE"])
-    ).write_text(alternate_public_key)
-    Path(str(values["FOSUN_ACTIVATION_CONTRACT_HASH_FILE"])).write_text(
-        blocked.contract_hash
+    Path(str(values["FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE"])).write_text(
+        alternate_public_key
     )
+    Path(str(values["FOSUN_ACTIVATION_CONTRACT_HASH_FILE"])).write_text(blocked.contract_hash)
     imported = False
 
     def forbidden_import(_name: str) -> object:
@@ -343,9 +399,7 @@ def test_activation_control_files_fail_closed_before_sdk_import(
     attack_kind: str,
 ) -> None:
     values = _activated_read_only_values(tmp_path)
-    publisher_path = Path(
-        str(values["FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE"])
-    )
+    publisher_path = Path(str(values["FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE"]))
     contract_path = Path(str(values["FOSUN_ACTIVATION_CONTRACT_HASH_FILE"]))
     if attack_kind == "publisher_symlink":
         actual_path = tmp_path / "actual-publisher-public-key.b64u"

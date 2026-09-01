@@ -6,9 +6,11 @@ import base64
 import hashlib
 import hmac
 import json
+import ssl
 import time
 from collections.abc import Callable
 from datetime import date
+from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
@@ -27,15 +29,29 @@ from nexus.providers.broker.gateway_contracts import (
 from nexus.providers.broker.settings import BrokerWorkerSettings
 
 GatewayOperation = Literal[
+    "fosun_sync_accounts",
     "fosun_sync_portfolio",
     "fosun_list_orders",
     "fosun_list_cash_flows",
 ]
 _PATHS: dict[GatewayOperation, str] = {
+    "fosun_sync_accounts": "/internal/v1/read-only/fosun_sync_accounts",
     "fosun_sync_portfolio": "/internal/v1/read-only/fosun_sync_portfolio",
     "fosun_list_orders": "/internal/v1/read-only/fosun_list_orders",
     "fosun_list_cash_flows": "/internal/v1/read-only/fosun_list_cash_flows",
 }
+_SAFE_GATEWAY_ERROR_CODES = frozenset(
+    {
+        "PROVIDER_APPLICATION_ERROR",
+        "PROVIDER_AUTHENTICATION_FAILED",
+        "PROVIDER_ERROR",
+        "PROVIDER_MALFORMED_RESPONSE",
+        "PROVIDER_PERMISSION_DENIED",
+        "PROVIDER_RATE_LIMITED",
+        "PROVIDER_UNAVAILABLE",
+        "PROVIDER_WINDOW_MISMATCH",
+    }
+)
 
 
 class FosunGatewayClient:
@@ -65,12 +81,18 @@ class FosunGatewayClient:
         self._uuid_factory = uuid_factory
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
-            cert=(str(settings.client_cert), str(settings.client_key)),
-            verify=str(settings.client_ca),
+            verify=_mtls_context(
+                settings.client_ca,
+                settings.client_cert,
+                settings.client_key,
+            ),
             timeout=httpx.Timeout(10.0),
             follow_redirects=False,
             trust_env=False,
         )
+
+    async def read_accounts(self) -> GatewayResponsePage:
+        return await self._post("fosun_sync_accounts", {})
 
     async def read_cash(self, external_account_id: str) -> GatewayResponsePage:
         validate_account_id(external_account_id)
@@ -193,9 +215,7 @@ class FosunGatewayClient:
                 headers=headers,
                 follow_redirects=False,
             ) as response:
-                if response.status_code != 200 or not is_exact_json_media_type(
-                    response.headers.get("content-type")
-                ):
+                if not is_exact_json_media_type(response.headers.get("content-type")):
                     raise GatewayClientError("gateway response rejected")
                 validate_content_length(response.headers.get("content-length"))
                 chunks: list[bytes] = []
@@ -206,12 +226,33 @@ class FosunGatewayClient:
                         raise GatewayClientError("gateway response rejected")
                     chunks.append(chunk)
                 raw_response = b"".join(chunks)
+                if response.status_code != 200:
+                    code = _safe_gateway_error_code(raw_response)
+                    if code is None:
+                        raise GatewayClientError("gateway response rejected")
+                    raise GatewayClientError(f"gateway rejected request: {code}")
         except httpx.HTTPError:
             raise GatewayClientError("gateway request failed") from None
         try:
             return GatewayResponsePage.model_validate(json.loads(raw_response))
         except (ValueError, json.JSONDecodeError):
             raise GatewayClientError("gateway response contract rejected") from None
+
+
+def _safe_gateway_error_code(payload: bytes) -> str | None:
+    try:
+        raw = json.loads(payload)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    error = raw.get("error")
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    if not isinstance(code, str) or code not in _SAFE_GATEWAY_ERROR_CODES:
+        return None
+    return code
 
 
 def _validated_origin(value: str) -> str:
@@ -230,3 +271,9 @@ def _validated_origin(value: str) -> str:
     ):
         raise ValueError("gateway origin must be an absolute HTTPS origin")
     return str(url).rstrip("/")
+
+
+def _mtls_context(client_ca: Path, client_cert: Path, client_key: Path) -> ssl.SSLContext:
+    context = ssl.create_default_context(cafile=str(client_ca))
+    context.load_cert_chain(certfile=str(client_cert), keyfile=str(client_key))
+    return context

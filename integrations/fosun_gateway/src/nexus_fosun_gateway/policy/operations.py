@@ -56,19 +56,25 @@ MARKET_OPERATIONS: Final[frozenset[ActorOperation]] = frozenset(
 def authorize_runtime_operation(
     operation: RuntimeOperation,
     actor: "VerifiedGatewayActor",
-    runtime_authorization: RuntimeAuthorization | None,
+    runtime_authorization: RuntimeAuthorization | frozenset[RuntimeOperation] | None,
     *,
-    transport_mode: Literal["fixture", "read_only"],
+    transport_mode: Literal["fixture", "read_only", "local_read_only"],
 ) -> None:
     """Require both caller identity and immutable scoped evidence before transport."""
     if operation not in actor.allowed_operations:
         raise _operation_not_allowed()
     if transport_mode == "fixture":
         return
-    if (
-        runtime_authorization is None
-        or operation not in runtime_authorization.authorized_operation_set
-    ):
+    authorized = (
+        runtime_authorization
+        if isinstance(runtime_authorization, frozenset)
+        else (
+            None
+            if runtime_authorization is None
+            else runtime_authorization.authorized_operation_set
+        )
+    )
+    if authorized is None or operation not in authorized:
         raise _operation_not_allowed()
 
 

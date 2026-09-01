@@ -28,7 +28,7 @@ export function PortfolioSummary({ portfolio, snapshot, currency }: PortfolioSum
       <dl className="portfolio-summary__cash" aria-label={`${currency} 现金事实`}>
         <Fact term="账面现金" value={cash ? `${currency} ${formatDecimal(cash.cash_balance)}` : "无数据"} />
         <Fact term="可用现金" value={cash ? `${currency} ${formatDecimal(cash.available_cash)}` : "无数据"} />
-        <Fact term="Provider 时点" value={formatTime(cash?.provider_as_of ?? null)} />
+        <Fact term="数据更新时间" value={formatTime(cash?.provider_as_of ?? snapshot.as_of)} />
       </dl>
 
       <div className="portfolio-summary__section">

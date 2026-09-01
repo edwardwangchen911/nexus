@@ -9,7 +9,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Event
 from typing import cast
 
@@ -29,8 +29,9 @@ from nexus_fosun_gateway.activation import (
 from nexus_fosun_gateway.adapter.fixture import FixtureFosunTransport
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
 from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
-from nexus_fosun_gateway.admission import admitted_sdk_subject
+from nexus_fosun_gateway.admission import admitted_sdk_subject, probe_ready_sdk_subject
 from nexus_fosun_gateway.domain import GatewayError
+from nexus_fosun_gateway.probe_contract import RuntimeOperation
 from nexus_fosun_gateway.routes.read_only import router as read_only_router
 from nexus_fosun_gateway.security.dependency_logging import (
     enforce_sdk_dependency_log_boundary,
@@ -43,6 +44,17 @@ from nexus_fosun_gateway.security.provider_environment import (
 from nexus_fosun_gateway.security.provider_tls import enforce_sdk_tls_verification
 from nexus_fosun_gateway.security.tls import production_listener_configs
 from nexus_fosun_gateway.settings import BROKER_LISTENER_PORT, Environment, GatewaySettings
+
+_LOCAL_READ_ONLY_LIFETIME = timedelta(hours=12)
+_LOCAL_READ_ONLY_OPERATIONS: frozenset[RuntimeOperation] = frozenset(
+    {
+        "fosun_sync_accounts",
+        "fosun_sync_portfolio:cash",
+        "fosun_sync_portfolio:holdings",
+        "fosun_get_quotes",
+        "fosun_get_bars",
+    }
+)
 
 
 @asynccontextmanager
@@ -71,7 +83,10 @@ def build_transport(
     on_activation_expired: Callable[[datetime], None] | None = None,
     activation_checked_at: datetime | None = None,
     activation_monotonic_anchor: float | None = None,
-) -> tuple[FosunTransport, RuntimeAuthorization | None]:
+) -> tuple[
+    FosunTransport,
+    RuntimeAuthorization | frozenset[RuntimeOperation] | None,
+]:
     """Create only the explicitly configured transport; never fall back across modes."""
     if settings.transport_mode == "fixture":
         return FixtureFosunTransport(), None
@@ -81,12 +96,6 @@ def build_transport(
         or settings.fsopenapi_api_key is None
         or settings.fsopenapi_client_private_key is None
         or settings.fsopenapi_server_public_key is None
-        or settings.activation_probe_artifact is None
-        or settings.activation_probe_receipt is None
-        or settings.activation_probe_publisher_public_key_b64u_file is None
-        or settings.activation_contract_hash_file is None
-        or settings.read_only_scope_contract_version != "v1"
-        or settings.read_only_scope is None
     ):
         raise _sdk_not_admitted()
     try:
@@ -97,61 +106,83 @@ def build_transport(
         activation_monotonic_anchor = time.monotonic()
     if activation_checked_at is None:
         activation_checked_at = datetime.now(UTC)
-    trusted_publication_key_bytes = _read_bounded_or_empty(
-        settings.activation_probe_publisher_public_key_b64u_file,
-        max_bytes=MAX_TRUSTED_PUBLISHER_KEY_BYTES,
-    )
-    activation_contract_hash_bytes = _read_bounded_or_empty(
-        settings.activation_contract_hash_file,
-        max_bytes=64,
-    )
-    try:
-        activation_contract_hash = activation_contract_hash_bytes.decode("ascii")
-    except UnicodeError:
-        raise _sdk_not_admitted() from None
-    if re.fullmatch(r"[0-9a-f]{64}", activation_contract_hash) is None:
-        raise _sdk_not_admitted()
     manifest_bytes = _read_bounded_or_empty(
         settings.provider_manifest,
         max_bytes=MAX_ARTIFACT_BYTES,
     )
-    probe_bytes = _read_bounded_or_empty(
-        settings.activation_probe_artifact,
-        max_bytes=MAX_ARTIFACT_BYTES,
-    )
-    publication_receipt_bytes = _read_bounded_or_empty(
-        settings.activation_probe_receipt,
-        max_bytes=MAX_PUBLICATION_RECEIPT_BYTES,
-    )
     try:
         manifest_document = json.loads(manifest_bytes)
-        subject = admitted_sdk_subject(manifest_document)
+        subject = (
+            probe_ready_sdk_subject(manifest_document)
+            if settings.transport_mode == "local_read_only"
+            else admitted_sdk_subject(manifest_document)
+        )
         if subject is None or not hmac.compare_digest(
             subject.provider_base_url,
             settings.fsopenapi_base_url,
         ):
             raise ValueError
-        activation, runtime_authorization = evaluate_scoped_activation(
-            manifest_bytes,
-            probe_bytes,
-            publication_receipt_bytes,
-            expected_scope=settings.read_only_scope,
-            trusted_publication_public_key_bytes=trusted_publication_key_bytes,
-            checked_at=activation_checked_at,
-        )
     except (OSError, UnicodeError, ValueError):
         raise _sdk_not_admitted() from None
-    if (
-        activation.status != "activated_read_only"
-        or activation.capability_expires_at is None
-        or runtime_authorization is None
-        or runtime_authorization.scope != settings.read_only_scope
-        or not hmac.compare_digest(
-            activation.contract_hash,
-            activation_contract_hash,
+    runtime_authorization: RuntimeAuthorization | frozenset[RuntimeOperation] | None
+    if settings.transport_mode == "read_only":
+        if (
+            settings.activation_probe_artifact is None
+            or settings.activation_probe_receipt is None
+            or settings.activation_probe_publisher_public_key_b64u_file is None
+            or settings.activation_contract_hash_file is None
+            or settings.read_only_scope_contract_version != "v1"
+            or settings.read_only_scope is None
+        ):
+            raise _sdk_not_admitted()
+        trusted_publication_key_bytes = _read_bounded_or_empty(
+            settings.activation_probe_publisher_public_key_b64u_file,
+            max_bytes=MAX_TRUSTED_PUBLISHER_KEY_BYTES,
         )
-    ):
-        raise _sdk_not_admitted()
+        activation_contract_hash_bytes = _read_bounded_or_empty(
+            settings.activation_contract_hash_file,
+            max_bytes=64,
+        )
+        try:
+            activation_contract_hash = activation_contract_hash_bytes.decode("ascii")
+        except UnicodeError:
+            raise _sdk_not_admitted() from None
+        if re.fullmatch(r"[0-9a-f]{64}", activation_contract_hash) is None:
+            raise _sdk_not_admitted()
+        try:
+            activation, runtime_authorization = evaluate_scoped_activation(
+                manifest_bytes,
+                _read_bounded_or_empty(
+                    settings.activation_probe_artifact,
+                    max_bytes=MAX_ARTIFACT_BYTES,
+                ),
+                _read_bounded_or_empty(
+                    settings.activation_probe_receipt,
+                    max_bytes=MAX_PUBLICATION_RECEIPT_BYTES,
+                ),
+                expected_scope=settings.read_only_scope,
+                trusted_publication_public_key_bytes=trusted_publication_key_bytes,
+                checked_at=activation_checked_at,
+            )
+        except (OSError, UnicodeError, ValueError):
+            raise _sdk_not_admitted() from None
+        if (
+            activation.status != "activated_read_only"
+            or activation.capability_expires_at is None
+            or runtime_authorization is None
+            or runtime_authorization.scope != settings.read_only_scope
+            or not hmac.compare_digest(
+                activation.contract_hash,
+                activation_contract_hash,
+            )
+        ):
+            raise _sdk_not_admitted()
+        capability_expires_at = activation.capability_expires_at
+        capability_checked_at = activation.checked_at
+    else:
+        runtime_authorization = _LOCAL_READ_ONLY_OPERATIONS
+        capability_checked_at = activation_checked_at
+        capability_expires_at = activation_checked_at + _LOCAL_READ_ONLY_LIFETIME
     try:
         enforce_sdk_dependency_log_boundary()
         module = importlib.import_module("fsopenapi")
@@ -167,17 +198,26 @@ def build_transport(
             logging_enable=False,
             log_body=False,
         )
-        enforce_sdk_tls_verification(client, auth_module)
+        if settings.transport_mode == "local_read_only":
+            enforce_sdk_tls_verification(
+                client,
+                auth_module,
+                https_proxy_url=settings.fsopenapi_https_proxy_url,
+                zero_retries=True,
+            )
+        else:
+            enforce_sdk_tls_verification(client, auth_module)
     except Exception:
         raise _sdk_not_admitted() from None
     return (
         SdkFosunTransport(
             client,
-            capability_expires_at=activation.capability_expires_at,
-            activation_checked_at=activation.checked_at,
+            capability_expires_at=capability_expires_at,
+            activation_checked_at=capability_checked_at,
             activation_monotonic_anchor=activation_monotonic_anchor,
             on_poison=on_poison,
             on_activation_expired=on_activation_expired,
+            max_attempts=1 if settings.transport_mode == "local_read_only" else 3,
         ),
         runtime_authorization,
     )

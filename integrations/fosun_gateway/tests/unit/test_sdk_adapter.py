@@ -5,6 +5,9 @@ from sdk_adapter_portfolio_cases import (
     test_cash_flow_provider_page_must_match_requested_cursor_and_limit as test_cash_flow_provider_page_must_match_requested_cursor_and_limit,  # noqa: E501
 )
 from sdk_adapter_portfolio_cases import (
+    test_holdings_accepts_provider_count_as_requested_page_capacity as test_holdings_accepts_provider_count_as_requested_page_capacity,  # noqa: E501
+)
+from sdk_adapter_portfolio_cases import (
     test_holdings_orders_and_cashflow_pages_bind_provider_ranges_to_request as test_holdings_orders_and_cashflow_pages_bind_provider_ranges_to_request,  # noqa: E501
 )
 from sdk_adapter_portfolio_cases import (

@@ -114,6 +114,32 @@ def test_gateway_reads_nexus_environment_alias_for_production() -> None:
     assert settings.environment is Environment.PRODUCTION
 
 
+def test_local_read_only_requires_exact_proxy_and_rejects_activation_paths() -> None:
+    values = _production_settings()
+    values["FOSUN_GATEWAY_TRANSPORT_MODE"] = "local_read_only"
+    values["FSOPENAPI_HTTPS_PROXY_URL"] = "http://127.0.0.1:9090"
+    for key in (
+        "FOSUN_ACTIVATION_PROBE_ARTIFACT",
+        "FOSUN_ACTIVATION_PROBE_RECEIPT",
+        "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE",
+        "FOSUN_ACTIVATION_CONTRACT_HASH_FILE",
+    ):
+        values.pop(key)
+
+    settings = GatewaySettings.model_validate(values)
+
+    assert settings.transport_mode == "local_read_only"
+    assert settings.fsopenapi_https_proxy_url == "http://127.0.0.1:9090"
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(
+            {**values, "FSOPENAPI_HTTPS_PROXY_URL": "http://127.0.0.1:9091"}
+        )
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(
+            {**values, "FOSUN_ACTIVATION_PROBE_ARTIFACT": "/tmp/quarantined.json"}
+        )
+
+
 @pytest.mark.parametrize("sdk_admitted", ["1", "TRUE", "yes", 1])
 def test_gateway_requires_exact_sdk_admission_switch(sdk_admitted: object) -> None:
     values = _production_settings()
@@ -280,9 +306,7 @@ def _production_settings() -> dict[str, object]:
         "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE": (
             "/synthetic/fosun-publisher-public-key.b64u"
         ),
-        "FOSUN_ACTIVATION_CONTRACT_HASH_FILE": (
-            "/synthetic/fosun-activation-contract.sha256"
-        ),
+        "FOSUN_ACTIVATION_CONTRACT_HASH_FILE": ("/synthetic/fosun-activation-contract.sha256"),
         "FOSUN_PROVIDER_MANIFEST": "/synthetic/fosun-provider-manifest.json",
         "FSOPENAPI_BASE_URL": "https://openapi.fosunxcz.com",
         "FSOPENAPI_API_KEY": "synthetic-api-key",

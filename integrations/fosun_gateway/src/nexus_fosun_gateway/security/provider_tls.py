@@ -52,10 +52,7 @@ class _ProbeDispatchGate:
 
     def _linearize_attempt(self) -> int:
         with self._lock:
-            if (
-                self._revoked
-                or self._inflight_attempts
-            ):
+            if self._revoked or self._inflight_attempts:
                 raise NonRetryableTransportRefusal("probe HTTP dispatch is revoked")
             self._last_linearized_attempt += 1
             attempt = self._last_linearized_attempt
@@ -122,14 +119,11 @@ class ProbeTlsControls:
             and getattr(self._auth_module, "requests", None) is self._auth_proxy
             and getattr(self._business_proxy, "_observer", None) is observer
             and getattr(self._auth_proxy, "_observer", None) is observer
-            and getattr(self._business_proxy, "_dispatch_gate", None)
-            is self._dispatch_gate
-            and getattr(self._auth_proxy, "_dispatch_gate", None)
-            is self._dispatch_gate
+            and getattr(self._business_proxy, "_dispatch_gate", None) is self._dispatch_gate
+            and getattr(self._auth_proxy, "_dispatch_gate", None) is self._dispatch_gate
             and getattr(self._business_proxy, "_https_proxy_url", None)
             == _LOCAL_PROBE_HTTPS_PROXY_URL
-            and getattr(self._auth_proxy, "_https_proxy_url", None)
-            == _LOCAL_PROBE_HTTPS_PROXY_URL
+            and getattr(self._auth_proxy, "_https_proxy_url", None) == _LOCAL_PROBE_HTTPS_PROXY_URL
             and _session_proxies_are_empty(self._business_session)
             and _session_proxies_are_empty(self._auth_session)
         )
@@ -244,14 +238,22 @@ class _VerifiedRequestsProxy:
         return getattr(self._delegate, name)
 
 
-def enforce_sdk_tls_verification(client: object, auth_module: object) -> None:
+def enforce_sdk_tls_verification(
+    client: object,
+    auth_module: object,
+    *,
+    https_proxy_url: str | None = None,
+    zero_retries: bool = False,
+) -> None:
     """Patch the exact v1.2.0 surfaces or reject the SDK before any network call."""
+    if https_proxy_url not in (None, _LOCAL_PROBE_HTTPS_PROXY_URL):
+        raise RuntimeError("reviewed SDK HTTPS proxy is unavailable")
     _install_sdk_tls_verification(
         client,
         auth_module,
         observer=None,
-        probe_mode=False,
-        https_proxy_url=None,
+        probe_mode=zero_retries,
+        https_proxy_url=https_proxy_url,
     )
 
 
@@ -318,9 +320,7 @@ def _install_sdk_tls_verification(
         isolated_auth_session = session_factory()
         enforce_sdk_dependency_log_boundary()
         isolated_auth_post = getattr(isolated_auth_session, "post", None)
-        if not callable(isolated_auth_post) or not hasattr(
-            isolated_auth_session, "trust_env"
-        ):
+        if not callable(isolated_auth_post) or not hasattr(isolated_auth_session, "trust_env"):
             raise RuntimeError("reviewed SDK TLS verification surface is unavailable")
         if probe_mode:
             _force_zero_https_retries(session, requests_module)
@@ -359,10 +359,7 @@ def _install_sdk_tls_verification(
             _restore_attribute_quietly(auth_module, "requests", requests_module)
         if session is not None and session_trust_env is not _MISSING_ATTRIBUTE:
             _restore_attribute_quietly(session, "trust_env", session_trust_env)
-        if (
-            isolated_auth_session is not None
-            and auth_trust_env is not _MISSING_ATTRIBUTE
-        ):
+        if isolated_auth_session is not None and auth_trust_env is not _MISSING_ATTRIBUTE:
             _restore_attribute_quietly(
                 isolated_auth_session,
                 "trust_env",

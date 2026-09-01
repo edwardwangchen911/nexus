@@ -123,6 +123,49 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_holdings_accepts_provider_count_as_requested_page_capacity() -> None:
+    response = _raw(
+        {
+            "count": 100,
+            "list": [
+                {
+                    "marketCode": "us",
+                    "stockCode": "AAPL",
+                    "currency": "USD",
+                    "quantity": "10",
+                    "quantityAvail": "10",
+                    "qtyOnHold": "0",
+                    "avgCost": "100.00",
+                    "dilutedCost": "98.50",
+                    "price": "123.45",
+                }
+            ],
+            "start": 0,
+            "total": 1,
+        },
+        "synthetic-request-holdings-capacity",
+    )
+    adapter = SdkFosunTransport(
+        SimpleNamespace(portfolio=SimpleNamespace(get_holdings=RecordingMethod(response))),
+        rate_limiter=NoopRateLimiter(),
+    )
+
+    page = await adapter.execute(
+        "fosun_sync_portfolio",
+        {
+            "account_id": "synthetic-account-001",
+            "read_kind": "holdings",
+            "cursor": None,
+            "limit": 100,
+        },
+    )
+
+    assert len(page.items) == 1
+    assert page.has_more is False
+    assert page.next_cursor is None
 @pytest.mark.asyncio
 async def test_holdings_orders_and_cashflow_pages_bind_provider_ranges_to_request(
     client: SimpleNamespace,

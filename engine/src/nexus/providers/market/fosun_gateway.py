@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import re
+import ssl
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -232,8 +233,11 @@ class FosunMarketGatewayClient:
         self._uuid_factory = uuid_factory
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
-            cert=(str(identity.client_cert), str(identity.client_key)),
-            verify=str(identity.client_ca),
+            verify=_mtls_context(
+                identity.client_ca,
+                identity.client_cert,
+                identity.client_key,
+            ),
             timeout=httpx.Timeout(10.0),
             follow_redirects=False,
             trust_env=False,
@@ -608,3 +612,9 @@ def _validated_origin(value: str) -> str:
     ):
         raise ValueError("gateway origin must be an absolute HTTPS origin")
     return str(url).rstrip("/")
+
+
+def _mtls_context(client_ca: Path, client_cert: Path, client_key: Path) -> ssl.SSLContext:
+    context = ssl.create_default_context(cafile=str(client_ca))
+    context.load_cert_chain(certfile=str(client_cert), keyfile=str(client_key))
+    return context

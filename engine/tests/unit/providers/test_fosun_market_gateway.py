@@ -239,13 +239,17 @@ def test_default_transport_is_mtls_bounded_and_does_not_trust_environment(
         captured.update(kwargs)
         return object()
 
+    ssl_context = object()
     monkeypatch.setattr("nexus.providers.market.fosun_gateway.httpx.AsyncClient", capture_client)
+    monkeypatch.setattr(
+        "nexus.providers.market.fosun_gateway._mtls_context",
+        lambda *_args: ssl_context,
+    )
 
     FosunMarketGatewayClient(_identity(tmp_path))
 
     assert captured == {
-        "cert": (str(tmp_path / "market.crt"), str(tmp_path / "market.key")),
-        "verify": str(tmp_path / "ca.crt"),
+        "verify": ssl_context,
         "timeout": httpx.Timeout(10.0),
         "follow_redirects": False,
         "trust_env": False,

@@ -99,8 +99,13 @@ def normalize_holdings_response(
     holdings, request_id = _success_envelope(raw)
     try:
         positions = tuple(_position(item, account_id) for item in _mappings(_list(holdings)))
-        start, count, total = _pagination(holdings, context, len(positions))
-        next_cursor = str(start + count) if start + count < total else None
+        start, page_span, total = _pagination(
+            holdings,
+            context,
+            len(positions),
+            allow_requested_capacity=True,
+        )
+        next_cursor = str(start + page_span) if start + page_span < total else None
         return GatewayPage[GatewayItem](
             items=positions,
             source_request_id=request_id,
@@ -362,6 +367,8 @@ def _pagination(
     data: Mapping[str, object],
     context: Mapping[str, object],
     item_count: int,
+    *,
+    allow_requested_capacity: bool = False,
 ) -> tuple[int, int, int]:
     start = _required_value(data, "start")
     count = _required_value(data, "count")
@@ -378,14 +385,23 @@ def _pagination(
         or start < 0
         or count < 0
         or total < 0
-        or count != item_count
-        or count > limit
         or start > total
-        or start + count > total
-        or (count == 0 and start < total)
     ):
         raise ValueError
-    return start, count, total
+    returned_count_semantics = (
+        count == item_count
+        and count <= limit
+        and start + count <= total
+        and (count != 0 or start == total)
+    )
+    requested_capacity_semantics = (
+        allow_requested_capacity
+        and count == limit
+        and item_count == min(limit, total - start)
+    )
+    if not returned_count_semantics and not requested_capacity_semantics:
+        raise ValueError
+    return start, item_count, total
 
 
 def _context_cursor(context: Mapping[str, object]) -> int:

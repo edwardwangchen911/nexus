@@ -17,6 +17,13 @@ class GatewayFact(BaseModel):
             raise TypeError("binary floating-point financial facts are forbidden")
         return value
 
+
+class AccountItem(GatewayFact):
+    kind: Literal["account"]
+    external_account_id: str
+    status: str
+    base_currency: str | None
+
     @field_validator("*", mode="after")
     @classmethod
     def _reject_non_finite_decimal(cls, value: object) -> object:
