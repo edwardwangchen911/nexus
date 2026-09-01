@@ -344,6 +344,8 @@ def _production_settings(material: dict[str, Path]) -> GatewaySettings:
             "NEXUS_ENV": "production",
             "FOSUN_GATEWAY_CAPABILITY": "READ_ONLY",
             "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
+            "FOSUN_READ_ONLY_SCOPE_CONTRACT_VERSION": "v1",
+            "FOSUN_READ_ONLY_SCOPE": "core",
             "FOSUN_GATEWAY_REPLAY_STORE_PATH": material["server_cert"].parent / "replay.sqlite3",
             "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-current",
             "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret-32-bytes",

@@ -5,9 +5,10 @@ NEXUS 是私人投资研究、回测与模拟交易工作台。它不提供投�
 ## 当前状态
 
 - `phase0_offline_ready`：美股研究、确定性回测、三方案比较、Forward Shadow、硬风控和内部模拟交易已通过离线发布门禁。
-- Phase 1 的一次性 REST 只读 probe 已完成本地前置：官方域名与 SDK 提交均被精确锁定；
-  持续运行门禁仍为 `fixture_with_next_action / COMPLETE_SDK_ADMISSION`。尚未读取新凭据，
-  也未调用真实账户或 Provider。
+- Mac 本地的复星 `local_read_only` 链路已启用：现有 Gateway 经一次性本地刷新器将 1 个账户、
+  3 个现金币种、12 条持仓、单标的 Quote 和 276 根日 K 持久化到 PostgreSQL/对象存储，
+  并通过 API/BFF 在本地组合页和市场页展示来源与更新时间。
+- 该状态只是个人 Mac 本地只读使用，不代表生产部署、持续生产 Gateway、复星模拟盘交易或实盘激活。
 - 美股真实数据传输与耐久采集链路已实现但默认关闭：Alpaca、SEC、FRED/ALFRED
   使用固定源、冻结 universe、原始证据归档和幂等入库；未配置或启用真实 Provider
   凭据时继续使用无网络 fixture。

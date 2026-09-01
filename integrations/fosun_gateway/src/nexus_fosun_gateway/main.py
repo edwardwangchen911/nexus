@@ -363,11 +363,14 @@ async def _serve_production(app: FastAPI, settings: GatewaySettings) -> None:
     verifier = app.state.hmac_verifier
     if not isinstance(verifier, GatewayHmacVerifier):
         raise RuntimeError("GATEWAY_HMAC_VERIFIER_REQUIRED")
+    listener_host = (
+        "127.0.0.1" if settings.transport_mode == "local_read_only" else "0.0.0.0"
+    )
     servers = tuple(
         uvicorn.Server(
             uvicorn.Config(
                 app,
-                host="0.0.0.0",
+                host=listener_host,
                 port=listener.port,
                 lifespan="off",
                 **listener.tls_kwargs,

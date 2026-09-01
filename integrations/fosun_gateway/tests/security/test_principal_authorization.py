@@ -64,11 +64,13 @@ _IDENTITIES = (
 )
 _ALLOWED = {
     "broker": {
+        "fosun_capabilities",
+        "fosun_sync_accounts",
         "fosun_sync_portfolio",
         "fosun_list_orders",
         "fosun_list_cash_flows",
     },
-    "market": {"fosun_get_quotes", "fosun_get_bars"},
+    "market": {"fosun_capabilities", "fosun_get_quotes", "fosun_get_bars"},
 }
 
 

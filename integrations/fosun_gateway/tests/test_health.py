@@ -76,6 +76,44 @@ def test_http_readiness_turns_unhealthy_at_activation_expiry() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transport_mode", "expected_host"),
+    [("read_only", "0.0.0.0"), ("local_read_only", "127.0.0.1")],
+)
+async def test_gateway_listener_host_matches_transport_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    transport_mode: str,
+    expected_host: str,
+) -> None:
+    app = create_gateway_app(GatewaySettings.for_test())
+    transport = _UnavailableTransport()
+    app.state.transport = transport
+    listeners = (
+        SimpleNamespace(port=8081, tls_kwargs={}),
+        SimpleNamespace(port=8082, tls_kwargs={}),
+    )
+    configured_hosts: list[str] = []
+
+    class _Server:
+        def __init__(self, config: object) -> None:
+            configured_hosts.append(config.host)  # type: ignore[attr-defined]
+            self.should_exit = False
+
+        async def serve(self) -> None:
+            await asyncio.sleep(0)
+
+    settings = GatewaySettings.for_test().model_copy(
+        update={"transport_mode": transport_mode}
+    )
+    monkeypatch.setattr(main_module, "production_listener_configs", lambda _settings: listeners)
+    monkeypatch.setattr(main_module.uvicorn, "Server", _Server)
+
+    await _serve_production(app, settings)
+
+    assert configured_hosts == [expected_host, expected_host]
+
+
+@pytest.mark.asyncio
 async def test_dual_listener_shutdown_closes_transport_when_lifespan_is_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -119,6 +157,8 @@ def test_local_read_only_requires_exact_proxy_and_rejects_activation_paths() -> 
     values["FOSUN_GATEWAY_TRANSPORT_MODE"] = "local_read_only"
     values["FSOPENAPI_HTTPS_PROXY_URL"] = "http://127.0.0.1:9090"
     for key in (
+        "FOSUN_READ_ONLY_SCOPE_CONTRACT_VERSION",
+        "FOSUN_READ_ONLY_SCOPE",
         "FOSUN_ACTIVATION_PROBE_ARTIFACT",
         "FOSUN_ACTIVATION_PROBE_RECEIPT",
         "FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE",
@@ -291,6 +331,8 @@ def _production_settings() -> dict[str, object]:
         "NEXUS_ENV": "production",
         "FOSUN_GATEWAY_CAPABILITY": "READ_ONLY",
         "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
+        "FOSUN_READ_ONLY_SCOPE_CONTRACT_VERSION": "v1",
+        "FOSUN_READ_ONLY_SCOPE": "core",
         "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "gateway-current",
         "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret-32-bytes",
         "FOSUN_GATEWAY_REPLAY_STORE_PATH": "/synthetic/fosun-gateway/replay.sqlite3",
