@@ -50,7 +50,7 @@ for (const viewport of [
     await expect(page.getByText("摊薄成本")).toBeVisible();
     await expect(page.getByText(/香港交易所财报证据尚未准入/)).toBeVisible();
     await expect(page.getByRole("region", { name: "真实刷新仅限本机终端" })).toContainText(
-      "uv run --package nexus-engine nexus-engine-fosun-local-refresh",
+      "uv run --package nexus-engine nexus-fosun-local refresh",
     );
     await expect(page.getByRole("button", { name: "刷新页面数据" })).toBeEnabled();
     await expect(page.getByRole("button", { name: "同步复星只读事实" })).toHaveCount(0);

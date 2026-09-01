@@ -10,7 +10,7 @@ NEXUS 是私人投资研究、回测与模拟交易工作台。它不提供投�
   并通过 API/BFF 在本地组合页和可切换标的的市场页展示复星来源、更新时间与质量状态。组合页
   按原币种确定性展示现金、持仓市值、总资产与配置权重；没有合格 FX 证据时不生成跨币种合计，
   美股持仓可进入对应的已持久化 Quote 与日 K 页面。
-- 该状态只是个人 Mac 本地只读使用，不代表生产部署、持续生产 Gateway、复星模拟盘交易或实盘激活。
+- 该状态只是个人 Mac 本地只读使用。当前只区分无网络 fixture 与本地真实只读，不设“生产模式”，也不代表复星模拟盘交易或实盘激活。
 - 美股真实数据传输与耐久采集链路已实现但默认关闭：Alpaca、SEC、FRED/ALFRED
   使用固定源、冻结 universe、原始证据归档和幂等入库；未配置或启用真实 Provider
   凭据时继续使用无网络 fixture。
@@ -41,11 +41,19 @@ NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
 
 ### Mac 本地复星只读刷新
 
-在既有安全 launcher 已为 Gateway 与客户端加载同一组本地安全配置、且 Gateway 处于
-`local_read_only` 后，宿主机可执行一次手动刷新：
+统一使用 `nexus-fosun-local` 管理本地只读链路。先做无网络、无数据库的配置检查，再只读查看已持久化状态：
 
 ```bash
-uv run --package nexus-engine nexus-engine-fosun-local-refresh
+uv run --package nexus-engine nexus-fosun-local doctor
+uv run --package nexus-engine nexus-fosun-local status
+```
+
+`doctor` 只输出缺失的环境变量名和 TLS 文件是否存在，不打印配置值、不连数据库、不连复星。
+`status` 只读本地 PostgreSQL 中最新快照的脱敏汇总。只有在既有安全 launcher
+已加载本地配置、且 Gateway 为 `local_read_only` 时，才显式执行：
+
+```bash
+uv run --package nexus-engine nexus-fosun-local refresh
 ```
 
 刷新器从真实持仓确定性提取、去重并排序 `us...` 代码；最多接受 12 个美股标的，使用一次批量
@@ -55,6 +63,9 @@ Quote 和每个标的一次日 K 请求。Accounts、Cash、Holdings 合计各�
 自动调度、订单、账户写入或任何交易激活。组合页的“刷新页面数据”仅重新执行已持久化
 组合与快照的 BFF GET，不会 POST `/api/v1/broker-sync-runs`。`00656.HK` 仍仅作只读持仓展示，不请求
 Quote 或 K 线。
+
+组合快照同时展示两类就绪度：“展示状态”只回答现金/持仓事实是否可用；“决策状态”回答
+是否完成对账、时效和风控门禁。因此 `PARTIAL` 快照仍可正常展示真实资产，但不会被误用为优化或交易基线。
 
 - [本地开发与 Compose](docs/runbooks/local-development.md)：不强制 Docker Desktop，Docker Desktop、OrbStack 或 Colima 均可。
 - [备份/恢复演练](docs/runbooks/backup-restore.md)

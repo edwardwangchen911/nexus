@@ -23,6 +23,8 @@ export const snapshot: PortfolioSnapshot = {
   portfolio_id: portfolioId,
   coverage_scope: "broker_account",
   status: "READY",
+  display_readiness: "DISPLAY_READY",
+  decision_readiness: "DECISION_READY",
   as_of: "2026-08-23T08:00:00Z",
   cash: [
     { currency: "HKD", cash_balance: "8000.00", available_cash: "7000.00", provider_as_of: "2026-08-23T08:00:00Z" },

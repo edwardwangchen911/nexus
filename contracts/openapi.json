@@ -1466,6 +1466,15 @@
         "title": "DailyBriefResponse",
         "type": "object"
       },
+      "DecisionReadiness": {
+        "enum": [
+          "DECISION_READY",
+          "RECONCILIATION_PENDING",
+          "DATA_STALE",
+          "RECONCILIATION_REQUIRED"
+        ],
+        "type": "string"
+      },
       "DiagnosticItemResponse": {
         "additionalProperties": false,
         "properties": {
@@ -1584,6 +1593,13 @@
         ],
         "title": "DiagnosticItemResponse",
         "type": "object"
+      },
+      "DisplayReadiness": {
+        "enum": [
+          "DISPLAY_READY",
+          "DISPLAY_UNAVAILABLE"
+        ],
+        "type": "string"
       },
       "DrawdownAcknowledgeEnvelope": {
         "additionalProperties": false,
@@ -4961,6 +4977,12 @@
             "title": "Coverage Scope",
             "type": "string"
           },
+          "decision_readiness": {
+            "$ref": "#/components/schemas/DecisionReadiness"
+          },
+          "display_readiness": {
+            "$ref": "#/components/schemas/DisplayReadiness"
+          },
           "open_orders": {
             "items": {
               "$ref": "#/components/schemas/OpenOrderResponse"
@@ -4996,6 +5018,8 @@
           "portfolio_id",
           "coverage_scope",
           "status",
+          "display_readiness",
+          "decision_readiness",
           "cash",
           "positions",
           "open_orders",
