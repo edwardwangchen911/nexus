@@ -51,12 +51,12 @@ export function OptimizationNeedPanel({ report }: { report: DiagnosticReport }):
     <section className="optimization-need" data-need={report.optimization_need} aria-labelledby="optimization-need-title">
       <Icon aria-hidden="true" size={22} />
       <div>
-        <p className="eyebrow">DETERMINISTIC DIAGNOSIS</p>
+        <p className="eyebrow">确定性诊断</p>
         <h2 id="optimization-need-title">{copy.title}</h2>
         <p>{copy.detail}</p>
       </div>
       <span className="state-chip" data-state={needState(report.optimization_need)}>
-        {report.optimization_need}
+        {copy.title} <code>{report.optimization_need}</code>
       </span>
     </section>
   );
@@ -67,7 +67,7 @@ export function DiagnosticList({ report }: { report: DiagnosticReport }): React.
     <section className="diagnostic-ledger" aria-labelledby="diagnostic-ledger-title">
       <header className="diagnostic-ledger__heading">
         <div>
-          <p className="eyebrow">RISK THRESHOLD LEDGER</p>
+          <p className="eyebrow">风险阈值账簿</p>
           <h2 id="diagnostic-ledger-title">组合诊断账簿</h2>
         </div>
         <p className="numeric-data">截至 {formatUtc(report.snapshot_as_of)}</p>

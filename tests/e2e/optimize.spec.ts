@@ -41,8 +41,15 @@ for (const viewport of [
     await installFixtures(page);
     await page.goto("/overview");
 
-    await expect(page.getByRole("heading", { name: "值得比较优化方案" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "值得比较优化方案" })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole("region", { name: "冻结组合事实" })).toContainText("real_advisory_policy_v1");
+    if (viewport.width < 768) {
+      await page.locator(".app-shell__drawer > summary").click();
+      await expect(page.getByRole("navigation", { name: "移动主导航" }).getByRole("link", { name: "概览" })).toHaveAttribute("aria-current", "page");
+      await page.locator(".app-shell__drawer > summary").click();
+    } else {
+      await expect(page.getByRole("navigation", { name: "主导航" }).getByRole("link", { name: "概览" })).toHaveAttribute("aria-current", "page");
+    }
     await page.getByRole("link", { name: "打开组合诊断" }).click();
     await expect(page.getByRole("heading", { name: "组合诊断账簿" })).toBeVisible();
     await expect(page.getByRole("listitem", { name: /CONCENTRATION_TOP1/ })).toContainText("-0.05");

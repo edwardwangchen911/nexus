@@ -221,6 +221,8 @@ describe("integrations vertical slice", () => {
     expect(liveRegion).toHaveAttribute("aria-atomic", "true");
     expect(screen.getAllByRole("status")).toHaveLength(1);
     expect(screen.getByText("FOSUN · FIXTURE")).toBeVisible();
+    expect(screen.getByText("复星 · 演示数据")).toBeVisible();
+    expect(screen.getByText("查看系统证据")).toBeVisible();
   });
 
   it("keeps the live approval route visibly locked with no submit surface", () => {

@@ -300,7 +300,7 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
   return (
     <section className="page-stack portfolio-page" aria-label="组合事实页面" data-state={state}>
       <header className="page-heading">
-        <div><p className="eyebrow">PORTFOLIO / FROZEN FACTS</p><h1>组合事实</h1><p>复星真实持仓与内部模拟盘分账展示。未有合格 FX 证据时，不合并资产净值。</p></div>
+        <div><p className="eyebrow">资产与持仓</p><h1>组合事实</h1><p>复星真实持仓与内部模拟盘分账展示。缺少合格汇率证据时，各币种独立呈现，不虚构合并净值。</p></div>
         <div className="portfolio-page__actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新快照</button>{unresolvedSync ? <button className="button button--primary" type="button" onClick={onResolveSync} disabled={syncing}><ShieldCheck aria-hidden="true" size={17} />{syncing ? "正在继续确认" : "使用同一幂等键继续确认"}</button> : selected?.kind === "real_read_only" && syncRun?.status !== "ACTIVE" ? <button className="button button--primary" type="button" onClick={onSync} disabled={syncing}><ShieldCheck aria-hidden="true" size={17} />{syncing ? "正在确认同步任务" : "同步复星只读事实"}</button> : null}</div>
       </header>
       <div role="status" aria-label="组合操作状态" aria-live="polite" aria-atomic="true">
@@ -308,10 +308,10 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
       </div>
       {!selected ? <DataState state={state} title="组合快照" detail={stateDetail(state)} announce={false} /> : (
         <div className="portfolio-workspace">
-          <nav className="portfolio-rail" aria-label="组合选择"><ul>{portfolios.map((item) => <li key={item.portfolio_id}><button type="button" aria-pressed={item.portfolio_id === selectedPortfolioId} onClick={() => onSelect(item.portfolio_id)}><strong>{item.name}</strong><span>{kindLabel(item.kind)} · {item.coverage_scope}</span><span>{item.original_currencies.join(" / ") || "币种未知"}</span></button></li>)}</ul></nav>
+          <nav className="portfolio-rail" aria-label="组合选择"><p className="portfolio-rail__label">组合账户</p><ul>{portfolios.map((item) => <li key={item.portfolio_id}><button type="button" aria-pressed={item.portfolio_id === selectedPortfolioId} onClick={() => onSelect(item.portfolio_id)}><strong>{item.name}</strong><span>{kindLabel(item.kind)} · {coverageLabel(item.coverage_scope)}</span><span>{item.original_currencies.join(" / ") || "币种未知"}</span></button></li>)}</ul></nav>
           <div className="portfolio-detail">
             {!hasData || !snapshot ? <DataState state={state} title={`${selected.name} 快照`} detail={stateDetail(state)} announce={false} /> : <>
-              <div className="portfolio-snapshot-band"><div><p className="eyebrow">FROZEN SNAPSHOT</p><h2>{selected.name}</h2></div><dl><div><dt>数据来源</dt><dd>{selected.provider === "fosun" ? "复星（只读）" : selected.provider}</dd></div><div><dt>状态</dt><dd>{snapshot.status}</dd></div><div><dt>覆盖范围</dt><dd>{snapshot.coverage_scope}</dd></div><div><dt>更新时间</dt><dd>{formatTime(snapshot.as_of)}</dd></div></dl></div>
+              <div className="portfolio-snapshot-band"><div><p className="eyebrow">冻结快照</p><h2>{selected.name}</h2><p>只读账户事实，不含跨币种推算。</p></div><dl><div><dt>数据来源</dt><dd>{selected.provider === "fosun" ? "复星（只读）" : selected.provider}</dd></div><div><dt>快照状态</dt><dd>{snapshotStatusLabel(snapshot.status)} <code>{snapshot.status}</code></dd></div><div><dt>币种</dt><dd>{currencies.length}</dd></div><div><dt>持仓</dt><dd>{snapshot.positions.length}</dd></div><div><dt>未结订单</dt><dd>{snapshot.open_orders.length}</dd></div><div><dt>更新时间</dt><dd>{formatTime(snapshot.as_of)}</dd></div></dl></div>
               {state === "stale" ? <p className="inline-notice inline-notice--error" role="status">{stateDetail(state)}</p> : null}
               {snapshot.status === "RECONCILIATION_REQUIRED" ? <p className="inline-notice inline-notice--error">双读对账未通过。快照仅供展示，不能用作优化基线。</p> : null}
               {currencies.map((currency) => <PortfolioSummary key={currency} portfolio={selected} snapshot={snapshot} currency={currency} />)}
@@ -352,6 +352,8 @@ function isRecord(value: unknown): value is Record<string, unknown> { return typ
 async function fetchWithTimeout(path: string): Promise<Response> { return fetch(path, { signal: AbortSignal.timeout(LOAD_TIMEOUT_MS) }); }
 function snapshotState(status: PortfolioSnapshot["status"]): DataStateKind { return status === "READY" ? "ready" : status === "STALE" ? "stale" : "partial"; }
 function kindLabel(kind: PortfolioItem["kind"]): string { return ({ real_read_only: "真实只读", internal_paper: "内部模拟", shadow: "影子组合" })[kind]; }
+function coverageLabel(scope: string): string { return scope === "broker_account" ? "券商账户" : scope; }
+function snapshotStatusLabel(status: PortfolioSnapshot["status"]): string { return status === "READY" ? "已就绪" : status === "STALE" ? "已过期" : "需要对账"; }
 function formatTime(value: string | null): string { if (!value) return "Provider 时点缺失"; const date = new Date(value); return Number.isNaN(date.valueOf()) ? "无效时间" : date.toISOString().replace("T", " ").replace(".000Z", " UTC"); }
 function syncErrorMessage(code: unknown, status: number, retryAfter: string | null): string { if (code === "IDEMPOTENCY_CONFLICT") return "幂等键已被不同请求使用；未创建新任务。"; if (status === 429) return `只读同步冷却中${retryAfter && /^\d+$/.test(retryAfter) ? `，请等待 ${retryAfter} 秒` : ""}。当前快照保持不变。`; if (code === "VALIDATION_ERROR") return "同步请求不合法；未创建新任务。"; return "同步任务未登记。当前快照保持不变。"; }
 function stateDetail(state: DataStateKind): string { return ({ loading: "正在读取脱敏组合和冻结快照。", empty: "尚无可展示的冻结组合快照。", ready: "组合快照已就绪。", partial: "快照仅供研究，不可作为优化基线。", stale: "显示最后已知快照，不触发业务动作。", error: "读取失败；未开启任何交易能力。", forbidden: "当前身份无权读取组合事实。" })[state]; }

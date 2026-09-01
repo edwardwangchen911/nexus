@@ -41,7 +41,7 @@ export function PortfolioSummary({ portfolio, snapshot, currency }: PortfolioSum
     <section className="portfolio-summary" aria-label={`${portfolio.name} ${currency} 组合摘要`}>
       <header className="portfolio-summary__heading">
         <div>
-          <p className="eyebrow">ORIGINAL CURRENCY</p>
+          <p className="eyebrow">原币种账户</p>
           <h2>{currency}</h2>
         </div>
         <span className="mode-badge"><LockKeyhole aria-hidden="true" size={15} />只读</span>
@@ -144,15 +144,15 @@ function CurrencyValuationSummary({
   return (
     <section className="portfolio-valuation" aria-label={`${currency} 原币种资产估值`}>
       <header className="portfolio-valuation__heading">
-        <div><p className="eyebrow">ORIGINAL-CURRENCY VALUATION</p><h3>原币种资产估值</h3></div>
-        <span className="quality-badge" data-quality={snapshot.status}>{snapshot.status}</span>
+        <div><p className="eyebrow">原币种估值</p><h3>资产概览</h3></div>
+        <span className="quality-badge" data-quality={snapshot.status}>{snapshotStatusLabel(snapshot.status)} <code>{snapshot.status}</code></span>
       </header>
       <dl className="portfolio-valuation__facts">
         <Fact term="总资产" value={complete ? `${currency} ${formatMoney(valuation.totalValue!)}` : "无法计算"} />
         <Fact term="持仓市值" value={complete ? `${currency} ${formatMoney(valuation.holdingsValue!)}` : "无法计算"} />
         <Fact term="现金" value={complete ? `${currency} ${formatMoney(valuation.cashValue!)}` : "无法计算"} />
         <Fact term="数据来源" value={portfolio.provider === "fosun" ? "复星（只读）" : portfolio.provider} />
-        <Fact term="质量状态" value={snapshot.status} />
+        <Fact term="质量状态" value={`${snapshotStatusLabel(snapshot.status)} · ${snapshot.status}`} />
         <Fact term={valuation.asOfKind} value={formatTime(valuation.asOf)} />
       </dl>
       {complete && valuation.totalValue! > BIGINT_ZERO ? (
@@ -275,6 +275,10 @@ function roundDivide(value: bigint, divisor: bigint): bigint {
 
 function Fact({ term, value }: { term: string; value: string }): React.ReactElement {
   return <div><dt>{term}</dt><dd className="numeric-data">{value}</dd></div>;
+}
+
+function snapshotStatusLabel(status: PortfolioSnapshot["status"]): string {
+  return status === "READY" ? "已就绪" : status === "STALE" ? "已过期" : "需要对账";
 }
 
 function formatNullableDecimal(value: string | null, currency: string): string {

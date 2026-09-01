@@ -22,7 +22,10 @@ const primaryHrefs = [
 const systemHrefs = ["/strategies", "/integrations"];
 
 describe("AppShell", () => {
-  beforeEach(() => { navigation.push.mockClear(); });
+  beforeEach(() => {
+    route.pathname = "/overview";
+    navigation.push.mockClear();
+  });
 
   it("provides ordered primary and secondary navigation in desktop and mobile views", () => {
     const { container } = render(
@@ -47,6 +50,16 @@ describe("AppShell", () => {
     expect(desktopPrimary.parentElement).toHaveClass("app-shell__navigation-groups");
     expect(desktopPrimary.querySelector("a")).toHaveClass("app-shell__navigation-control");
     expect(container.querySelectorAll(".app-shell__navigation-control")).toHaveLength(17);
+  });
+
+  it("marks the current protected route in both navigation surfaces", () => {
+    route.pathname = "/portfolio/positions";
+    render(<AppShell><p>内容</p></AppShell>);
+
+    const currentLinks = screen.getAllByRole("link", { name: "组合" });
+    expect(currentLinks).toHaveLength(2);
+    expect(currentLinks.every((link) => link.getAttribute("aria-current") === "page")).toBe(true);
+    expect(screen.getAllByRole("link", { name: "概览" }).every((link) => !link.hasAttribute("aria-current"))).toBe(true);
   });
 
   it("moves focus to main after a client-side protected-route change without stealing initial focus", () => {

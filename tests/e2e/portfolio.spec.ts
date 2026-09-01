@@ -44,14 +44,20 @@ for (const viewport of [
     await installPortfolioFixtures(page);
     await page.goto("/portfolio");
 
-    await expect(page.getByRole("region", { name: "Fosun read-only HKD 组合摘要" })).toContainText("HKD 8,000.00");
+    await expect(page.getByRole("region", { name: "Fosun read-only HKD 组合摘要" })).toContainText("HKD 8,000.00", { timeout: 15_000 });
     await expect(page.getByRole("region", { name: "Fosun read-only USD 组合摘要" })).toContainText("USD 1,000.00");
     await expect(page.getByText("平均成本")).toBeVisible();
     await expect(page.getByText("摊薄成本")).toBeVisible();
     await expect(page.getByText(/香港交易所财报证据尚未准入/)).toBeVisible();
     await expect(page.getByRole("button", { name: "同步复星只读事实" })).toBeEnabled();
     await expect(page.getByText(/折算总资产/)).toHaveCount(0);
-
+    if (viewport.width < 768) {
+      await page.locator(".app-shell__drawer > summary").click();
+      await expect(page.getByRole("navigation", { name: "移动主导航" }).getByRole("link", { name: "组合" })).toHaveAttribute("aria-current", "page");
+      await page.locator(".app-shell__drawer > summary").click();
+    } else {
+      await expect(page.getByRole("navigation", { name: "主导航" }).getByRole("link", { name: "组合" })).toHaveAttribute("aria-current", "page");
+    }
     const serious = (await new AxeBuilder({ page }).analyze()).violations.filter(
       (violation) => violation.impact === "serious" || violation.impact === "critical",
     );

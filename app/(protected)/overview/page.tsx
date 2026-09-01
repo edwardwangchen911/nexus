@@ -39,16 +39,16 @@ export function OverviewPanel({ state, overview, onRefresh }: Props): React.Reac
   return (
     <section className="page-stack overview-page" aria-label="投资概览页面" data-state={state}>
       <header className="page-heading">
-        <div><p className="eyebrow">OVERVIEW / EVIDENCE FIRST</p><h1>今日组合判断</h1><p>只回答“是否需要进一步优化”；结论来自冻结快照与确定性阈值，不是 Agent 评分。</p></div>
-        <div className="page-actions"><span className="mode-badge">RESEARCH_ONLY</span><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新判断</button></div>
+        <div><p className="eyebrow">每日决策台</p><h1>今日组合判断</h1><p>先判断是否值得进一步优化。所有结论均来自冻结快照与确定性阈值，不使用 Agent 主观评分。</p></div>
+        <div className="page-actions"><span className="mode-badge">仅研究 <code>RESEARCH_ONLY</code></span><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新判断</button></div>
       </header>
       {!hasData ? <DataState state={state} title={stateTitle(state)} detail={stateDetail(state)}>
         {state === "empty" ? <a className="button button--primary" href="/market">研究美股证据<ArrowRight aria-hidden="true" size={17} /></a> : null}
       </DataState> : <>
         {state === "stale" ? <p className="inline-notice inline-notice--error" role="status">显示最后已知结果；当前请求失败，不可用于新动作。</p> : null}
-        <section className="overview-fact-band" aria-label="冻结组合事实"><div><p className="eyebrow">FROZEN SNAPSHOT</p><h2>只读事实快照</h2></div><dl className="numeric-data"><div><dt>截止</dt><dd>{formatUtc(overview.snapshot_as_of)}</dd></div><div><dt>交易日</dt><dd>{overview.trading_day ?? "未知"}</dd></div><div><dt>诊断策略</dt><dd>{overview.diagnostic_report.policy_version}</dd></div><div><dt>组合 ID</dt><dd>{overview.portfolio_id}</dd></div></dl></section>
         <OptimizationNeedPanel report={overview.diagnostic_report} />
         <nav className="overview-links" aria-label="概览后续动作"><a className="button button--primary" href={optimizeHref}>打开组合诊断<ArrowRight aria-hidden="true" size={17} /></a>{overview.proposal_group ? <a className="button button--quiet" href={`/optimize/${overview.proposal_group.proposal_group_id}`}>查看三方案比较</a> : null}</nav>
+        <section className="overview-fact-band" aria-label="冻结组合事实"><div><p className="eyebrow">决策证据</p><h2>只读事实快照</h2><p>用于复核判断来源，不会直接触发任何交易动作。</p></div><dl className="numeric-data"><div><dt>数据截止</dt><dd>{formatUtc(overview.snapshot_as_of)}</dd></div><div><dt>交易日</dt><dd>{overview.trading_day ?? "未知"}</dd></div><div><dt>诊断策略</dt><dd>{overview.diagnostic_report.policy_version}</dd></div><div><dt>组合 ID</dt><dd>{overview.portfolio_id}</dd></div></dl></section>
       </>}
     </section>
   );
