@@ -53,6 +53,47 @@ def test_explicit_environment_overrides_ignored_local_file(tmp_path: Path) -> No
     assert environment["DATABASE_URL"] == "postgresql+asyncpg://explicit-canary"
 
 
+def test_local_environment_translates_compose_service_names_to_loopback(tmp_path: Path) -> None:
+    infra = tmp_path / "infra"
+    infra.mkdir()
+    (infra / ".env.local").write_text(
+        "DATABASE_URL=postgresql+asyncpg://user:password@postgres:5432/nexus\n"
+        "OBJECT_STORE_ENDPOINT=http://minio:9000\n"
+        "NEXUS_POSTGRES_HOST_PORT=55433\n"
+        "NEXUS_MINIO_HOST_PORT=59000\n",
+        encoding="utf-8",
+    )
+
+    environment = fosun_local.load_local_environment(tmp_path, {})
+
+    assert environment["DATABASE_URL"] == (
+        "postgresql+asyncpg://user:password@127.0.0.1:55433/nexus"
+    )
+    assert environment["OBJECT_STORE_ENDPOINT"] == "http://127.0.0.1:59000"
+
+
+def test_invalid_local_host_port_fails_without_echoing_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    infra = tmp_path / "infra"
+    infra.mkdir()
+    (infra / ".env.local").write_text(
+        "DATABASE_URL=postgresql+asyncpg://user:secret-canary@postgres:5432/nexus\n"
+        "NEXUS_POSTGRES_HOST_PORT=invalid-secret-canary\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit):
+        fosun_local.main(["doctor"])
+
+    assert capsys.readouterr().err == (
+        '{"category": "local", "code": "LOCAL_HOST_PORT_INVALID", "status": "failed"}\n'
+    )
+
+
 def test_init_creates_two_distinct_mode_600_hmac_identities(tmp_path: Path) -> None:
     result = fosun_local.initialize_local_hmac(tmp_path)
 

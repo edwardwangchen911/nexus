@@ -10,11 +10,13 @@ import secrets
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import dotenv_values
 from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import desc, func, select
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -126,10 +128,47 @@ def load_local_environment(
             for name, filename in _LOCAL_TLS_FILES.items()
         }
     )
+    _localize_compose_endpoints(environment)
     environment.update(
         {name: value for name, value in process_environment.items() if value}
     )
     return environment
+
+
+def _localize_compose_endpoints(environment: dict[str, str]) -> None:
+    """Translate Compose-only service names to their loopback host ports."""
+    database_url = environment.get("DATABASE_URL")
+    if database_url:
+        parsed_database = make_url(database_url)
+        if parsed_database.host == "postgres":
+            environment["DATABASE_URL"] = parsed_database.set(
+                host="127.0.0.1",
+                port=_host_port(environment, "NEXUS_POSTGRES_HOST_PORT", 5432),
+            ).render_as_string(hide_password=False)
+
+    object_store_endpoint = environment.get("OBJECT_STORE_ENDPOINT")
+    if object_store_endpoint:
+        parsed_object_store = urlsplit(object_store_endpoint)
+        if parsed_object_store.hostname == "minio":
+            environment["OBJECT_STORE_ENDPOINT"] = urlunsplit(
+                parsed_object_store._replace(
+                    netloc=(
+                        "127.0.0.1:"
+                        f"{_host_port(environment, 'NEXUS_MINIO_HOST_PORT', 9000)}"
+                    )
+                )
+            )
+
+
+def _host_port(environment: Mapping[str, str], name: str, default: int) -> int:
+    raw = environment.get(name, str(default))
+    try:
+        port = int(raw)
+    except ValueError:
+        raise ValueError("LOCAL_HOST_PORT_INVALID") from None
+    if not 1 <= port <= 65535:
+        raise ValueError("LOCAL_HOST_PORT_INVALID")
+    return port
 
 
 def initialize_local_hmac(repo_root: Path) -> dict[str, object]:
@@ -324,8 +363,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> None:
     command = _parser().parse_args(argv).command
-    local_environment = load_local_environment(Path.cwd(), os.environ)
     try:
+        local_environment = load_local_environment(Path.cwd(), os.environ)
         if command == "init":
             result = initialize_local_hmac(Path.cwd())
         elif command == "doctor":
