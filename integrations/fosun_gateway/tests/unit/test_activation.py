@@ -65,6 +65,17 @@ def test_scoped_activation_rejects_cross_scope_pair() -> None:
     assert authorization is None
 
 
+def test_scoped_activation_rejects_legacy_v2_v1_pair() -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    legacy = _probe_bytes(manifest_bytes)
+    result, authorization = activation_module.evaluate_scoped_activation(
+        manifest_bytes, legacy, _receipt_bytes(legacy), expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT,
+    )
+    assert result.next_action == "REVIEW_PROBE_ARTIFACT"
+    assert authorization is None
+
+
 @pytest.mark.parametrize("field,value", [
     ("run_id", "readonly-core-run-0002"),
     ("scope_contract_version", "nexus.fosun.read-only-scope.v1.extended"),
