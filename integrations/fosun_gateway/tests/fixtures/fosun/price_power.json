@@ -7,15 +7,17 @@
   "provider_response": {
     "code": 0,
     "requestId": "synthetic-request-price-power",
-    "data": {
-      "usAAPL": {
+    "data": [
+      {
+        "mkt": "us",
+        "rawSymbol": "AAPL",
         "qtDate": 20260822,
         "qtTime": 120000000,
         "price": 12345,
         "power": 2,
         "tradeStatus": 0
       }
-    }
+    ]
   },
   "received_at": "2026-08-22T04:00:00Z"
 }

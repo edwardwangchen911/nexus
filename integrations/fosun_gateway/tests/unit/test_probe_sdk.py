@@ -1989,14 +1989,16 @@ class InstrumentedTransport:
     def _quote(self, *, codes: list[str]) -> object:
         self._record("fosun_get_quotes", {"codes": tuple(codes)})
         return _raw(
-            {
-                "usAAPL": {
+            [
+                {
+                    "mkt": "us",
+                    "rawSymbol": "AAPL",
                     "price": 100,
                     "power": 2,
                     "qtDate": 20260821,
                     "qtTime": 120000000,
                 }
-            },
+            ],
             "synthetic-request-canary",
         )
 

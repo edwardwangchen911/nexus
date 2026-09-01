@@ -9,14 +9,23 @@ from nexus_fosun_gateway.domain import GatewayError
 RECEIVED_AT = datetime(2026, 8, 29, 4, tzinfo=UTC)
 
 
-def _raw(data: dict[str, object]) -> dict[str, object]:
+def _raw(data: object) -> dict[str, object]:
     return {"code": 0, "data": data, "requestId": "synthetic-market-request"}
 
 
 def test_quotes_preserve_request_order_and_materialize_missing_price() -> None:
     page = normalize_provider_response(
         "fosun_get_quotes",
-        _raw({"usMSFT": {"price": 42000, "power": 2}}),
+        _raw(
+            [
+                {
+                    "mkt": "us",
+                    "rawSymbol": "MSFT",
+                    "price": 42000,
+                    "power": 2,
+                }
+            ]
+        ),
         received_at=RECEIVED_AT,
         context={"codes": ("usAAPL", "usMSFT")},
     )
@@ -32,11 +41,33 @@ def test_quotes_reject_unrequested_provider_code() -> None:
         normalize_provider_response(
             "fosun_get_quotes",
             _raw(
-                {
-                    "usAAPL": {"price": 20000, "power": 2},
-                    "usMSFT": {"price": 42000, "power": 2},
-                }
+                [
+                    {
+                        "mkt": "us",
+                        "rawSymbol": "AAPL",
+                        "price": 20000,
+                        "power": 2,
+                    },
+                    {
+                        "mkt": "us",
+                        "rawSymbol": "MSFT",
+                        "price": 42000,
+                        "power": 2,
+                    },
+                ]
             ),
+            received_at=RECEIVED_AT,
+            context={"codes": ("usAAPL",)},
+        )
+
+    assert error.value.code == "PROVIDER_MALFORMED_RESPONSE"
+
+
+def test_quotes_reject_obsolete_keyed_map_shape() -> None:
+    with pytest.raises(GatewayError) as error:
+        normalize_provider_response(
+            "fosun_get_quotes",
+            _raw({"usAAPL": {"price": 20000, "power": 2}}),
             received_at=RECEIVED_AT,
             context={"codes": ("usAAPL",)},
         )

@@ -32,8 +32,16 @@ def normalize_provider_response(
     context: Mapping[str, object] | None = None,
 ) -> GatewayPage[GatewayItem]:
     """Normalize one frozen SDK response without returning raw provider data."""
-    data, request_id = _success_envelope(raw)
     payload = context or {}
+    if operation == "fosun_get_quotes":
+        quotes, request_id = _success_list_envelope(raw)
+        try:
+            items = _quotes(quotes, received_at, payload)
+            return _page(items, request_id, received_at, quality="PARTIAL")
+        except (KeyError, TypeError, ValueError, InvalidOperation):
+            raise _malformed() from None
+
+    data, request_id = _success_envelope(raw)
     try:
         if operation == "fosun_sync_accounts":
             items = _accounts(data)
@@ -45,9 +53,6 @@ def normalize_provider_response(
             rows = _mappings(_list(data))
             items = tuple(_cash_flow(item) for item in rows)
             return _list_page(items, data, request_id, received_at, payload)
-        if operation == "fosun_get_quotes":
-            items = _quotes(data, received_at, payload)
-            return _page(items, request_id, received_at, quality="PARTIAL")
         if operation == "fosun_get_bars":
             items = _bars(data, payload, received_at)
             return _page(items, request_id, received_at, quality="PARTIAL")
@@ -109,6 +114,20 @@ def normalize_holdings_response(
 
 
 def _success_envelope(raw: object) -> tuple[Mapping[str, object], str]:
+    data, request_id = _success_envelope_value(raw)
+    if not isinstance(data, Mapping):
+        raise _malformed()
+    return data, request_id
+
+
+def _success_list_envelope(raw: object) -> tuple[list[object], str]:
+    data, request_id = _success_envelope_value(raw)
+    if not isinstance(data, list):
+        raise _malformed()
+    return data, request_id
+
+
+def _success_envelope_value(raw: object) -> tuple[object, str]:
     if not isinstance(raw, Mapping) or "code" not in raw:
         raise _malformed()
     code = raw.get("code")
@@ -136,7 +155,7 @@ def _success_envelope(raw: object) -> tuple[Mapping[str, object], str]:
         )
     data = raw.get("data")
     request_id = raw.get("requestId")
-    if not isinstance(data, Mapping) or not isinstance(request_id, str) or not request_id:
+    if not isinstance(request_id, str) or not request_id:
         raise _malformed()
     return data, request_id
 
@@ -212,22 +231,24 @@ def _cash_flow(item: Mapping[str, object]) -> CashFlowItem:
 
 
 def _quotes(
-    data: Mapping[str, object],
+    rows: list[object],
     received_at: datetime,
     context: Mapping[str, object],
 ) -> tuple[GatewayItem, ...]:
     requested = _required_strings(context, "codes")
-    if set(data) - set(requested):
-        raise ValueError
+    by_code: dict[str, Mapping[str, object]] = {}
+    for row in _mappings(rows):
+        code = f"{_required_str(row, 'mkt')}{_required_str(row, 'rawSymbol')}"
+        if code not in requested or code in by_code:
+            raise ValueError
+        by_code[code] = row
     items: list[GatewayItem] = []
     for code in requested:
-        quote = data.get(code)
+        quote = by_code.get(code)
         if quote is None:
             price = None
-        elif isinstance(quote, Mapping):
-            price = _scaled_optional(quote.get("price"), quote.get("power"))
         else:
-            raise ValueError
+            price = _scaled_optional(quote.get("price"), quote.get("power"))
         items.append(QuoteItem(instrument_code=code, price=price, as_of=received_at))
     return tuple(items)
 

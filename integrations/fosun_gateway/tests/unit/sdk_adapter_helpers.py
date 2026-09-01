@@ -132,14 +132,16 @@ def client() -> SimpleNamespace:
         market=SimpleNamespace(
             quote=RecordingMethod(
                 _raw(
-                    {
-                        "usAAPL": {
+                    [
+                        {
+                            "mkt": "us",
+                            "rawSymbol": "AAPL",
                             "price": 12345,
                             "power": 2,
                             "qtDate": 20260822,
                             "qtTime": 120000000,
                         }
-                    },
+                    ],
                     "synthetic-request-quotes",
                 )
             ),
