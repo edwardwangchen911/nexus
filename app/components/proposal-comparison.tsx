@@ -96,7 +96,7 @@ export function ProposalComparison({ group, startShadowEnabled = true, rejectEna
     <section className="proposal-comparison" aria-labelledby="proposal-comparison-title">
       <header className="proposal-comparison__heading">
         <div>
-          <p className="eyebrow">SAME BASELINE / THREE VARIANTS</p>
+          <p className="eyebrow">同一基线 · 三种方案</p>
           <h2 id="proposal-comparison-title">三方案同口径比较</h2>
           <p>所有值来自冻结的后端比较，不在浏览器重算或排序。</p>
         </div>

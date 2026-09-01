@@ -59,12 +59,17 @@ for (const viewport of [
       await page.screenshot({ path: `test-results/optimize-${viewport.name}.png`, fullPage: true });
     }
     await page.getByRole("link", { name: "打开已有三方案" }).click();
+    await expect(page.getByRole("region", { name: "投资决策证据链，可横向滚动" }).getByRole("listitem").filter({ hasText: "组合诊断" })).toHaveAttribute("aria-current", "step");
     const proposalTable = page.getByRole("table", { name: "保持现状、最小调整与策略目标的确定性比较" });
     await expect(proposalTable.getByRole("columnheader", { name: /保持现状|最小调整|策略目标/ })).toHaveCount(3);
     await expect(page.getByRole("heading", { name: "前向影子绩效" })).toBeVisible();
     await expect(page.getByLabel("三方案线型图例")).toContainText("实线");
     await expect(page.getByRole("table", { name: "三方案逐会话精确 NAV" })).toBeVisible();
     await expect(page.getByRole("note")).toContainText("不会创建订单");
+    if (viewport.name === "mobile-390" || viewport.name === "desktop-1440") {
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({ path: `test-results/proposal-group-${viewport.name}.png`, fullPage: true });
+    }
     const sessionNavigator = page.getByRole("group", { name: "选择影子会话" });
     await sessionNavigator.focus();
     await sessionNavigator.press("Home");

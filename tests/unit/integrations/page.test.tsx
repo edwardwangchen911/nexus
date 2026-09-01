@@ -75,6 +75,7 @@ describe("integrations vertical slice", () => {
     );
 
     const card = screen.getByRole("region", { name: "fosun 集成（只读）" });
+    expect(screen.getByText("系统能力 · 集成状态")).toBeVisible();
     expect(card).toHaveAttribute("data-read-only", "true");
     expect(card).not.toHaveAttribute("disabled");
     expect(screen.getByText("FIXTURE")).toBeVisible();
@@ -227,6 +228,7 @@ describe("integrations vertical slice", () => {
 
   it("keeps the live approval route visibly locked with no submit surface", () => {
     render(<LiveApprovalsPage />);
+    expect(screen.getByText("实盘能力 · 逐笔批准")).toBeVisible();
     expect(screen.getByText("阶段 4 前锁定")).toBeVisible();
     expect(screen.queryByRole("form")).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();

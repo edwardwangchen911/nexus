@@ -10,6 +10,9 @@ describe("Shadow forward-performance evidence", () => {
     const { container } = render(<ShadowPerformance shadow={shadow} />);
 
     expect(screen.getByRole("heading", { name: "前向影子绩效" })).toBeVisible();
+    expect(screen.getByText("前向证据 · 63 个会话")).toBeVisible();
+    expect(screen.getByText("检查点 · 5 / 21 / 63")).toBeVisible();
+    expect(screen.getByText("首会话 · 模拟结果")).toBeVisible();
     expect(screen.getByText("NAV 100 基准")).toBeVisible();
     const legend = screen.getByRole("list", { name: "三方案线型图例" });
     expect(within(legend).getByText("保持现状 · 实线")).toBeVisible();

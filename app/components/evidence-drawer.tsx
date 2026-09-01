@@ -61,7 +61,7 @@ export function EvidenceDrawer({ evidence, excerpt, open, onClose, returnFocusRe
       >
         <header>
           <div>
-            <p className="eyebrow">EVIDENCE / IMMUTABLE</p>
+            <p className="eyebrow">不可变证据</p>
             <h2 id="evidence-drawer-title">证据原文与定位</h2>
           </div>
           <button ref={closeRef} className="button button--quiet" type="button" onClick={close} aria-label="关闭证据抽屉">

@@ -36,6 +36,14 @@ describe("research evidence docket", () => {
     expect(screen.getByRole("region", { name: "每日 Agent 简报" })).toHaveAttribute("data-state", state);
   });
 
+  it("places the daily brief on the research step and labels its evidence period in Chinese", () => {
+    render(<BriefPanel state="ready" brief={briefData()} onRefresh={vi.fn()} />);
+
+    expect(screen.getByText("每日研究简报")).toBeVisible();
+    expect(screen.getByText("交易会话")).toBeVisible();
+    expect(screen.getByText("研究证据").closest("li")).toHaveAttribute("aria-current", "step");
+  });
+
   it("renders stance, paired arguments, votes, invalidation and versions without a score or trade action", () => {
     render(<ResearchPanel state="ready" research={researchData()} admission={researchAdmissionData()} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
 
@@ -121,6 +129,7 @@ describe("research evidence docket", () => {
     const trigger = screen.getByRole("button", { name: "查看证据" });
     fireEvent.click(trigger);
     const dialog = screen.getByRole("dialog", { name: "证据原文与定位" });
+    expect(dialog).toHaveTextContent("不可变证据");
     expect(dialog).toHaveTextContent("SEC");
     expect(dialog).toHaveTextContent(evidence.object_id);
     expect(dialog).toHaveTextContent(evidence.location);

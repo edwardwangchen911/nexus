@@ -116,7 +116,7 @@ export function PriceChart({ series }: { series: PriceChartSeries }): React.Reac
     <section className="price-chart" aria-label={`${series.symbol} 价格图表`}>
       <header className="price-chart__heading">
         <div>
-          <p className="eyebrow">OHLC / {series.source.toUpperCase()} · {series.feed.toUpperCase()}</p>
+          <p className="eyebrow">行情序列 · {series.source.toUpperCase()} / {series.feed.toUpperCase()}</p>
           <h2>{series.symbol} 日线</h2>
           <p className="price-chart__summary">
             复权口径：{marketAdjustmentLabel(series.adjustment)}；共 {series.bars.length} 个交易日；图形为辅助视图，下方表格提供同口径精确值。

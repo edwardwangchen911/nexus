@@ -115,6 +115,8 @@ describe("optimization pages", () => {
     render(<ProposalGroupPanel groupState="ready" shadowState="not-started" group={proposalGroup()} shadow={null} shadowRequestId={null} onRefresh={vi.fn()} onStartShadow={vi.fn()} onReject={vi.fn()} />);
 
     expect(screen.getAllByRole("columnheader", { name: /保持现状|最小调整|策略目标/ })).toHaveLength(3);
+    expect(screen.getAllByText("同一基线 · 三种方案").length).toBeGreaterThan(0);
+    expect(screen.getByText("组合诊断").closest("li")).toHaveAttribute("aria-current", "step");
     expect(screen.getByRole("link", { name: "试算最小调整权重" })).toHaveAttribute("href", expect.stringContaining(proposalIds.minimum_change));
     expect(screen.queryByRole("button", { name: /下单|交易|买入|卖出/ })).not.toBeInTheDocument();
   });

@@ -23,6 +23,7 @@ for (const viewport of [
       await page.goto(routeCase.path);
 
       await expect(page.getByRole("heading", { name: routeCase.heading })).toBeVisible();
+      await expect(page.getByText("实盘能力 · 逐笔批准", { exact: true })).toBeVisible();
       await expect(page.getByText(routeCase.stage, { exact: true })).toBeVisible();
       await expect(page.locator("form, input, select, textarea")).toHaveCount(0);
       await expect(page.getByRole("button", { name: /下单|提交|批准|买入|卖出|订单|开启实盘/ })).toHaveCount(0);
@@ -39,6 +40,7 @@ for (const viewport of [
         (violation) => violation.impact === "serious" || violation.impact === "critical",
       );
       expect(serious).toEqual([]);
+      await page.screenshot({ path: `test-results/live-approvals-${viewport.name}.png`, fullPage: true });
     });
   }
 }

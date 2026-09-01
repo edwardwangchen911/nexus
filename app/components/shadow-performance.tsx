@@ -133,7 +133,7 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
     <section className="shadow-performance" aria-labelledby="shadow-performance-title">
       <header className="shadow-performance__heading">
         <div>
-          <p className="eyebrow">FORWARD EVIDENCE / 63 SESSIONS</p>
+          <p className="eyebrow">前向证据 · 63 个会话</p>
           <h2 id="shadow-performance-title">前向影子绩效</h2>
           <p>三方案从同一冻结起点前向观察；所有数值来自后端封存事实，浏览器不重算绩效。</p>
         </div>
@@ -220,7 +220,7 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
       </ScrollableTable>
 
       <section className="shadow-performance__section" aria-labelledby="shadow-checkpoints-title">
-        <header><div><p className="eyebrow">CHECKPOINTS / 5 · 21 · 63</p><h3 id="shadow-checkpoints-title">检查点绩效</h3></div><p>未知值保留原因，不替换为零。</p></header>
+        <header><div><p className="eyebrow">检查点 · 5 / 21 / 63</p><h3 id="shadow-checkpoints-title">检查点绩效</h3></div><p>未知值保留原因，不替换为零。</p></header>
         <ScrollableTable label="影子检查点绩效表格，可横向滚动">
           <table className="shadow-metrics-table numeric-data">
             <caption>每个检查点的后端封存绩效</caption>
@@ -271,7 +271,7 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
       </section>
 
       <section className="shadow-performance__section" aria-labelledby="shadow-outcomes-title">
-        <header><div><p className="eyebrow">SESSION 1 / SIMULATED OUTCOMES</p><h3 id="shadow-outcomes-title">首会话模拟结果</h3></div><p>这些是模拟成交事实，不是订单或交易回执。</p></header>
+        <header><div><p className="eyebrow">首会话 · 模拟结果</p><h3 id="shadow-outcomes-title">首会话模拟结果</h3></div><p>这些是模拟成交事实，不是订单或交易回执。</p></header>
         {outcomes.length === 0 ? <p className="inline-notice">首会话没有模拟调仓结果。</p> : (
           <ScrollableTable label="首会话模拟结果表格，可横向滚动">
             <table className="shadow-outcomes-table numeric-data">

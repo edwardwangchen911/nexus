@@ -115,7 +115,7 @@ export function IntegrationsPanel({ state, integrations, pendingAction, notice, 
     <section className="page-stack integrations-page" aria-label="数据与能力状态页面" data-state={state}>
       <header className="page-heading">
         <div>
-          <p className="eyebrow">SYSTEM / INTEGRATIONS</p>
+          <p className="eyebrow">系统能力 · 集成状态</p>
           <h1>数据与能力状态</h1>
           <p>复星优先，补充源按数据域启用。这里只能测试非交易连接、切换安全模式，不会显示凭据或开启写能力。</p>
         </div>

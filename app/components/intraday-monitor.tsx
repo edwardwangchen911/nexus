@@ -38,7 +38,7 @@ export function IntradayMonitor({ symbol, monitor }: IntradayMonitorProps): Reac
     >
       <header className="intraday-monitor__heading">
         <div>
-          <p className="eyebrow">INTRADAY / 1 MINUTE EVIDENCE</p>
+          <p className="eyebrow">盘中监控 · 1 分钟证据</p>
           <h2>{symbol} 盘中监控</h2>
           <p>仅展示来源明确的完整分钟事实和确定性指标，不生成买卖信号。</p>
         </div>

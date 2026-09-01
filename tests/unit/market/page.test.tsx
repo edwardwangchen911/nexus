@@ -404,6 +404,7 @@ describe("market vertical slice", () => {
     }} />);
 
     expect(screen.getByRole("region", { name: "AAPL 价格图表" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "AAPL 价格图表" })).toHaveTextContent("行情序列 · ALPACA / SIP");
     expect(screen.getByRole("table", { name: "AAPL OHLCV 数据" })).toHaveTextContent(
       "227.160000000000",
     );

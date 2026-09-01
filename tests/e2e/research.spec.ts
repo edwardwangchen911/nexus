@@ -26,6 +26,10 @@ for (const viewport of [
 
     await expect(page.getByRole("heading", { name: "每日 Agent 简报" })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole("heading", { name: `${sessionDate} 证据完整度` })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("region", { name: "投资决策证据链，可横向滚动" }).getByRole("listitem").filter({ hasText: "研究证据" })).toHaveAttribute("aria-current", "step");
+    if (viewport.name === "mobile-390" || viewport.name === "desktop-1440") {
+      await page.screenshot({ path: `test-results/brief-${viewport.name}.png`, fullPage: true });
+    }
     await page.getByRole("link", { name: instrumentId }).first().click();
 
     await expect(page).toHaveURL(new RegExp(`/research/${instrumentId}\\?as_of=`));

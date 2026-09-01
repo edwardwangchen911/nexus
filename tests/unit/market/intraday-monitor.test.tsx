@@ -48,6 +48,7 @@ describe("IntradayMonitor", () => {
     render(<IntradayMonitor symbol="AAPL" monitor={monitor} />);
 
     const region = screen.getByRole("region", { name: "AAPL 盘中证据" });
+    expect(region).toHaveTextContent("盘中监控 · 1 分钟证据");
     expect(region).toHaveTextContent("实时 IEX（仅 IEX）");
     expect(region).toHaveTextContent("已就绪");
     expect(region).toHaveTextContent("+1.00%");

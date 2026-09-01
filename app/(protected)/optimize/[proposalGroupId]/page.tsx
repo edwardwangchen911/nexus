@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../../components/data-state";
+import { DecisionPath } from "../../../components/decision-path";
 import { ProposalComparison } from "../../../components/proposal-comparison";
 import { ShadowPerformance } from "../../../components/shadow-performance";
 import type { components } from "../../../lib/generated/schema";
@@ -220,7 +221,7 @@ export function ProposalGroupPanel({
     <section className="page-stack proposal-page" aria-label="三方案比较页面" data-state={groupState}>
       <header className="page-heading">
         <div>
-          <p className="eyebrow">PROPOSAL / SAME BASELINE</p>
+          <p className="eyebrow">同一基线 · 三种方案</p>
           <h1>三方案比较</h1>
           <p>固定顺序展示保持现状、最小调整与策略目标；未知值不参与优劣排序。</p>
         </div>
@@ -234,6 +235,7 @@ export function ProposalGroupPanel({
           </button>
         </div>
       </header>
+      <DecisionPath current="diagnose" />
 
       {!hasGroup ? (
         <DataState

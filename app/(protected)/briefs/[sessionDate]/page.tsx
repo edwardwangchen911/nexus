@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../../components/data-state";
+import { DecisionPath } from "../../../components/decision-path";
 import type { components } from "../../../lib/generated/schema";
 
 type Brief = components["schemas"]["DailyBriefResponse"];
@@ -40,13 +41,14 @@ export function BriefPanel({ state, brief, onRefresh }: { state: DataStateKind; 
   return (
     <section className="page-stack brief-page" aria-label="每日 Agent 简报" data-state={state}>
       <header className="page-heading">
-        <div><p className="eyebrow">BRIEF / DAILY DOSSIER</p><h1>每日 Agent 简报</h1><p>按证据完整度分列候选、持仓风险、否决与预算降级项；点击标的进入同一时点的决策回放。</p></div>
+        <div><p className="eyebrow">每日研究简报</p><h1>每日 Agent 简报</h1><p>按证据完整度分列候选、持仓风险、否决与预算降级项；点击标的进入同一时点的决策回放。</p></div>
         <div className="page-actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />重新读取简报</button></div>
       </header>
+      <DecisionPath current="research" />
       {!hasData ? <DataState state={state} title={state === "empty" ? "该 session 暂无简报" : "每日简报暂时不可用"} detail="简报只读取已持久化的 Agent 结果，不在页面调用模型。" /> : <>
         {state !== "ready" ? <p className="research-page__gate" role="note">简报为 {dataStateLabels[state]}；保留最后内容，但不能作为策略目标输入。</p> : null}
         <section className="brief-summary" aria-labelledby="brief-completeness-title">
-          <div><p className="eyebrow">SESSION</p><h2 id="brief-completeness-title">{brief.session_date} 证据完整度</h2></div>
+          <div><p className="eyebrow">交易会话</p><h2 id="brief-completeness-title">{brief.session_date} 证据完整度</h2></div>
           <dl>
             <div><dt>总运行</dt><dd>{brief.evidence_completeness.total_runs}</dd></div>
             <div><dt>完整</dt><dd>{brief.evidence_completeness.complete}</dd></div>
