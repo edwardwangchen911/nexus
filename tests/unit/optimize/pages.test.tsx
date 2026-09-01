@@ -57,6 +57,7 @@ describe("optimization pages", () => {
       snapshot_as_of: snapshot.as_of!,
       trading_day: null,
       diagnostic_report: null,
+      diagnostic_unavailable_reason: "SNAPSHOT_NOT_READY",
       proposal_group: null,
       proposal_admission: null,
       proposal_admission_reason: null,
@@ -66,6 +67,7 @@ describe("optimization pages", () => {
 
     expect(screen.getByRole("heading", { name: "今日资产概览" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "尚无诊断，保持现状" })).toBeVisible();
+    expect(screen.getByText("唯一缺失条件：冻结快照尚未达到 READY；保持现状。")).toBeVisible();
     expect(screen.getAllByText("复星（只读）").length).toBeGreaterThan(0);
     expect(screen.getAllByText("PARTIAL").length).toBeGreaterThan(0);
     expect(screen.getByRole("region", { name: "HKD 原币种资产估值" })).toHaveTextContent("HKD 27,500.00");

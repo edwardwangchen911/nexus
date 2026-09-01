@@ -67,7 +67,7 @@ function PortfolioFactsOverview({ overview }: { overview: Overview }): React.Rea
   ])].sort();
   return <>
     <section className="overview-fact-band" aria-label="复星只读组合事实">
-      <div><p className="eyebrow">FOSUN / READ ONLY</p><h2>尚无诊断，保持现状</h2><p>仅展示已持久化的现金、持仓和原币种估值；未生成诊断、策略或交易建议。</p></div>
+      <div><p className="eyebrow">FOSUN / READ ONLY</p><h2>尚无诊断，保持现状</h2><p>{diagnosticUnavailableMessage(overview.diagnostic_unavailable_reason)}</p></div>
       <dl className="numeric-data">
         <div><dt>数据来源</dt><dd>复星（只读）</dd></div>
         <div><dt>质量状态</dt><dd>{snapshot.status}</dd></div>
@@ -86,6 +86,11 @@ function PortfolioFactsOverview({ overview }: { overview: Overview }): React.Rea
       <a className="button button--quiet" href="/market">查看持仓行情</a>
     </nav>
   </>;
+}
+
+function diagnosticUnavailableMessage(reason: Overview["diagnostic_unavailable_reason"]): string {
+  if (reason === "SNAPSHOT_NOT_READY") return "唯一缺失条件：冻结快照尚未达到 READY；保持现状。";
+  return "唯一缺失条件：尚无已持久化诊断；保持现状。";
 }
 
 function stateTitle(state: DataStateKind): string {

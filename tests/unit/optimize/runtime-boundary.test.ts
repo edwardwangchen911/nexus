@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { sanitizeEngineResponse } from "../../../app/lib/engine/client";
 import { groupId, overviewData, proposalGroup } from "./fixtures";
+import { portfolio, snapshot } from "../portfolio/fixtures";
 
 const meta = { request_id: "0198d500-1000-7000-8000-000000001399", schema_version: "1", as_of: "2026-08-24T00:00:00Z" };
 const shadowGroupId = "0198d500-1000-7000-8000-000000001391";
@@ -155,6 +156,28 @@ describe("optimization Engine response boundary", () => {
 
     const mismatch = overviewData({ portfolio_snapshot_id: "0198d500-1000-7000-8000-000000001397" });
     expect((await sanitizeEngineResponse(json({ data: mismatch, meta }), undefined, "/internal/v1/overview")).status).toBe(500);
+  });
+
+  it("accepts one closed facts-only reason and rejects snapshot-state confusion", async () => {
+    const facts = {
+      overview_mode: "PORTFOLIO_FACTS_ONLY",
+      portfolio_id: portfolio.portfolio_id,
+      portfolio_name: portfolio.name,
+      provider: "fosun",
+      portfolio_snapshot_id: snapshot.portfolio_snapshot_id,
+      portfolio_snapshot: { ...snapshot, status: "PARTIAL" },
+      snapshot_as_of: snapshot.as_of,
+      trading_day: null,
+      diagnostic_report: null,
+      diagnostic_unavailable_reason: "SNAPSHOT_NOT_READY",
+      proposal_group: null,
+      proposal_admission: null,
+      proposal_admission_reason: null,
+    };
+
+    expect((await sanitizeEngineResponse(json({ data: facts, meta }), undefined, "/internal/v1/overview")).status).toBe(200);
+    expect((await sanitizeEngineResponse(json({ data: { ...facts, diagnostic_unavailable_reason: "DIAGNOSTIC_NOT_AVAILABLE" }, meta }), undefined, "/internal/v1/overview")).status).toBe(500);
+    expect((await sanitizeEngineResponse(json({ data: { ...facts, portfolio_snapshot: { ...snapshot, status: "READY" } }, meta }), undefined, "/internal/v1/overview")).status).toBe(500);
   });
 });
 

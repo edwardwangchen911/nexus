@@ -2190,6 +2190,8 @@ export interface components {
         /** OverviewResponse */
         OverviewResponse: {
             diagnostic_report: components["schemas"]["PortfolioDiagnosticResponse"] | null;
+            /** Diagnostic Unavailable Reason */
+            diagnostic_unavailable_reason: ("SNAPSHOT_NOT_READY" | "DIAGNOSTIC_NOT_AVAILABLE") | null;
             /**
              * Overview Mode
              * @enum {string}
