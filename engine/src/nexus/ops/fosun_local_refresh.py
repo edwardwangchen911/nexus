@@ -7,14 +7,16 @@ import hashlib
 import json
 import re
 import sys
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, Self
+from typing import Literal, Protocol, Self
 from uuid import UUID, uuid5
 
 import exchange_calendars as xcals  # type: ignore[import-untyped]
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -69,10 +71,35 @@ from nexus.reconciliation.facts import (
     canonical_position_hash,
 )
 
-_LOCAL_CONTRACT_HASH = hashlib.sha256(b"nexus.mac-local-fosun-read-only.v1").hexdigest()
+_LOCAL_CONTRACT_HASH = hashlib.sha256(b"nexus.mac-local-fosun-read-only.v2").hexdigest()
 _INSTRUMENT_NAMESPACE = UUID("639bd8e1-d250-4f58-a88c-370b6bbc621b")
 _UNIVERSE_ID = UUID("40cd56b4-c849-5ea7-b463-19699231f521")
-_LOCAL_RUNTIME_HOURS = 12
+_LOCAL_CAPABILITY_DAYS = 365
+_MAX_US_HOLDING_SYMBOLS = 12
+_MAX_PROVIDER_REQUESTS = 16
+_US_PROVIDER_CODE = re.compile(r"^us[A-Z][A-Z0-9.-]{0,14}$")
+
+
+class _MarketReader(Protocol):
+    async def read_quotes_raw(self, codes: tuple[str, ...]) -> RawGatewayResponse: ...
+
+    async def read_bars_raw(
+        self,
+        *,
+        code: str,
+        ktype: Literal["day", "minute"],
+        start_time: datetime,
+        end_time: datetime,
+        limit: int,
+    ) -> RawGatewayResponse: ...
+
+
+@dataclass(frozen=True)
+class _MarketSnapshotReads:
+    codes: tuple[str, ...]
+    quote_raw: RawGatewayResponse
+    bars_raw: tuple[tuple[str, RawGatewayResponse], ...]
+    request_counts: dict[str, int]
 
 
 class LocalFosunRefreshSettings(BaseSettings):
@@ -112,16 +139,6 @@ class LocalFosunRefreshSettings(BaseSettings):
         default="unknown",
         validation_alias="FOSUN_MARKET_DELIVERY_MODE",
     )
-    market_symbol: str = Field(default="usAAPL", validation_alias="FOSUN_LOCAL_SYMBOL")
-
-    @field_validator("market_symbol")
-    @classmethod
-    def _market_symbol_is_us_code(cls, value: str) -> str:
-        symbol = value.removeprefix("us")
-        if not value.startswith("us") or not symbol or not symbol.replace(".", "").isalnum():
-            raise ValueError("local market symbol is invalid")
-        return value
-
     @model_validator(mode="after")
     def _identities_are_distinct_and_local(self) -> Self:
         if (
@@ -151,7 +168,7 @@ async def refresh_local_fosun(
     *,
     now: datetime | None = None,
 ) -> dict[str, object]:
-    """Read exactly five business operations, then persist one display-only snapshot."""
+    """Read the bounded holdings-driven surface, then persist one display snapshot."""
     checked_at = (now or datetime.now(UTC)).astimezone(UTC)
     request_start_at, request_end_at, calendar_rows = _daily_window(checked_at)
     expected_sessions = tuple(
@@ -193,34 +210,13 @@ async def refresh_local_fosun(
             item.external_account_id != external_account_id for item in holdings
         ):
             raise ValueError("LOCAL_ACCOUNT_SCOPE_MISMATCH")
-        quote_raw = await market.read_quotes_raw((settings.market_symbol,))
-        try:
-            quote_page = parse_quote_page(quote_raw, expected_codes=(settings.market_symbol,))
-        except Exception:
-            raise RuntimeError("LOCAL_QUOTE_CONTRACT_INVALID") from None
-        if len(quote_page.items) != 1 or quote_page.items[0].price is None:
-            raise ValueError("LOCAL_QUOTE_UNAVAILABLE")
-        bars_raw = await market.read_bars_raw(
-            code=settings.market_symbol,
-            ktype="day",
-            start_time=request_start_at,
-            end_time=request_end_at,
-            limit=bar_limit,
+        market_reads = await _read_market_snapshot(
+            market,
+            codes=_us_holding_codes(holdings),
+            request_start_at=request_start_at,
+            request_end_at=request_end_at,
+            expected_sessions=expected_sessions,
         )
-        try:
-            bar_page = parse_bar_page(
-                bars_raw,
-                expected_code=settings.market_symbol,
-                expected_ktype="day",
-                start=request_start_at,
-                end=request_end_at,
-                limit=bar_limit,
-            )
-        except Exception:
-            raise RuntimeError("LOCAL_KLINE_CONTRACT_INVALID") from None
-        actual_sessions = tuple(item.timestamp.date() for item in bar_page.items)
-        if not bar_page.items or actual_sessions != expected_sessions:
-            raise ValueError("LOCAL_KLINE_WINDOW_INCOMPLETE")
     finally:
         await broker.aclose()
         await market.aclose()
@@ -240,8 +236,7 @@ async def refresh_local_fosun(
                     cash=cash,
                     holdings_page=holdings_page,
                     holdings=holdings,
-                    quote_raw=quote_raw,
-                    bars_raw=bars_raw,
+                    market_reads=market_reads,
                     request_start_at=request_start_at,
                     request_end_at=request_end_at,
                     calendar_rows=calendar_rows,
@@ -256,6 +251,91 @@ async def refresh_local_fosun(
         await engine.dispose()
 
 
+def _us_holding_codes(holdings: Sequence[PositionItem]) -> tuple[str, ...]:
+    codes = tuple(
+        sorted(
+            {
+                item.instrument_code
+                for item in holdings
+                if _US_PROVIDER_CODE.fullmatch(item.instrument_code) is not None
+            }
+        )
+    )
+    if not codes:
+        raise ValueError("LOCAL_US_HOLDING_SCOPE_EMPTY")
+    if len(codes) > _MAX_US_HOLDING_SYMBOLS:
+        raise ValueError("LOCAL_US_HOLDING_BUDGET_EXCEEDED")
+    return codes
+
+
+async def _read_market_snapshot(
+    market: _MarketReader,
+    *,
+    codes: tuple[str, ...],
+    request_start_at: datetime,
+    request_end_at: datetime,
+    expected_sessions: tuple[date, ...],
+) -> _MarketSnapshotReads:
+    if codes != tuple(sorted(set(codes))) or not 1 <= len(codes) <= _MAX_US_HOLDING_SYMBOLS:
+        raise ValueError("LOCAL_US_HOLDING_SCOPE_INVALID")
+    if any(_US_PROVIDER_CODE.fullmatch(code) is None for code in codes):
+        raise ValueError("LOCAL_US_HOLDING_SCOPE_INVALID")
+    bar_limit = len(expected_sessions)
+    if not 1 <= bar_limit <= 500:
+        raise ValueError("LOCAL_KLINE_BUDGET_INVALID")
+    if 4 + len(codes) > _MAX_PROVIDER_REQUESTS:
+        raise ValueError("LOCAL_PROVIDER_REQUEST_BUDGET_EXCEEDED")
+
+    quote_raw = await market.read_quotes_raw(codes)
+    try:
+        parse_quote_page(quote_raw, expected_codes=codes)
+    except Exception:
+        raise RuntimeError("LOCAL_QUOTE_CONTRACT_INVALID") from None
+
+    bars_raw: list[tuple[str, RawGatewayResponse]] = []
+    for code in codes:
+        raw = await market.read_bars_raw(
+            code=code,
+            ktype="day",
+            start_time=request_start_at,
+            end_time=request_end_at,
+            limit=bar_limit,
+        )
+        try:
+            page = parse_bar_page(
+                raw,
+                expected_code=code,
+                expected_ktype="day",
+                start=request_start_at,
+                end=request_end_at,
+                limit=bar_limit,
+            )
+        except Exception:
+            raise RuntimeError("LOCAL_KLINE_CONTRACT_INVALID") from None
+        actual_sessions = tuple(item.timestamp.date() for item in page.items)
+        if (
+            not actual_sessions
+            or actual_sessions[-1] != expected_sessions[-1]
+            or any(session not in expected_sessions for session in actual_sessions)
+        ):
+            raise ValueError("LOCAL_KLINE_WINDOW_INCOMPLETE")
+        bars_raw.append((code, raw))
+
+    return _MarketSnapshotReads(
+        codes=codes,
+        quote_raw=quote_raw,
+        bars_raw=tuple(bars_raw),
+        request_counts={
+            "accounts": 1,
+            "cash": 1,
+            "holdings": 1,
+            "quotes": 1,
+            "bars": len(bars_raw),
+            "total": 4 + len(bars_raw),
+        },
+    )
+
+
 async def _persist_refresh(
     session: AsyncSession,
     store: S3ProviderEvidenceStore,
@@ -266,13 +346,14 @@ async def _persist_refresh(
     cash: tuple[CashItem, ...],
     holdings_page: GatewayResponsePage,
     holdings: tuple[PositionItem, ...],
-    quote_raw: RawGatewayResponse,
-    bars_raw: RawGatewayResponse,
+    market_reads: _MarketSnapshotReads,
     request_start_at: datetime,
     request_end_at: datetime,
     calendar_rows: tuple[tuple[date, datetime, datetime], ...],
     authorized_at: datetime,
 ) -> dict[str, object]:
+    quote_raw = market_reads.quote_raw
+    bars_raw_by_code = dict(market_reads.bars_raw)
     account_page_as_of = accounts_page.as_of
     cash_page_as_of = cash_page.as_of
     holdings_page_as_of = holdings_page.as_of
@@ -286,16 +367,14 @@ async def _persist_refresh(
             currency=item.currency,
             valid_from=request_start_at.date(),
         )
-    market_instrument_id = await _ensure_instrument(
-        session,
-        settings.market_symbol,
-        currency="USD",
-        valid_from=request_start_at.date(),
-    )
     await _ensure_market_universe(
         session,
-        instrument_id=market_instrument_id,
-        published_at=min(account_page_as_of, quote_raw.received_at),
+        instrument_ids=tuple(instrument_ids[code] for code in market_reads.codes),
+        published_at=min(
+            account_page_as_of,
+            quote_raw.received_at,
+            *(raw.received_at for raw in bars_raw_by_code.values()),
+        ),
         effective_from=request_start_at.date(),
     )
     account = await session.scalar(
@@ -398,11 +477,11 @@ async def _persist_refresh(
         authorized_at=authorized_at,
         delivery_mode=settings.market_delivery_mode,
     )
-    quote_item = parse_quote_page(
+    quote_page = parse_quote_page(
         quote_raw,
-        expected_codes=(settings.market_symbol,),
-    ).items[0]
-    quote_evidence = encode_fosun_snapshot_evidence((((settings.market_symbol,), quote_raw),))
+        expected_codes=market_reads.codes,
+    )
+    quote_evidence = encode_fosun_snapshot_evidence(((market_reads.codes, quote_raw),))
     quote_digest = hashlib.sha256(quote_evidence).hexdigest()
     quote_key = _raw_key(quote_raw, quote_digest)
     quote_uri = await store.archive_raw(quote_key, quote_evidence)
@@ -419,26 +498,17 @@ async def _persist_refresh(
     )
     session.add(quote_artifact)
     await session.flush()
-    canonical_quote = canonical_quote_observation(
-        instrument_id=market_instrument_id,
-        source="fosun",
-        feed="l1",
-        delivery_mode=settings.market_delivery_mode,
-        event_kind="snapshot",
-        bid=None,
-        ask=None,
-        last=quote_item.price,
-        observed_at=quote_raw.received_at,
-        available_at=quote_raw.received_at,
-        received_at=quote_raw.received_at,
-        revision=quote_digest,
-    )
-    session.add(
-        LatestQuote(
-            instrument_id=market_instrument_id,
+    for quote_item in quote_page.items:
+        if quote_item.price is None:
+            continue
+        quality_flags = ["INTRADAY_BID_ASK_UNAVAILABLE"]
+        quality_flags.append("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE")
+        canonical_quote = canonical_quote_observation(
+            instrument_id=instrument_ids[quote_item.instrument_code],
             source="fosun",
             feed="l1",
             delivery_mode=settings.market_delivery_mode,
+            event_kind="snapshot",
             bid=None,
             ask=None,
             last=quote_item.price,
@@ -446,69 +516,90 @@ async def _persist_refresh(
             available_at=quote_raw.received_at,
             received_at=quote_raw.received_at,
             revision=quote_digest,
-            quality_flags=[
-                "FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE",
-                "INTRADAY_BID_ASK_UNAVAILABLE",
-            ],
-            event_kind="snapshot",
-            content_hash=hashlib.sha256(canonical_quote).hexdigest(),
-            evidence_status="verified",
-            data_artifact_id=quote_artifact.id,
-            **quote_binding.model_dump(),
         )
-    )
+        session.add(
+            LatestQuote(
+                instrument_id=instrument_ids[quote_item.instrument_code],
+                source="fosun",
+                feed="l1",
+                delivery_mode=settings.market_delivery_mode,
+                bid=None,
+                ask=None,
+                last=quote_item.price,
+                observed_at=quote_raw.received_at,
+                available_at=quote_raw.received_at,
+                received_at=quote_raw.received_at,
+                revision=quote_digest,
+                quality_flags=quality_flags,
+                event_kind="snapshot",
+                content_hash=hashlib.sha256(canonical_quote).hexdigest(),
+                evidence_status="verified",
+                data_artifact_id=quote_artifact.id,
+                **quote_binding.model_dump(),
+            )
+        )
+    bars_received_at = tuple(raw.received_at for raw in bars_raw_by_code.values())
     calendar_authority = await _insert_calendar(
         session,
         rows=calendar_rows,
         range_start=request_start_at.date(),
         range_end=authorized_at.date(),
-        published_at=min(quote_raw.received_at, bars_raw.received_at),
-    )
-    archived_bars = await archive_fosun_price_page_raw(
-        session,
-        store,
-        bars_raw,
-        commit=False,
-    )
-    bar_request = BarsRequest(
-        instrument_id=InstrumentId(market_instrument_id),
-        start=request_start_at,
-        end=request_end_at,
-        interval="1Day",
-        adjustment="raw",
+        published_at=min(quote_raw.received_at, *bars_received_at),
     )
     bar_provider = FosunMarketDataProvider(
         _ClosedMarketGateway(),
         symbol_resolver=_UnusedSymbolResolver(),
         delivery_mode=settings.market_delivery_mode,
     )
-    normalized_bars = await bar_provider.normalize_bars(
-        bar_request,
-        bars_raw,
-        symbol=settings.market_symbol.removeprefix("us"),
-    )
-    ingestion = await ingest_price_page(
-        session,
-        store,
-        normalized_bars,
-        provider_binding=bars_binding,
-        raw_artifact=archived_bars.raw_artifact,
-        calendar_authority_id=calendar_authority.id,
-        gateway_request_start_at=request_start_at,
-        gateway_request_end_at=request_end_at,
-        commit=False,
-    )
-    if ingestion.manifest.delivery_mode != "unknown":
-        raise ValueError("LOCAL_KLINE_DISPLAY_MODE_INVALID")
+    bar_count = 0
+    for code, bars_raw in market_reads.bars_raw:
+        archived_bars = await archive_fosun_price_page_raw(
+            session,
+            store,
+            bars_raw,
+            commit=False,
+        )
+        bar_request = BarsRequest(
+            instrument_id=InstrumentId(instrument_ids[code]),
+            start=request_start_at,
+            end=request_end_at,
+            interval="1Day",
+            adjustment="raw",
+        )
+        normalized_bars = await bar_provider.normalize_bars(
+            bar_request,
+            bars_raw,
+            symbol=code.removeprefix("us"),
+        )
+        ingestion = await ingest_price_page(
+            session,
+            store,
+            normalized_bars,
+            provider_binding=bars_binding,
+            raw_artifact=archived_bars.raw_artifact,
+            calendar_authority_id=calendar_authority.id,
+            gateway_request_start_at=request_start_at,
+            gateway_request_end_at=request_end_at,
+            commit=False,
+        )
+        if ingestion.manifest.delivery_mode != "unknown":
+            raise ValueError("LOCAL_KLINE_DISPLAY_MODE_INVALID")
+        bar_count += len(normalized_bars.items)
+    quote_success = sum(item.price is not None for item in quote_page.items)
     return {
         "status": "ok",
         "source": "fosun",
         "cash_currencies": len(cash),
         "positions": len(positions),
-        "quotes": 1,
-        "bars": len(normalized_bars.items),
+        "market_symbols": len(market_reads.codes),
+        "quotes": len(quote_page.items),
+        "quote_success": quote_success,
+        "quote_missing": len(quote_page.items) - quote_success,
+        "bar_series": len(market_reads.bars_raw),
+        "bars": bar_count,
+        "provider_requests": market_reads.request_counts,
         "portfolio_as_of": snapshot_as_of.isoformat(),
-        "market_as_of": max(quote_raw.received_at, bars_raw.received_at).isoformat(),
+        "market_as_of": max(quote_raw.received_at, *bars_received_at).isoformat(),
     }
 
 
@@ -556,22 +647,27 @@ async def _ensure_instrument(
 async def _ensure_market_universe(
     session: AsyncSession,
     *,
-    instrument_id: UUID,
+    instrument_ids: tuple[UUID, ...],
     published_at: datetime,
     effective_from: date,
 ) -> None:
+    if not instrument_ids or len(instrument_ids) != len(set(instrument_ids)):
+        raise ValueError("LOCAL_MARKET_UNIVERSE_INVALID")
+    digest = hashlib.sha256(
+        "\n".join(str(instrument_id) for instrument_id in instrument_ids).encode()
+    ).hexdigest()
+    version = f"holdings-{digest[:16]}"
     universe = await session.scalar(
         select(UniverseSnapshot).where(
-            UniverseSnapshot.key == "us_liquid",
-            UniverseSnapshot.version == "us_liquid_v1",
+            UniverseSnapshot.key == "fosun_local_holdings",
+            UniverseSnapshot.version == version,
         )
     )
     if universe is None:
-        digest = hashlib.sha256(str(instrument_id).encode()).hexdigest()
         universe = UniverseSnapshot(
-            id=_UNIVERSE_ID,
-            key="us_liquid",
-            version="us_liquid_v1",
+            id=uuid5(_UNIVERSE_ID, digest),
+            key="fosun_local_holdings",
+            version=version,
             effective_from=effective_from,
             source="fosun_local_read_only",
             content_hash=digest,
@@ -579,25 +675,27 @@ async def _ensure_market_universe(
         )
         session.add(universe)
         await session.flush()
-        session.add(
+        session.add_all(
             UniverseMember(
                 universe_snapshot_id=universe.id,
                 instrument_id=instrument_id,
-                inclusion_reason="local read-only market display",
+                inclusion_reason="local read-only holding market display",
             )
+            for instrument_id in instrument_ids
         )
         await session.flush()
         universe.published_at = published_at
         await session.flush()
         return
-    member = await session.scalar(
-        select(UniverseMember.id).where(
-            UniverseMember.universe_snapshot_id == universe.id,
-            UniverseMember.instrument_id == instrument_id,
+    existing_ids = tuple(
+        await session.scalars(
+            select(UniverseMember.instrument_id)
+            .where(UniverseMember.universe_snapshot_id == universe.id)
+            .order_by(UniverseMember.instrument_id)
         )
     )
-    if member is None:
-        raise ValueError("LOCAL_MARKET_UNIVERSE_IMMUTABLE")
+    if existing_ids != tuple(sorted(instrument_ids)) or universe.published_at is None:
+        raise ValueError("LOCAL_MARKET_UNIVERSE_INVALID")
 
 
 async def _ensure_market_bindings(
@@ -607,46 +705,68 @@ async def _ensure_market_bindings(
     delivery_mode: str,
 ) -> tuple[ProviderMarketBinding, ProviderMarketBinding]:
     created_at = authorized_at - timedelta(seconds=1)
-    expires_at = authorized_at + timedelta(hours=_LOCAL_RUNTIME_HOURS)
-    status = IntegrationStatus(
-        provider="fosun",
-        status="read_only",
-        last_success_at=authorized_at,
-        version=1,
-        mode_changed_at=created_at,
-        capability_invalidated_at=None,
-        admitted_contract_hash=_LOCAL_CONTRACT_HASH,
-        created_at=created_at,
+    expires_at = authorized_at + timedelta(days=_LOCAL_CAPABILITY_DAYS)
+    status = await session.scalar(
+        select(IntegrationStatus)
+        .where(IntegrationStatus.provider == "fosun")
+        .with_for_update()
     )
-    session.add(status)
-    quote_capability = ProviderCapability(
-        provider="fosun",
-        capability="READ_ONLY",
-        contract_hash=_LOCAL_CONTRACT_HASH,
-        expires_at=expires_at,
-        schema_version="1",
-        payload={
-            "operation": "fosun_get_quotes",
-            "market_scope": "US",
-            "delivery_mode": delivery_mode,
-        },
-        created_at=created_at,
-    )
-    bars_capability = ProviderCapability(
-        provider="fosun",
-        capability="READ_ONLY",
-        contract_hash=_LOCAL_CONTRACT_HASH,
-        expires_at=expires_at,
-        schema_version="1",
-        payload={
-            "operation": "fosun_get_bars",
-            "market_scope": "US",
-            "delivery_mode": delivery_mode,
-        },
-        created_at=created_at,
-    )
-    session.add_all((quote_capability, bars_capability))
+    if status is None:
+        status = IntegrationStatus(
+            provider="fosun",
+            status="read_only",
+            last_success_at=authorized_at,
+            version=1,
+            mode_changed_at=created_at,
+            capability_invalidated_at=None,
+            admitted_contract_hash=_LOCAL_CONTRACT_HASH,
+            created_at=created_at,
+        )
+        session.add(status)
+    else:
+        status.status = "read_only"
+        status.last_success_at = authorized_at
+        status.version += 1
+        status.mode_changed_at = created_at
+        status.capability_invalidated_at = None
+        status.admitted_contract_hash = _LOCAL_CONTRACT_HASH
+
+    capabilities: list[ProviderCapability] = []
+    for operation in ("fosun_get_quotes", "fosun_get_bars"):
+        capability = await session.scalar(
+            select(ProviderCapability).where(
+                ProviderCapability.provider == "fosun",
+                ProviderCapability.capability == "READ_ONLY",
+                ProviderCapability.contract_hash == _LOCAL_CONTRACT_HASH,
+                ProviderCapability.payload["operation"].as_string() == operation,
+                ProviderCapability.payload["market_scope"].as_string() == "US",
+            )
+        )
+        if capability is None:
+            capability = ProviderCapability(
+                provider="fosun",
+                capability="READ_ONLY",
+                contract_hash=_LOCAL_CONTRACT_HASH,
+                expires_at=expires_at,
+                schema_version="1",
+                payload={
+                    "operation": operation,
+                    "market_scope": "US",
+                    "delivery_mode": delivery_mode,
+                },
+                created_at=created_at,
+            )
+            session.add(capability)
+        elif (
+            capability.schema_version != "1"
+            or capability.payload.get("delivery_mode") != delivery_mode
+            or capability.created_at > authorized_at
+            or capability.expires_at <= authorized_at
+        ):
+            raise ValueError("LOCAL_MARKET_CAPABILITY_INVALID")
+        capabilities.append(capability)
     await session.flush()
+    quote_capability, bars_capability = capabilities
     return (
         ProviderMarketBinding(
             provider_capability_id=quote_capability.id,
@@ -673,10 +793,39 @@ async def _insert_calendar(
     range_end: date,
     published_at: datetime,
 ) -> ExchangeCalendarAuthorityRecord:
-    digest = hashlib.sha256("\n".join(item[0].isoformat() for item in rows).encode()).hexdigest()
+    digest = hashlib.sha256(
+        "\n".join(
+            "|".join(
+                (
+                    session_date.isoformat(),
+                    market_open.isoformat(),
+                    market_close.isoformat(),
+                )
+            )
+            for session_date, market_open, market_close in rows
+        ).encode()
+    ).hexdigest()
+    version = f"fosun-local-{digest[:16]}"
+    existing = await session.scalar(
+        select(ExchangeCalendarAuthorityRecord).where(
+            ExchangeCalendarAuthorityRecord.exchange == "XNYS",
+            ExchangeCalendarAuthorityRecord.version == version,
+            ExchangeCalendarAuthorityRecord.range_start == range_start,
+            ExchangeCalendarAuthorityRecord.range_end == range_end,
+        )
+    )
+    if existing is not None:
+        if (
+            existing.source != "exchange_calendars"
+            or existing.content_hash != digest
+            or existing.completeness_status != "complete"
+            or existing.published_at > published_at
+        ):
+            raise ValueError("LOCAL_CALENDAR_AUTHORITY_INVALID")
+        return existing
     authority = ExchangeCalendarAuthorityRecord(
         exchange="XNYS",
-        version=f"fosun-local-{digest[:16]}",
+        version=version,
         source="exchange_calendars",
         range_start=range_start,
         range_end=range_end,

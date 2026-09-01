@@ -66,6 +66,7 @@ _STALE_AFTER = timedelta(seconds=45)
 _SELECTED_SERIES_BAR_LIMIT = 500
 _UNIVERSE_KEY = "us_liquid"
 _UNIVERSE_VERSION = "us_liquid_v1"
+_LOCAL_FOSUN_UNIVERSE_KEY = "fosun_local_holdings"
 
 
 class PriceSeriesLoader(Protocol):
@@ -194,6 +195,9 @@ class MarketService:
         after_instrument_id: UUID | None,
         watchlist: bool | None,
     ) -> list[Row[tuple[Instrument, str]]]:
+        universe_id = await self._active_market_universe_id(decision_time)
+        if universe_id is None:
+            return []
         aliases = (
             select(
                 InstrumentAlias.instrument_id.label("instrument_id"),
@@ -231,8 +235,7 @@ class MarketService:
             )
             .where(
                 aliases.c.alias_rank == 1,
-                UniverseSnapshot.key == _UNIVERSE_KEY,
-                UniverseSnapshot.version == _UNIVERSE_VERSION,
+                UniverseSnapshot.id == universe_id,
                 UniverseSnapshot.effective_from <= decision_time.date(),
                 UniverseSnapshot.published_at.is_not(None),
                 UniverseSnapshot.published_at <= decision_time,
@@ -604,6 +607,9 @@ class MarketService:
     async def _active_instrument(
         self, instrument_id: UUID, decision_time: datetime
     ) -> Instrument | None:
+        universe_id = await self._active_market_universe_id(decision_time)
+        if universe_id is None:
+            return None
         return cast(
             Instrument | None,
             await self._session.scalar(
@@ -625,13 +631,46 @@ class MarketService:
                         InstrumentAlias.valid_to.is_(None),
                         InstrumentAlias.valid_to >= decision_time.date(),
                     ),
-                    UniverseSnapshot.key == _UNIVERSE_KEY,
-                    UniverseSnapshot.version == _UNIVERSE_VERSION,
+                    UniverseSnapshot.id == universe_id,
                     UniverseSnapshot.effective_from <= decision_time.date(),
                     UniverseSnapshot.published_at.is_not(None),
                     UniverseSnapshot.published_at <= decision_time,
                     Instrument.exchange.in_(US_EQUITY_EXCHANGES),
                     Instrument.currency == "USD",
+                )
+                .limit(1)
+            ),
+        )
+
+    async def _active_market_universe_id(self, decision_time: datetime) -> UUID | None:
+        local = await self._session.scalar(
+            select(UniverseSnapshot.id)
+            .where(
+                UniverseSnapshot.key == _LOCAL_FOSUN_UNIVERSE_KEY,
+                UniverseSnapshot.source == "fosun_local_read_only",
+                UniverseSnapshot.effective_from <= decision_time.date(),
+                UniverseSnapshot.published_at.is_not(None),
+                UniverseSnapshot.published_at <= decision_time,
+            )
+            .order_by(
+                UniverseSnapshot.published_at.desc(),
+                UniverseSnapshot.created_at.desc(),
+                UniverseSnapshot.id.desc(),
+            )
+            .limit(1)
+        )
+        if local is not None:
+            return local
+        return cast(
+            UUID | None,
+            await self._session.scalar(
+                select(UniverseSnapshot.id)
+                .where(
+                    UniverseSnapshot.key == _UNIVERSE_KEY,
+                    UniverseSnapshot.version == _UNIVERSE_VERSION,
+                    UniverseSnapshot.effective_from <= decision_time.date(),
+                    UniverseSnapshot.published_at.is_not(None),
+                    UniverseSnapshot.published_at <= decision_time,
                 )
                 .limit(1)
             ),

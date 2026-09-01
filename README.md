@@ -6,8 +6,8 @@ NEXUS 是私人投资研究、回测与模拟交易工作台。它不提供投�
 
 - `phase0_offline_ready`：美股研究、确定性回测、三方案比较、Forward Shadow、硬风控和内部模拟交易已通过离线发布门禁。
 - Mac 本地的复星 `local_read_only` 链路已启用：现有 Gateway 经一次性本地刷新器将 1 个账户、
-  3 个现金币种、12 条持仓、单标的 Quote 和 276 根日 K 持久化到 PostgreSQL/对象存储，
-  并通过 API/BFF 在本地组合页和市场页展示来源与更新时间。
+  3 个现金币种、12 条持仓、全部 12 个美股持仓的 Quote 和日 K 持久化到 PostgreSQL/对象存储，
+  并通过 API/BFF 在本地组合页和可切换标的的市场页展示复星来源、更新时间与质量状态。
 - 该状态只是个人 Mac 本地只读使用，不代表生产部署、持续生产 Gateway、复星模拟盘交易或实盘激活。
 - 美股真实数据传输与耐久采集链路已实现但默认关闭：Alpaca、SEC、FRED/ALFRED
   使用固定源、冻结 universe、原始证据归档和幂等入库；未配置或启用真实 Provider
@@ -36,6 +36,21 @@ NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
 ```
 
 ## 本地运行与运维
+
+### Mac 本地复星只读刷新
+
+在既有安全 launcher 已为 Gateway 与客户端加载同一组本地安全配置、且 Gateway 处于
+`local_read_only` 后，宿主机可执行一次手动刷新：
+
+```bash
+uv run --package nexus-engine nexus-engine-fosun-local-refresh
+```
+
+刷新器从真实持仓确定性提取、去重并排序 `us...` 代码；最多接受 12 个美股标的，使用一次批量
+Quote 和每个标的一次日 K 请求。Accounts、Cash、Holdings 合计各一次，单次总 Provider 请求最多
+16 次，全部串行、无自动重试。超过范围、合同不匹配或任一读取失败时 fail-closed，数据库事务不会
+覆盖上一份可用快照。浏览器只读取已持久化数据，不能触发 Gateway 或 Provider 请求；该入口不包含
+自动调度、订单、账户写入或任何交易激活。`00656.HK` 仍仅作只读持仓展示，不请求 Quote 或 K 线。
 
 - [本地开发与 Compose](docs/runbooks/local-development.md)：不强制 Docker Desktop，Docker Desktop、OrbStack 或 Colima 均可。
 - [备份/恢复演练](docs/runbooks/backup-restore.md)

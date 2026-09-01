@@ -658,6 +658,69 @@ describe("market vertical slice", () => {
     expect(screen.queryByRole("region", { name: "AAPL 盘中证据" })).not.toBeInTheDocument();
   });
 
+  it("switches between persisted Fosun quotes and each instrument's daily bars", async () => {
+    const fosunAapl: MarketItem = {
+      ...item,
+      source: "fosun",
+      feed: "l1",
+      delivery_mode: "unknown",
+      quality: "PARTIAL",
+      quality_reasons: ["INTRADAY_BID_ASK_UNAVAILABLE"],
+    };
+    const fosunMsft: MarketItem = {
+      ...msftItem,
+      source: "fosun",
+      feed: "l1",
+      delivery_mode: "unknown",
+      quality: "PARTIAL",
+      quality_reasons: ["INTRADAY_BID_ASK_UNAVAILABLE"],
+    };
+    const fosunAaplSeries: SelectedMarketSeries = {
+      ...selectedSeries,
+      source: "fosun",
+      feed: "l1",
+      delivery_mode: "unknown",
+      quality: "PARTIAL",
+      quality_reasons: ["HISTORY_DELIVERY_UNVERIFIED"],
+    };
+    const fosunMsftSeries: SelectedMarketSeries = {
+      ...msftSeries,
+      source: "fosun",
+      feed: "l1",
+      delivery_mode: "unknown",
+      quality: "PARTIAL",
+      quality_reasons: ["HISTORY_DELIVERY_UNVERIFIED"],
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "https://nexus.test");
+      const selected = url.searchParams.get("selected_instrument_id");
+      return jsonResponse(marketEnvelope({
+        items: [fosunAapl, fosunMsft],
+        selectedSeries: selected === fosunMsft.instrument_id
+          ? fosunMsftSeries
+          : fosunAaplSeries,
+        intradayMonitor: null,
+      }));
+    }));
+
+    render(<MarketPage />);
+    expect(await screen.findByRole("region", { name: "AAPL 价格图表" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent(
+      "复星 L1（只读）",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /MSFT/ }));
+
+    expect(await screen.findByRole("region", { name: "MSFT 价格图表" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "MSFT 报价证据" })).toHaveTextContent(
+      "418.790000000000",
+    );
+    expect(screen.getByRole("region", { name: "MSFT OHLCV 证据" })).toHaveTextContent(
+      "复星 L1（只读）",
+    );
+    expect(screen.queryByRole("region", { name: "AAPL 价格图表" })).not.toBeInTheDocument();
+  });
+
   it("polls stale market data at 15 seconds without issuing business writes", async () => {
     vi.useFakeTimers();
     window.history.replaceState(null, "", `/market?selected=${item.instrument_id}`);

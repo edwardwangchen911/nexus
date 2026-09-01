@@ -371,6 +371,7 @@ export function MarketPanel({
                     <h2>{selectedItem.symbol}</h2>
                   </div>
                   <dl>
+                    <EvidenceFact term="最新价" value={selectedItem.price ?? "无可验证报价"} />
                     <EvidenceFact term="报价来源" value={marketSourceLabel(selectedItem.source, selectedItem.feed)} />
                     <EvidenceFact term="Feed" value={selectedItem.feed?.toUpperCase() ?? "未选定"} />
                     <EvidenceFact term={quoteEvidenceTimeTerm(selectedItem)} value={formatUtc(selectedItem.as_of)} />

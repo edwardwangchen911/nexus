@@ -153,6 +153,41 @@ async def _seed_instrument(
         await factory.kw["bind"].dispose()
 
 
+async def _seed_local_fosun_universe(
+    database_url: str,
+    *,
+    instrument_ids: tuple[UUID, ...],
+) -> None:
+    factory = session_factory(_settings(database_url))
+    try:
+        async with factory() as session:
+            snapshot_id = uuid4()
+            snapshot = UniverseSnapshot(
+                id=snapshot_id,
+                key="fosun_local_holdings",
+                version="holdings-test",
+                effective_from=_DECISION_TIME.date(),
+                source="fosun_local_read_only",
+                content_hash="f" * 64,
+                published_at=None,
+            )
+            session.add(snapshot)
+            await session.flush()
+            session.add_all(
+                UniverseMember(
+                    universe_snapshot_id=snapshot_id,
+                    instrument_id=instrument_id,
+                    inclusion_reason="local read-only holding market display",
+                )
+                for instrument_id in instrument_ids
+            )
+            await session.flush()
+            snapshot.published_at = _DECISION_TIME - timedelta(seconds=1)
+            await session.commit()
+    finally:
+        await factory.kw["bind"].dispose()
+
+
 async def _seed_quote(
     database_url: str,
     *,
@@ -291,13 +326,15 @@ async def _seed_fosun_quote_v2(
     delivery_mode: str = "unknown",
     contract_hash: str = "a" * 64,
     received_at: datetime = _DECISION_TIME - timedelta(seconds=10),
+    admission: tuple[UUID, UUID, int, datetime] | None = None,
 ) -> tuple[UUID, UUID, int, datetime]:
-    admission = await _seed_fosun_admission(
-        database_url,
-        operation="fosun_get_quotes",
-        contract_hash=contract_hash,
-        delivery_mode=delivery_mode,
-    )
+    if admission is None:
+        admission = await _seed_fosun_admission(
+            database_url,
+            operation="fosun_get_quotes",
+            contract_hash=contract_hash,
+            delivery_mode=delivery_mode,
+        )
     capability_id, status_id, status_version, _ = admission
     raw_payload = (
         f"fosun-market-api-v2:{instrument_id}:{delivery_mode}:{received_at.isoformat()}:{last}"
@@ -899,6 +936,49 @@ async def test_market_and_watchlist_are_bound_to_published_us_liquid_v1_members(
     assert nonmember.status_code == hk.status_code == selected_nonmember.status_code == 404
     assert nonmember.json()["error"]["code"] == "NOT_FOUND"
     assert hk.json()["error"]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_market_prefers_latest_local_fosun_holdings_universe(
+    migrated_database_url: str,
+) -> None:
+    await _seed_instrument(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+        symbol="AAPL",
+        add_to_universe=False,
+    )
+    await _seed_instrument(
+        migrated_database_url,
+        instrument_id=_MSFT_ID,
+        symbol="MSFT",
+        add_to_universe=False,
+    )
+    await _seed_local_fosun_universe(
+        migrated_database_url,
+        instrument_ids=(_AAPL_ID, _MSFT_ID),
+    )
+    admission = await _seed_fosun_quote_v2(
+        migrated_database_url,
+        instrument_id=_AAPL_ID,
+    )
+    await _seed_fosun_quote_v2(
+        migrated_database_url,
+        instrument_id=_MSFT_ID,
+        admission=admission,
+    )
+    app = _app(migrated_database_url)
+    path = "/internal/v1/market"
+
+    async with _client(app, publish_universe=False) as client:
+        market = await client.get(path, headers=_headers("GET", path))
+
+    assert market.status_code == 200
+    assert [item["symbol"] for item in market.json()["data"]["items"]] == [
+        "AAPL",
+        "MSFT",
+    ]
+    assert {item["source"] for item in market.json()["data"]["items"]} == {"fosun"}
 
 
 @pytest.mark.asyncio
