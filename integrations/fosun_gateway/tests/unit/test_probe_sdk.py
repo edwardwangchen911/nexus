@@ -135,7 +135,7 @@ def test_frozen_sdk_methods_require_exact_probe_call_bindings_before_dispatch() 
         "fosun_get_bars",
     )
     assert inspect.signature(validated["fosun_get_bars"]).bind(
-        code="usAAPL", ktype="day", start_time=1, end_time=1, num=1
+        code="usAAPL", ktype="day", time=20260102, num=1
     )
 
 
@@ -688,8 +688,7 @@ async def test_executor_runs_exact_sequence_and_returns_only_value_free_evidence
     assert transport.calls[-1][1] == {
         "code": "usAAPL",
         "ktype": "day",
-        "start_time": "2026-08-21T00:00:00Z",
-        "end_time": "2026-08-21T00:00:00Z",
+        "time": 20260822,
         "limit": 1,
     }
     assert evidence.request_counts == tuple((label, 1) for label in (
@@ -2007,17 +2006,23 @@ class InstrumentedTransport:
         *,
         code: str,
         ktype: str,
-        start_time: int,
-        end_time: int,
-        num: int,
+        delay: object = None,
+        end_time: object = None,
+        num: int | None = None,
+        right: object = None,
+        start_time: object = None,
+        suspension: object = None,
+        time: int | None = None,
     ) -> object:
+        del delay, end_time, right, start_time, suspension
+        if num is None or time is None:
+            raise AssertionError("daily kline requires an exclusive date anchor and limit")
         self._record(
             "fosun_get_bars",
             {
                 "code": code,
                 "ktype": ktype,
-                "start_time": _timestamp_string(start_time),
-                "end_time": _timestamp_string(end_time),
+                "time": time,
                 "limit": num,
             },
         )
@@ -2105,10 +2110,6 @@ class _HarnessRequests:
 
 def _raw(data: object, request_id: str) -> dict[str, object]:
     return {"code": 0, "requestId": request_id, "data": data}
-
-
-def _timestamp_string(value: int) -> str:
-    return datetime.fromtimestamp(value / 1000, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _plan() -> ProbeRequestPlan:

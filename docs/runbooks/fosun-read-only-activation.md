@@ -375,12 +375,12 @@ cancellation/replacement, trade/simulation, subscription, or Webhook semantics r
 artifact. On unexpected permission, contract, history, adjustment, pagination, rate-limit, TLS,
 authentication, or response behavior, stop immediately and do not expand the request budget.
 
-The admitted Engine/Gateway contract treats a daily `kline` `end_time` as inclusive. The
-`kline_minimal` evidence must prove that a request ending on a known target trading date actually
-contains that completed date. An exclusive or ambiguous SDK boundary fails admission; do not
-silently add a following calendar day. Supporting an exclusive SDK later requires a versioned
-adapter contract, explicit requested/returned-window lineage, and new boundary tests before another
-probe can be admitted.
+The Gateway contract treats a daily `kline` `end_time` as inclusive. The admitted SDK's daily
+`time` parameter is an exclusive `YYYYMMDD` anchor, so the adapter maps the requested inclusive end
+date to the next UTC calendar date and still rejects every returned bar outside the original
+requested window. The `kline_minimal` evidence must prove that a request ending on a known target
+trading date actually contains that completed date; an empty, ambiguous, or wrong-date response
+fails admission.
 
 ## Sanitized artifact
 

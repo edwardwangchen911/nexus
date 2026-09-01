@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Event, Lock, Thread, Timer
 from typing import Protocol, cast
 
@@ -307,11 +307,7 @@ class SdkFosunTransport:
                     operation,
                     self._method("market", "kline"),
                     deadline=deadline,
-                    code=_required_str(payload, "code"),
-                    ktype=_required_str(payload, "ktype"),
-                    start_time=_optional_timestamp_ms(payload.get("start_time")),
-                    end_time=_optional_timestamp_ms(payload.get("end_time")),
-                    num=_required_int(payload, "limit"),
+                    **_bar_sdk_arguments(payload),
                 )
             else:
                 raise AssertionError("unreachable operation")
@@ -750,7 +746,7 @@ def _required_str(payload: Mapping[str, object], name: str) -> str:
     return value
 
 
-def _optional_timestamp_ms(value: object) -> int | None:
+def _optional_datetime(value: object) -> datetime | None:
     if value is None:
         return None
     if not isinstance(value, str) or not value:
@@ -761,7 +757,29 @@ def _optional_timestamp_ms(value: object) -> int | None:
         raise _invalid_payload() from None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise _invalid_payload()
-    return int(parsed.timestamp() * 1000)
+    return parsed
+
+
+def _bar_sdk_arguments(payload: Mapping[str, object]) -> dict[str, object]:
+    code = _required_str(payload, "code")
+    ktype = _required_str(payload, "ktype")
+    limit = _required_int(payload, "limit")
+    start = _optional_datetime(payload.get("start_time"))
+    end = _optional_datetime(payload.get("end_time"))
+    if (start is None) != (end is None) or (
+        start is not None and end is not None and start > end
+    ):
+        raise _invalid_payload()
+    arguments: dict[str, object] = {"code": code, "ktype": ktype, "num": limit}
+    if ktype == "day" and end is not None:
+        exclusive_date = end.astimezone(UTC).date() + timedelta(days=1)
+        arguments["time"] = int(exclusive_date.strftime("%Y%m%d"))
+    else:
+        arguments["start_time"] = (
+            None if start is None else int(start.timestamp() * 1000)
+        )
+        arguments["end_time"] = None if end is None else int(end.timestamp() * 1000)
+    return arguments
 
 
 def _required_int(payload: Mapping[str, object], name: str) -> int:

@@ -118,8 +118,7 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
             {
                 "code": "usAAPL",
                 "ktype": "day",
-                "start_time": 1785542400000,
-                "end_time": 1787356800000,
+                "time": 20260823,
                 "num": 100,
             },
         )
