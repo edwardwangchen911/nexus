@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import nexus_fosun_gateway.activation as activation_module
+import nexus_fosun_gateway.probe_contract as probe_contract
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -32,6 +33,36 @@ TEST_PUBLICATION_PUBLIC_KEY_B64U = base64.urlsafe_b64encode(
     )
 ).rstrip(b"=").decode()
 TRUSTED_PUBLICATION_KEY_BYTES = TEST_PUBLICATION_PUBLIC_KEY_B64U.encode("ascii")
+
+
+def test_scoped_activation_admits_only_exact_v3_v2_scope_pair() -> None:
+    evaluator = getattr(activation_module, "evaluate_scoped_activation")
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    result, authorization = evaluator(
+        manifest_bytes,
+        _scoped_probe_bytes(manifest_bytes, scope="core"),
+        _scoped_receipt_bytes(_scoped_probe_bytes(manifest_bytes, scope="core"), scope="core"),
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
+    assert result.status == "activated_read_only"
+    assert authorization is not None
+    assert authorization.scope == "core"
+    with pytest.raises((TypeError, AttributeError)):
+        authorization.scope = "extended"  # type: ignore[misc]
+
+
+def test_scoped_activation_rejects_cross_scope_pair() -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    probe_bytes = _scoped_probe_bytes(manifest_bytes, scope="core")
+    result, authorization = activation_module.evaluate_scoped_activation(
+        manifest_bytes, probe_bytes, _scoped_receipt_bytes(probe_bytes, scope="core"),
+        expected_scope="extended", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
+    assert result.next_action == "REVIEW_PROBE_ARTIFACT"
+    assert authorization is None
 
 
 def evaluate_activation(
@@ -1000,3 +1031,37 @@ def _public_key_b64u() -> str:
 
 def _b64u(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+
+
+def _scoped_probe_bytes(manifest_bytes: bytes, *, scope: str) -> bytes:
+    descriptor = probe_contract.scope_descriptor(scope)  # type: ignore[arg-type]
+    manifest = json.loads(manifest_bytes)
+    document = {
+        "schema_version": "nexus.fosun.sanitized-probe.v3",
+        "run_id": "readonly-core-run-0001",
+        "scope": scope,
+        "scope_contract_version": descriptor.scope_contract_version,
+        "provider": "fosun",
+        "captured_at": _utc_text(CHECKED_AT),
+        "capability_expires_at": _utc_text(CHECKED_AT + timedelta(hours=1)),
+        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "sdk_tag": manifest["sdk"]["tag"],
+        "sdk_commit": manifest["sdk"]["commit"],
+        "publication_public_key_b64u": _public_key_b64u(),
+        "physical_operation_set": list(descriptor.physical_operation_set),
+        "prerequisite_operation_set": list(descriptor.prerequisite_operation_set),
+        "authorized_operation_set": list(descriptor.authorized_operation_set),
+        "operations": [_operation(name) for name in descriptor.physical_operation_set],
+        "checks": {"permission_read_only": True, "history_window": True, "adjustment_semantics": True, "pagination": True, "rate_limit": True, "response_contract": True},
+    }
+    return _json_bytes(document)
+
+
+def _scoped_receipt_bytes(probe_bytes: bytes, *, scope: str) -> bytes:
+    descriptor = probe_contract.scope_descriptor(scope)  # type: ignore[arg-type]
+    digest = hashlib.sha256(probe_bytes).hexdigest()
+    run_id = "readonly-core-run-0001"
+    signature = TEST_PUBLICATION_KEY.sign(
+        b"NEXUS-FOSUN-PROBE-PUBLICATION-V2\0" + bytes.fromhex(digest) + b"\0" + run_id.encode() + b"\0" + scope.encode() + b"\0" + descriptor.scope_contract_version.encode()
+    )
+    return _json_bytes({"schema_version": "nexus.fosun.probe-publication.v2", "artifact_sha256": digest, "run_id": run_id, "scope": scope, "scope_contract_version": descriptor.scope_contract_version, "signature_b64u": _b64u(signature)})

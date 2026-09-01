@@ -11,6 +11,7 @@ import os
 import re
 import stat
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
@@ -35,6 +36,9 @@ from nexus_fosun_gateway.probe_contract import (
     BROKER_PROBE_OPERATIONS,
     MAX_BROKER_REQUESTS,
     REQUIRED_PROBE_OPERATIONS,
+    ProbeScope,
+    RuntimeOperation,
+    scope_descriptor,
     probe_response_contract_sha256,
 )
 
@@ -52,6 +56,7 @@ _Hex40 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
 _Hex64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 _Base64Url32 = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{43}$")]
 _Base64Url64 = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{86}$")]
+_RunId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9-]{15,63}$")]
 _OperationName = Annotated[
     str,
     StringConstraints(pattern=r"^[A-Za-z][A-Za-z0-9_]{0,63}$"),
@@ -98,6 +103,15 @@ class FosunActivationResult(BaseModel):
         return self
 
 
+@dataclass(frozen=True)
+class RuntimeAuthorization:
+    scope: ProbeScope
+    scope_contract_version: str
+    run_id: str
+    capability_expires_at: datetime
+    authorized_operation_set: frozenset[RuntimeOperation]
+
+
 class ProbeOperationEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -141,6 +155,36 @@ class ProbeChecks(BaseModel):
         )
 
 
+class ScopedProbeArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["nexus.fosun.sanitized-probe.v3"]
+    run_id: _RunId
+    scope: ProbeScope
+    scope_contract_version: str
+    provider: Literal["fosun"]
+    captured_at: datetime
+    capability_expires_at: datetime
+    manifest_sha256: _Hex64
+    sdk_tag: Annotated[str, StringConstraints(pattern=r"^v[0-9]+\.[0-9]+\.[0-9]+$")]
+    sdk_commit: _Hex40
+    publication_public_key_b64u: _Base64Url32
+    physical_operation_set: tuple[str, ...]
+    prerequisite_operation_set: tuple[str, ...]
+    authorized_operation_set: tuple[str, ...]
+    operations: tuple[ProbeOperationEvidence, ...]
+    checks: ProbeChecks
+
+
+class ScopedProbePublicationReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["nexus.fosun.probe-publication.v2"]
+    artifact_sha256: _Hex64
+    run_id: _RunId
+    scope: ProbeScope
+    scope_contract_version: str
+    signature_b64u: _Base64Url64
+
+
 class SanitizedProbeArtifact(BaseModel):
     """Metadata-only proof; it has no fields for account or response data."""
 
@@ -181,6 +225,57 @@ class ProbePublicationReceipt(BaseModel):
     def _validate_signature_encoding(self) -> ProbePublicationReceipt:
         _decode_base64url(self.signature_b64u, expected_bytes=64)
         return self
+
+
+def evaluate_scoped_activation(
+    manifest_bytes: bytes,
+    probe_bytes: bytes | None,
+    publication_receipt_bytes: bytes | None,
+    *,
+    expected_scope: ProbeScope,
+    trusted_publication_public_key_bytes: bytes | None,
+    checked_at: datetime | None = None,
+) -> tuple[FosunActivationResult, RuntimeAuthorization | None]:
+    """Strict v3/v2 scope admission; legacy entry points remain fixture-only."""
+    now = checked_at or datetime.now(UTC)
+    _require_aware(now, "checked_at")
+    manifest_sha256 = _sha256(manifest_bytes)
+    document = _load_mapping(manifest_bytes)
+    sdk_tag, sdk_commit = _sdk_subject(document)
+    base_hash = _contract_hash(manifest_sha256=manifest_sha256, sdk_tag=sdk_tag, sdk_commit=sdk_commit, probe_sha256=_sha256(probe_bytes) if probe_bytes else None, publication_receipt_sha256=_sha256(publication_receipt_bytes) if publication_receipt_bytes else None, trusted_publication_public_key_sha256=_sha256(trusted_publication_public_key_bytes) if trusted_publication_public_key_bytes else None)
+    if not document or not sdk_admission_document_is_valid(document):
+        return _blocked(base_hash, now, "COMPLETE_SDK_ADMISSION"), None
+    trusted = (_load_trusted_publication_key(trusted_publication_public_key_bytes) if trusted_publication_public_key_bytes else None)
+    if trusted is None or probe_bytes is None or publication_receipt_bytes is None:
+        return _blocked(base_hash, now, "REVIEW_PROBE_ARTIFACT"), None
+    trusted_b64u, trusted_key = trusted
+    try:
+        artifact = ScopedProbeArtifact.model_validate_json(probe_bytes)
+        receipt = ScopedProbePublicationReceipt.model_validate_json(publication_receipt_bytes)
+        descriptor = scope_descriptor(expected_scope)
+        valid = (
+            _canonical_json(artifact.model_dump(mode="json")) == probe_bytes
+            and _canonical_json(receipt.model_dump(mode="json")) == publication_receipt_bytes
+            and artifact.scope == expected_scope
+            and artifact.scope_contract_version == descriptor.scope_contract_version
+            and artifact.physical_operation_set == descriptor.physical_operation_set
+            and artifact.prerequisite_operation_set == descriptor.prerequisite_operation_set
+            and artifact.authorized_operation_set == descriptor.authorized_operation_set
+            and tuple(item.name for item in artifact.operations) == descriptor.physical_operation_set
+            and artifact.manifest_sha256 == manifest_sha256 and artifact.sdk_tag == sdk_tag and artifact.sdk_commit == sdk_commit
+            and hmac.compare_digest(artifact.publication_public_key_b64u, trusted_b64u)
+            and artifact.captured_at <= now < artifact.capability_expires_at
+            and receipt.artifact_sha256 == _sha256(probe_bytes) and receipt.run_id == artifact.run_id
+            and receipt.scope == artifact.scope and receipt.scope_contract_version == artifact.scope_contract_version
+        )
+        material = b"NEXUS-FOSUN-PROBE-PUBLICATION-V2\0" + bytes.fromhex(receipt.artifact_sha256) + b"\0" + receipt.run_id.encode() + b"\0" + receipt.scope.encode() + b"\0" + receipt.scope_contract_version.encode()
+        trusted_key.verify(_decode_base64url(receipt.signature_b64u, expected_bytes=64), material)
+    except (InvalidSignature, ValidationError, ValueError):
+        valid = False
+    if not valid:
+        return _blocked(base_hash, now, "REVIEW_PROBE_ARTIFACT"), None
+    result = FosunActivationResult(status="activated_read_only", contract_hash=base_hash, checked_at=now, capability_expires_at=artifact.capability_expires_at, next_action=None)
+    return result, RuntimeAuthorization(expected_scope, descriptor.scope_contract_version, artifact.run_id, artifact.capability_expires_at, frozenset(descriptor.authorized_operation_set))
 
 
 def evaluate_activation(

@@ -5,7 +5,38 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Literal
+
+ProbeScope = Literal["core", "extended"]
+RuntimeOperation = Literal[
+    "fosun_sync_accounts", "fosun_sync_portfolio:cash", "fosun_sync_portfolio:holdings",
+    "fosun_list_orders", "fosun_list_cash_flows", "fosun_get_quotes", "fosun_get_bars",
+]
+ProbeLabel = Literal[
+    "Session", "Accounts", "CashSummary", "Holdings", "OrderList", "CashFlows",
+    "quote", "kline_minimal",
+]
+
+
+@dataclass(frozen=True)
+class ScopeDescriptor:
+    scope: ProbeScope
+    scope_contract_version: str
+    physical_operation_set: tuple[ProbeLabel, ...]
+    prerequisite_operation_set: tuple[ProbeLabel, ...]
+    authorized_operation_set: tuple[RuntimeOperation, ...]
+
+
+SCOPE_DESCRIPTORS: Mapping[ProbeScope, ScopeDescriptor] = MappingProxyType({
+    "core": ScopeDescriptor("core", "nexus.fosun.read-only-scope.v1.core", ("Session", "Accounts", "CashSummary", "Holdings", "quote", "kline_minimal"), ("Session", "Accounts"), ("fosun_sync_accounts", "fosun_sync_portfolio:cash", "fosun_sync_portfolio:holdings", "fosun_get_quotes", "fosun_get_bars")),
+    "extended": ScopeDescriptor("extended", "nexus.fosun.read-only-scope.v1.extended", ("Session", "Accounts", "OrderList", "CashFlows"), ("Session", "Accounts"), ("fosun_list_orders", "fosun_list_cash_flows")),
+})
+
+
+def scope_descriptor(scope: ProbeScope) -> ScopeDescriptor:
+    return SCOPE_DESCRIPTORS[scope]
 
 REQUIRED_PROBE_OPERATIONS = (
     "Session",
