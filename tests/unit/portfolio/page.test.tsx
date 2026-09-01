@@ -57,6 +57,106 @@ describe("portfolio vertical slice", () => {
     expect(screen.queryByText(/折算总资产/)).not.toBeInTheDocument();
   });
 
+  it("shows deterministic original-currency valuation and allocation with source time", () => {
+    render(<PortfolioSummary portfolio={portfolio} snapshot={snapshot} currency="HKD" />);
+
+    const valuation = screen.getByRole("region", { name: "HKD 原币种资产估值" });
+    expect(valuation).toHaveTextContent("复星（只读）");
+    expect(valuation).toHaveTextContent("HKD 27,500.00");
+    expect(valuation).toHaveTextContent("HKD 19,500.00");
+    expect(valuation).toHaveTextContent("HKD 8,000.00");
+    expect(valuation).toHaveTextContent("现金 29.09%");
+    expect(valuation).toHaveTextContent("00656.HK 70.91%");
+    expect(valuation).toHaveTextContent("2026-08-23 08:00:00 UTC");
+    expect(valuation).not.toHaveTextContent("折算总资产");
+  });
+
+  it("fails closed instead of presenting a partial total when a holding price is missing", () => {
+    const missingPrice: PortfolioSnapshot = {
+      ...snapshot,
+      positions: snapshot.positions.map((position) => ({ ...position, current_price: null })),
+    };
+    render(<PortfolioSummary portfolio={portfolio} snapshot={missingPrice} currency="HKD" />);
+
+    const valuation = screen.getByRole("region", { name: "HKD 原币种资产估值" });
+    expect(valuation).toHaveTextContent("总资产无法计算");
+    expect(valuation).toHaveTextContent("缺失现价：00656.HK");
+    expect(valuation).not.toHaveTextContent("HKD 27,500.00");
+    expect(valuation).not.toHaveTextContent(/\d+\.\d+%/);
+  });
+
+  it("keeps valuation exact beyond the JavaScript safe integer range", () => {
+    const exactLargeCash: PortfolioSnapshot = {
+      ...snapshot,
+      cash: [{
+        currency: "HKD",
+        cash_balance: "9007199254740993.00",
+        available_cash: "9007199254740993.00",
+        provider_as_of: "2026-08-23T08:00:00Z",
+      }],
+      positions: [],
+      open_orders: [],
+    };
+    render(<PortfolioSummary portfolio={portfolio} snapshot={exactLargeCash} currency="HKD" />);
+
+    expect(screen.getByRole("region", { name: "HKD 原币种资产估值" }))
+      .toHaveTextContent("HKD 9,007,199,254,740,993.00");
+  });
+
+  it("withholds allocation percentages when original-currency total assets are zero", () => {
+    const zeroAssets: PortfolioSnapshot = {
+      ...snapshot,
+      cash: [{
+        currency: "HKD",
+        cash_balance: "0.00",
+        available_cash: "100.00",
+        provider_as_of: "2026-08-23T08:00:00Z",
+      }],
+      positions: [],
+      open_orders: [],
+    };
+    render(<PortfolioSummary portfolio={portfolio} snapshot={zeroAssets} currency="HKD" />);
+
+    const valuation = screen.getByRole("region", { name: "HKD 原币种资产估值" });
+    expect(valuation).toHaveTextContent("HKD 0.00");
+    expect(valuation).toHaveTextContent("配置结构无法计算：原币种总资产为零");
+    expect(valuation).not.toHaveTextContent("%");
+  });
+
+  it("links supported US holdings to their persisted market evidence without linking HK", () => {
+    const msftId = "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e709";
+    const withUsHolding: PortfolioSnapshot = {
+      ...snapshot,
+      cash: [
+        ...snapshot.cash,
+        { currency: "USD", cash_balance: "1000.00", available_cash: "900.00", provider_as_of: "2026-08-23T08:00:00Z" },
+      ],
+      positions: [
+        ...snapshot.positions,
+        {
+          ...snapshot.positions[0],
+          instrument_id: msftId,
+          symbol: "MSFT",
+          exchange: "XNYS",
+          currency: "USD",
+          quantity: "2",
+          available_quantity: "2",
+          frozen_quantity: "0",
+          current_price: "500",
+        },
+      ],
+    };
+
+    const { rerender } = render(<PortfolioSummary portfolio={portfolio} snapshot={withUsHolding} currency="USD" />);
+    expect(screen.getByRole("link", { name: "查看 MSFT 行情和 K 线" })).toHaveAttribute(
+      "href",
+      `/market?selected=${msftId}`,
+    );
+
+    rerender(<PortfolioSummary portfolio={portfolio} snapshot={withUsHolding} currency="HKD" />);
+    expect(screen.queryByRole("link", { name: /查看 00656\.HK 行情和 K 线/ })).not.toBeInTheDocument();
+  });
+
   it("shows 00656.HK and broker orders as read-only without leaking poisoned IDs", () => {
     const poisoned = {
       ...snapshot,
@@ -80,6 +180,7 @@ describe("portfolio vertical slice", () => {
       onSync={vi.fn()} onResolveSync={vi.fn()} />);
 
     expect(screen.getByText("显示最后已知快照，不触发业务动作。", { exact: true })).toBeVisible();
+    expect(screen.getByRole("region", { name: "HKD 原币种资产估值" })).toHaveTextContent("STALE");
     expect(screen.queryByRole("link", { name: /优化|方案|下单|交易/ })).not.toBeInTheDocument();
   });
 
@@ -368,8 +469,9 @@ describe("portfolio vertical slice", () => {
     expect(screen.getByText("ACTIVE")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "刷新同步状态" }));
 
-    expect(await screen.findByText("READY")).toBeVisible();
-    expect(screen.getByText("PASS")).toBeVisible();
+    const details = await screen.findByRole("region", { name: "同步详情" });
+    expect(details).toHaveTextContent("READY");
+    expect(details).toHaveTextContent("PASS");
   });
 
   it("does not attach an old snapshot to a newly selected portfolio after refresh failure", async () => {
