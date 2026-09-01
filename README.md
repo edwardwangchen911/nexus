@@ -44,9 +44,14 @@ NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" \
 统一使用 `nexus-fosun-local` 管理本地只读链路。先做无网络、无数据库的配置检查，再只读查看已持久化状态：
 
 ```bash
+uv run --package nexus-engine nexus-fosun-local init
 uv run --package nexus-engine nexus-fosun-local doctor
 uv run --package nexus-engine nexus-fosun-local status
 ```
+
+首次使用执行一次 `init`：它会在 Git 忽略的 `.secrets/nexus-fosun-local/hmac.env` 中生成
+broker/market 两套独立的本地 HMAC 身份，文件权限为 `0600`。重复执行只校验并返回
+`exists`，不覆盖、不轮换、不打印任何身份值。
 
 CLI 会自动读取已忽略、不入库的 `infra/.env.local`，并映射 `.secrets/nexus-fosun-local/`
 中现有的 broker/market TLS 文件和回环 Gateway 端口。显式环境变量始终优先，无需为日常检查手工

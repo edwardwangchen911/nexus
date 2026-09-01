@@ -1,3 +1,4 @@
+import stat
 from pathlib import Path
 
 import nexus.ops.fosun_local as fosun_local
@@ -50,6 +51,50 @@ def test_explicit_environment_overrides_ignored_local_file(tmp_path: Path) -> No
     )
 
     assert environment["DATABASE_URL"] == "postgresql+asyncpg://explicit-canary"
+
+
+def test_init_creates_two_distinct_mode_600_hmac_identities(tmp_path: Path) -> None:
+    result = fosun_local.initialize_local_hmac(tmp_path)
+
+    identity_file = tmp_path / ".secrets" / "nexus-fosun-local" / "hmac.env"
+    values = fosun_local.load_local_environment(tmp_path, {})
+    assert result == {"status": "created", "hmac_identities": 2, "secrets_printed": False}
+    assert stat.S_IMODE(identity_file.stat().st_mode) == 0o600
+    assert values["FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID"] == "broker-local-v1"
+    assert values["FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID"] == "market-local-v1"
+    assert len(values["FOSUN_GATEWAY_HMAC_CURRENT_SECRET"]) >= 32
+    assert len(values["FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET"]) >= 32
+    assert (
+        values["FOSUN_GATEWAY_HMAC_CURRENT_SECRET"]
+        != values["FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET"]
+    )
+
+
+def test_init_is_idempotent_and_never_rotates_existing_identities(tmp_path: Path) -> None:
+    fosun_local.initialize_local_hmac(tmp_path)
+    identity_file = tmp_path / ".secrets" / "nexus-fosun-local" / "hmac.env"
+    original = identity_file.read_bytes()
+
+    result = fosun_local.initialize_local_hmac(tmp_path)
+
+    assert result == {"status": "exists", "hmac_identities": 2, "secrets_printed": False}
+    assert identity_file.read_bytes() == original
+
+
+def test_init_command_output_never_contains_generated_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    fosun_local.main(["init"])
+
+    output = capsys.readouterr().out
+    values = fosun_local.load_local_environment(tmp_path, {})
+    assert '"status":"created"' in output
+    assert values["FOSUN_GATEWAY_HMAC_CURRENT_SECRET"] not in output
+    assert values["FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET"] not in output
 
 
 @pytest.mark.asyncio

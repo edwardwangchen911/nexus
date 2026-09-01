@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import secrets
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
@@ -72,6 +73,12 @@ _LOCAL_TLS_FILES = {
     "FOSUN_MARKET_GATEWAY_CLIENT_KEY": "market-client.key",
     "FOSUN_MARKET_GATEWAY_CLIENT_CA": "server-ca.pem",
 }
+_LOCAL_HMAC_ENVIRONMENT = (
+    "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID",
+    "FOSUN_GATEWAY_HMAC_CURRENT_SECRET",
+    "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID",
+    "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET",
+)
 
 
 class _LocalStatusSettings(BaseSettings):
@@ -101,6 +108,16 @@ def load_local_environment(
         for name, value in file_values.items()
         if isinstance(value, str) and value
     }
+    hmac_values = dotenv_values(
+        root / ".secrets" / "nexus-fosun-local" / "hmac.env"
+    )
+    environment.update(
+        {
+            name: value
+            for name in _LOCAL_HMAC_ENVIRONMENT
+            if isinstance((value := hmac_values.get(name)), str) and value
+        }
+    )
     environment.update(_LOCAL_GATEWAY_ENVIRONMENT)
     secret_root = root / ".secrets" / "nexus-fosun-local"
     environment.update(
@@ -113,6 +130,55 @@ def load_local_environment(
         {name: value for name, value in process_environment.items() if value}
     )
     return environment
+
+
+def initialize_local_hmac(repo_root: Path) -> dict[str, object]:
+    """Create two local-only HMAC identities once without returning their values."""
+    secret_root = repo_root.resolve() / ".secrets" / "nexus-fosun-local"
+    if secret_root.is_symlink():
+        raise RuntimeError("LOCAL_HMAC_IDENTITY_INVALID")
+    secret_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    identity_file = secret_root / "hmac.env"
+    if identity_file.exists():
+        _validate_local_hmac_file(identity_file)
+        return {"status": "exists", "hmac_identities": 2, "secrets_printed": False}
+
+    values = {
+        "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "broker-local-v1",
+        "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": secrets.token_urlsafe(32),
+        "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_KEY_ID": "market-local-v1",
+        "FOSUN_MARKET_GATEWAY_HMAC_CURRENT_SECRET": secrets.token_urlsafe(32),
+    }
+    payload = "".join(f"{name}={values[name]}\n" for name in _LOCAL_HMAC_ENVIRONMENT)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(identity_file, flags, 0o600)
+    except FileExistsError:
+        _validate_local_hmac_file(identity_file)
+        return {"status": "exists", "hmac_identities": 2, "secrets_printed": False}
+    try:
+        os.write(descriptor, payload.encode("ascii"))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return {"status": "created", "hmac_identities": 2, "secrets_printed": False}
+
+
+def _validate_local_hmac_file(identity_file: Path) -> None:
+    if identity_file.is_symlink() or not identity_file.is_file():
+        raise RuntimeError("LOCAL_HMAC_IDENTITY_INVALID")
+    if identity_file.stat().st_mode & 0o077:
+        raise RuntimeError("LOCAL_HMAC_IDENTITY_INVALID")
+    values = dotenv_values(identity_file)
+    selected = tuple(values.get(name) for name in _LOCAL_HMAC_ENVIRONMENT)
+    if (
+        any(not isinstance(value, str) or not value for value in selected)
+        or len(str(selected[1])) < 32
+        or len(str(selected[3])) < 32
+        or selected[0] == selected[2]
+        or selected[1] == selected[3]
+    ):
+        raise RuntimeError("LOCAL_HMAC_IDENTITY_INVALID")
 
 
 def doctor_local_environment(
@@ -252,7 +318,7 @@ def _gateway_failure_category(message: str) -> str:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nexus-fosun-local")
-    parser.add_argument("command", choices=("doctor", "status", "refresh"))
+    parser.add_argument("command", choices=("init", "doctor", "status", "refresh"))
     return parser
 
 
@@ -260,7 +326,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     command = _parser().parse_args(argv).command
     local_environment = load_local_environment(Path.cwd(), os.environ)
     try:
-        if command == "doctor":
+        if command == "init":
+            result = initialize_local_hmac(Path.cwd())
+        elif command == "doctor":
             result = doctor_local_environment(local_environment)
         elif command == "status":
             status_settings = _LocalStatusSettings.model_validate(local_environment)
