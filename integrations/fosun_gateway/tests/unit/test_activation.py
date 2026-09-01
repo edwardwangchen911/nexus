@@ -91,6 +91,17 @@ def test_scoped_activation_rejects_each_failed_check(check: str) -> None:
     assert authorization is None
 
 
+@pytest.mark.parametrize("field,value", [("captured_at", "2026-08-27T08:00:00"), ("capability_expires_at", "2026-08-27T09:00:00")])
+def test_scoped_activation_rejects_naive_timestamps(field: str, value: str) -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    document = json.loads(_scoped_probe_bytes(manifest_bytes, scope="core"))
+    document[field] = value
+    probe_bytes = _json_bytes(document)
+    result, authorization = activation_module.evaluate_scoped_activation(manifest_bytes, probe_bytes, _scoped_receipt_bytes(probe_bytes, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    assert result.next_action == "REVIEW_PROBE_ARTIFACT"
+    assert authorization is None
+
+
 def test_scoped_activation_rejects_legacy_v2_v1_pair() -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     legacy = _probe_bytes(manifest_bytes)
