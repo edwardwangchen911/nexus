@@ -174,6 +174,14 @@ class ScopedProbeArtifact(BaseModel):
     operations: tuple[ProbeOperationEvidence, ...]
     checks: ProbeChecks
 
+    @model_validator(mode="after")
+    def _validate_window(self) -> ScopedProbeArtifact:
+        _require_aware(self.captured_at, "captured_at")
+        _require_aware(self.capability_expires_at, "capability_expires_at")
+        if not timedelta(0) < self.capability_expires_at - self.captured_at <= MAX_CAPABILITY_TTL:
+            raise ValueError("invalid capability window")
+        return self
+
 
 class ScopedProbePublicationReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -253,6 +261,13 @@ def evaluate_scoped_activation(
         artifact = ScopedProbeArtifact.model_validate_json(probe_bytes)
         receipt = ScopedProbePublicationReceipt.model_validate_json(publication_receipt_bytes)
         descriptor = scope_descriptor(expected_scope)
+        scoped_hash = _sha256(_canonical_json({
+            "base_contract_hash": base_hash,
+            "run_id": artifact.run_id,
+            "scope": artifact.scope,
+            "scope_contract_version": artifact.scope_contract_version,
+            "authorized_operation_set": list(artifact.authorized_operation_set),
+        }))
         valid = (
             _canonical_json(artifact.model_dump(mode="json")) == probe_bytes
             and _canonical_json(receipt.model_dump(mode="json")) == publication_receipt_bytes
@@ -267,14 +282,19 @@ def evaluate_scoped_activation(
             and artifact.captured_at <= now < artifact.capability_expires_at
             and receipt.artifact_sha256 == _sha256(probe_bytes) and receipt.run_id == artifact.run_id
             and receipt.scope == artifact.scope and receipt.scope_contract_version == artifact.scope_contract_version
+            and all(item.passed and item.response_contract_sha256 == probe_response_contract_sha256(item.name) for item in artifact.operations)
+            and all(1 <= item.request_count <= MAX_REQUESTS_PER_OPERATION for item in artifact.operations)
+            and sum(item.request_count for item in artifact.operations) <= MAX_PROBE_REQUESTS
+            and sum(item.request_count for item in artifact.operations if item.name in BROKER_PROBE_OPERATIONS) <= MAX_BROKER_REQUESTS
+            and artifact.checks.all_passed()
         )
         material = b"NEXUS-FOSUN-PROBE-PUBLICATION-V2\0" + bytes.fromhex(receipt.artifact_sha256) + b"\0" + receipt.run_id.encode() + b"\0" + receipt.scope.encode() + b"\0" + receipt.scope_contract_version.encode()
         trusted_key.verify(_decode_base64url(receipt.signature_b64u, expected_bytes=64), material)
-    except (InvalidSignature, ValidationError, ValueError):
+    except (InvalidSignature, ValidationError, TypeError, ValueError):
         valid = False
     if not valid:
         return _blocked(base_hash, now, "REVIEW_PROBE_ARTIFACT"), None
-    result = FosunActivationResult(status="activated_read_only", contract_hash=base_hash, checked_at=now, capability_expires_at=artifact.capability_expires_at, next_action=None)
+    result = FosunActivationResult(status="activated_read_only", contract_hash=scoped_hash, checked_at=now, capability_expires_at=artifact.capability_expires_at, next_action=None)
     return result, RuntimeAuthorization(expected_scope, descriptor.scope_contract_version, artifact.run_id, artifact.capability_expires_at, frozenset(descriptor.authorized_operation_set))
 
 
