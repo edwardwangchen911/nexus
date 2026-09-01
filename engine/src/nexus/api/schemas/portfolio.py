@@ -9,10 +9,35 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstrai
 
 type PortfolioKind = Literal["real_read_only", "internal_paper", "shadow"]
 type SnapshotStatus = Literal["READY", "PARTIAL", "STALE", "RECONCILIATION_REQUIRED"]
+type DisplayReadiness = Literal["DISPLAY_READY", "DISPLAY_UNAVAILABLE"]
+type DecisionReadiness = Literal[
+    "DECISION_READY", "RECONCILIATION_PENDING", "DATA_STALE", "RECONCILIATION_REQUIRED"
+]
 type SyncRunStatus = Literal[
     "ACTIVE", "READY", "PARTIAL", "STALE", "RECONCILIATION_REQUIRED", "FAILED"
 ]
 type CurrencyCode = Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")]
+
+
+def derive_snapshot_readiness(
+    status: SnapshotStatus | str,
+    *,
+    has_display_facts: bool,
+) -> tuple[DisplayReadiness, DecisionReadiness]:
+    """Separate factual display availability from decision-grade readiness."""
+    display: DisplayReadiness = (
+        "DISPLAY_READY" if has_display_facts else "DISPLAY_UNAVAILABLE"
+    )
+    decisions: dict[str, DecisionReadiness] = {
+        "READY": "DECISION_READY",
+        "PARTIAL": "RECONCILIATION_PENDING",
+        "STALE": "DATA_STALE",
+        "RECONCILIATION_REQUIRED": "RECONCILIATION_REQUIRED",
+    }
+    try:
+        return display, decisions[status]
+    except KeyError as exc:
+        raise ValueError(f"unsupported snapshot status: {status!r}") from exc
 
 
 class _StrictSchema(BaseModel):
@@ -109,6 +134,8 @@ class PortfolioSnapshotResponse(_StrictSchema):
     portfolio_id: UUID
     coverage_scope: Literal["broker_account"]
     status: SnapshotStatus
+    display_readiness: DisplayReadiness
+    decision_readiness: DecisionReadiness
     cash: tuple[CashBucketResponse, ...] = Field(max_length=32)
     positions: tuple[PositionResponse, ...] = Field(max_length=2000)
     open_orders: tuple[OpenOrderResponse, ...] = Field(max_length=2000)

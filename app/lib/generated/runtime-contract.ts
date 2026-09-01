@@ -1366,6 +1366,15 @@ export const runtimeContractSchemas = {
     "title": "DailyBriefResponse",
     "type": "object"
   },
+  "DecisionReadiness": {
+    "enum": [
+      "DECISION_READY",
+      "RECONCILIATION_PENDING",
+      "DATA_STALE",
+      "RECONCILIATION_REQUIRED"
+    ],
+    "type": "string"
+  },
   "DiagnosticItemResponse": {
     "additionalProperties": false,
     "properties": {
@@ -1484,6 +1493,13 @@ export const runtimeContractSchemas = {
     ],
     "title": "DiagnosticItemResponse",
     "type": "object"
+  },
+  "DisplayReadiness": {
+    "enum": [
+      "DISPLAY_READY",
+      "DISPLAY_UNAVAILABLE"
+    ],
+    "type": "string"
   },
   "DrawdownAcknowledgeResponse": {
     "additionalProperties": false,
@@ -4359,6 +4375,12 @@ export const runtimeContractSchemas = {
         "title": "Coverage Scope",
         "type": "string"
       },
+      "decision_readiness": {
+        "$ref": "#/components/schemas/DecisionReadiness"
+      },
+      "display_readiness": {
+        "$ref": "#/components/schemas/DisplayReadiness"
+      },
       "open_orders": {
         "items": {
           "$ref": "#/components/schemas/OpenOrderResponse"
@@ -4394,6 +4416,8 @@ export const runtimeContractSchemas = {
       "portfolio_id",
       "coverage_scope",
       "status",
+      "display_readiness",
+      "decision_readiness",
       "cash",
       "positions",
       "open_orders",

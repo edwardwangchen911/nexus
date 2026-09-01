@@ -171,12 +171,22 @@ describe("portfolio vertical slice", () => {
 
   it("labels a stale broker snapshot as last-known and non-actionable", () => {
     render(<PortfolioPanel state="stale" portfolios={[{ ...portfolio, latest_snapshot_status: "STALE" }]}
-      snapshot={{ ...snapshot, status: "STALE" }} selectedPortfolioId={portfolioId}
+      snapshot={{ ...snapshot, status: "STALE", decision_readiness: "DATA_STALE" }} selectedPortfolioId={portfolioId}
       notice={null} onSelect={vi.fn()} onRefresh={vi.fn()} />);
 
     expect(screen.getByText("显示最后已知快照，不触发业务动作。", { exact: true })).toBeVisible();
     expect(screen.getByRole("region", { name: "HKD 原币种资产估值" })).toHaveTextContent("STALE");
     expect(screen.queryByRole("link", { name: /优化|方案|下单|交易/ })).not.toBeInTheDocument();
+  });
+
+  it("separates display availability from decision readiness", () => {
+    render(<PortfolioPanel state="partial" portfolios={[{ ...portfolio, latest_snapshot_status: "PARTIAL" }]}
+      snapshot={{ ...snapshot, status: "PARTIAL", decision_readiness: "RECONCILIATION_PENDING" }}
+      selectedPortfolioId={portfolioId} notice={null} onSelect={vi.fn()} onRefresh={vi.fn()} />);
+
+    expect(screen.getByText("资产可展示", { exact: true })).toBeVisible();
+    expect(screen.getByText("决策待对账", { exact: true })).toBeVisible();
+    expect(screen.getByText("资产事实可展示；订单或现金流尚未完成对账，不能作为优化基线。", { exact: true })).toBeVisible();
   });
 
   it("keeps an open order visible even when its instrument has no position", () => {
@@ -233,7 +243,7 @@ describe("portfolio vertical slice", () => {
 
     const guidance = screen.getByRole("region", { name: "真实刷新仅限本机终端" });
     expect(guidance).toHaveTextContent("浏览器只重新读取已持久化数据");
-    expect(guidance).toHaveTextContent("uv run --package nexus-engine nexus-engine-fosun-local-refresh");
+    expect(guidance).toHaveTextContent("uv run --package nexus-engine nexus-fosun-local refresh");
     expect(guidance).toHaveTextContent("最近本地刷新状态READY");
     expect(screen.queryByRole("button", { name: "同步复星只读事实" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "刷新同步状态" })).not.toBeInTheDocument();

@@ -18,6 +18,7 @@ from nexus.api.schemas.portfolio import (
     PortfolioPageResponse,
     PortfolioSnapshotResponse,
     PositionResponse,
+    derive_snapshot_readiness,
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
@@ -332,11 +333,17 @@ class PortfolioService:
         instrument_ids = {row.instrument_id for row in position_rows}
         instrument_ids.update(row.instrument_id for row in order_rows)
         symbols = await self._symbols(tuple(instrument_ids), snapshot.as_of)
+        display_readiness, decision_readiness = derive_snapshot_readiness(
+            snapshot.status,
+            has_display_facts=bool(cash_rows or position_rows),
+        )
         return PortfolioSnapshotResponse(
             portfolio_snapshot_id=snapshot.snapshot_id,
             portfolio_id=snapshot.portfolio_id,
             coverage_scope="broker_account",
             status=snapshot.status,
+            display_readiness=display_readiness,
+            decision_readiness=decision_readiness,
             cash=tuple(
                 CashBucketResponse(
                     currency=row.currency,

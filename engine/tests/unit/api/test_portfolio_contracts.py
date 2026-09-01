@@ -9,6 +9,7 @@ from nexus.api.schemas.portfolio import (
     PortfolioSnapshotEnvelope,
     PortfolioSnapshotResponse,
     PositionResponse,
+    derive_snapshot_readiness,
 )
 from nexus.main import create_engine_app
 from nexus.settings import EngineSettings
@@ -57,6 +58,8 @@ def test_snapshot_contract_forbids_an_unadmitted_converted_view() -> None:
         "portfolio_id": str(_PORTFOLIO_ID),
         "coverage_scope": "broker_account",
         "status": "PARTIAL",
+        "display_readiness": "DISPLAY_UNAVAILABLE",
+        "decision_readiness": "RECONCILIATION_PENDING",
         "cash": (),
         "positions": (),
         "open_orders": (),
@@ -66,6 +69,28 @@ def test_snapshot_contract_forbids_an_unadmitted_converted_view() -> None:
 
     with pytest.raises(ValidationError):
         PortfolioSnapshotResponse.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("status", "has_display_facts", "expected"),
+    (
+        ("READY", True, ("DISPLAY_READY", "DECISION_READY")),
+        ("PARTIAL", True, ("DISPLAY_READY", "RECONCILIATION_PENDING")),
+        ("PARTIAL", False, ("DISPLAY_UNAVAILABLE", "RECONCILIATION_PENDING")),
+        ("STALE", True, ("DISPLAY_READY", "DATA_STALE")),
+        (
+            "RECONCILIATION_REQUIRED",
+            True,
+            ("DISPLAY_READY", "RECONCILIATION_REQUIRED"),
+        ),
+    ),
+)
+def test_snapshot_readiness_separates_display_from_decision_use(
+    status: str,
+    has_display_facts: bool,
+    expected: tuple[str, str],
+) -> None:
+    assert derive_snapshot_readiness(status, has_display_facts=has_display_facts) == expected
 
 
 def test_portfolio_contracts_publish_fixed_collection_bounds() -> None:
@@ -135,6 +160,8 @@ def test_maximum_legal_snapshot_envelope_fits_the_bff_four_mebibyte_limit() -> N
                 "portfolio_id": str(_PORTFOLIO_ID),
                 "coverage_scope": "broker_account",
                 "status": "READY",
+                "display_readiness": "DISPLAY_READY",
+                "decision_readiness": "DECISION_READY",
                 "cash": (),
                 "positions": (
                     {

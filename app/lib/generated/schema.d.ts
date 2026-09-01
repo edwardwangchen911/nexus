@@ -1383,6 +1383,8 @@ export interface components {
             /** Truncated */
             truncated: boolean;
         };
+        /** @enum {string} */
+        DecisionReadiness: "DECISION_READY" | "RECONCILIATION_PENDING" | "DATA_STALE" | "RECONCILIATION_REQUIRED";
         /** DiagnosticItemResponse */
         DiagnosticItemResponse: {
             /**
@@ -1414,6 +1416,8 @@ export interface components {
             /** Unknown Reason */
             unknown_reason: string | null;
         };
+        /** @enum {string} */
+        DisplayReadiness: "DISPLAY_READY" | "DISPLAY_UNAVAILABLE";
         /** DrawdownAcknowledgeEnvelope */
         DrawdownAcknowledgeEnvelope: {
             data: components["schemas"]["DrawdownAcknowledgeResponse"];
@@ -2610,6 +2614,8 @@ export interface components {
              * @constant
              */
             coverage_scope: "broker_account";
+            decision_readiness: components["schemas"]["DecisionReadiness"];
+            display_readiness: components["schemas"]["DisplayReadiness"];
             /** Open Orders */
             open_orders: components["schemas"]["OpenOrderResponse"][];
             /**
