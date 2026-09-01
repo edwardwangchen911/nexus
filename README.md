@@ -52,7 +52,9 @@ uv run --package nexus-engine nexus-engine-fosun-local-refresh
 Quote 和每个标的一次日 K 请求。Accounts、Cash、Holdings 合计各一次，单次总 Provider 请求最多
 16 次，全部串行、无自动重试。超过范围、合同不匹配或任一读取失败时 fail-closed，数据库事务不会
 覆盖上一份可用快照。浏览器只读取已持久化数据，不能触发 Gateway 或 Provider 请求；该入口不包含
-自动调度、订单、账户写入或任何交易激活。`00656.HK` 仍仅作只读持仓展示，不请求 Quote 或 K 线。
+自动调度、订单、账户写入或任何交易激活。组合页的“刷新页面数据”仅重新执行已持久化
+组合与快照的 BFF GET，不会 POST `/api/v1/broker-sync-runs`。`00656.HK` 仍仅作只读持仓展示，不请求
+Quote 或 K 线。
 
 - [本地开发与 Compose](docs/runbooks/local-development.md)：不强制 Docker Desktop，Docker Desktop、OrbStack 或 Colima 均可。
 - [备份/恢复演练](docs/runbooks/backup-restore.md)

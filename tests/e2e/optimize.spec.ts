@@ -77,7 +77,19 @@ for (const viewport of [
     await sessionNavigator.press("End");
     await expect(page.getByRole("status", { name: "当前影子会话详情" })).toContainText("2026-08-31");
     await expect(page.getByRole("button", { name: /下单|交易|买入|卖出|审批|验证|晋级|自进化/ })).toHaveCount(0);
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    const overflow = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      offenders: [...document.querySelectorAll<HTMLElement>("body *")]
+        .map((element) => ({
+          className: element.className,
+          right: Math.round(element.getBoundingClientRect().right),
+          tagName: element.tagName,
+        }))
+        .filter((item) => item.right > document.documentElement.clientWidth + 1)
+        .slice(0, 8),
+    }));
+    expect(overflow.scrollWidth, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.clientWidth);
     const shadowSerious = (await new AxeBuilder({ page }).analyze()).violations.filter((violation) => violation.impact === "serious" || violation.impact === "critical");
     expect(shadowSerious).toEqual([]);
     await page.getByRole("link", { name: "试算最小调整权重" }).click();

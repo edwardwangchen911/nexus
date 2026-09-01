@@ -1,6 +1,6 @@
 "use client";
 
-import { RefreshCw, ShieldCheck } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
 import { PortfolioSummary } from "../../components/portfolio-summary";
@@ -8,57 +8,33 @@ import type { components } from "../../lib/generated/schema";
 
 export type PortfolioItem = components["schemas"]["PortfolioListItemResponse"];
 export type PortfolioSnapshot = components["schemas"]["PortfolioSnapshotResponse"];
-export type BrokerSyncRun = components["schemas"]["BrokerSyncRunResponse"];
 
 type Notice = { kind: "error" | "success"; text: string } | null;
-type PendingSync = { portfolioId: string; idempotencyKey: string; body: string };
-type TrackedSync = { location: string; run: BrokerSyncRun };
 type PortfolioPanelProps = {
   state: DataStateKind;
   portfolios: PortfolioItem[];
   snapshot: PortfolioSnapshot | null;
   selectedPortfolioId: string | null;
-  syncing: boolean;
-  unresolvedSync: boolean;
   notice: Notice;
-  syncRun?: BrokerSyncRun | null;
-  syncRefreshing?: boolean;
   onSelect: (portfolioId: string) => void;
   onRefresh: () => void;
-  onSync: () => void;
-  onResolveSync: () => void;
-  onRefreshSync?: () => void;
 };
 
 const LOAD_TIMEOUT_MS = 10_000;
-const SYNC_CONFIRM_TIMEOUT_MS = 35_000;
 const MAX_PORTFOLIO_PAGES = 10;
 const MAX_PORTFOLIOS_PER_PAGE = 50;
 const MAX_PORTFOLIOS = MAX_PORTFOLIO_PAGES * MAX_PORTFOLIOS_PER_PAGE;
-const SYNC_POLL_MS = 5_000;
-const SYNC_LOOKUP_ERROR = "无法刷新同步详情。冻结组合快照保持不变。";
 
 export default function PortfolioPage(): React.ReactElement {
   const [state, setState] = useState<DataStateKind>("loading");
   const [portfolios, setPortfolios] = useState<PortfolioItem[]>([]);
   const [snapshot, setSnapshot] = useState<PortfolioSnapshot | null>(null);
   const [selectedPortfolioId, setSelectedPortfolioId] = useState<string | null>(null);
-  const [syncing, setSyncing] = useState(false);
-  const [unresolvedSync, setUnresolvedSync] = useState<PendingSync | null>(null);
-  const [trackedSync, setTrackedSync] = useState<TrackedSync | null>(null);
-  const [syncRefreshing, setSyncRefreshing] = useState(false);
-  const [syncPollRevision, setSyncPollRevision] = useState(0);
   const [notice, setNotice] = useState<Notice>(null);
   const loadVersion = useRef(0);
-  const syncInFlight = useRef(false);
   const portfoliosRef = useRef<PortfolioItem[]>([]);
   const snapshotRef = useRef<PortfolioSnapshot | null>(null);
   const selectedPortfolioIdRef = useRef<string | null>(null);
-  const trackedSyncRef = useRef<TrackedSync | null>(null);
-  const unresolvedByPortfolio = useRef(new Map<string, PendingSync>());
-  const trackedByPortfolio = useRef(new Map<string, TrackedSync>());
-  const syncLookupVersion = useRef(0);
-  const syncLookupsInFlight = useRef(new Set<string>());
 
   const loadSnapshot = useCallback(async (portfolioId: string, version: number) => {
     const response = await fetchWithTimeout(`/api/v1/portfolios/${encodeURIComponent(portfolioId)}/snapshots/latest`);
@@ -123,11 +99,6 @@ export default function PortfolioPage(): React.ReactElement {
         snapshotRef.current = null;
         setSnapshot(null);
         setState("loading");
-        syncLookupVersion.current += 1;
-        const pending = unresolvedByPortfolio.current.get(selected) ?? null;
-        const tracked = trackedByPortfolio.current.get(selected) ?? null;
-        setUnresolvedSync(pending);
-        trackedSyncRef.current = tracked; setTrackedSync(tracked); setSyncRefreshing(false);
       }
       selectedPortfolioIdRef.current = selected; setSelectedPortfolioId(selected);
       await loadSnapshot(selected, version);
@@ -140,155 +111,26 @@ export default function PortfolioPage(): React.ReactElement {
     }
   }, [loadSnapshot]);
 
-  const refreshSyncRun = useCallback(async () => {
-    const tracked = trackedSyncRef.current;
-    if (!tracked || tracked.run.portfolio_id !== selectedPortfolioIdRef.current) return;
-    const runId = tracked.run.broker_sync_run_id;
-    if (syncLookupsInFlight.current.has(runId)) return;
-    syncLookupsInFlight.current.add(runId);
-    const version = syncLookupVersion.current + 1;
-    syncLookupVersion.current = version;
-    setSyncRefreshing(true);
-    try {
-      const response = await fetchWithTimeout(tracked.location);
-      if (!response.ok) throw new Error("sync lookup failed");
-      const payload = await response.json() as { data?: BrokerSyncRun };
-      const updated = validateSyncRun(payload.data, tracked);
-      const current = trackedByPortfolio.current.get(tracked.run.portfolio_id);
-      if (version !== syncLookupVersion.current || current?.run.broker_sync_run_id !== tracked.run.broker_sync_run_id || tracked.run.portfolio_id !== selectedPortfolioIdRef.current) return;
-      if (!updated) throw new Error("sync lookup mismatch");
-      trackedByPortfolio.current.set(tracked.run.portfolio_id, updated);
-      trackedSyncRef.current = updated; setTrackedSync(updated);
-      setNotice((currentNotice) => currentNotice?.kind === "error" && currentNotice.text === SYNC_LOOKUP_ERROR ? null : currentNotice);
-    } catch {
-      const current = trackedByPortfolio.current.get(tracked.run.portfolio_id);
-      if (version !== syncLookupVersion.current || current?.run.broker_sync_run_id !== tracked.run.broker_sync_run_id || tracked.run.portfolio_id !== selectedPortfolioIdRef.current) return;
-      setNotice({ kind: "error", text: SYNC_LOOKUP_ERROR });
-      setSyncPollRevision((value) => value + 1);
-    } finally {
-      const current = trackedByPortfolio.current.get(tracked.run.portfolio_id);
-      const shouldRearm = version !== syncLookupVersion.current
-        && current?.run.broker_sync_run_id === runId
-        && current.run.status === "ACTIVE"
-        && tracked.run.portfolio_id === selectedPortfolioIdRef.current;
-      syncLookupsInFlight.current.delete(runId);
-      if (version === syncLookupVersion.current) setSyncRefreshing(false);
-      else if (shouldRearm) setSyncPollRevision((value) => value + 1);
-    }
-  }, []);
-
   useEffect(() => {
     const timer = globalThis.setTimeout(() => void refresh(), 0);
     return () => globalThis.clearTimeout(timer);
   }, [refresh]);
 
-  useEffect(() => {
-    if (trackedSync?.run.status !== "ACTIVE") return;
-    const timer = globalThis.setTimeout(() => void refreshSyncRun(), SYNC_POLL_MS);
-    return () => globalThis.clearTimeout(timer);
-  }, [refreshSyncRun, syncPollRevision, trackedSync]);
-
   async function selectPortfolio(portfolioId: string): Promise<void> {
     const version = loadVersion.current + 1;
     loadVersion.current = version;
     selectedPortfolioIdRef.current = portfolioId; snapshotRef.current = null;
-    syncLookupVersion.current += 1;
-    const pending = unresolvedByPortfolio.current.get(portfolioId) ?? null;
-    const tracked = trackedByPortfolio.current.get(portfolioId) ?? null;
-    setUnresolvedSync(pending);
-    trackedSyncRef.current = tracked; setTrackedSync(tracked); setSyncRefreshing(false);
     setSelectedPortfolioId(portfolioId); setSnapshot(null); setState("loading"); setNotice(null);
     try { await loadSnapshot(portfolioId, version); }
     catch { if (version === loadVersion.current) { setState("error"); setNotice({ kind: "error", text: "无法读取该组合的冻结快照。" }); } }
   }
 
-  async function syncSelected(): Promise<void> {
-    if (!selectedPortfolioId || syncing || syncInFlight.current || unresolvedSync || trackedSync?.run.status === "ACTIVE") return;
-    await confirmSync({
-      portfolioId: selectedPortfolioId,
-      idempotencyKey: crypto.randomUUID(),
-      body: JSON.stringify({ portfolio_id: selectedPortfolioId }),
-    });
-  }
-
-  async function confirmSync(pending: PendingSync): Promise<void> {
-    if (syncInFlight.current) return;
-    syncInFlight.current = true;
-    setSyncing(true); setNotice(null);
-    try {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        try {
-        const response = await fetch("/api/v1/broker-sync-runs", {
-          method: "POST",
-          headers: { "content-type": "application/json", "idempotency-key": pending.idempotencyKey },
-          body: pending.body,
-          signal: AbortSignal.timeout(SYNC_CONFIRM_TIMEOUT_MS),
-        });
-        const payload = await response.json();
-        if (!response.ok) {
-          if (payload?.error?.code === "INTERNAL_ERROR") {
-            if (attempt === 0) continue;
-            unresolvedByPortfolio.current.set(pending.portfolioId, pending);
-            if (pending.portfolioId === selectedPortfolioIdRef.current) {
-              setUnresolvedSync(pending);
-              setNotice({ kind: "error", text: "同步请求结果仍未知。当前组合的新同步保持锁定；请使用同一幂等键继续确认。" });
-            }
-            return;
-          }
-          unresolvedByPortfolio.current.delete(pending.portfolioId);
-          if (pending.portfolioId === selectedPortfolioIdRef.current) {
-            setUnresolvedSync(null);
-            setNotice({ kind: "error", text: syncErrorMessage(payload?.error?.code, response.status, response.headers.get("retry-after")) });
-          }
-          return;
-        }
-        const accepted = acceptedSync(payload, response.headers.get("location"), pending);
-        if (!accepted) {
-          unresolvedByPortfolio.current.set(pending.portfolioId, pending);
-          if (pending.portfolioId === selectedPortfolioIdRef.current) {
-            setUnresolvedSync(pending);
-            setNotice({ kind: "error", text: "同步请求结果仍未知。当前组合的新同步保持锁定；请使用同一幂等键继续确认。" });
-          }
-          return;
-        }
-        unresolvedByPortfolio.current.delete(pending.portfolioId);
-        trackedByPortfolio.current.set(pending.portfolioId, accepted);
-        if (pending.portfolioId === selectedPortfolioIdRef.current) {
-          syncLookupVersion.current += 1;
-          setUnresolvedSync(null);
-          trackedSyncRef.current = accepted; setTrackedSync(accepted);
-        }
-        if (pending.portfolioId === selectedPortfolioIdRef.current) {
-          setNotice({ kind: "success", text: attempt === 0
-            ? "复星只读同步任务已登记。当前快照不会被静默覆盖。"
-            : "首次结果未知；已用同一幂等键确认同步任务。" });
-        }
-        return;
-        } catch {
-          if (attempt === 0) continue;
-          unresolvedByPortfolio.current.set(pending.portfolioId, pending);
-          if (pending.portfolioId === selectedPortfolioIdRef.current) {
-            setUnresolvedSync(pending);
-            setNotice({ kind: "error", text: "同步请求结果仍未知。当前组合的新同步保持锁定；请使用同一幂等键继续确认。" });
-          }
-        }
-      }
-    } finally {
-      syncInFlight.current = false;
-      setSyncing(false);
-    }
-  }
-
   return <PortfolioPanel state={state} portfolios={portfolios} snapshot={snapshot}
-    selectedPortfolioId={selectedPortfolioId} syncing={syncing} unresolvedSync={unresolvedSync !== null} notice={notice}
-    syncRun={trackedSync?.run ?? null} syncRefreshing={syncRefreshing}
-    onSelect={(id) => void selectPortfolio(id)} onRefresh={() => void refresh()}
-    onSync={() => void syncSelected()}
-    onResolveSync={() => { if (unresolvedSync) void confirmSync(unresolvedSync); }}
-    onRefreshSync={() => void refreshSyncRun()} />;
+    selectedPortfolioId={selectedPortfolioId} notice={notice}
+    onSelect={(id) => void selectPortfolio(id)} onRefresh={() => void refresh()} />;
 }
 
-export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioId, syncing, unresolvedSync, notice, syncRun = null, syncRefreshing = false, onSelect, onRefresh, onSync, onResolveSync, onRefreshSync }: PortfolioPanelProps): React.ReactElement {
+export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioId, notice, onSelect, onRefresh }: PortfolioPanelProps): React.ReactElement {
   const hasData = ["ready", "partial", "stale"].includes(state) && snapshot !== null;
   const selected = portfolios.find((item) => item.portfolio_id === selectedPortfolioId) ?? null;
   const currencies = selected && snapshot ? [...new Set([
@@ -301,7 +143,7 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
     <section className="page-stack portfolio-page" aria-label="组合事实页面" data-state={state}>
       <header className="page-heading">
         <div><p className="eyebrow">资产与持仓</p><h1>组合事实</h1><p>复星真实持仓与内部模拟盘分账展示。缺少合格汇率证据时，各币种独立呈现，不虚构合并净值。</p></div>
-        <div className="portfolio-page__actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新快照</button>{unresolvedSync ? <button className="button button--primary" type="button" onClick={onResolveSync} disabled={syncing}><ShieldCheck aria-hidden="true" size={17} />{syncing ? "正在继续确认" : "使用同一幂等键继续确认"}</button> : selected?.kind === "real_read_only" && syncRun?.status !== "ACTIVE" ? <button className="button button--primary" type="button" onClick={onSync} disabled={syncing}><ShieldCheck aria-hidden="true" size={17} />{syncing ? "正在确认同步任务" : "同步复星只读事实"}</button> : null}</div>
+        <div className="portfolio-page__actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新页面数据</button></div>
       </header>
       <div role="status" aria-label="组合操作状态" aria-live="polite" aria-atomic="true">
         {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
@@ -310,13 +152,13 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
         <div className="portfolio-workspace">
           <nav className="portfolio-rail" aria-label="组合选择"><p className="portfolio-rail__label">组合账户</p><ul>{portfolios.map((item) => <li key={item.portfolio_id}><button type="button" aria-pressed={item.portfolio_id === selectedPortfolioId} onClick={() => onSelect(item.portfolio_id)}><strong>{item.name}</strong><span>{kindLabel(item.kind)} · {coverageLabel(item.coverage_scope)}</span><span>{item.original_currencies.join(" / ") || "币种未知"}</span></button></li>)}</ul></nav>
           <div className="portfolio-detail">
+            {selected.kind === "real_read_only" ? <LocalRefreshGuidance status={selected.last_sync_run_status} /> : null}
             {!hasData || !snapshot ? <DataState state={state} title={`${selected.name} 快照`} detail={stateDetail(state)} announce={false} /> : <>
               <div className="portfolio-snapshot-band"><div><p className="eyebrow">冻结快照</p><h2>{selected.name}</h2><p>只读账户事实，不含跨币种推算。</p></div><dl><div><dt>数据来源</dt><dd>{selected.provider === "fosun" ? "复星（只读）" : selected.provider}</dd></div><div><dt>快照状态</dt><dd>{snapshotStatusLabel(snapshot.status)} <code>{snapshot.status}</code></dd></div><div><dt>币种</dt><dd>{currencies.length}</dd></div><div><dt>持仓</dt><dd>{snapshot.positions.length}</dd></div><div><dt>未结订单</dt><dd>{snapshot.open_orders.length}</dd></div><div><dt>更新时间</dt><dd>{formatTime(snapshot.as_of)}</dd></div></dl></div>
               {state === "stale" ? <p className="inline-notice inline-notice--error" role="status">{stateDetail(state)}</p> : null}
               {snapshot.status === "RECONCILIATION_REQUIRED" ? <p className="inline-notice inline-notice--error">双读对账未通过。快照仅供展示，不能用作优化基线。</p> : null}
               {currencies.map((currency) => <PortfolioSummary key={currency} portfolio={selected} snapshot={snapshot} currency={currency} />)}
             </>}
-            {syncRun?.portfolio_id === selected.portfolio_id ? <SyncRunDetails run={syncRun} refreshing={syncRefreshing} onRefresh={onRefreshSync} /> : null}
           </div>
         </div>
       )}
@@ -324,36 +166,22 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
   );
 }
 
-function SyncRunDetails({ run, refreshing, onRefresh }: { run: BrokerSyncRun; refreshing: boolean; onRefresh?: () => void }): React.ReactElement {
+function LocalRefreshGuidance({ status }: { status: PortfolioItem["last_sync_run_status"] }): React.ReactElement {
   return (
-    <section className="portfolio-sync-run" aria-labelledby="portfolio-sync-run-heading">
-      <header><div><p className="eyebrow">READ-ONLY SYNC RUN</p><h2 id="portfolio-sync-run-heading">同步详情</h2></div><button className="button button--quiet" type="button" onClick={onRefresh} disabled={refreshing}><RefreshCw aria-hidden="true" size={17} />{refreshing ? "正在刷新" : "刷新同步状态"}</button></header>
-      <dl><div><dt>状态</dt><dd>{run.status}</dd></div><div><dt>尝试次数</dt><dd>{run.attempt_count}</dd></div><div><dt>现金流质量</dt><dd>{run.cash_flow_quality}</dd></div><div><dt>接受时间</dt><dd>{formatTime(run.accepted_at)}</dd></div><div><dt>完成时间</dt><dd>{formatTime(run.completed_at)}</dd></div></dl>
-      {run.failure_category ? <p className="inline-notice inline-notice--error">同步失败类别：{run.failure_category}。Provider 原始原因不在页面展示。</p> : null}
+    <section className="portfolio-local-refresh" aria-label="真实刷新仅限本机终端">
+      <div><p className="eyebrow">LOCAL READ-ONLY REFRESH</p><h2>真实刷新仅限本机终端</h2></div>
+      <p>浏览器只重新读取已持久化数据，不会登记、执行或重试 Provider 同步。</p>
+      <p>通过既有安全 launcher 加载本地配置，并确认 Gateway 处于 <code>local_read_only</code> 后，在仓库根目录运行：</p>
+      <pre className="portfolio-local-refresh__command"><code>uv run --package nexus-engine nexus-engine-fosun-local-refresh</code></pre>
+      <p><span>最近本地刷新状态</span><strong>{status ?? "未登记"}</strong></p>
+      {status === "ACTIVE" ? <p className="inline-notice inline-notice--error">存在历史 ACTIVE 登记；当前页面不会执行、轮询或自动重试。请保留记录并在本机核对 launcher。</p> : null}
     </section>
   );
 }
-
-function acceptedSync(payload: unknown, location: string | null, pending: PendingSync): TrackedSync | null {
-  if (!isRecord(payload) || !isRecord(payload.data)) return null;
-  const run = payload.data as BrokerSyncRun;
-  const expected = typeof run.broker_sync_run_id === "string" ? `/api/v1/broker-sync-runs/${run.broker_sync_run_id}` : "";
-  if (location !== expected || run.portfolio_id !== pending.portfolioId) return null;
-  return { location, run };
-}
-
-function validateSyncRun(value: BrokerSyncRun | undefined, tracked: TrackedSync): TrackedSync | null {
-  if (!value || value.broker_sync_run_id !== tracked.run.broker_sync_run_id || value.portfolio_id !== tracked.run.portfolio_id) return null;
-  if (tracked.run.status !== "ACTIVE" && value.status === "ACTIVE") return null;
-  return { location: tracked.location, run: value };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 async function fetchWithTimeout(path: string): Promise<Response> { return fetch(path, { signal: AbortSignal.timeout(LOAD_TIMEOUT_MS) }); }
 function snapshotState(status: PortfolioSnapshot["status"]): DataStateKind { return status === "READY" ? "ready" : status === "STALE" ? "stale" : "partial"; }
 function kindLabel(kind: PortfolioItem["kind"]): string { return ({ real_read_only: "真实只读", internal_paper: "内部模拟", shadow: "影子组合" })[kind]; }
 function coverageLabel(scope: string): string { return scope === "broker_account" ? "券商账户" : scope; }
 function snapshotStatusLabel(status: PortfolioSnapshot["status"]): string { return status === "READY" ? "已就绪" : status === "STALE" ? "已过期" : "需要对账"; }
 function formatTime(value: string | null): string { if (!value) return "Provider 时点缺失"; const date = new Date(value); return Number.isNaN(date.valueOf()) ? "无效时间" : date.toISOString().replace("T", " ").replace(".000Z", " UTC"); }
-function syncErrorMessage(code: unknown, status: number, retryAfter: string | null): string { if (code === "IDEMPOTENCY_CONFLICT") return "幂等键已被不同请求使用；未创建新任务。"; if (status === 429) return `只读同步冷却中${retryAfter && /^\d+$/.test(retryAfter) ? `，请等待 ${retryAfter} 秒` : ""}。当前快照保持不变。`; if (code === "VALIDATION_ERROR") return "同步请求不合法；未创建新任务。"; return "同步任务未登记。当前快照保持不变。"; }
 function stateDetail(state: DataStateKind): string { return ({ loading: "正在读取脱敏组合和冻结快照。", empty: "尚无可展示的冻结组合快照。", ready: "组合快照已就绪。", partial: "快照仅供研究，不可作为优化基线。", stale: "显示最后已知快照，不触发业务动作。", error: "读取失败；未开启任何交易能力。", forbidden: "当前身份无权读取组合事实。" })[state]; }
