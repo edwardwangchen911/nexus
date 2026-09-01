@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future as ConcurrentFuture
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -82,6 +83,51 @@ async def test_local_deadline_worker_category(
 
     assert exc_info.value.code == expected_code, exc_info.value.code
     assert adapter.is_ready()
+    await asyncio.wait_for(adapter._sdk_concurrency.acquire(), timeout=1)
+    adapter._sdk_concurrency.release()
+
+
+@pytest.mark.asyncio
+async def test_deadline_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sdk_module, "_DEADLINE_SECONDS", 0.01)
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+
+    class SnapshotFuture(ConcurrentFuture[object]):
+        def __init__(self) -> None:
+            super().__init__()
+            self._first_done = True
+
+        def done(self) -> bool:
+            state = super().done()
+            if self._first_done:
+                self._first_done = False
+                release_worker.set()
+                assert worker_finished.wait(timeout=1)
+            return state
+
+    def quote(*, codes: list[str]) -> object:
+        del codes
+        assert release_worker.wait(timeout=1)
+        try:
+            raise AuthenticationError("code", "message", "request-id", {"data": "value"})
+        finally:
+            worker_finished.set()
+
+    monkeypatch.setattr(sdk_module, "Future", SnapshotFuture)
+    adapter = SdkFosunTransport(
+        SimpleNamespace(market=SimpleNamespace(quote=quote)),
+        rate_limiter=NoopRateLimiter(),
+        sdk_error_mapper=probe_sdk_error_mapper(fsopenapi_exceptions),
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        await adapter.execute("fosun_get_quotes", {"codes": ("usAAPL",)})
+
+    assert exc_info.value.code == "PROVIDER_TRANSPORT_POISONED"
+    assert not adapter.is_ready()
     await asyncio.wait_for(adapter._sdk_concurrency.acquire(), timeout=1)
     adapter._sdk_concurrency.release()
 

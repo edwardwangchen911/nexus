@@ -13,6 +13,9 @@ from sdk_adapter_concurrency_cases import (
     test_capability_expiry_while_cross_lane_waiting_never_invokes_sdk_method as test_capability_expiry_while_cross_lane_waiting_never_invokes_sdk_method,  # noqa: E501
 )
 from sdk_adapter_concurrency_cases import (
+    test_deadline_snapshot as test_deadline_snapshot,
+)
+from sdk_adapter_concurrency_cases import (
     test_dual_token_bucket_applies_thirty_per_minute_budget as test_dual_token_bucket_applies_thirty_per_minute_budget,  # noqa: E501
 )
 from sdk_adapter_concurrency_cases import (

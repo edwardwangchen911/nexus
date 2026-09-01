@@ -622,14 +622,16 @@ class SdkFosunTransport:
                 except TimeoutError:
                     if not timeout_scope.expired():
                         raise
-                    worker_error = (
-                        None
-                        if thread_future.cancelled() or not thread_future.done()
-                        else thread_future.exception()
-                    )
-                    if worker_error is not None:
-                        raise worker_error
-                    if not thread_future.done():
+                    worker_done = thread_future.done()
+                    if worker_done:
+                        worker_error = (
+                            None
+                            if thread_future.cancelled()
+                            else thread_future.exception()
+                        )
+                        if worker_error is not None:
+                            raise worker_error
+                    else:
                         self._poison_transport()
                         release_sdk_slot = False
 
@@ -725,10 +727,13 @@ def _is_transport_error(error: Exception) -> bool:
     """Classify only concrete local network/transport failures as transport."""
     return isinstance(
         error,
-        requests.exceptions.ConnectionError
-        | requests.exceptions.Timeout
-        | requests.exceptions.SSLError
-        | ssl.SSLError,
+        (
+            requests.exceptions.ConnectionError
+            | requests.exceptions.Timeout
+            | requests.exceptions.SSLError
+            | requests.exceptions.ChunkedEncodingError
+            | ssl.SSLError
+        ),
     )
 
 

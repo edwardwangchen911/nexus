@@ -354,6 +354,7 @@ def test_non_probe_timeout_subclass_is_immediately_unavailable_without_retry() -
         (requests.exceptions.ProxyError(), "PROVIDER_UNAVAILABLE"),
         (requests.ReadTimeout(), "PROVIDER_UNAVAILABLE"),
         (requests.exceptions.SSLError(), "PROVIDER_UNAVAILABLE"),
+        (requests.exceptions.ChunkedEncodingError(), "PROVIDER_UNAVAILABLE"),
         (ssl.SSLError(), "PROVIDER_UNAVAILABLE"),
         (requests.HTTPError(), "PROVIDER_APPLICATION_ERROR"),
         (requests.RequestException(), "PROVIDER_APPLICATION_ERROR"),
