@@ -13,6 +13,9 @@ for (const viewport of [
     await page.goto("/paper");
 
     await expect(page.getByRole("heading", { name: "内部模拟盘" })).toBeVisible();
+    const currentStage = page.getByRole("region", { name: "投资决策证据链，可横向滚动" }).getByRole("listitem").filter({ hasText: "内部模拟" });
+    await expect(currentStage).toHaveAttribute("aria-current", "step");
+    await expect(currentStage).toBeInViewport();
     await expect(page.getByRole("region", { name: "模拟账户边界" })).toContainText("不是实盘");
     await expect(page.getByLabel("模拟账户绩效事实")).toContainText("USD 8,500.00");
     await expect(page.getByRole("table", { name: "内部模拟持仓" })).toContainText("alpaca / iex");
@@ -34,6 +37,8 @@ for (const viewport of [
       (violation) => violation.impact === "serious" || violation.impact === "critical",
     );
     expect(serious).toEqual([]);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.screenshot({ path: `test-results/paper-${viewport.name}.png`, fullPage: true });
   });
 }
 

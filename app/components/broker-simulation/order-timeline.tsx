@@ -7,7 +7,7 @@ export function BrokerOrderTimeline({ events }: { events: BrokerEvent[] }): Reac
   return (
     <section className="broker-section" aria-labelledby="broker-events-title">
       <header className="broker-section__heading">
-        <div><p className="eyebrow">APPEND-ONLY RECEIPTS</p><h2 id="broker-events-title">事件时间线</h2></div>
+        <div><p className="eyebrow">仅追加回执</p><h2 id="broker-events-title">事件时间线</h2></div>
         <p>{events.length} 条脱敏事件</p>
       </header>
       {events.length === 0 ? <p className="broker-section__empty">暂无外部事件；不以推断状态代替回执。</p> : (
@@ -26,4 +26,3 @@ export function BrokerOrderTimeline({ events }: { events: BrokerEvent[] }): Reac
 }
 
 function shortId(value: string): string { return `${value.slice(0, 8)}…${value.slice(-4)}`; }
-

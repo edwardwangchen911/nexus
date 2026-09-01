@@ -9,7 +9,7 @@ export function ReconciliationPanel({ reconciliation }: { reconciliation: Reconc
   return (
     <section className="broker-section broker-reconciliation" aria-labelledby="broker-reconciliation-title">
       <header className="broker-section__heading">
-        <div><p className="eyebrow">AUTHORITATIVE RECONCILIATION</p><h2 id="broker-reconciliation-title">对账边界</h2></div>
+        <div><p className="eyebrow">权威对账</p><h2 id="broker-reconciliation-title">对账边界</h2></div>
         <GitCompareArrows aria-hidden="true" size={21} />
       </header>
       {!reconciliation ? <p className="broker-section__empty">尚无对账运行；外部账户事实不作推断。</p> : (
@@ -24,4 +24,3 @@ export function ReconciliationPanel({ reconciliation }: { reconciliation: Reconc
     </section>
   );
 }
-

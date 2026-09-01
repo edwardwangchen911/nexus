@@ -4,6 +4,7 @@ import { Layers3, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
+import { DecisionPath } from "../../components/decision-path";
 import { DiagnosticList, OptimizationNeedPanel } from "../../components/diagnostic-list";
 import type { components } from "../../lib/generated/schema";
 
@@ -64,6 +65,7 @@ export function OptimizePanel({ state, overview, creating, notice, onCreate, onR
   return (
     <section className="page-stack optimize-page" aria-label="组合优化页面" data-state={state}>
       <header className="page-heading"><div><p className="eyebrow">组合决策诊断</p><h1>组合诊断与优化</h1><p>先确认问题和准入边界，再比较同口径三方案。风险和权重始终由后端确定性计算。</p></div><div className="page-actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新诊断</button></div></header>
+      <DecisionPath current="diagnose" />
       {!hasData || diagnosticOverview === null ? <DataState state={state} title={state === "loading" ? "正在读取诊断" : "诊断暂时不可用"} detail="数据缺失或过期时保持现状。" /> : <>
         <OptimizationNeedPanel report={diagnosticOverview.diagnostic_report!} />
         <section className="proposal-admission" aria-labelledby="proposal-admission-title"><div><p className="eyebrow">服务器准入边界</p><h2 id="proposal-admission-title">三方案准入</h2><p>{admission ? "服务器已绑定快照、数据版本与成本策略，可以开始比较。" : <>当前不可创建：<code>{diagnosticOverview.proposal_admission_reason ?? "AUTHORITY_UNAVAILABLE"}</code></>}</p></div>

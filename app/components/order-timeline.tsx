@@ -28,7 +28,7 @@ export function OrderTimeline({ order, allowCancel = true, onCancel }: { order: 
     <article className="paper-order" data-status={order.status} aria-labelledby={titleId}>
       <header className="paper-order__heading">
         <div>
-          <p className="eyebrow">ORDER / APPEND-ONLY FACTS</p>
+          <p className="eyebrow">订单 · 仅追加事实</p>
           <h3 id={titleId}>{symbol} · {order.side === "buy" ? "买入" : "卖出"}</h3>
           <p className="paper-order__identity numeric-data">内部订单 {order.order_id}</p>
         </div>

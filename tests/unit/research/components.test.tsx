@@ -37,8 +37,10 @@ describe("research evidence docket", () => {
   });
 
   it("renders stance, paired arguments, votes, invalidation and versions without a score or trade action", () => {
-    render(<DecisionCard research={researchData()} />);
+    render(<ResearchPanel state="ready" research={researchData()} admission={researchAdmissionData()} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
 
+    expect(screen.getByText("时点冻结研究")).toBeVisible();
+    expect(screen.getByText("研究证据").closest("li")).toHaveAttribute("aria-current", "step");
     expect(screen.getByRole("heading", { name: "委员会决策记录" })).toBeVisible();
     expect(screen.getByText("保持观察", { exact: true })).toBeVisible();
     expect(screen.getByRole("heading", { name: "支持论点" })).toBeVisible();

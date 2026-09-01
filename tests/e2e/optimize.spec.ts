@@ -51,6 +51,7 @@ for (const viewport of [
       await expect(page.getByRole("navigation", { name: "主导航" }).getByRole("link", { name: "概览" })).toHaveAttribute("aria-current", "page");
     }
     await page.getByRole("link", { name: "打开组合诊断" }).click();
+    await expect(page.getByRole("region", { name: "投资决策证据链，可横向滚动" }).getByRole("listitem").filter({ hasText: "组合诊断" })).toHaveAttribute("aria-current", "step");
     await expect(page.getByRole("heading", { name: "组合诊断账簿" })).toBeVisible();
     await expect(page.getByRole("listitem", { name: /CONCENTRATION_TOP1/ })).toContainText("-0.05");
     if (viewport.name === "mobile-390" || viewport.name === "desktop-1440") {
@@ -75,9 +76,15 @@ for (const viewport of [
     const shadowSerious = (await new AxeBuilder({ page }).analyze()).violations.filter((violation) => violation.impact === "serious" || violation.impact === "critical");
     expect(shadowSerious).toEqual([]);
     await page.getByRole("link", { name: "试算最小调整权重" }).click();
+    await expect(page.getByRole("region", { name: "投资决策证据链，可横向滚动" }).getByRole("listitem").filter({ hasText: "情景试算" })).toHaveAttribute("aria-current", "step");
     await expect(page.getByRole("heading", { name: "有限权重情景" })).toBeVisible();
     await expect(page.getByRole("textbox", { name: "目标权重 1" })).toHaveValue("0.15");
     await expect(page.getByRole("button", { name: /下单|交易|买入|卖出/ })).toHaveCount(0);
+
+    if (viewport.name === "mobile-390" || viewport.name === "desktop-1440") {
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({ path: `test-results/what-if-${viewport.name}.png`, fullPage: true });
+    }
 
     const serious = (await new AxeBuilder({ page }).analyze()).violations.filter((violation) => violation.impact === "serious" || violation.impact === "critical");
     expect(serious).toEqual([]);

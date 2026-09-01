@@ -57,6 +57,8 @@ describe("strategy evolution workbench", () => {
     renderPanel("ready");
 
     expect(screen.getByRole("heading", { name: "baseline_v1" })).toBeVisible();
+    expect(screen.getByText("策略进化 · 证据账簿")).toBeVisible();
+    expect(screen.getByText("01 / 冠军权威")).toBeVisible();
     expect(screen.getByText("提高流动性门槛可减少成本侵蚀，同时保留中期动量溢价。")).toBeVisible();
     expect(screen.getByText("ADV20 最低成交额 · 3 个候选值")).toBeVisible();
     expect(screen.getByRole("heading", { name: "证据比较" })).toBeVisible();

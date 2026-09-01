@@ -19,6 +19,7 @@ for (const viewport of releaseViewports) {
     await page.goto("/strategies");
 
     await expect(page.getByRole("region", { name: "策略进化工作台" })).toHaveAttribute("data-state", "ready");
+    await expect(page.getByText("策略进化 · 证据账簿")).toBeVisible();
     await expect(page.getByText("实盘关闭")).toBeVisible();
     await expect(page.getByRole("heading", { name: "baseline_v1" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "活动实验" })).toBeVisible();
@@ -37,6 +38,7 @@ for (const viewport of releaseViewports) {
     await assertReleaseAccessibility(page);
 
     if (viewport.name === "mobile-390" || viewport.name === "desktop-1440") {
+      await page.evaluate(() => window.scrollTo(0, 0));
       await page.screenshot({ path: `test-results/strategy-evolution-${viewport.name}.png`, fullPage: true });
     }
   });

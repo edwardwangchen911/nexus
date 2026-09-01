@@ -49,6 +49,8 @@ describe("broker simulation workbench", () => {
       onRefresh={vi.fn()} onApprove={vi.fn()} onReject={vi.fn()} />);
 
     expect(screen.getByRole("heading", { name: "复星模拟盘验证" })).toBeVisible();
+    expect(screen.getByText("离线审核").closest("li")).toHaveAttribute("aria-current", "step");
+    expect(screen.getByText("失败关闭执行电路")).toBeVisible();
     const circuit = screen.getByRole("region", { name: "执行电路" });
     for (const step of ["策略提案", "确定性风控", "人工批准", "外部激活", "派发与对账"]) {
       expect(within(circuit).getByText(step)).toBeVisible();

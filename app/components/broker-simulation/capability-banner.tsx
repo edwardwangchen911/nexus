@@ -12,7 +12,7 @@ export function CapabilityBanner({ workbench }: { workbench: Workbench }): React
       <div className="broker-capability__lock">
         <LockKeyhole aria-hidden="true" size={20} />
         <div>
-          <p className="eyebrow">EXECUTION BOUNDARY</p>
+          <p className="eyebrow">执行能力边界</p>
           <h2 id="broker-capability-title">实盘关闭</h2>
         </div>
       </div>
@@ -31,4 +31,3 @@ export function CapabilityBanner({ workbench }: { workbench: Workbench }): React
     </section>
   );
 }
-

@@ -7,7 +7,7 @@ export function OrderBatch({ intent }: { intent: BrokerIntent }): React.ReactEle
   return (
     <section className="broker-section" aria-labelledby="broker-orders-title">
       <header className="broker-section__heading">
-        <div><p className="eyebrow">SERVER-DERIVED ORDERS</p><h2 id="broker-orders-title">订单预览</h2></div>
+        <div><p className="eyebrow">服务端推导订单</p><h2 id="broker-orders-title">订单预览</h2></div>
         <p>{intent.orders.length} 笔·不可在浏览器中改写</p>
       </header>
       {/* Bounded horizontal data regions remain keyboard-scrollable at 200% zoom. */}
@@ -37,4 +37,3 @@ export function OrderBatch({ intent }: { intent: BrokerIntent }): React.ReactEle
 function shortId(value: string): string {
   return `${value.slice(0, 8)}…${value.slice(-4)}`;
 }
-

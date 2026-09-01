@@ -4,6 +4,7 @@ import { AlertTriangle, Check, RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
+import { DecisionPath } from "../../components/decision-path";
 import { formatPaperDecimal, formatPaperTime, OrderTimeline, type PaperOrder } from "../../components/order-timeline";
 import type { components } from "../../lib/generated/schema";
 
@@ -244,16 +245,17 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
   return (
     <section className="page-stack paper-page" aria-label="内部模拟盘控制台" data-state={state}>
       <header className="page-heading">
-        <div><p className="eyebrow">INTERNAL PAPER / USD CASH ACCOUNT</p><h1>内部模拟盘</h1><p>确定性执行、账本与绩效事实。这里不是实盘，不连接券商写接口，也不提供创建订单入口。</p></div>
+        <div><p className="eyebrow">内部模拟 · 美元现金账户</p><h1>内部模拟盘</h1><p>先看账户绩效和风险暴露，再核对持仓、归因与订单账簿。这里不是实盘。</p></div>
         <div className="page-actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新事实</button></div>
       </header>
+      <DecisionPath current="paper" />
       <div role="status" aria-label="模拟盘操作状态" aria-live="polite" aria-atomic="true">
         {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
       </div>
       {!hasFacts ? <DataState state={state} title="内部模拟账户" detail={paperStateDetail(state)} announce={false} /> : <>
         <section className="paper-boundary" aria-label="模拟账户边界">
           <ShieldCheck aria-hidden="true" size={22} />
-          <div><p className="eyebrow">SIMULATION AUTHORITY</p><h2>{portfolio.name}</h2><p>初始资金 <strong className="numeric-data">USD {formatPaperDecimal(portfolio.initial_capital, 2)}</strong> · 仅内部模拟成交 · 实盘能力保持关闭</p></div>
+          <div><p className="eyebrow">模拟账户权威</p><h2>{portfolio.name}</h2><p>初始资金 <strong className="numeric-data">USD {formatPaperDecimal(portfolio.initial_capital, 2)}</strong> · 仅内部模拟成交 · 实盘能力保持关闭</p></div>
           <span className="mode-badge">不是实盘</span>
         </section>
         {state === "partial" || state === "stale" ? <p className="paper-state-warning"><AlertTriangle aria-hidden="true" size={18} />{paperStateDetail(state)}</p> : null}
@@ -261,7 +263,7 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
         <Positions portfolio={portfolio} />
         <Attributions portfolio={portfolio} />
         <section className="paper-orders" aria-labelledby="paper-orders-title">
-          <header className="paper-orders__heading"><div><p className="eyebrow">ORDERS / SERVER TIMELINE</p><h2 id="paper-orders-title">订单与模拟成交</h2><p>事件、状态和可取消性均由服务端给出，浏览器不推断状态。</p></div><label className="paper-orders__filter">订单状态筛选<select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value as "" | OrderStatus)} disabled={loadingMore}>{statusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label></header>
+          <header className="paper-orders__heading"><div><p className="eyebrow">服务端订单时间线</p><h2 id="paper-orders-title">订单与模拟成交</h2><p>事件、状态和可取消性均由服务端给出，浏览器不推断状态。</p></div><label className="paper-orders__filter">订单状态筛选<select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value as "" | OrderStatus)} disabled={loadingMore}>{statusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label></header>
           {orders.length === 0 ? <p className="paper-orders__empty">当前筛选下没有订单事实。</p> : <div className="paper-order-list">{orders.map((order) => <OrderTimeline key={order.order_id} order={order} allowCancel={state === "ready" && !loadingMore} onCancel={onCancel} />)}</div>}
           {nextCursor ? <button className="button button--quiet paper-orders__more" type="button" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? "正在加载" : "加载更多订单"}</button> : null}
         </section>
@@ -272,7 +274,7 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
 
 function PerformanceFacts({ portfolio }: { portfolio: PaperPortfolio }): React.ReactElement {
   const performance = portfolio.performance!;
-  return <section className="paper-performance" aria-labelledby="paper-performance-title"><header><div><p className="eyebrow">FROZEN PERFORMANCE</p><h2 id="paper-performance-title">账户绩效</h2></div><p className="numeric-data">截至 {formatPaperTime(performance.as_of)}</p></header><dl aria-label="模拟账户绩效事实">
+  return <section className="paper-performance" aria-labelledby="paper-performance-title"><header><div><p className="eyebrow">冻结绩效事实</p><h2 id="paper-performance-title">账户绩效</h2></div><p className="numeric-data">截至 {formatPaperTime(performance.as_of)}</p></header><dl aria-label="模拟账户绩效事实">
     <MoneyFact term="NAV" value={performance.nav} />
     <MoneyFact term="可用现金" value={performance.available_cash} />
     <MoneyFact term="预留现金" value={performance.reserved_cash} />
@@ -287,13 +289,13 @@ function PerformanceFacts({ portfolio }: { portfolio: PaperPortfolio }): React.R
 function Positions({ portfolio }: { portfolio: PaperPortfolio }): React.ReactElement {
   // Bounded horizontal data regions must remain keyboard-scrollable on narrow screens.
   // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
-  return <section className="paper-table-section" aria-labelledby="paper-positions-title"><header><div><p className="eyebrow">POSITIONS / QUALIFIED CLOSE</p><h2 id="paper-positions-title">持仓</h2></div><p>市价仅采用已准入的收盘权威。</p></header>{portfolio.positions.length === 0 ? <p className="paper-orders__empty">当前没有模拟持仓。</p> : <div className="table-scroll" role="region" aria-label="内部模拟持仓表，可横向滚动" tabIndex={0}><table className="paper-position-table numeric-data" aria-label="内部模拟持仓"><caption>数量、成本、市值与来源时点均为后端冻结事实。</caption><thead><tr><th scope="col">标的</th><th scope="col">数量</th><th scope="col">可用 / 预留</th><th scope="col">平均成本</th><th scope="col">参考收盘</th><th scope="col">市值</th><th scope="col">未实现损益</th><th scope="col">来源 / feed</th><th scope="col">交付</th><th scope="col">价格时点</th></tr></thead><tbody>{portfolio.positions.map((position) => <tr key={position.instrument_id}><th scope="row">{position.symbol ?? "未知标的"}</th><td>{formatPaperDecimal(position.quantity)}</td><td>{formatPaperDecimal(position.available_quantity)} / {formatPaperDecimal(position.reserved_quantity)}</td><td>USD {formatPaperDecimal(position.average_cost, 2)}</td><td>USD {formatPaperDecimal(position.reference_close, 2)}</td><td>USD {formatPaperDecimal(position.market_value, 2)}</td><td>USD {formatPaperDecimal(position.unrealized_pnl, 2)}</td><td>{position.price_source} / {position.price_feed}</td><td>{position.delivery_mode}</td><td>{formatPaperTime(position.price_as_of)}</td></tr>)}</tbody></table></div>}</section>;
+  return <section className="paper-table-section" aria-labelledby="paper-positions-title"><header><div><p className="eyebrow">持仓 · 准入收盘价</p><h2 id="paper-positions-title">持仓</h2></div><p>市价仅采用已准入的收盘权威。</p></header>{portfolio.positions.length === 0 ? <p className="paper-orders__empty">当前没有模拟持仓。</p> : <div className="table-scroll" role="region" aria-label="内部模拟持仓表，可横向滚动" tabIndex={0}><table className="paper-position-table numeric-data" aria-label="内部模拟持仓"><caption>数量、成本、市值与来源时点均为后端冻结事实。</caption><thead><tr><th scope="col">标的</th><th scope="col">数量</th><th scope="col">可用 / 预留</th><th scope="col">平均成本</th><th scope="col">参考收盘</th><th scope="col">市值</th><th scope="col">未实现损益</th><th scope="col">来源 / feed</th><th scope="col">交付</th><th scope="col">价格时点</th></tr></thead><tbody>{portfolio.positions.map((position) => <tr key={position.instrument_id}><th scope="row">{position.symbol ?? "未知标的"}</th><td>{formatPaperDecimal(position.quantity)}</td><td>{formatPaperDecimal(position.available_quantity)} / {formatPaperDecimal(position.reserved_quantity)}</td><td>USD {formatPaperDecimal(position.average_cost, 2)}</td><td>USD {formatPaperDecimal(position.reference_close, 2)}</td><td>USD {formatPaperDecimal(position.market_value, 2)}</td><td>USD {formatPaperDecimal(position.unrealized_pnl, 2)}</td><td>{position.price_source} / {position.price_feed}</td><td>{position.delivery_mode}</td><td>{formatPaperTime(position.price_as_of)}</td></tr>)}</tbody></table></div>}</section>;
 }
 
 function Attributions({ portfolio }: { portfolio: PaperPortfolio }): React.ReactElement {
   // Bounded horizontal data regions must remain keyboard-scrollable on narrow screens.
   // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
-  return <section className="paper-table-section" aria-labelledby="paper-attribution-title"><header><div><p className="eyebrow">ATTRIBUTION / PERSISTED</p><h2 id="paper-attribution-title">绩效归因</h2></div><p>行业证据缺失时保留 PARTIAL，不猜测分类。</p></header>{portfolio.attributions.length === 0 ? <p className="paper-orders__empty">尚无归因事实。</p> : <div className="table-scroll" role="region" aria-label="内部模拟绩效归因表，可横向滚动" tabIndex={0}><table className="paper-attribution-table numeric-data" aria-label="内部模拟绩效归因"><caption>现金、标的与行业维度的冻结归因。</caption><thead><tr><th scope="col">维度</th><th scope="col">键</th><th scope="col">市值</th><th scope="col">已实现</th><th scope="col">未实现</th><th scope="col">费用</th><th scope="col">滑点</th><th scope="col">完整性</th></tr></thead><tbody>{portfolio.attributions.map((item) => <tr key={`${item.dimension}:${item.dimension_key}`}><th scope="row">{attributionLabel(item.dimension)}</th><td>{item.dimension_key}</td><td>USD {formatPaperDecimal(item.market_value, 2)}</td><td>USD {formatPaperDecimal(item.realized_pnl, 2)}</td><td>USD {formatPaperDecimal(item.unrealized_pnl, 2)}</td><td>USD {formatPaperDecimal(item.fees, 2)}</td><td>USD {formatPaperDecimal(item.slippage, 2)}</td><td>{item.completeness}</td></tr>)}</tbody></table></div>}</section>;
+  return <section className="paper-table-section" aria-labelledby="paper-attribution-title"><header><div><p className="eyebrow">持久化绩效归因</p><h2 id="paper-attribution-title">绩效归因</h2></div><p>行业证据缺失时保留 PARTIAL，不猜测分类。</p></header>{portfolio.attributions.length === 0 ? <p className="paper-orders__empty">尚无归因事实。</p> : <div className="table-scroll" role="region" aria-label="内部模拟绩效归因表，可横向滚动" tabIndex={0}><table className="paper-attribution-table numeric-data" aria-label="内部模拟绩效归因"><caption>现金、标的与行业维度的冻结归因。</caption><thead><tr><th scope="col">维度</th><th scope="col">键</th><th scope="col">市值</th><th scope="col">已实现</th><th scope="col">未实现</th><th scope="col">费用</th><th scope="col">滑点</th><th scope="col">完整性</th></tr></thead><tbody>{portfolio.attributions.map((item) => <tr key={`${item.dimension}:${item.dimension_key}`}><th scope="row">{attributionLabel(item.dimension)}</th><td>{item.dimension_key}</td><td>USD {formatPaperDecimal(item.market_value, 2)}</td><td>USD {formatPaperDecimal(item.realized_pnl, 2)}</td><td>USD {formatPaperDecimal(item.unrealized_pnl, 2)}</td><td>USD {formatPaperDecimal(item.fees, 2)}</td><td>USD {formatPaperDecimal(item.slippage, 2)}</td><td>{item.completeness}</td></tr>)}</tbody></table></div>}</section>;
 }
 
 function PaperCancelDialog({ pending, submitting, onDismiss, onConfirm }: { pending: PendingCancel; submitting: boolean; onDismiss: () => void; onConfirm: () => void }): React.ReactElement {

@@ -11,7 +11,10 @@ for (const viewport of releaseViewports) {
     await installBrokerFixtures(page);
     await page.goto("/broker-simulation");
 
-    await expect(page.getByRole("region", { name: "复星模拟盘审核工作台" })).toHaveAttribute("data-state", "ready");
+    await expect(page.getByRole("region", { name: "复星模拟盘审核工作台" })).toHaveAttribute("data-state", "ready", { timeout: 15_000 });
+    const currentStage = page.getByRole("region", { name: "投资决策证据链，可横向滚动" }).getByRole("listitem").filter({ hasText: "离线审核" });
+    await expect(currentStage).toHaveAttribute("aria-current", "step");
+    await expect(currentStage).toBeInViewport();
     await expect(page.getByText("实盘关闭").first()).toBeVisible();
     await expect(page.getByText("USD 1,200.00")).toBeVisible();
     await expect(page.getByText(/external_activation_blocked/)).toBeVisible();
@@ -22,6 +25,7 @@ for (const viewport of releaseViewports) {
     await assertReleaseAccessibility(page);
 
     if (viewport.name === "mobile-390" || viewport.name === "desktop-1440") {
+      await page.evaluate(() => window.scrollTo(0, 0));
       await page.screenshot({ path: `test-results/broker-simulation-${viewport.name}.png`, fullPage: true });
     }
   });

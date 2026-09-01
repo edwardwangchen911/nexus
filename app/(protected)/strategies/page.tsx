@@ -367,7 +367,7 @@ export function StrategiesPanel(props: Props): React.ReactElement {
     <section className="page-stack strategies-page evolution-workbench" aria-label="策略进化工作台" data-state={state}>
       <header className="page-heading evolution-heading">
         <div>
-          <p className="eyebrow">STRATEGY EVOLUTION / EVIDENCE LEDGER</p>
+          <p className="eyebrow">策略进化 · 证据账簿</p>
           <h1>策略进化工作台</h1>
           <p>Agent 只提出可登记假设；候选生成、回测、Shadow、晋级与回滚均由确定性规则完成。</p>
         </div>
@@ -447,7 +447,7 @@ function ChampionSection({ overview, canWrite, busyAction, onStartExperiment, on
   return (
     <section className="evolution-section evolution-champion" aria-labelledby="champion-title">
       <header className="evolution-section__heading">
-        <div><p className="eyebrow">01 / CHAMPION AUTHORITY</p><h2 id="champion-title">{champion.strategy_version}</h2></div>
+        <div><p className="eyebrow">01 / 冠军权威</p><h2 id="champion-title">{champion.strategy_version}</h2></div>
         <div className="strategy-policy-card__badges"><span className="mode-badge">内部模拟冠军</span><span className="mode-badge">generation {champion.generation}</span></div>
       </header>
       <dl className="evolution-ledger numeric-data">
@@ -483,7 +483,7 @@ function ExperimentSection({ overview, detail, canWrite, busyAction, onSelectExp
   return (
     <section className="evolution-section" aria-labelledby="experiment-title">
       <header className="evolution-section__heading">
-        <div><p className="eyebrow">02 / REGISTERED HYPOTHESIS</p><h2 id="experiment-title">活动实验</h2></div>
+        <div><p className="eyebrow">02 / 已登记假设</p><h2 id="experiment-title">活动实验</h2></div>
         {family ? <span className="state-chip">{family.state}</span> : null}
       </header>
       {!family ? <p className="evolution-empty">当前没有活动 family；Agent 不会为空证据生成默认候选。</p> : (
@@ -518,7 +518,7 @@ function ComparisonSection({ detail }: { detail: ExperimentDetail | null }): Rea
   ] as const;
   return (
     <section className="evolution-section" aria-labelledby="comparison-title">
-      <header className="evolution-section__heading"><div><p className="eyebrow">03 / WALK-FORWARD EVIDENCE</p><h2 id="comparison-title">证据比较</h2></div><span className="state-chip">{comparison.status}</span></header>
+      <header className="evolution-section__heading"><div><p className="eyebrow">03 / 滚动窗口证据</p><h2 id="comparison-title">证据比较</h2></div><span className="state-chip">{comparison.status}</span></header>
       <div className="evolution-comparison-badges"><span className="mode-badge">{comparison.spy_comparison_complete ? "SPY 比较完整" : "SPY 比较不完整"}</span><span className="mode-badge">{comparison.equal_weight_comparison_complete ? "等权白名单比较完整" : "等权白名单比较不完整"}</span><span className="mode-badge">{comparison.data_mode}</span></div>
       {/* Bounded horizontal evidence must remain keyboard-scrollable on narrow screens. */}
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
@@ -536,7 +536,7 @@ function ShadowSection({ detail }: { detail: ExperimentDetail | null }): React.R
   const shadow = detail.shadow;
   return (
     <section className="evolution-section evolution-shadow" aria-labelledby="shadow-title">
-      <header className="evolution-section__heading"><div><p className="eyebrow">04 / FORWARD PAPER EVIDENCE</p><h2 id="shadow-title">Strategy Shadow</h2></div><span className="state-chip">{shadow.status}</span></header>
+      <header className="evolution-section__heading"><div><p className="eyebrow">04 / 前向模拟证据</p><h2 id="shadow-title">Strategy Shadow</h2></div><span className="state-chip">{shadow.status}</span></header>
       <div className="evolution-progress" aria-label={`Shadow 评估已完成 ${shadow.completed_sessions} / ${shadow.evaluation_sessions} 个 session`}><div style={{ inlineSize: `${Math.min(100, shadow.completed_sessions / shadow.evaluation_sessions * 100)}%` }} /><span>{shadow.completed_sessions} / {shadow.evaluation_sessions} sessions</span></div>
       <div className="evolution-comparison-badges" aria-label="Shadow 宽限进度"><span className="mode-badge">宽限期 {shadow.grace_sessions} sessions</span><span className="mode-badge">已等待 {shadow.grace_elapsed_sessions} sessions</span></div>
       <ol className="evolution-checkpoints" aria-label="Shadow 检查点">{[5, 21, 63].map((checkpoint) => <li key={checkpoint} data-complete={shadow.checkpoints_completed.includes(checkpoint as 5 | 21 | 63)}>检查点 {checkpoint} · {shadow.checkpoints_completed.includes(checkpoint as 5 | 21 | 63) ? "已完成" : "等待"}</li>)}</ol>
@@ -550,7 +550,7 @@ function GatesSection({ detail }: { detail: ExperimentDetail | null }): React.Re
   if (!detail) return <EmptyEvidence index="05" title="晋级解释" />;
   return (
     <section className="evolution-section" aria-labelledby="gates-title">
-      <header className="evolution-section__heading"><div><p className="eyebrow">05 / DETERMINISTIC GATES</p><h2 id="gates-title">晋级解释</h2></div><span className="mode-badge">{detail.integrity_status}</span></header>
+      <header className="evolution-section__heading"><div><p className="eyebrow">05 / 确定性门禁</p><h2 id="gates-title">晋级解释</h2></div><span className="mode-badge">{detail.integrity_status}</span></header>
       <ol className="evolution-gates">{detail.gates.map((gate, index) => <li key={`${gate.stage}-${gate.gate}`} data-status={gate.status}><span className="evolution-gates__index">{String(index + 1).padStart(2, "0")}</span><div><header><h3>{gate.gate}</h3><span>{gateStatusLabel(gate.status)}</span></header><dl className="numeric-data"><div><dt>阶段</dt><dd>{gate.stage}</dd></div><div><dt>观测</dt><dd>{gate.observed.join(" · ") || "UNKNOWN"}</dd></div><div><dt>阈值</dt><dd>{gate.thresholds.join(" · ") || "UNKNOWN"}</dd></div><div><dt>理由</dt><dd>{gate.reason_code}</dd></div></dl></div></li>)}</ol>
     </section>
   );
@@ -565,7 +565,7 @@ function HistorySection({ overview, canWrite, busyAction, rollbackTriggerRef, on
 }): React.ReactElement {
   return (
     <section className="evolution-section" aria-labelledby="history-title">
-      <header className="evolution-section__heading"><div><p className="eyebrow">06 / IMMUTABLE REGISTRY</p><h2 id="history-title">冠军历史</h2></div><History aria-hidden="true" size={22} /></header>
+      <header className="evolution-section__heading"><div><p className="eyebrow">06 / 不可变注册表</p><h2 id="history-title">冠军历史</h2></div><History aria-hidden="true" size={22} /></header>
       <ol className="evolution-history">{overview.registry_events.map((event) => <li key={event.sequence}><GitBranch aria-hidden="true" size={18} /><div><strong>{event.event_type} · {event.target_strategy_version}</strong><span>generation {event.champion_generation} · {event.status} · {formatUtc(event.occurred_at)}</span><small>{shortHash(event.event_hash)}</small></div></li>)}</ol>
       <div className="evolution-actions"><button ref={rollbackTriggerRef} className="button button--danger" type="button" disabled={!canWrite} aria-label="回滚上一个冠军" onClick={onOpenRollback}><RotateCcw aria-hidden="true" size={17} />{busyAction === "rollback" ? "回滚处理中…" : "回滚上一个冠军"}</button></div>
     </section>
@@ -573,7 +573,7 @@ function HistorySection({ overview, canWrite, busyAction, rollbackTriggerRef, on
 }
 
 function EmptyEvidence({ index, title }: { index: string; title: string }): React.ReactElement {
-  return <section className="evolution-section evolution-empty" aria-label={title}><p className="eyebrow">{index} / EVIDENCE UNAVAILABLE</p><h2>{title}</h2><p>当前没有可验证证据；不使用 0 或浏览器默认值代替。</p></section>;
+  return <section className="evolution-section evolution-empty" aria-label={title}><p className="eyebrow">{index} / 证据不可用</p><h2>{title}</h2><p>当前没有可验证证据；不使用 0 或浏览器默认值代替。</p></section>;
 }
 
 function HashRail({ values }: { values: Array<[string, string | null | undefined]> }): React.ReactElement {

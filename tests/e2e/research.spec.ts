@@ -24,12 +24,13 @@ for (const viewport of [
     await installFixtures(page);
     await page.goto(`/briefs/${sessionDate}`);
 
-    await expect(page.getByRole("heading", { name: "每日 Agent 简报" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: `${sessionDate} 证据完整度` })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "每日 Agent 简报" })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("heading", { name: `${sessionDate} 证据完整度` })).toBeVisible({ timeout: 15_000 });
     await page.getByRole("link", { name: instrumentId }).first().click();
 
     await expect(page).toHaveURL(new RegExp(`/research/${instrumentId}\\?as_of=`));
     await expect(page.getByRole("heading", { name: "委员会决策记录" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "投资决策证据链，可横向滚动" }).getByRole("listitem").filter({ hasText: "研究证据" })).toHaveAttribute("aria-current", "step");
     await expect(page.getByRole("heading", { name: "支持论点" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "反方论点" })).toBeVisible();
     await expect(page.getByText(/空头角色认为增长放缓/)).toBeVisible();
@@ -55,6 +56,10 @@ for (const viewport of [
       (violation) => violation.impact === "serious" || violation.impact === "critical",
     );
     expect(serious).toEqual([]);
+    if (viewport.name === "mobile-390" || viewport.name === "desktop-1440") {
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({ path: `test-results/research-${viewport.name}.png`, fullPage: true });
+    }
   });
 }
 

@@ -34,7 +34,7 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
     <article className="decision-card" aria-labelledby="decision-card-title">
       <header className="decision-card__heading">
         <div>
-          <p className="eyebrow">DECISION / EVIDENCE DOCKET</p>
+          <p className="eyebrow">委员会决策 · 证据卷宗</p>
           <h2 id="decision-card-title">委员会决策记录</h2>
         </div>
         <div className="decision-card__badges">

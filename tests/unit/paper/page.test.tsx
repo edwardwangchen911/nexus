@@ -48,6 +48,8 @@ describe("internal paper page", () => {
       onRefresh={vi.fn()} onStatusFilter={vi.fn()} onLoadMore={vi.fn()} onCancel={vi.fn()} />);
 
     expect(screen.getByRole("heading", { name: "内部模拟盘" })).toBeVisible();
+    expect(screen.getByText("内部模拟").closest("li")).toHaveAttribute("aria-current", "step");
+    expect(screen.getByText("冻结绩效事实")).toBeVisible();
     expect(screen.getAllByText(/不是实盘/).length).toBeGreaterThanOrEqual(2);
     expect(within(screen.getByRole("region", { name: "模拟账户边界" })).getByText("USD 10,000.00")).toBeVisible();
     const facts = screen.getByLabelText("模拟账户绩效事实");

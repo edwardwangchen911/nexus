@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../../components/data-state";
 import { DecisionCard } from "../../../components/decision-card";
+import { DecisionPath } from "../../../components/decision-path";
 import type { components } from "../../../lib/generated/schema";
 
 type Research = components["schemas"]["ResearchRunResponse"];
@@ -101,13 +102,14 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
   return (
     <section className="page-stack research-page" aria-label="个股研究证据页" data-state={state}>
       <header className="page-heading">
-        <div><p className="eyebrow">RESEARCH / POINT-IN-TIME</p><h1>个股研究证据页</h1><p>把委员会结论拆成论点、反证、失效条件和不可变证据；没有分数，也不提供交易动作。</p></div>
+        <div><p className="eyebrow">时点冻结研究</p><h1>个股研究证据页</h1><p>把委员会结论拆成论点、反证、失效条件和不可变证据；没有分数，也不提供交易动作。</p></div>
         <div className="page-actions">
           <span className="state-chip" data-state={state}>{dataStateLabels[state]}</span>
           <button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />重新读取</button>
           {canRun ? <button className="button button--primary" type="button" onClick={onRun} disabled={submitting}><ScanSearch aria-hidden="true" size={17} />{submitting ? "正在登记研究" : state === "empty" ? "运行冻结研究" : "重新运行冻结研究"}</button> : null}
         </div>
       </header>
+      <DecisionPath current="research" />
       {notice ? <p className="inline-notice" data-kind={notice.kind} role="status" aria-live="polite">{notice.text}</p> : null}
       {admission?.eligible === false ? <p className="research-page__gate" role="note">{researchAdmissionReason(admission.reason)}</p> : null}
       {!hasData ? <DataState state={state} title={researchStateTitle(state)} detail={researchStateDetail(state)} /> : <>

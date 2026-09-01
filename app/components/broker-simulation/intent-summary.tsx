@@ -24,7 +24,7 @@ export function IntentSummary({
     <section className="broker-section broker-intent" aria-labelledby="broker-intent-title">
       <header className="broker-section__heading">
         <div>
-          <p className="eyebrow">IMMUTABLE INTENT</p>
+          <p className="eyebrow">不可变策略意图</p>
           <h2 id="broker-intent-title">服务端批次意图</h2>
         </div>
         <span className="state-chip" data-state={intent.status}>{intent.status}</span>
@@ -67,4 +67,3 @@ export function IntentSummary({
 function shortHash(value: string): string {
   return `${value.slice(0, 8)}…${value.slice(-8)}`;
 }
-

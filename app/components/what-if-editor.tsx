@@ -67,7 +67,7 @@ function WhatIfProposalEditor({ group, proposal, actionsEnabled, onEvaluate }: {
     <section className="what-if-editor" aria-labelledby="what-if-title">
       <header>
         <div>
-          <p className="eyebrow">SIDE-EFFECT-FREE EVALUATION</p>
+          <p className="eyebrow">无副作用评估</p>
           <h2 id="what-if-title">有限权重情景</h2>
           <p>允许范围冻结自所选方案；仅分析，不持久化，不生成订单。</p>
         </div>

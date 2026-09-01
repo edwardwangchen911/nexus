@@ -8,6 +8,7 @@ import { IntentSummary } from "../../components/broker-simulation/intent-summary
 import { OrderBatch } from "../../components/broker-simulation/order-batch";
 import { BrokerOrderTimeline } from "../../components/broker-simulation/order-timeline";
 import { ReconciliationPanel } from "../../components/broker-simulation/reconciliation-panel";
+import { DecisionPath } from "../../components/decision-path";
 import type { components } from "../../lib/generated/schema";
 
 export type BrokerSimulation = components["schemas"]["BrokerSimulationResponse"];
@@ -174,7 +175,7 @@ export function BrokerSimulationPanel({
     <section className="broker-workbench" data-state={state} aria-label="复星模拟盘审核工作台">
       <header className="broker-hero">
         <div>
-          <p className="eyebrow">PHASE 3A / OFFLINE EVIDENCE LEDGER</p>
+          <p className="eyebrow">离线模拟审核 · 证据账簿</p>
           <h1>复星模拟盘验证</h1>
           <p>把策略意图、确定性风控、人工批准与券商回执拆成可追溯的权威节点。</p>
         </div>
@@ -185,6 +186,8 @@ export function BrokerSimulationPanel({
           </button>
         </div>
       </header>
+
+      <DecisionPath current="review" />
 
       <div className="broker-state" data-state={state}>
         <div role="status" aria-label="模拟盘工作台状态" aria-live="polite" aria-atomic="true">
@@ -215,7 +218,7 @@ export function BrokerSimulationPanel({
 function ExecutionCircuit(): React.ReactElement {
   return (
     <section className="broker-circuit" aria-label="执行电路">
-      <p className="eyebrow">FAIL-CLOSED EXECUTION CIRCUIT</p>
+      <p className="eyebrow">失败关闭执行电路</p>
       <ol>
         {["策略提案", "确定性风控", "人工批准", "外部激活", "派发与对账"].map((step, index) => (
           <li key={step} data-locked={index >= 3 ? "true" : undefined}>
@@ -246,7 +249,7 @@ function ApprovalDialog({ busy, onDismiss, onConfirm }: { busy: boolean; onDismi
     <div className="dialog-backdrop" role="presentation">
       <dialog className="dialog" open aria-modal="true" aria-labelledby="broker-approval-title" onKeyDown={onKeyDown}>
         <button className="dialog__close" type="button" onClick={onDismiss} disabled={busy} aria-label="关闭批准对话框" ref={closeRef}><X aria-hidden="true" size={18} /></button>
-        <p className="eyebrow">LOCAL APPROVAL ONLY</p>
+        <p className="eyebrow">仅记录本地批准</p>
         <h2 id="broker-approval-title">确认批准离线模拟批次</h2>
         <p>批准不会派发任何订单，也不会开启复星模拟写入或实盘。它只记录你对当前封印批次的本地批准。</p>
         <div className="dialog__actions">
