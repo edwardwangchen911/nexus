@@ -12,6 +12,18 @@ from types import SimpleNamespace
 
 import pytest
 import requests
+from fsopenapi.api.account import AccountAPI
+from fsopenapi.api.market import MarketAPI
+from fsopenapi.api.portfolio import PortfolioAPI
+from fsopenapi.api.trade import TradeAPI
+from fsopenapi.exceptions import (
+    APIError,
+    AuthenticationError,
+    RateLimitError,
+)
+from fsopenapi.exceptions import (
+    PermissionError as SdkPermissionError,
+)
 from nexus_fosun_gateway.adapter.probe_sdk import (
     PhysicalHttpBudget,
     ProbeBudgetError,
@@ -123,6 +135,27 @@ def test_frozen_sdk_methods_require_exact_probe_call_bindings_before_dispatch() 
     )
 
 
+def test_locked_fsopenapi_v1_2_method_surface_binds_without_constructing_client() -> None:
+    client = SimpleNamespace(
+        account=object.__new__(AccountAPI),
+        portfolio=object.__new__(PortfolioAPI),
+        trade=object.__new__(TradeAPI),
+        market=object.__new__(MarketAPI),
+    )
+
+    validated = validate_probe_sdk_method_bindings(client)
+
+    assert tuple(validated) == (
+        "fosun_sync_accounts",
+        "fosun_sync_portfolio_cash",
+        "fosun_sync_portfolio_holdings",
+        "fosun_list_orders",
+        "fosun_list_cash_flows",
+        "fosun_get_quotes",
+        "fosun_get_bars",
+    )
+
+
 def test_probe_sdk_binding_rejects_incompatible_method_before_physical_request() -> None:
     physical_requests = 0
 
@@ -213,6 +246,102 @@ def test_sdk_application_errors_map_to_closed_sanitized_probe_categories(
     assert diagnostic.code != "PROVIDER_UNAVAILABLE"
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (
+            AuthenticationError("secret-code", "secret-message", "secret-request", {}),
+            "PROVIDER_AUTHENTICATION_FAILED",
+        ),
+        (
+            SdkPermissionError("secret-code", "secret-message", "secret-request", {}),
+            "PROVIDER_PERMISSION_DENIED",
+        ),
+        (
+            RateLimitError("secret-code", "secret-message", "secret-request", {}),
+            "PROVIDER_RATE_LIMITED",
+        ),
+        (
+            APIError("secret-code", "secret-message", "secret-request", {}),
+            "PROVIDER_APPLICATION_ERROR",
+        ),
+    ],
+)
+def test_locked_sdk_exception_hierarchy_maps_without_rendering_provider_values(
+    error: Exception,
+    expected_code: str,
+) -> None:
+    mapper = probe_sdk_error_mapper(__import__("fsopenapi.exceptions", fromlist=["*"]))
+
+    mapped = mapper(error)
+
+    assert mapped is not None
+    assert mapped.code == expected_code
+    assert "secret-" not in repr(mapped)
+
+
+def test_non_probe_custom_permission_error_keeps_legacy_permission_mapping() -> None:
+    class PermissionError(Exception):
+        pass
+
+    def list_accounts() -> object:
+        raise PermissionError("local provider permission")
+
+    adapter = SdkFosunTransport(
+        SimpleNamespace(account=SimpleNamespace(list_accounts=list_accounts)),
+        rate_limiter=NoopRateLimiter(),
+        max_attempts=1,
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        asyncio.run(adapter.execute("fosun_sync_accounts", {}))
+
+    assert exc_info.value.code == "PROVIDER_PERMISSION_DENIED"
+
+
+def test_probe_unrecognized_permission_error_is_provider_not_permission() -> None:
+    class PermissionError(Exception):
+        pass
+
+    def list_accounts() -> object:
+        raise PermissionError("local provider permission")
+
+    adapter = SdkFosunTransport(
+        SimpleNamespace(account=SimpleNamespace(list_accounts=list_accounts)),
+        rate_limiter=NoopRateLimiter(),
+        max_attempts=1,
+        sdk_error_mapper=lambda _error: None,
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        asyncio.run(adapter.execute("fosun_sync_accounts", {}))
+
+    assert exc_info.value.code == "PROVIDER_APPLICATION_ERROR"
+
+
+def test_non_probe_timeout_subclass_is_immediately_unavailable_without_retry() -> None:
+    class SdkTimeout(TimeoutError):
+        pass
+
+    calls = 0
+
+    def list_accounts() -> object:
+        nonlocal calls
+        calls += 1
+        raise SdkTimeout
+
+    adapter = SdkFosunTransport(
+        SimpleNamespace(account=SimpleNamespace(list_accounts=list_accounts)),
+        rate_limiter=NoopRateLimiter(),
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        asyncio.run(adapter.execute("fosun_sync_accounts", {}))
+
+    assert exc_info.value.code == "PROVIDER_UNAVAILABLE"
+    assert calls == 1
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("failure", "expected_code"),
@@ -268,6 +397,70 @@ async def test_local_sdk_slot_deadline_remains_transport(
         SimpleNamespace(account=SimpleNamespace(list_accounts=lambda: object())),
         rate_limiter=NoopRateLimiter(),
         sdk_error_mapper=lambda _error: None,
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        await adapter.execute("fosun_sync_accounts", {})
+
+    assert exc_info.value.code == "PROVIDER_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_completed_sdk_future_at_local_deadline_remains_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_wait_for = asyncio.wait_for
+    wait_calls = 0
+    clock = FakeClock()
+
+    async def completed_future_deadline(awaitable: object, **kwargs: object) -> object:
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 3:
+            await asyncio.sleep(0.01)
+            clock.value = 11.0
+            raise TimeoutError
+        return await original_wait_for(awaitable, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.adapter.sdk.asyncio.wait_for", completed_future_deadline
+    )
+    adapter = SdkFosunTransport(
+        SimpleNamespace(account=SimpleNamespace(list_accounts=lambda: object())),
+        rate_limiter=NoopRateLimiter(),
+        sdk_error_mapper=lambda _error: None,
+        clock=clock,
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        await adapter.execute("fosun_sync_accounts", {})
+
+    assert exc_info.value.code == "PROVIDER_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_completed_sdk_future_deadline_uses_transport_with_frozen_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_wait_for = asyncio.wait_for
+    wait_calls = 0
+
+    async def completed_future_deadline(awaitable: object, **kwargs: object) -> object:
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 3:
+            await asyncio.sleep(0.01)
+            raise TimeoutError
+        return await original_wait_for(awaitable, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.adapter.sdk.asyncio.wait_for", completed_future_deadline
+    )
+    adapter = SdkFosunTransport(
+        SimpleNamespace(account=SimpleNamespace(list_accounts=lambda: object())),
+        rate_limiter=NoopRateLimiter(),
+        sdk_error_mapper=lambda _error: None,
+        clock=lambda: 0.0,
     )
 
     with pytest.raises(GatewayError) as exc_info:
@@ -770,7 +963,7 @@ async def test_executor_stops_after_first_failed_operation(fail_at: int) -> None
         "quote",
         "kline_minimal",
     )[fail_at]
-    assert exc_info.value.category == "permission"
+    assert exc_info.value.category == "provider"
     assert exc_info.value.physical_request_count == fail_at + 2
     assert len(transport.calls) == fail_at + 1
     assert controls.close_calls == 1

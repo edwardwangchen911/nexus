@@ -511,13 +511,15 @@ class SdkFosunTransport:
                 mapped = None if mapper is None else mapper(error)
                 if mapped is not None:
                     raise mapped from None
-                if isinstance(error, PermissionError):
+                if mapper is None and type(error).__name__ == "PermissionError":
                     raise GatewayError(
                         "PROVIDER_PERMISSION_DENIED",
                         "Provider permission denied.",
                         status_code=502,
                         next_action="REVIEW_PROVIDER_PERMISSION",
                     ) from None
+                if mapper is None and isinstance(error, TimeoutError):
+                    raise _provider_unavailable() from None
                 if mapper is not None and not _is_transport_error(error):
                     raise GatewayError(
                         "PROVIDER_APPLICATION_ERROR",
@@ -618,6 +620,14 @@ class SdkFosunTransport:
 
                         thread_future.add_done_callback(release_slot)
                         if isinstance(error, TimeoutError):
+                            raise _ProviderDeadlineExceeded from None
+                    if isinstance(error, TimeoutError):
+                        worker_error = (
+                            None
+                            if thread_future.cancelled()
+                            else thread_future.exception()
+                        )
+                        if worker_error is None:
                             raise _ProviderDeadlineExceeded from None
                     raise
                 if isinstance(result, _RateLimitWait):
