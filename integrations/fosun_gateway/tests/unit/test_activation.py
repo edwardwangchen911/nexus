@@ -112,6 +112,17 @@ def test_scoped_activation_rejects_per_operation_and_broker_budgets() -> None:
         assert result.next_action == "REVIEW_PROBE_ARTIFACT" and authorization is None
 
 
+def test_scoped_activation_total_budget_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The closed core row has six operations, so 6 * 3 < production total cap 24.
+    assert 6 * activation_module.MAX_REQUESTS_PER_OPERATION < activation_module.MAX_PROBE_REQUESTS
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    probe_bytes = _scoped_probe_bytes(manifest_bytes, scope="core")
+    monkeypatch.setattr(activation_module, "MAX_PROBE_REQUESTS", 5)
+    result, authorization = activation_module.evaluate_scoped_activation(manifest_bytes, probe_bytes, _scoped_receipt_bytes(probe_bytes, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    assert result.next_action == "REVIEW_PROBE_ARTIFACT"
+    assert authorization is None
+
+
 def test_scoped_activation_rejects_legacy_v2_v1_pair() -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     legacy = _probe_bytes(manifest_bytes)
