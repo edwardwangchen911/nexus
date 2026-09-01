@@ -76,6 +76,22 @@ def test_scoped_activation_rejects_legacy_v2_v1_pair() -> None:
     assert authorization is None
 
 
+@pytest.mark.parametrize("mutation", ["reordered", "duplicate", "extra", "passed", "digest", "ttl"])
+def test_scoped_activation_fail_closed_for_canonical_mutations(mutation: str) -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    document = json.loads(_scoped_probe_bytes(manifest_bytes, scope="core"))
+    if mutation == "reordered": document["physical_operation_set"].reverse()
+    elif mutation == "duplicate": document["authorized_operation_set"].append(document["authorized_operation_set"][0])
+    elif mutation == "extra": document["prerequisite_operation_set"].append("quote")
+    elif mutation == "passed": document["operations"][0]["passed"] = False
+    elif mutation == "digest": document["operations"][0]["response_contract_sha256"] = "0" * 64
+    else: document["capability_expires_at"] = "2026-08-28T09:00:01Z"
+    probe_bytes = _json_bytes(document)
+    result, authorization = activation_module.evaluate_scoped_activation(manifest_bytes, probe_bytes, _scoped_receipt_bytes(probe_bytes, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    assert result.next_action == "REVIEW_PROBE_ARTIFACT"
+    assert authorization is None
+
+
 @pytest.mark.parametrize("field,value", [
     ("run_id", "readonly-core-run-0002"),
     ("scope_contract_version", "nexus.fosun.read-only-scope.v1.extended"),
