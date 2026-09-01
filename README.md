@@ -67,10 +67,11 @@ uv run --package nexus-engine nexus-fosun-local refresh
 ```
 
 刷新器从真实持仓确定性提取、去重并排序 `us...` 代码；最多接受 12 个美股标的，使用一次批量
-Quote 和每个标的一次日 K 请求。Accounts、Cash、Holdings 合计各一次，单次总 Provider 请求最多
-16 次，全部串行、无自动重试。超过范围、合同不匹配或任一读取失败时 fail-closed，数据库事务不会
-覆盖上一份可用快照。浏览器只读取已持久化数据，不能触发 Gateway 或 Provider 请求；该入口不包含
-自动调度、订单、账户写入或任何交易激活。组合页的“刷新页面数据”仅重新执行已持久化
+Quote 和每个标的一次日 K 请求。账户发现和持仓范围发现各一次，随后按
+`Cash → Holdings → OrderList → Holdings → OrderList → Cash` 完成一次无重试双读；12 个美股标的时
+单次总 Provider 请求最多 21 次。超过范围、合同不匹配、订单读取失败或双读不一致时 fail-closed，
+数据库事务不会覆盖上一份可用快照。浏览器只读取已持久化数据，不能触发 Gateway 或 Provider 请求；
+该入口不包含自动调度、订单写入、账户写入或任何交易激活。组合页的“刷新页面数据”仅重新执行已持久化
 组合与快照的 BFF GET，不会 POST `/api/v1/broker-sync-runs`。`00656.HK` 仍仅作只读持仓展示，不请求
 Quote 或 K 线。
 
