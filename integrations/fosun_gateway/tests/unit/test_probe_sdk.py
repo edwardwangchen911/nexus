@@ -26,6 +26,7 @@ from fsopenapi.exceptions import (
     PermissionError as SdkPermissionError,
 )
 from nexus_fosun_gateway.adapter.probe_sdk import (
+    CoreProbeRequestPlan,
     PhysicalHttpBudget,
     ProbeBudgetError,
     ProbeRequestPlan,
@@ -717,6 +718,89 @@ async def test_executor_runs_exact_sequence_and_returns_only_value_free_evidence
     assert len(transport.calls) == 7
     assert controls.close_calls == 1
     assert transport.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_core_executor_runs_only_the_six_physical_core_labels_once() -> None:
+    clock = FakeClock()
+    budget = PhysicalHttpBudget(scope="core", clock=clock, sleeper=clock.sleep)
+    transport = InstrumentedTransport(budget)
+    transport.client.trade = None
+    executor = SdkProbeExecutor(
+        _probe_bundle(transport, RecordingControls(), budget),
+        budget,
+    )
+
+    evidence = await executor.run(
+        CoreProbeRequestPlan(
+            symbol="usAAPL",
+            session_date=date(2026, 8, 21),
+            limit=1,
+        )
+    )
+
+    assert [call[0] for call in transport.calls] == [
+        "fosun_sync_accounts",
+        "fosun_sync_portfolio",
+        "fosun_sync_portfolio",
+        "fosun_get_quotes",
+        "fosun_get_bars",
+    ]
+    assert evidence.request_counts == (
+        ("Session", 1),
+        ("Accounts", 1),
+        ("CashSummary", 1),
+        ("Holdings", 1),
+        ("quote", 1),
+        ("kline_minimal", 1),
+    )
+    assert budget.snapshot().total == 6
+
+
+@pytest.mark.asyncio
+async def test_core_executor_stops_at_first_failure_without_extended_dispatch() -> None:
+    clock = FakeClock()
+    budget = PhysicalHttpBudget(scope="core", clock=clock, sleeper=clock.sleep)
+    transport = InstrumentedTransport(budget, fail_at=3)
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        await SdkProbeExecutor(
+            _probe_bundle(transport, RecordingControls(), budget),
+            budget,
+        ).run(
+            CoreProbeRequestPlan(
+                symbol="usAAPL",
+                session_date=date(2026, 8, 21),
+                limit=1,
+            )
+        )
+
+    assert exc_info.value.operation == "quote"
+    assert exc_info.value.physical_request_count == 5
+    assert [call[0] for call in transport.calls] == [
+        "fosun_sync_accounts",
+        "fosun_sync_portfolio",
+        "fosun_sync_portfolio",
+        "fosun_get_quotes",
+    ]
+
+
+def test_core_budget_rejects_excluded_labels_and_second_dispatch_before_transport() -> None:
+    clock = FakeClock()
+    budget = PhysicalHttpBudget(scope="core", clock=clock, sleeper=clock.sleep)
+    budget.bind_http_controls()
+
+    with pytest.raises(ProbeBudgetError), budget.operation("OrderList"):
+        raise AssertionError("excluded operation context unexpectedly opened")
+
+    with budget.operation("quote"):
+        budget.before_dispatch("business")
+    with budget.operation("quote"), pytest.raises(ProbeBudgetError):
+        budget.before_dispatch("business")
+
+    assert budget.snapshot().count("OrderList") == 0
+    assert budget.snapshot().count("CashFlows") == 0
+    assert budget.snapshot().count("quote") == 1
 
 
 @pytest.mark.asyncio

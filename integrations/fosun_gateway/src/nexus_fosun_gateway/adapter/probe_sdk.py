@@ -32,7 +32,7 @@ from nexus_fosun_gateway.domain import (
     QuoteItem,
 )
 from nexus_fosun_gateway.policy.operations import GatewayOperation
-from nexus_fosun_gateway.probe_contract import MAX_BROKER_REQUESTS
+from nexus_fosun_gateway.probe_contract import MAX_BROKER_REQUESTS, scope_descriptor
 from nexus_fosun_gateway.probe_settings import ProbeProviderSettings
 from nexus_fosun_gateway.security.dependency_logging import (
     enforce_sdk_dependency_log_boundary,
@@ -199,12 +199,27 @@ _PROBE_SDK_METHOD_CALLS: tuple[tuple[str, str, str, dict[str, object]], ...] = (
         {"code": "usAAPL", "ktype": "day", "start_time": 1, "end_time": 1, "num": 1},
     ),
 )
+_CORE_PROBE_SDK_OPERATIONS = frozenset(
+    {
+        "fosun_sync_accounts",
+        "fosun_sync_portfolio_cash",
+        "fosun_sync_portfolio_holdings",
+        "fosun_get_quotes",
+        "fosun_get_bars",
+    }
+)
 
 
-def validate_probe_sdk_method_bindings(client: object) -> Mapping[str, Callable[..., object]]:
+def validate_probe_sdk_method_bindings(
+    client: object,
+    *,
+    scope: Literal["core"] | None = None,
+) -> Mapping[str, Callable[..., object]]:
     """Verify all frozen SDK calls bind before a probe can reach HTTP dispatch."""
     validated: dict[str, Callable[..., object]] = {}
     for operation, section_name, method_name, kwargs in _PROBE_SDK_METHOD_CALLS:
+        if scope == "core" and operation not in _CORE_PROBE_SDK_OPERATIONS:
+            continue
         method = getattr(getattr(client, section_name, None), method_name, None)
         if not callable(method):
             raise ProbeSdkError("SDK_CONTRACT_MISMATCH", category="contract")
@@ -272,6 +287,15 @@ class ProbeRequestPlan:
     session_date: date
     cash_flow_date_from: date
     cash_flow_date_to: date
+    limit: int
+
+
+@dataclass(frozen=True, slots=True)
+class CoreProbeRequestPlan:
+    """Validated inputs used only by the exact core physical sequence."""
+
+    symbol: str
+    session_date: date
     limit: int
 
 
@@ -384,9 +408,16 @@ class PhysicalHttpBudget:
     def __init__(
         self,
         *,
+        scope: Literal["core"] | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
+        self._scope = scope
+        self._allowed_labels = (
+            frozenset(scope_descriptor("core").physical_operation_set)
+            if scope == "core"
+            else frozenset(_LABELS)
+        )
         self._clock = clock
         self._sleeper = sleeper
         self._state_lock = Lock()
@@ -409,9 +440,13 @@ class PhysicalHttpBudget:
                 raise ProbeBudgetError()
             self._bound = True
 
+    @property
+    def scope(self) -> Literal["core"] | None:
+        return self._scope
+
     @contextmanager
     def operation(self, label: str) -> Iterator[None]:
-        if label not in _BUSINESS_LABELS:
+        if label not in _BUSINESS_LABELS or label not in self._allowed_labels:
             raise ProbeBudgetError()
         typed_label = label  # narrowed by the closed membership check
         domain: ProbeDomain = "broker" if label in _BROKER_LABELS else "market"
@@ -520,7 +555,10 @@ class PhysicalHttpBudget:
                 timestamps.popleft()
 
     def _require_available(self, label: ProbeLabel, domain: ProbeDomain) -> None:
-        if self._counts[label] >= _MAX_PER_LABEL or self._total >= _MAX_TOTAL:
+        if label not in self._allowed_labels:
+            raise ProbeBudgetError()
+        per_label_cap = 1 if self._scope == "core" else _MAX_PER_LABEL
+        if self._counts[label] >= per_label_cap or self._total >= _MAX_TOTAL:
             raise ProbeBudgetError()
         if len(self._total_timestamps) >= _MAX_TOTAL:
             raise ProbeBudgetError()
@@ -587,7 +625,10 @@ def build_probe_transport(
             rate_limiter=budget,
             max_attempts=1,
             sdk_error_mapper=probe_sdk_error_mapper(exceptions_module),
-            pre_dispatch_validator=lambda: _validate_probe_sdk_contract(client),
+            pre_dispatch_validator=lambda: _validate_probe_sdk_contract(
+                client,
+                scope=budget.scope,
+            ),
         )
         return ProbeTransportBundle(
             transport=transport,
@@ -621,7 +662,10 @@ class SdkProbeExecutor:
         self._started = False
         self._last_started_operation: ProbeLabel | Literal["unknown"] = "unknown"
 
-    async def run(self, plan: ProbeRequestPlan) -> ProbeExecutionEvidence:
+    async def run(
+        self,
+        plan: ProbeRequestPlan | CoreProbeRequestPlan,
+    ) -> ProbeExecutionEvidence:
         with self._run_lock:
             if self._started:
                 raise ProbeSdkError("PROBE_FAILED")
@@ -663,10 +707,16 @@ class SdkProbeExecutor:
             raise ProbeSdkError("PROBE_FAILED")
         return evidence
 
-    async def _execute(self, plan: ProbeRequestPlan) -> ProbeExecutionEvidence:
+    async def _execute(
+        self,
+        plan: ProbeRequestPlan | CoreProbeRequestPlan,
+    ) -> ProbeExecutionEvidence:
         if not self._bundle.is_bound_to(self._budget):
             raise ProbeSdkError("SDK_CONTRACT_MISMATCH")
         self._require_plan(plan)
+        is_core = type(plan) is CoreProbeRequestPlan
+        if is_core != (self._budget.scope == "core"):
+            raise ProbeSdkError("INVALID_PROBE_PLAN")
         accounts = await self._call("Accounts", "fosun_sync_accounts", {})
         _require_page_contract(accounts, AccountItem)
         snapshot = self._budget.snapshot()
@@ -700,25 +750,26 @@ class SdkProbeExecutor:
         )
         _require_page_contract(holdings, PositionItem)
 
-        orders = await self._call(
-            "OrderList",
-            "fosun_list_orders",
-            {"account_id": account_id, "cursor": None, "limit": plan.limit},
-        )
-        _require_page_contract(orders, OrderItem)
+        if isinstance(plan, ProbeRequestPlan):
+            orders = await self._call(
+                "OrderList",
+                "fosun_list_orders",
+                {"account_id": account_id, "cursor": None, "limit": plan.limit},
+            )
+            _require_page_contract(orders, OrderItem)
 
-        cash_flows = await self._call(
-            "CashFlows",
-            "fosun_list_cash_flows",
-            {
-                "account_id": account_id,
-                "date_from": plan.cash_flow_date_from.isoformat(),
-                "date_to": plan.cash_flow_date_to.isoformat(),
-                "cursor": None,
-                "limit": plan.limit,
-            },
-        )
-        _require_page_contract(cash_flows, CashFlowItem)
+            cash_flows = await self._call(
+                "CashFlows",
+                "fosun_list_cash_flows",
+                {
+                    "account_id": account_id,
+                    "date_from": plan.cash_flow_date_from.isoformat(),
+                    "date_to": plan.cash_flow_date_to.isoformat(),
+                    "cursor": None,
+                    "limit": plan.limit,
+                },
+            )
+            _require_page_contract(cash_flows, CashFlowItem)
 
         quotes = await self._call(
             "quote",
@@ -757,20 +808,32 @@ class SdkProbeExecutor:
             raise ProbeSdkError("PROBE_WINDOW_MISMATCH")
 
         final = self._budget.snapshot()
-        if any(final.count(label) < 1 for label in _LABELS):
+        expected_labels: tuple[ProbeLabel, ...]
+        if is_core:
+            expected_labels = cast(
+                tuple[ProbeLabel, ...],
+                scope_descriptor("core").physical_operation_set,
+            )
+        else:
+            expected_labels = _LABELS
+        if any(final.count(label) != 1 for label in expected_labels):
+            raise ProbeSdkError("SDK_CONTRACT_MISMATCH")
+        if is_core and (
+            final.count("OrderList") != 0 or final.count("CashFlows") != 0
+        ):
             raise ProbeSdkError("SDK_CONTRACT_MISMATCH")
         if final.auth_successes != 1:
             raise ProbeSdkError("SDK_CONTRACT_MISMATCH")
         return ProbeExecutionEvidence(
-            request_counts=final.counts,
+            request_counts=tuple((label, final.count(label)) for label in expected_labels),
             auth_successes=final.auth_successes,
             history_window=True,
-            pagination=False,
-            adjustment_semantics=False,
+            pagination=is_core,
+            adjustment_semantics=is_core,
             response_contract=True,
         )
 
-    def _require_plan(self, plan: ProbeRequestPlan) -> None:
+    def _require_plan(self, plan: ProbeRequestPlan | CoreProbeRequestPlan) -> None:
         try:
             now = self._utc_clock()
         except Exception:
@@ -784,9 +847,12 @@ class SdkProbeExecutor:
             or isinstance(plan.limit, bool)
             or not 1 <= plan.limit <= 10
             or type(plan.session_date) is not date
-            or type(plan.cash_flow_date_from) is not date
-            or type(plan.cash_flow_date_to) is not date
             or plan.session_date >= now.astimezone(UTC).date()
+        ):
+            raise ProbeSdkError("INVALID_PROBE_PLAN")
+        if isinstance(plan, ProbeRequestPlan) and (
+            type(plan.cash_flow_date_from) is not date
+            or type(plan.cash_flow_date_to) is not date
             or plan.cash_flow_date_from > plan.cash_flow_date_to
             or (plan.cash_flow_date_to - plan.cash_flow_date_from).days >= 7
         ):
@@ -903,8 +969,12 @@ def _map_gateway_error(error: GatewayError) -> ProbeSdkError:
     return ProbeSdkError("PROBE_FAILED")
 
 
-def _validate_probe_sdk_contract(client: object) -> None:
-    validate_probe_sdk_method_bindings(client)
+def _validate_probe_sdk_contract(
+    client: object,
+    *,
+    scope: Literal["core"] | None = None,
+) -> None:
+    validate_probe_sdk_method_bindings(client, scope=scope)
 
 
 def _close_controls_quietly(controls: ProbeTlsControls) -> None:

@@ -11,11 +11,19 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from nexus_fosun_gateway.activation import REQUIRED_PROBE_OPERATIONS
 from nexus_fosun_gateway.adapter.probe_sdk import ProbeExecutionEvidence, ProbeSdkError
-from nexus_fosun_gateway.probe import _build_prepared_probe
+from nexus_fosun_gateway.probe import CoreProbePlan, _build_prepared_probe
 
 MANIFEST_PATH = Path(__file__).parents[4] / "contracts" / "providers" / "fosun" / "manifest.json"
 OFFLINE_GUARD_PATH = Path(__file__).parents[4] / "scripts/offline_guard"
 TEST_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33)))
+CORE_PHYSICAL_OPERATIONS = (
+    "Session",
+    "Accounts",
+    "CashSummary",
+    "Holdings",
+    "quote",
+    "kline_minimal",
+)
 SUBPROCESS_SUCCESS_RESULT = {
     "status": "probe_published",
     "code": "OK",
@@ -29,6 +37,29 @@ SUBPROCESS_SUCCESS_RESULT = {
         "signature_b64u": "A" * 86,
     },
 }
+
+
+def test_core_cli_requires_explicit_scope_and_run_id_without_extended_inputs() -> None:
+    arguments = _arguments(MANIFEST_PATH)
+
+    plan = probe_cli._parse_probe_plan(tuple(arguments), str(MANIFEST_PATH))
+
+    assert isinstance(plan, CoreProbePlan)
+    assert plan.model_dump(mode="json") == {
+        "run_id": "readonly-core-run-0001",
+        "scope": "core",
+        "symbol": "usAAPL",
+        "session_date": "2026-08-28",
+        "limit": 1,
+        "capability_ttl_seconds": 3600,
+        "output_basename": "probe-20260831.json",
+    }
+    with pytest.raises(ProbeSdkError) as exc_info:
+        probe_cli._parse_probe_plan(
+            tuple(_legacy_arguments(MANIFEST_PATH)),
+            str(MANIFEST_PATH),
+        )
+    assert exc_info.value.code == "INVALID_PROBE_PLAN"
 
 
 def test_admitted_manifest_still_validates_plan_before_settings_or_sdk_import(
@@ -511,14 +542,14 @@ def test_success_publishes_before_signing_and_emits_receipt_last(
         return _build_prepared_probe(
             manifest_bytes,
             plan,
-            ProbeExecutionEvidence(
-                request_counts=tuple(
-                    (name, 1) for name in REQUIRED_PROBE_OPERATIONS
-                ),
-                auth_successes=1,
-                history_window=True,
-                pagination=False,
-                adjustment_semantics=False,
+                ProbeExecutionEvidence(
+                    request_counts=tuple(
+                        (name, 1) for name in CORE_PHYSICAL_OPERATIONS
+                    ),
+                    auth_successes=1,
+                    history_window=True,
+                    pagination=True,
+                    adjustment_semantics=True,
                 response_contract=True,
             ),
             started_at=started_at,
@@ -547,6 +578,12 @@ def test_success_publishes_before_signing_and_emits_receipt_last(
     assert exit_code == 0, output["code"]
     assert output["status"] == "probe_published"
     assert output["code"] == "OK"
+    assert output["run_id"] == "readonly-core-run-0001"
+    assert output["scope"] == "core"
+    assert output["scope_contract_version"] == "nexus.fosun.read-only-scope.v1.core"
+    assert output["publication_receipt"]["schema_version"] == (
+        "nexus.fosun.probe-publication.v2"
+    )
     assert output["publication_receipt"]["artifact_sha256"] == output["artifact_sha256"]
     assert captured.out.rfind('"publication_receipt"') > captured.out.rfind(
         '"activation_contract_hash"'
@@ -575,11 +612,14 @@ def test_post_sequence_local_failure_keeps_only_physical_probe_facts(
     _set_probe_environment(
         monkeypatch, manifest_path, output_dir, private_key_path, public_key_b64u
     )
-    budget = probe_cli.PhysicalHttpBudget()
-    budget._counts = {name: 1 for name in REQUIRED_PROBE_OPERATIONS}
-    budget._total = 8
+    budget = probe_cli.PhysicalHttpBudget(scope="core")
+    budget._counts = {
+        name: (1 if name in CORE_PHYSICAL_OPERATIONS else 0)
+        for name in REQUIRED_PROBE_OPERATIONS
+    }
+    budget._total = 6
     budget._last_dispatched_label = "kline_minimal"
-    monkeypatch.setattr(probe_cli, "PhysicalHttpBudget", lambda: budget)
+    monkeypatch.setattr(probe_cli, "PhysicalHttpBudget", lambda **_kwargs: budget)
     monkeypatch.setattr(probe_cli, "build_probe_transport", lambda *_args: object())
     monkeypatch.setattr(probe_cli, "SdkProbeExecutor", lambda *_args: object())
 
@@ -591,7 +631,7 @@ def test_post_sequence_local_failure_keeps_only_physical_probe_facts(
     assert probe_cli.main(_arguments(manifest_path)) == 2
     frame = json.loads(capfd.readouterr().out)
     assert frame["failure_operation"] == "kline_minimal"
-    assert frame["physical_request_count"] == 8
+    assert frame["physical_request_count"] == 6
     assert "publisher-private" not in json.dumps(frame)
 
 
@@ -636,14 +676,14 @@ def test_interrupt_after_artifact_publication_requires_quarantine(
         return _build_prepared_probe(
             manifest_bytes,
             plan,
-            ProbeExecutionEvidence(
-                request_counts=tuple(
-                    (name, 1) for name in REQUIRED_PROBE_OPERATIONS
-                ),
-                auth_successes=1,
-                history_window=True,
-                pagination=False,
-                adjustment_semantics=False,
+                ProbeExecutionEvidence(
+                    request_counts=tuple(
+                        (name, 1) for name in CORE_PHYSICAL_OPERATIONS
+                    ),
+                    auth_successes=1,
+                    history_window=True,
+                    pagination=True,
+                    adjustment_semantics=True,
                 response_contract=True,
             ),
             started_at=started_at,
@@ -778,7 +818,7 @@ def test_main_contains_interrupt_from_uncertain_stdout_delivery(
     assert captured.err == ""
 
 
-def _arguments(manifest_path: Path) -> list[str]:
+def _legacy_arguments(manifest_path: Path) -> list[str]:
     return [
         "--manifest",
         str(manifest_path),
@@ -789,6 +829,27 @@ def _arguments(manifest_path: Path) -> list[str]:
         "--cash-flow-date-from",
         "2026-08-24",
         "--cash-flow-date-to",
+        "2026-08-28",
+        "--limit",
+        "1",
+        "--capability-ttl-seconds",
+        "3600",
+        "--output-basename",
+        "probe-20260831.json",
+    ]
+
+
+def _arguments(manifest_path: Path) -> list[str]:
+    return [
+        "--manifest",
+        str(manifest_path),
+        "--run-id",
+        "readonly-core-run-0001",
+        "--scope",
+        "core",
+        "--symbol",
+        "usAAPL",
+        "--session-date",
         "2026-08-28",
         "--limit",
         "1",

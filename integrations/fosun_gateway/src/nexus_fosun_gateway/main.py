@@ -22,8 +22,9 @@ from nexus_fosun_gateway.activation import (
     MAX_ARTIFACT_BYTES,
     MAX_PUBLICATION_RECEIPT_BYTES,
     MAX_TRUSTED_PUBLISHER_KEY_BYTES,
+    RuntimeAuthorization,
     _read_bounded_or_empty,
-    evaluate_activation,
+    evaluate_scoped_activation,
 )
 from nexus_fosun_gateway.adapter.fixture import FixtureFosunTransport
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
@@ -70,10 +71,10 @@ def build_transport(
     on_activation_expired: Callable[[datetime], None] | None = None,
     activation_checked_at: datetime | None = None,
     activation_monotonic_anchor: float | None = None,
-) -> FosunTransport:
+) -> tuple[FosunTransport, RuntimeAuthorization | None]:
     """Create only the explicitly configured transport; never fall back across modes."""
     if settings.transport_mode == "fixture":
-        return FixtureFosunTransport()
+        return FixtureFosunTransport(), None
     if (
         not settings.sdk_admitted
         or settings.fsopenapi_base_url is None
@@ -84,6 +85,8 @@ def build_transport(
         or settings.activation_probe_receipt is None
         or settings.activation_probe_publisher_public_key_b64u_file is None
         or settings.activation_contract_hash_file is None
+        or settings.read_only_scope_contract_version != "v1"
+        or settings.read_only_scope is None
     ):
         raise _sdk_not_admitted()
     try:
@@ -128,10 +131,11 @@ def build_transport(
             settings.fsopenapi_base_url,
         ):
             raise ValueError
-        activation = evaluate_activation(
+        activation, runtime_authorization = evaluate_scoped_activation(
             manifest_bytes,
             probe_bytes,
             publication_receipt_bytes,
+            expected_scope=settings.read_only_scope,
             trusted_publication_public_key_bytes=trusted_publication_key_bytes,
             checked_at=activation_checked_at,
         )
@@ -140,6 +144,8 @@ def build_transport(
     if (
         activation.status != "activated_read_only"
         or activation.capability_expires_at is None
+        or runtime_authorization is None
+        or runtime_authorization.scope != settings.read_only_scope
         or not hmac.compare_digest(
             activation.contract_hash,
             activation_contract_hash,
@@ -164,13 +170,16 @@ def build_transport(
         enforce_sdk_tls_verification(client, auth_module)
     except Exception:
         raise _sdk_not_admitted() from None
-    return SdkFosunTransport(
-        client,
-        capability_expires_at=activation.capability_expires_at,
-        activation_checked_at=activation.checked_at,
-        activation_monotonic_anchor=activation_monotonic_anchor,
-        on_poison=on_poison,
-        on_activation_expired=on_activation_expired,
+    return (
+        SdkFosunTransport(
+            client,
+            capability_expires_at=activation.capability_expires_at,
+            activation_checked_at=activation.checked_at,
+            activation_monotonic_anchor=activation_monotonic_anchor,
+            on_poison=on_poison,
+            on_activation_expired=on_activation_expired,
+        ),
+        runtime_authorization,
     )
 
 
@@ -207,7 +216,7 @@ def create_gateway_app(settings: GatewaySettings | None = None) -> FastAPI:
 
     try:
         if resolved_settings.transport_mode == "fixture":
-            transport = build_transport(
+            transport, runtime_authorization = build_transport(
                 resolved_settings,
                 on_poison=verifier.mark_not_ready,
                 on_activation_expired=mark_activation_expired,
@@ -215,7 +224,7 @@ def create_gateway_app(settings: GatewaySettings | None = None) -> FastAPI:
         else:
             activation_monotonic_anchor = time.monotonic()
             activation_checked_at = verifier.trusted_activation_checked_at()
-            transport = build_transport(
+            transport, runtime_authorization = build_transport(
                 resolved_settings,
                 on_poison=verifier.mark_not_ready,
                 on_activation_expired=mark_activation_expired,
@@ -224,6 +233,7 @@ def create_gateway_app(settings: GatewaySettings | None = None) -> FastAPI:
             )
         verifier.bind_readiness_expiry(transport.readiness_expires_at())
         app.state.transport = transport
+        app.state.runtime_authorization = runtime_authorization
     except BaseException:
         verifier.close()
         raise

@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from nexus_fosun_gateway.activation import (
     MAX_ARTIFACT_BYTES,
     _read_bounded_or_empty,
-    verify_probe_publication,
+    evaluate_scoped_activation,
 )
 from nexus_fosun_gateway.adapter.probe_sdk import (
     PhysicalHttpBudget,
@@ -27,13 +27,12 @@ from nexus_fosun_gateway.adapter.probe_sdk import (
 )
 from nexus_fosun_gateway.admission import probe_ready_sdk_subject
 from nexus_fosun_gateway.probe import (
+    CoreProbePlan,
     PreparedProbeArtifact,
-    ProbePlan,
     run_sanitized_probe,
-    validate_sanitized_probe_artifact,
+    validate_scoped_probe_artifact,
 )
 from nexus_fosun_gateway.probe_contract import (
-    PROBE_CLI_ARGUMENT_NAMES,
     PROBE_FAILURE_CATEGORIES,
     PROBE_FAILURE_OPERATIONS,
 )
@@ -47,7 +46,16 @@ from nexus_fosun_gateway.security.provider_environment import (
     reject_unsafe_provider_environment,
 )
 
-_ARGUMENT_NAMES = PROBE_CLI_ARGUMENT_NAMES
+_ARGUMENT_NAMES = (
+    "--manifest",
+    "--run-id",
+    "--scope",
+    "--symbol",
+    "--session-date",
+    "--limit",
+    "--capability-ttl-seconds",
+    "--output-basename",
+)
 _PROBE_ENVIRONMENT_NAMES = (
     "FOSUN_PROVIDER_MANIFEST",
     "FOSUN_SDK_ADMITTED",
@@ -182,7 +190,7 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
         settings = ProbeProviderSettings.model_validate(environment_values)
         started_at = datetime.now(UTC)
         plan.validate_for_start(started_at)
-        budget = PhysicalHttpBudget()
+        budget = PhysicalHttpBudget(scope="core")
         bundle = build_probe_transport(manifest_document, settings, budget)
         executor = SdkProbeExecutor(bundle, budget)
         prepared = await run_sanitized_probe(
@@ -196,7 +204,11 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
             ),
             utc_clock=lambda: datetime.now(UTC),
         )
-        validate_sanitized_probe_artifact(manifest_bytes, prepared.artifact_bytes)
+        validate_scoped_probe_artifact(
+            manifest_bytes,
+            prepared.artifact_bytes,
+            expected_scope="core",
+        )
         publication_path = settings.output_dir / plan.output_basename
         publication = publish_probe_artifact(
             settings.output_dir,
@@ -207,16 +219,22 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
         )
         publication_complete = True
         receipt_bytes = prepared.sign_publication_receipt(publication)
-        verification_hash = verify_probe_publication(
+        activation, authorization = evaluate_scoped_activation(
             manifest_bytes,
             prepared.artifact_bytes,
             receipt_bytes,
+            expected_scope="core",
             trusted_publication_public_key_bytes=(
                 settings.publisher_public_key_b64u.encode("ascii")
             ),
             checked_at=datetime.now(UTC),
         )
-        if verification_hash is None:
+        if (
+            activation.status != "activated_read_only"
+            or authorization is None
+            or authorization.scope != "core"
+            or authorization.run_id != plan.run_id
+        ):
             raise ProbeSdkError("PROBE_OUTPUT_INVALID")
         receipt = json.loads(receipt_bytes)
         return {
@@ -226,12 +244,15 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
             "failure_operation": None,
             "failure_category": None,
             "physical_request_count": None,
+            "run_id": plan.run_id,
+            "scope": plan.scope,
+            "scope_contract_version": authorization.scope_contract_version,
             "artifact_sha256": prepared.artifact_sha256,
             "byte_length": prepared.byte_length,
             "capability_expires_at": prepared.capability_expires_at.isoformat().replace(
                 "+00:00", "Z"
             ),
-            "activation_contract_hash": verification_hash,
+            "activation_contract_hash": activation.contract_hash,
             "publication_receipt": receipt,
         }
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -313,7 +334,7 @@ def _parse_manifest_argument(arguments: tuple[str, ...]) -> tuple[str, Path]:
     return manifest_spelling, manifest_path
 
 
-def _parse_probe_plan(arguments: tuple[str, ...], manifest_spelling: str) -> ProbePlan:
+def _parse_probe_plan(arguments: tuple[str, ...], manifest_spelling: str) -> CoreProbePlan:
     if len(arguments) != len(_ARGUMENT_NAMES) * 2:
         raise ProbeSdkError("INVALID_PROBE_PLAN")
     values: dict[str, str] = {}
@@ -325,12 +346,14 @@ def _parse_probe_plan(arguments: tuple[str, ...], manifest_spelling: str) -> Pro
         values[name] = value
     if set(values) != set(_ARGUMENT_NAMES) or values["--manifest"] != manifest_spelling:
         raise ProbeSdkError("INVALID_PROBE_PLAN")
+    if values["--scope"] != "core":
+        raise ProbeSdkError("INVALID_PROBE_PLAN")
     try:
-        plan = ProbePlan(
+        plan = CoreProbePlan(
+            run_id=values["--run-id"],
+            scope="core",
             symbol=values["--symbol"],
             session_date=_exact_date(values["--session-date"]),
-            cash_flow_date_from=_exact_date(values["--cash-flow-date-from"]),
-            cash_flow_date_to=_exact_date(values["--cash-flow-date-to"]),
             limit=_exact_integer(values["--limit"]),
             capability_ttl_seconds=_exact_integer(
                 values["--capability-ttl-seconds"]

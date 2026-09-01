@@ -14,17 +14,19 @@ import nexus_fosun_gateway.main as main_module
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from nexus_fosun_gateway.activation import REQUIRED_PROBE_OPERATIONS, evaluate_activation
+from nexus_fosun_gateway.activation import (
+    evaluate_scoped_activation,
+)
 from nexus_fosun_gateway.adapter.fixture import FixtureFosunTransport
 from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
 from nexus_fosun_gateway.domain import GatewayError
 from nexus_fosun_gateway.main import build_transport
-from nexus_fosun_gateway.probe_contract import probe_response_contract_sha256
+from nexus_fosun_gateway.probe_contract import probe_response_contract_sha256, scope_descriptor
 from nexus_fosun_gateway.settings import GatewaySettings
 from pydantic import ValidationError
 
 MANIFEST_PATH = Path(__file__).parents[4] / "contracts" / "providers" / "fosun" / "manifest.json"
-PUBLICATION_DOMAIN = b"NEXUS-FOSUN-PROBE-PUBLICATION-V1\0"
+PUBLICATION_DOMAIN = b"NEXUS-FOSUN-PROBE-PUBLICATION-V2\0"
 TEST_PUBLICATION_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33)))
 
 
@@ -38,7 +40,75 @@ def test_fixture_mode_never_imports_or_instantiates_fsopenapi(
 
     monkeypatch.setattr("nexus_fosun_gateway.main.importlib.import_module", forbidden_import)
 
-    assert isinstance(build_transport(GatewaySettings.for_test()), FixtureFosunTransport)
+    transport, authorization = build_transport(GatewaySettings.for_test())
+
+    assert isinstance(transport, FixtureFosunTransport)
+    assert authorization is None
+
+
+def test_fixture_defaults_do_not_select_a_runtime_scope() -> None:
+    settings = GatewaySettings.for_test()
+
+    assert settings.read_only_scope_contract_version is None
+    assert settings.read_only_scope is None
+
+
+def test_read_only_scope_gate_has_no_implicit_default(tmp_path: Path) -> None:
+    values = _activated_read_only_values(tmp_path)
+    values.pop("FOSUN_READ_ONLY_SCOPE_CONTRACT_VERSION")
+    values.pop("FOSUN_READ_ONLY_SCOPE")
+
+    with pytest.raises(ValidationError):
+        GatewaySettings.model_validate(values)
+
+
+def test_core_scoped_activation_precedes_sdk_import_and_returns_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    activation_evaluated = False
+    real_evaluator = evaluate_scoped_activation
+
+    def evaluate_before_import(*args: object, **kwargs: object):
+        nonlocal activation_evaluated
+        result = real_evaluator(*args, **kwargs)
+        activation_evaluated = True
+        return result
+
+    class FakeSdkClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    def sdk_module(name: str) -> object:
+        assert activation_evaluated is True
+        if name == "fsopenapi":
+            return SimpleNamespace(SDKClient=FakeSdkClient)
+        if name == "fsopenapi.auth":
+            return SimpleNamespace()
+        raise AssertionError(name)
+
+    monkeypatch.setattr(main_module, "evaluate_scoped_activation", evaluate_before_import)
+    monkeypatch.setattr(main_module.importlib, "import_module", sdk_module)
+    monkeypatch.setattr(main_module, "enforce_sdk_tls_verification", lambda *_args: None)
+
+    transport, authorization = build_transport(
+        GatewaySettings.model_validate(_activated_read_only_values(tmp_path))
+    )
+
+    assert isinstance(transport, SdkFosunTransport)
+    assert authorization is not None
+    assert authorization.scope == "core"
+    assert authorization.scope_contract_version == "nexus.fosun.read-only-scope.v1.core"
+    assert authorization.run_id == "readonly-core-run-0001"
+    assert authorization.authorized_operation_set == frozenset(
+        {
+            "fosun_sync_accounts",
+            "fosun_sync_portfolio:cash",
+            "fosun_sync_portfolio:holdings",
+            "fosun_get_quotes",
+            "fosun_get_bars",
+        }
+    )
 
 
 def test_read_only_mode_without_admission_returns_stable_error() -> None:
@@ -200,14 +270,16 @@ def test_publisher_pin_mismatch_cannot_import_sdk_even_with_its_contract_hash(
     manifest_path = Path(str(values["FOSUN_PROVIDER_MANIFEST"]))
     probe_path = Path(str(values["FOSUN_ACTIVATION_PROBE_ARTIFACT"]))
     receipt_path = Path(str(values["FOSUN_ACTIVATION_PROBE_RECEIPT"]))
-    blocked = evaluate_activation(
+    blocked, authorization = evaluate_scoped_activation(
         manifest_path.read_bytes(),
         probe_path.read_bytes(),
         receipt_path.read_bytes(),
+        expected_scope="core",
         trusted_publication_public_key_bytes=alternate_public_key.encode("ascii"),
         checked_at=datetime.now(UTC),
     )
-    assert blocked.next_action == "REVIEW_PROBE_PUBLISHER_BINDING"
+    assert blocked.next_action == "REVIEW_PROBE_ARTIFACT"
+    assert authorization is None
     Path(
         str(values["FOSUN_ACTIVATION_PROBE_PUBLISHER_PUBLIC_KEY_B64U_FILE"])
     ).write_text(alternate_public_key)
@@ -528,9 +600,10 @@ def test_read_only_sdk_construction_forces_all_sdk_logging_off(
     )
     settings = GatewaySettings.model_validate(_activated_read_only_values(tmp_path))
 
-    transport = build_transport(settings)
+    transport, authorization = build_transport(settings)
 
     assert isinstance(transport, SdkFosunTransport)
+    assert authorization is not None and authorization.scope == "core"
     assert captured == {
         "base_url": "https://openapi.fosunxcz.com",
         "api_key": "synthetic-api-key",
@@ -640,10 +713,11 @@ async def test_sdk_dependency_logs_are_suppressed_at_construction_and_call_edges
         "nexus_fosun_gateway.main.importlib.import_module",
         sdk_module,
     )
-    transport = build_transport(
+    transport, authorization = build_transport(
         GatewaySettings.model_validate(_activated_read_only_values(tmp_path))
     )
     assert isinstance(transport, SdkFosunTransport)
+    assert authorization is not None and authorization.scope == "core"
     assert captured.getvalue() == ""
 
     # Simulate a runtime logging reconfiguration after construction. The
@@ -881,6 +955,8 @@ def _read_only_settings(manifest_path: Path) -> GatewaySettings:
             "NEXUS_ENV": "production",
             "FOSUN_GATEWAY_CAPABILITY": "READ_ONLY",
             "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
+            "FOSUN_READ_ONLY_SCOPE_CONTRACT_VERSION": "v1",
+            "FOSUN_READ_ONLY_SCOPE": "core",
             "FOSUN_GATEWAY_REPLAY_STORE_PATH": "/synthetic/fosun-gateway/replay.sqlite3",
             "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-current",
             "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret-32-bytes",
@@ -946,8 +1022,13 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
     )
+    descriptor = scope_descriptor("core")
+    run_id = "readonly-core-run-0001"
     probe = {
-        "schema_version": "nexus.fosun.sanitized-probe.v2",
+        "schema_version": "nexus.fosun.sanitized-probe.v3",
+        "run_id": run_id,
+        "scope": "core",
+        "scope_contract_version": descriptor.scope_contract_version,
         "provider": "fosun",
         "captured_at": captured_at.isoformat().replace("+00:00", "Z"),
         "capability_expires_at": (captured_at + timedelta(hours=1))
@@ -957,6 +1038,9 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
         "sdk_tag": manifest["sdk"]["tag"],
         "sdk_commit": manifest["sdk"]["commit"],
         "publication_public_key_b64u": _b64u(public_key),
+        "physical_operation_set": list(descriptor.physical_operation_set),
+        "prerequisite_operation_set": list(descriptor.prerequisite_operation_set),
+        "authorized_operation_set": list(descriptor.authorized_operation_set),
         "operations": [
             {
                 "name": name,
@@ -964,7 +1048,7 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
                 "passed": True,
                 "response_contract_sha256": probe_response_contract_sha256(name),
             }
-            for name in REQUIRED_PROBE_OPERATIONS
+            for name in descriptor.physical_operation_set
         ],
         "checks": {
             "permission_read_only": True,
@@ -981,11 +1065,19 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
     artifact_sha256 = hashlib.sha256(probe_bytes).hexdigest()
     receipt_bytes = json.dumps(
         {
-            "schema_version": "nexus.fosun.probe-publication.v1",
+            "schema_version": "nexus.fosun.probe-publication.v2",
             "artifact_sha256": artifact_sha256,
+            "run_id": run_id,
+            "scope": "core",
+            "scope_contract_version": descriptor.scope_contract_version,
             "signature_b64u": _b64u(
                 TEST_PUBLICATION_KEY.sign(
-                    PUBLICATION_DOMAIN + bytes.fromhex(artifact_sha256)
+                    PUBLICATION_DOMAIN
+                    + bytes.fromhex(artifact_sha256)
+                    + b"\0"
+                    + run_id.encode()
+                    + b"\0core\0"
+                    + descriptor.scope_contract_version.encode()
                 )
             ),
         },
@@ -995,14 +1087,16 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
     receipt_path = tmp_path / "sanitized-probe-receipt.json"
     receipt_path.write_bytes(receipt_bytes)
     trusted_key_bytes = _b64u(public_key).encode("ascii")
-    activation = evaluate_activation(
+    activation, authorization = evaluate_scoped_activation(
         manifest_bytes,
         probe_bytes,
         receipt_bytes,
+        expected_scope="core",
         trusted_publication_public_key_bytes=trusted_key_bytes,
         checked_at=captured_at,
     )
     assert activation.status == "activated_read_only"
+    assert authorization is not None
     trusted_key_path = tmp_path / "publisher-public-key.b64u"
     trusted_key_path.write_bytes(trusted_key_bytes)
     trusted_key_path.chmod(0o600)
@@ -1013,6 +1107,8 @@ def _activated_read_only_values(tmp_path: Path) -> dict[str, object]:
         "NEXUS_ENV": "production",
         "FOSUN_GATEWAY_CAPABILITY": "READ_ONLY",
         "FOSUN_GATEWAY_TRANSPORT_MODE": "read_only",
+        "FOSUN_READ_ONLY_SCOPE_CONTRACT_VERSION": "v1",
+        "FOSUN_READ_ONLY_SCOPE": "core",
         "FOSUN_GATEWAY_REPLAY_STORE_PATH": tmp_path / "replay.sqlite3",
         "FOSUN_GATEWAY_HMAC_CURRENT_KEY_ID": "synthetic-current",
         "FOSUN_GATEWAY_HMAC_CURRENT_SECRET": "synthetic-current-secret-32-bytes",

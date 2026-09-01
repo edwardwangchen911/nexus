@@ -12,7 +12,10 @@ from nexus_fosun_gateway.activation import (
     REQUIRED_PROBE_OPERATIONS,
     ProbePublicationReceipt,
     SanitizedProbeArtifact,
+    ScopedProbeArtifact,
+    ScopedProbePublicationReceipt,
     evaluate_activation,
+    evaluate_scoped_activation,
     verify_probe_publication,
 )
 from nexus_fosun_gateway.adapter.probe_sdk import (
@@ -21,11 +24,13 @@ from nexus_fosun_gateway.adapter.probe_sdk import (
     SdkProbeExecutor,
 )
 from nexus_fosun_gateway.probe import (
+    CoreProbePlan,
     ProbePlan,
     _build_prepared_probe,
     response_contract_sha256,
     run_sanitized_probe,
     validate_sanitized_probe_artifact,
+    validate_scoped_probe_artifact,
 )
 from nexus_fosun_gateway.publication import publish_probe_artifact
 from pydantic import ValidationError
@@ -61,6 +66,31 @@ def test_probe_runner_requires_an_explicit_publisher_signing_key_factory() -> No
     ]
 
     assert parameter.default is inspect.Parameter.empty
+
+
+def test_core_plan_exposes_only_core_non_secret_inputs() -> None:
+    plan = _core_plan()
+
+    plan.validate_for_start(STARTED_AT)
+    request = plan.to_request_plan()
+
+    assert plan.model_dump() == {
+        "run_id": "readonly-core-run-0001",
+        "scope": "core",
+        "symbol": "usAAPL",
+        "session_date": date(2026, 8, 28),
+        "limit": 1,
+        "capability_ttl_seconds": 3600,
+        "output_basename": "probe-20260831.json",
+    }
+    assert request.symbol == "usAAPL"
+    assert request.session_date == date(2026, 8, 28)
+    assert request.limit == 1
+
+    with pytest.raises(ValidationError):
+        CoreProbePlan.model_validate(
+            {**plan.model_dump(), "cash_flow_date_from": date(2026, 8, 24)}
+        )
 
 
 @pytest.mark.parametrize(
@@ -183,6 +213,141 @@ def test_prepared_artifact_contains_only_static_contract_and_value_free_evidence
     ):
         assert canary not in prepared.artifact_bytes.decode()
         assert canary not in repr(prepared)
+
+
+def test_core_prepared_artifact_and_receipt_form_an_admissible_v3_v2_pair(
+    tmp_path,
+) -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    prepared = _build_prepared_probe(
+        manifest_bytes,
+        _core_plan(),
+        _core_evidence(),
+        started_at=STARTED_AT,
+        captured_at=CAPTURED_AT,
+        private_key_factory=lambda: TEST_KEY,
+    )
+
+    artifact = ScopedProbeArtifact.model_validate_json(prepared.artifact_bytes)
+    assert artifact.model_dump(mode="json") | {"operations": None} == {
+        "schema_version": "nexus.fosun.sanitized-probe.v3",
+        "run_id": "readonly-core-run-0001",
+        "scope": "core",
+        "scope_contract_version": "nexus.fosun.read-only-scope.v1.core",
+        "provider": "fosun",
+        "captured_at": "2026-08-31T08:00:08Z",
+        "capability_expires_at": "2026-08-31T09:00:00Z",
+        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "sdk_tag": "v1.2.0",
+        "sdk_commit": "891d95fb4967efaa682387c1b35966ceea38fb21",
+        "publication_public_key_b64u": TRUSTED_PUBLICATION_KEY_BYTES.decode("ascii"),
+        "physical_operation_set": [
+            "Session",
+            "Accounts",
+            "CashSummary",
+            "Holdings",
+            "quote",
+            "kline_minimal",
+        ],
+        "prerequisite_operation_set": ["Session", "Accounts"],
+        "authorized_operation_set": [
+            "fosun_sync_accounts",
+            "fosun_sync_portfolio:cash",
+            "fosun_sync_portfolio:holdings",
+            "fosun_get_quotes",
+            "fosun_get_bars",
+        ],
+        "operations": None,
+        "checks": {
+            "permission_read_only": True,
+            "history_window": True,
+            "adjustment_semantics": True,
+            "pagination": True,
+            "rate_limit": True,
+            "response_contract": True,
+        },
+    }
+    assert tuple(item.name for item in artifact.operations) == (
+        "Session",
+        "Accounts",
+        "CashSummary",
+        "Holdings",
+        "quote",
+        "kline_minimal",
+    )
+    assert tuple(item.request_count for item in artifact.operations) == (1,) * 6
+    assert validate_scoped_probe_artifact(
+        manifest_bytes,
+        prepared.artifact_bytes,
+        expected_scope="core",
+    ) == artifact
+
+    publication = _publish(prepared, tmp_path, "core")
+    receipt_bytes = prepared.sign_publication_receipt(publication)
+    receipt = ScopedProbePublicationReceipt.model_validate_json(receipt_bytes)
+    result, authorization = evaluate_scoped_activation(
+        manifest_bytes,
+        prepared.artifact_bytes,
+        receipt_bytes,
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CAPTURED_AT,
+    )
+
+    assert receipt.model_dump() == {
+        "schema_version": "nexus.fosun.probe-publication.v2",
+        "artifact_sha256": prepared.artifact_sha256,
+        "run_id": "readonly-core-run-0001",
+        "scope": "core",
+        "scope_contract_version": "nexus.fosun.read-only-scope.v1.core",
+        "signature_b64u": receipt.signature_b64u,
+    }
+    assert result.status == "activated_read_only"
+    assert authorization is not None
+    assert authorization.authorized_operation_set == frozenset(
+        {
+            "fosun_sync_accounts",
+            "fosun_sync_portfolio:cash",
+            "fosun_sync_portfolio:holdings",
+            "fosun_get_quotes",
+            "fosun_get_bars",
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("scope", "extended"),
+        ("scope_contract_version", "nexus.fosun.read-only-scope.v1.extended"),
+        ("physical_operation_set", ["Session", "Accounts"]),
+        ("authorized_operation_set", ["fosun_list_orders"]),
+    ],
+)
+def test_core_artifact_validator_rejects_mixed_scope_evidence(
+    field: str,
+    value: object,
+) -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    prepared = _build_prepared_probe(
+        manifest_bytes,
+        _core_plan(),
+        _core_evidence(),
+        started_at=STARTED_AT,
+        captured_at=CAPTURED_AT,
+        private_key_factory=lambda: TEST_KEY,
+    )
+    document = json.loads(prepared.artifact_bytes)
+    document[field] = value
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        validate_scoped_probe_artifact(
+            manifest_bytes,
+            _json_bytes(document),
+            expected_scope="core",
+        )
+
+    assert exc_info.value.code == "PROBE_RESPONSE_INVALID"
 
 
 def test_static_contract_digest_does_not_depend_on_live_counts_or_values() -> None:
@@ -545,6 +710,18 @@ def _plan() -> ProbePlan:
     )
 
 
+def _core_plan() -> CoreProbePlan:
+    return CoreProbePlan(
+        run_id="readonly-core-run-0001",
+        scope="core",
+        symbol="usAAPL",
+        session_date=date(2026, 8, 28),
+        limit=1,
+        capability_ttl_seconds=3600,
+        output_basename="probe-20260831.json",
+    )
+
+
 def _evidence() -> ProbeExecutionEvidence:
     return ProbeExecutionEvidence(
         request_counts=tuple((name, 1) for name in REQUIRED_PROBE_OPERATIONS),
@@ -552,6 +729,24 @@ def _evidence() -> ProbeExecutionEvidence:
         history_window=True,
         pagination=False,
         adjustment_semantics=False,
+        response_contract=True,
+    )
+
+
+def _core_evidence() -> ProbeExecutionEvidence:
+    return ProbeExecutionEvidence(
+        request_counts=(
+            ("Session", 1),
+            ("Accounts", 1),
+            ("CashSummary", 1),
+            ("Holdings", 1),
+            ("quote", 1),
+            ("kline_minimal", 1),
+        ),
+        auth_successes=1,
+        history_window=True,
+        pagination=True,
+        adjustment_semantics=True,
         response_contract=True,
     )
 

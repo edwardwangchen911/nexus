@@ -28,7 +28,7 @@ from nexus_fosun_gateway.domain import GatewayError
 from nexus_fosun_gateway.policy.operations import (
     BROKER_OPERATIONS,
     MARKET_OPERATIONS,
-    GatewayOperation,
+    ActorOperation,
 )
 from nexus_fosun_gateway.security.replay_schema import (
     REPLAY_APPLICATION_ID,
@@ -288,14 +288,14 @@ class VerifiedGatewayActor:
     actor_id: str
     request_id: UUID
     key_id: str
-    allowed_operations: frozenset[GatewayOperation]
+    allowed_operations: frozenset[ActorOperation]
 
 
 @dataclass(frozen=True)
 class _VerificationIdentity:
     actor_id: str
     secret: str
-    allowed_operations: frozenset[GatewayOperation]
+    allowed_operations: frozenset[ActorOperation]
 
 
 class ReplayCache:
@@ -719,7 +719,7 @@ class GatewayHmacVerifier:
         request: Request,
         body: bytes,
         *,
-        operation: GatewayOperation | None = None,
+        operation: ActorOperation | None = None,
         expected_actor_id: str | None = None,
     ) -> VerifiedGatewayActor:
         required = (

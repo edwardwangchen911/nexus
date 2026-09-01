@@ -55,6 +55,14 @@ class GatewaySettings(BaseSettings):
         default="fixture",
         validation_alias="FOSUN_GATEWAY_TRANSPORT_MODE",
     )
+    read_only_scope_contract_version: Literal["v1"] | None = Field(
+        default=None,
+        validation_alias="FOSUN_READ_ONLY_SCOPE_CONTRACT_VERSION",
+    )
+    read_only_scope: Literal["core", "extended"] | None = Field(
+        default=None,
+        validation_alias="FOSUN_READ_ONLY_SCOPE",
+    )
     replica_count: Literal[1] = Field(
         default=1,
         validation_alias="FOSUN_GATEWAY_REPLICA_COUNT",
@@ -195,6 +203,16 @@ class GatewaySettings(BaseSettings):
 
     @model_validator(mode="after")
     def apply_environment_policy(self) -> Self:
+        if self.transport_mode == "read_only" and (
+            self.read_only_scope_contract_version != "v1"
+            or self.read_only_scope is None
+        ):
+            raise ValueError("read_only transport requires one explicit v1 scope")
+        if self.transport_mode == "fixture" and (
+            self.read_only_scope_contract_version is not None
+            or self.read_only_scope is not None
+        ):
+            raise ValueError("fixture transport cannot select a read_only scope")
         if self.transport_mode == "read_only" and self.environment is not Environment.PRODUCTION:
             raise ValueError("read_only transport requires the production mTLS environment")
         if self.environment is Environment.PRODUCTION:

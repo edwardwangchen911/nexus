@@ -1,7 +1,7 @@
 """Seven explicit read-only routes; no generic provider proxy exists."""
 
 import json
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Request
@@ -16,9 +16,14 @@ from pydantic import (
     model_validator,
 )
 
+from nexus_fosun_gateway.activation import RuntimeAuthorization
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
-from nexus_fosun_gateway.domain import GatewayError, GatewayItem, GatewayPage
-from nexus_fosun_gateway.policy.operations import GatewayOperation
+from nexus_fosun_gateway.domain import CapabilityItem, GatewayError, GatewayItem, GatewayPage
+from nexus_fosun_gateway.policy.operations import (
+    GatewayOperation,
+    authorize_runtime_operation,
+)
+from nexus_fosun_gateway.probe_contract import RuntimeOperation
 from nexus_fosun_gateway.settings import (
     BROKER_LISTENER_PORT,
     MARKET_LISTENER_PORT,
@@ -157,13 +162,6 @@ async def _execute(
         expected_actor_id=_listener_actor(request),
     )
     request.state.verified_gateway_actor = actor
-    if operation not in actor.allowed_operations:
-        raise GatewayError(
-            "OPERATION_NOT_ALLOWED",
-            "Gateway operation is not available to this caller.",
-            status_code=404,
-            next_action="USE_AUTHORIZED_OPERATION",
-        )
     try:
         decoded = json.loads(body)
         if not isinstance(decoded, dict):
@@ -176,8 +174,75 @@ async def _execute(
             status_code=422,
             next_action="FIX_REQUEST",
         ) from error
+    settings = cast("GatewaySettings", request.app.state.settings)
+    if operation == "fosun_capabilities":
+        if operation not in actor.allowed_operations:
+            raise _operation_not_allowed()
+        if settings.transport_mode == "read_only":
+            runtime_authorization = getattr(
+                request.app.state,
+                "runtime_authorization",
+                None,
+            )
+            if not isinstance(runtime_authorization, RuntimeAuthorization):
+                raise _operation_not_allowed()
+            return GatewayPage[GatewayItem](
+                items=(
+                    CapabilityItem(
+                        mode="read_only",
+                        operations=tuple(
+                            sorted(runtime_authorization.authorized_operation_set)
+                        ),
+                    ),
+                ),
+                source_request_id="gateway-local-capabilities",
+                has_more=False,
+                next_cursor=None,
+                as_of=datetime.now(UTC),
+            )
+    else:
+        authorize_runtime_operation(
+            _derive_runtime_operation(operation, payload),
+            actor,
+            getattr(request.app.state, "runtime_authorization", None),
+            transport_mode=settings.transport_mode,
+        )
     transport = cast("FosunTransport", request.app.state.transport)
     return await transport.execute(operation, payload.model_dump(mode="json"))
+
+
+def _derive_runtime_operation(
+    operation: GatewayOperation,
+    payload: RequestModel,
+) -> RuntimeOperation:
+    if operation == "fosun_sync_portfolio":
+        if not isinstance(payload, PortfolioReadRequest):
+            raise _operation_not_allowed()
+        return (
+            "fosun_sync_portfolio:cash"
+            if payload.read_kind == "cash"
+            else "fosun_sync_portfolio:holdings"
+        )
+    mapping: dict[GatewayOperation, RuntimeOperation] = {
+        "fosun_sync_accounts": "fosun_sync_accounts",
+        "fosun_list_orders": "fosun_list_orders",
+        "fosun_list_cash_flows": "fosun_list_cash_flows",
+        "fosun_get_quotes": "fosun_get_quotes",
+        "fosun_get_bars": "fosun_get_bars",
+    }
+    try:
+        return mapping[operation]
+    except KeyError:
+        raise _operation_not_allowed() from None
+
+
+def _operation_not_allowed() -> GatewayError:
+    return GatewayError(
+        "OPERATION_NOT_ALLOWED",
+        "Gateway operation is not available to this caller.",
+        status_code=404,
+        next_action="USE_AUTHORIZED_OPERATION",
+    )
 
 
 def _listener_actor(request: Request) -> str | None:
