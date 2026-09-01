@@ -76,6 +76,22 @@ def test_scoped_activation_rejects_legacy_v2_v1_pair() -> None:
     assert authorization is None
 
 
+def test_scoped_run_id_signature_and_hash_are_independently_bound() -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    original = _scoped_probe_bytes(manifest_bytes, scope="core")
+    changed_document = json.loads(original)
+    changed_document["run_id"] = "readonly-core-run-0002"
+    changed = _json_bytes(changed_document)
+    stale_result, stale_authorization = activation_module.evaluate_scoped_activation(manifest_bytes, changed, _scoped_receipt_bytes(changed, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    assert stale_result.next_action == "REVIEW_PROBE_ARTIFACT"
+    assert stale_authorization is None
+    result, authorization = activation_module.evaluate_scoped_activation(manifest_bytes, changed, _scoped_receipt_bytes(changed, scope="core", run_id="readonly-core-run-0002"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    original_result, _ = activation_module.evaluate_scoped_activation(manifest_bytes, original, _scoped_receipt_bytes(original, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    assert result.status == "activated_read_only" and authorization is not None
+    assert authorization.run_id == "readonly-core-run-0002"
+    assert result.contract_hash != original_result.contract_hash
+
+
 @pytest.mark.parametrize("mutation", ["reordered", "duplicate", "extra", "passed", "digest", "ttl"])
 def test_scoped_activation_fail_closed_for_canonical_mutations(mutation: str) -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
@@ -1104,10 +1120,9 @@ def _scoped_probe_bytes(manifest_bytes: bytes, *, scope: str) -> bytes:
     return _json_bytes(document)
 
 
-def _scoped_receipt_bytes(probe_bytes: bytes, *, scope: str) -> bytes:
+def _scoped_receipt_bytes(probe_bytes: bytes, *, scope: str, run_id: str = "readonly-core-run-0001") -> bytes:
     descriptor = probe_contract.scope_descriptor(scope)  # type: ignore[arg-type]
     digest = hashlib.sha256(probe_bytes).hexdigest()
-    run_id = "readonly-core-run-0001"
     signature = TEST_PUBLICATION_KEY.sign(
         b"NEXUS-FOSUN-PROBE-PUBLICATION-V2\0" + bytes.fromhex(digest) + b"\0" + run_id.encode() + b"\0" + scope.encode() + b"\0" + descriptor.scope_contract_version.encode()
     )
