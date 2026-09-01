@@ -230,8 +230,12 @@ export function eligibleProposalGroup(
 
 export function overviewData(overrides: Partial<Overview> = {}): Overview {
   return {
+    overview_mode: "DIAGNOSTIC",
     portfolio_id: portfolioId,
+    portfolio_name: null,
+    provider: null,
     portfolio_snapshot_id: snapshotId,
+    portfolio_snapshot: null,
     snapshot_as_of: "2026-08-24T00:00:00Z",
     trading_day: "2026-08-24",
     diagnostic_report: diagnosticReport(),

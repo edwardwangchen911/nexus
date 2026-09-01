@@ -11,6 +11,7 @@ import ProposalGroupPage, { ProposalGroupPanel } from "../../../app/(protected)/
 import { WhatIfPagePanel } from "../../../app/(protected)/what-if/page";
 import type { DataStateKind } from "../../../app/components/data-state";
 import { eligibleProposalGroup, groupId, overviewData, proposalGroup, proposalIds, shadowActive, shadowStale } from "./fixtures";
+import { portfolio, snapshot } from "../portfolio/fixtures";
 
 const states: Array<[DataStateKind, string]> = [
   ["loading", "正在加载"], ["empty", "暂无数据"], ["ready", "数据已就绪"],
@@ -42,6 +43,36 @@ describe("optimization pages", () => {
     render(<OverviewPanel state="empty" overview={null} onRefresh={vi.fn()} />);
 
     expect(screen.getByRole("link", { name: "研究美股证据" })).toHaveAttribute("href", "/market");
+    expect(screen.queryByRole("button", { name: /创建方案|下单|交易/ })).not.toBeInTheDocument();
+  });
+
+  it("shows persisted Fosun facts and keeps the current state when diagnostics are absent", () => {
+    const factsOnlyOverview: NonNullable<Parameters<typeof OverviewPanel>[0]["overview"]> = {
+      overview_mode: "PORTFOLIO_FACTS_ONLY",
+      portfolio_id: portfolio.portfolio_id,
+      portfolio_name: portfolio.name,
+      provider: "fosun",
+      portfolio_snapshot_id: snapshot.portfolio_snapshot_id,
+      portfolio_snapshot: { ...snapshot, status: "PARTIAL" },
+      snapshot_as_of: snapshot.as_of!,
+      trading_day: null,
+      diagnostic_report: null,
+      proposal_group: null,
+      proposal_admission: null,
+      proposal_admission_reason: null,
+    };
+
+    render(<OverviewPanel state="ready" overview={factsOnlyOverview} onRefresh={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: "今日资产概览" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "尚无诊断，保持现状" })).toBeVisible();
+    expect(screen.getAllByText("复星（只读）").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("PARTIAL").length).toBeGreaterThan(0);
+    expect(screen.getByRole("region", { name: "HKD 原币种资产估值" })).toHaveTextContent("HKD 27,500.00");
+    expect(screen.getByRole("region", { name: "USD 原币种资产估值" })).toHaveTextContent("USD 1,000.00");
+    expect(screen.getByRole("link", { name: "查看组合事实" })).toHaveAttribute("href", "/portfolio");
+    expect(screen.getByRole("link", { name: "查看持仓行情" })).toHaveAttribute("href", "/market");
+    expect(screen.queryByRole("link", { name: /打开组合诊断|查看三方案比较/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /创建方案|下单|交易/ })).not.toBeInTheDocument();
   });
 

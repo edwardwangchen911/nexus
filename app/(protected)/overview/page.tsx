@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
 import { OptimizationNeedPanel } from "../../components/diagnostic-list";
+import { PortfolioValuationSummary } from "../../components/portfolio-summary";
 import type { components } from "../../lib/generated/schema";
 
 type Overview = components["schemas"]["OverviewResponse"];
@@ -33,25 +34,58 @@ export default function OverviewPage(): React.ReactElement {
 
 export function OverviewPanel({ state, overview, onRefresh }: Props): React.ReactElement {
   const hasData = overview !== null && ["ready", "partial", "stale"].includes(state);
+  const factsOnly = overview?.overview_mode === "PORTFOLIO_FACTS_ONLY"
+    && overview.portfolio_snapshot !== null
+    && overview.provider !== null;
   const optimizeHref = overview
     ? `/optimize?portfolio_id=${encodeURIComponent(overview.portfolio_id)}${overview.trading_day ? `&session_date=${overview.trading_day}` : ""}`
     : "/optimize";
   return (
     <section className="page-stack overview-page" aria-label="投资概览页面" data-state={state}>
       <header className="page-heading">
-        <div><p className="eyebrow">OVERVIEW / EVIDENCE FIRST</p><h1>今日组合判断</h1><p>只回答“是否需要进一步优化”；结论来自冻结快照与确定性阈值，不是 Agent 评分。</p></div>
-        <div className="page-actions"><span className="mode-badge">RESEARCH_ONLY</span><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新判断</button></div>
+        <div><p className="eyebrow">OVERVIEW / EVIDENCE FIRST</p><h1>{factsOnly ? "今日资产概览" : "今日组合判断"}</h1><p>{factsOnly ? "展示冻结的复星只读事实；尚未生成诊断、策略或交易建议。" : "只回答“是否需要进一步优化”；结论来自冻结快照与确定性阈值，不是 Agent 评分。"}</p></div>
+        <div className="page-actions"><span className="mode-badge">RESEARCH_ONLY</span><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />{factsOnly ? "刷新概览" : "刷新判断"}</button></div>
       </header>
       {!hasData ? <DataState state={state} title={stateTitle(state)} detail={stateDetail(state)}>
         {state === "empty" ? <a className="button button--primary" href="/market">研究美股证据<ArrowRight aria-hidden="true" size={17} /></a> : null}
-      </DataState> : <>
+      </DataState> : factsOnly ? <PortfolioFactsOverview overview={overview} /> : overview.diagnostic_report ? <>
         {state === "stale" ? <p className="inline-notice inline-notice--error" role="status">显示最后已知结果；当前请求失败，不可用于新动作。</p> : null}
         <section className="overview-fact-band" aria-label="冻结组合事实"><div><p className="eyebrow">FROZEN SNAPSHOT</p><h2>只读事实快照</h2></div><dl className="numeric-data"><div><dt>截止</dt><dd>{formatUtc(overview.snapshot_as_of)}</dd></div><div><dt>交易日</dt><dd>{overview.trading_day ?? "未知"}</dd></div><div><dt>诊断策略</dt><dd>{overview.diagnostic_report.policy_version}</dd></div><div><dt>组合 ID</dt><dd>{overview.portfolio_id}</dd></div></dl></section>
         <OptimizationNeedPanel report={overview.diagnostic_report} />
         <nav className="overview-links" aria-label="概览后续动作"><a className="button button--primary" href={optimizeHref}>打开组合诊断<ArrowRight aria-hidden="true" size={17} /></a>{overview.proposal_group ? <a className="button button--quiet" href={`/optimize/${overview.proposal_group.proposal_group_id}`}>查看三方案比较</a> : null}</nav>
-      </>}
+      </> : <DataState state="partial" title="权威证据不完整" detail="默认保持现状，不创建方案或订单。" />}
     </section>
   );
+}
+
+function PortfolioFactsOverview({ overview }: { overview: Overview }): React.ReactElement {
+  const snapshot = overview.portfolio_snapshot!;
+  const provider = overview.provider!;
+  const currencies = [...new Set([
+    ...snapshot.cash.map((bucket) => bucket.currency),
+    ...snapshot.positions.map((position) => position.currency),
+  ])].sort();
+  return <>
+    <section className="overview-fact-band" aria-label="复星只读组合事实">
+      <div><p className="eyebrow">FOSUN / READ ONLY</p><h2>尚无诊断，保持现状</h2><p>仅展示已持久化的现金、持仓和原币种估值；未生成诊断、策略或交易建议。</p></div>
+      <dl className="numeric-data">
+        <div><dt>数据来源</dt><dd>复星（只读）</dd></div>
+        <div><dt>质量状态</dt><dd>{snapshot.status}</dd></div>
+        <div><dt>快照截止</dt><dd>{formatUtc(overview.snapshot_as_of)}</dd></div>
+        <div><dt>组合</dt><dd>{overview.portfolio_name ?? "复星只读组合"}</dd></div>
+      </dl>
+    </section>
+    {currencies.map((currency) => <PortfolioValuationSummary
+      key={currency}
+      provider={provider}
+      snapshot={snapshot}
+      currency={currency}
+    />)}
+    <nav className="overview-links" aria-label="概览后续动作">
+      <a className="button button--primary" href="/portfolio">查看组合事实<ArrowRight aria-hidden="true" size={17} /></a>
+      <a className="button button--quiet" href="/market">查看持仓行情</a>
+    </nav>
+  </>;
 }
 
 function stateTitle(state: DataStateKind): string {

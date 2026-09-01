@@ -3237,12 +3237,50 @@ export const runtimeContractSchemas = {
     "additionalProperties": false,
     "properties": {
       "diagnostic_report": {
-        "$ref": "#/components/schemas/PortfolioDiagnosticResponse"
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PortfolioDiagnosticResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "overview_mode": {
+        "enum": [
+          "DIAGNOSTIC",
+          "PORTFOLIO_FACTS_ONLY"
+        ],
+        "title": "Overview Mode",
+        "type": "string"
       },
       "portfolio_id": {
         "format": "uuid",
         "title": "Portfolio Id",
         "type": "string"
+      },
+      "portfolio_name": {
+        "anyOf": [
+          {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Portfolio Name"
+      },
+      "portfolio_snapshot": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PortfolioSnapshotResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "portfolio_snapshot_id": {
         "format": "uuid",
@@ -3281,6 +3319,18 @@ export const runtimeContractSchemas = {
           }
         ]
       },
+      "provider": {
+        "anyOf": [
+          {
+            "const": "fosun",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Provider"
+      },
       "snapshot_as_of": {
         "format": "date-time",
         "title": "Snapshot As Of",
@@ -3300,8 +3350,12 @@ export const runtimeContractSchemas = {
       }
     },
     "required": [
+      "overview_mode",
       "portfolio_id",
+      "portfolio_name",
+      "provider",
       "portfolio_snapshot_id",
+      "portfolio_snapshot",
       "snapshot_as_of",
       "trading_day",
       "diagnostic_report",
