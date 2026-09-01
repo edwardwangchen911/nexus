@@ -65,6 +65,21 @@ def test_scoped_activation_rejects_cross_scope_pair() -> None:
     assert authorization is None
 
 
+def test_scoped_activation_admits_exact_extended_authorization() -> None:
+    manifest_bytes = _json_bytes(_admitted_manifest())
+    extended = _scoped_probe_bytes(manifest_bytes, scope="extended", run_id="readonly-extended-run-0001")
+    result, authorization = activation_module.evaluate_scoped_activation(manifest_bytes, extended, _scoped_receipt_bytes(extended, scope="extended", run_id="readonly-extended-run-0001"), expected_scope="extended", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    core = _scoped_probe_bytes(manifest_bytes, scope="core")
+    core_result, _ = activation_module.evaluate_scoped_activation(manifest_bytes, core, _scoped_receipt_bytes(core, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    assert result.status == "activated_read_only" and authorization is not None
+    assert authorization.scope == "extended"
+    assert authorization.scope_contract_version == "nexus.fosun.read-only-scope.v1.extended"
+    assert authorization.run_id == "readonly-extended-run-0001"
+    assert authorization.capability_expires_at == CHECKED_AT + timedelta(hours=1)
+    assert authorization.authorized_operation_set == frozenset({"fosun_list_orders", "fosun_list_cash_flows"})
+    assert result.contract_hash != core_result.contract_hash
+
+
 def test_scoped_activation_rejects_legacy_v2_v1_pair() -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     legacy = _probe_bytes(manifest_bytes)
@@ -1100,12 +1115,12 @@ def _b64u(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
 
 
-def _scoped_probe_bytes(manifest_bytes: bytes, *, scope: str) -> bytes:
+def _scoped_probe_bytes(manifest_bytes: bytes, *, scope: str, run_id: str = "readonly-core-run-0001") -> bytes:
     descriptor = probe_contract.scope_descriptor(scope)  # type: ignore[arg-type]
     manifest = json.loads(manifest_bytes)
     document = {
         "schema_version": "nexus.fosun.sanitized-probe.v3",
-        "run_id": "readonly-core-run-0001",
+        "run_id": run_id,
         "scope": scope,
         "scope_contract_version": descriptor.scope_contract_version,
         "provider": "fosun",
