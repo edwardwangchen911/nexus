@@ -106,11 +106,24 @@ physical dispatch is a contract violation or an already-counted attempted dispat
 allowance.  The only legal labels are the selected scope's physical sequence; an unlabelled,
 overlapping, wrong-proxy, out-of-sequence, or extra request fails before bytes leave the process.
 
-The CLI result frame includes `scope`, `scope_contract_version`, and an artifact/receipt only for
-`probe_published`; every failure keeps those fields value-free/null. Capture and receipt commands
-take scope and reject a frame/artifact whose scope differs. Artifact basenames are scope-namespaced
-and create-only. A failed run directory, frame, artifact, receipt, or quarantine directory is
-never reused; a new run requires a new directory and fresh explicit external authorization.
+Each invocation also receives one non-secret, canonical run ID matching
+`^[a-z0-9][a-z0-9-]{15,63}$`. It is an execution identity, not an account or Provider value. The
+approved absolute output parent and its `runs/` child must already be protected; the runner then
+creates `runs/<run-id>/<scope>/` through held directory descriptors before it can create a frame.
+The parent, runs, new run, and new scope directories are no-follow, current-UID owned, mode `0700`.
+A run ID is create-only: an existing run directory, including an incomplete one, is
+`PROBE_OUTPUT_EXISTS`.
+
+The CLI result frame includes `run_id`, `scope`, `scope_contract_version`, and an artifact/receipt
+only for `probe_published`; every failure keeps evidence fields value-free/null. Within that scope
+directory the protected names are fixed as `result.frame.json`, `artifact.json`,
+`publication-receipt.json`, `staging/`, and `quarantine/`; all are created through the held dirfd
+and never target a sibling scope. Artifact and receipt schemas bind the same run ID and scope, so a
+same-parent core run and extended run cannot overwrite or be mistaken for one another. Capture and
+receipt CLIs take `--run-id` and `--scope`, then reject unless their arguments, directory identity,
+frame, artifact, and receipt have identical `run_id`, `scope`, and `scope_contract_version`.
+A failed run directory, frame, artifact, receipt, staging, or quarantine directory is never reused;
+a new run needs a new run ID and fresh explicit external authorization.
 
 ## Evidence, receipt, and admission
 
@@ -123,6 +136,7 @@ add:
 ```json
 {
   "schema_version": "nexus.fosun.sanitized-probe.v3",
+  "run_id": "example-readonly-run-0001",
   "scope": "core",
   "scope_contract_version": "nexus.fosun.read-only-scope.v1.core",
   "physical_operation_set": ["Session", "Accounts", "CashSummary", "Holdings", "quote", "kline_minimal"],
@@ -139,14 +153,14 @@ the core contract checks only observations actually made by core; extended check
 pages and never asserts cash/holding/market semantics. Neither scope claims pagination beyond its
 first page, Provider write permission, or a live account authorization broader than its final set.
 
-The detached receipt moves to `nexus.fosun.probe-publication.v2` and additionally binds
-`artifact_sha256`, `scope`, and `scope_contract_version` in canonical compact sorted-key JSON.
-The signed bytes are `NEXUS-FOSUN-PROBE-PUBLICATION-V2\\0 + artifact_sha256 + \\0 + scope + \\0 +
-scope_contract_version`, with unambiguous UTF-8 encoding. Verification must parse, canonicalize,
-and compare the artifact and receipt before signature verification. The activation contract hash
-includes manifest digest, SDK subject, artifact digest, receipt digest, trusted-key digest, scope,
-scope-contract-version, and ordered authorized set. This prevents scope swapping, downgrade, and
-receipt replay across scopes.
+The detached receipt is uniquely `nexus.fosun.probe-publication.v2` and additionally binds
+`artifact_sha256`, `run_id`, `scope`, and `scope_contract_version` in canonical compact sorted-key
+JSON. The signed bytes are `NEXUS-FOSUN-PROBE-PUBLICATION-V2\\0 + artifact_sha256 + \\0 + run_id +
+\\0 + scope + \\0 + scope_contract_version`, with unambiguous UTF-8 encoding. Verification must
+parse, canonicalize, and compare artifact and receipt before signature verification. The activation
+contract hash includes manifest digest, SDK subject, artifact digest, receipt digest, trusted-key
+digest, run ID, scope, scope-contract-version, and ordered authorized set. This prevents scope/run
+swapping, downgrade, and receipt replay across scopes.
 
 Publication stays create-only and follows the existing held-dirfd/no-follow, owner/mode/link-count,
 atomic durable write, and post-write verification rules. Sign only after durable artifact
@@ -155,18 +169,47 @@ quarantined, not admitted and not overwritten.
 
 ### Runtime admission and composition
 
-`evaluate_activation` becomes scope-aware: it accepts one expected scope and returns a capability
-whose `authorized_operation_set` is exact. Gateway construction must receive that set and install
-an operation guard before SDK dispatch and route selection. The core Gateway exposes only its five
-final operations; extended exposes only OrderList/CashFlows. A forbidden operation returns the
-existing non-disclosing denial before transport construction. `fosun_capabilities` may describe
-the active final set but is never evidence of an ungranted operation.
+`evaluate_activation` becomes scope-aware: it accepts one expected scope and returns an immutable
+`RuntimeAuthorization` containing exactly `scope`, `scope_contract_version`, `run_id`, expiry, and
+the closed `authorized_operation_set`. Gateway construction receives this value; it never receives
+an artifact-derived coarse `GatewayOperation` allowlist.
 
-Version gate: production admission accepts only v3/v2 receipts and a matching v1 scope contract.
-v1 artifacts, v1 receipts, v2 all-operation artifacts/receipts, missing scope fields, duplicate or
-unordered sets, unknown scope versions, and any mismatched manifest/SDK/publisher/time binding are
-`REVIEW_PROBE_ARTIFACT` or `REVIEW_PROBE_PUBLICATION_RECEIPT`, with no fallback. Existing runtime
-must remain fixture-only until an exact scope capability validates.
+For every request, authorization order is fixed and must complete before `transport.execute` or SDK
+client construction:
+
+1. Verify the listener's HMAC identity and its caller-specific allowed operation set.
+2. Perform route schema validation. For portfolio, validate `PortfolioReadRequest` including its
+   `read_kind` enum before making any authorization decision from it.
+3. Derive the runtime authorization name. Portfolio derives exactly
+   `fosun_sync_portfolio:cash` or `fosun_sync_portfolio:holdings` from the validated `read_kind`;
+   every other route maps one-to-one to its final operation name.
+4. Require the derived name in both the HMAC caller's allowed operation set and
+   `RuntimeAuthorization.authorized_operation_set`; otherwise return the existing non-disclosing
+   denial and do not construct/call transport.
+5. Only then invoke the route's fixed `transport.execute` operation with the already validated
+   request.
+
+Thus the guard cannot merely check the existing coarse `fosun_sync_portfolio` during route selection:
+it must guard the derived cash/holdings name after enum validation. Core may permit both derived
+names; an intentionally narrowed core authorization may permit only cash or only holdings and must
+deny the other in both directions. Invalid `read_kind` fails schema validation before authorization;
+it cannot be coerced to either scope or reach transport. `fosun_capabilities` may describe the
+active final set but is never evidence of an ungranted operation.
+
+The only production evidence pairing is:
+
+```text
+nexus.fosun.sanitized-probe.v3 artifact
+  + nexus.fosun.probe-publication.v2 receipt
+  + identical run_id/scope/scope_contract_version
+  + nexus.fosun.read-only-scope.v1.{scope}
+```
+
+Artifact v1/v2, receipt v1, any missing run-ID/scope fields, unknown versions, duplicate or
+unordered sets, mismatched manifest/SDK/publisher/time binding, and every other cross-pairing are
+`REVIEW_PROBE_ARTIFACT` or `REVIEW_PROBE_PUBLICATION_RECEIPT`, with no fallback. In particular, a
+legacy v2 all-operation artifact must never be interpreted as core or extended. Existing runtime
+remains fixture-only until this exact scope capability validates.
 
 First release does **not** combine core and extended artifacts in one runtime. This avoids deciding
 cross-run account equivalence from value-free evidence and keeps the initial least-privilege
@@ -210,10 +253,10 @@ authorization.
 | Area | Expected files | Change |
 | --- | --- | --- |
 | Contract constants | `integrations/fosun_gateway/src/nexus_fosun_gateway/probe_contract.py` | Define immutable scope descriptors, ordered physical/prerequisite/final sets, scope-specific response digests, and frame fields. |
-| Artifact/activation | `activation.py`, `probe.py` | Add v3 artifact/v2 receipt validation, canonical binding/signing, exact scope evaluator, legacy rejection. |
-| Execution | `adapter/probe_sdk.py`, `probe_cli.py` | Select one descriptor, enforce sequence/one-shot scope budget, scope-safe account discovery, frames. |
-| Publication pipeline | `probe_capture.py`, `probe_receipt.py`, `publication.py` | Bind and verify scope in protected create-only frame/artifact/receipt handling. |
-| Runtime | `settings.py`, `main.py`, `policy/operations.py`, `routes/read_only.py`, relevant composition code | Add exact version/scope gate and runtime operation guard; fixture default unchanged. |
+| Artifact/activation | `activation.py`, `probe.py` | Add v3 artifact/v2 receipt validation, canonical run-ID/scope binding/signing, exact scope evaluator, legacy rejection. |
+| Execution | `adapter/probe_sdk.py`, `probe_cli.py` | Select one descriptor, enforce sequence/one-shot scope budget, scope-safe account discovery, run-ID frames. |
+| Publication pipeline | `probe_capture.py`, `probe_receipt.py`, `publication.py` | Create protected per-run/per-scope directories and verify frame/artifact/receipt run-ID/scope identity. |
+| Runtime | `settings.py`, `main.py`, `policy/operations.py`, `routes/read_only.py`, relevant composition code | Add exact version/scope gate, `RuntimeAuthorization`, and post-validation derived-operation guard; fixture default unchanged. |
 | Tests/policy/docs | existing `integrations/fosun_gateway/tests/{unit,security,contract}`, `tests/policy/test_repository_policy.py`, `scripts/ci/repository_policy.py`, activation runbook | Cover contracts and prohibit scope confusion/write surface; revise operator runbook without secrets. |
 
 Do not modify provider manifests, dependency pins/lockfiles, `.openai/hosting.json`, Engine/database
@@ -226,17 +269,22 @@ Implement in these independently reviewable phases, writing a failing focused te
 minimal implementation change:
 
 1. **Descriptor and artifact validation:** exact core/extended constants and order; reject missing,
-   reordered, duplicate, extra, cross-scope, legacy v1/v2, and scope-version-mismatched evidence;
-   verify canonical digest and receipt signature bind scope.
+   reordered, duplicate, extra, cross-scope, legacy artifact v1/v2, receipt v1, unknown versions,
+   and scope/run-ID/version-mismatched evidence; verify canonical digest and receipt signature bind
+   scope and run ID.
 2. **Executor/CLI:** core reaches only its labels; extended visibly dispatches Session/Accounts as
    prerequisites but authorizes only two finals; no supplied account ID; first failure stops;
    max attempts remains one; physical total <=24 and broker <=6; no internal retry or unlabelled
    request; no raw error leaks.
-3. **Capture/publication:** scope fields survive one protected success frame; failures have null
-   evidence; artifact and receipt are create-only; scope-swapped frame/receipt is rejected;
-   extended failure cannot alter a prior core artifact.
+3. **Capture/publication:** scope/run ID fields survive one protected success frame; failures have
+   null evidence; artifact and receipt are create-only; same-parent core then extended use distinct
+   directories; wrong scope/run-ID cross-references fail closed; after extended publication failure,
+   the earlier core artifact/receipt bytes and SHA-256 are unchanged; failed directories cannot be
+   reused.
 4. **Admission/composition/network:** core denies OrderList/CashFlows, extended denies account,
-   cash, holdings, quote, and bar operations; fixture remains default; invalid/mixed evidence
+   cash, holdings, quote, and bar operations. Test cash-only and holdings-only authorization deny
+   the opposite `read_kind`, invalid `read_kind` fails before authorization, and all denied cases
+   leave transport unconstructed/uninvoked. Fixture remains default; invalid/mixed evidence
    constructs no SDK client; offline socket guard confirms tests do not open a network connection;
    repository policy rejects writes and scope bypasses.
 5. **Regression:** run the complete Gateway suite plus static/policy gates below. No Provider,
@@ -258,7 +306,8 @@ authorized by this document or by any prior failed full-scope run. It may be pro
 the implementation is merged, independently accepted with the matrix above, and its Gateway remains
 fail-closed. The main session must then present the exact core final operation set, the full fixed
 physical plan (`Session, Accounts, CashSummary, Holdings, quote, kline_minimal`), one-shot
-`max_attempts=1`, first-error stop, the unchanged 24/6 caps, no write surface, and the expected
-Provider/account impact. It must obtain or confirm authorization applicable to that exact run before
-any external connection. A failed core run publishes no artifact/receipt and cannot be retried,
-reused, or escalated without a new authorization.
+`max_attempts=1`, first-error stop, the unchanged 24/6 caps, no write surface, the unique protected
+core run ID/directory, and the expected Provider/account impact. It must obtain or confirm
+authorization applicable to that exact run before any external connection. A failed core run
+publishes no artifact/receipt and cannot be retried, reused, or escalated without a new
+authorization.
