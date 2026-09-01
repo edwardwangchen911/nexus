@@ -6,6 +6,7 @@ import asyncio
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from typing import Literal
 from uuid import UUID
 
 from nexus.domain.ids import new_uuid7
@@ -49,12 +50,15 @@ async def freeze_broker_snapshot(
     sync_run_id: UUID | None = None,
     deadline: timedelta = timedelta(seconds=60),
     prior_ready_snapshot: PortfolioSnapshot | None = None,
+    max_attempts: Literal[1, 2] = 2,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> BrokerSyncResult:
-    """Run at most two complete attempts under one internal sync-run identity."""
+    """Run one or two complete attempts under one internal sync-run identity."""
     timeout_seconds = deadline.total_seconds()
     if timeout_seconds <= 0 or timeout_seconds > 60:
         raise ValueError("deadline must be within (0, 60] seconds")
+    if max_attempts not in (1, 2):
+        raise ValueError("max_attempts must be 1 or 2")
     if prior_ready_snapshot is not None and prior_ready_snapshot.status != "READY":
         raise ValueError("prior snapshot must be READY")
     if prior_ready_snapshot is not None and prior_ready_snapshot.portfolio_id != (
@@ -68,7 +72,7 @@ async def freeze_broker_snapshot(
     last_reasons: tuple[str, ...] = ()
     latest_as_of: datetime | None = None
 
-    for attempt_count in (1, 2):
+    for attempt_count in range(1, max_attempts + 1):
         progress = AttemptProgress(attempt=attempt_count)
         attempt_deadline = monotonic() + timeout_seconds
         try:
@@ -89,7 +93,7 @@ async def freeze_broker_snapshot(
                 )
                 last_reasons = last_reasons or ("incomplete_provider_facts",)
                 traces.append(progress.trace(completed=True, reason="incomplete_provider_facts"))
-                if attempt_count == 1:
+                if attempt_count < max_attempts:
                     continue
                 if invalidated_current_window:
                     return _reconciliation_required(
@@ -143,7 +147,7 @@ async def freeze_broker_snapshot(
             traces.append(progress.trace(completed=False, reason=type(error).__name__))
 
         latest_as_of = progress.latest_provider_as_of or latest_as_of
-        if attempt_count == 1:
+        if attempt_count < max_attempts:
             continue
         if invalidated_current_window:
             return _reconciliation_required(
@@ -163,7 +167,7 @@ async def freeze_broker_snapshot(
             traces,
             latest_as_of,
         )
-    raise AssertionError("two-attempt loop must return")
+    raise AssertionError("bounded attempt loop must return")
 
 
 def _reconciliation_required(

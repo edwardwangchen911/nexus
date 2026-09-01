@@ -1,9 +1,24 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from uuid import UUID
 
 import pytest
-from nexus.ops.fosun_local_refresh import _ensure_market_bindings, _insert_calendar
+from helpers.broker_facts import position, read_set
+from helpers.broker_read import ScriptedBrokerProvider
+from nexus.ops.fosun_local_refresh import (
+    _ensure_market_bindings,
+    _insert_calendar,
+    _persist_ready_broker_snapshot,
+)
+from nexus.persistence.models.portfolio import (
+    BrokerSyncRun,
+    PortfolioSnapshotRecord,
+)
 from nexus.persistence.session import session_factory
+from nexus.providers.broker.fosun_contracts import PositionItem
+from nexus.reconciliation.broker_snapshot import freeze_broker_snapshot
+from nexus.reconciliation.facts import canonical_position_hash
 from nexus.settings import EngineSettings
+from sqlalchemy import select
 
 
 def _settings(database_url: str) -> EngineSettings:
@@ -77,3 +92,66 @@ async def test_local_calendar_authority_is_reused_for_the_same_completed_window(
         await factory.kw["bind"].dispose()
 
     assert second.id == first.id
+
+
+@pytest.mark.asyncio
+async def test_local_ready_broker_snapshot_is_finalized_atomically(
+    migrated_database_url: str,
+) -> None:
+    account_id = UUID("0198d600-1000-7000-8000-000000000001")
+    portfolio_id = UUID("0198d600-1000-7000-8000-000000000002")
+    sync_run_id = UUID("0198d600-1000-7000-8000-000000000003")
+    instrument_id = UUID("0198d600-1000-7000-8000-000000000004")
+    instant = datetime(2026, 9, 1, 4, 0, tzinfo=UTC)
+    stable = read_set(positions=(position(instrument_id),), orders=())
+    frozen = await freeze_broker_snapshot(
+        account_id,
+        ScriptedBrokerProvider([(stable, stable)]),
+        portfolio_id=portfolio_id,
+        sync_run_id=sync_run_id,
+        max_attempts=1,
+    )
+    holding = PositionItem(
+        kind="position",
+        external_account_id="redacted-test-account",
+        instrument_code="usAAPL",
+        currency="USD",
+        quantity="10",
+        available_quantity="10",
+        frozen_quantity="0",
+        average_cost="100",
+        diluted_cost=None,
+        current_price="120",
+        provider_as_of=instant,
+    )
+    factory = session_factory(_settings(migrated_database_url))
+    try:
+        async with factory() as session, session.begin():
+            stored = await _persist_ready_broker_snapshot(
+                session,
+                account_id=account_id,
+                portfolio_id=portfolio_id,
+                frozen=frozen,
+                holdings=(holding,),
+                instrument_ids={"usAAPL": instrument_id},
+                valid_from=date(2026, 8, 31),
+                completed_at=instant,
+            )
+        async with factory() as session:
+            run = await session.get(BrokerSyncRun, sync_run_id)
+            snapshot = await session.scalar(
+                select(PortfolioSnapshotRecord).where(
+                    PortfolioSnapshotRecord.id == stored.id
+                )
+            )
+    finally:
+        await factory.kw["bind"].dispose()
+
+    assert run is not None and run.status == "READY"
+    assert run.trigger_kind == "MANUAL"
+    assert run.attempt_count == 1
+    assert run.cash_flow_quality == "NOT_RUN"
+    assert snapshot is not None and snapshot.status == "READY"
+    assert snapshot.position_hash == canonical_position_hash(
+        frozen.portfolio_snapshot.positions
+    )

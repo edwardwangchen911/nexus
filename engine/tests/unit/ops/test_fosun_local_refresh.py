@@ -9,14 +9,16 @@ import nexus.ops.fosun_local_refresh as refresh_module
 import pytest
 from nexus.ops.fosun_local_refresh import (
     _daily_window,
+    _freeze_broker_facts,
     _read_market_snapshot,
     _safe_failure_code,
+    _SinglePageBrokerGateway,
     _symbol_and_exchange,
     _us_holding_codes,
     refresh_local_fosun,
 )
 from nexus.providers.broker.fosun_contracts import PositionItem
-from nexus.providers.broker.gateway_contracts import GatewayResponsePage
+from nexus.providers.broker.gateway_contracts import GatewayClientError, GatewayResponsePage
 from nexus.providers.market.fosun_gateway import RawGatewayResponse
 
 
@@ -106,6 +108,112 @@ class _RecordingMarket:
         )
 
 
+@pytest.mark.asyncio
+async def test_local_broker_facts_use_one_complete_six_phase_read() -> None:
+    instant = datetime(2026, 8, 31, tzinfo=UTC)
+    account_id = uuid4()
+    portfolio_id = uuid4()
+    sync_run_id = uuid4()
+    instrument_id = uuid4()
+
+    class _Broker:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def read_cash(self, _external_account_id: str) -> GatewayResponsePage:
+            self.calls.append("cash")
+            return GatewayResponsePage(
+                items=(
+                    {
+                        "kind": "cash",
+                        "external_account_id": "redacted-test-account",
+                        "currency": "USD",
+                        "cash_balance": "1000",
+                        "available_cash": "900",
+                        "provider_as_of": instant.isoformat(),
+                    },
+                ),
+                source_request_id=f"cash-{len(self.calls)}",
+                has_more=False,
+                next_cursor=None,
+                as_of=instant,
+                quality="PASS",
+            )
+
+        async def read_holdings(
+            self, _external_account_id: str, *, cursor: str | None, limit: int
+        ) -> GatewayResponsePage:
+            assert cursor is None and limit == 100
+            self.calls.append("holdings")
+            return GatewayResponsePage(
+                items=(_position("usAAPL").model_dump(mode="json"),),
+                source_request_id=f"holdings-{len(self.calls)}",
+                has_more=False,
+                next_cursor=None,
+                as_of=instant,
+                quality="PASS",
+            )
+
+        async def read_orders(
+            self, _external_account_id: str, *, cursor: str | None, limit: int
+        ) -> GatewayResponsePage:
+            assert cursor is None and limit == 100
+            self.calls.append("orders")
+            return GatewayResponsePage(
+                items=(),
+                source_request_id=f"orders-{len(self.calls)}",
+                has_more=False,
+                next_cursor=None,
+                as_of=instant,
+                quality="PASS",
+            )
+
+    broker = _Broker()
+
+    result = await _freeze_broker_facts(
+        broker,
+        account_id=account_id,
+        portfolio_id=portfolio_id,
+        sync_run_id=sync_run_id,
+        external_account_id="redacted-test-account",
+        instrument_ids={"usAAPL": instrument_id},
+    )
+
+    assert result.status == "READY"
+    assert result.attempt_count == 1
+    assert broker.calls == ["cash", "holdings", "orders", "holdings", "orders", "cash"]
+    assert result.portfolio_snapshot.portfolio_id == portfolio_id
+    assert result.portfolio_snapshot.positions[0].instrument_id == instrument_id
+
+
+@pytest.mark.asyncio
+async def test_local_broker_gateway_rejects_pagination_before_follow_up() -> None:
+    instant = datetime(2026, 8, 31, tzinfo=UTC)
+
+    class _Broker:
+        async def read_orders(
+            self, _external_account_id: str, *, cursor: str | None, limit: int
+        ) -> GatewayResponsePage:
+            assert cursor is None and limit == 100
+            return GatewayResponsePage(
+                items=(),
+                source_request_id="orders-page-1",
+                has_more=True,
+                next_cursor="2",
+                as_of=instant,
+                quality="PASS",
+            )
+
+    limited = _SinglePageBrokerGateway(_Broker())  # type: ignore[arg-type]
+
+    with pytest.raises(GatewayClientError, match="pagination rejected"):
+        await limited.read_orders(
+            "redacted-test-account",
+            cursor=None,
+            limit=100,
+        )
+
+
 def test_daily_window_is_bounded_to_completed_xnys_sessions() -> None:
     start, end, rows = _daily_window(datetime(2026, 9, 1, 4, 0, tzinfo=UTC))
 
@@ -164,12 +272,9 @@ async def test_market_snapshot_uses_one_exact_quote_set_and_one_bar_read_per_cod
     assert [call["code"] for call in bar_calls] == list(codes)
     assert len(bar_calls) == len(set(call["code"] for call in bar_calls)) == 12
     assert snapshot.request_counts == {
-        "accounts": 1,
-        "cash": 1,
-        "holdings": 1,
         "quotes": 1,
         "bars": 12,
-        "total": 16,
+        "total": 13,
     }
 
 
@@ -188,7 +293,7 @@ async def test_market_snapshot_accepts_a_listing_limited_daily_series() -> None:
     )
 
     assert snapshot.codes == ("usNEW",)
-    assert snapshot.request_counts["total"] == 5
+    assert snapshot.request_counts["total"] == 2
 
 
 @pytest.mark.asyncio

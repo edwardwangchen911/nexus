@@ -41,15 +41,14 @@ from nexus.persistence.models.market import (
 from nexus.persistence.models.portfolio import (
     Account,
     BrokerSyncRun,
-    CashSnapshot,
     Portfolio,
     PortfolioSnapshotRecord,
-    PositionSnapshot,
 )
 from nexus.persistence.models.runtime import IntegrationStatus
 from nexus.providers.base import BarsRequest, InstrumentId
-from nexus.providers.broker.base import BrokerPosition
-from nexus.providers.broker.fosun_contracts import AccountItem, CashItem, PositionItem
+from nexus.providers.broker.base import BrokerSyncResult
+from nexus.providers.broker.fosun import FosunBrokerProvider, GatewayReader
+from nexus.providers.broker.fosun_contracts import AccountItem, PositionItem
 from nexus.providers.broker.gateway_client import FosunGatewayClient
 from nexus.providers.broker.gateway_contracts import GatewayClientError, GatewayResponsePage
 from nexus.providers.broker.settings import BrokerWorkerSettings
@@ -64,19 +63,15 @@ from nexus.providers.market.fosun_gateway import (
     parse_bar_page,
     parse_quote_page,
 )
-from nexus.reconciliation.facts import (
-    ORDER_HASH_VERSION,
-    POSITION_HASH_VERSION,
-    canonical_order_hash,
-    canonical_position_hash,
-)
+from nexus.reconciliation.broker_snapshot import freeze_broker_snapshot
+from nexus.reconciliation.snapshot_persistence import finalize_broker_sync
 
 _LOCAL_CONTRACT_HASH = hashlib.sha256(b"nexus.mac-local-fosun-read-only.v2").hexdigest()
 _INSTRUMENT_NAMESPACE = UUID("639bd8e1-d250-4f58-a88c-370b6bbc621b")
 _UNIVERSE_ID = UUID("40cd56b4-c849-5ea7-b463-19699231f521")
 _LOCAL_CAPABILITY_DAYS = 365
 _MAX_US_HOLDING_SYMBOLS = 12
-_MAX_PROVIDER_REQUESTS = 16
+_MAX_PROVIDER_REQUESTS = 21
 _US_PROVIDER_CODE = re.compile(r"^us[A-Z][A-Z0-9.-]{0,14}$")
 
 
@@ -100,6 +95,79 @@ class _MarketSnapshotReads:
     quote_raw: RawGatewayResponse
     bars_raw: tuple[tuple[str, RawGatewayResponse], ...]
     request_counts: dict[str, int]
+
+
+@dataclass(frozen=True)
+class _LocalBrokerIdentity:
+    account_id: UUID
+    portfolio_id: UUID
+    sync_run_id: UUID
+    instrument_ids: dict[str, UUID]
+
+
+class _SinglePageBrokerGateway:
+    """Keep the one-shot local broker request budget fixed and explicit."""
+
+    def __init__(self, inner: GatewayReader) -> None:
+        self._inner = inner
+
+    async def read_cash(self, external_account_id: str) -> GatewayResponsePage:
+        return self._require_single_page(await self._inner.read_cash(external_account_id))
+
+    async def read_holdings(
+        self,
+        external_account_id: str,
+        *,
+        cursor: str | None,
+        limit: int,
+    ) -> GatewayResponsePage:
+        return self._require_single_page(
+            await self._inner.read_holdings(
+                external_account_id,
+                cursor=cursor,
+                limit=limit,
+            )
+        )
+
+    async def read_orders(
+        self,
+        external_account_id: str,
+        *,
+        cursor: str | None,
+        limit: int,
+    ) -> GatewayResponsePage:
+        return self._require_single_page(
+            await self._inner.read_orders(
+                external_account_id,
+                cursor=cursor,
+                limit=limit,
+            )
+        )
+
+    async def read_cash_flows(
+        self,
+        external_account_id: str,
+        *,
+        date_from: date,
+        date_to: date,
+        cursor: str | None,
+        limit: int,
+    ) -> GatewayResponsePage:
+        return self._require_single_page(
+            await self._inner.read_cash_flows(
+                external_account_id,
+                date_from=date_from,
+                date_to=date_to,
+                cursor=cursor,
+                limit=limit,
+            )
+        )
+
+    @staticmethod
+    def _require_single_page(page: GatewayResponsePage) -> GatewayResponsePage:
+        if page.has_more:
+            raise GatewayClientError("gateway pagination rejected")
+        return page
 
 
 class LocalFosunRefreshSettings(BaseSettings):
@@ -177,8 +245,9 @@ async def refresh_local_fosun(
     bar_limit = len(expected_sessions)
     if not 1 <= bar_limit <= 500:
         raise ValueError("LOCAL_KLINE_BUDGET_INVALID")
-    broker = FosunGatewayClient(_broker_settings(settings))
+    engine = None
     market = FosunMarketGatewayClient(_market_identity(settings))
+    broker = FosunGatewayClient(_broker_settings(settings))
     try:
         accounts_page = await broker.read_accounts()
         try:
@@ -188,13 +257,6 @@ async def refresh_local_fosun(
         if not accounts or accounts_page.has_more:
             raise ValueError("LOCAL_ACCOUNT_SCOPE_AMBIGUOUS")
         external_account_id = accounts[0].external_account_id
-        cash_page = await broker.read_cash(external_account_id)
-        try:
-            cash = tuple(CashItem.model_validate(item) for item in cash_page.items)
-        except Exception:
-            raise RuntimeError("LOCAL_CASH_CONTRACT_INVALID") from None
-        if not cash or cash_page.has_more:
-            raise ValueError("LOCAL_CASH_SCOPE_INVALID")
         holdings_page = await broker.read_holdings(
             external_account_id,
             cursor=None,
@@ -206,9 +268,7 @@ async def refresh_local_fosun(
             raise RuntimeError("LOCAL_HOLDINGS_CONTRACT_INVALID") from None
         if holdings_page.has_more:
             raise ValueError("LOCAL_HOLDINGS_BUDGET_EXCEEDED")
-        if any(item.external_account_id != external_account_id for item in cash) or any(
-            item.external_account_id != external_account_id for item in holdings
-        ):
+        if any(item.external_account_id != external_account_id for item in holdings):
             raise ValueError("LOCAL_ACCOUNT_SCOPE_MISMATCH")
         market_reads = await _read_market_snapshot(
             market,
@@ -217,12 +277,30 @@ async def refresh_local_fosun(
             request_end_at=request_end_at,
             expected_sessions=expected_sessions,
         )
+        engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        async with sessions() as session:
+            identity = await _load_local_broker_identity(session, holdings=holdings)
+        frozen = await _freeze_broker_facts(
+            broker,
+            account_id=identity.account_id,
+            portfolio_id=identity.portfolio_id,
+            sync_run_id=identity.sync_run_id,
+            external_account_id=external_account_id,
+            instrument_ids=identity.instrument_ids,
+        )
+        if frozen.status != "READY":
+            raise RuntimeError("LOCAL_BROKER_RECONCILIATION_REQUIRED")
+    except BaseException:
+        if engine is not None:
+            await engine.dispose()
+        raise
     finally:
         await broker.aclose()
         await market.aclose()
 
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    if engine is None:
+        raise AssertionError("local database engine was not initialized")
     store = S3ProviderEvidenceStore(settings)
     try:
         try:
@@ -232,10 +310,9 @@ async def refresh_local_fosun(
                     store,
                     settings=settings,
                     accounts_page=accounts_page,
-                    cash_page=cash_page,
-                    cash=cash,
-                    holdings_page=holdings_page,
                     holdings=holdings,
+                    identity=identity,
+                    frozen=frozen,
                     market_reads=market_reads,
                     request_start_at=request_start_at,
                     request_end_at=request_end_at,
@@ -268,6 +345,149 @@ def _us_holding_codes(holdings: Sequence[PositionItem]) -> tuple[str, ...]:
     return codes
 
 
+async def _freeze_broker_facts(
+    broker: GatewayReader,
+    *,
+    account_id: UUID,
+    portfolio_id: UUID,
+    sync_run_id: UUID,
+    external_account_id: str,
+    instrument_ids: dict[str, UUID],
+) -> BrokerSyncResult:
+    """Freeze one local read-only broker window without automatic retries."""
+    provider = FosunBrokerProvider(
+        account_id=account_id,
+        external_account_id=external_account_id,
+        client=_SinglePageBrokerGateway(broker),
+        instrument_ids=instrument_ids,
+        cash_flow_kinds={},
+    )
+    return await freeze_broker_snapshot(
+        account_id,
+        provider,
+        portfolio_id=portfolio_id,
+        sync_run_id=sync_run_id,
+        max_attempts=1,
+    )
+
+
+async def _load_local_broker_identity(
+    session: AsyncSession,
+    *,
+    holdings: tuple[PositionItem, ...],
+) -> _LocalBrokerIdentity:
+    """Resolve stable local IDs without writing before broker reconciliation succeeds."""
+    accounts = tuple(
+        await session.scalars(
+            select(Account).where(Account.provider == "fosun").order_by(Account.id).limit(2)
+        )
+    )
+    if len(accounts) > 1:
+        raise ValueError("LOCAL_ACCOUNT_SCOPE_AMBIGUOUS")
+    account_id = accounts[0].id if accounts else new_uuid7()
+    portfolios = tuple(
+        await session.scalars(
+            select(Portfolio)
+            .where(Portfolio.account_id == account_id)
+            .order_by(Portfolio.id)
+            .limit(2)
+        )
+    )
+    if len(portfolios) > 1:
+        raise ValueError("LOCAL_PORTFOLIO_SCOPE_AMBIGUOUS")
+    portfolio_id = portfolios[0].id if portfolios else new_uuid7()
+    instrument_ids: dict[str, UUID] = {}
+    for item in holdings:
+        symbol, _exchange = _symbol_and_exchange(item.instrument_code)
+        alias = await session.scalar(
+            select(InstrumentAlias).where(
+                InstrumentAlias.symbol == symbol,
+                InstrumentAlias.alias_type == "ticker",
+            )
+        )
+        instrument_ids[item.instrument_code] = (
+            alias.instrument_id
+            if alias is not None
+            else uuid5(_INSTRUMENT_NAMESPACE, item.instrument_code)
+        )
+    return _LocalBrokerIdentity(
+        account_id=account_id,
+        portfolio_id=portfolio_id,
+        sync_run_id=new_uuid7(),
+        instrument_ids=instrument_ids,
+    )
+
+
+async def _persist_ready_broker_snapshot(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    portfolio_id: UUID,
+    frozen: BrokerSyncResult,
+    holdings: tuple[PositionItem, ...],
+    instrument_ids: dict[str, UUID],
+    valid_from: date,
+    completed_at: datetime,
+) -> PortfolioSnapshotRecord:
+    """Persist one already-frozen local broker snapshot in a single transaction."""
+    if frozen.status != "READY" or frozen.portfolio_snapshot.portfolio_id != portfolio_id:
+        raise ValueError("LOCAL_BROKER_SNAPSHOT_NOT_READY")
+    account = await session.get(Account, account_id)
+    if account is None:
+        account = Account(id=account_id, provider="fosun", status="ACTIVE")
+        session.add(account)
+        await session.flush()
+    elif account.provider != "fosun" or account.status != "ACTIVE":
+        raise ValueError("LOCAL_BROKER_ACCOUNT_INVALID")
+    portfolio = await session.get(Portfolio, portfolio_id)
+    if portfolio is None:
+        portfolio = Portfolio(
+            id=portfolio_id,
+            account_id=account_id,
+            name="复星只读账户",
+        )
+        session.add(portfolio)
+        await session.flush()
+    elif portfolio.account_id != account_id:
+        raise ValueError("LOCAL_BROKER_PORTFOLIO_INVALID")
+    for item in holdings:
+        expected_id = instrument_ids.get(item.instrument_code)
+        if expected_id is None:
+            raise ValueError("LOCAL_BROKER_INSTRUMENT_UNMAPPED")
+        actual_id = await _ensure_instrument(
+            session,
+            item.instrument_code,
+            currency=item.currency,
+            valid_from=valid_from,
+            expected_id=expected_id,
+        )
+        if actual_id != expected_id:
+            raise ValueError("LOCAL_BROKER_INSTRUMENT_MISMATCH")
+    run = BrokerSyncRun(
+        id=frozen.sync_run_id,
+        account_id=account_id,
+        portfolio_id=portfolio_id,
+        trigger_kind="MANUAL",
+        actor_id="nexus-mac-local-read-only",
+        route="local-fosun-refresh",
+        idempotency_key=str(frozen.sync_run_id),
+        request_hash=hashlib.sha256(str(frozen.sync_run_id).encode()).hexdigest(),
+        status="ACTIVE",
+        accepted_at=completed_at,
+        completed_at=None,
+        attempt_count=0,
+        failure_reason=None,
+        cash_flow_quality="NOT_RUN",
+    )
+    session.add(run)
+    await session.flush()
+    return await finalize_broker_sync(
+        session,
+        frozen,
+        completed_at=completed_at,
+    )
+
+
 async def _read_market_snapshot(
     market: _MarketReader,
     *,
@@ -283,7 +503,7 @@ async def _read_market_snapshot(
     bar_limit = len(expected_sessions)
     if not 1 <= bar_limit <= 500:
         raise ValueError("LOCAL_KLINE_BUDGET_INVALID")
-    if 4 + len(codes) > _MAX_PROVIDER_REQUESTS:
+    if 9 + len(codes) > _MAX_PROVIDER_REQUESTS:
         raise ValueError("LOCAL_PROVIDER_REQUEST_BUDGET_EXCEEDED")
 
     quote_raw = await market.read_quotes_raw(codes)
@@ -326,12 +546,9 @@ async def _read_market_snapshot(
         quote_raw=quote_raw,
         bars_raw=tuple(bars_raw),
         request_counts={
-            "accounts": 1,
-            "cash": 1,
-            "holdings": 1,
             "quotes": 1,
             "bars": len(bars_raw),
-            "total": 4 + len(bars_raw),
+            "total": 1 + len(bars_raw),
         },
     )
 
@@ -342,10 +559,9 @@ async def _persist_refresh(
     *,
     settings: LocalFosunRefreshSettings,
     accounts_page: GatewayResponsePage,
-    cash_page: GatewayResponsePage,
-    cash: tuple[CashItem, ...],
-    holdings_page: GatewayResponsePage,
     holdings: tuple[PositionItem, ...],
+    identity: _LocalBrokerIdentity,
+    frozen: BrokerSyncResult,
     market_reads: _MarketSnapshotReads,
     request_start_at: datetime,
     request_end_at: datetime,
@@ -355,18 +571,17 @@ async def _persist_refresh(
     quote_raw = market_reads.quote_raw
     bars_raw_by_code = dict(market_reads.bars_raw)
     account_page_as_of = accounts_page.as_of
-    cash_page_as_of = cash_page.as_of
-    holdings_page_as_of = holdings_page.as_of
-    cash_request_id = cash_page.source_request_id
-    holdings_request_id = holdings_page.source_request_id
-    instrument_ids: dict[str, UUID] = {}
-    for item in holdings:
-        instrument_ids[item.instrument_code] = await _ensure_instrument(
-            session,
-            item.instrument_code,
-            currency=item.currency,
-            valid_from=request_start_at.date(),
-        )
+    instrument_ids = identity.instrument_ids
+    snapshot = await _persist_ready_broker_snapshot(
+        session,
+        account_id=identity.account_id,
+        portfolio_id=identity.portfolio_id,
+        frozen=frozen,
+        holdings=holdings,
+        instrument_ids=instrument_ids,
+        valid_from=request_start_at.date(),
+        completed_at=authorized_at,
+    )
     await _ensure_market_universe(
         session,
         instrument_ids=tuple(instrument_ids[code] for code in market_reads.codes),
@@ -376,101 +591,6 @@ async def _persist_refresh(
             *(raw.received_at for raw in bars_raw_by_code.values()),
         ),
         effective_from=request_start_at.date(),
-    )
-    account = await session.scalar(
-        select(Account).where(Account.provider == "fosun").order_by(Account.id).limit(2)
-    )
-    if account is None:
-        account = Account(provider="fosun", status="ACTIVE")
-        session.add(account)
-        await session.flush()
-    portfolio = await session.scalar(select(Portfolio).where(Portfolio.account_id == account.id))
-    if portfolio is None:
-        portfolio = Portfolio(account_id=account.id, name="复星只读账户")
-        session.add(portfolio)
-        await session.flush()
-    positions = tuple(
-        BrokerPosition(
-            instrument_id=instrument_ids[item.instrument_code],
-            currency=item.currency,
-            quantity=item.quantity,
-            available_quantity=item.available_quantity,
-            frozen_quantity=item.frozen_quantity,
-            avg_cost=item.average_cost,
-            diluted_cost=item.diluted_cost,
-            current_price=item.current_price,
-            provider_as_of=item.provider_as_of,
-        )
-        for item in holdings
-    )
-    sync_run = BrokerSyncRun(
-        account_id=account.id,
-        portfolio_id=portfolio.id,
-        trigger_kind="AUTOMATIC",
-        actor_id="nexus-mac-local-read-only",
-        route="local-fosun-refresh",
-        idempotency_key=str(new_uuid7()),
-        request_hash=hashlib.sha256(str(authorized_at).encode()).hexdigest(),
-        status="PARTIAL",
-        accepted_at=min(cash_page_as_of, holdings_page_as_of),
-        completed_at=authorized_at,
-        attempt_count=1,
-        failure_reason=None,
-        cash_flow_quality="NOT_RUN",
-    )
-    session.add(sync_run)
-    await session.flush()
-    snapshot_as_of = max(cash_page_as_of, holdings_page_as_of)
-    snapshot = PortfolioSnapshotRecord(
-        portfolio_id=portfolio.id,
-        sync_run_id=sync_run.id,
-        stale_from_snapshot_id=None,
-        status="PARTIAL",
-        as_of=snapshot_as_of,
-        position_hash_version=POSITION_HASH_VERSION,
-        position_hash=canonical_position_hash(positions),
-        order_hash_version=ORDER_HASH_VERSION,
-        order_hash=canonical_order_hash(()),
-        source_request_ids=[cash_request_id, holdings_request_id],
-        source_observations=[
-            {
-                "kind": "cash",
-                "source": "fosun",
-                "as_of": cash_page_as_of.isoformat(),
-            },
-            {
-                "kind": "holdings",
-                "source": "fosun",
-                "as_of": holdings_page_as_of.isoformat(),
-            },
-        ],
-    )
-    session.add(snapshot)
-    await session.flush()
-    session.add_all(
-        CashSnapshot(
-            portfolio_snapshot_id=snapshot.id,
-            currency=item.currency,
-            cash_balance=item.cash_balance,
-            available_cash=item.available_cash,
-            provider_as_of=item.provider_as_of,
-        )
-        for item in cash
-    )
-    session.add_all(
-        PositionSnapshot(
-            portfolio_snapshot_id=snapshot.id,
-            instrument_id=position.instrument_id,
-            currency=position.currency,
-            quantity=position.quantity,
-            available_quantity=position.available_quantity,
-            frozen_quantity=position.frozen_quantity,
-            avg_cost=position.avg_cost,
-            diluted_cost=position.diluted_cost,
-            current_price=position.current_price,
-            provider_as_of=position.provider_as_of,
-        )
-        for position in positions
     )
     quote_binding, bars_binding = await _ensure_market_bindings(
         session,
@@ -586,21 +706,55 @@ async def _persist_refresh(
             raise ValueError("LOCAL_KLINE_DISPLAY_MODE_INVALID")
         bar_count += len(normalized_bars.items)
     quote_success = sum(item.price is not None for item in quote_page.items)
+    broker_request_counts = _broker_request_counts(frozen)
+    provider_requests = {
+        "accounts": 1,
+        "cash": broker_request_counts["cash"],
+        "holdings": 1 + broker_request_counts["holdings"],
+        "orders": broker_request_counts["orders"],
+        "quotes": market_reads.request_counts["quotes"],
+        "bars": market_reads.request_counts["bars"],
+    }
+    provider_requests["total"] = sum(provider_requests.values())
     return {
         "status": "ok",
         "source": "fosun",
-        "cash_currencies": len(cash),
-        "positions": len(positions),
+        "snapshot_status": snapshot.status,
+        "cash_currencies": len(frozen.portfolio_snapshot.cash),
+        "positions": len(frozen.portfolio_snapshot.positions),
+        "open_orders": len(frozen.portfolio_snapshot.open_orders),
         "market_symbols": len(market_reads.codes),
         "quotes": len(quote_page.items),
         "quote_success": quote_success,
         "quote_missing": len(quote_page.items) - quote_success,
         "bar_series": len(market_reads.bars_raw),
         "bars": bar_count,
-        "provider_requests": market_reads.request_counts,
-        "portfolio_as_of": snapshot_as_of.isoformat(),
+        "provider_requests": provider_requests,
+        "portfolio_as_of": snapshot.as_of.isoformat() if snapshot.as_of else None,
         "market_as_of": max(quote_raw.received_at, *bars_received_at).isoformat(),
     }
+
+
+def _broker_request_counts(frozen: BrokerSyncResult) -> dict[str, int]:
+    if frozen.attempt_count != 1 or len(frozen.attempt_traces) != 1:
+        raise ValueError("LOCAL_BROKER_ATTEMPT_COUNT_INVALID")
+    observations = frozen.attempt_traces[0].get("source_observations")
+    if not isinstance(observations, tuple | list):
+        raise ValueError("LOCAL_BROKER_OBSERVATIONS_INVALID")
+    counts = {"cash": 0, "holdings": 0, "orders": 0}
+    for observation in observations:
+        if not isinstance(observation, dict):
+            raise ValueError("LOCAL_BROKER_OBSERVATIONS_INVALID")
+        phase = observation.get("phase")
+        if phase in {"cash_a", "cash_b"}:
+            counts["cash"] += 1
+        elif phase in {"positions_a", "positions_b"}:
+            counts["holdings"] += 1
+        elif phase in {"orders_a", "orders_b"}:
+            counts["orders"] += 1
+        else:
+            raise ValueError("LOCAL_BROKER_OBSERVATIONS_INVALID")
+    return counts
 
 
 async def _ensure_instrument(
@@ -609,6 +763,7 @@ async def _ensure_instrument(
     *,
     currency: str,
     valid_from: date,
+    expected_id: UUID | None = None,
 ) -> UUID:
     symbol, exchange = _symbol_and_exchange(code)
     existing = await session.scalar(
@@ -620,7 +775,7 @@ async def _ensure_instrument(
     )
     if existing is not None:
         return existing.instrument_id
-    instrument_id = uuid5(_INSTRUMENT_NAMESPACE, code)
+    instrument_id = expected_id or uuid5(_INSTRUMENT_NAMESPACE, code)
     session.add(
         Instrument(
             id=instrument_id,

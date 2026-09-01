@@ -61,6 +61,29 @@ async def test_first_reconciliation_mismatch_retries_complete_window(
 
 
 @pytest.mark.asyncio
+async def test_single_attempt_mode_never_retries_a_mismatch() -> None:
+    mismatch = (read_set(), read_set(positions=(position(quantity="11"),)))
+    provider = ScriptedBrokerProvider([mismatch])
+
+    result = await freeze_broker_snapshot(
+        ACCOUNT_ID,
+        provider,
+        max_attempts=1,
+    )
+
+    assert result.status == "RECONCILIATION_REQUIRED"
+    assert result.attempt_count == 1
+    assert [call[0] for call in provider.calls] == [
+        "cash",
+        "positions",
+        "orders",
+        "positions",
+        "orders",
+        "cash",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_second_mismatch_or_interruption_requires_reconciliation() -> None:
     mismatch = (read_set(), read_set(positions=(position(quantity="11"),)))
     mismatch_result = await freeze_broker_snapshot(
