@@ -23,6 +23,7 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
   const requestHeaders = await headers();
   const userId = requestHeaders.get(USER_ID_HEADER);
   const email = requestHeaders.get(USER_EMAIL_HEADER);
+  if (!userId && !email) return localDevelopmentUser(process.env);
   if (!userId || !email) return null;
 
   const encodedFullName = requestHeaders.get(USER_FULL_NAME_HEADER);
@@ -37,6 +38,21 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
     displayName: fullName ?? email,
     email,
     fullName,
+  };
+}
+
+export function localDevelopmentUser(
+  env: NodeJS.ProcessEnv,
+): ChatGPTUser | null {
+  if (env.NEXUS_AUTH_MODE !== "dev" || env.NEXUS_ENV === "production") {
+    return null;
+  }
+
+  return {
+    userId: "nexus-local-dev",
+    displayName: "NEXUS Local",
+    email: "local@nexus.invalid",
+    fullName: "NEXUS Local",
   };
 }
 
