@@ -89,6 +89,10 @@ def test_scoped_run_id_signature_and_hash_are_independently_bound() -> None:
     original_result, _ = activation_module.evaluate_scoped_activation(manifest_bytes, original, _scoped_receipt_bytes(original, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
     assert result.status == "activated_read_only" and authorization is not None
     assert authorization.run_id == "readonly-core-run-0002"
+    assert authorization.scope == "core"
+    assert authorization.scope_contract_version == "nexus.fosun.read-only-scope.v1.core"
+    assert authorization.capability_expires_at == CHECKED_AT + timedelta(hours=1)
+    assert authorization.authorized_operation_set == frozenset({"fosun_sync_accounts", "fosun_sync_portfolio:cash", "fosun_sync_portfolio:holdings", "fosun_get_quotes", "fosun_get_bars"})
     assert result.contract_hash != original_result.contract_hash
 
 
