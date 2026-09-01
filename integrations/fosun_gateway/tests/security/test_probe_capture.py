@@ -4,6 +4,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from typing import Literal
 
 import nexus_fosun_gateway.probe_capture as probe_capture
 import nexus_fosun_gateway.probe_cli as probe_cli
@@ -209,6 +210,43 @@ def test_capture_rejects_invalid_or_nonempty_failure_diagnostics(
     encoded = json.dumps(frame, separators=(",", ":")).encode() + b"\n"
 
     assert probe_capture._valid_frame_for_exit(encoded, 2) is False
+
+
+@pytest.mark.parametrize("category", ("auth", "permission", "rate_limit", "provider"))
+def test_capture_accepts_each_sanitized_sdk_failure_category_without_console_output(
+    category: Literal["auth", "permission", "rate_limit", "provider"],
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    operator_dir = tmp_path / "operator"
+    operator_dir.mkdir(mode=0o700)
+    frame_name = "fosun-probe-20260831t010203z.frame.json"
+    sanitized = ProbeSdkError(
+        "PROBE_FAILED",
+        operation="Session",
+        category=category,
+        physical_request_count=1,
+    )
+    frame = probe_cli.failure_result(sanitized)
+
+    def runner(file_descriptor: int, _arguments: tuple[str, ...]) -> int:
+        assert probe_cli.write_result_frame(frame, file_descriptor=file_descriptor)
+        return 2
+
+    result = probe_capture.capture_probe_result_frame(
+        operator_dir,
+        frame_name,
+        tuple(_probe_arguments(MANIFEST_PATH)),
+        runner=runner,
+    )
+
+    captured = capfd.readouterr()
+    frame_bytes = (operator_dir / frame_name).read_bytes()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == ""
+    assert probe_capture._valid_frame_for_exit(frame_bytes, result) is True
+    assert json.loads(frame_bytes)["failure_category"] == category
 
 
 def test_runbook_uses_lowercase_plan_names_and_secure_capture_command() -> None:

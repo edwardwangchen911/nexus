@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import ssl
 from collections.abc import Callable
 from dataclasses import replace
@@ -44,6 +45,8 @@ from nexus_fosun_gateway.domain import (
     GatewayItem,
     GatewayPage,
 )
+from nexus_fosun_gateway.probe_capture import _valid_frame_for_exit
+from nexus_fosun_gateway.probe_cli import failure_result
 from nexus_fosun_gateway.probe_settings import ProbeProviderSettings
 from pydantic import ValidationError
 from sdk_adapter_helpers import NoopRateLimiter
@@ -1422,8 +1425,14 @@ async def test_factory_executor_maps_real_sdk_application_errors_to_sanitized_se
     category: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    secret = "synthetic-sdk-error-secret"
+    canaries = (
+        "synthetic-sdk-code-canary",
+        "synthetic-sdk-message-canary",
+        "synthetic-sdk-request-id-canary",
+        "synthetic-sdk-data-canary",
+    )
     sdk_calls = 0
 
     class FakeResponse:
@@ -1490,7 +1499,7 @@ async def test_factory_executor_maps_real_sdk_application_errors_to_sanitized_se
             nonlocal sdk_calls
             sdk_calls += 1
             auth_module.requests.post("https://provider.invalid/session")
-            raise error_type(secret, secret, secret, {"secret": secret})
+            raise error_type(*canaries[:3], {"canary": canaries[3]})
 
     def module_import(name: str) -> object:
         if name == "fsopenapi":
@@ -1511,14 +1520,32 @@ async def test_factory_executor_maps_real_sdk_application_errors_to_sanitized_se
         ProbeProviderSettings.model_validate(_settings_values(tmp_path)),
         budget,
     )
-    with pytest.raises(ProbeSdkError) as exc_info:
-        await SdkProbeExecutor(bundle, budget).run(_plan())
+    try:
+        with pytest.raises(ProbeSdkError) as exc_info:
+            await SdkProbeExecutor(bundle, budget).run(_plan())
+    finally:
+        await bundle.aclose()
     error = exc_info.value
     assert sdk_calls == 1
     assert error.operation == "Session"
     assert error.category == category
     assert error.physical_request_count == 1
-    assert secret not in repr(error)
+    assert bundle.transport._max_attempts == 1
+    frame = failure_result(error)
+    encoded = json.dumps(frame, separators=(",", ":")).encode() + b"\n"
+    assert _valid_frame_for_exit(encoded, 2) is True
+    captured = capsys.readouterr()
+    rendered = "\n".join(
+        (
+            repr(error),
+            str(error),
+            repr(frame),
+            str(frame),
+            captured.out,
+            captured.err,
+        )
+    )
+    assert all(canary not in rendered for canary in canaries)
 
 
 def test_probe_settings_require_exact_fosun_base_url_before_sdk_import(
