@@ -26,12 +26,16 @@ MANIFEST_PATH = Path(__file__).parents[4] / "contracts" / "providers" / "fosun" 
 CHECKED_AT = datetime(2026, 8, 27, 8, 0, tzinfo=UTC)
 PUBLICATION_DOMAIN = b"NEXUS-FOSUN-PROBE-PUBLICATION-V1\0"
 TEST_PUBLICATION_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33)))
-TEST_PUBLICATION_PUBLIC_KEY_B64U = base64.urlsafe_b64encode(
-    TEST_PUBLICATION_KEY.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
+TEST_PUBLICATION_PUBLIC_KEY_B64U = (
+    base64.urlsafe_b64encode(
+        TEST_PUBLICATION_KEY.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
     )
-).rstrip(b"=").decode()
+    .rstrip(b"=")
+    .decode()
+)
 TRUSTED_PUBLICATION_KEY_BYTES = TEST_PUBLICATION_PUBLIC_KEY_B64U.encode("ascii")
 
 
@@ -57,8 +61,11 @@ def test_scoped_activation_rejects_cross_scope_pair() -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     probe_bytes = _scoped_probe_bytes(manifest_bytes, scope="core")
     result, authorization = activation_module.evaluate_scoped_activation(
-        manifest_bytes, probe_bytes, _scoped_receipt_bytes(probe_bytes, scope="core"),
-        expected_scope="extended", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        manifest_bytes,
+        probe_bytes,
+        _scoped_receipt_bytes(probe_bytes, scope="core"),
+        expected_scope="extended",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
         checked_at=CHECKED_AT,
     )
     assert result.next_action == "REVIEW_PROBE_ARTIFACT"
@@ -67,37 +74,82 @@ def test_scoped_activation_rejects_cross_scope_pair() -> None:
 
 def test_scoped_activation_admits_exact_extended_authorization() -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
-    extended = _scoped_probe_bytes(manifest_bytes, scope="extended", run_id="readonly-extended-run-0001")
-    result, authorization = activation_module.evaluate_scoped_activation(manifest_bytes, extended, _scoped_receipt_bytes(extended, scope="extended", run_id="readonly-extended-run-0001"), expected_scope="extended", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    extended = _scoped_probe_bytes(
+        manifest_bytes, scope="extended", run_id="readonly-extended-run-0001"
+    )
+    result, authorization = activation_module.evaluate_scoped_activation(
+        manifest_bytes,
+        extended,
+        _scoped_receipt_bytes(extended, scope="extended", run_id="readonly-extended-run-0001"),
+        expected_scope="extended",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
     core = _scoped_probe_bytes(manifest_bytes, scope="core")
-    core_result, _ = activation_module.evaluate_scoped_activation(manifest_bytes, core, _scoped_receipt_bytes(core, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    core_result, _ = activation_module.evaluate_scoped_activation(
+        manifest_bytes,
+        core,
+        _scoped_receipt_bytes(core, scope="core"),
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
     assert result.status == "activated_read_only" and authorization is not None
     assert authorization.scope == "extended"
     assert authorization.scope_contract_version == "nexus.fosun.read-only-scope.v1.extended"
     assert authorization.run_id == "readonly-extended-run-0001"
     assert authorization.capability_expires_at == CHECKED_AT + timedelta(hours=1)
-    assert authorization.authorized_operation_set == frozenset({"fosun_list_orders", "fosun_list_cash_flows"})
+    assert authorization.authorized_operation_set == frozenset(
+        {"fosun_list_orders", "fosun_list_cash_flows"}
+    )
     assert result.contract_hash != core_result.contract_hash
 
 
-@pytest.mark.parametrize("check", ["permission_read_only", "history_window", "adjustment_semantics", "pagination", "rate_limit", "response_contract"])
+@pytest.mark.parametrize(
+    "check",
+    [
+        "permission_read_only",
+        "history_window",
+        "adjustment_semantics",
+        "pagination",
+        "rate_limit",
+        "response_contract",
+    ],
+)
 def test_scoped_activation_rejects_each_failed_check(check: str) -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     document = json.loads(_scoped_probe_bytes(manifest_bytes, scope="core"))
     document["checks"][check] = False
     probe_bytes = _json_bytes(document)
-    result, authorization = activation_module.evaluate_scoped_activation(manifest_bytes, probe_bytes, _scoped_receipt_bytes(probe_bytes, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    result, authorization = activation_module.evaluate_scoped_activation(
+        manifest_bytes,
+        probe_bytes,
+        _scoped_receipt_bytes(probe_bytes, scope="core"),
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
     assert result.next_action == "REVIEW_PROBE_ARTIFACT"
     assert authorization is None
 
 
-@pytest.mark.parametrize("field,value", [("captured_at", "2026-08-27T08:00:00"), ("capability_expires_at", "2026-08-27T09:00:00")])
+@pytest.mark.parametrize(
+    "field,value",
+    [("captured_at", "2026-08-27T08:00:00"), ("capability_expires_at", "2026-08-27T09:00:00")],
+)
 def test_scoped_activation_rejects_naive_timestamps(field: str, value: str) -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     document = json.loads(_scoped_probe_bytes(manifest_bytes, scope="core"))
     document[field] = value
     probe_bytes = _json_bytes(document)
-    result, authorization = activation_module.evaluate_scoped_activation(manifest_bytes, probe_bytes, _scoped_receipt_bytes(probe_bytes, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    result, authorization = activation_module.evaluate_scoped_activation(
+        manifest_bytes,
+        probe_bytes,
+        _scoped_receipt_bytes(probe_bytes, scope="core"),
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
     assert result.next_action == "REVIEW_PROBE_ARTIFACT"
     assert authorization is None
 
@@ -106,9 +158,17 @@ def test_scoped_activation_rejects_per_operation_and_broker_budgets() -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     for index, counts in ((4, [1, 1, 1, 1, 4, 1]), (None, [1, 2, 2, 2, 1, 1])):
         document = json.loads(_scoped_probe_bytes(manifest_bytes, scope="core"))
-        for operation, count in zip(document["operations"], counts, strict=True): operation["request_count"] = count
+        for operation, count in zip(document["operations"], counts, strict=True):
+            operation["request_count"] = count
         probe_bytes = _json_bytes(document)
-        result, authorization = activation_module.evaluate_scoped_activation(manifest_bytes, probe_bytes, _scoped_receipt_bytes(probe_bytes, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+        result, authorization = activation_module.evaluate_scoped_activation(
+            manifest_bytes,
+            probe_bytes,
+            _scoped_receipt_bytes(probe_bytes, scope="core"),
+            expected_scope="core",
+            trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+            checked_at=CHECKED_AT,
+        )
         assert result.next_action == "REVIEW_PROBE_ARTIFACT" and authorization is None
 
 
@@ -118,7 +178,14 @@ def test_scoped_activation_total_budget_guard(monkeypatch: pytest.MonkeyPatch) -
     manifest_bytes = _json_bytes(_admitted_manifest())
     probe_bytes = _scoped_probe_bytes(manifest_bytes, scope="core")
     monkeypatch.setattr(activation_module, "MAX_PROBE_REQUESTS", 5)
-    result, authorization = activation_module.evaluate_scoped_activation(manifest_bytes, probe_bytes, _scoped_receipt_bytes(probe_bytes, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    result, authorization = activation_module.evaluate_scoped_activation(
+        manifest_bytes,
+        probe_bytes,
+        _scoped_receipt_bytes(probe_bytes, scope="core"),
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
     assert result.next_action == "REVIEW_PROBE_ARTIFACT"
     assert authorization is None
 
@@ -127,8 +194,12 @@ def test_scoped_activation_rejects_legacy_v2_v1_pair() -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     legacy = _probe_bytes(manifest_bytes)
     result, authorization = activation_module.evaluate_scoped_activation(
-        manifest_bytes, legacy, _receipt_bytes(legacy), expected_scope="core",
-        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT,
+        manifest_bytes,
+        legacy,
+        _receipt_bytes(legacy),
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
     )
     assert result.next_action == "REVIEW_PROBE_ARTIFACT"
     assert authorization is None
@@ -140,17 +211,51 @@ def test_scoped_run_id_signature_and_hash_are_independently_bound() -> None:
     changed_document = json.loads(original)
     changed_document["run_id"] = "readonly-core-run-0002"
     changed = _json_bytes(changed_document)
-    stale_result, stale_authorization = activation_module.evaluate_scoped_activation(manifest_bytes, changed, _scoped_receipt_bytes(changed, scope="core", run_id="readonly-core-run-0002", signature_run_id="readonly-core-run-0001"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    stale_result, stale_authorization = activation_module.evaluate_scoped_activation(
+        manifest_bytes,
+        changed,
+        _scoped_receipt_bytes(
+            changed,
+            scope="core",
+            run_id="readonly-core-run-0002",
+            signature_run_id="readonly-core-run-0001",
+        ),
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
     assert stale_result.next_action == "REVIEW_PROBE_ARTIFACT"
     assert stale_authorization is None
-    result, authorization = activation_module.evaluate_scoped_activation(manifest_bytes, changed, _scoped_receipt_bytes(changed, scope="core", run_id="readonly-core-run-0002"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
-    original_result, _ = activation_module.evaluate_scoped_activation(manifest_bytes, original, _scoped_receipt_bytes(original, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    result, authorization = activation_module.evaluate_scoped_activation(
+        manifest_bytes,
+        changed,
+        _scoped_receipt_bytes(changed, scope="core", run_id="readonly-core-run-0002"),
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
+    original_result, _ = activation_module.evaluate_scoped_activation(
+        manifest_bytes,
+        original,
+        _scoped_receipt_bytes(original, scope="core"),
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
     assert result.status == "activated_read_only" and authorization is not None
     assert authorization.run_id == "readonly-core-run-0002"
     assert authorization.scope == "core"
     assert authorization.scope_contract_version == "nexus.fosun.read-only-scope.v1.core"
     assert authorization.capability_expires_at == CHECKED_AT + timedelta(hours=1)
-    assert authorization.authorized_operation_set == frozenset({"fosun_sync_accounts", "fosun_sync_portfolio:cash", "fosun_sync_portfolio:holdings", "fosun_get_quotes", "fosun_get_bars"})
+    assert authorization.authorized_operation_set == frozenset(
+        {
+            "fosun_sync_accounts",
+            "fosun_sync_portfolio:cash",
+            "fosun_sync_portfolio:holdings",
+            "fosun_get_quotes",
+            "fosun_get_bars",
+        }
+    )
     assert result.contract_hash != original_result.contract_hash
 
 
@@ -158,33 +263,53 @@ def test_scoped_run_id_signature_and_hash_are_independently_bound() -> None:
 def test_scoped_activation_fail_closed_for_canonical_mutations(mutation: str) -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     document = json.loads(_scoped_probe_bytes(manifest_bytes, scope="core"))
-    if mutation == "reordered": document["physical_operation_set"].reverse()
-    elif mutation == "duplicate": document["authorized_operation_set"].append(document["authorized_operation_set"][0])
-    elif mutation == "extra": document["prerequisite_operation_set"].append("quote")
-    elif mutation == "passed": document["operations"][0]["passed"] = False
-    elif mutation == "digest": document["operations"][0]["response_contract_sha256"] = "0" * 64
-    else: document["capability_expires_at"] = "2026-08-28T09:00:01Z"
+    if mutation == "reordered":
+        document["physical_operation_set"].reverse()
+    elif mutation == "duplicate":
+        document["authorized_operation_set"].append(document["authorized_operation_set"][0])
+    elif mutation == "extra":
+        document["prerequisite_operation_set"].append("quote")
+    elif mutation == "passed":
+        document["operations"][0]["passed"] = False
+    elif mutation == "digest":
+        document["operations"][0]["response_contract_sha256"] = "0" * 64
+    else:
+        document["capability_expires_at"] = "2026-08-28T09:00:01Z"
     probe_bytes = _json_bytes(document)
-    result, authorization = activation_module.evaluate_scoped_activation(manifest_bytes, probe_bytes, _scoped_receipt_bytes(probe_bytes, scope="core"), expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT)
+    result, authorization = activation_module.evaluate_scoped_activation(
+        manifest_bytes,
+        probe_bytes,
+        _scoped_receipt_bytes(probe_bytes, scope="core"),
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
     assert result.next_action == "REVIEW_PROBE_ARTIFACT"
     assert authorization is None
 
 
-@pytest.mark.parametrize("field,value", [
-    ("run_id", "readonly-core-run-0002"),
-    ("scope_contract_version", "nexus.fosun.read-only-scope.v1.extended"),
-    ("physical_operation_set", ["Accounts", "Session"]),
-    ("authorized_operation_set", ["fosun_get_bars"]),
-    ("capability_expires_at", "2026-08-27T08:00:00Z"),
-])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("run_id", "readonly-core-run-0002"),
+        ("scope_contract_version", "nexus.fosun.read-only-scope.v1.extended"),
+        ("physical_operation_set", ["Accounts", "Session"]),
+        ("authorized_operation_set", ["fosun_get_bars"]),
+        ("capability_expires_at", "2026-08-27T08:00:00Z"),
+    ],
+)
 def test_scoped_activation_rejects_bound_artifact_mutations(field: str, value: object) -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     document = json.loads(_scoped_probe_bytes(manifest_bytes, scope="core"))
     document[field] = value
     probe_bytes = _json_bytes(document)
     result, authorization = activation_module.evaluate_scoped_activation(
-        manifest_bytes, probe_bytes, _scoped_receipt_bytes(probe_bytes, scope="core"),
-        expected_scope="core", trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES, checked_at=CHECKED_AT,
+        manifest_bytes,
+        probe_bytes,
+        _scoped_receipt_bytes(probe_bytes, scope="core"),
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
     )
     assert result.next_action == "REVIEW_PROBE_ARTIFACT"
     assert authorization is None
@@ -203,9 +328,7 @@ def evaluate_activation(
         manifest_bytes,
         probe_bytes,
         publication_receipt_bytes,
-        trusted_publication_public_key_bytes=(
-            trusted_publication_public_key_bytes
-        ),
+        trusted_publication_public_key_bytes=(trusted_publication_public_key_bytes),
         checked_at=checked_at,
     )
 
@@ -224,9 +347,7 @@ def test_admitted_manifest_requires_independent_publisher_trust_anchor() -> None
         manifest_bytes,
         probe_bytes,
         _receipt_bytes(probe_bytes),
-        trusted_publication_public_key_bytes=(
-            b"not-a-canonical-ed25519-public-key"
-        ),
+        trusted_publication_public_key_bytes=(b"not-a-canonical-ed25519-public-key"),
         checked_at=CHECKED_AT,
     )
 
@@ -565,8 +686,8 @@ def test_activation_clock_and_probe_timestamps_must_be_utc() -> None:
 
     probe["captured_at"] = CHECKED_AT.astimezone(non_utc).isoformat()
     probe["capability_expires_at"] = (
-        CHECKED_AT + timedelta(hours=1)
-    ).astimezone(non_utc).isoformat()
+        (CHECKED_AT + timedelta(hours=1)).astimezone(non_utc).isoformat()
+    )
     probe_bytes = _json_bytes(probe)
     result = evaluate_activation(
         manifest_bytes,
@@ -1134,9 +1255,7 @@ def _receipt_bytes(
     private_key: Ed25519PrivateKey = TEST_PUBLICATION_KEY,
 ) -> bytes:
     artifact_sha256 = hashlib.sha256(probe_bytes).hexdigest()
-    signature = private_key.sign(
-        PUBLICATION_DOMAIN + bytes.fromhex(artifact_sha256)
-    )
+    signature = private_key.sign(PUBLICATION_DOMAIN + bytes.fromhex(artifact_sha256))
     return _json_bytes(
         {
             "schema_version": "nexus.fosun.probe-publication.v1",
@@ -1158,7 +1277,9 @@ def _b64u(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
 
 
-def _scoped_probe_bytes(manifest_bytes: bytes, *, scope: str, run_id: str = "readonly-core-run-0001") -> bytes:
+def _scoped_probe_bytes(
+    manifest_bytes: bytes, *, scope: str, run_id: str = "readonly-core-run-0001"
+) -> bytes:
     descriptor = probe_contract.scope_descriptor(scope)  # type: ignore[arg-type]
     manifest = json.loads(manifest_bytes)
     document = {
@@ -1177,15 +1298,44 @@ def _scoped_probe_bytes(manifest_bytes: bytes, *, scope: str, run_id: str = "rea
         "prerequisite_operation_set": list(descriptor.prerequisite_operation_set),
         "authorized_operation_set": list(descriptor.authorized_operation_set),
         "operations": [_operation(name) for name in descriptor.physical_operation_set],
-        "checks": {"permission_read_only": True, "history_window": True, "adjustment_semantics": True, "pagination": True, "rate_limit": True, "response_contract": True},
+        "checks": {
+            "permission_read_only": True,
+            "history_window": True,
+            "adjustment_semantics": True,
+            "pagination": True,
+            "rate_limit": True,
+            "response_contract": True,
+        },
     }
     return _json_bytes(document)
 
 
-def _scoped_receipt_bytes(probe_bytes: bytes, *, scope: str, run_id: str = "readonly-core-run-0001", signature_run_id: str | None = None) -> bytes:
+def _scoped_receipt_bytes(
+    probe_bytes: bytes,
+    *,
+    scope: str,
+    run_id: str = "readonly-core-run-0001",
+    signature_run_id: str | None = None,
+) -> bytes:
     descriptor = probe_contract.scope_descriptor(scope)  # type: ignore[arg-type]
     digest = hashlib.sha256(probe_bytes).hexdigest()
     signature = TEST_PUBLICATION_KEY.sign(
-        b"NEXUS-FOSUN-PROBE-PUBLICATION-V2\0" + bytes.fromhex(digest) + b"\0" + (signature_run_id or run_id).encode() + b"\0" + scope.encode() + b"\0" + descriptor.scope_contract_version.encode()
+        b"NEXUS-FOSUN-PROBE-PUBLICATION-V2\0"
+        + bytes.fromhex(digest)
+        + b"\0"
+        + (signature_run_id or run_id).encode()
+        + b"\0"
+        + scope.encode()
+        + b"\0"
+        + descriptor.scope_contract_version.encode()
     )
-    return _json_bytes({"schema_version": "nexus.fosun.probe-publication.v2", "artifact_sha256": digest, "run_id": run_id, "scope": scope, "scope_contract_version": descriptor.scope_contract_version, "signature_b64u": _b64u(signature)})
+    return _json_bytes(
+        {
+            "schema_version": "nexus.fosun.probe-publication.v2",
+            "artifact_sha256": digest,
+            "run_id": run_id,
+            "scope": scope,
+            "scope_contract_version": descriptor.scope_contract_version,
+            "signature_b64u": _b64u(signature),
+        }
+    )
