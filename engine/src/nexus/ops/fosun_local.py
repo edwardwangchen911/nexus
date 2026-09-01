@@ -7,10 +7,11 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 
-from pydantic import ValidationError
+from dotenv import dotenv_values
+from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import desc, func, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -59,6 +60,18 @@ _TLS_ENVIRONMENT = (
     "FOSUN_MARKET_GATEWAY_CLIENT_KEY",
     "FOSUN_MARKET_GATEWAY_CLIENT_CA",
 )
+_LOCAL_GATEWAY_ENVIRONMENT = {
+    "FOSUN_GATEWAY_BASE_URL": "https://127.0.0.1:8081",
+    "FOSUN_MARKET_GATEWAY_BASE_URL": "https://127.0.0.1:8082",
+}
+_LOCAL_TLS_FILES = {
+    "FOSUN_GATEWAY_CLIENT_CERT": "broker-client.pem",
+    "FOSUN_GATEWAY_CLIENT_KEY": "broker-client.key",
+    "FOSUN_GATEWAY_CLIENT_CA": "server-ca.pem",
+    "FOSUN_MARKET_GATEWAY_CLIENT_CERT": "market-client.pem",
+    "FOSUN_MARKET_GATEWAY_CLIENT_KEY": "market-client.key",
+    "FOSUN_MARKET_GATEWAY_CLIENT_CA": "server-ca.pem",
+}
 
 
 class _LocalStatusSettings(BaseSettings):
@@ -69,7 +82,37 @@ class _LocalStatusSettings(BaseSettings):
         hide_input_in_errors=True,
     )
 
-    database_url: str
+    database_url: str = Field(validation_alias="DATABASE_URL")
+
+
+class LocalDatabaseError(RuntimeError):
+    """Value-free failure at the local persisted-status boundary."""
+
+
+def load_local_environment(
+    repo_root: Path,
+    process_environment: Mapping[str, str],
+) -> dict[str, str]:
+    """Compose ignored local settings and fixed loopback paths without mutating the process."""
+    root = repo_root.resolve()
+    file_values = dotenv_values(root / "infra" / ".env.local")
+    environment = {
+        name: value
+        for name, value in file_values.items()
+        if isinstance(value, str) and value
+    }
+    environment.update(_LOCAL_GATEWAY_ENVIRONMENT)
+    secret_root = root / ".secrets" / "nexus-fosun-local"
+    environment.update(
+        {
+            name: str(secret_root / filename)
+            for name, filename in _LOCAL_TLS_FILES.items()
+        }
+    )
+    environment.update(
+        {name: value for name, value in process_environment.items() if value}
+    )
+    return environment
 
 
 def doctor_local_environment(
@@ -156,9 +199,25 @@ async def read_local_status(database_url: str) -> dict[str, object]:
         await engine.dispose()
 
 
+async def read_local_status_safely(
+    database_url: str,
+    *,
+    reader: Callable[[str], Awaitable[dict[str, object]]] | None = None,
+) -> dict[str, object]:
+    selected_reader = reader or read_local_status
+    try:
+        return await selected_reader(database_url)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except (OSError, SQLAlchemyError):
+        raise LocalDatabaseError("LOCAL_DATABASE_UNAVAILABLE") from None
+
+
 def safe_failure(error: Exception) -> dict[str, str]:
     if isinstance(error, GatewayClientError):
         category = _gateway_failure_category(str(error))
+    elif isinstance(error, LocalDatabaseError):
+        category = "database"
     elif isinstance(error, ValidationError):
         category = "configuration"
     elif isinstance(error, SQLAlchemyError):
@@ -199,14 +258,15 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> None:
     command = _parser().parse_args(argv).command
+    local_environment = load_local_environment(Path.cwd(), os.environ)
     try:
         if command == "doctor":
-            result = doctor_local_environment(os.environ)
+            result = doctor_local_environment(local_environment)
         elif command == "status":
-            status_settings = _LocalStatusSettings()  # type: ignore[call-arg]
-            result = asyncio.run(read_local_status(status_settings.database_url))
+            status_settings = _LocalStatusSettings.model_validate(local_environment)
+            result = asyncio.run(read_local_status_safely(status_settings.database_url))
         else:
-            refresh_settings = LocalFosunRefreshSettings()  # type: ignore[call-arg]
+            refresh_settings = LocalFosunRefreshSettings.model_validate(local_environment)
             result = asyncio.run(refresh_local_fosun(refresh_settings))
     except (KeyboardInterrupt, SystemExit):
         raise

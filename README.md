@@ -48,8 +48,13 @@ uv run --package nexus-engine nexus-fosun-local doctor
 uv run --package nexus-engine nexus-fosun-local status
 ```
 
+CLI 会自动读取已忽略、不入库的 `infra/.env.local`，并映射 `.secrets/nexus-fosun-local/`
+中现有的 broker/market TLS 文件和回环 Gateway 端口。显式环境变量始终优先，无需为日常检查手工
+`export` 数据库、对象存储和 TLS 路径。
+
 `doctor` 只输出缺失的环境变量名和 TLS 文件是否存在，不打印配置值、不连数据库、不连复星。
-`status` 只读本地 PostgreSQL 中最新快照的脱敏汇总。只有在既有安全 launcher
+`status` 只读本地 PostgreSQL 中最新快照的脱敏汇总；本地数据库未运行时返回稳定的
+`LOCAL_DATABASE_UNAVAILABLE` / `database`，不暴露连接串或底层异常。只有在既有安全 launcher
 已加载本地配置、且 Gateway 为 `local_read_only` 时，才显式执行：
 
 ```bash
