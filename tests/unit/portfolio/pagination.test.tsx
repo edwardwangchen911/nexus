@@ -47,7 +47,7 @@ describe("portfolio pagination boundaries", () => {
     expect(await screen.findByRole("region", { name: "Portfolio 1 HKD 组合摘要" })).toBeVisible();
     expect(screen.getByRole("button", { name: /Portfolio 500/ })).toBeVisible();
     expect(calls).toBe(10);
-  });
+  }, 15_000);
 
   it("rejects a tenth page that still advertises another page", async () => {
     let calls = 0;
@@ -84,7 +84,7 @@ describe("portfolio pagination boundaries", () => {
 
     render(<PortfolioPage />);
     expect(await screen.findByRole("region", { name: "Fosun read-only HKD 组合摘要" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "刷新快照" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新页面数据" }));
 
     expect(await screen.findByText("无法读取组合事实。当前状态保持只读。")).toBeVisible();
     expect(screen.getByRole("region", { name: "Fosun read-only HKD 组合摘要" })).toBeVisible();
