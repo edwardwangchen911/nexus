@@ -245,6 +245,52 @@ def evaluate_scoped_activation(
     checked_at: datetime | None = None,
 ) -> tuple[FosunActivationResult, RuntimeAuthorization | None]:
     """Strict v3/v2 scope admission; legacy entry points remain fixture-only."""
+    return _evaluate_scoped_evidence(
+        manifest_bytes,
+        probe_bytes,
+        publication_receipt_bytes,
+        expected_scope=expected_scope,
+        trusted_publication_public_key_bytes=trusted_publication_public_key_bytes,
+        checked_at=checked_at,
+        document_is_valid=sdk_admission_document_is_valid,
+        invalid_manifest_action="COMPLETE_SDK_ADMISSION",
+    )
+
+
+def verify_scoped_probe_publication(
+    manifest_bytes: bytes,
+    probe_bytes: bytes,
+    publication_receipt_bytes: bytes,
+    *,
+    expected_scope: ProbeScope,
+    trusted_publication_public_key_bytes: bytes,
+    checked_at: datetime | None = None,
+) -> str | None:
+    """Verify one scoped probe publication without granting runtime authorization."""
+    result, _authorization = _evaluate_scoped_evidence(
+        manifest_bytes,
+        probe_bytes,
+        publication_receipt_bytes,
+        expected_scope=expected_scope,
+        trusted_publication_public_key_bytes=trusted_publication_public_key_bytes,
+        checked_at=checked_at,
+        document_is_valid=sdk_probe_ready_document_is_valid,
+        invalid_manifest_action="COMPLETE_PROBE_READINESS",
+    )
+    return result.contract_hash if result.status == "activated_read_only" else None
+
+
+def _evaluate_scoped_evidence(
+    manifest_bytes: bytes,
+    probe_bytes: bytes | None,
+    publication_receipt_bytes: bytes | None,
+    *,
+    expected_scope: ProbeScope,
+    trusted_publication_public_key_bytes: bytes | None,
+    checked_at: datetime | None,
+    document_is_valid: Callable[[object], bool],
+    invalid_manifest_action: str,
+) -> tuple[FosunActivationResult, RuntimeAuthorization | None]:
     now = checked_at or datetime.now(UTC)
     _require_aware(now, "checked_at")
     manifest_sha256 = _sha256(manifest_bytes)
@@ -262,8 +308,8 @@ def evaluate_scoped_activation(
         if trusted_publication_public_key_bytes
         else None,
     )
-    if not document or not sdk_admission_document_is_valid(document):
-        return _blocked(base_hash, now, "COMPLETE_SDK_ADMISSION"), None
+    if not document or not document_is_valid(document):
+        return _blocked(base_hash, now, invalid_manifest_action), None
     trusted = (
         _load_trusted_publication_key(trusted_publication_public_key_bytes)
         if trusted_publication_public_key_bytes

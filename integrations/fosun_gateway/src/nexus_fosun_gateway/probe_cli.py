@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from nexus_fosun_gateway.activation import (
     MAX_ARTIFACT_BYTES,
     _read_bounded_or_empty,
-    evaluate_scoped_activation,
+    verify_scoped_probe_publication,
 )
 from nexus_fosun_gateway.adapter.probe_sdk import (
     PhysicalHttpBudget,
@@ -222,7 +222,7 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
         )
         publication_complete = True
         receipt_bytes = prepared.sign_publication_receipt(publication)
-        activation, authorization = evaluate_scoped_activation(
+        activation_contract_hash = verify_scoped_probe_publication(
             manifest_bytes,
             prepared.artifact_bytes,
             receipt_bytes,
@@ -233,10 +233,10 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
             checked_at=datetime.now(UTC),
         )
         if (
-            activation.status != "activated_read_only"
-            or authorization is None
-            or authorization.scope != "core"
-            or authorization.run_id != plan.run_id
+            activation_contract_hash is None
+            or prepared.scope != "core"
+            or prepared.run_id != plan.run_id
+            or prepared.scope_contract_version is None
         ):
             raise ProbeSdkError("PROBE_OUTPUT_INVALID")
         receipt = json.loads(receipt_bytes)
@@ -249,13 +249,13 @@ async def _execute_once(arguments: tuple[str, ...]) -> dict[str, object]:
             "physical_request_count": None,
             "run_id": plan.run_id,
             "scope": plan.scope,
-            "scope_contract_version": authorization.scope_contract_version,
+            "scope_contract_version": prepared.scope_contract_version,
             "artifact_sha256": prepared.artifact_sha256,
             "byte_length": prepared.byte_length,
             "capability_expires_at": prepared.capability_expires_at.isoformat().replace(
                 "+00:00", "Z"
             ),
-            "activation_contract_hash": activation.contract_hash,
+            "activation_contract_hash": activation_contract_hash,
             "publication_receipt": receipt,
         }
     except (KeyboardInterrupt, asyncio.CancelledError):

@@ -57,6 +57,32 @@ def test_scoped_activation_admits_only_exact_v3_v2_scope_pair() -> None:
         authorization.scope = "extended"  # type: ignore[misc]
 
 
+def test_scoped_probe_publication_verifies_probe_ready_without_authorizing() -> None:
+    manifest_bytes = MANIFEST_PATH.read_bytes()
+    probe_bytes = _scoped_probe_bytes(manifest_bytes, scope="core")
+
+    contract_hash = activation_module.verify_scoped_probe_publication(
+        manifest_bytes,
+        probe_bytes,
+        _scoped_receipt_bytes(probe_bytes, scope="core"),
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
+    activation, authorization = activation_module.evaluate_scoped_activation(
+        manifest_bytes,
+        probe_bytes,
+        _scoped_receipt_bytes(probe_bytes, scope="core"),
+        expected_scope="core",
+        trusted_publication_public_key_bytes=TRUSTED_PUBLICATION_KEY_BYTES,
+        checked_at=CHECKED_AT,
+    )
+
+    assert isinstance(contract_hash, str) and len(contract_hash) == 64
+    assert activation.next_action == "COMPLETE_SDK_ADMISSION"
+    assert authorization is None
+
+
 def test_scoped_activation_rejects_cross_scope_pair() -> None:
     manifest_bytes = _json_bytes(_admitted_manifest())
     probe_bytes = _scoped_probe_bytes(manifest_bytes, scope="core")
