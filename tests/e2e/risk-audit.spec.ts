@@ -47,6 +47,7 @@ for (const viewport of [
         (violation) => violation.impact === "serious" || violation.impact === "critical",
       );
       expect(serious).toEqual([]);
+      await page.evaluate(() => window.scrollTo(0, 0));
       await page.screenshot({ path: `test-results/risk-audit-${viewport.name}.png`, fullPage: true });
     }
   });

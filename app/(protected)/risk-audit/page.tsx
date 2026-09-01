@@ -329,7 +329,7 @@ export function RiskAuditPanel({ state, readiness, data, kindFilter, statusFilte
   return <section className="page-stack risk-audit-page" aria-label="风险与审计控制台" data-state={state}>
     <header className="page-heading">
       <div>
-        <p className="eyebrow">DETERMINISTIC RISK / REDACTED AUDIT</p>
+        <p className="eyebrow">确定性风险控制台</p>
         <h1>风险与审计</h1>
         <p>验证依赖、数据质量、回撤锁和后台 Job。这里只展示脱敏事实；恢复动作不创建订单，也不连接真实券商写接口。</p>
       </div>
@@ -349,7 +349,7 @@ export function RiskAuditPanel({ state, readiness, data, kindFilter, statusFilte
       <AuditSummary data={data} recoveryEnabled={recoveryEnabled} onRetry={onRetry} onAcknowledge={onAcknowledge} />
       <section className="risk-audit-ledger" aria-labelledby="risk-audit-ledger-title">
         <header>
-          <div><p className="eyebrow">APPEND-ONLY / REDACTED</p><h2 id="risk-audit-ledger-title">脱敏审计事件</h2><p>只显示固定投影；原始事件内容、账户金额和密钥不会进入浏览器。</p></div>
+          <div><p className="eyebrow">仅追加 · 已脱敏</p><h2 id="risk-audit-ledger-title">脱敏审计事件</h2><p>只显示固定投影；原始事件内容、账户金额和密钥不会进入浏览器。</p></div>
           <button className="button button--quiet" type="button" onClick={onExport} disabled={!validDateRange(fromDate, toDate)}>
             <Download aria-hidden="true" size={17} />导出 31 天内 NDJSON.gz
           </button>
@@ -370,7 +370,7 @@ export function RiskAuditPanel({ state, readiness, data, kindFilter, statusFilte
 function ReadinessBand({ readiness }: { readiness: Readiness | null }): React.ReactElement {
   const components = readiness?.components;
   return <section className="risk-readiness" aria-labelledby="risk-readiness-title">
-    <header><div><p className="eyebrow">PROCESS READINESS</p><h2 id="risk-readiness-title">依赖就绪</h2></div><span className="state-chip" data-state={readiness?.status === "ready" ? "ready" : "stale"}>{readiness?.status === "ready" ? "全部就绪" : "未就绪"}</span></header>
+    <header><div><p className="eyebrow">运行依赖</p><h2 id="risk-readiness-title">依赖就绪</h2></div><span className="state-chip" data-state={readiness?.status === "ready" ? "ready" : "stale"}>{readiness?.status === "ready" ? "全部就绪" : "未就绪"}</span></header>
     <dl>{(["database", "migration", "object_store", "worker"] as const).map((key) => <div key={key}><dt>{componentLabel(key)}</dt><dd data-state={components?.[key] ?? "unavailable"}>{componentStateLabel(components?.[key] ?? "unavailable")}</dd></div>)}</dl>
   </section>;
 }
@@ -378,10 +378,10 @@ function ReadinessBand({ readiness }: { readiness: Readiness | null }): React.Re
 function AuditSummary({ data, recoveryEnabled, onRetry, onAcknowledge }: { data: RiskAuditData; recoveryEnabled: boolean; onRetry: RiskAuditPanelProps["onRetry"]; onAcknowledge: RiskAuditPanelProps["onAcknowledge"] }): React.ReactElement {
   const lock = data.summary.drawdown_lock;
   return <section className="risk-summary" aria-label="风险审计摘要">
-    <article data-tone={data.summary.data_quality === "PASS" ? "ready" : "attention"}><Archive aria-hidden="true" size={22} /><div><p className="eyebrow">DATA QUALITY</p><h2>{data.summary.data_quality}</h2><p>质量门结果来自确定性日流水线。</p></div></article>
-    <article data-tone={lock.state === "unlocked" ? "ready" : "attention"}><ShieldAlert aria-hidden="true" size={22} /><div><p className="eyebrow">DRAWDOWN LOCK</p><h2>{drawdownLabel(lock.state)}</h2><p>{lock.event_seq ? `事件版本 ${lock.event_seq}` : "尚无可确认版本"}</p>{lock.acknowledge_allowed && lock.event_seq ? <button className="button button--danger" type="button" disabled={!recoveryEnabled} aria-label="确认解除回撤锁" onClick={(event) => onAcknowledge(lock.event_seq!, event.currentTarget)}>确认解除回撤锁</button> : null}</div></article>
-    <article data-tone={data.summary.failed_jobs.count === 0 ? "ready" : "attention"}><RotateCcw aria-hidden="true" size={22} /><div><p className="eyebrow">FAILED JOBS</p><h2>{data.summary.failed_jobs.count}</h2><p>仅 manual_safe 且未超过两次的 Job 可逐个重试。</p></div></article>
-    {data.summary.failed_jobs.retryable.map((job) => <article className="retryable-job" data-tone="attention" key={job.job_id}><AlertTriangle aria-hidden="true" size={22} /><div><p className="eyebrow">MANUAL SAFE / {job.status}</p><h2>{job.job_type}</h2><p>版本 {job.version} · 已手动重试 {job.manual_retry_count}/2 · {formatTime(job.finished_at)}</p><p>{job.last_error_code ?? "未公开错误代码"} · Job {shortId(job.job_id)}</p><button className="button button--quiet" type="button" disabled={!recoveryEnabled} aria-label={`重试 ${job.job_type}`} onClick={(event) => onRetry(job, event.currentTarget)}>安全重试</button></div></article>)}
+    <article data-tone={data.summary.data_quality === "PASS" ? "ready" : "attention"}><Archive aria-hidden="true" size={22} /><div><p className="eyebrow">数据质量</p><h2>{dataQualityLabel(data.summary.data_quality)} <code>{data.summary.data_quality}</code></h2><p>质量门结果来自确定性日流水线。</p></div></article>
+    <article data-tone={lock.state === "unlocked" ? "ready" : "attention"}><ShieldAlert aria-hidden="true" size={22} /><div><p className="eyebrow">回撤锁</p><h2>{drawdownLabel(lock.state)}</h2><p>{lock.event_seq ? `事件版本 ${lock.event_seq}` : "尚无可确认版本"}</p>{lock.acknowledge_allowed && lock.event_seq ? <button className="button button--danger" type="button" disabled={!recoveryEnabled} aria-label="确认解除回撤锁" onClick={(event) => onAcknowledge(lock.event_seq!, event.currentTarget)}>确认解除回撤锁</button> : null}</div></article>
+    <article data-tone={data.summary.failed_jobs.count === 0 ? "ready" : "attention"}><RotateCcw aria-hidden="true" size={22} /><div><p className="eyebrow">失败任务</p><h2>{data.summary.failed_jobs.count}</h2><p>仅 manual_safe 且未超过两次的 Job 可逐个重试。</p></div></article>
+    {data.summary.failed_jobs.retryable.map((job) => <article className="retryable-job" data-tone="attention" key={job.job_id}><AlertTriangle aria-hidden="true" size={22} /><div><p className="eyebrow">安全重试候选 <code>{job.status}</code></p><h2>{job.job_type}</h2><p>版本 {job.version} · 已手动重试 {job.manual_retry_count}/2 · {formatTime(job.finished_at)}</p><p>{job.last_error_code ?? "未公开错误代码"} · Job {shortId(job.job_id)}</p><button className="button button--quiet" type="button" disabled={!recoveryEnabled} aria-label={`重试 ${job.job_type}`} onClick={(event) => onRetry(job, event.currentTarget)}>安全重试</button></div></article>)}
   </section>;
 }
 
@@ -398,7 +398,7 @@ function RecoveryDialog({ pending, submitting, onDismiss, onConfirm }: { pending
   useEffect(() => { backRef.current?.focus(); }, []);
   return <div className="confirmation-dialog" role="presentation" onKeyDown={(event) => { if (event.key === "Escape" && !submitting) onDismiss(); }}>
     <div role="dialog" aria-modal="true" aria-label={title}>
-      <p className="eyebrow">DETERMINISTIC RECOVERY</p><h3>{title}</h3>
+      <p className="eyebrow">确定性恢复</p><h3>{title}</h3>
       <p>{retry
         ? `只重新排队这个 manual_safe Job（版本 ${pending.job.version}），不改变 payload、不创建订单。`
         : `只确认事件版本 ${pending.eventSeq} 的回撤锁恢复资格；不会创建或提交订单。`}</p>
@@ -539,6 +539,7 @@ function formatTime(value: string): string {
 function shortId(value: string): string { return `${value.slice(0, 8)}…${value.slice(-4)}`; }
 function componentLabel(value: string): string { return ({ database: "数据库", migration: "迁移版本", object_store: "对象存储", worker: "后台 Worker" } as Record<string, string>)[value] ?? value; }
 function componentStateLabel(value: string): string { return ({ ready: "就绪", unavailable: "不可用", incompatible: "不兼容", stale: "过期" } as Record<string, string>)[value] ?? "不可用"; }
+function dataQualityLabel(value: string): string { return ({ PASS: "质量通过", PARTIAL: "证据不完整", FAIL: "质量未通过" } as Record<string, string>)[value] ?? "质量未知"; }
 function drawdownLabel(value: string): string { return ({ unlocked: "未锁定", locked: "已锁定", recovery_eligible: "可确认恢复", unknown: "未知" } as Record<string, string>)[value] ?? "未知"; }
 function kindLabel(value: AuditEvent["kind"]): string { return auditKinds.find(([kind]) => kind === value)?.[1] ?? value; }
 function isPlain(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

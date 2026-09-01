@@ -46,7 +46,11 @@ describe("risk-audit page", () => {
     expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     expect(screen.getByRole("region", { name: "风险与审计控制台" })).toHaveAttribute("data-state", state);
     if (!hasFacts) expect(screen.queryByText("daily_pipeline")).not.toBeInTheDocument();
-    if (state === "ready") expect(screen.getByRole("button", { name: "重试 daily_pipeline" })).toBeEnabled();
+    if (state === "ready") {
+      expect(screen.getByRole("button", { name: "重试 daily_pipeline" })).toBeEnabled();
+      expect(screen.getByText(/质量通过/)).toHaveTextContent("PASS");
+      expect(screen.getByText("仅追加 · 已脱敏")).toBeVisible();
+    }
     if (state === "partial" || state === "stale") {
       expect(screen.getByRole("button", { name: "重试 daily_pipeline" })).toBeDisabled();
       expect(screen.getByRole("button", { name: "确认解除回撤锁" })).toBeDisabled();

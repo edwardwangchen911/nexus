@@ -82,6 +82,7 @@ describe("optimization pages", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "创建三方案比较" }));
     await waitFor(() => expect(onCreate).toHaveBeenCalledWith(overviewData().proposal_admission));
+    expect(screen.getByText("服务器准入边界")).toBeVisible();
     expect(screen.queryByRole("button", { name: /下单|交易/ })).not.toBeInTheDocument();
   });
 

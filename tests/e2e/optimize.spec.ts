@@ -53,6 +53,10 @@ for (const viewport of [
     await page.getByRole("link", { name: "打开组合诊断" }).click();
     await expect(page.getByRole("heading", { name: "组合诊断账簿" })).toBeVisible();
     await expect(page.getByRole("listitem", { name: /CONCENTRATION_TOP1/ })).toContainText("-0.05");
+    if (viewport.name === "mobile-390" || viewport.name === "desktop-1440") {
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({ path: `test-results/optimize-${viewport.name}.png`, fullPage: true });
+    }
     await page.getByRole("link", { name: "打开已有三方案" }).click();
     const proposalTable = page.getByRole("table", { name: "保持现状、最小调整与策略目标的确定性比较" });
     await expect(proposalTable.getByRole("columnheader", { name: /保持现状|最小调整|策略目标/ })).toHaveCount(3);

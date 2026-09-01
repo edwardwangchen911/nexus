@@ -138,28 +138,34 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .market-page__heading-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .market-workspace { display: grid; grid-template-columns: minmax(14rem, 20rem) minmax(0, 1fr); gap: var(--space-4); align-items: start; }
 .market-rail, .market-detail { min-inline-size: 0; }
-.market-rail { display: grid; gap: var(--space-3); position: sticky; inset-block-start: var(--space-4); border: 1px solid var(--color-border); background: var(--color-surface); padding: var(--space-3); }
+.market-rail { display: grid; gap: var(--space-3); position: sticky; inset-block-start: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); padding: var(--space-3); box-shadow: var(--shadow-sm); }
+.market-rail__heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.market-rail__heading span { color: var(--color-text-muted); font-size: 0.75rem; }
 .market-filter { display: flex; align-items: center; gap: var(--space-2); min-block-size: 44px; font-weight: 700; cursor: pointer; }
 .market-filter input { inline-size: 1.25rem; block-size: 1.25rem; accent-color: var(--color-action); }
 .market-instrument-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
-.market-instrument { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-1) var(--space-2); inline-size: 100%; min-block-size: 64px; border: 1px solid var(--color-border); border-inline-start: 4px solid var(--color-border); background: var(--color-surface); padding: var(--space-2); color: var(--color-text); text-align: start; cursor: pointer; }
-.market-instrument:hover, .market-instrument[aria-pressed="true"] { border-color: var(--color-action); }
+.market-instrument { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-1) var(--space-2); inline-size: 100%; min-block-size: 64px; border: 1px solid transparent; border-inline-start: 4px solid transparent; border-radius: var(--radius-sm); background: transparent; padding: var(--space-2); color: var(--color-text); text-align: start; cursor: pointer; }
+.market-instrument:hover { background: var(--color-surface-muted); }
+.market-instrument[aria-pressed="true"] { border-color: color-mix(in srgb, var(--color-action) 24%, var(--color-border)); border-inline-start-color: var(--color-action); background: color-mix(in srgb, var(--color-action) 7%, white); }
 .market-instrument[data-quality="PARTIAL"] { border-inline-start-color: var(--color-warning); }
 .market-instrument[data-quality="FAIL"] { border-inline-start-color: var(--color-danger); }
 .market-instrument span { min-inline-size: 0; overflow-wrap: anywhere; }
 .market-instrument span:nth-child(n + 3) { color: var(--color-text-muted); font-size: 0.75rem; }
+.market-instrument code { color: inherit; font-size: 0.6875rem; font-weight: 500; }
 .market-instrument__symbol { font-weight: 800; letter-spacing: 0.04em; }
 .market-detail { display: grid; gap: var(--space-4); }
-.market-evidence-band { display: grid; grid-template-columns: minmax(8rem, 0.8fr) minmax(16rem, 2fr) auto; gap: var(--space-4); align-items: center; border-block: 1px solid var(--color-border); border-inline-start: 4px solid var(--color-action); background: var(--color-surface); padding: var(--space-4); }
+.market-evidence-band { display: grid; grid-template-columns: minmax(8rem, 0.8fr) minmax(16rem, 2fr) auto; gap: var(--space-4); align-items: center; border: 1px solid var(--color-border); border-inline-start: 4px solid var(--color-action); border-radius: var(--radius-md); background: var(--color-surface); padding: var(--space-4); box-shadow: var(--shadow-sm); }
 .market-evidence-band h2 { margin: var(--space-1) 0 0; font-size: 1.5rem; }
 .market-evidence-band dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); margin: 0; }
 .market-evidence-band dt { color: var(--color-text-muted); font-size: 0.75rem; }
 .market-evidence-band dd { min-inline-size: 0; overflow-wrap: anywhere; margin: var(--space-1) 0 0; }
+.market-evidence-fact--primary { grid-column: span 2; }
+.market-evidence-fact--primary dd { color: var(--color-text); font-size: 1.25rem; font-weight: 800; white-space: nowrap; }
 .market-evidence-band--history { grid-template-columns: minmax(8rem, 0.8fr) minmax(16rem, 2.4fr); }
 .market-evidence-band--history dl { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .market-adjustment-warning { display: flex; grid-column: 1 / -1; align-items: start; gap: var(--space-2); margin: 0; border-inline-start: 4px solid var(--color-warning); background: var(--color-canvas); padding: var(--space-3); color: var(--color-warning); }
 .market-evidence-actions { display: grid; gap: var(--space-2); }
-.market-reasons { display: flex; align-items: start; gap: var(--space-2); border-inline-start: 4px solid var(--color-warning); background: var(--color-surface); padding: var(--space-3); color: var(--color-warning); }
+.market-reasons { display: flex; align-items: start; gap: var(--space-2); border: 1px solid color-mix(in srgb, var(--color-warning) 26%, var(--color-border)); border-inline-start: 4px solid var(--color-warning); border-radius: var(--radius-sm); background: var(--color-surface); padding: var(--space-3); color: var(--color-warning); }
 .market-reasons ul { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
 .market-reasons li { display: grid; min-inline-size: 0; gap: var(--space-1); }
 .market-history-empty { display: flex; align-items: start; gap: var(--space-3); border: 1px solid var(--color-border); background: var(--color-surface); padding: var(--space-6); }
@@ -287,7 +293,7 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .diagnostic-item__thresholds { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2); margin: 0; border-block: 1px solid var(--color-border); padding-block: var(--space-3); }
 .diagnostic-item__unknown { display: flex; align-items: start; gap: var(--space-2); color: var(--color-warning); }
 .diagnostic-item__unknown code { overflow-wrap: anywhere; }
-.proposal-admission { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); border: 1px solid var(--color-border); background: var(--color-surface); padding: var(--space-4); }
+.proposal-admission { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); border: 1px solid var(--color-border); border-inline-start: 4px solid var(--color-action); border-radius: var(--radius-md); background: var(--color-surface); padding: var(--space-4); box-shadow: var(--shadow-sm); }
 .proposal-admission h2, .proposal-admission p { margin-block: 0; }
 .proposal-admission h2 { margin-block-start: var(--space-1); }
 .proposal-admission div > p:last-child { margin-block-start: var(--space-2); color: var(--color-text-muted); }
@@ -558,7 +564,7 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .risk-audit-page { inline-size: 100%; max-inline-size: 96rem; margin-inline: auto; }
 .risk-audit-warning { display: flex; align-items: start; gap: var(--space-2); margin: 0; border-inline-start: 4px solid var(--color-warning); background: var(--color-surface); padding: var(--space-3); color: var(--color-warning); }
 .risk-audit-warning svg { flex: 0 0 auto; }
-.risk-readiness, .risk-audit-ledger { min-inline-size: 0; border: 1px solid var(--color-border); background: var(--color-surface); padding: var(--space-4); }
+.risk-readiness, .risk-audit-ledger { min-inline-size: 0; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); padding: var(--space-4); box-shadow: var(--shadow-sm); }
 .risk-readiness { border-block-start: 4px solid var(--color-action); }
 .risk-readiness > header, .risk-audit-ledger > header { display: flex; align-items: start; justify-content: space-between; gap: var(--space-4); }
 .risk-readiness h2, .risk-audit-ledger h2 { margin: var(--space-1) 0 0; }
@@ -566,14 +572,15 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .risk-readiness dl > div { min-inline-size: 0; border-block-end: 1px solid var(--color-border); padding: var(--space-3); }
 .risk-readiness dt { color: var(--color-text-muted); font-size: 0.75rem; }
 .risk-readiness dd { margin: var(--space-1) 0 0; font-weight: 700; }
-.risk-readiness dd[data-state="ready"] { color: var(--color-action); }
+.risk-readiness dd[data-state="ready"] { color: var(--color-positive); }
 .risk-readiness dd:not([data-state="ready"]) { color: var(--color-danger); }
 .risk-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); }
-.risk-summary article { display: grid; grid-template-columns: auto minmax(0, 1fr); align-content: start; gap: var(--space-3); min-inline-size: 0; border: 1px solid var(--color-border); border-block-start: 4px solid var(--color-action); background: var(--color-surface); padding: var(--space-4); }
+.risk-summary article { display: grid; grid-template-columns: auto minmax(0, 1fr); align-content: start; gap: var(--space-3); min-inline-size: 0; border: 1px solid var(--color-border); border-block-start: 4px solid var(--color-positive); border-radius: var(--radius-md); background: var(--color-surface); padding: var(--space-4); box-shadow: var(--shadow-sm); }
 .risk-summary article[data-tone="attention"] { border-block-start-color: var(--color-warning); }
-.risk-summary article > svg { color: var(--color-action); }
+.risk-summary article > svg { color: var(--color-positive); }
 .risk-summary article[data-tone="attention"] > svg { color: var(--color-warning); }
 .risk-summary article h2 { margin: var(--space-1) 0; overflow-wrap: anywhere; font-size: 1.35rem; }
+.risk-summary article h2 code, .risk-summary .eyebrow code { color: currentColor; font-size: 0.6875rem; font-weight: 500; }
 .risk-summary article p { margin: var(--space-1) 0; color: var(--color-text-muted); }
 .risk-summary article .button { margin-block-start: var(--space-3); }
 .risk-summary .retryable-job { border-block-start-color: var(--color-danger); }

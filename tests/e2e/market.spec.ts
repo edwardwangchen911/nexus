@@ -127,6 +127,7 @@ for (const viewport of [
     await page.getByRole("button", { name: "将 AAPL 加入观察列表" }).click();
     await expect(page.getByText("AAPL 已加入观察列表。", { exact: true })).toBeVisible();
 
+    await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({
       path: `test-results/intraday-market-${viewport.name}.png`,
       fullPage: true,

@@ -227,6 +227,8 @@ describe("market vertical slice", () => {
     expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent(
       "实时",
     );
+    expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent("质量通过 · PASS");
+    expect(screen.getByText("报价证据")).toBeVisible();
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("复星 L1（只读）");
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("实时");
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("未复权（raw）");

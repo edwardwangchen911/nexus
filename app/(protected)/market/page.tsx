@@ -317,9 +317,9 @@ export function MarketPanel({
     <section className="page-stack market-page" aria-label="市场监控页面" data-state={state}>
       <header className="page-heading">
         <div>
-          <p className="eyebrow">MARKET / SOURCE-AWARE</p>
+          <p className="eyebrow">来源可追溯行情</p>
           <h1>市场监控</h1>
-          <p>价格是指示性证据，不是交易触发器。每个值都保留来源、feed、截止时间与质量原因。</p>
+          <p>先看报价是否可靠，再决定是否继续研究。价格只作指示性证据，不会触发交易。</p>
         </div>
         <div className="market-page__heading-actions">
           <span className="state-chip" data-state={state}>{dataStateLabels[state]}</span>
@@ -335,6 +335,7 @@ export function MarketPanel({
       ) : (
         <div className="market-workspace">
           <aside className="market-rail" aria-label="股票池与观察列表">
+            <div className="market-rail__heading"><p className="eyebrow">研究标的</p><span>{items.length} 只</span></div>
             <label className="market-filter">
               <input type="checkbox" checked={watchlistOnly} onChange={onToggleWatchlistOnly} />
               只看观察列表
@@ -352,7 +353,7 @@ export function MarketPanel({
                     <span className="market-instrument__symbol">{marketItem.symbol}</span>
                     <span className="numeric-data">{marketItem.price ?? "无法选定可靠价格"}</span>
                     <span>{sourceLabel(marketItem.source, marketItem.feed)}</span>
-                    <span>{marketItem.quality}</span>
+                    <span>{marketQualityLabel(marketItem.quality)} <code>{marketItem.quality}</code></span>
                   </button>
                 </li>
               ))}
@@ -367,16 +368,16 @@ export function MarketPanel({
               <>
                 <section className="market-evidence-band" aria-label={`${selectedItem.symbol} 报价证据`}>
                   <div>
-                    <p className="eyebrow">QUOTE EVIDENCE</p>
+                    <p className="eyebrow">报价证据</p>
                     <h2>{selectedItem.symbol}</h2>
                   </div>
                   <dl>
-                    <EvidenceFact term="最新价" value={selectedItem.price ?? "无可验证报价"} />
+                    <EvidenceFact term="最新价" value={selectedItem.price ?? "无可验证报价"} highlight />
                     <EvidenceFact term="报价来源" value={marketSourceLabel(selectedItem.source, selectedItem.feed)} />
                     <EvidenceFact term="Feed" value={selectedItem.feed?.toUpperCase() ?? "未选定"} />
                     <EvidenceFact term={quoteEvidenceTimeTerm(selectedItem)} value={formatUtc(selectedItem.as_of)} />
                     <EvidenceFact term="实时性口径" value={marketDeliveryModeLabel(selectedItem.delivery_mode)} />
-                    <EvidenceFact term="报价质量" value={selectedItem.quality} />
+                    <EvidenceFact term="报价质量" value={`${marketQualityLabel(selectedItem.quality)} · ${selectedItem.quality}`} />
                   </dl>
                   <div className="market-evidence-actions">
                     {selectedItem.as_of ? <a
@@ -567,8 +568,8 @@ function formatUtc(value: string | null): string {
   return parsed.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
 }
 
-function EvidenceFact({ term, value }: { term: string; value: string }): React.ReactElement {
-  return <div><dt>{term}</dt><dd className="numeric-data">{value}</dd></div>;
+function EvidenceFact({ term, value, highlight = false }: { term: string; value: string; highlight?: boolean }): React.ReactElement {
+  return <div className={highlight ? "market-evidence-fact--primary" : undefined}><dt>{term}</dt><dd className="numeric-data">{value}</dd></div>;
 }
 
 function HistoryEvidence({ symbol, series }: { symbol: string; series: SelectedMarketSeries }): React.ReactElement {
@@ -576,7 +577,7 @@ function HistoryEvidence({ symbol, series }: { symbol: string; series: SelectedM
   return (
     <section className="market-evidence-band market-evidence-band--history" aria-label={`${symbol} OHLCV 证据`}>
       <div>
-        <p className="eyebrow">OHLCV EVIDENCE</p>
+        <p className="eyebrow">历史序列证据</p>
         <h2>{symbol} 历史序列</h2>
       </div>
       <dl>
@@ -587,7 +588,7 @@ function HistoryEvidence({ symbol, series }: { symbol: string; series: SelectedM
         <EvidenceFact term="周期" value={series.interval ?? "未选定"} />
         <EvidenceFact term="最新可用时间" value={formatUtc(latestBar?.available_at ?? null)} />
         <EvidenceFact term="最新观测时间" value={formatUtc(latestBar?.observed_at ?? null)} />
-        <EvidenceFact term="序列质量" value={series.quality} />
+        <EvidenceFact term="序列质量" value={`${marketQualityLabel(series.quality)} · ${series.quality}`} />
       </dl>
       {series.adjustment === "raw" ? (
         <p className="market-adjustment-warning">
@@ -610,6 +611,10 @@ function stateTitle(state: DataStateKind): string {
     forbidden: "无权访问市场监控",
   };
   return titles[state];
+}
+
+function marketQualityLabel(quality: MarketQuality): string {
+  return quality === "PASS" ? "质量通过" : quality === "PARTIAL" ? "证据不完整" : "质量未通过";
 }
 
 function stateDetail(state: DataStateKind): string {
