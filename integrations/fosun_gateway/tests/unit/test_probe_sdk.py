@@ -1224,6 +1224,7 @@ async def test_probe_factory_disables_adapter_level_retries(
     tmp_path: Path,
 ) -> None:
     sdk_calls = 0
+    session_dispatches = 0
 
     class FakeSession:
         trust_env = True
@@ -1238,7 +1239,9 @@ async def test_probe_factory_disables_adapter_level_retries(
             return self._adapters[prefix]
 
         def request(self, *_args: object, **_kwargs: object) -> object:
-            raise AssertionError("the synthetic SDK method fails before HTTP")
+            nonlocal session_dispatches
+            session_dispatches += 1
+            raise requests.ConnectionError("synthetic network failure")
 
         def post(self, *_args: object, **_kwargs: object) -> object:
             raise AssertionError("the synthetic SDK method fails before HTTP")
@@ -1250,15 +1253,10 @@ async def test_probe_factory_disables_adapter_level_retries(
         adapters = requests.adapters
         Session = FakeSession
 
-    def list_accounts() -> object:
-        nonlocal sdk_calls
-        sdk_calls += 1
-        raise RuntimeError("synthetic retryable provider failure")
-
     class FakeSdkClient:
         def __init__(self, **_kwargs: object) -> None:
             self._http_session = FakeSession()
-            self.account = SimpleNamespace(list_accounts=list_accounts)
+            self.account = SimpleNamespace(list_accounts=self._list_accounts)
             self.portfolio = SimpleNamespace(
                 get_assets_summary=lambda **_kwargs: object(),
                 get_holdings=lambda **_kwargs: object(),
@@ -1271,6 +1269,11 @@ async def test_probe_factory_disables_adapter_level_retries(
                 quote=lambda **_kwargs: object(),
                 kline=lambda **_kwargs: object(),
             )
+
+        def _list_accounts(self) -> object:
+            nonlocal sdk_calls
+            sdk_calls += 1
+            return self._http_session.request("POST", "https://provider.invalid/read")
 
     auth_module = SimpleNamespace(requests=FakeRequests())
 
@@ -1298,6 +1301,224 @@ async def test_probe_factory_disables_adapter_level_retries(
         await bundle.aclose()
 
     assert sdk_calls == 1
+    assert session_dispatches == 1
+    assert budget.snapshot().total == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("section_name", "method_name"),
+    [
+        ("account", "list_accounts"),
+        ("portfolio", "get_assets_summary"),
+        ("portfolio", "get_holdings"),
+        ("trade", "list_orders"),
+        ("trade", "get_cash_flows"),
+        ("market", "quote"),
+        ("market", "kline"),
+    ],
+)
+async def test_factory_rejects_each_incompatible_sdk_method_before_dispatch(
+    section_name: str,
+    method_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sdk_calls = 0
+    http_dispatches = 0
+
+    class FakeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self._adapters = {"https://": requests.adapters.HTTPAdapter(max_retries=2)}
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            self._adapters[prefix] = adapter
+
+        def get_adapter(self, prefix: str) -> object:
+            return self._adapters[prefix]
+
+        def request(self, *_args: object, **_kwargs: object) -> object:
+            nonlocal http_dispatches
+            http_dispatches += 1
+            raise AssertionError("signature mismatch must precede HTTP")
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            return self.request(*_args, **_kwargs)
+
+        def close(self) -> None:
+            return None
+
+    class FakeRequests:
+        adapters = requests.adapters
+        Session = FakeSession
+
+    def valid_method(**_kwargs: object) -> object:
+        nonlocal sdk_calls
+        sdk_calls += 1
+        raise AssertionError("signature mismatch must precede SDK call")
+
+    def incompatible(required: object) -> object:
+        del required
+        return object()
+
+    class FakeSdkClient:
+        def __init__(self, **_kwargs: object) -> None:
+            self._http_session = FakeSession()
+            self.account = SimpleNamespace(list_accounts=valid_method)
+            self.portfolio = SimpleNamespace(
+                get_assets_summary=valid_method, get_holdings=valid_method
+            )
+            self.trade = SimpleNamespace(
+                list_orders=valid_method, get_cash_flows=valid_method
+            )
+            self.market = SimpleNamespace(quote=valid_method, kline=valid_method)
+            setattr(getattr(self, section_name), method_name, incompatible)
+
+    def module_import(name: str) -> object:
+        if name == "fsopenapi":
+            return SimpleNamespace(SDKClient=FakeSdkClient)
+        if name == "fsopenapi.auth":
+            return SimpleNamespace(requests=FakeRequests())
+        if name == "fsopenapi.exceptions":
+            return SimpleNamespace()
+        raise AssertionError(name)
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.adapter.probe_sdk.importlib.import_module", module_import
+    )
+    budget = PhysicalHttpBudget()
+    bundle = build_probe_transport(
+        _admitted_document(),
+        ProbeProviderSettings.model_validate(_settings_values(tmp_path)),
+        budget,
+    )
+    try:
+        with pytest.raises(ProbeSdkError) as exc_info:
+            await bundle.transport.execute("fosun_sync_accounts", {})
+    finally:
+        await bundle.aclose()
+
+    assert exc_info.value.code == "SDK_CONTRACT_MISMATCH"
+    assert exc_info.value.category == "contract"
+    assert sdk_calls == 0
+    assert http_dispatches == 0
+    assert budget.snapshot().total == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "category"),
+    [
+        (AuthenticationError, "auth"),
+        (SdkPermissionError, "permission"),
+        (RateLimitError, "rate_limit"),
+        (APIError, "provider"),
+    ],
+)
+async def test_factory_executor_maps_real_sdk_application_errors_to_sanitized_session(
+    error_type: type[APIError],
+    category: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    secret = "synthetic-sdk-error-secret"
+    sdk_calls = 0
+
+    class FakeResponse:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        def iter_content(self, *, chunk_size: int) -> tuple[bytes, ...]:
+            del chunk_size
+            return (b'{"code":0}',)
+
+        def close(self) -> None:
+            return None
+
+    class FakeSession:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self._adapters = {"https://": requests.adapters.HTTPAdapter(max_retries=2)}
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            self._adapters[prefix] = adapter
+
+        def get_adapter(self, prefix: str) -> object:
+            return self._adapters[prefix]
+
+        def request(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("SDK application error must occur before business HTTP")
+
+        def post(self, *_args: object, **_kwargs: object) -> object:
+            return FakeResponse()
+
+        def close(self) -> None:
+            return None
+
+    class FakeRequests:
+        adapters = requests.adapters
+
+        def __init__(self) -> None:
+            self.session = FakeSession()
+
+        def Session(self) -> FakeSession:  # noqa: N802 - mirrors requests API
+            return self.session
+
+    auth_requests = FakeRequests()
+    auth_module = SimpleNamespace(requests=auth_requests)
+
+    class FakeSdkClient:
+        def __init__(self, **_kwargs: object) -> None:
+            self._http_session = FakeSession()
+            self.account = SimpleNamespace(list_accounts=self._list_accounts)
+            self.portfolio = SimpleNamespace(
+                get_assets_summary=lambda **_kwargs: object(),
+                get_holdings=lambda **_kwargs: object(),
+            )
+            self.trade = SimpleNamespace(
+                list_orders=lambda **_kwargs: object(),
+                get_cash_flows=lambda **_kwargs: object(),
+            )
+            self.market = SimpleNamespace(
+                quote=lambda **_kwargs: object(), kline=lambda **_kwargs: object()
+            )
+
+        def _list_accounts(self) -> object:
+            nonlocal sdk_calls
+            sdk_calls += 1
+            auth_module.requests.post("https://provider.invalid/session")
+            raise error_type(secret, secret, secret, {"secret": secret})
+
+    def module_import(name: str) -> object:
+        if name == "fsopenapi":
+            return SimpleNamespace(SDKClient=FakeSdkClient)
+        if name == "fsopenapi.auth":
+            return auth_module
+        if name == "fsopenapi.exceptions":
+            import fsopenapi.exceptions as exceptions
+            return exceptions
+        raise AssertionError(name)
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.adapter.probe_sdk.importlib.import_module", module_import
+    )
+    budget = PhysicalHttpBudget()
+    bundle = build_probe_transport(
+        _admitted_document(),
+        ProbeProviderSettings.model_validate(_settings_values(tmp_path)),
+        budget,
+    )
+    with pytest.raises(ProbeSdkError) as exc_info:
+        await SdkProbeExecutor(bundle, budget).run(_plan())
+    error = exc_info.value
+    assert sdk_calls == 1
+    assert error.operation == "Session"
+    assert error.category == category
+    assert error.physical_request_count == 1
+    assert secret not in repr(error)
 
 
 def test_probe_settings_require_exact_fosun_base_url_before_sdk_import(
