@@ -602,12 +602,11 @@ class SdkFosunTransport:
                 # call running. Consume any late exception without rendering it;
                 # asyncio's orphan-Future logger could expose Provider text.
                 wrapped.add_done_callback(_consume_future_exception)
+                timeout_scope = asyncio.timeout(remaining)
                 try:
-                    result = await asyncio.wait_for(
-                        asyncio.shield(wrapped),
-                        timeout=remaining,
-                    )
-                except (TimeoutError, asyncio.CancelledError) as error:
+                    async with timeout_scope:
+                        result = await asyncio.shield(wrapped)
+                except asyncio.CancelledError:
                     if not thread_future.done():
                         self._poison_transport()
                         release_sdk_slot = False
@@ -619,17 +618,29 @@ class SdkFosunTransport:
                                 pass
 
                         thread_future.add_done_callback(release_slot)
-                        if isinstance(error, TimeoutError):
-                            raise _ProviderDeadlineExceeded from None
-                    if isinstance(error, TimeoutError):
-                        worker_error = (
-                            None
-                            if thread_future.cancelled()
-                            else thread_future.exception()
-                        )
-                        if worker_error is None:
-                            raise _ProviderDeadlineExceeded from None
                     raise
+                except TimeoutError:
+                    if not timeout_scope.expired():
+                        raise
+                    worker_error = (
+                        None
+                        if thread_future.cancelled() or not thread_future.done()
+                        else thread_future.exception()
+                    )
+                    if worker_error is not None:
+                        raise worker_error
+                    if not thread_future.done():
+                        self._poison_transport()
+                        release_sdk_slot = False
+
+                        def release_slot(_: Future[object]) -> None:
+                            try:
+                                loop.call_soon_threadsafe(self._sdk_concurrency.release)
+                            except RuntimeError:
+                                pass
+
+                        thread_future.add_done_callback(release_slot)
+                    raise _ProviderDeadlineExceeded from None
                 if isinstance(result, _RateLimitWait):
                     rate_delay = result.delay
                 else:
@@ -712,7 +723,13 @@ def _provider_unavailable() -> GatewayError:
 
 def _is_transport_error(error: Exception) -> bool:
     """Classify only concrete local network/transport failures as transport."""
-    return isinstance(error, requests.RequestException | ssl.SSLError)
+    return isinstance(
+        error,
+        requests.exceptions.ConnectionError
+        | requests.exceptions.Timeout
+        | requests.exceptions.SSLError
+        | ssl.SSLError,
+    )
 
 
 def _consume_future_exception(future: asyncio.Future[object]) -> None:

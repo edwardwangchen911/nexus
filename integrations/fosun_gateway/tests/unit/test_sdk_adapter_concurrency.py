@@ -22,6 +22,9 @@ from sdk_adapter_concurrency_cases import (
     test_late_sdk_exception_after_timeout_is_consumed_without_logging as test_late_sdk_exception_after_timeout_is_consumed_without_logging,  # noqa: E501
 )
 from sdk_adapter_concurrency_cases import (
+    test_local_deadline_worker_category as test_local_deadline_worker_category,
+)
+from sdk_adapter_concurrency_cases import (
     test_market_backlog_cannot_queue_ahead_of_broker_work as test_market_backlog_cannot_queue_ahead_of_broker_work,  # noqa: E501
 )
 from sdk_adapter_concurrency_cases import (
@@ -56,4 +59,7 @@ from sdk_adapter_concurrency_cases import (
 )
 from sdk_adapter_concurrency_cases import (
     test_timed_out_sdk_call_poisons_cross_lane_requests_until_restart as test_timed_out_sdk_call_poisons_cross_lane_requests_until_restart,  # noqa: E501
+)
+from sdk_adapter_concurrency_cases import (
+    test_worker_timeout_mapping as test_worker_timeout_mapping,
 )

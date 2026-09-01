@@ -9,14 +9,99 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import fsopenapi.exceptions as fsopenapi_exceptions
 import nexus_fosun_gateway.adapter.sdk as sdk_module
 import pytest
+import requests
+from fsopenapi.exceptions import AuthenticationError, RateLimitError
+from fsopenapi.exceptions import PermissionError as SdkPermissionError
+from nexus_fosun_gateway.adapter.probe_sdk import probe_sdk_error_mapper
 from nexus_fosun_gateway.adapter.sdk import (
     DualTokenBucket,
     SdkFosunTransport,
 )
 from nexus_fosun_gateway.domain import GatewayError
 from sdk_adapter_helpers import FakeClock, NoopRateLimiter, _raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("worker_error", "expected_code"),
+    [
+        (requests.ConnectionError("synthetic completed transport failure"), "PROVIDER_UNAVAILABLE"),
+        (
+            AuthenticationError("code", "message", "request-id", {"data": "value"}),
+            "PROVIDER_AUTHENTICATION_FAILED",
+        ),
+        (
+            SdkPermissionError("code", "message", "request-id", {"data": "value"}),
+            "PROVIDER_PERMISSION_DENIED",
+        ),
+        (
+            RateLimitError("code", "message", "request-id", {"data": "value"}),
+            "PROVIDER_RATE_LIMITED",
+        ),
+    ],
+)
+async def test_local_deadline_worker_category(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_error: Exception,
+    expected_code: str,
+) -> None:
+    """A blocked loop can observe the local deadline before Future wrapping catches up."""
+    monkeypatch.setattr(sdk_module, "_DEADLINE_SECONDS", 0.01)
+    started = threading.Event()
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+
+    def quote(*, codes: list[str]) -> object:
+        del codes
+        started.set()
+        release_worker.wait(timeout=1)
+        try:
+            raise worker_error
+        finally:
+            worker_finished.set()
+
+    adapter = SdkFosunTransport(
+        SimpleNamespace(market=SimpleNamespace(quote=quote)),
+        rate_limiter=NoopRateLimiter(),
+        sdk_error_mapper=probe_sdk_error_mapper(fsopenapi_exceptions),
+    )
+    request = asyncio.create_task(adapter.execute("fosun_get_quotes", {"codes": ("usAAPL",)}))
+    assert await asyncio.to_thread(started.wait, 1)
+
+    def release_while_loop_is_blocked() -> None:
+        release_worker.set()
+        assert worker_finished.wait(timeout=1)
+        time.sleep(0.03)
+
+    asyncio.get_running_loop().call_soon(release_while_loop_is_blocked)
+    with pytest.raises(GatewayError) as exc_info:
+        await request
+
+    assert exc_info.value.code == expected_code, exc_info.value.code
+    assert adapter.is_ready()
+    await asyncio.wait_for(adapter._sdk_concurrency.acquire(), timeout=1)
+    adapter._sdk_concurrency.release()
+
+
+@pytest.mark.asyncio
+async def test_worker_timeout_mapping() -> None:
+    def quote(*, codes: list[str]) -> object:
+        del codes
+        raise TimeoutError("synthetic worker timeout")
+
+    adapter = SdkFosunTransport(
+        SimpleNamespace(market=SimpleNamespace(quote=quote)),
+        rate_limiter=NoopRateLimiter(),
+        sdk_error_mapper=lambda _error: None,
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        await adapter.execute("fosun_get_quotes", {"codes": ("usAAPL",)})
+
+    assert exc_info.value.code == "PROVIDER_APPLICATION_ERROR"
 
 
 @pytest.mark.asyncio
