@@ -27,15 +27,16 @@
 
 | File | Responsibility | Task |
 | --- | --- | --- |
-| `integrations/fosun_gateway/src/nexus_fosun_gateway/probe_contract.py` | Immutable scope descriptors, run-ID validation, ordered physical/prerequisite/final operations, response digests, frame fields | 1 |
+| `integrations/fosun_gateway/src/nexus_fosun_gateway/probe_contract.py` | Defines and exports `RuntimeOperation`, immutable scope descriptors, run-ID validation, ordered physical/prerequisite/final operations, response digests, frame fields | 1 |
 | `integrations/fosun_gateway/src/nexus_fosun_gateway/activation.py` | Artifact v3/receipt v2 parsing, canonical pair verification, immutable runtime authorization, exact activation result | 1 |
 | `integrations/fosun_gateway/src/nexus_fosun_gateway/probe.py` | Scope-aware plan, artifact construction and local validation | 2 |
 | `integrations/fosun_gateway/src/nexus_fosun_gateway/adapter/probe_sdk.py` | Scope-selected executor and physically attributed one-shot budget | 2 |
-| `integrations/fosun_gateway/src/nexus_fosun_gateway/probe_cli.py` | Explicit `--run-id`/`--scope`, scoped success and null-evidence failure frames | 2 |
+| `integrations/fosun_gateway/src/nexus_fosun_gateway/probe_cli.py` | Explicit `--run-id`/`--scope`, scope-specific arguments, frames, and the sole production publication entry | 2, 3 |
 | `integrations/fosun_gateway/src/nexus_fosun_gateway/publication.py` | Held-dirfd creation and create-only scope output operations | 3 |
 | `integrations/fosun_gateway/src/nexus_fosun_gateway/probe_capture.py` | Scope/run-bound protected frame creation and verification | 3 |
 | `integrations/fosun_gateway/src/nexus_fosun_gateway/probe_receipt.py` | Scope/run-bound receipt extraction, cross-reference rejection | 3 |
 | `integrations/fosun_gateway/src/nexus_fosun_gateway/policy/operations.py` | Coarse Gateway mapping plus fine-grained `RuntimeOperation` and derivation | 4 |
+| `integrations/fosun_gateway/src/nexus_fosun_gateway/security/hmac.py` | HMAC identity/signature/replay/listener authentication with fine-grained caller operations only | 4 |
 | `integrations/fosun_gateway/src/nexus_fosun_gateway/routes/read_only.py` | HMAC, schema, derive, caller intersection, runtime intersection, then transport | 4 |
 | `integrations/fosun_gateway/src/nexus_fosun_gateway/settings.py` | Exact v1 feature/scope configuration and fixture-default validation | 4 |
 | `integrations/fosun_gateway/src/nexus_fosun_gateway/main.py` | Evidence startup gate before `fsopenapi` import/client/`SdkFosunTransport`; bind authorization to app | 4 |
@@ -56,6 +57,7 @@ Recommended order is Task 1 → 2 → 3 → 4 → 5. Each task consumes only the
 
 **Interfaces:**
 - Produces `ProbeScope = Literal["core", "extended"]`, `ScopeDescriptor`, `SCOPE_DESCRIPTORS: Mapping[ProbeScope, ScopeDescriptor]`, and `scope_descriptor(scope: ProbeScope) -> ScopeDescriptor`.
+- Produces `RuntimeOperation = Literal["fosun_sync_accounts", "fosun_sync_portfolio:cash", "fosun_sync_portfolio:holdings", "fosun_list_orders", "fosun_list_cash_flows", "fosun_get_quotes", "fosun_get_bars"]` in `probe_contract.py`; later Tasks 1 and 4 import it from that module.
 - `ScopeDescriptor` is frozen and exposes `scope_contract_version: str`, `physical_operation_set: tuple[ProbeLabel, ...]`, `prerequisite_operation_set: tuple[ProbeLabel, ...]`, `authorized_operation_set: tuple[RuntimeOperation, ...]`, and scope-specific checks/response-digest lookup.
 - Produces `RuntimeAuthorization(frozen=True)` with `scope: ProbeScope`, `scope_contract_version: str`, `run_id: str`, `capability_expires_at: datetime`, and `authorized_operation_set: frozenset[RuntimeOperation]`.
 - Changes `evaluate_activation(manifest_bytes: bytes, probe_bytes: bytes | None, publication_receipt_bytes: bytes | None, *, expected_scope: ProbeScope, trusted_publication_public_key_bytes: bytes | None, checked_at: datetime | None) -> tuple[FosunActivationResult, RuntimeAuthorization | None]`; fixture outcomes return `(result, None)`.
@@ -72,8 +74,10 @@ def test_scope_descriptors_are_immutable_closed_rows() -> None:
     assert scope_descriptor("extended").authorized_operation_set == (
         "fosun_list_orders", "fosun_list_cash_flows",
     )
-    with pytest.raises(TypeError):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         SCOPE_DESCRIPTORS["core"].authorized_operation_set += ("fosun_list_orders",)
+    with pytest.raises(TypeError):
+        SCOPE_DESCRIPTORS["core"] = scope_descriptor("extended")
 
 def test_activation_rejects_legacy_or_cross_scope_pair() -> None:
     result, authorization = evaluate_activation(
@@ -89,11 +93,16 @@ def test_activation_rejects_legacy_or_cross_scope_pair() -> None:
 
 Run: `UV_OFFLINE=1 uv run --package nexus-fosun-gateway pytest integrations/fosun_gateway/tests/unit/test_activation.py integrations/fosun_gateway/tests/unit/test_probe.py integrations/fosun_gateway/tests/security/test_probe_receipt.py -q`
 
-Expected: FAIL because `ScopeDescriptor`, `RuntimeAuthorization`, v3 artifact fields, v2 receipt fields, and `expected_scope` do not exist.
+Expected: FAIL because `RuntimeOperation`, `ScopeDescriptor`, `RuntimeAuthorization`, v3 artifact fields, v2 receipt fields, and `expected_scope` do not exist.
 
 - [ ] **Step 3: Implement the minimal contract and parser changes**
 
 ```python
+RuntimeOperation = Literal[
+    "fosun_sync_accounts", "fosun_sync_portfolio:cash", "fosun_sync_portfolio:holdings",
+    "fosun_list_orders", "fosun_list_cash_flows", "fosun_get_quotes", "fosun_get_bars",
+]
+
 @dataclass(frozen=True)
 class ScopeDescriptor:
     scope: ProbeScope
@@ -138,8 +147,8 @@ git commit -m "feat: add scoped Fosun evidence contract"
 
 **Interfaces:**
 - Consumes `ScopeDescriptor`, `ProbeScope`, run-ID validator, and v3 artifact models from Task 1.
-- Changes `ProbePlan` to include `run_id: str` and `scope: ProbeScope`; `_parse_probe_plan()` accepts exactly one `--run-id` and one `--scope core|extended` and rejects missing/duplicate/unknown/retry/account-ID arguments.
-- Changes `SdkProbeExecutor.run(plan: ProbeRequestPlan, descriptor: ScopeDescriptor) -> ProbeExecutionEvidence`.
+- Changes `ProbePlan` to a discriminated scope form: common `run_id`, `scope`, `limit`, and `capability_ttl_seconds`; core additionally requires `symbol` and `session_date`, while extended additionally requires `cash_flow_date_from` and `cash_flow_date_to`. `_parse_probe_plan()` accepts `--manifest --run-id --scope --limit --capability-ttl-seconds --symbol --session-date` for core, and `--manifest --run-id --scope --limit --capability-ttl-seconds --cash-flow-date-from --cash-flow-date-to` for extended; each rejects duplicate/unknown/retry/account-ID and the other scope’s fields before settings, executor, or transport construction.
+- Changes `ProbeRequestPlan` to the same discriminated data shape and `SdkProbeExecutor.run(plan: ProbeRequestPlan, descriptor: ScopeDescriptor) -> ProbeExecutionEvidence`.
 - Produces a `PreparedProbeArtifact` carrying `run_id`, `scope`, `scope_contract_version`, v3 canonical bytes, SHA-256, length, and expiry; `sign_publication_receipt()` emits v2 bytes.
 
 - [ ] **Step 1: Write failing scope execution tests**
@@ -158,7 +167,17 @@ def test_first_dispatch_failure_stops_at_one_attempt_without_error_value() -> No
     result = failure_result(ProbeSdkError("PROBE_FAILED", operation="Accounts", physical_request_count=2))
     assert result["physical_request_count"] == 2
     assert all(result[name] is None for name in ("artifact_sha256", "publication_receipt"))
+
+@pytest.mark.parametrize("arguments", [
+    CORE_ARGUMENTS + ("--cash-flow-date-from", "2026-08-01"),
+    EXTENDED_ARGUMENTS + ("--symbol", "usAAPL"),
+])
+def test_scope_rejects_cross_scope_arguments_before_transport(arguments: tuple[str, ...]) -> None:
+    with pytest.raises(ProbeSdkError, match="INVALID_PROBE_PLAN"):
+        _parse_probe_plan(arguments, MANIFEST_SPELLING)
 ```
+
+Define `CORE_ARGUMENTS` and `EXTENDED_ARGUMENTS` in `test_probe_cli.py` as complete alternating tuples, respectively `("--manifest", MANIFEST_SPELLING, "--run-id", "readonly-core-run-0001", "--scope", "core", "--symbol", "usAAPL", "--session-date", "2026-08-31", "--limit", "1", "--capability-ttl-seconds", "60")` and `("--manifest", MANIFEST_SPELLING, "--run-id", "readonly-extended-run-0001", "--scope", "extended", "--cash-flow-date-from", "2026-08-01", "--cash-flow-date-to", "2026-08-02", "--limit", "1", "--capability-ttl-seconds", "60")`; import `_parse_probe_plan` from `probe_cli` in that existing test module.
 
 - [ ] **Step 2: Run focused tests to verify failure**
 
@@ -168,7 +187,7 @@ Expected: FAIL because executor has one fixed eight-label sequence and CLI has n
 
 - [ ] **Step 3: Implement descriptor-selected, one-shot execution**
 
-Use the descriptor physical sequence exactly: core `Session, Accounts, CashSummary, Holdings, quote, kline_minimal`; extended `Session, Accounts, OrderList, CashFlows`. Keep account discovery freshly within each execution, pass the normalized account ID only to CashSummary/Holdings or OrderList/CashFlows in the same process, and do not add a plan/environment/CLI/artifact/frame field for it. Reset `PhysicalHttpBudget` per executor, make pre-dispatch reject labels absent from the selected descriptor, enforce total `<=24`, broker `<=6`, scope broker `<=6`, per-label `<=3`, and `max_attempts=1`; a second attributed dispatch fails rather than retries. Build v3 operation evidence only from the descriptor and use descriptor checks. Add `run_id`, `scope`, and `scope_contract_version` to the fixed ordered frame fields; on every non-published path keep artifact/receipt fields null and preserve only safe failure code/category/label/count.
+Use the descriptor physical sequence exactly: core `Session, Accounts, CashSummary, Holdings, quote, kline_minimal`; extended `Session, Accounts, OrderList, CashFlows`. Keep account discovery freshly within each execution, pass the normalized account ID only to CashSummary/Holdings or OrderList/CashFlows in the same process, and do not add a plan/environment/CLI/artifact/frame field for it. Replace the current single `ProbePlan`/`ProbeRequestPlan` with `CoreProbePlan` and `ExtendedProbePlan` Pydantic models plus `ProbePlan = CoreProbePlan | ExtendedProbePlan`; core’s `to_request_plan()` supplies only symbol/session date/limit and extended’s supplies only cash-flow date range/limit. Reset `PhysicalHttpBudget` per executor, make pre-dispatch reject labels absent from the selected descriptor, enforce total `<=24`, broker `<=6`, scope broker `<=6`, per-label `<=3`, and `max_attempts=1`; a second attributed dispatch fails rather than retries. Build v3 operation evidence only from the descriptor and use descriptor checks. Add `run_id`, `scope`, and `scope_contract_version` to the fixed ordered frame fields; on every non-published path keep artifact/receipt fields null and preserve only safe failure code/category/label/count.
 
 - [ ] **Step 4: Run focused tests and verify static typing**
 
@@ -188,15 +207,18 @@ git commit -m "feat: run one scoped Fosun probe"
 
 **Files:**
 - Modify: `integrations/fosun_gateway/src/nexus_fosun_gateway/publication.py`
+- Modify: `integrations/fosun_gateway/src/nexus_fosun_gateway/probe_cli.py`
 - Modify: `integrations/fosun_gateway/src/nexus_fosun_gateway/probe_capture.py`
 - Modify: `integrations/fosun_gateway/src/nexus_fosun_gateway/probe_receipt.py`
 - Modify: `integrations/fosun_gateway/tests/security/test_probe_publication.py`
 - Modify: `integrations/fosun_gateway/tests/security/test_probe_capture.py`
 - Modify: `integrations/fosun_gateway/tests/security/test_probe_receipt.py`
+- Modify: `integrations/fosun_gateway/tests/unit/test_probe_cli.py`
 
 **Interfaces:**
 - Consumes Task 1 v3/v2 models and Task 2 `ProbePlan`/frame fields.
 - Produces `create_scope_run_directory(output_parent: Path, run_id: str, scope: ProbeScope) -> ScopedProbeOutput` with held `dir_fd`; `ScopedProbeOutput` has fixed names and exposes no path to sibling scopes.
+- Changes `_execute_once()` in `probe_cli.py` to call `create_scope_run_directory(settings.output_dir, plan.run_id, plan.scope)` once, then pass that returned held scope directory only to frame/artifact/receipt publication; it removes the baseline `settings.output_dir / plan.output_basename` path construction and has no alternate `publish_probe_artifact(settings.output_dir, ...)` call.
 - Changes capture and receipt CLIs to require `--run-id` and `--scope`, use the fixed directory and fixed basenames, and reject all argument/frame/artifact/receipt identity disagreements.
 
 - [ ] **Step 1: Write failing protected-output tests**
@@ -212,17 +234,23 @@ def test_same_parent_core_and_extended_cannot_overwrite_each_other(tmp_path: Pat
 def test_receipt_rejects_frame_artifact_scope_or_run_swap() -> None:
     assert probe_receipt.main(swapped_arguments) == 2
     assert not (scope_dir / "publication-receipt.json").exists()
+
+def test_existing_run_directory_is_exact_create_only_failure(tmp_path: Path) -> None:
+    output_parent = protected_absolute_parent_with_runs(tmp_path)
+    (output_parent / "runs" / "readonly-core-run-0001").mkdir(mode=0o700)
+    with pytest.raises(ProbeSdkError, match="PROBE_OUTPUT_EXISTS"):
+        create_scope_run_directory(output_parent, "readonly-core-run-0001", "core")
 ```
 
 - [ ] **Step 2: Run focused tests to verify failure**
 
-Run: `UV_OFFLINE=1 uv run --package nexus-fosun-gateway pytest integrations/fosun_gateway/tests/security/test_probe_publication.py integrations/fosun_gateway/tests/security/test_probe_capture.py integrations/fosun_gateway/tests/security/test_probe_receipt.py -q`
+Run: `UV_OFFLINE=1 uv run --package nexus-fosun-gateway pytest integrations/fosun_gateway/tests/security/test_probe_publication.py integrations/fosun_gateway/tests/security/test_probe_capture.py integrations/fosun_gateway/tests/security/test_probe_receipt.py integrations/fosun_gateway/tests/unit/test_probe_cli.py -q`
 
 Expected: FAIL because output uses arbitrary basenames/directories and identity is not scope/run-bound.
 
 - [ ] **Step 3: Implement held-dirfd, create-only hierarchy and cross-checks**
 
-Open the already-approved absolute parent and `runs/` via no-follow dirfds, require current UID and `0700`, then create `runs/<run-id>` and its only selected `<scope>` child with `O_EXCL` semantics; any existing run directory returns `PROBE_OUTPUT_EXISTS`. Create the fixed frame/artifact/receipt/staging/quarantine names only below that held scope dirfd. Preserve existing durable atomic write and post-write verification; never reuse a failed frame/artifact/receipt/staging/quarantine. Capture writes `result.frame.json`; publication writes `artifact.json`; receipt extraction writes `publication-receipt.json`. Parse and compare run ID/scope/version from CLI arguments, selected directory identity, success frame, artifact, and receipt before signing/publishing. On a post-artifact error, quarantine the selected scope only; prove an already published core artifact and receipt retain identical bytes and SHA-256 after a later extended publication failure.
+Add `protected_absolute_parent_with_runs(tmp_path: Path) -> Path` to `test_probe_publication.py`: it creates an absolute `tmp_path / "operator"` and its `runs` child, chmods both to `0700`, and returns the parent. Open that already-approved absolute parent and `runs/` via no-follow dirfds, require current UID and `0700`, then create `runs/<run-id>` and its only selected `<scope>` child with `O_EXCL` semantics; any existing run directory returns `PROBE_OUTPUT_EXISTS`. Create the fixed frame/artifact/receipt/staging/quarantine names only below that held scope dirfd. Preserve existing durable atomic write and post-write verification; never reuse a failed frame/artifact/receipt/staging/quarantine. Capture writes `result.frame.json`; the sole `probe_cli._execute_once()` publication path writes `artifact.json`; receipt extraction writes `publication-receipt.json`. Parse and compare run ID/scope/version from CLI arguments, selected directory identity, success frame, artifact, and receipt before signing/publishing. Add a test that monkeypatches `publish_probe_artifact` and asserts its directory argument is the held selected scope directory, never `settings.output_dir`. On a post-artifact error, quarantine the selected scope only; prove an already published core artifact and receipt retain identical bytes and SHA-256 after a later extended publication failure.
 
 - [ ] **Step 4: Run focused tests and failure-state regressions**
 
@@ -234,7 +262,7 @@ Expected: PASS; unsafe ownership/mode/symlink/link count, existing/incomplete ru
 
 ```bash
 git diff --check
-git add integrations/fosun_gateway/src/nexus_fosun_gateway/publication.py integrations/fosun_gateway/src/nexus_fosun_gateway/probe_capture.py integrations/fosun_gateway/src/nexus_fosun_gateway/probe_receipt.py integrations/fosun_gateway/tests/security/test_probe_publication.py integrations/fosun_gateway/tests/security/test_probe_capture.py integrations/fosun_gateway/tests/security/test_probe_receipt.py
+git add integrations/fosun_gateway/src/nexus_fosun_gateway/publication.py integrations/fosun_gateway/src/nexus_fosun_gateway/probe_capture.py integrations/fosun_gateway/src/nexus_fosun_gateway/probe_receipt.py integrations/fosun_gateway/src/nexus_fosun_gateway/probe_cli.py integrations/fosun_gateway/tests/security/test_probe_publication.py integrations/fosun_gateway/tests/security/test_probe_capture.py integrations/fosun_gateway/tests/security/test_probe_receipt.py integrations/fosun_gateway/tests/unit/test_probe_cli.py
 git commit -m "feat: isolate Fosun scope publication"
 ```
 
@@ -242,10 +270,12 @@ git commit -m "feat: isolate Fosun scope publication"
 
 **Files:**
 - Modify: `integrations/fosun_gateway/src/nexus_fosun_gateway/policy/operations.py`
+- Modify: `integrations/fosun_gateway/src/nexus_fosun_gateway/security/hmac.py`
 - Modify: `integrations/fosun_gateway/src/nexus_fosun_gateway/routes/read_only.py`
 - Modify: `integrations/fosun_gateway/src/nexus_fosun_gateway/settings.py`
 - Modify: `integrations/fosun_gateway/src/nexus_fosun_gateway/main.py`
 - Modify: `integrations/fosun_gateway/tests/security/test_principal_authorization.py`
+- Modify: `integrations/fosun_gateway/tests/security/read_only_helpers.py`
 - Modify: `integrations/fosun_gateway/tests/security/test_read_only_surface.py`
 - Modify: `integrations/fosun_gateway/tests/security/test_read_only_transport.py`
 - Modify: `integrations/fosun_gateway/tests/unit/test_composition.py`
@@ -253,20 +283,22 @@ git commit -m "feat: isolate Fosun scope publication"
 
 **Interfaces:**
 - Consumes Task 1 `RuntimeAuthorization` and the scope-aware `evaluate_activation` signature.
-- Produces `RuntimeOperation = Literal["fosun_sync_accounts", "fosun_sync_portfolio:cash", "fosun_sync_portfolio:holdings", "fosun_list_orders", "fosun_list_cash_flows", "fosun_get_quotes", "fosun_get_bars"]` and `derive_runtime_operation(operation: GatewayOperation, payload: RequestModel) -> RuntimeOperation`.
-- Changes HMAC identity/verified actor `allowed_operations` to `frozenset[RuntimeOperation]`; its verification occurs before schema parsing but it cannot authorize route content until derivation.
+- Consumes Task 1 `RuntimeOperation`; produces `derive_runtime_operation(operation: GatewayOperation, payload: RequestModel) -> RuntimeOperation` in `policy/operations.py`.
+- Changes `security/hmac.py` `_VerificationIdentity.allowed_operations` and `VerifiedGatewayActor.allowed_operations` to `frozenset[RuntimeOperation]`. `GatewayHmacVerifier.verify(request: Request, body: bytes, *, expected_actor_id: str | None) -> VerifiedGatewayActor` verifies identity/signature/replay/listener only; it removes the `operation: GatewayOperation | None` parameter and its pre-schema coarse allowlist rejection.
 - `build_transport(settings: GatewaySettings, *, on_poison: Callable[[], None] | None = None, on_activation_expired: Callable[[datetime], None] | None = None, activation_checked_at: datetime | None = None, activation_monotonic_anchor: float | None = None) -> tuple[FosunTransport, RuntimeAuthorization | None]` returns a non-null authorization only for read-only mode; fixture returns `(FixtureFosunTransport(), None)`. `create_gateway_app` stores `app.state.runtime_authorization`.
 
 - [ ] **Step 1: Write failing startup and request-gate tests**
 
 ```python
-@pytest.mark.asyncio
-async def test_cash_only_authorization_denies_holdings_before_transport(client, transport) -> None:
-    response = await signed_post(client, "/internal/v1/read-only/fosun_sync_portfolio", {
+def test_cash_only_authorization_denies_holdings_before_transport(
+    authorized_client: tuple[TestClient, RecordingTransport],
+) -> None:
+    client, transport = authorized_client
+    response = _post_signed(client, "fosun_sync_portfolio", {
         "account_id": "fixture-account", "read_kind": "holdings", "cursor": "0", "limit": 1,
-    }, allowed_operations={"fosun_sync_portfolio:cash"})
+    }, nonce="0198f7a0-2222-7777-8222-000000000901")
     assert response.status_code == 404
-    transport.execute.assert_not_awaited()
+    assert transport.calls == 0
 
 def test_mixed_startup_evidence_constructs_no_sdk_client(monkeypatch) -> None:
     monkeypatch.setattr(main.importlib, "import_module", pytest.fail)
@@ -282,13 +314,29 @@ Expected: FAIL because current HMAC authorizes coarse `fosun_sync_portfolio` bef
 
 - [ ] **Step 3: Implement separate fine-grained authorization without widening SDK mapping**
 
-Keep `GatewayOperation` and every route-to-`transport.execute` call unchanged. Add `RuntimeOperation` and an explicit mapping: accounts/orders/cash flows/quotes/bars map one-to-one; `fosun_sync_portfolio` derives only after `PortfolioReadRequest.model_validate` returns, mapping `cash` to `fosun_sync_portfolio:cash` and `holdings` to `fosun_sync_portfolio:holdings`. In `_execute`, preserve HMAC identity verification first, parse schema second, derive third, require the derived operation in both `actor.allowed_operations` and `app.state.runtime_authorization.authorized_operation_set` fourth, then call `transport.execute` fifth. Invalid `read_kind` returns existing `VALIDATION_ERROR` before derivation; any caller/runtime denial returns existing non-disclosing `OPERATION_NOT_ALLOWED` and makes zero transport/provider dispatch. `fosun_capabilities` reports only active final runtime operations and never grants one.
+Keep `GatewayOperation` and every route-to-`transport.execute` call unchanged. Import Task 1 `RuntimeOperation` into `policy/operations.py` and add an explicit mapping: accounts/orders/cash flows/quotes/bars map one-to-one; `fosun_sync_portfolio` derives only after `PortfolioReadRequest.model_validate` returns, mapping `cash` to `fosun_sync_portfolio:cash` and `holdings` to `fosun_sync_portfolio:holdings`. In `security/hmac.py`, migrate the two identity dataclasses and `_verification_identity()` principal rows to fine runtime sets (broker: cash, holdings, orders, cash flows; market: quotes, bars); preserve signature/replay/listener behavior and remove only `if operation is not None and operation not in identity.allowed_operations`. In `_execute`, call `verify(request, body, expected_actor_id=_listener_actor(request))`, parse schema second, derive third, require the derived operation in both `actor.allowed_operations` and `app.state.runtime_authorization.authorized_operation_set` fourth, then call `transport.execute` fifth. Invalid `read_kind` returns existing `VALIDATION_ERROR` before derivation; any caller/runtime denial returns existing non-disclosing `OPERATION_NOT_ALLOWED` and makes zero transport/provider dispatch. `fosun_capabilities` reports only active final runtime operations and never grants one. Update `read_only_helpers._post_signed(client: TestClient, operation: str, payload: dict[str, object], **auth: object) -> Response` only for fine-runtime expected assertions; it remains the existing concrete signing helper, not a newly invented `signed_post` helper.
 
 In settings require exact production `FOSUN_READ_ONLY_SCOPE_CONTRACT_VERSION=v1` and one explicit `FOSUN_READ_ONLY_SCOPE=core|extended` only when `transport_mode="read_only"`; absent/other values remain fixture validation. In `main.build_transport`, read exact evidence paths, invoke scope-aware activation, require non-null authorization and matching stored contract hash before importing `fsopenapi` or constructing SDK client/`SdkFosunTransport`, then return/bind that authorization. Preserve fixture mode and `FOSUN_SDK_ADMITTED=false` defaults. Do not implement core+extended composition.
 
 - [ ] **Step 4: Run focused tests with offline socket guard**
 
-Run: `NEXUS_RUNTIME_TMP="$(mktemp -d "$PWD/.nexus-runtime-task4.XXXXXX")"; chmod 700 "$NEXUS_RUNTIME_TMP"; TMPDIR="$NEXUS_RUNTIME_TMP" PYTHONDONTWRITEBYTECODE=1 NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" UV_OFFLINE=1 uv run --package nexus-fosun-gateway pytest integrations/fosun_gateway/tests/security/test_principal_authorization.py integrations/fosun_gateway/tests/security/test_read_only_surface.py integrations/fosun_gateway/tests/security/test_read_only_transport.py integrations/fosun_gateway/tests/unit/test_composition.py integrations/fosun_gateway/tests/test_health.py -q -p no:cacheprovider; rmdir "$NEXUS_RUNTIME_TMP"`
+Run:
+
+```bash
+set -euo pipefail
+NEXUS_RUNTIME_TMP="$(mktemp -d "$PWD/.nexus-runtime-task4.XXXXXX")"
+chmod 700 "$NEXUS_RUNTIME_TMP"
+cleanup() { rmdir "$NEXUS_RUNTIME_TMP"; }
+trap cleanup EXIT
+TMPDIR="$NEXUS_RUNTIME_TMP" PYTHONDONTWRITEBYTECODE=1 \
+  NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" UV_OFFLINE=1 \
+  uv run --package nexus-fosun-gateway pytest \
+  integrations/fosun_gateway/tests/security/test_principal_authorization.py \
+  integrations/fosun_gateway/tests/security/test_read_only_surface.py \
+  integrations/fosun_gateway/tests/security/test_read_only_transport.py \
+  integrations/fosun_gateway/tests/unit/test_composition.py \
+  integrations/fosun_gateway/tests/test_health.py -q -p no:cacheprovider
+```
 
 Expected: PASS; cash-only and holdings-only both deny their opposite, core denies orders/cash flows, extended denies accounts/cash/holdings/quotes/bars, invalid schema does not authorize, denied routes have zero dispatch, mixed/legacy/missing startup evidence imports no SDK, and no socket opens.
 
@@ -296,7 +344,7 @@ Expected: PASS; cash-only and holdings-only both deny their opposite, core denie
 
 ```bash
 git diff --check
-git add integrations/fosun_gateway/src/nexus_fosun_gateway/policy/operations.py integrations/fosun_gateway/src/nexus_fosun_gateway/routes/read_only.py integrations/fosun_gateway/src/nexus_fosun_gateway/settings.py integrations/fosun_gateway/src/nexus_fosun_gateway/main.py integrations/fosun_gateway/tests/security/test_principal_authorization.py integrations/fosun_gateway/tests/security/test_read_only_surface.py integrations/fosun_gateway/tests/security/test_read_only_transport.py integrations/fosun_gateway/tests/unit/test_composition.py integrations/fosun_gateway/tests/test_health.py
+git add integrations/fosun_gateway/src/nexus_fosun_gateway/policy/operations.py integrations/fosun_gateway/src/nexus_fosun_gateway/security/hmac.py integrations/fosun_gateway/src/nexus_fosun_gateway/routes/read_only.py integrations/fosun_gateway/src/nexus_fosun_gateway/settings.py integrations/fosun_gateway/src/nexus_fosun_gateway/main.py integrations/fosun_gateway/tests/security/test_principal_authorization.py integrations/fosun_gateway/tests/security/read_only_helpers.py integrations/fosun_gateway/tests/security/test_read_only_surface.py integrations/fosun_gateway/tests/security/test_read_only_transport.py integrations/fosun_gateway/tests/unit/test_composition.py integrations/fosun_gateway/tests/test_health.py
 git commit -m "feat: gate Fosun requests by scoped runtime authorization"
 ```
 
@@ -309,7 +357,7 @@ git commit -m "feat: gate Fosun requests by scoped runtime authorization"
 
 **Interfaces:**
 - Consumes the Task 4 production surface and exact `RuntimeOperation` derivation point.
-- Produces `check_scoped_runtime_authorization(root: Path) -> list[Finding]`, called by repository-policy main, which rejects reintroduction of coarse pre-schema portfolio authorization, probe-only imports in runtime, writes, and changed production surface without reviewed hash updates.
+- Produces `check_scoped_runtime_authorization(root: Path) -> list[PolicyFinding]`, called by repository-policy main, which rejects reintroduction of coarse pre-schema portfolio authorization, probe-only imports in runtime, writes, and changed production surface without reviewed hash updates.
 - Produces an operator runbook that names one explicit scope, v3/v2/run-ID pairing and safe rollback to fixture mode, but contains no values, commands that invoke a probe, or activation claim.
 
 - [ ] **Step 1: Write failing policy and runbook tests**
@@ -321,7 +369,7 @@ def test_repository_policy_rejects_coarse_portfolio_authorization(tmp_path: Path
     route.write_text('if operation not in actor.allowed_operations: return await transport.execute(operation, {})')
     findings = repository_policy.check_scoped_runtime_authorization(tmp_path)
     assert [(item.rule, item.path) for item in findings] == [
-        ("scoped_runtime_authorization_missing", str(route.relative_to(tmp_path))),
+        ("scoped_runtime_authorization_missing", "integrations/fosun_gateway/src/nexus_fosun_gateway/routes/read_only.py"),
     ]
 ```
 
@@ -333,7 +381,7 @@ Expected: FAIL because there is no scoped-runtime authorization policy check.
 
 - [ ] **Step 3: Implement minimal policy and documentation update**
 
-Extend repository policy’s reviewed source hash/tripwire only for the intentional changed Gateway files, preserve the frozen SDK/dependency/manifest checks, and add an AST/text structural check requiring HMAC verification, schema validation, `derive_runtime_operation`, caller/runtime intersections, and `transport.execute` in that order. Keep forbidden write scanning active over all Gateway source. Revise the runbook to require exactly one v3 artifact and v2 receipt with equal run ID/scope/version, describe legacy archive-only treatment, scope-specific least privilege, fixture-mode rollback after Gateway stop, and state that no fifth core probe is authorized by implementation acceptance.
+Update `_EXPECTED_GATEWAY_SOURCE_SHA256` for exactly `policy/operations.py`, `routes/read_only.py`, and `main.py` after their intended reviewed changes; add `security/hmac.py` to that mapping and make `check_gateway_read_allowlist()` hash all five named files. Recompute `_EXPECTED_GATEWAY_INSTALLABLE_SRC_SHA256` after Tasks 1–4. Keep `_EXPECTED_FOSUN_GATEWAY_PYPROJECT_SHA256` unchanged because no Task edits `integrations/fosun_gateway/pyproject.toml`; add a test asserting an unchanged pyproject produces no pin finding and a changed pyproject still produces its existing finding. Preserve frozen SDK lock/manifest/write gates, then add the structural check requiring `verify(request, body, expected_actor_id=...)`, schema validation, `derive_runtime_operation`, actor/runtime intersections, and `transport.execute` in order. Add a test that `security/hmac.py` absent from the reviewed mapping or altered after fixture hash setup yields the existing reviewed-source finding. Keep forbidden write scanning active over all Gateway source. Revise the runbook to require exactly one v3 artifact and v2 receipt with equal run ID/scope/version, describe legacy archive-only treatment, scope-specific least privilege, fixture-mode rollback after Gateway stop, and state that no fifth core probe is authorized by implementation acceptance.
 
 - [ ] **Step 4: Run full required offline acceptance harness**
 
@@ -354,7 +402,8 @@ TMPDIR="$NEXUS_GATEWAY_TMP" PYTHONDONTWRITEBYTECODE=1 \
   NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" UV_OFFLINE=1 \
   uv run --package nexus-fosun-gateway pytest integrations/fosun_gateway/tests -q \
   -p no:cacheprovider
-UV_OFFLINE=1 uv run pytest tests/policy -q
+TMPDIR="$NEXUS_POLICY_TMP" PYTHONDONTWRITEBYTECODE=1 UV_OFFLINE=1 \
+  uv run pytest tests/policy -q -p no:cacheprovider
 UV_OFFLINE=1 uv run python scripts/ci/repository_policy.py \
   --root . \
   --inventory-output "$NEXUS_POLICY_TMP/nexus-dependency-inventory.json"
@@ -380,9 +429,10 @@ Expected: `git show --check` has no whitespace error and status is clean after t
 ## Plan self-review
 
 - [x] **Spec coverage:** Task 1 covers immutable core/extended descriptors, three closed sets, v3/v2 canonical run/scope binding, legacy/cross-scope rejection, signature/hash binding, and no scope composition. Task 2 covers selected physical sequences, process-local account binding, one-shot/budget/label behavior, and value-free frames. Task 3 covers protected create-only run/scope hierarchy, staging/quarantine, matching frame/artifact/receipt, and cross-scope preservation. Task 4 covers startup-before-SDK construction, immutable runtime authorization, exact feature gate, HMAC→schema→derived authorization→two intersections→transport order, and cash/holdings bidirectional denial. Task 5 covers repository policy, runbook, no writes/raw errors, and required offline harness.
-- [x] **Placeholder scan:** No `TBD`, `TODO`, “implement later”, “appropriate error handling”, “similar to Task”, or unspecified test step remains.
-- [x] **Type consistency:** `ProbeScope`, `ScopeDescriptor`, `RuntimeOperation`, `RuntimeAuthorization`, `expected_scope`, `run_id`, and `scope_contract_version` are defined in Task 1 and consumed consistently by Tasks 2–5; the coarse `GatewayOperation` remains the SDK transport type.
-- [x] **Path and command check:** Every production/test/runbook/policy path listed exists in the baseline; the acceptance commands use existing `uv`, pytest, repository-policy, Ruff, mypy, and Git entry points. No command targets system `/tmp` or runs a Provider/probe/capture command.
+- [x] **Review findings closure:** Task 1 defines `RuntimeOperation` in `probe_contract.py` before `ScopeDescriptor` and `RuntimeAuthorization`, and uses `FrozenInstanceError` plus a separate `MappingProxyType` write test. Task 2 gives mutually exclusive core/extended CLI tuples and no cross-scope `ProbePlan` field. Task 3 changes the real `probe_cli._execute_once()` publication path and tests the existing run directory’s exact `PROBE_OUTPUT_EXISTS`. Task 4 includes `security/hmac.py`, existing `_post_signed`, identity dataclass migration, and the no-coarse-operation `verify()` signature. Task 5 uses `PolicyFinding`, enumerates the five reviewed source hashes/tree hash/unchanged pyproject hash, and gives every pytest checkout-local `TMPDIR`.
+- [x] **Placeholder and helper scan:** No `TBD`, `TODO`, “implement later”, “appropriate error handling”, “similar to Task”, ellipsis, undefined `signed_post`, or unspecified test helper remains; `protected_absolute_parent_with_runs`, `CORE_ARGUMENTS`, `EXTENDED_ARGUMENTS`, and `_post_signed` are defined or identified in their exact test file.
+- [x] **Type consistency:** `RuntimeOperation` is defined only in Task 1 `probe_contract.py`; `activation.py`, `policy/operations.py`, `security/hmac.py`, routes, and tests import it. `ProbeScope`, `ScopeDescriptor`, `RuntimeAuthorization`, `expected_scope`, `run_id`, and `scope_contract_version` are produced before consumption; the coarse `GatewayOperation` remains the SDK transport type.
+- [x] **Path and command check:** Every production/test/runbook/policy path listed exists in the baseline; the acceptance commands use existing `uv`, pytest, repository-policy, Ruff, mypy, and Git entry points. All pytest commands use checkout-local `mktemp` directories with `0700`, traps clean only those exact directories without changing umask, and no command targets system `/tmp` or runs a Provider/probe/capture command.
 
 ## Execution handoff
 
