@@ -4,7 +4,7 @@
 
 **Goal:** Replace the all-operation Fosun probe admission with one immutable, fail-closed `core` or `extended` read-only scope authorization, without adding a Provider write surface.
 
-**Architecture:** Keep the current Gateway route-to-SDK mapping (`GatewayOperation`) intact, but introduce a separate `RuntimeOperation` namespace for the fine-grained final capability contract. Scope descriptors own physical, prerequisite, and final ordered sets; artifact v3 and receipt v2 bind the selected descriptor plus a create-only run ID. Startup creates one immutable `RuntimeAuthorization` before SDK construction, while every request authorizes a schema-derived runtime operation before `transport.execute`.
+**Architecture:** Keep the existing Gateway route-to-SDK mapping (`GatewayOperation`) for the seven Provider-backed read routes, but introduce a separate `RuntimeOperation` namespace for the fine-grained final capability contract. `fosun_capabilities` is an HMAC-authenticated local introspection exception: it returns active final operations and never becomes a `RuntimeOperation` or calls transport. Scope descriptors own physical, prerequisite, and final ordered sets; artifact v3 and receipt v2 bind the selected descriptor plus a create-only run ID. Startup creates one immutable `RuntimeAuthorization` before SDK construction, while each Provider-backed read request authorizes a schema-derived runtime operation before `transport.execute`.
 
 **Tech Stack:** Python 3.12, FastAPI, Pydantic v2, cryptography Ed25519, pytest, Ruff, mypy, uv.
 
@@ -225,6 +225,7 @@ git commit -m "feat: run one scoped Fosun probe"
 
 ```python
 def test_same_parent_core_and_extended_cannot_overwrite_each_other(tmp_path: Path) -> None:
+    parent = protected_absolute_parent_with_runs(tmp_path)
     core = create_scope_run_directory(parent, "readonly-core-run-0001", "core")
     extended = create_scope_run_directory(parent, "readonly-extended-run-0001", "extended")
     assert core.directory != extended.directory
@@ -286,6 +287,7 @@ git commit -m "feat: isolate Fosun scope publication"
 - Consumes Task 1 `RuntimeOperation`; produces `derive_runtime_operation(operation: GatewayOperation, payload: RequestModel) -> RuntimeOperation` in `policy/operations.py`.
 - Changes `security/hmac.py` `_VerificationIdentity.allowed_operations` and `VerifiedGatewayActor.allowed_operations` to `frozenset[RuntimeOperation]`. `GatewayHmacVerifier.verify(request: Request, body: bytes, *, expected_actor_id: str | None) -> VerifiedGatewayActor` verifies identity/signature/replay/listener only; it removes the `operation: GatewayOperation | None` parameter and its pre-schema coarse allowlist rejection.
 - `build_transport(settings: GatewaySettings, *, on_poison: Callable[[], None] | None = None, on_activation_expired: Callable[[datetime], None] | None = None, activation_checked_at: datetime | None = None, activation_monotonic_anchor: float | None = None) -> tuple[FosunTransport, RuntimeAuthorization | None]` returns a non-null authorization only for read-only mode; fixture returns `(FixtureFosunTransport(), None)`. `create_gateway_app` stores `app.state.runtime_authorization`.
+- `fosun_capabilities` is not a `RuntimeOperation`: after HMAC identity verification it returns `GatewayPage` built locally from `RuntimeAuthorization.authorized_operation_set` in read-only mode, with no `transport.execute`; fixture mode retains the existing fixture/static local capabilities response and does not read `runtime_authorization` or construct SDK/Provider state.
 
 - [ ] **Step 1: Write failing startup and request-gate tests**
 
@@ -304,7 +306,24 @@ def test_mixed_startup_evidence_constructs_no_sdk_client(monkeypatch) -> None:
     monkeypatch.setattr(main.importlib, "import_module", pytest.fail)
     with pytest.raises(GatewayError, match="SDK_NOT_ADMITTED"):
         build_transport(mixed_scope_settings)
+
+def test_capabilities_is_local_and_scope_exact(
+    core_client: tuple[TestClient, RecordingTransport],
+    extended_client: tuple[TestClient, RecordingTransport],
+    fixture_client: tuple[TestClient, RecordingTransport],
+) -> None:
+    core, core_transport = core_client
+    extended, extended_transport = extended_client
+    fixture, fixture_transport = fixture_client
+    assert _post_signed(core, "fosun_capabilities", {}, nonce="0198f7a0-2222-7777-8222-000000000902").json()["items"] == [
+        "fosun_sync_accounts", "fosun_sync_portfolio:cash", "fosun_sync_portfolio:holdings", "fosun_get_quotes", "fosun_get_bars",
+    ]
+    assert _post_signed(extended, "fosun_capabilities", {}, nonce="0198f7a0-2222-7777-8222-000000000903").json()["items"] == ["fosun_list_orders", "fosun_list_cash_flows"]
+    assert _post_signed(fixture, "fosun_capabilities", {}, nonce="0198f7a0-2222-7777-8222-000000000904").status_code == 200
+    assert (core_transport.calls, extended_transport.calls, fixture_transport.calls) == (0, 0, 0)
 ```
+
+In `test_principal_authorization.py`, define `core_client` and `extended_client` fixtures as `Iterator[tuple[TestClient, RecordingTransport]]`: each starts `create_gateway_app(GatewaySettings.for_test())`, replaces `app.state.transport` with `RecordingTransport`, and assigns an explicit Task 1 `RuntimeAuthorization` whose ordered `authorized_operation_set` is respectively the core or extended descriptor finals. Define `fixture_client: Iterator[tuple[TestClient, RecordingTransport]]` the same way but leave `app.state.runtime_authorization` unset; assert `recording.calls == 0` after each capabilities request and assert a signed fixture quote route remains `200`. The core accounts case uses `_post_signed(core_client, "fosun_sync_accounts", {}, nonce="0198f7a0-2222-7777-8222-000000000905")` and asserts `200`; the extended accounts case uses its own nonce and asserts `404` with `recording.calls == 0`.
 
 - [ ] **Step 2: Run focused tests to verify failure**
 
@@ -314,7 +333,7 @@ Expected: FAIL because current HMAC authorizes coarse `fosun_sync_portfolio` bef
 
 - [ ] **Step 3: Implement separate fine-grained authorization without widening SDK mapping**
 
-Keep `GatewayOperation` and every route-to-`transport.execute` call unchanged. Import Task 1 `RuntimeOperation` into `policy/operations.py` and add an explicit mapping: accounts/orders/cash flows/quotes/bars map one-to-one; `fosun_sync_portfolio` derives only after `PortfolioReadRequest.model_validate` returns, mapping `cash` to `fosun_sync_portfolio:cash` and `holdings` to `fosun_sync_portfolio:holdings`. In `security/hmac.py`, migrate the two identity dataclasses and `_verification_identity()` principal rows to fine runtime sets (broker: cash, holdings, orders, cash flows; market: quotes, bars); preserve signature/replay/listener behavior and remove only `if operation is not None and operation not in identity.allowed_operations`. In `_execute`, call `verify(request, body, expected_actor_id=_listener_actor(request))`, parse schema second, derive third, require the derived operation in both `actor.allowed_operations` and `app.state.runtime_authorization.authorized_operation_set` fourth, then call `transport.execute` fifth. Invalid `read_kind` returns existing `VALIDATION_ERROR` before derivation; any caller/runtime denial returns existing non-disclosing `OPERATION_NOT_ALLOWED` and makes zero transport/provider dispatch. `fosun_capabilities` reports only active final runtime operations and never grants one. Update `read_only_helpers._post_signed(client: TestClient, operation: str, payload: dict[str, object], **auth: object) -> Response` only for fine-runtime expected assertions; it remains the existing concrete signing helper, not a newly invented `signed_post` helper.
+Keep `GatewayOperation` and every Provider-backed route-to-`transport.execute` call unchanged. Import Task 1 `RuntimeOperation` into `policy/operations.py` and add an explicit mapping: accounts/orders/cash flows/quotes/bars map one-to-one; `fosun_sync_portfolio` derives only after `PortfolioReadRequest.model_validate` returns, mapping `cash` to `fosun_sync_portfolio:cash` and `holdings` to `fosun_sync_portfolio:holdings`. In `security/hmac.py`, migrate the two identity dataclasses and `_verification_identity()` principal rows to fine runtime sets (broker: accounts, cash, holdings, orders, cash flows; market: quotes, bars); preserve signature/replay/listener behavior and remove only `if operation is not None and operation not in identity.allowed_operations`. In `_execute`, call `verify(request, body, expected_actor_id=_listener_actor(request))`, parse schema second, derive third, require the derived operation in both `actor.allowed_operations` and `app.state.runtime_authorization.authorized_operation_set` fourth, then call `transport.execute` fifth only when `settings.transport_mode == "read_only"` and `runtime_authorization` is non-null. Invalid `read_kind` returns existing `VALIDATION_ERROR` before derivation; any caller/runtime denial returns existing non-disclosing `OPERATION_NOT_ALLOWED` and makes zero transport/provider dispatch. In fixture mode preserve the existing coarse HMAC/read-only route behavior and fixture transport; do not read `runtime_authorization`, import SDK, or dispatch a Provider request. Make `fosun_capabilities` a separate HMAC-authenticated route: in read-only mode it returns only the active `RuntimeAuthorization.authorized_operation_set` in descriptor order without calling `transport.execute`; in fixture mode retain the existing fixture/static response without runtime authorization. It is introspection only and cannot grant, derive, or widen any capability. Update `read_only_helpers._post_signed(client: TestClient, operation: str, payload: dict[str, object], **auth: object) -> Response` only for fine-runtime expected assertions; it remains the existing concrete signing helper, not a newly invented `signed_post` helper.
 
 In settings require exact production `FOSUN_READ_ONLY_SCOPE_CONTRACT_VERSION=v1` and one explicit `FOSUN_READ_ONLY_SCOPE=core|extended` only when `transport_mode="read_only"`; absent/other values remain fixture validation. In `main.build_transport`, read exact evidence paths, invoke scope-aware activation, require non-null authorization and matching stored contract hash before importing `fsopenapi` or constructing SDK client/`SdkFosunTransport`, then return/bind that authorization. Preserve fixture mode and `FOSUN_SDK_ADMITTED=false` defaults. Do not implement core+extended composition.
 
@@ -338,7 +357,7 @@ TMPDIR="$NEXUS_RUNTIME_TMP" PYTHONDONTWRITEBYTECODE=1 \
   integrations/fosun_gateway/tests/test_health.py -q -p no:cacheprovider
 ```
 
-Expected: PASS; cash-only and holdings-only both deny their opposite, core denies orders/cash flows, extended denies accounts/cash/holdings/quotes/bars, invalid schema does not authorize, denied routes have zero dispatch, mixed/legacy/missing startup evidence imports no SDK, and no socket opens.
+Expected: PASS; cash-only and holdings-only both deny their opposite, core accounts succeeds while extended accounts is denied by runtime authorization, core denies orders/cash flows, extended denies accounts/cash/holdings/quotes/bars, invalid schema does not authorize, capabilities returns each scope’s exact final set without dispatch and grants none, fixture routes retain existing behavior without SDK/Provider access, mixed/legacy/missing startup evidence imports no SDK, and no socket opens.
 
 - [ ] **Step 5: Remove only the explicit local test directory and commit runtime gates**
 
@@ -429,9 +448,9 @@ Expected: `git show --check` has no whitespace error and status is clean after t
 ## Plan self-review
 
 - [x] **Spec coverage:** Task 1 covers immutable core/extended descriptors, three closed sets, v3/v2 canonical run/scope binding, legacy/cross-scope rejection, signature/hash binding, and no scope composition. Task 2 covers selected physical sequences, process-local account binding, one-shot/budget/label behavior, and value-free frames. Task 3 covers protected create-only run/scope hierarchy, staging/quarantine, matching frame/artifact/receipt, and cross-scope preservation. Task 4 covers startup-before-SDK construction, immutable runtime authorization, exact feature gate, HMAC→schema→derived authorization→two intersections→transport order, and cash/holdings bidirectional denial. Task 5 covers repository policy, runbook, no writes/raw errors, and required offline harness.
-- [x] **Review findings closure:** Task 1 defines `RuntimeOperation` in `probe_contract.py` before `ScopeDescriptor` and `RuntimeAuthorization`, and uses `FrozenInstanceError` plus a separate `MappingProxyType` write test. Task 2 gives mutually exclusive core/extended CLI tuples and no cross-scope `ProbePlan` field. Task 3 changes the real `probe_cli._execute_once()` publication path and tests the existing run directory’s exact `PROBE_OUTPUT_EXISTS`. Task 4 includes `security/hmac.py`, existing `_post_signed`, identity dataclass migration, and the no-coarse-operation `verify()` signature. Task 5 uses `PolicyFinding`, enumerates the five reviewed source hashes/tree hash/unchanged pyproject hash, and gives every pytest checkout-local `TMPDIR`.
+- [x] **Review findings closure:** Task 1 defines `RuntimeOperation` in `probe_contract.py` before `ScopeDescriptor` and `RuntimeAuthorization`, and uses `FrozenInstanceError` plus a separate `MappingProxyType` write test. Task 2 gives mutually exclusive core/extended CLI tuples and no cross-scope `ProbePlan` field. Task 3 initializes its protected parent before first use, changes the real `probe_cli._execute_once()` publication path, and tests the existing run directory’s exact `PROBE_OUTPUT_EXISTS`. Task 4 includes `security/hmac.py`, existing `_post_signed`, a broker identity set containing `fosun_sync_accounts`, identity dataclass migration, no-coarse-operation `verify()`, scope-exact local capabilities, and fixture regression without runtime authorization or Provider access. Task 5 uses `PolicyFinding`, enumerates the five reviewed source hashes/tree hash/unchanged pyproject hash, and gives every pytest checkout-local `TMPDIR`.
 - [x] **Placeholder and helper scan:** No `TBD`, `TODO`, “implement later”, “appropriate error handling”, “similar to Task”, ellipsis, undefined `signed_post`, or unspecified test helper remains; `protected_absolute_parent_with_runs`, `CORE_ARGUMENTS`, `EXTENDED_ARGUMENTS`, and `_post_signed` are defined or identified in their exact test file.
-- [x] **Type consistency:** `RuntimeOperation` is defined only in Task 1 `probe_contract.py`; `activation.py`, `policy/operations.py`, `security/hmac.py`, routes, and tests import it. `ProbeScope`, `ScopeDescriptor`, `RuntimeAuthorization`, `expected_scope`, `run_id`, and `scope_contract_version` are produced before consumption; the coarse `GatewayOperation` remains the SDK transport type.
+- [x] **Type consistency:** `RuntimeOperation` is defined only in Task 1 `probe_contract.py`; `activation.py`, `policy/operations.py`, `security/hmac.py`, routes, and tests import it. `fosun_capabilities` is deliberately outside that seven-member final type, is not passed to transport in read-only mode, and is not an authorization source. `ProbeScope`, `ScopeDescriptor`, `RuntimeAuthorization`, `expected_scope`, `run_id`, and `scope_contract_version` are produced before consumption; the coarse `GatewayOperation` remains the Provider transport type for non-capabilities routes and fixture compatibility.
 - [x] **Path and command check:** Every production/test/runbook/policy path listed exists in the baseline; the acceptance commands use existing `uv`, pytest, repository-policy, Ruff, mypy, and Git entry points. All pytest commands use checkout-local `mktemp` directories with `0700`, traps clean only those exact directories without changing umask, and no command targets system `/tmp` or runs a Provider/probe/capture command.
 
 ## Execution handoff
