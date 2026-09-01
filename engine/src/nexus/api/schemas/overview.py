@@ -36,6 +36,9 @@ class OverviewResponse(_StrictOverviewSchema):
     snapshot_as_of: datetime
     trading_day: date | None
     diagnostic_report: PortfolioDiagnosticResponse | None
+    diagnostic_unavailable_reason: Literal[
+        "SNAPSHOT_NOT_READY", "DIAGNOSTIC_NOT_AVAILABLE"
+    ] | None
     proposal_group: OverviewProposalGroupSummaryResponse | None
     proposal_admission: ProposalAdmissionResponse | None
     proposal_admission_reason: Literal["OPTIMIZATION_AUTHORITY_MISSING"] | None
@@ -43,6 +46,12 @@ class OverviewResponse(_StrictOverviewSchema):
     @model_validator(mode="after")
     def _admission_state_is_unambiguous(self) -> "OverviewResponse":
         if self.overview_mode == "PORTFOLIO_FACTS_ONLY":
+            expected_reason = (
+                "DIAGNOSTIC_NOT_AVAILABLE"
+                if self.portfolio_snapshot is not None
+                and self.portfolio_snapshot.status == "READY"
+                else "SNAPSHOT_NOT_READY"
+            )
             if (
                 self.portfolio_name is None
                 or self.provider != "fosun"
@@ -52,6 +61,7 @@ class OverviewResponse(_StrictOverviewSchema):
                 or self.proposal_group is not None
                 or self.proposal_admission is not None
                 or self.proposal_admission_reason is not None
+                or self.diagnostic_unavailable_reason != expected_reason
             ):
                 raise ValueError(
                     "portfolio facts overview must contain only persisted broker facts"
@@ -63,7 +73,11 @@ class OverviewResponse(_StrictOverviewSchema):
             ):
                 raise ValueError("portfolio facts overview snapshot identity must match")
         else:
-            if self.diagnostic_report is None or self.portfolio_snapshot is not None:
+            if (
+                self.diagnostic_report is None
+                or self.portfolio_snapshot is not None
+                or self.diagnostic_unavailable_reason is not None
+            ):
                 raise ValueError("diagnostic overview must contain one diagnostic report")
             if self.diagnostic_report.portfolio_snapshot_id != self.portfolio_snapshot_id:
                 raise ValueError("diagnostic overview snapshot identity must match")

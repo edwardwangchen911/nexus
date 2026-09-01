@@ -221,12 +221,13 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
         || data.portfolio_snapshot.as_of !== data.snapshot_as_of
         || data.provider !== "fosun"
         || data.diagnostic_report !== null
+        || data.diagnostic_unavailable_reason !== (data.portfolio_snapshot.status === "READY" ? "DIAGNOSTIC_NOT_AVAILABLE" : "SNAPSHOT_NOT_READY")
         || data.proposal_group !== null
         || data.proposal_admission !== null
         || data.proposal_admission_reason !== null) return INVALID_DATA;
       return data;
     }
-    if (data.overview_mode !== "DIAGNOSTIC" || !isPlain(data.diagnostic_report)) return INVALID_DATA;
+    if (data.overview_mode !== "DIAGNOSTIC" || !isPlain(data.diagnostic_report) || data.diagnostic_unavailable_reason !== null) return INVALID_DATA;
     if (data.portfolio_snapshot !== null || data.portfolio_snapshot_id !== data.diagnostic_report.portfolio_snapshot_id) return INVALID_DATA;
     if (data.proposal_admission !== null && (!isPlain(data.proposal_admission) || data.proposal_admission.portfolio_snapshot_id !== data.portfolio_snapshot_id)) return INVALID_DATA;
     return data;

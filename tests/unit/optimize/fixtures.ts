@@ -239,6 +239,7 @@ export function overviewData(overrides: Partial<Overview> = {}): Overview {
     snapshot_as_of: "2026-08-24T00:00:00Z",
     trading_day: "2026-08-24",
     diagnostic_report: diagnosticReport(),
+    diagnostic_unavailable_reason: null,
     proposal_group: { proposal_group_id: groupId, status: "compared", version: 4 },
     proposal_admission: {
       portfolio_snapshot_id: snapshotId,

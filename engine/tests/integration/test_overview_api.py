@@ -71,6 +71,7 @@ async def test_overview_selects_latest_persisted_report_and_projects_headroom(
     assert data["proposal_group"] is None
     assert data["proposal_admission"] is None
     assert data["proposal_admission_reason"] == "OPTIMIZATION_AUTHORITY_MISSING"
+    assert data["diagnostic_unavailable_reason"] is None
     items = {item["diagnostic_code"]: item for item in data["diagnostic_report"]["items"]}
     assert items["CONCENTRATION_TOP1"] == {
         "diagnostic_code": "CONCENTRATION_TOP1",
@@ -121,6 +122,7 @@ async def test_overview_returns_fosun_portfolio_facts_when_no_diagnostic_exists(
     assert data["proposal_group"] is None
     assert data["proposal_admission"] is None
     assert data["proposal_admission_reason"] is None
+    assert data["diagnostic_unavailable_reason"] == "DIAGNOSTIC_NOT_AVAILABLE"
     assert data["portfolio_snapshot"] == {
         "portfolio_snapshot_id": "0198d500-1000-7000-8000-000000000041",
         "portfolio_id": str(PORTFOLIOS[0]),
@@ -173,6 +175,30 @@ async def test_overview_returns_fosun_portfolio_facts_when_no_diagnostic_exists(
     assert envelope["meta"]["as_of"] == data["snapshot_as_of"]
     assert "provider_order_id" not in response.text
     assert "source_observations" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_overview_names_snapshot_admission_as_the_only_missing_condition(
+    migrated_database_url: str,
+) -> None:
+    """A non-ready frozen snapshot must stay facts-only with one closed reason."""
+    await seed_portfolio_list(migrated_database_url)
+    path = f"/internal/v1/overview?portfolio_id={PORTFOLIOS[2]}"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["overview_mode"] == "PORTFOLIO_FACTS_ONLY"
+    assert data["portfolio_snapshot"]["status"] == "PARTIAL"
+    assert data["diagnostic_unavailable_reason"] == "SNAPSHOT_NOT_READY"
+    assert data["diagnostic_report"] is None
+    assert data["proposal_group"] is None
+    assert data["proposal_admission"] is None
 
 
 @pytest.mark.asyncio

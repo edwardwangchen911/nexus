@@ -136,6 +136,7 @@ async def get_overview(
             snapshot_as_of=report.snapshot_as_of,
             trading_day=report.trading_day,
             diagnostic_report=PortfolioDiagnosticResponse.from_report(report),
+            diagnostic_unavailable_reason=None,
             proposal_group=None
             if group is None
             else OverviewProposalGroupSummaryResponse(
@@ -213,6 +214,11 @@ async def _portfolio_facts_overview(
             snapshot_as_of=row.as_of,
             trading_day=None,
             diagnostic_report=None,
+            diagnostic_unavailable_reason=(
+                "DIAGNOSTIC_NOT_AVAILABLE"
+                if snapshot.status == "READY"
+                else "SNAPSHOT_NOT_READY"
+            ),
             proposal_group=None,
             proposal_admission=None,
             proposal_admission_reason=None,

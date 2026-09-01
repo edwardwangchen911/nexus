@@ -3246,6 +3246,21 @@ export const runtimeContractSchemas = {
           }
         ]
       },
+      "diagnostic_unavailable_reason": {
+        "anyOf": [
+          {
+            "enum": [
+              "SNAPSHOT_NOT_READY",
+              "DIAGNOSTIC_NOT_AVAILABLE"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Diagnostic Unavailable Reason"
+      },
       "overview_mode": {
         "enum": [
           "DIAGNOSTIC",
@@ -3359,6 +3374,7 @@ export const runtimeContractSchemas = {
       "snapshot_as_of",
       "trading_day",
       "diagnostic_report",
+      "diagnostic_unavailable_reason",
       "proposal_group",
       "proposal_admission",
       "proposal_admission_reason"
