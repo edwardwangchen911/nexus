@@ -25,6 +25,9 @@ from nexus.persistence.models.optimization import (
     OptimizationAdmissionAuthorityRecord,
     OptimizationProposalGroupRecord,
 )
+from nexus.persistence.models.paper import PaperAccountRecord
+from nexus.persistence.models.portfolio import Account, Portfolio, PortfolioSnapshotRecord
+from nexus.portfolio.service import PortfolioService
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,14 +51,6 @@ async def get_overview(
     session: AsyncSession = Depends(transactional_session),
 ) -> OverviewEnvelope:
     """Select one latest persisted diagnostic by a total order without recalculation."""
-    try:
-        policy = await load_real_advisory_policy_v1(session)
-    except ValueError as error:
-        raise NexusError(
-            ErrorCode.DATA_PARTIAL,
-            "The persisted diagnostic policy authority is unavailable.",
-            status_code=409,
-        ) from error
     statement = select(PortfolioDiagnosticReportRecord)
     if portfolio_id is not None:
         statement = statement.where(PortfolioDiagnosticReportRecord.portfolio_id == portfolio_id)
@@ -68,7 +63,25 @@ async def get_overview(
         ).limit(1)
     )
     if record is None:
-        raise NexusError(ErrorCode.NOT_FOUND, "Overview diagnostic was not found.", status_code=404)
+        if session_date is not None:
+            raise NexusError(
+                ErrorCode.NOT_FOUND,
+                "Overview diagnostic was not found.",
+                status_code=404,
+            )
+        return await _portfolio_facts_overview(
+            portfolio_id=portfolio_id,
+            actor=actor,
+            session=session,
+        )
+    try:
+        policy = await load_real_advisory_policy_v1(session)
+    except ValueError as error:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL,
+            "The persisted diagnostic policy authority is unavailable.",
+            status_code=409,
+        ) from error
     if record.policy_id != REAL_ADVISORY_POLICY_ID or record.policy_version != policy.version:
         raise NexusError(
             ErrorCode.DATA_PARTIAL,
@@ -114,8 +127,12 @@ async def get_overview(
         )
     return OverviewEnvelope(
         data=OverviewResponse(
+            overview_mode="DIAGNOSTIC",
             portfolio_id=record.portfolio_id,
+            portfolio_name=None,
+            provider=None,
             portfolio_snapshot_id=record.portfolio_snapshot_id,
+            portfolio_snapshot=None,
             snapshot_as_of=report.snapshot_as_of,
             trading_day=report.trading_day,
             diagnostic_report=PortfolioDiagnosticResponse.from_report(report),
@@ -138,4 +155,67 @@ async def get_overview(
             else "OPTIMIZATION_AUTHORITY_MISSING",
         ),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=report.snapshot_as_of),
+    )
+
+
+async def _portfolio_facts_overview(
+    *,
+    portfolio_id: UUID | None,
+    actor: VerifiedServiceActor,
+    session: AsyncSession,
+) -> OverviewEnvelope:
+    statement = (
+        select(
+            PortfolioSnapshotRecord.id.label("snapshot_id"),
+            PortfolioSnapshotRecord.portfolio_id,
+            PortfolioSnapshotRecord.as_of,
+            Portfolio.name.label("portfolio_name"),
+            Account.provider,
+        )
+        .join(Portfolio, Portfolio.id == PortfolioSnapshotRecord.portfolio_id)
+        .join(Account, Account.id == Portfolio.account_id)
+        .outerjoin(PaperAccountRecord, PaperAccountRecord.portfolio_id == Portfolio.id)
+        .where(Account.provider == "fosun", PaperAccountRecord.id.is_(None))
+    )
+    if portfolio_id is not None:
+        statement = statement.where(PortfolioSnapshotRecord.portfolio_id == portfolio_id)
+    row = (
+        await session.execute(
+            statement.order_by(
+                desc(PortfolioSnapshotRecord.created_at),
+                desc(PortfolioSnapshotRecord.id),
+            ).limit(1)
+        )
+    ).first()
+    if row is None:
+        raise NexusError(ErrorCode.NOT_FOUND, "Overview facts were not found.", status_code=404)
+    if row.as_of is None:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL,
+            "The persisted portfolio snapshot time is unavailable.",
+            status_code=409,
+        )
+    snapshot = await PortfolioService(session, row.as_of).latest_snapshot(row.portfolio_id)
+    if snapshot.portfolio_snapshot_id != row.snapshot_id or snapshot.as_of != row.as_of:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL,
+            "The persisted portfolio snapshot authority is inconsistent.",
+            status_code=409,
+        )
+    return OverviewEnvelope(
+        data=OverviewResponse(
+            overview_mode="PORTFOLIO_FACTS_ONLY",
+            portfolio_id=row.portfolio_id,
+            portfolio_name=row.portfolio_name,
+            provider="fosun",
+            portfolio_snapshot_id=row.snapshot_id,
+            portfolio_snapshot=snapshot,
+            snapshot_as_of=row.as_of,
+            trading_day=None,
+            diagnostic_report=None,
+            proposal_group=None,
+            proposal_admission=None,
+            proposal_admission_reason=None,
+        ),
+        meta=SuccessMetaResponse(request_id=actor.request_id, as_of=row.as_of),
     )

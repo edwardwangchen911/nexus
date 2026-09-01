@@ -58,17 +58,18 @@ export default function OptimizePage(): React.ReactElement {
 }
 
 export function OptimizePanel({ state, overview, creating, notice, onCreate, onRefresh }: Props): React.ReactElement {
-  const hasData = overview !== null && ["ready", "partial", "stale"].includes(state);
-  const admission = overview?.proposal_admission ?? null;
+  const diagnosticOverview = overview?.diagnostic_report ? overview : null;
+  const hasData = diagnosticOverview !== null && ["ready", "partial", "stale"].includes(state);
+  const admission = diagnosticOverview?.proposal_admission ?? null;
   return (
     <section className="page-stack optimize-page" aria-label="组合优化页面" data-state={state}>
       <header className="page-heading"><div><p className="eyebrow">OPTIMIZE / THRESHOLD LEDGER</p><h1>组合诊断与优化</h1><p>先定位明确问题，再由后端生成同口径三方案；浏览器不计算风险或权重。</p></div><div className="page-actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新诊断</button></div></header>
-      {!hasData ? <DataState state={state} title={state === "loading" ? "正在读取诊断" : "诊断暂时不可用"} detail="数据缺失或过期时保持现状。" /> : <>
-        <OptimizationNeedPanel report={overview.diagnostic_report} />
-        <DiagnosticList report={overview.diagnostic_report} />
+      {!hasData || diagnosticOverview === null ? <DataState state={state} title={state === "loading" ? "正在读取诊断" : "诊断暂时不可用"} detail="数据缺失或过期时保持现状。" /> : <>
+        <OptimizationNeedPanel report={diagnosticOverview.diagnostic_report!} />
+        <DiagnosticList report={diagnosticOverview.diagnostic_report!} />
         {notice ? <p className={`inline-notice inline-notice--${notice.kind}`} role="status">{notice.text}</p> : null}
-        <section className="proposal-admission" aria-labelledby="proposal-admission-title"><div><p className="eyebrow">SERVER AUTHORITY</p><h2 id="proposal-admission-title">三方案准入</h2><p>{admission ? "服务器已绑定快照、数据版本与成本策略。" : `当前不可创建：${overview.proposal_admission_reason ?? "AUTHORITY_UNAVAILABLE"}`}</p></div>
-          {overview.proposal_group ? <a className="button button--quiet" href={`/optimize/${overview.proposal_group.proposal_group_id}`}>打开已有三方案</a> : admission && state === "ready" ? <button className="button button--primary" type="button" disabled={creating} onClick={() => void onCreate(admission).catch(() => undefined)}><Layers3 aria-hidden="true" size={17} />{creating ? "正在创建" : "创建三方案比较"}</button> : null}
+        <section className="proposal-admission" aria-labelledby="proposal-admission-title"><div><p className="eyebrow">SERVER AUTHORITY</p><h2 id="proposal-admission-title">三方案准入</h2><p>{admission ? "服务器已绑定快照、数据版本与成本策略。" : `当前不可创建：${diagnosticOverview.proposal_admission_reason ?? "AUTHORITY_UNAVAILABLE"}`}</p></div>
+          {diagnosticOverview.proposal_group ? <a className="button button--quiet" href={`/optimize/${diagnosticOverview.proposal_group.proposal_group_id}`}>打开已有三方案</a> : admission && state === "ready" ? <button className="button button--primary" type="button" disabled={creating} onClick={() => void onCreate(admission).catch(() => undefined)}><Layers3 aria-hidden="true" size={17} />{creating ? "正在创建" : "创建三方案比较"}</button> : null}
         </section>
       </>}
     </section>

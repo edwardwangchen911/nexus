@@ -2189,12 +2189,20 @@ export interface components {
         };
         /** OverviewResponse */
         OverviewResponse: {
-            diagnostic_report: components["schemas"]["PortfolioDiagnosticResponse"];
+            diagnostic_report: components["schemas"]["PortfolioDiagnosticResponse"] | null;
+            /**
+             * Overview Mode
+             * @enum {string}
+             */
+            overview_mode: "DIAGNOSTIC" | "PORTFOLIO_FACTS_ONLY";
             /**
              * Portfolio Id
              * Format: uuid
              */
             portfolio_id: string;
+            /** Portfolio Name */
+            portfolio_name: string | null;
+            portfolio_snapshot: components["schemas"]["PortfolioSnapshotResponse"] | null;
             /**
              * Portfolio Snapshot Id
              * Format: uuid
@@ -2204,6 +2212,8 @@ export interface components {
             /** Proposal Admission Reason */
             proposal_admission_reason: "OPTIMIZATION_AUTHORITY_MISSING" | null;
             proposal_group: components["schemas"]["OverviewProposalGroupSummaryResponse"] | null;
+            /** Provider */
+            provider: "fosun" | null;
             /**
              * Snapshot As Of
              * Format: date-time

@@ -49,7 +49,7 @@ export function PortfolioSummary({ portfolio, snapshot, currency }: PortfolioSum
 
       <CurrencyValuationSummary
         currency={currency}
-        portfolio={portfolio}
+        provider={portfolio.provider}
         snapshot={snapshot}
         valuation={valuation}
       />
@@ -127,14 +127,35 @@ export function PortfolioSummary({ portfolio, snapshot, currency }: PortfolioSum
   );
 }
 
+export function PortfolioValuationSummary({
+  provider,
+  snapshot,
+  currency,
+}: {
+  provider: string;
+  snapshot: PortfolioSnapshot;
+  currency: string;
+}): React.ReactElement {
+  const cash = snapshot.cash.find((bucket) => bucket.currency === currency) ?? null;
+  const positions = snapshot.positions
+    .filter((position) => position.currency === currency)
+    .sort((left, right) => (left.symbol ?? left.instrument_id).localeCompare(right.symbol ?? right.instrument_id));
+  return <CurrencyValuationSummary
+    currency={currency}
+    provider={provider}
+    snapshot={snapshot}
+    valuation={currencyValuation(snapshot, cash, positions)}
+  />;
+}
+
 function CurrencyValuationSummary({
   currency,
-  portfolio,
+  provider,
   snapshot,
   valuation,
 }: {
   currency: string;
-  portfolio: PortfolioItem;
+  provider: string;
   snapshot: PortfolioSnapshot;
   valuation: CurrencyValuation;
 }): React.ReactElement {
@@ -151,7 +172,7 @@ function CurrencyValuationSummary({
         <Fact term="总资产" value={complete ? `${currency} ${formatMoney(valuation.totalValue!)}` : "无法计算"} />
         <Fact term="持仓市值" value={complete ? `${currency} ${formatMoney(valuation.holdingsValue!)}` : "无法计算"} />
         <Fact term="现金" value={complete ? `${currency} ${formatMoney(valuation.cashValue!)}` : "无法计算"} />
-        <Fact term="数据来源" value={portfolio.provider === "fosun" ? "复星（只读）" : portfolio.provider} />
+        <Fact term="数据来源" value={provider === "fosun" ? "复星（只读）" : provider} />
         <Fact term="质量状态" value={`${snapshotStatusLabel(snapshot.status)} · ${snapshot.status}`} />
         <Fact term={valuation.asOfKind} value={formatTime(valuation.asOf)} />
       </dl>
