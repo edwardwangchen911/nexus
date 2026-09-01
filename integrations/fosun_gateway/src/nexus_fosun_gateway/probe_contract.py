@@ -46,6 +46,7 @@ PROBE_FAILURE_OPERATIONS = ("unknown", *REQUIRED_PROBE_OPERATIONS)
 PROBE_FAILURE_CATEGORIES = (
     "auth",
     "permission",
+    "provider",
     "transport",
     "rate_limit",
     "budget",

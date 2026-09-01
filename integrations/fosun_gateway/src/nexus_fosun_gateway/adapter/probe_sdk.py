@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import re
 import time
 from collections import deque
@@ -12,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from threading import Event, Lock, Thread
-from typing import Literal
+from typing import Literal, cast
 
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
 from nexus_fosun_gateway.adapter.refusal import NonRetryableTransportRefusal
@@ -148,7 +149,7 @@ class ProbeSdkError(RuntimeError):
         *,
         operation: ProbeLabel | Literal["unknown"] = "unknown",
         category: Literal[
-            "auth", "permission", "transport", "timeout", "rate_limit", "budget",
+            "auth", "permission", "provider", "transport", "timeout", "rate_limit", "budget",
             "contract", "unknown",
         ] = "unknown",
         physical_request_count: int = 0,
@@ -158,6 +159,99 @@ class ProbeSdkError(RuntimeError):
         self.operation = operation
         self.category = category
         self.physical_request_count = physical_request_count
+
+
+_PROBE_SDK_METHOD_CALLS: tuple[tuple[str, str, str, dict[str, object]], ...] = (
+    ("fosun_sync_accounts", "account", "list_accounts", {}),
+    (
+        "fosun_sync_portfolio_cash",
+        "portfolio",
+        "get_assets_summary",
+        {"sub_account_id": "x"},
+    ),
+    (
+        "fosun_sync_portfolio_holdings",
+        "portfolio",
+        "get_holdings",
+        {"sub_account_id": "x", "start": 0, "count": 1},
+    ),
+    (
+        "fosun_list_orders",
+        "trade",
+        "list_orders",
+        {"sub_account_id": "x", "start": 0, "count": 1},
+    ),
+    (
+        "fosun_list_cash_flows",
+        "trade",
+        "get_cash_flows",
+        {
+            "sub_account_id": "x",
+            "trade_date_from": "2026-01-01",
+            "trade_date_to": "2026-01-01",
+        },
+    ),
+    ("fosun_get_quotes", "market", "quote", {"codes": ["usAAPL"]}),
+    (
+        "fosun_get_bars",
+        "market",
+        "kline",
+        {"code": "usAAPL", "ktype": "day", "start_time": 1, "end_time": 1, "num": 1},
+    ),
+)
+
+
+def validate_probe_sdk_method_bindings(client: object) -> Mapping[str, Callable[..., object]]:
+    """Verify all frozen SDK calls bind before a probe can reach HTTP dispatch."""
+    validated: dict[str, Callable[..., object]] = {}
+    for operation, section_name, method_name, kwargs in _PROBE_SDK_METHOD_CALLS:
+        method = getattr(getattr(client, section_name, None), method_name, None)
+        if not callable(method):
+            raise ProbeSdkError("SDK_CONTRACT_MISMATCH", category="contract")
+        try:
+            inspect.signature(method).bind(**kwargs)
+        except (TypeError, ValueError):
+            raise ProbeSdkError("SDK_CONTRACT_MISMATCH", category="contract") from None
+        validated[operation] = cast("Callable[..., object]", method)
+    return validated
+
+
+def probe_sdk_error_mapper(exceptions_module: object) -> Callable[[Exception], GatewayError | None]:
+    """Map only reviewed SDK application exceptions without rendering their values."""
+    types = {
+        name: getattr(exceptions_module, name, None)
+        for name in ("AuthenticationError", "PermissionError", "RateLimitError", "APIError")
+    }
+
+    def mapper(error: Exception) -> GatewayError | None:
+        if _is_exception_instance(error, types["AuthenticationError"]):
+            return _probe_provider_error("PROVIDER_AUTHENTICATION_FAILED", "REVIEW_PROVIDER_AUTH")
+        if _is_exception_instance(error, types["PermissionError"]):
+            return _probe_provider_error("PROVIDER_PERMISSION_DENIED", "REVIEW_PROVIDER_PERMISSION")
+        if _is_exception_instance(error, types["RateLimitError"]):
+            return _probe_provider_error("PROVIDER_RATE_LIMITED", "RETRY_LATER")
+        if _is_exception_instance(error, types["APIError"]):
+            return _probe_provider_error("PROVIDER_APPLICATION_ERROR", "REVIEW_PROVIDER_RESPONSE")
+        return None
+
+    return mapper
+
+
+def _probe_provider_error(code: str, next_action: str) -> GatewayError:
+    return GatewayError(
+        code,
+        "Provider SDK application failure.",
+        status_code=502,
+        next_action=next_action,
+    )
+
+
+def _is_exception_instance(error: Exception, candidate: object) -> bool:
+    return (
+        isinstance(candidate, type)
+        and issubclass(candidate, Exception)
+        and isinstance(error, candidate)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,6 +554,7 @@ def build_probe_transport(
         enforce_sdk_dependency_log_boundary()
         sdk_module = importlib.import_module("fsopenapi")
         auth_module = importlib.import_module("fsopenapi.auth")
+        exceptions_module = importlib.import_module("fsopenapi.exceptions")
     except ImportError:
         raise ProbeSdkError("SDK_NOT_AVAILABLE") from None
     except UnsafeProviderEnvironmentError:
@@ -487,7 +582,13 @@ def build_probe_transport(
             https_proxy_url=settings.probe_https_proxy_url,
         )
         budget.bind_http_controls()
-        transport = SdkFosunTransport(client, rate_limiter=budget, max_attempts=1)
+        transport = SdkFosunTransport(
+            client,
+            rate_limiter=budget,
+            max_attempts=1,
+            sdk_error_mapper=probe_sdk_error_mapper(exceptions_module),
+            pre_dispatch_validator=lambda: _validate_probe_sdk_contract(client),
+        )
         return ProbeTransportBundle(
             transport=transport,
             controls=controls,
@@ -735,7 +836,7 @@ class SdkProbeExecutor:
     def _with_diagnostic(self, error: ProbeSdkError) -> ProbeSdkError:
         """Attach only closed, value-free facts at the executor boundary."""
         category: Literal[
-            "auth", "permission", "transport", "timeout", "rate_limit", "budget",
+            "auth", "permission", "provider", "transport", "timeout", "rate_limit", "budget",
             "contract", "unknown",
         ]
         if error.code == "PROBE_BUDGET_EXCEEDED":
@@ -791,11 +892,19 @@ def _map_gateway_error(error: GatewayError) -> ProbeSdkError:
         return ProbeSdkError("PROBE_RESPONSE_INVALID")
     if error.code == "PROVIDER_PERMISSION_DENIED":
         return ProbeSdkError("PROBE_FAILED", category="permission")
+    if error.code == "PROVIDER_AUTHENTICATION_FAILED":
+        return ProbeSdkError("PROBE_FAILED", category="auth")
     if error.code == "PROVIDER_RATE_LIMITED":
         return ProbeSdkError("PROBE_FAILED", category="rate_limit")
+    if error.code == "PROVIDER_APPLICATION_ERROR":
+        return ProbeSdkError("PROBE_FAILED", category="provider")
     if error.code == "PROVIDER_UNAVAILABLE":
         return ProbeSdkError("PROBE_FAILED", category="transport")
     return ProbeSdkError("PROBE_FAILED")
+
+
+def _validate_probe_sdk_contract(client: object) -> None:
+    validate_probe_sdk_method_bindings(client)
 
 
 def _close_controls_quietly(controls: ProbeTlsControls) -> None:

@@ -75,6 +75,8 @@ async def test_executor_sanitizes_provider_and_close_exceptions(
             return SimpleNamespace(SDKClient=_FailingSdkClient)
         if name == "fsopenapi.auth":
             return auth_module
+        if name == "fsopenapi.exceptions":
+            return SimpleNamespace()
         raise AssertionError(name)
 
     monkeypatch.setattr(
@@ -109,6 +111,18 @@ class _FailingSdkClient:
     def __init__(self, **_kwargs: object) -> None:
         self._http_session = _FailingSession()
         self.account = SimpleNamespace(list_accounts=self._list_accounts)
+        self.portfolio = SimpleNamespace(
+            get_assets_summary=lambda **_kwargs: object(),
+            get_holdings=lambda **_kwargs: object(),
+        )
+        self.trade = SimpleNamespace(
+            list_orders=lambda **_kwargs: object(),
+            get_cash_flows=lambda **_kwargs: object(),
+        )
+        self.market = SimpleNamespace(
+            quote=lambda **_kwargs: object(),
+            kline=lambda **_kwargs: object(),
+        )
 
     def _list_accounts(self) -> object:
         raise PermissionError("synthetic-provider-body-canary")

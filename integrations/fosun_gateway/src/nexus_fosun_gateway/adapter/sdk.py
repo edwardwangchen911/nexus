@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import ssl
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
@@ -10,6 +11,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Event, Lock, Thread, Timer
 from typing import Protocol, cast
+
+import requests
 
 from nexus_fosun_gateway.adapter.normalization import (
     normalize_cash_summary_response,
@@ -35,6 +38,10 @@ _DEADLINE_SECONDS = 10.0
 @dataclass(frozen=True, slots=True)
 class _RateLimitWait:
     delay: float
+
+
+class _ProviderDeadlineExceeded(Exception):
+    """Private sentinel for locally enforced provider-call deadlines."""
 
 
 def _utc_now() -> datetime:
@@ -132,6 +139,8 @@ class SdkFosunTransport:
         utc_clock: Callable[[], datetime] = _utc_now,
         on_poison: Callable[[], None] | None = None,
         on_activation_expired: Callable[[datetime], None] | None = None,
+        sdk_error_mapper: Callable[[Exception], GatewayError | None] | None = None,
+        pre_dispatch_validator: Callable[[], None] | None = None,
         max_attempts: int = _MAX_ATTEMPTS,
     ) -> None:
         enforce_sdk_dependency_log_boundary()
@@ -206,6 +215,8 @@ class SdkFosunTransport:
         self._poisoned = Event()
         self._closed = Event()
         self._on_poison = on_poison
+        self._sdk_error_mapper = sdk_error_mapper
+        self._pre_dispatch_validator = pre_dispatch_validator
         self._max_attempts = max_attempts
         if self._activation_deadline is not None:
             timer = Timer(
@@ -222,6 +233,9 @@ class SdkFosunTransport:
         operation: GatewayOperation,
         payload: Mapping[str, object],
     ) -> GatewayPage[GatewayItem]:
+        validator = self._pre_dispatch_validator
+        if validator is not None:
+            validator()
         self._require_transport_ready()
         self._require_active_capability()
         if operation not in READ_ONLY_OPERATIONS:
@@ -481,7 +495,7 @@ class SdkFosunTransport:
                     deadline=deadline,
                     kwargs=kwargs,
                 )
-            except TimeoutError:
+            except _ProviderDeadlineExceeded:
                 # A running Python thread cannot be cancelled safely. It is daemonized
                 # so process shutdown remains possible, while poison prevents any new
                 # work from entering this transport until a reviewed restart.
@@ -493,12 +507,23 @@ class SdkFosunTransport:
             except NonRetryableTransportRefusal:
                 raise
             except Exception as error:
-                if type(error).__name__ == "PermissionError":
+                mapper = self._sdk_error_mapper
+                mapped = None if mapper is None else mapper(error)
+                if mapped is not None:
+                    raise mapped from None
+                if isinstance(error, PermissionError):
                     raise GatewayError(
                         "PROVIDER_PERMISSION_DENIED",
                         "Provider permission denied.",
                         status_code=502,
                         next_action="REVIEW_PROVIDER_PERMISSION",
+                    ) from None
+                if mapper is not None and not _is_transport_error(error):
+                    raise GatewayError(
+                        "PROVIDER_APPLICATION_ERROR",
+                        "Provider SDK application failure.",
+                        status_code=502,
+                        next_action="REVIEW_PROVIDER_RESPONSE",
                     ) from None
                 delay = _retry_after(error)
                 remaining = deadline - self._clock()
@@ -539,11 +564,14 @@ class SdkFosunTransport:
             self._require_active_capability()
             remaining = deadline - self._clock()
             if remaining <= 0:
-                raise TimeoutError
-            await asyncio.wait_for(
-                self._sdk_concurrency.acquire(),
-                timeout=remaining,
-            )
+                raise _ProviderDeadlineExceeded
+            try:
+                await asyncio.wait_for(
+                    self._sdk_concurrency.acquire(),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                raise _ProviderDeadlineExceeded from None
             release_sdk_slot = True
             rate_delay: float | None = None
             try:
@@ -551,7 +579,7 @@ class SdkFosunTransport:
                 self._require_active_capability()
                 remaining = deadline - self._clock()
                 if remaining <= 0:
-                    raise TimeoutError
+                    raise _ProviderDeadlineExceeded
                 thread_future: Future[object] = Future()
                 sdk_thread = Thread(
                     target=self._run_sdk_call,
@@ -577,7 +605,7 @@ class SdkFosunTransport:
                         asyncio.shield(wrapped),
                         timeout=remaining,
                     )
-                except (TimeoutError, asyncio.CancelledError):
+                except (TimeoutError, asyncio.CancelledError) as error:
                     if not thread_future.done():
                         self._poison_transport()
                         release_sdk_slot = False
@@ -589,6 +617,8 @@ class SdkFosunTransport:
                                 pass
 
                         thread_future.add_done_callback(release_slot)
+                        if isinstance(error, TimeoutError):
+                            raise _ProviderDeadlineExceeded from None
                     raise
                 if isinstance(result, _RateLimitWait):
                     rate_delay = result.delay
@@ -600,7 +630,7 @@ class SdkFosunTransport:
             assert rate_delay is not None
             remaining = deadline - self._clock()
             if rate_delay > remaining:
-                raise TimeoutError
+                raise _ProviderDeadlineExceeded
             await self._sleeper(rate_delay)
 
     def _run_sdk_call(
@@ -668,6 +698,11 @@ def _provider_unavailable() -> GatewayError:
         status_code=503,
         next_action="RETRY_LATER",
     )
+
+
+def _is_transport_error(error: Exception) -> bool:
+    """Classify only concrete local network/transport failures as transport."""
+    return isinstance(error, requests.RequestException | ssl.SSLError)
 
 
 def _consume_future_exception(future: asyncio.Future[object]) -> None:

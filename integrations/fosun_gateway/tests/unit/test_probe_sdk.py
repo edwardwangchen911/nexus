@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import ssl
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
@@ -20,6 +22,8 @@ from nexus_fosun_gateway.adapter.probe_sdk import (
     _close_probe_controls_bounded,
     _require_page_contract,
     build_probe_transport,
+    probe_sdk_error_mapper,
+    validate_probe_sdk_method_bindings,
 )
 from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
 from nexus_fosun_gateway.domain import (
@@ -30,6 +34,7 @@ from nexus_fosun_gateway.domain import (
 )
 from nexus_fosun_gateway.probe_settings import ProbeProviderSettings
 from pydantic import ValidationError
+from sdk_adapter_helpers import NoopRateLimiter
 from test_probe_settings import _admitted_document, _settings_values
 
 
@@ -44,6 +49,235 @@ class FakeClock:
     def sleep(self, delay: float) -> None:
         self.sleeps.append(delay)
         self.value += delay
+
+
+def test_frozen_sdk_methods_require_exact_probe_call_bindings_before_dispatch() -> None:
+    class Account:
+        def list_accounts(self) -> object:
+            return object()
+
+    class Portfolio:
+        def get_assets_summary(self, sub_account_id: object = None) -> object:
+            return object()
+
+        def get_holdings(
+            self,
+            sub_account_id: object = None,
+            start: int = 0,
+            count: int = 100,
+        ) -> object:
+            return object()
+
+    class Trade:
+        def list_orders(
+            self,
+            sub_account_id: object,
+            apply_account_id: object = None,
+            start: int = 0,
+            count: int = 20,
+        ) -> object:
+            return object()
+
+        def get_cash_flows(
+            self,
+            sub_account_id: object,
+            trade_date_from: object = None,
+            trade_date_to: object = None,
+        ) -> object:
+            return object()
+
+    class Market:
+        def quote(self, codes: object, fields: object = None) -> object:
+            return object()
+
+        def kline(
+            self,
+            code: object,
+            ktype: object,
+            delay: object = None,
+            end_time: object = None,
+            num: object = None,
+            right: object = None,
+            start_time: object = None,
+            suspension: object = None,
+            time: object = None,
+        ) -> object:
+            return object()
+
+    client = SimpleNamespace(
+        account=Account(), portfolio=Portfolio(), trade=Trade(), market=Market()
+    )
+    validated = validate_probe_sdk_method_bindings(client)
+
+    assert tuple(validated) == (
+        "fosun_sync_accounts",
+        "fosun_sync_portfolio_cash",
+        "fosun_sync_portfolio_holdings",
+        "fosun_list_orders",
+        "fosun_list_cash_flows",
+        "fosun_get_quotes",
+        "fosun_get_bars",
+    )
+    assert inspect.signature(validated["fosun_get_bars"]).bind(
+        code="usAAPL", ktype="day", start_time=1, end_time=1, num=1
+    )
+
+
+def test_probe_sdk_binding_rejects_incompatible_method_before_physical_request() -> None:
+    physical_requests = 0
+
+    class Account:
+        def list_accounts(self, unexpected: object) -> object:
+            nonlocal physical_requests
+            physical_requests += 1
+            return object()
+
+    client = SimpleNamespace(account=Account(), portfolio=object(), trade=object(), market=object())
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        validate_probe_sdk_method_bindings(client)
+
+    assert exc_info.value.code == "SDK_CONTRACT_MISMATCH"
+    assert exc_info.value.category == "contract"
+    assert physical_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_probe_transport_rejects_bad_binding_before_sdk_dispatch() -> None:
+    sdk_calls = 0
+
+    class Account:
+        def list_accounts(self, unexpected: object) -> object:
+            nonlocal sdk_calls
+            sdk_calls += 1
+            return object()
+
+    client = SimpleNamespace(account=Account(), portfolio=object(), trade=object(), market=object())
+    adapter = SdkFosunTransport(
+        client,
+        rate_limiter=NoopRateLimiter(),
+        pre_dispatch_validator=lambda: _validate_without_result(client),
+    )
+
+    with pytest.raises(ProbeSdkError) as exc_info:
+        await adapter.execute("fosun_sync_accounts", {})
+
+    assert exc_info.value.code == "SDK_CONTRACT_MISMATCH"
+    assert sdk_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("exception_name", "expected_code", "expected_next_action"),
+    [
+        ("AuthenticationError", "PROVIDER_AUTHENTICATION_FAILED", "REVIEW_PROVIDER_AUTH"),
+        ("PermissionError", "PROVIDER_PERMISSION_DENIED", "REVIEW_PROVIDER_PERMISSION"),
+        ("RateLimitError", "PROVIDER_RATE_LIMITED", "RETRY_LATER"),
+        ("APIError", "PROVIDER_APPLICATION_ERROR", "REVIEW_PROVIDER_RESPONSE"),
+    ],
+)
+def test_sdk_application_errors_map_to_closed_sanitized_probe_categories(
+    exception_name: str,
+    expected_code: str,
+    expected_next_action: str,
+) -> None:
+    exception_type = type(exception_name, (Exception,), {})
+    mapper = probe_sdk_error_mapper(
+        SimpleNamespace(
+            AuthenticationError=(
+                exception_type
+                if exception_name == "AuthenticationError"
+                else type("Auth", (Exception,), {})
+            ),
+            PermissionError=(
+                exception_type
+                if exception_name == "PermissionError"
+                else type("Perm", (Exception,), {})
+            ),
+            RateLimitError=(
+                exception_type
+                if exception_name == "RateLimitError"
+                else type("Rate", (Exception,), {})
+            ),
+            APIError=(
+                exception_type if exception_name == "APIError" else type("Api", (Exception,), {})
+            ),
+        )
+    )
+
+    mapped = mapper(exception_type("secret code message request_id data"))
+
+    assert mapped is not None
+    diagnostic = mapped
+    assert diagnostic.code == expected_code
+    assert diagnostic.next_action == expected_next_action
+    assert diagnostic.code != "PROVIDER_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        (requests.Timeout(), "PROVIDER_UNAVAILABLE"),
+        (requests.ConnectionError(), "PROVIDER_UNAVAILABLE"),
+        (ssl.SSLError(), "PROVIDER_UNAVAILABLE"),
+        (TimeoutError("local timeout"), "PROVIDER_APPLICATION_ERROR"),
+        (RuntimeError("local failure"), "PROVIDER_APPLICATION_ERROR"),
+    ],
+)
+async def test_only_concrete_network_failures_are_classified_as_transport(
+    failure: Exception,
+    expected_code: str,
+) -> None:
+    def list_accounts() -> object:
+        raise failure
+
+    adapter = SdkFosunTransport(
+        SimpleNamespace(account=SimpleNamespace(list_accounts=list_accounts)),
+        rate_limiter=NoopRateLimiter(),
+        max_attempts=1,
+        sdk_error_mapper=lambda _error: None,
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        await adapter.execute("fosun_sync_accounts", {})
+
+    assert exc_info.value.code == expected_code
+
+
+@pytest.mark.asyncio
+async def test_local_sdk_slot_deadline_remains_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_wait_for = asyncio.wait_for
+    wait_calls = 0
+
+    async def timeout_sdk_slot_wait(awaitable: object, **kwargs: object) -> object:
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 2:
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                close()
+            raise TimeoutError
+        return await original_wait_for(awaitable, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "nexus_fosun_gateway.adapter.sdk.asyncio.wait_for", timeout_sdk_slot_wait
+    )
+    adapter = SdkFosunTransport(
+        SimpleNamespace(account=SimpleNamespace(list_accounts=lambda: object())),
+        rate_limiter=NoopRateLimiter(),
+        sdk_error_mapper=lambda _error: None,
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        await adapter.execute("fosun_sync_accounts", {})
+
+    assert exc_info.value.code == "PROVIDER_UNAVAILABLE"
+
+
+def _validate_without_result(client: object) -> None:
+    validate_probe_sdk_method_bindings(client)
 
 
 def test_physical_budget_counts_auth_and_business_at_fixed_labels() -> None:
@@ -767,6 +1001,8 @@ def test_probe_factory_lazily_constructs_counted_no_retry_sdk(
             return SimpleNamespace(SDKClient=FakeSdkClient)
         if name == "fsopenapi.auth":
             return auth_module
+        if name == "fsopenapi.exceptions":
+            return SimpleNamespace()
         raise AssertionError(name)
 
     monkeypatch.setattr(
@@ -830,6 +1066,18 @@ async def test_probe_factory_disables_adapter_level_retries(
         def __init__(self, **_kwargs: object) -> None:
             self._http_session = FakeSession()
             self.account = SimpleNamespace(list_accounts=list_accounts)
+            self.portfolio = SimpleNamespace(
+                get_assets_summary=lambda **_kwargs: object(),
+                get_holdings=lambda **_kwargs: object(),
+            )
+            self.trade = SimpleNamespace(
+                list_orders=lambda **_kwargs: object(),
+                get_cash_flows=lambda **_kwargs: object(),
+            )
+            self.market = SimpleNamespace(
+                quote=lambda **_kwargs: object(),
+                kline=lambda **_kwargs: object(),
+            )
 
     auth_module = SimpleNamespace(requests=FakeRequests())
 
@@ -838,6 +1086,8 @@ async def test_probe_factory_disables_adapter_level_retries(
             return SimpleNamespace(SDKClient=FakeSdkClient)
         if name == "fsopenapi.auth":
             return auth_module
+        if name == "fsopenapi.exceptions":
+            return SimpleNamespace()
         raise AssertionError(name)
 
     monkeypatch.setattr(
@@ -977,6 +1227,8 @@ def test_probe_factory_closes_both_sessions_when_bundle_attestation_fails(
             return SimpleNamespace(SDKClient=FakeSdkClient)
         if name == "fsopenapi.auth":
             return auth_module
+        if name == "fsopenapi.exceptions":
+            return SimpleNamespace()
         raise AssertionError(name)
 
     monkeypatch.setattr(
@@ -1428,6 +1680,8 @@ def _probe_bundle(
             return SimpleNamespace(SDKClient=sdk_client)
         if name == "fsopenapi.auth":
             return transport.auth_module
+        if name == "fsopenapi.exceptions":
+            return SimpleNamespace()
         raise AssertionError(name)
 
     with pytest.MonkeyPatch.context() as monkeypatch:
