@@ -74,6 +74,8 @@ describe("portfolio engine client boundary", () => {
       [portfolioPage(), "kind"],
       [portfolioPage(), "coverage_scope"],
       [snapshotEnvelope(), "coverage_scope"],
+      [snapshotEnvelope(), "display_readiness"],
+      [snapshotEnvelope(), "decision_readiness"],
       [snapshotEnvelope(), "converted_view"],
       [snapshotEnvelope(), "symbol"],
       [snapshotEnvelope(), "read_only"],
@@ -88,6 +90,18 @@ describe("portfolio engine client boundary", () => {
         delete (target as Record<string, unknown>)[field];
         expect((await sanitizeEngineResponse(jsonResponse(payload), undefined, `/internal/v1/portfolios/${portfolioId}/snapshots/latest`)).status).toBe(500);
       }
+    }
+  });
+
+  it("rejects readiness values outside the generated closed enums", async () => {
+    const cases: Array<["display_readiness" | "decision_readiness", string]> = [
+      ["display_readiness", "DISPLAY_UNKNOWN"],
+      ["decision_readiness", "DECISION_UNKNOWN"],
+    ];
+    for (const [field, value] of cases) {
+      const payload = snapshotEnvelope();
+      Object.assign(payload.data, { [field]: value });
+      expect((await sanitizeEngineResponse(jsonResponse(payload), undefined, `/internal/v1/portfolios/${portfolioId}/snapshots/latest`)).status).toBe(500);
     }
   });
 
@@ -199,7 +213,7 @@ function portfolioPage() {
 }
 
 function snapshotEnvelope() {
-  return { data: { portfolio_snapshot_id: snapshotId, portfolio_id: portfolioId, coverage_scope: "broker_account", status: "READY", cash: [{ currency: "HKD", cash_balance: "8000.00", available_cash: "7000.00", provider_as_of: "2026-08-23T08:00:00Z" }], positions: [], open_orders: [{ broker_order_snapshot_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e704", instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e703", symbol: "00656.HK", currency: "HKD", side: "BUY", quantity: "100", filled_quantity: "0", price: "6.10", status: "SUBMITTED", updated_at: "2026-08-23T07:59:00Z", read_only: true }], converted_view: null, as_of: "2026-08-23T08:00:00Z" }, meta: meta() };
+  return { data: { portfolio_snapshot_id: snapshotId, portfolio_id: portfolioId, coverage_scope: "broker_account", status: "READY", display_readiness: "DISPLAY_READY", decision_readiness: "DECISION_READY", cash: [{ currency: "HKD", cash_balance: "8000.00", available_cash: "7000.00", provider_as_of: "2026-08-23T08:00:00Z" }], positions: [], open_orders: [{ broker_order_snapshot_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e704", instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e703", symbol: "00656.HK", currency: "HKD", side: "BUY", quantity: "100", filled_quantity: "0", price: "6.10", status: "SUBMITTED", updated_at: "2026-08-23T07:59:00Z", read_only: true }], converted_view: null, as_of: "2026-08-23T08:00:00Z" }, meta: meta() };
 }
 
 function syncEnvelope() {
