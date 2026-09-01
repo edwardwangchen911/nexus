@@ -30,6 +30,7 @@ const diagnostic = {
 for (const viewport of [
   { name: "mobile-375", width: 375, height: 812 },
   { name: "mobile-390", width: 390, height: 844 },
+  { name: "mobile-short", width: 390, height: 480 },
   { name: "tablet-768", width: 768, height: 1024 },
   { name: "desktop-1024", width: 1024, height: 768 },
   { name: "desktop-1440", width: 1440, height: 1000 },
@@ -51,7 +52,7 @@ for (const viewport of [
       await expect(mobileOverview).toHaveAttribute("aria-current", "page");
       await mobileOverview.focus();
       await expect(mobileOverview).toBeFocused();
-      if (viewport.name === "mobile-landscape") {
+      if (viewport.name === "mobile-short") {
         const navigationPanel = drawer.locator(":scope > .app-shell__navigation-groups");
         const scrollEvidence = await navigationPanel.evaluate((element) => {
           const panel = element as HTMLElement;
