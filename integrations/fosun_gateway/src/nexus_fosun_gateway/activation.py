@@ -38,8 +38,8 @@ from nexus_fosun_gateway.probe_contract import (
     REQUIRED_PROBE_OPERATIONS,
     ProbeScope,
     RuntimeOperation,
-    scope_descriptor,
     probe_response_contract_sha256,
+    scope_descriptor,
 )
 
 RESULT_SCHEMA_VERSION = "nexus.fosun.activation-result.v1"
@@ -250,10 +250,25 @@ def evaluate_scoped_activation(
     manifest_sha256 = _sha256(manifest_bytes)
     document = _load_mapping(manifest_bytes)
     sdk_tag, sdk_commit = _sdk_subject(document)
-    base_hash = _contract_hash(manifest_sha256=manifest_sha256, sdk_tag=sdk_tag, sdk_commit=sdk_commit, probe_sha256=_sha256(probe_bytes) if probe_bytes else None, publication_receipt_sha256=_sha256(publication_receipt_bytes) if publication_receipt_bytes else None, trusted_publication_public_key_sha256=_sha256(trusted_publication_public_key_bytes) if trusted_publication_public_key_bytes else None)
+    base_hash = _contract_hash(
+        manifest_sha256=manifest_sha256,
+        sdk_tag=sdk_tag,
+        sdk_commit=sdk_commit,
+        probe_sha256=_sha256(probe_bytes) if probe_bytes else None,
+        publication_receipt_sha256=_sha256(publication_receipt_bytes)
+        if publication_receipt_bytes
+        else None,
+        trusted_publication_public_key_sha256=_sha256(trusted_publication_public_key_bytes)
+        if trusted_publication_public_key_bytes
+        else None,
+    )
     if not document or not sdk_admission_document_is_valid(document):
         return _blocked(base_hash, now, "COMPLETE_SDK_ADMISSION"), None
-    trusted = (_load_trusted_publication_key(trusted_publication_public_key_bytes) if trusted_publication_public_key_bytes else None)
+    trusted = (
+        _load_trusted_publication_key(trusted_publication_public_key_bytes)
+        if trusted_publication_public_key_bytes
+        else None
+    )
     if trusted is None or probe_bytes is None or publication_receipt_bytes is None:
         return _blocked(base_hash, now, "REVIEW_PROBE_ARTIFACT"), None
     trusted_b64u, trusted_key = trusted
@@ -261,13 +276,17 @@ def evaluate_scoped_activation(
         artifact = ScopedProbeArtifact.model_validate_json(probe_bytes)
         receipt = ScopedProbePublicationReceipt.model_validate_json(publication_receipt_bytes)
         descriptor = scope_descriptor(expected_scope)
-        scoped_hash = _sha256(_canonical_json({
-            "base_contract_hash": base_hash,
-            "run_id": artifact.run_id,
-            "scope": artifact.scope,
-            "scope_contract_version": artifact.scope_contract_version,
-            "authorized_operation_set": list(artifact.authorized_operation_set),
-        }))
+        scoped_hash = _sha256(
+            _canonical_json(
+                {
+                    "base_contract_hash": base_hash,
+                    "run_id": artifact.run_id,
+                    "scope": artifact.scope,
+                    "scope_contract_version": artifact.scope_contract_version,
+                    "authorized_operation_set": list(artifact.authorized_operation_set),
+                }
+            )
+        )
         valid = (
             _canonical_json(artifact.model_dump(mode="json")) == probe_bytes
             and _canonical_json(receipt.model_dump(mode="json")) == publication_receipt_bytes
@@ -276,26 +295,64 @@ def evaluate_scoped_activation(
             and artifact.physical_operation_set == descriptor.physical_operation_set
             and artifact.prerequisite_operation_set == descriptor.prerequisite_operation_set
             and artifact.authorized_operation_set == descriptor.authorized_operation_set
-            and tuple(item.name for item in artifact.operations) == descriptor.physical_operation_set
-            and artifact.manifest_sha256 == manifest_sha256 and artifact.sdk_tag == sdk_tag and artifact.sdk_commit == sdk_commit
+            and tuple(item.name for item in artifact.operations)
+            == descriptor.physical_operation_set
+            and artifact.manifest_sha256 == manifest_sha256
+            and artifact.sdk_tag == sdk_tag
+            and artifact.sdk_commit == sdk_commit
             and hmac.compare_digest(artifact.publication_public_key_b64u, trusted_b64u)
             and artifact.captured_at <= now < artifact.capability_expires_at
-            and receipt.artifact_sha256 == _sha256(probe_bytes) and receipt.run_id == artifact.run_id
-            and receipt.scope == artifact.scope and receipt.scope_contract_version == artifact.scope_contract_version
-            and all(item.passed and item.response_contract_sha256 == probe_response_contract_sha256(item.name) for item in artifact.operations)
-            and all(1 <= item.request_count <= MAX_REQUESTS_PER_OPERATION for item in artifact.operations)
+            and receipt.artifact_sha256 == _sha256(probe_bytes)
+            and receipt.run_id == artifact.run_id
+            and receipt.scope == artifact.scope
+            and receipt.scope_contract_version == artifact.scope_contract_version
+            and all(
+                item.passed
+                and item.response_contract_sha256 == probe_response_contract_sha256(item.name)
+                for item in artifact.operations
+            )
+            and all(
+                1 <= item.request_count <= MAX_REQUESTS_PER_OPERATION
+                for item in artifact.operations
+            )
             and sum(item.request_count for item in artifact.operations) <= MAX_PROBE_REQUESTS
-            and sum(item.request_count for item in artifact.operations if item.name in BROKER_PROBE_OPERATIONS) <= MAX_BROKER_REQUESTS
+            and sum(
+                item.request_count
+                for item in artifact.operations
+                if item.name in BROKER_PROBE_OPERATIONS
+            )
+            <= MAX_BROKER_REQUESTS
             and artifact.checks.all_passed()
         )
-        material = b"NEXUS-FOSUN-PROBE-PUBLICATION-V2\0" + bytes.fromhex(receipt.artifact_sha256) + b"\0" + receipt.run_id.encode() + b"\0" + receipt.scope.encode() + b"\0" + receipt.scope_contract_version.encode()
+        material = (
+            b"NEXUS-FOSUN-PROBE-PUBLICATION-V2\0"
+            + bytes.fromhex(receipt.artifact_sha256)
+            + b"\0"
+            + receipt.run_id.encode()
+            + b"\0"
+            + receipt.scope.encode()
+            + b"\0"
+            + receipt.scope_contract_version.encode()
+        )
         trusted_key.verify(_decode_base64url(receipt.signature_b64u, expected_bytes=64), material)
     except (InvalidSignature, ValidationError, TypeError, ValueError):
         valid = False
     if not valid:
         return _blocked(base_hash, now, "REVIEW_PROBE_ARTIFACT"), None
-    result = FosunActivationResult(status="activated_read_only", contract_hash=scoped_hash, checked_at=now, capability_expires_at=artifact.capability_expires_at, next_action=None)
-    return result, RuntimeAuthorization(expected_scope, descriptor.scope_contract_version, artifact.run_id, artifact.capability_expires_at, frozenset(descriptor.authorized_operation_set))
+    result = FosunActivationResult(
+        status="activated_read_only",
+        contract_hash=scoped_hash,
+        checked_at=now,
+        capability_expires_at=artifact.capability_expires_at,
+        next_action=None,
+    )
+    return result, RuntimeAuthorization(
+        expected_scope,
+        descriptor.scope_contract_version,
+        artifact.run_id,
+        artifact.capability_expires_at,
+        frozenset(descriptor.authorized_operation_set),
+    )
 
 
 def evaluate_activation(
@@ -311,9 +368,7 @@ def evaluate_activation(
         manifest_bytes,
         probe_bytes,
         publication_receipt_bytes,
-        trusted_publication_public_key_bytes=(
-            trusted_publication_public_key_bytes
-        ),
+        trusted_publication_public_key_bytes=(trusted_publication_public_key_bytes),
         checked_at=checked_at,
         document_is_valid=sdk_admission_document_is_valid,
         invalid_manifest_action="COMPLETE_SDK_ADMISSION",
@@ -334,9 +389,7 @@ def verify_probe_publication(
         manifest_bytes,
         probe_bytes,
         publication_receipt_bytes,
-        trusted_publication_public_key_bytes=(
-            trusted_publication_public_key_bytes
-        ),
+        trusted_publication_public_key_bytes=(trusted_publication_public_key_bytes),
         checked_at=checked_at,
         document_is_valid=sdk_probe_ready_document_is_valid,
         invalid_manifest_action="COMPLETE_PROBE_READINESS",
@@ -364,9 +417,7 @@ def _evaluate_evidence(
     sdk_tag, sdk_commit = _sdk_subject(manifest_document)
     probe_sha256 = _sha256(probe_bytes) if probe_bytes is not None else None
     publication_receipt_sha256 = (
-        _sha256(publication_receipt_bytes)
-        if publication_receipt_bytes is not None
-        else None
+        _sha256(publication_receipt_bytes) if publication_receipt_bytes is not None else None
     )
     trusted_publication_public_key_sha256 = (
         _sha256(trusted_publication_public_key_bytes)
@@ -379,9 +430,7 @@ def _evaluate_evidence(
         sdk_commit=sdk_commit,
         probe_sha256=probe_sha256,
         publication_receipt_sha256=publication_receipt_sha256,
-        trusted_publication_public_key_sha256=(
-            trusted_publication_public_key_sha256
-        ),
+        trusted_publication_public_key_sha256=(trusted_publication_public_key_sha256),
     )
 
     if manifest_document is None:
@@ -390,9 +439,7 @@ def _evaluate_evidence(
         return _blocked(contract_hash, now, invalid_manifest_action)
     if trusted_publication_public_key_bytes is None:
         return _blocked(contract_hash, now, "PROVIDE_TRUSTED_PROBE_PUBLISHER")
-    trusted_publisher = _load_trusted_publication_key(
-        trusted_publication_public_key_bytes
-    )
+    trusted_publisher = _load_trusted_publication_key(trusted_publication_public_key_bytes)
     if trusted_publisher is None:
         return _blocked(contract_hash, now, "REVIEW_TRUSTED_PROBE_PUBLISHER")
     trusted_public_key_b64u, trusted_public_key = trusted_publisher
@@ -461,9 +508,7 @@ def _evaluate_evidence(
         if require_complete_checks
         else probe.checks.one_shot_observations_are_exact()
     )
-    if not checks_are_valid or not all(
-        operation.passed for operation in probe.operations
-    ):
+    if not checks_are_valid or not all(operation.passed for operation in probe.operations):
         return _blocked(contract_hash, now, "REVIEW_PROBE_EVIDENCE")
     if publication_receipt_bytes is None:
         return _blocked(contract_hash, now, "PROVIDE_PROBE_PUBLICATION_RECEIPT")
@@ -507,9 +552,7 @@ def evaluate_activation_paths(
             if publication_receipt_path is not None
             else None
         ),
-        trusted_publication_public_key_bytes=(
-            trusted_publication_public_key_bytes
-        ),
+        trusted_publication_public_key_bytes=(trusted_publication_public_key_bytes),
         checked_at=checked_at,
     )
 
@@ -536,9 +579,7 @@ def main(argv: list[str] | None = None) -> int:
         args.manifest,
         args.probe_artifact,
         args.publication_receipt,
-        trusted_publication_public_key_bytes=(
-            args.trusted_publisher_public_key_b64u
-        ),
+        trusted_publication_public_key_bytes=(args.trusted_publisher_public_key_b64u),
     )
     print(result.model_dump_json())
     if args.require_activated and result.status != "activated_read_only":
@@ -575,9 +616,7 @@ def _contract_hash(
         "manifest_sha256": manifest_sha256,
         "probe_artifact_sha256": probe_sha256,
         "probe_publication_receipt_sha256": publication_receipt_sha256,
-        "trusted_publication_public_key_sha256": (
-            trusted_publication_public_key_sha256
-        ),
+        "trusted_publication_public_key_sha256": (trusted_publication_public_key_sha256),
         "result_schema_version": RESULT_SCHEMA_VERSION,
         "sdk_subject": {"commit": sdk_commit, "tag": sdk_tag},
     }
@@ -652,9 +691,8 @@ def _read_bounded_or_empty(path: Path, *, max_bytes: int) -> bytes:
             "st_mtime_ns",
             "st_ctime_ns",
         )
-        if (
-            len(content) != before.st_size
-            or any(getattr(before, field) != getattr(after, field) for field in stable_fields)
+        if len(content) != before.st_size or any(
+            getattr(before, field) != getattr(after, field) for field in stable_fields
         ):
             return b""
         return content
