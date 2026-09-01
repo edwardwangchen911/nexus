@@ -299,13 +299,37 @@ minimal implementation change:
    capture CLI against secrets, or probe command is part of acceptance.
 
 ```bash
-NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" uv run --package nexus-fosun-gateway pytest integrations/fosun_gateway/tests -q
-uv run pytest tests/policy -q
-uv run python scripts/ci/repository_policy.py
-uv run --package nexus-fosun-gateway ruff check integrations/fosun_gateway/src integrations/fosun_gateway/tests
-uv run --package nexus-fosun-gateway mypy integrations/fosun_gateway/src
+set -euo pipefail
+NEXUS_GATEWAY_TMP="$(mktemp -d "$PWD/.nexus-gateway-acceptance.XXXXXX")"
+NEXUS_POLICY_TMP="$(mktemp -d "$PWD/.nexus-policy-acceptance.XXXXXX")"
+chmod 700 "$NEXUS_GATEWAY_TMP" "$NEXUS_POLICY_TMP"
+cleanup() {
+  rm -f "$NEXUS_POLICY_TMP/nexus-dependency-inventory.json"
+  rmdir "$NEXUS_POLICY_TMP" "$NEXUS_GATEWAY_TMP"
+}
+trap cleanup EXIT
+
+TMPDIR="$NEXUS_GATEWAY_TMP" PYTHONDONTWRITEBYTECODE=1 \
+  NEXUS_OFFLINE_SOCKET_GUARD=1 PYTHONPATH="$PWD/scripts/offline_guard" UV_OFFLINE=1 \
+  uv run --package nexus-fosun-gateway pytest integrations/fosun_gateway/tests -q \
+  -p no:cacheprovider
+UV_OFFLINE=1 uv run pytest tests/policy -q
+UV_OFFLINE=1 uv run python scripts/ci/repository_policy.py \
+  --root . \
+  --inventory-output "$NEXUS_POLICY_TMP/nexus-dependency-inventory.json"
+UV_OFFLINE=1 uv run --package nexus-fosun-gateway ruff check \
+  integrations/fosun_gateway/src integrations/fosun_gateway/tests
+UV_OFFLINE=1 uv run --package nexus-fosun-gateway mypy integrations/fosun_gateway/src
 git diff --check
 ```
+
+Do not set `umask 077` inside the pytest process: it would turn a test-created `0755`
+`unsafe_dir` into `0700` and mask the intended unsafe-directory assertion. The initial `644+1`
+Gateway outcome was that harness-side umask contamination, not a product regression. The corrected
+harness has been observed to report Gateway `645 passed` and Policy `128 passed`; those observations
+validate only this acceptance harness and are not evidence that the future scope-contract
+implementation is complete. The cleanup trap removes only the two explicit checkout-local temporary
+directories (and the inventory file); it never writes a tracked path or uses system `/tmp`.
 
 ## Fifth core probe gate
 
