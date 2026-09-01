@@ -4,6 +4,8 @@ import { ArrowRight, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
+import { AuthorityLedger } from "../../components/authority-ledger";
+import { IntelligenceHeader } from "../../components/intelligence-header";
 import { OptimizationNeedPanel } from "../../components/diagnostic-list";
 import { PortfolioValuationSummary } from "../../components/portfolio-summary";
 import type { components } from "../../lib/generated/schema";
@@ -43,10 +45,12 @@ export function OverviewPanel({ state, overview, onRefresh }: Props): React.Reac
     : "/optimize";
   return (
     <section className="page-stack overview-page" aria-label="投资概览页面" data-state={state}>
-      <header className="page-heading">
-        <div><p className="eyebrow">{factsOnly ? "资产事实台" : "每日决策台"}</p><h1>{factsOnly ? "今日资产概览" : "今日组合判断"}</h1><p>{factsOnly ? "展示冻结的复星只读事实；尚未生成诊断、策略或交易建议。" : "先判断是否值得进一步优化。所有结论均来自冻结快照与确定性阈值，不使用 Agent 主观评分。"}</p></div>
-        <div className="page-actions"><span className="mode-badge">仅研究 <code>RESEARCH_ONLY</code></span><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />{factsOnly ? "刷新概览" : "刷新判断"}</button></div>
-      </header>
+      <IntelligenceHeader
+        eyebrow={factsOnly ? "资产事实台" : "每日决策台"}
+        title={factsOnly ? "今日资产概览" : "今日组合判断"}
+        description={factsOnly ? "展示冻结的复星只读事实；尚未生成诊断、策略或交易建议。" : "先判断是否值得进一步优化。所有结论均来自冻结快照与确定性阈值，不使用 Agent 主观评分。"}
+        actions={<><span className="mode-badge">仅研究 <code>RESEARCH_ONLY</code></span><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />{factsOnly ? "刷新概览" : "刷新判断"}</button></>}
+      />
       {!hasData ? <DataState state={state} title={stateTitle(state)} detail={stateDetail(state)}>
         {state === "empty" ? <a className="button button--primary" href="/market">研究美股证据<ArrowRight aria-hidden="true" size={17} /></a> : null}
       </DataState> : factsOnly ? <PortfolioFactsOverview overview={overview} /> : overview.diagnostic_report ? <>
@@ -76,6 +80,7 @@ function PortfolioFactsOverview({ overview }: { overview: Overview }): React.Rea
         <div><dt>组合</dt><dd>{overview.portfolio_name ?? "复星只读组合"}</dd></div>
       </dl>
     </section>
+    <AuthorityLedger snapshotStatus={snapshot.status} displayReadiness={snapshot.display_readiness} decisionReadiness={snapshot.decision_readiness} />
     {currencies.map((currency) => <PortfolioValuationSummary
       key={currency}
       provider={provider}

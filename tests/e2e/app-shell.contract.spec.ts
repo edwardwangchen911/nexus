@@ -42,3 +42,25 @@ test("mobile drawer keeps both navigation groups nested and enforces the hit-are
     expect(control.width).toBeGreaterThanOrEqual(44);
   }
 });
+
+test("desktop skip link renders above the fixed sidebar", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.goto("/overview");
+  await page.keyboard.press("Tab");
+
+  const skipLink = page.getByRole("link", { name: "跳到主要内容" });
+  await expect(skipLink).toBeFocused();
+  await expect(skipLink).toBeVisible();
+  const geometry = await skipLink.evaluate((link) => {
+    const rectangle = link.getBoundingClientRect();
+    const sidebar = document.querySelector<HTMLElement>(".app-shell__sidebar");
+    const topElement = document.elementFromPoint(rectangle.left + rectangle.width / 2, rectangle.top + rectangle.height / 2);
+    return {
+      linkZIndex: Number.parseInt(getComputedStyle(link).zIndex, 10),
+      sidebarZIndex: sidebar ? Number.parseInt(getComputedStyle(sidebar).zIndex, 10) : 0,
+      topElementIsLink: topElement === link || link.contains(topElement),
+    };
+  });
+  expect(geometry.linkZIndex).toBeGreaterThan(geometry.sidebarZIndex);
+  expect(geometry.topElementIsLink).toBe(true);
+});

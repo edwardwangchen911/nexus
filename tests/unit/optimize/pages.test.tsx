@@ -70,6 +70,10 @@ describe("optimization pages", () => {
     expect(screen.getByText("唯一缺失条件：冻结快照尚未达到 READY；保持现状。")).toBeVisible();
     expect(screen.getAllByText("复星（只读）").length).toBeGreaterThan(0);
     expect(screen.getAllByText("PARTIAL").length).toBeGreaterThan(0);
+    const authority = screen.getByRole("region", { name: "数据与决策权威边界" });
+    expect(authority).toHaveTextContent(snapshot.display_readiness);
+    expect(authority).toHaveTextContent(snapshot.decision_readiness);
+    expect(authority).toHaveTextContent("HUMAN APPROVAL");
     expect(screen.getByRole("region", { name: "HKD 原币种资产估值" })).toHaveTextContent("HKD 27,500.00");
     expect(screen.getByRole("region", { name: "USD 原币种资产估值" })).toHaveTextContent("USD 1,000.00");
     expect(screen.getByRole("link", { name: "查看组合事实" })).toHaveAttribute("href", "/portfolio");

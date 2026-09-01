@@ -44,6 +44,7 @@ test("no data progresses through frozen research, diagnosis, three proposals, an
 
   await page.getByRole("link", { name: "概览", exact: true }).click();
   await expect(page.getByRole("heading", { name: "值得比较优化方案" })).toBeVisible();
+  await page.screenshot({ path: "test-results/decision-ledger-overview-diagnostic-desktop.png", fullPage: true });
   await page.getByRole("link", { name: "打开组合诊断" }).click();
   await expect(page.getByRole("heading", { name: "组合诊断账簿" })).toBeVisible();
   await page.getByRole("link", { name: "打开已有三方案" }).click();

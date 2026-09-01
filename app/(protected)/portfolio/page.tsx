@@ -1,8 +1,10 @@
 "use client";
 
-import { RefreshCw } from "lucide-react";
+import { ChevronDown, RefreshCw, TerminalSquare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
+import { AuthorityLedger } from "../../components/authority-ledger";
+import { IntelligenceHeader } from "../../components/intelligence-header";
 import { PortfolioSummary } from "../../components/portfolio-summary";
 import { PortfolioDiagnostic } from "../../components/portfolio-diagnostic";
 import type { components } from "../../lib/generated/schema";
@@ -148,10 +150,13 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
   ])].sort() : [];
   return (
     <section className="page-stack portfolio-page" aria-label="组合事实页面" data-state={state}>
-      <header className="page-heading">
-        <div><p className="eyebrow">资产与持仓</p><h1>组合事实</h1><p>复星真实持仓与内部模拟盘分账展示。缺少合格汇率证据时，各币种独立呈现，不虚构合并净值。</p></div>
-        <div className="portfolio-page__actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新页面数据</button></div>
-      </header>
+      <IntelligenceHeader
+        eyebrow="资产与持仓"
+        title="组合事实"
+        description="复星真实持仓与内部模拟盘分账展示。缺少合格汇率证据时，各币种独立呈现，不虚构合并净值。"
+        marker="ASSET LEDGER"
+        actions={<><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新页面数据</button></>}
+      />
       <div role="status" aria-label="组合操作状态" aria-live="polite" aria-atomic="true">
         {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
       </div>
@@ -163,6 +168,7 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
             {!hasData || !snapshot ? <DataState state={state} title={`${selected.name} 快照`} detail={stateDetail(state)} announce={false} /> : <>
               <div className="portfolio-snapshot-band"><div><p className="eyebrow">冻结快照</p><h2>{selected.name}</h2><p>只读账户事实，不含跨币种推算。</p></div><dl><div><dt>数据来源</dt><dd>{selected.provider === "fosun" ? "复星（只读）" : selected.provider}</dd></div><div><dt>展示状态</dt><dd>{displayReadinessLabel(snapshot.display_readiness)}</dd></div><div><dt>决策状态</dt><dd>{decisionReadinessLabel(snapshot.decision_readiness)}</dd></div><div><dt>现金流对账</dt><dd>{cashFlowQualityLabel(snapshot.cash_flow_quality)} · {snapshot.cash_flow_count} 条</dd></div><div><dt>执行能力</dt><dd>{snapshot.execution_locked ? "已锁定" : "异常"}</dd></div><div><dt>风控状态</dt><dd>{snapshotStatusLabel(snapshot.status)} <code>{snapshot.status}</code></dd></div><div><dt>覆盖范围</dt><dd>{coverageLabel(snapshot.coverage_scope)}</dd></div><div><dt>币种</dt><dd>{currencies.length}</dd></div><div><dt>持仓</dt><dd>{snapshot.positions.length}</dd></div><div><dt>未结订单</dt><dd>{snapshot.open_orders.length}</dd></div><div><dt>{snapshot.time_basis === "gateway_observed" ? "读取时间" : "更新时间"}</dt><dd>{formatTime(snapshot.as_of)}</dd></div></dl></div>
               {snapshot.time_basis === "gateway_observed" ? <p className="inline-notice">此快照使用网关读取时间；券商未提供逐条更新时间。双读对账只证明读取窗口内一致，不代表逐笔成交回放。</p> : null}
+              <AuthorityLedger snapshotStatus={snapshot.status} displayReadiness={snapshot.display_readiness} decisionReadiness={snapshot.decision_readiness} />
               {snapshot.decision_readiness === "RECONCILIATION_PENDING" ? <p className="inline-notice">资产事实可展示；订单或现金流尚未完成对账，不能作为优化基线。</p> : null}
               {state === "stale" ? <p className="inline-notice inline-notice--error" role="status">{stateDetail(state)}</p> : null}
               {snapshot.status === "RECONCILIATION_REQUIRED" ? <p className="inline-notice inline-notice--error">双读对账未通过。快照仅供展示，不能用作优化基线。</p> : null}
@@ -177,14 +183,20 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
 
 function LocalRefreshGuidance({ status }: { status: PortfolioItem["last_sync_run_status"] }): React.ReactElement {
   return (
-    <section className="portfolio-local-refresh" aria-label="真实刷新仅限本机终端">
-      <div><p className="eyebrow">LOCAL READ-ONLY REFRESH</p><h2>真实刷新仅限本机终端</h2></div>
-      <p>浏览器只重新读取已持久化数据，不会登记、执行或重试 Provider 同步。</p>
-      <p>通过既有安全 launcher 加载本地配置，并确认 Gateway 处于 <code>local_read_only</code> 后，在仓库根目录运行：</p>
-      <pre className="portfolio-local-refresh__command"><code>uv run --package nexus-engine nexus-fosun-local refresh</code></pre>
-      <p><span>最近本地刷新状态</span><strong>{status ?? "未登记"}</strong></p>
-      {status === "ACTIVE" ? <p className="inline-notice inline-notice--error">存在历史 ACTIVE 登记；当前页面不会执行、轮询或自动重试。请保留记录并在本机核对 launcher。</p> : null}
-    </section>
+    <details className="portfolio-local-refresh" aria-label="真实刷新仅限本机终端" role="region" open={status === "ACTIVE" || undefined}>
+      <summary>
+        <span className="portfolio-local-refresh__icon"><TerminalSquare aria-hidden="true" size={17} /></span>
+        <span><small>LOCAL READ-ONLY REFRESH</small><strong>数据刷新与来源</strong></span>
+        <span className="portfolio-local-refresh__state"><span>最近本地刷新状态</span><strong>{status ?? "未登记"}</strong></span>
+        <ChevronDown aria-hidden="true" size={17} />
+      </summary>
+      <div className="portfolio-local-refresh__body">
+        <p>浏览器只重新读取已持久化数据，不会登记、执行或重试 Provider 同步。</p>
+        <p>通过既有安全 launcher 加载本地配置，并确认 Gateway 处于 <code>local_read_only</code> 后，在仓库根目录运行：</p>
+        <pre className="portfolio-local-refresh__command"><code>uv run --package nexus-engine nexus-fosun-local refresh</code></pre>
+        {status === "ACTIVE" ? <p className="inline-notice inline-notice--error">存在历史 ACTIVE 登记；当前页面不会执行、轮询或自动重试。请保留记录并在本机核对 launcher。</p> : null}
+      </div>
+    </details>
   );
 }
 async function fetchWithTimeout(path: string): Promise<Response> { return fetch(path, { signal: AbortSignal.timeout(LOAD_TIMEOUT_MS) }); }

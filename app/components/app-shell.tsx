@@ -3,10 +3,12 @@
 import { useEffect, useRef, type ComponentType, type MouseEvent } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  Bot,
   ChartCandlestick,
   FlaskConical,
   LayoutDashboard,
   Menu,
+  LockKeyhole,
   PlugZap,
   ScrollText,
   ShieldCheck,
@@ -110,15 +112,19 @@ export function AppShell({ children }: { children: React.ReactNode }): React.Rea
       <SkipLink />
       <aside className="app-shell__sidebar">
         <div className="app-shell__brand">
-          <span>NEXUS</span>
-          <small>私人投资工作台</small>
+          <span className="app-shell__brand-mark" aria-hidden="true">N</span>
+          <span className="app-shell__brand-copy"><strong>NEXUS</strong><small>INVESTMENT INTELLIGENCE</small></span>
         </div>
         <NavigationGroups />
+        <footer className="app-shell__boundary">
+          <p><Bot aria-hidden="true" size={15} />Agent research layer</p>
+          <p><LockKeyhole aria-hidden="true" size={15} />Live execution locked</p>
+        </footer>
       </aside>
       <details className="app-shell__drawer">
         <summary className="app-shell__navigation-control">
-          <Menu aria-hidden="true" size={18} strokeWidth={1.8} />
-          导航
+          <span className="app-shell__mobile-brand"><span aria-hidden="true">N</span><strong>NEXUS</strong></span>
+          <span><Menu aria-hidden="true" size={18} strokeWidth={1.8} />导航</span>
         </summary>
         <NavigationGroups mobile />
       </details>
