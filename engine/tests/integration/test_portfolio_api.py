@@ -270,6 +270,9 @@ async def test_latest_snapshot_preserves_currency_costs_and_read_only_ids(
     assert data["coverage_scope"] == "broker_account"
     assert data["display_readiness"] == "DISPLAY_READY"
     assert data["decision_readiness"] == "DECISION_READY"
+    assert data["cash_flow_quality"] == "PASS"
+    assert data["cash_flow_count"] == 1
+    assert data["execution_locked"] is True
     assert data["converted_view"] is None
     assert [bucket["currency"] for bucket in data["cash"]] == ["USD"]
     position = data["positions"][0]
@@ -308,13 +311,14 @@ async def test_latest_snapshot_exposes_every_state_with_nullable_as_of(
     assert response.json()["data"]["portfolio_snapshot_id"] == str(snapshot_id)
     assert response.json()["data"]["status"] == status
     expected_decision = {
-        "READY": "DECISION_READY",
+        "READY": "RECONCILIATION_PENDING",
         "PARTIAL": "RECONCILIATION_PENDING",
         "STALE": "DATA_STALE",
         "RECONCILIATION_REQUIRED": "RECONCILIATION_REQUIRED",
     }[status]
     assert response.json()["data"]["display_readiness"] == "DISPLAY_UNAVAILABLE"
     assert response.json()["data"]["decision_readiness"] == expected_decision
+    assert response.json()["data"]["execution_locked"] is True
     assert response.json()["data"]["as_of"] is None
 
 

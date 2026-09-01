@@ -72,15 +72,18 @@ def test_snapshot_contract_forbids_an_unadmitted_converted_view() -> None:
 
 
 @pytest.mark.parametrize(
-    ("status", "has_display_facts", "expected"),
+    ("status", "has_display_facts", "cash_flow_quality", "expected"),
     (
-        ("READY", True, ("DISPLAY_READY", "DECISION_READY")),
-        ("PARTIAL", True, ("DISPLAY_READY", "RECONCILIATION_PENDING")),
-        ("PARTIAL", False, ("DISPLAY_UNAVAILABLE", "RECONCILIATION_PENDING")),
-        ("STALE", True, ("DISPLAY_READY", "DATA_STALE")),
+        ("READY", True, "PASS", ("DISPLAY_READY", "DECISION_READY")),
+        ("READY", True, "NOT_RUN", ("DISPLAY_READY", "RECONCILIATION_PENDING")),
+        ("READY", True, "PARTIAL", ("DISPLAY_READY", "RECONCILIATION_PENDING")),
+        ("PARTIAL", True, "PASS", ("DISPLAY_READY", "RECONCILIATION_PENDING")),
+        ("PARTIAL", False, "NOT_RUN", ("DISPLAY_UNAVAILABLE", "RECONCILIATION_PENDING")),
+        ("STALE", True, "PASS", ("DISPLAY_READY", "DATA_STALE")),
         (
             "RECONCILIATION_REQUIRED",
             True,
+            "PASS",
             ("DISPLAY_READY", "RECONCILIATION_REQUIRED"),
         ),
     ),
@@ -88,9 +91,14 @@ def test_snapshot_contract_forbids_an_unadmitted_converted_view() -> None:
 def test_snapshot_readiness_separates_display_from_decision_use(
     status: str,
     has_display_facts: bool,
+    cash_flow_quality: str,
     expected: tuple[str, str],
 ) -> None:
-    assert derive_snapshot_readiness(status, has_display_facts=has_display_facts) == expected
+    assert derive_snapshot_readiness(
+        status,
+        has_display_facts=has_display_facts,
+        cash_flow_quality=cash_flow_quality,
+    ) == expected
 
 
 def test_portfolio_contracts_publish_fixed_collection_bounds() -> None:
@@ -162,6 +170,9 @@ def test_maximum_legal_snapshot_envelope_fits_the_bff_four_mebibyte_limit() -> N
                 "status": "READY",
                 "display_readiness": "DISPLAY_READY",
                 "decision_readiness": "DECISION_READY",
+                "cash_flow_quality": "PASS",
+                "cash_flow_count": 0,
+                "execution_locked": True,
                 "cash": (),
                 "positions": (
                     {

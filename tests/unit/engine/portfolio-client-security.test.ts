@@ -213,7 +213,7 @@ function portfolioPage() {
 }
 
 function snapshotEnvelope() {
-  return { data: { portfolio_snapshot_id: snapshotId, portfolio_id: portfolioId, coverage_scope: "broker_account", status: "READY", display_readiness: "DISPLAY_READY", decision_readiness: "DECISION_READY", cash: [{ currency: "HKD", cash_balance: "8000.00", available_cash: "7000.00", provider_as_of: "2026-08-23T08:00:00Z" }], positions: [], open_orders: [{ broker_order_snapshot_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e704", instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e703", symbol: "00656.HK", currency: "HKD", side: "BUY", quantity: "100", filled_quantity: "0", price: "6.10", status: "SUBMITTED", updated_at: "2026-08-23T07:59:00Z", read_only: true }], converted_view: null, as_of: "2026-08-23T08:00:00Z" }, meta: meta() };
+  return { data: { portfolio_snapshot_id: snapshotId, portfolio_id: portfolioId, coverage_scope: "broker_account", status: "READY", display_readiness: "DISPLAY_READY", decision_readiness: "DECISION_READY", cash_flow_quality: "PASS", cash_flow_count: 1, execution_locked: true, cash: [{ currency: "HKD", cash_balance: "8000.00", available_cash: "7000.00", provider_as_of: "2026-08-23T08:00:00Z" }], positions: [], open_orders: [{ broker_order_snapshot_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e704", instrument_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e703", symbol: "00656.HK", currency: "HKD", side: "BUY", quantity: "100", filled_quantity: "0", price: "6.10", status: "SUBMITTED", updated_at: "2026-08-23T07:59:00Z", read_only: true }], converted_view: null, as_of: "2026-08-23T08:00:00Z" }, meta: meta() };
 }
 
 function syncEnvelope() {

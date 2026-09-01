@@ -23,6 +23,21 @@ afterEach(() => {
 });
 
 describe("portfolio vertical slice", () => {
+  it("shows cash-flow reconciliation and the permanent execution lock", () => {
+    render(<PortfolioPanel
+      state="ready"
+      portfolios={[portfolio]}
+      snapshot={snapshot}
+      selectedPortfolioId={portfolioId}
+      notice={null}
+      onSelect={vi.fn()}
+      onRefresh={vi.fn()}
+    />);
+
+    expect(screen.getByText("现金流对账").parentElement).toHaveTextContent("已通过 · 1 条");
+    expect(screen.getByText("执行能力").parentElement).toHaveTextContent("已锁定");
+  });
+
   it.each(stateLabels)("renders the visible %s data state", (state, label) => {
     render(<PortfolioPanel
       state={state}

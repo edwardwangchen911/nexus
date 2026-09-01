@@ -17,19 +17,25 @@ type SyncRunStatus = Literal[
     "ACTIVE", "READY", "PARTIAL", "STALE", "RECONCILIATION_REQUIRED", "FAILED"
 ]
 type CurrencyCode = Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")]
+type CashFlowQuality = Literal["PASS", "PARTIAL", "NOT_RUN"]
 
 
 def derive_snapshot_readiness(
     status: SnapshotStatus | str,
     *,
     has_display_facts: bool,
+    cash_flow_quality: CashFlowQuality | str,
 ) -> tuple[DisplayReadiness, DecisionReadiness]:
     """Separate factual display availability from decision-grade readiness."""
     display: DisplayReadiness = (
         "DISPLAY_READY" if has_display_facts else "DISPLAY_UNAVAILABLE"
     )
     decisions: dict[str, DecisionReadiness] = {
-        "READY": "DECISION_READY",
+        "READY": (
+            "DECISION_READY"
+            if cash_flow_quality == "PASS"
+            else "RECONCILIATION_PENDING"
+        ),
         "PARTIAL": "RECONCILIATION_PENDING",
         "STALE": "DATA_STALE",
         "RECONCILIATION_REQUIRED": "RECONCILIATION_REQUIRED",
@@ -136,6 +142,9 @@ class PortfolioSnapshotResponse(_StrictSchema):
     status: SnapshotStatus
     display_readiness: DisplayReadiness
     decision_readiness: DecisionReadiness
+    cash_flow_quality: CashFlowQuality
+    cash_flow_count: int = Field(ge=0)
+    execution_locked: Literal[True]
     cash: tuple[CashBucketResponse, ...] = Field(max_length=32)
     positions: tuple[PositionResponse, ...] = Field(max_length=2000)
     open_orders: tuple[OpenOrderResponse, ...] = Field(max_length=2000)
@@ -156,7 +165,7 @@ class BrokerSyncRunResponse(_StrictSchema):
     accepted_at: AwareDatetime
     completed_at: AwareDatetime | None
     attempt_count: int = Field(ge=0)
-    cash_flow_quality: Literal["PASS", "PARTIAL", "NOT_RUN"]
+    cash_flow_quality: CashFlowQuality
     failure_category: Literal["SYNC_FAILED"] | None
 
 

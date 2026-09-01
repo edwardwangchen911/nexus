@@ -851,13 +851,7 @@ export const runtimeContractSchemas = {
         "type": "string"
       },
       "cash_flow_quality": {
-        "enum": [
-          "PASS",
-          "PARTIAL",
-          "NOT_RUN"
-        ],
-        "title": "Cash Flow Quality",
-        "type": "string"
+        "$ref": "#/components/schemas/CashFlowQuality"
       },
       "completed_at": {
         "anyOf": [
@@ -953,6 +947,14 @@ export const runtimeContractSchemas = {
     ],
     "title": "CashBucketResponse",
     "type": "object"
+  },
+  "CashFlowQuality": {
+    "enum": [
+      "PASS",
+      "PARTIAL",
+      "NOT_RUN"
+    ],
+    "type": "string"
   },
   "ChampionStateResponse": {
     "additionalProperties": false,
@@ -4366,6 +4368,14 @@ export const runtimeContractSchemas = {
         "title": "Cash",
         "type": "array"
       },
+      "cash_flow_count": {
+        "minimum": 0,
+        "title": "Cash Flow Count",
+        "type": "integer"
+      },
+      "cash_flow_quality": {
+        "$ref": "#/components/schemas/CashFlowQuality"
+      },
       "converted_view": {
         "title": "Converted View",
         "type": "null"
@@ -4380,6 +4390,11 @@ export const runtimeContractSchemas = {
       },
       "display_readiness": {
         "$ref": "#/components/schemas/DisplayReadiness"
+      },
+      "execution_locked": {
+        "const": true,
+        "title": "Execution Locked",
+        "type": "boolean"
       },
       "open_orders": {
         "items": {
@@ -4418,6 +4433,9 @@ export const runtimeContractSchemas = {
       "status",
       "display_readiness",
       "decision_readiness",
+      "cash_flow_quality",
+      "cash_flow_count",
+      "execution_locked",
       "cash",
       "positions",
       "open_orders",

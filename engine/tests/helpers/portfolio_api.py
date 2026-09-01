@@ -7,6 +7,7 @@ from nexus.main import create_engine_app
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.portfolio import (
     Account,
+    BrokerCashFlow,
     BrokerOrderSnapshot,
     BrokerSyncAttempt,
     BrokerSyncRun,
@@ -124,7 +125,7 @@ async def seed_portfolio_list(database_url: str) -> None:
                 completed_at=CLOCK - timedelta(minutes=1),
                 attempt_count=1,
                 failure_reason=None,
-                cash_flow_quality="NOT_RUN",
+                cash_flow_quality="PASS" if status == "READY" else "NOT_RUN",
             )
             snapshot = PortfolioSnapshotRecord(
                 id=UUID(f"0198d500-1000-7000-8000-00000000004{index + 1}"),
@@ -154,6 +155,21 @@ async def seed_portfolio_list(database_url: str) -> None:
             if index == 0:
                 session.add_all(
                     (
+                        BrokerCashFlow(
+                            account_id=account_id,
+                            sync_run_id=run.id,
+                            provider="fosun",
+                            provider_cash_flow_id="synthetic-flow-1",
+                            identity_version="provider_cash_flow_id_v1",
+                            identity_quality="STABLE",
+                            currency="USD",
+                            amount=Decimal("10"),
+                            occurred_at=snapshot.as_of,
+                            provider_business_date=snapshot.as_of.date(),
+                            kind="deposit",
+                            source_request_id="synthetic-cash-flow-request",
+                            response_as_of=snapshot.as_of,
+                        ),
                         PositionSnapshot(
                             portfolio_snapshot_id=snapshot.id,
                             instrument_id=INSTRUMENT_ID,

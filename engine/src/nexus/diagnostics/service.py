@@ -45,7 +45,7 @@ from nexus.persistence.models.diagnostics import (
     PortfolioDiagnosticItemRecord,
     PortfolioDiagnosticReportRecord,
 )
-from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
+from nexus.persistence.models.portfolio import BrokerSyncRun, PortfolioSnapshotRecord
 from nexus.providers.broker.base import PortfolioSnapshot
 
 
@@ -175,6 +175,19 @@ async def diagnose_and_persist(
     snapshot = await load_frozen_snapshot(
         session, portfolio_id=portfolio_id, snapshot_id=snapshot_id
     )
+    cash_flow_quality = await session.scalar(
+        select(BrokerSyncRun.cash_flow_quality)
+        .join(
+            PortfolioSnapshotRecord,
+            PortfolioSnapshotRecord.sync_run_id == BrokerSyncRun.id,
+        )
+        .where(
+            PortfolioSnapshotRecord.id == snapshot_id,
+            PortfolioSnapshotRecord.portfolio_id == portfolio_id,
+        )
+    )
+    if snapshot.status != "READY" or cash_flow_quality != "PASS":
+        raise ValueError("diagnostic reconciliation is incomplete")
     identities = await load_instrument_identities(session, snapshot=snapshot)
     if snapshot.as_of is None:
         raise ValueError("diagnostic snapshot timestamp is unavailable")

@@ -1230,11 +1230,7 @@ export interface components {
              * Format: uuid
              */
             broker_sync_run_id: string;
-            /**
-             * Cash Flow Quality
-             * @enum {string}
-             */
-            cash_flow_quality: "PASS" | "PARTIAL" | "NOT_RUN";
+            cash_flow_quality: components["schemas"]["CashFlowQuality"];
             /** Completed At */
             completed_at: string | null;
             /** Failure Category */
@@ -1261,6 +1257,8 @@ export interface components {
             /** Provider As Of */
             provider_as_of: string | null;
         };
+        /** @enum {string} */
+        CashFlowQuality: "PASS" | "PARTIAL" | "NOT_RUN";
         /** ChampionStateResponse */
         ChampionStateResponse: {
             /** Auto Promotion Paused */
@@ -2607,6 +2605,9 @@ export interface components {
             as_of: string | null;
             /** Cash */
             cash: components["schemas"]["CashBucketResponse"][];
+            /** Cash Flow Count */
+            cash_flow_count: number;
+            cash_flow_quality: components["schemas"]["CashFlowQuality"];
             /** Converted View */
             converted_view: null;
             /**
@@ -2616,6 +2617,11 @@ export interface components {
             coverage_scope: "broker_account";
             decision_readiness: components["schemas"]["DecisionReadiness"];
             display_readiness: components["schemas"]["DisplayReadiness"];
+            /**
+             * Execution Locked
+             * @constant
+             */
+            execution_locked: true;
             /** Open Orders */
             open_orders: components["schemas"]["OpenOrderResponse"][];
             /**

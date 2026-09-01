@@ -40,6 +40,7 @@ from nexus.persistence.models.market import (
 )
 from nexus.persistence.models.portfolio import (
     Account,
+    BrokerCashFlowWatermark,
     BrokerSyncRun,
     Portfolio,
     PortfolioSnapshotRecord,
@@ -64,6 +65,7 @@ from nexus.providers.market.fosun_gateway import (
     parse_quote_page,
 )
 from nexus.reconciliation.broker_snapshot import freeze_broker_snapshot
+from nexus.reconciliation.cash_flows import CashFlowSyncResult, fetch_cash_flows
 from nexus.reconciliation.snapshot_persistence import finalize_broker_sync
 
 _LOCAL_CONTRACT_HASH = hashlib.sha256(b"nexus.mac-local-fosun-read-only.v2").hexdigest()
@@ -71,7 +73,7 @@ _INSTRUMENT_NAMESPACE = UUID("639bd8e1-d250-4f58-a88c-370b6bbc621b")
 _UNIVERSE_ID = UUID("40cd56b4-c849-5ea7-b463-19699231f521")
 _LOCAL_CAPABILITY_DAYS = 365
 _MAX_US_HOLDING_SYMBOLS = 12
-_MAX_PROVIDER_REQUESTS = 21
+_MAX_PROVIDER_REQUESTS = 22
 _US_PROVIDER_CODE = re.compile(r"^us[A-Z][A-Z0-9.-]{0,14}$")
 
 
@@ -103,6 +105,7 @@ class _LocalBrokerIdentity:
     portfolio_id: UUID
     sync_run_id: UUID
     instrument_ids: dict[str, UUID]
+    previous_cash_flow_watermark: date | None
 
 
 class _SinglePageBrokerGateway:
@@ -281,16 +284,16 @@ async def refresh_local_fosun(
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         async with sessions() as session:
             identity = await _load_local_broker_identity(session, holdings=holdings)
-        frozen = await _freeze_broker_facts(
+        frozen, cash_flow_result = await _read_broker_facts(
             broker,
             account_id=identity.account_id,
             portfolio_id=identity.portfolio_id,
             sync_run_id=identity.sync_run_id,
             external_account_id=external_account_id,
             instrument_ids=identity.instrument_ids,
+            cash_flow_end=request_end_at.date(),
+            previous_cash_flow_watermark=identity.previous_cash_flow_watermark,
         )
-        if frozen.status != "READY":
-            raise RuntimeError("LOCAL_BROKER_RECONCILIATION_REQUIRED")
     except BaseException:
         if engine is not None:
             await engine.dispose()
@@ -313,6 +316,7 @@ async def refresh_local_fosun(
                     holdings=holdings,
                     identity=identity,
                     frozen=frozen,
+                    cash_flow_result=cash_flow_result,
                     market_reads=market_reads,
                     request_start_at=request_start_at,
                     request_end_at=request_end_at,
@@ -371,6 +375,45 @@ async def _freeze_broker_facts(
     )
 
 
+async def _read_broker_facts(
+    broker: GatewayReader,
+    *,
+    account_id: UUID,
+    portfolio_id: UUID,
+    sync_run_id: UUID,
+    external_account_id: str,
+    instrument_ids: dict[str, UUID],
+    cash_flow_end: date,
+    previous_cash_flow_watermark: date | None,
+) -> tuple[BrokerSyncResult, CashFlowSyncResult]:
+    """Read the reconciled snapshot, then one bounded cash-flow overlap window."""
+    provider = FosunBrokerProvider(
+        account_id=account_id,
+        external_account_id=external_account_id,
+        client=_SinglePageBrokerGateway(broker),
+        instrument_ids=instrument_ids,
+        cash_flow_kinds={"1": "deposit"},
+    )
+    frozen = await freeze_broker_snapshot(
+        account_id,
+        provider,
+        portfolio_id=portfolio_id,
+        sync_run_id=sync_run_id,
+        max_attempts=1,
+    )
+    if frozen.status != "READY":
+        raise RuntimeError("LOCAL_BROKER_RECONCILIATION_REQUIRED")
+    cash_flows = await fetch_cash_flows(
+        account_id,
+        provider,
+        sync_run_id=sync_run_id,
+        initial_start=cash_flow_end - timedelta(days=6),
+        end=cash_flow_end,
+        previous_watermark=previous_cash_flow_watermark,
+    )
+    return frozen, cash_flows
+
+
 async def _load_local_broker_identity(
     session: AsyncSession,
     *,
@@ -415,6 +458,11 @@ async def _load_local_broker_identity(
         portfolio_id=portfolio_id,
         sync_run_id=new_uuid7(),
         instrument_ids=instrument_ids,
+        previous_cash_flow_watermark=await session.scalar(
+            select(BrokerCashFlowWatermark.provider_business_date).where(
+                BrokerCashFlowWatermark.account_id == account_id
+            )
+        ),
     )
 
 
@@ -428,6 +476,7 @@ async def _persist_ready_broker_snapshot(
     instrument_ids: dict[str, UUID],
     valid_from: date,
     completed_at: datetime,
+    cash_flow_result: CashFlowSyncResult,
 ) -> PortfolioSnapshotRecord:
     """Persist one already-frozen local broker snapshot in a single transaction."""
     if frozen.status != "READY" or frozen.portfolio_snapshot.portfolio_id != portfolio_id:
@@ -485,6 +534,7 @@ async def _persist_ready_broker_snapshot(
         session,
         frozen,
         completed_at=completed_at,
+        cash_flow_result=cash_flow_result,
     )
 
 
@@ -503,7 +553,7 @@ async def _read_market_snapshot(
     bar_limit = len(expected_sessions)
     if not 1 <= bar_limit <= 500:
         raise ValueError("LOCAL_KLINE_BUDGET_INVALID")
-    if 9 + len(codes) > _MAX_PROVIDER_REQUESTS:
+    if 10 + len(codes) > _MAX_PROVIDER_REQUESTS:
         raise ValueError("LOCAL_PROVIDER_REQUEST_BUDGET_EXCEEDED")
 
     quote_raw = await market.read_quotes_raw(codes)
@@ -562,6 +612,7 @@ async def _persist_refresh(
     holdings: tuple[PositionItem, ...],
     identity: _LocalBrokerIdentity,
     frozen: BrokerSyncResult,
+    cash_flow_result: CashFlowSyncResult,
     market_reads: _MarketSnapshotReads,
     request_start_at: datetime,
     request_end_at: datetime,
@@ -581,6 +632,7 @@ async def _persist_refresh(
         instrument_ids=instrument_ids,
         valid_from=request_start_at.date(),
         completed_at=authorized_at,
+        cash_flow_result=cash_flow_result,
     )
     await _ensure_market_universe(
         session,
@@ -712,6 +764,7 @@ async def _persist_refresh(
         "cash": broker_request_counts["cash"],
         "holdings": 1 + broker_request_counts["holdings"],
         "orders": broker_request_counts["orders"],
+        "cash_flows": 1,
         "quotes": market_reads.request_counts["quotes"],
         "bars": market_reads.request_counts["bars"],
     }
@@ -723,6 +776,8 @@ async def _persist_refresh(
         "cash_currencies": len(frozen.portfolio_snapshot.cash),
         "positions": len(frozen.portfolio_snapshot.positions),
         "open_orders": len(frozen.portfolio_snapshot.open_orders),
+        "cash_flow_quality": cash_flow_result.quality,
+        "cash_flows": len(cash_flow_result.facts),
         "market_symbols": len(market_reads.codes),
         "quotes": len(quote_page.items),
         "quote_success": quote_success,

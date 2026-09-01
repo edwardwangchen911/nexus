@@ -14,8 +14,10 @@ from nexus.persistence.models.portfolio import (
     PortfolioSnapshotRecord,
 )
 from nexus.persistence.session import session_factory
+from nexus.providers.broker.base import SourceObservation
 from nexus.providers.broker.fosun_contracts import PositionItem
 from nexus.reconciliation.broker_snapshot import freeze_broker_snapshot
+from nexus.reconciliation.cash_flows import CashFlowSyncResult
 from nexus.reconciliation.facts import canonical_position_hash
 from nexus.settings import EngineSettings
 from sqlalchemy import select
@@ -124,6 +126,19 @@ async def test_local_ready_broker_snapshot_is_finalized_atomically(
         current_price="120",
         provider_as_of=instant,
     )
+    cash_flow_result = CashFlowSyncResult(
+        facts=(),
+        quality="PASS",
+        pagination_complete=True,
+        watermark_date=date(2026, 8, 31),
+        source_observations=(
+            SourceObservation(
+                source_request_id="cash-flows-empty",
+                response_as_of=instant,
+                quality="PASS",
+            ),
+        ),
+    )
     factory = session_factory(_settings(migrated_database_url))
     try:
         async with factory() as session, session.begin():
@@ -136,13 +151,12 @@ async def test_local_ready_broker_snapshot_is_finalized_atomically(
                 instrument_ids={"usAAPL": instrument_id},
                 valid_from=date(2026, 8, 31),
                 completed_at=instant,
+                cash_flow_result=cash_flow_result,
             )
         async with factory() as session:
             run = await session.get(BrokerSyncRun, sync_run_id)
             snapshot = await session.scalar(
-                select(PortfolioSnapshotRecord).where(
-                    PortfolioSnapshotRecord.id == stored.id
-                )
+                select(PortfolioSnapshotRecord).where(PortfolioSnapshotRecord.id == stored.id)
             )
     finally:
         await factory.kw["bind"].dispose()
@@ -150,8 +164,6 @@ async def test_local_ready_broker_snapshot_is_finalized_atomically(
     assert run is not None and run.status == "READY"
     assert run.trigger_kind == "MANUAL"
     assert run.attempt_count == 1
-    assert run.cash_flow_quality == "NOT_RUN"
+    assert run.cash_flow_quality == "PASS"
     assert snapshot is not None and snapshot.status == "READY"
-    assert snapshot.position_hash == canonical_position_hash(
-        frozen.portfolio_snapshot.positions
-    )
+    assert snapshot.position_hash == canonical_position_hash(frozen.portfolio_snapshot.positions)

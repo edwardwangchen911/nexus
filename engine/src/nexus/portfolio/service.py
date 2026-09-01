@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import and_, desc, or_, select, true, union_all
+from sqlalchemy import and_, desc, func, or_, select, true, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.api.errors import ErrorCode, NexusError
@@ -27,6 +27,7 @@ from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.paper import PaperAccountRecord
 from nexus.persistence.models.portfolio import (
     Account,
+    BrokerCashFlow,
     BrokerOrderSnapshot,
     BrokerSyncRun,
     CashSnapshot,
@@ -264,7 +265,10 @@ class PortfolioService:
                     PortfolioSnapshotRecord.portfolio_id,
                     PortfolioSnapshotRecord.status,
                     PortfolioSnapshotRecord.as_of,
+                    BrokerSyncRun.account_id,
+                    BrokerSyncRun.cash_flow_quality,
                 )
+                .join(BrokerSyncRun, BrokerSyncRun.id == PortfolioSnapshotRecord.sync_run_id)
                 .where(PortfolioSnapshotRecord.portfolio_id == portfolio_id)
                 .order_by(
                     desc(PortfolioSnapshotRecord.created_at),
@@ -330,12 +334,18 @@ class PortfolioService:
             )
         ).all()
         _require_bounded_collection("open_orders", order_rows, _MAX_OPEN_ORDERS)
+        cash_flow_count = await self._session.scalar(
+            select(func.count())
+            .select_from(BrokerCashFlow)
+            .where(BrokerCashFlow.account_id == snapshot.account_id)
+        )
         instrument_ids = {row.instrument_id for row in position_rows}
         instrument_ids.update(row.instrument_id for row in order_rows)
         symbols = await self._symbols(tuple(instrument_ids), snapshot.as_of)
         display_readiness, decision_readiness = derive_snapshot_readiness(
             snapshot.status,
             has_display_facts=bool(cash_rows or position_rows),
+            cash_flow_quality=snapshot.cash_flow_quality,
         )
         return PortfolioSnapshotResponse(
             portfolio_snapshot_id=snapshot.snapshot_id,
@@ -344,6 +354,9 @@ class PortfolioService:
             status=snapshot.status,
             display_readiness=display_readiness,
             decision_readiness=decision_readiness,
+            cash_flow_quality=snapshot.cash_flow_quality,
+            cash_flow_count=int(cash_flow_count or 0),
+            execution_locked=True,
             cash=tuple(
                 CashBucketResponse(
                     currency=row.currency,

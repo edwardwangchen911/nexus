@@ -187,6 +187,124 @@ async def test_local_broker_facts_use_one_complete_six_phase_read() -> None:
 
 
 @pytest.mark.asyncio
+async def test_local_broker_read_includes_one_cash_flow_window_after_order_reconciliation() -> None:
+    instant = datetime(2026, 8, 31, tzinfo=UTC)
+    account_id = uuid4()
+    instrument_id = uuid4()
+
+    class _Broker:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def read_cash(self, _external_account_id: str) -> GatewayResponsePage:
+            self.calls.append("cash")
+            return GatewayResponsePage(
+                items=(
+                    {
+                        "kind": "cash",
+                        "external_account_id": "redacted-test-account",
+                        "currency": "USD",
+                        "cash_balance": "1000",
+                        "available_cash": "900",
+                        "provider_as_of": instant.isoformat(),
+                    },
+                ),
+                source_request_id=f"cash-{len(self.calls)}",
+                has_more=False,
+                next_cursor=None,
+                as_of=instant,
+                quality="PASS",
+            )
+
+        async def read_holdings(
+            self, _external_account_id: str, *, cursor: str | None, limit: int
+        ) -> GatewayResponsePage:
+            assert cursor is None and limit == 100
+            self.calls.append("holdings")
+            return GatewayResponsePage(
+                items=(_position("usAAPL").model_dump(mode="json"),),
+                source_request_id=f"holdings-{len(self.calls)}",
+                has_more=False,
+                next_cursor=None,
+                as_of=instant,
+                quality="PASS",
+            )
+
+        async def read_orders(
+            self, _external_account_id: str, *, cursor: str | None, limit: int
+        ) -> GatewayResponsePage:
+            assert cursor is None and limit == 100
+            self.calls.append("orders")
+            return GatewayResponsePage(
+                items=(),
+                source_request_id=f"orders-{len(self.calls)}",
+                has_more=False,
+                next_cursor=None,
+                as_of=instant,
+                quality="PASS",
+            )
+
+        async def read_cash_flows(
+            self,
+            _external_account_id: str,
+            *,
+            date_from: date,
+            date_to: date,
+            cursor: str | None,
+            limit: int,
+        ) -> GatewayResponsePage:
+            assert (date_from, date_to, cursor, limit) == (
+                date(2026, 8, 25),
+                date(2026, 8, 31),
+                None,
+                100,
+            )
+            self.calls.append("cash_flows")
+            return GatewayResponsePage(
+                items=(
+                    {
+                        "kind": "cash_flow",
+                        "external_cash_flow_id": "synthetic-flow-1",
+                        "currency": "USD",
+                        "amount": "10",
+                        "occurred_at": instant.isoformat(),
+                        "flow_type": "1",
+                    },
+                ),
+                source_request_id="cash-flows-1",
+                has_more=False,
+                next_cursor=None,
+                as_of=instant,
+                quality="PASS",
+            )
+
+    broker = _Broker()
+    frozen, cash_flows = await refresh_module._read_broker_facts(
+        broker,
+        account_id=account_id,
+        portfolio_id=uuid4(),
+        sync_run_id=uuid4(),
+        external_account_id="redacted-test-account",
+        instrument_ids={"usAAPL": instrument_id},
+        cash_flow_end=date(2026, 8, 31),
+        previous_cash_flow_watermark=None,
+    )
+
+    assert frozen.status == "READY"
+    assert cash_flows.quality == "PASS"
+    assert cash_flows.pagination_complete is True
+    assert broker.calls == [
+        "cash",
+        "holdings",
+        "orders",
+        "holdings",
+        "orders",
+        "cash",
+        "cash_flows",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_local_broker_gateway_rejects_pagination_before_follow_up() -> None:
     instant = datetime(2026, 8, 31, tzinfo=UTC)
 
@@ -381,8 +499,7 @@ async def test_provider_failure_never_opens_database_or_overwrites_previous_snap
             assert cursor is None and limit == 100
             return GatewayResponsePage(
                 items=tuple(
-                    _position(code).model_dump(mode="json")
-                    for code in ("usAAPL", "usMSFT")
+                    _position(code).model_dump(mode="json") for code in ("usAAPL", "usMSFT")
                 ),
                 source_request_id="holdings-test",
                 has_more=False,
@@ -455,6 +572,4 @@ def test_failure_output_only_preserves_fixed_local_error_codes() -> None:
         "LOCAL_KLINE_WINDOW_INCOMPLETE"
     )
     assert _safe_failure_code(ValueError("secret value")) == "LOCAL_READ_ONLY_REFRESH_FAILED"
-    assert _safe_failure_code(RuntimeError("LOCAL_BAD-CHAR")) == (
-        "LOCAL_READ_ONLY_REFRESH_FAILED"
-    )
+    assert _safe_failure_code(RuntimeError("LOCAL_BAD-CHAR")) == ("LOCAL_READ_ONLY_REFRESH_FAILED")

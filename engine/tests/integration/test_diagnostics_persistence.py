@@ -3,7 +3,14 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 import pytest
-from helpers.portfolio_api import ACCOUNTS, PORTFOLIOS, seed_portfolio_list, settings
+from helpers.portfolio_api import (
+    ACCOUNTS,
+    CLOCK,
+    PORTFOLIOS,
+    seed_portfolio_list,
+    settings,
+    snapshot_record,
+)
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
 from nexus.diagnostics.repository import load_history
 from nexus.diagnostics.service import diagnose_and_persist
@@ -32,6 +39,43 @@ def test_repository_has_no_ready_report_writer_even_by_convention() -> None:
 
     assert not hasattr(repository, "persist_report")
     assert not hasattr(repository, "_persist_report")
+
+
+@pytest.mark.asyncio
+async def test_production_diagnosis_rejects_ready_snapshot_without_cash_flow_reconciliation(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    run_id = UUID("0198d500-1000-7000-8000-000000000091")
+    snapshot_id = UUID("0198d500-1000-7000-8000-000000000092")
+    async with factory() as session, session.begin():
+        session.add(
+            BrokerSyncRun(
+                id=run_id,
+                account_id=ACCOUNTS[1],
+                portfolio_id=PORTFOLIOS[1],
+                trigger_kind="AUTOMATIC",
+                actor_id="unreconciled-ready",
+                route="broker-sync",
+                idempotency_key="unreconciled-ready",
+                request_hash="9" * 64,
+                status="READY",
+                accepted_at=CLOCK,
+                completed_at=CLOCK,
+                attempt_count=1,
+                failure_reason=None,
+                cash_flow_quality="NOT_RUN",
+            )
+        )
+        session.add(snapshot_record(snapshot_id, run_id, "READY", CLOCK, None))
+    async with factory() as session, session.begin():
+        with pytest.raises(ValueError, match="diagnostic reconciliation is incomplete"):
+            await diagnose_and_persist(
+                session,
+                portfolio_id=PORTFOLIOS[1],
+                snapshot_id=snapshot_id,
+            )
 
 
 @pytest.mark.asyncio

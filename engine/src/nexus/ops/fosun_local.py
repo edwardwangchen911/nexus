@@ -261,12 +261,16 @@ async def read_local_status(database_url: str) -> dict[str, object]:
                 )
             ).scalar_one_or_none()
             run = (
-                await session.execute(
-                    select(BrokerSyncRun)
-                    .order_by(desc(BrokerSyncRun.created_at), desc(BrokerSyncRun.id))
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
+                await session.get(BrokerSyncRun, snapshot.sync_run_id)
+                if snapshot
+                else (
+                    await session.execute(
+                        select(BrokerSyncRun)
+                        .order_by(desc(BrokerSyncRun.created_at), desc(BrokerSyncRun.id))
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+            )
             if snapshot is None:
                 return {
                     "status": "no_snapshot",
@@ -288,6 +292,7 @@ async def read_local_status(database_url: str) -> dict[str, object]:
             display, decision = derive_snapshot_readiness(
                 snapshot.status,
                 has_display_facts=bool(counts["cash"] or counts["positions"]),
+                cash_flow_quality=run.cash_flow_quality if run else "NOT_RUN",
             )
             return {
                 "status": "ok",
