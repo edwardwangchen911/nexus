@@ -337,7 +337,7 @@ Put the pure helper cases in new `test_runtime_authorization.py`; they construct
 
 - [ ] **Step 2: Run focused tests to verify failure**
 
-Run: `UV_OFFLINE=1 uv run --package nexus-fosun-gateway pytest integrations/fosun_gateway/tests/security/test_principal_authorization.py integrations/fosun_gateway/tests/security/test_read_only_surface.py integrations/fosun_gateway/tests/security/test_read_only_transport.py integrations/fosun_gateway/tests/unit/test_composition.py integrations/fosun_gateway/tests/test_health.py -q`
+Run: `UV_OFFLINE=1 uv run --package nexus-fosun-gateway pytest integrations/fosun_gateway/tests/security/test_principal_authorization.py integrations/fosun_gateway/tests/security/test_read_only_surface.py integrations/fosun_gateway/tests/security/test_read_only_transport.py integrations/fosun_gateway/tests/unit/test_runtime_authorization.py integrations/fosun_gateway/tests/unit/test_composition.py integrations/fosun_gateway/tests/test_health.py -q`
 
 Expected: FAIL because current HMAC authorizes coarse `fosun_sync_portfolio` before `PortfolioReadRequest` validation and startup has no selected scope/runtime authorization.
 
@@ -363,6 +363,7 @@ TMPDIR="$NEXUS_RUNTIME_TMP" PYTHONDONTWRITEBYTECODE=1 \
   integrations/fosun_gateway/tests/security/test_principal_authorization.py \
   integrations/fosun_gateway/tests/security/test_read_only_surface.py \
   integrations/fosun_gateway/tests/security/test_read_only_transport.py \
+  integrations/fosun_gateway/tests/unit/test_runtime_authorization.py \
   integrations/fosun_gateway/tests/unit/test_composition.py \
   integrations/fosun_gateway/tests/test_health.py -q -p no:cacheprovider
 ```
