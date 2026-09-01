@@ -174,20 +174,27 @@ quarantined, not admitted and not overwritten.
 the closed `authorized_operation_set`. Gateway construction receives this value; it never receives
 an artifact-derived coarse `GatewayOperation` allowlist.
 
-For every request, authorization order is fixed and must complete before `transport.execute` or SDK
-client construction:
+There are two non-interchangeable gates:
 
-1. Verify the listener's HMAC identity and its caller-specific allowed operation set.
-2. Perform route schema validation. For portfolio, validate `PortfolioReadRequest` including its
-   `read_kind` enum before making any authorization decision from it.
-3. Derive the runtime authorization name. Portfolio derives exactly
-   `fosun_sync_portfolio:cash` or `fosun_sync_portfolio:holdings` from the validated `read_kind`;
-   every other route maps one-to-one to its final operation name.
-4. Require the derived name in both the HMAC caller's allowed operation set and
-   `RuntimeAuthorization.authorized_operation_set`; otherwise return the existing non-disclosing
-   denial and do not construct/call transport.
-5. Only then invoke the route's fixed `transport.execute` operation with the already validated
-   request.
+1. **Startup gate:** validate the one exact artifact/receipt/version/run-ID/scope pairing and build
+   `RuntimeAuthorization` before constructing `SdkFosunTransport` or its SDK client. Invalid,
+   missing, mixed, expired, or legacy evidence keeps the runtime fixture-only or rejects startup;
+   it never constructs a Provider SDK client.
+2. **Request gate:** a successfully started read-only Gateway can own one shared transport/client.
+   Its per-request authorization is independent of that startup construction and must complete
+   before every `transport.execute` call or Provider physical dispatch:
+
+   1. Verify the listener's HMAC identity and its caller-specific allowed operation set.
+   2. Perform route schema validation. For portfolio, validate `PortfolioReadRequest` including its
+      `read_kind` enum before making any authorization decision from it.
+   3. Derive the runtime authorization name. Portfolio derives exactly
+      `fosun_sync_portfolio:cash` or `fosun_sync_portfolio:holdings` from the validated `read_kind`;
+      every other route maps one-to-one to its final operation name.
+   4. Require the derived name in both the HMAC caller's allowed operation set and
+      `RuntimeAuthorization.authorized_operation_set`; otherwise return the existing non-disclosing
+      denial without calling `transport.execute` or causing Provider physical dispatch.
+   5. Only then invoke the route's fixed `transport.execute` operation with the already validated
+      request.
 
 Thus the guard cannot merely check the existing coarse `fosun_sync_portfolio` during route selection:
 it must guard the derived cash/holdings name after enum validation. Core may permit both derived
@@ -284,9 +291,10 @@ minimal implementation change:
 4. **Admission/composition/network:** core denies OrderList/CashFlows, extended denies account,
    cash, holdings, quote, and bar operations. Test cash-only and holdings-only authorization deny
    the opposite `read_kind`, invalid `read_kind` fails before authorization, and all denied cases
-   leave transport unconstructed/uninvoked. Fixture remains default; invalid/mixed evidence
-   constructs no SDK client; offline socket guard confirms tests do not open a network connection;
-   repository policy rejects writes and scope bypasses.
+   leave `transport.execute` uninvoked with zero Provider physical dispatch. Separately, invalid or
+   mixed startup evidence constructs neither SDK client nor `SdkFosunTransport`. Fixture remains
+   default; offline socket guard confirms tests do not open a network connection; repository policy
+   rejects writes and scope bypasses.
 5. **Regression:** run the complete Gateway suite plus static/policy gates below. No Provider,
    capture CLI against secrets, or probe command is part of acceptance.
 
