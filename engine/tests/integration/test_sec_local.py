@@ -28,7 +28,7 @@ class InMemoryRawEvidenceStore:
         return f"memory://sha256/{key.rsplit('/', 1)[-1]}"
 
 
-async def seed_instrument(settings, *, asset_type="common_stock"):
+async def seed_instrument(settings, *, asset_type="common_stock", exchange="XNAS"):
     from datetime import date
     from decimal import Decimal
 
@@ -37,7 +37,7 @@ async def seed_instrument(settings, *, asset_type="common_stock"):
             Instrument(
                 id=INSTRUMENT,
                 asset_type=asset_type,
-                exchange="XNAS",
+                exchange=exchange,
                 currency="USD",
                 tick_size=Decimal("0.01"),
                 risk_bucket="us_equity",
@@ -55,7 +55,9 @@ async def seed_instrument(settings, *, asset_type="common_stock"):
         )
 
 
-def sec_responder(requests, *, wrong_issuer=False, reject=False):
+def sec_responder(
+    requests, *, wrong_issuer=False, reject=False, ambiguous=False, wrong_submission=False
+):
     def respond(request):
         requests.append(request)
         assert request.method == "GET"
@@ -68,7 +70,8 @@ def sec_responder(requests, *, wrong_issuer=False, reject=False):
                 200,
                 json={
                     "fields": ["cik", "name", "ticker", "exchange"],
-                    "data": [[320193, "Apple Inc.", "AAPL", "Nasdaq"]],
+                    "data": [[320193, "Apple Inc.", "AAPL", "Nasdaq"]]
+                    + ([[42, "Different company", "AAPL", "NYSE"]] if ambiguous else []),
                 },
             )
         assert request.url.host == "data.sec.gov"
@@ -82,6 +85,8 @@ def sec_responder(requests, *, wrong_issuer=False, reject=False):
             assert request.url.path == "/submissions/CIK0000320193.json"
             payload = json.loads((FIXTURES / "submissions.json").read_bytes())
             payload.update({"cik": "0000320193", "tickers": ["AAPL"], "exchanges": ["Nasdaq"]})
+            if wrong_submission:
+                payload["tickers"] = ["MSFT"]
             # Real submissions also contain non-financial forms with no Company Facts.
             recent = payload["filings"]["recent"]
             for key, value in {
@@ -97,9 +102,9 @@ def sec_responder(requests, *, wrong_issuer=False, reject=False):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("asset_type", ["common_stock", "equity"])
+@pytest.mark.parametrize(("asset_type", "exchange"), [("common_stock", "XNYS"), ("equity", "XNAS")])
 async def test_sec_only_refresh_archives_real_shape_and_freezes_inputs(
-    migrated_database_url, asset_type
+    migrated_database_url, asset_type, exchange
 ):
     from nexus.ops.sec_local import refresh_sec_research
 
@@ -107,7 +112,7 @@ async def test_sec_only_refresh_archives_real_shape_and_freezes_inputs(
     from nexus.ops.openai_local import prepare_database
 
     await prepare_database(settings)
-    await seed_instrument(settings, asset_type=asset_type)
+    await seed_instrument(settings, asset_type=asset_type, exchange=exchange)
     requests = []
     store = InMemoryRawEvidenceStore()
     async with httpx.AsyncClient(transport=httpx.MockTransport(sec_responder(requests))) as client:
@@ -123,6 +128,8 @@ async def test_sec_only_refresh_archives_real_shape_and_freezes_inputs(
         assert first["model_requests"] == 0
         assert first["execution_locked"] is True
         assert first["filings_created"] == 1
+        assert first["instrument_exchange"] == exchange
+        assert first["sec_exchange"] == "XNAS"
         second = await refresh_sec_research(
             settings,
             INSTRUMENT,
@@ -138,6 +145,7 @@ async def test_sec_only_refresh_archives_real_shape_and_freezes_inputs(
         assert await session.scalar(select(func.count()).select_from(FinancialFactRecord)) == 11
         assert await session.scalar(select(func.count()).select_from(AgentResearchRunRecord)) == 0
         assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 2
+        assert (await session.get(Instrument, INSTRUMENT)).exchange == exchange
         assert (
             await session.scalar(select(func.count()).select_from(AgentDataSnapshotEvidenceRecord))
             == 2
@@ -168,7 +176,7 @@ async def test_sec_only_refresh_archives_real_shape_and_freezes_inputs(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["contact", "rate_limit", "issuer"])
+@pytest.mark.parametrize("failure", ["contact", "rate_limit", "issuer", "ambiguous", "submission"])
 async def test_sec_only_refresh_stops_without_fake_research(migrated_database_url, failure):
     from nexus.ops.sec_local import refresh_sec_research
 
@@ -181,6 +189,8 @@ async def test_sec_only_refresh_stops_without_fake_research(migrated_database_ur
                 requests,
                 wrong_issuer=failure == "issuer",
                 reject=failure == "rate_limit",
+                ambiguous=failure == "ambiguous",
+                wrong_submission=failure == "submission",
             )
         )
     ) as client:
@@ -192,7 +202,10 @@ async def test_sec_only_refresh_stops_without_fake_research(migrated_database_ur
                 http_client=client,
                 store=InMemoryRawEvidenceStore(),
             )
-    assert len(requests) == {"contact": 0, "rate_limit": 1, "issuer": 3}[failure]
+    assert (
+        len(requests)
+        == {"contact": 0, "rate_limit": 1, "issuer": 3, "ambiguous": 1, "submission": 3}[failure]
+    )
     async with session_factory(settings)() as session:
         assert await session.scalar(select(func.count()).select_from(Filing)) == 0
         assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 0

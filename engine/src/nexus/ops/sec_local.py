@@ -156,12 +156,7 @@ async def refresh_sec_research(
             if not isinstance(rows, list):
                 raise ValueError("SEC_LOCAL_TICKER_MAPPING_INVALID")
             matches = [
-                row
-                for row in rows
-                if isinstance(row, list)
-                and len(row) == 4
-                and row[2] == symbol
-                and _EXCHANGES.get(row[3]) == exchange
+                row for row in rows if isinstance(row, list) and len(row) == 4 and row[2] == symbol
             ]
             if (
                 len(matches) != 1
@@ -170,11 +165,18 @@ async def refresh_sec_research(
                 or not 0 < matches[0][0] < 10**10
             ):
                 raise ValueError("SEC_LOCAL_TICKER_MAPPING_UNAVAILABLE")
+            # The Fosun local importer uses XNYS as a US-market placeholder.
+            # Resolve the actual listing from SEC and corroborate it in submissions;
+            # never rewrite the immutable instrument master from a research read.
+            sec_exchange = _EXCHANGES.get(matches[0][3])
+            if sec_exchange not in US_EQUITY_EXCHANGES:
+                raise ValueError("SEC_LOCAL_TICKER_MAPPING_UNAVAILABLE")
+            assert sec_exchange is not None
             identity = SecInstrumentIdentity(
                 instrument_id,
                 str(matches[0][0]).zfill(10),
                 symbol,
-                exchange,
+                sec_exchange,
                 "USD",
             )
             await store.put_if_absent(
@@ -207,6 +209,8 @@ async def refresh_sec_research(
                     "model_requests": 0,
                     "execution_locked": True,
                     "research_completed": False,
+                    "instrument_exchange": exchange,
+                    "sec_exchange": identity.exchange,
                     "research_path": f"/research/{instrument_id}?"
                     + urlencode(
                         {

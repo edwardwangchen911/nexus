@@ -69,6 +69,8 @@ uv run --package nexus-engine nexus-openai-local setup
 10-K/10-Q：最多 3 个公开 GET（标的目录、Company Facts、当前 submissions），60 秒总窗口，
 禁止跳转、无自动重试、首错即停。复用已有 SEC 归档与财报/财务事实入库逻辑，
 核对 ticker/交易所/CIK 后生成研究输入及研究页路径，不启动模型或后台任务。
+实际上市交易所由 SEC 目录与 submissions 交叉核对；旧复星主表的 `XNYS` 市场占位不作
+上市交易所依据。返回值分别标明本地主表与 SEC 交易所，不改写持仓、行情或主表。
 仅写本机数据库及本机对象存储；重复财报不重复入库。停用此命令即可停止采集，无新服务或迁移。
 Responses 使用 `store=false`，工具续调用显式携带上下文；预算、证据校验和执行锁不变。
 本次不改变数据库 schema；停用此本机入口即可停止模型调用，保留配置与审计历史。
