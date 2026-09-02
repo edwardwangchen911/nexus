@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.optimizer.compare import ComparisonDimensions
+from nexus.optimizer.compare import ComparableProposal, ComparisonDimensions, compare_proposals
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.optimization import (
     OptimizationProposalGroupRecord,
@@ -43,6 +43,25 @@ class FrozenProposalComparison(BaseModel):
     diagnostic_complete: bool
     execution_locked: Literal[True] = True
     variants: tuple[FrozenComparisonVariant, ...] = Field(min_length=3, max_length=3)
+
+
+def assess_frozen_comparison(comparison: FrozenProposalComparison) -> dict[str, object]:
+    """Add a current read assessment; never rewrite the saved snapshot or its content hash."""
+    result = compare_proposals(tuple(
+        ComparableProposal(
+            variant=row.variant, dimensions=row.dimensions,
+            requires_fx=row.requires_fx, cost_complete=row.cost_complete,
+            eligibility_complete=not row.non_executable,
+            evidence_complete=comparison.diagnostic_complete,
+            partial=comparison.partial, stale=comparison.authority_stale,
+            source_conflict=comparison.source_conflict,
+        )
+        for row in comparison.variants
+    ))
+    return {
+        "status": result.status, "recommendation": result.recommendation,
+        "reasons": list(result.reasons),
+    }
 
 
 async def read_comparison_for_freeze(
