@@ -1,11 +1,12 @@
 """Idempotent production proposal-group construction without a worker/lease."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.diagnostics.artifacts import ArtifactByteReader
 from nexus.diagnostics.models import PortfolioDiagnosticReport
 from nexus.diagnostics.repository import _read_report, load_frozen_snapshot
 from nexus.optimizer.authority import load_admission_authority
@@ -27,6 +28,7 @@ from nexus.optimizer.persistence import (
     ProposalPersistenceAuthority,
     persist_proposal_group,
 )
+from nexus.optimizer.scenario_risk import ScenarioEvidence, load_scenario_evidence
 from nexus.optimizer.selection_authority import load_selection_authority
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import (
@@ -36,6 +38,7 @@ from nexus.persistence.models.optimization import (
 from nexus.providers.broker.base import PortfolioSnapshot
 from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
+from nexus.simulation.costs import CostModel
 from nexus.strategy.intents import ResearchIntent
 
 _SCHEMA_VERSION = "optimization_group_v1"
@@ -63,6 +66,7 @@ async def build_and_persist_proposal_group(
     request_hash: str,
     admission_authority_id: UUID,
     research: tuple[ResearchIntent, ...],
+    artifact_reader: ArtifactByteReader | None = None,
 ) -> PersistedProposalGroup:
     """Load frozen inputs, compose real variants, then invoke the sole atomic writer."""
     admission = await session.get(
@@ -119,8 +123,9 @@ async def build_and_persist_proposal_group(
             "cost_model_version": "cost_policy_v1",
         }
     )
+    scenario = await load_scenario_evidence(session, snapshot, artifact_reader)
     comparisons = _comparison_inputs(
-        group, report, minimum_inputs, snapshot, cost_policy.parameters
+        group, report, minimum_inputs, snapshot, cost_policy.parameters, scenario
     )
     return await create_proposal_group_idempotently(
         session,
@@ -128,7 +133,8 @@ async def build_and_persist_proposal_group(
         idempotency_key=idempotency_key,
         request_hash=request_hash,
         group=group,
-        authority=loaded.persistence,
+        authority=replace(loaded.persistence, cost_complete=False)
+        if group.portfolio_scope == "real_read_only" else loaded.persistence,
         comparisons=comparisons,
     )
 
@@ -229,10 +235,15 @@ def _comparison_inputs(
     minimum_inputs: MinimumChangeInputs,
     snapshot: PortfolioSnapshot,
     cost_parameters: dict[str, object],
+    scenario_evidence: ScenarioEvidence | None = None,
 ) -> tuple[ProposalComparisonInput, ProposalComparisonInput, ProposalComparisonInput]:
     currencies = {position.instrument_id: position.currency for position in snapshot.positions}
     commission = Decimal(str(cost_parameters["commission_bps"]))
     slippage = Decimal(str(cost_parameters["slippage_bps"]))
+    model = CostModel(commission_bps=commission, spread_bps=Decimal(0), slippage_bps=slippage)
+    # The published methodology has no broker fee evidence. Simulation parameters
+    # cannot certify costs for a real-account analysis, even when both are zero.
+    cost_proven = group.portfolio_scope != "real_read_only"
     result = []
     for proposal in group.proposals:
         incomplete_strategy = (
@@ -242,28 +253,34 @@ def _comparison_inputs(
         incomplete_minimum = (
             proposal.variant == "minimum_change" and not minimum_inputs.evidence_complete
         )
-        cost = proposal.turnover * (commission + slippage) / Decimal("10000")
+        traded_weight = sum(
+            (abs(p.target_weight - p.current_weight) for p in proposal.positions), Decimal(0)
+        )
+        cost = model.estimate(traded_weight)
         dimensions = evaluate_dimensions(
             proposal,
             report,
-            cost=None if incomplete_strategy or incomplete_minimum else cost,
+            cost=None if incomplete_strategy or incomplete_minimum or not cost_proven else cost,
             instrument_currencies=currencies,
+            scenario_evidence=scenario_evidence,
         )
         result.append(
             ProposalComparisonInput(
                 variant=proposal.variant,
                 violation_count=dimensions.hard_violations,
                 turnover=proposal.turnover,
-                cost=cost if not incomplete_strategy and not incomplete_minimum else None,
+                cost=cost
+                if not incomplete_strategy and not incomplete_minimum and cost_proven else None,
                 unknown_metrics=dimensions.unknown_ranked_dimensions
                 + (("strategy_evidence",) if incomplete_strategy else ())
                 + (("minimum_change_evidence",) if incomplete_minimum else ()),
                 requires_fx=False,
                 source_conflict=False,
                 partial=False,
-                cost_complete=True,
+                cost_complete=cost_proven,
                 evidence_complete=not incomplete_strategy and not incomplete_minimum,
                 dimensions=dimensions,
+                evidence_refs=() if scenario_evidence is None else scenario_evidence.refs,
             )
         )
     return result[0], result[1], result[2]

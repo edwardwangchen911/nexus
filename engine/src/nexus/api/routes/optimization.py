@@ -57,6 +57,7 @@ from nexus.audit.service import append_audit_event
 from nexus.domain.decimal import decimal_to_string
 from nexus.optimizer.admission import admit_queued_job
 from nexus.optimizer.authority import load_admission_authority
+from nexus.optimizer.construction import load_analysis_construction_inputs
 from nexus.optimizer.initial_draft import InitialDraftUnavailable, create_initial_draft
 from nexus.optimizer.lifecycle import reject_group_idempotently
 from nexus.optimizer.models import (
@@ -288,13 +289,23 @@ async def admit_optimization_proposal(
         data_snapshot_id=body.data_snapshot_id,
         cost_policy_id=body.cost_policy_id,
     )
-    if loaded is None:
+    construction = None if loaded is not None else await load_analysis_construction_inputs(
+        session, portfolio_snapshot_id=body.portfolio_snapshot_id,
+        data_snapshot_id=body.data_snapshot_id, cost_policy_id=body.cost_policy_id,
+        now=_utc_now(request),
+    )
+    if loaded is None and construction is None:
         raise NexusError(
             ErrorCode.DATA_PARTIAL,
             "Persisted optimization authority is incomplete.",
             status_code=409,
             details={"reason": "OPTIMIZATION_AUTHORITY_MISSING"},
         )
+    if loaded is not None:
+        portfolio_id, valuation_time = loaded.portfolio_id, loaded.persistence.valuation_time
+    else:
+        assert construction is not None
+        portfolio_id, valuation_time = construction.portfolio_id, construction.valuation_time
     try:
         job = await admit_queued_job(
             session,
@@ -307,8 +318,8 @@ async def admit_optimization_proposal(
                 "data_snapshot_id": str(body.data_snapshot_id),
                 "cost_policy_id": str(body.cost_policy_id),
             },
-            portfolio_id=loaded.portfolio_id,
-            effective_at=loaded.persistence.valuation_time,
+            portfolio_id=portfolio_id,
+            effective_at=valuation_time,
         )
     except IdempotencyConflict as error:
         raise NexusError(
@@ -465,6 +476,7 @@ async def create_optimization_draft(
             session, portfolio_snapshot_id=body.portfolio_snapshot_id,
             diagnostic_report_id=body.diagnostic_report_id, actor_id=actor.actor_id,
             idempotency_key=idempotency_key, request_hash=request_hash, now=_utc_now(request),
+            artifact_reader=getattr(request.app.state, "diagnostic_artifact_reader", None),
         )
     except IdempotencyConflict as error:
         raise NexusError(ErrorCode.IDEMPOTENCY_CONFLICT, "Draft request conflicts with prior request.", status_code=409) from error

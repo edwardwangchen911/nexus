@@ -1,6 +1,7 @@
 """Atomic immutable storage and redacted retrieval for diagnostic reports."""
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 from hashlib import sha256
@@ -11,6 +12,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.diagnostics.models import (
+    ComparableVariantEvidence,
     DiagnosticHistory,
     DiagnosticItem,
     InstrumentIdentity,
@@ -261,9 +263,143 @@ async def load_history(
         )
         for record, report in zip(records, reports, strict=True)
     )
+    comparisons = await _comparable_history(session, records, current_snapshot_as_of)
     return DiagnosticHistory(
-        prior_reports=tuple(reports), authority_refs=refs, comparable_variants=()
+        prior_reports=tuple(reports),
+        authority_refs=(*refs, *(ref for item in comparisons for ref in item.evidence_refs)),
+        comparable_variants=comparisons,
     )
+
+
+async def _comparable_history(
+    session: AsyncSession,
+    reports: Sequence[PortfolioDiagnosticReportRecord],
+    cutoff: datetime,
+) -> tuple[ComparableVariantEvidence, ...]:
+    """Read historical comparisons, never promote a draft or reuse another portfolio's proof."""
+    from nexus.optimizer.authority import load_admission_authority
+    from nexus.optimizer.repository import (
+        _comparison_is_executable,
+        has_executable_shadow_authority,
+    )
+    from nexus.persistence.models.data import DataSnapshot
+    from nexus.persistence.models.optimization import (
+        OptimizationAdmissionAuthorityRecord,
+        OptimizationProposalGroupRecord,
+        OptimizationProposalRecord,
+        ProposalComparisonRecord,
+    )
+
+    if not reports:
+        return ()
+    groups = tuple(
+        await session.scalars(
+            select(OptimizationProposalGroupRecord)
+            .where(
+                OptimizationProposalGroupRecord.diagnostic_report_id.in_([r.id for r in reports]),
+                OptimizationProposalGroupRecord.created_at <= cutoff,
+                OptimizationProposalGroupRecord.baseline_ready.is_(True),
+                OptimizationProposalGroupRecord.diagnostic_complete.is_(True),
+                OptimizationProposalGroupRecord.partial.is_(False),
+                OptimizationProposalGroupRecord.cost_complete.is_(True),
+                OptimizationProposalGroupRecord.source_conflict.is_(False),
+                OptimizationProposalGroupRecord.requires_fx.is_(False),
+                OptimizationProposalGroupRecord.authority_stale.is_(False),
+            )
+            .order_by(OptimizationProposalGroupRecord.id)
+        )
+    )
+    result = []
+    for group in groups:
+        authority = await load_admission_authority(
+            session,
+            portfolio_snapshot_id=group.baseline_portfolio_snapshot_id,
+            data_snapshot_id=group.data_snapshot_id,
+            cost_policy_id=group.cost_policy_id,
+        )
+        if (
+            authority is None
+            or authority.persistence.diagnostic_report_id != group.diagnostic_report_id
+            or authority.persistence.diagnostic_input_hash != group.diagnostic_input_hash
+            or authority.persistence.valuation_time != group.valuation_time
+            or authority.persistence.portfolio_scope != group.portfolio_scope
+            or authority.persistence.source_policy_id != group.source_policy_id
+            or authority.persistence.optimizer_policy_id != group.policy_id
+            or authority.persistence.selection_authority_id != group.selection_authority_id
+            or authority.persistence.selection_evidence_hash != group.selection_evidence_hash
+        ):
+            continue
+        admission = await session.get(
+            OptimizationAdmissionAuthorityRecord, authority.admission_authority_id
+        )
+        data = await session.get(DataSnapshot, group.data_snapshot_id)
+        if (
+            admission is None
+            or admission.created_at > cutoff
+            or data is None
+            or data.created_at > cutoff
+        ):
+            continue
+        rows = (
+            await session.execute(
+                select(OptimizationProposalRecord, ProposalComparisonRecord)
+                .join(ProposalComparisonRecord)
+                .where(
+                    OptimizationProposalRecord.proposal_group_id == group.id,
+                    OptimizationProposalRecord.created_at <= cutoff,
+                    ProposalComparisonRecord.created_at <= cutoff,
+                )
+                .order_by(OptimizationProposalRecord.variant)
+            )
+        ).all()
+        if len(rows) != 3:
+            continue
+        hold = next((c for p, c in rows if p.variant == "hold_current"), None)
+        if hold is None or not _comparison_is_executable(hold, group):
+            continue
+        for proposal, comparison in rows:
+            if proposal.variant == "hold_current" or not _comparison_is_executable(
+                comparison, group
+            ):
+                continue
+            if proposal.variant == "strategy_target" and not await has_executable_shadow_authority(
+                session, group
+            ):
+                continue
+            digest = sha256(
+                json.dumps(
+                    {
+                        "group_id": str(group.id),
+                        "variant": proposal.variant,
+                        "baseline_id": str(group.baseline_portfolio_snapshot_id),
+                        "diagnostic_input_hash": group.diagnostic_input_hash,
+                        "metrics": comparison.metrics,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            ref = EvidenceRef(
+                source="nexus_db",
+                object_id=f"proposal-comparison:{comparison.id}",
+                available_at=max(
+                    group.created_at,
+                    proposal.created_at,
+                    comparison.created_at,
+                    admission.created_at,
+                    data.created_at,
+                ),
+                location=f"db://proposal-comparisons/{comparison.id}",
+                content_hash=digest,
+            )
+            result.append(
+                ComparableVariantEvidence(
+                    variant=cast(Literal["minimum_change", "strategy_target"], proposal.variant),
+                    proposal_group_id=group.id,
+                    evidence_refs=(ref,),
+                )
+            )
+    return tuple(result)
 
 
 async def latest_report(
@@ -349,9 +485,7 @@ def _stored_decimal(value: str | None) -> Decimal | None:
         return None
     with localcontext() as context:
         context.prec = 50
-        return Decimal(value).quantize(
-            Decimal("0.000000000001"), rounding=ROUND_HALF_UP
-        )
+        return Decimal(value).quantize(Decimal("0.000000000001"), rounding=ROUND_HALF_UP)
 
 
 def _string(value: Decimal | None) -> str | None:

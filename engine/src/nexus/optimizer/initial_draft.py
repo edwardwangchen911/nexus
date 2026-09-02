@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.diagnostics.artifacts import ArtifactByteReader
 from nexus.diagnostics.assembler import load_diagnostic_source_policy
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID, load_real_advisory_policy_v1
 from nexus.diagnostics.repository import (
@@ -28,6 +29,7 @@ from nexus.optimizer.production import (
     _minimum_change_inputs,
     create_proposal_group_idempotently,
 )
+from nexus.optimizer.scenario_risk import load_scenario_evidence
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
 from nexus.persistence.models.optimization import OptimizationPolicyRecord
@@ -57,6 +59,8 @@ async def create_initial_draft(
     idempotency_key: str,
     request_hash: str,
     now: datetime,
+    expected_data_snapshot_id: UUID | None = None,
+    artifact_reader: ArtifactByteReader | None = None,
 ) -> PersistedProposalGroup:
     """Create no Job, authority, research call, order, or synthetic candidate diagnosis."""
     record = await session.scalar(
@@ -184,6 +188,9 @@ async def create_initial_draft(
     }
     if fx is not None:
         inputs["fx_valuation"] = fx.input_identity()
+    scenario = await load_scenario_evidence(session, snapshot, artifact_reader)
+    if scenario.refs:
+        inputs["comparison_evidence"] = [ref.model_dump(mode="json") for ref in scenario.refs]
     digest = hashlib.sha256(
         json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -211,6 +218,8 @@ async def create_initial_draft(
         )
     )
     assert data is not None
+    if expected_data_snapshot_id is not None and data.id != expected_data_snapshot_id:
+        raise InitialDraftUnavailable("DRAFT_INPUT_BINDING_CHANGED")
     authority = ProposalPersistenceAuthority(
         diagnostic_report_id=diagnostic.id,
         data_snapshot_id=data.id,
@@ -245,7 +254,7 @@ async def create_initial_draft(
             ),
         )
         for comparison in _comparison_inputs(
-            group, report, minimum, snapshot, cost_policy.parameters
+            group, report, minimum, snapshot, cost_policy.parameters, scenario
         )
     )
     return await create_proposal_group_idempotently(

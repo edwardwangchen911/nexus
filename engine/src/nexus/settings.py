@@ -36,6 +36,11 @@ class _SafeSettings(BaseSettings):
 
 
 class EngineSettings(_SafeSettings):
+    @property
+    def object_store_prefix(self) -> Literal["provider/market"]:
+        """Read the same frozen market namespace used by the provider collector."""
+        return "provider/market"
+
     environment: Environment = Field(
         default=Environment.DEVELOPMENT,
         validation_alias="NEXUS_ENV",

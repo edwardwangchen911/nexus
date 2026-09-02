@@ -24,7 +24,9 @@ from nexus.api.routes.risk_audit import router as risk_audit_router
 from nexus.api.routes.strategies import router as strategies_router
 from nexus.api.routes.system import router as system_router
 from nexus.api.schemas.optimization import WhatIfRequest
+from nexus.diagnostics.artifacts import ArtifactByteReader
 from nexus.domain.ids import new_uuid7
+from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.persistence.session import session_factory
 from nexus.readiness import ReadinessObjectStore, S3ReadinessObjectStore
 from nexus.settings import EngineSettings
@@ -34,11 +36,17 @@ def create_engine_app(
     settings: EngineSettings | None = None,
     *,
     readiness_object_store: ReadinessObjectStore | None = None,
+    diagnostic_artifact_reader: ArtifactByteReader | None = None,
 ) -> FastAPI:
     """Create the stateless API application without probing dependencies."""
     app = FastAPI(title="NEXUS Engine", version="0.1.0")
     app.state.settings = settings or EngineSettings()
     app.state.session_factory = session_factory(app.state.settings)
+    app.state.diagnostic_artifact_reader = (
+        diagnostic_artifact_reader
+        if diagnostic_artifact_reader is not None
+        else S3ProviderEvidenceStore(app.state.settings).read_normalized
+    )
     app.state.readiness_object_store = readiness_object_store or S3ReadinessObjectStore(
         app.state.settings
     )
