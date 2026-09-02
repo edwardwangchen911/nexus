@@ -11,12 +11,12 @@ const factLabels: Record<string, string> = {
 export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string }): React.ReactElement {
   return <article className="decision-card" aria-labelledby="research-inputs-title">
     <header className="decision-card__heading">
-      <div><p className="eyebrow">SEC · 本地只读证据</p><h2 id="research-inputs-title">{inputs.display_symbol ?? "标的"} · 已冻结财报</h2></div>
+      <div><p className="eyebrow">SEC · 本地只读证据</p><h2 id="research-inputs-title">{inputs.display_symbol ?? "标的"} · {inputs.filings.some((filing) => filing.form === "6-K") ? "已冻结披露" : "已冻结财报"}</h2></div>
       <span className="mode-badge">资料核验 · 非 AI 结论</span>
     </header>
     <dl className="decision-card__authority">
       <div><dt>冻结截止</dt><dd>{formatUtc(asOf)}</dd></div>
-      <div><dt>财报</dt><dd>{inputs.filings.length} 份</dd></div>
+      <div><dt>SEC 资料</dt><dd>{inputs.filings.length} 份</dd></div>
       <div><dt>财务事实</dt><dd>{inputs.total_facts} 条</dd></div>
       <div><dt>使用边界</dt><dd>未形成买卖判断，不触发交易</dd></div>
     </dl>
@@ -47,6 +47,15 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
       <details className="portfolio-disclosure"><summary>查看证据版本与哈希</summary>
         <dl className="decision-card__versions"><div><dt>版本</dt><dd>{filing.revision}</dd></div><div><dt>内容 SHA-256</dt><dd>{filing.content_hash}</dd></div></dl>
       </details>
+      {filing.disclosure_excerpt ? <>
+        <p>文本披露，不是结构化财务指标；不代表完整覆盖，不据此推导财务数值。</p>
+        <details className="portfolio-disclosure"><summary>查看冻结披露正文{filing.disclosure_truncated ? "（节选）" : ""}</summary>
+          <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{filing.disclosure_excerpt}</p>
+          {filing.disclosure_truncated ? <p>正文超出展示上限，完整原文请查看 SEC 来源。</p> : null}
+          {filing.source_url ? <a href={filing.source_url} target="_blank" rel="noreferrer">查看 SEC 原文</a> : null}
+        </details>
+      </> : filing.form === "6-K" ? <p>披露正文暂不可用，不作为已读取的文本证据。</p> : null}
+      {inputs.facts.some((fact) => fact.evidence_ref_id === filing.evidence_ref_id) ? <>
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- The overflow table needs keyboard focus for horizontal scrolling. */}
       <div className="table-scroll" role="region" aria-label={`${filing.form} 财务事实，可横向滚动`} tabIndex={0}>
         <table className="market-table numeric-data">
@@ -60,6 +69,7 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
           </tr>)}</tbody>
         </table>
       </div>
+      </> : <p>尚无结构化财务指标。</p>}
     </section>)}
   </article>;
 }

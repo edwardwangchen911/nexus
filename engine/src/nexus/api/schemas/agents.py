@@ -76,6 +76,13 @@ class ResearchInputFiling(_StrictAgentSchema):
     received_at: datetime
     revision: str = Field(max_length=255)
     content_hash: str = Field(pattern="^[0-9a-f]{64}$")
+    disclosure_excerpt: str | None = Field(default=None, max_length=12000)
+    disclosure_truncated: bool = False
+    source_url: str | None = Field(
+        default=None,
+        max_length=512,
+        pattern=r"^https://www\.sec\.gov/Archives/edgar/data/[0-9]+/[0-9]{18}/[A-Za-z0-9][A-Za-z0-9._-]*\.htm[l]?$",
+    )
 
 
 class ResearchInputFact(_StrictAgentSchema):

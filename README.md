@@ -101,6 +101,11 @@ uv run --package nexus-engine nexus-openai-local setup --backend responses
 10-K/10-Q：最多 3 个公开 GET（标的目录、Company Facts、当前 submissions），60 秒总窗口，
 禁止跳转、无自动重试、首错即停。复用已有 SEC 归档与财报/财务事实入库逻辑，
 核对 ticker/交易所/CIK 后生成研究输入及研究页路径，不启动模型或后台任务。
+仅有外国发行人 6-K 文本时，使用 `nexus-openai-local refresh-disclosure --instrument-id <标的 UUID>`。
+同样最多 3 个公开 GET（目录、submissions、最新 6-K 原文），无重试；不请求 Company Facts。
+原文归档并校验哈希后进入既有数据库、冻结研究、Codex SDK 与研究页；正文按需展开，
+明确区分披露与结构化财务指标，不从文字生成财务数值，不覆盖 ETF，也不提升行情或执行权限。
+无新依赖或数据库迁移；停用此命令即可停止采集，既有财报入口不变。
 实际上市交易所由 SEC 目录与 submissions 交叉核对；旧复星主表的 `XNYS` 市场占位不作
 上市交易所依据。返回值分别标明本地主表与 SEC 交易所，不改写持仓、行情或主表。
 研究页直接展示快照绑定的 SEC 财报与财务原始值，含统计期间、接受/入库时间、版本和哈希；

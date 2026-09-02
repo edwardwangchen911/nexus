@@ -5540,6 +5540,23 @@ export const runtimeContractSchemas = {
         "title": "Content Hash",
         "type": "string"
       },
+      "disclosure_excerpt": {
+        "anyOf": [
+          {
+            "maxLength": 12000,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Disclosure Excerpt"
+      },
+      "disclosure_truncated": {
+        "default": false,
+        "title": "Disclosure Truncated",
+        "type": "boolean"
+      },
       "evidence_ref_id": {
         "format": "uuid",
         "title": "Evidence Ref Id",
@@ -5565,6 +5582,19 @@ export const runtimeContractSchemas = {
         "default": "sec",
         "title": "Source",
         "type": "string"
+      },
+      "source_url": {
+        "anyOf": [
+          {
+            "maxLength": 512,
+            "pattern": "^https://www\\.sec\\.gov/Archives/edgar/data/[0-9]+/[0-9]{18}/[A-Za-z0-9][A-Za-z0-9._-]*\\.htm[l]?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Source Url"
       }
     },
     "required": [

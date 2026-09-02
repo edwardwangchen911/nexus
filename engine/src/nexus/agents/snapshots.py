@@ -16,6 +16,7 @@ from nexus.domain.time import require_utc
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
+from nexus.research.sec_disclosures import SEC_RESEARCH_FORMS
 
 
 async def prepare_research_snapshot(
@@ -42,7 +43,7 @@ async def prepare_research_snapshot(
                     Filing.evidence_ref_id == ResearchEvidenceRef.id,
                     Filing.instrument_id == instrument_id,
                     Filing.source == "sec",
-                    Filing.form.in_(("10-K", "10-Q", "8-K")),
+                    Filing.form.in_(SEC_RESEARCH_FORMS),
                     Filing.filed_at <= as_of,
                     Filing.accepted_at <= as_of,
                     Filing.created_at <= as_of,

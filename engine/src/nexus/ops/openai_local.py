@@ -275,6 +275,7 @@ def main() -> int:
             "verify",
             "prepare-research",
             "refresh-research",
+            "refresh-disclosure",
             "run-once",
         ),
     )
@@ -291,7 +292,8 @@ def main() -> int:
             raise ValueError("OPENAI_REPOSITORY_ROOT_REQUIRED")
         settings = local_settings(
             root,
-            load_model_key=args.action not in {"prepare-research", "refresh-research"},
+            load_model_key=args.action
+            not in {"prepare-research", "refresh-research", "refresh-disclosure"},
             backend=args.backend,
         )
         if args.action == "setup":
@@ -318,7 +320,7 @@ def main() -> int:
                     settings, args.instrument_id, as_of=args.as_of or datetime.now(UTC)
                 )
             )
-        elif args.action == "refresh-research":
+        elif args.action in {"refresh-research", "refresh-disclosure"}:
             if args.instrument_id is None:
                 raise ValueError("OPENAI_RESEARCH_INSTRUMENT_REQUIRED")
             if args.as_of is not None:
@@ -333,6 +335,7 @@ def main() -> int:
                     settings,
                     args.instrument_id,
                     contact=contact,
+                    disclosure_only=args.action == "refresh-disclosure",
                 )
             )
         elif args.action == "run-once":

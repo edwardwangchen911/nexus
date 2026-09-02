@@ -13,6 +13,7 @@ from nexus.domain.decimal import decimal_to_string
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord as Frozen
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.research import Filing, FinancialFactRecord, ResearchEvidenceRef
+from nexus.research.sec_disclosures import read_disclosures
 
 
 async def read_research_inputs(
@@ -49,6 +50,12 @@ async def read_research_inputs(
     if not rows:
         return None
     visible = rows[:20]
+    disclosures = await read_disclosures(
+        session,
+        instrument_id=instrument_id,
+        evidence_ids=tuple(evidence.id for _, evidence in visible),
+        as_of=as_of,
+    )
     query = select(FinancialFactRecord).where(
         FinancialFactRecord.filing_id.in_([filing.id for filing, _ in visible]),
         FinancialFactRecord.instrument_id == instrument_id,
@@ -88,6 +95,15 @@ async def read_research_inputs(
                 received_at=evidence.created_at,
                 revision=evidence.revision,
                 content_hash=evidence.content_hash,
+                disclosure_excerpt=disclosures[evidence.id].excerpt
+                if evidence.id in disclosures
+                else None,
+                disclosure_truncated=disclosures[evidence.id].truncated
+                if evidence.id in disclosures
+                else False,
+                source_url=disclosures[evidence.id].source_url
+                if evidence.id in disclosures
+                else None,
             )
             for filing, evidence in visible
         ),

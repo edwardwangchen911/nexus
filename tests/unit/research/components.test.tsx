@@ -17,6 +17,24 @@ const states: Array<[DataStateKind, string]> = [
 ];
 
 describe("research evidence docket", () => {
+  it("distinguishes inert disclosure text from financial metrics and expands on demand", () => {
+    const source = "https://www.sec.gov/Archives/edgar/data/1/000000000126000001/doc.htm";
+    const excerpt = "Company has not decided. <script>alert('not executable')</script>";
+    render(<ResearchInputs asOf="2026-09-02T06:00:00Z" inputs={{
+      display_symbol: "TEST", total_facts: 0, truncated: false, facts: [],
+      filings: [{ evidence_ref_id: "filing-1", source: "sec", form: "6-K", accession_number: "0000000001-26-000001", accepted_at: "2026-08-21T20:00:00Z", received_at: "2026-09-02T05:59:00Z", revision: "a".repeat(64), content_hash: "a".repeat(64), disclosure_excerpt: excerpt, disclosure_truncated: true, source_url: source }],
+    }} />);
+    expect(screen.getByRole("heading", { name: "TEST · 已冻结披露" })).toBeVisible();
+    expect(screen.getByText(/文本披露，不是结构化财务指标/)).toBeVisible();
+    expect(screen.getByText("尚无结构化财务指标。")).toBeVisible();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    const details = screen.getByText("查看冻结披露正文（节选）").closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("查看冻结披露正文（节选）"));
+    expect(screen.getByText(excerpt)).toBeVisible();
+    expect(details.querySelector("script")).toBeNull();
+    expect(screen.getByRole("link", { name: "查看 SEC 原文" })).toHaveAttribute("href", source);
+  });
   it("shows frozen portfolio context and missing market evidence without a model", () => {
     render(<ResearchInputs asOf="2026-09-02T06:00:00Z" inputs={{
       display_symbol: "TEST", total_facts: 0, truncated: false, filings: [], facts: [],

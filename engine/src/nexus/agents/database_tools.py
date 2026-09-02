@@ -45,6 +45,7 @@ from nexus.quality.source_policy import (
     SOURCE_POLICY_V2_VERSION,
     SOURCE_POLICY_VERSION,
 )
+from nexus.research.sec_disclosures import read_disclosures
 
 
 async def database_read_only_tools(
@@ -218,6 +219,12 @@ class _BoundDatabaseExecutors:
                 .limit(20)
             )
         )
+        disclosures = await read_disclosures(
+            self._session,
+            instrument_id=self._instrument_id,
+            evidence_ids=tuple(record.evidence_ref_id for record in records),
+            as_of=self._decision_time,
+        )
         return self._result(
             "search_filing_evidence",
             [
@@ -228,6 +235,11 @@ class _BoundDatabaseExecutors:
                     "filed_at": _timestamp(record.filed_at),
                     "accepted_at": _timestamp(record.accepted_at),
                     "revision": record.revision,
+                    **(
+                        {"disclosure": disclosures[record.evidence_ref_id].model_dump(mode="json")}
+                        if record.evidence_ref_id in disclosures
+                        else {}
+                    ),
                 }
                 for record in records
             ],

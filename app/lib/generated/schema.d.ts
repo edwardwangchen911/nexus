@@ -3070,6 +3070,13 @@ export interface components {
             accession_number: string;
             /** Content Hash */
             content_hash: string;
+            /** Disclosure Excerpt */
+            disclosure_excerpt?: string | null;
+            /**
+             * Disclosure Truncated
+             * @default false
+             */
+            disclosure_truncated: boolean;
             /**
              * Evidence Ref Id
              * Format: uuid
@@ -3090,6 +3097,8 @@ export interface components {
              * @constant
              */
             source: "sec";
+            /** Source Url */
+            source_url?: string | null;
         };
         /** ResearchInputsSummary */
         ResearchInputsSummary: {

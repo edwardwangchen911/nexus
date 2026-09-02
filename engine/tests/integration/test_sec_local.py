@@ -1,8 +1,10 @@
 """The single-company local path must reach persisted research without unrelated keys."""
 
 import json
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import httpx
@@ -17,6 +19,55 @@ from sqlalchemy import func, select
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures/sec"
 INSTRUMENT = UUID("0198d500-1000-7000-8000-000000009001")
+
+
+def disclosure_responder(requests, *, failure=None):
+    base = sec_responder(requests)
+
+    def respond(request):
+        if request.url.path == "/files/company_tickers_exchange.json":
+            return base(request)
+        requests.append(request)
+        assert request.method == "GET"
+        if request.url.path == "/submissions/CIK0000320193.json":
+            return httpx.Response(
+                200,
+                json={
+                    "cik": "0000320193",
+                    "tickers": ["AAPL"],
+                    "exchanges": ["Nasdaq"],
+                    "filings": {
+                        "recent": {
+                            "accessionNumber": ["0000320193-26-000001"],
+                            "acceptanceDateTime": [
+                                "2099-01-01T20:00:00Z"
+                                if failure == "future"
+                                else "2026-08-21T20:00:00"
+                                if failure == "naive"
+                                else "2026-08-21T20:00:00Z"
+                            ],
+                            "filingDate": ["invalid" if failure == "date" else "2026-08-21"],
+                            "form": ["20-F" if failure == "unsupported" else "6-K"],
+                            "primaryDocument": [
+                                "../secret.htm" if failure == "path" else "doc.htm"
+                            ],
+                        }
+                    },
+                },
+            )
+        assert request.url.host == "www.sec.gov"
+        assert request.url.path == "/Archives/edgar/data/320193/000032019326000001/doc.htm"
+        if failure == "redirect":
+            return httpx.Response(302, headers={"Location": "https://other.invalid/"})
+        return httpx.Response(
+            200,
+            content=(
+                b"<html><body><script>hidden</script>"
+                b"<p>Company has not decided on the reported facility.</p></body></html>"
+            ),
+        )
+
+    return respond
 
 
 class InMemoryRawEvidenceStore:
@@ -217,6 +268,184 @@ async def test_sec_only_refresh_stops_without_fake_research(migrated_database_ur
         len(requests)
         == {"contact": 0, "rate_limit": 1, "issuer": 3, "ambiguous": 1, "submission": 3}[failure]
     )
+    async with session_factory(settings)() as session:
+        assert await session.scalar(select(func.count()).select_from(Filing)) == 0
+        assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 0
+
+
+@pytest.mark.asyncio
+async def test_disclosure_reaches_sdk_api_and_portfolio_without_fabricated_facts(
+    migrated_database_url,
+    monkeypatch,
+):
+    from helpers.portfolio_api import app, headers
+    from nexus.agents import codex_sdk
+    from nexus.agents.committee import ROLE_ORDER
+    from nexus.agents.responses_budget import UsageSnapshot
+    from nexus.ops.openai_local import prepare_database
+    from nexus.ops.sec_local import refresh_sec_research
+    from nexus.portfolio.research import read_position_research
+    from nexus.research.sec_disclosures import SCHEMA_VERSION, read_disclosures
+    from nexus.worker import run_agent_worker_once
+
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    await prepare_database(settings)
+    await seed_instrument(settings)
+    requests = []
+    store = InMemoryRawEvidenceStore()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(disclosure_responder(requests))
+    ) as client:
+        first = await refresh_sec_research(
+            settings,
+            INSTRUMENT,
+            contact="test@example.invalid",
+            http_client=client,
+            store=store,
+            disclosure_only=True,
+        )
+        replay = await refresh_sec_research(
+            settings,
+            INSTRUMENT,
+            contact="test@example.invalid",
+            http_client=client,
+            store=store,
+            disclosure_only=True,
+        )
+    assert first["provider_requests"] == replay["provider_requests"] == 3
+    assert first["model_requests"] == 0 and first["execution_locked"] is True
+    assert first["filings_created"] == replay["filings_replayed"] == 1
+    assert replay["filings_created"] == 0
+    assert len(requests) == 6 and not any("companyfacts" in str(item.url) for item in requests)
+    assert any(key.endswith(".html") for key in store.objects)
+    now = datetime.now(UTC)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url, now=now)),
+        base_url="http://testserver",
+    ) as client:
+        path = (
+            f"/internal/v1/instruments/{INSTRUMENT}/research-admission?"
+            + first["research_path"].split("?", 1)[1]
+        )
+        response = await client.get(path, headers=headers("GET", path))
+        assert response.status_code == 200
+        admission = response.json()["data"]
+        assert admission["eligible"] is True
+        assert admission["inputs"]["facts"] == [] and admission["inputs"]["total_facts"] == 0
+        filing = admission["inputs"]["filings"][0]
+        assert filing["form"] == "6-K" and filing["disclosure_truncated"] is False
+        assert filing["disclosure_excerpt"] == "Company has not decided on the reported facility."
+        assert filing["source_url"].endswith("/000032019326000001/doc.htm")
+        body = json.dumps(
+            {
+                "instrument_id": str(INSTRUMENT),
+                "data_snapshot_id": first["data_snapshot_id"],
+                "decision_time": admission["decision_time"],
+            }
+        ).encode()
+        path = "/internal/v1/research-runs"
+        submitted = await client.post(
+            path,
+            content=body,
+            headers={**headers("POST", path, body), "Idempotency-Key": "disclosure-research"},
+        )
+        assert submitted.status_code == 202
+        run_id = submitted.json()["data"]["run_id"]
+        invoke = AsyncMock(
+            return_value=(
+                json.dumps(
+                    {
+                        "roles": [
+                            {
+                                "role": role,
+                                "vote": "abstain",
+                                "claims": [
+                                    {
+                                        "text": "披露称未决定扩产；缺少财务指标和合格行情。",
+                                        "citations": [0],
+                                    }
+                                ],
+                                "conflicting_facts": False,
+                            }
+                            for role in ROLE_ORDER
+                        ]
+                    }
+                ),
+                UsageSnapshot(input_tokens=300, output_tokens=80, provider_calls=1),
+            )
+        )
+        monkeypatch.setattr(codex_sdk, "invoke_codex", invoke)
+        assert await run_agent_worker_once(settings) is True
+        invoke.assert_awaited_once()
+        frozen = invoke.call_args.args[0]["frozen_inputs"]
+        assert frozen["financial_facts"]["items"] == []
+        assert (
+            frozen["filing_disclosures"]["items"][0]["disclosure"]["excerpt"]
+            == filing["disclosure_excerpt"]
+        )
+        path = f"/internal/v1/research-runs/{run_id}"
+        result = (await client.get(path, headers=headers("GET", path))).json()["data"]
+        assert result["status"] == "completed" and result["quality_status"] == "partial"
+        assert result["intent"]["exposure_action"] == "none"
+    async with session_factory(settings)() as session:
+        assert await session.scalar(select(func.count()).select_from(FinancialFactRecord)) == 0
+        assert await session.scalar(select(func.count()).select_from(Filing)) == 1
+        assert (await session.get(AgentResearchRunRecord, UUID(run_id))).retry_count == 0
+        assert (await read_position_research(session, (INSTRUMENT,), read_at=datetime.now(UTC)))[
+            INSTRUMENT
+        ].status == "completed"
+        evidence_id = UUID(filing["evidence_ref_id"])
+        source = await session.scalar(
+            select(DataSnapshot).where(DataSnapshot.schema_version == SCHEMA_VERSION)
+        )
+        assert (
+            await read_disclosures(
+                session,
+                instrument_id=INSTRUMENT,
+                evidence_ids=(evidence_id,),
+                as_of=source.received_at - timedelta(seconds=1),
+            )
+            == {}
+        )
+        assert (
+            await read_disclosures(
+                session, instrument_id=UUID(int=42), evidence_ids=(evidence_id,), as_of=now
+            )
+            == {}
+        )
+        # In-memory corruption only; immutable persisted evidence is never rewritten.
+        source.payload = {**source.payload, "excerpt": "Altered disclosure must not be trusted."}
+        with session.no_autoflush:
+            assert (
+                await read_disclosures(
+                    session, instrument_id=INSTRUMENT, evidence_ids=(evidence_id,), as_of=now
+                )
+                == {}
+            )
+    assert await run_agent_worker_once(settings) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["path", "future", "naive", "date", "unsupported", "redirect"])
+async def test_disclosure_error_stops_before_persisting_or_retrying(migrated_database_url, failure):
+    from nexus.ops.sec_local import refresh_sec_research
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    await seed_instrument(settings)
+    requests = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(disclosure_responder(requests, failure=failure))
+    ) as client:
+        with pytest.raises((ValueError, RuntimeError)):
+            await refresh_sec_research(
+                settings,
+                INSTRUMENT,
+                contact="test@example.invalid",
+                http_client=client,
+                store=InMemoryRawEvidenceStore(),
+                disclosure_only=True,
+            )
+    assert len(requests) == (3 if failure == "redirect" else 2)
     async with session_factory(settings)() as session:
         assert await session.scalar(select(func.count()).select_from(Filing)) == 0
         assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 0

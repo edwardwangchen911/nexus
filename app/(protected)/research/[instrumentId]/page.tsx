@@ -116,7 +116,7 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
       {admission?.eligible === false ? <p className="research-page__gate" role="note">{researchAdmissionReason(admission.reason)}</p> : null}
       {inputs && admission ? <ResearchInputs inputs={inputs} asOf={admission.decision_time} /> : null}
       {!hasData ? (inputs && state === "empty"
-        ? <p className="research-page__gate" role="note">财报资料已就绪，AI 研究尚未生成。可先核验数值、期间与来源；模型配置可稍后补充。</p>
+        ? <p className="research-page__gate" role="note">{admission?.inputs?.filings.some((filing) => filing.form === "6-K") ? "披露资料已就绪，AI 研究尚未生成。可先核验正文、时间与来源；文本不等于财务指标。" : "财报资料已就绪，AI 研究尚未生成。可先核验数值、期间与来源；模型配置可稍后补充。"}</p>
         : <DataState state={state} title={researchStateTitle(state)} detail={researchStateDetail(state)} />) : <>
         {state !== "ready" ? <p className="research-page__gate" role="note">当前数据为 {dataStateLabels[state]}；保留最后证据供核验，但禁止创建或重跑研究。</p> : null}
         <DecisionCard research={research} />
