@@ -233,4 +233,25 @@ def test_research_can_veto_a_deterministic_addition_but_cannot_create_one() -> N
     ).proposals[2]
     assert baseline.strategy_evidence_complete is False
     assert baseline.positions[0].target_weight == baseline.positions[0].current_weight
-    assert baseline.cash_target_weight == Decimal("0.4") / Decimal("1.4")
+    assert abs(baseline.cash_target_weight - Decimal("0.4") / Decimal("1.4")) < Decimal("1e-12")
+
+
+def test_weight_normalization_preserves_zero_cash_and_storage_precision() -> None:
+    from nexus.optimizer.models import _current_positions
+
+    positions = tuple(BrokerPosition(
+        instrument_id=UUID(int=i), currency="USD", quantity=1, available_quantity=1,
+        frozen_quantity=0, avg_cost=1, diluted_cost=1, current_price=1,
+    ) for i in (3, 2, 1))
+    snapshot = PortfolioSnapshot(
+        id=UUID(int=501), portfolio_id=UUID(int=502), status="READY",
+        cash=(CashBalance(currency="USD", cash_balance=0, available_cash=0),),
+        positions=positions, open_orders=(), as_of=datetime(2026, 8, 24, tzinfo=UTC),
+    )
+    normalized, cash = _current_positions(snapshot)
+    assert cash == 0
+    assert sum(p.current_weight for p in normalized) == 1
+    assert normalized[0].current_weight == Decimal("0.333333333334")
+    assert all(p.current_weight.as_tuple().exponent == -12 for p in normalized)
+    reversed_snapshot = snapshot.model_copy(update={"positions": tuple(reversed(positions))})
+    assert _current_positions(reversed_snapshot) == (normalized, cash)

@@ -3,7 +3,7 @@
 
 from collections.abc import Mapping
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
@@ -382,14 +382,28 @@ def _current_positions(snapshot: PortfolioSnapshot) -> tuple[tuple[ProposalPosit
     total = cash + sum((value for _, value in values), _ZERO)
     if total <= _ZERO:
         raise ValueError("baseline requires positive valuated value")
+    # Normalize at the existing NUMERIC(38,12) storage precision. Keep actual cash
+    # separate; assign only the rounding residue to the largest security, by UUID.
+    quantum = Decimal("0.000000000001")
+    weights = {
+        instrument_id: (value / total).quantize(quantum, rounding=ROUND_HALF_UP)
+        for instrument_id, value in values
+    }
+    cash_weight = (cash / total).quantize(quantum, rounding=ROUND_HALF_UP)
+    residue = _ONE - cash_weight - sum(weights.values(), _ZERO)
+    if values:
+        largest = min(values, key=lambda row: (-row[1], row[0]))[0]
+        weights[largest] += residue
+    else:
+        cash_weight += residue
     positions = tuple(
         ProposalPosition(
             instrument_id=instrument_id,
-            current_weight=value / total,
-            target_weight=value / total,
-            action="maintain",
+            current_weight=weights[instrument_id],
+            target_weight=weights[instrument_id],
+            action="maintain" if weights[instrument_id] else "none",
             reason_code="BASELINE_WEIGHT",
         )
         for instrument_id, value in sorted(values, key=lambda entry: entry[0])
     )
-    return positions, cash / total
+    return positions, cash_weight

@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.domain.decimal import decimal_to_string
 from nexus.optimizer.compare import ComparisonDimensions
 from nexus.optimizer.models import OptimizationProposalGroup
 from nexus.optimizer.selection_authority import load_selection_authority
@@ -95,17 +96,21 @@ class ProposalComparisonInput:
         )
 
     def metrics_payload(self, authority: ProposalPersistenceAuthority) -> dict[str, object]:
+        dimensions = self.dimensions.model_dump(mode="json")
+        for metric in dimensions.values():
+            if isinstance(metric, dict) and metric.get("value") is not None:
+                metric["value"] = decimal_to_string(Decimal(metric["value"]))
         return {
             "violation_count": self.violation_count,
-            "turnover": str(self.turnover),
-            "cost": None if self.cost is None else str(self.cost),
+            "turnover": decimal_to_string(self.turnover),
+            "cost": None if self.cost is None else decimal_to_string(self.cost),
             "unknown_metrics": list(self.unknown_metrics),
             "constraint_complete": self.constraint_complete,
             "eligibility_complete": self.eligibility_complete,
             "evidence_complete": self.evidence_complete,
             "stale": self.stale,
             "ranking_eligible": not self.non_executable,
-            "dimensions": self.dimensions.model_dump(mode="json"),
+            "dimensions": dimensions,
             "authority": {
                 "diagnostic_report_id": str(authority.diagnostic_report_id),
                 "data_snapshot_id": str(authority.data_snapshot_id),

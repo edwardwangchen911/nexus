@@ -19,6 +19,7 @@ from nexus.optimizer.minimum_change import (
 from nexus.optimizer.models import (
     OptimizationPolicy,
     OptimizationProposalGroup,
+    _current_positions,
     build_proposal_group,
 )
 from nexus.optimizer.persistence import (
@@ -197,10 +198,14 @@ def _minimum_change_inputs(
         ):
             return MinimumChangeInputs((), Decimal("0"), False)
         liquidity[instrument_id] = Decimal("1") / (Decimal("1") + Decimal(item.metric_value))
+    current_positions, _ = _current_positions(snapshot)
+    current_weights = {
+        position.instrument_id: position.current_weight for position in current_positions
+    }
     candidates = tuple(
         ReductionCandidate(
             instrument_id=instrument_id,
-            current_weight=value / total,
+            current_weight=current_weights[instrument_id],
             contribution=contribution[instrument_id],
             severity_rank=severity[instrument_id],
             liquidity_score=liquidity[instrument_id],

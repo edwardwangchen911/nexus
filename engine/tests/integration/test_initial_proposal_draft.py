@@ -82,8 +82,7 @@ async def _seed(database_url: str, invalid: str = "") -> tuple[UUID, UUID]:
             )
         )
         instrument_ids = tuple(
-            UUID(int=801 + index)
-            for index in range(2 if invalid == "insufficient_names" else 5)
+            UUID(int=801 + index) for index in range(2 if invalid == "insufficient_names" else 5)
         )
         for index, instrument_id in enumerate(instrument_ids):
             currency = "HKD" if invalid == "mixed_currency" and index == 1 else "USD"
@@ -279,3 +278,49 @@ async def test_initial_draft_refuses_unproved_baseline_without_writing(
         )
         assert await db.scalar(select(func.count()).select_from(DataSnapshot)) == 0
         assert await db.scalar(select(func.count()).select_from(Job)) == 0
+
+
+@pytest.mark.asyncio
+async def test_hkd_cash_uses_received_historical_fx_and_stays_non_executable(
+    migrated_database_url: str,
+) -> None:
+    from hashlib import sha256
+
+    from nexus.research.fx import import_dexhkus_vintage
+
+    class Store:
+        async def put_if_absent(self, *, key: str, content: bytes) -> str:
+            return f"memory://sha256/{sha256(content).hexdigest()}"
+
+    baseline, diagnostic = await _seed(migrated_database_url, "foreign_cash")
+    async with session_factory(settings(migrated_database_url))() as db, db.begin():
+        await import_dexhkus_vintage(
+            db,
+            payload=b"observation_date,DEXHKUS_20260820\n2026-08-20,7.8500\n",
+            url="https://alfred.stlouisfed.org/graph/alfredgraph.csv?id=DEXHKUS&cosd=2026-08-20&coed=2026-08-20&vintage_date=2026-08-20",
+            received_at=CLOCK,
+            store=Store(),
+        )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://test",
+    ) as client:
+        response = await _post(client, baseline, diagnostic)
+        assert response.status_code == 201, response.text
+        data = response.json()["data"]
+        assert all(p["comparison"]["requires_fx"] for p in data["proposals"])
+        assert all(p["comparison"]["non_executable"] for p in data["proposals"])
+        hold = data["proposals"][0]
+        weights = [Decimal(p["current_weight"]) for p in hold["positions"]]
+        expected_security_weight = Decimal(100) / (Decimal(100) + Decimal(1) / Decimal("7.85"))
+        assert abs(sum(weights) - expected_security_weight) < Decimal("1e-11")
+    async with session_factory(settings(migrated_database_url))() as db:
+        cash = await db.scalar(
+            select(CashSnapshot).where(CashSnapshot.portfolio_snapshot_id == baseline)
+        )
+        assert cash.currency == "HKD" and cash.cash_balance == 1
+        group = await db.get(OptimizationProposalGroupRecord, UUID(data["proposal_group_id"]))
+        assert group.requires_fx
+        inputs = await db.get(DataSnapshot, group.data_snapshot_id)
+        assert inputs.payload["fx_valuation"]["rate"] == "7.850000000000"
+        assert inputs.payload["fx_valuation"]["received_at"] == CLOCK.isoformat()

@@ -388,8 +388,8 @@ async def get_optimization_group(
                     positions=tuple(
                         OptimizationProposalPositionResponse(
                             instrument_id=position.instrument_id,
-                            current_weight=str(position.current_weight),
-                            target_weight=str(position.target_weight),
+                            current_weight=decimal_to_string(position.current_weight),
+                            target_weight=decimal_to_string(position.target_weight),
                             action=cast(ProposalAction, position.action),
                             reason_code=position.reason_code,
                         )

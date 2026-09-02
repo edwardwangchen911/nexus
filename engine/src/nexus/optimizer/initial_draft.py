@@ -37,6 +37,7 @@ from nexus.persistence.models.portfolio import (
     Portfolio,
     PortfolioSnapshotRecord,
 )
+from nexus.research.fx import load_dexhkus_valuation
 
 
 class InitialDraftUnavailable(ValueError):
@@ -94,8 +95,6 @@ async def create_initial_draft(
         snapshot_id=record.id,
     )
     identities = await load_instrument_identities(session, snapshot=snapshot)
-    if any(c.currency != "USD" and c.cash_balance != 0 for c in snapshot.cash):
-        raise InitialDraftUnavailable("DRAFT_FX_VALUATION_UNAVAILABLE")
     if (
         not snapshot.positions
         or any(
@@ -109,12 +108,35 @@ async def create_initial_draft(
             for p in snapshot.positions
         )
         or any(
-            c.cash_balance < 0
-            or (c.provider_as_of is not None and c.provider_as_of > record.as_of)
+            c.cash_balance < 0 or (c.provider_as_of is not None and c.provider_as_of > record.as_of)
             for c in snapshot.cash
         )
     ):
         raise InitialDraftUnavailable("DRAFT_REQUIRES_VALUED_USD_US_BASELINE")
+    fx = None
+    if any(c.currency != "USD" and c.cash_balance != 0 for c in snapshot.cash):
+        if any(c.currency not in {"USD", "HKD"} and c.cash_balance != 0 for c in snapshot.cash):
+            raise InitialDraftUnavailable("DRAFT_FX_VALUATION_UNAVAILABLE")
+        fx = await load_dexhkus_valuation(session, valuation_time=record.as_of, known_at=now)
+        if fx is None:
+            raise InitialDraftUnavailable("DRAFT_FX_VALUATION_UNAVAILABLE")
+        # Scenario valuation only: retain the immutable broker cash rows and their currency.
+        snapshot = snapshot.model_copy(
+            update={
+                "cash": tuple(
+                    cash.model_copy(
+                        update={
+                            "currency": "USD",
+                            "cash_balance": cash.cash_balance / fx.rate_hkd_per_usd,
+                            "available_cash": cash.available_cash / fx.rate_hkd_per_usd,
+                        }
+                    )
+                    if cash.currency == "HKD"
+                    else cash
+                    for cash in snapshot.cash
+                )
+            }
+        )
     report = await read_report(session, diagnostic)
     if any(ref.available_at > record.as_of for item in report.items for ref in item.evidence_refs):
         raise InitialDraftUnavailable("DRAFT_EVIDENCE_AFTER_VALUATION")
@@ -151,7 +173,7 @@ async def create_initial_draft(
         or cost_policy.available_at > record.as_of
     ):
         raise ValueError("initial draft policies are unavailable")
-    inputs = {
+    inputs: dict[str, object] = {
         "schema_version": "optimization_draft_inputs_v1",
         "portfolio_snapshot_id": str(record.id),
         "diagnostic_report_id": str(diagnostic.id),
@@ -160,6 +182,8 @@ async def create_initial_draft(
         "cost_policy_id": str(cost_policy.id),
         "optimizer_policy_id": str(optimizer_policy.id),
     }
+    if fx is not None:
+        inputs["fx_valuation"] = fx.input_identity()
     digest = hashlib.sha256(
         json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -199,12 +223,13 @@ async def create_initial_draft(
         diagnostic_complete=False,
         source_conflict=False,
         partial=True,
-        requires_fx=False,
+        requires_fx=fx is not None,
         cost_complete=False,
     )
     comparisons = tuple(
         replace(
             comparison,
+            requires_fx=fx is not None,
             partial=True,
             constraint_complete=False,
             eligibility_complete=False,
