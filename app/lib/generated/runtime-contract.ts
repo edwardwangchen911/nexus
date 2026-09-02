@@ -116,6 +116,19 @@ export const runtimeContractSchemas = {
     "title": "ActiveFamilyResponse",
     "type": "object"
   },
+  "AgentRole": {
+    "enum": [
+      "orchestrator",
+      "fundamental",
+      "market_state",
+      "macro_sector",
+      "bull",
+      "bear",
+      "evidence_audit",
+      "portfolio"
+    ],
+    "type": "string"
+  },
   "AgentRunStatus": {
     "enum": [
       "prepared",
@@ -6049,6 +6062,16 @@ export const runtimeContractSchemas = {
         ],
         "title": "Settled Cost Usd"
       },
+      "stage_trace": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ResearchStageTrace"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "status": {
         "$ref": "#/components/schemas/AgentRunStatus"
       }
@@ -6070,6 +6093,121 @@ export const runtimeContractSchemas = {
       "budget_reason"
     ],
     "title": "ResearchRunResponse",
+    "type": "object"
+  },
+  "ResearchStageRole": {
+    "additionalProperties": false,
+    "properties": {
+      "claims": {
+        "items": {
+          "$ref": "#/components/schemas/ResearchClaim"
+        },
+        "maxItems": 2,
+        "minItems": 1,
+        "title": "Claims",
+        "type": "array"
+      },
+      "reviewed_claim_ids": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 16,
+        "title": "Reviewed Claim Ids",
+        "type": "array"
+      },
+      "role": {
+        "$ref": "#/components/schemas/AgentRole"
+      }
+    },
+    "required": [
+      "role",
+      "claims",
+      "reviewed_claim_ids"
+    ],
+    "title": "ResearchStageRole",
+    "type": "object"
+  },
+  "ResearchStageSummary": {
+    "additionalProperties": false,
+    "properties": {
+      "input_tokens": {
+        "minimum": 0,
+        "title": "Input Tokens",
+        "type": "integer"
+      },
+      "output_tokens": {
+        "minimum": 0,
+        "title": "Output Tokens",
+        "type": "integer"
+      },
+      "roles": {
+        "items": {
+          "$ref": "#/components/schemas/ResearchStageRole"
+        },
+        "maxItems": 5,
+        "title": "Roles",
+        "type": "array"
+      },
+      "stage": {
+        "enum": [
+          "research",
+          "critique",
+          "synthesis"
+        ],
+        "title": "Stage",
+        "type": "string"
+      },
+      "status": {
+        "enum": [
+          "complete",
+          "partial",
+          "unavailable"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "stage",
+      "status",
+      "roles",
+      "input_tokens",
+      "output_tokens"
+    ],
+    "title": "ResearchStageSummary",
+    "type": "object"
+  },
+  "ResearchStageTrace": {
+    "additionalProperties": false,
+    "properties": {
+      "evidence_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Evidence Hash",
+        "type": "string"
+      },
+      "stages": {
+        "items": {
+          "$ref": "#/components/schemas/ResearchStageSummary"
+        },
+        "maxItems": 3,
+        "title": "Stages",
+        "type": "array"
+      },
+      "status": {
+        "enum": [
+          "verified",
+          "invalid"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "evidence_hash",
+      "status",
+      "stages"
+    ],
+    "title": "ResearchStageTrace",
     "type": "object"
   },
   "RetryableJobSummary": {

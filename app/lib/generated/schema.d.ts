@@ -871,6 +871,8 @@ export interface components {
             state: "PROPOSED" | "REJECTED" | "ADMITTED" | "BACKTEST_RUNNING" | "BACKTEST_FAILED" | "BACKTEST_PASSED" | "SHADOW_RUNNING" | "SHADOW_FAILED" | "EXPIRED" | "VETOED" | "PROMOTION_ELIGIBLE" | "PROMOTED" | "STALE_CHAMPION_BASELINE";
         };
         /** @enum {string} */
+        AgentRole: "orchestrator" | "fundamental" | "market_state" | "macro_sector" | "bull" | "bear" | "evidence_audit" | "portfolio";
+        /** @enum {string} */
         AgentRunStatus: "prepared" | "running" | "validated" | "audited" | "synthesized" | "completed" | "failed" | "abstained";
         /**
          * AggregateMetric
@@ -3272,7 +3274,47 @@ export interface components {
             run_id: string;
             /** Settled Cost Usd */
             settled_cost_usd: string | null;
+            stage_trace?: components["schemas"]["ResearchStageTrace"] | null;
             status: components["schemas"]["AgentRunStatus"];
+        };
+        /** ResearchStageRole */
+        ResearchStageRole: {
+            /** Claims */
+            claims: components["schemas"]["ResearchClaim"][];
+            /** Reviewed Claim Ids */
+            reviewed_claim_ids: string[];
+            role: components["schemas"]["AgentRole"];
+        };
+        /** ResearchStageSummary */
+        ResearchStageSummary: {
+            /** Input Tokens */
+            input_tokens: number;
+            /** Output Tokens */
+            output_tokens: number;
+            /** Roles */
+            roles: components["schemas"]["ResearchStageRole"][];
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "research" | "critique" | "synthesis";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "complete" | "partial" | "unavailable";
+        };
+        /** ResearchStageTrace */
+        ResearchStageTrace: {
+            /** Evidence Hash */
+            evidence_hash: string;
+            /** Stages */
+            stages: components["schemas"]["ResearchStageSummary"][];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "verified" | "invalid";
         };
         /** RetryableJobSummary */
         RetryableJobSummary: {

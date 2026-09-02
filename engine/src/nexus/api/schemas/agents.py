@@ -4,12 +4,13 @@ from datetime import UTC, date, datetime
 from typing import Literal
 from uuid import UUID
 
+from nexus.agents.committee import AgentRole
 from nexus.agents.portfolio_context import PortfolioResearchContext
 from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
-from nexus.strategy.intents import ResearchCondition, ResearchIntent, RoleVote
+from nexus.strategy.intents import ResearchClaim, ResearchCondition, ResearchIntent, RoleVote
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -40,6 +41,26 @@ class ResearchRunCreateRequest(_StrictAgentSchema):
         return require_utc(value)
 
 
+class ResearchStageRole(_StrictAgentSchema):
+    role: AgentRole
+    claims: tuple[ResearchClaim, ...] = Field(min_length=1, max_length=2)
+    reviewed_claim_ids: tuple[str, ...] = Field(max_length=16)
+
+
+class ResearchStageSummary(_StrictAgentSchema):
+    stage: Literal["research", "critique", "synthesis"]
+    status: Literal["complete", "partial", "unavailable"]
+    roles: tuple[ResearchStageRole, ...] = Field(max_length=5)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+
+
+class ResearchStageTrace(_StrictAgentSchema):
+    evidence_hash: str = Field(pattern="^[0-9a-f]{64}$")
+    status: Literal["verified", "invalid"]
+    stages: tuple[ResearchStageSummary, ...] = Field(max_length=3)
+
+
 class ResearchRunResponse(_StrictAgentSchema):
     run_id: UUID
     instrument_id: UUID
@@ -60,6 +81,7 @@ class ResearchRunResponse(_StrictAgentSchema):
     quality_status: Literal["complete", "partial"] | None
     budget_reason: Literal["budget_exhausted"] | None
     abstention_reason: str | None = Field(default=None, max_length=100)
+    stage_trace: ResearchStageTrace | None = None
 
 
 class ResearchRunEnvelope(_StrictAgentSchema):

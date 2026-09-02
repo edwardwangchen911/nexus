@@ -224,6 +224,20 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["billing_mode"] == "chatgpt_subscription"
+    if staged:
+        trace = data["stage_trace"]
+        assert trace["status"] == "verified"
+        assert trace["evidence_hash"] == run.evidence_hash
+        assert [stage["status"] for stage in trace["stages"]] == (
+            ["complete", "unavailable", "unavailable"] if model_fails else ["complete"] * 3
+        )
+        assert trace["stages"][0]["input_tokens"] == 300
+        if not model_fails:
+            assert trace["stages"][2]["roles"][0]["reviewed_claim_ids"] == [
+                "bear:0", "evidence_audit:0"
+            ]
+    else:
+        assert data["stage_trace"] is None
     if not model_fails:
         assert data["input_tokens"] == (900 if staged else 300)
         assert data["output_tokens"] == (240 if staged else 80)

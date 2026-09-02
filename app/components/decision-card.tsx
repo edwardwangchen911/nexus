@@ -77,6 +77,28 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
         </div>
       ) : null}
 
+      {research.stage_trace ? (
+        <section className="decision-card__section" aria-label="三阶段研究过程">
+          <h3>研究 → 反证 → 综合</h3>
+          <p>实验流程 · 仅展示已保存的阶段。各阶段使用同一冻结证据，阶段用量仅包含已保存输出，失败调用以总用量说明为准。</p>
+          {research.stage_trace.status === "invalid" ? <p role="note">阶段记录校验失败，暂不展示论点。</p> : research.stage_trace.stages.map((stage) => (
+            <details key={stage.stage} open={stage.stage === "synthesis"}>
+              <summary>{({ research: "研究", critique: "反证", synthesis: "综合" } as const)[stage.stage]} · {({ complete: "已保存完整输出", partial: "仅保存部分输出", unavailable: "未保存有效输出" } as const)[stage.status]}</summary>
+              <p>已保存输入 / 输出 tokens：{stage.input_tokens} / {stage.output_tokens}</p>
+              {stage.roles.map((role) => <section key={role.role} aria-label={`${roleLabel(role.role)}阶段论点`}>
+                <h4>{roleLabel(role.role)}</h4>
+                {role.reviewed_claim_ids.length ? <p>回应论点：{role.reviewed_claim_ids.map((id) => {
+                  const [reviewedRole, index] = id.split(":");
+                  return `${roleLabel(reviewedRole as components["schemas"]["RoleVote"]["role"])} #${Number(index) + 1}`;
+                }).join("、")}</p> : null}
+                <ol>{role.claims.map((claim, index) => <li key={index}><p>{claim.text}</p><EvidenceButtons evidenceRefs={claim.evidence_refs} excerpt={claim.text} onOpen={openEvidence} /></li>)}</ol>
+              </section>)}
+            </details>
+          ))}
+          <details><summary>核对冻结输入版本</summary><p>证据摘要：<code>{research.stage_trace.evidence_hash}</code></p><p>数据快照：<code>{research.data_snapshot_id}</code></p></details>
+        </section>
+      ) : null}
+
       {intent ? (
         <>
           <div className="decision-card__arguments">

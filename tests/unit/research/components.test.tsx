@@ -256,3 +256,30 @@ describe("research evidence docket", () => {
     await waitFor(() => expect(opener).toHaveFocus());
   });
 });
+
+describe("saved experimental research stages", () => {
+  it("shows critique lineage and retained stages after a terminal failure", () => {
+    render(<DecisionCard research={researchData({
+      status: "failed", intent: null, abstention_reason: "model_usage_uncertain",
+      stage_trace: { evidence_hash: "a".repeat(64), status: "verified", stages: [
+        { stage: "research", status: "complete", input_tokens: 100, output_tokens: 50, roles: [] },
+        { stage: "critique", status: "partial", input_tokens: 80, output_tokens: 30, roles: [
+          { role: "bear", claims: [{ text: "缺少价格，无法验证估值。", evidence_refs: [evidence] }], reviewed_claim_ids: ["bull:0"] },
+        ] },
+        { stage: "synthesis", status: "unavailable", input_tokens: 0, output_tokens: 0, roles: [] },
+      ] },
+    })} />);
+    fireEvent.click(screen.getByText("反证 · 仅保存部分输出"));
+    expect(screen.getByText("回应论点：多头 #1")).toBeVisible();
+    expect(screen.getByText("缺少价格，无法验证估值。")).toBeVisible();
+    expect(screen.getByText("综合 · 未保存有效输出")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /运行|下单/ })).not.toBeInTheDocument();
+  });
+
+  it("does not render invalid stage claims", () => {
+    render(<DecisionCard research={researchData({ stage_trace: {
+      evidence_hash: "a".repeat(64), status: "invalid", stages: [],
+    } })} />);
+    expect(screen.getByText("阶段记录校验失败，暂不展示论点。")).toBeVisible();
+  });
+});

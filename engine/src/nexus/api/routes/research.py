@@ -19,6 +19,7 @@ from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.research_inputs import read_research_inputs
+from nexus.api.research_stages import read_stage_trace
 from nexus.api.schemas.agents import (
     AgentRunStatus,
     ResearchAdmissionEnvelope,
@@ -283,7 +284,8 @@ async def _hydrate_response(
                 .order_by(AgentResearchOutputEvidenceRecord.evidence_ref_id)
             )
         )
-    return _response(run, output, evidence_records)
+    response = _response(run, output, evidence_records)
+    return response.model_copy(update={"stage_trace": await read_stage_trace(session, run)})
 
 
 def _response(
