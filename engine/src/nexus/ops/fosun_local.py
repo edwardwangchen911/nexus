@@ -9,6 +9,7 @@ import os
 import secrets
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -28,6 +29,7 @@ from nexus.ops.fosun_local_refresh import (
     _safe_failure_code,
     refresh_local_fosun,
 )
+from nexus.ops.price_evidence_status import read_price_evidence_status
 from nexus.persistence.models.portfolio import (
     BrokerOrderSnapshot,
     BrokerSyncRun,
@@ -294,6 +296,12 @@ async def read_local_status(database_url: str) -> dict[str, object]:
                 "last_sync_run_status": run.status if run else None,
                 "cash_flow_quality": run.cash_flow_quality if run else None,
                 "counts": counts,
+                "price_evidence": await read_price_evidence_status(
+                    session,
+                    snapshot_id=snapshot.id,
+                    snapshot_as_of=snapshot.as_of,
+                    checked_at=datetime.now(UTC),
+                ),
                 "network_checked": False,
             }
     finally:

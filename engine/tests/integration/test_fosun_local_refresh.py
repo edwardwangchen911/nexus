@@ -10,6 +10,7 @@ from helpers.observed_gateway import NOW, ObservedGateway
 from helpers.portfolio_api import app as portfolio_app
 from helpers.portfolio_api import headers
 from nexus.ops import fosun_local_refresh as refresh_module
+from nexus.ops.fosun_local import read_local_status
 from nexus.ops.fosun_local_refresh import (
     _diagnose_local_snapshot,
     _ensure_market_bindings,
@@ -104,6 +105,14 @@ async def test_local_observed_refresh_reaches_database_and_snapshot_api(
         assert preliminary["status"] == "preview"
         assert preliminary["optimization_need"] == "RESEARCH_REQUIRED"
         assert preliminary["items"] > 0
+
+        local_status = await read_local_status(migrated_database_url)
+        price_status = local_status["price_evidence"]
+        assert price_status["held_instruments"] == 1
+        assert price_status["missing_series"] == 1
+        assert price_status["stored_authority_records"] == 0
+        assert price_status["authority_revalidated"] is False
+        assert local_status["network_checked"] is False
 
         async def fail_diagnostic(*_args: object, **_kwargs: object) -> None:
             raise RuntimeError("synthetic-secret-canary")
