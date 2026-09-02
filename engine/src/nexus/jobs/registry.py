@@ -87,8 +87,11 @@ class JobHandlerSpec:
             raise ValueError("handler schema_version is invalid")
         if self.payload_model.model_config.get("extra") != "forbid":
             raise ValueError("handler payload model must set extra='forbid'")
-        if not 0 < self.timeout_seconds <= 45:
-            raise ValueError("handler timeout_seconds must be in (0, 45]")
+        maximum_timeout = (
+            120 if self.job_type is JobType.AGENT_RESEARCH and self.max_attempts == 1 else 45
+        )
+        if not 0 < self.timeout_seconds <= maximum_timeout:
+            raise ValueError("handler timeout_seconds exceeds its bounded runtime")
         if not 1 <= self.max_attempts <= 3:
             raise ValueError("handler max_attempts must be between 1 and 3")
         if _NAMESPACE.fullmatch(self.idempotency_namespace) is None:

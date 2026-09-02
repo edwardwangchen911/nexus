@@ -219,7 +219,7 @@ def _agent_registry(
                 schema_version=_JOB_SCHEMA,
                 payload_model=_AgentResearchJobPayload,
                 queue=QueueName.GENERAL,
-                timeout_seconds=45,
+                timeout_seconds=120 if runtime_mode is AgentRuntimeMode.CODEX_SDK else 45,
                 retry_policy=RetryPolicy.AUTOMATIC_SAFE,
                 max_attempts=1 if runtime_mode is AgentRuntimeMode.CODEX_SDK else 3,
                 idempotency_namespace="agent.research",

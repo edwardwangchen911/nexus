@@ -177,6 +177,54 @@ def _spec(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("timeout,attempts,elapsed,lease", [(2, 3, 1, 60), (120, 1, 75, 135)])
+async def test_worker_lease_covers_bounded_handler_and_terminal_write(
+    migrated_database_url,
+    timeout,
+    attempts,
+    elapsed,
+    lease,
+):
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    job_id = await _enqueue(
+        factory,
+        job_type=JobType.AGENT_RESEARCH,
+        payload={"value": "bounded-stages"},
+        max_attempts=attempts,
+    )
+    now = _NOW
+
+    async def handler(context):
+        nonlocal now
+        assert (context.claim.expires_at - _NOW).total_seconds() == lease
+        now += timedelta(seconds=elapsed)
+        return JobHandlerResult(outcome="succeeded", result_code="STAGES_COMPLETED")
+
+    assert await run_job_worker_once(
+        factory,
+        registry=JobRegistry((_spec(handler, timeout_seconds=timeout, max_attempts=attempts),)),
+        queue=QueueName.GENERAL,
+        worker_id="bounded-stages",
+        worker_started_at=_NOW,
+        process_version="test",
+        migration_head="0033_cash_flow_business_date",
+        clock=lambda: now,
+    )
+    async with factory() as session:
+        job = await session.get(Job, job_id)
+        assert job.status == "succeeded" and job.attempt_count == 1
+
+
+@pytest.mark.parametrize(
+    "job_type,attempts",
+    [(JobType.AGENT_RESEARCH, 2), (JobType.DAILY_BRIEF, 1)],
+)
+def test_extended_handler_budget_is_limited_to_single_attempt_research(job_type, attempts):
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        _spec(lambda _: None, job_type=job_type, timeout_seconds=120, max_attempts=attempts)
+
+
+@pytest.mark.asyncio
 async def test_preclaim_guard_fails_before_heartbeat_reclaim_or_claim(
     migrated_database_url: str,
 ) -> None:

@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from collections.abc import Mapping
+from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -190,6 +191,7 @@ async def invoke_codex(
     with TemporaryDirectory(prefix="nexus-codex-") as temporary:
         directory = Path(temporary)
         client = AsyncCodex(sdk_config(directory))
+        run_task = None
         try:
             async with asyncio.timeout(TIMEOUT_SECONDS):
                 account = await client.account(refresh_token=False)
@@ -216,16 +218,25 @@ async def invoke_codex(
                     ),
                     developer_instructions="Research only. Execution is locked. No tools.",
                 )
-                result = await thread.run(
-                    wire,
-                    output_schema=cast(
-                        JsonObject, pydantic_function_tool(output_model)["function"]["parameters"]
-                    ),
-                    approval_mode=ApprovalMode.deny_all,
-                    sandbox=Sandbox.read_only,
+                run_task = asyncio.create_task(
+                    thread.run(
+                        wire,
+                        output_schema=cast(
+                            JsonObject,
+                            pydantic_function_tool(output_model)["function"]["parameters"],
+                        ),
+                        approval_mode=ApprovalMode.deny_all,
+                        sandbox=Sandbox.read_only,
+                    )
                 )
+                # SDK streaming blocks in to_thread(queue.get). Keep its queue registered
+                # until close wakes the reader; cancellation first would orphan the waiter.
+                result = await asyncio.shield(run_task)
         finally:
             await client.close()
+            if run_task is not None:
+                with suppress(Exception, asyncio.CancelledError):
+                    await asyncio.wait_for(run_task, timeout=1)
     if result.status is not TurnStatus.completed or not result.final_response:
         raise ValueError("CODEX_RESPONSE_INCOMPLETE")
     if any(

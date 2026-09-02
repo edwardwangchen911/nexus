@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from math import ceil
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -98,6 +99,18 @@ async def run_job_worker_once(
 ) -> bool:
     """Heartbeat, reclaim, claim, and terminalize at most one durable Job."""
     claim_time = clock()
+    # Preserve the normal 60s lease; a bounded research handler needs its full
+    # runtime plus the same 15s margin before another worker may reclaim it.
+    lease_seconds = max(
+        60,
+        ceil(
+            max(
+                (spec.timeout_seconds for spec in registry.specs if spec.queue is queue),
+                default=45,
+            )
+        )
+        + 15,
+    )
     async with factory() as session, session.begin():
         if preclaim_guard is not None:
             await preclaim_guard(session)
@@ -116,7 +129,7 @@ async def run_job_worker_once(
             queue=queue,
             worker_id=worker_id,
             now=claim_time,
-            lease_seconds=60,
+            lease_seconds=lease_seconds,
             job_types=(tuple(sorted(registry.job_types)) if claim_registered_only else None),
         )
     if claim is None:

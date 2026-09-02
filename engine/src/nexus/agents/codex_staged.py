@@ -92,7 +92,7 @@ class StagedCodexCommittee(CodexCommittee):
         deadline: float | None = None,
     ) -> None:
         super().__init__(prompts=prompts, tools=tools)
-        # Keep settlement/terminal writes inside the existing 45s handler/60s lease.
+        # Reserve terminal writes inside the worker-owned aggregate deadline.
         self._deadline = None if deadline is None else deadline - 5
         self.last_stage_input: StageInputIdentity | None = None
 
@@ -119,7 +119,7 @@ class StagedCodexCommittee(CodexCommittee):
             self._attempted = True
             self._request, self._evidence = request, evidence_refs
             if self._deadline is None:
-                self._deadline = asyncio.get_running_loop().time() + 35
+                self._deadline = asyncio.get_running_loop().time() + 115
         # Mark a stage as attempted before any awaited work; a failure is terminal.
         self.failure_reason = "model_execution_failed"
         self.last_stage_input = None

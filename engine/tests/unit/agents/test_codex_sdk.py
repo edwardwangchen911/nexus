@@ -261,6 +261,44 @@ async def test_staged_budget_exhaustion_stops_before_next_provider_call(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_worker_allows_three_individually_bounded_stages_past_40_seconds(monkeypatch):
+    from nexus.agents import codex_staged
+    from nexus.worker import _agent_registry
+
+    request, evidence, prompts = _authority()
+    spec = _agent_registry(
+        EngineSettings(agent_runtime_mode="codex_sdk"),
+        responses_client=None,
+        tools=None,
+    ).specs[0]
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    elapsed = 0.0
+
+    async def invoke(payload, *, output_model):
+        nonlocal elapsed
+        elapsed += 25  # Each stage fits its 35s limit; all three need 75s.
+        return json.dumps(_staged_batch(payload["stage"], payload["requested_roles"])), (
+            UsageSnapshot(input_tokens=300, output_tokens=80)
+        )
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    with monkeypatch.context() as timer:
+        timer.setattr(loop, "time", lambda: started + elapsed)
+        model = codex_staged.StagedCodexCommittee(
+            prompts=prompts,
+            tools=_tools(),
+            deadline=started + spec.timeout_seconds,
+        )
+        outputs = [
+            await model.analyze(role, request, evidence, prompts[role]) for role in ROLE_ORDER
+        ]
+    assert len(outputs) == 8 and model.usage.provider_calls == 3
+    assert elapsed == 75
+    assert spec.max_attempts == 1
+
+
+@pytest.mark.asyncio
 async def test_staged_deadline_leaves_worker_time_to_persist_terminal_state(monkeypatch):
     from nexus.agents import codex_staged
 
@@ -509,6 +547,51 @@ async def test_timeout_closes_sdk_without_retry(monkeypatch):
     monkeypatch.setattr(codex_sdk, "TIMEOUT_SECONDS", 0.01)
     with pytest.raises(TimeoutError):
         await codex_sdk.invoke_codex({})
+    client.close.assert_awaited_once()
+    thread.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("external_cancel", [False, True])
+async def test_timeout_wakes_sdk_notification_thread_before_unregister(
+    monkeypatch, external_cancel
+):
+    import queue
+
+    client, thread, _, _ = _sdk(monkeypatch)
+    notifications = queue.Queue()
+    registered = False
+    closed_while_registered = False
+    started = asyncio.Event()
+
+    async def stream(*args, **kwargs):
+        nonlocal registered
+        registered = True
+        started.set()
+        try:
+            # Mirrors SDK to_thread(queue.get); finite timeout keeps a regression safe.
+            await asyncio.to_thread(notifications.get, True, 1)
+            raise ConnectionError("closed")
+        finally:
+            registered = False
+
+    async def close():
+        nonlocal closed_while_registered
+        closed_while_registered = registered
+        if registered:
+            notifications.put(None)
+
+    thread.run.side_effect = stream
+    client.close.side_effect = close
+    monkeypatch.setattr(codex_sdk, "TIMEOUT_SECONDS", 1 if external_cancel else 0.02)
+    task = asyncio.create_task(codex_sdk.invoke_codex({}))
+    await started.wait()
+    if external_cancel:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError if external_cancel else TimeoutError):
+        await task
+    assert closed_while_registered
+    assert not registered
     client.close.assert_awaited_once()
     thread.run.assert_awaited_once()
 
