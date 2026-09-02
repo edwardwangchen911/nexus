@@ -8,6 +8,28 @@ const meta = { request_id: "0198d500-1000-7000-8000-000000001399", schema_versio
 const shadowGroupId = "0198d500-1000-7000-8000-000000001391";
 
 describe("optimization Engine response boundary", () => {
+  it("explains missing FX valuation without forwarding upstream details", async () => {
+    const response = await sanitizeEngineResponse(Response.json({ error: {
+      code: "DATA_PARTIAL", message: "untrusted", request_id: meta.request_id,
+      details: { reason: "DRAFT_FX_VALUATION_UNAVAILABLE", account: "must-not-escape" },
+    } }, { status: 409 }), undefined, "/internal/v1/optimization-proposal-drafts", "POST");
+    expect(response.status).toBe(409);
+    const body = await response.json();
+    expect(body.error.message).toContain("缺少汇率估值");
+    expect(body.error.details).toEqual({});
+  });
+  it("rejects an executable response from initial draft creation", async () => {
+    const path = "/internal/v1/optimization-proposal-drafts";
+    const data = proposalGroup({ status: "draft" });
+    for (const proposal of data.proposals) {
+      proposal.analysis_only = true;
+      proposal.comparison.non_executable = true;
+      proposal.comparison.metrics.ranking_eligible = false;
+    }
+    expect((await sanitizeEngineResponse(json({ data, meta }), undefined, path, "POST")).status).toBe(200);
+    data.proposals[1].comparison.non_executable = false;
+    expect((await sanitizeEngineResponse(json({ data, meta }), undefined, path, "POST")).status).toBe(500);
+  });
   it("accepts only the closed generated three-proposal response", async () => {
     const payload = { data: proposalGroup(), meta };
     const accepted = await sanitizeEngineResponse(json(payload), undefined, `/internal/v1/optimization-proposals/${groupId}`);

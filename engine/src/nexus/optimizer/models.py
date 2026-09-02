@@ -184,12 +184,51 @@ def build_proposal_group(
     portfolio_scope: PortfolioScope = "real_read_only",
 ) -> OptimizationProposalGroup:
     """Compose three simultaneous deterministic variants without accepting Agent weights."""
+    if report.optimization_need != "OPTIMIZATION_CANDIDATE":
+        raise ValueError("diagnostic report is not an optimization candidate")
+    return _compose_group(
+        snapshot, report, research, policy,
+        selection_authority=selection_authority,
+        minimum_change_candidates=minimum_change_candidates,
+        excess_weight=excess_weight, portfolio_scope=portfolio_scope,
+    )
+
+
+def build_initial_proposal_draft(
+    snapshot: PortfolioSnapshot,
+    report: PortfolioDiagnosticReport,
+    policy: OptimizationPolicy,
+    *,
+    minimum_change_candidates: tuple["ReductionCandidate", ...],
+    excess_weight: Decimal,
+) -> OptimizationProposalGroup:
+    """Build a read-only scenario before formal admission, without rewriting diagnosis."""
+    if report.optimization_need not in {"RESEARCH_REQUIRED", "OPTIMIZATION_CANDIDATE"}:
+        raise ValueError("diagnostic report does not support an initial draft")
+    if not minimum_change_candidates or excess_weight <= _ZERO:
+        raise ValueError("initial draft requires an evidenced reduction scenario")
+    return _compose_group(
+        snapshot, report, (), policy, selection_authority=None,
+        minimum_change_candidates=minimum_change_candidates,
+        excess_weight=excess_weight, portfolio_scope="real_read_only",
+    )
+
+
+def _compose_group(
+    snapshot: PortfolioSnapshot,
+    report: PortfolioDiagnosticReport,
+    research: tuple["ResearchIntent", ...],
+    policy: OptimizationPolicy,
+    *,
+    selection_authority: "DeterministicSelectionAuthority | None",
+    minimum_change_candidates: tuple["ReductionCandidate", ...],
+    excess_weight: Decimal,
+    portfolio_scope: PortfolioScope,
+) -> OptimizationProposalGroup:
     if snapshot.status != "READY":
         raise ValueError("READY baseline is required")
     if report.portfolio_snapshot_id != snapshot.id:
         raise ValueError("diagnostic report must bind the baseline")
-    if report.optimization_need != "OPTIMIZATION_CANDIDATE":
-        raise ValueError("diagnostic report is not an optimization candidate")
     if policy.version != "optimizer_v1":
         raise ValueError("unsupported optimization policy")
     current, cash_weight = _current_positions(snapshot)

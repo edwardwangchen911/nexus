@@ -6042,6 +6042,27 @@
         "title": "ProposalComparisonResponse",
         "type": "object"
       },
+      "ProposalDraftRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "diagnostic_report_id": {
+            "format": "uuid",
+            "title": "Diagnostic Report Id",
+            "type": "string"
+          },
+          "portfolio_snapshot_id": {
+            "format": "uuid",
+            "title": "Portfolio Snapshot Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "portfolio_snapshot_id",
+          "diagnostic_report_id"
+        ],
+        "title": "ProposalDraftRequest",
+        "type": "object"
+      },
       "ReadinessComponents": {
         "additionalProperties": false,
         "properties": {
@@ -10774,6 +10795,88 @@
           }
         },
         "summary": "List Market"
+      }
+    },
+    "/internal/v1/optimization-proposal-drafts": {
+      "post": {
+        "description": "Create the first non-executable scenario without queueing a formal proposal Job.",
+        "operationId": "create_optimization_draft_internal_v1_optimization_proposal_drafts_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposalDraftRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptimizationProposalGroupEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NexusErrorEnvelope"
+                }
+              }
+            },
+            "description": "Stable NEXUS error envelope."
+          }
+        },
+        "summary": "Create Optimization Draft"
       }
     },
     "/internal/v1/optimization-proposals": {

@@ -24,6 +24,20 @@ describe("optimization BFF routes", () => {
     }));
   });
 
+  it("creates initial drafts from IDs only and never accepts model target weights", async () => {
+    const { POST } = await import("../../../app/api/v1/optimization-proposal-drafts/route");
+    const payload = { portfolio_snapshot_id: portfolioId, diagnostic_report_id: groupId };
+    const request = (value: unknown) => new Request("https://nexus.test/api/v1/optimization-proposal-drafts", {
+      method: "POST", headers: { origin: "https://nexus.test", "content-type": "application/json", "idempotency-key": "draft-once" },
+      body: JSON.stringify(value),
+    });
+    await POST(request(payload));
+    expect(engineFetch).toHaveBeenCalledWith("/internal/v1/optimization-proposal-drafts", expect.objectContaining({ method: "POST", actor }));
+    engineFetch.mockClear();
+    expect((await POST(request({ ...payload, target_weights: [1] }))).status).toBe(400);
+    expect(engineFetch).not.toHaveBeenCalled();
+  });
+
   it("forwards only canonical overview filters", async () => {
     const { GET } = await import("../../../app/api/v1/overview/route");
     await GET(new Request(`https://nexus.test/api/v1/overview?session_date=2026-08-24&portfolio_id=${portfolioId}`));

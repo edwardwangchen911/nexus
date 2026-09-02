@@ -117,7 +117,11 @@ export function rebuildAllowedEngineResponse(status: number, value: unknown, ups
       return Response.json({
         error: {
           code: error.code,
-          message: SAFE_ENGINE_ERROR_MESSAGES[error.code],
+          message: pathname === "/internal/v1/optimization-proposal-drafts"
+            && error.code === "DATA_PARTIAL"
+            && error.details.reason === "DRAFT_FX_VALUATION_UNAVAILABLE"
+            ? "当前快照含非美元现金，缺少汇率估值，暂不能生成可比草稿。"
+            : SAFE_ENGINE_ERROR_MESSAGES[error.code],
           request_id: error.request_id,
           details: {},
         },
@@ -285,11 +289,18 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       : INVALID_DATA;
   }
   const proposalGroup = /^\/internal\/v1\/optimization-proposals\/([^/]+)$/.exec(pathname);
-  if (proposalGroup && validateUuid(proposalGroup[1])) {
+  const draftCreation = pathname === "/internal/v1/optimization-proposal-drafts";
+  if (draftCreation || proposalGroup && validateUuid(proposalGroup[1])) {
     if (!matchesRuntimeSchema(data, optimizationProposalGroupRuntimeSchema) || !isPlain(data) || !Array.isArray(data.proposals)) return INVALID_DATA;
     const variants = data.proposals.map((proposal) => isPlain(proposal) ? proposal.variant : null);
     const ids = data.proposals.map((proposal) => isPlain(proposal) ? proposal.proposal_id : null);
-    return sameUuid(data.proposal_group_id, proposalGroup[1])
+    const bound = draftCreation
+      ? data.portfolio_scope === "real_read_only" && data.proposals.every((proposal) =>
+        isPlain(proposal) && proposal.analysis_only === true && isPlain(proposal.comparison)
+        && proposal.comparison.non_executable === true && isPlain(proposal.comparison.metrics)
+        && proposal.comparison.metrics.ranking_eligible === false)
+      : proposalGroup !== null && sameUuid(data.proposal_group_id, proposalGroup[1]);
+    return bound
       && variants.join(":") === "hold_current:minimum_change:strategy_target"
       && ids.every((id) => typeof id === "string") && new Set(ids).size === 3
       ? data

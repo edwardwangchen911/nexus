@@ -351,6 +351,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/v1/optimization-proposal-drafts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Optimization Draft
+         * @description Create the first non-executable scenario without queueing a formal proposal Job.
+         */
+        post: operations["create_optimization_draft_internal_v1_optimization_proposal_drafts_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/v1/optimization-proposals": {
         parameters: {
             query?: never;
@@ -3032,6 +3052,19 @@ export interface components {
              */
             tax_impact: "unknown";
         };
+        /** ProposalDraftRequest */
+        ProposalDraftRequest: {
+            /**
+             * Diagnostic Report Id
+             * Format: uuid
+             */
+            diagnostic_report_id: string;
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+        };
         /** ReadinessComponents */
         ReadinessComponents: {
             /**
@@ -5261,6 +5294,68 @@ export interface operations {
             };
             /** @description Stable NEXUS error envelope. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+        };
+    };
+    create_optimization_draft_internal_v1_optimization_proposal_drafts_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProposalDraftRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptimizationProposalGroupEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NexusErrorEnvelope"];
+                };
+            };
+            /** @description Stable NEXUS error envelope. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

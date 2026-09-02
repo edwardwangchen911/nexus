@@ -34,6 +34,15 @@ export function requireProposalAdmission(value: Record<string, unknown>): void {
   }
 }
 
+export function requireProposalDraft(value: Record<string, unknown>): void {
+  requireExactKeys(value, ["portfolio_snapshot_id", "diagnostic_report_id"]);
+  for (const key of ["portfolio_snapshot_id", "diagnostic_report_id"] as const) {
+    if (typeof value[key] !== "string" || !validateUuid(value[key])) {
+      throw invalid("The draft request is invalid.");
+    }
+  }
+}
+
 export function requireLifecycleVersion(request: Request, value: Record<string, unknown>): number {
   requireExactKeys(value, ["version"]);
   const version = value.version;

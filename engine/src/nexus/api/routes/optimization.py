@@ -29,6 +29,7 @@ from nexus.api.schemas.optimization import (
     ProposalComparisonDimensionsResponse,
     ProposalComparisonMetricsResponse,
     ProposalComparisonResponse,
+    ProposalDraftRequest,
     ShadowAttemptResponse,
     ShadowCheckpointResponse,
     ShadowCoverageResponse,
@@ -56,6 +57,7 @@ from nexus.audit.service import append_audit_event
 from nexus.domain.decimal import decimal_to_string
 from nexus.optimizer.admission import admit_queued_job
 from nexus.optimizer.authority import load_admission_authority
+from nexus.optimizer.initial_draft import InitialDraftUnavailable, create_initial_draft
 from nexus.optimizer.lifecycle import reject_group_idempotently
 from nexus.optimizer.models import (
     PortfolioScope,
@@ -440,6 +442,43 @@ async def get_optimization_group(
         ),
         meta=SuccessMetaResponse(request_id=actor.request_id, as_of=group.valuation_time),
     )
+
+
+@router.post(
+    "/internal/v1/optimization-proposal-drafts",
+    response_model=OptimizationProposalGroupEnvelope,
+    status_code=201,
+    responses=_ERROR_RESPONSES,
+)
+async def create_optimization_draft(
+    request: Request,
+    idempotency_key: _IdempotencyKey,
+    body: ProposalDraftRequest,
+    actor: VerifiedServiceActor = Depends(require_service_actor),
+    session: AsyncSession = Depends(transactional_session),
+) -> OptimizationProposalGroupEnvelope:
+    """Create the first non-executable scenario without queueing a formal proposal Job."""
+    request_hash = hashlib.sha256(b"initial-draft\0" + await request.body()).hexdigest()
+    _validate_claim(actor.actor_id, "initial-optimization-draft", idempotency_key, request_hash)
+    try:
+        result = await create_initial_draft(
+            session, portfolio_snapshot_id=body.portfolio_snapshot_id,
+            diagnostic_report_id=body.diagnostic_report_id, actor_id=actor.actor_id,
+            idempotency_key=idempotency_key, request_hash=request_hash, now=_utc_now(request),
+        )
+    except IdempotencyConflict as error:
+        raise NexusError(ErrorCode.IDEMPOTENCY_CONFLICT, "Draft request conflicts with prior request.", status_code=409) from error
+    except InitialDraftUnavailable as error:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL, "Stored facts do not support an initial draft.",
+            status_code=409, details={"reason": error.reason},
+        ) from error
+    except ValueError as error:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL, "Stored facts do not support an initial draft.",
+            status_code=409, details={"reason": "INITIAL_DRAFT_EVIDENCE_INCOMPLETE"},
+        ) from error
+    return await get_optimization_group(result.group_id, actor=actor, session=session)
 
 
 async def _transition_endpoint(

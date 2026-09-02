@@ -5,7 +5,7 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.optimizer.compare import ComparisonDimensions
@@ -66,8 +66,22 @@ async def read_comparison_for_freeze(
             OptimizationProposalGroupRecord.portfolio_scope == "real_read_only",
             OptimizationProposalGroupRecord.created_at <= as_of,
             DataSnapshot.created_at <= as_of,
-            DataSnapshot.available_at <= valuation_time,
-            DataSnapshot.received_at <= valuation_time,
+            DataSnapshot.available_at <= as_of,
+            DataSnapshot.received_at <= as_of,
+            or_(
+                and_(DataSnapshot.available_at <= valuation_time,
+                     DataSnapshot.received_at <= valuation_time),
+                and_(
+                    OptimizationProposalGroupRecord.partial.is_(True),
+                    DataSnapshot.source == "nexus_optimizer_draft",
+                    DataSnapshot.schema_version == "optimization_draft_inputs_v1",
+                    DataSnapshot.payload["portfolio_snapshot_id"].astext
+                    == str(portfolio_snapshot_id),
+                    DataSnapshot.payload["diagnostic_report_id"].astext
+                    == str(diagnostic_report_id),
+                    DataSnapshot.payload["diagnostic_input_hash"].astext == diagnostic_input_hash,
+                ),
+            ),
         )
         .order_by(
             OptimizationProposalGroupRecord.created_at.desc(),

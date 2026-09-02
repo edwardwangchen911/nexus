@@ -51,6 +51,11 @@ class ProposalAdmissionRequest(_StrictOptimizationSchema):
     cost_policy_id: UUID
 
 
+class ProposalDraftRequest(_StrictOptimizationSchema):
+    portfolio_snapshot_id: UUID
+    diagnostic_report_id: UUID
+
+
 class OptimizationLifecycleRequest(_StrictOptimizationSchema):
     version: int = Field(ge=0)
 
