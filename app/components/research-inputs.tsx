@@ -40,6 +40,10 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
       </dl>
       {inputs.portfolio_context.diagnostics.filter((item) => item.unknown_reason).map((item) => <p key={item.code}>{item.unknown_reason}</p>)}
       {inputs.portfolio_context.diagnostics_truncated ? <p>诊断项仅展示前 100 项。</p> : null}
+      {inputs.portfolio_context.proposal_comparison ? <p>
+        此次研究已包含同一基线的方案比较，冻结于 {formatUtc(inputs.portfolio_context.proposal_comparison.frozen_at)}。
+        <a href={`/optimize/${inputs.portfolio_context.proposal_comparison.proposal_group_id}`}>查看方案详情</a>
+      </p> : null}
       <details className="portfolio-disclosure"><summary>组合背景证据</summary>
         <dl className="decision-card__versions"><div><dt>快照标识</dt><dd>{inputs.portfolio_context.portfolio_snapshot_id}</dd></div><div><dt>内容 SHA-256</dt><dd>{inputs.portfolio_context.content_hash}</dd></div></dl>
       </details>

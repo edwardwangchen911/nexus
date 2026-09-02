@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.proposal_context import FrozenProposalComparison, read_comparison_for_freeze
 from nexus.diagnostics.models import OptimizationNeed
 from nexus.domain.decimal import DecimalString, decimal_to_string
 from nexus.persistence.models.data import DataSnapshot
@@ -78,6 +79,7 @@ class PortfolioResearchContext(BaseModel):
     diagnostics: tuple[ContextDiagnostic, ...] = Field(max_length=100)
     diagnostics_truncated: bool
     research_focus: ConcentrationResearchFocus | None = None
+    proposal_comparison: FrozenProposalComparison | None = None
     evidence_ref_id: UUID | None = None
     content_hash: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
 
@@ -87,6 +89,8 @@ def _bytes(context: PortfolioResearchContext) -> bytes:
     # Preserve the exact content identity of older frozen contexts.
     if context.research_focus is None:
         excluded.add("research_focus")
+    if context.proposal_comparison is None:
+        excluded.add("proposal_comparison")
     return json.dumps(
         context.model_dump(mode="json", exclude=excluded),
         sort_keys=True,
@@ -271,6 +275,14 @@ async def freeze_portfolio_context(
         research_focus=(
             _concentration_focus(held, currency_positions, items, report)
             if ready and valid else None
+        ),
+        proposal_comparison=(
+            await read_comparison_for_freeze(
+                session, portfolio_snapshot_id=snapshot.id,
+                diagnostic_report_id=report.id,
+                diagnostic_input_hash=report.diagnostic_input_hash,
+                valuation_time=snapshot.as_of, as_of=as_of,
+            ) if ready and report is not None else None
         ),
     )
     content = _bytes(context)

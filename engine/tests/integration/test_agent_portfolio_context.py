@@ -34,6 +34,120 @@ from sqlalchemy import update
 from engine.tests.integration.test_research_snapshot_preparation import INSTRUMENT, NOW, seed_filing
 
 
+@pytest.mark.asyncio
+async def test_existing_comparison_is_frozen_for_research_without_creating_proposals(
+    migrated_database_url,
+):
+    from nexus.optimizer.compare import ComparisonDimensions, TypedMetric
+    from nexus.optimizer.cost_policy import COST_POLICY_ID
+    from nexus.persistence.models.optimization import (
+        OptimizationProposalGroupRecord,
+        OptimizationProposalRecord,
+        ProposalComparisonRecord,
+    )
+    from nexus.quality.source_policy import SOURCE_POLICY_ID
+    from sqlalchemy import func, select
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    await prepare_database(settings)
+    async with session_factory(settings)() as session, session.begin():
+        await seed_filing(session)
+        portfolio, report = await seed_context(session)
+        old = await prepare_research_snapshot(session, INSTRUMENT, as_of=NOW)
+        data = DataSnapshot(
+            source="fixture", provider_object_id="comparison", revision="1",
+            observed_at=NOW, available_at=NOW, received_at=NOW,
+            schema_version="1", payload={}, created_at=NOW,
+        )
+        session.add(data)
+        await session.flush()
+        at = NOW + timedelta(seconds=1)
+        group = OptimizationProposalGroupRecord(
+            baseline_portfolio_snapshot_id=portfolio.id,
+            diagnostic_report_id=report.id, diagnostic_input_hash=report.diagnostic_input_hash,
+            data_snapshot_id=data.id, source_policy_id=SOURCE_POLICY_ID,
+            cost_policy_id=COST_POLICY_ID,
+            policy_id=UUID("e690b91d-1e24-5de3-b2b2-566a463fca25"),
+            valuation_time=NOW, baseline_ready=True, diagnostic_complete=False,
+            partial=True, created_at=at,
+        )
+        session.add(group)
+        await session.flush()
+        dimensions = ComparisonDimensions(
+            hard_violations=0,
+            **{name: TypedMetric.unknown("MISSING_EVIDENCE") for name in
+               ComparisonDimensions.model_fields if name != "hard_violations"},
+        )
+        for variant in ("hold_current", "minimum_change", "strategy_target"):
+            child = OptimizationProposalRecord(
+                proposal_group_id=group.id, variant=variant,
+                baseline_portfolio_snapshot_id=portfolio.id,
+                analysis_only=True, strategy_evidence_complete=False, created_at=at,
+            )
+            session.add(child)
+            await session.flush()
+            session.add(ProposalComparisonRecord(
+                proposal_id=child.id, metrics={"dimensions": dimensions.model_dump(mode="json")},
+                non_executable=True, cost_complete=False,
+                created_at=at + timedelta(seconds=2) if variant == "strategy_target" else at,
+            ))
+        await session.flush()
+        later = NOW + timedelta(seconds=4)
+        from nexus.agents.proposal_context import read_comparison_for_freeze
+
+        scope = dict(
+            portfolio_snapshot_id=portfolio.id, diagnostic_report_id=report.id,
+            diagnostic_input_hash=report.diagnostic_input_hash,
+            valuation_time=NOW, as_of=later,
+        )
+        for mismatch in (
+            {"as_of": NOW},
+            {"as_of": NOW + timedelta(seconds=2)},
+            {"portfolio_snapshot_id": UUID(int=999)},
+            {"diagnostic_report_id": UUID(int=999)},
+            {"diagnostic_input_hash": "0" * 64},
+            {"valuation_time": later},
+        ):
+            assert await read_comparison_for_freeze(session, **(scope | mismatch)) is None
+        snapshot = await prepare_research_snapshot(session, INSTRUMENT, as_of=later)
+        inputs = await read_research_inputs(
+            session, snapshot_id=snapshot.id, instrument_id=INSTRUMENT, as_of=later,
+        )
+        frozen = inputs.portfolio_context.proposal_comparison
+        assert frozen.proposal_group_id == group.id
+        assert len(frozen.variants) == 3
+        assert all(row.dimensions.liquidity.status == "unknown" for row in frozen.variants)
+        old_inputs = await read_research_inputs(
+            session, snapshot_id=old.id, instrument_id=INSTRUMENT, as_of=later,
+        )
+        assert old_inputs.portfolio_context.proposal_comparison is None
+        admission = await admit_research_run(
+            session, actor_id="test", route="/internal/v1/research-runs",
+            idempotency_key="frozen-comparison", request_hash="a" * 64,
+            request=ResearchRequest(
+                instrument_id=INSTRUMENT, data_snapshot_id=snapshot.id, decision_time=later,
+            ),
+            prompt_version_id=None, model_config_id=None,
+            daily_limit_usd=Decimal("3"), now=later,
+        )
+        tools = await database_read_only_tools(session, admission.run, allow_fixture_evidence=False)
+        result = await tools.execute("get_proposal_comparison", {
+            "proposal_group_id": str(group.id), "as_of": later.isoformat(),
+        })
+        assert result["status"] == "ok"
+        assert result["items"][0]["proposal_group_id"] == str(group.id)
+        assert result["items"][0]["execution_locked"] is True
+        assert "private-" not in json.dumps(result)
+        with pytest.raises(ToolInputError, match="proposal"):
+            await tools.execute("get_proposal_comparison", {
+                "proposal_group_id": str(UUID(int=999)), "as_of": later.isoformat(),
+            })
+        count = await session.scalar(
+            select(func.count()).select_from(OptimizationProposalGroupRecord)
+        )
+        assert count == 1
+
+
 async def seed_context(session, *, quality="PASS", status="READY", offset=0, price="20"):
     at = NOW + timedelta(seconds=offset)
     account = Account(provider="fosun", status="ACTIVE", created_at=at)

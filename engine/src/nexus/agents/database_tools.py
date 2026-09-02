@@ -646,7 +646,23 @@ class _BoundDatabaseExecutors:
 
     async def proposal_comparison(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_common_scope(payload)
-        return self._capability_unavailable("get_proposal_comparison")
+        context = await read_portfolio_context(
+            self._session, self._snapshot_id, self._instrument_id, self._decision_time,
+        )
+        if (
+            context is None or context.proposal_comparison is None
+            or not await self._current_evidence_authority_valid()
+            or context.evidence_ref_id not in self._evidence_ids
+        ):
+            return self._capability_unavailable("get_proposal_comparison")
+        comparison = context.proposal_comparison
+        if payload["proposal_group_id"] != comparison.proposal_group_id:
+            raise ToolInputError("tool request exceeds frozen proposal authority")
+        return self._result("get_proposal_comparison", [{
+            **comparison.model_dump(mode="json"),
+            "evidence_ref_id": str(context.evidence_ref_id),
+            "content_hash": context.content_hash,
+        }])
 
     async def _require_snapshot_scope(self, payload: Mapping[str, object]) -> None:
         await self._require_common_scope(payload)

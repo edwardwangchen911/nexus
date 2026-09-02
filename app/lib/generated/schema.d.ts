@@ -1286,6 +1286,32 @@ export interface components {
             /** Strategy Version */
             strategy_version: string;
         };
+        /**
+         * ComparisonDimensions
+         * @description Every required Task 12 comparison dimension, including typed tax unknown.
+         */
+        ComparisonDimensions: {
+            correlation: components["schemas"]["TypedMetric"];
+            cost: components["schemas"]["TypedMetric"];
+            currency_exposure: components["schemas"]["TypedMetric"];
+            drawdown: components["schemas"]["TypedMetric"];
+            /** Hard Violations */
+            hard_violations: number;
+            hhi: components["schemas"]["TypedMetric"];
+            liquidity: components["schemas"]["TypedMetric"];
+            sector_exposure: components["schemas"]["TypedMetric"];
+            /**
+             * @default {
+             *       "reason": "TAX_DATA_UNAVAILABLE",
+             *       "status": "unknown"
+             *     }
+             */
+            tax_impact: components["schemas"]["TypedMetric"];
+            top1: components["schemas"]["TypedMetric"];
+            top3: components["schemas"]["TypedMetric"];
+            turnover: components["schemas"]["TypedMetric"];
+            volatility: components["schemas"]["TypedMetric"];
+        };
         /** ComparisonMetricResponse */
         ComparisonMetricResponse: {
             /** Reason */
@@ -1676,6 +1702,78 @@ export interface components {
             count: number;
             /** Retryable */
             retryable: components["schemas"]["RetryableJobSummary"][];
+        };
+        /** FrozenComparisonVariant */
+        FrozenComparisonVariant: {
+            /** Cost Complete */
+            cost_complete: boolean;
+            dimensions: components["schemas"]["ComparisonDimensions"];
+            /** Non Executable */
+            non_executable: boolean;
+            /** Requires Fx */
+            requires_fx: boolean;
+            /**
+             * Variant
+             * @enum {string}
+             */
+            variant: "hold_current" | "minimum_change" | "strategy_target";
+        };
+        /**
+         * FrozenProposalComparison
+         * @description A saved comparison is evidence, never a recommendation or execution grant.
+         */
+        FrozenProposalComparison: {
+            /** Authority Stale */
+            authority_stale: boolean;
+            /**
+             * Cost Policy Id
+             * Format: uuid
+             */
+            cost_policy_id: string;
+            /**
+             * Data Snapshot Id
+             * Format: uuid
+             */
+            data_snapshot_id: string;
+            /** Diagnostic Complete */
+            diagnostic_complete: boolean;
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            /**
+             * Frozen At
+             * Format: date-time
+             */
+            frozen_at: string;
+            /**
+             * Optimizer Policy Id
+             * Format: uuid
+             */
+            optimizer_policy_id: string;
+            /** Partial */
+            partial: boolean;
+            /**
+             * Proposal Group Id
+             * Format: uuid
+             */
+            proposal_group_id: string;
+            /** Source Conflict */
+            source_conflict: boolean;
+            /**
+             * Source Policy Id
+             * Format: uuid
+             */
+            source_policy_id: string;
+            /**
+             * Valuation Time
+             * Format: date-time
+             */
+            valuation_time: string;
+            /** Variants */
+            variants: components["schemas"]["FrozenComparisonVariant"][];
         };
         /** GateResultResponse */
         GateResultResponse: {
@@ -2685,6 +2783,7 @@ export interface components {
             portfolio_snapshot_id: string;
             /** Position Weight */
             position_weight: string | null;
+            proposal_comparison?: components["schemas"]["FrozenProposalComparison"] | null;
             /**
              * Research As Of
              * Format: date-time
@@ -3990,6 +4089,21 @@ export interface components {
         };
         /** @enum {string} */
         SyncRunStatus: "ACTIVE" | "READY" | "PARTIAL" | "STALE" | "RECONCILIATION_REQUIRED" | "FAILED";
+        /**
+         * TypedMetric
+         * @description One dimension is explicitly known or carries a stable unknown reason.
+         */
+        TypedMetric: {
+            /** Reason */
+            reason?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "known" | "unknown";
+            /** Value */
+            value?: string | null;
+        };
         /** VetoExperimentRequest */
         VetoExperimentRequest: {
             /**

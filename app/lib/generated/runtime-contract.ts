@@ -1054,6 +1054,72 @@ export const runtimeContractSchemas = {
     "title": "ChampionStateResponse",
     "type": "object"
   },
+  "ComparisonDimensions": {
+    "additionalProperties": false,
+    "description": "Every required Task 12 comparison dimension, including typed tax unknown.",
+    "properties": {
+      "correlation": {
+        "$ref": "#/components/schemas/TypedMetric"
+      },
+      "cost": {
+        "$ref": "#/components/schemas/TypedMetric"
+      },
+      "currency_exposure": {
+        "$ref": "#/components/schemas/TypedMetric"
+      },
+      "drawdown": {
+        "$ref": "#/components/schemas/TypedMetric"
+      },
+      "hard_violations": {
+        "title": "Hard Violations",
+        "type": "integer"
+      },
+      "hhi": {
+        "$ref": "#/components/schemas/TypedMetric"
+      },
+      "liquidity": {
+        "$ref": "#/components/schemas/TypedMetric"
+      },
+      "sector_exposure": {
+        "$ref": "#/components/schemas/TypedMetric"
+      },
+      "tax_impact": {
+        "$ref": "#/components/schemas/TypedMetric",
+        "default": {
+          "reason": "TAX_DATA_UNAVAILABLE",
+          "status": "unknown"
+        }
+      },
+      "top1": {
+        "$ref": "#/components/schemas/TypedMetric"
+      },
+      "top3": {
+        "$ref": "#/components/schemas/TypedMetric"
+      },
+      "turnover": {
+        "$ref": "#/components/schemas/TypedMetric"
+      },
+      "volatility": {
+        "$ref": "#/components/schemas/TypedMetric"
+      }
+    },
+    "required": [
+      "hard_violations",
+      "top1",
+      "top3",
+      "hhi",
+      "sector_exposure",
+      "currency_exposure",
+      "volatility",
+      "drawdown",
+      "correlation",
+      "liquidity",
+      "turnover",
+      "cost"
+    ],
+    "title": "ComparisonDimensions",
+    "type": "object"
+  },
   "ComparisonMetricResponse": {
     "additionalProperties": false,
     "properties": {
@@ -2044,6 +2110,132 @@ export const runtimeContractSchemas = {
       "retryable"
     ],
     "title": "FailedJobSummary",
+    "type": "object"
+  },
+  "FrozenComparisonVariant": {
+    "additionalProperties": false,
+    "properties": {
+      "cost_complete": {
+        "title": "Cost Complete",
+        "type": "boolean"
+      },
+      "dimensions": {
+        "$ref": "#/components/schemas/ComparisonDimensions"
+      },
+      "non_executable": {
+        "title": "Non Executable",
+        "type": "boolean"
+      },
+      "requires_fx": {
+        "title": "Requires Fx",
+        "type": "boolean"
+      },
+      "variant": {
+        "enum": [
+          "hold_current",
+          "minimum_change",
+          "strategy_target"
+        ],
+        "title": "Variant",
+        "type": "string"
+      }
+    },
+    "required": [
+      "variant",
+      "dimensions",
+      "non_executable",
+      "requires_fx",
+      "cost_complete"
+    ],
+    "title": "FrozenComparisonVariant",
+    "type": "object"
+  },
+  "FrozenProposalComparison": {
+    "additionalProperties": false,
+    "description": "A saved comparison is evidence, never a recommendation or execution grant.",
+    "properties": {
+      "authority_stale": {
+        "title": "Authority Stale",
+        "type": "boolean"
+      },
+      "cost_policy_id": {
+        "format": "uuid",
+        "title": "Cost Policy Id",
+        "type": "string"
+      },
+      "data_snapshot_id": {
+        "format": "uuid",
+        "title": "Data Snapshot Id",
+        "type": "string"
+      },
+      "diagnostic_complete": {
+        "title": "Diagnostic Complete",
+        "type": "boolean"
+      },
+      "execution_locked": {
+        "const": true,
+        "default": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "frozen_at": {
+        "format": "date-time",
+        "title": "Frozen At",
+        "type": "string"
+      },
+      "optimizer_policy_id": {
+        "format": "uuid",
+        "title": "Optimizer Policy Id",
+        "type": "string"
+      },
+      "partial": {
+        "title": "Partial",
+        "type": "boolean"
+      },
+      "proposal_group_id": {
+        "format": "uuid",
+        "title": "Proposal Group Id",
+        "type": "string"
+      },
+      "source_conflict": {
+        "title": "Source Conflict",
+        "type": "boolean"
+      },
+      "source_policy_id": {
+        "format": "uuid",
+        "title": "Source Policy Id",
+        "type": "string"
+      },
+      "valuation_time": {
+        "format": "date-time",
+        "title": "Valuation Time",
+        "type": "string"
+      },
+      "variants": {
+        "items": {
+          "$ref": "#/components/schemas/FrozenComparisonVariant"
+        },
+        "maxItems": 3,
+        "minItems": 3,
+        "title": "Variants",
+        "type": "array"
+      }
+    },
+    "required": [
+      "proposal_group_id",
+      "data_snapshot_id",
+      "source_policy_id",
+      "cost_policy_id",
+      "optimizer_policy_id",
+      "valuation_time",
+      "frozen_at",
+      "partial",
+      "source_conflict",
+      "authority_stale",
+      "diagnostic_complete",
+      "variants"
+    ],
+    "title": "FrozenProposalComparison",
     "type": "object"
   },
   "GateResultResponse": {
@@ -4586,6 +4778,16 @@ export const runtimeContractSchemas = {
           }
         ],
         "title": "Position Weight"
+      },
+      "proposal_comparison": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/FrozenProposalComparison"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "research_as_of": {
         "format": "date-time",
@@ -7867,6 +8069,48 @@ export const runtimeContractSchemas = {
       "FAILED"
     ],
     "type": "string"
+  },
+  "TypedMetric": {
+    "additionalProperties": false,
+    "description": "One dimension is explicitly known or carries a stable unknown reason.",
+    "properties": {
+      "reason": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "status": {
+        "enum": [
+          "known",
+          "unknown"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "value": {
+        "anyOf": [
+          {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Value"
+      }
+    },
+    "required": [
+      "status"
+    ],
+    "title": "TypedMetric",
+    "type": "object"
   },
   "WatchlistMembershipResponse": {
     "additionalProperties": false,
