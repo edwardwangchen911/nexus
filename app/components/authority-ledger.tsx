@@ -10,6 +10,7 @@ export function AuthorityLedger({ snapshotStatus, displayReadiness, decisionRead
   const displayReady = displayReadiness === "DISPLAY_READY";
   const decisionReady = decisionReadiness === "DECISION_READY";
   const decisionAttention = decisionReadiness === "RECONCILIATION_REQUIRED" || decisionReadiness === "DATA_STALE";
+  const decisionLabel: Record<string, string> = { DECISION_READY: "决策可用", RECONCILIATION_PENDING: "决策待对账", DATA_STALE: "决策数据已过期", RECONCILIATION_REQUIRED: "决策对账失败" };
 
   return (
     <section className="authority-ledger" aria-label="数据与决策权威边界">
@@ -21,10 +22,10 @@ export function AuthorityLedger({ snapshotStatus, displayReadiness, decisionRead
         <span className="authority-ledger__mode"><Bot aria-hidden="true" size={15} />Agent 只提案</span>
       </header>
       <ol>
-        <LedgerStep icon={DatabaseZap} label="Provider fact" value={snapshotStatus} state={snapshotStatus === "READY" ? "verified" : "attention"} />
-        <LedgerStep icon={Eye} label="Display gate" value={displayReadiness} state={displayReady ? "verified" : "attention"} />
-        <LedgerStep icon={Scale} label="Decision gate" value={decisionReadiness} state={decisionReady ? "verified" : decisionAttention ? "attention" : "current"} />
-        <LedgerStep icon={LockKeyhole} label="Execution" value="HUMAN APPROVAL" state="locked" />
+        <LedgerStep icon={DatabaseZap} label="冻结事实" value={snapshotStatus} state={snapshotStatus === "READY" ? "verified" : "attention"} />
+        <LedgerStep icon={Eye} label={displayReady ? "资产可展示" : "暂无资产事实"} value={displayReadiness} state={displayReady ? "verified" : "attention"} />
+        <LedgerStep icon={Scale} label={decisionLabel[decisionReadiness] ?? "决策不可用"} value={decisionReadiness} state={decisionReady ? "verified" : decisionAttention ? "attention" : "current"} />
+        <LedgerStep icon={LockKeyhole} label="执行锁定" value="HUMAN APPROVAL" state="locked" />
       </ol>
     </section>
   );

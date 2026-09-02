@@ -127,5 +127,5 @@ function qualityLabel(quality: IntegrationStatus["quality"] | undefined): string
 function formatTimestamp(value: string | null | undefined): string {
   if (!value) return "无";
   const parsed = new Date(value);
-  return Number.isNaN(parsed.valueOf()) ? "无效时间" : parsed.toLocaleString("zh-CN", { hour12: false });
+  return Number.isNaN(parsed.valueOf()) ? "无效时间" : parsed.toISOString().replace("T", " ").replace(".000Z", " UTC");
 }

@@ -54,8 +54,18 @@ for (const viewport of releaseViewports) {
     await expect(page.getByRole("button", { name: "刷新页面数据" })).toBeEnabled();
     await expect(page.getByRole("button", { name: "同步复星只读事实" })).toHaveCount(0);
     await expect(page.getByText(/折算总资产/)).toHaveCount(0);
+    const assets = page.getByRole("region", { name: "HKD 原币种资产估值" });
+    await expect(assets.getByText("HKD 27,500.00", { exact: true })).toBeVisible();
+    await expect(page.locator(".portfolio-workspace")).toHaveAttribute("data-single", "true");
+    const metric = await assets.locator(".portfolio-valuation__facts dd").first().boundingBox();
+    const authorityBox = await authority.boundingBox();
+    expect(metric!.y + metric!.height).toBeLessThan(authorityBox!.y);
+    if (viewport.width < 768) {
+      expect(metric!.y + metric!.height).toBeLessThan(viewport.height);
+      expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThan(3200);
+    }
     if (viewport.name === "desktop-1440" || viewport.name === "mobile-390") {
-      await page.screenshot({ path: `test-results/decision-ledger-portfolio-${viewport.name}.png`, fullPage: true });
+      await page.screenshot({ path: `test-results/asset-first-portfolio-${viewport.name}.png`, fullPage: true });
     }
     if (viewport.width < 768) {
       await page.locator(".app-shell__drawer > summary").click();

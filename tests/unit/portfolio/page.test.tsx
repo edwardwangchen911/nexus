@@ -6,7 +6,7 @@ import PortfolioPage, {
   type PortfolioItem,
   type PortfolioSnapshot,
 } from "../../../app/(protected)/portfolio/page";
-import { PortfolioSummary } from "../../../app/components/portfolio-summary";
+import { PortfolioSummary, PortfolioValuationSummary } from "../../../app/components/portfolio-summary";
 import type { DataStateKind } from "../../../app/components/data-state";
 import { portfolio, portfolioId, responseMeta, snapshot } from "./fixtures";
 
@@ -46,6 +46,24 @@ describe("portfolio vertical slice", () => {
 
     expect(screen.getByText("现金流对账").parentElement).toHaveTextContent("已通过 · 1 条");
     expect(screen.getByText("执行能力").parentElement).toHaveTextContent("已锁定");
+  });
+
+  it("keeps compact asset totals visible while source details open on demand", () => {
+    const { container } = render(<PortfolioValuationSummary provider="fosun" snapshot={snapshot} currency="HKD" compact />);
+    expect(screen.getByText("HKD 27,500.00")).toBeVisible();
+    expect(screen.getByText("复星（只读）")).not.toBeVisible();
+    fireEvent.click(screen.getByText("估值来源与口径"));
+    expect(screen.getByText("复星（只读）")).toBeVisible();
+    expect(screen.getByText("2026-08-23 08:00:00 UTC")).toBeVisible();
+    const bars = container.querySelectorAll<HTMLElement>(".portfolio-allocation__meter > span");
+    expect([...bars].map((bar) => bar.style.inlineSize)).toEqual(["29.09%", "70.91%"]);
+  });
+
+  it("does not invent a bounded allocation bar for negative or leveraged shares", () => {
+    const { container } = render(<PortfolioValuationSummary provider="fosun" snapshot={{ ...snapshot, cash: [{ ...snapshot.cash[0], cash_balance: "-1000.00" }] }} currency="HKD" compact />);
+    expect(screen.getByText("现金 -5.41%")).toBeVisible();
+    expect(screen.getByText("00656.HK 105.41%")).toBeVisible();
+    expect(container.querySelectorAll(".portfolio-allocation__meter")).toHaveLength(0);
   });
 
   it.each(stateLabels)("renders the visible %s data state", (state, label) => {

@@ -7,6 +7,7 @@ type PortfolioSummaryProps = {
   portfolio: PortfolioItem;
   snapshot: PortfolioSnapshot;
   currency: string;
+  showValuation?: boolean;
 };
 
 type Position = PortfolioSnapshot["positions"][number];
@@ -28,7 +29,7 @@ const BIGINT_TWO = BigInt(2);
 const BIGINT_HUNDRED = BigInt(100);
 const PERCENT_HUNDREDTHS_FACTOR = BigInt(10_000);
 
-export function PortfolioSummary({ portfolio, snapshot, currency }: PortfolioSummaryProps): React.ReactElement {
+export function PortfolioSummary({ portfolio, snapshot, currency, showValuation = true }: PortfolioSummaryProps): React.ReactElement {
   const cash = snapshot.cash.find((bucket) => bucket.currency === currency) ?? null;
   const positions = snapshot.positions
     .filter((position) => position.currency === currency)
@@ -47,18 +48,21 @@ export function PortfolioSummary({ portfolio, snapshot, currency }: PortfolioSum
         <span className="mode-badge"><LockKeyhole aria-hidden="true" size={15} />只读</span>
       </header>
 
-      <CurrencyValuationSummary
+      {showValuation ? <CurrencyValuationSummary
         currency={currency}
         provider={portfolio.provider}
         snapshot={snapshot}
         valuation={valuation}
-      />
+      /> : null}
 
+      <details className="portfolio-disclosure">
+      <summary>现金明细与更新时间</summary>
       <dl className="portfolio-summary__cash" aria-label={`${currency} 现金事实`}>
         <Fact term="账面现金" value={cash ? `${currency} ${formatDecimal(cash.cash_balance)}` : "无数据"} />
         <Fact term="可用现金" value={cash ? `${currency} ${formatDecimal(cash.available_cash)}` : "无数据"} />
         <Fact term={snapshot.time_basis === "gateway_observed" ? "数据读取时间" : "数据更新时间"} value={formatTime(cash?.provider_as_of ?? snapshot.as_of)} />
       </dl>
+      </details>
 
       <div className="portfolio-summary__section">
         <h3>持仓</h3>
@@ -96,7 +100,7 @@ export function PortfolioSummary({ portfolio, snapshot, currency }: PortfolioSum
         )}
       </div>
 
-      <div className="portfolio-summary__section">
+      <div className="portfolio-summary__section" data-empty={orders.length === 0}>
         <h3>未结订单快照</h3>
         {orders.length === 0 ? <p className="portfolio-summary__empty">该原币种没有未结订单事实。</p> : (
           <div className="table-scroll" tabIndex={0} role="region" aria-label={`${currency} 未结订单表，可横向滚动`}>
@@ -131,10 +135,12 @@ export function PortfolioValuationSummary({
   provider,
   snapshot,
   currency,
+  compact = false,
 }: {
   provider: string;
   snapshot: PortfolioSnapshot;
   currency: string;
+  compact?: boolean;
 }): React.ReactElement {
   const cash = snapshot.cash.find((bucket) => bucket.currency === currency) ?? null;
   const positions = snapshot.positions
@@ -145,6 +151,7 @@ export function PortfolioValuationSummary({
     provider={provider}
     snapshot={snapshot}
     valuation={currencyValuation(snapshot, cash, positions)}
+    compact={compact}
   />;
 }
 
@@ -153,28 +160,30 @@ function CurrencyValuationSummary({
   provider,
   snapshot,
   valuation,
+  compact = false,
 }: {
   currency: string;
   provider: string;
   snapshot: PortfolioSnapshot;
   valuation: CurrencyValuation;
+  compact?: boolean;
 }): React.ReactElement {
   const complete = valuation.totalValue !== null
     && valuation.cashValue !== null
     && valuation.holdingsValue !== null;
   return (
-    <section className="portfolio-valuation" aria-label={`${currency} 原币种资产估值`}>
+    <section className="portfolio-valuation" data-compact={compact} aria-label={`${currency} 原币种资产估值`}>
       <header className="portfolio-valuation__heading">
-        <div><p className="eyebrow">原币种估值</p><h3>资产概览</h3></div>
+        <div><p className="eyebrow">原币种估值 · 只读</p><h3>{compact ? currency : "资产概览"}</h3></div>
         <span className="quality-badge" data-quality={snapshot.status}>{snapshotStatusLabel(snapshot.status)} <code>{snapshot.status}</code></span>
       </header>
       <dl className="portfolio-valuation__facts">
         <Fact term="总资产" value={complete ? `${currency} ${formatMoney(valuation.totalValue!)}` : "无法计算"} />
         <Fact term="持仓市值" value={complete ? `${currency} ${formatMoney(valuation.holdingsValue!)}` : "无法计算"} />
         <Fact term="现金" value={complete ? `${currency} ${formatMoney(valuation.cashValue!)}` : "无法计算"} />
-        <Fact term="数据来源" value={provider === "fosun" ? "复星（只读）" : provider} />
+        {!compact ? <><Fact term="数据来源" value={provider === "fosun" ? "复星（只读）" : provider} />
         <Fact term="质量状态" value={`${snapshotStatusLabel(snapshot.status)} · ${snapshot.status}`} />
-        <Fact term={valuation.asOfKind} value={formatTime(valuation.asOf)} />
+        <Fact term={valuation.asOfKind} value={formatTime(valuation.asOf)} /></> : null}
       </dl>
       {complete && valuation.totalValue! > BIGINT_ZERO ? (
         <div className="portfolio-allocation">
@@ -202,7 +211,14 @@ function CurrencyValuationSummary({
           总资产无法计算。{valuation.missingFacts.join("；")}。上一份冻结事实保持可见，不进行部分汇总或 FX 折算。
         </p>
       )}
-      <p className="portfolio-valuation__note">仅按复星冻结快照中的原币种账面现金、持仓数量与现价计算；不进行跨币种折算，也不构成投资建议。</p>
+      {compact ? <details className="portfolio-disclosure">
+        <summary>估值来源与口径</summary>
+        <dl className="portfolio-valuation__facts">
+          <Fact term="数据来源" value={provider === "fosun" ? "复星（只读）" : provider} />
+          <Fact term={valuation.asOfKind} value={formatTime(valuation.asOf)} />
+        </dl>
+        <p className="portfolio-valuation__note">冻结事实 · 原币种独立估值，不进行跨币种折算，也不构成投资建议。</p>
+      </details> : <p className="portfolio-valuation__note">仅按复星冻结快照中的原币种账面现金、持仓数量与现价计算；不进行跨币种折算，也不构成投资建议。</p>}
     </section>
   );
 }
@@ -213,6 +229,7 @@ function AllocationLine({ label, value, total, currency }: { label: string; valu
       <span>{label}</span>
       <span className="numeric-data">{currency} {formatMoney(value)}</span>
       <strong className="numeric-data">{label} {formatPercent(value, total)}</strong>
+      {value >= BIGINT_ZERO && value <= total && total > BIGINT_ZERO ? <span className="portfolio-allocation__meter" aria-hidden="true"><span style={{ inlineSize: formatPercent(value, total) }} /></span> : null}
     </li>
   );
 }

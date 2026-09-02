@@ -51,10 +51,10 @@ export function OverviewPanel({ state, overview, onRefresh }: Props): React.Reac
         description={factsOnly ? "展示冻结的复星只读事实；尚未生成诊断、策略或交易建议。" : "先判断是否值得进一步优化。所有结论均来自冻结快照与确定性阈值，不使用 Agent 主观评分。"}
         actions={<><span className="mode-badge">仅研究 <code>RESEARCH_ONLY</code></span><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />{factsOnly ? "刷新概览" : "刷新判断"}</button></>}
       />
+      {hasData && state === "stale" ? <p className="inline-notice inline-notice--error" role="status">显示最后已知结果；当前请求失败，不可用于新动作。</p> : null}
       {!hasData ? <DataState state={state} title={stateTitle(state)} detail={stateDetail(state)}>
         {state === "empty" ? <a className="button button--primary" href="/market">研究美股证据<ArrowRight aria-hidden="true" size={17} /></a> : null}
       </DataState> : factsOnly ? <PortfolioFactsOverview overview={overview} /> : overview.diagnostic_report ? <>
-        {state === "stale" ? <p className="inline-notice inline-notice--error" role="status">显示最后已知结果；当前请求失败，不可用于新动作。</p> : null}
         <OptimizationNeedPanel report={overview.diagnostic_report} />
         <nav className="overview-links" aria-label="概览后续动作"><a className="button button--primary" href={optimizeHref}>打开组合诊断<ArrowRight aria-hidden="true" size={17} /></a>{overview.proposal_group ? <a className="button button--quiet" href={`/optimize/${overview.proposal_group.proposal_group_id}`}>查看三方案比较</a> : null}</nav>
         <section className="overview-fact-band" aria-label="冻结组合事实"><div><p className="eyebrow">决策证据</p><h2>只读事实快照</h2><p>用于复核判断来源，不会直接触发任何交易动作。</p></div><dl className="numeric-data"><div><dt>数据截止</dt><dd>{formatUtc(overview.snapshot_as_of)}</dd></div><div><dt>交易日</dt><dd>{overview.trading_day ?? "未知"}</dd></div><div><dt>诊断策略</dt><dd>{overview.diagnostic_report.policy_version}</dd></div><div><dt>组合 ID</dt><dd>{overview.portfolio_id}</dd></div></dl></section>
@@ -71,6 +71,9 @@ function PortfolioFactsOverview({ overview }: { overview: Overview }): React.Rea
     ...snapshot.positions.map((position) => position.currency),
   ])].sort();
   return <>
+    <div className="portfolio-assets" aria-label="原币种资产总览">
+      {currencies.map((currency) => <PortfolioValuationSummary key={currency} provider={provider} snapshot={snapshot} currency={currency} compact />)}
+    </div>
     <section className="overview-fact-band" aria-label="复星只读组合事实">
       <div><p className="eyebrow">复星只读事实</p><h2>尚无诊断，保持现状</h2><p>{diagnosticUnavailableMessage(overview.diagnostic_unavailable_reason)}</p></div>
       <dl className="numeric-data">
@@ -81,12 +84,6 @@ function PortfolioFactsOverview({ overview }: { overview: Overview }): React.Rea
       </dl>
     </section>
     <AuthorityLedger snapshotStatus={snapshot.status} displayReadiness={snapshot.display_readiness} decisionReadiness={snapshot.decision_readiness} />
-    {currencies.map((currency) => <PortfolioValuationSummary
-      key={currency}
-      provider={provider}
-      snapshot={snapshot}
-      currency={currency}
-    />)}
     <nav className="overview-links" aria-label="概览后续动作">
       <a className="button button--primary" href="/portfolio">查看组合事实<ArrowRight aria-hidden="true" size={17} /></a>
       <a className="button button--quiet" href="/market">查看持仓行情</a>

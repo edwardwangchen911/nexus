@@ -5,8 +5,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
 import { AuthorityLedger } from "../../components/authority-ledger";
 import { IntelligenceHeader } from "../../components/intelligence-header";
-import { PortfolioSummary } from "../../components/portfolio-summary";
 import { PortfolioDiagnostic } from "../../components/portfolio-diagnostic";
+import { PortfolioSummary, PortfolioValuationSummary } from "../../components/portfolio-summary";
 import type { components } from "../../lib/generated/schema";
 
 export type PortfolioItem = components["schemas"]["PortfolioListItemResponse"];
@@ -161,19 +161,25 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
         {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
       </div>
       {!selected ? <DataState state={state} title="组合快照" detail={stateDetail(state)} announce={false} /> : (
-        <div className="portfolio-workspace">
+        <div className="portfolio-workspace" data-single={portfolios.length === 1}>
           <nav className="portfolio-rail" aria-label="组合选择"><p className="portfolio-rail__label">组合账户</p><ul>{portfolios.map((item) => <li key={item.portfolio_id}><button type="button" aria-pressed={item.portfolio_id === selectedPortfolioId} onClick={() => onSelect(item.portfolio_id)}><strong>{item.name}</strong><span>{kindLabel(item.kind)} · {coverageLabel(item.coverage_scope)}</span><span>{item.original_currencies.join(" / ") || "币种未知"}</span></button></li>)}</ul></nav>
           <div className="portfolio-detail">
-            {selected.kind === "real_read_only" ? <LocalRefreshGuidance status={selected.last_sync_run_status} /> : null}
             {!hasData || !snapshot ? <DataState state={state} title={`${selected.name} 快照`} detail={stateDetail(state)} announce={false} /> : <>
-              <div className="portfolio-snapshot-band"><div><p className="eyebrow">冻结快照</p><h2>{selected.name}</h2><p>只读账户事实，不含跨币种推算。</p></div><dl><div><dt>数据来源</dt><dd>{selected.provider === "fosun" ? "复星（只读）" : selected.provider}</dd></div><div><dt>展示状态</dt><dd>{displayReadinessLabel(snapshot.display_readiness)}</dd></div><div><dt>决策状态</dt><dd>{decisionReadinessLabel(snapshot.decision_readiness)}</dd></div><div><dt>现金流对账</dt><dd>{cashFlowQualityLabel(snapshot.cash_flow_quality)} · {snapshot.cash_flow_count} 条</dd></div><div><dt>执行能力</dt><dd>{snapshot.execution_locked ? "已锁定" : "异常"}</dd></div><div><dt>风控状态</dt><dd>{snapshotStatusLabel(snapshot.status)} <code>{snapshot.status}</code></dd></div><div><dt>覆盖范围</dt><dd>{coverageLabel(snapshot.coverage_scope)}</dd></div><div><dt>币种</dt><dd>{currencies.length}</dd></div><div><dt>持仓</dt><dd>{snapshot.positions.length}</dd></div><div><dt>未结订单</dt><dd>{snapshot.open_orders.length}</dd></div><div><dt>{snapshot.time_basis === "gateway_observed" ? "读取时间" : "更新时间"}</dt><dd>{formatTime(snapshot.as_of)}</dd></div></dl></div>
-              {snapshot.time_basis === "gateway_observed" ? <p className="inline-notice">此快照使用网关读取时间；券商未提供逐条更新时间。双读对账只证明读取窗口内一致，不代表逐笔成交回放。</p> : null}
-              <AuthorityLedger snapshotStatus={snapshot.status} displayReadiness={snapshot.display_readiness} decisionReadiness={snapshot.decision_readiness} />
-              {snapshot.decision_readiness === "RECONCILIATION_PENDING" ? <p className="inline-notice">资产事实可展示；订单或现金流尚未完成对账，不能作为优化基线。</p> : null}
               {state === "stale" ? <p className="inline-notice inline-notice--error" role="status">{stateDetail(state)}</p> : null}
+              {snapshot.decision_readiness === "RECONCILIATION_PENDING" ? <p className="inline-notice">资产事实可展示；订单或现金流尚未完成对账，不能作为优化基线。</p> : null}
               {snapshot.status === "RECONCILIATION_REQUIRED" ? <p className="inline-notice inline-notice--error">双读对账未通过。快照仅供展示，不能用作优化基线。</p> : null}
-              {currencies.map((currency) => <PortfolioSummary key={currency} portfolio={selected} snapshot={snapshot} currency={currency} />)}
+              <div className="portfolio-assets" aria-label="原币种资产总览">
+                {currencies.map((currency) => <PortfolioValuationSummary key={currency} provider={selected.provider} snapshot={snapshot} currency={currency} compact />)}
+              </div>
+              <AuthorityLedger snapshotStatus={snapshot.status} displayReadiness={snapshot.display_readiness} decisionReadiness={snapshot.decision_readiness} />
+              <details className="portfolio-disclosure portfolio-source">
+                <summary>快照来源与覆盖范围 · {selected.provider === "fosun" ? "复星（只读）" : selected.provider} · {formatTime(snapshot.as_of)}</summary>
+              <div className="portfolio-snapshot-band"><div><p className="eyebrow">冻结快照</p><h2>{selected.name}</h2><p>只读账户事实，不含跨币种推算。</p></div><dl><div><dt>数据来源</dt><dd>{selected.provider === "fosun" ? "复星（只读）" : selected.provider}</dd></div><div><dt>现金流对账</dt><dd>{cashFlowQualityLabel(snapshot.cash_flow_quality)} · {snapshot.cash_flow_count} 条</dd></div><div><dt>执行能力</dt><dd>{snapshot.execution_locked ? "已锁定" : "异常"}</dd></div><div><dt>覆盖范围</dt><dd>{coverageLabel(snapshot.coverage_scope)}</dd></div><div><dt>币种</dt><dd>{currencies.length}</dd></div><div><dt>持仓</dt><dd>{snapshot.positions.length}</dd></div><div><dt>未结订单</dt><dd>{snapshot.open_orders.length}</dd></div><div><dt>{snapshot.time_basis === "gateway_observed" ? "读取时间" : "更新时间"}</dt><dd>{formatTime(snapshot.as_of)}</dd></div></dl></div>
+              {snapshot.time_basis === "gateway_observed" ? <p className="inline-notice">此快照使用网关读取时间；券商未提供逐条更新时间。双读对账只证明读取窗口内一致，不代表逐笔成交回放。</p> : null}
+              </details>
+              {currencies.map((currency) => <PortfolioSummary key={currency} portfolio={selected} snapshot={snapshot} currency={currency} showValuation={false} />)}
             </>}
+            {selected.kind === "real_read_only" ? <LocalRefreshGuidance status={selected.last_sync_run_status} /> : null}
           </div>
         </div>
       )}
@@ -203,9 +209,6 @@ async function fetchWithTimeout(path: string): Promise<Response> { return fetch(
 function snapshotState(status: PortfolioSnapshot["status"]): DataStateKind { return status === "READY" ? "ready" : status === "STALE" ? "stale" : "partial"; }
 function kindLabel(kind: PortfolioItem["kind"]): string { return ({ real_read_only: "真实只读", internal_paper: "内部模拟", shadow: "影子组合" })[kind]; }
 function coverageLabel(scope: string): string { return scope === "broker_account" ? "券商账户" : scope; }
-function snapshotStatusLabel(status: PortfolioSnapshot["status"]): string { return status === "READY" ? "已就绪" : status === "STALE" ? "已过期" : "需要对账"; }
-function displayReadinessLabel(value: PortfolioSnapshot["display_readiness"]): string { return value === "DISPLAY_READY" ? "资产可展示" : "暂无资产事实"; }
-function decisionReadinessLabel(value: PortfolioSnapshot["decision_readiness"]): string { return ({ DECISION_READY: "决策可用", RECONCILIATION_PENDING: "决策待对账", DATA_STALE: "决策数据已过期", RECONCILIATION_REQUIRED: "决策对账失败" })[value]; }
 function cashFlowQualityLabel(value: PortfolioSnapshot["cash_flow_quality"]): string { return ({ PASS: "已通过", PARTIAL: "不完整", NOT_RUN: "未运行" })[value]; }
 function formatTime(value: string | null): string { if (!value) return "Provider 时点缺失"; const date = new Date(value); return Number.isNaN(date.valueOf()) ? "无效时间" : date.toISOString().replace("T", " ").replace(".000Z", " UTC"); }
 function stateDetail(state: DataStateKind): string { return ({ loading: "正在读取脱敏组合和冻结快照。", empty: "尚无可展示的冻结组合快照。", ready: "组合快照已就绪。", partial: "资产事实可展示；订单或现金流尚未完成对账，不能作为优化基线。", stale: "显示最后已知快照，不触发业务动作。", error: "读取失败；未开启任何交易能力。", forbidden: "当前身份无权读取组合事实。" })[state]; }
