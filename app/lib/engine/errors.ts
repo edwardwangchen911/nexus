@@ -296,13 +296,20 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
     if (!matchesRuntimeSchema(data, optimizationProposalGroupRuntimeSchema) || !isPlain(data) || !Array.isArray(data.proposals)) return INVALID_DATA;
     const variants = data.proposals.map((proposal) => isPlain(proposal) ? proposal.variant : null);
     const ids = data.proposals.map((proposal) => isPlain(proposal) ? proposal.proposal_id : null);
+    const economic = data.economic_comparison;
+    const economicValid = economic == null || isPlain(economic) && (
+      economic.status === "compared"
+        ? economic.recommendation !== null
+        : economic.recommendation === null && Array.isArray(economic.reasons)
+          && economic.reasons.length > 0
+    );
     const bound = draftCreation
       ? data.portfolio_scope === "real_read_only" && data.proposals.every((proposal) =>
         isPlain(proposal) && proposal.analysis_only === true && isPlain(proposal.comparison)
         && proposal.comparison.non_executable === true && isPlain(proposal.comparison.metrics)
         && proposal.comparison.metrics.ranking_eligible === false)
       : proposalGroup !== null && sameUuid(data.proposal_group_id, proposalGroup[1]);
-    return bound
+    return bound && economicValid
       && variants.join(":") === "hold_current:minimum_change:strategy_target"
       && ids.every((id) => typeof id === "string") && new Set(ids).size === 3
       ? data

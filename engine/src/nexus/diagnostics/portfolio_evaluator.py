@@ -106,8 +106,11 @@ def _currency_items(
             for position, _ in values
         ):
             items.extend(_exposure_items(values, scope, market, policy, resolver, value_refs))
-        if market.quality == "PASS":
+        # ADV uses qualified close * volume and does not require adjusted returns
+        # or a benchmark. Its own evidence resolver still rejects missing/future inputs.
+        if market.quality in {"PASS", "PARTIAL"}:
             items.extend(_liquidity_items(values, scope, market, policy, resolver, value_refs))
+        if market.quality == "PASS":
             items.extend(market_risk_items(values, scope, market, policy, snapshot, resolver))
     total = cash + sum((value for _, value in values), Decimal(0))
     if total > 0:

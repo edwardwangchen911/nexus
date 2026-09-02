@@ -49,6 +49,40 @@ HOLIDAY = date(2026, 7, 3)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing_session", [False, True])
+async def test_partial_market_persists_only_evidenced_liquidity(
+    migrated_database_url: str, missing_session: bool,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    payloads: dict[str, bytes] = {}
+    async with factory() as session, session.begin():
+        await _seed_spy(session)
+        await _add_series(
+            session, payloads, INSTRUMENT_ID, "asset",
+            omitted_session=date(2026, 8, 21) if missing_session else None,
+        )
+        report = await diagnose_and_persist(
+            session, portfolio_id=PORTFOLIOS[0], snapshot_id=SNAPSHOT_ID,
+            artifact_reader=FixtureArtifactReader(payloads),
+        )
+        assert report.optimization_need == "RESEARCH_REQUIRED"
+        assert any(i.unknown_reason == "MARKET_EVIDENCE_UNAVAILABLE" for i in report.items)
+        liquidity = next(
+            i for i in report.items if i.diagnostic_code.startswith("LIQUIDITY_DAYS_TO_EXIT:")
+        )
+        if missing_session:
+            assert liquidity.metric_value is None and liquidity.unknown_reason is not None
+        else:
+            assert liquidity.metric_value is not None
+            assert any(
+                ref.object_id.startswith("price-series-manifest:")
+                for ref in liquidity.evidence_refs
+            )
+        assert await diagnostic_report_count(session) == 1
+
+
+@pytest.mark.asyncio
 async def test_production_service_assembles_real_diagnostics_from_hashed_parquet(
     migrated_database_url: str,
 ) -> None:

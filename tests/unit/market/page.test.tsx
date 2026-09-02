@@ -334,6 +334,7 @@ describe("market vertical slice", () => {
     expect(quote).toHaveTextContent("复星 L1（只读）");
     expect(quote).toHaveTextContent("网关接收时间");
     expect(quote).toHaveTextContent("实时性未获证明");
+    expect(quote).toHaveTextContent("报价源时间未知（上游未提供）");
     expect(screen.getByText("上游报价未提供成交时间")).toBeVisible();
     expect(screen.getByText("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE")).toBeVisible();
   });
@@ -723,6 +724,60 @@ describe("market vertical slice", () => {
       "复星 L1（只读）",
     );
     expect(screen.queryByRole("region", { name: "AAPL 价格图表" })).not.toBeInTheDocument();
+  });
+
+  it("advances the query snapshot without changing quote time or freshness", async () => {
+    vi.useFakeTimers();
+    window.history.replaceState(null, "", `/market?selected=${item.instrument_id}`);
+    const snapshotTimes = ["2026-08-22T00:00:00Z", "2026-08-22T00:00:15Z"];
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () => {
+      const envelope = marketEnvelope({ items: [{ ...item, quality: "PARTIAL", quality_reasons: ["QUOTE_STALE"] }] });
+      envelope.meta.as_of = snapshotTimes[Math.min(fetchMock.mock.calls.length - 1, 1)];
+      return jsonResponse(envelope);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const view = render(<MarketPage />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByLabelText("查询快照时点")).toHaveTextContent("2026-08-22 08:00:00 北京时间");
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    expect(screen.getByLabelText("查询快照时点")).toHaveTextContent("2026-08-22 08:00:15 北京时间");
+    const quote = screen.getByRole("region", { name: "AAPL 报价证据" });
+    expect(quote).toHaveTextContent("行情记录时间2026-08-22 04:00:00 北京时间");
+    expect(quote).not.toHaveTextContent("08:00:15");
+    expect(screen.getByRole("region", { name: "市场监控页面" })).toHaveAttribute("data-state", "stale");
+    expect(screen.getByText(/页面每 15 秒读取已保存数据/)).toHaveTextContent("不代表券商每 15 秒采集");
+    expect(fetchMock.mock.calls.every(([, init]) => (init as RequestInit).method === "GET")).toBe(true);
+    view.unmount();
+  });
+
+  it("keeps cursor-frozen meta time distinct from later page requests", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-22T00:00:30Z"));
+    window.history.replaceState(null, "", `/market?selected=${item.instrument_id}&cursor=frozen-page`);
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () => jsonResponse(marketEnvelope()));
+    vi.stubGlobal("fetch", fetchMock);
+    const view = render(<MarketPage />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.every(([url]) => String(url).includes("cursor=frozen-page"))).toBe(true);
+    expect(screen.getByLabelText("查询快照时点")).toHaveTextContent("2026-08-22 08:00:00 北京时间");
+    expect(screen.queryByText(/本次读取时间|本次页面读取时间/)).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "打开 AAPL 个股研究" })).toHaveAttribute("href", `/research/${item.instrument_id}?as_of=${encodeURIComponent(marketEnvelope().meta.as_of)}`);
+    view.unmount();
+  });
+
+  it("does not fill a missing quote timestamp from the snapshot or daily session", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(marketEnvelope({
+      items: [{ ...item, as_of: null, delivery_mode: "unknown", quality: "PARTIAL", quality_reasons: ["FUTURE_DATA_EXCLUDED"] }],
+      selectedSeries: { ...selectedSeries, bars: selectedSeries.bars.map((bar) => ({ ...bar, observed_at: null })) },
+    }))));
+    render(<MarketPage />);
+    const quote = await screen.findByRole("region", { name: "AAPL 报价证据" });
+    expect(quote).toHaveTextContent("行情记录时间未知");
+    expect(quote).toHaveTextContent("实时性未获证明");
+    expect(quote).not.toHaveTextContent("2026-08-22");
+    expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("最新观测时间未知");
+    expect(screen.getByText("未来时点数据已排除")).toBeVisible();
   });
 
   it("polls stale market data at 15 seconds without issuing business writes", async () => {

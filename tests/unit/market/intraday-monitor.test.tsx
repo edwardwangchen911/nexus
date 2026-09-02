@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   IntradayMonitor,
@@ -43,6 +43,8 @@ const monitor: IntradayMonitorData = {
   })),
 };
 
+afterEach(() => vi.useRealTimers());
+
 describe("IntradayMonitor", () => {
   it("renders exact source authority, deterministic metrics and a semantic minute table", () => {
     render(<IntradayMonitor symbol="AAPL" monitor={monitor} />);
@@ -55,6 +57,9 @@ describe("IntradayMonitor", () => {
     expect(region).toHaveTextContent("-2.5%");
     expect(region).toHaveTextContent("3.125%");
     expect(region).toHaveTextContent("4.402 基点");
+    expect(region).toHaveTextContent("成交源时间 2026-08-22 04:00:02 北京时间");
+    expect(region).toHaveTextContent("盘口源时间 2026-08-22 04:00:01 北京时间");
+    expect(region).toHaveTextContent("分钟年龄（快照时点） 15 秒");
     expect(screen.getByRole("table", { name: "AAPL 1 分钟行情数据" })).toHaveTextContent(
       "227.16",
     );
@@ -133,8 +138,40 @@ describe("IntradayMonitor", () => {
     expect(region).toHaveTextContent("盘口未提供");
     expect(region).not.toHaveTextContent("4.402 基点");
     expect(region).toHaveTextContent("分钟截止 2026-08-22 04:00:00 北京时间");
-    expect(region).toHaveTextContent("网关接收时间 2026-08-22 04:00:03 北京时间");
+    expect(region).toHaveTextContent("成交记录网关接收时间 2026-08-22 04:00:03 北京时间");
+    expect(region).toHaveTextContent("盘口记录网关接收时间 2026-08-22 04:00:01 北京时间");
+    expect(region).toHaveTextContent("报价源时间 未知（上游未提供）");
+    expect(region).toHaveTextContent("接收记录年龄（快照时点） 14 秒");
+    expect(region).not.toHaveTextContent("盘口源时间");
     expect(region).toHaveTextContent("上游报价未提供成交时间");
     expect(region).toHaveTextContent("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE");
+  });
+
+  it("never substitutes a minute bar time for missing quote or trade receipt times", () => {
+    render(<IntradayMonitor symbol="AAPL" monitor={{
+      ...monitor, source: "fosun", feed: "l1", delivery_mode: "unknown",
+      trade_as_of: null, quote_as_of: null, quote_age_seconds: null,
+      quality_reasons: ["FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE"],
+    }} />);
+    const region = screen.getByRole("region", { name: "AAPL 盘中证据" });
+    expect(region).toHaveTextContent("成交记录网关接收时间 未知");
+    expect(region).toHaveTextContent("盘口记录网关接收时间 未知");
+    expect(region).not.toHaveTextContent("网关接收时间 2026");
+    expect(region).toHaveTextContent("接收记录年龄（快照时点） 未知");
+  });
+
+  it("preserves outside-session status and server ages across wall-clock changes", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-22T00:00:00Z"));
+    const closed = { ...monitor, status: "outside_session" as const, trade_as_of: null, quote_as_of: null };
+    const view = render(<IntradayMonitor symbol="AAPL" monitor={closed} />);
+    vi.setSystemTime(new Date("2026-08-23T00:00:00Z"));
+    view.rerender(<IntradayMonitor symbol="AAPL" monitor={{ ...closed }} />);
+    const region = screen.getByRole("region", { name: "AAPL 盘中证据" });
+    expect(region).toHaveTextContent("非交易时段");
+    expect(region).not.toHaveTextContent("证据已过期");
+    expect(region).toHaveTextContent("成交源时间 未知");
+    expect(region).toHaveTextContent("盘口源时间 未知");
+    expect(region).toHaveTextContent("分钟年龄（快照时点） 15 秒");
   });
 });
