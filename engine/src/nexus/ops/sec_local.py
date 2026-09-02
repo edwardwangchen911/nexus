@@ -259,8 +259,10 @@ async def refresh_sec_research(
                     if len({len(array) for array in arrays}) != 1:
                         raise ValueError("SEC_LOCAL_SUBMISSIONS_INVALID")
                     candidates = []
+                    amendments = []
                     for accession, accepted, filed, form, filename in zip(*arrays, strict=True):
-                        if form != disclosure_form:
+                        is_amendment = disclosure_form == "8-K" and form == "8-K/A"
+                        if form != disclosure_form and not is_amendment:
                             continue
                         if not all(
                             isinstance(value, str)
@@ -274,6 +276,14 @@ async def refresh_sec_research(
                             raise ValueError("SEC_LOCAL_ACCEPTANCE_TIME_INVALID") from None
                         if accepted_at.tzinfo is None:
                             raise ValueError("SEC_LOCAL_ACCEPTANCE_TIME_INVALID")
+                        if is_amendment:
+                            if (
+                                accepted_at > current.received_at
+                                or filed_date > current.received_at.date()
+                            ):
+                                raise ValueError("SEC_LOCAL_ACCEPTANCE_TIME_INVALID")
+                            amendments.append(accepted_at)
+                            continue
                         if (
                             accepted_at <= current.received_at
                             and filed_date <= current.received_at.date()
@@ -284,6 +294,8 @@ async def refresh_sec_research(
                             raise ValueError("SEC_LOCAL_DISCLOSURE_AMENDMENT_UNSUPPORTED")
                         raise ValueError("SEC_LOCAL_DISCLOSURE_UNAVAILABLE")
                     accepted_at, accession, filed, filename = max(candidates)
+                    if amendments and max(amendments) >= accepted_at:
+                        raise ValueError("SEC_LOCAL_DISCLOSURE_AMENDMENT_UNSUPPORTED")
                     if not re.fullmatch(
                         r"[0-9]{10}-[0-9]{2}-[0-9]{6}", accession
                     ) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.html?", filename):

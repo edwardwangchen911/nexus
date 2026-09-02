@@ -571,6 +571,64 @@ async def test_8k_revision_preserves_old_frozen_text_and_receipt(migrated_databa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("amended_at", "blocked"),
+    [
+        ("2026-08-21T21:00:00Z", True),
+        ("2026-08-21T20:00:00Z", True),
+        ("2026-08-21T19:00:00Z", False),
+        ("unknown", True),
+        ("2026-08-21T21:00:00", True),
+        ("2099-01-01T00:00:00Z", True),
+    ],
+)
+async def test_8k_does_not_hide_a_newer_or_undated_amendment(
+    migrated_database_url, amended_at, blocked
+):
+    from nexus.ops.sec_local import refresh_sec_research
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    await seed_instrument(settings)
+    requests = []
+    original = disclosure_responder(requests, form="8-K")
+
+    def respond(request):
+        response = original(request)
+        if request.url.path == "/submissions/CIK0000320193.json":
+            payload = response.json()
+            recent = payload["filings"]["recent"]
+            for key, value in {
+                "accessionNumber": "0000320193-26-000002",
+                "acceptanceDateTime": amended_at,
+                "filingDate": "2026-08-21",
+                "form": "8-K/A",
+                "primaryDocument": "amendment.htm",
+            }.items():
+                recent[key].append(value)
+            return httpx.Response(200, json=payload)
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        call = refresh_sec_research(
+            settings,
+            INSTRUMENT,
+            contact="test@example.invalid",
+            http_client=client,
+            store=InMemoryRawEvidenceStore(),
+            disclosure_only=True,
+            disclosure_form="8-K",
+        )
+        if blocked:
+            with pytest.raises(ValueError, match="AMENDMENT_UNSUPPORTED|ACCEPTANCE_TIME_INVALID"):
+                await call
+        else:
+            assert (await call)["filings_created"] == 1
+    assert len(requests) == (2 if blocked else 3)
+    async with session_factory(settings)() as session:
+        assert await session.scalar(select(func.count()).select_from(Filing)) == int(not blocked)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("form", ["6-K", "8-K"])
 @pytest.mark.parametrize("failure", ["path", "future", "naive", "date", "unsupported", "redirect"])
 async def test_disclosure_error_stops_before_persisting_or_retrying(
