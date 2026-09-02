@@ -1,4 +1,4 @@
-"""Bounded SEC 6-K text evidence; never synthesize accounting facts from prose."""
+"""Bounded SEC 6-K/497K text evidence; never synthesize accounting facts from prose."""
 
 import hashlib
 import json
@@ -17,14 +17,24 @@ from nexus.persistence.models.research import Filing, ResearchEvidenceRef
 
 MAX_EXCERPT = 12000
 SCHEMA_VERSION = "sec_disclosure_v1"
-SEC_RESEARCH_FORMS = ("10-K", "10-Q", "8-K", "6-K")
+SEC_RESEARCH_FORMS = ("10-K", "10-Q", "8-K", "6-K", "497K")
+
+
+class SecFundIdentity(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    cik: str = Field(pattern=r"^[0-9]{10}$")
+    series_id: str = Field(pattern=r"^S[0-9]{9}$")
+    class_id: str = Field(pattern=r"^C[0-9]{9}$")
+    symbol: str = Field(pattern=r"^[A-Z][A-Z0-9.-]{0,14}$")
+    filing_index_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class SecDisclosure(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     instrument_id: UUID
-    form: Literal["6-K"]
+    form: Literal["6-K", "497K"]
     accession_number: str = Field(pattern=r"^[0-9]{10}-[0-9]{2}-[0-9]{6}$")
     source_url: str = Field(
         max_length=512,
@@ -35,16 +45,23 @@ class SecDisclosure(BaseModel):
     raw_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     excerpt: str = Field(min_length=20, max_length=MAX_EXCERPT)
     truncated: bool
+    fund_identity: SecFundIdentity | None = None
 
     @model_validator(mode="after")
     def check_binding(self) -> Self:
         if self.source_url.split("/")[-2] != self.accession_number.replace("-", ""):
             raise ValueError("SEC_DISCLOSURE_ACCESSION_MISMATCH")
+        if (self.form == "497K") != (self.fund_identity is not None):
+            raise ValueError("SEC_DISCLOSURE_FUND_IDENTITY_REQUIRED")
+        if self.fund_identity and self.source_url.split("/")[-3] != str(
+            int(self.fund_identity.cik)
+        ):
+            raise ValueError("SEC_DISCLOSURE_FUND_CIK_MISMATCH")
         return self
 
     def canonical_bytes(self) -> bytes:
         return json.dumps(
-            self.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+            self.model_dump(mode="json", exclude_none=True), sort_keys=True, separators=(",", ":")
         ).encode()
 
 

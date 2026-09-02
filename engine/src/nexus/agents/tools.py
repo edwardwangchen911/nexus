@@ -72,7 +72,9 @@ class _FinancialFactsInput(_SnapshotInput):
 
 
 class _FilingEvidenceInput(_SnapshotInput):
-    forms: tuple[Literal["10-K", "10-Q", "8-K", "6-K"], ...] = Field(min_length=1, max_length=4)
+    forms: tuple[Literal["10-K", "10-Q", "8-K", "6-K", "497K"], ...] = Field(
+        min_length=1, max_length=5
+    )
     filed_from: date
     filed_to: date
 

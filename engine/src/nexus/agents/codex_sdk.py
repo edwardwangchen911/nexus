@@ -271,7 +271,8 @@ class CodexCommittee:
                         "Produce eight roles exactly once in the supplied order. Chinese prose, "
                         "one concise factual claim per role. Cite zero-based evidence indexes. "
                         "Do not invent missing facts, prices or macro conditions. "
-                        "Text disclosures are not structured financial metrics. Abstain when "
+                        "Text disclosures are not structured financial metrics. A 497K is a fund "
+                        "prospectus, not company financials or current fund holdings. Abstain when "
                         "evidence is unavailable. No URLs, code, orders, quantities or weights. "
                         "This is research, not a trading instruction. Execution remains locked."
                     ),
@@ -331,7 +332,7 @@ class CodexCommittee:
                 "search_filing_evidence",
                 {
                     **scope,
-                    "forms": ["10-K", "10-Q", "8-K", "6-K"],
+                    "forms": ["10-K", "10-Q", "8-K", "6-K", "497K"],
                     "filed_from": (request.decision_time - timedelta(days=365)).date().isoformat(),
                     "filed_to": request.decision_time.date().isoformat(),
                 },

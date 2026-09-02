@@ -17,14 +17,15 @@ const states: Array<[DataStateKind, string]> = [
 ];
 
 describe("research evidence docket", () => {
-  it("distinguishes inert disclosure text from financial metrics and expands on demand", () => {
+  it.each(["6-K", "497K"])("distinguishes inert %s text from financial metrics and expands on demand", (form) => {
     const source = "https://www.sec.gov/Archives/edgar/data/1/000000000126000001/doc.htm";
     const excerpt = "Company has not decided. <script>alert('not executable')</script>";
     render(<ResearchInputs asOf="2026-09-02T06:00:00Z" inputs={{
       display_symbol: "TEST", total_facts: 0, truncated: false, facts: [],
-      filings: [{ evidence_ref_id: "filing-1", source: "sec", form: "6-K", accession_number: "0000000001-26-000001", accepted_at: "2026-08-21T20:00:00Z", received_at: "2026-09-02T05:59:00Z", revision: "a".repeat(64), content_hash: "a".repeat(64), disclosure_excerpt: excerpt, disclosure_truncated: true, source_url: source }],
+      filings: [{ evidence_ref_id: "filing-1", source: "sec", form, accession_number: "0000000001-26-000001", accepted_at: "2026-08-21T20:00:00Z", received_at: "2026-09-02T05:59:00Z", revision: "a".repeat(64), content_hash: "a".repeat(64), disclosure_excerpt: excerpt, disclosure_truncated: true, source_url: source }],
     }} />);
-    expect(screen.getByRole("heading", { name: "TEST · 已冻结披露" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: form === "497K" ? "TEST · 已冻结基金资料" : "TEST · 已冻结披露" })).toBeVisible();
+    if (form === "497K") expect(screen.getByText(/不是公司财报，也不是基金最新持仓/)).toBeVisible();
     expect(screen.getByText(/文本披露，不是结构化财务指标/)).toBeVisible();
     expect(screen.getByText("尚无结构化财务指标。")).toBeVisible();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();

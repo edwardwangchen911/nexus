@@ -276,10 +276,12 @@ def main() -> int:
             "prepare-research",
             "refresh-research",
             "refresh-disclosure",
+            "refresh-fund",
             "run-once",
         ),
     )
     parser.add_argument("--instrument-id", type=UUID)
+    parser.add_argument("--accession")
     parser.add_argument("--backend", choices=("codex_sdk", "responses"), default="codex_sdk")
     parser.add_argument("--as-of", type=datetime.fromisoformat)
     parser.add_argument(
@@ -293,7 +295,7 @@ def main() -> int:
         settings = local_settings(
             root,
             load_model_key=args.action
-            not in {"prepare-research", "refresh-research", "refresh-disclosure"},
+            not in {"prepare-research", "refresh-research", "refresh-disclosure", "refresh-fund"},
             backend=args.backend,
         )
         if args.action == "setup":
@@ -320,7 +322,9 @@ def main() -> int:
                     settings, args.instrument_id, as_of=args.as_of or datetime.now(UTC)
                 )
             )
-        elif args.action in {"refresh-research", "refresh-disclosure"}:
+        elif args.action in {"refresh-research", "refresh-disclosure", "refresh-fund"}:
+            if (args.action == "refresh-fund") != (args.accession is not None):
+                raise ValueError("SEC_LOCAL_FUND_ACCESSION_REQUIRED")
             if args.instrument_id is None:
                 raise ValueError("OPENAI_RESEARCH_INSTRUMENT_REQUIRED")
             if args.as_of is not None:
@@ -336,6 +340,7 @@ def main() -> int:
                     args.instrument_id,
                     contact=contact,
                     disclosure_only=args.action == "refresh-disclosure",
+                    fund_accession=args.accession,
                 )
             )
         elif args.action == "run-once":

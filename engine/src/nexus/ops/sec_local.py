@@ -23,6 +23,7 @@ from nexus.providers.sec import SecCompanyFactsClient, SecInstrumentIdentity
 from nexus.providers.sec_http import SecHttpTransport
 from nexus.providers.settings import ProviderWorkerSettings
 from nexus.research.sec_disclosures import SecDisclosure, disclosure_excerpt, persist_disclosure
+from nexus.research.sec_funds import fetch_fund_disclosure, resolve_fund
 from nexus.settings import EngineSettings
 
 _EXCHANGES = {"Nasdaq": "XNAS", "NYSE": "XNYS", "NYSE American": "XASE"}
@@ -30,7 +31,9 @@ _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 
 
 class _Budget:
-    requests = 0
+    def __init__(self, maximum: int = 3) -> None:
+        self.requests = 0
+        self.maximum = maximum
 
 
 class _BoundedBytes:
@@ -49,7 +52,7 @@ class _BoundedBytes:
         query: tuple[tuple[str, str], ...],
         headers: tuple[tuple[str, str], ...],
     ) -> bytes:
-        if self.budget.requests >= 3:
+        if self.budget.requests >= self.budget.maximum:
             raise ValueError("SEC_LOCAL_REQUEST_BUDGET_EXHAUSTED")
         self.budget.requests += 1
         return await self.inner.get_bytes(path_segments, query, headers)
@@ -88,8 +91,13 @@ async def refresh_sec_research(
     http_client: httpx.AsyncClient | None = None,
     store: RawEvidenceStore | None = None,
     disclosure_only: bool = False,
+    fund_accession: str | None = None,
 ) -> dict[str, object]:
-    """Freeze one latest 10-K/10-Q, or explicitly a text-only 6-K; never enqueue."""
+    """Freeze company facts, latest 6-K, or one selected 497K; never enqueue."""
+    if fund_accession is not None and (
+        disclosure_only or not re.fullmatch(r"[0-9]{10}-[0-9]{2}-[0-9]{6}", fund_accession)
+    ):
+        raise ValueError("SEC_LOCAL_FUND_ACCESSION_REQUIRED")
     if (
         not contact
         or contact != contact.strip()
@@ -133,7 +141,7 @@ async def refresh_sec_research(
         )
         if (
             instrument is None
-            or instrument.asset_type not in {"equity", "common_stock"}
+            or instrument.asset_type not in {"equity", "common_stock", "equity_etf"}
             or instrument.currency != "USD"
             or instrument.exchange not in US_EQUITY_EXCHANGES
             or len(symbols) != 1
@@ -141,45 +149,55 @@ async def refresh_sec_research(
         ):
             raise ValueError("SEC_LOCAL_US_INSTRUMENT_REQUIRED")
         symbol, exchange = symbols[0], instrument.exchange
-    budget = _Budget()
+    budget = _Budget(4 if fund_accession else 3)
     owned_client = http_client is None
     client = http_client or httpx.AsyncClient(follow_redirects=False, timeout=30)
     try:
         async with asyncio.timeout(60):
             directory = _BoundedBytes(client, "www.sec.gov", budget)
             mapping_raw = await directory.get_bytes(
-                ("files", "company_tickers_exchange.json"),
+                (
+                    "files",
+                    "company_tickers_mf.json"
+                    if fund_accession
+                    else "company_tickers_exchange.json",
+                ),
                 (),
                 (("User-Agent", f"NEXUS {contact}"), ("Accept-Encoding", "gzip, deflate")),
             )
             mapping = json.loads(mapping_raw)
-            if mapping.get("fields") != ["cik", "name", "ticker", "exchange"]:
-                raise ValueError("SEC_LOCAL_TICKER_MAPPING_INVALID")
-            rows = mapping.get("data")
-            if not isinstance(rows, list):
-                raise ValueError("SEC_LOCAL_TICKER_MAPPING_INVALID")
-            matches = [
-                row for row in rows if isinstance(row, list) and len(row) == 4 and row[2] == symbol
-            ]
-            if (
-                len(matches) != 1
-                or isinstance(matches[0][0], bool)
-                or not isinstance(matches[0][0], int)
-                or not 0 < matches[0][0] < 10**10
-            ):
-                raise ValueError("SEC_LOCAL_TICKER_MAPPING_UNAVAILABLE")
-            # The Fosun local importer uses XNYS as a US-market placeholder.
-            # Resolve the actual listing from SEC and corroborate it in submissions;
-            # never rewrite the immutable instrument master from a research read.
-            sec_exchange = _EXCHANGES.get(matches[0][3])
-            if sec_exchange not in US_EQUITY_EXCHANGES:
-                raise ValueError("SEC_LOCAL_TICKER_MAPPING_UNAVAILABLE")
-            assert sec_exchange is not None
+            fund_identity = resolve_fund(mapping, symbol) if fund_accession else None
+            sec_exchange = None
+            if fund_identity:
+                cik = fund_identity[0]
+            else:
+                if mapping.get("fields") != ["cik", "name", "ticker", "exchange"]:
+                    raise ValueError("SEC_LOCAL_TICKER_MAPPING_INVALID")
+                rows = mapping.get("data")
+                if not isinstance(rows, list):
+                    raise ValueError("SEC_LOCAL_TICKER_MAPPING_INVALID")
+                matches = [
+                    row
+                    for row in rows
+                    if isinstance(row, list) and len(row) == 4 and row[2] == symbol
+                ]
+                if (
+                    len(matches) != 1
+                    or isinstance(matches[0][0], bool)
+                    or not isinstance(matches[0][0], int)
+                    or not 0 < matches[0][0] < 10**10
+                ):
+                    raise ValueError("SEC_LOCAL_TICKER_MAPPING_UNAVAILABLE")
+                # Resolve the actual listing; the local XNYS placeholder is not evidence.
+                sec_exchange = _EXCHANGES.get(matches[0][3])
+                if sec_exchange not in US_EQUITY_EXCHANGES:
+                    raise ValueError("SEC_LOCAL_TICKER_MAPPING_UNAVAILABLE")
+                cik = str(matches[0][0]).zfill(10)
             identity = SecInstrumentIdentity(
                 instrument_id,
-                str(matches[0][0]).zfill(10),
+                cik,
                 symbol,
-                sec_exchange,
+                sec_exchange or exchange,
                 "USD",
             )
             await store.put_if_absent(
@@ -187,12 +205,38 @@ async def refresh_sec_research(
                 content=mapping_raw,
             )
             data_client = SecCompanyFactsClient(
-                _IdentityTransport(_BoundedBytes(client, "data.sec.gov", budget), identity),
+                SecHttpTransport(_BoundedBytes(client, "data.sec.gov", budget))
+                if fund_identity
+                else _IdentityTransport(_BoundedBytes(client, "data.sec.gov", budget), identity),
                 contact=contact,
                 max_attempts=1,
             )
             async with factory() as session, session.begin():
-                if disclosure_only:
+                if fund_accession and fund_identity:
+                    document, originals = await fetch_fund_disclosure(
+                        instrument_id=instrument_id,
+                        symbol=symbol,
+                        identity=fund_identity,
+                        accession=fund_accession,
+                        client=data_client,
+                        directory=directory,
+                        contact=contact,
+                    )
+                    for kind, original in originals:
+                        await store.put_if_absent(
+                            key=f"raw/sec/{today.isoformat()}/{kind}/{sha256(original).hexdigest()}.bin",
+                            content=original,
+                        )
+                    content = document.canonical_bytes()
+                    location = await store.put_if_absent(
+                        key=f"evidence/sec/{fund_accession}/{sha256(content).hexdigest()}.json",
+                        content=content,
+                    )
+                    inserted = await persist_disclosure(
+                        session, document, location=location, received_at=datetime.now(UTC)
+                    )
+                    created, replayed = int(inserted), int(not inserted)
+                elif disclosure_only:
                     current = await data_client.fetch_submissions(identity.cik)
                     recent = json.loads(current.raw_payload)["filings"]["recent"]
                     fields = (
@@ -302,7 +346,7 @@ async def refresh_sec_research(
                     "execution_locked": True,
                     "research_completed": False,
                     "instrument_exchange": exchange,
-                    "sec_exchange": identity.exchange,
+                    "sec_exchange": sec_exchange,
                     "research_path": f"/research/{instrument_id}?"
                     + urlencode(
                         {

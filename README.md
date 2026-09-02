@@ -104,8 +104,12 @@ uv run --package nexus-engine nexus-openai-local setup --backend responses
 仅有外国发行人 6-K 文本时，使用 `nexus-openai-local refresh-disclosure --instrument-id <标的 UUID>`。
 同样最多 3 个公开 GET（目录、submissions、最新 6-K 原文），无重试；不请求 Company Facts。
 原文归档并校验哈希后进入既有数据库、冻结研究、Codex SDK 与研究页；正文按需展开，
-明确区分披露与结构化财务指标，不从文字生成财务数值，不覆盖 ETF，也不提升行情或执行权限。
+明确区分披露与结构化财务指标，不从文字生成财务数值，也不提升行情或执行权限。
 无新依赖或数据库迁移；停用此命令即可停止采集，既有财报入口不变。
+ETF 使用 `nexus-openai-local refresh-fund --instrument-id <标的 UUID> --accession <497K 申报编号>`。
+最多 4 个公开 GET（SEC 基金目录、submissions、申报索引、原文），无重试、首错即停。
+目录与索引交叉核对 CIK、基金系列、份额类别和 ticker；仅冻结指定的单基金摘要招募书，
+不自动声称它是最新版本，也不把招募书当作当前基金持仓或公司财报；不改写持仓主表。
 实际上市交易所由 SEC 目录与 submissions 交叉核对；旧复星主表的 `XNYS` 市场占位不作
 上市交易所依据。返回值分别标明本地主表与 SEC 交易所，不改写持仓、行情或主表。
 研究页直接展示快照绑定的 SEC 财报与财务原始值，含统计期间、接受/入库时间、版本和哈希；

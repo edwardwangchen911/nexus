@@ -70,6 +70,49 @@ def disclosure_responder(requests, *, failure=None):
     return respond
 
 
+def fund_responder(requests, *, failure=None):
+    original = disclosure_responder([])
+
+    def respond(request):
+        requests.append(request)
+        assert request.method == "GET"
+        if request.url.path == "/files/company_tickers_mf.json":
+            row = [320193, "S000000001", "C000000001", "AAPL"]
+            return httpx.Response(
+                200,
+                json={
+                    "fields": ["cik", "seriesId", "classId", "symbol"],
+                    "data": [row, row] if failure == "ambiguous" else [row],
+                },
+            )
+        if request.url.path == "/submissions/CIK0000320193.json":
+            payload = original(request).json()
+            payload["filings"]["recent"]["form"] = ["6-K" if failure == "form" else "497K"]
+            return httpx.Response(200, json=payload)
+        if request.url.path.endswith("-index.html"):
+            series = "S000000002" if failure == "series" else "S000000001"
+            share_class = "C000000002" if failure == "class" else "C000000001"
+            extra_class = " C000000003" if failure == "multiple" else ""
+            filename = "other.htm" if failure == "document_link" else "doc.htm"
+            return httpx.Response(
+                200,
+                text=(
+                    f"<p>Form 497K {series} {share_class}{extra_class} AAPL</p>"
+                    f'<a href="/Archives/edgar/data/320193/000032019326000001/{filename}">'
+                    "Primary disclosure</a>"
+                ),
+            )
+        assert request.url.path == "/Archives/edgar/data/320193/000032019326000001/doc.htm"
+        return httpx.Response(
+            200,
+            text="<p>"
+            + ("OTHER" if failure == "body" else "AAPL")
+            + " fund tracks a sector index; concentration risk applies.</p>",
+        )
+
+    return respond
+
+
 class InMemoryRawEvidenceStore:
     def __init__(self):
         self.objects = {}
@@ -274,9 +317,11 @@ async def test_sec_only_refresh_stops_without_fake_research(migrated_database_ur
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["6-K", "497K"])
 async def test_disclosure_reaches_sdk_api_and_portfolio_without_fabricated_facts(
     migrated_database_url,
     monkeypatch,
+    form,
 ):
     from helpers.portfolio_api import app, headers
     from nexus.agents import codex_sdk
@@ -293,8 +338,14 @@ async def test_disclosure_reaches_sdk_api_and_portfolio_without_fabricated_facts
     await seed_instrument(settings)
     requests = []
     store = InMemoryRawEvidenceStore()
+    options = (
+        {"fund_accession": "0000320193-26-000001"} if form == "497K" else {"disclosure_only": True}
+    )
+    request_limit = 4 if form == "497K" else 3
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(disclosure_responder(requests))
+        transport=httpx.MockTransport(
+            fund_responder(requests) if form == "497K" else disclosure_responder(requests)
+        )
     ) as client:
         first = await refresh_sec_research(
             settings,
@@ -302,7 +353,7 @@ async def test_disclosure_reaches_sdk_api_and_portfolio_without_fabricated_facts
             contact="test@example.invalid",
             http_client=client,
             store=store,
-            disclosure_only=True,
+            **options,
         )
         replay = await refresh_sec_research(
             settings,
@@ -310,14 +361,19 @@ async def test_disclosure_reaches_sdk_api_and_portfolio_without_fabricated_facts
             contact="test@example.invalid",
             http_client=client,
             store=store,
-            disclosure_only=True,
+            **options,
         )
-    assert first["provider_requests"] == replay["provider_requests"] == 3
+    assert first["provider_requests"] == replay["provider_requests"] == request_limit
     assert first["model_requests"] == 0 and first["execution_locked"] is True
     assert first["filings_created"] == replay["filings_replayed"] == 1
     assert replay["filings_created"] == 0
-    assert len(requests) == 6 and not any("companyfacts" in str(item.url) for item in requests)
-    assert any(key.endswith(".html") for key in store.objects)
+    assert len(requests) == request_limit * 2 and not any(
+        "companyfacts" in str(item.url) for item in requests
+    )
+    assert any("/disclosure/" in key for key in store.objects)
+    if form == "497K":
+        assert first["sec_exchange"] is None
+        assert any("/filing-index/" in key for key in store.objects)
     now = datetime.now(UTC)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(migrated_database_url, now=now)),
@@ -333,8 +389,12 @@ async def test_disclosure_reaches_sdk_api_and_portfolio_without_fabricated_facts
         assert admission["eligible"] is True
         assert admission["inputs"]["facts"] == [] and admission["inputs"]["total_facts"] == 0
         filing = admission["inputs"]["filings"][0]
-        assert filing["form"] == "6-K" and filing["disclosure_truncated"] is False
-        assert filing["disclosure_excerpt"] == "Company has not decided on the reported facility."
+        assert filing["form"] == form and filing["disclosure_truncated"] is False
+        assert filing["disclosure_excerpt"] == (
+            "AAPL fund tracks a sector index; concentration risk applies."
+            if form == "497K"
+            else "Company has not decided on the reported facility."
+        )
         assert filing["source_url"].endswith("/000032019326000001/doc.htm")
         body = json.dumps(
             {
@@ -361,7 +421,7 @@ async def test_disclosure_reaches_sdk_api_and_portfolio_without_fabricated_facts
                                 "vote": "abstain",
                                 "claims": [
                                     {
-                                        "text": "披露称未决定扩产；缺少财务指标和合格行情。",
+                                        "text": "冻结文本资料已核验；缺少合格行情。",
                                         "citations": [0],
                                     }
                                 ],
@@ -379,6 +439,11 @@ async def test_disclosure_reaches_sdk_api_and_portfolio_without_fabricated_facts
         invoke.assert_awaited_once()
         frozen = invoke.call_args.args[0]["frozen_inputs"]
         assert frozen["financial_facts"]["items"] == []
+        if form == "497K":
+            assert (
+                frozen["filing_disclosures"]["items"][0]["disclosure"]["fund_identity"]["class_id"]
+                == "C000000001"
+            )
         assert (
             frozen["filing_disclosures"]["items"][0]["disclosure"]["excerpt"]
             == filing["disclosure_excerpt"]
@@ -446,6 +511,34 @@ async def test_disclosure_error_stops_before_persisting_or_retrying(migrated_dat
                 disclosure_only=True,
             )
     assert len(requests) == (3 if failure == "redirect" else 2)
+    async with session_factory(settings)() as session:
+        assert await session.scalar(select(func.count()).select_from(Filing)) == 0
+        assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["ambiguous", "form", "series", "class", "multiple", "document_link", "body"]
+)
+async def test_fund_identity_mismatch_never_becomes_research(migrated_database_url, failure):
+    from nexus.ops.sec_local import refresh_sec_research
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    await seed_instrument(settings)
+    requests = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(fund_responder(requests, failure=failure))
+    ) as client:
+        with pytest.raises((ValueError, RuntimeError)):
+            await refresh_sec_research(
+                settings,
+                INSTRUMENT,
+                contact="test@example.invalid",
+                http_client=client,
+                store=InMemoryRawEvidenceStore(),
+                fund_accession="0000320193-26-000001",
+            )
+    assert len(requests) == {"ambiguous": 1, "form": 2, "body": 4}.get(failure, 3)
     async with session_factory(settings)() as session:
         assert await session.scalar(select(func.count()).select_from(Filing)) == 0
         assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 0

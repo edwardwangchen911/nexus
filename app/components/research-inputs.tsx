@@ -9,9 +9,10 @@ const factLabels: Record<string, string> = {
 };
 
 export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string }): React.ReactElement {
+  const documentLabel = inputs.filings.some((filing) => filing.form === "497K") ? "已冻结基金资料" : inputs.filings.some((filing) => filing.form === "6-K") ? "已冻结披露" : "已冻结财报";
   return <article className="decision-card" aria-labelledby="research-inputs-title">
     <header className="decision-card__heading">
-      <div><p className="eyebrow">SEC · 本地只读证据</p><h2 id="research-inputs-title">{inputs.display_symbol ?? "标的"} · {inputs.filings.some((filing) => filing.form === "6-K") ? "已冻结披露" : "已冻结财报"}</h2></div>
+      <div><p className="eyebrow">SEC · 本地只读证据</p><h2 id="research-inputs-title">{inputs.display_symbol ?? "标的"} · {documentLabel}</h2></div>
       <span className="mode-badge">资料核验 · 非 AI 结论</span>
     </header>
     <dl className="decision-card__authority">
@@ -39,6 +40,7 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
     </section> : null}
     {inputs.filings.map((filing) => <section className="decision-card__section" key={filing.evidence_ref_id}>
       <h3>SEC {filing.form}</h3>
+      {filing.form === "497K" ? <p>ETF 摘要招募书：用于研究基金目标、费用与风险，不是公司财报，也不是基金最新持仓。</p> : null}
       <dl className="decision-card__authority">
         <div><dt>申报编号</dt><dd>{filing.accession_number}</dd></div>
         <div><dt>SEC 接受时间</dt><dd>{formatUtc(filing.accepted_at)}</dd></div>
@@ -54,7 +56,7 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
           {filing.disclosure_truncated ? <p>正文超出展示上限，完整原文请查看 SEC 来源。</p> : null}
           {filing.source_url ? <a href={filing.source_url} target="_blank" rel="noreferrer">查看 SEC 原文</a> : null}
         </details>
-      </> : filing.form === "6-K" ? <p>披露正文暂不可用，不作为已读取的文本证据。</p> : null}
+      </> : ["6-K", "497K"].includes(filing.form) ? <p>披露正文暂不可用，不作为已读取的文本证据。</p> : null}
       {inputs.facts.some((fact) => fact.evidence_ref_id === filing.evidence_ref_id) ? <>
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- The overflow table needs keyboard focus for horizontal scrolling. */}
       <div className="table-scroll" role="region" aria-label={`${filing.form} 财务事实，可横向滚动`} tabIndex={0}>

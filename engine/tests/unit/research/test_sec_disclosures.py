@@ -1,5 +1,6 @@
 """Text evidence is bounded, inert, and tied to one SEC accession."""
 
+import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -33,6 +34,7 @@ def test_excerpt_cap_is_explicit_and_short_or_oversized_documents_fail():
         {"accession_number": "0000000001-26-000002"},
         {"filed_at": datetime(2026, 8, 22)},
         {"accepted_at": datetime(2026, 8, 21)},
+        {"form": "497K"},
     ],
 )
 def test_document_rejects_wrong_source_accession_and_time(change):
@@ -46,6 +48,16 @@ def test_document_rejects_wrong_source_accession_and_time(change):
         raw_content_hash="a" * 64,
         excerpt="Company confirms no decision has been made.",
         truncated=False,
+    )
+    # Optional fund metadata must not change hashes of previously frozen 6-K records.
+    legacy = SecDisclosure.model_validate(payload)
+    assert (
+        legacy.canonical_bytes()
+        == json.dumps(
+            legacy.model_dump(mode="json", exclude={"fund_identity"}),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     )
     payload.update(change)
     with pytest.raises(ValueError):
