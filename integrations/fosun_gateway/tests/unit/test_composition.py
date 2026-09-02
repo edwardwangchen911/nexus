@@ -19,7 +19,7 @@ from nexus_fosun_gateway.activation import (
     evaluate_scoped_activation,
 )
 from nexus_fosun_gateway.adapter.fixture import FixtureFosunTransport
-from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
+from nexus_fosun_gateway.adapter.sdk import DualTokenBucket, SdkFosunTransport
 from nexus_fosun_gateway.domain import GatewayError
 from nexus_fosun_gateway.main import build_transport
 from nexus_fosun_gateway.policy.operations import (
@@ -135,6 +135,12 @@ def test_local_read_only_skips_activation_and_freezes_one_attempt_scope(
     ):
         values.pop(key)
     tls_calls: list[dict[str, object]] = []
+    local_clock = [0.0]
+
+    def local_bucket(**kwargs):
+        return DualTokenBucket(clock=lambda: local_clock[0], **kwargs)
+
+    monkeypatch.setattr(main_module, "DualTokenBucket", local_bucket, raising=False)
 
     class FakeSdkClient:
         def __init__(self, **_kwargs: object) -> None:
@@ -175,6 +181,15 @@ def test_local_read_only_skips_activation_and_freezes_one_attempt_scope(
         }
     )
     assert "fosun_simulation_create_order" not in authorization
+    assert transport._broker_rate_limiter is transport._market_rate_limiter
+    for tick in range(30):
+        local_clock[0] = float(tick)
+        limiter = (
+            transport._broker_rate_limiter if tick < 9 else transport._market_rate_limiter
+        )
+        assert limiter.try_acquire_at_call_edge() is None
+    local_clock[0] = 30.0
+    assert transport._broker_rate_limiter.try_acquire_at_call_edge() == 30.0
     broker_actor = VerifiedGatewayActor(
         "nexus-broker-worker", UUID(int=1), "synthetic-broker", BROKER_OPERATIONS
     )

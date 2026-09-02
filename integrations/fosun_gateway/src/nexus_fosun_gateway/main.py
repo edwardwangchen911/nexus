@@ -28,7 +28,7 @@ from nexus_fosun_gateway.activation import (
 )
 from nexus_fosun_gateway.adapter.fixture import FixtureFosunTransport
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
-from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
+from nexus_fosun_gateway.adapter.sdk import DualTokenBucket, SdkFosunTransport
 from nexus_fosun_gateway.admission import admitted_sdk_subject, probe_ready_sdk_subject
 from nexus_fosun_gateway.domain import GatewayError
 from nexus_fosun_gateway.probe_contract import RuntimeOperation
@@ -214,6 +214,15 @@ def build_transport(
     return (
         SdkFosunTransport(
             client,
+            rate_limiter=(
+                DualTokenBucket(
+                    qps_capacity=1.0,
+                    qps_refill_per_second=1.0,
+                    requests_per_minute=30,
+                )
+                if settings.transport_mode == "local_read_only"
+                else None
+            ),
             capability_expires_at=capability_expires_at,
             activation_checked_at=capability_checked_at,
             activation_monotonic_anchor=activation_monotonic_anchor,

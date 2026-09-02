@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime
 from typing import Literal, Protocol
 from uuid import UUID
@@ -69,6 +70,7 @@ class FosunBrokerProvider:
         instrument_ids: dict[str, UUID],
         cash_flow_kinds: dict[str, str],
         snapshot_time_basis: SnapshotTimeBasis = "provider_event",
+        order_instrument_resolver: Callable[[str], UUID] | None = None,
     ) -> None:
         if not external_account_id:
             raise ValueError("external account ID is required")
@@ -78,6 +80,7 @@ class FosunBrokerProvider:
         self._instrument_ids = dict(instrument_ids)
         self._cash_flow_kinds = dict(cash_flow_kinds)
         self._snapshot_time_basis = snapshot_time_basis
+        self._order_instrument_resolver = order_instrument_resolver
 
     async def read_cash(self, account_id: UUID, *, sync_run_id: UUID) -> BrokerPage[CashBalance]:
         del sync_run_id
@@ -173,7 +176,7 @@ class FosunBrokerProvider:
                 items.append(
                     BrokerOrderFact(
                         provider_order_id=item.external_order_id,
-                        instrument_id=self._instrument(item.instrument_code),
+                        instrument_id=self._order_instrument(item.instrument_code),
                         side=item.side,
                         quantity=item.quantity,
                         filled_quantity=item.filled_quantity,
@@ -247,6 +250,11 @@ class FosunBrokerProvider:
             return self._instrument_ids[code]
         except KeyError:
             raise ValueError("unmapped instrument") from None
+
+    def _order_instrument(self, code: str) -> UUID:
+        if code not in self._instrument_ids and self._order_instrument_resolver is not None:
+            return self._order_instrument_resolver(code)
+        return self._instrument(code)
 
     def _cash_flow_kind(self, value: str) -> str:
         try:

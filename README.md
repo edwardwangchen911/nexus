@@ -10,6 +10,10 @@ NEXUS 是私人投资研究、回测与模拟交易工作台。它不提供投�
   并通过 API/BFF 在本地组合页和可切换标的的市场页展示复星来源、更新时间与质量状态。组合页
   按原币种确定性展示现金、持仓市值、总资产与配置权重；没有合格 FX 证据时不生成跨币种合计，
   美股持仓可进入对应的已持久化 Quote 与日 K 页面。
+- 2026-09-02 本地真实刷新已完成现金、持仓和未终结订单双读对账，快照为 `READY`，
+  订单已通过数据库/BFF 展示；`display_ready=true`、`execution_locked=true`。
+  CashFlows 实际返回的 `createdAt` 没有时区，公开字段说明也未明确时区，当前不猜测转换：
+  `cash_flow_quality=PARTIAL`、`decision_ready=false`，第一份正式组合诊断仍未生成。
 - 该状态只是个人 Mac 本地只读使用。当前只区分无网络 fixture 与本地真实只读，不设“生产模式”，也不代表复星模拟盘交易或实盘激活。
 - 美股真实数据传输与耐久采集链路已实现但默认关闭：Alpaca、SEC、FRED/ALFRED
   使用固定源、冻结 universe、原始证据归档和幂等入库；未配置或启用真实 Provider

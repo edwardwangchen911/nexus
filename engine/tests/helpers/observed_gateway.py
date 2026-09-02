@@ -8,10 +8,13 @@ NOW = datetime(2026, 9, 2, tzinfo=UTC)
 
 
 class ObservedGateway:
-    def __init__(self, *, mismatch: bool = False, missing_price: bool = False) -> None:
+    def __init__(
+        self, *, mismatch: bool = False, missing_price: bool = False, order_code: str = "usAAPL"
+    ) -> None:
         self.calls = 0
         self.mismatch = mismatch
         self.missing_price = missing_price
+        self.order_code = order_code
 
     def page(self, item: dict[str, object]) -> GatewayResponsePage:
         self.calls += 1
@@ -58,7 +61,7 @@ class ObservedGateway:
             {
                 "kind": "order",
                 "external_order_id": "synthetic-order",
-                "instrument_code": "usAAPL",
+                "instrument_code": self.order_code,
                 "side": "buy",
                 "quantity": "1",
                 "filled_quantity": "0",

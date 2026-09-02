@@ -442,6 +442,11 @@ async def _read_broker_facts(
     previous_cash_flow_watermark: date | None,
 ) -> tuple[BrokerSyncResult, CashFlowSyncResult]:
     """Read the reconciled snapshot, then one bounded cash-flow overlap window."""
+    def resolve_order_instrument(code: str) -> UUID:
+        if _US_PROVIDER_CODE.fullmatch(code) is None:
+            raise ValueError("LOCAL_ORDER_INSTRUMENT_UNSUPPORTED")
+        return instrument_ids.setdefault(code, uuid5(_INSTRUMENT_NAMESPACE, code))
+
     provider = FosunBrokerProvider(
         account_id=account_id,
         external_account_id=external_account_id,
@@ -449,6 +454,7 @@ async def _read_broker_facts(
         instrument_ids=instrument_ids,
         cash_flow_kinds={"1": "deposit"},
         snapshot_time_basis="gateway_observed",
+        order_instrument_resolver=resolve_order_instrument,
     )
     frozen = await freeze_broker_snapshot(
         account_id,
@@ -496,6 +502,24 @@ async def _load_local_broker_identity(
         raise ValueError("LOCAL_PORTFOLIO_SCOPE_AMBIGUOUS")
     portfolio_id = portfolios[0].id if portfolios else new_uuid7()
     instrument_ids: dict[str, UUID] = {}
+    aliases = await session.execute(
+        select(InstrumentAlias.symbol, Instrument.id, Instrument.exchange, Instrument.currency)
+        .join(Instrument, Instrument.id == InstrumentAlias.instrument_id)
+        .where(
+            InstrumentAlias.alias_type == "ticker",
+            InstrumentAlias.valid_from <= datetime.now(UTC).date(),
+            InstrumentAlias.valid_to.is_(None),
+        )
+    )
+    for symbol, instrument_id, exchange, currency in aliases:
+        code = f"us{symbol}"
+        if exchange not in {"XNYS", "XNAS"} or currency != "USD":
+            continue
+        if _US_PROVIDER_CODE.fullmatch(code) is None:
+            continue
+        if code in instrument_ids and instrument_ids[code] != instrument_id:
+            raise ValueError("LOCAL_BROKER_INSTRUMENT_AMBIGUOUS")
+        instrument_ids[code] = instrument_id
     for item in holdings:
         symbol, _exchange = _symbol_and_exchange(item.instrument_code)
         alias = await session.scalar(
@@ -567,6 +591,18 @@ async def _persist_ready_broker_snapshot(
             expected_id=expected_id,
         )
         if actual_id != expected_id:
+            raise ValueError("LOCAL_BROKER_INSTRUMENT_MISMATCH")
+    codes_by_id = {instrument_id: code for code, instrument_id in instrument_ids.items()}
+    for order in frozen.portfolio_snapshot.open_orders:
+        if await session.get(Instrument, order.instrument_id) is not None:
+            continue
+        code = codes_by_id.get(order.instrument_id, "")
+        if _US_PROVIDER_CODE.fullmatch(code) is None:
+            raise ValueError("LOCAL_ORDER_INSTRUMENT_UNSUPPORTED")
+        actual_id = await _ensure_instrument(
+            session, code, currency="USD", valid_from=valid_from, expected_id=order.instrument_id
+        )
+        if actual_id != order.instrument_id:
             raise ValueError("LOCAL_BROKER_INSTRUMENT_MISMATCH")
     run = BrokerSyncRun(
         id=frozen.sync_run_id,

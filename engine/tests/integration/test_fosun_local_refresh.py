@@ -32,19 +32,22 @@ from sqlalchemy import select
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("order_code", ("usAAPL", "usMSFT"))
 async def test_local_observed_refresh_reaches_database_and_snapshot_api(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    order_code: str,
 ) -> None:
     account_id, portfolio_id, sync_run_id, instrument_id = (uuid4() for _ in range(4))
-    broker = ObservedGateway()
+    broker = ObservedGateway(order_code=order_code)
+    instrument_ids = {"usAAPL": instrument_id}
     frozen, cash_flows = await _read_broker_facts(
         broker,
         account_id=account_id,
         portfolio_id=portfolio_id,
         sync_run_id=sync_run_id,
         external_account_id="synthetic-account",
-        instrument_ids={"usAAPL": instrument_id},
+        instrument_ids=instrument_ids,
         cash_flow_end=NOW.date(),
         previous_cash_flow_watermark=None,
     )
@@ -70,7 +73,7 @@ async def test_local_observed_refresh_reaches_database_and_snapshot_api(
                 portfolio_id=portfolio_id,
                 frozen=frozen,
                 holdings=(holding,),
-                instrument_ids={"usAAPL": instrument_id},
+                instrument_ids=instrument_ids,
                 valid_from=NOW.date(),
                 completed_at=NOW + timedelta(seconds=7),
                 cash_flow_result=cash_flows,
@@ -130,6 +133,9 @@ async def test_local_observed_refresh_reaches_database_and_snapshot_api(
     assert data["cash"][0]["provider_as_of"] is None
     assert data["positions"][0]["provider_as_of"] is None
     assert data["open_orders"][0]["updated_at"] is None
+    assert data["open_orders"][0]["symbol"] == order_code.removeprefix("us")
+    assert len(data["positions"]) == 1
+    assert data["positions"][0]["symbol"] == "AAPL"
     assert broker.calls == 7
     assert diagnostic_response.status_code == 200
     report = diagnostic_response.json()["data"]
