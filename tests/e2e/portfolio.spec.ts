@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { diagnosticReport } from "../unit/optimize/fixtures";
 import { assertReleaseAccessibility, releaseViewports } from "./helpers/accessibility";
 
 const requestId = "0198f7a0-1111-7777-8111-111111111111";
@@ -24,6 +25,10 @@ const snapshot = {
   status: "READY",
   display_readiness: "DISPLAY_READY",
   decision_readiness: "DECISION_READY",
+  cash_flow_quality: "PASS",
+  cash_flow_count: 12,
+  execution_locked: true,
+  time_basis: "provider_event",
   as_of: "2026-08-23T08:00:00Z",
   cash: [
     { currency: "HKD", cash_balance: "8000.00", available_cash: "7000.00", provider_as_of: "2026-08-23T08:00:00Z" },
@@ -155,6 +160,48 @@ test("page refresh only reloads persisted facts and never admits a broker sync",
   await expect(page.getByRole("button", { name: /买入|卖出|下单|修改持仓/ })).toHaveCount(0);
 });
 
+test("desktop formal diagnosis survives page refresh with reconciliation and execution lock intact", async ({ page }) => {
+  const brokerSyncRequests: string[] = [];
+  const diagnosticMethods: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/v1/broker-sync-runs")) brokerSyncRequests.push(request.method());
+  });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await installPortfolioFixtures(page);
+  const baseReport = diagnosticReport("RESEARCH_REQUIRED");
+  const report = {
+    ...baseReport,
+    portfolio_snapshot_id: snapshot.portfolio_snapshot_id,
+    snapshot_as_of: snapshot.as_of,
+    trading_day: snapshot.as_of.slice(0, 10),
+    items: baseReport.items.map((item) => ({
+      ...item,
+      evidence_refs: item.evidence_refs.map((ref) => ({ ...ref, available_at: snapshot.as_of })),
+    })),
+  };
+  await page.route(`**/api/v1/portfolios/${portfolioId}/diagnostics/latest`, async (route) => {
+    diagnosticMethods.push(route.request().method());
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: report, meta: meta() }) });
+  });
+  await page.goto("/portfolio");
+  const diagnostic = page.getByRole("region", { name: "当前快照诊断" });
+  await expect(diagnostic.getByRole("heading", { name: "需要补充证据" })).toBeVisible();
+  await expect(diagnostic.getByRole("listitem")).toHaveCount(report.items.length);
+  await expect(page.getByText("只读初步诊断", { exact: true })).toHaveCount(0);
+  await page.locator(".portfolio-source > summary").click();
+  await expect(page.locator(".portfolio-source")).toContainText("已通过 · 12 条");
+  await expect(page.locator(".portfolio-source")).toContainText("已锁定");
+  const readsBeforeRefresh = diagnosticMethods.length;
+  await page.getByRole("button", { name: "刷新页面数据" }).click();
+  await expect.poll(() => diagnosticMethods.length).toBeGreaterThan(readsBeforeRefresh);
+  await expect(diagnostic.getByRole("heading", { name: "需要补充证据" })).toBeVisible();
+  expect(diagnosticMethods.every((method) => method === "GET")).toBe(true);
+  expect(brokerSyncRequests).toEqual([]);
+  await expect(page.getByRole("button", { name: /买入|卖出|下单|修改持仓/ })).toHaveCount(0);
+  await assertReleaseAccessibility(page);
+});
+
 test("legacy Fosun holdings route permanently converges on the portfolio source view", async ({ page }) => {
   await installPortfolioFixtures(page);
   const response = await page.goto("/holdings/fosun");
@@ -175,6 +222,9 @@ async function installPortfolioFixtures(page: Page, snapshotOverride: Partial<ty
   }));
   await page.route(`**/api/v1/portfolios/${portfolioId}/snapshots/latest`, async (route) => route.fulfill({
     status: 200, contentType: "application/json", body: JSON.stringify({ data: { ...snapshot, ...snapshotOverride }, meta: meta() }),
+  }));
+  await page.route(`**/api/v1/portfolios/${portfolioId}/diagnostics/latest`, async (route) => route.fulfill({
+    status: 404, contentType: "application/json", body: JSON.stringify({ error: { code: "DIAGNOSTIC_NOT_AVAILABLE" }, meta: meta() }),
   }));
 }
 
