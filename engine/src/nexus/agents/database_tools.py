@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE, load_frozen_evidence
 from nexus.agents.portfolio_context import PortfolioResearchContext, read_portfolio_context
 from nexus.agents.price_features import compute_price_features
+from nexus.agents.proposal_context import assess_frozen_comparison
 from nexus.agents.tools import ReadOnlyTools, ToolExecutor, ToolInputError
 from nexus.market.price_bar_authority import (
     HASH_VERSION,
@@ -87,6 +88,14 @@ class _FrozenEvidenceAuthority:
     available_at: datetime
     location: str
     content_hash: str
+
+
+def _context_payload(context: PortfolioResearchContext, *, exclude: set[str]) -> dict[str, object]:
+    payload = context.model_dump(mode="json", exclude=exclude)
+    comparison = payload.get("proposal_comparison")
+    if isinstance(comparison, dict) and context.proposal_comparison is not None:
+        comparison["economic_comparison"] = assess_frozen_comparison(context.proposal_comparison)
+    return payload
 
 
 class _BoundDatabaseExecutors:
@@ -589,8 +598,8 @@ class _BoundDatabaseExecutors:
         return self._result(
             "get_portfolio_exposure",
             [
-                context.model_dump(
-                    mode="json",
+                _context_payload(
+                    context,
                     exclude={
                         "diagnostics",
                         "diagnostic_input_hash",
@@ -611,8 +620,8 @@ class _BoundDatabaseExecutors:
         return self._result(
             "get_portfolio_diagnostics",
             [
-                context.model_dump(
-                    mode="json",
+                _context_payload(
+                    context,
                     exclude={
                         "position_weight",
                         "cash_weight",
@@ -660,6 +669,7 @@ class _BoundDatabaseExecutors:
             raise ToolInputError("tool request exceeds frozen proposal authority")
         return self._result("get_proposal_comparison", [{
             **comparison.model_dump(mode="json"),
+            "economic_comparison": assess_frozen_comparison(comparison),
             "evidence_ref_id": str(context.evidence_ref_id),
             "content_hash": context.content_hash,
         }])

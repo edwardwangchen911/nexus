@@ -130,10 +130,12 @@ class ComparableProposal:
 
 @dataclass(frozen=True)
 class ProposalComparison:
-    recommendation: ProposalVariant
+    recommendation: ProposalVariant | None
     ranked_variants: tuple[ProposalVariant, ...]
     tax_impact: TypedMetric = TypedMetric.unknown("TAX_DATA_UNAVAILABLE")
     excluded_variants: tuple[ProposalVariant, ...] = ()
+    status: Literal["incomparable", "policy_required", "compared"] = "compared"
+    reasons: tuple[str, ...] = ()
 
 
 def compare_proposals(proposals: tuple[ComparableProposal, ...]) -> ProposalComparison:
@@ -153,11 +155,30 @@ def compare_proposals(proposals: tuple[ComparableProposal, ...]) -> ProposalComp
             if proposal.authority_complete and _proves_safe_improvement(proposal, hold)
         )
     ranked = tuple(item.variant for item in sorted(eligible, key=_rank_key))
-    recommendation = ranked[0] if ranked and ranked[0] != "hold_current" else "hold_current"
+    reasons: list[str] = []
+    if any(not p.cost_complete or p.dimensions.cost.status != "known" for p in proposals):
+        reasons.append("COST_EVIDENCE_INCOMPLETE")
+    incomplete = any(not p.authority_complete for p in proposals)
+    if incomplete:
+        reasons.append("COMPARISON_EVIDENCE_INCOMPLETE")
+    tradeoff = hold.authority_complete and any(
+        p.authority_complete
+        and _value(p.dimensions, "cost") > _value(hold.dimensions, "cost")
+        and _noncost_improvement(p.dimensions, hold.dimensions)
+        for p in proposals[1:]
+    )
+    if tradeoff:
+        reasons.append("ECONOMIC_COMPARISON_POLICY_MISSING")
+    status: Literal["incomparable", "policy_required", "compared"] = (
+        "incomparable" if incomplete else "policy_required" if tradeoff else "compared"
+    )
+    recommendation = ranked[0] if ranked and status == "compared" else None
     return ProposalComparison(
         recommendation=recommendation,
         ranked_variants=ranked,
         excluded_variants=tuple(item.variant for item in proposals if item not in eligible),
+        status=status,
+        reasons=tuple(reasons),
     )
 
 
@@ -278,6 +299,21 @@ def _proves_safe_improvement(candidate: ComparableProposal, hold: ComparableProp
         )
         or _value(left, "liquidity") > _value(right, "liquidity")
         or _value(left, "cost") < _value(right, "cost")
+    )
+
+
+def _noncost_improvement(left: ComparisonDimensions, right: ComparisonDimensions) -> bool:
+    """Identify a cost-versus-risk tradeoff without approving it or changing risk gates."""
+    if left.hard_violations > right.hard_violations:
+        return False
+    if any(_value(left, name) > _value(right, name) for name in _RISK_SMALLER_IS_BETTER):
+        return False
+    if _value(left, "liquidity") < _value(right, "liquidity"):
+        return False
+    return (
+        left.hard_violations < right.hard_violations
+        or any(_value(left, name) < _value(right, name) for name in _RISK_SMALLER_IS_BETTER)
+        or _value(left, "liquidity") > _value(right, "liquidity")
     )
 
 
