@@ -195,6 +195,10 @@ async def test_responses_committee_returns_frozen_role_output_with_fake_transpor
     assert call["model"] == "configured-reasoning"
     assert call["text"]["format"]["name"] == "committee_role_output_v1"
     assert {tool["type"] for tool in call["tools"]} == {"function"}
+    schemas = [call["text"]["format"]["schema"], *(tool["parameters"] for tool in call["tools"])]
+    for schema in schemas:
+        assert set(schema["required"]) == set(schema["properties"])
+        assert schema["additionalProperties"] is False
 
 
 @pytest.mark.asyncio
@@ -238,14 +242,23 @@ async def test_official_typed_function_call_completes_through_fixed_tool_loop() 
     assert isinstance(calls[0]["input"][0]["content"], str)
     assert isinstance(calls[0]["input"][1]["content"], str)
     assert "previous_response_id" not in calls[0]
-    assert calls[1]["previous_response_id"] == "resp_fixture"
-    assert calls[1]["input"] == [
+    assert all(call.get("store") is False for call in calls)
+    assert all("previous_response_id" not in call for call in calls)
+    assert calls[1]["input"][-1:] == [
         {
             "type": "function_call_output",
             "call_id": "call_fixture",
             "output": '{"status":"ok"}',
         }
     ]
+    assert any(item.get("type") == "function_call" for item in calls[1]["input"])
+    assert any(
+        item.get("type") == "message" and item.get("role") == "assistant" and item.get("content")
+        for item in calls[1]["input"]
+    )
+    assert any(
+        item.get("encrypted_content") == "opaque-test-reasoning" for item in calls[1]["input"]
+    )
 
 
 @pytest.mark.asyncio
@@ -358,6 +371,7 @@ class _TypedCommitteeResponses(_CommitteeResponses):
                         "summary": [],
                         "type": "reasoning",
                         "status": "completed",
+                        "encrypted_content": "opaque-test-reasoning",
                     }
                 ),
             )
@@ -366,9 +380,7 @@ class _TypedCommitteeResponses(_CommitteeResponses):
 
 class _TypedCommitteeClient:
     def __init__(self, evidence: EvidenceRef, *, include_reasoning: bool = False) -> None:
-        self.responses = _TypedCommitteeResponses(
-            evidence, include_reasoning=include_reasoning
-        )
+        self.responses = _TypedCommitteeResponses(evidence, include_reasoning=include_reasoning)
 
 
 class _TypedToolCommitteeResponses(_TypedCommitteeResponses):
@@ -381,6 +393,8 @@ class _TypedToolCommitteeResponses(_TypedCommitteeResponses):
             return response.model_copy(
                 update={
                     "output": [
+                        response.output[0],
+                        response.output[1],
                         ResponseFunctionToolCall.model_validate(
                             {
                                 "id": "fc_fixture",
@@ -396,7 +410,7 @@ class _TypedToolCommitteeResponses(_TypedCommitteeResponses):
                                 "status": "completed",
                                 "type": "function_call",
                             }
-                        )
+                        ),
                     ]
                 }
             )

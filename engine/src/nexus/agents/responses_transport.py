@@ -55,6 +55,13 @@ def _normalize_typed(value: Response) -> NormalizedResponse:
         if isinstance(item, ResponseReasoningItem):
             if item.status not in (None, "completed"):
                 raise ResponseShapeError("Responses reasoning item is incomplete", usage=usage)
+            output.append(
+                item.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                    include={"id", "type", "summary", "encrypted_content", "status"},
+                )
+            )
             continue
         if isinstance(item, ResponseFunctionToolCall):
             if (
@@ -65,21 +72,26 @@ def _normalize_typed(value: Response) -> NormalizedResponse:
             ):
                 raise ResponseShapeError("Responses function call is malformed", usage=usage)
             output.append(
-                {
-                    "type": "function_call",
-                    "call_id": item.call_id,
-                    "name": item.name,
-                    "arguments": item.arguments,
-                }
+                item.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                    include={"id", "type", "call_id", "name", "arguments", "status"},
+                )
             )
             continue
         if not isinstance(item, ResponseOutputMessage) or item.status != "completed":
             raise ResponseShapeError("Responses output item is not allowlisted", usage=usage)
-        output.append({"type": "message"})
         for content in item.content:
             if not isinstance(content, ResponseOutputText):
                 raise ResponseShapeError("Responses message content is not text", usage=usage)
             text_parts.append(content.text)
+        output.append(
+            item.model_dump(
+                mode="json",
+                exclude_none=True,
+                include={"id", "type", "status", "role", "content"},
+            )
+        )
     return NormalizedResponse(
         response_id=value.id,
         output=tuple(output),

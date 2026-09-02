@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
+from openai import pydantic_function_tool
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from nexus.agents.committee import AgentRole, CommitteeRoleOutput, PromptAsset
@@ -98,7 +99,6 @@ class ResponsesResearchModel:
         input_items: list[Mapping[str, object]] = [
             {"role": "user", "content": _wire_json(request.model_dump(mode="json"))}
         ]
-        previous_response_id: str | None = None
         allowance_ledger = RunUsageAllowance(
             max_input_tokens=self._config.max_input_tokens,
             max_output_tokens=self._config.max_output_tokens,
@@ -116,6 +116,8 @@ class ResponsesResearchModel:
                     "input": input_items,
                     "tools": list(definitions.values()),
                     "tool_choice": "auto",
+                    "store": False,
+                    "include": ["reasoning.encrypted_content"],
                     "text": {
                         "format": {
                             "type": "json_schema",
@@ -125,8 +127,6 @@ class ResponsesResearchModel:
                         }
                     },
                 }
-                if previous_response_id is not None:
-                    request_payload["previous_response_id"] = previous_response_id
                 call_allowance = allowance_ledger.authorize(request_payload)
                 create_kwargs = dict(
                     model=self._config.model_id,
@@ -136,9 +136,9 @@ class ResponsesResearchModel:
                     tools=list(definitions.values()),
                     tool_choice="auto",
                     text=request_payload["text"],
+                    store=False,
+                    include=["reasoning.encrypted_content"],
                 )
-                if previous_response_id is not None:
-                    create_kwargs["previous_response_id"] = previous_response_id
                 result = await create(**create_kwargs)
                 try:
                     normalized = normalize_response(result)
@@ -179,12 +179,8 @@ class ResponsesResearchModel:
                                 ),
                             }
                         )
-                    if normalized.response_id is None:
-                        input_items.extend(normalized.output)
-                        input_items.extend(continuation)
-                    else:
-                        previous_response_id = normalized.response_id
-                        input_items = continuation
+                    input_items.extend(normalized.output)
+                    input_items.extend(continuation)
                     continue
                 raw_text = normalized.output_text
                 if not isinstance(raw_text, str):
@@ -269,14 +265,11 @@ class ResponsesCommittee:
                     {
                         "role": role,
                         "request": request.model_dump(mode="json"),
-                        "evidence_refs": [
-                            item.model_dump(mode="json") for item in evidence_refs
-                        ],
+                        "evidence_refs": [item.model_dump(mode="json") for item in evidence_refs],
                     }
                 ),
             },
         ]
-        previous_response_id: str | None = None
         usage_before = self.usage
         loop = asyncio.get_running_loop()
         deadline = loop.time() + float(self._config.absolute_timeout_seconds)
@@ -290,17 +283,19 @@ class ResponsesCommittee:
                     "input": input_items,
                     "tools": list(definitions.values()),
                     "tool_choice": "auto",
+                    "store": False,
+                    "include": ["reasoning.encrypted_content"],
                     "text": {
                         "format": {
                             "type": "json_schema",
                             "name": "committee_role_output_v1",
                             "strict": True,
-                            "schema": _CommitteePayload.model_json_schema(),
+                            "schema": pydantic_function_tool(_CommitteePayload)["function"][
+                                "parameters"
+                            ],
                         }
                     },
                 }
-                if previous_response_id is not None:
-                    request_payload["previous_response_id"] = previous_response_id
                 allowance = self._allowance.authorize(request_payload)
                 create_kwargs = dict(
                     model=self._config.model_id,
@@ -310,9 +305,9 @@ class ResponsesCommittee:
                     tools=list(definitions.values()),
                     tool_choice="auto",
                     text=request_payload["text"],
+                    store=False,
+                    include=["reasoning.encrypted_content"],
                 )
-                if previous_response_id is not None:
-                    create_kwargs["previous_response_id"] = previous_response_id
                 result = await create(**create_kwargs)
                 try:
                     normalized = normalize_response(result)
@@ -353,12 +348,8 @@ class ResponsesCommittee:
                                 ),
                             }
                         )
-                    if normalized.response_id is None:
-                        input_items.extend(normalized.output)
-                        input_items.extend(continuation)
-                    else:
-                        previous_response_id = normalized.response_id
-                        input_items = continuation
+                    input_items.extend(normalized.output)
+                    input_items.extend(continuation)
                     continue
                 raw_text = normalized.output_text
                 if not isinstance(raw_text, str):

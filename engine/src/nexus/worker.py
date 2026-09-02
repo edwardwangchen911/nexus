@@ -273,7 +273,12 @@ async def _committee(
         return _UnavailableResponsesCommittee()
     client = responses_client
     if client is None:
-        client = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+        client = AsyncOpenAI(
+            api_key=settings.openai_api_key.get_secret_value(),
+            base_url="https://api.openai.com/v1",
+            max_retries=0,
+            timeout=30,
+        )
     configured_tools = tools or await database_read_only_tools(
         session,
         run,

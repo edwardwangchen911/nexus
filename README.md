@@ -33,6 +33,34 @@ NEXUS 是私人投资研究、回测与模拟交易工作台。它不提供投�
 
 ## 命令
 
+### 本机 OpenAI Agent 接入
+
+复用已有 Responses/委员会和预算逻辑，不新建 Agent 框架。默认固定
+`gpt-5.4-mini-2026-03-17`，模型与 8 个已有提示词可幂等登记到本地数据库。
+单次研究共享 64,000 输入 / 8,192 输出 token 上限，按 2026-09-02 核实的
+[官方标准价格](https://developers.openai.com/api/docs/models/gpt-5.4-mini)最多约 $0.085；
+沿用现有每日预算检查（默认 $3）。不启用自动调度，不开放交易。
+
+在仓库根目录执行：
+
+```bash
+uv run --package nexus-engine nexus-openai-local setup
+```
+
+`setup` 登记本地配置，在本机终端隐藏输入 API Key，保存到被 Git 忽略的
+`.secrets/nexus-openai-local/api-key`（0600）；也接受进程中的 `OPENAI_API_KEY`。
+不要在聊天、命令参数或受版本控制的文件中填写密钥；不复用 Codex 登录凭据。
+`setup --skip-key` 可先完成无网络配置；`status` 只返回脱敏状态。
+录入后 `setup` 自动执行一次 `verify`：只向官方 API 发出一次不含账户数据的连通性请求，输出上限 128 tokens、
+超时 30 秒、无 SDK 自动重试；不能把连通性通过当作真实研究完成。
+
+已有证据准入和任务登记完成后，`nexus-openai-local run-once` 只处理一个已有研究任务。
+缺少研究快照、合格价格证据或模型密钥时，不生成假研究；当前历史风险证据缺口仍须补齐。
+Responses 使用 `store=false`，工具续调用显式携带上下文；预算、证据校验和执行锁不变。
+本次不改变数据库 schema；停用此本机入口即可停止模型调用，保留配置与审计历史。
+
+### 常用开发命令
+
 ```bash
 npm install
 npm run lint

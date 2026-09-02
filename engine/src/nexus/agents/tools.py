@@ -6,6 +6,7 @@ from datetime import date, datetime
 from typing import Final, Literal, Protocol
 from uuid import UUID
 
+from openai import pydantic_function_tool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from nexus.domain.time import require_utc
@@ -184,7 +185,7 @@ def response_function_tools() -> Mapping[str, dict[str, object]]:
             "type": "function",
             "name": name,
             "description": "Read-only typed research lookup.",
-            "parameters": schema.model_json_schema(),
+            "parameters": pydantic_function_tool(schema)["function"]["parameters"],
             "strict": True,
         }
         for name, schema in _TOOL_INPUTS.items()
