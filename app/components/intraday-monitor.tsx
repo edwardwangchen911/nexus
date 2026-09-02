@@ -1,5 +1,6 @@
 "use client";
 
+import { formatDisplayDecimal } from "../lib/display-decimal";
 import { Activity, ChevronLeft, ChevronRight, Clock3, TriangleAlert } from "lucide-react";
 import { useRef } from "react";
 
@@ -89,7 +90,7 @@ export function IntradayMonitor({ symbol, monitor }: IntradayMonitorProps): Reac
             <polyline points={chartPoints.join(" ")} />
           </svg>
           <figcaption>
-            {monitor.bars.length} 个已返回样本；折线仅作趋势辅助，精确值以下方表格为准。
+            {monitor.bars.length} 个已返回样本；折线仅作趋势辅助，下方表格最多显示 3 位小数。
           </figcaption>
         </figure>
       ) : (
@@ -132,11 +133,11 @@ export function IntradayMonitor({ symbol, monitor }: IntradayMonitorProps): Reac
             {monitor.bars.map((bar) => (
               <tr key={`${bar.observed_at}:${bar.available_at}`}>
                 <th scope="row">{formatUtc(bar.observed_at)}</th>
-                <td>{bar.open}</td>
-                <td>{bar.high}</td>
-                <td>{bar.low}</td>
-                <td>{bar.close}</td>
-                <td>{bar.volume}</td>
+                <td>{formatDisplayDecimal(bar.open)}</td>
+                <td>{formatDisplayDecimal(bar.high)}</td>
+                <td>{formatDisplayDecimal(bar.low)}</td>
+                <td>{formatDisplayDecimal(bar.close)}</td>
+                <td>{formatDisplayDecimal(bar.volume)}</td>
                 <td>{formatUtc(bar.available_at)}</td>
               </tr>
             ))}
@@ -209,7 +210,7 @@ function gatewayReceiptTime(monitor: IntradayMonitorData): string | null {
 }
 
 function formatAge(value: number | null | undefined): string {
-  return value === null || value === undefined ? "未知" : `${value} 秒`;
+  return value === null || value === undefined ? "未知" : `${formatDisplayDecimal(value)} 秒`;
 }
 
 function formatUtc(value: string | null): string {

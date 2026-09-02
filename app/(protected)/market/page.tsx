@@ -1,5 +1,6 @@
 "use client";
 
+import { formatDisplayDecimal } from "../../lib/display-decimal";
 import { DatabaseZap, RefreshCw, Star, StarOff, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -356,7 +357,7 @@ export function MarketPanel({
                     onClick={() => onSelect(marketItem)}
                   >
                     <span className="market-instrument__symbol">{marketItem.symbol}</span>
-                    <span className="numeric-data">{marketItem.price ?? "无法选定可靠价格"}</span>
+                    <span className="numeric-data">{marketItem.price === null ? "无法选定可靠价格" : formatDisplayDecimal(marketItem.price)}</span>
                     <span>{sourceLabel(marketItem.source, marketItem.feed)}</span>
                     <span>{marketQualityLabel(marketItem.quality)} <code>{marketItem.quality}</code></span>
                   </button>
@@ -377,7 +378,7 @@ export function MarketPanel({
                     <h2>{selectedItem.symbol}</h2>
                   </div>
                   <dl>
-                    <EvidenceFact term="最新价" value={selectedItem.price ?? "无可验证报价"} highlight />
+                    <EvidenceFact term="最新价" value={selectedItem.price === null ? "无可验证报价" : formatDisplayDecimal(selectedItem.price)} highlight />
                     <EvidenceFact term="报价来源" value={marketSourceLabel(selectedItem.source, selectedItem.feed)} />
                     <EvidenceFact term="Feed" value={selectedItem.feed?.toUpperCase() ?? "未选定"} />
                     <EvidenceFact term={quoteEvidenceTimeTerm(selectedItem)} value={formatUtc(selectedItem.as_of)} />

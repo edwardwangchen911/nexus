@@ -130,7 +130,7 @@ describe("portfolio vertical slice", () => {
     expect(summary).toHaveTextContent("HKD");
     expect(summary).toHaveTextContent("8,000.00");
     expect(summary).toHaveTextContent("平均成本");
-    expect(summary).toHaveTextContent("6.20");
+    expect(summary).toHaveTextContent("6.2");
     expect(summary).toHaveTextContent("摊薄成本");
     expect(summary).toHaveTextContent("5.75");
     expect(summary).not.toHaveTextContent("USD");
@@ -141,20 +141,20 @@ describe("portfolio vertical slice", () => {
   it("prioritizes value and allocation while frozen quantities remain visible before opening details", () => {
     render(<PortfolioSummary portfolio={portfolio} snapshot={snapshot} currency="HKD" showValuation={false} />);
     const holdings = screen.getByRole("region", { name: "HKD 持仓表，可横向滚动" });
-    expect(within(holdings).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["标的", "持仓市值", "原币种内占比", "现价", "总量", "Agent 研究", "账户明细"]);
+    expect(within(holdings).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["标的", "持仓市值", "资产占比（含现金）", "现价", "总量", "Agent 研究", "账户明细"]);
     expect(screen.getByText("70.91%")).toBeVisible();
     expect(screen.getByText("冻结 200")).toBeVisible();
     expect(screen.getByText("平均成本")).not.toBeVisible();
     fireEvent.click(screen.getByText("成本与数量 · 只读"));
     expect(screen.getByText("平均成本")).toBeVisible();
-    expect(screen.getByText("HKD 6.20")).toBeVisible();
+    expect(screen.getByText("HKD 6.2")).toBeVisible();
     expect(screen.getByText("摊薄成本")).toBeVisible();
   });
 
   it("condenses cash-only currencies without hiding available cash or adding a holdings table", () => {
     render(<PortfolioSummary portfolio={portfolio} snapshot={snapshot} currency="USD" showValuation={false} />);
-    expect(screen.getByText("USD 1,000.00")).toBeVisible();
-    expect(screen.getByText("USD 900.00")).toBeVisible();
+    expect(screen.getByText("USD 1,000")).toBeVisible();
+    expect(screen.getByText("USD 900")).toBeVisible();
     expect(screen.getByText("无持仓 · 无未结订单 · 只读")).toBeVisible();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });

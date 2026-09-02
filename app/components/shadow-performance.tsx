@@ -1,5 +1,6 @@
 "use client";
 
+import { formatDisplayDecimal } from "../lib/display-decimal";
 import { ChevronLeft, ChevronRight, ShieldCheck } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
@@ -172,7 +173,7 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
         <ul className="shadow-performance__end-labels" aria-label="曲线终点直接标注">
           {shadow.portfolios.map((portfolio) => (
             <li key={portfolio.variant} data-variant={portfolio.variant}>
-              {variantLabels[portfolio.variant]} <span className="numeric-data">{portfolio.nav.at(-1)?.nav ?? "尚无"}</span>
+              {variantLabels[portfolio.variant]} <span className="numeric-data">{portfolio.nav.length ? formatDisplayDecimal(portfolio.nav.at(-1)!.nav) : "尚无"}</span>
             </li>
           ))}
         </ul>
@@ -196,7 +197,7 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
         </button>
         <p id={detailId} role="status" aria-label="当前影子会话详情" aria-live="polite" className="numeric-data">
           {activeSession ?? "尚无会话"}
-          {activeSession ? activePoints.map((point, index) => ` · ${variantLabels[variants[index]]} ${point?.nav ?? "未知"}`) : ""}
+          {activeSession ? activePoints.map((point, index) => ` · ${variantLabels[variants[index]]} ${point ? formatDisplayDecimal(point.nav) : "未知"}`) : ""}
         </p>
         <button className="button button--quiet" type="button" onClick={() => moveTo(boundedIndex + 1)} disabled={boundedIndex >= sessions.length - 1}>
           下一会话<ChevronRight aria-hidden="true" size={17} />
@@ -206,13 +207,13 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
 
       <ScrollableTable label="三方案逐会话精确 NAV 表格，可横向滚动">
         <table className="shadow-nav-table numeric-data" aria-label="三方案逐会话精确 NAV">
-          <caption>图形对应的完整逐会话精确 NAV；不省略、不重算。</caption>
+          <caption>图形对应的逐会话 NAV，最多显示 3 位小数；底层数值保持原精度。</caption>
           <thead><tr><th scope="col">交易日</th>{variants.map((variant) => <th scope="col" key={variant}>{variantLabels[variant]}</th>)}</tr></thead>
           <tbody>
             {sessions.map((session, index) => (
               <tr key={session} data-active={index === boundedIndex ? "true" : "false"}>
                 <th scope="row">{session}</th>
-                {shadow.portfolios.map((portfolio) => <td key={portfolio.variant}>{portfolio.nav[index].nav}</td>)}
+                {shadow.portfolios.map((portfolio) => <td key={portfolio.variant}>{formatDisplayDecimal(portfolio.nav[index].nav)}</td>)}
               </tr>
             ))}
           </tbody>
@@ -238,7 +239,7 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
                   <MetricCell metric={item.metrics.volatility_improvement} />
                   <MetricCell metric={item.metrics.cumulative_turnover} />
                   <MetricCell metric={item.metrics.fee_drag_index_points} />
-                  <td>{item.metrics.worst_sessions.length === 0 ? `未知 · ${checkpoint.reason ?? item.metrics.net_cumulative_return.reason}` : item.metrics.worst_sessions.map((worst) => `${worst.session} ${worst.return_value}`).join("；")}</td>
+                  <td>{item.metrics.worst_sessions.length === 0 ? `未知 · ${checkpoint.reason ?? item.metrics.net_cumulative_return.reason}` : item.metrics.worst_sessions.map((worst) => `${worst.session} ${formatDisplayDecimal(worst.return_value)}`).join("；")}</td>
                 </tr>
               )))}
             </tbody>
@@ -277,7 +278,7 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
             <table className="shadow-outcomes-table numeric-data">
               <caption>三方案首会话的确定性模拟结果</caption>
               <thead><tr><th scope="col">方案</th><th scope="col">标的</th><th scope="col">方向</th><th scope="col">状态</th><th scope="col">原因</th><th scope="col">数量</th><th scope="col">价格</th><th scope="col">名义金额</th><th scope="col">成本</th></tr></thead>
-              <tbody>{outcomes.map(({ portfolio, outcome }) => <tr key={`${portfolio.variant}:${outcome.instrument_id}`}><th scope="row">{variantLabels[portfolio.variant]}</th><td>{outcome.instrument_id}</td><td>{outcome.side}</td><td>{outcome.status}</td><td>{outcome.reason}</td><td>{outcome.fill?.quantity ?? "—"}</td><td>{outcome.fill?.price ?? "—"}</td><td>{outcome.fill?.notional ?? "—"}</td><td>{outcome.fill?.cost ?? "—"}</td></tr>)}</tbody>
+              <tbody>{outcomes.map(({ portfolio, outcome }) => <tr key={`${portfolio.variant}:${outcome.instrument_id}`}><th scope="row">{variantLabels[portfolio.variant]}</th><td>{outcome.instrument_id}</td><td>{outcome.side}</td><td>{outcome.status}</td><td>{outcome.reason}</td><td>{outcome.fill ? formatDisplayDecimal(outcome.fill.quantity) : "—"}</td><td>{outcome.fill ? formatDisplayDecimal(outcome.fill.price) : "—"}</td><td>{outcome.fill ? formatDisplayDecimal(outcome.fill.notional) : "—"}</td><td>{outcome.fill ? formatDisplayDecimal(outcome.fill.cost) : "—"}</td></tr>)}</tbody>
             </table>
           </ScrollableTable>
         )}
@@ -293,7 +294,7 @@ function ScrollableTable({ label, children }: { label: string; children: React.R
 }
 
 function MetricCell({ metric }: { metric: Metric }): React.ReactElement {
-  return <td>{metric.status === "known" ? metric.value : `未知 · ${metric.reason}`}</td>;
+  return <td>{metric.status === "known" ? formatDisplayDecimal(metric.value) : `未知 · ${metric.reason}`}</td>;
 }
 
 function freshnessLabel(value: Shadow["freshness"]["status"]): string {

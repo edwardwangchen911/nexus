@@ -407,7 +407,7 @@ describe("market vertical slice", () => {
     expect(screen.getByRole("region", { name: "AAPL 价格图表" })).toBeVisible();
     expect(screen.getByRole("region", { name: "AAPL 价格图表" })).toHaveTextContent("行情序列 · ALPACA / SIP");
     expect(screen.getByRole("table", { name: "AAPL OHLCV 数据" })).toHaveTextContent(
-      "227.160000000000",
+      "227.16",
     );
     expect(screen.getByText(/共 2 个交易日/)).toBeVisible();
     expect(screen.getByText(/复权口径：未复权（raw）/)).toBeVisible();
@@ -717,7 +717,7 @@ describe("market vertical slice", () => {
 
     expect(await screen.findByRole("region", { name: "MSFT 价格图表" })).toBeVisible();
     expect(screen.getByRole("region", { name: "MSFT 报价证据" })).toHaveTextContent(
-      "418.790000000000",
+      "418.79",
     );
     expect(screen.getByRole("region", { name: "MSFT OHLCV 证据" })).toHaveTextContent(
       "复星 L1（只读）",

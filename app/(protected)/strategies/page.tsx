@@ -1,5 +1,6 @@
 "use client";
 
+import { formatDisplayDecimal } from "../../lib/display-decimal";
 import {
   Bot,
   FlaskConical,
@@ -586,6 +587,6 @@ function axisLabel(axis: components["schemas"]["SearchAxisSummaryResponse"]["axi
 function gateStatusLabel(status: components["schemas"]["GateResultResponse"]["status"]): string {
   return ({ PASS: "通过", FAIL: "失败", UNKNOWN: "未知", STALE: "过期" })[status];
 }
-function formatMetric(value: string | null): string { return value ?? "UNKNOWN"; }
+function formatMetric(value: string | null): string { return value === null ? "UNKNOWN" : formatDisplayDecimal(value); }
 function shortHash(value: string): string { return `${value.slice(0, 10)}…${value.slice(-8)}`; }
 function formatUtc(value: string): string { return value.replace("T", " ").replace("Z", " UTC"); }

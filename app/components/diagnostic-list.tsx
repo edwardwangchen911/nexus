@@ -1,3 +1,4 @@
+import { formatDisplayDecimal } from "../lib/display-decimal";
 import { AlertTriangle, Ban, CircleCheck, Search } from "lucide-react";
 import type { components } from "../lib/generated/schema";
 
@@ -101,6 +102,7 @@ export function DiagnosticList({ report, summary = false }: { report: Diagnostic
                   <h3>{diagnosticLabel(item.diagnostic_code)}</h3>
                   <p><code>{item.diagnostic_code}</code></p>
                   <p>{item.policy_scope} · {actionLabels[item.actionability]}</p>
+                  {item.diagnostic_code.startsWith("CONCENTRATION_") ? <p>集中度按同币种证券市值计算，不含现金。</p> : item.diagnostic_code === "CASH_RATIO" ? <p>现金占比按同币种现金与证券总市值计算。</p> : null}
                 </div>
                 <span className="diagnostic-item__severity">{severityLabels[item.severity]}</span>
               </header>
@@ -141,7 +143,7 @@ function Threshold({ label, value, unit }: { label: string; value: string | null
   return (
     <div>
       <dt>{label}</dt>
-      <dd>{value ?? "未知"}{value === null ? "" : ` ${unit}`}</dd>
+      <dd>{value === null ? "未知" : formatDisplayDecimal(value)}{value === null ? "" : ` ${unit}`}</dd>
     </div>
   );
 }

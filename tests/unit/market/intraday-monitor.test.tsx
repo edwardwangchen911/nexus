@@ -56,7 +56,7 @@ describe("IntradayMonitor", () => {
     expect(region).toHaveTextContent("3.13%");
     expect(region).toHaveTextContent("4.40 bps");
     expect(screen.getByRole("table", { name: "AAPL 1 分钟行情数据" })).toHaveTextContent(
-      "227.160000000000",
+      "227.16",
     );
     expect(screen.getByRole("button", { name: "向左浏览 AAPL 盘中表格" })).toBeVisible();
     expect(screen.getByRole("button", { name: "向右浏览 AAPL 盘中表格" })).toBeVisible();
