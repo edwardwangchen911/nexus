@@ -76,6 +76,11 @@ async def test_staged_committee_passes_validated_claims_forward_and_shares_usage
         f"{role}:0" for role in ROLE_ORDER[:5]
     }
     assert all(p["frozen_inputs"] == submitted[0]["frozen_inputs"] for p in submitted)
+    assert [p["requested_roles"] for p in submitted] == [
+        list(ROLE_ORDER[:5]),
+        list(ROLE_ORDER[5:7]),
+        list(ROLE_ORDER[7:]),
+    ]
     assert model.usage == UsageSnapshot(input_tokens=900, output_tokens=240, provider_calls=3)
     assert sum(o.input_tokens for o in outputs) == 900
     assert sum(o.output_tokens for o in outputs) == 240
@@ -118,6 +123,69 @@ async def test_staged_critique_rejects_missing_self_or_fabricated_references(mon
     assert invoke.await_count == 2
     assert model.usage.input_tokens == 600
     assert tuple(model._outputs) == ROLE_ORDER[:5]
+    assert model.failure_reason == "model_stage_review_invalid"
+
+
+@pytest.mark.asyncio
+async def test_staged_roles_can_be_reordered_without_changing_identity(monkeypatch):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    batch = _staged_batch("research", ROLE_ORDER[:5])
+    batch["roles"].reverse()
+    monkeypatch.setattr(
+        codex_staged,
+        "invoke_codex",
+        AsyncMock(
+            return_value=(json.dumps(batch), UsageSnapshot(input_tokens=300, output_tokens=80))
+        ),
+    )
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools())
+    first = await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    assert first.role == "orchestrator" and first.input_tokens == 300
+    assert tuple(model._outputs) == ROLE_ORDER[:5]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["schema", "duplicate", "wrong_stage", "citation"])
+async def test_staged_failure_categories_are_safe_and_terminal(monkeypatch, invalid):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    batch = _staged_batch("research", ROLE_ORDER[:5])
+    if invalid == "schema":
+        batch["secret-canary"] = "not-to-be-persisted"
+    elif invalid == "duplicate":
+        batch["roles"][1] = batch["roles"][0]
+    elif invalid == "wrong_stage":
+        batch["roles"][0]["role"] = "portfolio"
+    else:
+        batch["roles"][0]["claims"][0]["citations"] = [len(evidence)]
+    invoke = AsyncMock(
+        return_value=(json.dumps(batch), UsageSnapshot(input_tokens=300, output_tokens=80))
+    )
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools())
+    with pytest.raises(ValueError):
+        await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    expected = "roles" if invalid in {"duplicate", "wrong_stage"} else invalid
+    assert model.failure_reason == f"model_stage_{expected}_invalid"
+    assert not model._outputs and model.usage.input_tokens == 300
+    with pytest.raises(ValueError, match="CODEX_REQUEST_ALREADY_FAILED"):
+        await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    invoke.assert_awaited_once()
+
+
+def test_stage_schemas_restrict_roles_counts_and_review_shape():
+    from nexus.agents.codex_staged import STAGE_MODELS, STAGES
+
+    for stage, roles in STAGES:
+        batch = _staged_batch(stage, roles)
+        schema = STAGE_MODELS[stage]
+        assert schema.model_validate(batch)
+        batch["roles"].append(batch["roles"][0])
+        with pytest.raises(ValueError):
+            schema.model_validate(batch)
 
 
 @pytest.mark.asyncio
@@ -173,6 +241,7 @@ async def test_staged_budget_exhaustion_stops_before_next_provider_call(monkeypa
     with pytest.raises(ValueError, match="CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED"):
         await model.analyze("bear", request, evidence, prompts["bear"])
     invoke.assert_awaited_once()
+    assert model.failure_reason == "model_stage_allowance_exhausted"
 
 
 @pytest.mark.asyncio

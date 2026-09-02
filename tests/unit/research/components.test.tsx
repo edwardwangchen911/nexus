@@ -109,6 +109,14 @@ describe("research evidence docket", () => {
     expect(screen.getByText(/交易保持锁定/)).toBeVisible();
   });
 
+  it("does not present partial SDK usage as an exact total", () => {
+    render(<ResearchPanel state="partial" research={researchData({
+      status: "failed", intent: null, billing_mode: "chatgpt_subscription",
+      input_tokens: 300, output_tokens: 80, abstention_reason: "model_usage_uncertain",
+    })} admission={null} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
+    expect(screen.getByText(/仅为已知下限，不会自动重试/)).toBeVisible();
+  });
+
   it("renders stance, paired arguments, votes, invalidation and versions without a score or trade action", () => {
     render(<ResearchPanel state="ready" research={researchData()} admission={researchAdmissionData()} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
 

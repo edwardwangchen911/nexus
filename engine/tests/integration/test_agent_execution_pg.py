@@ -71,7 +71,7 @@ _DRIFT_INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000001712")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_fails", [False, True])
+@pytest.mark.parametrize("model_fails", [False, True, "invalid_citation"])
 @pytest.mark.parametrize("staged", [False, True])
 async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries(
     migrated_database_url,
@@ -139,7 +139,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     if staged:
 
         async def staged_invoke(payload, *, output_model):
-            if model_fails and payload["stage"] == "critique":
+            if model_fails is True and payload["stage"] == "critique":
                 raise TimeoutError("synthetic-secret-canary")
             roles = [prompt["role"] for prompt in payload["prompts"]]
             reviewed = (
@@ -156,6 +156,8 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                     if item["role"] in roles
                 ]
             }
+            if model_fails == "invalid_citation" and payload["stage"] == "critique":
+                response["roles"][0]["claims"] = [{"text": "invalid", "citations": [999]}]
             return json.dumps(response), UsageSnapshot(input_tokens=300, output_tokens=80)
 
         invoke.side_effect = staged_invoke
@@ -247,8 +249,68 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             assert past[_INSTRUMENT_ID].status == "not_started"
             assert past[_INSTRUMENT_ID].run_id is None
     elif staged:
-        assert data["abstention_reason"] == "model_usage_uncertain"
-        assert data["input_tokens"] == 300 and data["output_tokens"] == 80
+        assert data["abstention_reason"] == (
+            "model_stage_citation_invalid"
+            if model_fails == "invalid_citation"
+            else "model_usage_uncertain"
+        )
+        multiplier = 2 if model_fails == "invalid_citation" else 1
+        assert data["input_tokens"] == 300 * multiplier
+        assert data["output_tokens"] == 80 * multiplier
+
+
+@pytest.mark.asyncio
+async def test_registering_staged_config_does_not_activate_it_for_default_admission(
+    migrated_database_url,
+):
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    factory = session_factory(settings)
+    await _seed_authority(factory)
+    # The shared test fixture freezes created_at defaults; use explicit ordered timestamps.
+    async with factory() as session, session.begin():
+        for version in (1, 2):
+            session.add(
+                AgentModelConfigRecord(
+                    model_id="gpt-5.4-mini",
+                    version=f"codex-sdk-chatgpt-v{version}",
+                    config_hash=str(version) * 64,
+                    max_input_tokens=64_000,
+                    max_tool_calls=0,
+                    max_output_tokens=8_192,
+                    input_usd_per_million=Decimal("0"),
+                    output_usd_per_million=Decimal("0"),
+                    pricing_available_at=_NOW,
+                    pricing_expires_at=_NOW + timedelta(days=30),
+                    created_at=_NOW + timedelta(hours=version),
+                )
+            )
+    async with factory() as session, session.begin():
+        for explicit in (False, True):
+            staged_id = await session.scalar(
+                select(AgentModelConfigRecord.id).where(
+                    AgentModelConfigRecord.version == "codex-sdk-chatgpt-v2"
+                )
+            )
+            admission = await admit_research_run(
+                session,
+                actor_id="sdk-test",
+                route="/internal/v1/research-runs",
+                idempotency_key=f"sdk-opt-in-{explicit}",
+                request_hash="b" * 64,
+                request=ResearchRequest(
+                    instrument_id=_INSTRUMENT_ID,
+                    data_snapshot_id=_SNAPSHOT_ID,
+                    decision_time=_NOW,
+                ),
+                prompt_version_id=None,
+                model_config_id=staged_id if explicit else None,
+                daily_limit_usd=Decimal("3"),
+                now=datetime(2026, 9, 2, tzinfo=UTC),
+            )
+            selected = await session.get(AgentModelConfigRecord, admission.run.model_config_id)
+            assert selected.version == (
+                "codex-sdk-chatgpt-v2" if explicit else "codex-sdk-chatgpt-v1"
+            )
 
 
 @pytest.mark.asyncio

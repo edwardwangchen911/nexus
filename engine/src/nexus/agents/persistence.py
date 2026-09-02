@@ -278,6 +278,8 @@ async def admit_research_run(
             .where(
                 AgentModelConfigRecord.pricing_available_at <= now,
                 AgentModelConfigRecord.pricing_expires_at > now,
+                # Experimental staged research requires an explicit immutable model ID.
+                AgentModelConfigRecord.version != "codex-sdk-chatgpt-v2",
             )
             .order_by(AgentModelConfigRecord.created_at.desc())
             .limit(1)

@@ -56,6 +56,9 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
         <p className="research-page__gate" role="note">
           模型来源：Codex SDK · 使用 ChatGPT 套餐额度，不按 API 美元费用结算。
           输入 / 输出 tokens：{research.input_tokens ?? "未知"} / {research.output_tokens ?? "未知"}。
+          {research.abstention_reason === "model_usage_uncertain"
+            ? " 部分模型调用未返回用量；上述仅为已知下限，不会自动重试。"
+            : null}
           仅生成研究，交易保持锁定。
         </p>
       ) : null}

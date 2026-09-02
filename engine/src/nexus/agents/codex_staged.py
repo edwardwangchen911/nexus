@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nexus.agents.codex_sdk import (
     MAX_INPUT_TOKENS,
@@ -35,6 +35,40 @@ class _ReviewedRole(_Role):
 class _StageBatch(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     roles: tuple[_ReviewedRole, ...] = Field(min_length=1, max_length=5)
+
+
+class _ResearchRole(_ReviewedRole):
+    role: Literal["orchestrator", "fundamental", "market_state", "macro_sector", "bull"]
+    reviewed_claim_ids: tuple[str, ...] = Field(max_length=0)
+
+
+class _CritiqueRole(_ReviewedRole):
+    role: Literal["bear", "evidence_audit"]
+    reviewed_claim_ids: tuple[str, ...] = Field(min_length=1, max_length=16)
+
+
+class _SynthesisRole(_ReviewedRole):
+    role: Literal["portfolio"]
+    reviewed_claim_ids: tuple[str, ...] = Field(min_length=2, max_length=16)
+
+
+class _ResearchBatch(_StageBatch):
+    roles: tuple[_ResearchRole, ...] = Field(min_length=5, max_length=5)
+
+
+class _CritiqueBatch(_StageBatch):
+    roles: tuple[_CritiqueRole, ...] = Field(min_length=2, max_length=2)
+
+
+class _SynthesisBatch(_StageBatch):
+    roles: tuple[_SynthesisRole, ...] = Field(min_length=1, max_length=1)
+
+
+STAGE_MODELS: dict[str, type[_StageBatch]] = {
+    "research": _ResearchBatch,
+    "critique": _CritiqueBatch,
+    "synthesis": _SynthesisBatch,
+}
 
 
 class StagedCodexCommittee(CodexCommittee):
@@ -110,6 +144,7 @@ class StagedCodexCommittee(CodexCommittee):
                 "Execution remains locked; unavailable prices do not become a trade recommendation."
             ),
             "stage": stage,
+            "requested_roles": list(roles),
             "prompts": [self._prompts[item].model_dump(mode="json") for item in roles],
             "request": request.model_dump(mode="json"),
             "evidence": [item.model_dump(mode="json") for item in evidence_refs],
@@ -124,6 +159,7 @@ class StagedCodexCommittee(CodexCommittee):
             or self._deadline is None
             or asyncio.get_running_loop().time() >= self._deadline
         ):
+            self.failure_reason = "model_stage_allowance_exhausted"
             raise ValueError("CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED")
         self.failure_reason = "model_usage_uncertain"
         self.usage = UsageSnapshot(
@@ -132,7 +168,7 @@ class StagedCodexCommittee(CodexCommittee):
             provider_calls=self.usage.provider_calls + 1,
         )
         async with asyncio.timeout_at(self._deadline):
-            raw, usage = await invoke_codex(payload, output_model=_StageBatch)
+            raw, usage = await invoke_codex(payload, output_model=STAGE_MODELS[stage])
         self.usage = UsageSnapshot(
             input_tokens=self.usage.input_tokens + usage.input_tokens,
             output_tokens=self.usage.output_tokens + usage.output_tokens,
@@ -143,13 +179,21 @@ class StagedCodexCommittee(CodexCommittee):
             self.usage.input_tokens > MAX_INPUT_TOKENS
             or self.usage.output_tokens > MAX_OUTPUT_TOKENS
         ):
+            self.failure_reason = "model_token_limit_exceeded"
             raise ValueError("CODEX_TOKEN_LIMIT_EXCEEDED")
-        batch = _StageBatch.model_validate_json(raw)
-        if tuple(item.role for item in batch.roles) != roles:
+        try:
+            batch = _StageBatch.model_validate_json(raw)
+        except ValidationError:
+            self.failure_reason = "model_stage_schema_invalid"
+            raise
+        # Role identity is authoritative; a harmless response permutation is not a failure.
+        if len(batch.roles) != len(roles) or {item.role for item in batch.roles} != set(roles):
+            self.failure_reason = "model_stage_roles_invalid"
             raise ValueError("CODEX_ROLES_INVALID")
         prior_ids = {item["claim_id"] for item in previous}
         outputs = {}
-        for index, item in enumerate(batch.roles):
+        ordered_roles = sorted(batch.roles, key=lambda item: roles.index(item.role))
+        for index, item in enumerate(ordered_roles):
             reviewed = set(item.reviewed_claim_ids)
             if (
                 not reviewed.issubset(prior_ids)
@@ -163,12 +207,14 @@ class StagedCodexCommittee(CodexCommittee):
                     )
                 )
             ):
+                self.failure_reason = "model_stage_review_invalid"
                 raise ValueError("CODEX_REVIEW_REFERENCE_INVALID")
             if any(
                 citation < 0 or citation >= len(evidence_refs)
                 for claim in item.claims
                 for citation in claim.citations
             ):
+                self.failure_reason = "model_stage_citation_invalid"
                 raise ValueError("CODEX_CITATION_INVALID")
             outputs[item.role] = CommitteeRoleOutput(
                 role=item.role,

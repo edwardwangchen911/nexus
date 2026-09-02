@@ -58,6 +58,17 @@ LIFECYCLE: Final[tuple[str, ...]] = (
     "completed",
 )
 TERMINAL: Final[frozenset[str]] = frozenset({"completed", "failed", "abstained"})
+SAFE_MODEL_FAILURES: Final[frozenset[str]] = frozenset(
+    {
+        "model_usage_uncertain",
+        "model_stage_allowance_exhausted",
+        "model_token_limit_exceeded",
+        "model_stage_schema_invalid",
+        "model_stage_roles_invalid",
+        "model_stage_review_invalid",
+        "model_stage_citation_invalid",
+    }
+)
 
 
 async def execute_research_run(
@@ -165,6 +176,7 @@ async def execute_research_run(
             prompt=prompt,
         )
         if output is None:
+            failure_reason = getattr(committee, "failure_reason", None)
             return await _terminal_after_committee(
                 session,
                 run,
@@ -174,8 +186,8 @@ async def execute_research_run(
                 output_sequence=output_sequence,
                 event_sequence=event_sequence + 1,
                 status="failed",
-                reason="model_usage_uncertain"
-                if getattr(committee, "failure_reason", None) == "model_usage_uncertain"
+                reason=failure_reason
+                if isinstance(failure_reason, str) and failure_reason in SAFE_MODEL_FAILURES
                 else "model_execution_failed",
             )
         if output.role != role or output.prompt_hash != prompt.content_hash:
