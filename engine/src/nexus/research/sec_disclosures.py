@@ -1,4 +1,4 @@
-"""Bounded SEC 6-K/497K text evidence; never synthesize accounting facts from prose."""
+"""Bounded SEC 8-K/6-K/497K text; never synthesize accounting facts from prose."""
 
 import hashlib
 import json
@@ -34,7 +34,7 @@ class SecDisclosure(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     instrument_id: UUID
-    form: Literal["6-K", "497K"]
+    form: Literal["8-K", "6-K", "497K"]
     accession_number: str = Field(pattern=r"^[0-9]{10}-[0-9]{2}-[0-9]{6}$")
     source_url: str = Field(
         max_length=512,
@@ -46,11 +46,18 @@ class SecDisclosure(BaseModel):
     excerpt: str = Field(min_length=20, max_length=MAX_EXCERPT)
     truncated: bool
     fund_identity: SecFundIdentity | None = None
+    issuer_cik: str | None = Field(default=None, pattern=r"^[0-9]{10}$")
 
     @model_validator(mode="after")
     def check_binding(self) -> Self:
         if self.source_url.split("/")[-2] != self.accession_number.replace("-", ""):
             raise ValueError("SEC_DISCLOSURE_ACCESSION_MISMATCH")
+        if self.form == "8-K" and self.issuer_cik is None:
+            raise ValueError("SEC_DISCLOSURE_ISSUER_REQUIRED")
+        if self.issuer_cik is not None and (
+            self.form != "8-K" or self.source_url.split("/")[-3] != str(int(self.issuer_cik))
+        ):
+            raise ValueError("SEC_DISCLOSURE_ISSUER_MISMATCH")
         if (self.form == "497K") != (self.fund_identity is not None):
             raise ValueError("SEC_DISCLOSURE_FUND_IDENTITY_REQUIRED")
         if self.fund_identity and self.source_url.split("/")[-3] != str(
@@ -163,11 +170,14 @@ async def persist_disclosure(
         if existing.content_hash != digest:
             raise ValueError("SEC_DISCLOSURE_HASH_CONFLICT")
         return False
+    # SEC acceptance is not first public availability. New 8-K evidence is usable
+    # only from actual receipt; legacy 6-K/497K bindings remain byte-compatible.
+    available_at = received_at if document.form == "8-K" else document.accepted_at
     evidence = ResearchEvidenceRef(
         source="sec",
         provider_object_id=document.accession_number,
         revision=digest,
-        available_at=document.accepted_at,
+        available_at=available_at,
         location=location,
         content_hash=digest,
         byte_length=len(content),
@@ -193,7 +203,7 @@ async def persist_disclosure(
             provider_object_id=document.accession_number,
             revision=digest,
             observed_at=document.accepted_at,
-            available_at=document.accepted_at,
+            available_at=available_at,
             received_at=received_at,
             schema_version=SCHEMA_VERSION,
             payload=document.model_dump(mode="json"),
@@ -243,12 +253,14 @@ async def read_disclosures(
             continue
         content = document.canonical_bytes()
         digest = hashlib.sha256(content).hexdigest()
+        available_at = snapshot.received_at if document.form == "8-K" else document.accepted_at
         if (
             document.instrument_id == instrument_id
             and document.accession_number == filing.accession_number == evidence.provider_object_id
             and document.form == filing.form
-            and document.accepted_at == filing.accepted_at == evidence.available_at
-            and document.accepted_at == snapshot.available_at == snapshot.observed_at
+            and document.accepted_at == filing.accepted_at == snapshot.observed_at
+            and available_at == evidence.available_at == snapshot.available_at
+            and max(document.accepted_at, document.filed_at) <= snapshot.received_at
             and document.filed_at == filing.filed_at <= as_of
             and document.accepted_at <= as_of
             and digest == evidence.content_hash == evidence.revision == snapshot.revision

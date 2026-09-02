@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 
 def test_refresh_entrypoint_reports_missing_contact_without_reading_key(
     tmp_path,
@@ -28,3 +30,38 @@ def test_refresh_entrypoint_reports_missing_contact_without_reading_key(
     payload = json.loads(capsys.readouterr().out)
     assert payload["code"] == "SEC_CONTACT_REQUIRED"
     assert payload["execution_locked"] is True
+
+
+@pytest.mark.parametrize("action", ["refresh-research", "refresh-fund", "status"])
+def test_disclosure_form_cannot_change_unrelated_command(action, tmp_path, monkeypatch, capsys):
+    from nexus.ops.openai_local import main
+
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine/pyproject.toml").write_text("")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.argv", ["nexus-openai-local", action, "--form", "8-K"])
+    assert main() == 1
+    assert json.loads(capsys.readouterr().out)["code"] == "SEC_LOCAL_DISCLOSURE_FORM_INVALID"
+
+
+def test_8k_cli_reaches_contact_guard_without_loading_model_key(tmp_path, monkeypatch, capsys):
+    from nexus.ops.openai_local import main
+
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine/pyproject.toml").write_text("")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SEC_CONTACT", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "invalid key must not be loaded")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "nexus-openai-local",
+            "refresh-disclosure",
+            "--form",
+            "8-K",
+            "--instrument-id",
+            "0198d500-1000-7000-8000-000000009001",
+        ],
+    )
+    assert main() == 1
+    assert json.loads(capsys.readouterr().out)["code"] == "SEC_CONTACT_REQUIRED"

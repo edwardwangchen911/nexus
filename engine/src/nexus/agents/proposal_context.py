@@ -9,6 +9,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.optimizer.compare import ComparableProposal, ComparisonDimensions, compare_proposals
+from nexus.optimizer.cost_policy import COST_POLICY_ID
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.optimization import (
     OptimizationProposalGroupRecord,
@@ -50,7 +51,9 @@ def assess_frozen_comparison(comparison: FrozenProposalComparison) -> dict[str, 
     result = compare_proposals(tuple(
         ComparableProposal(
             variant=row.variant, dimensions=row.dimensions,
-            requires_fx=row.requires_fx, cost_complete=row.cost_complete,
+            requires_fx=row.requires_fx,
+            # Frozen proposal context is sourced only from real_read_only groups.
+            cost_complete=row.cost_complete and comparison.cost_policy_id != COST_POLICY_ID,
             eligibility_complete=not row.non_executable,
             evidence_complete=comparison.diagnostic_complete,
             partial=comparison.partial, stale=comparison.authority_stale,
