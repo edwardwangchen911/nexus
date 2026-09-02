@@ -1746,6 +1746,51 @@ export const runtimeContractSchemas = {
     "title": "DrawdownLockSummary",
     "type": "object"
   },
+  "EconomicComparisonResponse": {
+    "additionalProperties": false,
+    "description": "Explain comparison evidence without granting ranking or execution permission.",
+    "properties": {
+      "reasons": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Reasons",
+        "type": "array"
+      },
+      "recommendation": {
+        "anyOf": [
+          {
+            "enum": [
+              "hold_current",
+              "minimum_change",
+              "strategy_target"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Recommendation"
+      },
+      "status": {
+        "enum": [
+          "incomparable",
+          "policy_required",
+          "compared"
+        ],
+        "title": "Status",
+        "type": "string"
+      }
+    },
+    "required": [
+      "status",
+      "recommendation",
+      "reasons"
+    ],
+    "title": "EconomicComparisonResponse",
+    "type": "object"
+  },
   "EvidenceCompletenessSummary": {
     "additionalProperties": false,
     "properties": {
@@ -3347,6 +3392,16 @@ export const runtimeContractSchemas = {
       "diagnostic_input_hash": {
         "title": "Diagnostic Input Hash",
         "type": "string"
+      },
+      "economic_comparison": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/EconomicComparisonResponse"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "portfolio_scope": {
         "enum": [
