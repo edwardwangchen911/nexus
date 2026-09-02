@@ -36,6 +36,11 @@ afterEach(() => {
 });
 
 describe("integrations vertical slice", () => {
+  it("distinguishes stale data-source evidence from the displayed snapshot", () => {
+    render(<GlobalSystemStatusView state="stale" integrations={[fosunFixture]} refreshing={false} onRefresh={vi.fn()} />);
+    expect(screen.getByText("数据源：数据已过期")).toBeVisible();
+    expect(screen.getByText("数据源证据已过期；页面仍可展示已存快照，不代表当前决策条件已满足。")).toBeVisible();
+  });
   it.each(stateLabels)("renders the visible %s data state", (state, label) => {
     render(
       <IntegrationsPanel

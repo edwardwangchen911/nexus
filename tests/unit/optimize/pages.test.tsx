@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("next/navigation", () => ({
@@ -22,10 +22,11 @@ const states: Array<[DataStateKind, string]> = [
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("optimization pages", () => {
-  it.each(states)("renders overview %s as an explicit visible state", (state, label) => {
+  it.each(states)("renders overview %s as an explicit visible state", (state) => {
     render(<OverviewPanel state={state} overview={["ready", "partial", "stale"].includes(state) ? overviewData() : null} onRefresh={vi.fn()} />);
 
-    expect(screen.getAllByText(label).length).toBeGreaterThan(0);
+    const readingLabels = { loading: "正在读取概览", ready: "概览已载入", partial: "概览证据不完整", stale: "读取失败 · 保留旧结果", empty: "暂无概览", error: "概览读取失败", forbidden: "无权读取概览" };
+    expect(screen.getByText(readingLabels[state])).toBeVisible();
     expect(screen.getByRole("region", { name: "投资概览页面" })).toHaveAttribute("data-state", state);
   });
 
@@ -67,7 +68,7 @@ describe("optimization pages", () => {
 
     expect(screen.getByRole("heading", { name: "今日资产概览" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "尚无诊断，保持现状" })).toBeVisible();
-    expect(screen.getByText("唯一缺失条件：冻结快照尚未达到 READY；保持现状。")).toBeVisible();
+    expect(screen.getByText("快照尚未达到 READY，暂不能形成正式诊断；未分析不等于没有风险。")).toBeVisible();
     expect(screen.getAllByText("复星（只读）").length).toBeGreaterThan(0);
     expect(screen.getAllByText("PARTIAL").length).toBeGreaterThan(0);
     const authority = screen.getByRole("region", { name: "数据与决策权威边界" });
@@ -80,6 +81,23 @@ describe("optimization pages", () => {
     expect(screen.getByRole("link", { name: "查看持仓行情" })).toHaveAttribute("href", "/market");
     expect(screen.queryByRole("link", { name: /打开组合诊断|查看三方案比较/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /创建方案|下单|交易/ })).not.toBeInTheDocument();
+  });
+
+  it("surfaces at most three existing findings without changing report order or authority", () => {
+    const overview = overviewData();
+    const report = overview.diagnostic_report!;
+    const originalOrder = report.items.map((item) => item.diagnostic_code);
+    render(<OverviewPanel state="ready" overview={overview} onRefresh={vi.fn()} />);
+    const highlights = screen.getByRole("region", { name: "本次诊断重点" });
+    const items = within(highlights).getAllByRole("listitem");
+    expect(items).toHaveLength(3);
+    expect(items[0]).toHaveTextContent("SOURCE_AUTHORITY");
+    expect(items[0]).toHaveTextContent("数据来源可靠性");
+    expect(items[0]).toHaveTextContent("SOURCE_CONFLICT");
+    expect(items[1]).toHaveTextContent("CONCENTRATION_TOP1");
+    expect(report.items.map((item) => item.diagnostic_code)).toEqual(originalOrder);
+    expect(screen.getByText("概览已载入")).toBeVisible();
+    expect(screen.getByRole("link", { name: "查看资产组合" })).toHaveAttribute("href", "/portfolio");
   });
 
   it("creates a comparison only from server-supplied admission authority", async () => {

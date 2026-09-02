@@ -38,6 +38,17 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
   const containsHongKongHolding = positions.some((position) => position.symbol === "00656.HK");
   const valuation = currencyValuation(snapshot, cash, positions);
 
+  if (!showValuation && positions.length === 0 && orders.length === 0 && cash) {
+    return <section className="portfolio-summary portfolio-summary--cash-only" aria-label={`${portfolio.name} ${currency} 组合摘要`}>
+      <header><h2>{currency} 现金</h2><span className="portfolio-summary__empty">无持仓 · 无未结订单 · 只读</span></header>
+      <dl className="portfolio-summary__cash">
+        <Fact term="账面现金" value={`${currency} ${formatDecimal(cash.cash_balance)}`} />
+        <Fact term="可用现金" value={`${currency} ${formatDecimal(cash.available_cash)}`} />
+        <Fact term="数据更新时间" value={formatTime(cash.provider_as_of ?? snapshot.as_of)} />
+      </dl>
+    </section>;
+  }
+
   return (
     <section className="portfolio-summary" aria-label={`${portfolio.name} ${currency} 组合摘要`}>
       <header className="portfolio-summary__heading">
@@ -68,9 +79,9 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
         <h3>持仓</h3>
         {positions.length === 0 ? <p className="portfolio-summary__empty">该原币种没有持仓事实。</p> : (
           <div className="table-scroll" tabIndex={0} role="region" aria-label={`${currency} 持仓表，可横向滚动`}>
-            <table className="portfolio-table">
+            <table className="portfolio-table portfolio-table--holdings">
               <caption>{portfolio.name} · {currency} · 原币种</caption>
-              <thead><tr><th>标的</th><th>总量</th><th>可用</th><th>冻结</th><th>平均成本</th><th>摊薄成本</th><th>现价</th><th>持仓市值</th><th>权限</th></tr></thead>
+              <thead><tr><th>标的</th><th>持仓市值</th><th>原币种内占比</th><th>现价</th><th>总量</th><th>账户明细</th></tr></thead>
               <tbody>{valuation.positionValues.map(({ position, value }) => (
                 <tr key={position.instrument_id}>
                   <th scope="row">
@@ -84,15 +95,21 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
                       </a>
                     ) : <span className="portfolio-symbol">{position.symbol ?? "未知标的"}</span>}
                     <small>{position.exchange}</small>
+                    {parseFixedDecimal(position.frozen_quantity) !== BIGINT_ZERO ? <small className="portfolio-frozen">冻结 {formatDecimal(position.frozen_quantity)}</small> : null}
                   </th>
-                  <td>{formatDecimal(position.quantity)}</td>
-                  <td>{formatDecimal(position.available_quantity)}</td>
-                  <td>{formatDecimal(position.frozen_quantity)}</td>
-                  <td>{formatNullableDecimal(position.avg_cost, currency)}</td>
-                  <td>{formatNullableDecimal(position.diluted_cost, currency)}</td>
-                  <td>{formatNullableDecimal(position.current_price, currency)}</td>
                   <td>{value === null ? "无法计算" : `${currency} ${formatMoney(value)}`}</td>
-                  <td>{position.read_only ? "只读" : "未知"}</td>
+                  <td>{value !== null && valuation.totalValue !== null ? formatPercent(value, valuation.totalValue) : "无法计算"}</td>
+                  <td>{formatNullableDecimal(position.current_price, currency)}</td>
+                  <td>{formatDecimal(position.quantity)}</td>
+                  <td><details className="portfolio-disclosure portfolio-position-details">
+                    <summary>成本与数量 · {position.read_only ? "只读" : "权限未知"}</summary>
+                    <dl>
+                      <Fact term="平均成本" value={formatNullableDecimal(position.avg_cost, currency)} />
+                      <Fact term="摊薄成本" value={formatNullableDecimal(position.diluted_cost, currency)} />
+                      <Fact term="可用" value={formatDecimal(position.available_quantity)} />
+                      <Fact term="冻结" value={formatDecimal(position.frozen_quantity)} />
+                    </dl>
+                  </details></td>
                 </tr>
               ))}</tbody>
             </table>
@@ -185,6 +202,8 @@ function CurrencyValuationSummary({
         <Fact term="质量状态" value={`${snapshotStatusLabel(snapshot.status)} · ${snapshot.status}`} />
         <Fact term={valuation.asOfKind} value={formatTime(valuation.asOf)} /></> : null}
       </dl>
+      <details className="portfolio-disclosure portfolio-valuation__detail" open={compact ? undefined : true}>
+      <summary>配置、来源与估值口径</summary>
       {complete && valuation.totalValue! > BIGINT_ZERO ? (
         <div className="portfolio-allocation">
           <h4>配置结构</h4>
@@ -206,19 +225,16 @@ function CurrencyValuationSummary({
           <h4>配置结构</h4>
           <p className="portfolio-summary__empty">配置结构无法计算：原币种总资产为零。</p>
         </div>
-      ) : (
-        <p className="inline-notice inline-notice--error">
-          总资产无法计算。{valuation.missingFacts.join("；")}。上一份冻结事实保持可见，不进行部分汇总或 FX 折算。
-        </p>
-      )}
-      {compact ? <details className="portfolio-disclosure">
-        <summary>估值来源与口径</summary>
+      ) : null}
+      {compact ? <>
         <dl className="portfolio-valuation__facts">
           <Fact term="数据来源" value={provider === "fosun" ? "复星（只读）" : provider} />
           <Fact term={valuation.asOfKind} value={formatTime(valuation.asOf)} />
         </dl>
         <p className="portfolio-valuation__note">冻结事实 · 原币种独立估值，不进行跨币种折算，也不构成投资建议。</p>
-      </details> : <p className="portfolio-valuation__note">仅按复星冻结快照中的原币种账面现金、持仓数量与现价计算；不进行跨币种折算，也不构成投资建议。</p>}
+      </> : <p className="portfolio-valuation__note">仅按复星冻结快照中的原币种账面现金、持仓数量与现价计算；不进行跨币种折算，也不构成投资建议。</p>}
+      </details>
+      {!complete ? <p className="inline-notice inline-notice--error">总资产无法计算。{valuation.missingFacts.join("；")}。上一份冻结事实保持可见，不进行部分汇总或 FX 折算。</p> : null}
     </section>
   );
 }

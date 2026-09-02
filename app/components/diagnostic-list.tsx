@@ -73,21 +73,23 @@ export function OptimizationNeedPanel({ report }: { report: DiagnosticReport }):
   );
 }
 
-export function DiagnosticList({ report }: { report: DiagnosticReport }): React.ReactElement {
+export function DiagnosticList({ report, summary = false }: { report: DiagnosticReport; summary?: boolean }): React.ReactElement {
+  const severityOrder = { critical: 0, warning: 1, info: 2 };
+  const items = summary ? [...report.items].sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]).slice(0, 3) : report.items;
   return (
-    <section className="diagnostic-ledger" aria-labelledby="diagnostic-ledger-title">
+    <section className="diagnostic-ledger" data-summary={summary} aria-labelledby="diagnostic-ledger-title">
       <header className="diagnostic-ledger__heading">
         <div>
-          <p className="eyebrow">风险阈值账簿</p>
-          <h2 id="diagnostic-ledger-title">组合诊断账簿</h2>
+          <p className="eyebrow">{summary ? "按报告严重程度排序 · 最多三项" : "风险阈值账簿"}</p>
+          <h2 id="diagnostic-ledger-title">{summary ? "本次诊断重点" : "组合诊断账簿"}</h2>
         </div>
         <p className="numeric-data">截至 {formatUtc(report.snapshot_as_of)}</p>
       </header>
       {report.items.length === 0 ? (
-        <p className="diagnostic-ledger__empty">当前报告没有诊断项；合法结论是保持现状。</p>
+        <p className="diagnostic-ledger__empty">当前报告没有诊断明细；不等同于没有风险，请以报告结论和数据边界为准。</p>
       ) : (
         <ul className="diagnostic-list">
-          {report.items.map((item, index) => (
+          {items.map((item, index) => (
             <li
               key={`${item.diagnostic_code}:${item.policy_scope}:${index}`}
               className="diagnostic-item"
@@ -96,8 +98,8 @@ export function DiagnosticList({ report }: { report: DiagnosticReport }): React.
             >
               <header>
                 <div>
-                  <h3>{metricLabels[item.diagnostic_code] ?? item.diagnostic_code}</h3>
-                  {metricLabels[item.diagnostic_code] ? <p><code>{item.diagnostic_code}</code></p> : null}
+                  <h3>{diagnosticLabel(item.diagnostic_code)}</h3>
+                  <p><code>{item.diagnostic_code}</code></p>
                   <p>{item.policy_scope} · {actionLabels[item.actionability]}</p>
                 </div>
                 <span className="diagnostic-item__severity">{severityLabels[item.severity]}</span>
@@ -122,6 +124,17 @@ export function DiagnosticList({ report }: { report: DiagnosticReport }): React.
       )}
     </section>
   );
+}
+
+function diagnosticLabel(code: string): string {
+  const labels: Record<string, string> = {
+    CONCENTRATION_TOP1: "最大单一持仓占比", CONCENTRATION_TOP3: "前三大持仓占比",
+    CASH_RATIO: "现金占比", CORRELATION_CLUSTER: "相关性集中风险", CURRENCY_EXPOSURE: "币种暴露",
+    RISK_BUCKET_EXPOSURE: "风险类别暴露", LIQUIDITY_DAYS_TO_EXIT: "退出所需交易日",
+    DRAWDOWN_252: "历史回撤", SOURCE_AUTHORITY: "数据来源可靠性", PRELIMINARY_DIAGNOSTIC: "初步快照诊断",
+  };
+  const baseCode = code.split(":")[0];
+  return metricLabels[baseCode] ?? labels[baseCode] ?? code;
 }
 
 function Threshold({ label, value, unit }: { label: string; value: string | null; unit: string }): React.ReactElement {

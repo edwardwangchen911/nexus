@@ -52,7 +52,7 @@ describe("portfolio vertical slice", () => {
     const { container } = render(<PortfolioValuationSummary provider="fosun" snapshot={snapshot} currency="HKD" compact />);
     expect(screen.getByText("HKD 27,500.00")).toBeVisible();
     expect(screen.getByText("复星（只读）")).not.toBeVisible();
-    fireEvent.click(screen.getByText("估值来源与口径"));
+    fireEvent.click(screen.getByText("配置、来源与估值口径"));
     expect(screen.getByText("复星（只读）")).toBeVisible();
     expect(screen.getByText("2026-08-23 08:00:00 UTC")).toBeVisible();
     const bars = container.querySelectorAll<HTMLElement>(".portfolio-allocation__meter > span");
@@ -61,6 +61,7 @@ describe("portfolio vertical slice", () => {
 
   it("does not invent a bounded allocation bar for negative or leveraged shares", () => {
     const { container } = render(<PortfolioValuationSummary provider="fosun" snapshot={{ ...snapshot, cash: [{ ...snapshot.cash[0], cash_balance: "-1000.00" }] }} currency="HKD" compact />);
+    fireEvent.click(screen.getByText("配置、来源与估值口径"));
     expect(screen.getByText("-5.41%")).toBeVisible();
     expect(screen.getByText("105.41%")).toBeVisible();
     expect(container.querySelectorAll(".portfolio-allocation__meter")).toHaveLength(0);
@@ -77,7 +78,7 @@ describe("portfolio vertical slice", () => {
       onRefresh={vi.fn()}
     />);
 
-    expect(screen.getAllByText(label).length).toBeGreaterThan(0);
+    expect(screen.getByText(`快照展示：${label}`)).toBeVisible();
     expect(screen.getByRole("region", { name: "组合事实页面" })).toHaveAttribute("data-state", state);
   });
 
@@ -94,6 +95,39 @@ describe("portfolio vertical slice", () => {
     expect(summary).not.toHaveTextContent("USD");
     expect(summary).not.toHaveTextContent("9,000");
     expect(screen.queryByText(/折算总资产/)).not.toBeInTheDocument();
+  });
+
+  it("prioritizes value and allocation while frozen quantities remain visible before opening details", () => {
+    render(<PortfolioSummary portfolio={portfolio} snapshot={snapshot} currency="HKD" showValuation={false} />);
+    const holdings = screen.getByRole("region", { name: "HKD 持仓表，可横向滚动" });
+    expect(within(holdings).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["标的", "持仓市值", "原币种内占比", "现价", "总量", "账户明细"]);
+    expect(screen.getByText("70.91%")).toBeVisible();
+    expect(screen.getByText("冻结 200")).toBeVisible();
+    expect(screen.getByText("平均成本")).not.toBeVisible();
+    fireEvent.click(screen.getByText("成本与数量 · 只读"));
+    expect(screen.getByText("平均成本")).toBeVisible();
+    expect(screen.getByText("HKD 6.20")).toBeVisible();
+    expect(screen.getByText("摊薄成本")).toBeVisible();
+  });
+
+  it("condenses cash-only currencies without hiding available cash or adding a holdings table", () => {
+    render(<PortfolioSummary portfolio={portfolio} snapshot={snapshot} currency="USD" showValuation={false} />);
+    expect(screen.getByText("USD 1,000.00")).toBeVisible();
+    expect(screen.getByText("USD 900.00")).toBeVisible();
+    expect(screen.getByText("无持仓 · 无未结订单 · 只读")).toBeVisible();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  it("keeps incomplete valuation warnings visible with details collapsed", () => {
+    render(<PortfolioValuationSummary provider="fosun" snapshot={{ ...snapshot, positions: [{ ...snapshot.positions[0], current_price: null }] }} currency="HKD" compact />);
+    expect(screen.getByText(/缺失现价/)).toBeVisible();
+    expect(screen.getByText("复星（只读）")).not.toBeVisible();
+  });
+
+  it("does not condense currencies with open orders into a cash-only row", () => {
+    render(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot, positions: [] }} currency="HKD" showValuation={false} />);
+    expect(screen.getByRole("region", { name: "HKD 未结订单表，可横向滚动" })).toBeVisible();
+    expect(screen.queryByText("无持仓 · 无未结订单 · 只读")).not.toBeInTheDocument();
   });
 
   it("shows deterministic original-currency valuation and allocation with source time", () => {

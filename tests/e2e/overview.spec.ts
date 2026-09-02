@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
-import { eligibleProposalGroup, groupId, overviewData, shadowActive } from "../unit/optimize/fixtures";
+import { diagnosticReport, eligibleProposalGroup, groupId, overviewData, shadowActive } from "../unit/optimize/fixtures";
 import { portfolio, snapshot } from "../unit/portfolio/fixtures";
 import { assertReleaseAccessibility } from "./helpers/accessibility";
 import {
@@ -12,6 +12,35 @@ import {
 } from "../unit/research/fixtures";
 
 const meta = { request_id: "0198fa00-1111-7777-8111-111111111111", schema_version: "1", as_of: decisionTime };
+
+test("desktop overview separates loaded results from stale sources and leads with report findings", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await installShellFixture(page);
+  await page.route("**/api/v1/overview**", (route) => route.fulfill({
+    status: 200, contentType: "application/json", body: JSON.stringify({ data: overviewData({
+      portfolio_name: portfolio.name, portfolio_id: portfolio.portfolio_id, provider: "fosun",
+      portfolio_snapshot: snapshot, portfolio_snapshot_id: snapshot.portfolio_snapshot_id, snapshot_as_of: snapshot.as_of!,
+      diagnostic_report: { ...diagnosticReport("RESEARCH_REQUIRED"), portfolio_snapshot_id: snapshot.portfolio_snapshot_id, snapshot_as_of: snapshot.as_of! },
+      proposal_group: null, proposal_admission: null,
+    }), meta }),
+  }));
+  await page.goto("/overview");
+  await expect(page.getByText("概览已载入")).toBeVisible();
+  await expect(page.getByRole("status", { name: "全局系统状态" })).toContainText("数据源：数据已过期");
+  await expect(page.getByRole("heading", { name: "需要补充证据" })).toBeVisible();
+  const highlights = page.getByRole("region", { name: "本次诊断重点" });
+  await expect(highlights.getByRole("listitem")).toHaveCount(3);
+  await expect(highlights.getByRole("listitem").first()).toContainText("SOURCE_AUTHORITY");
+  const assets = page.getByRole("region", { name: "HKD 原币种资产估值" });
+  await expect(assets.getByText("HKD 27,500.00", { exact: true })).toBeVisible();
+  const assetBox = await assets.boundingBox();
+  const highlightBox = await highlights.boundingBox();
+  expect(assetBox!.y + assetBox!.height).toBeLessThan(highlightBox!.y);
+  await expect(page.getByRole("link", { name: "打开组合诊断" })).toBeVisible();
+  await assertReleaseAccessibility(page);
+  await page.screenshot({ path: "test-results/overview-focus-desktop.png", fullPage: true });
+});
 
 test("facts-only overview leads with assets without hiding decision boundaries", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });

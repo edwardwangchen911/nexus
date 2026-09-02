@@ -155,7 +155,7 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
         title="组合事实"
         description="复星真实持仓与内部模拟盘分账展示。缺少合格汇率证据时，各币种独立呈现，不虚构合并净值。"
         marker="ASSET LEDGER"
-        actions={<><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新页面数据</button></>}
+        actions={<><span className="state-chip" data-state={state}>快照展示：{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新页面数据</button></>}
       />
       <div role="status" aria-label="组合操作状态" aria-live="polite" aria-atomic="true">
         {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}

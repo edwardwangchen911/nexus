@@ -19,9 +19,9 @@ export function AuthorityLedger({ snapshotStatus, displayReadiness, decisionRead
         <span className="authority-ledger__mode"><Bot aria-hidden="true" size={15} />Agent 只提案</span>
       </header>
       <ol>
-        <LedgerStep icon={DatabaseZap} label="冻结事实" value={snapshotStatus} state={snapshotStatus === "READY" ? "verified" : "attention"} />
+        <LedgerStep icon={DatabaseZap} label="快照质量" value={snapshotStatus} state={snapshotStatus === "READY" ? "verified" : "attention"} />
         <LedgerStep icon={Eye} label={displayReady ? "资产可展示" : "暂无资产事实"} value={displayReadiness} state={displayReady ? "verified" : "attention"} />
-        <LedgerStep icon={Scale} label={decisionLabel[decisionReadiness] ?? "决策不可用"} value={decisionReadiness} state={decisionReady ? "verified" : decisionAttention ? "attention" : "current"} />
+        <LedgerStep icon={Scale} label={decisionReady ? "决策可用（快照时点）" : decisionLabel[decisionReadiness] ?? "决策不可用"} value={decisionReadiness} state={decisionReady ? "verified" : decisionAttention ? "attention" : "current"} />
         <LedgerStep icon={LockKeyhole} label="执行锁定" value="HUMAN APPROVAL" state="locked" />
       </ol>
     </section>

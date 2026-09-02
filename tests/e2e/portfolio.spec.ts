@@ -43,8 +43,12 @@ for (const viewport of releaseViewports) {
 
     await expect(page.getByRole("region", { name: "Fosun read-only HKD 组合摘要" })).toContainText("HKD 8,000.00", { timeout: 15_000 });
     await expect(page.getByRole("region", { name: "Fosun read-only USD 组合摘要" })).toContainText("USD 1,000.00");
+    await expect(page.getByText("平均成本")).not.toBeVisible();
+    await expect(page.getByText("冻结 200")).toBeVisible();
+    await page.getByText("成本与数量 · 只读").click();
     await expect(page.getByText("平均成本")).toBeVisible();
     await expect(page.getByText("摊薄成本")).toBeVisible();
+    await page.getByText("成本与数量 · 只读").click();
     const authority = page.getByRole("region", { name: "数据与决策权威边界" });
     await expect(authority).toContainText("DISPLAY_READY");
     await expect(authority).toContainText("DECISION_READY");
@@ -62,16 +66,19 @@ for (const viewport of releaseViewports) {
     expect(metric!.y + metric!.height).toBeLessThan(authorityBox!.y);
     if (viewport.name === "desktop-1440") {
       expect(authorityBox!.height).toBeLessThan(100);
+      await assets.getByText("配置、来源与估值口径").click();
       const row = assets.locator(".portfolio-allocation li").first();
       const amount = await row.locator("span").nth(1).boundingBox();
       const percent = await row.locator("strong").boundingBox();
       expect(Math.abs(amount!.y - percent!.y)).toBeLessThan(8);
+      await assets.getByText("配置、来源与估值口径").click();
     }
     if (viewport.width < 768) {
       expect(metric!.y + metric!.height).toBeLessThan(viewport.height);
       expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThan(3200);
     }
     if (viewport.name === "desktop-1440" || viewport.name === "mobile-390") {
+      await page.evaluate(() => { (document.activeElement as HTMLElement | null)?.blur(); window.scrollTo(0, 0); });
       await page.screenshot({ path: `test-results/asset-first-portfolio-${viewport.name}.png`, fullPage: true });
     }
     if (viewport.width < 768) {
