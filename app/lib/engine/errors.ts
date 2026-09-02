@@ -43,6 +43,7 @@ export const ERROR_STATUSES = {
   UNAUTHENTICATED: [401], FORBIDDEN: [403], VALIDATION_ERROR: [400, 422, 429], NOT_FOUND: [404], VERSION_CONFLICT: [409], IDEMPOTENCY_CONFLICT: [409], DATA_PARTIAL: [409], DATA_STALE: [409], BROKER_STALE: [409], SOURCE_CONFLICT: [409], CAPABILITY_EXPIRED: [409], PROPOSAL_NOT_EXECUTABLE: [409], ACCOUNT_TYPE_MISMATCH: [422], APPROVAL_REQUIRED: [409], RISK_REJECTED: [422], DRAWDOWN_LOCKED: [409], RECONCILIATION_REQUIRED: [409], SIMULATION_WRITE_DISABLED: [409], BUDGET_EXHAUSTED: [409, 429], EVOLUTION_BLOCKED: [422], AUTHORITY_UNAVAILABLE: [503], PROVIDER_UNAVAILABLE: [503], INTERNAL_ERROR: [500],
 } as const;
 export type StableEngineErrorCode = keyof typeof ERROR_STATUSES;
+const DRAFT_FX_MESSAGE = "当前快照含非美元现金，缺少汇率估值，暂不能生成可比草稿。";
 export const SAFE_ENGINE_ERROR_MESSAGES: Record<StableEngineErrorCode, string> = {
   UNAUTHENTICATED: "Authentication is required.",
   FORBIDDEN: "Access is not permitted.",
@@ -119,8 +120,9 @@ export function rebuildAllowedEngineResponse(status: number, value: unknown, ups
           code: error.code,
           message: pathname === "/internal/v1/optimization-proposal-drafts"
             && error.code === "DATA_PARTIAL"
-            && error.details.reason === "DRAFT_FX_VALUATION_UNAVAILABLE"
-            ? "当前快照含非美元现金，缺少汇率估值，暂不能生成可比草稿。"
+            && (error.details.reason === "DRAFT_FX_VALUATION_UNAVAILABLE"
+              || error.message === DRAFT_FX_MESSAGE)
+            ? DRAFT_FX_MESSAGE
             : SAFE_ENGINE_ERROR_MESSAGES[error.code],
           request_id: error.request_id,
           details: {},

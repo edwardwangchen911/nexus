@@ -17,6 +17,9 @@ describe("optimization Engine response boundary", () => {
     const body = await response.json();
     expect(body.error.message).toContain("缺少汇率估值");
     expect(body.error.details).toEqual({});
+    const finalResponse = await sanitizeEngineResponse(Response.json(body, { status: 409 }),
+      "http://localhost/api/v1/optimization-proposal-drafts", undefined, "POST");
+    expect((await finalResponse.json()).error).toEqual(body.error);
   });
   it("rejects an executable response from initial draft creation", async () => {
     const path = "/internal/v1/optimization-proposal-drafts";
