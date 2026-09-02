@@ -66,9 +66,13 @@ export function OptimizePanel({ state, overview, creating, notice, onCreate, onR
     <section className="page-stack optimize-page" aria-label="组合优化页面" data-state={state}>
       <header className="page-heading"><div><p className="eyebrow">组合决策诊断</p><h1>组合诊断与优化</h1><p>先确认问题和准入边界，再比较同口径三方案。风险和权重始终由后端确定性计算。</p></div><div className="page-actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新诊断</button></div></header>
       <DecisionPath current="diagnose" />
-      {!hasData || diagnosticOverview === null ? <DataState state={state} title={state === "loading" ? "正在读取诊断" : "诊断暂时不可用"} detail="数据缺失或过期时保持现状。" /> : <>
+      {!hasData || diagnosticOverview === null ? <DataState state={state} title={state === "loading" ? "正在读取诊断" : "诊断暂时不可用"} detail="诊断数据缺失或不可用，暂不能判断是否需要调整；请核查数据后刷新。" /> : <>
         <OptimizationNeedPanel report={diagnosticOverview.diagnostic_report!} />
-        <section className="proposal-admission" aria-labelledby="proposal-admission-title"><div><p className="eyebrow">服务器准入边界</p><h2 id="proposal-admission-title">三方案准入</h2><p>{admission ? "服务器已绑定快照、数据版本与成本策略，可以开始比较。" : <>当前不可创建：<code>{diagnosticOverview.proposal_admission_reason ?? "AUTHORITY_UNAVAILABLE"}</code></>}</p></div>
+        <section className="proposal-admission" aria-labelledby="proposal-admission-title"><div><p className="eyebrow">服务器准入边界</p><h2 id="proposal-admission-title">三方案准入</h2><p>{admission ? "服务器已绑定快照、数据版本与成本策略，可以开始比较。"
+          : diagnosticOverview.proposal_admission_reason === "OPTIMIZATION_AUTHORITY_MISSING"
+            ? "当前不可创建：缺少有效的三方案准入记录，请先核验所需的快照、数据版本与成本策略。"
+            : "当前不可创建：服务器未提供可用准入信息，请核查准入状态后刷新。"}</p>
+          {!admission && diagnosticOverview.proposal_admission_reason ? <details><summary>查看原因代码</summary><code>{diagnosticOverview.proposal_admission_reason}</code></details> : null}</div>
           {diagnosticOverview.proposal_group ? <a className="button button--quiet" href={`/optimize/${diagnosticOverview.proposal_group.proposal_group_id}`}>打开已有三方案</a> : admission && state === "ready" ? <button className="button button--primary" type="button" disabled={creating} onClick={() => void onCreate(admission).catch(() => undefined)}><Layers3 aria-hidden="true" size={17} />{creating ? "正在创建" : "创建三方案比较"}</button> : null}
         </section>
         {notice ? <p className={`inline-notice inline-notice--${notice.kind}`} role="status">{notice.text}</p> : null}

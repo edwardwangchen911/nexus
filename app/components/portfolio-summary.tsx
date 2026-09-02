@@ -40,6 +40,13 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
   const orders = snapshot.open_orders.filter((order) => order.currency === currency);
   const containsHongKongHolding = positions.some((position) => position.symbol === "00656.HK");
   const valuation = currencyValuation(snapshot, cash, positions);
+  const cashTime = cash ? cash.provider_as_of ?? snapshot.as_of : null;
+  const cashTimeLabel = cash?.provider_as_of ? "数据源更新时间"
+    : snapshot.time_basis === "gateway_observed" ? "本机读取时间"
+      : snapshot.time_basis === "provider_event" ? "快照截止时间" : "快照时间（含义未确认）";
+  const researchPositions = positions.filter((position) => position.symbol !== "00656.HK");
+  const completeResearch = researchPositions.filter((position) => position.research?.status === "completed" && position.research.quality_status === "complete").length;
+  const partialResearch = researchPositions.filter((position) => position.research?.status === "completed" && position.research.quality_status === "partial").length;
 
   if (!showValuation && positions.length === 0 && orders.length === 0 && cash) {
     return <section className="portfolio-summary portfolio-summary--cash-only" aria-label={`${portfolio.name} ${currency} 组合摘要`}>
@@ -47,7 +54,7 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
       <dl className="portfolio-summary__cash">
         <Fact term="账面现金" value={`${currency} ${formatDecimal(cash.cash_balance)}`} />
         <Fact term="可用现金" value={`${currency} ${formatDecimal(cash.available_cash)}`} />
-        <Fact term="数据更新时间" value={formatTime(cash.provider_as_of ?? snapshot.as_of)} />
+        <Fact term={cashTimeLabel} value={formatTime(cashTime)} />
       </dl>
     </section>;
   }
@@ -74,14 +81,14 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
       <dl className="portfolio-summary__cash" aria-label={`${currency} 现金事实`}>
         <Fact term="账面现金" value={cash ? `${currency} ${formatDecimal(cash.cash_balance)}` : "无数据"} />
         <Fact term="可用现金" value={cash ? `${currency} ${formatDecimal(cash.available_cash)}` : "无数据"} />
-        <Fact term={snapshot.time_basis === "gateway_observed" ? "数据读取时间" : "数据更新时间"} value={formatTime(cash?.provider_as_of ?? snapshot.as_of)} />
+        <Fact term={cashTimeLabel} value={formatTime(cashTime)} />
       </dl>
       </details>
 
       <div className="portfolio-summary__section">
         <h3>持仓</h3>
-        {positions.some((position) => position.research) ? <p className="portfolio-evidence-note">
-          Agent 已完成 {positions.filter((position) => position.symbol !== "00656.HK" && position.research?.status === "completed" && ["complete", "partial"].includes(position.research.quality_status ?? "")).length} / {positions.length} 个持仓研究。
+        {researchPositions.some((position) => position.research) ? <p className="portfolio-evidence-note">
+          Agent 研究输出已生成 {completeResearch + partialResearch} / {researchPositions.length} 个可研究持仓；其中证据完整 {completeResearch}，证据不完整 {partialResearch}。
           研究按各自冻结时点展示，不等于当前组合诊断通过；交易保持锁定。打开报告不会调用模型。
           状态读取：{formatTime(positions.find((position) => position.research)?.research?.read_at ?? null)}。
         </p> : null}
@@ -165,7 +172,7 @@ function PositionResearch({ position }: { position: Position }): React.ReactElem
     not_started: research.data_snapshot_id ? "研究资料已冻结 · 待研究" : "研究证据待补齐",
     prepared: "研究已登记 · 待执行", running: "研究执行中", validated: "研究核验中",
     audited: "证据审计中", synthesized: "研究汇总中", completed: research.quality_status === "complete"
-      ? "研究已完成" : research.quality_status === "partial" ? "研究已完成 · 证据不完整" : "结果待核验",
+      ? "研究输出已生成 · 证据完整" : research.quality_status === "partial" ? "研究输出已生成 · 证据不完整" : "结果待核验",
     failed: "研究失败 · 保持观望", abstained: "证据不足 · 未形成研究",
   } as const;
   const href = research.data_snapshot_id && research.decision_time

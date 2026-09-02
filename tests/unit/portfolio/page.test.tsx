@@ -34,8 +34,9 @@ describe("portfolio vertical slice", () => {
       newer_inputs_available: true,
     } };
     render(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot, positions: [position] }} currency="HKD" />);
-    expect(screen.getByText(/Agent 已完成 1 \/ 1/)).toHaveTextContent("不等于当前组合诊断通过；交易保持锁定");
-    expect(screen.getByText("研究已完成 · 证据不完整")).toBeVisible();
+    expect(screen.getByText(/Agent 研究输出已生成 1 \/ 1/)).toHaveTextContent("证据完整 0，证据不完整 1");
+    expect(screen.getByText(/Agent 研究输出已生成 1 \/ 1/)).toHaveTextContent("不等于当前组合诊断通过；交易保持锁定");
+    expect(screen.getByText("研究输出已生成 · 证据不完整")).toBeVisible();
     expect(screen.getByText("已有更新的冻结资料，当前报告未使用")).toBeVisible();
     expect(screen.getByRole("link", { name: "查看 TEST 研究报告" })).toHaveAttribute("href", `/research/${position.instrument_id}?as_of=2026-09-02T04%3A00%3A00Z`);
     expect(screen.getByText("研究截止 2026-09-02 12:00:00 北京时间")).toBeVisible();
@@ -59,7 +60,7 @@ describe("portfolio vertical slice", () => {
     } };
     render(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot, positions: [position] }} currency="HKD" />);
     expect(screen.getByText(label)).toBeVisible();
-    expect(screen.getByText(/Agent 已完成 0 \/ 1/)).toBeVisible();
+    expect(screen.getByText(/Agent 研究输出已生成 0 \/ 1/)).toBeVisible();
     if (data_snapshot_id) expect(screen.getByRole("link", { name: "查看 TEST 研究资料" })).toBeVisible();
     else expect(screen.queryByRole("link", { name: /研究资料/ })).not.toBeInTheDocument();
   });
@@ -72,6 +73,40 @@ describe("portfolio vertical slice", () => {
     expect(screen.getByText("读取时间")).toBeInTheDocument();
     expect(screen.getByText(/券商未提供逐条更新时间/)).toBeInTheDocument();
     expect(screen.getByText("执行能力").parentElement).toHaveTextContent("已锁定");
+  });
+
+  it.each([false, true])("uses the same cash time provenance with valuation shown=%s", (showValuation) => {
+    const { rerender } = render(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot,
+      time_basis: "gateway_observed", cash: [{ ...snapshot.cash[1], provider_as_of: null }],
+    }} currency="USD" showValuation={showValuation} />);
+    expect(screen.getByText("本机读取时间").parentElement).toHaveTextContent("2026-08-23 16:00:00 北京时间");
+    expect(screen.queryByText("数据更新时间")).not.toBeInTheDocument();
+    rerender(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot,
+      time_basis: "gateway_observed", cash: [{ ...snapshot.cash[1], provider_as_of: "2026-08-23T07:00:00Z" }],
+    }} currency="USD" showValuation={showValuation} />);
+    expect(screen.getByText("数据源更新时间").parentElement).toHaveTextContent("2026-08-23 15:00:00 北京时间");
+    expect(screen.queryByText("本机读取时间")).not.toBeInTheDocument();
+    rerender(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot,
+      time_basis: "unknown", cash: [{ ...snapshot.cash[1], provider_as_of: null }],
+    }} currency="USD" showValuation={showValuation} />);
+    expect(screen.getByText("快照时间（含义未确认）").parentElement).toHaveTextContent("2026-08-23 16:00:00 北京时间");
+    rerender(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot, as_of: null,
+      time_basis: "unknown", cash: [{ ...snapshot.cash[1], provider_as_of: null }],
+    }} currency="USD" showValuation={showValuation} />);
+    expect(screen.getByText("快照时间（含义未确认）").parentElement).toHaveTextContent("未知");
+  });
+
+  it("separates complete and partial research and excludes read-only HK holdings from coverage", () => {
+    const research = { read_at: "2026-09-02T08:00:00Z", status: "completed" as const,
+      quality_status: "complete" as const, uncertainties: [], newer_inputs_available: false };
+    render(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot, positions: [
+      { ...snapshot.positions[0], research },
+      { ...snapshot.positions[0], instrument_id: "test-a", symbol: "TESTA", research },
+      { ...snapshot.positions[0], instrument_id: "test-b", symbol: "TESTB", research: { ...research, quality_status: "partial" } },
+    ] }} currency="HKD" />);
+    expect(screen.getByText(/Agent 研究输出已生成 2 \/ 2/)).toHaveTextContent("证据完整 1，证据不完整 1");
+    expect(screen.getByText("研究输出已生成 · 证据完整")).toBeVisible();
+    expect(screen.getByText("只读展示，不生成基本面判断")).toBeVisible();
   });
 
   it("shows cash-flow reconciliation and the permanent execution lock", () => {
