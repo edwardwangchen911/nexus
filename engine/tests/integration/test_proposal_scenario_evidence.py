@@ -7,16 +7,17 @@ from uuid import UUID
 import httpx
 import pytest
 from helpers.diagnostic_artifacts import FixtureArtifactReader
-from helpers.portfolio_api import CLOCK, app, headers, settings
+from helpers.portfolio_api import CLOCK, headers, settings
 from integration.test_diagnostic_assembly import SPY_ID, _add_series, _seed_spy
 from integration.test_initial_proposal_draft import _post, _seed
 from integration.test_proposal_construction_path import _construct
 from nexus.jobs.models import QueueName
 from nexus.jobs.worker import run_job_worker_once
-from nexus.optimizer.jobs import build_optimization_registry
+from nexus.main import create_engine_app
 from nexus.persistence.models.market import SectorExposure
 from nexus.persistence.models.runtime import Job
 from nexus.persistence.session import session_factory
+from nexus.worker import _general_registry
 
 
 @pytest.mark.asyncio
@@ -52,8 +53,11 @@ async def test_draft_api_recomputes_risk_from_db_and_rejects_unqualified_sectors
                     created_at=CLOCK if invalid == "future" else CLOCK - timedelta(days=1),
                 )
             )
-    engine_app = app(migrated_database_url)
-    engine_app.state.diagnostic_artifact_reader = FixtureArtifactReader(payloads)
+    reader = FixtureArtifactReader(payloads)
+    engine_app = create_engine_app(
+        settings(migrated_database_url), diagnostic_artifact_reader=reader,
+    )
+    engine_app.state.utc_clock = lambda: CLOCK
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=engine_app),
         base_url="http://test",
@@ -86,8 +90,11 @@ async def test_draft_api_recomputes_risk_from_db_and_rejects_unqualified_sectors
             factory = session_factory(settings(migrated_database_url))
             assert await run_job_worker_once(
                 factory,
-                registry=build_optimization_registry(
-                    artifact_reader=FixtureArtifactReader(payloads),
+                registry=_general_registry(
+                    settings(migrated_database_url),
+                    responses_client=None,
+                    tools=None,
+                    artifact_reader=reader,
                 ),
                 queue=QueueName.GENERAL,
                 worker_id="evidenced-proposal",

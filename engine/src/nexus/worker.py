@@ -28,6 +28,7 @@ from nexus.agents.price_authority import (
 from nexus.agents.responses import ResponsesClient, ResponsesCommittee, ResponsesModelConfig
 from nexus.agents.tools import ReadOnlyToolRegistry, ToolInputError
 from nexus.audit.manifest import S3AuditManifestObjectStore
+from nexus.diagnostics.artifacts import ArtifactByteReader
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.daily_local import (
@@ -46,6 +47,8 @@ from nexus.jobs.registry import (
     JobRegistry,
 )
 from nexus.jobs.worker import UnsafeJobError, run_job_worker_once
+from nexus.market.object_store import S3ProviderEvidenceStore
+from nexus.optimizer.jobs import build_optimization_registry
 from nexus.persistence.migrations import (
     CURRENT_GENERAL_WORKER_PROCESS_VERSION,
     CURRENT_MIGRATION_HEAD,
@@ -153,6 +156,7 @@ def _general_registry(
     *,
     responses_client: object | None,
     tools: ReadOnlyToolRegistry | None,
+    artifact_reader: ArtifactByteReader | None = None,
 ) -> JobRegistry:
     agent = _agent_registry(
         settings,
@@ -163,7 +167,14 @@ def _general_registry(
         audit_object_store=S3AuditManifestObjectStore(settings),
         include_provider_stages=settings.provider_jobs_enabled,
     )
-    return JobRegistry((*agent.specs, *daily.specs))
+    optimization = build_optimization_registry(
+        artifact_reader=(
+            artifact_reader
+            if artifact_reader is not None
+            else S3ProviderEvidenceStore(settings).read_normalized
+        ),
+    )
+    return JobRegistry((*agent.specs, *daily.specs, *optimization.specs))
 
 
 def _agent_registry(
