@@ -12,6 +12,7 @@ import { MarketQualityReasons } from "../../components/market-quality-reasons";
 import { PriceChart } from "../../components/price-chart";
 import type { components } from "../../lib/generated/schema";
 import {
+  isReceiptOnlyQuote,
   marketAdjustmentLabel,
   marketDeliveryModeLabel,
   marketSourceLabel,
@@ -338,6 +339,12 @@ export function MarketPanel({
         </div>
       </header>
 
+      <p>
+        <span aria-label="查询快照时点">查询快照时点 {formatUtc(researchAsOf)}</span>
+        <br />
+        <span>页面每 15 秒读取已保存数据，后台页每 60 秒；不代表券商每 15 秒采集，分页可能沿用同一快照。</span>
+      </p>
+
       {!hasData ? (
         <DataState state={state} title={stateTitle(state)} detail={stateDetail(state)} />
       ) : (
@@ -383,7 +390,8 @@ export function MarketPanel({
                     <EvidenceFact term="最新价" value={selectedItem.price === null ? "无可验证报价" : formatDisplayDecimal(selectedItem.price)} highlight />
                     <EvidenceFact term="报价来源" value={marketSourceLabel(selectedItem.source, selectedItem.feed)} />
                     <EvidenceFact term="Feed" value={selectedItem.feed?.toUpperCase() ?? "未选定"} />
-                    <EvidenceFact term={quoteEvidenceTimeTerm(selectedItem)} value={formatUtc(selectedItem.as_of)} />
+                    <EvidenceFact term={isReceiptOnlyQuote(selectedItem.source, selectedItem.quality_reasons) ? "网关接收时间" : "行情记录时间"} value={formatUtc(selectedItem.as_of)} />
+                    {isReceiptOnlyQuote(selectedItem.source, selectedItem.quality_reasons) ? <EvidenceFact term="报价源时间" value="未知（上游未提供）" /> : null}
                     <EvidenceFact term="实时性口径" value={marketDeliveryModeLabel(selectedItem.delivery_mode)} />
                     <EvidenceFact term="报价质量" value={`${marketQualityLabel(selectedItem.quality)} · ${selectedItem.quality}`} />
                   </dl>
@@ -516,13 +524,6 @@ function isSelectedEvidenceStale(series: SelectedMarketSeries | null, item: Mark
 
 function sourceLabel(source: string | null, feed: string | null): string {
   return marketSourceLabel(source, feed);
-}
-
-function quoteEvidenceTimeTerm(item: MarketItem): string {
-  return item.source === "fosun"
-    && item.quality_reasons.includes("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE")
-    ? "网关接收时间"
-    : "报价截止";
 }
 
 type MarketLocationState = {

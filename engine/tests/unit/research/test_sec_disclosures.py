@@ -51,10 +51,11 @@ def test_document_rejects_wrong_source_accession_and_time(change):
     )
     # Optional fund metadata must not change hashes of previously frozen 6-K records.
     legacy = SecDisclosure.model_validate(payload)
+    assert "issuer_cik" not in json.loads(legacy.canonical_bytes())
     assert (
         legacy.canonical_bytes()
         == json.dumps(
-            legacy.model_dump(mode="json", exclude={"fund_identity"}),
+            legacy.model_dump(mode="json", exclude_none=True),
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
@@ -62,3 +63,40 @@ def test_document_rejects_wrong_source_accession_and_time(change):
     payload.update(change)
     with pytest.raises(ValueError):
         SecDisclosure.model_validate(payload)
+
+
+def current_report(**changes):
+    payload = dict(
+        instrument_id=uuid4(),
+        form="8-K",
+        issuer_cik="0000000001",
+        accession_number="0000000042-26-000001",
+        source_url="https://www.sec.gov/Archives/edgar/data/1/000000004226000001/doc.htm",
+        filed_at=datetime(2026, 8, 21, tzinfo=UTC),
+        accepted_at=datetime(2026, 8, 21, 20, tzinfo=UTC),
+        raw_content_hash="a" * 64,
+        excerpt="Company confirms a public operating update.",
+        truncated=False,
+    )
+    return SecDisclosure.model_validate(payload | changes)
+
+
+def test_8k_retains_issuer_identity_even_when_submission_agent_cik_differs():
+    report = current_report()
+    assert report.form == "8-K" and report.issuer_cik == "0000000001"
+    assert json.loads(report.canonical_bytes())["issuer_cik"] == "0000000001"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"issuer_cik": None},
+        {"issuer_cik": "0000000002"},
+        {"accession_number": "0000000042-26-000002"},
+        {"source_url": "https://www.sec.gov/Archives/edgar/data/1/000000004226000001/../doc.htm"},
+        {"form": "8-K/A"},
+    ],
+)
+def test_8k_rejects_unbound_identity_path_or_unsupported_amendment(change):
+    with pytest.raises(ValueError):
+        current_report(**change)

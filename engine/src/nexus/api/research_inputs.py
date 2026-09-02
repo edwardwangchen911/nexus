@@ -92,7 +92,9 @@ async def read_research_inputs(
                 form=filing.form,
                 accession_number=filing.accession_number,
                 accepted_at=filing.accepted_at,
-                received_at=evidence.created_at,
+                received_at=evidence.available_at
+                if evidence.id in disclosures and disclosures[evidence.id].form == "8-K"
+                else evidence.created_at,
                 revision=evidence.revision,
                 content_hash=evidence.content_hash,
                 disclosure_excerpt=disclosures[evidence.id].excerpt

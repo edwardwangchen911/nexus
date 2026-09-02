@@ -21,6 +21,27 @@ INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000000013")
 SNAPSHOT_AT = datetime(2026, 8, 23, tzinfo=UTC)
 
 
+def test_partial_raw_history_keeps_independently_proven_liquidity():
+    snapshot = _snapshot()
+    market = _market(snapshot)
+    market = market.model_copy(update={
+        "quality": "PARTIAL", "benchmark": None,
+        "prices": {INSTRUMENT_ID: market.prices[INSTRUMENT_ID].model_copy(
+            update={"adjustment": "raw"}
+        )},
+    })
+    report = diagnose_portfolio(
+        snapshot, market, DiagnosticHistory.empty(), RealAdvisoryPolicy.v1()
+    )
+    items = {item.diagnostic_code: item for item in report.items}
+    liquidity = items[f"LIQUIDITY_DAYS_TO_EXIT:{INSTRUMENT_ID}"]
+    assert Decimal(liquidity.metric_value) == Decimal("1")
+    assert {ref.object_id for ref in liquidity.evidence_refs} == {"snapshot", "position", "adv"}
+    assert report.optimization_need == "RESEARCH_REQUIRED"
+    assert items["MARKET_EVIDENCE"].unknown_reason == "MARKET_EVIDENCE_UNAVAILABLE"
+    assert not any(code.startswith(("VOLATILITY", "DRAWDOWN", "BETA")) for code in items)
+
+
 @pytest.mark.parametrize("price", (None, Decimal(0)))
 @pytest.mark.parametrize("include_priced_holding", (False, True))
 def test_snapshot_only_diagnosis_does_not_turn_unpriced_holdings_into_cash_only(
@@ -138,9 +159,12 @@ def test_market_evidence_rejects_a_global_ref_bag() -> None:
         ("inconsistent", "ADV20_EVIDENCE_INCONSISTENT"),
     ),
 )
-def test_adv_evidence_gaps_are_explicit_unknowns(case: str, expected_reason: str) -> None:
+@pytest.mark.parametrize("quality", ["PASS", "PARTIAL"])
+def test_adv_evidence_gaps_are_explicit_unknowns(
+    case: str, expected_reason: str, quality: str
+) -> None:
     snapshot = _snapshot()
-    market = _market(snapshot)
+    market = _market(snapshot).model_copy(update={"quality": quality})
     bindings = {
         "missing": {},
         "future": {INSTRUMENT_ID: _binding("adv", "d", as_of=SNAPSHOT_AT + timedelta(seconds=1))},
