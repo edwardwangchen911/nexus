@@ -173,8 +173,52 @@ def test_dimension_evaluator_uses_raw_portfolio_weights_except_security_hhi() ->
     assert result.top3.value == Decimal("0.6")
     assert result.hhi.value == Decimal("5") / Decimal("9")
     assert result.currency_exposure.value == Decimal("0.4")
-    assert result.liquidity.value == Decimal("5") / Decimal("12")
+    expected_days = Decimal("0.4") * (Decimal("1") * Decimal("0.4") / Decimal("0.5")) + Decimal("0.2") * (Decimal("5") * Decimal("0.2") / Decimal("0.3"))
+    assert result.liquidity.value == Decimal("1") / (Decimal("1") + expected_days)
     assert result.volatility.status == result.drawdown.status == "unknown"
+
+
+@pytest.mark.parametrize("current,target,expected", [
+    ("0.5", "0.5", Decimal("1") / Decimal("3")),
+    ("0.5", "0.25", Decimal("2") / Decimal("3")),
+    ("0.25", "0.5", Decimal("1") / Decimal("5")),
+    ("0.5", "0", Decimal("1")),
+    ("0", "0.5", None),
+])
+def test_liquidity_revalues_exit_days_at_target_position(
+    current: str, target: str, expected: Decimal | None,
+) -> None:
+    instrument, baseline = UUID(int=301), UUID(int=302)
+    now = datetime(2026, 8, 24, tzinfo=UTC)
+    proposal = OptimizationProposal(
+        variant="minimum_change", baseline_portfolio_snapshot_id=baseline,
+        positions=(ProposalPosition(
+            instrument_id=instrument, current_weight=current, target_weight=target,
+            action="maintain" if current == target else "reduce" if Decimal(target) < Decimal(current) else "increase",
+            reason_code="LIQUIDITY_SCENARIO",
+        ),),
+        cash_current_weight=Decimal("1") - Decimal(current),
+        cash_target_weight=Decimal("1") - Decimal(target),
+        analysis_only=True, strategy_evidence_complete=False,
+    )
+    report = PortfolioDiagnosticReport(
+        portfolio_snapshot_id=baseline, snapshot_as_of=now,
+        policy_version="real_advisory_policy_v1", optimization_need="RESEARCH_REQUIRED",
+        items=(DiagnosticItem(
+            diagnostic_code=f"LIQUIDITY_DAYS_TO_EXIT:{instrument}",
+            metric_value="4", unit="trading_days", reference_limit="2",
+            policy_scope="currency:USD", severity="warning", actionability="research",
+            unknown_reason=None, evidence_refs=(EvidenceRef(
+                source="fixture", object_id="adv", available_at=now,
+                location="fixture://adv", content_hash="a" * 64,
+            ),),
+        ),),
+    )
+    metric = evaluate_dimensions(
+        proposal, report, cost=Decimal("0"), instrument_currencies={instrument: "USD"},
+    ).liquidity
+    assert metric.value == expected
+    assert metric.status == ("unknown" if expected is None else "known")
 
 
 def test_cash_denominator_prevents_false_concentration_recommendation() -> None:

@@ -232,7 +232,10 @@ async def test_production_builder_uses_frozen_diagnostics_selection_and_atomic_w
     assert minimum_metrics["top3"] == minimum_metrics["top1"]
     assert minimum_metrics["hhi"] == {"status": "known", "value": "1", "reason": None}
     assert minimum_metrics["currency_exposure"] == minimum_metrics["top1"]
-    expected_liquidity = Decimal("1") / (Decimal("1") + minimum.target_weight)
+    target_exit_days = minimum.target_weight / minimum.current_weight
+    expected_liquidity = Decimal("1") / (
+        Decimal("1") + minimum.target_weight * target_exit_days
+    )
     assert abs(Decimal(minimum_metrics["liquidity"]["value"]) - expected_liquidity) <= tolerance
     assert Decimal(minimum_metrics["turnover"]["value"]) == Decimal("0.0001")
     assert minimum_metrics["cost"]["status"] == "known"

@@ -181,7 +181,10 @@ def evaluate_dimensions(
     top1 = weights[0] if weights else Decimal("0")
     top3 = sum(weights[:3], Decimal("0"))
     hhi = sum((weight * weight for weight in normalized), Decimal("0"))
-    liquidity = _weighted_liquidity(report, raw_by_id)
+    liquidity = _weighted_liquidity(
+        report, raw_by_id,
+        {position.instrument_id: position.current_weight for position in proposal.positions},
+    )
     currency_exposure = _currency_exposure(raw_by_id, instrument_currencies)
     return ComparisonDimensions(
         hard_violations=sum(weight > Decimal("0.30") for weight in weights),
@@ -213,10 +216,21 @@ def _currency_exposure(
 
 
 def _weighted_liquidity(
-    report: PortfolioDiagnosticReport, weights: Mapping[UUID, Decimal]
+    report: PortfolioDiagnosticReport,
+    weights: Mapping[UUID, Decimal],
+    current_weights: Mapping[UUID, Decimal],
 ) -> TypedMetric:
+    """Revalue exit days at target size using the same frozen ADV and valuation.
+
+    Diagnostic days describe the baseline position. At unchanged ADV and price,
+    target days = baseline days * target weight / baseline weight. New holdings
+    have no baseline size from which to recover ADV, so their value stays unknown.
+    """
     weighted_days = Decimal("0")
     for instrument_id, weight in weights.items():
+        current_weight = current_weights.get(instrument_id, Decimal("0"))
+        if current_weight <= 0:
+            return TypedMetric.unknown("LIQUIDITY_POST_PROPOSAL_NOT_PROVEN")
         matches = tuple(
             item for item in report.items
             if item.diagnostic_code == f"LIQUIDITY_DAYS_TO_EXIT:{instrument_id}"
@@ -227,7 +241,8 @@ def _weighted_liquidity(
             return TypedMetric.unknown("LIQUIDITY_POST_PROPOSAL_NOT_PROVEN")
         metric_value = matches[0].metric_value
         assert metric_value is not None
-        weighted_days += weight * Decimal(metric_value)
+        target_days = Decimal(metric_value) * weight / current_weight
+        weighted_days += weight * target_days
     return TypedMetric.known(Decimal("1") / (Decimal("1") + weighted_days))
 
 
