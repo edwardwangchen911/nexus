@@ -135,6 +135,7 @@ async def create_initial_draft(
         OptimizationPolicy.v1(),
         minimum_change_candidates=minimum.candidates,
         excess_weight=minimum.excess_weight,
+        minimum_change_result=minimum.reduction,
     )
     source_policy = await load_diagnostic_source_policy(session, record.as_of)
     cost_policy = await load_cost_policy_v1(session)

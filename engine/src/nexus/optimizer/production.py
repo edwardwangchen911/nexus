@@ -1,7 +1,7 @@
 """Idempotent production proposal-group construction without a worker/lease."""
 
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, Decimal
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +11,11 @@ from nexus.diagnostics.repository import _read_report, load_frozen_snapshot
 from nexus.optimizer.authority import load_admission_authority
 from nexus.optimizer.compare import evaluate_dimensions
 from nexus.optimizer.cost_policy import load_cost_policy_v1
-from nexus.optimizer.minimum_change import ReductionCandidate
+from nexus.optimizer.minimum_change import (
+    MinimumChangeResult,
+    ReductionCandidate,
+    reduce_to_concentration_limits,
+)
 from nexus.optimizer.models import (
     OptimizationPolicy,
     OptimizationProposalGroup,
@@ -47,6 +51,7 @@ class MinimumChangeInputs:
     candidates: tuple[ReductionCandidate, ...]
     excess_weight: Decimal
     evidence_complete: bool
+    reduction: MinimumChangeResult | None = None
 
 
 async def build_and_persist_proposal_group(
@@ -103,6 +108,7 @@ async def build_and_persist_proposal_group(
         selection_authority=selection,
         minimum_change_candidates=minimum_inputs.candidates,
         excess_weight=minimum_inputs.excess_weight,
+        minimum_change_result=minimum_inputs.reduction,
         portfolio_scope=loaded.persistence.portfolio_scope,  # type: ignore[arg-type]
     ).model_copy(
         update={
@@ -145,13 +151,6 @@ def _minimum_change_inputs(
         for item in violations
     ):
         return MinimumChangeInputs((), Decimal("0"), False)
-    one_bp = Decimal("0.0001")
-    excess = max(
-        Decimal(item.metric_value) - Decimal(item.reference_limit)
-        for item in violations
-        if item.metric_value is not None and item.reference_limit is not None
-    )
-    excess = (excess / one_bp).to_integral_value(rounding=ROUND_CEILING) * one_bp
     values = tuple(
         (position.instrument_id, position.quantity * (position.current_price or Decimal("0")))
         for position in snapshot.positions
@@ -163,6 +162,13 @@ def _minimum_change_inputs(
         raise ValueError("minimum-change baseline value is unavailable")
     security_total = sum((value for _, value in values), Decimal("0"))
     if security_total <= 0:
+        return MinimumChangeInputs((), Decimal("0"), False)
+    currencies = {position.currency for position in snapshot.positions}
+    if (
+        len(currencies) != 1
+        or any(cash.currency not in currencies and cash.cash_balance != 0 for cash in snapshot.cash)
+        or any(item.policy_scope != f"currency:{next(iter(currencies))}" for item in violations)
+    ):
         return MinimumChangeInputs((), Decimal("0"), False)
     ranked = tuple(sorted(values, key=lambda row: (-row[1], row[0])))
     contribution: dict[UUID, Decimal] = {instrument_id: Decimal("0") for instrument_id, _ in values}
@@ -201,7 +207,15 @@ def _minimum_change_inputs(
         )
         for instrument_id, value in values
     )
-    return MinimumChangeInputs(candidates, excess, True)
+    limits = tuple(
+        (1 if item.diagnostic_code == "CONCENTRATION_TOP1" else 3, Decimal(item.reference_limit))
+        for item in violations if item.reference_limit is not None
+    )
+    try:
+        reduction = reduce_to_concentration_limits(candidates, limits)
+    except ValueError:
+        return MinimumChangeInputs((), Decimal("0"), False)
+    return MinimumChangeInputs(candidates, reduction.cash_released, True, reduction)
 
 
 def _comparison_inputs(

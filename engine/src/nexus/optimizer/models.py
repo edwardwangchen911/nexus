@@ -15,7 +15,7 @@ from nexus.domain.time import require_utc
 from nexus.providers.broker.base import PortfolioSnapshot
 
 if TYPE_CHECKING:
-    from nexus.optimizer.minimum_change import ReductionCandidate
+    from nexus.optimizer.minimum_change import MinimumChangeResult, ReductionCandidate
     from nexus.optimizer.strategy_target import DeterministicSelectionAuthority
     from nexus.strategy.intents import ResearchIntent
 
@@ -181,6 +181,7 @@ def build_proposal_group(
     selection_authority: "DeterministicSelectionAuthority | None" = None,
     minimum_change_candidates: tuple["ReductionCandidate", ...] = (),
     excess_weight: Decimal = _ZERO,
+    minimum_change_result: "MinimumChangeResult | None" = None,
     portfolio_scope: PortfolioScope = "real_read_only",
 ) -> OptimizationProposalGroup:
     """Compose three simultaneous deterministic variants without accepting Agent weights."""
@@ -190,6 +191,7 @@ def build_proposal_group(
         snapshot, report, research, policy,
         selection_authority=selection_authority,
         minimum_change_candidates=minimum_change_candidates,
+        minimum_change_result=minimum_change_result,
         excess_weight=excess_weight, portfolio_scope=portfolio_scope,
     )
 
@@ -201,6 +203,7 @@ def build_initial_proposal_draft(
     *,
     minimum_change_candidates: tuple["ReductionCandidate", ...],
     excess_weight: Decimal,
+    minimum_change_result: "MinimumChangeResult | None" = None,
 ) -> OptimizationProposalGroup:
     """Build a read-only scenario before formal admission, without rewriting diagnosis."""
     if report.optimization_need not in {"RESEARCH_REQUIRED", "OPTIMIZATION_CANDIDATE"}:
@@ -210,6 +213,7 @@ def build_initial_proposal_draft(
     return _compose_group(
         snapshot, report, (), policy, selection_authority=None,
         minimum_change_candidates=minimum_change_candidates,
+        minimum_change_result=minimum_change_result,
         excess_weight=excess_weight, portfolio_scope="real_read_only",
     )
 
@@ -223,6 +227,7 @@ def _compose_group(
     selection_authority: "DeterministicSelectionAuthority | None",
     minimum_change_candidates: tuple["ReductionCandidate", ...],
     excess_weight: Decimal,
+    minimum_change_result: "MinimumChangeResult | None" = None,
     portfolio_scope: PortfolioScope,
 ) -> OptimizationProposalGroup:
     if snapshot.status != "READY":
@@ -248,13 +253,19 @@ def _compose_group(
     if excess_weight > _ZERO:
         from nexus.optimizer.minimum_change import reduce_until_satisfied
 
-        minimum_result = reduce_until_satisfied(
+        minimum_result = minimum_change_result or reduce_until_satisfied(
             minimum_change_candidates, excess_weight=excess_weight
         )
         if {item.instrument_id for item in minimum_result.positions} != {
             item.instrument_id for item in current
         }:
             raise ValueError("minimum-change candidates must exactly match baseline positions")
+        if {p.instrument_id: p.current_weight for p in minimum_result.positions} != {p.instrument_id: p.current_weight for p in current}:
+            raise ValueError("minimum-change result must preserve baseline weights")
+        if minimum_result.cash_released != excess_weight or any(
+            p.target_weight > p.current_weight for p in minimum_result.positions
+        ):
+            raise ValueError("minimum-change result must be reduce-only and conserve released cash")
         minimum_positions = minimum_result.positions
         minimum_cash += minimum_result.cash_released
     minimum = OptimizationProposal(

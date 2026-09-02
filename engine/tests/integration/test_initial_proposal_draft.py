@@ -81,9 +81,13 @@ async def _seed(database_url: str, invalid: str = "") -> tuple[UUID, UUID]:
                 provider_as_of=at,
             )
         )
-        instrument_ids = (UUID(int=801), UUID(int=802))
+        instrument_ids = tuple(
+            UUID(int=801 + index)
+            for index in range(2 if invalid == "insufficient_names" else 5)
+        )
         for index, instrument_id in enumerate(instrument_ids):
             currency = "HKD" if invalid == "mixed_currency" and index == 1 else "USD"
+            quantity = 60 if index == 0 else 40 if invalid == "insufficient_names" else 10
             db.add(
                 Instrument(
                     id=instrument_id,
@@ -108,8 +112,8 @@ async def _seed(database_url: str, invalid: str = "") -> tuple[UUID, UUID]:
                     portfolio_snapshot_id=snapshot.id,
                     instrument_id=instrument_id,
                     currency=currency,
-                    quantity=60 if index == 0 else 40,
-                    available_quantity=60 if index == 0 else 40,
+                    quantity=quantity,
+                    available_quantity=quantity,
                     frozen_quantity=0,
                     current_price=None if invalid == "missing_price" else 1,
                     provider_as_of=at,
@@ -189,6 +193,8 @@ async def test_first_draft_is_created_readable_and_replayed_without_formal_admis
         assert any(
             Decimal(p["target_weight"]) < Decimal(p["current_weight"]) for p in minimum["positions"]
         )
+        target_weights = [Decimal(p["target_weight"]) for p in minimum["positions"]]
+        assert max(target_weights) <= Decimal("0.30") * sum(target_weights)
         replay = await _post(client, baseline, diagnostic)
         assert replay.json()["data"]["proposal_group_id"] == data["proposal_group_id"]
         path = f"/internal/v1/optimization-proposals/{data['proposal_group_id']}"
@@ -247,6 +253,7 @@ async def test_first_draft_is_created_readable_and_replayed_without_formal_admis
         "cash_flow",
         "mixed_currency",
         "foreign_cash",
+        "insufficient_names",
         "missing_price",
         "missing_liquidity",
         "future_evidence",

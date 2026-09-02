@@ -219,7 +219,10 @@ async def test_production_builder_uses_frozen_diagnostics_selection_and_atomic_w
     assert group.selection_evidence_hash == "a" * 64
     minimum = positions["minimum_change"][0]
     strategy = positions["strategy_target"][0]
-    assert minimum.target_weight == minimum.current_weight - Decimal("0.0002")
+    # This legacy fixture has one HKD security and a USD-scoped diagnosis.
+    # It cannot prove a reduce-only solution to security concentration.
+    assert minimum.target_weight == minimum.current_weight
+    assert "minimum_change_evidence" in comparisons["minimum_change"].metrics["unknown_metrics"]
     assert strategy.target_weight == Decimal("0.125000000000")
     assert tuple(child.strategy_evidence_complete for child in children) == (False, False, True)
     hold_metrics = comparisons["hold_current"].metrics["dimensions"]  # type: ignore[union-attr,index]
@@ -237,9 +240,8 @@ async def test_production_builder_uses_frozen_diagnostics_selection_and_atomic_w
         Decimal("1") + minimum.target_weight * target_exit_days
     )
     assert abs(Decimal(minimum_metrics["liquidity"]["value"]) - expected_liquidity) <= tolerance
-    assert Decimal(minimum_metrics["turnover"]["value"]) == Decimal("0.0001")
-    assert minimum_metrics["cost"]["status"] == "known"
-    assert Decimal(minimum_metrics["cost"]["value"]) == Decimal("0")
+    assert Decimal(minimum_metrics["turnover"]["value"]) == Decimal("0")
+    assert minimum_metrics["cost"]["status"] == "unknown"
     assert minimum_metrics["volatility"]["reason"] == "VOLATILITY_POST_PROPOSAL_NOT_PROVEN"
     assert minimum_metrics["drawdown"]["reason"] == "DRAWDOWN_POST_PROPOSAL_NOT_PROVEN"
     assert minimum_metrics["correlation"]["reason"] == "CORRELATION_POST_PROPOSAL_NOT_PROVEN"
