@@ -195,6 +195,7 @@ async def test_local_broker_facts_use_one_complete_six_phase_read() -> None:
         (None, None),
         (None, "missing_event_time"),
         ("gateway rejected request: PROVIDER_PERMISSION_DENIED", "permission"),
+        ("gateway rejected request: OPERATION_NOT_ALLOWED", "scope"),
         ("gateway rejected request: PROVIDER_AUTHENTICATION_FAILED", "auth"),
         ("gateway rejected request: PROVIDER_RATE_LIMITED", "rate_limit"),
         ("gateway rejected request: PROVIDER_ERROR", "provider"),

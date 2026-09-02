@@ -9,6 +9,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import UUID
 
 import nexus_fosun_gateway.main as main_module
 import pytest
@@ -21,7 +22,13 @@ from nexus_fosun_gateway.adapter.fixture import FixtureFosunTransport
 from nexus_fosun_gateway.adapter.sdk import SdkFosunTransport
 from nexus_fosun_gateway.domain import GatewayError
 from nexus_fosun_gateway.main import build_transport
+from nexus_fosun_gateway.policy.operations import (
+    BROKER_OPERATIONS,
+    MARKET_OPERATIONS,
+    authorize_runtime_operation,
+)
 from nexus_fosun_gateway.probe_contract import probe_response_contract_sha256, scope_descriptor
+from nexus_fosun_gateway.security.hmac import VerifiedGatewayActor
 from nexus_fosun_gateway.settings import GatewaySettings
 from pydantic import ValidationError
 
@@ -161,12 +168,28 @@ def test_local_read_only_skips_activation_and_freezes_one_attempt_scope(
             "fosun_sync_accounts",
             "fosun_sync_portfolio:cash",
             "fosun_sync_portfolio:holdings",
+            "fosun_list_orders",
+            "fosun_list_cash_flows",
             "fosun_get_quotes",
             "fosun_get_bars",
         }
     )
-    assert "fosun_list_orders" not in authorization
-    assert "fosun_list_cash_flows" not in authorization
+    assert "fosun_simulation_create_order" not in authorization
+    broker_actor = VerifiedGatewayActor(
+        "nexus-broker-worker", UUID(int=1), "synthetic-broker", BROKER_OPERATIONS
+    )
+    market_actor = VerifiedGatewayActor(
+        "nexus-provider-worker", UUID(int=2), "synthetic-market", MARKET_OPERATIONS
+    )
+    for operation in ("fosun_list_orders", "fosun_list_cash_flows"):
+        authorize_runtime_operation(
+            operation, broker_actor, authorization, transport_mode="local_read_only"
+        )
+        with pytest.raises(GatewayError) as denied:
+            authorize_runtime_operation(
+                operation, market_actor, authorization, transport_mode="local_read_only"
+            )
+        assert denied.value.code == "OPERATION_NOT_ALLOWED"
 
 
 def test_read_only_mode_without_admission_returns_stable_error() -> None:

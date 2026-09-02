@@ -15,8 +15,15 @@ from sdk_adapter_helpers import NoopRateLimiter, RecordingMethod, _raw
 @pytest.mark.asyncio
 async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
     client: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Changing an SDK method or its typed arguments breaks the reviewed seam."""
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 2, 23, 30, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr("nexus_fosun_gateway.adapter.sdk.datetime", FixedDatetime)
     adapter = SdkFosunTransport(client, rate_limiter=NoopRateLimiter())
 
     accounts = await adapter.execute("fosun_sync_accounts", {})
@@ -99,7 +106,8 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
                 "start": 40,
                 "count": 20,
                 "from_date": "1970-01-01",
-                "status_arr": [20, 22, 40, 60],
+                "to_date": "2026-09-03",
+                "status_arr": [10, 20, 21, 22, 40, 60],
             },
         )
     ]

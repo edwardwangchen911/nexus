@@ -48,7 +48,9 @@ def normalize_provider_response(
             return _page(items, request_id, received_at)
         if operation == "fosun_list_orders":
             items = tuple(_order(item) for item in _mappings(_list(data)))
-            return _list_page(items, data, request_id, received_at, payload)
+            return _list_page(
+                items, data, request_id, received_at, payload, allow_requested_capacity=True
+            )
         if operation == "fosun_list_cash_flows":
             rows = _mappings(_list(data))
             items = tuple(_cash_flow(item) for item in rows)
@@ -347,8 +349,12 @@ def _list_page(
     request_id: str,
     received_at: datetime,
     context: Mapping[str, object],
+    *,
+    allow_requested_capacity: bool = False,
 ) -> GatewayPage[GatewayItem]:
-    start, count, total = _pagination(data, context, len(items))
+    start, count, total = _pagination(
+        data, context, len(items), allow_requested_capacity=allow_requested_capacity
+    )
     next_cursor = str(start + count) if start + count < total else None
     quality: Literal["PASS", "PARTIAL"] = (
         "PARTIAL" if items and isinstance(items[0], OrderItem) else "PASS"
@@ -422,6 +428,9 @@ def _context_limit(context: Mapping[str, object]) -> int:
 
 def _list(data: Mapping[str, object]) -> list[object]:
     value = data.get("list")
+    if "list" in data and value is None and type(data.get("total")) is int and data["total"] == 0:
+        # Some successful empty pages use null; pagination still proves the range.
+        return []
     if not isinstance(value, list):
         raise ValueError
     return value

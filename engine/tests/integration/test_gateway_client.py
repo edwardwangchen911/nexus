@@ -164,14 +164,17 @@ async def test_gateway_response_requires_exact_json_media_type(
 
 
 @pytest.mark.asyncio
-async def test_gateway_error_exposes_only_allowlisted_sanitized_code(tmp_path: Path) -> None:
+@pytest.mark.parametrize("code", ("PROVIDER_MALFORMED_RESPONSE", "OPERATION_NOT_ALLOWED"))
+async def test_gateway_error_exposes_only_allowlisted_sanitized_code(
+    tmp_path: Path, code: str
+) -> None:
     responses = iter(
         (
             httpx.Response(
                 502,
                 json={
                     "error": {
-                        "code": "PROVIDER_MALFORMED_RESPONSE",
+                        "code": code,
                         "message": "must not cross the client boundary",
                         "next_action": "REVIEW_PROVIDER_CONTRACT",
                     },
@@ -197,7 +200,7 @@ async def test_gateway_error_exposes_only_allowlisted_sanitized_code(tmp_path: P
 
     with pytest.raises(
         GatewayClientError,
-        match=r"^gateway rejected request: PROVIDER_MALFORMED_RESPONSE$",
+        match=rf"^gateway rejected request: {code}$",
     ):
         await client.read_cash("synthetic-account-001")
     with pytest.raises(GatewayClientError, match=r"^gateway response rejected$") as error:

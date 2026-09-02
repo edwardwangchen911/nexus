@@ -51,6 +51,8 @@ _LOCAL_READ_ONLY_OPERATIONS: frozenset[RuntimeOperation] = frozenset(
         "fosun_sync_accounts",
         "fosun_sync_portfolio:cash",
         "fosun_sync_portfolio:holdings",
+        "fosun_list_orders",
+        "fosun_list_cash_flows",
         "fosun_get_quotes",
         "fosun_get_bars",
     }

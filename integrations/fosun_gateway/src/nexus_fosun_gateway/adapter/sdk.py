@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from threading import Event, Lock, Thread, Timer
 from typing import Protocol, cast
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -285,7 +286,8 @@ class SdkFosunTransport:
                     sub_account_id=_required_str(payload, "account_id"),
                     # Omission defaults to seven days and can hide older still-open orders.
                     from_date="1970-01-01",
-                    status_arr=[20, 22, 40, 60],
+                    to_date=datetime.now(UTC).astimezone(ZoneInfo("Asia/Hong_Kong")).date().isoformat(),
+                    status_arr=[10, 20, 21, 22, 40, 60],
                     start=_cursor(payload),
                     count=_required_int(payload, "limit"),
                 )

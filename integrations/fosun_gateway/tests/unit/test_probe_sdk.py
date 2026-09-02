@@ -1921,10 +1921,13 @@ class InstrumentedTransport:
         start: int | None,
         count: int,
         from_date: str | None = None,
+        to_date: str | None = None,
         status_arr: list[int] | None = None,
     ) -> object:
         assert from_date == "1970-01-01"
-        assert status_arr == [20, 22, 40, 60]
+        assert to_date is not None
+        date.fromisoformat(to_date)
+        assert status_arr == [10, 20, 21, 22, 40, 60]
         self._record(
             "fosun_list_orders",
             {
