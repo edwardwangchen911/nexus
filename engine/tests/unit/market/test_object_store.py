@@ -54,6 +54,26 @@ class FakeS3Client:
         return {}
 
 
+@pytest.mark.asyncio
+async def test_diagnostic_reader_uses_the_frozen_normalized_object_only() -> None:
+    client = FakeS3Client()
+    store = S3ProviderEvidenceStore(_settings(), client=client)
+    payload = b"synthetic-normalized-artifact"
+    key = f"normalized/market/{sha256(payload).hexdigest()}.parquet"
+    uri = await store.put_normalized(key, payload)
+    assert await store.read_normalized(uri) == payload
+    assert client.get_calls[-1]["VersionId"] == "version-1"
+    count = len(client.get_calls)
+    for invalid in (
+        "https://external.invalid/artifact",
+        uri.replace("normalized/market", "raw"),
+        uri.replace("normalized/market", "normalized/../market"),
+    ):
+        with pytest.raises(ValueError):
+            await store.read_normalized(invalid)
+    assert len(client.get_calls) == count
+
+
 class VersionedS3Client(FakeS3Client):
     def __init__(self) -> None:
         super().__init__()
@@ -243,10 +263,7 @@ async def test_real_s3_get_never_reaches_dependency_logs(
 
     result = await store.read_raw(
         key,
-        uri=(
-            "s3://nexus-log-bucket-canary/"
-            f"{storage_key}?versionId=sdk-version-1"
-        ),
+        uri=(f"s3://nexus-log-bucket-canary/{storage_key}?versionId=sdk-version-1"),
     )
 
     assert result == payload
@@ -570,8 +587,6 @@ async def test_normalized_writer_is_content_addressed_and_create_only() -> None:
     assert first.endswith("versionId=version-1")
     assert replay.endswith("versionId=version-1")
     assert client.objects[f"provider/market/{key}"] == payload
-    assert client.get_calls == [
-        {"Bucket": "nexus-fixtures", "Key": f"provider/market/{key}"}
-    ]
+    assert client.get_calls == [{"Bucket": "nexus-fixtures", "Key": f"provider/market/{key}"}]
     with pytest.raises(ValueError, match="normalized market object key"):
         await store.put_normalized(f"raw/market/{digest}.json", payload)

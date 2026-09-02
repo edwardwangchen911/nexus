@@ -28,8 +28,9 @@ class DerivedCurrencyNav:
 
     currency: str
     value: Decimal
-    provider_as_of: datetime
+    provider_as_of: datetime | None
     source_request_ids: tuple[str, ...]
+    observed_at: datetime | None = None
 
 
 @dataclass(frozen=True)

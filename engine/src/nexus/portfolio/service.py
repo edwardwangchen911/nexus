@@ -19,6 +19,7 @@ from nexus.api.schemas.portfolio import (
     PortfolioSnapshotResponse,
     PositionResponse,
     derive_snapshot_readiness,
+    snapshot_time_basis,
 )
 from nexus.domain.decimal import decimal_to_string
 from nexus.domain.time import require_utc
@@ -248,8 +249,7 @@ class PortfolioService:
             if len(values[snapshot_id]) > _MAX_CURRENCIES:
                 _raise_collection_overflow("original_currencies", _MAX_CURRENCIES)
         return {
-            snapshot_id: tuple(sorted(currencies))
-            for snapshot_id, currencies in values.items()
+            snapshot_id: tuple(sorted(currencies)) for snapshot_id, currencies in values.items()
         }
 
     async def latest_snapshot(self, portfolio_id: UUID) -> PortfolioSnapshotResponse:
@@ -265,6 +265,7 @@ class PortfolioService:
                     PortfolioSnapshotRecord.portfolio_id,
                     PortfolioSnapshotRecord.status,
                     PortfolioSnapshotRecord.as_of,
+                    PortfolioSnapshotRecord.source_observations,
                     BrokerSyncRun.account_id,
                     BrokerSyncRun.cash_flow_quality,
                 )
@@ -356,6 +357,7 @@ class PortfolioService:
             decision_readiness=decision_readiness,
             cash_flow_quality=snapshot.cash_flow_quality,
             cash_flow_count=int(cash_flow_count or 0),
+            time_basis=snapshot_time_basis(snapshot.source_observations),
             execution_locked=True,
             cash=tuple(
                 CashBucketResponse(

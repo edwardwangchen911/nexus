@@ -20,7 +20,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from nexus.api.schemas.portfolio import derive_snapshot_readiness
+from nexus.api.schemas.portfolio import derive_snapshot_readiness, snapshot_time_basis
 from nexus.ops.fosun_local_refresh import (
     LocalFosunRefreshSettings,
     LocalOrderReadError,
@@ -108,13 +108,9 @@ def load_local_environment(
     root = repo_root.resolve()
     file_values = dotenv_values(root / "infra" / ".env.local")
     environment = {
-        name: value
-        for name, value in file_values.items()
-        if isinstance(value, str) and value
+        name: value for name, value in file_values.items() if isinstance(value, str) and value
     }
-    hmac_values = dotenv_values(
-        root / ".secrets" / "nexus-fosun-local" / "hmac.env"
-    )
+    hmac_values = dotenv_values(root / ".secrets" / "nexus-fosun-local" / "hmac.env")
     environment.update(
         {
             name: value
@@ -125,15 +121,10 @@ def load_local_environment(
     environment.update(_LOCAL_GATEWAY_ENVIRONMENT)
     secret_root = root / ".secrets" / "nexus-fosun-local"
     environment.update(
-        {
-            name: str(secret_root / filename)
-            for name, filename in _LOCAL_TLS_FILES.items()
-        }
+        {name: str(secret_root / filename) for name, filename in _LOCAL_TLS_FILES.items()}
     )
     _localize_compose_endpoints(environment)
-    environment.update(
-        {name: value for name, value in process_environment.items() if value}
-    )
+    environment.update({name: value for name, value in process_environment.items() if value})
     return environment
 
 
@@ -154,10 +145,7 @@ def _localize_compose_endpoints(environment: dict[str, str]) -> None:
         if parsed_object_store.hostname == "minio":
             environment["OBJECT_STORE_ENDPOINT"] = urlunsplit(
                 parsed_object_store._replace(
-                    netloc=(
-                        "127.0.0.1:"
-                        f"{_host_port(environment, 'NEXUS_MINIO_HOST_PORT', 9000)}"
-                    )
+                    netloc=(f"127.0.0.1:{_host_port(environment, 'NEXUS_MINIO_HOST_PORT', 9000)}")
                 )
             )
 
@@ -302,6 +290,7 @@ async def read_local_status(database_url: str) -> dict[str, object]:
                 "display_readiness": display,
                 "decision_readiness": decision,
                 "as_of": snapshot.as_of.isoformat() if snapshot.as_of else None,
+                "time_basis": snapshot_time_basis(snapshot.source_observations),
                 "last_sync_run_status": run.status if run else None,
                 "cash_flow_quality": run.cash_flow_quality if run else None,
                 "counts": counts,

@@ -100,14 +100,15 @@ def _currency_items(
             [position for position, _ in values], results, market, snapshot_refs
         )
         items.extend(_concentration_items(values, scope, market, policy, value_refs))
-        if all(
+        if market.quality == "PASS" and all(
             market.identities.get(position.instrument_id) is not None
             and market.identities[position.instrument_id].restriction == "STANDARD"
             for position, _ in values
         ):
             items.extend(_exposure_items(values, scope, market, policy, resolver, value_refs))
-        items.extend(_liquidity_items(values, scope, market, policy, resolver, value_refs))
-        items.extend(market_risk_items(values, scope, market, policy, snapshot, resolver))
+        if market.quality == "PASS":
+            items.extend(_liquidity_items(values, scope, market, policy, resolver, value_refs))
+            items.extend(market_risk_items(values, scope, market, policy, snapshot, resolver))
     total = cash + sum((value for _, value in values), Decimal(0))
     if total > 0:
         items.append(

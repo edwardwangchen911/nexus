@@ -4424,6 +4424,10 @@ export const runtimeContractSchemas = {
       },
       "status": {
         "$ref": "#/components/schemas/SnapshotStatus"
+      },
+      "time_basis": {
+        "$ref": "#/components/schemas/SnapshotTimeBasis",
+        "default": "unknown"
       }
     },
     "required": [
@@ -6792,6 +6796,14 @@ export const runtimeContractSchemas = {
       "PARTIAL",
       "STALE",
       "RECONCILIATION_REQUIRED"
+    ],
+    "type": "string"
+  },
+  "SnapshotTimeBasis": {
+    "enum": [
+      "provider_event",
+      "gateway_observed",
+      "unknown"
     ],
     "type": "string"
   },

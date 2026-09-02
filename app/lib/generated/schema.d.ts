@@ -2637,6 +2637,8 @@ export interface components {
             /** Positions */
             positions: components["schemas"]["PositionResponse"][];
             status: components["schemas"]["SnapshotStatus"];
+            /** @default unknown */
+            time_basis: components["schemas"]["SnapshotTimeBasis"];
         };
         /** PositionResponse */
         PositionResponse: {
@@ -3580,6 +3582,8 @@ export interface components {
         };
         /** @enum {string} */
         SnapshotStatus: "READY" | "PARTIAL" | "STALE" | "RECONCILIATION_REQUIRED";
+        /** @enum {string} */
+        SnapshotTimeBasis: "provider_event" | "gateway_observed" | "unknown";
         /**
          * StartExperimentRequest
          * @description The browser cannot choose a strategy, search axis, model, or data source.

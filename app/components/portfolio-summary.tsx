@@ -18,7 +18,7 @@ type CurrencyValuation = {
   totalValue: bigint | null;
   missingFacts: string[];
   asOf: string | null;
-  asOfKind: "Provider 截止时间" | "快照截止时间";
+  asOfKind: "Provider 截止时间" | "快照截止时间" | "快照读取时间";
 };
 
 const DECIMAL_PLACES = 12;
@@ -57,7 +57,7 @@ export function PortfolioSummary({ portfolio, snapshot, currency }: PortfolioSum
       <dl className="portfolio-summary__cash" aria-label={`${currency} 现金事实`}>
         <Fact term="账面现金" value={cash ? `${currency} ${formatDecimal(cash.cash_balance)}` : "无数据"} />
         <Fact term="可用现金" value={cash ? `${currency} ${formatDecimal(cash.available_cash)}` : "无数据"} />
-        <Fact term="数据更新时间" value={formatTime(cash?.provider_as_of ?? snapshot.as_of)} />
+        <Fact term={snapshot.time_basis === "gateway_observed" ? "数据读取时间" : "数据更新时间"} value={formatTime(cash?.provider_as_of ?? snapshot.as_of)} />
       </dl>
 
       <div className="portfolio-summary__section">
@@ -249,7 +249,7 @@ function currencyValuation(
     totalValue,
     missingFacts,
     asOf,
-    asOfKind: completeProviderTimes ? "Provider 截止时间" : "快照截止时间",
+    asOfKind: completeProviderTimes ? "Provider 截止时间" : snapshot.time_basis === "gateway_observed" ? "快照读取时间" : "快照截止时间",
   };
 }
 

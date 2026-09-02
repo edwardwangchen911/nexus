@@ -1,5 +1,6 @@
 """Strict redacted contracts for broker-backed portfolio reads and sync admission."""
 
+from collections.abc import Mapping, Sequence
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -18,6 +19,17 @@ type SyncRunStatus = Literal[
 ]
 type CurrencyCode = Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")]
 type CashFlowQuality = Literal["PASS", "PARTIAL", "NOT_RUN"]
+type SnapshotTimeBasis = Literal["provider_event", "gateway_observed", "unknown"]
+
+
+def snapshot_time_basis(observations: Sequence[Mapping[str, object]]) -> SnapshotTimeBasis:
+    """Expose stored time provenance without reinterpreting legacy snapshots."""
+    bases = {item.get("time_basis") for item in observations}
+    if bases == {"gateway_observed"}:
+        return "gateway_observed"
+    if bases == {"provider_event"}:
+        return "provider_event"
+    return "unknown"
 
 
 def derive_snapshot_readiness(
@@ -27,15 +39,9 @@ def derive_snapshot_readiness(
     cash_flow_quality: CashFlowQuality | str,
 ) -> tuple[DisplayReadiness, DecisionReadiness]:
     """Separate factual display availability from decision-grade readiness."""
-    display: DisplayReadiness = (
-        "DISPLAY_READY" if has_display_facts else "DISPLAY_UNAVAILABLE"
-    )
+    display: DisplayReadiness = "DISPLAY_READY" if has_display_facts else "DISPLAY_UNAVAILABLE"
     decisions: dict[str, DecisionReadiness] = {
-        "READY": (
-            "DECISION_READY"
-            if cash_flow_quality == "PASS"
-            else "RECONCILIATION_PENDING"
-        ),
+        "READY": ("DECISION_READY" if cash_flow_quality == "PASS" else "RECONCILIATION_PENDING"),
         "PARTIAL": "RECONCILIATION_PENDING",
         "STALE": "DATA_STALE",
         "RECONCILIATION_REQUIRED": "RECONCILIATION_REQUIRED",
@@ -150,6 +156,7 @@ class PortfolioSnapshotResponse(_StrictSchema):
     open_orders: tuple[OpenOrderResponse, ...] = Field(max_length=2000)
     converted_view: None
     as_of: AwareDatetime | None
+    time_basis: SnapshotTimeBasis = "unknown"
 
 
 class PortfolioSnapshotEnvelope(_StrictSchema):

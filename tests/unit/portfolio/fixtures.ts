@@ -29,6 +29,7 @@ export const snapshot: PortfolioSnapshot = {
   cash_flow_count: 1,
   execution_locked: true,
   as_of: "2026-08-23T08:00:00Z",
+  time_basis: "provider_event",
   cash: [
     { currency: "HKD", cash_balance: "8000.00", available_cash: "7000.00", provider_as_of: "2026-08-23T08:00:00Z" },
     { currency: "USD", cash_balance: "1000.00", available_cash: "900.00", provider_as_of: "2026-08-23T08:00:00Z" },

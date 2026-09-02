@@ -64,6 +64,7 @@ class AttemptProgress:
                 "source_request_id": page.source_request_id,
                 "response_as_of": page.as_of.isoformat(),
                 "quality": page.quality,
+                "time_basis": page.time_basis,
             }
         )
         phase_facts = self.raw_facts.setdefault(phase, [])
@@ -77,7 +78,10 @@ class AttemptProgress:
             {
                 "currency": value.currency,
                 "value": str(value.value),
-                "provider_as_of": value.provider_as_of.isoformat(),
+                "provider_as_of": (
+                    value.provider_as_of.isoformat() if value.provider_as_of else None
+                ),
+                **({"observed_at": value.observed_at.isoformat()} if value.observed_at else {}),
                 "source_request_ids": value.source_request_ids,
             }
             for value in values
@@ -162,11 +166,20 @@ async def read_atomic_window(
         *orders_b_pages,
         cash_b_page,
     )
+    all_pages = (*pages_a, *pages_b)
+    if len({page.time_basis for page in all_pages}) != 1:
+        raise AtomicWindowInvalidated("broker snapshot time bases differ")
+    if all_pages[0].time_basis == "gateway_observed":
+        times = [page.as_of for page in all_pages]
+        if times != sorted(times) or (times[-1] - times[0]).total_seconds() > 60:
+            raise AtomicWindowInvalidated("broker observation window is invalid")
+        if len({page.source_request_id for page in all_pages}) != len(all_pages):
+            raise AtomicWindowInvalidated("broker observations reuse a request")
     read_a = BrokerReadSet(
         cash=cash_a_page.items,
         positions=positions_a,
         open_orders=orders_a,
-        completed_at=_facts_as_of(cash_a_page.items, positions_a, orders_a),
+        completed_at=_snapshot_as_of(pages_a, cash_a_page.items, positions_a, orders_a),
         complete=_pages_complete(pages_a, cash_a_page.items, positions_a, orders_a),
         source_request_ids=tuple(page.source_request_id for page in pages_a),
         source_observations=_source_observations(pages_a),
@@ -176,7 +189,7 @@ async def read_atomic_window(
         cash=cash_b_page.items,
         positions=positions_b,
         open_orders=orders_b,
-        completed_at=_facts_as_of(cash_b_page.items, positions_b, orders_b),
+        completed_at=_snapshot_as_of(pages_b, cash_b_page.items, positions_b, orders_b),
         complete=_pages_complete(pages_b, cash_b_page.items, positions_b, orders_b),
         source_request_ids=tuple(page.source_request_id for page in pages_b),
         source_observations=_source_observations(pages_b),
@@ -196,6 +209,9 @@ def _derive_nav(
     cash_page: BrokerPage[CashBalance],
     position_pages: tuple[BrokerPage[BrokerPosition], ...],
 ) -> tuple[DerivedCurrencyNav, ...]:
+    observed = cash_page.time_basis == "gateway_observed"
+    nav_pages: tuple[BrokerPage[Any], ...] = (cash_page, *position_pages)
+    observed_at = max(page.as_of for page in nav_pages) if observed else None
     cash_map = cash_by_currency(cash)
     positions_by_currency: dict[str, list[BrokerPosition]] = {}
     request_ids_by_currency = {currency: [cash_page.source_request_id] for currency in cash_map}
@@ -207,23 +223,25 @@ def _derive_nav(
             request_ids_by_currency[position.currency].append(page.source_request_id)
     values: list[DerivedCurrencyNav] = []
     for currency, cash_item in sorted(cash_map.items()):
-        if cash_item.provider_as_of is None:
+        if cash_item.provider_as_of is None and not observed:
             raise AtomicWindowInvalidated("cash NAV time is unavailable")
         value = cash_item.cash_balance
-        as_of = cash_item.provider_as_of
+        fact_times = [cash_item.provider_as_of] if cash_item.provider_as_of is not None else []
         for position in positions_by_currency.get(currency, []):
-            if position.current_price is None or position.provider_as_of is None:
+            if position.current_price is None or (position.provider_as_of is None and not observed):
                 raise AtomicWindowInvalidated("position NAV input is unavailable")
             value += position.quantity * position.current_price
-            as_of = max(as_of, position.provider_as_of)
+            if position.provider_as_of is not None:
+                fact_times.append(position.provider_as_of)
         if not value.is_finite():
             raise AtomicWindowInvalidated("derived NAV is non-finite")
         values.append(
             DerivedCurrencyNav(
                 currency=currency,
                 value=value,
-                provider_as_of=as_of,
+                provider_as_of=None if observed else max(fact_times),
                 source_request_ids=tuple(dict.fromkeys(request_ids_by_currency[currency])),
+                observed_at=observed_at,
             )
         )
     return tuple(values)
@@ -241,23 +259,27 @@ def _pages_complete(
     positions: tuple[BrokerPosition, ...],
     orders: tuple[BrokerOrderFact, ...],
 ) -> bool:
+    observed = all(page.time_basis == "gateway_observed" for page in pages)
     return (
         all(page.quality == "PASS" for page in pages)
         and bool(cash)
-        and all(item.provider_as_of is not None for item in cash)
+        and (observed or all(item.provider_as_of is not None for item in cash))
         and all(
-            position.current_price is not None and position.provider_as_of is not None
+            position.current_price is not None and (observed or position.provider_as_of is not None)
             for position in positions
         )
-        and all(order.updated_at is not None for order in orders)
+        and (observed or all(order.updated_at is not None for order in orders))
     )
 
 
-def _facts_as_of(
+def _snapshot_as_of(
+    pages: tuple[BrokerPage[Any], ...],
     cash: tuple[CashBalance, ...],
     positions: tuple[BrokerPosition, ...],
     orders: tuple[BrokerOrderFact, ...],
 ) -> datetime | None:
+    if all(page.time_basis == "gateway_observed" for page in pages):
+        return max(page.as_of for page in pages)
     values = (
         *(item.provider_as_of for item in cash if item.provider_as_of is not None),
         *(item.provider_as_of for item in positions if item.provider_as_of is not None),
@@ -274,6 +296,7 @@ def _source_observations(
             source_request_id=page.source_request_id,
             response_as_of=page.as_of,
             quality=page.quality,
+            time_basis=page.time_basis,
         )
         for page in pages
     )

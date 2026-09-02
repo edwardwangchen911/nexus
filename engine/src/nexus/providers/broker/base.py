@@ -11,6 +11,7 @@ from nexus.domain.time import require_utc
 
 SnapshotStatus = Literal["READY", "PARTIAL", "STALE", "RECONCILIATION_REQUIRED"]
 BrokerPageQuality = Literal["PASS", "PARTIAL"]
+SnapshotTimeBasis = Literal["provider_event", "gateway_observed"]
 BrokerOrderStatus = Literal["pending", "submitted", "partially_filled"]
 
 
@@ -48,6 +49,7 @@ class SourceObservation(BrokerFact):
     source_request_id: str
     response_as_of: datetime
     quality: BrokerPageQuality
+    time_basis: SnapshotTimeBasis = "provider_event"
 
     @field_validator("response_as_of")
     @classmethod
@@ -129,6 +131,7 @@ class BrokerPage[ItemT](BrokerFact):
     source_request_id: str
     as_of: datetime
     quality: BrokerPageQuality = "PASS"
+    time_basis: SnapshotTimeBasis = "provider_event"
 
     @field_validator("as_of")
     @classmethod

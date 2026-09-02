@@ -193,7 +193,7 @@ async def test_local_broker_facts_use_one_complete_six_phase_read() -> None:
     ("order_error", "category"),
     (
         (None, None),
-        (None, "incomplete_facts"),
+        (None, "missing_event_time"),
         ("gateway rejected request: PROVIDER_PERMISSION_DENIED", "permission"),
         ("gateway rejected request: PROVIDER_AUTHENTICATION_FAILED", "auth"),
         ("gateway rejected request: PROVIDER_RATE_LIMITED", "rate_limit"),
@@ -226,7 +226,7 @@ async def test_local_broker_read_preserves_order_failure_and_bounds_follow_up(
                         "cash_balance": "1000",
                         "available_cash": "900",
                         "provider_as_of": (
-                            None if category == "incomplete_facts" else instant.isoformat()
+                            None if category == "missing_event_time" else instant.isoformat()
                         ),
                     },
                 ),
@@ -327,15 +327,14 @@ async def test_local_broker_read_preserves_order_failure_and_bounds_follow_up(
         assert broker.calls == ["cash", "holdings", "orders"]
         return
 
-    if category == "incomplete_facts":
-        with pytest.raises(RuntimeError, match="LOCAL_BROKER_RECONCILIATION_REQUIRED"):
-            await read
-        assert broker.calls == ["cash", "holdings", "orders", "holdings", "orders", "cash"]
-        return
-
     frozen, cash_flows = await read
 
     assert frozen.status == "READY"
+    assert {item.time_basis for item in frozen.portfolio_snapshot.source_observations} == {
+        "gateway_observed"
+    }
+    if category == "missing_event_time":
+        assert frozen.portfolio_snapshot.cash[0].provider_as_of is None
     assert cash_flows.quality == "PASS"
     assert cash_flows.pagination_complete is True
     assert broker.calls == [

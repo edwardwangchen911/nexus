@@ -98,6 +98,8 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
                 "sub_account_id": "synthetic-account-001",
                 "start": 40,
                 "count": 20,
+                "from_date": "1970-01-01",
+                "status_arr": [20, 22, 40, 60],
             },
         )
     ]

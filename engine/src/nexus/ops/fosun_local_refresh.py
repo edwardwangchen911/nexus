@@ -21,6 +21,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from nexus.diagnostics.artifacts import ArtifactByteReader
+from nexus.diagnostics.service import diagnose_and_persist
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.market_authority import ProviderMarketBinding
 from nexus.market.ingestion import archive_fosun_price_page_raw, ingest_price_page
@@ -231,6 +233,7 @@ class LocalFosunRefreshSettings(BaseSettings):
         default="unknown",
         validation_alias="FOSUN_MARKET_DELIVERY_MODE",
     )
+
     @model_validator(mode="after")
     def _identities_are_distinct_and_local(self) -> Self:
         if (
@@ -263,9 +266,7 @@ async def refresh_local_fosun(
     """Read the bounded holdings-driven surface, then persist one display snapshot."""
     checked_at = (now or datetime.now(UTC)).astimezone(UTC)
     request_start_at, request_end_at, calendar_rows = _daily_window(checked_at)
-    expected_sessions = tuple(
-        row[0] for row in calendar_rows if row[0] <= request_end_at.date()
-    )
+    expected_sessions = tuple(row[0] for row in calendar_rows if row[0] <= request_end_at.date())
     bar_limit = len(expected_sessions)
     if not 1 <= bar_limit <= 500:
         raise ValueError("LOCAL_KLINE_BUDGET_INVALID")
@@ -348,9 +349,42 @@ async def refresh_local_fosun(
             if isinstance(error, GatewayClientError):
                 raise
             raise RuntimeError("LOCAL_PERSISTENCE_FAILED") from None
+        result["diagnostic"] = await _diagnose_local_snapshot(
+            sessions,
+            frozen=frozen,
+            cash_flow_quality=cash_flow_result.quality,
+            artifact_reader=store.read_normalized,
+        )
         return result
     finally:
         await engine.dispose()
+
+
+async def _diagnose_local_snapshot(
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    frozen: BrokerSyncResult,
+    cash_flow_quality: str,
+    artifact_reader: ArtifactByteReader,
+) -> dict[str, object]:
+    """Generate from committed local facts; a diagnostic failure must not erase a refresh."""
+    if frozen.status != "READY" or cash_flow_quality != "PASS":
+        return {"status": "not_run", "code": "RECONCILIATION_PENDING"}
+    try:
+        async with sessions() as session, session.begin():
+            report = await diagnose_and_persist(
+                session,
+                portfolio_id=frozen.portfolio_snapshot.portfolio_id,
+                snapshot_id=frozen.portfolio_snapshot.id,
+                artifact_reader=artifact_reader,
+            )
+        return {
+            "status": "persisted",
+            "optimization_need": report.optimization_need,
+            "items": len(report.items),
+        }
+    except Exception:
+        return {"status": "failed", "code": "LOCAL_DIAGNOSTIC_FAILED"}
 
 
 def _us_holding_codes(holdings: Sequence[PositionItem]) -> tuple[str, ...]:
@@ -414,6 +448,7 @@ async def _read_broker_facts(
         client=_SinglePageBrokerGateway(broker),
         instrument_ids=instrument_ids,
         cash_flow_kinds={"1": "deposit"},
+        snapshot_time_basis="gateway_observed",
     )
     frozen = await freeze_broker_snapshot(
         account_id,
@@ -938,9 +973,7 @@ async def _ensure_market_bindings(
     created_at = authorized_at - timedelta(seconds=1)
     expires_at = authorized_at + timedelta(days=_LOCAL_CAPABILITY_DAYS)
     status = await session.scalar(
-        select(IntegrationStatus)
-        .where(IntegrationStatus.provider == "fosun")
-        .with_for_update()
+        select(IntegrationStatus).where(IntegrationStatus.provider == "fosun").with_for_update()
     )
     if status is None:
         status = IntegrationStatus(

@@ -60,7 +60,20 @@ def diagnose_portfolio(
     if snapshot.status != "READY" or source_conflict:
         return _report(snapshot, policy, "BLOCKED", (_blocked_item(market, source_conflict),))
     if market.quality != "PASS":
-        return _report(snapshot, policy, "RESEARCH_REQUIRED", (_market_unknown_item(market),))
+        # Missing market history must not hide independently evidenced account-state metrics.
+        resolver = EvidenceResolver(snapshot.as_of)
+        snapshot_evidence = resolver.resolve(
+            market.evidence.snapshot,
+            "SNAPSHOT",
+            expected_as_of=snapshot.as_of,
+        )
+        items = [_market_unknown_item(market)]
+        if snapshot_evidence.reason is None:
+            items.extend(
+                evaluate_currency_scopes(snapshot, market, policy, resolver, snapshot_evidence.refs)
+            )
+        _assert_fosun_read_only_scope(snapshot, market, items)
+        return _report(snapshot, policy, "RESEARCH_REQUIRED", tuple(items))
     resolver = EvidenceResolver(snapshot.as_of)
     snapshot_evidence = resolver.resolve(
         market.evidence.snapshot,

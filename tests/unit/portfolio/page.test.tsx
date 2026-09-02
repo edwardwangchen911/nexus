@@ -23,6 +23,16 @@ afterEach(() => {
 });
 
 describe("portfolio vertical slice", () => {
+  it("labels observed snapshots without inventing provider update timestamps", () => {
+    render(<PortfolioPanel state="ready" portfolios={[portfolio]}
+      snapshot={{ ...snapshot, time_basis: "gateway_observed" }}
+      selectedPortfolioId={portfolioId} notice={null} onSelect={vi.fn()} onRefresh={vi.fn()}
+    />);
+    expect(screen.getByText("读取时间")).toBeInTheDocument();
+    expect(screen.getByText(/券商未提供逐条更新时间/)).toBeInTheDocument();
+    expect(screen.getByText("执行能力").parentElement).toHaveTextContent("已锁定");
+  });
+
   it("shows cash-flow reconciliation and the permanent execution lock", () => {
     render(<PortfolioPanel
       state="ready"

@@ -1,13 +1,21 @@
 from datetime import UTC, date, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from helpers.broker_facts import position, read_set
 from helpers.broker_read import ScriptedBrokerProvider
+from helpers.diagnostic_artifacts import FixtureArtifactReader
+from helpers.observed_gateway import NOW, ObservedGateway
+from helpers.portfolio_api import app as portfolio_app
+from helpers.portfolio_api import headers
+from nexus.ops import fosun_local_refresh as refresh_module
 from nexus.ops.fosun_local_refresh import (
+    _diagnose_local_snapshot,
     _ensure_market_bindings,
     _insert_calendar,
     _persist_ready_broker_snapshot,
+    _read_broker_facts,
 )
 from nexus.persistence.models.portfolio import (
     BrokerSyncRun,
@@ -21,6 +29,117 @@ from nexus.reconciliation.cash_flows import CashFlowSyncResult
 from nexus.reconciliation.facts import canonical_position_hash
 from nexus.settings import EngineSettings
 from sqlalchemy import select
+
+
+@pytest.mark.asyncio
+async def test_local_observed_refresh_reaches_database_and_snapshot_api(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_id, portfolio_id, sync_run_id, instrument_id = (uuid4() for _ in range(4))
+    broker = ObservedGateway()
+    frozen, cash_flows = await _read_broker_facts(
+        broker,
+        account_id=account_id,
+        portfolio_id=portfolio_id,
+        sync_run_id=sync_run_id,
+        external_account_id="synthetic-account",
+        instrument_ids={"usAAPL": instrument_id},
+        cash_flow_end=NOW.date(),
+        previous_cash_flow_watermark=None,
+    )
+    holding = PositionItem(
+        kind="position",
+        external_account_id="synthetic-account",
+        instrument_code="usAAPL",
+        currency="USD",
+        quantity="1",
+        available_quantity="1",
+        frozen_quantity="0",
+        average_cost="90",
+        diluted_cost=None,
+        current_price="100",
+        provider_as_of=None,
+    )
+    factory = session_factory(_settings(migrated_database_url))
+    try:
+        async with factory() as session, session.begin():
+            stored = await _persist_ready_broker_snapshot(
+                session,
+                account_id=account_id,
+                portfolio_id=portfolio_id,
+                frozen=frozen,
+                holdings=(holding,),
+                instrument_ids={"usAAPL": instrument_id},
+                valid_from=NOW.date(),
+                completed_at=NOW + timedelta(seconds=7),
+                cash_flow_result=cash_flows,
+            )
+            assert {item["time_basis"] for item in stored.source_observations} == {
+                "gateway_observed"
+            }
+        diagnostic = await _diagnose_local_snapshot(
+            factory,
+            frozen=frozen,
+            cash_flow_quality="PASS",
+            artifact_reader=FixtureArtifactReader({}),
+        )
+        assert diagnostic["status"] == "persisted"
+        assert diagnostic["optimization_need"] == "RESEARCH_REQUIRED"
+        blocked = await _diagnose_local_snapshot(
+            factory,
+            frozen=frozen,
+            cash_flow_quality="NOT_RUN",
+            artifact_reader=FixtureArtifactReader({}),
+        )
+        assert blocked == {"status": "not_run", "code": "RECONCILIATION_PENDING"}
+
+        async def fail_diagnostic(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("synthetic-secret-canary")
+
+        monkeypatch.setattr(refresh_module, "diagnose_and_persist", fail_diagnostic)
+        failed = await _diagnose_local_snapshot(
+            factory,
+            frozen=frozen,
+            cash_flow_quality="PASS",
+            artifact_reader=FixtureArtifactReader({}),
+        )
+        assert failed == {"status": "failed", "code": "LOCAL_DIAGNOSTIC_FAILED"}
+    finally:
+        await factory.kw["bind"].dispose()
+
+    path = f"/internal/v1/portfolios/{portfolio_id}/snapshots/latest"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=portfolio_app(migrated_database_url, now=NOW)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+        diagnostic_path = f"/internal/v1/portfolios/{portfolio_id}/diagnostics/latest"
+        diagnostic_response = await client.get(
+            diagnostic_path,
+            headers=headers("GET", diagnostic_path),
+        )
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["time_basis"] == "gateway_observed"
+    assert data["as_of"] == "2026-09-02T00:00:06Z"
+    assert data["status"] == "READY"
+    assert data["decision_readiness"] == "DECISION_READY"
+    assert data["cash_flow_quality"] == "PASS" and data["cash_flow_count"] == 1
+    assert data["execution_locked"] is True
+    assert data["cash"][0]["provider_as_of"] is None
+    assert data["positions"][0]["provider_as_of"] is None
+    assert data["open_orders"][0]["updated_at"] is None
+    assert broker.calls == 7
+    assert diagnostic_response.status_code == 200
+    report = diagnostic_response.json()["data"]
+    assert report["optimization_need"] == "RESEARCH_REQUIRED"
+    cash_item = next(item for item in report["items"] if item["diagnostic_code"] == "CASH_RATIO")
+    assert cash_item["metric_value"] is not None
+    assert cash_item["evidence_refs"]
+    assert any(item["diagnostic_code"] == "CONCENTRATION_TOP1" for item in report["items"])
+    assert not any(item["diagnostic_code"].startswith("VOLATILITY") for item in report["items"])
+    assert any(item["unknown_reason"] is not None for item in report["items"])
 
 
 def _settings(database_url: str) -> EngineSettings:

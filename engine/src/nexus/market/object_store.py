@@ -145,10 +145,7 @@ class S3ProviderEvidenceStore:
         return await self.put_if_absent(key=key, content=payload)
 
     async def read_raw(self, key: str, *, uri: str) -> bytes:
-        if (
-            not key.startswith("raw/")
-            or not _object_key_is_safe(key)
-        ):
+        if not key.startswith("raw/") or not _object_key_is_safe(key):
             raise ValueError("provider raw object key is invalid")
         version_id = _version_id_from_frozen_uri(
             uri,
@@ -165,6 +162,18 @@ class S3ProviderEvidenceStore:
         if not key.startswith("normalized/market/"):
             raise ValueError("normalized market object key is invalid")
         return await self.put_if_absent(key=key, content=payload)
+
+    async def read_normalized(self, uri: str) -> bytes:
+        """Read a frozen diagnostic artifact only from this store's market prefix."""
+        key = urlsplit(uri).path.removeprefix(f"/{self._prefix}/")
+        if not key.startswith("normalized/market/") or not _object_key_is_safe(key):
+            raise ValueError("normalized market object key is invalid")
+        version_id = _version_id_from_frozen_uri(
+            uri,
+            bucket=self._bucket,
+            storage_key=self._storage_key(key),
+        )
+        return await _run_object_io(self._read_bounded, key, version_id=version_id)
 
     async def _put_create_only(
         self,

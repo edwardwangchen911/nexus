@@ -47,7 +47,7 @@ def validate_broker_sync_result(result: BrokerSyncResult) -> None:
     if result.reconciliation_reasons:
         raise InvalidBrokerSyncResult("READY result must not retain mismatch reasons")
     if snapshot.as_of is None:
-        raise InvalidBrokerSyncResult("READY snapshot requires a Provider time")
+        raise InvalidBrokerSyncResult("READY snapshot requires a declared snapshot time")
     trace = result.attempt_traces[-1]
     if (
         trace.get("completed") is not True
@@ -111,6 +111,7 @@ def _validate_observations(
                     "source_request_id": request_id,
                     "response_as_of": response_as_of,
                     "quality": quality,
+                    "time_basis": observation.get("time_basis", "provider_event"),
                 }
             )
         except ValueError:
@@ -141,6 +142,14 @@ def _validate_observations(
         raise InvalidBrokerSyncResult("snapshot source IDs do not match final read B")
     if tuple(b_observations) != result.portfolio_snapshot.source_observations:
         raise InvalidBrokerSyncResult("snapshot source observations do not match final read B")
+    if len({item.time_basis for _, item in typed}) != 1:
+        raise InvalidBrokerSyncResult("broker snapshot time bases differ")
+    if typed[0][1].time_basis == "gateway_observed":
+        times = [item.response_as_of for _, item in typed]
+        if times != sorted(times) or (times[-1] - times[0]).total_seconds() > 60:
+            raise InvalidBrokerSyncResult("broker observation window is invalid")
+        if len(set(observed_ids)) != len(observed_ids):
+            raise InvalidBrokerSyncResult("broker observations reuse a request")
     return tuple(typed)
 
 
@@ -149,6 +158,7 @@ def _validate_fact_times(
     observations: tuple[tuple[str, SourceObservation], ...],
     result: BrokerSyncResult,
 ) -> None:
+    observed = observations[0][1].time_basis == "gateway_observed"
     responses: dict[str, list[datetime]] = {phase: [] for phase in _PHASES}
     for phase, observation in observations:
         responses[phase].append(observation.response_as_of)
@@ -170,7 +180,7 @@ def _validate_fact_times(
         )
         for phase, timestamps in phase_facts:
             phase_times = tuple(timestamps)
-            if any(timestamp is None for timestamp in phase_times):
+            if not observed and any(timestamp is None for timestamp in phase_times):
                 raise InvalidBrokerSyncResult("READY broker facts require Provider times")
             typed_times = tuple(timestamp for timestamp in phase_times if timestamp is not None)
             if any(timestamp > max(responses[phase]) for timestamp in typed_times):
@@ -178,6 +188,8 @@ def _validate_fact_times(
             if suffix == "b":
                 b_fact_times.extend(typed_times)
     snapshot_as_of = result.portfolio_snapshot.as_of
+    if observed:
+        b_fact_times = [item.response_as_of for phase, item in observations if phase.endswith("_b")]
     if not b_fact_times or snapshot_as_of != max(b_fact_times):
         raise InvalidBrokerSyncResult("snapshot as-of does not match final read B facts")
 
@@ -193,9 +205,7 @@ def _position_rows(raw: dict[object, object], suffix: str) -> tuple[BrokerPositi
 
 
 def _order_rows(raw: dict[object, object], suffix: str) -> tuple[BrokerOrderFact, ...]:
-    return tuple(
-        BrokerOrderFact.model_validate(row) for row in _raw_rows(raw, f"orders_{suffix}")
-    )
+    return tuple(BrokerOrderFact.model_validate(row) for row in _raw_rows(raw, f"orders_{suffix}"))
 
 
 def _validate_reconciliation(
@@ -261,6 +271,7 @@ def _typed_nav(raw: dict[object, object], label: str) -> tuple[DerivedCurrencyNa
         currency = row.get("currency")
         value = row.get("value")
         provider_as_of = row.get("provider_as_of")
+        observed_at = row.get("observed_at")
         source_request_ids = row.get("source_request_ids")
         if (
             not isinstance(currency, str)
@@ -269,7 +280,10 @@ def _typed_nav(raw: dict[object, object], label: str) -> tuple[DerivedCurrencyNa
             or not currency.isalpha()
             or currency != currency.upper()
             or not isinstance(value, str)
-            or not isinstance(provider_as_of, str)
+            or not (
+                (isinstance(provider_as_of, str) and observed_at is None)
+                or (provider_as_of is None and isinstance(observed_at, str))
+            )
             or not isinstance(source_request_ids, tuple | list)
         ):
             raise ValueError("derived NAV row is invalid")
@@ -277,8 +291,17 @@ def _typed_nav(raw: dict[object, object], label: str) -> tuple[DerivedCurrencyNa
             DerivedCurrencyNav(
                 currency=currency,
                 value=Decimal(value),
-                provider_as_of=require_utc(datetime.fromisoformat(provider_as_of)),
+                provider_as_of=(
+                    require_utc(datetime.fromisoformat(provider_as_of))
+                    if isinstance(provider_as_of, str)
+                    else None
+                ),
                 source_request_ids=tuple(source_request_ids),
+                observed_at=(
+                    require_utc(datetime.fromisoformat(observed_at))
+                    if isinstance(observed_at, str)
+                    else None
+                ),
             )
         )
     return tuple(result)
@@ -295,7 +318,19 @@ def _validate_nav(raw: dict[object, object], trace: dict[str, object]) -> None:
         rows = derived[label]
         if not isinstance(rows, tuple | list) or not rows:
             raise InvalidBrokerSyncResult("derived NAV evidence is empty")
-        expected = _recompute_nav(raw, suffix)
+        read_observations = [
+            item
+            for item in observations
+            if isinstance(item, dict)
+            and item.get("phase") in {f"cash_{suffix}", f"positions_{suffix}"}
+        ]
+        observed_at = None
+        if read_observations[0].get("time_basis", "provider_event") == "gateway_observed":
+            observed_at = max(
+                require_utc(datetime.fromisoformat(str(item["response_as_of"])))
+                for item in read_observations
+            )
+        expected = _recompute_nav(raw, suffix, observed_at=observed_at)
         seen: set[str] = set()
         phase_source_ids = {
             observation.get("source_request_id")
@@ -319,7 +354,11 @@ def _validate_nav(raw: dict[object, object], trace: dict[str, object]) -> None:
                 raise InvalidBrokerSyncResult("derived NAV provenance is invalid")
             try:
                 value = row["value"]
-                as_of = row["provider_as_of"]
+                as_of = row.get("observed_at") if observed_at else row.get("provider_as_of")
+                if (observed_at and row.get("provider_as_of") is not None) or (
+                    not observed_at and row.get("observed_at") is not None
+                ):
+                    raise ValueError
                 if not isinstance(value, str) or not isinstance(as_of, str):
                     raise ValueError
                 decimal_value = Decimal(value)
@@ -340,7 +379,9 @@ def _validate_nav(raw: dict[object, object], trace: dict[str, object]) -> None:
             raise InvalidBrokerSyncResult("derived NAV currency coverage is invalid")
 
 
-def _recompute_nav(raw: dict[object, object], suffix: str) -> dict[str, tuple[Decimal, datetime]]:
+def _recompute_nav(
+    raw: dict[object, object], suffix: str, *, observed_at: datetime | None = None
+) -> dict[str, tuple[Decimal, datetime]]:
     cash_rows = raw.get(f"cash_{suffix}")
     position_rows = raw.get(f"positions_{suffix}")
     if not isinstance(cash_rows, tuple | list) or not isinstance(position_rows, tuple | list):
@@ -352,15 +393,17 @@ def _recompute_nav(raw: dict[object, object], suffix: str) -> dict[str, tuple[De
         raise InvalidBrokerSyncResult("derived NAV inputs are invalid") from None
     values: dict[str, tuple[Decimal, datetime]] = {}
     for item in cash:
-        if item.currency in values or item.provider_as_of is None:
+        as_of = observed_at or item.provider_as_of
+        if item.currency in values or as_of is None:
             raise InvalidBrokerSyncResult("derived NAV cash inputs are ambiguous")
-        values[item.currency] = (item.cash_balance, item.provider_as_of)
+        values[item.currency] = (item.cash_balance, as_of)
     for position in positions:
         prior = values.get(position.currency)
-        if prior is None or position.current_price is None or position.provider_as_of is None:
+        as_of = observed_at or position.provider_as_of
+        if prior is None or position.current_price is None or as_of is None:
             raise InvalidBrokerSyncResult("derived NAV position inputs are incomplete")
         values[position.currency] = (
             prior[0] + position.quantity * position.current_price,
-            max(prior[1], position.provider_as_of),
+            max(prior[1], as_of),
         )
     return values

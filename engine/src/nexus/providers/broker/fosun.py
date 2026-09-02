@@ -18,6 +18,7 @@ from nexus.providers.broker.base import (
     BrokerProviderError,
     CashBalance,
     DateRange,
+    SnapshotTimeBasis,
 )
 from nexus.providers.broker.fosun_contracts import CashFlowItem, CashItem, OrderItem, PositionItem
 from nexus.providers.broker.gateway_client import GatewayClientError, GatewayResponsePage
@@ -67,6 +68,7 @@ class FosunBrokerProvider:
         client: GatewayReader,
         instrument_ids: dict[str, UUID],
         cash_flow_kinds: dict[str, str],
+        snapshot_time_basis: SnapshotTimeBasis = "provider_event",
     ) -> None:
         if not external_account_id:
             raise ValueError("external account ID is required")
@@ -75,6 +77,7 @@ class FosunBrokerProvider:
         self._client = client
         self._instrument_ids = dict(instrument_ids)
         self._cash_flow_kinds = dict(cash_flow_kinds)
+        self._snapshot_time_basis = snapshot_time_basis
 
     async def read_cash(self, account_id: UUID, *, sync_run_id: UUID) -> BrokerPage[CashBalance]:
         del sync_run_id
@@ -93,8 +96,12 @@ class FosunBrokerProvider:
                 )
                 for item in raw_items
             )
-            quality = _quality(response, all(item.provider_as_of is not None for item in items))
-            return _page(response, items, quality)
+            return self._snapshot_page(
+                response,
+                items,
+                all(item.provider_as_of is not None for item in items),
+                observed_complete=bool(items),
+            )
         except _MAPPING_ERRORS:
             raise BrokerProviderError("gateway facts rejected") from None
 
@@ -132,7 +139,12 @@ class FosunBrokerProvider:
             complete = all(
                 item.current_price is not None and item.provider_as_of is not None for item in items
             )
-            return _page(response, items, _quality(response, complete))
+            return self._snapshot_page(
+                response,
+                items,
+                complete,
+                observed_complete=all(item.current_price is not None for item in items),
+            )
         except _MAPPING_ERRORS:
             raise BrokerProviderError("gateway facts rejected") from None
 
@@ -171,7 +183,7 @@ class FosunBrokerProvider:
                     )
                 )
             complete = all(item.updated_at is not None for item in items)
-            return _page(response, tuple(items), _quality(response, complete))
+            return self._snapshot_page(response, tuple(items), complete, observed_complete=True)
         except _MAPPING_ERRORS:
             raise BrokerProviderError("gateway facts rejected") from None
 
@@ -209,6 +221,23 @@ class FosunBrokerProvider:
         except _MAPPING_ERRORS:
             raise BrokerProviderError("gateway facts rejected") from None
 
+    def _snapshot_page[ItemT](
+        self,
+        response: GatewayResponsePage,
+        items: tuple[ItemT, ...],
+        complete: bool,
+        *,
+        observed_complete: bool,
+    ) -> BrokerPage[ItemT]:
+        # The reviewed Fosun account-state contracts omit event/update timestamps.
+        # Only the local read-only caller selects observation semantics; raw fact times stay null.
+        quality: BrokerPageQuality = (
+            ("PASS" if observed_complete else "PARTIAL")
+            if self._snapshot_time_basis == "gateway_observed"
+            else _quality(response, complete)
+        )
+        return _page(response, items, quality, time_basis=self._snapshot_time_basis)
+
     def _require_account(self, account_id: UUID) -> None:
         if account_id != self._account_id:
             raise BrokerProviderError("broker account scope rejected")
@@ -241,6 +270,8 @@ def _page[ItemT](
     response: GatewayResponsePage,
     items: tuple[ItemT, ...],
     quality: BrokerPageQuality,
+    *,
+    time_basis: SnapshotTimeBasis = "provider_event",
 ) -> BrokerPage[ItemT]:
     return BrokerPage(
         items=items,
@@ -249,4 +280,5 @@ def _page[ItemT](
         source_request_id=response.source_request_id,
         as_of=response.as_of,
         quality=quality,
+        time_basis=time_basis,
     )

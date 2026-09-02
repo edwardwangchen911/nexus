@@ -1920,7 +1920,11 @@ class InstrumentedTransport:
         sub_account_id: str,
         start: int | None,
         count: int,
+        from_date: str | None = None,
+        status_arr: list[int] | None = None,
     ) -> object:
+        assert from_date == "1970-01-01"
+        assert status_arr == [20, 22, 40, 60]
         self._record(
             "fosun_list_orders",
             {

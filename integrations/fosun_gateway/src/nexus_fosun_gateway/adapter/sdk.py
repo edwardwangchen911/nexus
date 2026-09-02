@@ -283,6 +283,9 @@ class SdkFosunTransport:
                     self._method("trade", "list_orders"),
                     deadline=deadline,
                     sub_account_id=_required_str(payload, "account_id"),
+                    # Omission defaults to seven days and can hide older still-open orders.
+                    from_date="1970-01-01",
+                    status_arr=[20, 22, 40, 60],
                     start=_cursor(payload),
                     count=_required_int(payload, "limit"),
                 )
