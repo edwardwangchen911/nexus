@@ -150,6 +150,9 @@ async def test_group_get_is_closed_three_way_and_what_if_requires_its_allowed_un
         "strategy_target",
     ]
     assert all("comparison" in proposal for proposal in proposals)
+    assert group_response.json()["data"]["economic_comparison"] == {
+        "status": "compared", "recommendation": "hold_current", "reasons": [],
+    }
     assert group_response.json()["data"]["shadow_eligibility"] == {
         "eligible": False,
         "reasons": ["SELECTION_AUTHORITY_MISSING"],

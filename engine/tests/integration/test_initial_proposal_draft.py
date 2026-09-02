@@ -185,6 +185,10 @@ async def test_first_draft_is_created_readable_and_replayed_without_formal_admis
         assert response.status_code == 201, response.text
         data = response.json()["data"]
         assert data["status"] == "draft"
+        assert data["economic_comparison"] == {
+            "status": "incomparable", "recommendation": None,
+            "reasons": ["COST_EVIDENCE_INCOMPLETE", "COMPARISON_EVIDENCE_INCOMPLETE"],
+        }
         assert data["baseline_portfolio_snapshot_id"] == str(baseline)
         assert all(p["comparison"]["non_executable"] for p in data["proposals"])
         assert all(not p["comparison"]["metrics"]["ranking_eligible"] for p in data["proposals"])
