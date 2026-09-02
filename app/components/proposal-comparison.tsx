@@ -105,6 +105,8 @@ export function ProposalComparison({ group, startShadowEnabled = true, rejectEna
         <span className="state-chip" data-state={terminal ? "stale" : "ready"}>{statusLabel(group.status)}</span>
       </header>
 
+      <EconomicComparisonSummary comparison={group.economic_comparison} />
+
       {/* The bounded scroll region must be keyboard-focusable on narrow screens. */}
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
       <div className="table-scroll proposal-comparison__scroll" role="region" aria-label="三方案指标表，可横向滚动" tabIndex={0}>
@@ -179,6 +181,42 @@ export function ProposalComparison({ group, startShadowEnabled = true, rejectEna
             </div>
           </div>
         </div>
+      ) : null}
+    </section>
+  );
+}
+
+const economicReasons = new Map([
+  ["COST_EVIDENCE_INCOMPLETE", "费用证据不完整，需补齐费用依据后再比较。"],
+  ["COMPARISON_EVIDENCE_INCOMPLETE", "方案比较证据不完整，需补齐相关指标与依据后再比较。"],
+  ["ECONOMIC_COMPARISON_POLICY_MISSING", "尚未明确风险改善与新增成本如何权衡，需先确定比较判据。"],
+]);
+
+function EconomicComparisonSummary({ comparison }: { comparison: ProposalGroup["economic_comparison"] }): React.ReactElement {
+  const compared = comparison?.status === "compared" && comparison.recommendation !== null;
+  const label = !comparison
+    ? "经济比较结论未报告"
+    : compared
+      ? `比较结果：${variantLabels[comparison.recommendation!]}`
+      : comparison.status === "policy_required" ? "待明确比较判据" : "暂不可比";
+
+  return (
+    <section aria-label="经济比较结论">
+      <h3>{label}</h3>
+      <p>{!comparison
+        ? "当前响应没有报告经济比较结论，不据此判断哪种方案更优。"
+        : compared
+          ? "这是已保存的经济比较结果，不代表已作出人工选择，也不授予执行权限。"
+          : "尚未形成经济比较结论，不能据此认定保持现状或调整更优。"}</p>
+      {comparison?.reasons.length ? (
+        <>
+          <p>{[...new Set(comparison.reasons.map((reason) => economicReasons.get(reason)
+            ?? "存在未分类的比较限制，请查看原因代码"))].join(" ")}</p>
+          <details>
+            <summary>查看原因代码</summary>
+            {comparison.reasons.map((reason, index) => <p key={`${index}:${reason}`}><code>{reason}</code></p>)}
+          </details>
+        </>
       ) : null}
     </section>
   );

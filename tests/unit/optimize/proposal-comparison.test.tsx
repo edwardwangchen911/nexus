@@ -1,10 +1,71 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ProposalComparison } from "../../../app/components/proposal-comparison";
 import { eligibleProposalGroup, proposalGroup } from "./fixtures";
 
 describe("three-way proposal comparison", () => {
+  it.each([undefined, null])("reports legacy economic output %s as unreported, never hold", (economic) => {
+    const onStartShadow = vi.fn();
+    const onReject = vi.fn();
+    render(<ProposalComparison group={proposalGroup({ economic_comparison: economic })} onStartShadow={onStartShadow} onReject={onReject} />);
+    const region = screen.getByRole("region", { name: "经济比较结论" });
+    expect(region).toHaveTextContent("经济比较结论未报告");
+    expect(region).toHaveTextContent("不据此判断哪种方案更优");
+    expect(region).not.toHaveTextContent("比较结果：保持现状");
+    expect(onStartShadow).not.toHaveBeenCalled();
+    expect(onReject).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["incomparable", "COST_EVIDENCE_INCOMPLETE", "暂不可比", "费用证据不完整"],
+    ["incomparable", "COMPARISON_EVIDENCE_INCOMPLETE", "暂不可比", "方案比较证据不完整"],
+    ["policy_required", "ECONOMIC_COMPARISON_POLICY_MISSING", "待明确比较判据", "风险改善与新增成本如何权衡"],
+  ] as const)("explains %s / %s without inferring a hold recommendation", (status, reason, label, explanation) => {
+    const group = proposalGroup({ economic_comparison: { status, recommendation: null, reasons: [reason] } });
+    render(<ProposalComparison group={group} onStartShadow={vi.fn()} onReject={vi.fn()} />);
+    const region = screen.getByRole("region", { name: "经济比较结论" });
+    expect(region).toHaveTextContent(label);
+    expect(region).toHaveTextContent(explanation);
+    expect(region).toHaveTextContent("尚未形成经济比较结论");
+    expect(region).not.toHaveTextContent("比较结果：保持现状");
+    expect(within(region).getByText("查看原因代码")).toBeVisible();
+    expect(within(region).getByText(reason).closest("details")).not.toHaveAttribute("open");
+    expect(screen.queryByRole("button", { name: "启动影子验证" })).not.toBeInTheDocument();
+  });
+
+  it.each(["hold_current", "minimum_change", "strategy_target"] as const)("shows the reported %s result without changing lifecycle eligibility", (recommendation) => {
+    const labels = { hold_current: "保持现状", minimum_change: "最小调整", strategy_target: "策略目标" };
+    const onStartShadow = vi.fn();
+    render(<ProposalComparison group={proposalGroup({ economic_comparison: { status: "compared", recommendation, reasons: [] } })} onStartShadow={onStartShadow} onReject={vi.fn()} />);
+    const region = screen.getByRole("region", { name: "经济比较结论" });
+    expect(region).toHaveTextContent(`比较结果：${labels[recommendation]}`);
+    expect(region).toHaveTextContent("不代表已作出人工选择，也不授予执行权限");
+    expect(screen.queryByRole("button", { name: "启动影子验证" })).not.toBeInTheDocument();
+    expect(onStartShadow).not.toHaveBeenCalled();
+  });
+
+  it("keeps economic explanations independent from existing shadow permission and confirmation", () => {
+    const onStartShadow = vi.fn();
+    render(<ProposalComparison group={eligibleProposalGroup({ economic_comparison: {
+      status: "policy_required", recommendation: null, reasons: ["ECONOMIC_COMPARISON_POLICY_MISSING"],
+    } })} onStartShadow={onStartShadow} onReject={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "启动影子验证" }));
+    expect(screen.getByRole("dialog", { name: "确认启动影子验证" })).toBeVisible();
+    expect(onStartShadow).not.toHaveBeenCalled();
+  });
+
+  it.each(['<img src=x onerror="alert(1)">', "__proto__"])("preserves zero and unknown costs and renders unfamiliar reason %s only as inert details", (reason) => {
+    const group = proposalGroup({ economic_comparison: { status: "incomparable", recommendation: null, reasons: [reason] } });
+    group.proposals[0].comparison.metrics.dimensions.cost = { status: "known", value: "0", reason: null };
+    const { container } = render(<ProposalComparison group={group} onStartShadow={vi.fn()} onReject={vi.fn()} />);
+    const row = screen.getByRole("rowheader", { name: "成本占比" }).closest("tr")!;
+    expect(within(row).getAllByRole("cell")[0]).toHaveTextContent(/^0%$/);
+    expect(within(row).getAllByRole("cell")[2]).toHaveTextContent("未知");
+    expect(screen.getByRole("region", { name: "经济比较结论" })).toHaveTextContent("存在未分类的比较限制，请查看原因代码");
+    expect(container.querySelector("img")).toBeNull();
+  });
+
   it("uses percent weights and coefficient HHI without promising blocked group eligibility", () => {
     const { container } = render(<ProposalComparison group={proposalGroup()} onStartShadow={vi.fn()} onReject={vi.fn()} />);
     const row = (label: string) => screen.getByRole("rowheader", { name: label }).closest("tr");
