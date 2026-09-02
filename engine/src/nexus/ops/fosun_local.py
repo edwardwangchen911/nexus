@@ -23,6 +23,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from nexus.api.schemas.portfolio import derive_snapshot_readiness
 from nexus.ops.fosun_local_refresh import (
     LocalFosunRefreshSettings,
+    LocalOrderReadError,
+    _gateway_failure_category,
     _safe_failure_code,
     refresh_local_fosun,
 )
@@ -324,6 +326,8 @@ async def read_local_status_safely(
 
 
 def safe_failure(error: Exception) -> dict[str, str]:
+    if isinstance(error, LocalOrderReadError):
+        return error.safe_output()
     if isinstance(error, GatewayClientError):
         category = _gateway_failure_category(str(error))
     elif isinstance(error, LocalDatabaseError):
@@ -341,23 +345,6 @@ def safe_failure(error: Exception) -> dict[str, str]:
         "category": category,
         "code": _safe_failure_code(error),
     }
-
-
-def _gateway_failure_category(message: str) -> str:
-    categories = {
-        "gateway rejected request: PROVIDER_AUTHENTICATION_FAILED": "auth",
-        "gateway rejected request: PROVIDER_PERMISSION_DENIED": "permission",
-        "gateway rejected request: PROVIDER_RATE_LIMITED": "rate_limit",
-        "gateway rejected request: PROVIDER_APPLICATION_ERROR": "provider",
-        "gateway rejected request: PROVIDER_ERROR": "provider",
-        "gateway rejected request: PROVIDER_UNAVAILABLE": "provider",
-        "gateway rejected request: PROVIDER_MALFORMED_RESPONSE": "contract",
-        "gateway rejected request: PROVIDER_WINDOW_MISMATCH": "contract",
-        "gateway request failed": "transport",
-        "gateway response contract rejected": "contract",
-        "gateway response rejected": "contract",
-    }
-    return categories.get(message, "gateway")
 
 
 def _parser() -> argparse.ArgumentParser:

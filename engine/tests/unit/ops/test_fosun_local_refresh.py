@@ -5,8 +5,10 @@ from decimal import Decimal
 from types import SimpleNamespace
 from uuid import uuid4
 
+import nexus.ops.fosun_local as local_module
 import nexus.ops.fosun_local_refresh as refresh_module
 import pytest
+from nexus.ops.fosun_local import safe_failure
 from nexus.ops.fosun_local_refresh import (
     _daily_window,
     _freeze_broker_facts,
@@ -187,7 +189,24 @@ async def test_local_broker_facts_use_one_complete_six_phase_read() -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_broker_read_includes_one_cash_flow_window_after_order_reconciliation() -> None:
+@pytest.mark.parametrize(
+    ("order_error", "category"),
+    (
+        (None, None),
+        (None, "incomplete_facts"),
+        ("gateway rejected request: PROVIDER_PERMISSION_DENIED", "permission"),
+        ("gateway rejected request: PROVIDER_AUTHENTICATION_FAILED", "auth"),
+        ("gateway rejected request: PROVIDER_RATE_LIMITED", "rate_limit"),
+        ("gateway rejected request: PROVIDER_ERROR", "provider"),
+        ("gateway rejected request: PROVIDER_APPLICATION_ERROR", "provider"),
+        ("gateway rejected request: PROVIDER_MALFORMED_RESPONSE", "contract"),
+        ("gateway request failed", "transport"),
+        ("gateway rejected request: PROVIDER_ERROR secret-canary", "gateway"),
+    ),
+)
+async def test_local_broker_read_preserves_order_failure_and_bounds_follow_up(
+    order_error: str | None, category: str | None
+) -> None:
     instant = datetime(2026, 8, 31, tzinfo=UTC)
     account_id = uuid4()
     instrument_id = uuid4()
@@ -206,7 +225,9 @@ async def test_local_broker_read_includes_one_cash_flow_window_after_order_recon
                         "currency": "USD",
                         "cash_balance": "1000",
                         "available_cash": "900",
-                        "provider_as_of": instant.isoformat(),
+                        "provider_as_of": (
+                            None if category == "incomplete_facts" else instant.isoformat()
+                        ),
                     },
                 ),
                 source_request_id=f"cash-{len(self.calls)}",
@@ -235,6 +256,8 @@ async def test_local_broker_read_includes_one_cash_flow_window_after_order_recon
         ) -> GatewayResponsePage:
             assert cursor is None and limit == 100
             self.calls.append("orders")
+            if order_error is not None:
+                raise GatewayClientError(order_error)
             return GatewayResponsePage(
                 items=(),
                 source_request_id=f"orders-{len(self.calls)}",
@@ -279,7 +302,7 @@ async def test_local_broker_read_includes_one_cash_flow_window_after_order_recon
             )
 
     broker = _Broker()
-    frozen, cash_flows = await refresh_module._read_broker_facts(
+    read = refresh_module._read_broker_facts(
         broker,
         account_id=account_id,
         portfolio_id=uuid4(),
@@ -289,6 +312,28 @@ async def test_local_broker_read_includes_one_cash_flow_window_after_order_recon
         cash_flow_end=date(2026, 8, 31),
         previous_cash_flow_watermark=None,
     )
+
+    if order_error is not None:
+        with pytest.raises(RuntimeError) as failure:
+            await read
+        assert safe_failure(failure.value) == {
+            "status": "failed",
+            "code": "LOCAL_ORDER_LIST_READ_FAILED",
+            "category": category,
+            "operation": "OrderList",
+        }
+        assert "canary" not in str(failure.value)
+        assert "redacted-test-account" not in repr(failure.value)
+        assert broker.calls == ["cash", "holdings", "orders"]
+        return
+
+    if category == "incomplete_facts":
+        with pytest.raises(RuntimeError, match="LOCAL_BROKER_RECONCILIATION_REQUIRED"):
+            await read
+        assert broker.calls == ["cash", "holdings", "orders", "holdings", "orders", "cash"]
+        return
+
+    frozen, cash_flows = await read
 
     assert frozen.status == "READY"
     assert cash_flows.quality == "PASS"
@@ -324,12 +369,13 @@ async def test_local_broker_gateway_rejects_pagination_before_follow_up() -> Non
 
     limited = _SinglePageBrokerGateway(_Broker())  # type: ignore[arg-type]
 
-    with pytest.raises(GatewayClientError, match="pagination rejected"):
+    with pytest.raises(RuntimeError, match="LOCAL_ORDER_LIST_READ_FAILED") as failure:
         await limited.read_orders(
             "redacted-test-account",
             cursor=None,
             limit=100,
         )
+    assert safe_failure(failure.value)["category"] == "contract"
 
 
 def test_daily_window_is_bounded_to_completed_xnys_sessions() -> None:
@@ -573,3 +619,42 @@ def test_failure_output_only_preserves_fixed_local_error_codes() -> None:
     )
     assert _safe_failure_code(ValueError("secret value")) == "LOCAL_READ_ONLY_REFRESH_FAILED"
     assert _safe_failure_code(RuntimeError("LOCAL_BAD-CHAR")) == ("LOCAL_READ_ONLY_REFRESH_FAILED")
+
+
+@pytest.mark.parametrize("entrypoint", ("local", "refresh"))
+def test_order_failure_reaches_both_cli_outputs_without_payloads(
+    entrypoint: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class _Broker:
+        async def read_orders(self, *_args: object, **_kwargs: object) -> GatewayResponsePage:
+            raise GatewayClientError("gateway rejected request: PROVIDER_PERMISSION_DENIED")
+
+    async def _refresh(_settings: object) -> dict[str, object]:
+        await _SinglePageBrokerGateway(_Broker()).read_orders(  # type: ignore[arg-type]
+            "secret-account-canary", cursor=None, limit=100
+        )
+        raise AssertionError("must stop on first error")
+
+    module = local_module if entrypoint == "local" else refresh_module
+    settings_factory = (
+        SimpleNamespace(model_validate=lambda _environment: object())
+        if entrypoint == "local"
+        else lambda: object()
+    )
+    monkeypatch.setattr(module, "LocalFosunRefreshSettings", settings_factory)
+    monkeypatch.setattr(module, "refresh_local_fosun", _refresh)
+    monkeypatch.setattr(local_module, "load_local_environment", lambda *_args: {})
+    monkeypatch.setattr("sys.argv", ["nexus-fosun-local", "refresh"])
+    with pytest.raises(SystemExit) as stopped:
+        module.main()
+
+    assert stopped.value.code == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert json.loads(output.err) == {
+        "status": "failed",
+        "code": "LOCAL_ORDER_LIST_READ_FAILED",
+        "category": "permission",
+        "operation": "OrderList",
+    }
+    assert "canary" not in output.err

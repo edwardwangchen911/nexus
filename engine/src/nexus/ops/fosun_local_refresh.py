@@ -108,6 +108,22 @@ class _LocalBrokerIdentity:
     previous_cash_flow_watermark: date | None
 
 
+class LocalOrderReadError(RuntimeError):
+    """Preserve only a fixed category across the local reconciliation boundary."""
+
+    def __init__(self, error: GatewayClientError) -> None:
+        super().__init__("LOCAL_ORDER_LIST_READ_FAILED")
+        self.category = _gateway_failure_category(str(error))
+
+    def safe_output(self) -> dict[str, str]:
+        return {
+            "status": "failed",
+            "code": "LOCAL_ORDER_LIST_READ_FAILED",
+            "category": self.category,
+            "operation": "OrderList",
+        }
+
+
 class _SinglePageBrokerGateway:
     """Keep the one-shot local broker request budget fixed and explicit."""
 
@@ -139,13 +155,18 @@ class _SinglePageBrokerGateway:
         cursor: str | None,
         limit: int,
     ) -> GatewayResponsePage:
-        return self._require_single_page(
-            await self._inner.read_orders(
-                external_account_id,
-                cursor=cursor,
-                limit=limit,
+        try:
+            return self._require_single_page(
+                await self._inner.read_orders(
+                    external_account_id,
+                    cursor=cursor,
+                    limit=limit,
+                )
             )
-        )
+        except GatewayClientError as error:
+            # This local one-shot error must not be reduced to generic snapshot failure.
+            # Never attach the response, request, account, or original exception text.
+            raise LocalOrderReadError(error) from None
 
     async def read_cash_flows(
         self,
@@ -1150,6 +1171,24 @@ def _safe_failure_code(error: Exception) -> str:
     return "LOCAL_READ_ONLY_REFRESH_FAILED"
 
 
+def _gateway_failure_category(message: str) -> str:
+    categories = {
+        "gateway rejected request: PROVIDER_AUTHENTICATION_FAILED": "auth",
+        "gateway rejected request: PROVIDER_PERMISSION_DENIED": "permission",
+        "gateway rejected request: PROVIDER_RATE_LIMITED": "rate_limit",
+        "gateway rejected request: PROVIDER_APPLICATION_ERROR": "provider",
+        "gateway rejected request: PROVIDER_ERROR": "provider",
+        "gateway rejected request: PROVIDER_UNAVAILABLE": "provider",
+        "gateway rejected request: PROVIDER_MALFORMED_RESPONSE": "contract",
+        "gateway rejected request: PROVIDER_WINDOW_MISMATCH": "contract",
+        "gateway request failed": "transport",
+        "gateway response contract rejected": "contract",
+        "gateway response rejected": "contract",
+        "gateway pagination rejected": "contract",
+    }
+    return categories.get(message, "gateway")
+
+
 def main() -> None:
     try:
         result = asyncio.run(
@@ -1158,8 +1197,12 @@ def main() -> None:
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as error:
-        code = _safe_failure_code(error)
-        sys.stderr.write(f'{{"status":"failed","code":"{code}"}}\n')
+        failure = (
+            error.safe_output()
+            if isinstance(error, LocalOrderReadError)
+            else {"status": "failed", "code": _safe_failure_code(error)}
+        )
+        sys.stderr.write(json.dumps(failure, sort_keys=True) + "\n")
         raise SystemExit(1) from None
     sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
 
