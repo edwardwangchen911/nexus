@@ -5,6 +5,7 @@ import json
 import re
 from datetime import UTC, date, datetime
 from hashlib import sha256
+from typing import Literal
 from urllib.parse import urlencode, urlsplit
 from uuid import UUID
 
@@ -91,9 +92,12 @@ async def refresh_sec_research(
     http_client: httpx.AsyncClient | None = None,
     store: RawEvidenceStore | None = None,
     disclosure_only: bool = False,
+    disclosure_form: Literal["6-K", "8-K"] = "6-K",
     fund_accession: str | None = None,
 ) -> dict[str, object]:
-    """Freeze company facts, latest 6-K, or one selected 497K; never enqueue."""
+    """Freeze company facts, latest selected 8-K/6-K, or one 497K; never enqueue."""
+    if disclosure_form not in {"6-K", "8-K"} or (disclosure_form != "6-K" and not disclosure_only):
+        raise ValueError("SEC_LOCAL_DISCLOSURE_FORM_INVALID")
     if fund_accession is not None and (
         disclosure_only or not re.fullmatch(r"[0-9]{10}-[0-9]{2}-[0-9]{6}", fund_accession)
     ):
@@ -256,7 +260,7 @@ async def refresh_sec_research(
                         raise ValueError("SEC_LOCAL_SUBMISSIONS_INVALID")
                     candidates = []
                     for accession, accepted, filed, form, filename in zip(*arrays, strict=True):
-                        if form != "6-K":
+                        if form != disclosure_form:
                             continue
                         if not all(
                             isinstance(value, str)
@@ -276,6 +280,8 @@ async def refresh_sec_research(
                         ):
                             candidates.append((accepted_at, accession, filed_date, filename))
                     if not candidates:
+                        if disclosure_form == "8-K" and "8-K/A" in recent["form"]:
+                            raise ValueError("SEC_LOCAL_DISCLOSURE_AMENDMENT_UNSUPPORTED")
                         raise ValueError("SEC_LOCAL_DISCLOSURE_UNAVAILABLE")
                     accepted_at, accession, filed, filename = max(candidates)
                     if not re.fullmatch(
@@ -295,10 +301,11 @@ async def refresh_sec_research(
                         (),
                         (("User-Agent", f"NEXUS {contact}"), ("Accept-Encoding", "gzip, deflate")),
                     )
+                    received_at = datetime.now(UTC)
                     excerpt, truncated = disclosure_excerpt(raw)
                     document = SecDisclosure(
                         instrument_id=instrument_id,
-                        form="6-K",
+                        form=disclosure_form,
                         accession_number=accession,
                         accepted_at=accepted_at,
                         filed_at=datetime.combine(filed, datetime.min.time(), tzinfo=UTC),
@@ -306,6 +313,7 @@ async def refresh_sec_research(
                         raw_content_hash=sha256(raw).hexdigest(),
                         excerpt=excerpt,
                         truncated=truncated,
+                        issuer_cik=identity.cik if disclosure_form == "8-K" else None,
                     )
                     content = document.canonical_bytes()
                     digest = sha256(content).hexdigest()
@@ -321,7 +329,7 @@ async def refresh_sec_research(
                         key=f"evidence/sec/{accession}/{digest}.json", content=content
                     )
                     inserted = await persist_disclosure(
-                        session, document, location=location, received_at=datetime.now(UTC)
+                        session, document, location=location, received_at=received_at
                     )
                     created, replayed = int(inserted), int(not inserted)
                 else:

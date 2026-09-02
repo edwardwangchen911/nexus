@@ -289,6 +289,9 @@ def main() -> int:
     )
     parser.add_argument("--instrument-id", type=UUID)
     parser.add_argument("--accession")
+    parser.add_argument(
+        "--form", choices=("6-K", "8-K"), help="Company disclosure form (default: 6-K)"
+    )
     parser.add_argument("--backend", choices=("codex_sdk", "responses"), default="codex_sdk")
     parser.add_argument(
         "--staged", action="store_true", help="Setup the three-stage SDK committee version"
@@ -300,6 +303,8 @@ def main() -> int:
     args = parser.parse_args()
     root = Path.cwd().resolve()
     try:
+        if args.form is not None and args.action != "refresh-disclosure":
+            raise ValueError("SEC_LOCAL_DISCLOSURE_FORM_INVALID")
         if args.staged and (args.action != "setup" or args.backend != "codex_sdk"):
             raise ValueError("CODEX_STAGED_SETUP_ONLY")
         if not (root / "engine/pyproject.toml").is_file():
@@ -352,6 +357,7 @@ def main() -> int:
                     args.instrument_id,
                     contact=contact,
                     disclosure_only=args.action == "refresh-disclosure",
+                    disclosure_form=args.form or "6-K",
                     fund_accession=args.accession,
                 )
             )

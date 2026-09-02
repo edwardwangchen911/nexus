@@ -3,6 +3,7 @@
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -12,7 +13,7 @@ import pytest
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord, AgentResearchRunRecord
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias
-from nexus.persistence.models.research import Filing, FinancialFactRecord
+from nexus.persistence.models.research import Filing, FinancialFactRecord, ResearchEvidenceRef
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import func, select
@@ -21,7 +22,7 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures/sec"
 INSTRUMENT = UUID("0198d500-1000-7000-8000-000000009001")
 
 
-def disclosure_responder(requests, *, failure=None):
+def disclosure_responder(requests, *, failure=None, form="6-K"):
     base = sec_responder(requests)
 
     def respond(request):
@@ -47,7 +48,7 @@ def disclosure_responder(requests, *, failure=None):
                                 else "2026-08-21T20:00:00Z"
                             ],
                             "filingDate": ["invalid" if failure == "date" else "2026-08-21"],
-                            "form": ["20-F" if failure == "unsupported" else "6-K"],
+                            "form": ["20-F" if failure == "unsupported" else form],
                             "primaryDocument": [
                                 "../secret.htm" if failure == "path" else "doc.htm"
                             ],
@@ -317,7 +318,7 @@ async def test_sec_only_refresh_stops_without_fake_research(migrated_database_ur
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("form", ["6-K", "497K"])
+@pytest.mark.parametrize("form", ["6-K", "497K", "8-K"])
 async def test_disclosure_reaches_sdk_api_and_portfolio_without_fabricated_facts(
     migrated_database_url,
     monkeypatch,
@@ -341,10 +342,14 @@ async def test_disclosure_reaches_sdk_api_and_portfolio_without_fabricated_facts
     options = (
         {"fund_accession": "0000320193-26-000001"} if form == "497K" else {"disclosure_only": True}
     )
+    if form == "8-K":
+        options["disclosure_form"] = "8-K"
     request_limit = 4 if form == "497K" else 3
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(
-            fund_responder(requests) if form == "497K" else disclosure_responder(requests)
+            fund_responder(requests)
+            if form == "497K"
+            else disclosure_responder(requests, form=form)
         )
     ) as client:
         first = await refresh_sec_research(
@@ -463,6 +468,19 @@ async def test_disclosure_reaches_sdk_api_and_portfolio_without_fabricated_facts
         source = await session.scalar(
             select(DataSnapshot).where(DataSnapshot.schema_version == SCHEMA_VERSION)
         )
+        if form == "8-K":
+            from nexus.agents.snapshots import prepare_research_snapshot
+
+            evidence = await session.get(ResearchEvidenceRef, evidence_id)
+            assert evidence.available_at == source.available_at == source.received_at
+            assert source.observed_at < source.received_at
+            assert datetime.fromisoformat(filing["received_at"]) == source.received_at
+            assert (
+                await prepare_research_snapshot(
+                    session, INSTRUMENT, as_of=source.received_at - timedelta(microseconds=1)
+                )
+                is None
+            )
         assert (
             await read_disclosures(
                 session,
@@ -491,15 +509,80 @@ async def test_disclosure_reaches_sdk_api_and_portfolio_without_fabricated_facts
 
 
 @pytest.mark.asyncio
+async def test_8k_revision_preserves_old_frozen_text_and_receipt(migrated_database_url):
+    from nexus.agents.snapshots import prepare_research_snapshot
+    from nexus.api.research_inputs import read_research_inputs
+    from nexus.research.sec_disclosures import SecDisclosure, persist_disclosure
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    await seed_instrument(settings)
+    accepted = datetime(2026, 8, 21, 20, tzinfo=UTC)
+    received = accepted + timedelta(days=1)
+    document = SecDisclosure(
+        instrument_id=INSTRUMENT,
+        issuer_cik="0000320193",
+        form="8-K",
+        accession_number="0000320193-26-000001",
+        source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019326000001/doc.htm",
+        filed_at=accepted.replace(hour=0),
+        accepted_at=accepted,
+        raw_content_hash="a" * 64,
+        excerpt="Original operating update for investors.",
+        truncated=False,
+    )
+    factory = session_factory(settings)
+    location = "memory://sha256/" + sha256(document.canonical_bytes()).hexdigest()
+    async with factory() as session, session.begin():
+        with pytest.raises(ValueError, match="RECEIPT_TIME_INVALID"):
+            await persist_disclosure(
+                session, document, location=location, received_at=accepted - timedelta(seconds=1)
+            )
+        assert await persist_disclosure(session, document, location=location, received_at=received)
+        old = await prepare_research_snapshot(session, INSTRUMENT, as_of=received)
+        assert old is not None
+        assert not await persist_disclosure(
+            session, document, location=location, received_at=received + timedelta(seconds=1)
+        )
+        revised = document.model_copy(
+            update={
+                "raw_content_hash": "b" * 64,
+                "excerpt": "Revised operating update for investors.",
+            }
+        )
+        later = received + timedelta(hours=1)
+        revised_location = "memory://sha256/" + sha256(revised.canonical_bytes()).hexdigest()
+        assert await persist_disclosure(
+            session, revised, location=revised_location, received_at=later
+        )
+        current = await prepare_research_snapshot(session, INSTRUMENT, as_of=later)
+        original = await read_research_inputs(
+            session, snapshot_id=old.id, instrument_id=INSTRUMENT, as_of=later
+        )
+        latest = await read_research_inputs(
+            session, snapshot_id=current.id, instrument_id=INSTRUMENT, as_of=later
+        )
+        assert [f.disclosure_excerpt for f in original.filings] == [document.excerpt]
+        assert {f.disclosure_excerpt for f in latest.filings} == {document.excerpt, revised.excerpt}
+        assert await session.scalar(select(func.count()).select_from(Filing)) == 2
+        assert sorted(await session.scalars(select(ResearchEvidenceRef.available_at))) == [
+            received,
+            later,
+        ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["6-K", "8-K"])
 @pytest.mark.parametrize("failure", ["path", "future", "naive", "date", "unsupported", "redirect"])
-async def test_disclosure_error_stops_before_persisting_or_retrying(migrated_database_url, failure):
+async def test_disclosure_error_stops_before_persisting_or_retrying(
+    migrated_database_url, failure, form
+):
     from nexus.ops.sec_local import refresh_sec_research
 
     settings = EngineSettings(database_url=migrated_database_url)
     await seed_instrument(settings)
     requests = []
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(disclosure_responder(requests, failure=failure))
+        transport=httpx.MockTransport(disclosure_responder(requests, failure=failure, form=form))
     ) as client:
         with pytest.raises((ValueError, RuntimeError)):
             await refresh_sec_research(
@@ -509,6 +592,7 @@ async def test_disclosure_error_stops_before_persisting_or_retrying(migrated_dat
                 http_client=client,
                 store=InMemoryRawEvidenceStore(),
                 disclosure_only=True,
+                disclosure_form=form,
             )
     assert len(requests) == (3 if failure == "redirect" else 2)
     async with session_factory(settings)() as session:
