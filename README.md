@@ -183,6 +183,11 @@ Provider 请求最多 22 次。超过范围、合同不匹配、订单读取失�
 组合与快照的 BFF GET，不会 POST `/api/v1/broker-sync-runs`。`00656.HK` 仍仅作只读持仓展示，不请求
 Quote 或 K 线。
 
+K 线展示链路固定显式发送 `right=noward`（不复权），不依赖 Provider 的省略参数默认值。
+复星[行情接口合同](https://openapi-docs.fosunxcz.com/specs/public/market/market/openapi.yaml)
+另有 `forward`（前复权）和 `backward`（后复权），但当前入口不开放选择，也不因此将展示数据
+升级为正式研究证据。该修正只影响后续显式刷新，不触发外部请求、不改写既有快照或历史质量标记。
+
 组合快照同时展示两类就绪度：“展示状态”只回答现金/持仓事实是否可用；“决策状态”回答
 是否完成对账、时效和风控门禁。因此 `PARTIAL` 快照仍可正常展示真实资产，但不会被误用为优化或交易基线。
 

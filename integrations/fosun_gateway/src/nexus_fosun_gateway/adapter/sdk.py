@@ -775,7 +775,8 @@ def _bar_sdk_arguments(payload: Mapping[str, object]) -> dict[str, object]:
         start is not None and end is not None and start > end
     ):
         raise _invalid_payload()
-    arguments: dict[str, object] = {"code": code, "ktype": ktype, "num": limit}
+    # Fosun documents `noward` as unadjusted; never infer raw from an omitted default.
+    arguments: dict[str, object] = {"code": code, "ktype": ktype, "num": limit, "right": "noward"}
     if ktype == "day" and end is not None:
         exclusive_date = end.astimezone(UTC).date() + timedelta(days=1)
         arguments["time"] = int(exclusive_date.strftime("%Y%m%d"))

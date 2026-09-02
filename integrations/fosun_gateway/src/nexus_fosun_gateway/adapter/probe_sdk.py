@@ -196,7 +196,7 @@ _PROBE_SDK_METHOD_CALLS: tuple[tuple[str, str, str, dict[str, object]], ...] = (
         "fosun_get_bars",
         "market",
         "kline",
-        {"code": "usAAPL", "ktype": "day", "time": 20260102, "num": 1},
+        {"code": "usAAPL", "ktype": "day", "time": 20260102, "num": 1, "right": "noward"},
     ),
 )
 _CORE_PROBE_SDK_OPERATIONS = frozenset(

@@ -130,6 +130,7 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
                 "ktype": "day",
                 "time": 20260823,
                 "num": 100,
+                "right": "noward",
             },
         )
     ]

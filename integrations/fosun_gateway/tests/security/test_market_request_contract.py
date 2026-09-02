@@ -84,3 +84,18 @@ def test_bars_require_canonical_code_paired_window_and_strict_limit(
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("right", ("noward", "forward", "backward"))
+def test_bars_do_not_allow_clients_to_override_adjustment(
+    gateway_client: TestClient, right: str
+) -> None:
+    response = _post_signed(
+        gateway_client,
+        "fosun_get_bars",
+        {"code": "usAAPL", "ktype": "day", "right": right},
+        nonce="0198f7a0-2222-7777-8222-222222222315",
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"

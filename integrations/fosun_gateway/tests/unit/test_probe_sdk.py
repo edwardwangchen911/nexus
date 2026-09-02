@@ -135,7 +135,7 @@ def test_frozen_sdk_methods_require_exact_probe_call_bindings_before_dispatch() 
         "fosun_get_bars",
     )
     assert inspect.signature(validated["fosun_get_bars"]).bind(
-        code="usAAPL", ktype="day", time=20260102, num=1
+        code="usAAPL", ktype="day", time=20260102, num=1, right="noward"
     )
 
 
@@ -158,6 +158,33 @@ def test_locked_fsopenapi_v1_2_method_surface_binds_without_constructing_client(
         "fosun_get_quotes",
         "fosun_get_bars",
     )
+
+
+@pytest.mark.parametrize("scope", (None, "core"))
+def test_sdk_without_explicit_adjustment_is_rejected_without_calling_it(scope) -> None:
+    physical_requests = 0
+
+    class LegacyMarket:
+        def quote(self, codes: object) -> object:
+            raise AssertionError("method validation must not call the SDK")
+
+        def kline(self, code: object, ktype: object, time: object, num: object) -> object:
+            nonlocal physical_requests
+            physical_requests += 1
+            return object()
+
+    client = SimpleNamespace(
+        account=object.__new__(AccountAPI),
+        portfolio=object.__new__(PortfolioAPI),
+        trade=object.__new__(TradeAPI),
+        market=LegacyMarket(),
+    )
+
+    with pytest.raises(ProbeSdkError) as failure:
+        validate_probe_sdk_method_bindings(client, scope=scope)
+
+    assert failure.value.code == "SDK_CONTRACT_MISMATCH"
+    assert physical_requests == 0
 
 
 def test_probe_sdk_binding_rejects_incompatible_method_before_physical_request() -> None:

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from nexus_fosun_gateway.adapter.normalization import normalize_provider_response
+from nexus_fosun_gateway.adapter.sdk import _bar_sdk_arguments
 from nexus_fosun_gateway.domain import GatewayError
 from sdk_adapter_helpers import client as client
 from sdk_adapter_portfolio_cases import (
@@ -23,6 +24,26 @@ from sdk_adapter_portfolio_cases import (
 from sdk_adapter_portfolio_cases import (
     test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface as test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface,  # noqa: E501
 )
+
+
+@pytest.mark.parametrize("ktype", ("day", "minute"))
+@pytest.mark.parametrize("bounded", (False, True))
+def test_bar_request_explicitly_selects_unadjusted_prices(ktype: str, bounded: bool) -> None:
+    payload = {"code": "usAAPL", "ktype": ktype, "limit": 100}
+    if bounded:
+        payload.update(start_time="2026-08-01T00:00:00Z", end_time="2026-08-22T00:00:00Z")
+
+    arguments = _bar_sdk_arguments(payload)
+
+    assert arguments["right"] == "noward"
+    assert arguments["num"] == 100
+    if bounded and ktype == "day":
+        assert arguments["time"] == 20260823
+        assert "end_time" not in arguments
+    else:
+        assert "time" not in arguments
+        assert arguments["start_time"] == (1785542400000 if bounded else None)
+        assert arguments["end_time"] == (1787356800000 if bounded else None)
 
 
 @pytest.mark.parametrize("operation", ("fosun_list_orders", "fosun_list_cash_flows"))
@@ -50,7 +71,10 @@ def test_null_list_requires_pagination_proof_of_no_records(operation, total, acc
 
 @pytest.mark.parametrize("returned,total,accepted", ((1, 1, True), (0, 0, True), (1, 2, False)))
 def test_orders_capacity_count_requires_complete_page(
-    client: SimpleNamespace, returned: int, total: int, accepted: bool  # noqa: F811
+    client: SimpleNamespace,  # noqa: F811
+    returned: int,
+    total: int,
+    accepted: bool,
 ):
     raw = deepcopy(client.trade.list_orders.response)
     raw["data"].update(start=0, count=100, total=total)
