@@ -39,6 +39,29 @@ NEXUS 是私人投资研究、回测与模拟交易工作台。它不提供投�
 
 ### 本机 OpenAI Agent 接入
 
+当前本机使用官方 Python [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)
+（`openai-codex==0.147.0`，自带对应运行时），不再维护自写 CLI 输出解析器。
+复用本机已有 ChatGPT 登录，无需模型 API Key，也不读取、复制或展示认证文件。
+
+```bash
+uv run --package nexus-engine nexus-openai-local setup --backend codex_sdk
+uv run --package nexus-engine nexus-openai-local status --backend codex_sdk
+uv run --package nexus-engine nexus-openai-local run-once --backend codex_sdk
+```
+
+`setup` 仅登记模型和既有提示词、检查登录，不做模型推理。`run-once` 处理一个已登记的研究任务：
+主程序从数据库读取冻结的财报及脱敏组合背景，交给一个临时、只读、无工具的 SDK 会话，
+一次生成既有 8 个角色的结果，沿用原有证据校验、数据库、BFF 和研究页面。
+关闭模型请求/流重试和任务自动重试；35 秒超时后关闭 SDK，不启动后台轮询。
+工具、插件、MCP、hooks 和账户写入均不开放，不向 SDK 继承数据库或券商环境变量。
+财报期间与来源保留，模型只能引用冻结证据；缺合格价格依据仍为 `partial / watch`。
+页面区分 ChatGPT 套餐额度与 API 美元费用，并展示真实 token 用量；零 API 美元不代表免费或无限额度。
+64,000 输入 / 8,192 输出为本地验收阈值，不承诺能中途硬截断套餐计费；SDK 会话也有上下文开销。
+新增依赖仅位于 Python 引擎，无新服务、数据库迁移或自动调度。
+停用此入口即可停止调用；如需回到下面的 API 方式，显式使用 `--backend responses`，保留审计历史。
+
+#### 可选：独立 API Key 的 Responses 接入
+
 复用已有 Responses/委员会和预算逻辑，不新建 Agent 框架。默认固定
 `gpt-5.4-mini-2026-03-17`，模型与 8 个已有提示词可幂等登记到本地数据库。
 单次研究共享 64,000 输入 / 8,192 输出 token 上限，按 2026-09-02 核实的
@@ -48,12 +71,12 @@ NEXUS 是私人投资研究、回测与模拟交易工作台。它不提供投�
 在仓库根目录执行：
 
 ```bash
-uv run --package nexus-engine nexus-openai-local setup
+uv run --package nexus-engine nexus-openai-local setup --backend responses
 ```
 
-`setup` 登记本地配置，在本机终端隐藏输入 API Key，保存到被 Git 忽略的
+以下 API 方式的命令均须显式加 `--backend responses`。`setup` 登记本地配置，在本机终端隐藏输入 API Key，保存到被 Git 忽略的
 `.secrets/nexus-openai-local/api-key`（0600）；也接受进程中的 `OPENAI_API_KEY`。
-不要在聊天、命令参数或受版本控制的文件中填写密钥；不复用 Codex 登录凭据。
+不要在聊天、命令参数或受版本控制的文件中填写密钥；此 API 方式不复用 Codex 登录凭据。
 `setup --skip-key` 可先完成无网络配置；`status` 只返回脱敏状态。
 录入后 `setup` 自动执行一次 `verify`：只向官方 API 发出一次不含账户数据的连通性请求，输出上限 128 tokens、
 超时 30 秒、无 SDK 自动重试；不能把连通性通过当作真实研究完成。

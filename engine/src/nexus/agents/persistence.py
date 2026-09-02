@@ -455,7 +455,7 @@ async def admit_research_run(
         payload={"run_id": str(run.id)},
         queue=QueueName.GENERAL,
         retry_policy=RetryPolicy.AUTOMATIC_SAFE,
-        max_attempts=3,
+        max_attempts=1 if model.version == "codex-sdk-chatgpt-v1" else 3,
         available_at=now,
     )
     await session.flush()

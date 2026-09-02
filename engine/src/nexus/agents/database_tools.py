@@ -175,6 +175,10 @@ class _BoundDatabaseExecutors:
                     "value": format(record.value, "f"),
                     "unit": record.unit,
                     "period_end": record.period_end.isoformat(),
+                    "period_start": record.period_start.isoformat()
+                    if record.period_start
+                    else None,
+                    "period_kind": record.period_kind,
                     "accepted_at": _timestamp(record.accepted_at),
                     "revision": record.revision,
                 }

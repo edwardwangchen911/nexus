@@ -272,9 +272,7 @@ async def execute_research_run(
         model,
         evidence_refs,
         role_outputs,
-        price_authority_valid=(
-            final_price_authority_status is FrozenPriceAuthorityStatus.VALID
-        ),
+        price_authority_valid=(final_price_authority_status is FrozenPriceAuthorityStatus.VALID),
     )
     await _append_output(
         session,
@@ -322,7 +320,7 @@ async def _analyze_with_one_retry(
         try:
             return await committee.analyze(role, request, evidence_refs, prompt)
         except Exception:
-            if run.retry_count >= 1:
+            if getattr(committee, "retry_on_error", True) is False or run.retry_count >= 1:
                 return None
             run.retry_count += 1
             await session.flush()

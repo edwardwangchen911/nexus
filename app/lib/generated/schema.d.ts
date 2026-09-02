@@ -3183,6 +3183,8 @@ export interface components {
         ResearchRunResponse: {
             /** Abstention Reason */
             abstention_reason?: string | null;
+            /** Billing Mode */
+            billing_mode?: "chatgpt_subscription" | null;
             /** Budget Reason */
             budget_reason: "budget_exhausted" | null;
             /**
@@ -3199,6 +3201,8 @@ export interface components {
             disagreement?: string | null;
             /** Evidence */
             evidence: components["schemas"]["EvidenceRef"][];
+            /** Input Tokens */
+            input_tokens?: number | null;
             /**
              * Instrument Id
              * Format: uuid
@@ -3207,6 +3211,8 @@ export interface components {
             intent: components["schemas"]["ResearchIntent"] | null;
             /** Invalidation Conditions */
             invalidation_conditions: components["schemas"]["ResearchCondition"][];
+            /** Output Tokens */
+            output_tokens?: number | null;
             /** Quality Status */
             quality_status: ("complete" | "partial") | null;
             /** Reserved Cost Usd */

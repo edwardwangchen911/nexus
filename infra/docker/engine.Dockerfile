@@ -8,6 +8,7 @@ COPY pyproject.toml uv.lock ./
 COPY engine/pyproject.toml engine/pyproject.toml
 COPY integrations/fosun_gateway/pyproject.toml integrations/fosun_gateway/pyproject.toml
 COPY contracts/strategy contracts/strategy
+COPY contracts/agent contracts/agent
 COPY engine/src engine/src
 COPY engine/alembic.ini engine/alembic.ini
 COPY engine/alembic engine/alembic

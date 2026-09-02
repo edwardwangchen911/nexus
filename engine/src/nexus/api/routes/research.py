@@ -159,9 +159,7 @@ async def create_research_run(
             model_config_id=None,
             daily_limit_usd=settings.agent_daily_budget_usd,
             now=now,
-            allow_fixture_price_authority=(
-                settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE
-            ),
+            allow_fixture_price_authority=(settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE),
         )
     except BudgetExhausted as error:
         raise NexusError(
@@ -327,6 +325,11 @@ def _response(
         decision_time=run.decision_time,
         status=cast(AgentRunStatus, status),
         retry_count=run.retry_count,
+        billing_mode="chatgpt_subscription"
+        if run.pricing_version == "codex-sdk-chatgpt-v1"
+        else None,
+        input_tokens=run.input_tokens,
+        output_tokens=run.output_tokens,
         reserved_cost_usd=decimal_to_string(run.reserved_cost_usd),
         settled_cost_usd=None
         if run.settled_cost_usd is None

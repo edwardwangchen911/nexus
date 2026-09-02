@@ -81,6 +81,15 @@ describe("research evidence docket", () => {
     expect(screen.getByText("研究证据").closest("li")).toHaveAttribute("aria-current", "step");
   });
 
+  it("shows SDK subscription usage without claiming API spend or enabling execution", () => {
+    render(<ResearchPanel state="partial" research={researchData({
+      billing_mode: "chatgpt_subscription", input_tokens: 300, output_tokens: 80,
+    })} admission={null} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
+    expect(screen.getByText(/模型来源：Codex SDK/)).toBeVisible();
+    expect(screen.getByText(/300 \/ 80/)).toBeVisible();
+    expect(screen.getByText(/交易保持锁定/)).toBeVisible();
+  });
+
   it("renders stance, paired arguments, votes, invalidation and versions without a score or trade action", () => {
     render(<ResearchPanel state="ready" research={researchData()} admission={researchAdmissionData()} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
 

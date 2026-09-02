@@ -24,7 +24,7 @@ from nexus.agents.committee import load_prompt_assets
 from nexus.ops.fosun_local import _localize_compose_endpoints
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentPromptVersionRecord
 from nexus.persistence.session import session_factory
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 
 # Official model page checked 2026-09-02; do not extend pricing validity on each startup.
 # https://developers.openai.com/api/docs/models/gpt-5.4-mini
@@ -43,8 +43,14 @@ _CONFIG: dict[str, str | int] = {
 _KEY_PATH = Path(".secrets/nexus-openai-local/api-key")
 
 
-def local_settings(root: Path, *, load_model_key: bool = True) -> EngineSettings:
+def local_settings(
+    root: Path, *, load_model_key: bool = True, backend: str = "responses"
+) -> EngineSettings:
     """Load only the local app configuration and OpenAI key, never broker credentials."""
+    if backend not in {"responses", "codex_sdk"}:
+        raise ValueError("OPENAI_BACKEND_INVALID")
+    if backend == "codex_sdk":
+        load_model_key = False
     environment = {
         key: value for key, value in dotenv_values(root / "infra/.env.local").items() if value
     }
@@ -65,7 +71,9 @@ def local_settings(root: Path, *, load_model_key: bool = True) -> EngineSettings
         raise ValueError("OPENAI_KEY_INVALID")
     environment.update(
         {
-            "AGENT_RUNTIME_MODE": "responses" if key else "fixture",
+            "AGENT_RUNTIME_MODE": "codex_sdk"
+            if backend == "codex_sdk"
+            else ("responses" if key else "fixture"),
             "OPENAI_EXTRACTION_MODEL": MODEL_ID,
             "OPENAI_REASONING_MODEL": MODEL_ID,
             "NEXUS_PROVIDER_JOBS_ENABLED": "false",
@@ -81,6 +89,10 @@ def local_settings(root: Path, *, load_model_key: bool = True) -> EngineSettings
 
 
 def status(settings: EngineSettings) -> dict[str, object]:
+    if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
+        from nexus.agents.codex_sdk import sdk_status
+
+        return asyncio.run(sdk_status())
     key_present = settings.openai_api_key is not None and bool(
         settings.openai_api_key.get_secret_value()
     )
@@ -102,7 +114,27 @@ async def prepare_database(settings: EngineSettings) -> None:
     host = make_url(settings.database_url).host
     if host is None or host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
-    config_hash = hashlib.sha256(json.dumps(_CONFIG, sort_keys=True).encode()).hexdigest()
+    config = dict(_CONFIG)
+    if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
+        from nexus.agents.codex_sdk import CONFIG_VERSION, MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS
+        from nexus.agents.codex_sdk import MODEL_ID as SDK_MODEL
+
+        config.update(
+            {
+                "model_id": SDK_MODEL,
+                "version": CONFIG_VERSION,
+                "max_input_tokens": MAX_INPUT_TOKENS,
+                "max_output_tokens": MAX_OUTPUT_TOKENS,
+                "max_tool_calls": 0,
+                "input_usd_per_million": "0",
+                "output_usd_per_million": "0",
+                # These fields bound configuration validity, not subscription pricing.
+                "pricing_expires_at": "2027-09-02T00:00:00+00:00",
+                "billing_mode": "chatgpt_subscription",
+                "max_sdk_turns": 1,
+            }
+        )
+    config_hash = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
     async with session_factory(settings)() as session, session.begin():
         for prompt in load_prompt_assets().values():
             existing = await session.scalar(
@@ -124,25 +156,25 @@ async def prepare_database(settings: EngineSettings) -> None:
                 raise ValueError("OPENAI_PROMPT_VERSION_CONFLICT")
         existing_model = await session.scalar(
             select(AgentModelConfigRecord).where(
-                AgentModelConfigRecord.model_id == MODEL_ID,
-                AgentModelConfigRecord.version == _CONFIG["version"],
+                AgentModelConfigRecord.model_id == config["model_id"],
+                AgentModelConfigRecord.version == config["version"],
             )
         )
         if existing_model is None:
             session.add(
                 AgentModelConfigRecord(
-                    model_id=MODEL_ID,
-                    version=str(_CONFIG["version"]),
+                    model_id=str(config["model_id"]),
+                    version=str(config["version"]),
                     config_hash=config_hash,
-                    max_input_tokens=int(_CONFIG["max_input_tokens"]),
-                    max_output_tokens=int(_CONFIG["max_output_tokens"]),
-                    max_tool_calls=int(_CONFIG["max_tool_calls"]),
-                    input_usd_per_million=Decimal(str(_CONFIG["input_usd_per_million"])),
-                    output_usd_per_million=Decimal(str(_CONFIG["output_usd_per_million"])),
+                    max_input_tokens=int(config["max_input_tokens"]),
+                    max_output_tokens=int(config["max_output_tokens"]),
+                    max_tool_calls=int(config["max_tool_calls"]),
+                    input_usd_per_million=Decimal(str(config["input_usd_per_million"])),
+                    output_usd_per_million=Decimal(str(config["output_usd_per_million"])),
                     pricing_available_at=datetime.fromisoformat(
-                        str(_CONFIG["pricing_available_at"])
+                        str(config["pricing_available_at"])
                     ),
-                    pricing_expires_at=datetime.fromisoformat(str(_CONFIG["pricing_expires_at"])),
+                    pricing_expires_at=datetime.fromisoformat(str(config["pricing_expires_at"])),
                 )
             )
         elif existing_model.config_hash != config_hash:
@@ -247,6 +279,7 @@ def main() -> int:
         ),
     )
     parser.add_argument("--instrument-id", type=UUID)
+    parser.add_argument("--backend", choices=("codex_sdk", "responses"), default="codex_sdk")
     parser.add_argument("--as-of", type=datetime.fromisoformat)
     parser.add_argument(
         "--skip-key", action="store_true", help="Prepare local DB only; no key prompt or network"
@@ -257,17 +290,25 @@ def main() -> int:
         if not (root / "engine/pyproject.toml").is_file():
             raise ValueError("OPENAI_REPOSITORY_ROOT_REQUIRED")
         settings = local_settings(
-            root, load_model_key=args.action not in {"prepare-research", "refresh-research"}
+            root,
+            load_model_key=args.action not in {"prepare-research", "refresh-research"},
+            backend=args.backend,
         )
         if args.action == "setup":
             asyncio.run(prepare_database(settings))
-            if not args.skip_key and settings.openai_api_key is None:
+            if (
+                args.backend == "responses"
+                and not args.skip_key
+                and settings.openai_api_key is None
+            ):
                 _save_key(root)
                 settings = local_settings(root)
             result = {**status(settings), "database_configuration": "registered"}
-            if not args.skip_key:
+            if args.backend == "responses" and not args.skip_key:
                 result.update(asyncio.run(verify_connection(settings)))
         elif args.action == "verify":
+            if args.backend == "codex_sdk":
+                raise ValueError("CODEX_USE_RUN_ONCE_FOR_RESEARCH")
             result = asyncio.run(verify_connection(settings))
         elif args.action == "prepare-research":
             if args.instrument_id is None:
@@ -295,10 +336,14 @@ def main() -> int:
                 )
             )
         elif args.action == "run-once":
-            if settings.openai_api_key is None:
+            if args.backend == "responses" and settings.openai_api_key is None:
                 raise ValueError("OPENAI_API_KEY_MISSING")
-            if datetime.now(UTC) >= datetime.fromisoformat(str(_CONFIG["pricing_expires_at"])):
+            if args.backend == "responses" and datetime.now(UTC) >= datetime.fromisoformat(
+                str(_CONFIG["pricing_expires_at"])
+            ):
                 raise ValueError("OPENAI_PRICING_EXPIRED")
+            if args.backend == "codex_sdk" and not status(settings)["ready_for_model_requests"]:
+                raise ValueError("CODEX_CHATGPT_LOGIN_REQUIRED")
             from nexus.worker import run_agent_worker_once
 
             result = {
@@ -313,7 +358,8 @@ def main() -> int:
         # Provider/DB errors can include credentials or request contents; never print them.
         code = (
             str(error)
-            if isinstance(error, ValueError) and str(error).startswith(("OPENAI_", "SEC_"))
+            if isinstance(error, ValueError)
+            and str(error).startswith(("OPENAI_", "SEC_", "CODEX_"))
             else type(error).__name__
         )
         print(json.dumps({"status": "blocked", "code": code, "execution_locked": True}))

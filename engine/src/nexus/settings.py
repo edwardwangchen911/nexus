@@ -17,6 +17,7 @@ class Environment(StrEnum):
 class AgentRuntimeMode(StrEnum):
     FIXTURE = "fixture"
     RESPONSES = "responses"
+    CODEX_SDK = "codex_sdk"
 
 
 class _SafeSettings(BaseSettings):
@@ -126,6 +127,10 @@ class EngineSettings(_SafeSettings):
 
     def _validate_agent_runtime(self) -> None:
         if self.agent_runtime_mode in {None, AgentRuntimeMode.FIXTURE}:
+            return
+        if self.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
+            if self.environment is Environment.PRODUCTION or self.provider_jobs_enabled:
+                raise ValueError("Codex SDK is only available for local research without providers")
             return
         if (
             _nonempty_secret(self.openai_api_key) is None

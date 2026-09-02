@@ -19,7 +19,7 @@ from nexus.agents.committee import (
 )
 from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.execution import TERMINAL, execute_research_run
-from nexus.agents.execution_authority import load_frozen_evidence
+from nexus.agents.execution_authority import load_frozen_evidence, load_frozen_prompts
 from nexus.agents.models import ResearchRequest
 from nexus.agents.price_authority import (
     FrozenPriceAuthorityStatus,
@@ -110,6 +110,8 @@ async def run_worker(settings: EngineSettings | None = None, *, run_forever: boo
     """Validate fixture startup in tests, or poll durable jobs in the worker process."""
     configured = settings or EngineSettings()
     _require_worker_runtime(configured)
+    if run_forever and configured.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
+        raise ValueError("Codex SDK research requires an explicit run-once invocation")
     if not run_forever:
         await asyncio.sleep(0)
         return
@@ -171,7 +173,10 @@ def _agent_registry(
     tools: ReadOnlyToolRegistry | None,
 ) -> JobRegistry:
     runtime_mode = _require_worker_runtime(settings)
-    allow_fixture_evidence = settings.environment is not Environment.PRODUCTION
+    allow_fixture_evidence = (
+        settings.environment is not Environment.PRODUCTION
+        and runtime_mode is not AgentRuntimeMode.CODEX_SDK
+    )
     allow_fixture_price_authority = runtime_mode is AgentRuntimeMode.FIXTURE
 
     async def handle(context: JobHandlerContext) -> JobHandlerResult:
@@ -215,7 +220,7 @@ def _agent_registry(
                 queue=QueueName.GENERAL,
                 timeout_seconds=45,
                 retry_policy=RetryPolicy.AUTOMATIC_SAFE,
-                max_attempts=3,
+                max_attempts=1 if runtime_mode is AgentRuntimeMode.CODEX_SDK else 3,
                 idempotency_namespace="agent.research",
                 handler=handle,
             ),
@@ -247,8 +252,14 @@ async def _committee(
     tools: ReadOnlyToolRegistry | None,
 ) -> CommitteeModel:
     if settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE:
+        configured_model = await session.get(AgentModelConfigRecord, run.model_config_id)
+        if configured_model is not None and configured_model.version == "codex-sdk-chatgpt-v1":
+            return _UnavailableResponsesCommittee()
         return FixtureCommittee()
-    allow_fixture_evidence = settings.environment is not Environment.PRODUCTION
+    allow_fixture_evidence = (
+        settings.environment is not Environment.PRODUCTION
+        and settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
+    )
     evidence_records = await load_frozen_evidence(
         session,
         run,
@@ -265,6 +276,37 @@ async def _committee(
     if price_authority_status is FrozenPriceAuthorityStatus.INVALID:
         raise ToolInputError("frozen price authority is unavailable")
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
+        from nexus.agents.codex_sdk import CONFIG_VERSION, MODEL_ID, CodexCommittee
+
+        prompts = await load_frozen_prompts(session, run)
+        if (
+            model is None
+            or model.model_id != MODEL_ID
+            or model.version != CONFIG_VERSION
+            or model.input_usd_per_million != 0
+            or model.output_usd_per_million != 0
+            or prompts is None
+        ):
+            return _UnavailableResponsesCommittee()
+        return CodexCommittee(
+            prompts={
+                role: PromptAsset(
+                    role=role,
+                    version=item.version,
+                    content=item.content,
+                    content_hash=item.content_hash,
+                )
+                for role, item in prompts.items()
+            },
+            tools=tools
+            or await database_read_only_tools(
+                session,
+                run,
+                allow_fixture_evidence=False,
+                allow_fixture_price_evidence=False,
+            ),
+        )
     if (
         model is None
         or settings.openai_reasoning_model != model.model_id

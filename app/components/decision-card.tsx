@@ -50,6 +50,14 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
         <div><dt>证据完整度</dt><dd>{research.quality_status ?? "未形成"}</dd></div>
       </dl>
 
+      {research.billing_mode === "chatgpt_subscription" ? (
+        <p className="research-page__gate" role="note">
+          模型来源：Codex SDK · 使用 ChatGPT 套餐额度，不按 API 美元费用结算。
+          输入 / 输出 tokens：{research.input_tokens ?? "未知"} / {research.output_tokens ?? "未知"}。
+          仅生成研究，交易保持锁定。
+        </p>
+      ) : null}
+
       {isHongKongGap ? (
         <div className="decision-card__warning" role="note">
           <ShieldAlert aria-hidden="true" size={19} />

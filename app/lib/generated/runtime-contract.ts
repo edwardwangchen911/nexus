@@ -5744,6 +5744,18 @@ export const runtimeContractSchemas = {
         ],
         "title": "Abstention Reason"
       },
+      "billing_mode": {
+        "anyOf": [
+          {
+            "const": "chatgpt_subscription",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Billing Mode"
+      },
       "budget_reason": {
         "anyOf": [
           {
@@ -5786,6 +5798,18 @@ export const runtimeContractSchemas = {
         "title": "Evidence",
         "type": "array"
       },
+      "input_tokens": {
+        "anyOf": [
+          {
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Input Tokens"
+      },
       "instrument_id": {
         "format": "uuid",
         "title": "Instrument Id",
@@ -5808,6 +5832,18 @@ export const runtimeContractSchemas = {
         "maxItems": 10,
         "title": "Invalidation Conditions",
         "type": "array"
+      },
+      "output_tokens": {
+        "anyOf": [
+          {
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Output Tokens"
       },
       "quality_status": {
         "anyOf": [

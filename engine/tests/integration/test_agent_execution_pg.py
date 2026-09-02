@@ -5,6 +5,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import httpx
@@ -67,6 +68,104 @@ _EVIDENCE_ID = UUID("0198d500-1000-7000-8000-000000001604")
 _PRICE_MANIFEST_ID = UUID("0198d500-1000-7000-8000-000000001707")
 _PARQUET_PRICE_EVIDENCE_ID = UUID("0198d500-1000-7000-8000-000000001708")
 _DRIFT_INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000001712")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_fails", [False, True])
+async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries(
+    migrated_database_url,
+    monkeypatch,
+    model_fails,
+):
+    from nexus.agents import codex_sdk
+    from nexus.agents.responses_budget import UsageSnapshot
+    from nexus.ops.openai_local import prepare_database
+
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    factory = session_factory(settings)
+    await _seed_authority(factory, include_base_evidence=False)
+    await _seed_database_tool_authority(
+        factory, link_price=False, bar_count=1, price_quality_flags=("missing",)
+    )
+    await prepare_database(settings)
+    async with factory() as session, session.begin():
+        model = await session.scalar(
+            select(AgentModelConfigRecord).where(
+                AgentModelConfigRecord.version == codex_sdk.CONFIG_VERSION
+            )
+        )
+        admission = await admit_research_run(
+            session,
+            actor_id="sdk-test",
+            route="/internal/v1/research-runs",
+            idempotency_key="sdk-batch",
+            request_hash="a" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID, data_snapshot_id=_SNAPSHOT_ID, decision_time=_NOW
+            ),
+            prompt_version_id=None,
+            model_config_id=model.id,
+            daily_limit_usd=Decimal("3"),
+            now=datetime(2026, 9, 2, tzinfo=UTC),
+        )
+    batch = {
+        "roles": [
+            {
+                "role": role,
+                "vote": "abstain",
+                "claims": [
+                    {"text": "冻结财报包含季度收入；缺少合格行情，保持观察。", "citations": [0]}
+                ],
+                "conflicting_facts": False,
+            }
+            for role in ROLE_ORDER
+        ]
+    }
+    invoke = AsyncMock(
+        return_value=(
+            json.dumps(batch),
+            UsageSnapshot(input_tokens=300, output_tokens=80, provider_calls=1),
+        )
+    )
+    if model_fails:
+        invoke.side_effect = RuntimeError("offline simulated model failure")
+    monkeypatch.setattr(codex_sdk, "invoke_codex", invoke)
+    assert await run_agent_worker_once(settings) is True
+    invoke.assert_awaited_once()
+    submitted = invoke.call_args.args[0]
+    assert submitted["frozen_inputs"]["financial_facts"]["items"][0]["period_start"] == "2026-04-01"
+    async with factory() as session:
+        run = await session.get(AgentResearchRunRecord, admission.run_id)
+        assert run.retry_count == 0
+        assert run.status == ("failed" if model_fails else "completed")
+        job = await session.scalar(select(Job).where(Job.payload["run_id"].astext == str(run.id)))
+        assert job.max_attempts == 1
+        if not model_fails:
+            assert (run.input_tokens, run.output_tokens) == (300, 80)
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(AgentResearchOutputRecord)
+                    .where(
+                        AgentResearchOutputRecord.run_id == run.id,
+                        AgentResearchOutputRecord.role.in_(ROLE_ORDER),
+                    )
+                )
+                == 8
+            )
+    assert await run_agent_worker_once(settings) is False
+    path = f"/internal/v1/research-runs/{admission.run_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["billing_mode"] == "chatgpt_subscription"
+    if not model_fails:
+        assert data["input_tokens"] == 300 and data["output_tokens"] == 80
+        assert data["intent"]["stance"] == "watch"
+        assert data["intent"]["exposure_action"] == "none"
 
 
 @pytest.mark.asyncio
