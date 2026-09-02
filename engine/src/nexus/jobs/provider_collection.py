@@ -91,7 +91,9 @@ from nexus.providers.fred import FRED_SERIES, normalize_alfred_observation
 from nexus.providers.market.alpaca import MarketProviderPayloadError
 from nexus.providers.market.fosun_gateway import FosunMarketGatewayError, RawGatewayResponse
 from nexus.providers.sec import (
+    SecCompanyFactsClient,
     SecInstrumentIdentity,
+    SecRawDocument,
     is_canonical_sec_accession_number,
     normalize_company_facts,
 )
@@ -1564,15 +1566,48 @@ async def _collect_sec(
     store: RawEvidenceStore,
     instruments: Sequence[SecInstrumentIdentity],
 ) -> tuple[int, int]:
+    return await collect_sec_filings(
+        cast(AsyncSession, context.session),
+        client=bundle.sec_client,
+        store=store,
+        instruments=instruments,
+    )
+
+
+async def collect_sec_filings(
+    session: AsyncSession,
+    *,
+    client: SecCompanyFactsClient,
+    store: RawEvidenceStore,
+    instruments: Sequence[SecInstrumentIdentity],
+    latest_only: bool = False,
+) -> tuple[int, int]:
     collected = 0
     replayed = 0
     for instrument in instruments:
-        (
-            company_facts,
-            submissions,
-        ) = await bundle.sec_client.fetch_company_facts_and_submission_history(instrument.cik)
+        submissions: tuple[SecRawDocument, ...]
+        if latest_only:
+            company_facts, current = await client.fetch_company_facts_and_submissions(
+                instrument.cik
+            )
+            submissions = (current,)
+        else:
+            company_facts, submissions = await client.fetch_company_facts_and_submission_history(
+                instrument.cik
+            )
         submission_payloads = tuple(document.raw_payload for document in submissions)
         accession_metadata = _submission_metadata(submission_payloads)
+        if latest_only:
+            candidates = {
+                accession: metadata
+                for accession, metadata in accession_metadata.items()
+                if metadata[1] in {"10-K", "10-Q"}
+                and metadata[0] <= min(company_facts.received_at, submissions[0].received_at)
+            }
+            if not candidates:
+                raise RuntimeError("SEC_RECENT_FINANCIAL_FILING_UNAVAILABLE")
+            latest = max(candidates, key=lambda accession: (candidates[accession][0], accession))
+            accession_metadata = {latest: candidates[latest]}
         evidence_payloads = {
             accession: _sec_accession_content(
                 company_facts.raw_payload,
@@ -1616,12 +1651,13 @@ async def _collect_sec(
             tuple(document.raw_payload for document in submissions),
             instrument=instrument,
             evidence_by_accession=evidence_by_accession,
+            included_accessions=frozenset(accession_metadata) if latest_only else None,
         )
         accessions = sorted({fact.accession_number for fact in facts})
         for accession in accessions:
             accession_facts = tuple(fact for fact in facts if fact.accession_number == accession)
             first = accession_facts[0]
-            existing = await context.session.scalar(
+            existing = await session.scalar(
                 select(ResearchEvidenceRef).where(
                     ResearchEvidenceRef.source == "sec",
                     ResearchEvidenceRef.provider_object_id == accession,
@@ -1642,8 +1678,8 @@ async def _collect_sec(
                 content_hash=first.evidence_ref.content_hash,
                 byte_length=len(evidence_payloads[accession]),
             )
-            context.session.add(evidence)
-            await context.session.flush()
+            session.add(evidence)
+            await session.flush()
             filing = Filing(
                 instrument_id=instrument.instrument_id,
                 evidence_ref_id=evidence.id,
@@ -1655,9 +1691,9 @@ async def _collect_sec(
                 accepted_at=first.accepted_at,
                 revision=first.revision,
             )
-            context.session.add(filing)
-            await context.session.flush()
-            context.session.add_all(
+            session.add(filing)
+            await session.flush()
+            session.add_all(
                 FinancialFactRecord(
                     filing_id=filing.id,
                     evidence_ref_id=evidence.id,
@@ -1682,7 +1718,7 @@ async def _collect_sec(
                 for fact in accession_facts
             )
             collected += 1
-    await context.session.flush()
+    await session.flush()
     return collected, replayed
 
 
@@ -1931,7 +1967,9 @@ def _sec_accession_content(
     submissions_payloads: Sequence[bytes],
     accession: str,
 ) -> bytes:
-    company_facts = _json_mapping(company_facts_payload, "SEC_COMPANY_FACTS_INVALID")
+    company_facts = _json_mapping(
+        company_facts_payload, "SEC_COMPANY_FACTS_INVALID", decimal_strings=True
+    )
     facts_root = company_facts.get("facts")
     if not isinstance(facts_root, Mapping):
         raise RuntimeError("SEC_COMPANY_FACTS_INVALID")
@@ -1970,9 +2008,11 @@ def _sec_accession_content(
     ).encode()
 
 
-def _json_mapping(payload: bytes, error_code: str) -> Mapping[str, object]:
+def _json_mapping(
+    payload: bytes, error_code: str, *, decimal_strings: bool = False
+) -> Mapping[str, object]:
     try:
-        value = json.loads(payload)
+        value = json.loads(payload, parse_float=str if decimal_strings else float)
     except Exception as error:
         raise RuntimeError(error_code) from error
     if not isinstance(value, Mapping):

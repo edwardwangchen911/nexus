@@ -279,6 +279,7 @@ def normalize_company_facts(
     *,
     instrument: SecInstrumentIdentity,
     evidence_by_accession: Mapping[str, EvidenceRef],
+    included_accessions: frozenset[str] | None = None,
 ) -> tuple[FinancialFact, ...]:
     """Join Company Facts with submissions ``acceptanceDateTime`` by accession.
 
@@ -288,7 +289,12 @@ def normalize_company_facts(
     """
     instrument.assert_us_sec_eligible()
     company_facts = _load_object(company_facts_payload, "INVALID_COMPANY_FACTS_PAYLOAD")
-    source_cik = _required_string(company_facts, "cik", "CIK_MISMATCH")
+    raw_cik = company_facts.get("cik")
+    if isinstance(raw_cik, bool) or not isinstance(raw_cik, str | int):
+        raise SecNormalizationError("CIK_MISMATCH")
+    source_cik = str(raw_cik)
+    if not source_cik.isascii() or not source_cik.isdigit() or len(source_cik) > 10:
+        raise SecNormalizationError("CIK_MISMATCH")
     if source_cik.zfill(10) != instrument.cik.zfill(10):
         raise SecNormalizationError("CIK_MISMATCH")
     accepted_by_accession = _accepted_submission_metadata(submissions_payload)
@@ -310,6 +316,21 @@ def normalize_company_facts(
             if not isinstance(tagged_fact, Mapping):
                 raise SecNormalizationError("INVALID_TAGGED_FACT")
             units = tagged_fact.get("units")
+            if included_accessions is not None and isinstance(units, Mapping):
+                selected_units = {}
+                for unit, entries in units.items():
+                    if not isinstance(entries, list):
+                        raise SecNormalizationError("AMBIGUOUS_UNIT")
+                    selected = [
+                        entry
+                        for entry in entries
+                        if isinstance(entry, Mapping) and entry.get("accn") in included_accessions
+                    ]
+                    if selected:
+                        selected_units[unit] = selected
+                units = selected_units
+                if not units:
+                    continue
             if not isinstance(units, Mapping) or len(units) != 1:
                 raise SecNormalizationError("AMBIGUOUS_UNIT")
             unit, entries = next(iter(units.items()))

@@ -62,6 +62,14 @@ uv run --package nexus-engine nexus-openai-local setup
 本入口不会把展示用 K 线提升为研究证据；真实财报尚未入库时返回
 `RESEARCH_EVIDENCE_UNAVAILABLE`，不创建空快照。资料齐备后仍沿用原有研究 API/Worker；
 价格依据缺失时委员会结果保持不完整、无仓位动作。停止使用该命令即可停用，无 schema 迁移。
+
+真实财报使用同一个入口：`nexus-openai-local refresh-research --instrument-id <标的 UUID>`。
+只需在本机已忽略的 `infra/.env.local` 中配置 `SEC_CONTACT` 联系邮箱（随请求标识发送给 SEC，
+不是登录账号或密钥），不需要 OpenAI、FRED 或券商凭据。单次仅处理该美股标的的最新
+10-K/10-Q：最多 3 个公开 GET（标的目录、Company Facts、当前 submissions），60 秒总窗口，
+禁止跳转、无自动重试、首错即停。复用已有 SEC 归档与财报/财务事实入库逻辑，
+核对 ticker/交易所/CIK 后生成研究输入及研究页路径，不启动模型或后台任务。
+仅写本机数据库及本机对象存储；重复财报不重复入库。停用此命令即可停止采集，无新服务或迁移。
 Responses 使用 `store=false`，工具续调用显式携带上下文；预算、证据校验和执行锁不变。
 本次不改变数据库 schema；停用此本机入口即可停止模型调用，保留配置与审计历史。
 

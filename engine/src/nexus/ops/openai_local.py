@@ -236,7 +236,15 @@ def _save_key(root: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "action", choices=("setup", "status", "verify", "prepare-research", "run-once")
+        "action",
+        choices=(
+            "setup",
+            "status",
+            "verify",
+            "prepare-research",
+            "refresh-research",
+            "run-once",
+        ),
     )
     parser.add_argument("--instrument-id", type=UUID)
     parser.add_argument("--as-of", type=datetime.fromisoformat)
@@ -248,7 +256,9 @@ def main() -> int:
     try:
         if not (root / "engine/pyproject.toml").is_file():
             raise ValueError("OPENAI_REPOSITORY_ROOT_REQUIRED")
-        settings = local_settings(root, load_model_key=args.action != "prepare-research")
+        settings = local_settings(
+            root, load_model_key=args.action not in {"prepare-research", "refresh-research"}
+        )
         if args.action == "setup":
             asyncio.run(prepare_database(settings))
             if not args.skip_key and settings.openai_api_key is None:
@@ -265,6 +275,23 @@ def main() -> int:
             result = asyncio.run(
                 prepare_local_research(
                     settings, args.instrument_id, as_of=args.as_of or datetime.now(UTC)
+                )
+            )
+        elif args.action == "refresh-research":
+            if args.instrument_id is None:
+                raise ValueError("OPENAI_RESEARCH_INSTRUMENT_REQUIRED")
+            if args.as_of is not None:
+                raise ValueError("SEC_LOCAL_REFRESH_USES_CURRENT_TIME")
+            from nexus.ops.sec_local import refresh_sec_research
+
+            contact = os.environ.get("SEC_CONTACT") or dotenv_values(root / "infra/.env.local").get(
+                "SEC_CONTACT"
+            )
+            result = asyncio.run(
+                refresh_sec_research(
+                    settings,
+                    args.instrument_id,
+                    contact=contact,
                 )
             )
         elif args.action == "run-once":
@@ -286,7 +313,7 @@ def main() -> int:
         # Provider/DB errors can include credentials or request contents; never print them.
         code = (
             str(error)
-            if isinstance(error, ValueError) and str(error).startswith("OPENAI_")
+            if isinstance(error, ValueError) and str(error).startswith(("OPENAI_", "SEC_"))
             else type(error).__name__
         )
         print(json.dumps({"status": "blocked", "code": code, "execution_locked": True}))
