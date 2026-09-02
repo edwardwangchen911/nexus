@@ -99,6 +99,7 @@ class _MarketSnapshotReads:
     quote_raw: RawGatewayResponse
     bars_raw: tuple[tuple[str, RawGatewayResponse], ...]
     request_counts: dict[str, int]
+    delivery_mode: Literal["unknown", "real_time", "delayed"]
 
 
 @dataclass(frozen=True)
@@ -449,6 +450,7 @@ async def _read_broker_facts(
     previous_cash_flow_watermark: date | None,
 ) -> tuple[BrokerSyncResult, CashFlowSyncResult]:
     """Read the reconciled snapshot, then one bounded cash-flow overlap window."""
+
     def resolve_order_instrument(code: str) -> UUID:
         if _US_PROVIDER_CODE.fullmatch(code) is None:
             raise ValueError("LOCAL_ORDER_INSTRUMENT_UNSUPPORTED")
@@ -662,6 +664,7 @@ async def _read_market_snapshot(
         raise RuntimeError("LOCAL_QUOTE_CONTRACT_INVALID") from None
 
     bars_raw: list[tuple[str, RawGatewayResponse]] = []
+    reported_delays: set[bool | None] = set()
     for code in codes:
         raw = await market.read_bars_raw(
             code=code,
@@ -689,11 +692,19 @@ async def _read_market_snapshot(
         ):
             raise ValueError("LOCAL_KLINE_WINDOW_INCOMPLETE")
         bars_raw.append((code, raw))
+        reported_delays.add(page.provider_reported_delay)
 
     return _MarketSnapshotReads(
         codes=codes,
         quote_raw=quote_raw,
         bars_raw=tuple(bars_raw),
+        delivery_mode=(
+            "delayed"
+            if reported_delays == {True}
+            else "real_time"
+            if reported_delays == {False}
+            else "unknown"
+        ),
         request_counts={
             "quotes": 1,
             "bars": len(bars_raw),
@@ -747,6 +758,7 @@ async def _persist_refresh(
         session,
         authorized_at=authorized_at,
         delivery_mode=settings.market_delivery_mode,
+        bars_delivery_mode=market_reads.delivery_mode,
     )
     quote_page = parse_quote_page(
         quote_raw,
@@ -820,7 +832,7 @@ async def _persist_refresh(
     bar_provider = FosunMarketDataProvider(
         _ClosedMarketGateway(),
         symbol_resolver=_UnusedSymbolResolver(),
-        delivery_mode=settings.market_delivery_mode,
+        delivery_mode=market_reads.delivery_mode,
     )
     bar_count = 0
     for code, bars_raw in market_reads.bars_raw:
@@ -853,7 +865,7 @@ async def _persist_refresh(
             gateway_request_end_at=request_end_at,
             commit=False,
         )
-        if ingestion.manifest.delivery_mode != "unknown":
+        if ingestion.manifest.delivery_mode != market_reads.delivery_mode:
             raise ValueError("LOCAL_KLINE_DISPLAY_MODE_INVALID")
         bar_count += len(normalized_bars.items)
     quote_success = sum(item.price is not None for item in quote_page.items)
@@ -1012,8 +1024,9 @@ async def _ensure_market_bindings(
     *,
     authorized_at: datetime,
     delivery_mode: str,
+    bars_delivery_mode: Literal["unknown", "real_time", "delayed"] | None = None,
 ) -> tuple[ProviderMarketBinding, ProviderMarketBinding]:
-    created_at = authorized_at - timedelta(seconds=1)
+    created_at = authorized_at
     expires_at = authorized_at + timedelta(days=_LOCAL_CAPABILITY_DAYS)
     status = await session.scalar(
         select(IntegrationStatus).where(IntegrationStatus.provider == "fosun").with_for_update()
@@ -1040,37 +1053,44 @@ async def _ensure_market_bindings(
 
     capabilities: list[ProviderCapability] = []
     for operation in ("fosun_get_quotes", "fosun_get_bars"):
+        selected_mode = (
+            bars_delivery_mode
+            if operation == "fosun_get_bars" and bars_delivery_mode is not None
+            else delivery_mode
+        )
         capability = await session.scalar(
-            select(ProviderCapability).where(
+            select(ProviderCapability)
+            .where(
                 ProviderCapability.provider == "fosun",
                 ProviderCapability.capability == "READ_ONLY",
                 ProviderCapability.contract_hash == _LOCAL_CONTRACT_HASH,
                 ProviderCapability.payload["operation"].as_string() == operation,
                 ProviderCapability.payload["market_scope"].as_string() == "US",
             )
+            .order_by(ProviderCapability.created_at.desc(), ProviderCapability.id.desc())
+            .limit(1)
         )
-        if capability is None:
-            capability = ProviderCapability(
-                provider="fosun",
-                capability="READ_ONLY",
-                contract_hash=_LOCAL_CONTRACT_HASH,
-                expires_at=expires_at,
-                schema_version="1",
-                payload={
-                    "operation": operation,
-                    "market_scope": "US",
-                    "delivery_mode": delivery_mode,
-                },
-                created_at=created_at,
-            )
-            session.add(capability)
-        elif (
+        if capability is not None and (
             capability.schema_version != "1"
-            or capability.payload.get("delivery_mode") != delivery_mode
             or capability.created_at > authorized_at
             or capability.expires_at <= authorized_at
         ):
             raise ValueError("LOCAL_MARKET_CAPABILITY_INVALID")
+        if capability is None or capability.payload.get("delivery_mode") != selected_mode:
+            capability = ProviderCapability(
+                provider="fosun",
+                capability="READ_ONLY",
+                contract_hash=_LOCAL_CONTRACT_HASH,
+                expires_at=expires_at if capability is None else capability.expires_at,
+                schema_version="1",
+                payload={
+                    "operation": operation,
+                    "market_scope": "US",
+                    "delivery_mode": selected_mode,
+                },
+                created_at=created_at,
+            )
+            session.add(capability)
         capabilities.append(capability)
     await session.flush()
     quote_capability, bars_capability = capabilities

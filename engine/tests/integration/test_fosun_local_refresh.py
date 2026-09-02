@@ -18,6 +18,7 @@ from nexus.ops.fosun_local_refresh import (
     _persist_ready_broker_snapshot,
     _read_broker_facts,
 )
+from nexus.persistence.models.data import ProviderCapability
 from nexus.persistence.models.portfolio import (
     BrokerCashFlow,
     BrokerSyncRun,
@@ -200,6 +201,43 @@ async def test_local_market_bindings_are_reusable_across_successful_refreshes(
     assert second_bars.provider_capability_id == first_bars.provider_capability_id
     assert second_quote.provider_status_id == first_quote.provider_status_id
     assert second_quote.provider_status_version == first_quote.provider_status_version + 1
+
+
+@pytest.mark.asyncio
+async def test_reported_delivery_appends_capability_version_without_relabeling_history(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(_settings(migrated_database_url))
+    first_at = datetime.now(UTC) - timedelta(minutes=5)
+    try:
+        async with factory() as session, session.begin():
+            first_quote, first_bars = await _ensure_market_bindings(
+                session, authorized_at=first_at, delivery_mode="unknown"
+            )
+        async with factory() as session, session.begin():
+            second_quote, second_bars = await _ensure_market_bindings(
+                session,
+                authorized_at=first_at + timedelta(minutes=1),
+                delivery_mode="unknown",
+                bars_delivery_mode="delayed",
+            )
+        async with factory() as session, session.begin():
+            _, third_bars = await _ensure_market_bindings(
+                session,
+                authorized_at=first_at + timedelta(minutes=2),
+                delivery_mode="unknown",
+                bars_delivery_mode="delayed",
+            )
+            old = await session.get(ProviderCapability, first_bars.provider_capability_id)
+            new = await session.get(ProviderCapability, second_bars.provider_capability_id)
+            assert old.payload["delivery_mode"] == "unknown"
+            assert new.payload["delivery_mode"] == "delayed"
+            assert old.created_at < new.created_at
+        assert first_quote.provider_capability_id == second_quote.provider_capability_id
+        assert first_bars.provider_capability_id != second_bars.provider_capability_id
+        assert second_bars.provider_capability_id == third_bars.provider_capability_id
+    finally:
+        await factory.kw["bind"].dispose()
 
 
 @pytest.mark.asyncio

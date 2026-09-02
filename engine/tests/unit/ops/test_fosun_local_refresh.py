@@ -111,6 +111,38 @@ class _RecordingMarket:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("delays", "expected"),
+    (
+        ((True, True), "delayed"),
+        ((False, False), "real_time"),
+        ((True, False), "unknown"),
+        ((True, None), "unknown"),
+        ((None, None), "unknown"),
+    ),
+)
+async def test_local_delivery_uses_only_consistent_response_declarations(delays, expected):
+    codes = ("usAAPL", "usMSFT")
+
+    class Market(_RecordingMarket):
+        async def read_bars_raw(self, **kwargs):
+            raw = await super().read_bars_raw(**kwargs)
+            doc = json.loads(raw.raw_payload)
+            doc["provider_reported_delay"] = delays[codes.index(kwargs["code"])]
+            return raw.model_copy(update={"raw_payload": json.dumps(doc).encode()})
+
+    result = await _read_market_snapshot(
+        Market(codes),
+        codes=codes,
+        request_start_at=datetime(2026, 8, 31, tzinfo=UTC),
+        request_end_at=datetime(2026, 9, 1, tzinfo=UTC),
+        expected_sessions=(date(2026, 8, 31),),
+    )
+    assert result.delivery_mode == expected
+    assert result.request_counts["total"] == 3
+
+
+@pytest.mark.asyncio
 async def test_local_broker_facts_use_one_complete_six_phase_read() -> None:
     instant = datetime(2026, 8, 31, tzinfo=UTC)
     account_id = uuid4()

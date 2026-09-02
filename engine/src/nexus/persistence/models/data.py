@@ -63,6 +63,7 @@ Index(
     ProviderCapability.contract_hash,
     text("COALESCE(payload ->> 'operation', '')"),
     text("COALESCE(payload ->> 'market_scope', '')"),
+    ProviderCapability.created_at,
     unique=True,
 )
 
