@@ -23,6 +23,12 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
     </dl>
     {inputs.truncated ? <p role="note">当前仅展示部分冻结资料，不代表完整覆盖。</p> : null}
     {inputs.portfolio_context ? <section className="decision-card__section">
+      {inputs.portfolio_context.research_focus ? <section aria-label="本次组合研究问题">
+        <h3>本次组合研究问题</h3>
+        <p>{inputs.portfolio_context.research_focus.question}</p>
+        <p>依据同一资产快照的集中度诊断。证券占比 {inputs.portfolio_context.research_focus.observed_weight}，预警阈值 {inputs.portfolio_context.research_focus.reference_limit}；均为同币种证券内比例，不含现金。</p>
+        <p>预警触发研究，不代表已决定减仓。政策版本：{inputs.portfolio_context.research_focus.policy_version}。</p>
+      </section> : null}
       <h3>此持仓的冻结组合背景</h3>
       <p>复星已入库快照，不是实时仓位；仅提供研究背景，执行保持锁定。</p>
       <dl className="decision-card__authority">

@@ -46,12 +46,21 @@ describe("research evidence docket", () => {
         valuation_reason: null, snapshot_decision_ready: true, execution_locked: true,
         diagnostic_run_id: "diagnostic", optimization_need: "RESEARCH_REQUIRED",
         diagnostic_input_hash: "d".repeat(64), diagnostics_truncated: false,
+        research_focus: {
+          question: "该持仓触发单一标的集中度预警：现有证据支持维持，还是需要研究减仓？",
+          diagnostic_code: "CONCENTRATION_TOP1", policy_scope: "currency:USD",
+          policy_version: "real_advisory_v1", observed_weight: "0.7", reference_limit: "0.35",
+          weight_basis: "same_currency_securities_excluding_cash",
+        },
         diagnostics: [{ code: "MARKET_EVIDENCE", severity: "warning", actionability: "research", unknown_reason: "MARKET_EVIDENCE_UNAVAILABLE" }],
         evidence_ref_id: "evidence", content_hash: "a".repeat(64),
       },
     }} />);
     expect(screen.getByRole("heading", { name: "此持仓的冻结组合背景" })).toBeVisible();
     expect(screen.getByText("0.4（USD 资产内）")).toBeVisible();
+    expect(screen.getByRole("region", { name: "本次组合研究问题" })).toBeVisible();
+    expect(screen.getByText(/均为同币种证券内比例，不含现金/)).toBeVisible();
+    expect(screen.getByText(/预警触发研究，不代表已决定减仓/)).toBeVisible();
     expect(screen.getByText("MARKET_EVIDENCE_UNAVAILABLE")).toBeVisible();
     expect(screen.getByText(/不是实时仓位/)).toBeVisible();
     expect(screen.queryByRole("button", { name: /交易|下单/ })).not.toBeInTheDocument();

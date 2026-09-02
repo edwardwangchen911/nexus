@@ -141,6 +141,43 @@ async def seed_context(session, *, quality="PASS", status="READY", offset=0, pri
 
 
 @pytest.mark.asyncio
+async def test_concentration_question_is_frozen_and_reaches_api_without_rewriting_old_inputs(
+    migrated_database_url,
+):
+    from nexus.agents.portfolio_context import read_portfolio_context
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    await prepare_database(settings)
+    async with session_factory(settings)() as session, session.begin():
+        await seed_filing(session)
+        _, report = await seed_context(session)
+        old = await prepare_research_snapshot(session, INSTRUMENT, as_of=NOW)
+        assert old is not None
+        session.add(PortfolioDiagnosticItemRecord(
+            report_id=report.id, diagnostic_code="CONCENTRATION_TOP1",
+            metric_value=Decimal(1), unit="ratio", reference_limit=Decimal("0.35"),
+            policy_scope="currency:USD", severity="warning", actionability="research",
+            unknown_reason=None, created_at=NOW + timedelta(seconds=1),
+        ))
+        await session.flush()
+        later = NOW + timedelta(seconds=2)
+        snapshot = await prepare_research_snapshot(session, INSTRUMENT, as_of=later)
+        assert snapshot is not None and snapshot.id != old.id
+        inputs = await read_research_inputs(
+            session, snapshot_id=snapshot.id, instrument_id=INSTRUMENT, as_of=later,
+        )
+        assert inputs is not None and inputs.portfolio_context is not None
+        context = inputs.portfolio_context
+        assert context.position_weight == "0.4"  # Includes cash.
+        assert context.research_focus is not None
+        assert Decimal(context.research_focus.observed_weight) == 1  # Securities only.
+        assert Decimal(context.research_focus.reference_limit) == Decimal("0.35")
+        earlier = await read_portfolio_context(session, old.id, INSTRUMENT, later)
+        assert earlier is not None and earlier.research_focus is None
+        assert await read_portfolio_context(session, snapshot.id, INSTRUMENT, NOW) is None
+
+
+@pytest.mark.asyncio
 async def test_frozen_portfolio_context_reaches_api_and_real_tools(migrated_database_url):
     settings = EngineSettings(database_url=migrated_database_url)
     await prepare_database(settings)

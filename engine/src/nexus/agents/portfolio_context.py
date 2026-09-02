@@ -40,6 +40,21 @@ class ContextDiagnostic(BaseModel):
     unknown_reason: str | None = Field(max_length=200)
 
 
+class ConcentrationResearchFocus(BaseModel):
+    """A research question tied to the holding that actually triggered the warning."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    question: Literal["该持仓触发单一标的集中度预警：现有证据支持维持，还是需要研究减仓？"]
+    diagnostic_code: Literal["CONCENTRATION_TOP1"] = "CONCENTRATION_TOP1"
+    policy_scope: str
+    policy_version: str
+    observed_weight: DecimalString
+    reference_limit: DecimalString
+    weight_basis: Literal["same_currency_securities_excluding_cash"] = (
+        "same_currency_securities_excluding_cash"
+    )
+
+
 class PortfolioResearchContext(BaseModel):
     """No account identities, cash amounts, quantities, order IDs or other holdings."""
 
@@ -62,16 +77,62 @@ class PortfolioResearchContext(BaseModel):
     diagnostic_input_hash: str | None = Field(pattern="^[0-9a-f]{64}$")
     diagnostics: tuple[ContextDiagnostic, ...] = Field(max_length=100)
     diagnostics_truncated: bool
+    research_focus: ConcentrationResearchFocus | None = None
     evidence_ref_id: UUID | None = None
     content_hash: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
 
 
 def _bytes(context: PortfolioResearchContext) -> bytes:
+    excluded = {"evidence_ref_id", "content_hash"}
+    # Preserve the exact content identity of older frozen contexts.
+    if context.research_focus is None:
+        excluded.add("research_focus")
     return json.dumps(
-        context.model_dump(mode="json", exclude={"evidence_ref_id", "content_hash"}),
+        context.model_dump(mode="json", exclude=excluded),
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
+
+
+def _concentration_focus(
+    held: PositionSnapshot,
+    positions: list[PositionSnapshot],
+    items: list[PortfolioDiagnosticItemRecord],
+    report: PortfolioDiagnosticReportRecord | None,
+) -> ConcentrationResearchFocus | None:
+    if report is None or not positions or any(
+        p.currency != held.currency or p.current_price is None or p.current_price <= 0
+        or p.quantity <= 0 for p in positions
+    ):
+        return None
+    with localcontext() as context:
+        context.prec = 38
+        values = {p.instrument_id: p.quantity * cast(Decimal, p.current_price) for p in positions}
+        held_value = values.get(held.instrument_id)
+        if held_value is None or held_value != max(values.values()):
+            return None
+        weight = held_value / sum(values.values(), Decimal(0))
+        matches = [item for item in items if (
+            item.diagnostic_code == "CONCENTRATION_TOP1"
+            and item.policy_scope == f"currency:{held.currency}"
+            and item.unknown_reason is None
+            and item.severity in {"warning", "critical"}
+            and item.metric_value is not None and item.reference_limit is not None
+            and item.metric_value > item.reference_limit
+            # Database ratios use NUMERIC(38, 12).
+            and abs(item.metric_value - weight) <= Decimal("0.000000000001")
+        )]
+    if len(matches) != 1:
+        return None
+    trigger = matches[0]
+    assert trigger.metric_value is not None and trigger.reference_limit is not None
+    return ConcentrationResearchFocus(
+        question="该持仓触发单一标的集中度预警：现有证据支持维持，还是需要研究减仓？",
+        policy_scope=trigger.policy_scope,
+        policy_version=report.policy_version,
+        observed_weight=decimal_to_string(trigger.metric_value),
+        reference_limit=decimal_to_string(trigger.reference_limit),
+    )
 
 
 async def freeze_portfolio_context(
@@ -207,6 +268,10 @@ async def freeze_portfolio_context(
             for item in items[:100]
         ),
         diagnostics_truncated=len(items) > 100,
+        research_focus=(
+            _concentration_focus(held, currency_positions, items, report)
+            if ready and valid else None
+        ),
     )
     content = _bytes(context)
     digest = hashlib.sha256(content).hexdigest()

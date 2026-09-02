@@ -1331,6 +1331,37 @@ export interface components {
             /** Valid Oos Window Count */
             valid_oos_window_count?: number | null;
         };
+        /**
+         * ConcentrationResearchFocus
+         * @description A research question tied to the holding that actually triggered the warning.
+         */
+        ConcentrationResearchFocus: {
+            /**
+             * Diagnostic Code
+             * @default CONCENTRATION_TOP1
+             * @constant
+             */
+            diagnostic_code: "CONCENTRATION_TOP1";
+            /** Observed Weight */
+            observed_weight: string;
+            /** Policy Scope */
+            policy_scope: string;
+            /** Policy Version */
+            policy_version: string;
+            /**
+             * Question
+             * @constant
+             */
+            question: "该持仓触发单一标的集中度预警：现有证据支持维持，还是需要研究减仓？";
+            /** Reference Limit */
+            reference_limit: string;
+            /**
+             * Weight Basis
+             * @default same_currency_securities_excluding_cash
+             * @constant
+             */
+            weight_basis: "same_currency_securities_excluding_cash";
+        };
         /** ContextDiagnostic */
         ContextDiagnostic: {
             /**
@@ -2659,6 +2690,7 @@ export interface components {
              * Format: date-time
              */
             research_as_of: string;
+            research_focus?: components["schemas"]["ConcentrationResearchFocus"] | null;
             /**
              * Snapshot As Of
              * Format: date-time

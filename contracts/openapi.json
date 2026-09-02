@@ -1321,6 +1321,58 @@
         "title": "ComparisonResponse",
         "type": "object"
       },
+      "ConcentrationResearchFocus": {
+        "additionalProperties": false,
+        "description": "A research question tied to the holding that actually triggered the warning.",
+        "properties": {
+          "diagnostic_code": {
+            "const": "CONCENTRATION_TOP1",
+            "default": "CONCENTRATION_TOP1",
+            "title": "Diagnostic Code",
+            "type": "string"
+          },
+          "observed_weight": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Observed Weight",
+            "type": "string"
+          },
+          "policy_scope": {
+            "title": "Policy Scope",
+            "type": "string"
+          },
+          "policy_version": {
+            "title": "Policy Version",
+            "type": "string"
+          },
+          "question": {
+            "const": "该持仓触发单一标的集中度预警：现有证据支持维持，还是需要研究减仓？",
+            "title": "Question",
+            "type": "string"
+          },
+          "reference_limit": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Reference Limit",
+            "type": "string"
+          },
+          "weight_basis": {
+            "const": "same_currency_securities_excluding_cash",
+            "default": "same_currency_securities_excluding_cash",
+            "title": "Weight Basis",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question",
+          "policy_scope",
+          "policy_version",
+          "observed_weight",
+          "reference_limit"
+        ],
+        "title": "ConcentrationResearchFocus",
+        "type": "object"
+      },
       "ContextDiagnostic": {
         "additionalProperties": false,
         "properties": {
@@ -5124,6 +5176,16 @@
             "format": "date-time",
             "title": "Research As Of",
             "type": "string"
+          },
+          "research_focus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConcentrationResearchFocus"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "snapshot_as_of": {
             "format": "date-time",
