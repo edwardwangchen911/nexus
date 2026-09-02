@@ -60,6 +60,13 @@ for (const viewport of releaseViewports) {
     const metric = await assets.locator(".portfolio-valuation__facts dd").first().boundingBox();
     const authorityBox = await authority.boundingBox();
     expect(metric!.y + metric!.height).toBeLessThan(authorityBox!.y);
+    if (viewport.name === "desktop-1440") {
+      expect(authorityBox!.height).toBeLessThan(100);
+      const row = assets.locator(".portfolio-allocation li").first();
+      const amount = await row.locator("span").nth(1).boundingBox();
+      const percent = await row.locator("strong").boundingBox();
+      expect(Math.abs(amount!.y - percent!.y)).toBeLessThan(8);
+    }
     if (viewport.width < 768) {
       expect(metric!.y + metric!.height).toBeLessThan(viewport.height);
       expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThan(3200);

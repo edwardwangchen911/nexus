@@ -15,10 +15,7 @@ export function AuthorityLedger({ snapshotStatus, displayReadiness, decisionRead
   return (
     <section className="authority-ledger" aria-label="数据与决策权威边界">
       <header>
-        <div>
-          <p className="eyebrow">NEXUS AUTHORITY CIRCUIT</p>
-          <h2>证据如何抵达决策</h2>
-        </div>
+        <h2>数据与权限</h2>
         <span className="authority-ledger__mode"><Bot aria-hidden="true" size={15} />Agent 只提案</span>
       </header>
       <ol>

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import PortfolioPage, {
@@ -61,8 +61,8 @@ describe("portfolio vertical slice", () => {
 
   it("does not invent a bounded allocation bar for negative or leveraged shares", () => {
     const { container } = render(<PortfolioValuationSummary provider="fosun" snapshot={{ ...snapshot, cash: [{ ...snapshot.cash[0], cash_balance: "-1000.00" }] }} currency="HKD" compact />);
-    expect(screen.getByText("现金 -5.41%")).toBeVisible();
-    expect(screen.getByText("00656.HK 105.41%")).toBeVisible();
+    expect(screen.getByText("-5.41%")).toBeVisible();
+    expect(screen.getByText("105.41%")).toBeVisible();
     expect(container.querySelectorAll(".portfolio-allocation__meter")).toHaveLength(0);
   });
 
@@ -104,8 +104,8 @@ describe("portfolio vertical slice", () => {
     expect(valuation).toHaveTextContent("HKD 27,500.00");
     expect(valuation).toHaveTextContent("HKD 19,500.00");
     expect(valuation).toHaveTextContent("HKD 8,000.00");
-    expect(valuation).toHaveTextContent("现金 29.09%");
-    expect(valuation).toHaveTextContent("00656.HK 70.91%");
+    expect(within(valuation).getByText("现金", { selector: "li > span" }).closest("li")).toHaveTextContent("29.09%");
+    expect(within(valuation).getByText("00656.HK", { selector: "li > span" }).closest("li")).toHaveTextContent("70.91%");
     expect(valuation).toHaveTextContent("2026-08-23 08:00:00 UTC");
     expect(valuation).not.toHaveTextContent("折算总资产");
   });

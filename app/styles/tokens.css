@@ -107,19 +107,14 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .intelligence-header__copy h1 { margin: var(--space-1) 0 var(--space-2); font-size: 1.75rem; font-weight: 650; letter-spacing: -0.025em; line-height: 1.2; text-wrap: balance; }
 .intelligence-header__copy > p:last-child { max-inline-size: 68ch; margin: 0; color: var(--color-text-muted); font-size: 0.875rem; }
 .intelligence-header__actions { align-self: start; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); max-inline-size: 28rem; }
-.authority-ledger { display: grid; gap: var(--space-4); min-inline-size: 0; border: 1px solid var(--color-border); background:
-  linear-gradient(90deg, rgb(123 150 255 / 0.06), transparent 45%),
-  var(--color-surface); padding: var(--space-4); box-shadow: var(--shadow-sm); }
+.authority-ledger { display: grid; gap: var(--space-2); min-inline-size: 0; border: 1px solid var(--color-border); background: var(--color-surface); padding: var(--space-3); }
 .authority-ledger > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
-.authority-ledger h2 { margin: var(--space-1) 0 0; font-size: 1.15rem; }
+.authority-ledger h2 { margin: 0; color: var(--color-text-muted); font-size: 0.875rem; }
 .authority-ledger__mode { display: inline-flex; align-items: center; gap: var(--space-2); border: 1px solid rgb(123 150 255 / 0.3); background: rgb(123 150 255 / 0.07); padding: var(--space-1) var(--space-2); color: #B9C7FF; font-size: 0.75rem; font-weight: 650; }
 .authority-ledger ol { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
 .authority-ledger li { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-2); align-items: center; min-inline-size: 0; border-block-start: 1px solid var(--color-border); padding: var(--space-3); }
-.authority-ledger li + li::before { position: absolute; inset-block-start: -3px; inset-inline-start: -3px; inline-size: 6px; block-size: 6px; border-radius: 50%; background: var(--color-border); content: ""; }
 .authority-ledger li[data-state="verified"] { border-block-start-color: var(--color-positive); }
-.authority-ledger li[data-state="verified"]::before { background: var(--color-positive); box-shadow: 0 0 12px rgb(72 201 166 / 0.55); }
 .authority-ledger li[data-state="current"] { border-block-start-color: var(--color-warning); }
-.authority-ledger li[data-state="current"]::before, .authority-ledger li[data-state="attention"]::before { background: var(--color-warning); }
 .authority-ledger li[data-state="attention"] { border-block-start-color: var(--color-warning); background: rgb(226 180 91 / 0.045); }
 .authority-ledger li[data-state="locked"] { border-block-start-style: dashed; color: var(--color-text-muted); }
 .authority-ledger__icon { display: grid; place-items: center; inline-size: 32px; block-size: 32px; border: 1px solid var(--color-border); background: var(--color-surface-muted); color: var(--color-info); }
@@ -332,6 +327,13 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .portfolio-allocation__meter { grid-column: 1 / -1; display: block; block-size: 4px; overflow: hidden; background: var(--color-border); }
 .portfolio-allocation__meter > span { display: block; block-size: 100%; background: var(--color-info); }
 .portfolio-allocation li:first-child .portfolio-allocation__meter > span { background: var(--color-positive); }
+@media (min-width: 1280px) {
+  .authority-ledger { grid-template-columns: 8rem minmax(0, 1fr); align-items: center; }
+  .authority-ledger > header { flex-direction: column; align-items: flex-start; gap: var(--space-2); }
+  .portfolio-valuation[data-compact="true"] .portfolio-allocation li { grid-template-columns: minmax(0, 1fr) auto minmax(4rem, auto); }
+  .portfolio-valuation[data-compact="true"] .portfolio-allocation li strong { grid-column: auto; }
+  .portfolio-valuation[data-compact="true"] .portfolio-allocation li > span:first-child { overflow-wrap: anywhere; }
+}
 .portfolio-allocation li span:nth-child(2), .portfolio-allocation li strong { text-align: end; }
 .portfolio-valuation__note { color: var(--color-text-muted); font-size: 0.8125rem; line-height: 1.5; }
 .portfolio-summary__cash { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); margin: 0; border-block: 1px solid var(--color-border); padding-block: var(--space-3); }

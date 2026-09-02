@@ -228,7 +228,7 @@ function AllocationLine({ label, value, total, currency }: { label: string; valu
     <li>
       <span>{label}</span>
       <span className="numeric-data">{currency} {formatMoney(value)}</span>
-      <strong className="numeric-data">{label} {formatPercent(value, total)}</strong>
+      <strong className="numeric-data">{formatPercent(value, total)}</strong>
       {value >= BIGINT_ZERO && value <= total && total > BIGINT_ZERO ? <span className="portfolio-allocation__meter" aria-hidden="true"><span style={{ inlineSize: formatPercent(value, total) }} /></span> : null}
     </li>
   );
