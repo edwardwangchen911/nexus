@@ -60,7 +60,7 @@ for (const viewport of [
     await expect(dialog).toContainText("SEC");
     await expect(dialog).toContainText("0000320193-26-000001");
     await expect(dialog).toContainText("memory://sha256/");
-    await expect(dialog).toContainText("2026-08-24 18:30:00 UTC");
+    await expect(dialog).toContainText("2026-08-25 02:30:00 北京时间");
     await expect(dialog).toContainText("a".repeat(64));
     await expect(page.getByRole("button", { name: "关闭证据抽屉" })).toBeFocused();
     if (viewport.name === "desktop-1440") {

@@ -38,7 +38,7 @@ describe("portfolio vertical slice", () => {
     expect(screen.getByText("研究已完成 · 证据不完整")).toBeVisible();
     expect(screen.getByText("已有更新的冻结资料，当前报告未使用")).toBeVisible();
     expect(screen.getByRole("link", { name: "查看 TEST 研究报告" })).toHaveAttribute("href", `/research/${position.instrument_id}?as_of=2026-09-02T04%3A00%3A00Z`);
-    expect(screen.getByText("研究截止 2026-09-02 04:00:00 UTC")).toBeVisible();
+    expect(screen.getByText("研究截止 2026-09-02 12:00:00 北京时间")).toBeVisible();
     fireEvent.click(screen.getByText("摘要与证据缺口"));
     expect(screen.getByText("冻结财报收入有变化。")).toBeVisible();
     expect(screen.getByText("缺少合格价格证据，不能生成仓位动作。")).toBeVisible();
@@ -95,7 +95,7 @@ describe("portfolio vertical slice", () => {
     expect(screen.getByText("复星（只读）")).not.toBeVisible();
     fireEvent.click(screen.getByText("配置、来源与估值口径"));
     expect(screen.getByText("复星（只读）")).toBeVisible();
-    expect(screen.getByText("2026-08-23 08:00:00 UTC")).toBeVisible();
+    expect(screen.getByText("2026-08-23 16:00:00 北京时间")).toBeVisible();
     const bars = container.querySelectorAll<HTMLElement>(".portfolio-allocation__meter > span");
     expect([...bars].map((bar) => bar.style.inlineSize)).toEqual(["29.09%", "70.91%"]);
   });
@@ -181,7 +181,7 @@ describe("portfolio vertical slice", () => {
     expect(valuation).toHaveTextContent("HKD 8,000.00");
     expect(within(valuation).getByText("现金", { selector: "li > span" }).closest("li")).toHaveTextContent("29.09%");
     expect(within(valuation).getByText("00656.HK", { selector: "li > span" }).closest("li")).toHaveTextContent("70.91%");
-    expect(valuation).toHaveTextContent("2026-08-23 08:00:00 UTC");
+    expect(valuation).toHaveTextContent("2026-08-23 16:00:00 北京时间");
     expect(valuation).not.toHaveTextContent("折算总资产");
   });
 

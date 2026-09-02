@@ -58,15 +58,15 @@ describe("strategy evolution workbench", () => {
 
     expect(screen.getByRole("heading", { name: "baseline_v1" })).toBeVisible();
     expect(screen.getByText("策略进化 · 证据账簿")).toBeVisible();
-    expect(screen.getByText("01 / 冠军权威")).toBeVisible();
+    expect(screen.getByText("01 / 当前主用策略")).toBeVisible();
     expect(screen.getByText("提高流动性门槛可减少成本侵蚀，同时保留中期动量溢价。")).toBeVisible();
-    expect(screen.getByText("ADV20 最低成交额 · 3 个候选值")).toBeVisible();
+    expect(screen.getByText("近 20 日最低平均成交额 · 3 个候选值")).toBeVisible();
     expect(screen.getByRole("heading", { name: "证据比较" })).toBeVisible();
     expect(screen.getByText("SPY 比较完整")).toBeVisible();
     expect(screen.getByText("等权白名单比较完整")).toBeVisible();
-    expect(screen.getByText("21 / 63 sessions")).toBeVisible();
-    expect(screen.getByText("宽限期 5 sessions")).toBeVisible();
-    expect(screen.getByText("已等待 0 sessions")).toBeVisible();
+    expect(screen.getByText("21 / 63 个交易日")).toBeVisible();
+    expect(screen.getByText("宽限期 5 个交易日")).toBeVisible();
+    expect(screen.getByText("已等待 0 个交易日")).toBeVisible();
     expect(screen.getByText("检查点 5 · 已完成")).toBeVisible();
     expect(screen.getByText("检查点 21 · 已完成")).toBeVisible();
     expect(screen.getByText("检查点 63 · 等待")).toBeVisible();
@@ -117,10 +117,10 @@ describe("strategy evolution workbench", () => {
       errorMessage: "操作结果未知。",
     });
 
-    expect(screen.getByRole("region", { name: "未知操作恢复" })).toHaveTextContent("路径、命令、权威版本和幂等键均保持不变");
+    expect(screen.getByRole("region", { name: "未知操作恢复" })).toHaveTextContent("继续确认会复用原请求，不会重复创建操作");
     expect(screen.getByRole("button", { name: "暂停自动晋级" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "否决本次晋级" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "使用同一幂等键继续确认" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续确认原操作结果" }));
     expect(callbacks.onRetryUnknown).toHaveBeenCalledOnce();
   });
 

@@ -1,3 +1,4 @@
+import { statusLabel } from "../../lib/display-labels";
 import type { components } from "../../lib/generated/schema";
 import { formatPaperTime } from "../order-timeline";
 
@@ -15,7 +16,7 @@ export function BrokerOrderTimeline({ events }: { events: BrokerEvent[] }): Reac
           {events.map((event) => (
             <li key={`${event.order_id}:${event.sequence}`}>
               <span className="broker-timeline__seq numeric-data">E{String(event.sequence).padStart(2, "0")}</span>
-              <div><strong>{event.status}</strong><p>{event.source} · {shortId(event.order_id)}</p></div>
+              <div><strong>{statusLabel(event.status)}</strong><p>{event.source} · {shortId(event.order_id)}</p></div>
               <time className="numeric-data" dateTime={event.occurred_at}>{formatPaperTime(event.occurred_at)}</time>
             </li>
           ))}

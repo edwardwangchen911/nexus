@@ -54,7 +54,8 @@ export function marketSourceLabel(source: string | null, feed: string | null): s
 export function marketDeliveryModeLabel(mode: string | null): string {
   if (mode === "real_time") return "实时";
   if (mode === "delayed") return "延迟（具体时长未声明）";
-  if (mode === "fixture") return "离线 Fixture";
+  if (mode === "fixture") return "离线示例";
+  if (mode === "not_applicable") return "不适用";
   if (mode === null) return "实时性不可用";
   return "实时性未获证明";
 }

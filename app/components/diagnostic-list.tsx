@@ -1,4 +1,6 @@
-import { formatDisplayDecimal } from "../lib/display-decimal";
+import { formatDisplayTime } from "../lib/display-format";
+import { formatMetric } from "../lib/display-format";
+import { reasonLabel } from "../lib/display-labels";
 import { AlertTriangle, Ban, CircleCheck, Search } from "lucide-react";
 import type { components } from "../lib/generated/schema";
 
@@ -8,7 +10,7 @@ type DiagnosticItem = DiagnosticReport["items"][number];
 const needCopy = {
   BLOCKED: {
     title: "当前无法判断",
-    detail: "快照、对账或来源权威未通过。先恢复可靠事实，再比较方案。",
+    detail: "快照、对账或数据来源核验未通过。先恢复可靠事实，再比较方案。",
     icon: Ban,
   },
   RESEARCH_REQUIRED: {
@@ -41,11 +43,13 @@ const severityLabels: Record<DiagnosticItem["severity"], string> = {
 const actionLabels: Record<DiagnosticItem["actionability"], string> = {
   monitor: "持续监控",
   research: "补充研究",
-  reduce_only: "仅可研究减压",
+  reduce_only: "仅研究降低仓位",
   blocked: "阻断",
 };
 
 const metricLabels: Record<string, string> = {
+  VOLATILITY_20: "20 日年化波动率", VOLATILITY_63: "63 日年化波动率",
+  BETA_126: "126 日市场敏感度（Beta）", CORRELATION_126: "126 日相关系数",
   CASH_RATIO: "现金占比",
   CONCENTRATION_TOP1: "单一持仓集中度",
   CONCENTRATION_TOP3: "前三大持仓占比",
@@ -81,7 +85,7 @@ export function DiagnosticList({ report, summary = false }: { report: Diagnostic
     <section className="diagnostic-ledger" data-summary={summary} aria-labelledby="diagnostic-ledger-title">
       <header className="diagnostic-ledger__heading">
         <div>
-          <p className="eyebrow">{summary ? "按报告严重程度排序 · 最多三项" : "风险阈值账簿"}</p>
+          <p className="eyebrow">{summary ? "按报告严重程度排序 · 最多三项" : "风险指标与阈值"}</p>
           <h2 id="diagnostic-ledger-title">{summary ? "本次诊断重点" : "组合诊断账簿"}</h2>
         </div>
         <p className="numeric-data">截至 {formatUtc(report.snapshot_as_of)}</p>
@@ -101,20 +105,21 @@ export function DiagnosticList({ report, summary = false }: { report: Diagnostic
                 <div>
                   <h3>{diagnosticLabel(item.diagnostic_code)}</h3>
                   <p><code>{item.diagnostic_code}</code></p>
-                  <p>{item.policy_scope} · {actionLabels[item.actionability]}</p>
-                  {item.diagnostic_code.startsWith("CONCENTRATION_") ? <p>集中度按同币种证券市值计算，不含现金。</p> : item.diagnostic_code === "CASH_RATIO" ? <p>现金占比按同币种现金与证券总市值计算。</p> : null}
+                  <p><span title={item.policy_scope}>{item.policy_scope === "portfolio" ? "组合范围" : item.policy_scope}</span> · {actionLabels[item.actionability]}</p>
+                  {item.diagnostic_code.startsWith("CONCENTRATION_") ? <p>集中度按同币种证券市值计算，不含现金。</p> : item.diagnostic_code.split(":")[0] === "CASH_RATIO" ? <p>现金占比按同币种现金与证券总市值计算。</p> : null}
                 </div>
                 <span className="diagnostic-item__severity">{severityLabels[item.severity]}</span>
               </header>
               <dl className="diagnostic-item__thresholds numeric-data">
-                <Threshold label="当前值" value={item.metric_value} unit={item.unit} />
-                <Threshold label="阈值" value={item.reference_limit} unit={item.unit} />
-                <Threshold label="余量" value={item.headroom} unit={item.unit} />
+                <Threshold label="当前值" value={item.metric_value} unit={item.unit} metric={item.diagnostic_code} />
+                <Threshold label="阈值" value={item.reference_limit} unit={item.unit} metric={item.diagnostic_code} />
+                <Threshold label="距阈值余量" value={item.headroom} unit={item.unit} metric={item.diagnostic_code} />
               </dl>
+              {item.headroom !== null ? <p>余量为负表示已越过阈值；比例指标的余量以百分点表示。</p> : null}
               {unknownReasons(item).length > 0 ? (
                 <div className="diagnostic-item__unknown">
                   <AlertTriangle aria-hidden="true" size={17} />
-                  <span>未知原因：{unknownReasons(item).map((reason, reasonIndex) => <span key={reason}>{reasonIndex > 0 ? "、" : ""}<code>{reason}</code></span>)}</span>
+                  <span>未知原因：{unknownReasons(item).map((reason, reasonIndex) => <span key={reason}>{reasonIndex > 0 ? "；" : ""}{reasonLabel(reason)} · <code>{reason}</code></span>)}</span>
                 </div>
               ) : null}
               <p className="diagnostic-item__evidence">
@@ -131,7 +136,7 @@ export function DiagnosticList({ report, summary = false }: { report: Diagnostic
 function diagnosticLabel(code: string): string {
   const labels: Record<string, string> = {
     CONCENTRATION_TOP1: "最大单一持仓占比", CONCENTRATION_TOP3: "前三大持仓占比",
-    CASH_RATIO: "现金占比", CORRELATION_CLUSTER: "相关性集中风险", CURRENCY_EXPOSURE: "币种暴露",
+    CASH_RATIO: "现金占比", CORRELATION_CLUSTER: "高相关持仓合计占比", CURRENCY_EXPOSURE: "币种暴露",
     RISK_BUCKET_EXPOSURE: "风险类别暴露", LIQUIDITY_DAYS_TO_EXIT: "退出所需交易日",
     DRAWDOWN_252: "历史回撤", SOURCE_AUTHORITY: "数据来源可靠性", PRELIMINARY_DIAGNOSTIC: "初步快照诊断",
   };
@@ -139,11 +144,11 @@ function diagnosticLabel(code: string): string {
   return metricLabels[baseCode] ?? labels[baseCode] ?? code;
 }
 
-function Threshold({ label, value, unit }: { label: string; value: string | null; unit: string }): React.ReactElement {
+function Threshold({ label, value, unit, metric }: { label: string; value: string | null; unit: string; metric: string }): React.ReactElement {
   return (
     <div>
       <dt>{label}</dt>
-      <dd>{value === null ? "未知" : formatDisplayDecimal(value)}{value === null ? "" : ` ${unit}`}</dd>
+      <dd>{formatMetric(value, unit, metric, label === "距阈值余量")}</dd>
     </div>
   );
 }
@@ -158,6 +163,4 @@ function needState(need: DiagnosticReport["optimization_need"]): string {
   return "ready";
 }
 
-function formatUtc(value: string): string {
-  return value.replace("T", " ").replace("Z", " UTC");
-}
+function formatUtc(value: string | null | undefined): string { return formatDisplayTime(value); }

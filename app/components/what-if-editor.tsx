@@ -1,6 +1,7 @@
 "use client";
 
-import { formatDisplayDecimal } from "../lib/display-decimal";
+import { formatMetric, formatPercent } from "../lib/display-format";
+import { statusLabel, reasonText, metricLabels } from "../lib/display-labels";
 import { Calculator, TriangleAlert } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { components } from "../lib/generated/schema";
@@ -69,17 +70,17 @@ function WhatIfProposalEditor({ group, proposal, actionsEnabled, onEvaluate }: {
       <header>
         <div>
           <p className="eyebrow">无副作用评估</p>
-          <h2 id="what-if-title">有限权重情景</h2>
+          <h2 id="what-if-title">持仓权重试算</h2>
           <p>允许范围冻结自所选方案；仅分析，不持久化，不生成订单。</p>
         </div>
-        <span className="mode-badge">{proposal.variant}</span>
+        <span className="mode-badge">{statusLabel(proposal.variant)}</span>
       </header>
       <div className="what-if-editor__fields">
         {proposal.positions.map((position, index) => {
           const inputId = `what-if-weight-${position.instrument_id}`;
           return (
             <div className="what-if-field" key={position.instrument_id}>
-              <label htmlFor={inputId}>目标权重 {index + 1}</label>
+              <label htmlFor={inputId}>目标权重 {index + 1}（0–1）</label>
               <code>{position.instrument_id}</code>
               <input
                 id={inputId}
@@ -94,7 +95,7 @@ function WhatIfProposalEditor({ group, proposal, actionsEnabled, onEvaluate }: {
                   setError(null); setResult(null);
                 }}
               />
-              <small id={`${inputId}-help`}>当前 {position.current_weight} · 方案 {position.target_weight} · 最多 18 位小数</small>
+              <small id={`${inputId}-help`}>当前 {formatPercent(position.current_weight)} · 方案 {formatPercent(position.target_weight)}。输入 0.2 表示 20%；输入值保留原精度。</small>
             </div>
           );
         })}
@@ -120,7 +121,7 @@ function WhatIfResult({ result }: { result: WhatIfResponse }): React.ReactElemen
       <h3 id="what-if-result-title">后端确定性结果</h3>
       <dl>
         <div><dt>标的数量</dt><dd className="numeric-data">{result.instrument_count}</dd></div>
-        <div><dt>约束命中</dt><dd className="numeric-data">{violations.status === "known" ? violations.value : violations.reason}</dd></div>
+        <div><dt>约束命中</dt><dd className="numeric-data">{violations.status === "known" ? formatMetric(violations.value, violations.unit) : reasonText(violations.reason)}</dd></div>
         <div><dt>策略</dt><dd>{result.policy_version}</dd></div>
       </dl>
       {/* The bounded scroll region must be keyboard-focusable on narrow screens. */}
@@ -129,7 +130,7 @@ function WhatIfResult({ result }: { result: WhatIfResponse }): React.ReactElemen
         <table className="what-if-result__table">
           <caption>后端返回的全部指标；未知项保留原因</caption>
           <thead><tr><th scope="col">分组</th><th scope="col">指标</th><th scope="col">结果</th></tr></thead>
-          <tbody>{rows.map(({ group: metricGroup, name, metric }) => <tr key={`${metricGroup}:${name}`}><td>{metricGroup}</td><th scope="row"><code>{name}</code></th><td className="numeric-data">{metric.status === "known" ? `${formatDisplayDecimal(metric.value)} ${metric.unit}` : `未知 · ${metric.reason}`}</td></tr>)}</tbody>
+          <tbody>{rows.map(({ group: metricGroup, name, metric }) => <tr key={`${metricGroup}:${name}`}><td>{metricGroup}</td><th scope="row"><span title={name}>{metricLabels[name] ?? name}</span></th><td className="numeric-data">{metric.status === "known" ? formatMetric(metric.value, metric.unit, name) : `未知 · ${reasonText(metric.reason)}`}</td></tr>)}</tbody>
         </table>
       </div>
       <p>结果仅存在于当前页面；离开页面即丢弃。</p>

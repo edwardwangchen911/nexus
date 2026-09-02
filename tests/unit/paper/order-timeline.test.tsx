@@ -14,13 +14,13 @@ describe("OrderTimeline", () => {
     const events = within(timeline).getAllByRole("listitem");
     expect(events.map((item) => item.getAttribute("data-event-seq"))).toEqual(["1", "2", "3", "4"]);
     expect(events[0]).toHaveTextContent("paper_order_proposed");
-    expect(events[3]).toHaveTextContent("submitted → partially_filled");
+    expect(events[3]).toHaveTextContent("已提交 → 部分成交");
 
     const fills = screen.getByRole("table", { name: "AAPL 模拟成交事实" });
     expect(fills).toHaveTextContent("alpaca / iex");
-    expect(fills).toHaveTextContent("delayed");
-    expect(fills).toHaveTextContent("2026-08-26 19:59:00 UTC");
-    expect(fills).toHaveTextContent("10 bps");
+    expect(fills).toHaveTextContent("延迟");
+    expect(fills).toHaveTextContent("2026-08-27 03:59:00 北京时间");
+    expect(fills).toHaveTextContent("10 基点");
   });
 
   it("shows a cancel control only when the server marks the order cancellable", () => {

@@ -5,6 +5,20 @@ import { ProposalComparison } from "../../../app/components/proposal-comparison"
 import { eligibleProposalGroup, proposalGroup } from "./fixtures";
 
 describe("three-way proposal comparison", () => {
+  it("uses percent weights and coefficient HHI without promising blocked group eligibility", () => {
+    const { container } = render(<ProposalComparison group={proposalGroup()} onStartShadow={vi.fn()} onReject={vi.fn()} />);
+    const row = (label: string) => screen.getByRole("rowheader", { name: label }).closest("tr");
+    expect(row("最大单项权重")).toHaveTextContent("20%");
+    expect(row("持仓集中度指数（HHI）")).toHaveTextContent("0.52");
+    expect(row("持仓集中度指数（HHI）")).not.toHaveTextContent("52%");
+    expect(container).not.toHaveTextContent("可进入影子验证");
+  });
+
+  it("does not advertise shadow eligibility when cached data disables the action", () => {
+    render(<ProposalComparison group={eligibleProposalGroup()} startShadowEnabled={false} onStartShadow={vi.fn()} onReject={vi.fn()} />);
+    expect(screen.queryByText("可进入影子验证")).not.toBeInTheDocument();
+  });
+
   it("renders exactly three ordered semantic columns and no trading control", () => {
     render(<ProposalComparison group={proposalGroup()} onStartShadow={vi.fn()} onReject={vi.fn()} />);
 
@@ -13,7 +27,7 @@ describe("three-way proposal comparison", () => {
     expect(headers.map((header) => header.textContent)).toEqual(["保持现状", "最小调整", "策略目标"]);
     expect(screen.getAllByText("仅分析").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/COST_NOT_PROVEN/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/TAX_DATA_UNAVAILABLE/).length).toBe(3);
+    expect(screen.getAllByTitle("TAX_DATA_UNAVAILABLE").length).toBe(3);
     expect(screen.queryByRole("button", { name: /下单|交易|买入|卖出/ })).not.toBeInTheDocument();
   });
 
@@ -35,7 +49,7 @@ describe("three-way proposal comparison", () => {
       render(<ProposalComparison group={proposalGroup({ status })} onStartShadow={vi.fn()} onReject={vi.fn()} />);
 
       expect(screen.queryByRole("button", { name: "启动影子验证" })).not.toBeInTheDocument();
-      expect(screen.getAllByText(new RegExp(status, "i")).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(({ expired: "已过期", rejected: "已拒绝", validated: "已验证" } as const)[status]).length).toBeGreaterThan(0);
     },
   );
 
@@ -47,7 +61,7 @@ describe("three-way proposal comparison", () => {
     expect(screen.queryByRole("button", { name: "启动影子验证" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "拒绝方案组" }));
     await waitFor(() => expect(onReject).toHaveBeenCalledWith(group.proposal_group_id, group.version));
-    expect(screen.getByText(/当前状态 shadowing/)).toBeVisible();
+    expect(screen.getByText(/当前状态 观察中/)).toBeVisible();
   });
 
   it("closes an outstanding confirmation when the data becomes stale", () => {

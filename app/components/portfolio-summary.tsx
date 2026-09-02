@@ -1,3 +1,5 @@
+import { statusLabel } from "../lib/display-labels";
+import { formatDisplayTime } from "../lib/display-format";
 import { formatDisplayDecimal } from "../lib/display-decimal";
 import { CircleDollarSign, LockKeyhole } from "lucide-react";
 import type { PortfolioItem, PortfolioSnapshot } from "../(protected)/portfolio/page";
@@ -20,7 +22,7 @@ type CurrencyValuation = {
   totalValue: bigint | null;
   missingFacts: string[];
   asOf: string | null;
-  asOfKind: "Provider 截止时间" | "快照截止时间" | "快照读取时间";
+  asOfKind: "数据源截止时间" | "快照截止时间" | "快照读取时间";
 };
 
 const DECIMAL_PLACES = 12;
@@ -134,10 +136,10 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
               <tbody>{orders.map((order) => (
                 <tr key={order.broker_order_snapshot_id}>
                   <th scope="row">{order.symbol ?? "未知标的"}</th>
-                  <td>{order.side}</td><td>{formatDecimal(order.quantity)}</td>
+                  <td>{statusLabel(order.side)}</td><td>{formatDecimal(order.quantity)}</td>
                   <td>{formatDecimal(order.filled_quantity)}</td>
                   <td>{formatNullableDecimal(order.price, currency)}</td>
-                  <td>{order.status}</td><td>{order.read_only ? "只读" : "未知"}</td>
+                  <td>{statusLabel(order.status)}</td><td>{order.read_only ? "只读" : "未知"}</td>
                 </tr>
               ))}</tbody>
             </table>
@@ -318,7 +320,7 @@ function currencyValuation(
     totalValue,
     missingFacts,
     asOf,
-    asOfKind: completeProviderTimes ? "Provider 截止时间" : snapshot.time_basis === "gateway_observed" ? "快照读取时间" : "快照截止时间",
+    asOfKind: completeProviderTimes ? "数据源截止时间" : snapshot.time_basis === "gateway_observed" ? "快照读取时间" : "快照截止时间",
   };
 }
 
@@ -372,15 +374,11 @@ function snapshotStatusLabel(status: PortfolioSnapshot["status"]): string {
 }
 
 function formatNullableDecimal(value: string | null, currency: string): string {
-  return value === null ? "无" : `${currency} ${formatDecimal(value)}`;
+  return value === null ? "未知" : `${currency} ${formatDecimal(value)}`;
 }
 
 function formatDecimal(value: string): string {
   return formatDisplayDecimal(value, { group: true });
 }
 
-function formatTime(value: string | null): string {
-  if (!value) return "无";
-  const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? "无效时间" : `${date.toISOString().replace("T", " ").replace(".000Z", " UTC")}`;
-}
+function formatTime(value: string | null | undefined): string { return formatDisplayTime(value); }

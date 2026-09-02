@@ -83,7 +83,7 @@ describe("integrations vertical slice", () => {
     expect(screen.getByText("系统能力 · 集成状态")).toBeVisible();
     expect(card).toHaveAttribute("data-read-only", "true");
     expect(card).not.toHaveAttribute("disabled");
-    expect(screen.getByText("FIXTURE")).toBeVisible();
+    expect(screen.getByText("离线示例")).toBeVisible();
     expect(screen.queryByText(/ak_must|account-must|internal\.invalid/)).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "复星模拟盘验证" })).toHaveClass("button");
     expect(screen.getByRole("link", { name: "实盘逐笔批准" })).toHaveClass("button");
@@ -102,9 +102,9 @@ describe("integrations vertical slice", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "正在对账权威状态" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在核对连接状态" })).toBeDisabled();
     expect(screen.getByText("请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请使用同一幂等键继续确认。")).toBeVisible();
-    expect(screen.getByRole("button", { name: "禁用复星 Provider" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "禁用复星数据源" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "使用同一幂等键继续确认" })).toBeEnabled();
   });
 
@@ -124,7 +124,7 @@ describe("integrations vertical slice", () => {
     );
 
     expect(await screen.findByText("FOSUN · FIXTURE")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "禁用复星 Provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "禁用复星数据源" }));
     expect(await screen.findByText("FOSUN · DISABLED")).toBeVisible();
     expect(screen.getByRole("region", { name: "fosun 集成（已禁用）" })).toBeVisible();
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method !== "POST")).toHaveLength(1);
@@ -153,9 +153,9 @@ describe("integrations vertical slice", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<IntegrationStatusProvider><IntegrationsPage /></IntegrationStatusProvider>);
-    expect(await screen.findByRole("button", { name: "禁用复星 Provider" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "禁用复星数据源" })).toBeVisible();
     vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("button", { name: "禁用复星 Provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "禁用复星数据源" }));
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(70_000);
@@ -163,8 +163,8 @@ describe("integrations vertical slice", () => {
 
     expect(screen.getByText("请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请使用同一幂等键继续确认。")).toBeVisible();
     expect(screen.getByRole("region", { name: "fosun 集成（只读）" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "正在对账权威状态" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "禁用复星 Provider" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在核对连接状态" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "禁用复星数据源" })).toBeDisabled();
     expect(postCount).toBe(2);
     expect(getCount).toBe(2);
     expect(new Set(idempotencyKeys).size).toBe(1);
@@ -204,7 +204,7 @@ describe("integrations vertical slice", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<IntegrationStatusProvider><IntegrationsPage /></IntegrationStatusProvider>);
-    fireEvent.click(await screen.findByRole("button", { name: "禁用复星 Provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "禁用复星数据源" }));
     expect(await screen.findByText("首次结果未知；已使用同一幂等键确认最终结果。")).toBeVisible();
 
     expect(screen.getByRole("region", { name: "fosun 集成（已禁用）" })).toBeVisible();

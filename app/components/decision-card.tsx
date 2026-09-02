@@ -1,6 +1,9 @@
 "use client";
 
-import { formatDisplayDecimal } from "../lib/display-decimal";
+import { formatDisplayTime } from "../lib/display-format";
+
+import { formatMetric } from "../lib/display-format";
+import { statusLabel, reasonText, operatorLabel, signalLabel } from "../lib/display-labels";
 import { FileSearch, ShieldAlert } from "lucide-react";
 import { useRef, useState } from "react";
 
@@ -41,7 +44,7 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
           <h2 id="decision-card-title">委员会决策记录</h2>
         </div>
         <div className="decision-card__badges">
-          <Badge data-state={intent?.quality_status === "complete" ? "ready" : "partial"}>{intent?.quality_status ?? research.status}</Badge>
+          <Badge data-state={intent?.quality_status === "complete" ? "ready" : "partial"}>{statusLabel(intent?.quality_status ?? research.status)}</Badge>
           <Badge variant="secondary">{intent ? stanceLabels[intent.stance] : "未形成研究意图"}</Badge>
         </div>
       </header>
@@ -49,8 +52,8 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
       <dl className="decision-card__authority">
         <div><dt>标的</dt><dd>{intent?.display_symbol ?? research.instrument_id}</dd></div>
         <div><dt>截止时间</dt><dd className="numeric-data">{formatUtc(research.decision_time)}</dd></div>
-        <div><dt>运行状态</dt><dd>{research.status}</dd></div>
-        <div><dt>证据完整度</dt><dd>{research.quality_status ?? "未形成"}</dd></div>
+        <div><dt>运行状态</dt><dd>{statusLabel(research.status)}</dd></div>
+        <div><dt>证据完整度</dt><dd>{research.quality_status ? statusLabel(research.quality_status) : "未形成"}</dd></div>
       </dl>
 
       {research.billing_mode === "chatgpt_subscription" ? (
@@ -74,7 +77,7 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
       {terminalReason ? (
         <div className="decision-card__warning" role="note">
           <ShieldAlert aria-hidden="true" size={19} />
-          <div><p>研究未完成：<code>{terminalReason}</code>。保留已验证证据供排查，此状态不能支持策略目标。</p>
+          <div><p>研究未完成：<span>{reasonText(terminalReason)}</span>。保留已验证证据供排查，此状态不能支持策略目标。</p>
           {research.failed_stage_input ? <details><summary>失败调用的输入记录</summary><p>阶段：{({ research: "研究", critique: "反证", synthesis: "综合" } as const)[research.failed_stage_input.stage]}</p><p>请求摘要：<code>{research.failed_stage_input.request_hash}</code></p><p>同源输入：<code>{research.failed_stage_input.frozen_inputs_hash}</code></p></details> : null}
           </div>
         </div>
@@ -88,7 +91,7 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
             <details key={stage.stage} open={stage.stage === "synthesis"}>
               <summary>{({ research: "研究", critique: "反证", synthesis: "综合" } as const)[stage.stage]} · {({ complete: "已保存完整输出", partial: "仅保存部分输出", unavailable: "未保存有效输出" } as const)[stage.status]}</summary>
               <p>已保存输入 / 输出 tokens：{stage.input_tokens} / {stage.output_tokens}</p>
-              {stage.input_hash ? <details><summary>本阶段输入摘要</summary><p>请求与输出合同：<code>{stage.input_hash}</code></p><p>同源输入：<code>{stage.frozen_inputs_hash}</code></p></details> : <p>未留存本阶段提交输入摘要。</p>}
+              {stage.input_hash ? <details><summary>本阶段输入摘要</summary><p>请求与输出格式版本：<code>{stage.input_hash}</code></p><p>同源输入：<code>{stage.frozen_inputs_hash}</code></p></details> : <p>未留存本阶段提交输入摘要。</p>}
               {stage.roles.map((role) => <section key={role.role} aria-label={`${roleLabel(role.role)}阶段论点`}>
                 <h4>{roleLabel(role.role)}</h4>
                 {role.reviewed_claim_ids.length ? <p>回应论点：{role.reviewed_claim_ids.map((id) => {
@@ -122,8 +125,8 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
               <ul className="decision-card__conditions">
                 {research.invalidation_conditions.map((condition, index) => (
                   <li key={`${condition.signal}:${index}`}>
-                    <code>{condition.signal}</code>
-                    <span>{condition.operator} {typeof condition.threshold === "boolean" ? String(condition.threshold) : formatDisplayDecimal(condition.threshold)} · {condition.unit}</span>
+                    <span title={condition.signal}>{signalLabel(condition.signal)}</span>
+                    <span>{operatorLabel(condition.operator)} {typeof condition.threshold === "boolean" ? (condition.threshold ? "是" : "否") : formatMetric(condition.threshold, condition.unit, condition.signal)}</span>
                     <EvidenceButtons evidenceRefs={condition.evidence_refs} excerpt={`${condition.signal} ${condition.operator} ${String(condition.threshold)}`} onOpen={openEvidence} />
                   </li>
                 ))}
@@ -138,7 +141,7 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
           </dl>
         </>
       ) : (
-        <p className="decision-card__empty">委员会没有输出可消费的研究意图；系统保持观望。</p>
+        <p className="decision-card__empty">尚未形成可供后续分析的研究结论；系统保持观望。</p>
       )}
 
       <EvidenceDrawer
@@ -177,6 +180,4 @@ function roleLabel(role: components["schemas"]["RoleVote"]["role"]): string {
   return ({ orchestrator: "编排", fundamental: "基本面", market_state: "市场状态", macro_sector: "宏观行业", bull: "多头", bear: "空头", evidence_audit: "证据审计", portfolio: "组合" } as const)[role];
 }
 
-function formatUtc(value: string): string {
-  return `${value.replace("T", " ").replace(/(?:\.\d+)?Z$/, "")} UTC`;
-}
+function formatUtc(value: string | null | undefined): string { return formatDisplayTime(value); }

@@ -17,6 +17,13 @@ const states: Array<[DataStateKind, string]> = [
 ];
 
 describe("internal paper page", () => {
+  it.each(["1", "0.1"])("renders integer and short-decimal drawdown ratios correctly: %s", (ratio) => {
+    const portfolio = structuredClone(paperPortfolio);
+    portfolio.performance!.drawdown_ratio = ratio;
+    render(<PaperPanel state="ready" portfolio={portfolio} orders={[]} nextCursor={null} statusFilter="" loadingMore={false} notice={null} onRefresh={vi.fn()} onStatusFilter={vi.fn()} onLoadMore={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.getByLabelText("模拟账户绩效事实")).toHaveTextContent(ratio === "1" ? "100%" : "10%");
+  });
+
   it.each(states)("renders the visible %s state without inventing facts", (state, label) => {
     const hasFacts = ["ready", "partial", "stale"].includes(state);
     render(<PaperPanel
@@ -61,8 +68,8 @@ describe("internal paper page", () => {
     const positions = screen.getByRole("table", { name: "内部模拟持仓" });
     expect(positions).toHaveTextContent("AAPL");
     expect(positions).toHaveTextContent("alpaca / iex");
-    expect(positions).toHaveTextContent("delayed");
-    expect(positions).toHaveTextContent("2026-08-26 20:00:00 UTC");
+    expect(positions).toHaveTextContent("延迟");
+    expect(positions).toHaveTextContent("2026-08-27 04:00:00 北京时间");
     expect(screen.getByRole("table", { name: "内部模拟绩效归因" })).toHaveTextContent("information_technology");
     expect(document.body).not.toHaveTextContent(/account_id|client_order_id|provider_object/);
   });

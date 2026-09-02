@@ -122,7 +122,7 @@ test("unknown retry result can only continue with the same idempotency key", asy
   await page.getByRole("button", { name: "重试 daily_pipeline" }).click();
   await page.getByRole("button", { name: "确认安全重试" }).click();
   await expect(page.getByText("恢复结果未知。保持相同幂等键并关闭其他恢复动作。")).toBeVisible();
-  await page.getByRole("button", { name: "使用同一幂等键继续确认" }).click();
+  await page.getByRole("button", { name: "继续确认原操作结果" }).click();
   await expect(page.getByText("Job 已重新排队；已刷新权威事实。")).toBeVisible();
   expect(attempts).toBe(2);
   expect(new Set(keys).size).toBe(1);

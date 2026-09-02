@@ -1,6 +1,7 @@
 "use client";
 
-import { formatDisplayDecimal } from "../lib/display-decimal";
+import { formatMetric } from "../lib/display-format";
+import { statusLabel, reasonText, reasonLabel } from "../lib/display-labels";
 import { AlertTriangle, Check, FlaskConical, RefreshCw, X } from "lucide-react";
 import { useState } from "react";
 import type { components } from "../lib/generated/schema";
@@ -24,18 +25,18 @@ const variantLabels: Record<Variant, string> = {
   strategy_target: "策略目标",
 };
 const metricRows = [
-  ["hard_violations", "硬违例", "count"],
+  ["hard_violations", "硬性约束不达标数", "count"],
   ["top1", "最大单项权重", "ratio"],
   ["top3", "前三项权重", "ratio"],
-  ["hhi", "证券 HHI", "ratio"],
+  ["hhi", "持仓集中度指数（HHI）", "ratio"],
   ["sector_exposure", "最大行业暴露", "ratio"],
   ["currency_exposure", "最大币种暴露", "ratio"],
   ["volatility", "历史波动", "ratio"],
   ["drawdown", "回撤情景", "ratio"],
-  ["correlation", "相关性", "ratio"],
-  ["liquidity", "流动性因子", "factor"],
+  ["correlation", "相关系数", "ratio"],
+  ["liquidity", "流动性系数（越高越易退出）", "coefficient"],
   ["turnover", "单边换手", "ratio"],
-  ["cost", "成本", "ratio"],
+  ["cost", "成本占比", "ratio"],
   ["tax_impact", "税务影响", "state"],
 ] as const;
 
@@ -47,14 +48,14 @@ export function ProposalComparison({ group, startShadowEnabled = true, rejectEna
   const complete = ordered.every((proposal): proposal is Proposal => proposal !== undefined);
   const shadowReason = group.shadow_eligibility.eligible
     ? null
-    : group.shadow_eligibility.reasons.join("、") || "服务器未授予影子验证资格。";
+    : group.shadow_eligibility.reasons.map(reasonText).join("；") || "服务器未授予影子验证资格。";
   const terminal = ["expired", "rejected", "validated"].includes(group.status);
   const canShadow = startShadowEnabled && group.status === "compared" && shadowReason === null;
   const canReject = rejectEnabled && ["draft", "compared", "shadowing"].includes(group.status);
   const blockedReason = !startShadowEnabled
     ? "当前数据状态不允许发起操作；请先重新读取方案。"
     : group.status !== "compared"
-      ? `当前状态 ${group.status} 不允许再次启动影子验证。`
+      ? `当前状态 ${statusLabel(group.status)} 不允许再次启动影子验证。`
       : shadowReason;
 
   async function startShadow(): Promise<void> {
@@ -99,9 +100,9 @@ export function ProposalComparison({ group, startShadowEnabled = true, rejectEna
         <div>
           <p className="eyebrow">同一基线 · 三种方案</p>
           <h2 id="proposal-comparison-title">三方案同口径比较</h2>
-          <p>所有值来自冻结的后端比较，不在浏览器重算或排序。</p>
+          <p>占比和收益率显示为百分比，集中度指数和相关系数保留原量纲。最大单项和前三项权重以含现金总资产为分母；HHI 仅按证券持仓归一化计算。数值来自已保存的方案比较。</p>
         </div>
-        <span className="state-chip" data-state={terminal ? "stale" : "ready"}>{group.status}</span>
+        <span className="state-chip" data-state={terminal ? "stale" : "ready"}>{statusLabel(group.status)}</span>
       </header>
 
       {/* The bounded scroll region must be keyboard-focusable on narrow screens. */}
@@ -120,7 +121,7 @@ export function ProposalComparison({ group, startShadowEnabled = true, rejectEna
           <tbody>
             <tr>
               <th scope="row">方案状态</th>
-              {ordered.map((proposal) => <td key={proposal.variant}><ProposalBadges proposal={proposal} /></td>)}
+              {ordered.map((proposal) => <td key={proposal.variant}><ProposalBadges proposal={proposal} shadowEligible={canShadow} /></td>)}
             </tr>
             {metricRows.map(([metric, label, unit]) => (
               <tr key={metric}>
@@ -183,11 +184,11 @@ export function ProposalComparison({ group, startShadowEnabled = true, rejectEna
   );
 }
 
-function ProposalBadges({ proposal }: { proposal: Proposal }): React.ReactElement {
+function ProposalBadges({ proposal, shadowEligible }: { proposal: Proposal; shadowEligible: boolean }): React.ReactElement {
   return (
     <span className="proposal-badges">
       {proposal.analysis_only ? <span className="mode-badge">仅分析</span> : null}
-      <span className="mode-badge">{proposal.comparison.non_executable ? "不可执行" : "可进入影子验证"}</span>
+      <span className="mode-badge">{proposal.comparison.non_executable ? "不可执行" : shadowEligible ? "可进入影子验证" : "仅供比较"}</span>
       {!proposal.strategy_evidence_complete && proposal.variant === "strategy_target"
         ? <span className="mode-badge">证据未完成</span>
         : null}
@@ -199,6 +200,6 @@ function MetricValue({ proposal, metric, unit }: { proposal: Proposal; metric: t
   const dimensions = proposal.comparison.metrics.dimensions;
   if (metric === "hard_violations") return <>{dimensions.hard_violations} 项</>;
   const value = dimensions[metric];
-  if (value.status === "unknown") return <span className="metric-unknown">未知 · {value.reason}</span>;
-  return <>{formatDisplayDecimal(value.value)} {unit === "ratio" ? "ratio" : unit}</>;
+  if (value.status === "unknown") return <span className="metric-unknown" title={value.reason ?? undefined}>未知 · {value.reason ? reasonLabel(value.reason) : "原因未提供"}</span>;
+  return <>{formatMetric(value.value, unit, metric)}</>;
 }

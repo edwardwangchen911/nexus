@@ -25,11 +25,11 @@ describe("portfolio optimization diagnostics", () => {
 
     const concentration = screen.getByRole("listitem", { name: /CONCENTRATION_TOP1/ });
     expect(concentration).toHaveTextContent("当前值");
-    expect(concentration).toHaveTextContent("0.2 ratio");
+    expect(concentration).toHaveTextContent("20%");
     expect(concentration).toHaveTextContent("阈值");
-    expect(concentration).toHaveTextContent("0.15");
+    expect(concentration).toHaveTextContent("15%");
     expect(concentration).toHaveTextContent("余量");
-    expect(concentration).toHaveTextContent("-0.05");
+    expect(concentration).toHaveTextContent("-5 个百分点");
     for (const reason of [
       "ADV20_MISSING",
       "DRAWDOWN_252_COVERAGE_INSUFFICIENT",
