@@ -28,7 +28,7 @@ class InMemoryRawEvidenceStore:
         return f"memory://sha256/{key.rsplit('/', 1)[-1]}"
 
 
-async def seed_instrument(settings):
+async def seed_instrument(settings, *, asset_type="common_stock"):
     from datetime import date
     from decimal import Decimal
 
@@ -36,7 +36,7 @@ async def seed_instrument(settings):
         session.add(
             Instrument(
                 id=INSTRUMENT,
-                asset_type="equity",
+                asset_type=asset_type,
                 exchange="XNAS",
                 currency="USD",
                 tick_size=Decimal("0.01"),
@@ -97,14 +97,17 @@ def sec_responder(requests, *, wrong_issuer=False, reject=False):
 
 
 @pytest.mark.asyncio
-async def test_sec_only_refresh_archives_real_shape_and_freezes_inputs(migrated_database_url):
+@pytest.mark.parametrize("asset_type", ["common_stock", "equity"])
+async def test_sec_only_refresh_archives_real_shape_and_freezes_inputs(
+    migrated_database_url, asset_type
+):
     from nexus.ops.sec_local import refresh_sec_research
 
     settings = EngineSettings(database_url=migrated_database_url)
     from nexus.ops.openai_local import prepare_database
 
     await prepare_database(settings)
-    await seed_instrument(settings)
+    await seed_instrument(settings, asset_type=asset_type)
     requests = []
     store = InMemoryRawEvidenceStore()
     async with httpx.AsyncClient(transport=httpx.MockTransport(sec_responder(requests))) as client:

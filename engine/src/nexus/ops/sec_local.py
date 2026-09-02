@@ -130,7 +130,7 @@ async def refresh_sec_research(
         )
         if (
             instrument is None
-            or instrument.asset_type != "equity"
+            or instrument.asset_type not in {"equity", "common_stock"}
             or instrument.currency != "USD"
             or instrument.exchange not in US_EQUITY_EXCHANGES
             or len(symbols) != 1
