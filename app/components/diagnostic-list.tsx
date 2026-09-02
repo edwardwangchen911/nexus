@@ -44,6 +44,17 @@ const actionLabels: Record<DiagnosticItem["actionability"], string> = {
   blocked: "阻断",
 };
 
+const metricLabels: Record<string, string> = {
+  CASH_RATIO: "现金占比",
+  CONCENTRATION_TOP1: "单一持仓集中度",
+  CONCENTRATION_TOP3: "前三大持仓占比",
+  CONCENTRATION_HHI: "持仓集中度指数",
+  PRELIMINARY_DIAGNOSTIC: "初步诊断使用边界",
+  CASH_FLOW_RECONCILIATION: "现金流水待对账",
+  MARKET_EVIDENCE: "历史风险证据待补齐",
+  POSITION_MARKET_VALUE: "持仓估值完整性",
+};
+
 export function OptimizationNeedPanel({ report }: { report: DiagnosticReport }): React.ReactElement {
   const copy = needCopy[report.optimization_need];
   const Icon = copy.icon;
@@ -85,7 +96,8 @@ export function DiagnosticList({ report }: { report: DiagnosticReport }): React.
             >
               <header>
                 <div>
-                  <h3>{item.diagnostic_code}</h3>
+                  <h3>{metricLabels[item.diagnostic_code] ?? item.diagnostic_code}</h3>
+                  {metricLabels[item.diagnostic_code] ? <p><code>{item.diagnostic_code}</code></p> : null}
                   <p>{item.policy_scope} · {actionLabels[item.actionability]}</p>
                 </div>
                 <span className="diagnostic-item__severity">{severityLabels[item.severity]}</span>

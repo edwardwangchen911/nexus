@@ -523,7 +523,7 @@ export interface paths {
         };
         /**
          * Get Latest Diagnostic
-         * @description Return the latest immutable server-computed projection, never a browser recalculation.
+         * @description Return the current formal report or an explicitly preliminary read-only projection.
          */
         get: operations["getLatestPortfolioDiagnostic"];
         put?: never;

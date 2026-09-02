@@ -89,13 +89,15 @@ async def test_local_observed_refresh_reaches_database_and_snapshot_api(
         )
         assert diagnostic["status"] == "persisted"
         assert diagnostic["optimization_need"] == "RESEARCH_REQUIRED"
-        blocked = await _diagnose_local_snapshot(
+        preliminary = await _diagnose_local_snapshot(
             factory,
             frozen=frozen,
             cash_flow_quality="NOT_RUN",
             artifact_reader=FixtureArtifactReader({}),
         )
-        assert blocked == {"status": "not_run", "code": "RECONCILIATION_PENDING"}
+        assert preliminary["status"] == "preview"
+        assert preliminary["optimization_need"] == "RESEARCH_REQUIRED"
+        assert preliminary["items"] > 0
 
         async def fail_diagnostic(*_args: object, **_kwargs: object) -> None:
             raise RuntimeError("synthetic-secret-canary")

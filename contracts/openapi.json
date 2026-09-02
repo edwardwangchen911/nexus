@@ -10539,7 +10539,7 @@
     },
     "/internal/v1/portfolios/{portfolio_id}/diagnostics/latest": {
       "get": {
-        "description": "Return the latest immutable server-computed projection, never a browser recalculation.",
+        "description": "Return the current formal report or an explicitly preliminary read-only projection.",
         "operationId": "getLatestPortfolioDiagnostic",
         "parameters": [
           {

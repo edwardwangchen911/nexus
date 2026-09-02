@@ -4,7 +4,16 @@ from uuid import UUID
 
 import httpx
 import pytest
-from helpers.portfolio_api import PORTFOLIOS, app, headers, seed_portfolio_list, settings
+from helpers.portfolio_api import (
+    ACCOUNTS,
+    CLOCK,
+    PORTFOLIOS,
+    app,
+    headers,
+    seed_portfolio_list,
+    settings,
+    snapshot_record,
+)
 from nexus.api.routes.diagnostics import router as diagnostics_router
 from nexus.diagnostics.assembler import DiagnosticEvidenceCapabilityUnavailable
 from nexus.diagnostics.policy import REAL_ADVISORY_POLICY_ID
@@ -18,12 +27,108 @@ from nexus.persistence.models.diagnostics import (
     PortfolioDiagnosticItemRecord,
     PortfolioDiagnosticReportRecord,
 )
+from nexus.persistence.models.portfolio import BrokerSyncRun
 from nexus.persistence.session import session_factory
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 INPUT_HASH = "e" * 64
+
+
+@pytest.mark.asyncio
+async def test_latest_diagnostic_never_reuses_an_old_formal_report_for_a_new_snapshot(
+    migrated_database_url: str,
+) -> None:
+    await seed_portfolio_list(migrated_database_url)
+    factory = session_factory(settings(migrated_database_url))
+    run_id = UUID("0198d500-1000-7000-8000-000000000091")
+    snapshot_id = UUID("0198d500-1000-7000-8000-000000000092")
+    async with factory() as session, session.begin():
+        await _seed_diagnostic_graph(session)
+        session.add(
+            BrokerSyncRun(
+                id=run_id,
+                account_id=ACCOUNTS[0],
+                portfolio_id=PORTFOLIOS[0],
+                trigger_kind="AUTOMATIC",
+                actor_id="preview-test",
+                route="broker-sync",
+                idempotency_key="preview-test",
+                request_hash="9" * 64,
+                status="READY",
+                accepted_at=CLOCK,
+                completed_at=CLOCK,
+                attempt_count=1,
+                cash_flow_quality="NOT_RUN",
+            )
+        )
+        latest = snapshot_record(snapshot_id, run_id, "READY", CLOCK, None)
+        latest.portfolio_id = PORTFOLIOS[0]
+        session.add(latest)
+    path = f"/internal/v1/portfolios/{PORTFOLIOS[0]}/diagnostics/latest"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["portfolio_snapshot_id"] == str(snapshot_id)
+    assert any(item["diagnostic_code"] == "PRELIMINARY_DIAGNOSTIC" for item in data["items"])
+    async with factory() as session:
+        assert (
+            await session.scalar(select(func.count()).select_from(PortfolioDiagnosticReportRecord))
+            == 1
+        )
+    await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cash_flow_quality", ("PARTIAL", "NOT_RUN"))
+async def test_unreconciled_cash_flows_allow_read_only_preview_without_formal_report(
+    migrated_database_url: str,
+    cash_flow_quality: str,
+) -> None:
+    """Missing cash-flow evidence must not hide independently verified snapshot metrics."""
+    await seed_portfolio_list(migrated_database_url, ready_cash_flow_quality=cash_flow_quality)
+    factory = session_factory(settings(migrated_database_url))
+    path = f"/internal/v1/portfolios/{PORTFOLIOS[0]}/diagnostics/latest"
+    snapshot_path = f"/internal/v1/portfolios/{PORTFOLIOS[0]}/snapshots/latest"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+        snapshot_response = await client.get(snapshot_path, headers=headers("GET", snapshot_path))
+    assert response.status_code == 200
+    report = response.json()["data"]
+    assert report["optimization_need"] == "RESEARCH_REQUIRED"
+    assert (
+        report["portfolio_snapshot_id"] == snapshot_response.json()["data"]["portfolio_snapshot_id"]
+    )
+    items = report["items"]
+    assert any(item["diagnostic_code"] == "PRELIMINARY_DIAGNOSTIC" for item in items)
+    assert any(item["unknown_reason"] == "CASH_FLOW_RECONCILIATION_PENDING" for item in items)
+    top1 = next(item for item in items if item["diagnostic_code"] == "CONCENTRATION_TOP1")
+    assert top1["metric_value"] == "1"
+    assert top1["evidence_refs"]
+    cash = next(
+        item
+        for item in items
+        if item["diagnostic_code"] == "CASH_RATIO" and item["policy_scope"] == "currency:USD"
+    )
+    assert cash["metric_value"] == "1"
+    assert all(item["actionability"] in {"research", "monitor", "blocked"} for item in items)
+    assert not any(item["diagnostic_code"].startswith(("VOLATILITY", "DRAWDOWN")) for item in items)
+    assert snapshot_response.json()["data"]["decision_readiness"] == "RECONCILIATION_PENDING"
+    assert snapshot_response.json()["data"]["execution_locked"] is True
+    async with factory() as session:
+        assert (
+            await session.scalar(select(func.count()).select_from(PortfolioDiagnosticReportRecord))
+            == 0
+        )
+    await factory.kw["bind"].dispose()
 
 
 @pytest.mark.asyncio
@@ -46,19 +151,23 @@ async def test_latest_diagnostic_is_redacted_and_returns_persisted_item_shape(
         "$ref": "#/components/schemas/PortfolioDiagnosticEnvelope"
     }
     for status_code in ("404", "422"):
-        assert operation["responses"][status_code]["content"]["application/json"][
-            "schema"
-        ] == {"$ref": "#/components/schemas/NexusErrorEnvelope"}
+        assert operation["responses"][status_code]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/NexusErrorEnvelope"
+        }
     request_headers = headers("GET", path)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=engine_app), base_url="http://testserver"
     ) as client:
         response = await client.get(path, headers=request_headers)
-        for portfolio_id in PORTFOLIOS[1:]:
-            missing_path = f"/internal/v1/portfolios/{portfolio_id}/diagnostics/latest"
-            missing = await client.get(missing_path, headers=headers("GET", missing_path))
-            assert missing.status_code == 404
-            assert missing.json()["error"]["code"] == "NOT_FOUND"
+        missing_path = f"/internal/v1/portfolios/{PORTFOLIOS[1]}/diagnostics/latest"
+        missing = await client.get(missing_path, headers=headers("GET", missing_path))
+        assert missing.status_code == 404
+        assert missing.json()["error"]["code"] == "NOT_FOUND"
+        partial_path = f"/internal/v1/portfolios/{PORTFOLIOS[2]}/diagnostics/latest"
+        partial = await client.get(partial_path, headers=headers("GET", partial_path))
+        assert partial.status_code == 200
+        assert partial.json()["data"]["optimization_need"] == "BLOCKED"
+        assert all(item["metric_value"] is None for item in partial.json()["data"]["items"])
 
     assert response.status_code == 200
     item = response.json()["data"]["items"][0]

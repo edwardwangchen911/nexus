@@ -4,6 +4,7 @@ import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
 import { PortfolioSummary } from "../../components/portfolio-summary";
+import { PortfolioDiagnostic } from "../../components/portfolio-diagnostic";
 import type { components } from "../../lib/generated/schema";
 
 export type PortfolioItem = components["schemas"]["PortfolioListItemResponse"];
@@ -31,6 +32,7 @@ export default function PortfolioPage(): React.ReactElement {
   const [snapshot, setSnapshot] = useState<PortfolioSnapshot | null>(null);
   const [selectedPortfolioId, setSelectedPortfolioId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
+  const [diagnosticVersion, setDiagnosticVersion] = useState(0);
   const loadVersion = useRef(0);
   const portfoliosRef = useRef<PortfolioItem[]>([]);
   const snapshotRef = useRef<PortfolioSnapshot | null>(null);
@@ -50,6 +52,7 @@ export default function PortfolioPage(): React.ReactElement {
     if (version !== loadVersion.current) return;
     if (envelope.data.portfolio_id !== portfolioId) throw new Error("snapshot portfolio mismatch");
     snapshotRef.current = envelope.data; setSnapshot(envelope.data);
+    setDiagnosticVersion((current) => current + 1);
     setState(snapshotState(envelope.data.status));
   }, []);
 
@@ -125,9 +128,13 @@ export default function PortfolioPage(): React.ReactElement {
     catch { if (version === loadVersion.current) { setState("error"); setNotice({ kind: "error", text: "无法读取该组合的冻结快照。" }); } }
   }
 
-  return <PortfolioPanel state={state} portfolios={portfolios} snapshot={snapshot}
+  return <><PortfolioPanel state={state} portfolios={portfolios} snapshot={snapshot}
     selectedPortfolioId={selectedPortfolioId} notice={notice}
-    onSelect={(id) => void selectPortfolio(id)} onRefresh={() => void refresh()} />;
+    onSelect={(id) => void selectPortfolio(id)} onRefresh={() => void refresh()} />
+    {snapshot && ["ready", "partial", "stale"].includes(state) ? <PortfolioDiagnostic
+      key={`${snapshot.portfolio_id}:${snapshot.portfolio_snapshot_id}:${diagnosticVersion}`}
+      portfolioId={snapshot.portfolio_id} snapshotId={snapshot.portfolio_snapshot_id}
+    /> : null}</>;
 }
 
 export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioId, notice, onSelect, onRefresh }: PortfolioPanelProps): React.ReactElement {

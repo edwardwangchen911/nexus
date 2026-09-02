@@ -21,6 +21,48 @@ INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000000013")
 SNAPSHOT_AT = datetime(2026, 8, 23, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("price", (None, Decimal(0)))
+@pytest.mark.parametrize("include_priced_holding", (False, True))
+def test_snapshot_only_diagnosis_does_not_turn_unpriced_holdings_into_cash_only(
+    price: Decimal | None,
+    include_priced_holding: bool,
+) -> None:
+    snapshot = _snapshot()
+    priced_id = UUID("0198d500-1000-7000-8000-000000000014")
+    priced = snapshot.positions[0].model_copy(update={"instrument_id": priced_id})
+    snapshot = snapshot.model_copy(
+        update={
+            "positions": (snapshot.positions[0].model_copy(update={"current_price": price}),)
+            + ((priced,) if include_priced_holding else ()),
+        }
+    )
+    market = _market(snapshot).model_copy(update={"quality": "PARTIAL"})
+    if include_priced_holding:
+        market = market.model_copy(
+            update={
+                "identities": {
+                    **market.identities,
+                    priced_id: InstrumentIdentity.standard(priced_id),
+                },
+                "evidence": market.evidence.model_copy(
+                    update={
+                        "position_prices": {
+                            **market.evidence.position_prices,
+                            priced_id: _binding("priced", "f"),
+                        },
+                    }
+                ),
+            }
+        )
+    report = diagnose_portfolio(
+        snapshot, market, DiagnosticHistory.empty(), RealAdvisoryPolicy.v1()
+    )
+    cash = next(item for item in report.items if item.diagnostic_code == "CASH_RATIO")
+    assert cash.metric_value is None
+    assert cash.unknown_reason is not None
+    assert not any(item.diagnostic_code == "CONCENTRATION_TOP1" for item in report.items)
+
+
 def test_known_diagnostic_item_requires_immutable_evidence() -> None:
     with pytest.raises(ValueError, match="evidence_refs"):
         DiagnosticItem(
@@ -37,11 +79,14 @@ def test_known_diagnostic_item_requires_immutable_evidence() -> None:
 
 def test_known_diagnostics_retain_only_their_actual_input_evidence() -> None:
     snapshot = _snapshot()
-    refs = {name: _ref(name, character) for name, character in zip(
-        ("snapshot", "cash", "position", "adv", "bucket", "prices", "benchmark", "calendar"),
-        "12345678",
-        strict=True,
-    )}
+    refs = {
+        name: _ref(name, character)
+        for name, character in zip(
+            ("snapshot", "cash", "position", "adv", "bucket", "prices", "benchmark", "calendar"),
+            "12345678",
+            strict=True,
+        )
+    }
     report = diagnose_portfolio(
         snapshot,
         _market(snapshot, refs),
@@ -69,9 +114,7 @@ def test_known_diagnostics_retain_only_their_actual_input_evidence() -> None:
         refs["prices"],
         refs["benchmark"],
     )
-    assert items["CASH_RATIO"].evidence_refs == (
-        refs["snapshot"], refs["position"], refs["cash"]
-    )
+    assert items["CASH_RATIO"].evidence_refs == (refs["snapshot"], refs["position"], refs["cash"])
     assert items["DATA_COMPLETENESS_TRADING_CALENDAR"].evidence_refs == (refs["calendar"],)
     used_object_ids = {ref.object_id for item in report.items for ref in item.evidence_refs}
     assert "unrelated" not in used_object_ids
@@ -95,18 +138,12 @@ def test_market_evidence_rejects_a_global_ref_bag() -> None:
         ("inconsistent", "ADV20_EVIDENCE_INCONSISTENT"),
     ),
 )
-def test_adv_evidence_gaps_are_explicit_unknowns(
-    case: str, expected_reason: str
-) -> None:
+def test_adv_evidence_gaps_are_explicit_unknowns(case: str, expected_reason: str) -> None:
     snapshot = _snapshot()
     market = _market(snapshot)
     bindings = {
         "missing": {},
-        "future": {
-            INSTRUMENT_ID: _binding(
-                "adv", "d", as_of=SNAPSHOT_AT + timedelta(seconds=1)
-            )
-        },
+        "future": {INSTRUMENT_ID: _binding("adv", "d", as_of=SNAPSHOT_AT + timedelta(seconds=1))},
         "inconsistent": {
             INSTRUMENT_ID: _binding(
                 "adv",
@@ -201,9 +238,7 @@ def test_authoritative_partial_and_derived_unknowns_retain_relevant_refs() -> No
     partial_ref = _ref("partial-series", "a")
     partial = diagnose_portfolio(
         snapshot,
-        market.model_copy(
-            update={"quality": "PARTIAL", "incomplete_refs": (partial_ref,)}
-        ),
+        market.model_copy(update={"quality": "PARTIAL", "incomplete_refs": (partial_ref,)}),
         DiagnosticHistory.empty(),
         RealAdvisoryPolicy.v1(),
     )
@@ -254,11 +289,14 @@ def _snapshot() -> PortfolioSnapshot:
 def _market(
     snapshot: PortfolioSnapshot, refs: dict[str, EvidenceRef] | None = None
 ) -> MarketEvidence:
-    refs = refs or {name: _ref(name, character) for name, character in zip(
-        ("snapshot", "cash", "position", "adv", "bucket", "prices", "benchmark", "calendar"),
-        "12345678",
-        strict=True,
-    )}
+    refs = refs or {
+        name: _ref(name, character)
+        for name, character in zip(
+            ("snapshot", "cash", "position", "adv", "bucket", "prices", "benchmark", "calendar"),
+            "12345678",
+            strict=True,
+        )
+    }
     series = _series(snapshot, 253)
     return MarketEvidence(
         prices={INSTRUMENT_ID: series},
@@ -278,9 +316,7 @@ def _market(
                 INSTRUMENT_ID: _binding_from_ref(refs["prices"], session=series.bars[-1].session)
             },
             benchmark=_binding_from_ref(refs["benchmark"], session=series.bars[-1].session),
-            trading_calendar=_binding_from_ref(
-                refs["calendar"], session=series.bars[-1].session
-            ),
+            trading_calendar=_binding_from_ref(refs["calendar"], session=series.bars[-1].session),
         ),
         incomplete_refs=(refs["snapshot"],),
     )
@@ -334,9 +370,7 @@ def _binding_from_ref(ref: EvidenceRef, *, session: date | None = None) -> Evide
     )
 
 
-def _ref(
-    object_id: str, character: str, *, available_at: datetime = SNAPSHOT_AT
-) -> EvidenceRef:
+def _ref(object_id: str, character: str, *, available_at: datetime = SNAPSHOT_AT) -> EvidenceRef:
     return EvidenceRef(
         source="fixture",
         object_id=object_id,

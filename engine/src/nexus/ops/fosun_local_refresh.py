@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from nexus.diagnostics.artifacts import ArtifactByteReader
-from nexus.diagnostics.service import diagnose_and_persist
+from nexus.diagnostics.service import diagnose_and_persist, preview_snapshot_diagnostic
 from nexus.domain.ids import new_uuid7
 from nexus.jobs.market_authority import ProviderMarketBinding
 from nexus.market.ingestion import archive_fosun_price_page_raw, ingest_price_page
@@ -368,18 +368,25 @@ async def _diagnose_local_snapshot(
     artifact_reader: ArtifactByteReader,
 ) -> dict[str, object]:
     """Generate from committed local facts; a diagnostic failure must not erase a refresh."""
-    if frozen.status != "READY" or cash_flow_quality != "PASS":
+    if frozen.status != "READY":
         return {"status": "not_run", "code": "RECONCILIATION_PENDING"}
     try:
         async with sessions() as session, session.begin():
-            report = await diagnose_and_persist(
-                session,
-                portfolio_id=frozen.portfolio_snapshot.portfolio_id,
-                snapshot_id=frozen.portfolio_snapshot.id,
-                artifact_reader=artifact_reader,
-            )
+            if cash_flow_quality == "PASS":
+                report = await diagnose_and_persist(
+                    session,
+                    portfolio_id=frozen.portfolio_snapshot.portfolio_id,
+                    snapshot_id=frozen.portfolio_snapshot.id,
+                    artifact_reader=artifact_reader,
+                )
+            else:
+                report = await preview_snapshot_diagnostic(
+                    session,
+                    portfolio_id=frozen.portfolio_snapshot.portfolio_id,
+                    snapshot_id=frozen.portfolio_snapshot.id,
+                )
         return {
-            "status": "persisted",
+            "status": "persisted" if cash_flow_quality == "PASS" else "preview",
             "optimization_need": report.optimization_need,
             "items": len(report.items),
         }

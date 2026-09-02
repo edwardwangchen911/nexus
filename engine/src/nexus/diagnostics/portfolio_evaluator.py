@@ -95,7 +95,7 @@ def _currency_items(
                 evidence_refs=_position_refs(position, result.refs, market, snapshot_refs),
             )
         )
-    if values and not invalid:
+    if values and not invalid and value_unknown is None:
         value_refs = _all_position_refs(
             [position for position, _ in values], results, market, snapshot_refs
         )
@@ -116,7 +116,7 @@ def _currency_items(
                 currency,
                 cash,
                 total,
-                bool(invalid),
+                bool(invalid) or value_unknown is not None,
                 snapshot,
                 market,
                 policy,

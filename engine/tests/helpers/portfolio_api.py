@@ -61,7 +61,7 @@ def headers(method: str, path: str, body: bytes = b"") -> dict[str, str]:
     return signed
 
 
-async def seed_portfolio_list(database_url: str) -> None:
+async def seed_portfolio_list(database_url: str, *, ready_cash_flow_quality: str = "PASS") -> None:
     factory = session_factory(settings(database_url))
     async with factory() as session, session.begin():
         session.add(
@@ -125,7 +125,7 @@ async def seed_portfolio_list(database_url: str) -> None:
                 completed_at=CLOCK - timedelta(minutes=1),
                 attempt_count=1,
                 failure_reason=None,
-                cash_flow_quality="PASS" if status == "READY" else "NOT_RUN",
+                cash_flow_quality=ready_cash_flow_quality if status == "READY" else "NOT_RUN",
             )
             snapshot = PortfolioSnapshotRecord(
                 id=UUID(f"0198d500-1000-7000-8000-00000000004{index + 1}"),

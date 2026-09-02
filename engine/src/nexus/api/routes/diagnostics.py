@@ -1,4 +1,5 @@
 """Read-only persisted portfolio diagnostic routes."""
+
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
@@ -8,6 +9,9 @@ from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.schemas.diagnostics import PortfolioDiagnosticEnvelope, PortfolioDiagnosticResponse
 from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
 from nexus.diagnostics.repository import latest_report
+from nexus.diagnostics.service import preview_snapshot_diagnostic
+from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
@@ -28,9 +32,21 @@ async def get_latest_diagnostic(
     actor: VerifiedServiceActor = Depends(require_service_actor),
     session: AsyncSession = Depends(transactional_session),
 ) -> PortfolioDiagnosticEnvelope:
-    """Return the latest immutable server-computed projection, never a browser recalculation."""
+    """Return the current formal report or an explicitly preliminary read-only projection."""
     try:
         report = await latest_report(session, portfolio_id=portfolio_id)
+        snapshot_id = await session.scalar(
+            select(PortfolioSnapshotRecord.id)
+            .where(PortfolioSnapshotRecord.portfolio_id == portfolio_id)
+            .order_by(PortfolioSnapshotRecord.created_at.desc(), PortfolioSnapshotRecord.id.desc())
+            .limit(1)
+        )
+        if snapshot_id is not None and (
+            report is None or report.portfolio_snapshot_id != snapshot_id
+        ):
+            report = await preview_snapshot_diagnostic(
+                session, portfolio_id=portfolio_id, snapshot_id=snapshot_id
+            )
     except ValueError as error:
         raise NexusError(
             ErrorCode.DATA_PARTIAL,

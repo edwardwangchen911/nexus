@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.diagnostics.artifacts import ArtifactByteReader
-from nexus.diagnostics.assembler import assemble_diagnostic_evidence
+from nexus.diagnostics.assembler import _snapshot_bindings, assemble_diagnostic_evidence
 from nexus.diagnostics.decision import optimization_need as _optimization_need
 from nexus.diagnostics.evidence import EvidenceResolver, EvidenceResult, combine_refs
 from nexus.diagnostics.input_hash import diagnostic_input_hash
@@ -15,6 +15,7 @@ from nexus.diagnostics.items import item as _item
 from nexus.diagnostics.items import threshold_item as _threshold_item
 from nexus.diagnostics.items import unknown_item as _unknown_item
 from nexus.diagnostics.models import (
+    DiagnosticEvidence,
     DiagnosticHistory,
     DiagnosticItem,
     MarketEvidence,
@@ -306,6 +307,69 @@ async def diagnose_and_persist(
 
     await write_authoritative_result()
     return report
+
+
+async def preview_snapshot_diagnostic(
+    session: AsyncSession,
+    *,
+    portfolio_id: UUID,
+    snapshot_id: UUID,
+) -> PortfolioDiagnosticReport:
+    """Read-only snapshot metrics; never persist these as a formal decision baseline."""
+    policy = await load_real_advisory_policy_v1(session)
+    snapshot = await load_frozen_snapshot(
+        session, portfolio_id=portfolio_id, snapshot_id=snapshot_id
+    )
+    bindings, _ = await _snapshot_bindings(session, snapshot)
+    identities = await load_instrument_identities(session, snapshot=snapshot)
+    market = MarketEvidence(
+        quality="PARTIAL",
+        identities=identities,
+        evidence=DiagnosticEvidence.model_validate(bindings),
+    )
+    report = diagnose_portfolio(snapshot, market, DiagnosticHistory.empty(), policy)
+    cash_flow_quality = await session.scalar(
+        select(BrokerSyncRun.cash_flow_quality)
+        .join(PortfolioSnapshotRecord, PortfolioSnapshotRecord.sync_run_id == BrokerSyncRun.id)
+        .where(
+            PortfolioSnapshotRecord.id == snapshot_id,
+            PortfolioSnapshotRecord.portfolio_id == portfolio_id,
+        )
+    )
+    notices = [
+        _unknown_item(
+            "PRELIMINARY_DIAGNOSTIC",
+            "status",
+            "FORMAL_DIAGNOSTIC_PENDING",
+            "portfolio",
+            market,
+        ).model_copy(update={"actionability": "blocked"})
+    ]
+    if cash_flow_quality != "PASS":
+        notices.append(
+            _unknown_item(
+                "CASH_FLOW_RECONCILIATION",
+                "status",
+                "CASH_FLOW_RECONCILIATION_PENDING",
+                "portfolio",
+                market,
+            ).model_copy(update={"actionability": "blocked"})
+        )
+    # A verified concentration threshold can prompt research, never a reduce-only intent.
+    items = tuple(notices) + tuple(
+        item.model_copy(update={"actionability": "research"})
+        if item.actionability == "reduce_only"
+        else item
+        for item in report.items
+    )
+    return report.model_copy(
+        update={
+            "items": items,
+            "optimization_need": "BLOCKED"
+            if report.optimization_need == "BLOCKED"
+            else "RESEARCH_REQUIRED",
+        }
+    )
 
 
 def _calendar_evidence(
