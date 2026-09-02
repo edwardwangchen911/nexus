@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DataState, dataStateLabels, type DataStateKind } from "../../../components/data-state";
 import { DecisionCard } from "../../../components/decision-card";
 import { DecisionPath } from "../../../components/decision-path";
+import { ResearchInputs } from "../../../components/research-inputs";
 import type { components } from "../../../lib/generated/schema";
 
 type Research = components["schemas"]["ResearchRunResponse"];
@@ -97,6 +98,7 @@ export default function ResearchPage(): React.ReactElement {
 
 export function ResearchPanel({ state, research, admission, submitting, notice, onRefresh, onRun }: Props): React.ReactElement {
   const hasData = research !== null && ["ready", "partial", "stale"].includes(state);
+  const inputs = state !== "forbidden" && state !== "loading" ? admission?.inputs : null;
   const canRun = admission?.eligible === true && admission.data_snapshot_id !== null
     && (state === "empty" || state === "ready" && research?.status === "completed");
   return (
@@ -104,7 +106,7 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
       <header className="page-heading">
         <div><p className="eyebrow">时点冻结研究</p><h1>个股研究证据页</h1><p>把委员会结论拆成论点、反证、失效条件和不可变证据；没有分数，也不提供交易动作。</p></div>
         <div className="page-actions">
-          <span className="state-chip" data-state={state}>{dataStateLabels[state]}</span>
+          <span className="state-chip" data-state={state}>{inputs && state === "empty" ? "财报已冻结 · 研究待生成" : dataStateLabels[state]}</span>
           <button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />重新读取</button>
           {canRun ? <button className="button button--primary" type="button" onClick={onRun} disabled={submitting}><ScanSearch aria-hidden="true" size={17} />{submitting ? "正在登记研究" : state === "empty" ? "运行冻结研究" : "重新运行冻结研究"}</button> : null}
         </div>
@@ -112,7 +114,10 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
       <DecisionPath current="research" />
       {notice ? <p className="inline-notice" data-kind={notice.kind} role="status" aria-live="polite">{notice.text}</p> : null}
       {admission?.eligible === false ? <p className="research-page__gate" role="note">{researchAdmissionReason(admission.reason)}</p> : null}
-      {!hasData ? <DataState state={state} title={researchStateTitle(state)} detail={researchStateDetail(state)} /> : <>
+      {inputs && admission ? <ResearchInputs inputs={inputs} asOf={admission.decision_time} /> : null}
+      {!hasData ? (inputs && state === "empty"
+        ? <p className="research-page__gate" role="note">财报资料已就绪，AI 研究尚未生成。可先核验数值、期间与来源；模型配置可稍后补充。</p>
+        : <DataState state={state} title={researchStateTitle(state)} detail={researchStateDetail(state)} />) : <>
         {state !== "ready" ? <p className="research-page__gate" role="note">当前数据为 {dataStateLabels[state]}；保留最后证据供核验，但禁止创建或重跑研究。</p> : null}
         <DecisionCard research={research} />
       </>}

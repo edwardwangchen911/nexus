@@ -5638,6 +5638,16 @@
             "title": "Eligible",
             "type": "boolean"
           },
+          "inputs": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResearchInputsSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "instrument_id": {
             "format": "uuid",
             "title": "Instrument Id",
@@ -5765,6 +5775,188 @@
           "evidence_refs"
         ],
         "title": "ResearchCondition",
+        "type": "object"
+      },
+      "ResearchInputFact": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_ref_id": {
+            "format": "uuid",
+            "title": "Evidence Ref Id",
+            "type": "string"
+          },
+          "fact": {
+            "maxLength": 64,
+            "title": "Fact",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "period_end": {
+            "format": "date",
+            "title": "Period End",
+            "type": "string"
+          },
+          "period_kind": {
+            "enum": [
+              "instant",
+              "duration"
+            ],
+            "title": "Period Kind",
+            "type": "string"
+          },
+          "period_start": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Period Start"
+          },
+          "raw_tag": {
+            "maxLength": 255,
+            "title": "Raw Tag",
+            "type": "string"
+          },
+          "unit": {
+            "maxLength": 100,
+            "title": "Unit",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "evidence_ref_id",
+          "fact",
+          "raw_tag",
+          "value",
+          "unit",
+          "period_kind",
+          "period_start",
+          "period_end"
+        ],
+        "title": "ResearchInputFact",
+        "type": "object"
+      },
+      "ResearchInputFiling": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted_at": {
+            "format": "date-time",
+            "title": "Accepted At",
+            "type": "string"
+          },
+          "accession_number": {
+            "maxLength": 32,
+            "title": "Accession Number",
+            "type": "string"
+          },
+          "content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "evidence_ref_id": {
+            "format": "uuid",
+            "title": "Evidence Ref Id",
+            "type": "string"
+          },
+          "form": {
+            "maxLength": 32,
+            "title": "Form",
+            "type": "string"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "revision": {
+            "maxLength": 255,
+            "title": "Revision",
+            "type": "string"
+          },
+          "source": {
+            "const": "sec",
+            "default": "sec",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence_ref_id",
+          "form",
+          "accession_number",
+          "accepted_at",
+          "received_at",
+          "revision",
+          "content_hash"
+        ],
+        "title": "ResearchInputFiling",
+        "type": "object"
+      },
+      "ResearchInputsSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "display_symbol": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Symbol"
+          },
+          "facts": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchInputFact"
+            },
+            "maxItems": 100,
+            "title": "Facts",
+            "type": "array"
+          },
+          "filings": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchInputFiling"
+            },
+            "maxItems": 20,
+            "title": "Filings",
+            "type": "array"
+          },
+          "total_facts": {
+            "minimum": 0,
+            "title": "Total Facts",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "display_symbol",
+          "filings",
+          "facts",
+          "total_facts",
+          "truncated"
+        ],
+        "title": "ResearchInputsSummary",
         "type": "object"
       },
       "ResearchIntent": {

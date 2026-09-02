@@ -16,6 +16,22 @@ const states: Array<[DataStateKind, string]> = [
 ];
 
 describe("research evidence docket", () => {
+  it("shows frozen financial inputs without pretending an AI report exists", () => {
+    render(<ResearchPanel state="empty" research={null} admission={researchAdmissionData({
+      inputs: {
+        display_symbol: "AAPL", total_facts: 1, truncated: false,
+        filings: [{ evidence_ref_id: "filing-1", source: "sec", form: "10-Q", accession_number: "0000320193-26-000001", accepted_at: "2026-08-20T20:00:00Z", received_at: "2026-08-24T20:00:00Z", revision: "filing-v1", content_hash: "a".repeat(64) }],
+        facts: [{ id: "fact-1", evidence_ref_id: "filing-1", fact: "net_income", raw_tag: "NetIncomeLoss", value: "123.45", unit: "USD", period_kind: "duration", period_start: "2026-04-01", period_end: "2026-06-30" }],
+      },
+    })} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "AAPL · 已冻结财报" })).toBeVisible();
+    expect(screen.getByText("123.45")).toBeVisible();
+    expect(screen.getByText(/2026-04-01.*2026-06-30/)).toBeVisible();
+    expect(screen.getByText("0000320193-26-000001")).toBeVisible();
+    expect(screen.getByText(/财报资料已就绪，AI 研究尚未生成/)).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "委员会决策记录" })).not.toBeInTheDocument();
+    expect(screen.queryByText("请从市场或每日简报进入，并保留 URL 中的 as_of。")).not.toBeInTheDocument();
+  });
   it.each(states)("renders research %s as an explicit visible state", (state, label) => {
     render(<ResearchPanel
       state={state}

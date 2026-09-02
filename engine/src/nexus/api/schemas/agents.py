@@ -63,18 +63,53 @@ class ResearchRunEnvelope(_StrictAgentSchema):
     meta: SuccessMetaResponse
 
 
+class ResearchInputFiling(_StrictAgentSchema):
+    evidence_ref_id: UUID
+    source: Literal["sec"] = "sec"
+    form: str = Field(max_length=32)
+    accession_number: str = Field(max_length=32)
+    accepted_at: datetime
+    received_at: datetime
+    revision: str = Field(max_length=255)
+    content_hash: str = Field(pattern="^[0-9a-f]{64}$")
+
+
+class ResearchInputFact(_StrictAgentSchema):
+    id: UUID
+    evidence_ref_id: UUID
+    fact: str = Field(max_length=64)
+    raw_tag: str = Field(max_length=255)
+    value: DecimalString
+    unit: str = Field(max_length=100)
+    period_kind: Literal["instant", "duration"]
+    period_start: date | None
+    period_end: date
+
+
+class ResearchInputsSummary(_StrictAgentSchema):
+    display_symbol: str | None = Field(max_length=100)
+    filings: tuple[ResearchInputFiling, ...] = Field(max_length=20)
+    facts: tuple[ResearchInputFact, ...] = Field(max_length=100)
+    total_facts: int = Field(ge=0)
+    truncated: bool
+
+
 class ResearchAdmissionResponse(_StrictAgentSchema):
     eligible: bool
-    reason: Literal[
-        "instrument_not_found",
-        "decision_time_in_future",
-        "data_snapshot_unavailable",
-        "prompt_authority_unavailable",
-        "model_pricing_unavailable",
-    ] | None
+    reason: (
+        Literal[
+            "instrument_not_found",
+            "decision_time_in_future",
+            "data_snapshot_unavailable",
+            "prompt_authority_unavailable",
+            "model_pricing_unavailable",
+        ]
+        | None
+    )
     instrument_id: UUID
     data_snapshot_id: UUID | None
     decision_time: datetime
+    inputs: ResearchInputsSummary | None = None
 
     @field_validator("decision_time")
     @classmethod

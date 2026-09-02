@@ -18,6 +18,7 @@ from nexus.agents.persistence import (
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
+from nexus.api.research_inputs import read_research_inputs
 from nexus.api.schemas.agents import (
     AgentRunStatus,
     ResearchAdmissionEnvelope,
@@ -109,6 +110,13 @@ async def get_research_admission(
         instrument_id=instrument_id,
         data_snapshot_id=None if snapshot is None else snapshot.id,
         decision_time=bounded_as_of,
+        inputs=(
+            await read_research_inputs(
+                session, snapshot_id=snapshot.id, instrument_id=instrument_id, as_of=bounded_as_of
+            )
+            if snapshot is not None
+            else None
+        ),
     )
     return ResearchAdmissionEnvelope(
         data=response,

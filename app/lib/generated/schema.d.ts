@@ -2874,6 +2874,7 @@ export interface components {
             decision_time: string;
             /** Eligible */
             eligible: boolean;
+            inputs?: components["schemas"]["ResearchInputsSummary"] | null;
             /**
              * Instrument Id
              * Format: uuid
@@ -2910,6 +2911,84 @@ export interface components {
              * @enum {string}
              */
             unit: "ratio" | "basis_points" | "days" | "currency" | "boolean" | "count" | "state";
+        };
+        /** ResearchInputFact */
+        ResearchInputFact: {
+            /**
+             * Evidence Ref Id
+             * Format: uuid
+             */
+            evidence_ref_id: string;
+            /** Fact */
+            fact: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Period End
+             * Format: date
+             */
+            period_end: string;
+            /**
+             * Period Kind
+             * @enum {string}
+             */
+            period_kind: "instant" | "duration";
+            /** Period Start */
+            period_start: string | null;
+            /** Raw Tag */
+            raw_tag: string;
+            /** Unit */
+            unit: string;
+            /** Value */
+            value: string;
+        };
+        /** ResearchInputFiling */
+        ResearchInputFiling: {
+            /**
+             * Accepted At
+             * Format: date-time
+             */
+            accepted_at: string;
+            /** Accession Number */
+            accession_number: string;
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Evidence Ref Id
+             * Format: uuid
+             */
+            evidence_ref_id: string;
+            /** Form */
+            form: string;
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /** Revision */
+            revision: string;
+            /**
+             * Source
+             * @default sec
+             * @constant
+             */
+            source: "sec";
+        };
+        /** ResearchInputsSummary */
+        ResearchInputsSummary: {
+            /** Display Symbol */
+            display_symbol: string | null;
+            /** Facts */
+            facts: components["schemas"]["ResearchInputFact"][];
+            /** Filings */
+            filings: components["schemas"]["ResearchInputFiling"][];
+            /** Total Facts */
+            total_facts: number;
+            /** Truncated */
+            truncated: boolean;
         };
         /** ResearchIntent */
         ResearchIntent: {

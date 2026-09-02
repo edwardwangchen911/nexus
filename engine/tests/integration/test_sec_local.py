@@ -173,6 +173,17 @@ async def test_sec_only_refresh_archives_real_shape_and_freezes_inputs(
     assert response.status_code == 200
     assert response.json()["data"]["eligible"] is True
     assert response.json()["data"]["data_snapshot_id"] == first["data_snapshot_id"]
+    inputs = response.json()["data"]["inputs"]
+    assert inputs["display_symbol"] == "AAPL"
+    assert len(inputs["filings"]) == 1
+    assert inputs["filings"][0]["source"] == "sec"
+    assert inputs["filings"][0]["form"] == "10-Q"
+    assert inputs["total_facts"] == len(inputs["facts"]) == 11
+    assert inputs["truncated"] is False
+    eps = next(fact for fact in inputs["facts"] if fact["fact"] == "diluted_eps")
+    assert Decimal(eps["value"]) == Decimal("1.25")
+    assert eps["period_start"] is not None
+    assert eps["evidence_ref_id"] == inputs["filings"][0]["evidence_ref_id"]
 
 
 @pytest.mark.asyncio
