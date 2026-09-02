@@ -189,7 +189,13 @@ async def test_unknown_instrument_status_or_cash_flow_kind_fails_closed() -> Non
 
 
 @pytest.mark.asyncio
-async def test_only_reviewed_open_order_statuses_survive_and_missing_update_is_partial() -> None:
+@pytest.mark.parametrize(
+    ("status", "normalized_status"),
+    (("20", "pending"), ("22", "pending"), ("40", "submitted"), ("60", "partially_filled")),
+)
+async def test_only_reviewed_open_order_statuses_survive_and_missing_update_is_partial(
+    status: str, normalized_status: str
+) -> None:
     service = provider(
         {
             "orders": page(
@@ -201,7 +207,7 @@ async def test_only_reviewed_open_order_statuses_survive_and_missing_update_is_p
                     "quantity": "2",
                     "filled_quantity": "1",
                     "price": "100",
-                    "status": "60",
+                    "status": status,
                     "submitted_at": NOW.isoformat(),
                     "updated_at": None,
                 },
@@ -229,6 +235,6 @@ async def test_only_reviewed_open_order_statuses_survive_and_missing_update_is_p
     )
 
     assert [item.provider_order_id for item in result.items] == ["synthetic-open"]
-    assert result.items[0].status == "partially_filled"
+    assert result.items[0].status == normalized_status
     assert result.items[0].updated_at is None
     assert result.quality == "PARTIAL"

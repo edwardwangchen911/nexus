@@ -49,6 +49,7 @@ _OPEN_ORDER_STATUSES: dict[str, Literal["pending", "submitted", "partially_fille
     "10": "pending",
     "20": "pending",
     "21": "pending",
+    "22": "pending",
     "40": "submitted",
     "60": "partially_filled",
 }
