@@ -1,5 +1,9 @@
 "use client";
 
+import { statusLabel } from "../../lib/display-labels";
+
+import { formatDisplayTime } from "../../lib/display-format";
+
 import { FlaskConical, LockKeyhole, Power, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
@@ -199,13 +203,13 @@ function IntegrationCard({ status, pendingAction, onTest, onModeChange }: Omit<I
     <section className="integration-card" aria-label={`${status.provider} 集成（${readOnly ? "只读" : "已禁用"}）`} data-read-only={readOnly ? "true" : "false"}>
       <div className="integration-card__heading">
         <div><p className="eyebrow">{status.provider.toUpperCase()}</p><h2>{label}</h2></div>
-        <span className="mode-badge"><ShieldCheck aria-hidden="true" size={15} />{status.mode.toUpperCase()}</span>
+        <span className="mode-badge"><ShieldCheck aria-hidden="true" size={15} />{statusLabel(status.mode)}</span>
       </div>
       <dl className="integration-card__facts">
-        <Fact term="质量" value={status.quality} />
+        <Fact term="质量" value={statusLabel(status.quality)} />
         <Fact term="最后成功" value={formatDate(status.as_of)} />
         <Fact term="权限到期" value={formatDate(status.capability_expires_at)} />
-        <Fact term="契约哈希" value={status.contract_hash ?? "未准入"} />
+        <Fact term="接入配置摘要" value={status.contract_hash ?? "未准入"} />
         <Fact term="资源版本" value={String(status.version)} />
       </dl>
       <p className="integration-card__next">{status.next_action ?? "无需操作"}</p>
@@ -213,13 +217,13 @@ function IntegrationCard({ status, pendingAction, onTest, onModeChange }: Omit<I
         {status.provider === "fosun" && status.mode === "fixture" ? (
           <button className={`button ${reconciling ? "button--quiet" : "button--primary"}`} type="button" onClick={() => onTest(status)} disabled={testing}>
             <FlaskConical aria-hidden="true" size={17} />
-            {reconciling ? "正在对账权威状态" : testing ? "正在测试复星非交易连接" : "测试非交易连接"}
+            {reconciling ? "正在核对连接状态" : testing ? "正在测试复星非交易连接" : "测试非交易连接"}
           </button>
         ) : null}
         {status.provider === "fosun" ? (
-          <button className="button button--quiet" type="button" onClick={() => onModeChange(status, status.mode === "disabled" ? "fixture" : "disabled")} disabled={changing} aria-label={status.mode === "disabled" ? "启用复星 fixture" : "禁用复星 Provider"}>
+          <button className="button button--quiet" type="button" onClick={() => onModeChange(status, status.mode === "disabled" ? "fixture" : "disabled")} disabled={changing} aria-label={status.mode === "disabled" ? "启用复星离线示例" : "禁用复星数据源"}>
             <Power aria-hidden="true" size={17} />
-            {reconciling ? "正在对账" : changing ? "正在更新" : status.mode === "disabled" ? "启用 fixture" : "禁用 Provider"}
+            {reconciling ? "正在对账" : changing ? "正在更新" : status.mode === "disabled" ? "启用离线示例" : "禁用数据源"}
           </button>
         ) : null}
       </div>
@@ -228,5 +232,5 @@ function IntegrationCard({ status, pendingAction, onTest, onModeChange }: Omit<I
 }
 
 function Fact({ term, value }: { term: string; value: string }): React.ReactElement { return <div><dt>{term}</dt><dd className="numeric-data">{value}</dd></div>; }
-function formatDate(value: string | null): string { if (!value) return "无"; const date = new Date(value); return Number.isNaN(date.valueOf()) ? "无效时间" : date.toLocaleString("zh-CN", { hour12: false }); }
-function stateDetail(state: DataStateKind): string { const details: Record<DataStateKind, string> = { loading: "正在读取引擎的脱敏 Provider 状态。", empty: "尚无可展示的 Provider 状态。", ready: "Provider 状态已就绪。", partial: "部分 Provider 尚未启用或能力未准入。", stale: "显示最后已知状态；截止时间已过，请刷新。", error: "状态读取失败；未开启任何额外能力。", forbidden: "当前身份无权读取集成状态。" }; return details[state]; }
+function formatDate(value: string | null | undefined): string { return formatDisplayTime(value); }
+function stateDetail(state: DataStateKind): string { const details: Record<DataStateKind, string> = { loading: "正在读取引擎的脱敏 数据源状态。", empty: "尚无可展示的 数据源状态。", ready: "数据源状态已就绪。", partial: "部分数据源 尚未启用或能力未准入。", stale: "显示最后已知状态；截止时间已过，请刷新。", error: "状态读取失败；未开启任何额外能力。", forbidden: "当前身份无权读取集成状态。" }; return details[state]; }

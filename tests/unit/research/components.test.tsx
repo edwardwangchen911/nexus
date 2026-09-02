@@ -57,11 +57,11 @@ describe("research evidence docket", () => {
       },
     }} />);
     expect(screen.getByRole("heading", { name: "此持仓的冻结组合背景" })).toBeVisible();
-    expect(screen.getByText("0.4（USD 资产内）")).toBeVisible();
+    expect(screen.getByText("40%（USD 资产内）")).toBeVisible();
     expect(screen.getByRole("region", { name: "本次组合研究问题" })).toBeVisible();
     expect(screen.getByText(/均为同币种证券内比例，不含现金/)).toBeVisible();
     expect(screen.getByText(/预警触发研究，不代表已决定减仓/)).toBeVisible();
-    expect(screen.getByText("MARKET_EVIDENCE_UNAVAILABLE")).toBeVisible();
+    expect(screen.getByText(/历史风险证据尚未齐备/)).toBeVisible();
     expect(screen.getByText(/不是实时仓位/)).toBeVisible();
     expect(screen.queryByRole("button", { name: /交易|下单/ })).not.toBeInTheDocument();
   });
@@ -105,7 +105,7 @@ describe("research evidence docket", () => {
     render(<BriefPanel state="ready" brief={briefData()} onRefresh={vi.fn()} />);
 
     expect(screen.getByText("每日研究简报")).toBeVisible();
-    expect(screen.getByText("交易会话")).toBeVisible();
+    expect(screen.getByText("交易日")).toBeVisible();
     expect(screen.getByText("研究证据").closest("li")).toHaveAttribute("aria-current", "step");
   });
 
@@ -139,7 +139,7 @@ describe("research evidence docket", () => {
     expect(screen.getByRole("heading", { name: "支持论点" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "反方论点" })).toBeVisible();
     expect(screen.getByText(/空头角色认为增长放缓/)).toBeVisible();
-    expect(screen.getByText("revenue_growth_ttm", { exact: true })).toBeVisible();
+    expect(screen.getByTitle("revenue_growth_ttm")).toBeVisible();
     expect(screen.getByText("committee-v1", { exact: true })).toBeVisible();
     expect(document.body).not.toHaveTextContent(/\d+\s*\/\s*100|置信度/);
     expect(screen.queryByRole("button", { name: /下单|交易|买入|卖出/ })).not.toBeInTheDocument();
@@ -218,7 +218,7 @@ describe("research evidence docket", () => {
     expect(dialog).toHaveTextContent("SEC");
     expect(dialog).toHaveTextContent(evidence.object_id);
     expect(dialog).toHaveTextContent(evidence.location);
-    expect(dialog).toHaveTextContent("2026-08-24 18:30:00 UTC");
+    expect(dialog).toHaveTextContent("2026-08-25 02:30:00 北京时间");
     expect(dialog).toHaveTextContent(evidence.content_hash);
     expect(dialog).toHaveTextContent("现金流质量稳定。");
     fireEvent.keyDown(dialog, { key: "Escape" });

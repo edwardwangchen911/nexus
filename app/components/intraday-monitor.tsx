@@ -1,5 +1,9 @@
 "use client";
 
+import { formatPercent as displayPercent } from "../lib/display-format";
+
+import { formatDisplayTime } from "../lib/display-format";
+
 import { formatDisplayDecimal } from "../lib/display-decimal";
 import { Activity, ChevronLeft, ChevronRight, Clock3, TriangleAlert } from "lucide-react";
 import { useRef } from "react";
@@ -182,17 +186,12 @@ function statusState(status: IntradayMonitorData["status"]): "ready" | "partial"
 
 function formatPercent(value: string | null, signed: boolean): string {
   if (value === null) return "证据不足";
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return "证据不足";
-  const percent = parsed * 100;
-  const prefix = signed && percent > 0 ? "+" : "";
-  return `${prefix}${percent.toFixed(2)}%`;
+  const result = displayPercent(value);
+  return signed && /^[1-9]|^0\.\d*[1-9]/.test(result) ? `+${result}` : result;
 }
 
 function formatBps(value: string | null): string {
-  if (value === null) return "证据不足";
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? `${parsed.toFixed(2)} bps` : "证据不足";
+  return value === null ? "证据不足" : `${formatDisplayDecimal(value)} 基点`;
 }
 
 function formatSpread(monitor: IntradayMonitorData): string {
@@ -213,12 +212,7 @@ function formatAge(value: number | null | undefined): string {
   return value === null || value === undefined ? "未知" : `${formatDisplayDecimal(value)} 秒`;
 }
 
-function formatUtc(value: string | null): string {
-  if (!value) return "无";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.valueOf())) return "无效时间";
-  return parsed.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
-}
+function formatUtc(value: string | null | undefined): string { return formatDisplayTime(value); }
 
 function buildChartPoints(bars: IntradayMonitorData["bars"]): string[] {
   if (bars.length < MINIMUM_CHART_SAMPLES) return [];

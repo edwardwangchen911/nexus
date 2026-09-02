@@ -1,5 +1,7 @@
 "use client";
 
+import { formatDisplayTime } from "../../lib/display-format";
+
 import { ChevronDown, RefreshCw, TerminalSquare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DataState, dataStateLabels, type DataStateKind } from "../../components/data-state";
@@ -210,5 +212,5 @@ function snapshotState(status: PortfolioSnapshot["status"]): DataStateKind { ret
 function kindLabel(kind: PortfolioItem["kind"]): string { return ({ real_read_only: "真实只读", internal_paper: "内部模拟", shadow: "影子组合" })[kind]; }
 function coverageLabel(scope: string): string { return scope === "broker_account" ? "券商账户" : scope; }
 function cashFlowQualityLabel(value: PortfolioSnapshot["cash_flow_quality"]): string { return ({ PASS: "已通过", PARTIAL: "不完整", NOT_RUN: "未运行" })[value]; }
-function formatTime(value: string | null): string { if (!value) return "Provider 时点缺失"; const date = new Date(value); return Number.isNaN(date.valueOf()) ? "无效时间" : date.toISOString().replace("T", " ").replace(".000Z", " UTC"); }
+function formatTime(value: string | null | undefined): string { return formatDisplayTime(value); }
 function stateDetail(state: DataStateKind): string { return ({ loading: "正在读取脱敏组合和冻结快照。", empty: "尚无可展示的冻结组合快照。", ready: "组合快照已就绪。", partial: "资产事实可展示；订单或现金流尚未完成对账，不能作为优化基线。", stale: "显示最后已知快照，不触发业务动作。", error: "读取失败；未开启任何交易能力。", forbidden: "当前身份无权读取组合事实。" })[state]; }

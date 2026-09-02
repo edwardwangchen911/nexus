@@ -233,9 +233,9 @@ describe("market vertical slice", () => {
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("复星 L1（只读）");
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("实时");
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("未复权（raw）");
-    expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("2026-08-22 00:01:00 UTC");
+    expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("2026-08-22 08:01:00 北京时间");
     expect(screen.getByText("未复权价格不可直接用于跨期收益、动量或回撤判断。")).toBeVisible();
-    expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent("2026-08-21 20:00:00 UTC");
+    expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent("2026-08-22 04:00:00 北京时间");
     expect(screen.getByRole("link", { name: "打开 AAPL 个股研究" })).toHaveAttribute(
       "href",
       `/research/${item.instrument_id}?as_of=${encodeURIComponent("2026-09-02T06:00:00Z")}`,

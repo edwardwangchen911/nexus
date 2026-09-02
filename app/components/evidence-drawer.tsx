@@ -1,5 +1,7 @@
 "use client";
 
+import { formatDisplayTime } from "../lib/display-format";
+
 import type { RefObject } from "react";
 
 import type { components } from "../lib/generated/schema";
@@ -52,6 +54,4 @@ export function EvidenceDrawer({ evidence, excerpt, open, onClose, returnFocusRe
   );
 }
 
-function formatUtc(value: string): string {
-  return `${value.replace("T", " ").replace(/(?:\.\d+)?Z$/, "")} UTC`;
-}
+function formatUtc(value: string | null | undefined): string { return formatDisplayTime(value); }

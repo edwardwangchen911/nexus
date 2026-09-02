@@ -1,5 +1,7 @@
 "use client";
 
+import { formatDisplayTime } from "../lib/display-format";
+
 import { useEffect, useRef } from "react";
 import { Activity, ChevronDown, RefreshCw } from "lucide-react";
 import { dataStateLabels, type DataStateKind } from "./data-state";
@@ -126,8 +128,4 @@ function qualityLabel(quality: IntegrationStatus["quality"] | undefined): string
   return "未知";
 }
 
-function formatTimestamp(value: string | null | undefined): string {
-  if (!value) return "无";
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.valueOf()) ? "无效时间" : parsed.toISOString().replace("T", " ").replace(".000Z", " UTC");
-}
+function formatTimestamp(value: string | null | undefined): string { return formatDisplayTime(value); }

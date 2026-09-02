@@ -55,9 +55,9 @@ for (const viewport of releaseViewports) {
     await expect(page.getByText("摊薄成本")).toBeVisible();
     await page.getByText("成本与数量 · 只读").click();
     const authority = page.getByRole("region", { name: "数据与决策权威边界" });
-    await expect(authority).toContainText("DISPLAY_READY");
-    await expect(authority).toContainText("DECISION_READY");
-    await expect(authority).toContainText("HUMAN APPROVAL");
+    await expect(authority).toContainText("可以查看");
+    await expect(authority).toContainText("快照已通过核验");
+    await expect(authority).toContainText("需逐笔人工确认");
     await expect(page.getByText(/香港交易所财报证据尚未准入/)).toBeVisible();
     await expect(page.getByRole("region", { name: "真实刷新仅限本机终端" }).getByText("最近本地刷新状态")).toBeVisible();
     await expect(page.getByRole("button", { name: "刷新页面数据" })).toBeEnabled();

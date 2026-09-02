@@ -1,5 +1,8 @@
 "use client";
 
+import { formatMetric } from "../../../lib/display-format";
+import { statusLabel, reasonText, operatorLabel, signalLabel } from "../../../lib/display-labels";
+
 import { RefreshCw } from "lucide-react";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -45,10 +48,10 @@ export function BriefPanel({ state, brief, onRefresh }: { state: DataStateKind; 
         <div className="page-actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />重新读取简报</button></div>
       </header>
       <DecisionPath current="research" />
-      {!hasData ? <DataState state={state} title={state === "empty" ? "该 session 暂无简报" : "每日简报暂时不可用"} detail="简报只读取已持久化的 Agent 结果，不在页面调用模型。" /> : <>
+      {!hasData ? <DataState state={state} title={state === "empty" ? "该交易日暂无简报" : "每日简报暂时不可用"} detail="简报只读取已持久化的 Agent 结果，不在页面调用模型。" /> : <>
         {state !== "ready" ? <p className="research-page__gate" role="note">简报为 {dataStateLabels[state]}；保留最后内容，但不能作为策略目标输入。</p> : null}
         <section className="brief-summary" aria-labelledby="brief-completeness-title">
-          <div><p className="eyebrow">交易会话</p><h2 id="brief-completeness-title">{brief.session_date} 证据完整度</h2></div>
+          <div><p className="eyebrow">交易日</p><h2 id="brief-completeness-title">{brief.session_date} 证据完整度</h2></div>
           <dl>
             <div><dt>总运行</dt><dd>{brief.evidence_completeness.total_runs}</dd></div>
             <div><dt>完整</dt><dd>{brief.evidence_completeness.complete}</dd></div>
@@ -63,14 +66,14 @@ export function BriefPanel({ state, brief, onRefresh }: { state: DataStateKind; 
           <BriefSection title="预算降级观察" items={brief.budget_exhausted_watch} asOf={brief.generated_at} />
         </div>
         <section className="brief-ledger" aria-labelledby="brief-disagreement-title"><h2 id="brief-disagreement-title">委员会分歧</h2>{brief.disagreements.length ? <ul>{brief.disagreements.map((item) => <li key={item.run_id}><a href={researchHref(item.instrument_id, brief.generated_at)}>{item.instrument_id}</a><p>{item.summary}</p></li>)}</ul> : <p>没有记录到分歧。</p>}</section>
-        <section className="brief-ledger" aria-labelledby="brief-invalidation-title"><h2 id="brief-invalidation-title">失效条件</h2>{brief.invalidations.length ? <ul>{brief.invalidations.map((item) => <li key={item.run_id}><a href={researchHref(item.instrument_id, brief.generated_at)}>{item.instrument_id}</a><p>{item.conditions.map((condition) => `${condition.signal} ${condition.operator} ${String(condition.threshold)}`).join("；")}</p></li>)}</ul> : <p>没有可展示的失效条件。</p>}</section>
+        <section className="brief-ledger" aria-labelledby="brief-invalidation-title"><h2 id="brief-invalidation-title">失效条件</h2>{brief.invalidations.length ? <ul>{brief.invalidations.map((item) => <li key={item.run_id}><a href={researchHref(item.instrument_id, brief.generated_at)}>{item.instrument_id}</a><p>{item.conditions.map((condition) => `${signalLabel(condition.signal)} ${operatorLabel(condition.operator)} ${typeof condition.threshold === "boolean" ? (condition.threshold ? "是" : "否") : formatMetric(condition.threshold, condition.unit, condition.signal)}`).join("；")}</p></li>)}</ul> : <p>没有可展示的失效条件。</p>}</section>
       </>}
     </section>
   );
 }
 
 function BriefSection({ title, items, asOf }: { title: string; items: BriefItem[]; asOf: string }): React.ReactElement {
-  return <section className="brief-section" aria-label={title}><h2>{title}</h2>{items.length ? <ul>{items.map((item) => <li key={item.run_id}><a href={researchHref(item.instrument_id, asOf)}>{item.instrument_id}</a><span>{item.stance ?? item.status}</span>{item.reason ? <code>{item.reason}</code> : null}</li>)}</ul> : <p>本 session 没有此类记录。</p>}</section>;
+  return <section className="brief-section" aria-label={title}><h2>{title}</h2>{items.length ? <ul>{items.map((item) => <li key={item.run_id}><a href={researchHref(item.instrument_id, asOf)}>{item.instrument_id}</a><span>{statusLabel(item.stance ?? item.status)}</span>{item.reason ? <span>{reasonText(item.reason)}</span> : null}</li>)}</ul> : <p>本交易日没有此类记录。</p>}</section>;
 }
 
 function researchHref(instrumentId: string, asOf: string): string {

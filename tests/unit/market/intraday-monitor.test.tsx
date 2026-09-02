@@ -51,10 +51,10 @@ describe("IntradayMonitor", () => {
     expect(region).toHaveTextContent("盘中监控 · 1 分钟证据");
     expect(region).toHaveTextContent("实时 IEX（仅 IEX）");
     expect(region).toHaveTextContent("已就绪");
-    expect(region).toHaveTextContent("+1.00%");
-    expect(region).toHaveTextContent("-2.50%");
-    expect(region).toHaveTextContent("3.13%");
-    expect(region).toHaveTextContent("4.40 bps");
+    expect(region).toHaveTextContent("+1%");
+    expect(region).toHaveTextContent("-2.5%");
+    expect(region).toHaveTextContent("3.125%");
+    expect(region).toHaveTextContent("4.402 基点");
     expect(screen.getByRole("table", { name: "AAPL 1 分钟行情数据" })).toHaveTextContent(
       "227.16",
     );
@@ -131,9 +131,9 @@ describe("IntradayMonitor", () => {
     expect(region).toHaveTextContent("复星 L1（只读）");
     expect(region).toHaveTextContent("实时性未获证明");
     expect(region).toHaveTextContent("盘口未提供");
-    expect(region).not.toHaveTextContent("4.40 bps");
-    expect(region).toHaveTextContent("分钟截止 2026-08-21 20:00:00 UTC");
-    expect(region).toHaveTextContent("网关接收时间 2026-08-21 20:00:03 UTC");
+    expect(region).not.toHaveTextContent("4.402 基点");
+    expect(region).toHaveTextContent("分钟截止 2026-08-22 04:00:00 北京时间");
+    expect(region).toHaveTextContent("网关接收时间 2026-08-22 04:00:03 北京时间");
     expect(region).toHaveTextContent("上游报价未提供成交时间");
     expect(region).toHaveTextContent("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE");
   });

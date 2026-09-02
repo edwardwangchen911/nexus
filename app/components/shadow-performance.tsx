@@ -1,5 +1,9 @@
 "use client";
 
+import { formatDisplayTime, formatPercent } from "../lib/display-format";
+import { statusLabel, reasonText } from "../lib/display-labels";
+import { marketDeliveryModeLabel } from "../lib/market-evidence-labels";
+
 import { formatDisplayDecimal } from "../lib/display-decimal";
 import { ChevronLeft, ChevronRight, ShieldCheck } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
@@ -134,7 +138,7 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
     <section className="shadow-performance" aria-labelledby="shadow-performance-title">
       <header className="shadow-performance__heading">
         <div>
-          <p className="eyebrow">前向证据 · 63 个会话</p>
+          <p className="eyebrow">前向证据 · 63 个交易日</p>
           <h2 id="shadow-performance-title">前向影子绩效</h2>
           <p>三方案从同一冻结起点前向观察；所有数值来自后端封存事实，浏览器不重算绩效。</p>
         </div>
@@ -149,12 +153,12 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
       </div>
 
       <dl className="shadow-performance__summary">
-        <div><dt>开始会话</dt><dd className="numeric-data">{shadow.start_session}</dd></div>
-        <div><dt>最新会话</dt><dd className="numeric-data">{shadow.freshness.latest_session ?? "尚无"}</dd></div>
+        <div><dt>开始交易日</dt><dd className="numeric-data">{shadow.start_session}</dd></div>
+        <div><dt>最新交易日</dt><dd className="numeric-data">{shadow.freshness.latest_session ?? "尚无"}</dd></div>
         <div><dt>完成进度</dt><dd className="numeric-data">{shadow.coverage.completed} / {shadow.coverage.required}</dd></div>
         <div><dt>当前检查点</dt><dd className="numeric-data">{latestCheckpoint ? `${latestCheckpoint.ordinal} 日` : "尚无"}</dd></div>
         <div><dt>数据状态</dt><dd>{freshnessLabel(shadow.freshness.status)}</dd></div>
-        <div><dt>可用时间</dt><dd className="numeric-data">{shadow.freshness.available_at ?? "尚无"}</dd></div>
+        <div><dt>可用时间</dt><dd className="numeric-data">{formatDisplayTime(shadow.freshness.available_at)}</dd></div>
       </dl>
 
       <div className="shadow-performance__chart-shell">
@@ -167,7 +171,7 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
               </li>
             ))}
           </ul>
-          <span className="shadow-performance__anchor"><span aria-hidden="true" />NAV 100 基准</span>
+          <span className="shadow-performance__anchor"><span aria-hidden="true" />净值基准 100</span>
         </div>
         <div ref={chartRef} className="shadow-performance__canvas" aria-hidden="true" />
         <ul className="shadow-performance__end-labels" aria-label="曲线终点直接标注">
@@ -187,27 +191,27 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
       <div
         className="shadow-performance__navigator"
         role="group"
-        aria-label="选择影子会话"
+        aria-label="选择影子交易日"
         aria-describedby={detailId}
         tabIndex={0}
         onKeyDown={handleKey}
       >
         <button className="button button--quiet" type="button" onClick={() => moveTo(boundedIndex - 1)} disabled={boundedIndex <= 0}>
-          <ChevronLeft aria-hidden="true" size={17} />上一会话
+          <ChevronLeft aria-hidden="true" size={17} />上一交易日
         </button>
-        <p id={detailId} role="status" aria-label="当前影子会话详情" aria-live="polite" className="numeric-data">
-          {activeSession ?? "尚无会话"}
+        <p id={detailId} role="status" aria-label="当前影子交易日详情" aria-live="polite" className="numeric-data">
+          {activeSession ?? "尚无交易日"}
           {activeSession ? activePoints.map((point, index) => ` · ${variantLabels[variants[index]]} ${point ? formatDisplayDecimal(point.nav) : "未知"}`) : ""}
         </p>
         <button className="button button--quiet" type="button" onClick={() => moveTo(boundedIndex + 1)} disabled={boundedIndex >= sessions.length - 1}>
-          下一会话<ChevronRight aria-hidden="true" size={17} />
+          下一交易日<ChevronRight aria-hidden="true" size={17} />
         </button>
       </div>
       {/* eslint-enable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */}
 
-      <ScrollableTable label="三方案逐会话精确 NAV 表格，可横向滚动">
-        <table className="shadow-nav-table numeric-data" aria-label="三方案逐会话精确 NAV">
-          <caption>图形对应的逐会话 NAV，最多显示 3 位小数；底层数值保持原精度。</caption>
+      <ScrollableTable label="三方案逐交易日净值 表格，可横向滚动">
+        <table className="shadow-nav-table numeric-data" aria-label="三方案逐交易日净值">
+          <caption>图形对应的逐交易日 NAV，最多显示 3 位小数；底层数值保持原精度。</caption>
           <thead><tr><th scope="col">交易日</th>{variants.map((variant) => <th scope="col" key={variant}>{variantLabels[variant]}</th>)}</tr></thead>
           <tbody>
             {sessions.map((session, index) => (
@@ -225,21 +229,21 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
         <ScrollableTable label="影子检查点绩效表格，可横向滚动">
           <table className="shadow-metrics-table numeric-data">
             <caption>每个检查点的后端封存绩效</caption>
-            <thead><tr><th scope="col">检查点</th><th scope="col">方案</th><th scope="col">净累计收益</th><th scope="col">相对保持差异</th><th scope="col">最大回撤</th><th scope="col">回撤改善</th><th scope="col">年化波动</th><th scope="col">波动改善</th><th scope="col">累计换手</th><th scope="col">费用拖累 <span>NAV 指数点</span></th><th scope="col">最差会话</th></tr></thead>
+            <thead><tr><th scope="col">检查点</th><th scope="col">方案</th><th scope="col">净累计收益</th><th scope="col">相对保持差异</th><th scope="col">最大回撤</th><th scope="col">回撤改善</th><th scope="col">年化波动</th><th scope="col">波动改善</th><th scope="col">累计换手</th><th scope="col">费用拖累 <span>净值指数点</span></th><th scope="col">最差交易日</th></tr></thead>
             <tbody>
               {shadow.checkpoints.flatMap((checkpoint) => checkpoint.metrics.map((item) => (
                 <tr key={`${checkpoint.ordinal}:${item.variant}`}>
                   <th scope="row">{checkpoint.ordinal} 日 · {checkpoint.status === "complete" ? "完整" : "不完整"}</th>
                   <td>{variantLabels[item.variant]}</td>
                   <MetricCell metric={item.metrics.net_cumulative_return} />
-                  <MetricCell metric={item.metrics.return_delta_vs_hold} />
+                  <MetricCell metric={item.metrics.return_delta_vs_hold} difference />
                   <MetricCell metric={item.metrics.max_drawdown} />
-                  <MetricCell metric={item.metrics.drawdown_improvement} />
+                  <MetricCell metric={item.metrics.drawdown_improvement} difference />
                   <MetricCell metric={item.metrics.annualized_volatility} />
-                  <MetricCell metric={item.metrics.volatility_improvement} />
+                  <MetricCell metric={item.metrics.volatility_improvement} difference />
                   <MetricCell metric={item.metrics.cumulative_turnover} />
-                  <MetricCell metric={item.metrics.fee_drag_index_points} />
-                  <td>{item.metrics.worst_sessions.length === 0 ? `未知 · ${checkpoint.reason ?? item.metrics.net_cumulative_return.reason}` : item.metrics.worst_sessions.map((worst) => `${worst.session} ${formatDisplayDecimal(worst.return_value)}`).join("；")}</td>
+                  <MetricCell metric={item.metrics.fee_drag_index_points} indexPoints />
+                  <td>{item.metrics.worst_sessions.length === 0 ? `未知 · ${reasonText(checkpoint.reason ?? item.metrics.net_cumulative_return.reason)}` : item.metrics.worst_sessions.map((worst) => `${worst.session} ${formatPercent(worst.return_value)}`).join("；")}</td>
                 </tr>
               )))}
             </tbody>
@@ -252,10 +256,10 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
           <h3>覆盖与刷新</h3>
           <dl>
             <div><dt>已完成 / 应到</dt><dd className="numeric-data">{shadow.coverage.completed} / {shadow.coverage.due}</dd></div>
-            <div><dt>下一会话</dt><dd className="numeric-data">{shadow.coverage.next_expected_session ?? "已完成"}</dd></div>
-            <div><dt>缺失会话</dt><dd className="numeric-data">{shadow.coverage.missing_sessions.join("、") || "无"}</dd></div>
-            <div><dt>最后尝试</dt><dd className="numeric-data">{shadow.freshness.last_attempt_at ?? "尚无"}</dd></div>
-            <div><dt>失败原因</dt><dd>{shadow.last_failed_attempt?.reason ?? "无"}</dd></div>
+            <div><dt>下一交易日</dt><dd className="numeric-data">{shadow.coverage.next_expected_session ?? "已完成"}</dd></div>
+            <div><dt>缺失交易日</dt><dd className="numeric-data">{shadow.coverage.missing_sessions.join("、") || "无"}</dd></div>
+            <div><dt>最后尝试</dt><dd className="numeric-data">{formatDisplayTime(shadow.freshness.last_attempt_at)}</dd></div>
+            <div><dt>失败原因</dt><dd>{shadow.last_failed_attempt ? reasonText(shadow.last_failed_attempt.reason) : "无"}</dd></div>
           </dl>
         </div>
         <div>
@@ -263,8 +267,8 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
           <ul>
             {shadow.sources.map((source) => (
               <li key={`${source.source}:${source.kind}:${source.delivery_mode}`}>
-                <strong>{source.source} · {source.kind} · {source.delivery_mode}</strong>
-                <span className="numeric-data">{source.latest_session} · {source.available_at}</span>
+                <strong>{source.source} · {source.kind === "price_bars" ? "历史行情" : source.kind === "corporate_actions" ? "公司行动" : source.kind} · {marketDeliveryModeLabel(source.delivery_mode)}</strong>
+                <span className="numeric-data">{source.latest_session} · {formatDisplayTime(source.available_at)}</span>
               </li>
             ))}
           </ul>
@@ -272,13 +276,13 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
       </section>
 
       <section className="shadow-performance__section" aria-labelledby="shadow-outcomes-title">
-        <header><div><p className="eyebrow">首会话 · 模拟结果</p><h3 id="shadow-outcomes-title">首会话模拟结果</h3></div><p>这些是模拟成交事实，不是订单或交易回执。</p></header>
-        {outcomes.length === 0 ? <p className="inline-notice">首会话没有模拟调仓结果。</p> : (
-          <ScrollableTable label="首会话模拟结果表格，可横向滚动">
+        <header><div><p className="eyebrow">首交易日 · 模拟结果</p><h3 id="shadow-outcomes-title">首交易日模拟结果</h3></div><p>这些是模拟成交事实，不是订单或交易回执。</p></header>
+        {outcomes.length === 0 ? <p className="inline-notice">首交易日没有模拟调仓结果。</p> : (
+          <ScrollableTable label="首交易日模拟结果表格，可横向滚动">
             <table className="shadow-outcomes-table numeric-data">
-              <caption>三方案首会话的确定性模拟结果</caption>
+              <caption>三方案首交易日的确定性模拟结果</caption>
               <thead><tr><th scope="col">方案</th><th scope="col">标的</th><th scope="col">方向</th><th scope="col">状态</th><th scope="col">原因</th><th scope="col">数量</th><th scope="col">价格</th><th scope="col">名义金额</th><th scope="col">成本</th></tr></thead>
-              <tbody>{outcomes.map(({ portfolio, outcome }) => <tr key={`${portfolio.variant}:${outcome.instrument_id}`}><th scope="row">{variantLabels[portfolio.variant]}</th><td>{outcome.instrument_id}</td><td>{outcome.side}</td><td>{outcome.status}</td><td>{outcome.reason}</td><td>{outcome.fill ? formatDisplayDecimal(outcome.fill.quantity) : "—"}</td><td>{outcome.fill ? formatDisplayDecimal(outcome.fill.price) : "—"}</td><td>{outcome.fill ? formatDisplayDecimal(outcome.fill.notional) : "—"}</td><td>{outcome.fill ? formatDisplayDecimal(outcome.fill.cost) : "—"}</td></tr>)}</tbody>
+              <tbody>{outcomes.map(({ portfolio, outcome }) => <tr key={`${portfolio.variant}:${outcome.instrument_id}`}><th scope="row">{variantLabels[portfolio.variant]}</th><td>{outcome.instrument_id}</td><td>{statusLabel(outcome.side)}</td><td>{statusLabel(outcome.status)}</td><td>{reasonText(outcome.reason)}</td><td>{outcome.fill ? formatDisplayDecimal(outcome.fill.quantity) : "—"}</td><td>{outcome.fill ? formatDisplayDecimal(outcome.fill.price) : "—"}</td><td>{outcome.fill ? formatDisplayDecimal(outcome.fill.notional) : "—"}</td><td>{outcome.fill ? formatDisplayDecimal(outcome.fill.cost) : "—"}</td></tr>)}</tbody>
             </table>
           </ScrollableTable>
         )}
@@ -293,12 +297,12 @@ function ScrollableTable({ label, children }: { label: string; children: React.R
   return <div className="table-scroll" role="region" aria-label={label} tabIndex={0}>{children}</div>;
 }
 
-function MetricCell({ metric }: { metric: Metric }): React.ReactElement {
-  return <td>{metric.status === "known" ? formatDisplayDecimal(metric.value) : `未知 · ${metric.reason}`}</td>;
+function MetricCell({ metric, difference = false, indexPoints = false }: { metric: Metric; difference?: boolean; indexPoints?: boolean }): React.ReactElement {
+  return <td>{metric.status === "known" ? (indexPoints ? formatDisplayDecimal(metric.value) : formatPercent(metric.value, difference)) : `未知 · ${reasonText(metric.reason)}`}</td>;
 }
 
 function freshnessLabel(value: Shadow["freshness"]["status"]): string {
-  return value === "current" ? "当前" : value === "stale" ? "已滞后" : "尚无到期会话";
+  return value === "current" ? "当前" : value === "stale" ? "已滞后" : "尚无到期交易日";
 }
 
 function lineClass(variant: Variant): "solid" | "dashed" | "dotted" {

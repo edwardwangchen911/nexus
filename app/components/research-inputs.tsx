@@ -1,3 +1,6 @@
+import { formatPercent } from "../lib/display-format";
+import { statusLabel, reasonText } from "../lib/display-labels";
+import { formatDisplayTime } from "../lib/display-format";
 import { formatDisplayDecimal } from "../lib/display-decimal";
 import type { components } from "../lib/generated/schema";
 
@@ -27,19 +30,19 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
       {inputs.portfolio_context.research_focus ? <section aria-label="本次组合研究问题">
         <h3>本次组合研究问题</h3>
         <p>{inputs.portfolio_context.research_focus.question}</p>
-        <p>依据同一资产快照的集中度诊断。证券占比 {formatDisplayDecimal(inputs.portfolio_context.research_focus.observed_weight)}，预警阈值 {formatDisplayDecimal(inputs.portfolio_context.research_focus.reference_limit)}；均为同币种证券内比例，不含现金。</p>
+        <p>依据同一资产快照的集中度诊断。证券占比 {formatPercent(inputs.portfolio_context.research_focus.observed_weight)}，预警阈值 {formatPercent(inputs.portfolio_context.research_focus.reference_limit)}；均为同币种证券内比例，不含现金。</p>
         <p>预警触发研究，不代表已决定减仓。政策版本：{inputs.portfolio_context.research_focus.policy_version}。</p>
       </section> : null}
       <h3>此持仓的冻结组合背景</h3>
       <p>复星已入库快照，不是实时仓位；仅提供研究背景，执行保持锁定。</p>
       <dl className="decision-card__authority">
         <div><dt>资产快照时间</dt><dd>{formatUtc(inputs.portfolio_context.snapshot_as_of)}</dd></div>
-        <div><dt>资产占比（含现金，比例）</dt><dd>{inputs.portfolio_context.position_weight === null ? "估值资料不完整" : `${formatDisplayDecimal(inputs.portfolio_context.position_weight)}（${inputs.portfolio_context.currency} 资产内）`}</dd></div>
-        <div><dt>同币种现金占比（比例）</dt><dd>{inputs.portfolio_context.cash_weight === null ? "估值资料不完整" : formatDisplayDecimal(inputs.portfolio_context.cash_weight)}</dd></div>
+        <div><dt>资产占比（含现金）</dt><dd>{inputs.portfolio_context.position_weight === null ? "估值资料不完整" : `${formatPercent(inputs.portfolio_context.position_weight)}（${inputs.portfolio_context.currency} 资产内）`}</dd></div>
+        <div><dt>同币种现金占比</dt><dd>{inputs.portfolio_context.cash_weight === null ? "估值资料不完整" : formatPercent(inputs.portfolio_context.cash_weight)}</dd></div>
         <div><dt>该快照对账</dt><dd>{inputs.portfolio_context.snapshot_decision_ready ? "已通过；不代表研究证据齐备" : "未通过；不可作为正式决策依据"}</dd></div>
-        <div><dt>确定性诊断</dt><dd>{inputs.portfolio_context.optimization_need ?? "无已冻结的正式诊断"}</dd></div>
+        <div><dt>确定性诊断</dt><dd>{inputs.portfolio_context.optimization_need ? statusLabel(inputs.portfolio_context.optimization_need) : "尚无正式诊断"}</dd></div>
       </dl>
-      {inputs.portfolio_context.diagnostics.filter((item) => item.unknown_reason).map((item) => <p key={item.code}>{item.unknown_reason}</p>)}
+      {inputs.portfolio_context.diagnostics.filter((item) => item.unknown_reason).map((item) => <p key={item.code}>{reasonText(item.unknown_reason)}</p>)}
       {inputs.portfolio_context.diagnostics_truncated ? <p>诊断项仅展示前 100 项。</p> : null}
       {inputs.portfolio_context.proposal_comparison ? <p>
         此次研究已包含同一基线的方案比较，冻结于 {formatUtc(inputs.portfolio_context.proposal_comparison.frozen_at)}。
@@ -87,6 +90,4 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
   </article>;
 }
 
-function formatUtc(value: string): string {
-  return value.replace("T", " ").replace(/(?:Z|\+00:00)$/, " UTC");
-}
+function formatUtc(value: string | null | undefined): string { return formatDisplayTime(value); }

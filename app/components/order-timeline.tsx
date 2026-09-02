@@ -1,5 +1,10 @@
 "use client";
 
+import { statusLabel, reasonText } from "../lib/display-labels";
+import { marketDeliveryModeLabel } from "../lib/market-evidence-labels";
+
+import { formatDisplayTime } from "../lib/display-format";
+
 import { Ban, Clock3, ReceiptText } from "lucide-react";
 import { useId } from "react";
 
@@ -59,8 +64,8 @@ export function OrderTimeline({ order, allowCancel = true, onCancel }: { order: 
             <li key={event.event_seq} data-event-seq={event.event_seq}>
               <span className="paper-timeline__seq numeric-data">E{String(event.event_seq).padStart(2, "0")}</span>
               <div>
-                <strong>{event.from_status ?? "初始"} → {event.to_status}</strong>
-                <p>{event.actor_kind} · {event.reason_code}</p>
+                <strong>{event.from_status ? statusLabel(event.from_status) : "初始"} → {statusLabel(event.to_status)}</strong>
+                <p>{event.actor_kind} · {reasonText(event.reason_code)}</p>
               </div>
               <time className="numeric-data" dateTime={event.occurred_at}>{formatPaperTime(event.occurred_at)}</time>
             </li>
@@ -73,7 +78,7 @@ export function OrderTimeline({ order, allowCancel = true, onCancel }: { order: 
             <ScrollableTable label={`${symbol} 模拟成交表，可横向滚动`}>
               <table className="paper-fill-table numeric-data" aria-label={`${symbol} 模拟成交事实`}>
                 <caption>价格、滑点与数据权威均来自后端确定性执行模型。</caption>
-                <thead><tr><th scope="col">序号</th><th scope="col">数量</th><th scope="col">价格</th><th scope="col">名义金额</th><th scope="col">费用</th><th scope="col">滑点</th><th scope="col">来源 / feed</th><th scope="col">交付</th><th scope="col">来源时点</th></tr></thead>
+                <thead><tr><th scope="col">序号</th><th scope="col">数量</th><th scope="col">价格</th><th scope="col">名义金额</th><th scope="col">费用</th><th scope="col">滑点</th><th scope="col">来源 / 数据通道</th><th scope="col">交付</th><th scope="col">来源时点</th></tr></thead>
                 <tbody>{order.fills.map((fill) => (
                   <tr key={fill.fill_id}>
                     <th scope="row">F{String(fill.fill_seq).padStart(2, "0")}</th>
@@ -81,9 +86,9 @@ export function OrderTimeline({ order, allowCancel = true, onCancel }: { order: 
                     <td>USD {formatPaperDecimal(fill.price, 2)}</td>
                     <td>USD {formatPaperDecimal(fill.notional, 2)}</td>
                     <td>USD {formatPaperDecimal(fill.fee, 2)}</td>
-                    <td>{formatDisplayDecimal(fill.slippage_bps)} bps · USD {formatPaperDecimal(fill.slippage, 2)}</td>
+                    <td>{formatDisplayDecimal(fill.slippage_bps)} 基点 · USD {formatPaperDecimal(fill.slippage, 2)}</td>
                     <td>{fill.source} / {fill.feed}</td>
-                    <td>{fill.delivery_mode}</td>
+                    <td>{marketDeliveryModeLabel(fill.delivery_mode)}</td>
                     <td>{formatPaperTime(fill.source_as_of)}</td>
                   </tr>
                 ))}</tbody>
@@ -110,7 +115,4 @@ export function formatPaperDecimal(value: string, fixedDigits?: number): string 
   return formatDisplayDecimal(value, { group: true, fixedDigits });
 }
 
-export function formatPaperTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? "无效时间" : date.toISOString().replace("T", " ").replace(/(?:\.\d+)?Z$/, " UTC");
-}
+export function formatPaperTime(value: string | null | undefined): string { return formatDisplayTime(value); }

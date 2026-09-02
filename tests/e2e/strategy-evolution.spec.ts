@@ -27,9 +27,9 @@ for (const viewport of releaseViewports) {
     await expect(page.getByRole("heading", { name: "Strategy Shadow" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "晋级解释" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "冠军历史" })).toBeVisible();
-    await expect(page.getByText("21 / 63 sessions")).toBeVisible();
-    await expect(page.getByText("宽限期 5 sessions")).toBeVisible();
-    await expect(page.getByText("已等待 0 sessions")).toBeVisible();
+    await expect(page.getByText("21 / 63 个交易日")).toBeVisible();
+    await expect(page.getByText("宽限期 5 个交易日")).toBeVisible();
+    await expect(page.getByText("已等待 0 个交易日")).toBeVisible();
     await expect(page.getByRole("button", { name: /下单|交易|买入|卖出|券商/ })).toHaveCount(0);
 
     const comparison = page.getByRole("region", { name: "挑战者与冠军比较表" });
@@ -224,7 +224,7 @@ test("an unknown network result replays the exact command with the same idempote
 
   await page.getByRole("button", { name: "暂停自动晋级" }).click();
   await expect(page.getByRole("alert")).toContainText("操作结果未知");
-  const retry = page.getByRole("button", { name: "使用同一幂等键继续确认" });
+  const retry = page.getByRole("button", { name: "继续确认原操作结果" });
   await expect(retry).toBeVisible();
   await expect(page.getByRole("button", { name: "否决本次晋级" })).toBeDisabled();
 

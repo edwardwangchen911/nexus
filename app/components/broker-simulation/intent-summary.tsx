@@ -1,3 +1,4 @@
+import { statusLabel } from "../../lib/display-labels";
 import { CheckCircle2, FileKey2, XCircle } from "lucide-react";
 
 import type { components } from "../../lib/generated/schema";
@@ -27,7 +28,7 @@ export function IntentSummary({
           <p className="eyebrow">不可变策略意图</p>
           <h2 id="broker-intent-title">服务端批次意图</h2>
         </div>
-        <span className="state-chip" data-state={intent.status}>{intent.status}</span>
+        <span className="state-chip" data-state={intent.status}>{statusLabel(intent.status)}</span>
       </header>
       <div className="broker-intent__body">
         <div className="broker-intent__notional">

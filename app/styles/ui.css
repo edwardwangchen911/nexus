@@ -80,3 +80,6 @@
   .nexus-button { transition: none; }
   .nexus-sheet[data-state="open"] { animation: none; }
 }
+
+/* Keep short Chinese status labels intact beside multi-line explanations. */
+.state-chip { flex-shrink: 0; white-space: nowrap; }

@@ -1,5 +1,7 @@
 "use client";
 
+import { formatDisplayTime } from "../../lib/display-format";
+
 import { ArrowRight, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -117,4 +119,4 @@ function stateTitle(state: DataStateKind): string {
 }
 function stateDetail(state: DataStateKind): string { return state === "partial" || state === "stale" ? "默认保持现状，不创建方案或订单。" : "可稍后刷新；页面不会用假数据补齐。"; }
 function snapshotStatusLabel(status: PortfolioSnapshot["status"]): string { return status === "READY" ? "已就绪" : status === "STALE" ? "已过期" : "需要对账"; }
-function formatUtc(value: string): string { return value.replace("T", " ").replace("Z", " UTC"); }
+function formatUtc(value: string | null | undefined): string { return formatDisplayTime(value); }

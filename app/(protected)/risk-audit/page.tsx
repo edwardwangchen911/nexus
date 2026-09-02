@@ -1,5 +1,7 @@
 "use client";
 
+import { formatDisplayTime } from "../../lib/display-format";
+
 import {
   AlertTriangle,
   Archive,
@@ -48,7 +50,7 @@ const PAGE_SIZE = 50;
 const MAX_EVENTS = 500;
 const auditKinds: Array<[AuditKind, string]> = [
   ["", "全部类型"], ["quality", "数据质量"], ["risk", "确定性风控"],
-  ["agent_cost", "Agent 成本"], ["job", "后台 Job"],
+  ["agent_cost", "Agent 成本"], ["job", "后台任务"],
   ["reconciliation", "对账"], ["audit", "其他审计"],
 ];
 const outcomeFilters: Array<[OutcomeFilter, string]> = [
@@ -331,7 +333,7 @@ export function RiskAuditPanel({ state, readiness, data, kindFilter, statusFilte
       <div>
         <p className="eyebrow">确定性风险控制台</p>
         <h1>风险与审计</h1>
-        <p>验证依赖、数据质量、回撤锁和后台 Job。这里只展示脱敏事实；恢复动作不创建订单，也不连接真实券商写接口。</p>
+        <p>验证依赖、数据质量、回撤锁和后台任务。这里只展示脱敏事实；恢复动作不创建订单，也不连接真实券商写接口。</p>
       </div>
       <div className="page-actions">
         <span className="state-chip" data-state={state}>{dataStateLabels[state]}</span>
@@ -349,11 +351,12 @@ export function RiskAuditPanel({ state, readiness, data, kindFilter, statusFilte
       <AuditSummary data={data} recoveryEnabled={recoveryEnabled} onRetry={onRetry} onAcknowledge={onAcknowledge} />
       <section className="risk-audit-ledger" aria-labelledby="risk-audit-ledger-title">
         <header>
-          <div><p className="eyebrow">仅追加 · 已脱敏</p><h2 id="risk-audit-ledger-title">脱敏审计事件</h2><p>只显示固定投影；原始事件内容、账户金额和密钥不会进入浏览器。</p></div>
+          <div><p className="eyebrow">仅追加 · 已脱敏</p><h2 id="risk-audit-ledger-title">脱敏审计事件</h2><p>仅展示允许公开的审计摘要；原始记录保存在本机。</p></div>
           <button className="button button--quiet" type="button" onClick={onExport} disabled={!validDateRange(fromDate, toDate)}>
             <Download aria-hidden="true" size={17} />导出 31 天内 NDJSON.gz
           </button>
         </header>
+        <p>日期筛选按 UTC 自然日；下方事件时间显示为北京时间。</p>
         <div className="risk-audit-filters" aria-label="审计事件筛选">
           <label>事件类型<select aria-label="事件类型" value={kindFilter} onChange={(event) => onFilters({ ...filters, kind: event.target.value as AuditKind })}>{auditKinds.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label>
           <label>结果状态<select aria-label="结果状态" value={statusFilter} onChange={(event) => onFilters({ ...filters, status: event.target.value as OutcomeFilter })}>{outcomeFilters.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label>
@@ -388,7 +391,7 @@ function AuditSummary({ data, recoveryEnabled, onRetry, onAcknowledge }: { data:
 function AuditTable({ events }: { events: AuditEvent[] }): React.ReactElement {
   // Bounded horizontal data regions must remain keyboard-scrollable on narrow screens.
   // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
-  return <div className="table-scroll" role="region" aria-label="脱敏审计事件表，可横向滚动" tabIndex={0}><table className="risk-audit-table" aria-label="脱敏审计事件"><caption>事件序号、类型、动作和脱敏 outcome；哈希链由后端验证。</caption><thead><tr><th scope="col">序号</th><th scope="col">发生时间</th><th scope="col">类型</th><th scope="col">动作</th><th scope="col">Actor</th><th scope="col">脱敏结果</th><th scope="col">Schema</th></tr></thead><tbody>{events.map((event) => <tr key={event.event_seq}><td className="numeric-data">#{event.event_seq}</td><td className="numeric-data">{formatTime(event.occurred_at)}</td><td>{kindLabel(event.kind)}</td><th scope="row">{event.action}</th><td>{event.actor_kind}</td><td>{outcomeText(event.outcome)}</td><td className="numeric-data">v{event.schema_version}</td></tr>)}</tbody></table></div>;
+  return <div className="table-scroll" role="region" aria-label="脱敏审计事件表，可横向滚动" tabIndex={0}><table className="risk-audit-table" aria-label="脱敏审计事件"><caption>事件序号、类型、动作和脱敏结果；哈希链由后端验证。</caption><thead><tr><th scope="col">序号</th><th scope="col">发生时间</th><th scope="col">类型</th><th scope="col">动作</th><th scope="col">操作方</th><th scope="col">脱敏结果</th><th scope="col">格式版本</th></tr></thead><tbody>{events.map((event) => <tr key={event.event_seq}><td className="numeric-data">#{event.event_seq}</td><td className="numeric-data">{formatTime(event.occurred_at)}</td><td>{kindLabel(event.kind)}</td><th scope="row">{event.action}</th><td>{event.actor_kind}</td><td>{outcomeText(event.outcome)}</td><td className="numeric-data">v{event.schema_version}</td></tr>)}</tbody></table></div>;
 }
 
 function RecoveryDialog({ pending, submitting, onDismiss, onConfirm }: { pending: PendingAction; submitting: boolean; onDismiss: () => void; onConfirm: () => void }): React.ReactElement {
@@ -531,13 +534,10 @@ function stateDetail(state: DataStateKind): string {
   return "依赖、数据质量与审计事实均已验证。";
 }
 
-function formatTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? "未知时点" : `${date.toISOString().slice(0, 19).replace("T", " ")} UTC`;
-}
+function formatTime(value: string | null | undefined): string { return formatDisplayTime(value); }
 
 function shortId(value: string): string { return `${value.slice(0, 8)}…${value.slice(-4)}`; }
-function componentLabel(value: string): string { return ({ database: "数据库", migration: "迁移版本", object_store: "对象存储", worker: "后台 Worker" } as Record<string, string>)[value] ?? value; }
+function componentLabel(value: string): string { return ({ database: "数据库", migration: "迁移版本", object_store: "对象存储", worker: "后台处理服务" } as Record<string, string>)[value] ?? value; }
 function componentStateLabel(value: string): string { return ({ ready: "就绪", unavailable: "不可用", incompatible: "不兼容", stale: "过期" } as Record<string, string>)[value] ?? "不可用"; }
 function dataQualityLabel(value: string): string { return ({ PASS: "质量通过", PARTIAL: "证据不完整", FAIL: "质量未通过" } as Record<string, string>)[value] ?? "质量未知"; }
 function drawdownLabel(value: string): string { return ({ unlocked: "未锁定", locked: "已锁定", recovery_eligible: "可确认恢复", unknown: "未知" } as Record<string, string>)[value] ?? "未知"; }

@@ -1,3 +1,4 @@
+import { statusLabel } from "../../lib/display-labels";
 import type { components } from "../../lib/generated/schema";
 import { formatPaperDecimal } from "../order-timeline";
 
@@ -22,9 +23,9 @@ export function OrderBatch({ intent }: { intent: BrokerIntent }): React.ReactEle
               <th scope="row">{shortId(order.instrument_id)}</th>
               <td>{formatPaperDecimal(order.quantity)}</td>
               <td>USD {formatPaperDecimal(order.limit_price, 2)}</td>
-              <td>{order.order_type} · {order.time_in_force}</td>
-              <td>{order.session}</td>
-              <td><span className="state-chip" data-state={order.status}>{order.status}</span></td>
+              <td>{statusLabel(order.order_type)} · {statusLabel(order.time_in_force)}</td>
+              <td>{statusLabel(order.session)}</td>
+              <td><span className="state-chip" data-state={order.status}>{statusLabel(order.status)}</span></td>
             </tr>
           ))}</tbody>
         </table>

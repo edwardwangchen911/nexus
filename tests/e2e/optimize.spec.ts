@@ -76,7 +76,7 @@ for (const viewport of [
     await page.getByRole("link", { name: "打开组合诊断" }).click();
     await expect(page.getByRole("region", { name: "投资决策证据链，可横向滚动" }).getByRole("listitem").filter({ hasText: "组合诊断" })).toHaveAttribute("aria-current", "step");
     await expect(page.getByRole("heading", { name: "组合诊断账簿" })).toBeVisible();
-    await expect(page.getByRole("listitem", { name: /CONCENTRATION_TOP1/ })).toContainText("-0.05");
+    await expect(page.getByRole("listitem", { name: /CONCENTRATION_TOP1/ })).toContainText("-5 个百分点");
     if (viewport.name === "mobile-390" || viewport.name === "desktop-1440") {
       await page.evaluate(() => window.scrollTo(0, 0));
       await page.screenshot({ path: `test-results/optimize-${viewport.name}.png`, fullPage: true });
@@ -87,18 +87,18 @@ for (const viewport of [
     await expect(proposalTable.getByRole("columnheader", { name: /保持现状|最小调整|策略目标/ })).toHaveCount(3);
     await expect(page.getByRole("heading", { name: "前向影子绩效" })).toBeVisible();
     await expect(page.getByLabel("三方案线型图例")).toContainText("实线");
-    await expect(page.getByRole("table", { name: "三方案逐会话精确 NAV" })).toBeVisible();
+    await expect(page.getByRole("table", { name: "三方案逐交易日净值" })).toBeVisible();
     await expect(page.getByRole("note")).toContainText("不会创建订单");
     if (viewport.name === "mobile-390" || viewport.name === "desktop-1440") {
       await page.evaluate(() => window.scrollTo(0, 0));
       await page.screenshot({ path: `test-results/proposal-group-${viewport.name}.png`, fullPage: true });
     }
-    const sessionNavigator = page.getByRole("group", { name: "选择影子会话" });
+    const sessionNavigator = page.getByRole("group", { name: "选择影子交易日" });
     await sessionNavigator.focus();
     await sessionNavigator.press("Home");
-    await expect(page.getByRole("status", { name: "当前影子会话详情" })).toContainText("2026-08-25");
+    await expect(page.getByRole("status", { name: "当前影子交易日详情" })).toContainText("2026-08-25");
     await sessionNavigator.press("End");
-    await expect(page.getByRole("status", { name: "当前影子会话详情" })).toContainText("2026-08-31");
+    await expect(page.getByRole("status", { name: "当前影子交易日详情" })).toContainText("2026-08-31");
     await expect(page.getByRole("button", { name: /下单|交易|买入|卖出|审批|验证|晋级|自进化/ })).toHaveCount(0);
     const overflow = await page.evaluate(() => ({
       clientWidth: document.documentElement.clientWidth,

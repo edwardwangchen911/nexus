@@ -1,5 +1,7 @@
 "use client";
 
+import { formatDisplayTime } from "../../lib/display-format";
+
 import { formatDisplayDecimal } from "../../lib/display-decimal";
 import { DatabaseZap, RefreshCw, Star, StarOff, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -567,12 +569,7 @@ function saveMarketScrollY(scrollY: number): void {
   globalThis.history.replaceState(state, "", globalThis.location.href);
 }
 
-function formatUtc(value: string | null): string {
-  if (!value) return "无";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.valueOf())) return "无效时间";
-  return parsed.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
-}
+function formatUtc(value: string | null | undefined): string { return formatDisplayTime(value); }
 
 function EvidenceFact({ term, value, highlight = false }: { term: string; value: string; highlight?: boolean }): React.ReactElement {
   return <div className={highlight ? "market-evidence-fact--primary" : undefined}><dt>{term}</dt><dd className="numeric-data">{value}</dd></div>;

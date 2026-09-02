@@ -1,3 +1,4 @@
+import { statusLabel } from "../lib/display-labels";
 import { Bot, DatabaseZap, Eye, LockKeyhole, Scale } from "lucide-react";
 
 type AuthorityLedgerProps = {
@@ -37,7 +38,7 @@ function LedgerStep({ icon: Icon, label, value, state }: {
   return (
     <li data-state={state}>
       <span className="authority-ledger__icon"><Icon aria-hidden="true" size={17} strokeWidth={1.8} /></span>
-      <span><small>{label}</small><strong>{value}</strong></span>
+      <span><small>{label}</small><strong title={value}>{statusLabel(value)}</strong></span>
     </li>
   );
 }

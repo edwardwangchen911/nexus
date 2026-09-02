@@ -72,9 +72,11 @@ describe("optimization pages", () => {
     expect(screen.getAllByText("复星（只读）").length).toBeGreaterThan(0);
     expect(screen.getAllByText("PARTIAL").length).toBeGreaterThan(0);
     const authority = screen.getByRole("region", { name: "数据与决策权威边界" });
-    expect(authority).toHaveTextContent(snapshot.display_readiness);
-    expect(authority).toHaveTextContent(snapshot.decision_readiness);
-    expect(authority).toHaveTextContent("HUMAN APPROVAL");
+    expect(authority).toHaveTextContent("可以查看");
+    expect(authority).toHaveTextContent("快照已通过核验");
+    expect(screen.getByTitle(snapshot.display_readiness)).toBeVisible();
+    expect(screen.getByTitle(snapshot.decision_readiness)).toBeVisible();
+    expect(authority).toHaveTextContent("需逐笔人工确认");
     expect(screen.getByRole("region", { name: "HKD 原币种资产估值" })).toHaveTextContent("HKD 27,500.00");
     expect(screen.getByRole("region", { name: "USD 原币种资产估值" })).toHaveTextContent("USD 1,000.00");
     expect(screen.getByRole("link", { name: "查看组合事实" })).toHaveAttribute("href", "/portfolio");
@@ -212,7 +214,7 @@ describe("optimization pages", () => {
     expect(await screen.findByRole("heading", { name: "前向影子绩效" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "重新加载方案" }));
     expect(await screen.findByText(/保留最近一次已验证曲线/)).toBeVisible();
-    expect(screen.getByRole("table", { name: "三方案逐会话精确 NAV" })).toBeVisible();
+    expect(screen.getByRole("table", { name: "三方案逐交易日净值" })).toBeVisible();
   });
 
   it("consumes ShadowStartEnvelope then refetches the read projection", async () => {
@@ -264,7 +266,7 @@ describe("optimization pages", () => {
     fireEvent.click(await screen.findByRole("button", { name: "拒绝方案组" }));
 
     expect(await screen.findByText(/方案组已拒绝/)).toBeVisible();
-    expect(screen.getByText("rejected")).toBeVisible();
+    expect(screen.getByText("已拒绝")).toBeVisible();
     const post = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
     expect(post?.[0]).toBe(`/api/v1/optimization-proposals/${groupId}/reject`);
     expect(new Headers(post?.[1]?.headers).get("if-match")).toBe('"5"');

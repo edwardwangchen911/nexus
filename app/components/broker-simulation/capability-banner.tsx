@@ -1,3 +1,4 @@
+import { statusLabel } from "../../lib/display-labels";
 import { LockKeyhole, ShieldCheck } from "lucide-react";
 
 import type { components } from "../../lib/generated/schema";
@@ -17,8 +18,8 @@ export function CapabilityBanner({ workbench }: { workbench: Workbench }): React
         </div>
       </div>
       <dl className="broker-capability__facts">
-        <div><dt>运行能力</dt><dd>{capability.status}</dd></div>
-        <div><dt>外部激活</dt><dd>{capability.external_activation}</dd></div>
+        <div><dt>运行能力</dt><dd>{statusLabel(capability.status)}</dd></div>
+        <div><dt>外部激活</dt><dd>{statusLabel(capability.external_activation)}</dd></div>
         <div><dt>模拟写入</dt><dd>{capability.simulation_write_enabled ? "已激活" : "关闭"}</dd></div>
         <div><dt>账户边界</dt><dd>{account?.redacted_label ?? "未绑定外部模拟账户"}</dd></div>
       </dl>
@@ -26,7 +27,7 @@ export function CapabilityBanner({ workbench }: { workbench: Workbench }): React
         <ShieldCheck aria-hidden="true" size={17} />
         {account
           ? `能力到期 ${formatPaperTime(account.capability_expires_at)}；仅展示脱敏标识。`
-          : "Phase 3A 仅验证离线权威链，未连接真实账户。"}
+          : "当前仅验证离线示例，尚未绑定外部模拟账户。"}
       </p>
     </section>
   );

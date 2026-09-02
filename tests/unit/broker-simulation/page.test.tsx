@@ -59,7 +59,7 @@ describe("broker simulation workbench", () => {
     expect(screen.getByText("USD 1,200.00")).toBeVisible();
     expect(screen.getByRole("table", { name: "服务端订单批次" })).toHaveTextContent("USD 200.00");
     expect(screen.getByRole("list", { name: "券商订单事件时间线" })).toHaveTextContent("E01");
-    expect(screen.getByText(/external_activation_blocked/)).toBeVisible();
+    expect(screen.getByText(/外部连接未激活/)).toBeVisible();
     expect(document.body).not.toHaveTextContent(/account_id|provider_id|client_order_id|api[_-]?key/i);
   });
 
