@@ -1,0 +1,82 @@
+/* Source-adapted shadcn/ui controls; no global reset or alternate theme. */
+.nexus-button {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  max-inline-size: 100%;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+.nexus-button--default { min-block-size: 36px; padding: 8px 12px; }
+.nexus-button--sm { min-block-size: 32px; padding: 6px 10px; }
+.nexus-button--icon { inline-size: 36px; min-block-size: 36px; padding: 8px; }
+.nexus-button--primary { background: var(--color-action); color: var(--color-action-text); }
+.nexus-button--primary:hover:not(:disabled) { background: var(--color-focus); }
+.nexus-button--outline { border-color: var(--color-border); background: var(--color-surface); color: var(--color-text); }
+.nexus-button--ghost { background: transparent; color: var(--color-info); }
+.nexus-button--outline:hover:not(:disabled), .nexus-button--ghost:hover:not(:disabled) { background: var(--color-surface-muted); border-color: var(--color-action); }
+.nexus-button:disabled { opacity: 0.55; cursor: not-allowed; }
+.nexus-button[aria-busy="true"] { cursor: progress; }
+.nexus-button:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; }
+.nexus-button svg { flex: 0 0 auto; pointer-events: none; }
+.nexus-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-inline-size: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  color: var(--color-text-muted);
+}
+.nexus-badge--secondary { background: var(--color-surface-muted); color: var(--color-text); }
+.nexus-badge[data-state="ready"] { color: var(--color-positive); }
+.nexus-badge[data-state="partial"], .nexus-badge[data-state="stale"] { color: var(--color-warning); }
+.nexus-badge[data-state="error"], .nexus-badge[data-state="forbidden"] { color: var(--color-danger); }
+.nexus-sheet-overlay { position: fixed; inset: 0; z-index: 100; background: var(--color-scrim); }
+.nexus-sheet {
+  position: fixed;
+  inset-block: 0;
+  inset-inline-end: 0;
+  z-index: 101;
+  display: flex;
+  flex-direction: column;
+  inline-size: min(36rem, 100%);
+  max-block-size: 100dvh;
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-inline-start: 1px solid var(--color-border);
+  box-shadow: -16px 0 48px rgb(0 0 0 / 0.24);
+}
+.nexus-sheet[data-state="open"] { animation: nexus-sheet-enter 140ms ease-out; }
+.nexus-sheet__header { flex: 0 0 auto; padding: 28px 64px 24px 28px; border-block-end: 1px solid var(--color-border); }
+.nexus-sheet__title { margin: 12px 0 8px; font-size: 1.375rem; font-weight: 650; line-height: 1.4; }
+.nexus-sheet__description { margin: 0; color: var(--color-text-muted); font-size: 0.8125rem; line-height: 1.7; }
+.nexus-sheet__close { position: absolute; inset-block-start: 24px; inset-inline-end: 20px; }
+.nexus-evidence-body { min-block-size: 0; overflow-y: auto; overscroll-behavior: contain; padding: 24px 28px; }
+.nexus-evidence-body h3 { margin: 0 0 12px; font-size: 0.8125rem; font-weight: 600; }
+.nexus-evidence-excerpt { margin: 0 0 28px; padding-inline-start: 16px; border-inline-start: 2px solid var(--color-info); font-size: 0.9375rem; line-height: 1.8; overflow-wrap: anywhere; }
+.nexus-evidence-facts { margin: 0; }
+.nexus-evidence-facts > div { display: grid; grid-template-columns: 6rem minmax(0, 1fr); gap: 16px; padding-block: 14px; border-block-start: 1px solid var(--color-border); }
+.nexus-evidence-facts dt { color: var(--color-text-muted); font-size: 0.75rem; }
+.nexus-evidence-facts dd { margin: 0; font-size: 0.8125rem; overflow-wrap: anywhere; }
+.nexus-evidence-facts code { font-family: var(--component-numeric-font-family); font-size: inherit; }
+.nexus-evidence-note { flex: 0 0 auto; margin: auto 0 0; padding: 16px 28px; background: var(--color-canvas); border-block-start: 1px solid var(--color-border); font-size: 0.75rem; line-height: 1.7; color: var(--color-text-muted); }
+@keyframes nexus-sheet-enter { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
+@media (prefers-reduced-motion: reduce) {
+  .nexus-button { transition: none; }
+  .nexus-sheet[data-state="open"] { animation: none; }
+}

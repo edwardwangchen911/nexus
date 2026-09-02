@@ -19,6 +19,9 @@
     "check:generated": "node scripts/generate-client.mjs --check"
   },
   "dependencies": {
+    "@radix-ui/react-dialog": "1.1.23",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
     "lightweight-charts": "^5.2.1",
     "lucide-react": "^1.33.0",
     "openapi-fetch": "^0.17.0",

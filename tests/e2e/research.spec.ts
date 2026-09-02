@@ -63,6 +63,18 @@ for (const viewport of [
     await expect(dialog).toContainText("2026-08-24 18:30:00 UTC");
     await expect(dialog).toContainText("a".repeat(64));
     await expect(page.getByRole("button", { name: "关闭证据抽屉" })).toBeFocused();
+    if (viewport.name === "desktop-1440") {
+      await expect(dialog).toHaveCSS("opacity", "1");
+      await page.screenshot({ path: "test-results/evidence-sheet-desktop.png", animations: "disabled" });
+      const overlayViolations = (await new AxeBuilder({ page }).analyze()).violations.filter(
+        (violation) => violation.impact === "serious" || violation.impact === "critical",
+      );
+      expect(overlayViolations).toEqual([]);
+      await page.keyboard.press("Tab");
+      await expect(page.getByRole("button", { name: "关闭证据抽屉" })).toBeFocused();
+      await page.keyboard.press("Shift+Tab");
+      await expect(page.getByRole("button", { name: "关闭证据抽屉" })).toBeFocused();
+    }
     await dialog.press("Escape");
     await expect(opener).toBeFocused();
 
@@ -109,6 +121,47 @@ test("empty research uses only the server admission body for the first run", asy
     decision_time: decisionTime,
   });
   await expect(page.getByRole("button", { name: /下单|交易|买入|卖出/ })).toHaveCount(0);
+});
+
+test("desktop evidence sheet contains long content, locks background and restores focus", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await installFixtures(page);
+  const envelope = researchEnvelope();
+  envelope.data.intent!.theses[0].text = "只读研究摘录，必须保留不确定性。".repeat(180);
+  const requests: string[] = [];
+  page.on("request", (request) => { if (request.method() !== "GET") requests.push(request.url()); });
+  await page.route(`**/api/v1/instruments/${instrumentId}/research?**`, async (route) => route.fulfill({
+    status: 200, contentType: "application/json", body: JSON.stringify(envelope),
+  }));
+  await page.goto(`/research/${instrumentId}?as_of=${encodeURIComponent(decisionTime)}`);
+  const opener = page.getByRole("button", { name: "查看证据定位" }).first();
+  await opener.click();
+  const dialog = page.getByRole("dialog", { name: "证据原文与定位" });
+  await expect(dialog).toBeVisible();
+  await expect(page.getByRole("button", { name: "重新读取" })).toHaveCount(0);
+  const close = dialog.getByRole("button", { name: "关闭证据抽屉" });
+  await expect(close).toBeVisible();
+  const scrollBody = dialog.locator(".nexus-evidence-body");
+  expect(await scrollBody.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+  const backgroundScroll = await page.evaluate(() => window.scrollY);
+  await scrollBody.hover();
+  await page.mouse.wheel(0, 600);
+  await expect.poll(() => scrollBody.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.scrollY)).toBe(backgroundScroll);
+  await dialog.getByText("内容哈希", { exact: true }).scrollIntoViewIfNeeded();
+  await expect(close).toBeVisible();
+  await expect(dialog.getByText("内容哈希", { exact: true })).toBeVisible();
+  expect(await dialog.evaluate((el) => getComputedStyle(el).animationName)).toBe("none");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  await close.click();
+  await expect(opener).toBeFocused();
+  await opener.press("Enter");
+  await page.locator('[data-slot="sheet-overlay"]').click({ position: { x: 12, y: 12 } });
+  await expect(dialog).toHaveCount(0);
+  await expect(opener).toBeFocused();
+  await expect(page.getByRole("button", { name: "重新读取" })).toBeVisible();
+  expect(requests).toEqual([]);
 });
 
 async function installFixtures(page: Page): Promise<void> {

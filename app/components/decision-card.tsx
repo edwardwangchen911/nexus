@@ -5,6 +5,8 @@ import { useRef, useState } from "react";
 
 import type { components } from "../lib/generated/schema";
 import { EvidenceDrawer } from "./evidence-drawer";
+import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
 
 type Research = components["schemas"]["ResearchRunResponse"];
 type Evidence = components["schemas"]["EvidenceRef"];
@@ -38,8 +40,8 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
           <h2 id="decision-card-title">委员会决策记录</h2>
         </div>
         <div className="decision-card__badges">
-          <span className="state-chip" data-state={intent?.quality_status === "complete" ? "ready" : "partial"}>{intent?.quality_status ?? research.status}</span>
-          <span className="mode-badge">{intent ? stanceLabels[intent.stance] : "未形成研究意图"}</span>
+          <Badge data-state={intent?.quality_status === "complete" ? "ready" : "partial"}>{intent?.quality_status ?? research.status}</Badge>
+          <Badge variant="secondary">{intent ? stanceLabels[intent.stance] : "未形成研究意图"}</Badge>
         </div>
       </header>
 
@@ -139,7 +141,7 @@ function EvidenceButtons({ evidenceRefs, excerpt, onOpen }: {
   excerpt: string | null;
   onOpen: (evidence: Evidence, excerpt: string | null, opener: HTMLButtonElement) => void;
 }): React.ReactElement {
-  return <div className="evidence-links">{evidenceRefs.map((evidence, index) => <button key={`${evidence.source}:${evidence.object_id}:${evidence.content_hash}`} className="evidence-link" type="button" onClick={(event) => onOpen(evidence, excerpt, event.currentTarget)}><FileSearch aria-hidden="true" size={16} />{index === 0 ? "查看证据定位" : `查看证据定位 ${index + 1}`}</button>)}</div>;
+  return <div className="evidence-links">{evidenceRefs.map((evidence, index) => <Button key={`${evidence.source}:${evidence.object_id}:${evidence.content_hash}`} variant="ghost" size="sm" aria-haspopup="dialog" onClick={(event) => onOpen(evidence, excerpt, event.currentTarget)}><FileSearch aria-hidden="true" size={16} />{index === 0 ? "查看证据定位" : `查看证据定位 ${index + 1}`}</Button>)}</div>;
 }
 
 function roleLabel(role: components["schemas"]["RoleVote"]["role"]): string {

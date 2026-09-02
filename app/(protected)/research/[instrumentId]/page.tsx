@@ -8,6 +8,8 @@ import { DataState, dataStateLabels, type DataStateKind } from "../../../compone
 import { DecisionCard } from "../../../components/decision-card";
 import { DecisionPath } from "../../../components/decision-path";
 import { ResearchInputs } from "../../../components/research-inputs";
+import { Badge } from "../../../components/ui/badge";
+import { Button } from "../../../components/ui/button";
 import type { components } from "../../../lib/generated/schema";
 
 type Research = components["schemas"]["ResearchRunResponse"];
@@ -106,9 +108,9 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
       <header className="page-heading">
         <div><p className="eyebrow">时点冻结研究</p><h1>个股研究证据页</h1><p>把委员会结论拆成论点、反证、失效条件和不可变证据；没有分数，也不提供交易动作。</p></div>
         <div className="page-actions">
-          <span className="state-chip" data-state={state}>{inputs && state === "empty" ? "财报已冻结 · 研究待生成" : dataStateLabels[state]}</span>
-          <button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />重新读取</button>
-          {canRun ? <button className="button button--primary" type="button" onClick={onRun} disabled={submitting}><ScanSearch aria-hidden="true" size={17} />{submitting ? "正在登记研究" : state === "empty" ? "运行冻结研究" : "重新运行冻结研究"}</button> : null}
+          <Badge data-state={state}>{inputs && state === "empty" ? "财报已冻结 · 研究待生成" : dataStateLabels[state]}</Badge>
+          <Button variant="outline" onClick={onRefresh}><RefreshCw aria-hidden="true" size={16} />重新读取</Button>
+          {canRun ? <Button onClick={onRun} disabled={submitting} aria-busy={submitting}><ScanSearch aria-hidden="true" size={16} />{submitting ? "正在登记研究" : state === "empty" ? "运行冻结研究" : "重新运行冻结研究"}</Button> : null}
         </div>
       </header>
       <DecisionPath current="research" />

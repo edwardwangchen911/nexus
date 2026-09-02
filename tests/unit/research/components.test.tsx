@@ -218,4 +218,33 @@ describe("research evidence docket", () => {
     })} />);
     expect(screen.getByRole("button", { name: "查看证据定位 2" })).toBeVisible();
   });
+
+  it("keeps pending research disabled and visibly busy", () => {
+    const onRun = vi.fn();
+    render(<ResearchPanel state="empty" research={null} admission={researchAdmissionData()} submitting notice={null} onRefresh={vi.fn()} onRun={onRun} />);
+    const button = screen.getByRole("button", { name: "正在登记研究" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    fireEvent.click(button);
+    expect(onRun).not.toHaveBeenCalled();
+  });
+
+  it("closes an unmounted selection, restores its exact trigger and reopens safely", async () => {
+    const current = researchData();
+    const hostile = { ...evidence, location: 'https://untrusted.invalid/<script>not executable</script>' };
+    render(<DecisionCard research={researchData({ intent: {
+      ...current.intent!, theses: [{ text: "<img src=x onerror=alert(1)>", evidence_refs: [hostile] }],
+    } })} />);
+    const opener = screen.getAllByRole("button", { name: "查看证据定位" })[0];
+    fireEvent.click(opener);
+    expect(screen.getByRole("dialog")).toHaveTextContent(hostile.location);
+    expect(screen.getByRole("dialog").querySelector("a, img, script")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "关闭证据抽屉" }));
+    await waitFor(() => expect(opener).toHaveFocus());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(opener);
+    expect(screen.getByRole("dialog")).toHaveTextContent("<img src=x onerror=alert(1)>");
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
 });
