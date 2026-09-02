@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from uuid import UUID
 
 import pytest
@@ -20,6 +21,33 @@ from sqlalchemy.exc import DBAPIError
 
 RUN_A = UUID("0198d400-6000-7000-8000-000000000001")
 RUN_B = UUID("0198d400-6000-7000-8000-000000000002")
+
+
+@pytest.mark.asyncio
+async def test_date_only_flow_persists_idempotently_and_detects_business_date_revision(
+    migrated_database_url: str,
+) -> None:
+    from datetime import date
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_accounts(factory)
+    result = _stable_cash_flow_result()
+    fact = replace(result.facts[0], occurred_at=None, kind="fosun:100")
+    result = replace(result, facts=(fact,))
+    async with factory() as session, session.begin():
+        await _insert_run(session, RUN_A, ACCOUNT_A, PORTFOLIO_A, "ACTIVE", "a")
+        run = await session.get(BrokerSyncRun, RUN_A)
+        assert await persist_cash_flows(session, run, "fosun", result) == "PASS"
+    async with factory() as session, session.begin():
+        run = await session.get(BrokerSyncRun, RUN_A)
+        assert await persist_cash_flows(session, run, "fosun", result) == "PASS"
+        changed = replace(result, facts=(replace(fact, provider_business_date=date(2026, 8, 22)),))
+        assert await persist_cash_flows(session, run, "fosun", changed) == "PARTIAL"
+    async with factory() as session:
+        rows = (await session.scalars(select(BrokerCashFlow))).all()
+        assert len(rows) == 1
+        assert rows[0].occurred_at is None
+        assert rows[0].provider_business_date == date(2026, 8, 23)
 
 
 @pytest.mark.asyncio

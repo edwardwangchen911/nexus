@@ -154,7 +154,7 @@ def test_response_contract_digests_are_static_and_versioned() -> None:
         "CashSummary": "fad8e8db49292aa8e785cb24aaa8adb8fff2424266a2f8f8885db74aae907243",
         "Holdings": "69c108c2a59445a2e25e84f1cdfd96fb8e1f56e90dc926c42c4597fe755054eb",
         "OrderList": "525ff22a5d85e28bb6dacbb1b3403bc05bb914bc2211412e304694742a99e696",
-        "CashFlows": "1c3ee0a334a16a32d58f3b0bd28abebf43c5501bb35607333d9f0de6f4b8a427",
+        "CashFlows": "c78814f12dd3506f1d5828291cfaea1a98a0326a849cb058e1ea943098e24e9b",
         "quote": "c38d50d4bf4eb899c6d69a5bc916f7aeefe40bd66a04f3c2520345b37dc3b579",
         "kline_minimal": "332970ce3cb34937ca39e021d693a923402bfba1ed536cde3de64564bf8edf37",
     }

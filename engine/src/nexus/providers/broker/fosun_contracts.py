@@ -1,6 +1,6 @@
 """Reviewed financial fact schemas returned by the Fosun gateway."""
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -73,5 +73,14 @@ class CashFlowItem(GatewayFact):
     external_cash_flow_id: str
     currency: str
     amount: Decimal
-    occurred_at: datetime
+    occurred_at: datetime | None
+    provider_business_date: date | None = None
+    direction: Literal[1, 2] | None = None
     flow_type: str
+
+    @field_validator("direction", mode="before")
+    @classmethod
+    def _direction_is_integer(cls, value: object) -> object:
+        if value is not None and type(value) is not int:
+            raise ValueError("invalid cash-flow direction")
+        return value

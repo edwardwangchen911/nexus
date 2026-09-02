@@ -459,7 +459,7 @@ async def _read_broker_facts(
         external_account_id=external_account_id,
         client=_SinglePageBrokerGateway(broker),
         instrument_ids=instrument_ids,
-        cash_flow_kinds={"1": "deposit"},
+        cash_flow_kinds={},
         snapshot_time_basis="gateway_observed",
         order_instrument_resolver=resolve_order_instrument,
     )

@@ -289,6 +289,7 @@ async def test_local_broker_read_preserves_order_failure_and_bounds_follow_up(
                     {
                         "kind": "cash_flow",
                         "external_cash_flow_id": "synthetic-flow-1",
+                        "direction": 1,
                         "currency": "USD",
                         "amount": "10",
                         "occurred_at": instant.isoformat(),

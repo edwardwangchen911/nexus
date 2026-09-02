@@ -179,7 +179,9 @@ _ITEM_FIELDS: Mapping[str, tuple[tuple[str, str], ...]] = MappingProxyType(
             ("external_cash_flow_id", "nonempty-string"),
             ("currency", "string"),
             ("amount", "finite-decimal"),
-            ("occurred_at", "aware-utc-datetime"),
+            ("occurred_at", "null-or-aware-utc-datetime"),
+            ("provider_business_date", "null-or-iso-date"),
+            ("direction", "null-or-inflow-1-or-outflow-2"),
             ("flow_type", "string"),
         ),
         "quote": (

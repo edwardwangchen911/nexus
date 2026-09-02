@@ -1,7 +1,7 @@
 """Normalize frozen public Fosun response shapes into gateway-owned models."""
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal, cast
 
@@ -228,12 +228,40 @@ def _order(item: Mapping[str, object]) -> OrderItem:
 
 
 def _cash_flow(item: Mapping[str, object]) -> CashFlowItem:
+    trade_date = item.get("tradeDate")
+    business_date = None
+    if trade_date is not None:
+        if not isinstance(trade_date, str) or len(trade_date) != 10:
+            raise ValueError
+        business_date = date.fromisoformat(trade_date)
+        if business_date.isoformat() != trade_date:
+            raise ValueError
+    created_at = _required_value(item, "createdAt")
+    occurred_at = None
+    if isinstance(created_at, str) and business_date is not None:
+        parsed = datetime.fromisoformat(created_at)
+        if parsed.tzinfo is None:
+            # Preserve date precision, never attach a guessed timezone to createdAt.
+            if parsed.strftime("%Y-%m-%d %H:%M:%S") != created_at:
+                raise ValueError
+        else:
+            occurred_at = _aware_datetime(created_at)
+    else:
+        occurred_at = _aware_datetime(created_at)
+    direction = item.get("direction")
+    if direction is not None and (type(direction) is not int or direction not in (1, 2)):
+        raise ValueError
+    flow_type = _required_value(item, "flowType")
+    if type(flow_type) is not int or flow_type < 0:
+        raise ValueError
     return CashFlowItem(
         external_cash_flow_id=str(_required_value(item, "flowId")),
         currency=_required_str(item, "currency"),
         amount=_decimal(item, "amount"),
-        occurred_at=_aware_datetime(_required_value(item, "createdAt")),
-        flow_type=str(_required_value(item, "flowType")),
+        occurred_at=occurred_at,
+        provider_business_date=business_date,
+        direction=cast("Literal[1, 2] | None", direction),
+        flow_type=str(flow_type),
     )
 
 

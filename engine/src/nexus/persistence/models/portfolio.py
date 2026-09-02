@@ -319,6 +319,10 @@ class BrokerCashFlow(ImmutableCreatedAt, Base):
             name="identity_quality_allowed",
         ),
         CheckConstraint("currency ~ '^[A-Z]{3}$'", name="currency_canonical"),
+        CheckConstraint(
+            "occurred_at IS NOT NULL OR identity_quality = 'STABLE'",
+            name="date_only_identity_stable",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=new_uuid7)
@@ -334,7 +338,7 @@ class BrokerCashFlow(ImmutableCreatedAt, Base):
     identity_quality: Mapped[str] = mapped_column(String(30))
     currency: Mapped[str] = mapped_column(String(3))
     amount: Mapped[Decimal]
-    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    occurred_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     provider_business_date: Mapped[date] = mapped_column(Date)
     kind: Mapped[str] = mapped_column(String(100))
     source_request_id: Mapped[str] = mapped_column(String(128))

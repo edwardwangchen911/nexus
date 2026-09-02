@@ -1,10 +1,17 @@
 """Normalized public gateway models; provider objects never cross this module."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 SyntheticSafeId = Annotated[str, StringConstraints(min_length=1, max_length=128)]
 
@@ -87,13 +94,21 @@ class CashFlowItem(GatewayModel):
     external_cash_flow_id: SyntheticSafeId
     currency: str
     amount: Decimal
-    occurred_at: datetime
+    occurred_at: datetime | None
+    provider_business_date: date | None = None
+    direction: Literal[1, 2] | None = None
     flow_type: str
 
     @field_validator("occurred_at")
     @classmethod
-    def occurred_at_is_aware_utc(cls, value: datetime) -> datetime:
-        return _as_utc(value)
+    def occurred_at_is_aware_utc(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _as_utc(value)
+
+    @model_validator(mode="after")
+    def cash_flow_has_date(self) -> "CashFlowItem":
+        if self.occurred_at is None and self.provider_business_date is None:
+            raise ValueError("cash flow requires a business date or an aware timestamp")
+        return self
 
 
 class QuoteItem(GatewayModel):

@@ -99,7 +99,8 @@ class BrokerCashFlow(BrokerFact):
     provider_cash_flow_id: str | None
     currency: str
     amount: Decimal
-    occurred_at: datetime
+    occurred_at: datetime | None
+    provider_business_date: date | None = None
     kind: str
 
     @field_validator("currency")
@@ -109,8 +110,14 @@ class BrokerCashFlow(BrokerFact):
 
     @field_validator("occurred_at")
     @classmethod
-    def _occurred_at_utc(cls, value: datetime) -> datetime:
-        return require_utc(value)
+    def _occurred_at_utc(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else require_utc(value)
+
+    @model_validator(mode="after")
+    def _cash_flow_date_required(self) -> "BrokerCashFlow":
+        if self.occurred_at is None and self.provider_business_date is None:
+            raise ValueError("cash flow requires a business date or an aware timestamp")
+        return self
 
 
 class DateRange(BrokerFact):

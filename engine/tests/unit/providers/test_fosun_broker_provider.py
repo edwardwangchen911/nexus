@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from uuid import UUID
 
 import pytest
@@ -12,6 +13,43 @@ SYNC_RUN_ID = UUID("0198d400-4000-7000-8000-000000000003")
 NOW = datetime(2026, 8, 23, 4, tzinfo=UTC)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "direction,amount,want", [(1, "12.5", "12.5"), (2, "12.5", "-12.5"), (2, "-12.5", "-12.5")]
+)
+async def test_provider_business_date_direction_and_opaque_type_are_preserved(
+    direction, amount, want
+):
+    service = provider(
+        {
+            "cash_flows": page(
+                {
+                    "kind": "cash_flow",
+                    "external_cash_flow_id": "synthetic-flow",
+                    "currency": "USD",
+                    "amount": amount,
+                    "occurred_at": None,
+                    "provider_business_date": "2026-08-21",
+                    "direction": direction,
+                    "flow_type": "703",
+                }
+            )
+        }
+    )
+    result = await service.read_cash_flows(
+        ACCOUNT_ID,
+        DateRange(start=date(2026, 8, 20), end=date(2026, 8, 23)),
+        None,
+        sync_run_id=SYNC_RUN_ID,
+        limit=100,
+    )
+    assert result.quality == "PASS"
+    assert result.items[0].amount == Decimal(want)
+    assert result.items[0].kind == "fosun:703"
+    assert result.items[0].occurred_at is None
+    assert result.items[0].provider_business_date == date(2026, 8, 21)
+
+
 def page(*items: dict[str, object], quality: str = "PASS") -> GatewayResponsePage:
     return GatewayResponsePage(
         items=items,
@@ -21,6 +59,35 @@ def page(*items: dict[str, object], quality: str = "PASS") -> GatewayResponsePag
         as_of=NOW,
         quality=quality,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction,amount", [(1, "-1"), (0, "1"), (True, "1"), (2, "NaN")])
+async def test_invalid_direction_or_amount_cannot_become_decision_cash_flow(direction, amount):
+    service = provider(
+        {
+            "cash_flows": page(
+                {
+                    "kind": "cash_flow",
+                    "external_cash_flow_id": "synthetic-flow",
+                    "currency": "USD",
+                    "amount": amount,
+                    "occurred_at": None,
+                    "provider_business_date": "2026-08-21",
+                    "direction": direction,
+                    "flow_type": "100",
+                }
+            )
+        }
+    )
+    with pytest.raises(BrokerProviderError):
+        await service.read_cash_flows(
+            ACCOUNT_ID,
+            DateRange(start=date(2026, 8, 20), end=date(2026, 8, 23)),
+            None,
+            sync_run_id=SYNC_RUN_ID,
+            limit=100,
+        )
 
 
 class FakeGatewayClient:

@@ -18,6 +18,7 @@ from nexus.ops.fosun_local_refresh import (
     _read_broker_facts,
 )
 from nexus.persistence.models.portfolio import (
+    BrokerCashFlow,
     BrokerSyncRun,
     PortfolioSnapshotRecord,
 )
@@ -81,6 +82,11 @@ async def test_local_observed_refresh_reaches_database_and_snapshot_api(
             assert {item["time_basis"] for item in stored.source_observations} == {
                 "gateway_observed"
             }
+        async with factory() as session:
+            fact = await session.scalar(select(BrokerCashFlow))
+            assert fact.occurred_at is None
+            assert fact.provider_business_date == NOW.date()
+            assert fact.kind == "fosun:100"
         diagnostic = await _diagnose_local_snapshot(
             factory,
             frozen=frozen,

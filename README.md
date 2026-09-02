@@ -10,13 +10,16 @@ NEXUS 是私人投资研究、回测与模拟交易工作台。它不提供投�
   并通过 API/BFF 在本地组合页和可切换标的的市场页展示复星来源、更新时间与质量状态。组合页
   按原币种确定性展示现金、持仓市值、总资产与配置权重；没有合格 FX 证据时不生成跨币种合计，
   美股持仓可进入对应的已持久化 Quote 与日 K 页面。
-- 2026-09-02 本地真实刷新已完成现金、持仓和未终结订单双读对账，快照为 `READY`，
-  订单已通过数据库/BFF 展示；`display_ready=true`、`execution_locked=true`。
-  CashFlows 实际返回的 `createdAt` 没有时区，公开字段说明也未明确时区，当前不猜测转换：
-  `cash_flow_quality=PARTIAL`、`decision_ready=false`，第一份正式组合诊断仍未生成。
-- 组合页和现有诊断 API 已可读取真实快照的只读初步诊断：按原币种展示现金占比、
-  单一/前三大持仓集中度及未知项。初步结果不写入正式报告库，不成为优化或交易基线；
-  现金流未对账不再挡住这些独立指标，缺价持仓也不会被漏算成“100% 现金”。
+- 2026-09-02 11:33（北京时间）本地真实刷新已完成现金、持仓、未终结订单双读及现金流
+  日期窗口、分页、稳定 ID 与重复/冲突检查：12 条 CashFlows 已入库，`cash_flow_quality=PASS`，
+  `display_readiness=DISPLAY_READY`、`decision_readiness=DECISION_READY`、`execution_locked=true`。
+- 第一份正式真实组合诊断已持久化，并通过现有 API/BFF 和组合页展示。报告含 6 个诊断项，
+  结论为 `RESEARCH_REQUIRED`：现金占比和集中度可用，但历史市场证据仍为
+  `MARKET_EVIDENCE_UNAVAILABLE`，不能据此宣称风险低或生成订单。
+- CashFlows 使用 Provider 的 `tradeDate` 作为业务日期；按官方 OpenAPI 的
+  `direction=1/2` 规范流入/流出金额，保留流水类型原代码，不猜测“入金/分红”等类别。
+  `createdAt` 无时区时精确时刻保持空值，不擅自指定时区。未来对账不完整的快照仍只提供
+  显式标注的初步诊断，不能成为正式优化基线。
 - 该状态只是个人 Mac 本地只读使用。当前只区分无网络 fixture 与本地真实只读，不设“生产模式”，也不代表复星模拟盘交易或实盘激活。
 - 美股真实数据传输与耐久采集链路已实现但默认关闭：Alpaca、SEC、FRED/ALFRED
   使用固定源、冻结 universe、原始证据归档和幂等入库；未配置或启用真实 Provider
@@ -85,6 +88,10 @@ Quote 或 K 线。
 
 组合快照同时展示两类就绪度：“展示状态”只回答现金/持仓事实是否可用；“决策状态”回答
 是否完成对账、时效和风控门禁。因此 `PARTIAL` 快照仍可正常展示真实资产，但不会被误用为优化或交易基线。
+
+现金流日期精度迁移 `0033_cash_flow_business_date` 只允许精确时刻为空，旧记录不变，
+日期精度记录必须具有稳定 Provider ID。空表可迁移往返；已存在此类记录时降级会拒绝，
+不得通过删除记录或编造时间回滚。此时保留兼容 schema 并以前向修复恢复代码。
 
 - [本地开发与 Compose](docs/runbooks/local-development.md)：不强制 Docker Desktop，Docker Desktop、OrbStack 或 Colima 均可。
 - [备份/恢复演练](docs/runbooks/backup-restore.md)

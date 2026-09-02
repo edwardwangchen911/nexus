@@ -80,8 +80,10 @@ class ObservedGateway:
                 "external_cash_flow_id": "synthetic-flow",
                 "currency": "USD",
                 "amount": "1000",
-                "occurred_at": NOW.isoformat(),
-                "flow_type": "1",
+                "occurred_at": None,
+                "provider_business_date": NOW.date().isoformat(),
+                "flow_type": "100",
+                "direction": 1,
             }
         )
         return page.model_copy(update={"quality": "PASS"})

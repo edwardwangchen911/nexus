@@ -32,8 +32,11 @@ def validate_cash_flow_result(result: CashFlowSyncResult) -> None:
             or not fact.currency.isalpha()
             or fact.currency != fact.currency.upper()
             or not fact.amount.is_finite()
-            or fact.occurred_at.tzinfo is None
-            or fact.occurred_at.utcoffset() is None
+            or (
+                fact.occurred_at is not None
+                and (fact.occurred_at.tzinfo is None or fact.occurred_at.utcoffset() is None)
+            )
+            or (fact.occurred_at is None and fact.identity_quality != "STABLE")
             or fact.response_as_of.tzinfo is None
             or fact.response_as_of.utcoffset() is None
             or not fact.source_request_id

@@ -16,6 +16,58 @@ ACCOUNT_ID = UUID("0198d400-2000-7000-8000-000000000001")
 SYNC_RUN_ID = UUID("0198d400-2000-7000-8000-000000000002")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_time", [None, datetime(2026, 8, 24, tzinfo=UTC)])
+async def test_explicit_business_date_controls_window_not_creation_time(event_time):
+    item = BrokerCashFlow(
+        provider_cash_flow_id="synthetic-date-only",
+        currency="USD",
+        amount=Decimal("-10"),
+        occurred_at=event_time,
+        provider_business_date=date(2026, 8, 21),
+        kind="fosun:100",
+    )
+    result = await fetch_cash_flows(
+        ACCOUNT_ID,
+        ScriptedCashFlowProvider([page((item,))]),
+        sync_run_id=SYNC_RUN_ID,
+        initial_start=date(2026, 8, 21),
+        end=date(2026, 8, 21),
+        previous_watermark=None,
+    )
+    assert result.quality == "PASS"
+    assert result.facts[0].provider_business_date == date(2026, 8, 21)
+    assert result.facts[0].occurred_at == event_time
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider_id,business_date", [(None, date(2026, 8, 21)), ("stable", date(2026, 8, 20))]
+)
+async def test_date_only_without_stable_id_or_outside_window_cannot_pass(
+    provider_id, business_date
+):
+    item = BrokerCashFlow(
+        provider_cash_flow_id=provider_id,
+        currency="USD",
+        amount=Decimal("10"),
+        occurred_at=None,
+        provider_business_date=business_date,
+        kind="fosun:100",
+    )
+    result = await fetch_cash_flows(
+        ACCOUNT_ID,
+        ScriptedCashFlowProvider([page((item,))]),
+        sync_run_id=SYNC_RUN_ID,
+        initial_start=date(2026, 8, 21),
+        end=date(2026, 8, 21),
+        previous_watermark=None,
+    )
+    assert result.quality == "PARTIAL"
+    assert result.watermark_date is None
+    assert result.facts == ()
+
+
 def flow(
     provider_id: str | None,
     *,
@@ -137,10 +189,7 @@ async def test_terminal_fiftieth_cash_flow_page_is_accepted() -> None:
 @pytest.mark.asyncio
 async def test_continuation_after_fiftieth_cash_flow_page_is_incomplete() -> None:
     provider = ScriptedCashFlowProvider(
-        [
-            page((flow(f"flow-{index}"),), cursor=str(index + 1))
-            for index in range(50)
-        ]
+        [page((flow(f"flow-{index}"),), cursor=str(index + 1)) for index in range(50)]
     )
 
     result = await fetch_cash_flows(

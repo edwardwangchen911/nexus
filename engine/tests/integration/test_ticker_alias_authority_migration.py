@@ -26,10 +26,11 @@ def _config() -> Config:
     return Config(str(_ENGINE_ROOT / "alembic.ini"))
 
 
-def test_0032_is_the_single_forward_head() -> None:
+def test_0032_precedes_cash_flow_business_date_head() -> None:
     scripts = ScriptDirectory.from_config(_config())
 
-    assert scripts.get_heads() == [_REVISION]
+    assert scripts.get_heads() == ["0033_cash_flow_business_date"]
+    assert scripts.get_revision("0033_cash_flow_business_date").down_revision == _REVISION
     revision = scripts.get_revision(_REVISION)
     assert revision is not None
     assert revision.down_revision == "0031_intraday_schema_admission"

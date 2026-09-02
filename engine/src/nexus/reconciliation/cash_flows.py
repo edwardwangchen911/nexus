@@ -34,7 +34,7 @@ class NormalizedCashFlow:
     identity_quality: Literal["STABLE", "FALLBACK_PARTIAL"]
     currency: str
     amount: Decimal
-    occurred_at: datetime
+    occurred_at: datetime | None
     provider_business_date: date
     kind: str
     source_request_id: str
@@ -143,7 +143,11 @@ def _normalize(
     source_request_id: str,
     response_as_of: datetime,
 ) -> NormalizedCashFlow:
-    business_date = item.occurred_at.astimezone(_PROVIDER_TIMEZONE).date()
+    business_date = item.provider_business_date
+    if business_date is None:
+        if item.occurred_at is None:
+            raise _CashFlowWindowInvalidated("cash-flow business date is missing")
+        business_date = item.occurred_at.astimezone(_PROVIDER_TIMEZONE).date()
     if business_date < window.start or business_date > window.end:
         raise _CashFlowWindowInvalidated("cash flow is outside requested business dates")
     if not item.currency or len(item.currency) > 3 or not item.kind or len(item.kind) > 100:
@@ -162,6 +166,8 @@ def _normalize(
         version = _STABLE_ID_VERSION
         identity_quality: Literal["STABLE", "FALLBACK_PARTIAL"] = "STABLE"
     else:
+        if item.occurred_at is None:
+            raise _CashFlowWindowInvalidated("date-only cash flow requires a stable provider ID")
         identity = f"fallback:v1:{_fallback_hash(item)}"
         version = CASH_FLOW_FALLBACK_VERSION
         identity_quality = "FALLBACK_PARTIAL"
@@ -180,6 +186,8 @@ def _normalize(
 
 
 def _fallback_hash(item: BrokerCashFlow) -> str:
+    if item.occurred_at is None:
+        raise _CashFlowWindowInvalidated("fallback cash-flow identity requires an event time")
     amount = "0" if item.amount == 0 else format(item.amount.normalize(), "f")
     occurred_at = item.occurred_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     payload = json.dumps(

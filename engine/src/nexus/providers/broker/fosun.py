@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Literal, Protocol
 from uuid import UUID
 
@@ -214,9 +215,14 @@ class FosunBrokerProvider:
                 BrokerCashFlow(
                     provider_cash_flow_id=item.external_cash_flow_id,
                     currency=item.currency,
-                    amount=item.amount,
-                    occurred_at=require_utc(item.occurred_at),
-                    kind=self._cash_flow_kind(item.flow_type),
+                    amount=_cash_flow_amount(item),
+                    occurred_at=_optional_utc(item.occurred_at),
+                    provider_business_date=item.provider_business_date,
+                    kind=(
+                        f"fosun:{item.flow_type}"
+                        if item.direction is not None
+                        else self._cash_flow_kind(item.flow_type)
+                    ),
                 )
                 for item in raw_items
             )
@@ -264,6 +270,19 @@ class FosunBrokerProvider:
 
 
 _MAPPING_ERRORS = (GatewayClientError, ValidationError, TypeError, ValueError)
+
+
+def _cash_flow_amount(item: CashFlowItem) -> Decimal:
+    if not item.amount.is_finite():
+        raise ValueError("non-finite cash-flow amount")
+    if item.direction is None:
+        return item.amount
+    if not item.flow_type.isascii() or not item.flow_type.isdecimal():
+        raise ValueError("invalid provider cash-flow type")
+    # Official CashFlowInfo: direction 1=inflow, 2=outflow. Type stays opaque.
+    if item.direction == 1 and item.amount < 0:
+        raise ValueError("cash-flow direction contradicts amount")
+    return -abs(item.amount) if item.direction == 2 else item.amount
 
 
 def _optional_utc(value: datetime | None) -> datetime | None:
