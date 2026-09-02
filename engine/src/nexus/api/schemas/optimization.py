@@ -435,6 +435,25 @@ class ShadowEligibilityResponse(_StrictOptimizationSchema):
     reasons: tuple[str, ...]
 
 
+class EconomicComparisonResponse(_StrictOptimizationSchema):
+    """Explain comparison evidence without granting ranking or execution permission."""
+
+    status: Literal["incomparable", "policy_required", "compared"]
+    recommendation: ProposalVariant | None
+    reasons: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def _recommendation_requires_comparison(self) -> "EconomicComparisonResponse":
+        if self.status == "compared":
+            if self.recommendation is None:
+                raise ValueError("completed economic comparison requires a recommendation")
+        elif self.recommendation is not None or not self.reasons:
+            raise ValueError(
+                "incomplete economic comparison requires reasons and no recommendation"
+            )
+        return self
+
+
 class OptimizationProposalGroupResponse(_StrictOptimizationSchema):
     proposal_group_id: UUID
     status: ProposalGroupStatus
@@ -451,6 +470,7 @@ class OptimizationProposalGroupResponse(_StrictOptimizationSchema):
         OptimizationProposalResponse,
     ]
     shadow_eligibility: ShadowEligibilityResponse
+    economic_comparison: EconomicComparisonResponse | None = None
 
     @model_validator(mode="after")
     def _three_fixed_variants(self) -> "OptimizationProposalGroupResponse":
