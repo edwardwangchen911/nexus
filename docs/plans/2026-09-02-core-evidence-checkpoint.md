@@ -320,3 +320,29 @@ https://alfred.stlouisfed.org/graph/alfredgraph.csv?id=DEXHKUS&cosd=2026-08-24&c
 无需逐次批准，替代旧的按请求次数申请窗口流程；仍保留限流、超时、失败先诊断及禁止
 自动重试。不得因为工作树尚未同步规则就恢复废止的重复审批。新增付费、权限、外部
 写入及交易仍按现行规则确认。主库另一任务未提交的 AGENTS.md 改动已保留。
+
+## 真实只读刷新恢复与新行情事实
+
+fea44d7 已快进主线；共享服务负责人仅重建 API，核对六份修改源文件的容器/主库/提交
+哈希一致，health/live 与本地 overview GET 为 200。数据库、MinIO、端口及另一任务
+未提交的 AGENTS.md 保持原状。
+
+重启后原 /tmp 网关运行目录已不存在，不能宣称其临时 nonce 历史已恢复。原持久化
+.secrets/nexus-fosun-local/replay.sqlite3 的 schema/integrity 均正常，旧 owner 已退出，
+ready 标记已过期。先保存审查副本、持有单实例锁，再调用现有 readiness 的过期处理；
+原持久化 nonce 全部保留，没有新建空库或手删保护标记。已审查 launcher 从本任务历史
+恢复到被 Git 忽略的持久目录，仅从原位置读取凭据；正常经历 61 秒启动等待后就绪。
+
+一次既有 local_read_only refresh 成功，总计 22 个业务读取请求，无重试。新账户快照
+as_of 为 2026-09-02T15:41:15.067652Z，双读及 CashFlows 对账通过；12 个标的行情归档
+完成，并生成 RESEARCH_REQUIRED 诊断。网关随后通过 SIGTERM 正常退出，两监听关闭，
+没有调度、模型调用或交易写入。
+
+逐份读取本地对象库并核验哈希：12 份新 K 线原始响应均有 provider_reported_delay=true
+及 sdk_requested_adjustment=noward。这是新响应实际事实，不回填旧归档。归一化仍沿
+展示入口的 unknown 准入；status 仍报告 0 个价格权威、归一化记录晚于账户截止时点。
+故剩余是已保存事实到诊断证据的衔接，不是再次授权或重复取数；可先用已有归档推进。
+
+实际 Browser 验证 localhost:3302/portfolio 已加载，显示北京时间 23:41:15 的新快照，
+执行锁定；同一时刻在本地数据库状态及 overview BFF GET 交叉一致。页面仍明确需要
+补充证据，没有通过展示/对账状态冒充研究或方案合格。完整真实决策闭环仍未完成。
