@@ -63,7 +63,7 @@
 
 ### 4.1 行情时间与新鲜度
 
-保持现有 `MarketItemResponse.as_of` 原义，不通过改名或回填让历史数据看似新鲜。`meta.as_of` 是本次读取/决策截止，不是所有行情的源时间。现有 `MarketBarResponse.session/observed_at/available_at` 和盘中 `trade_as_of/quote_as_of/bar_as_of` 继续各自展示。
+保持现有 `MarketItemResponse.as_of` 原义，不通过改名或回填让历史数据看似新鲜。`meta.as_of` 是查询快照时点/数据读取截止：存在cursor时保持游标冻结的decision_time，并非本次HTTP请求时间，更不是所有行情的源时间。真正的页面刷新成功时间若需要，由C独立记录本地成功接收时刻并明确不代表市场事件。现有 `MarketBarResponse.session/observed_at/available_at` 和盘中 `trade_as_of/quote_as_of/bar_as_of` 继续各自展示。
 
 A 如确认有准确存储事实，给 `MarketItemResponse` 兼容增加可空字段：`source_observed_at: datetime | None = None`、`received_at: datetime | None = None`、`persisted_at: datetime | None = None`。只能映射经逐层验证的来源：上游事件时间、原始响应接收、数据库写入。没有该语义的存储值时保持 null，不以 nearby timestamp 代替。先通过合同测试再生成客户端；C 在新字段未合入前用现有字段实施可独立合入的诚实标签。
 
@@ -73,7 +73,7 @@ A 如确认有准确存储事实，给 `MarketItemResponse` 兼容增加可空�
 
 B 保留现有请求/响应、202 异步语义及 Job ID。输出 `build_optimization_registry(*, artifact_reader=None).specs`，A 在现有 general registry 注册，不新建 worker。对象读取复用 `app.state.diagnostic_artifact_reader` 的只读 transport，不能把对象库密钥放 Job payload。
 
-分析方案组不等于合格排名、用户选择或执行许可。所有候选绑定同一组合、估值基线、研究快照、价格/行业/FX 版本与可用时点。研究工具只读已合格的历史比较；跨组合、未来证据、草案/分析组不得冒充正式结果。
+分析方案组不等于合格排名、用户选择或执行许可。所有候选绑定同一组合、估值基线、研究快照、价格/行业/FX 版本与可用时点。既有 `agents/proposal_context.py` 已允许同case的分析草案以 `partial/non_executable` 冻结并由研究工具只读消费；保留此能力，不为本计划删掉或重复实现。正式历史排名仍仅纳入合格比较；跨组合、未来证据、草案/分析组不得冒充正式结果。
 
 成本“未知”和“确为零”分开。当前 `candidate.cost <= hold.cost=0` 不能作为经济上不调整的充分理由。没有有来源的适用费用、比较目标与预算时，只显示各维度/缺口，不宣称持有更优，不擅自新增阈值或风险容忍度。
 
@@ -106,7 +106,7 @@ SEC 的 `accepted_at` 不是首次网页公开时间；官方说明没有首次�
 - 现有共享 3302 服务由现负责人维护；C 新预览选择未占用端口并告知 A，不能重启别人进程。端口/PID/数据库名写在任务上下文，不固化为长期规则。
 - 一次只跑一组重型 PG/浏览器/全量构建；由 A 协调时间窗，不禁止其他编码和轻量单测。只读样本采集同样避免两个任务重复读取相同缺口。
 - API 生产者 owner 修改自己的 schema；生成产物 `contracts/openapi.json`、`app/lib/generated/*` 由 A 在集成时统一生成核验。C 不手改生成文件；可在本分支运行生成命令验证，但不覆盖他人的合同。
-- `engine/src/nexus/api/main.py` 的依赖注入也由 A 独占；C不碰后端snapshot/diagnostic时点，D不注册并行组合根。需要新字段/路由时先交A集成小补丁。
+- `engine/src/nexus/main.py` 的依赖注入也由 A 独占；C不碰后端snapshot/diagnostic时点，D不注册并行组合根。需要新字段/路由时先交A集成小补丁。
 - 关键测试必须覆盖：未来/错时点、未知与零、单位/分母、重复/幂等、旧版本兼容、越权拒绝、无自动外呼、错误与进程退出。资金/风控用 Decimal 及独立回归。
 - 无真实数据时报告具体缺口，不能将隔离样本/测试数/页面 200 宣称真实验收。
 

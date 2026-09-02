@@ -62,7 +62,7 @@ D0=2026-09-03，D+n 为有效开发日而非自动承诺的自然日；首轮完
 | W1 | D0–D2 | A1/A3 + 集成 | B1/B2成本缺口分类 | C1/研究方案读取状态 | D1/D2优先阻塞材料 | 最新主线页面诚实显示时间/缺口，方案入口实际可跑 |
 | W2 | D2–D4 | A2与新诊断 | B2/B3研究比较闭环 | C2真实页面验收 | D2供证据/修订兼容 | 条件满足时一个真实案例闭环；否则列精确外部依赖 |
 | W3 | D4–D7 | 核心闭环验收/集成 | 核心缺口修复 | 同案例浏览器验收 | 核心资料缺口修复 | 当前真实决策闭环、行情时间与官方公告最小交付 |
-| W4 | 核心完成后约1–2周有效开发 | T1/S1用途authority | T1后S1（不并排给同一人） | 结果/归因页面 | 历史数据/公司行动证据 | baseline真实回测及人工选择后Shadow单次闭环 |
+| W4 | 核心完成后约1–2周有效开发 | T1/S1用途authority | T1与S1按就绪顺序排，不并排给同一人 | 结果/归因页面 | 历史数据/公司行动证据 | baseline真实回测及人工选择后Shadow单次闭环 |
 | W5 | W4后约2–3周有效开发 | S2/L1/O1分批 | S2→S3；之后E1 | paper/演化/运维可见状态 | 必要证据修订 | 内部paper与绩效；每日流程/演化按准入启用 |
 | 外部模拟 | 用户决定进入该阶段后约1–2周开发及验收窗口 | X2→X3 | 相关合同复核 | 模拟状态界面 | 官方模拟协议核查 | 正式模拟账户闭环，不等于实盘 |
 | 运行观察 | 对应模块启用后 | R1/故障核查 | 归因结果复核 | 时间/失效展示 | 必要资料修订 | 至少5实际交易日稳定性观察；长期晋级协议另计 |
@@ -128,7 +128,7 @@ git diff --check
 
 **实现:** 逐层核对 FosunSnapshotProvider 到存储及 API 的源时间、receipt-only 标记、delivery_mode；按方案4.1仅添加能可靠映射的可空字段。复用现有单次采集入口与盘中模块；不新建常驻服务，不默认激活15秒外部采集。
 
-**测试:** 无上游时间时source_observed_at=null，页面读取不触发Provider；上游delay布尔值不转换成臆造分钟数；未来/乱序时刻拒绝；刷新GET只改变读取截止不改行情原时刻；历史响应缺新字段兼容。
+**测试:** 无上游时间时source_observed_at=null，页面读取不触发Provider；上游delay布尔值不转换成臆造分钟数；未来/乱序时刻拒绝；新查询的读取截止可推进但行情原时刻不变，带cursor的查询快照仍冻结；历史响应缺新字段兼容。
 
 **验收:** 一次真实只读样本经持久化/受保护API/页面对齐；若上游没有源时间，交付明确限制，不能承诺真实行情时延。C可先按旧字段标签独立合入。
 
@@ -158,9 +158,9 @@ git diff --check
 
 ### B3：一个真实研究与比较消费
 
-**Files:** `agents/{committee,synthesis,database_tools,execution}.py` 与既有阶段/证据测试；若需改SEC CLI，先向D交接该文件。
+**Files:** `agents/{committee,synthesis,database_tools,execution,proposal_context,portfolio_context}.py` 与既有阶段/证据测试；若需改SEC CLI，先向D交接该文件。
 
-**实现:** 用A新快照的一项组合问题，冻结同批证据；检查反证确实回应论点、综合解释未解决矛盾；`get_proposal_comparison` 只读取本次授权绑定且合格的持久化结果。常规模型验证复用现有套餐，不反复对同一缺失材料烧额度。
+**实现:** `proposal_context`→`portfolio_context`冻结→`database_tools.proposal_comparison`已实现并有PG回归，不从零接tool。保留同case分析草案以partial/non_executable作为研究上下文的现有能力，与严格合格正式排名分开。用A新快照的一项组合问题，冻结同批证据；检查反证确实回应论点、综合解释未解决矛盾，以及compare的研究/证据/hash/时间绑定。常规模型验证复用现有套餐，不反复对同一缺失材料烧额度。
 
 **测试/验收:** 错引用、时间漂移、跨研究compare、矛盾未回应、阶段失败和未知用量、超时后进程清理；读工具无隐式创建。真实验收报告必须能回答原问题，不要求买入/调整；缺材料不是证据充分不调整。
 
@@ -170,11 +170,11 @@ git diff --check
 
 **Files:** `app/(protected)/market/page.tsx`、相关既有市场组件/格式函数、`tests/unit/market/{page,intraday-monitor,market-boundary}.test.tsx`、`tests/unit/engine/market-routes.test.ts`。
 
-**第一小切片:** 不等待A新schema。复用现有 item.as_of、meta.as_of、盘中quote/bar时间，将“本次读取时间”与行情记录时间分别标注，源时间不明给精确说明；复用既有实时/延迟标签、轮询和北京时间格式，不再实现一套时间格式库。
+**第一小切片:** 不等待A新schema。复用现有 item.as_of、meta.as_of、盘中quote/bar时间，将“查询快照时点/数据读取截止”与行情记录时间分别标注；cursor存在时meta.as_of冻结，不能标成最新HTTP读取时间。确需显示本次页面刷新成功时刻，独立记录本地成功接收并注明非行情时间。源时间不明给精确说明；复用既有实时/延迟标签、轮询和北京时间格式，不再实现一套时间格式库。
 
 **第二小切片:** A新可空字段合同合入后，按source/received/persisted分别展示，null不显示假时间；过期判断复用既有quote/bar与交易时段政策，不在周末/盘外仅凭墙钟制造误报。旧字段原含义不变。
 
-**测试向量:** meta推进而行情不变；delivery unknown；源时间null；历史响应缺字段；休市/过期/未来时刻；切换标的不显示上个标的证据；隐藏页轮询；GET未触发券商/模型。先增加失败断言，再改标签/mapper。
+**测试向量:** 无cursor新查询meta推进而行情不变；带cursor快照冻结但本次请求完成时间推进；delivery unknown；源时间null；历史响应缺字段；休市/过期/未来时刻；切换标的不显示上个标的证据；隐藏页轮询；GET未触发券商/模型。先增加失败断言，再改标签/mapper。
 
 **验证:** `npm run test:unit -- tests/unit/market tests/unit/engine/market-routes.test.ts`、`npm run typecheck`、目标文件lint；使用自己端口实际浏览器验证，指出哪些后端字段尚未部署。
 
@@ -245,6 +245,7 @@ def test_disclosure_script_is_not_research_text():
 
 - 复用 `backtest/{engine,authority_loader,costs,metrics}.py` 和 `shadow/{authority,start,service,query,repository}.py`。
 - A2的新用途authority就绪后，B补读取适配；人工选择真实方案前只在隔离合成环境建立session，不代用户选择真实组合动作。
+- T1与S1不是全局先后依赖；S1自己的方案/价格用途/人工选择已满足时可先做，不因T1多年历史数据不足而等待。
 - 测试 `engine/tests/integration/test_shadow_start_pg.py`、`test_shadow_advance_pg.py`、`engine/tests/property/test_shadow_no_lookahead.py`；补新旧policy兼容、重复推进、缺交易日/公司行动、成本基准与归因一致性。
 - 验收是同方案单次手动推进→结果/归因→API/页面，不能以“历史测试绿”宣告当前源已可用。随后至少5实际交易日观察，不作为收益预测。
 
@@ -285,6 +286,6 @@ def test_disclosure_script_is_not_research_text():
 
 ## 9. 初始交付状态与更新方法
 
-2026-09-03建立此计划时：A1 `49535dd`已提交未合入/未应用；B1 `9177f32`已提交并交A审查，A正在独立集成B与registry，不捆绑A1迁移；C1/D1准备派发；核查基线main为dce390b，根AGENTS有需保留的未提交修改。以上是时点记录，不是自动状态看板。
+2026-09-03建立此计划时：A1 `49535dd`已提交未合入/未应用；B1 `9177f32`与A接线已合main `7dd98d8`，不含A1迁移，运行生效另行验证；C1/D1已派发，四开发会话均active。根AGENTS仍有需保留的未提交修改。独立文档review已修正cursor冻结的meta.as_of语义；以上是时点记录，不是自动状态看板。
 
 每个owner更新自己会话，不并发编辑这张总计划。协调人收到A确认的main SHA与验收证据后更新本节或已有 `docs/plans/2026-09-02-core-evidence-checkpoint.md`，避免新增重复状态系统。所有安全且无依赖的小切片继续推进；遇到真实外部阻塞只停受影响项。
