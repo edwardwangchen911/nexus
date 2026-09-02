@@ -72,3 +72,7 @@ export function marketAdjustmentLabel(adjustment: string | null): string {
 export function qualityReasonLabel(reason: string): string {
   return QUALITY_REASON_LABELS[reason] ?? "存在未分类的数据质量问题";
 }
+
+export function isReceiptOnlyQuote(source: string | null, qualityReasons: readonly string[]): boolean {
+  return source === "fosun" && qualityReasons.includes("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE");
+}

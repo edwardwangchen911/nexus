@@ -10,6 +10,7 @@ import { useRef } from "react";
 
 import type { components } from "../lib/generated/schema";
 import {
+  isReceiptOnlyQuote,
   marketDeliveryModeLabel,
   marketSourceLabel,
 } from "../lib/market-evidence-labels";
@@ -28,6 +29,7 @@ export function IntradayMonitor({ symbol, monitor }: IntradayMonitorProps): Reac
   const tableScrollRef = useRef<HTMLDivElement>(null);
   const chartPoints = buildChartPoints(monitor.bars);
   const hasChart = chartPoints.length >= MINIMUM_CHART_SAMPLES;
+  const receiptOnly = isReceiptOnlyQuote(monitor.source, monitor.quality_reasons);
 
   function scrollTable(direction: -1 | 1): void {
     const container = tableScrollRef.current;
@@ -57,11 +59,11 @@ export function IntradayMonitor({ symbol, monitor }: IntradayMonitorProps): Reac
         <strong>{marketSourceLabel(monitor.source, monitor.feed)}</strong>
         <span>{intradayDeliveryModeLabel(monitor)}</span>
         <span className="numeric-data">分钟截止 {formatUtc(monitor.bar_as_of)}</span>
-        {usesGatewayReceiptTime(monitor) ? (
-          <span className="numeric-data">网关接收时间 {formatUtc(gatewayReceiptTime(monitor))}</span>
-        ) : null}
-        <span className="numeric-data">分钟年龄 {formatAge(monitor.bar_age_seconds)}</span>
-        <span className="numeric-data">报价年龄 {formatAge(monitor.quote_age_seconds)}</span>
+        <span className="numeric-data">{receiptOnly ? "成交记录网关接收时间" : "成交源时间"} {formatUtc(monitor.trade_as_of)}</span>
+        <span className="numeric-data">{receiptOnly ? "盘口记录网关接收时间" : "盘口源时间"} {formatUtc(monitor.quote_as_of)}</span>
+        {receiptOnly ? <span>报价源时间 未知（上游未提供）</span> : null}
+        <span className="numeric-data">分钟年龄（快照时点） {formatAge(monitor.bar_age_seconds)}</span>
+        <span className="numeric-data">{receiptOnly ? "接收记录年龄（快照时点）" : "盘口年龄（快照时点）"} {formatAge(monitor.quote_age_seconds)}</span>
       </div>
 
       <dl className="intraday-monitor__metrics">
@@ -197,15 +199,6 @@ function formatBps(value: string | null): string {
 function formatSpread(monitor: IntradayMonitorData): string {
   if (monitor.bid === null || monitor.ask === null) return "盘口未提供";
   return formatBps(monitor.spread_bps);
-}
-
-function usesGatewayReceiptTime(monitor: IntradayMonitorData): boolean {
-  return monitor.source === "fosun"
-    && monitor.quality_reasons.includes("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE");
-}
-
-function gatewayReceiptTime(monitor: IntradayMonitorData): string | null {
-  return monitor.trade_as_of ?? monitor.quote_as_of ?? monitor.bar_as_of;
 }
 
 function formatAge(value: number | null | undefined): string {
