@@ -1547,6 +1547,21 @@ export interface components {
             state: "unlocked" | "locked" | "recovery_eligible" | "unknown";
         };
         /**
+         * EconomicComparisonResponse
+         * @description Explain comparison evidence without granting ranking or execution permission.
+         */
+        EconomicComparisonResponse: {
+            /** Reasons */
+            reasons: string[];
+            /** Recommendation */
+            recommendation: ("hold_current" | "minimum_change" | "strategy_target") | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "incomparable" | "policy_required" | "compared";
+        };
+        /**
          * EmptyActionRequest
          * @description Reject accidental mutable payloads on Job retry.
          */
@@ -2263,6 +2278,7 @@ export interface components {
             data_snapshot_id: string;
             /** Diagnostic Input Hash */
             diagnostic_input_hash: string;
+            economic_comparison?: components["schemas"]["EconomicComparisonResponse"] | null;
             /**
              * Portfolio Scope
              * @enum {string}

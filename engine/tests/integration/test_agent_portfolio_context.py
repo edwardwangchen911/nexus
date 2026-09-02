@@ -137,6 +137,18 @@ async def test_existing_comparison_is_frozen_for_research_without_creating_propo
         assert result["status"] == "ok"
         assert result["items"][0]["proposal_group_id"] == str(group.id)
         assert result["items"][0]["execution_locked"] is True
+        assert result["items"][0]["economic_comparison"] == {
+            "status": "incomparable", "recommendation": None,
+            "reasons": ["COST_EVIDENCE_INCOMPLETE", "COMPARISON_EVIDENCE_INCOMPLETE"],
+        }
+        exposure = await tools.execute("get_portfolio_exposure", {
+            "portfolio_snapshot_id": str(portfolio.id), "instrument_id": str(INSTRUMENT),
+            "as_of": later.isoformat(),
+        })
+        assert exposure["items"][0]["proposal_comparison"]["economic_comparison"] == (
+            result["items"][0]["economic_comparison"]
+        )
+        assert exposure["items"][0]["content_hash"] == inputs.portfolio_context.content_hash
         assert "private-" not in json.dumps(result)
         with pytest.raises(ToolInputError, match="proposal"):
             await tools.execute("get_proposal_comparison", {

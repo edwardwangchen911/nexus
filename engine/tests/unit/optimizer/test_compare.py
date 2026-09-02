@@ -23,6 +23,30 @@ def test_typed_metric_rejects_binary_float() -> None:
         TypedMetric(status="known", value=0.1)
 
 
+def test_positive_cost_risk_improvement_needs_policy_not_a_hold_recommendation() -> None:
+    result = compare_proposals((
+        ComparableProposal("hold_current", _dimensions(violations=1, top1="0.5", drawdown="0.2", cost="0")),
+        ComparableProposal("minimum_change", _dimensions(violations=0, top1="0.4", drawdown="0.2", cost="0.001")),
+        ComparableProposal("strategy_target", _dimensions(violations=2, top1="0.6", drawdown="0.3", cost="0.01")),
+    ))
+    assert result.recommendation is None
+    assert result.status == "policy_required"
+    assert result.reasons == ("ECONOMIC_COMPARISON_POLICY_MISSING",)
+    # Existing admission/risk ranking is unchanged; it is not an economic conclusion.
+    assert result.ranked_variants == ("hold_current",)
+
+
+def test_zero_commission_does_not_certify_other_missing_cost_components() -> None:
+    result = compare_proposals((
+        ComparableProposal("hold_current", _dimensions(violations=1, top1="0.5", drawdown="0.2", cost="0")),
+        ComparableProposal("minimum_change", _dimensions(violations=0, top1="0.4", drawdown="0.2", cost="0"), cost_complete=False),
+        ComparableProposal("strategy_target", _dimensions(violations=2, top1="0.6", drawdown="0.3", cost="0.01")),
+    ))
+    assert result.recommendation is None
+    assert result.status == "incomparable"
+    assert "COST_EVIDENCE_INCOMPLETE" in result.reasons
+
+
 def _dimensions(
     *,
     violations: int,
@@ -70,7 +94,8 @@ def test_comparison_requires_every_typed_dimension_and_no_risk_deterioration() -
             ComparableProposal("strategy_target", _dimensions(violations=0, top1="0.3", drawdown="0.2", cost="0.02", unknown="drawdown")),
         )
     )
-    assert unknown.recommendation == "hold_current"
+    assert unknown.recommendation is None
+    assert unknown.status == "incomparable"
     assert unknown.excluded_variants == ("minimum_change", "strategy_target")
     assert unknown.tax_impact.status == "unknown"
 
@@ -94,7 +119,8 @@ def test_comparison_excludes_unknown_cost_from_ranking_and_can_recommend_hold() 
             ),
         )
     )
-    assert result.recommendation == "hold_current"
+    assert result.recommendation is None
+    assert result.status == "incomparable"
     assert result.tax_impact.status == "unknown"
     assert result.ranked_variants == ()
     assert result.excluded_variants == (
@@ -120,7 +146,8 @@ def test_comparison_excludes_partial_stale_and_incomplete_evidence() -> None:
             ),
         )
     )
-    assert result.recommendation == "hold_current"
+    assert result.recommendation is None
+    assert result.status == "incomparable"
     assert result.ranked_variants == ("hold_current",)
     assert result.excluded_variants == ("minimum_change", "strategy_target")
 
