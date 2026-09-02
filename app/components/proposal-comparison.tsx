@@ -206,7 +206,7 @@ function EconomicComparisonSummary({ comparison }: { comparison: ProposalGroup["
       <p>{!comparison
         ? "当前响应没有报告经济比较结论，不据此判断哪种方案更优。"
         : compared
-          ? "这是已保存的经济比较结果，不代表已作出人工选择，也不授予执行权限。"
+          ? "这是基于已保存证据计算的比较结果，不代表已作出人工选择，也不授予执行权限。"
           : "尚未形成经济比较结论，不能据此认定保持现状或调整更优。"}</p>
       {comparison?.reasons.length ? (
         <>

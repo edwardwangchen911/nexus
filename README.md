@@ -147,6 +147,9 @@ uv run --package nexus-engine nexus-openai-local setup --backend responses
 禁止跳转、无自动重试、首错即停。复用已有 SEC 归档与财报/财务事实入库逻辑，
 核对 ticker/交易所/CIK 后生成研究输入及研究页路径，不启动模型或后台任务。
 仅有外国发行人 6-K 文本时，使用 `nexus-openai-local refresh-disclosure --instrument-id <标的 UUID>`。
+美国发行人的 8-K 主文使用同一命令加 `--form 8-K`；默认仍为 6-K。8-K 按实际收到
+正文的时刻进入新研究，SEC 接受时间另行保留。较新或同刻的 8-K/A 暂不支持时明确停止，
+不把旧 8-K 当作最新完整披露；本入口不下载附件，不从主文推造财务数值。
 同样最多 3 个公开 GET（目录、submissions、最新 6-K 原文），无重试；不请求 Company Facts。
 原文归档并校验哈希后进入既有数据库、冻结研究、Codex SDK 与研究页；正文按需展开，
 明确区分披露与结构化财务指标，不从文字生成财务数值，也不提升行情或执行权限。
