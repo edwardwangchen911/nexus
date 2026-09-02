@@ -70,6 +70,17 @@ def test_financial_fact_rejects_binary_float() -> None:
         _fact(value=100.0)  # type: ignore[arg-type]
 
 
+def test_next_business_day_filing_preserves_both_dates_without_early_selection() -> None:
+    accepted = datetime(2026, 8, 20, 22, tzinfo=UTC)
+    filed = datetime(2026, 8, 21, tzinfo=UTC)
+    payload = _fact(accepted_at=accepted).model_dump()
+    payload["filed_at"] = filed
+    fact = FinancialFact.model_validate(payload)
+    assert fact.accepted_at == accepted and fact.filed_at == filed
+    assert select_financial_fact([fact], "revenue", accepted) is None
+    assert select_financial_fact([fact], "revenue", filed) == fact
+
+
 def test_restated_fact_is_not_visible_before_acceptance() -> None:
     original_fact = _fact(accepted_at=ACCEPTED, revision="1")
     restated_fact = _fact(value="110.00", accepted_at=ACCEPTED + timedelta(days=7), revision="2")

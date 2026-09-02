@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
+from nexus.agents.portfolio_context import freeze_portfolio_context
 from nexus.domain.time import require_utc
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.data import DataSnapshot
@@ -49,18 +50,21 @@ async def prepare_research_snapshot(
                 .exists(),
             )
             .order_by(ResearchEvidenceRef.available_at.desc(), ResearchEvidenceRef.id)
-            # Admission can add one price reference to the same bounded manifest.
-            .limit(MAX_FROZEN_EVIDENCE - 1)
+            # Leave room for one price reference and one separate portfolio context.
+            .limit(MAX_FROZEN_EVIDENCE - 2)
         )
     )
     if not evidence:
         return None
-    payload = {
+    context = await freeze_portfolio_context(session, instrument_id, as_of)
+    payload: dict[str, object] = {
         "instrument_id": str(instrument_id),
         "as_of": as_of.isoformat(),
         "evidence_ids": [str(item.id) for item in evidence],
         "scope": "persisted_sec_filings",
     }
+    if context is not None:
+        payload["portfolio_context"] = context[0].model_dump(mode="json")
     revision = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     snapshot_id = await session.scalar(
         insert(DataSnapshot)

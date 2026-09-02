@@ -25,6 +25,7 @@ type Notice = { kind: "error" | "success"; text: string } | null;
 
 type MarketPanelProps = {
   state: DataStateKind;
+  researchAsOf?: string | null;
   items: MarketItem[];
   selectedSeries: SelectedMarketSeries | null;
   intradayMonitor?: IntradayMonitorData | null;
@@ -46,6 +47,7 @@ const LOAD_TIMEOUT_MS = 10_000;
 export default function MarketPage(): React.ReactElement {
   const initialLocation = useMemo(() => readMarketLocation(), []);
   const [state, setState] = useState<DataStateKind>("loading");
+  const [researchAsOf, setResearchAsOf] = useState<string | null>(null);
   const [items, setItems] = useState<MarketItem[]>([]);
   const [selectedSeries, setSelectedSeries] = useState<SelectedMarketSeries | null>(null);
   const [intradayMonitor, setIntradayMonitor] = useState<IntradayMonitorData | null>(null);
@@ -104,6 +106,7 @@ export default function MarketPage(): React.ReactElement {
         return;
       }
       const data = result.envelope.data;
+      setResearchAsOf(result.envelope.meta.as_of);
       const nextSelectedInstrumentId = selectedInstrumentId !== null
         && data.items.some((item) => item.instrument_id === selectedInstrumentId)
         ? selectedInstrumentId
@@ -244,6 +247,7 @@ export default function MarketPage(): React.ReactElement {
   return (
     <MarketPanel
       state={state}
+      researchAsOf={researchAsOf}
       items={items}
       selectedSeries={selectedSeries}
       intradayMonitor={intradayMonitor}
@@ -284,6 +288,7 @@ export default function MarketPage(): React.ReactElement {
 
 export function MarketPanel({
   state,
+  researchAsOf = null,
   items,
   selectedSeries,
   intradayMonitor = null,
@@ -383,7 +388,7 @@ export function MarketPanel({
                     {selectedItem.as_of ? <a
                       className="button button--quiet"
                       aria-label={`打开 ${selectedItem.symbol} 个股研究`}
-                      href={`/research/${selectedItem.instrument_id}?as_of=${encodeURIComponent(selectedItem.as_of)}`}
+                      href={`/research/${selectedItem.instrument_id}?as_of=${encodeURIComponent(researchAsOf ?? selectedItem.as_of)}`}
                     >打开个股研究</a> : null}
                     <button
                       className="button button--quiet"

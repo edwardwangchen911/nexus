@@ -1225,6 +1225,55 @@ export const runtimeContractSchemas = {
     "title": "ComparisonResponse",
     "type": "object"
   },
+  "ContextDiagnostic": {
+    "additionalProperties": false,
+    "properties": {
+      "actionability": {
+        "enum": [
+          "monitor",
+          "research",
+          "reduce_only",
+          "blocked"
+        ],
+        "title": "Actionability",
+        "type": "string"
+      },
+      "code": {
+        "maxLength": 200,
+        "title": "Code",
+        "type": "string"
+      },
+      "severity": {
+        "enum": [
+          "info",
+          "warning",
+          "critical"
+        ],
+        "title": "Severity",
+        "type": "string"
+      },
+      "unknown_reason": {
+        "anyOf": [
+          {
+            "maxLength": 200,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Unknown Reason"
+      }
+    },
+    "required": [
+      "code",
+      "severity",
+      "actionability",
+      "unknown_reason"
+    ],
+    "title": "ContextDiagnostic",
+    "type": "object"
+  },
   "CurrencyCode": {
     "pattern": "^[A-Z]{3}$",
     "type": "string"
@@ -4345,6 +4394,186 @@ export const runtimeContractSchemas = {
     "title": "PortfolioPageResponse",
     "type": "object"
   },
+  "PortfolioResearchContext": {
+    "additionalProperties": false,
+    "description": "No account identities, cash amounts, quantities, order IDs or other holdings.",
+    "properties": {
+      "cash_weight": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Cash Weight"
+      },
+      "content_hash": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Content Hash"
+      },
+      "currency": {
+        "pattern": "^[A-Z]{3}$",
+        "title": "Currency",
+        "type": "string"
+      },
+      "diagnostic_input_hash": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Diagnostic Input Hash"
+      },
+      "diagnostic_run_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Diagnostic Run Id"
+      },
+      "diagnostics": {
+        "items": {
+          "$ref": "#/components/schemas/ContextDiagnostic"
+        },
+        "maxItems": 100,
+        "title": "Diagnostics",
+        "type": "array"
+      },
+      "diagnostics_truncated": {
+        "title": "Diagnostics Truncated",
+        "type": "boolean"
+      },
+      "evidence_ref_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Evidence Ref Id"
+      },
+      "execution_locked": {
+        "const": true,
+        "default": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "optimization_need": {
+        "anyOf": [
+          {
+            "enum": [
+              "BLOCKED",
+              "RESEARCH_REQUIRED",
+              "OPTIMIZATION_CANDIDATE",
+              "NO_ACTION"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Optimization Need"
+      },
+      "portfolio_snapshot_id": {
+        "format": "uuid",
+        "title": "Portfolio Snapshot Id",
+        "type": "string"
+      },
+      "position_weight": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Position Weight"
+      },
+      "research_as_of": {
+        "format": "date-time",
+        "title": "Research As Of",
+        "type": "string"
+      },
+      "snapshot_as_of": {
+        "format": "date-time",
+        "title": "Snapshot As Of",
+        "type": "string"
+      },
+      "snapshot_decision_ready": {
+        "title": "Snapshot Decision Ready",
+        "type": "boolean"
+      },
+      "source": {
+        "const": "fosun",
+        "default": "fosun",
+        "title": "Source",
+        "type": "string"
+      },
+      "valuation_reason": {
+        "anyOf": [
+          {
+            "const": "INCOMPLETE_CURRENCY_VALUATION",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Valuation Reason"
+      }
+    },
+    "required": [
+      "instrument_id",
+      "portfolio_snapshot_id",
+      "snapshot_as_of",
+      "research_as_of",
+      "currency",
+      "position_weight",
+      "cash_weight",
+      "valuation_reason",
+      "snapshot_decision_ready",
+      "diagnostic_run_id",
+      "optimization_need",
+      "diagnostic_input_hash",
+      "diagnostics",
+      "diagnostics_truncated"
+    ],
+    "title": "PortfolioResearchContext",
+    "type": "object"
+  },
   "PortfolioSnapshotResponse": {
     "additionalProperties": false,
     "properties": {
@@ -5257,6 +5486,16 @@ export const runtimeContractSchemas = {
         "maxItems": 20,
         "title": "Filings",
         "type": "array"
+      },
+      "portfolio_context": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PortfolioResearchContext"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "total_facts": {
         "minimum": 0,

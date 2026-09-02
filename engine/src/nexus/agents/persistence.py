@@ -17,6 +17,7 @@ from nexus.agents.budget import BudgetExhausted
 from nexus.agents.committee import ROLE_ORDER, AgentRole
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE
 from nexus.agents.models import ResearchRequest
+from nexus.agents.portfolio_context import read_portfolio_context
 from nexus.agents.price_authority import freeze_price_authority
 from nexus.agents.tools import EXPECTED_READ_ONLY_TOOL_NAMES
 from nexus.jobs.models import (
@@ -37,6 +38,7 @@ from nexus.persistence.models.agents import (
 )
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument
+from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.models.runtime import Job
 from nexus.reconciliation.admission_claim import claim_or_lock
 from nexus.reconciliation.persistence_errors import IdempotencyConflict
@@ -342,6 +344,32 @@ async def admit_research_run(
         }
         for record in evidence_records
     ]
+    # Portfolio context is a separate local input, not a filing or price authority.
+    # Freeze it into the run manifest only after its exact snapshot payload validates.
+    if "portfolio_context" in snapshot.payload:
+        context = await read_portfolio_context(
+            session,
+            snapshot.id,
+            request.instrument_id,
+            request.decision_time,
+        )
+        if context is None or context.evidence_ref_id is None:
+            raise ValueError("portfolio context authority is invalid")
+        context_evidence = await session.get(ResearchEvidenceRef, context.evidence_ref_id)
+        assert context_evidence is not None
+        evidence_manifest.append(
+            {
+                "id": str(context_evidence.id),
+                "source": context_evidence.source,
+                "provider_object_id": context_evidence.provider_object_id,
+                "revision": context_evidence.revision,
+                "available_at": context_evidence.available_at.isoformat().replace("+00:00", "Z"),
+                "location": context_evidence.location,
+                "content_hash": context_evidence.content_hash,
+            }
+        )
+        if len(evidence_manifest) > MAX_FROZEN_EVIDENCE:
+            raise ValueError("evidence authority exceeds 100 rows")
     evidence_manifest_hash = hashlib.sha256(
         json.dumps(evidence_manifest, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -351,9 +379,7 @@ async def admit_research_run(
         {
             "instrument_id": str(request.instrument_id),
             "data_snapshot_id": str(request.data_snapshot_id),
-            "decision_time": request.decision_time.strftime(
-                "%Y-%m-%dT%H:%M:%S.%fZ"
-            ),
+            "decision_time": request.decision_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "request_hash": request_hash,
             "schema_hash": _schema_hash(),
             "model_hash": model.config_hash,

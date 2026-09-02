@@ -83,8 +83,8 @@ class FinancialFact(BaseModel):
             raise ValueError("duration facts require period_start")
         if self.period_start is not None and self.period_start > self.period_end:
             raise ValueError("period_start must not be after period_end")
-        if self.filed_at > self.accepted_at:
-            raise ValueError("filed_at must not be after accepted_at")
+        # SEC may assign the next business day's filing date to an evening acceptance.
+        # Preserve both source values; filing date is not an event timestamp.
         return self
 
 
@@ -96,7 +96,8 @@ def select_financial_fact(
     visible = [
         fact
         for fact in facts
-        if fact.canonical_fact == canonical_fact and fact.accepted_at <= decision_at
+        if fact.canonical_fact == canonical_fact
+        and max(fact.accepted_at, fact.filed_at, fact.evidence_ref.available_at) <= decision_at
     ]
     if not visible:
         return None

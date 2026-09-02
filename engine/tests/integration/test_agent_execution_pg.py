@@ -3094,6 +3094,7 @@ async def test_server_authoritative_first_run_admission_selects_frozen_snapshot_
         "instrument_id": str(_INSTRUMENT_ID),
         "data_snapshot_id": str(_SNAPSHOT_ID),
         "decision_time": "2026-08-24T12:00:00Z",
+        "inputs": None,
     }
     assert future.status_code == 200
     assert future.json()["data"] == {
@@ -3102,6 +3103,7 @@ async def test_server_authoritative_first_run_admission_selects_frozen_snapshot_
         "instrument_id": str(_INSTRUMENT_ID),
         "data_snapshot_id": None,
         "decision_time": "2036-08-24T12:00:00Z",
+        "inputs": None,
     }
 
 

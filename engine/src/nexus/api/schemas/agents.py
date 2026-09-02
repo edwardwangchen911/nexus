@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 from typing import Literal
 from uuid import UUID
 
+from nexus.agents.portfolio_context import PortfolioResearchContext
 from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
 from nexus.domain.evidence import EvidenceRef
@@ -92,6 +93,7 @@ class ResearchInputsSummary(_StrictAgentSchema):
     facts: tuple[ResearchInputFact, ...] = Field(max_length=100)
     total_facts: int = Field(ge=0)
     truncated: bool
+    portfolio_context: PortfolioResearchContext | None = None
 
 
 class ResearchAdmissionResponse(_StrictAgentSchema):

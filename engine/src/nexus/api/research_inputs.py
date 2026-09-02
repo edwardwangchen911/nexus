@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.portfolio_context import read_portfolio_context
 from nexus.api.schemas.agents import ResearchInputFact, ResearchInputFiling, ResearchInputsSummary
 from nexus.domain.decimal import decimal_to_string
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord as Frozen
@@ -76,6 +77,7 @@ async def read_research_inputs(
         )
     )
     return ResearchInputsSummary(
+        portfolio_context=await read_portfolio_context(session, snapshot_id, instrument_id, as_of),
         display_symbol=symbol,
         filings=tuple(
             ResearchInputFiling(

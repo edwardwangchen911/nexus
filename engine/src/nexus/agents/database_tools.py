@@ -12,6 +12,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.execution_authority import MAX_FROZEN_EVIDENCE, load_frozen_evidence
+from nexus.agents.portfolio_context import PortfolioResearchContext, read_portfolio_context
 from nexus.agents.price_features import compute_price_features
 from nexus.agents.tools import ReadOnlyTools, ToolExecutor, ToolInputError
 from nexus.market.price_bar_authority import (
@@ -66,6 +67,12 @@ async def database_read_only_tools(
         frozen_evidence,
         evidence,
         allow_fixture_price_evidence=allow_fixture_price_evidence,
+        portfolio_context=await read_portfolio_context(
+            session,
+            run.data_snapshot_id,
+            run.instrument_id,
+            run.decision_time,
+        ),
     )
     return ReadOnlyTools(executors=bound.executors)
 
@@ -90,6 +97,7 @@ class _BoundDatabaseExecutors:
         evidence: tuple[ResearchEvidenceRef, ...],
         *,
         allow_fixture_price_evidence: bool,
+        portfolio_context: PortfolioResearchContext | None,
     ) -> None:
         self._session = session
         self._run_id = run.id
@@ -102,6 +110,7 @@ class _BoundDatabaseExecutors:
         self._evidence_ids = tuple(record.id for record in evidence)
         self._evidence = evidence
         self._allow_fixture_price_evidence = allow_fixture_price_evidence
+        self._portfolio_context = portfolio_context
 
     @property
     def executors(self) -> Mapping[str, ToolExecutor]:
@@ -558,11 +567,66 @@ class _BoundDatabaseExecutors:
 
     async def portfolio_exposure(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_common_scope(payload)
-        return self._capability_unavailable("get_portfolio_exposure")
+        context = await self._require_portfolio_scope(payload)
+        if context is None:
+            return self._capability_unavailable("get_portfolio_exposure")
+        return self._result(
+            "get_portfolio_exposure",
+            [
+                context.model_dump(
+                    mode="json",
+                    exclude={
+                        "diagnostics",
+                        "diagnostic_input_hash",
+                        "optimization_need",
+                        "diagnostics_truncated",
+                    },
+                )
+            ],
+        )
 
     async def portfolio_diagnostics(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_common_scope(payload)
-        return self._capability_unavailable("get_portfolio_diagnostics")
+        context = await self._require_portfolio_scope(payload)
+        if context is None or context.diagnostic_run_id is None:
+            return self._capability_unavailable("get_portfolio_diagnostics")
+        if payload["diagnostic_run_id"] != context.diagnostic_run_id:
+            raise ToolInputError("tool request exceeds frozen diagnostic authority")
+        return self._result(
+            "get_portfolio_diagnostics",
+            [
+                context.model_dump(
+                    mode="json",
+                    exclude={
+                        "position_weight",
+                        "cash_weight",
+                        "valuation_reason",
+                    },
+                )
+            ],
+        )
+
+    async def _require_portfolio_scope(
+        self,
+        payload: Mapping[str, object],
+    ) -> PortfolioResearchContext | None:
+        context = await read_portfolio_context(
+            self._session,
+            self._snapshot_id,
+            self._instrument_id,
+            self._decision_time,
+        )
+        if (
+            context is None
+            or not await self._current_evidence_authority_valid()
+            or context.evidence_ref_id not in self._evidence_ids
+        ):
+            return None
+        if payload["portfolio_snapshot_id"] != context.portfolio_snapshot_id or payload.get(
+            "instrument_id"
+        ) not in (None, self._instrument_id):
+            raise ToolInputError("tool request exceeds frozen portfolio authority")
+        return context
 
     async def proposal_comparison(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_common_scope(payload)
@@ -649,7 +713,21 @@ class _BoundDatabaseExecutors:
         status: str = "ok",
         reason: str | None = None,
     ) -> Mapping[str, object]:
+        context = self._portfolio_context
+        scope = (
+            {
+                "portfolio_scope": {
+                    "portfolio_snapshot_id": str(context.portfolio_snapshot_id),
+                    "diagnostic_run_id": str(context.diagnostic_run_id)
+                    if context.diagnostic_run_id
+                    else None,
+                }
+            }
+            if context and context.evidence_ref_id in self._evidence_ids
+            else {}
+        )
         return {
+            **scope,
             "schema_version": "agent_read_only_tool_result_v1",
             "tool": tool,
             "instrument_id": str(self._instrument_id),

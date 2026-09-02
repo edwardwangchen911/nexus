@@ -21,6 +21,22 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
       <div><dt>使用边界</dt><dd>未形成买卖判断，不触发交易</dd></div>
     </dl>
     {inputs.truncated ? <p role="note">当前仅展示部分冻结资料，不代表完整覆盖。</p> : null}
+    {inputs.portfolio_context ? <section className="decision-card__section">
+      <h3>此持仓的冻结组合背景</h3>
+      <p>复星已入库快照，不是实时仓位；仅提供研究背景，执行保持锁定。</p>
+      <dl className="decision-card__authority">
+        <div><dt>资产快照时间</dt><dd>{formatUtc(inputs.portfolio_context.snapshot_as_of)}</dd></div>
+        <div><dt>持仓权重（比例）</dt><dd>{inputs.portfolio_context.position_weight === null ? "估值资料不完整" : `${inputs.portfolio_context.position_weight}（${inputs.portfolio_context.currency} 资产内）`}</dd></div>
+        <div><dt>同币种现金占比（比例）</dt><dd>{inputs.portfolio_context.cash_weight ?? "估值资料不完整"}</dd></div>
+        <div><dt>该快照对账</dt><dd>{inputs.portfolio_context.snapshot_decision_ready ? "已通过；不代表研究证据齐备" : "未通过；不可作为正式决策依据"}</dd></div>
+        <div><dt>确定性诊断</dt><dd>{inputs.portfolio_context.optimization_need ?? "无已冻结的正式诊断"}</dd></div>
+      </dl>
+      {inputs.portfolio_context.diagnostics.filter((item) => item.unknown_reason).map((item) => <p key={item.code}>{item.unknown_reason}</p>)}
+      {inputs.portfolio_context.diagnostics_truncated ? <p>诊断项仅展示前 100 项。</p> : null}
+      <details className="portfolio-disclosure"><summary>组合背景证据</summary>
+        <dl className="decision-card__versions"><div><dt>快照标识</dt><dd>{inputs.portfolio_context.portfolio_snapshot_id}</dd></div><div><dt>内容 SHA-256</dt><dd>{inputs.portfolio_context.content_hash}</dd></div></dl>
+      </details>
+    </section> : null}
     {inputs.filings.map((filing) => <section className="decision-card__section" key={filing.evidence_ref_id}>
       <h3>SEC {filing.form}</h3>
       <dl className="decision-card__authority">

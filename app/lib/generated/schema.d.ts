@@ -1329,6 +1329,23 @@ export interface components {
             /** Valid Oos Window Count */
             valid_oos_window_count?: number | null;
         };
+        /** ContextDiagnostic */
+        ContextDiagnostic: {
+            /**
+             * Actionability
+             * @enum {string}
+             */
+            actionability: "monitor" | "research" | "reduce_only" | "blocked";
+            /** Code */
+            code: string;
+            /**
+             * Severity
+             * @enum {string}
+             */
+            severity: "info" | "warning" | "critical";
+            /** Unknown Reason */
+            unknown_reason: string | null;
+        };
         CurrencyCode: string;
         /** DailyBriefEnvelope */
         DailyBriefEnvelope: {
@@ -2594,6 +2611,68 @@ export interface components {
             /** Next Cursor */
             next_cursor: string | null;
         };
+        /**
+         * PortfolioResearchContext
+         * @description No account identities, cash amounts, quantities, order IDs or other holdings.
+         */
+        PortfolioResearchContext: {
+            /** Cash Weight */
+            cash_weight: string | null;
+            /** Content Hash */
+            content_hash?: string | null;
+            /** Currency */
+            currency: string;
+            /** Diagnostic Input Hash */
+            diagnostic_input_hash: string | null;
+            /** Diagnostic Run Id */
+            diagnostic_run_id: string | null;
+            /** Diagnostics */
+            diagnostics: components["schemas"]["ContextDiagnostic"][];
+            /** Diagnostics Truncated */
+            diagnostics_truncated: boolean;
+            /** Evidence Ref Id */
+            evidence_ref_id?: string | null;
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            /** Optimization Need */
+            optimization_need: ("BLOCKED" | "RESEARCH_REQUIRED" | "OPTIMIZATION_CANDIDATE" | "NO_ACTION") | null;
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+            /** Position Weight */
+            position_weight: string | null;
+            /**
+             * Research As Of
+             * Format: date-time
+             */
+            research_as_of: string;
+            /**
+             * Snapshot As Of
+             * Format: date-time
+             */
+            snapshot_as_of: string;
+            /** Snapshot Decision Ready */
+            snapshot_decision_ready: boolean;
+            /**
+             * Source
+             * @default fosun
+             * @constant
+             */
+            source: "fosun";
+            /** Valuation Reason */
+            valuation_reason: "INCOMPLETE_CURRENCY_VALUATION" | null;
+        };
         /** PortfolioSnapshotEnvelope */
         PortfolioSnapshotEnvelope: {
             data: components["schemas"]["PortfolioSnapshotResponse"];
@@ -2985,6 +3064,7 @@ export interface components {
             facts: components["schemas"]["ResearchInputFact"][];
             /** Filings */
             filings: components["schemas"]["ResearchInputFiling"][];
+            portfolio_context?: components["schemas"]["PortfolioResearchContext"] | null;
             /** Total Facts */
             total_facts: number;
             /** Truncated */

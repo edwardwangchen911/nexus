@@ -6,6 +6,7 @@ import { BriefPanel } from "../../../app/(protected)/briefs/[sessionDate]/page";
 import { ResearchPanel } from "../../../app/(protected)/research/[instrumentId]/page";
 import { DecisionCard } from "../../../app/components/decision-card";
 import { EvidenceDrawer } from "../../../app/components/evidence-drawer";
+import { ResearchInputs } from "../../../app/components/research-inputs";
 import type { DataStateKind } from "../../../app/components/data-state";
 import { briefData, evidence, researchAdmissionData, researchData } from "./fixtures";
 
@@ -16,6 +17,26 @@ const states: Array<[DataStateKind, string]> = [
 ];
 
 describe("research evidence docket", () => {
+  it("shows frozen portfolio context and missing market evidence without a model", () => {
+    render(<ResearchInputs asOf="2026-09-02T06:00:00Z" inputs={{
+      display_symbol: "TEST", total_facts: 0, truncated: false, filings: [], facts: [],
+      portfolio_context: {
+        instrument_id: "instrument", portfolio_snapshot_id: "snapshot",
+        snapshot_as_of: "2026-09-02T03:33:00Z", research_as_of: "2026-09-02T06:00:00Z",
+        source: "fosun", currency: "USD", position_weight: "0.4", cash_weight: "0.6",
+        valuation_reason: null, snapshot_decision_ready: true, execution_locked: true,
+        diagnostic_run_id: "diagnostic", optimization_need: "RESEARCH_REQUIRED",
+        diagnostic_input_hash: "d".repeat(64), diagnostics_truncated: false,
+        diagnostics: [{ code: "MARKET_EVIDENCE", severity: "warning", actionability: "research", unknown_reason: "MARKET_EVIDENCE_UNAVAILABLE" }],
+        evidence_ref_id: "evidence", content_hash: "a".repeat(64),
+      },
+    }} />);
+    expect(screen.getByRole("heading", { name: "此持仓的冻结组合背景" })).toBeVisible();
+    expect(screen.getByText("0.4（USD 资产内）")).toBeVisible();
+    expect(screen.getByText("MARKET_EVIDENCE_UNAVAILABLE")).toBeVisible();
+    expect(screen.getByText(/不是实时仓位/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /交易|下单/ })).not.toBeInTheDocument();
+  });
   it("shows frozen financial inputs without pretending an AI report exists", () => {
     render(<ResearchPanel state="empty" research={null} admission={researchAdmissionData({
       inputs: {
