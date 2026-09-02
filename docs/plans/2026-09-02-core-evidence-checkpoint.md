@@ -275,3 +275,18 @@ HHI 是证券分母。开始时仅凭不同分母把比较器判断为错误是�
 
 本轮只读查询真实数据库确认 DEXHKUS 记录 0 条；未外部取数、调用模型或生成新的
 真实方案。真实案例仍先缺 FX 估值及其他完整比较证据，整个决策闭环尚未验收通过。
+
+公开 FX 证据核验：本地缺 DEXHKUS 并不等于需要券商授权才能取得汇率。原设计已指定
+该公开序列用于情景归一化。ALFRED 官方页 https://alfred.stlouisfed.org/series?seid=DEXHKUS
+在本轮读取时显示 2026-08-28 值 7.8400，单位 HKD per USD，页面更新时间
+2026-08-31 15:16 CDT；FRED 官方图页同值同时间。公开 HTML 已一次下载并保存于主库
+outputs/acceptance/fx-public-evidence/，SHA256 为
+dbc0dd22800b5d24a1c5a24c885a968e7d7a372045af82bbcae3596601033329，旁存收到时间与 URL。
+状态 captured_not_admitted：尚未写入 MacroObservation，也未作为旧估值权威使用；
+不得把页面更新时间直接冒充所有观察的 ALFRED vintage。搜索摘要首条仍停在 8 月 14 日，
+须核验官方页面本身，不能把搜索缓存当最新数据。此次为无账户的公开资料读取，没有
+调用券商或付费模型。下一步复用现有宏观证据/日历记录接入，不能因此放松执行锁定。
+
+同轮进一步检查最新真实诊断：未来证据引用 0，已知流动性项 0，reduce_only 项 0，
+未知原因为 MARKET_EVIDENCE_UNAVAILABLE。故即便接入 FX，该诊断也尚不具备减仓构建
+输入；需要补齐真实行情证据，而不是强改其 actionability 或制造不调整结论。
