@@ -80,6 +80,36 @@ def _report(*items: DiagnosticItem) -> PortfolioDiagnosticReport:
     )
 
 
+def test_sale_cost_uses_traded_notional_and_real_cost_stays_unknown() -> None:
+    from nexus.optimizer.models import OptimizationPolicy, build_proposal_group
+    from nexus.optimizer.production import MinimumChangeInputs, _comparison_inputs
+
+    snapshot, report = _snapshot(), _report()
+    for scope in ("internal_paper", "real_read_only"):
+        group = build_proposal_group(
+            snapshot, report, (), OptimizationPolicy.v1(), portfolio_scope=scope,
+        )
+        minimum = group.proposals[1]
+        sale = minimum.positions[0].model_copy(
+            update={"target_weight": Decimal("0.3"), "action": "reduce"},
+        )
+        minimum = minimum.model_copy(update={
+            "positions": (sale, minimum.positions[1]), "cash_target_weight": Decimal("0.4"),
+        })
+        group = group.model_copy(
+            update={"proposals": (group.proposals[0], minimum, group.proposals[2])}
+        )
+        compared = _comparison_inputs(
+            group, report, MinimumChangeInputs((), Decimal(0), True), snapshot,
+            {"commission_bps": "0", "slippage_bps": "10"},
+        )[1]
+        if scope == "internal_paper":
+            # A sale of 10% of NAV at 10 bps costs 0.01% of NAV, not half that.
+            assert compared.cost == Decimal("0.0001")
+        else:
+            assert compared.cost is None and not compared.cost_complete
+
+
 def test_sector_or_missing_liquidity_proof_fails_closed() -> None:
     liquidity = _item(f"LIQUIDITY_DAYS_TO_EXIT:{_FIRST}", "1", "2", "info", "monitor")
     for items in (
