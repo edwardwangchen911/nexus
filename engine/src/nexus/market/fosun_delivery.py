@@ -1,10 +1,11 @@
 """Reclassify stored daily bars from their actual response, preserving old facts."""
 
-from datetime import UTC, datetime
+from datetime import datetime
 from hashlib import sha256
+from typing import cast
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.diagnostics.artifacts import ArtifactByteReader
@@ -30,6 +31,11 @@ from nexus.providers.market.fosun_gateway import FosunBarPage, _load_exact_json
 _SCHEMA = "fosun_daily_delivery_v1"
 
 
+async def _database_now(session: AsyncSession) -> datetime:
+    """Use the guard's clock for new processing facts; never alter source times."""
+    return cast(datetime, await session.scalar(select(func.clock_timestamp())))
+
+
 async def reclassify_daily_delivery(
     session: AsyncSession,
     *,
@@ -48,13 +54,13 @@ async def reclassify_daily_delivery(
     ) != ("fosun", "l1", "1Day", "raw", "unknown"):
         raise ValueError("FOSUN_UNKNOWN_DAILY_PARENT_REQUIRED")
     current = await load_frozen_fosun_market_authority(
-        session, check_time=datetime.now(UTC), operation="fosun_get_bars"
+        session, check_time=await _database_now(session), operation="fosun_get_bars"
     )
     if current is None or current.contract_hash != parent.provider_contract_hash:
         raise ValueError("FOSUN_CURRENT_READ_AUTHORITY_REQUIRED")
     await acquire_fosun_market_authority_locks(session, (current,))
     rechecked = await load_frozen_fosun_market_authority(
-        session, check_time=datetime.now(UTC), operation="fosun_get_bars"
+        session, check_time=await _database_now(session), operation="fosun_get_bars"
     )
     if rechecked != current:
         raise ValueError("FOSUN_READ_AUTHORITY_CHANGED")
@@ -161,12 +167,12 @@ async def reclassify_daily_delivery(
             expires_at=current.capability_expires_at,
             schema_version="1",
             payload={"operation": "fosun_get_bars", "market_scope": "US", "delivery_mode": mode},
-            created_at=datetime.now(UTC),
+            created_at=await _database_now(session),
         )
         session.add(capability)
         await session.flush()
         capability_id = capability.id
-    authorized_at = datetime.now(UTC)
+    authorized_at = await _database_now(session)
     new_id = new_uuid7()
     evidence = ResearchEvidenceRef(
         source="fosun",

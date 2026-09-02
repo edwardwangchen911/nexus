@@ -17,6 +17,7 @@ from nexus.persistence.models.data import PriceBarSetAuthority, PriceSeriesManif
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.session import session_factory
 from nexus.providers.base import MarketDataProvenance, PriceBar, ProviderPage
+from nexus.readiness import probe_migration
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 
@@ -149,8 +150,14 @@ async def test_cached_response_creates_new_version_and_preserves_original(
     try:
         async with factory() as session, session.begin():
             parent_id = await seed(session, store)
+        class AheadClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.now(tz) + timedelta(seconds=5)
+
+        monkeypatch.setattr("nexus.market.fosun_delivery.datetime", AheadClock)
         async with factory() as session, session.begin():
-            before = datetime.now(UTC)
+            before = await session.scalar(text("select clock_timestamp()"))
             new_id = await reclassify_daily_delivery(
                 session, manifest_id=parent_id, raw_reader=store.read, normalized_reader=store.read
             )
@@ -183,6 +190,7 @@ async def test_cached_response_creates_new_version_and_preserves_original(
                 == "0034_capability_versions"
             )
             assert await session.get(PriceSeriesManifest, new_id) is not None
+            assert await probe_migration(session) == "ready"
     finally:
         await factory.kw["bind"].dispose()
 
