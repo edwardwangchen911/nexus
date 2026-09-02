@@ -112,6 +112,29 @@ describe("optimization pages", () => {
     expect(screen.queryByRole("button", { name: /下单|交易/ })).not.toBeInTheDocument();
   });
 
+  it.each(["OPTIMIZATION_AUTHORITY_MISSING", null] as const)("explains unavailable admission %s without enabling creation", (reason) => {
+    const onCreate = vi.fn();
+    render(<OptimizePanel state="ready" overview={overviewData({ proposal_group: null,
+      proposal_admission: null, proposal_admission_reason: reason,
+    })} creating={false} notice={null} onCreate={onCreate} onRefresh={vi.fn()} />);
+    const region = screen.getByRole("region", { name: "三方案准入" });
+    expect(region).toHaveTextContent(reason ? "缺少有效的三方案准入记录" : "服务器未提供可用准入信息");
+    if (reason) {
+      expect(within(region).getByText(reason)).not.toBeVisible();
+      fireEvent.click(within(region).getByText("查看原因代码"));
+      expect(within(region).getByText(reason)).toBeVisible();
+    }
+    expect(screen.queryByRole("button", { name: "创建三方案比较" })).not.toBeInTheDocument();
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it("does not equate missing diagnosis with a recommendation to hold", () => {
+    render(<OptimizePanel state="empty" overview={null} creating={false} notice={null} onCreate={vi.fn()} onRefresh={vi.fn()} />);
+    expect(screen.getByText("诊断数据缺失或不可用，暂不能判断是否需要调整；请核查数据后刷新。")).toBeVisible();
+    expect(screen.queryByText("数据缺失或过期时保持现状。")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "创建三方案比较" })).not.toBeInTheDocument();
+  });
+
   it("reuses the proposal idempotency key while an admission result is unknown", async () => {
     const keys: Array<string | null> = [];
     let proposalCalls = 0;
