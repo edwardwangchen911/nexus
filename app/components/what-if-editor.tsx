@@ -1,5 +1,6 @@
 "use client";
 
+import { formatDisplayDecimal } from "../lib/display-decimal";
 import { Calculator, TriangleAlert } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { components } from "../lib/generated/schema";
@@ -128,7 +129,7 @@ function WhatIfResult({ result }: { result: WhatIfResponse }): React.ReactElemen
         <table className="what-if-result__table">
           <caption>后端返回的全部指标；未知项保留原因</caption>
           <thead><tr><th scope="col">分组</th><th scope="col">指标</th><th scope="col">结果</th></tr></thead>
-          <tbody>{rows.map(({ group: metricGroup, name, metric }) => <tr key={`${metricGroup}:${name}`}><td>{metricGroup}</td><th scope="row"><code>{name}</code></th><td className="numeric-data">{metric.status === "known" ? `${metric.value} ${metric.unit}` : `未知 · ${metric.reason}`}</td></tr>)}</tbody>
+          <tbody>{rows.map(({ group: metricGroup, name, metric }) => <tr key={`${metricGroup}:${name}`}><td>{metricGroup}</td><th scope="row"><code>{name}</code></th><td className="numeric-data">{metric.status === "known" ? `${formatDisplayDecimal(metric.value)} ${metric.unit}` : `未知 · ${metric.reason}`}</td></tr>)}</tbody>
         </table>
       </div>
       <p>结果仅存在于当前页面；离开页面即丢弃。</p>

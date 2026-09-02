@@ -3,6 +3,7 @@
 import { Ban, Clock3, ReceiptText } from "lucide-react";
 import { useId } from "react";
 
+import { formatDisplayDecimal } from "../lib/display-decimal";
 import type { components } from "../lib/generated/schema";
 
 export type PaperOrder = components["schemas"]["PaperOrderResponse"];
@@ -80,7 +81,7 @@ export function OrderTimeline({ order, allowCancel = true, onCancel }: { order: 
                     <td>USD {formatPaperDecimal(fill.price, 2)}</td>
                     <td>USD {formatPaperDecimal(fill.notional, 2)}</td>
                     <td>USD {formatPaperDecimal(fill.fee, 2)}</td>
-                    <td>{fill.slippage_bps} bps · USD {formatPaperDecimal(fill.slippage, 2)}</td>
+                    <td>{formatDisplayDecimal(fill.slippage_bps)} bps · USD {formatPaperDecimal(fill.slippage, 2)}</td>
                     <td>{fill.source} / {fill.feed}</td>
                     <td>{fill.delivery_mode}</td>
                     <td>{formatPaperTime(fill.source_as_of)}</td>
@@ -106,37 +107,10 @@ function ScrollableTable({ label, children }: { label: string; children: React.R
 }
 
 export function formatPaperDecimal(value: string, fixedDigits?: number): string {
-  const match = /^(-?)(0|[1-9]\d*)(?:\.(\d+))?$/.exec(value);
-  if (!match) return "无效数值";
-  const sign = match[1];
-  const integer = match[2];
-  const fraction = match[3] ?? "";
-  if (fixedDigits === undefined) {
-    const trimmed = fraction.replace(/0+$/, "");
-    return `${sign}${groupDigits(integer)}${trimmed ? `.${trimmed}` : ""}`;
-  }
-  const scale = fraction.length;
-  let units = BigInt(`${sign}${integer}${fraction}`);
-  if (scale > fixedDigits) {
-    const divisor = BigInt(10) ** BigInt(scale - fixedDigits);
-    const absolute = units < BigInt(0) ? -units : units;
-    const rounded = absolute / divisor + (absolute % divisor * BigInt(2) >= divisor ? BigInt(1) : BigInt(0));
-    units = units < BigInt(0) ? -rounded : rounded;
-  } else if (scale < fixedDigits) {
-    units *= BigInt(10) ** BigInt(fixedDigits - scale);
-  }
-  const negative = units < BigInt(0);
-  const digits = (negative ? -units : units).toString().padStart(fixedDigits + 1, "0");
-  const whole = fixedDigits === 0 ? digits : digits.slice(0, -fixedDigits);
-  const decimals = fixedDigits === 0 ? "" : `.${digits.slice(-fixedDigits)}`;
-  return `${negative ? "-" : ""}${groupDigits(whole)}${decimals}`;
+  return formatDisplayDecimal(value, { group: true, fixedDigits });
 }
 
 export function formatPaperTime(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.valueOf()) ? "无效时间" : date.toISOString().replace("T", " ").replace(/(?:\.\d+)?Z$/, " UTC");
-}
-
-function groupDigits(value: string): string {
-  return value.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import { formatDisplayDecimal } from "../lib/display-decimal";
 import { AlertTriangle, Check, FlaskConical, RefreshCw, X } from "lucide-react";
 import { useState } from "react";
 import type { components } from "../lib/generated/schema";
@@ -199,5 +200,5 @@ function MetricValue({ proposal, metric, unit }: { proposal: Proposal; metric: t
   if (metric === "hard_violations") return <>{dimensions.hard_violations} 项</>;
   const value = dimensions[metric];
   if (value.status === "unknown") return <span className="metric-unknown">未知 · {value.reason}</span>;
-  return <>{value.value} {unit === "ratio" ? "ratio" : unit}</>;
+  return <>{formatDisplayDecimal(value.value)} {unit === "ratio" ? "ratio" : unit}</>;
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import { formatDisplayDecimal } from "../lib/display-decimal";
 import { FileSearch, ShieldAlert } from "lucide-react";
 import { useRef, useState } from "react";
 
@@ -122,7 +123,7 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
                 {research.invalidation_conditions.map((condition, index) => (
                   <li key={`${condition.signal}:${index}`}>
                     <code>{condition.signal}</code>
-                    <span>{condition.operator} {String(condition.threshold)} · {condition.unit}</span>
+                    <span>{condition.operator} {typeof condition.threshold === "boolean" ? String(condition.threshold) : formatDisplayDecimal(condition.threshold)} · {condition.unit}</span>
                     <EvidenceButtons evidenceRefs={condition.evidence_refs} excerpt={`${condition.signal} ${condition.operator} ${String(condition.threshold)}`} onOpen={openEvidence} />
                   </li>
                 ))}

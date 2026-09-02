@@ -1,5 +1,6 @@
 "use client";
 
+import { formatDisplayDecimal } from "../lib/display-decimal";
 import { ChevronLeft, ChevronRight, RotateCcw } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { components } from "../lib/generated/schema";
@@ -119,7 +120,7 @@ export function PriceChart({ series }: { series: PriceChartSeries }): React.Reac
           <p className="eyebrow">行情序列 · {series.source.toUpperCase()} / {series.feed.toUpperCase()}</p>
           <h2>{series.symbol} 日线</h2>
           <p className="price-chart__summary">
-            复权口径：{marketAdjustmentLabel(series.adjustment)}；共 {series.bars.length} 个交易日；图形为辅助视图，下方表格提供同口径精确值。
+            复权口径：{marketAdjustmentLabel(series.adjustment)}；共 {series.bars.length} 个交易日；图形为辅助视图，下方表格使用同口径数据，最多显示 3 位小数。
           </p>
         </div>
         <div className="price-chart__controls" aria-label="K 线键盘控制">
@@ -154,7 +155,7 @@ export function PriceChart({ series }: { series: PriceChartSeries }): React.Reac
 
       {activeBar ? (
         <p id={activeDetailId} className="price-chart__active numeric-data" aria-label="当前 K 线详情">
-          {activeBar.session} · 开 {activeBar.open} · 高 {activeBar.high} · 低 {activeBar.low} · 收 {activeBar.close} · 量 {activeBar.volume}
+          {activeBar.session} · 开 {formatDisplayDecimal(activeBar.open)} · 高 {formatDisplayDecimal(activeBar.high)} · 低 {formatDisplayDecimal(activeBar.low)} · 收 {formatDisplayDecimal(activeBar.close)} · 量 {formatDisplayDecimal(activeBar.volume)}
         </p>
       ) : null}
 
@@ -169,7 +170,7 @@ export function PriceChart({ series }: { series: PriceChartSeries }): React.Reac
           <button className="button button--quiet" type="button" onClick={() => scrollTable(1)}>向右浏览表格</button>
         </div>
         <table className="market-table numeric-data" aria-label={`${series.symbol} OHLCV 数据`}>
-          <caption>{series.symbol} 与图形完全一致的 OHLCV 数据</caption>
+          <caption>{series.symbol} 与图形同源的 OHLCV 数据（最多 3 位小数）</caption>
           <thead>
             <tr>
               <th scope="col">交易日</th>
@@ -184,11 +185,11 @@ export function PriceChart({ series }: { series: PriceChartSeries }): React.Reac
             {series.bars.map((bar) => (
               <tr key={bar.session} data-active={bar.session === activeBar?.session ? "true" : "false"}>
                 <th scope="row">{bar.session}</th>
-                <td>{bar.open}</td>
-                <td>{bar.high}</td>
-                <td>{bar.low}</td>
-                <td>{bar.close}</td>
-                <td>{bar.volume}</td>
+                <td>{formatDisplayDecimal(bar.open)}</td>
+                <td>{formatDisplayDecimal(bar.high)}</td>
+                <td>{formatDisplayDecimal(bar.low)}</td>
+                <td>{formatDisplayDecimal(bar.close)}</td>
+                <td>{formatDisplayDecimal(bar.volume)}</td>
               </tr>
             ))}
           </tbody>

@@ -25,7 +25,7 @@ describe("portfolio optimization diagnostics", () => {
 
     const concentration = screen.getByRole("listitem", { name: /CONCENTRATION_TOP1/ });
     expect(concentration).toHaveTextContent("当前值");
-    expect(concentration).toHaveTextContent("0.20");
+    expect(concentration).toHaveTextContent("0.2 ratio");
     expect(concentration).toHaveTextContent("阈值");
     expect(concentration).toHaveTextContent("0.15");
     expect(concentration).toHaveTextContent("余量");

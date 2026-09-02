@@ -1,3 +1,4 @@
+import { formatDisplayDecimal } from "../lib/display-decimal";
 import { CircleDollarSign, LockKeyhole } from "lucide-react";
 import type { PortfolioItem, PortfolioSnapshot } from "../(protected)/portfolio/page";
 
@@ -85,8 +86,8 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
         {positions.length === 0 ? <p className="portfolio-summary__empty">该原币种没有持仓事实。</p> : (
           <div className="table-scroll" tabIndex={0} role="region" aria-label={`${currency} 持仓表，可横向滚动`}>
             <table className="portfolio-table portfolio-table--holdings">
-              <caption>{portfolio.name} · {currency} · 原币种</caption>
-              <thead><tr><th>标的</th><th>持仓市值</th><th>原币种内占比</th><th>现价</th><th>总量</th><th>Agent 研究</th><th>账户明细</th></tr></thead>
+              <caption>{portfolio.name} · {currency} · 占比以同币种现金与证券总市值为分母；数值最多显示 3 位小数。</caption>
+              <thead><tr><th>标的</th><th>持仓市值</th><th>资产占比（含现金）</th><th>现价</th><th>总量</th><th>Agent 研究</th><th>账户明细</th></tr></thead>
               <tbody>{valuation.positionValues.map(({ position, value }) => (
                 <tr key={position.instrument_id}>
                   <th scope="row">
@@ -375,9 +376,7 @@ function formatNullableDecimal(value: string | null, currency: string): string {
 }
 
 function formatDecimal(value: string): string {
-  const match = /^(-?)(\d+)(\.\d+)?$/.exec(value);
-  if (!match) return "无效数值";
-  return `${match[1]}${match[2].replace(/\B(?=(\d{3})+(?!\d))/g, ",")}${match[3] ?? ""}`;
+  return formatDisplayDecimal(value, { group: true });
 }
 
 function formatTime(value: string | null): string {

@@ -1,3 +1,4 @@
+import { formatDisplayDecimal } from "../lib/display-decimal";
 import type { components } from "../lib/generated/schema";
 
 type Inputs = components["schemas"]["ResearchInputsSummary"];
@@ -26,15 +27,15 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
       {inputs.portfolio_context.research_focus ? <section aria-label="本次组合研究问题">
         <h3>本次组合研究问题</h3>
         <p>{inputs.portfolio_context.research_focus.question}</p>
-        <p>依据同一资产快照的集中度诊断。证券占比 {inputs.portfolio_context.research_focus.observed_weight}，预警阈值 {inputs.portfolio_context.research_focus.reference_limit}；均为同币种证券内比例，不含现金。</p>
+        <p>依据同一资产快照的集中度诊断。证券占比 {formatDisplayDecimal(inputs.portfolio_context.research_focus.observed_weight)}，预警阈值 {formatDisplayDecimal(inputs.portfolio_context.research_focus.reference_limit)}；均为同币种证券内比例，不含现金。</p>
         <p>预警触发研究，不代表已决定减仓。政策版本：{inputs.portfolio_context.research_focus.policy_version}。</p>
       </section> : null}
       <h3>此持仓的冻结组合背景</h3>
       <p>复星已入库快照，不是实时仓位；仅提供研究背景，执行保持锁定。</p>
       <dl className="decision-card__authority">
         <div><dt>资产快照时间</dt><dd>{formatUtc(inputs.portfolio_context.snapshot_as_of)}</dd></div>
-        <div><dt>持仓权重（比例）</dt><dd>{inputs.portfolio_context.position_weight === null ? "估值资料不完整" : `${inputs.portfolio_context.position_weight}（${inputs.portfolio_context.currency} 资产内）`}</dd></div>
-        <div><dt>同币种现金占比（比例）</dt><dd>{inputs.portfolio_context.cash_weight ?? "估值资料不完整"}</dd></div>
+        <div><dt>资产占比（含现金，比例）</dt><dd>{inputs.portfolio_context.position_weight === null ? "估值资料不完整" : `${formatDisplayDecimal(inputs.portfolio_context.position_weight)}（${inputs.portfolio_context.currency} 资产内）`}</dd></div>
+        <div><dt>同币种现金占比（比例）</dt><dd>{inputs.portfolio_context.cash_weight === null ? "估值资料不完整" : formatDisplayDecimal(inputs.portfolio_context.cash_weight)}</dd></div>
         <div><dt>该快照对账</dt><dd>{inputs.portfolio_context.snapshot_decision_ready ? "已通过；不代表研究证据齐备" : "未通过；不可作为正式决策依据"}</dd></div>
         <div><dt>确定性诊断</dt><dd>{inputs.portfolio_context.optimization_need ?? "无已冻结的正式诊断"}</dd></div>
       </dl>
@@ -71,11 +72,11 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- The overflow table needs keyboard focus for horizontal scrolling. */}
       <div className="table-scroll" role="region" aria-label={`${filing.form} 财务事实，可横向滚动`} tabIndex={0}>
         <table className="market-table numeric-data">
-          <caption>财务原始值 · 保留原单位与期间，未年化、未合并不同期间</caption>
+          <caption>财务数值（最多 3 位小数）· 保留原单位与期间，未年化、未合并不同期间</caption>
           <thead><tr><th scope="col">指标</th><th scope="col">数值</th><th scope="col">单位</th><th scope="col">统计期间 / 时点</th><th scope="col">原始标签</th></tr></thead>
           <tbody>{inputs.facts.filter((fact) => fact.evidence_ref_id === filing.evidence_ref_id).map((fact) => <tr key={fact.id}>
             <th scope="row">{factLabels[fact.fact] ?? fact.fact}</th>
-            <td>{fact.value.replace(/(\.\d*?[1-9])0+$|\.0+$/, "$1")}</td><td>{fact.unit}</td>
+            <td>{formatDisplayDecimal(fact.value)}</td><td>{fact.unit}</td>
             <td>{fact.period_kind === "duration" ? `${fact.period_start} 至 ${fact.period_end}` : `${fact.period_end}（时点）`}</td>
             <td>{fact.raw_tag}</td>
           </tr>)}</tbody>

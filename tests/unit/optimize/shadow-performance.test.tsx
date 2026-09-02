@@ -23,13 +23,13 @@ describe("Shadow forward-performance evidence", () => {
 
     const navTable = screen.getByRole("table", { name: "三方案逐会话精确 NAV" });
     expect(within(navTable).getAllByRole("row")).toHaveLength(shadow.coverage.completed + 1);
-    expect(within(navTable).getByText(shadow.portfolios[2].nav[4].nav)).toBeVisible();
+    expect(within(navTable).getByText("101.5")).toBeVisible();
     expect(within(navTable).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual([
       "交易日", "保持现状", "最小调整", "策略目标",
     ]);
 
     expect(screen.getByText("NAV 指数点")).toBeVisible();
-    expect(screen.getAllByText("-0.021000000000").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("-0.021").length).toBeGreaterThan(0);
     expect(screen.getByText(/不会创建订单，也不需要交易审批/)).toBeVisible();
     expect(screen.getByText(/fosun · price_bars · delayed/)).toBeVisible();
     expect(screen.getAllByText(/filled at target-session open/)).toHaveLength(3);
