@@ -4,13 +4,16 @@ from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from nexus.diagnostics.models import PortfolioDiagnosticReport
 from nexus.optimizer.models import OptimizationProposal, ProposalVariant
+
+if TYPE_CHECKING:
+    from nexus.optimizer.scenario_risk import ScenarioEvidence
 
 MetricStatus = Literal["known", "unknown"]
 
@@ -164,6 +167,7 @@ def evaluate_dimensions(
     *,
     cost: Decimal | None,
     instrument_currencies: Mapping[UUID, str],
+    scenario_evidence: "ScenarioEvidence | None" = None,
 ) -> ComparisonDimensions:
     """Evaluate proposal weights in memory and retain unavailable risk inputs as unknown."""
     positive = tuple(
@@ -186,7 +190,7 @@ def evaluate_dimensions(
         {position.instrument_id: position.current_weight for position in proposal.positions},
     )
     currency_exposure = _currency_exposure(raw_by_id, instrument_currencies)
-    return ComparisonDimensions(
+    dimensions = ComparisonDimensions(
         hard_violations=sum(weight > Decimal("0.30") for weight in weights),
         top1=TypedMetric.known(top1),
         top3=TypedMetric.known(top3),
@@ -202,6 +206,15 @@ def evaluate_dimensions(
         if cost is None
         else TypedMetric.known(cost),
     )
+    if (
+        scenario_evidence is not None
+        and scenario_evidence.baseline_id == proposal.baseline_portfolio_snapshot_id
+        and scenario_evidence.valuation_time == report.snapshot_as_of
+    ):
+        from nexus.optimizer.scenario_risk import scenario_metrics
+
+        dimensions = dimensions.model_copy(update=scenario_metrics(raw_by_id, scenario_evidence))
+    return dimensions
 
 
 def _currency_exposure(

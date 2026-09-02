@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.domain.decimal import decimal_to_string
+from nexus.domain.evidence import EvidenceRef
 from nexus.optimizer.compare import ComparisonDimensions
 from nexus.optimizer.models import OptimizationProposalGroup
 from nexus.optimizer.selection_authority import load_selection_authority
@@ -71,6 +72,7 @@ class ProposalComparisonInput:
     eligibility_complete: bool = True
     evidence_complete: bool = True
     stale: bool = False
+    evidence_refs: tuple[EvidenceRef, ...] = ()
 
     def __post_init__(self) -> None:
         if self.variant not in {"hold_current", "minimum_change", "strategy_target"}:
@@ -96,6 +98,8 @@ class ProposalComparisonInput:
         )
 
     def metrics_payload(self, authority: ProposalPersistenceAuthority) -> dict[str, object]:
+        if any(ref.available_at > authority.valuation_time for ref in self.evidence_refs):
+            raise ValueError("comparison evidence is unavailable at valuation")
         dimensions = self.dimensions.model_dump(mode="json")
         for metric in dimensions.values():
             if isinstance(metric, dict) and metric.get("value") is not None:
@@ -118,6 +122,7 @@ class ProposalComparisonInput:
                 "optimizer_policy_id": str(authority.optimizer_policy_id),
                 "cost_policy_id": str(authority.cost_policy_id),
             },
+            "evidence_refs": [ref.model_dump(mode="json") for ref in self.evidence_refs],
         }
 
 
