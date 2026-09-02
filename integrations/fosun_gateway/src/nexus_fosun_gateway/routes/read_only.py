@@ -18,7 +18,13 @@ from pydantic import (
 
 from nexus_fosun_gateway.activation import RuntimeAuthorization
 from nexus_fosun_gateway.adapter.protocol import FosunTransport
-from nexus_fosun_gateway.domain import CapabilityItem, GatewayError, GatewayItem, GatewayPage
+from nexus_fosun_gateway.domain import (
+    CapabilityItem,
+    GatewayBarPage,
+    GatewayError,
+    GatewayItem,
+    GatewayPage,
+)
 from nexus_fosun_gateway.policy.operations import (
     GatewayOperation,
     authorize_runtime_operation,
@@ -309,8 +315,9 @@ async def fosun_get_quotes(request: Request) -> GatewayPage[GatewayItem]:
     return await _execute(request, "fosun_get_quotes", QuotesRequest)
 
 
-async def fosun_get_bars(request: Request) -> GatewayPage[GatewayItem]:
-    return await _execute(request, "fosun_get_bars", BarsRequest)
+async def fosun_get_bars(request: Request) -> GatewayBarPage:
+    page = await _execute(request, "fosun_get_bars", BarsRequest)
+    return GatewayBarPage.model_validate(page.model_dump())
 
 
 router.add_api_route("/fosun_capabilities", fosun_capabilities, methods=["POST"])

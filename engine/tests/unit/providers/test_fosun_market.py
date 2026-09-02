@@ -240,6 +240,31 @@ async def test_daily_provider_resolves_pit_code_and_preserves_exact_bar_values()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("request_adjustment", [None, "noward", "forward"])
+async def test_daily_adjustment_request_proof_is_preserved_without_delivery_promotion(
+    request_adjustment,
+) -> None:
+    gateway = _gateway()
+    payload = json.loads(gateway.bar_payload)
+    if request_adjustment is not None:
+        payload["sdk_requested_adjustment"] = request_adjustment
+    gateway.bar_payload = json.dumps(payload).encode()
+    provider = FosunMarketDataProvider(
+        gateway, symbol_resolver=_Resolver(), delivery_mode="unknown"
+    )
+    if request_adjustment == "forward":
+        with pytest.raises(MarketProviderPayloadError):
+            await provider.fetch_bars(_daily_request())
+        return
+    page = await provider.fetch_bars(_daily_request())
+    assert page.raw_payload == gateway.bar_payload
+    assert page.provenance.delivery_mode == "unknown"
+    assert page.items[0].quality_flags == (
+        () if request_adjustment == "noward" else ("FOSUN_ADJUSTMENT_REQUEST_UNVERIFIED",)
+    )
+
+
+@pytest.mark.asyncio
 async def test_daily_provider_preserves_gateway_session_date_at_utc_midnight() -> None:
     gateway = _gateway(bar_timestamp=datetime(2026, 8, 21, tzinfo=UTC))
     gateway.bar_payload = gateway.bar_payload.replace(b'"interval":"minute"', b'"interval":"day"')

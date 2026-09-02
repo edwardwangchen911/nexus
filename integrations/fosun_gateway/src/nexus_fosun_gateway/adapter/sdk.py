@@ -21,7 +21,13 @@ from nexus_fosun_gateway.adapter.normalization import (
     normalize_provider_response,
 )
 from nexus_fosun_gateway.adapter.refusal import NonRetryableTransportRefusal
-from nexus_fosun_gateway.domain import CapabilityItem, GatewayError, GatewayItem, GatewayPage
+from nexus_fosun_gateway.domain import (
+    CapabilityItem,
+    GatewayBarPage,
+    GatewayError,
+    GatewayItem,
+    GatewayPage,
+)
 from nexus_fosun_gateway.policy.operations import (
     MARKET_OPERATIONS,
     READ_ONLY_OPERATIONS,
@@ -308,22 +314,29 @@ class SdkFosunTransport:
                     codes=list(_required_strings(payload, "codes")),
                 )
             elif operation == "fosun_get_bars":
+                bar_arguments = _bar_sdk_arguments(payload)
                 raw = await self._invoke(
                     operation,
                     self._method("market", "kline"),
                     deadline=deadline,
-                    **_bar_sdk_arguments(payload),
+                    **bar_arguments,
                 )
             else:
                 raise AssertionError("unreachable operation")
         finally:
             lane.release()
-        return normalize_provider_response(
+        page = normalize_provider_response(
             operation,
             raw,
             received_at=datetime.now(UTC),
             context=payload,
         )
+        if operation == "fosun_get_bars":
+            return GatewayBarPage.model_validate({
+                **page.model_dump(),
+                "sdk_requested_adjustment": bar_arguments["right"],
+            })
+        return page
 
     def is_ready(self) -> bool:
         if self._poisoned.is_set() or self._closed.is_set():

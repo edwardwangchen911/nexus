@@ -166,6 +166,11 @@ class GatewayPage[ItemT: BaseModel](GatewayModel):
         return _as_utc(value)
 
 
+class GatewayBarPage(GatewayPage[GatewayItem]):
+    # Adapter-owned request fact, not a claim that the provider verified adjustment.
+    sdk_requested_adjustment: Literal["noward"] | None = None
+
+
 class GatewayError(Exception):
     """Sanitized error that is safe to serialize across the gateway boundary."""
 

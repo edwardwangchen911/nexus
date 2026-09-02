@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from nexus_fosun_gateway.adapter.normalization import normalize_provider_response
 from nexus_fosun_gateway.adapter.sdk import _bar_sdk_arguments
-from nexus_fosun_gateway.domain import GatewayError
+from nexus_fosun_gateway.domain import GatewayBarPage, GatewayError
 from sdk_adapter_helpers import client as client
 from sdk_adapter_portfolio_cases import (
     test_cash_flow_provider_page_must_match_requested_cursor_and_limit as test_cash_flow_provider_page_must_match_requested_cursor_and_limit,  # noqa: E501
@@ -44,6 +44,18 @@ def test_bar_request_explicitly_selects_unadjusted_prices(ktype: str, bounded: b
         assert "time" not in arguments
         assert arguments["start_time"] == (1785542400000 if bounded else None)
         assert arguments["end_time"] == (1787356800000 if bounded else None)
+
+
+def test_legacy_bar_page_cannot_claim_an_explicit_sdk_adjustment() -> None:
+    page = GatewayBarPage(
+        items=(),
+        source_request_id="synthetic-old-bars",
+        has_more=False,
+        next_cursor=None,
+        as_of=datetime(2026, 9, 2, tzinfo=UTC),
+        quality="PARTIAL",
+    )
+    assert page.sdk_requested_adjustment is None
 
 
 @pytest.mark.parametrize("operation", ("fosun_list_orders", "fosun_list_cash_flows"))

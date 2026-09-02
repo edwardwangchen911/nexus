@@ -99,3 +99,36 @@ def test_bars_do_not_allow_clients_to_override_adjustment(
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_bar_route_preserves_adapter_request_fact_and_legacy_unknown(gateway_client, monkeypatch):
+    from nexus_fosun_gateway.domain import GatewayBarPage
+
+    original = gateway_client.app.state.transport.execute
+
+    async def with_request_fact(operation, payload):
+        page = await original(operation, payload)
+        return GatewayBarPage.model_validate(
+            {
+                **page.model_dump(),
+                "sdk_requested_adjustment": "noward",
+            }
+        )
+
+    legacy = _post_signed(
+        gateway_client,
+        "fosun_get_bars",
+        {"code": "usAAPL", "ktype": "day"},
+        nonce="0198f7a0-2222-7777-8222-222222222316",
+    )
+    assert legacy.status_code == 200
+    assert legacy.json()["sdk_requested_adjustment"] is None
+    monkeypatch.setattr(gateway_client.app.state.transport, "execute", with_request_fact)
+    current = _post_signed(
+        gateway_client,
+        "fosun_get_bars",
+        {"code": "usAAPL", "ktype": "day"},
+        nonce="0198f7a0-2222-7777-8222-222222222317",
+    )
+    assert current.status_code == 200
+    assert current.json()["sdk_requested_adjustment"] == "noward"

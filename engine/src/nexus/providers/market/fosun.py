@@ -317,7 +317,9 @@ class FosunMarketDataProvider:
                 available_at=response.received_at,
                 received_at=response.received_at,
                 revision=revision,
-                quality_flags=(),
+                quality_flags=()
+                if page.sdk_requested_adjustment == "noward"
+                else ("FOSUN_ADJUSTMENT_REQUEST_UNVERIFIED",),
             )
             for item in page.items
             if request.interval != "1Min"

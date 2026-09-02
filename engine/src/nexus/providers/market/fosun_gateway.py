@@ -199,6 +199,7 @@ class FosunBarPage(BaseModel):
     next_cursor: None
     as_of: datetime
     quality: Literal["PARTIAL"]
+    sdk_requested_adjustment: Literal["noward"] | None = None
 
     @field_validator("source_request_id")
     @classmethod

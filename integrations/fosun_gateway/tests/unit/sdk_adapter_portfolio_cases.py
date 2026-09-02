@@ -84,6 +84,9 @@ async def test_sdk_adapter_uses_only_frozen_v1_2_read_method_surface(
     assert flows.items[0].external_cash_flow_id == "synthetic-cash-flow-001"
     assert str(quotes.items[0].price) == "123.45"
     assert str(bars.items[0].close) == "105"
+    assert bars.sdk_requested_adjustment == "noward"
+    assert bars.model_dump(mode="json")["sdk_requested_adjustment"] == "noward"
+    assert "sdk_requested_adjustment" not in quotes.model_dump(mode="json")
     assert client.account.list_accounts.calls == [((), {})]
     assert client.portfolio.get_assets_summary.calls == [
         ((), {"sub_account_id": "synthetic-account-001"})
