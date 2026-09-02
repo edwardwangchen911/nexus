@@ -15,6 +15,7 @@ from nexus.api.errors import ErrorCode, NexusError
 from nexus.api.routes.portfolios import _utc_now
 from nexus.api.schemas.integrations import NexusErrorEnvelope, SuccessMetaResponse
 from nexus.api.schemas.optimization import (
+    EconomicComparisonResponse,
     OptimizationJobData,
     OptimizationJobEnvelope,
     OptimizationLifecycleData,
@@ -57,7 +58,9 @@ from nexus.audit.service import append_audit_event
 from nexus.domain.decimal import decimal_to_string
 from nexus.optimizer.admission import admit_queued_job
 from nexus.optimizer.authority import load_admission_authority
+from nexus.optimizer.compare import ComparableProposal, ComparisonDimensions, compare_proposals
 from nexus.optimizer.construction import load_analysis_construction_inputs
+from nexus.optimizer.cost_policy import COST_POLICY_ID
 from nexus.optimizer.initial_draft import InitialDraftUnavailable, create_initial_draft
 from nexus.optimizer.lifecycle import reject_group_idempotently
 from nexus.optimizer.models import (
@@ -447,6 +450,7 @@ async def get_optimization_group(
             source_policy_id=group.source_policy_id,
             cost_policy_id=group.cost_policy_id,
             proposals=(proposal_data[0], proposal_data[1], proposal_data[2]),
+            economic_comparison=_economic_comparison(group, proposal_data),
             shadow_eligibility=ShadowEligibilityResponse(
                 eligible=not reasons, reasons=tuple(reasons)
             ),
@@ -873,6 +877,55 @@ def _validate_if_match(value: str, version: int) -> None:
             "If-Match must equal the request version.",
             status_code=422,
         )
+
+
+def _economic_comparison(
+    group: OptimizationProposalGroupRecord,
+    proposals: list[OptimizationProposalResponse],
+) -> EconomicComparisonResponse:
+    """Describe persisted comparison evidence without changing execution eligibility."""
+    expected_authority = ProposalComparisonAuthorityResponse(
+        diagnostic_report_id=group.diagnostic_report_id,
+        data_snapshot_id=group.data_snapshot_id,
+        source_policy_id=group.source_policy_id,
+        optimizer_policy_id=group.policy_id,
+        cost_policy_id=group.cost_policy_id,
+    )
+    # Historical real-account rows may mark the zero-cost methodology complete;
+    # it has never been evidence of actual broker charges.
+    cost_complete = group.cost_complete and not (
+        group.portfolio_scope == "real_read_only" and group.cost_policy_id == COST_POLICY_ID
+    )
+    inputs = []
+    for proposal in proposals:
+        comparison = proposal.comparison
+        metrics = comparison.metrics
+        inputs.append(ComparableProposal(
+            variant=proposal.variant,
+            dimensions=ComparisonDimensions.model_validate(metrics.dimensions.model_dump()),
+            requires_fx=group.requires_fx or comparison.requires_fx,
+            constraint_complete=metrics.constraint_complete,
+            eligibility_complete=metrics.eligibility_complete,
+            evidence_complete=(
+                group.baseline_ready and group.diagnostic_complete
+                and metrics.evidence_complete and metrics.ranking_eligible
+                and not metrics.unknown_metrics and not comparison.non_executable
+                and not proposal.analysis_only
+                and proposal.portfolio_scope == group.portfolio_scope
+                and metrics.authority == expected_authority
+                and (proposal.variant != "strategy_target" or proposal.strategy_evidence_complete)
+            ),
+            stale=group.authority_stale or metrics.stale,
+            partial=group.partial,
+            source_conflict=group.source_conflict,
+            cost_complete=cost_complete and comparison.cost_complete,
+        ))
+    assessment = compare_proposals(tuple(inputs))
+    return EconomicComparisonResponse(
+        status=assessment.status,
+        recommendation=assessment.recommendation,
+        reasons=assessment.reasons,
+    )
 
 
 def _shadow_eligibility_reasons(

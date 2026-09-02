@@ -5,10 +5,13 @@ from uuid import UUID
 
 import pytest
 from nexus.agents.proposal_context import FrozenProposalComparison
+from nexus.optimizer.cost_policy import COST_POLICY_ID
 
 
-@pytest.mark.parametrize("partial", [False, True])
-def test_frozen_comparison_reports_tradeoff_or_missing_authority(partial: bool) -> None:
+@pytest.mark.parametrize("partial,legacy_cost", [(False, False), (True, False), (False, True)])
+def test_frozen_comparison_reports_tradeoff_or_missing_authority(
+    partial: bool, legacy_cost: bool
+) -> None:
     from nexus.agents.proposal_context import assess_frozen_comparison
 
     variants = []
@@ -69,11 +72,15 @@ def test_frozen_comparison_reports_tradeoff_or_missing_authority(partial: bool) 
             "variants": variants,
         }
     )
+    if legacy_cost:
+        frozen = frozen.model_copy(update={"cost_policy_id": COST_POLICY_ID})
     before = frozen.model_dump_json()
     result = assess_frozen_comparison(frozen)
     assert result["recommendation"] is None
-    assert result["status"] == ("incomparable" if partial else "policy_required")
-    assert result["reasons"] == [
+    assert result["status"] == ("incomparable" if partial or legacy_cost else "policy_required")
+    assert result["reasons"] == ([
+        "COST_EVIDENCE_INCOMPLETE", "COMPARISON_EVIDENCE_INCOMPLETE"
+    ] if legacy_cost else [
         "COMPARISON_EVIDENCE_INCOMPLETE" if partial else "ECONOMIC_COMPARISON_POLICY_MISSING"
-    ]
+    ])
     assert frozen.model_dump_json() == before
