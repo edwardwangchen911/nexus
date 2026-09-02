@@ -5280,6 +5280,119 @@
         "title": "PortfolioSnapshotResponse",
         "type": "object"
       },
+      "PositionResearchResponse": {
+        "additionalProperties": false,
+        "description": "Current read-only research index, not a change to the broker snapshot.",
+        "properties": {
+          "data_snapshot_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Snapshot Id"
+          },
+          "decision_time": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Time"
+          },
+          "newer_inputs_available": {
+            "default": false,
+            "title": "Newer Inputs Available",
+            "type": "boolean"
+          },
+          "quality_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "complete",
+                  "partial",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality Status"
+          },
+          "read_at": {
+            "format": "date-time",
+            "title": "Read At",
+            "type": "string"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PositionResearchStatus"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "maxLength": 400,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "uncertainties": {
+            "default": [],
+            "items": {
+              "maxLength": 400,
+              "type": "string"
+            },
+            "maxItems": 3,
+            "title": "Uncertainties",
+            "type": "array"
+          }
+        },
+        "required": [
+          "read_at",
+          "status"
+        ],
+        "title": "PositionResearchResponse",
+        "type": "object"
+      },
+      "PositionResearchStatus": {
+        "enum": [
+          "not_started",
+          "prepared",
+          "running",
+          "validated",
+          "audited",
+          "synthesized",
+          "completed",
+          "failed",
+          "abstained"
+        ],
+        "type": "string"
+      },
       "PositionResponse": {
         "additionalProperties": false,
         "properties": {
@@ -5370,6 +5483,16 @@
             "const": true,
             "title": "Read Only",
             "type": "boolean"
+          },
+          "research": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PositionResearchResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "symbol": {
             "anyOf": [

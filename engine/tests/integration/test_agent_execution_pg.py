@@ -80,6 +80,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     from nexus.agents import codex_sdk
     from nexus.agents.responses_budget import UsageSnapshot
     from nexus.ops.openai_local import prepare_database
+    from nexus.portfolio.research import read_position_research
 
     settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
     factory = session_factory(settings)
@@ -108,6 +109,11 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             daily_limit_usd=Decimal("3"),
             now=datetime(2026, 9, 2, tzinfo=UTC),
         )
+    async with factory() as session:
+        index = await read_position_research(session, (_INSTRUMENT_ID,), read_at=datetime.now(UTC))
+        assert index[_INSTRUMENT_ID].status == "prepared"
+        assert index[_INSTRUMENT_ID].quality_status is None
+        assert index[_INSTRUMENT_ID].run_id == admission.run_id
     batch = {
         "roles": [
             {
@@ -140,6 +146,18 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
         assert run.status == ("failed" if model_fails else "completed")
         job = await session.scalar(select(Job).where(Job.payload["run_id"].astext == str(run.id)))
         assert job.max_attempts == 1
+        index = await read_position_research(session, (_INSTRUMENT_ID,), read_at=datetime.now(UTC))
+        research = index[_INSTRUMENT_ID]
+        assert research.status == run.status
+        assert research.data_snapshot_id == _SNAPSHOT_ID
+        assert research.decision_time == _NOW
+        assert research.newer_inputs_available is False
+        assert research.quality_status == (None if model_fails else "partial")
+        if model_fails:
+            assert research.summary is None and not research.uncertainties
+        else:
+            assert "Price authority is unavailable." in research.uncertainties
+            assert research.summary
         if not model_fails:
             assert (run.input_tokens, run.output_tokens) == (300, 80)
             assert (
@@ -166,6 +184,25 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
         assert data["input_tokens"] == 300 and data["output_tokens"] == 80
         assert data["intent"]["stance"] == "watch"
         assert data["intent"]["exposure_action"] == "none"
+        from nexus.agents.snapshots import prepare_research_snapshot
+
+        async with factory() as session, session.begin():
+            newer = await prepare_research_snapshot(
+                session, _INSTRUMENT_ID, as_of=_NOW + timedelta(hours=1)
+            )
+            assert newer is not None
+        async with factory() as session:
+            index = await read_position_research(
+                session, (_INSTRUMENT_ID,), read_at=datetime.now(UTC)
+            )
+            assert index[_INSTRUMENT_ID].newer_inputs_available is True
+            assert index[_INSTRUMENT_ID].run_id == admission.run_id
+            assert index[_INSTRUMENT_ID].data_snapshot_id == _SNAPSHOT_ID
+            past = await read_position_research(
+                session, (_INSTRUMENT_ID,), read_at=_NOW - timedelta(seconds=1)
+            )
+            assert past[_INSTRUMENT_ID].status == "not_started"
+            assert past[_INSTRUMENT_ID].run_id is None
 
 
 @pytest.mark.asyncio

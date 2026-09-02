@@ -60,6 +60,11 @@ uv run --package nexus-engine nexus-openai-local run-once --backend codex_sdk
 新增依赖仅位于 Python 引擎，无新服务、数据库迁移或自动调度。
 停用此入口即可停止调用；如需回到下面的 API 方式，显式使用 `--backend responses`，保留审计历史。
 
+组合页的「Agent 研究」列直接读取已有冻结资料和研究结果，按持仓展示状态、报告截止时间、
+摘要及证据缺口；打开报告或刷新页面不会登记任务、调用模型或访问券商。
+研究状态有独立读取时间，不改写账户快照，也不改变 `decision_readiness` 或交易锁。
+此接线仅新增可选响应字段，无依赖或数据库迁移；回滚应用代码即可撤回展示，已有研究不受影响。
+
 #### 可选：独立 API Key 的 Responses 接入
 
 复用已有 Responses/委员会和预算逻辑，不新建 Agent 框架。默认固定

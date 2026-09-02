@@ -37,6 +37,7 @@ from nexus.persistence.models.portfolio import (
     PositionSnapshot,
 )
 from nexus.portfolio.cursor import PortfolioCursorCodec, PortfolioCursorState
+from nexus.portfolio.research import read_position_research
 
 _MAX_CASH_BUCKETS = 32
 _MAX_CURRENCIES = 32
@@ -343,6 +344,11 @@ class PortfolioService:
         instrument_ids = {row.instrument_id for row in position_rows}
         instrument_ids.update(row.instrument_id for row in order_rows)
         symbols = await self._symbols(tuple(instrument_ids), snapshot.as_of)
+        research = await read_position_research(
+            self._session,
+            tuple(row.instrument_id for row in position_rows),
+            read_at=self._request_time,
+        )
         display_readiness, decision_readiness = derive_snapshot_readiness(
             snapshot.status,
             has_display_facts=bool(cash_rows or position_rows),
@@ -382,6 +388,7 @@ class PortfolioService:
                     current_price=_optional_decimal(row.current_price),
                     provider_as_of=row.provider_as_of,
                     read_only=True,
+                    research=research.get(row.instrument_id),
                 )
                 for row in position_rows
             ),

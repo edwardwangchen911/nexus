@@ -352,6 +352,9 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .portfolio-position-details dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
 .portfolio-position-details dt { color: var(--color-text-muted); font-size: 0.75rem; }
 .portfolio-position-details dd { margin: 0; }
+.portfolio-position-research { display: grid; gap: var(--space-2); inline-size: 15rem; white-space: normal; overflow-wrap: anywhere; text-align: start; font-family: var(--font-geist-sans), system-ui, sans-serif; }
+.portfolio-position-research small { color: var(--color-text-muted); }
+.portfolio-position-research p { margin: var(--space-2) 0; line-height: 1.5; }
 .portfolio-valuation__detail > .portfolio-allocation { margin-block-end: var(--space-3); }
 .portfolio-summary__empty { color: var(--color-text-muted); }
 .portfolio-table { inline-size: 100%; min-inline-size: 60rem; border-collapse: collapse; font-family: var(--component-numeric-font-family); font-variant-numeric: tabular-nums; }

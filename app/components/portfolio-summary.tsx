@@ -77,11 +77,16 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
 
       <div className="portfolio-summary__section">
         <h3>持仓</h3>
+        {positions.some((position) => position.research) ? <p className="portfolio-evidence-note">
+          Agent 已完成 {positions.filter((position) => position.symbol !== "00656.HK" && position.research?.status === "completed" && ["complete", "partial"].includes(position.research.quality_status ?? "")).length} / {positions.length} 个持仓研究。
+          研究按各自冻结时点展示，不等于当前组合诊断通过；交易保持锁定。打开报告不会调用模型。
+          状态读取：{formatTime(positions.find((position) => position.research)?.research?.read_at ?? null)}。
+        </p> : null}
         {positions.length === 0 ? <p className="portfolio-summary__empty">该原币种没有持仓事实。</p> : (
           <div className="table-scroll" tabIndex={0} role="region" aria-label={`${currency} 持仓表，可横向滚动`}>
             <table className="portfolio-table portfolio-table--holdings">
               <caption>{portfolio.name} · {currency} · 原币种</caption>
-              <thead><tr><th>标的</th><th>持仓市值</th><th>原币种内占比</th><th>现价</th><th>总量</th><th>账户明细</th></tr></thead>
+              <thead><tr><th>标的</th><th>持仓市值</th><th>原币种内占比</th><th>现价</th><th>总量</th><th>Agent 研究</th><th>账户明细</th></tr></thead>
               <tbody>{valuation.positionValues.map(({ position, value }) => (
                 <tr key={position.instrument_id}>
                   <th scope="row">
@@ -101,6 +106,7 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
                   <td>{value !== null && valuation.totalValue !== null ? formatPercent(value, valuation.totalValue) : "无法计算"}</td>
                   <td>{formatNullableDecimal(position.current_price, currency)}</td>
                   <td>{formatDecimal(position.quantity)}</td>
+                  <td><PositionResearch position={position} /></td>
                   <td><details className="portfolio-disclosure portfolio-position-details">
                     <summary>成本与数量 · {position.read_only ? "只读" : "权限未知"}</summary>
                     <dl>
@@ -146,6 +152,35 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
       ) : null}
     </section>
   );
+}
+
+function PositionResearch({ position }: { position: Position }): React.ReactElement {
+  const research = position.research;
+  if (position.symbol === "00656.HK") return <span>只读展示，不生成基本面判断</span>;
+  if (!research) return <span>研究状态未读取</span>;
+  const labels = {
+    not_started: research.data_snapshot_id ? "研究资料已冻结 · 待研究" : "研究证据待补齐",
+    prepared: "研究已登记 · 待执行", running: "研究执行中", validated: "研究核验中",
+    audited: "证据审计中", synthesized: "研究汇总中", completed: research.quality_status === "complete"
+      ? "研究已完成" : research.quality_status === "partial" ? "研究已完成 · 证据不完整" : "结果待核验",
+    failed: "研究失败 · 保持观望", abstained: "证据不足 · 未形成研究",
+  } as const;
+  const href = research.data_snapshot_id && research.decision_time
+    ? `/research/${encodeURIComponent(position.instrument_id)}?as_of=${encodeURIComponent(research.decision_time)}` : null;
+  const linkLabel = research.run_id ? research.status === "completed" ? "研究报告" : "研究状态" : "研究资料";
+  return <div className="portfolio-position-research">
+    <span>{labels[research.status]}</span>
+    {research.newer_inputs_available ? <small>已有更新的冻结资料，当前报告未使用</small> : null}
+    {href ? <a className="portfolio-market-link" href={href} aria-label={`查看 ${position.symbol ?? "该持仓"} ${linkLabel}`}>
+      查看{linkLabel}
+    </a> : <small>尚无可引用的研究快照</small>}
+    {research.run_id ? <small>研究截止 {formatTime(research.decision_time ?? null)}</small> : null}
+    {research.summary || research.uncertainties.length ? <details className="portfolio-disclosure">
+      <summary>摘要与证据缺口</summary>
+      {research.summary ? <p>{research.summary}</p> : null}
+      {research.uncertainties.map((item, index) => <p key={index}>{item === "Price authority is unavailable." ? "缺少合格价格证据，不能生成仓位动作。" : item}</p>)}
+    </details> : null}
+  </div>;
 }
 
 export function PortfolioValuationSummary({

@@ -112,6 +112,35 @@ class CashBucketResponse(_StrictSchema):
     provider_as_of: AwareDatetime | None
 
 
+type PositionResearchStatus = Literal[
+    "not_started",
+    "prepared",
+    "running",
+    "validated",
+    "audited",
+    "synthesized",
+    "completed",
+    "failed",
+    "abstained",
+]
+
+
+class PositionResearchResponse(_StrictSchema):
+    """Current read-only research index, not a change to the broker snapshot."""
+
+    read_at: AwareDatetime
+    status: PositionResearchStatus
+    run_id: UUID | None = None
+    data_snapshot_id: UUID | None = None
+    decision_time: AwareDatetime | None = None
+    quality_status: Literal["complete", "partial", "failed"] | None = None
+    summary: str | None = Field(default=None, max_length=400)
+    uncertainties: tuple[Annotated[str, StringConstraints(max_length=400)], ...] = Field(
+        default=(), max_length=3
+    )
+    newer_inputs_available: bool = False
+
+
 class PositionResponse(_StrictSchema):
     instrument_id: UUID
     symbol: str | None = Field(min_length=1, max_length=32)
@@ -125,6 +154,7 @@ class PositionResponse(_StrictSchema):
     current_price: DecimalString | None
     provider_as_of: AwareDatetime | None
     read_only: Literal[True]
+    research: PositionResearchResponse | None = None
 
 
 class OpenOrderResponse(_StrictSchema):

@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { engineFetch, sanitizeEngineResponse } from "../../../app/lib/engine/client";
+import { snapshot as portfolioSnapshot } from "../portfolio/fixtures";
 
 const actor = { userId: "nexus-test-user", requestId: "0198f7a0-1111-7777-8111-111111111114" };
 const portfolioId = "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e701";
@@ -20,6 +21,23 @@ afterEach(() => {
 });
 
 describe("portfolio engine client boundary", () => {
+  it("accepts bounded research metadata but rejects private or oversized nested fields", async () => {
+    const research = { read_at: "2026-09-02T08:00:00Z", status: "completed", run_id: runId,
+      data_snapshot_id: snapshotId, decision_time: "2026-09-02T04:00:00Z", quality_status: "partial",
+      summary: "冻结研究保持观望。", uncertainties: ["缺少合格价格证据。"], newer_inputs_available: false };
+    const payload = { ...snapshotEnvelope(), data: { ...portfolioSnapshot,
+      positions: [{ ...portfolioSnapshot.positions[0], research }] } };
+    const path = `/internal/v1/portfolios/${portfolioId}/snapshots/latest`;
+    const sanitize = (value: unknown) => sanitizeEngineResponse(jsonResponse(value), undefined, path);
+    expect((await sanitize(payload)).status).toBe(200);
+    for (const bad of [{ account_id: "private" }, { summary: "x".repeat(401) },
+      { uncertainties: ["x".repeat(401)] }, { uncertainties: ["a", "b", "c", "d"] }, { status: "trade_ready" }]) {
+      const invalid = structuredClone(payload);
+      Object.assign(invalid.data.positions[0].research, bad);
+      expect((await sanitize(invalid)).status).toBe(500);
+    }
+  });
+
   it("signs only a canonical bounded portfolio query", async () => {
     setEngineEnvironment();
     let sent = "";

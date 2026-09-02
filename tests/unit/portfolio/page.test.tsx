@@ -23,6 +23,47 @@ afterEach(() => {
 });
 
 describe("portfolio vertical slice", () => {
+  it("connects a partial frozen Agent report without calling a model or promoting readiness", () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const position = { ...snapshot.positions[0], symbol: "TEST", research: {
+      read_at: "2026-09-02T08:00:00Z", status: "completed" as const,
+      run_id: "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e710", data_snapshot_id: snapshot.portfolio_snapshot_id,
+      decision_time: "2026-09-02T04:00:00Z", quality_status: "partial" as const,
+      summary: "冻结财报收入有变化。", uncertainties: ["Price authority is unavailable."],
+      newer_inputs_available: true,
+    } };
+    render(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot, positions: [position] }} currency="HKD" />);
+    expect(screen.getByText(/Agent 已完成 1 \/ 1/)).toHaveTextContent("不等于当前组合诊断通过；交易保持锁定");
+    expect(screen.getByText("研究已完成 · 证据不完整")).toBeVisible();
+    expect(screen.getByText("已有更新的冻结资料，当前报告未使用")).toBeVisible();
+    expect(screen.getByRole("link", { name: "查看 TEST 研究报告" })).toHaveAttribute("href", `/research/${position.instrument_id}?as_of=2026-09-02T04%3A00%3A00Z`);
+    expect(screen.getByText("研究截止 2026-09-02 04:00:00 UTC")).toBeVisible();
+    fireEvent.click(screen.getByText("摘要与证据缺口"));
+    expect(screen.getByText("冻结财报收入有变化。")).toBeVisible();
+    expect(screen.getByText("缺少合格价格证据，不能生成仓位动作。")).toBeVisible();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["not_started", null, "研究证据待补齐"],
+    ["not_started", snapshot.portfolio_snapshot_id, "研究资料已冻结 · 待研究"],
+    ["prepared", snapshot.portfolio_snapshot_id, "研究已登记 · 待执行"],
+    ["failed", snapshot.portfolio_snapshot_id, "研究失败 · 保持观望"],
+    ["completed", snapshot.portfolio_snapshot_id, "结果待核验"],
+  ] as const)("does not turn %s inputs into a completed report", (status, data_snapshot_id, label) => {
+    const position = { ...snapshot.positions[0], symbol: "TEST", research: {
+      read_at: "2026-09-02T08:00:00Z", status, data_snapshot_id,
+      decision_time: data_snapshot_id ? "2026-09-02T04:00:00Z" : null,
+      uncertainties: [], newer_inputs_available: false,
+    } };
+    render(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot, positions: [position] }} currency="HKD" />);
+    expect(screen.getByText(label)).toBeVisible();
+    expect(screen.getByText(/Agent 已完成 0 \/ 1/)).toBeVisible();
+    if (data_snapshot_id) expect(screen.getByRole("link", { name: "查看 TEST 研究资料" })).toBeVisible();
+    else expect(screen.queryByRole("link", { name: /研究资料/ })).not.toBeInTheDocument();
+  });
+
   it("labels observed snapshots without inventing provider update timestamps", () => {
     render(<PortfolioPanel state="ready" portfolios={[portfolio]}
       snapshot={{ ...snapshot, time_basis: "gateway_observed" }}
@@ -100,7 +141,7 @@ describe("portfolio vertical slice", () => {
   it("prioritizes value and allocation while frozen quantities remain visible before opening details", () => {
     render(<PortfolioSummary portfolio={portfolio} snapshot={snapshot} currency="HKD" showValuation={false} />);
     const holdings = screen.getByRole("region", { name: "HKD 持仓表，可横向滚动" });
-    expect(within(holdings).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["标的", "持仓市值", "原币种内占比", "现价", "总量", "账户明细"]);
+    expect(within(holdings).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["标的", "持仓市值", "原币种内占比", "现价", "总量", "Agent 研究", "账户明细"]);
     expect(screen.getByText("70.91%")).toBeVisible();
     expect(screen.getByText("冻结 200")).toBeVisible();
     expect(screen.getByText("平均成本")).not.toBeVisible();

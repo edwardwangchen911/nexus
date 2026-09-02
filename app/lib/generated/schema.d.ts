@@ -2719,6 +2719,40 @@ export interface components {
             /** @default unknown */
             time_basis: components["schemas"]["SnapshotTimeBasis"];
         };
+        /**
+         * PositionResearchResponse
+         * @description Current read-only research index, not a change to the broker snapshot.
+         */
+        PositionResearchResponse: {
+            /** Data Snapshot Id */
+            data_snapshot_id?: string | null;
+            /** Decision Time */
+            decision_time?: string | null;
+            /**
+             * Newer Inputs Available
+             * @default false
+             */
+            newer_inputs_available: boolean;
+            /** Quality Status */
+            quality_status?: ("complete" | "partial" | "failed") | null;
+            /**
+             * Read At
+             * Format: date-time
+             */
+            read_at: string;
+            /** Run Id */
+            run_id?: string | null;
+            status: components["schemas"]["PositionResearchStatus"];
+            /** Summary */
+            summary?: string | null;
+            /**
+             * Uncertainties
+             * @default []
+             */
+            uncertainties: string[];
+        };
+        /** @enum {string} */
+        PositionResearchStatus: "not_started" | "prepared" | "running" | "validated" | "audited" | "synthesized" | "completed" | "failed" | "abstained";
         /** PositionResponse */
         PositionResponse: {
             /** Available Quantity */
@@ -2748,6 +2782,7 @@ export interface components {
              * @constant
              */
             read_only: true;
+            research?: components["schemas"]["PositionResearchResponse"] | null;
             /** Symbol */
             symbol: string | null;
         };
