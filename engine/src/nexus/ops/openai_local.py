@@ -11,6 +11,8 @@ import sys
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlencode
+from uuid import UUID
 
 import httpx
 from dotenv import dotenv_values
@@ -41,16 +43,18 @@ _CONFIG: dict[str, str | int] = {
 _KEY_PATH = Path(".secrets/nexus-openai-local/api-key")
 
 
-def local_settings(root: Path) -> EngineSettings:
+def local_settings(root: Path, *, load_model_key: bool = True) -> EngineSettings:
     """Load only the local app configuration and OpenAI key, never broker credentials."""
     environment = {
         key: value for key, value in dotenv_values(root / "infra/.env.local").items() if value
     }
     environment.update({key: value for key, value in os.environ.items() if value})
     _localize_compose_endpoints(environment)
+    if not load_model_key:
+        environment.pop("OPENAI_API_KEY", None)
     key = environment.get("OPENAI_API_KEY", "").strip()
     key_path = root / _KEY_PATH
-    if not key and (key_path.exists() or key_path.is_symlink()):
+    if load_model_key and not key and (key_path.exists() or key_path.is_symlink()):
         descriptor = os.open(key_path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(descriptor) as stream:
             info = os.fstat(stream.fileno())
@@ -69,7 +73,11 @@ def local_settings(root: Path) -> EngineSettings:
     )
     if key:
         environment["OPENAI_API_KEY"] = key
-    return EngineSettings.model_validate(environment)
+    # BaseSettings also reads the process environment; an explicit None prevents
+    # it from restoring a key that this offline-only command intentionally ignores.
+    return EngineSettings.model_validate(
+        {**environment, **({"OPENAI_API_KEY": None} if not load_model_key else {})}
+    )
 
 
 def status(settings: EngineSettings) -> dict[str, object]:
@@ -180,6 +188,36 @@ async def verify_connection(
     }
 
 
+async def prepare_local_research(
+    settings: EngineSettings, instrument_id: UUID, *, as_of: datetime
+) -> dict[str, object]:
+    """Freeze already-ingested research inputs; do not enqueue work or contact providers."""
+    from nexus.agents.snapshots import prepare_research_snapshot
+
+    if settings.database_url is None or make_url(settings.database_url).host not in {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+    }:
+        raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
+    async with session_factory(settings)() as session, session.begin():
+        snapshot = await prepare_research_snapshot(session, instrument_id, as_of=as_of)
+        return {
+            "status": "RESEARCH_INPUTS_PREPARED" if snapshot else "RESEARCH_EVIDENCE_UNAVAILABLE",
+            "data_snapshot_id": str(snapshot.id) if snapshot else None,
+            "research_path": f"/research/{instrument_id}?"
+            + urlencode(
+                {
+                    "as_of": as_of.isoformat().replace("+00:00", "Z"),
+                }
+            ),
+            "model_requests": 0,
+            "provider_requests": 0,
+            "research_completed": False,
+            "execution_locked": True,
+        }
+
+
 def _save_key(root: Path) -> None:
     if not sys.stdin.isatty():
         raise ValueError("OPENAI_KEY_REQUIRES_LOCAL_TERMINAL")
@@ -197,7 +235,11 @@ def _save_key(root: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("setup", "status", "verify", "run-once"))
+    parser.add_argument(
+        "action", choices=("setup", "status", "verify", "prepare-research", "run-once")
+    )
+    parser.add_argument("--instrument-id", type=UUID)
+    parser.add_argument("--as-of", type=datetime.fromisoformat)
     parser.add_argument(
         "--skip-key", action="store_true", help="Prepare local DB only; no key prompt or network"
     )
@@ -206,7 +248,7 @@ def main() -> int:
     try:
         if not (root / "engine/pyproject.toml").is_file():
             raise ValueError("OPENAI_REPOSITORY_ROOT_REQUIRED")
-        settings = local_settings(root)
+        settings = local_settings(root, load_model_key=args.action != "prepare-research")
         if args.action == "setup":
             asyncio.run(prepare_database(settings))
             if not args.skip_key and settings.openai_api_key is None:
@@ -217,6 +259,14 @@ def main() -> int:
                 result.update(asyncio.run(verify_connection(settings)))
         elif args.action == "verify":
             result = asyncio.run(verify_connection(settings))
+        elif args.action == "prepare-research":
+            if args.instrument_id is None:
+                raise ValueError("OPENAI_RESEARCH_INSTRUMENT_REQUIRED")
+            result = asyncio.run(
+                prepare_local_research(
+                    settings, args.instrument_id, as_of=args.as_of or datetime.now(UTC)
+                )
+            )
         elif args.action == "run-once":
             if settings.openai_api_key is None:
                 raise ValueError("OPENAI_API_KEY_MISSING")

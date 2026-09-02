@@ -18,6 +18,19 @@ def test_local_setup_reports_missing_key_without_enabling_responses(
     assert status(settings)["ready_for_model_requests"] is False
 
 
+def test_offline_preparation_ignores_model_credentials(tmp_path: Path, monkeypatch) -> None:
+    from nexus.ops.openai_local import local_settings
+
+    monkeypatch.setenv("OPENAI_API_KEY", "invalid whitespace key")
+    key = tmp_path / ".secrets/nexus-openai-local/api-key"
+    key.parent.mkdir(parents=True)
+    key.write_text("invalid whitespace key")
+    key.chmod(0o644)
+    settings = local_settings(tmp_path, load_model_key=False)
+    assert settings.openai_api_key is None
+    assert settings.agent_runtime_mode == "fixture"
+
+
 def test_private_key_file_is_loaded_but_never_returned(tmp_path: Path, monkeypatch) -> None:
     from nexus.ops.openai_local import local_settings, status
 
@@ -135,3 +148,19 @@ async def test_verification_accepts_a_real_sdk_shape_without_claiming_research(
     assert result["research_completed"] is False
     assert result["physical_requests"] == 1
     assert "test-only-openai-key" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_research_preparation_rejects_remote_database_before_connection() -> None:
+    from datetime import UTC, datetime
+    from uuid import UUID
+
+    from nexus.ops.openai_local import prepare_local_research
+    from nexus.settings import EngineSettings
+
+    with pytest.raises(ValueError, match="OPENAI_LOCAL_DATABASE_REQUIRED"):
+        await prepare_local_research(
+            EngineSettings(database_url="postgresql+asyncpg://remote.invalid/nexus"),
+            UUID(int=42),
+            as_of=datetime(2026, 9, 2, tzinfo=UTC),
+        )

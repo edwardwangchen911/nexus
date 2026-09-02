@@ -56,6 +56,12 @@ uv run --package nexus-engine nexus-openai-local setup
 
 已有证据准入和任务登记完成后，`nexus-openai-local run-once` 只处理一个已有研究任务。
 缺少研究快照、合格价格证据或模型密钥时，不生成假研究；当前历史风险证据缺口仍须补齐。
+密钥暂不可用时，可先运行 `nexus-openai-local prepare-research --instrument-id <标的 UUID>`：
+只从本地已入库的 SEC 财报冻结研究输入，并返回现有研究页路径；不请求 SEC、复星或模型，
+不登记研究任务，不消耗模型预算。相同标的、时点和证据重复执行不会重复创建快照。
+本入口不会把展示用 K 线提升为研究证据；真实财报尚未入库时返回
+`RESEARCH_EVIDENCE_UNAVAILABLE`，不创建空快照。资料齐备后仍沿用原有研究 API/Worker；
+价格依据缺失时委员会结果保持不完整、无仓位动作。停止使用该命令即可停用，无 schema 迁移。
 Responses 使用 `store=false`，工具续调用显式携带上下文；预算、证据校验和执行锁不变。
 本次不改变数据库 schema；停用此本机入口即可停止模型调用，保留配置与审计历史。
 
