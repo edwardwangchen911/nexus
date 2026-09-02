@@ -43,6 +43,13 @@ class PromptAsset(BaseModel):
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class StageInputIdentity(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    stage: Literal["research", "critique", "synthesis"]
+    request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    frozen_inputs_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class CommitteeRoleOutput(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -55,6 +62,8 @@ class CommitteeRoleOutput(BaseModel):
     conflicting_facts: bool = False
     stage: Literal["research", "critique", "synthesis"] | None = None
     reviewed_claim_ids: tuple[str, ...] = ()
+    stage_input_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    frozen_inputs_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class CommitteeModel(Protocol):

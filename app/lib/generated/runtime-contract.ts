@@ -5964,6 +5964,16 @@ export const runtimeContractSchemas = {
         "title": "Evidence",
         "type": "array"
       },
+      "failed_stage_input": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/StageInputIdentity"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "input_tokens": {
         "anyOf": [
           {
@@ -6130,6 +6140,30 @@ export const runtimeContractSchemas = {
   "ResearchStageSummary": {
     "additionalProperties": false,
     "properties": {
+      "frozen_inputs_hash": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Frozen Inputs Hash"
+      },
+      "input_hash": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Input Hash"
+      },
       "input_tokens": {
         "minimum": 0,
         "title": "Input Tokens",
@@ -7564,6 +7598,37 @@ export const runtimeContractSchemas = {
       "unknown"
     ],
     "type": "string"
+  },
+  "StageInputIdentity": {
+    "additionalProperties": false,
+    "properties": {
+      "frozen_inputs_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Frozen Inputs Hash",
+        "type": "string"
+      },
+      "request_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Request Hash",
+        "type": "string"
+      },
+      "stage": {
+        "enum": [
+          "research",
+          "critique",
+          "synthesis"
+        ],
+        "title": "Stage",
+        "type": "string"
+      }
+    },
+    "required": [
+      "stage",
+      "request_hash",
+      "frozen_inputs_hash"
+    ],
+    "title": "StageInputIdentity",
+    "type": "object"
   },
   "StrategyEvolutionData": {
     "additionalProperties": false,

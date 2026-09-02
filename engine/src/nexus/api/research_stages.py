@@ -105,6 +105,15 @@ def validate_stage_trace(
             prior_ids.update(f"{role}:{index}" for index in range(len(output.claims)))
     except (ValidationError, TypeError, ValueError):
         return invalid
+    if any(o.stage_input_hash or o.frozen_inputs_hash for o in outputs) and (
+        any(not o.stage_input_hash or not o.frozen_inputs_hash for o in outputs)
+        or len({o.frozen_inputs_hash for o in outputs}) != 1
+        or any(
+            len({o.stage_input_hash for o in outputs if o.stage == stage}) > 1
+            for stage, _ in STAGES
+        )
+    ):
+        return invalid
     return ResearchStageTrace(
         evidence_hash=run.evidence_hash,
         status="verified",
@@ -124,6 +133,8 @@ def validate_stage_trace(
                 ),
                 input_tokens=sum(o.input_tokens for o in saved),
                 output_tokens=sum(o.output_tokens for o in saved),
+                input_hash=saved[0].stage_input_hash if saved else None,
+                frozen_inputs_hash=saved[0].frozen_inputs_hash if saved else None,
             )
             for stage, roles in STAGES
         ),

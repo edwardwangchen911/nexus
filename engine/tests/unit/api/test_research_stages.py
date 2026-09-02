@@ -87,6 +87,29 @@ def test_failure_preserves_only_saved_stages(count, statuses):
     assert [s.status for s in trace.stages] == statuses
 
 
+@pytest.mark.parametrize("drift", [None, "stage", "frozen", "missing"])
+def test_stage_input_fingerprints_cannot_drift_within_one_run(drift):
+    run, records, evidence, prompts = _case()
+    for item in records:
+        item.payload["stage_input_hash"] = hashlib.sha256(
+            item.payload["stage"].encode()
+        ).hexdigest()
+        item.payload["frozen_inputs_hash"] = "d" * 64
+    if drift == "stage":
+        records[1].payload["stage_input_hash"] = "f" * 64
+    elif drift == "frozen":
+        records[-1].payload["frozen_inputs_hash"] = "f" * 64
+    elif drift == "missing":
+        records[-1].payload["stage_input_hash"] = None
+    for item in records:
+        _sign(item)
+    trace = validate_stage_trace(run, records, evidence, prompts)
+    assert trace.status == ("verified" if drift is None else "invalid")
+    if drift is None:
+        assert {s.frozen_inputs_hash for s in trace.stages} == {"d" * 64}
+        assert all(s.input_hash for s in trace.stages)
+
+
 @pytest.mark.parametrize(
     "damage",
     [

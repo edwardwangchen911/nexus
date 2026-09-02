@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime
 from typing import Literal
 from uuid import UUID
 
-from nexus.agents.committee import AgentRole
+from nexus.agents.committee import AgentRole, StageInputIdentity
 from nexus.agents.portfolio_context import PortfolioResearchContext
 from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
@@ -53,6 +53,8 @@ class ResearchStageSummary(_StrictAgentSchema):
     roles: tuple[ResearchStageRole, ...] = Field(max_length=5)
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
+    input_hash: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
+    frozen_inputs_hash: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
 
 
 class ResearchStageTrace(_StrictAgentSchema):
@@ -82,6 +84,7 @@ class ResearchRunResponse(_StrictAgentSchema):
     budget_reason: Literal["budget_exhausted"] | None
     abstention_reason: str | None = Field(default=None, max_length=100)
     stage_trace: ResearchStageTrace | None = None
+    failed_stage_input: StageInputIdentity | None = None
 
 
 class ResearchRunEnvelope(_StrictAgentSchema):

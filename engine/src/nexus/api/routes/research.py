@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from nexus.agents.budget import BudgetExhausted
+from nexus.agents.committee import StageInputIdentity
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import (
     admit_research_run,
@@ -295,6 +296,7 @@ def _response(
 ) -> ResearchRunResponse:
     intent = None
     abstention_reason = None
+    failed_stage_input = None
     if output is not None and output.intent is not None:
         try:
             intent = ResearchIntent.model_validate(output.intent)
@@ -318,6 +320,13 @@ def _response(
         raw_reason = output.payload.get("reason")
         if isinstance(raw_reason, str) and len(raw_reason) <= 100:
             abstention_reason = raw_reason
+        if run.status in {"failed", "abstained"} and output.payload.get("stage_input"):
+            try:
+                failed_stage_input = StageInputIdentity.model_validate(
+                    output.payload["stage_input"]
+                )
+            except ValidationError:
+                pass
     status = run.status
     if abstention_reason is not None and status == "completed":
         status = "abstained"
@@ -345,6 +354,7 @@ def _response(
         quality_status=None if intent is None else intent.quality_status,
         budget_reason="budget_exhausted" if abstention_reason == "budget_exhausted" else None,
         abstention_reason=abstention_reason,
+        failed_stage_input=failed_stage_input,
     )
 
 

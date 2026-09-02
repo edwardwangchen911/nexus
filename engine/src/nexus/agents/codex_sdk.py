@@ -5,6 +5,7 @@ MCP servers, user hooks, or automatic retry are enabled in the runtime.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 from collections.abc import Mapping
@@ -162,6 +163,21 @@ async def sdk_status() -> dict[str, object]:
         "execution_locked": True,
         "automatic_scheduling": False,
     }
+
+
+def codex_request_hash(payload: Mapping[str, object], output_model: type[BaseModel]) -> str:
+    """Fingerprint the submitted context and strict output schema, never model prose."""
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "payload": payload,
+                "output_schema": pydantic_function_tool(output_model)["function"]["parameters"],
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
 
 async def invoke_codex(

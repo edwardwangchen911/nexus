@@ -1,6 +1,7 @@
 """Three bounded SDK calls with validated research -> critique -> synthesis context."""
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Mapping
 from typing import Literal
@@ -12,9 +13,16 @@ from nexus.agents.codex_sdk import (
     MAX_OUTPUT_TOKENS,
     CodexCommittee,
     _Role,
+    codex_request_hash,
     invoke_codex,
 )
-from nexus.agents.committee import ROLE_ORDER, AgentRole, CommitteeRoleOutput, PromptAsset
+from nexus.agents.committee import (
+    ROLE_ORDER,
+    AgentRole,
+    CommitteeRoleOutput,
+    PromptAsset,
+    StageInputIdentity,
+)
 from nexus.agents.models import ResearchRequest
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.agents.tools import ReadOnlyToolRegistry
@@ -86,6 +94,7 @@ class StagedCodexCommittee(CodexCommittee):
         super().__init__(prompts=prompts, tools=tools)
         # Keep settlement/terminal writes inside the existing 45s handler/60s lease.
         self._deadline = None if deadline is None else deadline - 5
+        self.last_stage_input: StageInputIdentity | None = None
 
     async def analyze(
         self,
@@ -113,6 +122,7 @@ class StagedCodexCommittee(CodexCommittee):
                 self._deadline = asyncio.get_running_loop().time() + 35
         # Mark a stage as attempted before any awaited work; a failure is terminal.
         self.failure_reason = "model_execution_failed"
+        self.last_stage_input = None
         previous = [
             {
                 "claim_id": f"{output.role}:{index}",
@@ -152,6 +162,12 @@ class StagedCodexCommittee(CodexCommittee):
             "previous_claims": previous,
         }
         estimated_input = len(json.dumps(payload, ensure_ascii=False).encode()) + 8192
+        stage_input_hash = codex_request_hash(payload, STAGE_MODELS[stage])
+        frozen_inputs_hash = hashlib.sha256(
+            json.dumps(
+                self._frozen_inputs, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
         if (
             self.usage.input_tokens + estimated_input > MAX_INPUT_TOKENS
             or self.usage.output_tokens >= MAX_OUTPUT_TOKENS
@@ -162,6 +178,11 @@ class StagedCodexCommittee(CodexCommittee):
             self.failure_reason = "model_stage_allowance_exhausted"
             raise ValueError("CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED")
         self.failure_reason = "model_usage_uncertain"
+        self.last_stage_input = StageInputIdentity(
+            stage=stage,
+            request_hash=stage_input_hash,
+            frozen_inputs_hash=frozen_inputs_hash,
+        )
         self.usage = UsageSnapshot(
             input_tokens=self.usage.input_tokens,
             output_tokens=self.usage.output_tokens,
@@ -234,7 +255,10 @@ class StagedCodexCommittee(CodexCommittee):
                 conflicting_facts=item.conflicting_facts,
                 stage=stage,
                 reviewed_claim_ids=item.reviewed_claim_ids,
+                stage_input_hash=stage_input_hash,
+                frozen_inputs_hash=frozen_inputs_hash,
             )
         self._outputs.update(outputs)
         self.failure_reason = None
+        self.last_stage_input = None
         return self._outputs[role]

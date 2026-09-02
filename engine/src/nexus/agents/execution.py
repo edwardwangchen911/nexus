@@ -15,6 +15,7 @@ from nexus.agents.committee import (
     CommitteeModel,
     CommitteeRoleOutput,
     PromptAsset,
+    StageInputIdentity,
 )
 from nexus.agents.execution_authority import (
     load_frozen_evidence,
@@ -452,6 +453,7 @@ async def _terminal_after_committee(
             reason = "usage_accounting_failed"
     else:
         await release_daily_budget_if_reserved(session, run_id=run.id)
+    stage_input = getattr(committee, "last_stage_input", None)
     return await _persist_terminal(
         session,
         run,
@@ -459,6 +461,7 @@ async def _terminal_after_committee(
         event_sequence=event_sequence,
         status=status,
         reason=reason,
+        stage_input=stage_input if isinstance(stage_input, StageInputIdentity) else None,
     )
 
 
@@ -508,6 +511,7 @@ async def _persist_terminal(
     event_sequence: int,
     status: Literal["failed", "abstained"],
     reason: str,
+    stage_input: StageInputIdentity | None = None,
 ) -> ResearchRunResult:
     await _append_output(
         session,
@@ -516,7 +520,10 @@ async def _persist_terminal(
         status=status,
         role=None,
         prompt_hash=None,
-        payload={"reason": reason},
+        payload={
+            "reason": reason,
+            **({"stage_input": stage_input.model_dump(mode="json")} if stage_input else {}),
+        },
         intent=None,
     )
     await _advance(session, run, status)

@@ -76,6 +76,20 @@ async def test_staged_committee_passes_validated_claims_forward_and_shares_usage
         f"{role}:0" for role in ROLE_ORDER[:5]
     }
     assert all(p["frozen_inputs"] == submitted[0]["frozen_inputs"] for p in submitted)
+    assert len({o.frozen_inputs_hash for o in outputs}) == 1
+    assert outputs[0].frozen_inputs_hash is not None
+    assert len({o.stage_input_hash for o in outputs}) == 3
+    for payload in submitted:
+        expected_hash = codex_sdk.codex_request_hash(
+            payload, codex_staged.STAGE_MODELS[payload["stage"]]
+        )
+        assert all(
+            o.stage_input_hash == expected_hash for o in outputs if o.stage == payload["stage"]
+        )
+    changed = {**submitted[1], "previous_claims": []}
+    assert codex_sdk.codex_request_hash(changed, codex_staged.STAGE_MODELS["critique"]) != (
+        outputs[5].stage_input_hash
+    )
     assert [p["requested_roles"] for p in submitted] == [
         list(ROLE_ORDER[:5]),
         list(ROLE_ORDER[5:7]),
@@ -219,6 +233,7 @@ async def test_staged_failure_preserves_known_usage_and_does_not_retry_uncertain
     assert model.failure_reason == "model_usage_uncertain"
     assert model.usage == UsageSnapshot(input_tokens=300, output_tokens=80, provider_calls=2)
     assert invoke.await_count == 2
+    assert model.last_stage_input.stage == "critique"
 
 
 @pytest.mark.asyncio
@@ -242,6 +257,7 @@ async def test_staged_budget_exhaustion_stops_before_next_provider_call(monkeypa
         await model.analyze("bear", request, evidence, prompts["bear"])
     invoke.assert_awaited_once()
     assert model.failure_reason == "model_stage_allowance_exhausted"
+    assert model.last_stage_input is None
 
 
 @pytest.mark.asyncio

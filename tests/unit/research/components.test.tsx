@@ -113,8 +113,11 @@ describe("research evidence docket", () => {
     render(<ResearchPanel state="partial" research={researchData({
       status: "failed", intent: null, billing_mode: "chatgpt_subscription",
       input_tokens: 300, output_tokens: 80, abstention_reason: "model_usage_uncertain",
+      failed_stage_input: { stage: "critique", request_hash: "b".repeat(64), frozen_inputs_hash: "c".repeat(64) },
     })} admission={null} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
     expect(screen.getByText(/仅为已知下限，不会自动重试/)).toBeVisible();
+    fireEvent.click(screen.getByText("失败调用的输入记录"));
+    expect(screen.getByText("阶段：反证")).toBeVisible();
   });
 
   it("renders stance, paired arguments, votes, invalidation and versions without a score or trade action", () => {

@@ -3247,6 +3247,7 @@ export interface components {
             disagreement?: string | null;
             /** Evidence */
             evidence: components["schemas"]["EvidenceRef"][];
+            failed_stage_input?: components["schemas"]["StageInputIdentity"] | null;
             /** Input Tokens */
             input_tokens?: number | null;
             /**
@@ -3287,6 +3288,10 @@ export interface components {
         };
         /** ResearchStageSummary */
         ResearchStageSummary: {
+            /** Frozen Inputs Hash */
+            frozen_inputs_hash?: string | null;
+            /** Input Hash */
+            input_hash?: string | null;
             /** Input Tokens */
             input_tokens: number;
             /** Output Tokens */
@@ -3835,6 +3840,18 @@ export interface components {
         SnapshotStatus: "READY" | "PARTIAL" | "STALE" | "RECONCILIATION_REQUIRED";
         /** @enum {string} */
         SnapshotTimeBasis: "provider_event" | "gateway_observed" | "unknown";
+        /** StageInputIdentity */
+        StageInputIdentity: {
+            /** Frozen Inputs Hash */
+            frozen_inputs_hash: string;
+            /** Request Hash */
+            request_hash: string;
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "research" | "critique" | "synthesis";
+        };
         /**
          * StartExperimentRequest
          * @description The browser cannot choose a strategy, search axis, model, or data source.

@@ -73,7 +73,9 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
       {terminalReason ? (
         <div className="decision-card__warning" role="note">
           <ShieldAlert aria-hidden="true" size={19} />
-          <p>研究未完成：<code>{terminalReason}</code>。保留已验证证据供排查，此状态不能支持策略目标。</p>
+          <div><p>研究未完成：<code>{terminalReason}</code>。保留已验证证据供排查，此状态不能支持策略目标。</p>
+          {research.failed_stage_input ? <details><summary>失败调用的输入记录</summary><p>阶段：{({ research: "研究", critique: "反证", synthesis: "综合" } as const)[research.failed_stage_input.stage]}</p><p>请求摘要：<code>{research.failed_stage_input.request_hash}</code></p><p>同源输入：<code>{research.failed_stage_input.frozen_inputs_hash}</code></p></details> : null}
+          </div>
         </div>
       ) : null}
 
@@ -85,6 +87,7 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
             <details key={stage.stage} open={stage.stage === "synthesis"}>
               <summary>{({ research: "研究", critique: "反证", synthesis: "综合" } as const)[stage.stage]} · {({ complete: "已保存完整输出", partial: "仅保存部分输出", unavailable: "未保存有效输出" } as const)[stage.status]}</summary>
               <p>已保存输入 / 输出 tokens：{stage.input_tokens} / {stage.output_tokens}</p>
+              {stage.input_hash ? <details><summary>本阶段输入摘要</summary><p>请求与输出合同：<code>{stage.input_hash}</code></p><p>同源输入：<code>{stage.frozen_inputs_hash}</code></p></details> : <p>未留存本阶段提交输入摘要。</p>}
               {stage.roles.map((role) => <section key={role.role} aria-label={`${roleLabel(role.role)}阶段论点`}>
                 <h4>{roleLabel(role.role)}</h4>
                 {role.reviewed_claim_ids.length ? <p>回应论点：{role.reviewed_claim_ids.map((id) => {
