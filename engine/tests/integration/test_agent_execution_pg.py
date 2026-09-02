@@ -72,12 +72,14 @@ _DRIFT_INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000001712")
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_fails", [False, True])
+@pytest.mark.parametrize("staged", [False, True])
 async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries(
     migrated_database_url,
     monkeypatch,
     model_fails,
+    staged,
 ):
-    from nexus.agents import codex_sdk
+    from nexus.agents import codex_sdk, codex_staged
     from nexus.agents.responses_budget import UsageSnapshot
     from nexus.ops.openai_local import prepare_database
     from nexus.portfolio.research import read_position_research
@@ -88,11 +90,12 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     await _seed_database_tool_authority(
         factory, link_price=False, bar_count=1, price_quality_flags=("missing",)
     )
-    await prepare_database(settings)
+    await prepare_database(settings, staged=staged)
     async with factory() as session, session.begin():
         model = await session.scalar(
             select(AgentModelConfigRecord).where(
-                AgentModelConfigRecord.version == codex_sdk.CONFIG_VERSION
+                AgentModelConfigRecord.version
+                == (codex_sdk.STAGED_CONFIG_VERSION if staged else codex_sdk.CONFIG_VERSION)
             )
         )
         admission = await admit_research_run(
@@ -133,11 +136,34 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             UsageSnapshot(input_tokens=300, output_tokens=80, provider_calls=1),
         )
     )
-    if model_fails:
+    if staged:
+
+        async def staged_invoke(payload, *, output_model):
+            if model_fails and payload["stage"] == "critique":
+                raise TimeoutError("synthetic-secret-canary")
+            roles = [prompt["role"] for prompt in payload["prompts"]]
+            reviewed = (
+                []
+                if payload["stage"] == "research"
+                else ["bull:0"]
+                if payload["stage"] == "critique"
+                else ["bear:0", "evidence_audit:0"]
+            )
+            response = {
+                "roles": [
+                    {**item, "reviewed_claim_ids": reviewed}
+                    for item in batch["roles"]
+                    if item["role"] in roles
+                ]
+            }
+            return json.dumps(response), UsageSnapshot(input_tokens=300, output_tokens=80)
+
+        invoke.side_effect = staged_invoke
+    elif model_fails:
         invoke.side_effect = RuntimeError("offline simulated model failure")
-    monkeypatch.setattr(codex_sdk, "invoke_codex", invoke)
+    monkeypatch.setattr(codex_staged if staged else codex_sdk, "invoke_codex", invoke)
     assert await run_agent_worker_once(settings) is True
-    invoke.assert_awaited_once()
+    assert invoke.await_count == (2 if model_fails else 3) if staged else invoke.await_count == 1
     submitted = invoke.call_args.args[0]
     assert submitted["frozen_inputs"]["financial_facts"]["items"][0]["period_start"] == "2026-04-01"
     async with factory() as session:
@@ -159,7 +185,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             assert "Price authority is unavailable." in research.uncertainties
             assert research.summary
         if not model_fails:
-            assert (run.input_tokens, run.output_tokens) == (300, 80)
+            assert (run.input_tokens, run.output_tokens) == ((900, 240) if staged else (300, 80))
             assert (
                 await session.scalar(
                     select(func.count())
@@ -171,6 +197,22 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                 )
                 == 8
             )
+        if staged:
+            outputs = tuple(
+                await session.scalars(
+                    select(AgentResearchOutputRecord)
+                    .where(
+                        AgentResearchOutputRecord.run_id == run.id,
+                        AgentResearchOutputRecord.role.in_(ROLE_ORDER),
+                    )
+                    .order_by(AgentResearchOutputRecord.sequence)
+                )
+            )
+            assert len(outputs) == (5 if model_fails else 8)
+            assert outputs[0].payload["stage"] == "research"
+            if not model_fails:
+                assert outputs[-1].payload["stage"] == "synthesis"
+                assert outputs[-1].payload["reviewed_claim_ids"] == ["bear:0", "evidence_audit:0"]
     assert await run_agent_worker_once(settings) is False
     path = f"/internal/v1/research-runs/{admission.run_id}"
     async with httpx.AsyncClient(
@@ -181,7 +223,8 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     data = response.json()["data"]
     assert data["billing_mode"] == "chatgpt_subscription"
     if not model_fails:
-        assert data["input_tokens"] == 300 and data["output_tokens"] == 80
+        assert data["input_tokens"] == (900 if staged else 300)
+        assert data["output_tokens"] == (240 if staged else 80)
         assert data["intent"]["stance"] == "watch"
         assert data["intent"]["exposure_action"] == "none"
         from nexus.agents.snapshots import prepare_research_snapshot
@@ -203,6 +246,9 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             )
             assert past[_INSTRUMENT_ID].status == "not_started"
             assert past[_INSTRUMENT_ID].run_id is None
+    elif staged:
+        assert data["abstention_reason"] == "model_usage_uncertain"
+        assert data["input_tokens"] == 300 and data["output_tokens"] == 80
 
 
 @pytest.mark.asyncio

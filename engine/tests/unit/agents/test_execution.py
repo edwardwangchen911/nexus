@@ -123,6 +123,7 @@ def _synthesize(
     *,
     include_price_authority: bool = True,
     price_authority_valid: bool | None = None,
+    staged: bool = False,
 ):
     now = datetime(2026, 8, 24, tzinfo=UTC)
     content_hash = "a" * 64
@@ -132,8 +133,7 @@ def _synthesize(
         else "filing:0000000001-26-000001"
     )
     location = (
-        "db://price-bar-set/018f75b4-4d86-7c36-bc4c-cd71f2f64521"
-        f"@sha256:{content_hash}"
+        f"db://price-bar-set/018f75b4-4d86-7c36-bc4c-cd71f2f64521@sha256:{content_hash}"
         if include_price_authority
         else f"memory://sha256/{content_hash}"
     )
@@ -172,7 +172,9 @@ def _synthesize(
         data_snapshot_id=snapshot_id,
         decision_time=now,
     )
-    model = AgentModelConfigRecord(model_id="fixture-model")
+    model = AgentModelConfigRecord(
+        model_id="fixture-model", version="codex-sdk-chatgpt-v2" if staged else "fixture-v1"
+    )
     snapshot = DataSnapshot(id=snapshot_id, revision="fixture-v1")
     return synthesize_intent(
         run,
@@ -183,9 +185,7 @@ def _synthesize(
         (evidence,),
         outputs,
         price_authority_valid=(
-            include_price_authority
-            if price_authority_valid is None
-            else price_authority_valid
+            include_price_authority if price_authority_valid is None else price_authority_valid
         ),
     )
 
@@ -209,6 +209,22 @@ def test_missing_price_authority_forces_market_abstention_and_watch() -> None:
     assert (intent.stance, intent.exposure_action) == ("watch", "none")
     assert intent.quality_status == "partial"
     assert "Price authority is unavailable." in intent.uncertainties
+
+
+def test_staged_synthesis_is_not_outvoted_by_earlier_support_and_keeps_evidence_veto():
+    votes = ("support",) * 5 + ("oppose", "support", "oppose")
+    intent = _synthesize(votes, staged=True)
+    assert intent.stance == "reduce_candidate"
+    assert intent.theses[0].text == "portfolio evidence"
+    assert [claim.text for claim in intent.counter_theses] == [
+        "bear evidence",
+        "evidence_audit evidence",
+    ]
+    missing = _synthesize(votes, staged=True, include_price_authority=False)
+    assert missing.stance == "watch" and missing.exposure_action == "none"
+    unresolved = _synthesize(votes[:6] + ("abstain", "support"), staged=True)
+    assert unresolved.stance == "watch" and unresolved.quality_status == "partial"
+    assert "Evidence review has unresolved objections." in unresolved.uncertainties
 
 
 def test_price_shaped_strings_do_not_establish_revalidated_authority() -> None:

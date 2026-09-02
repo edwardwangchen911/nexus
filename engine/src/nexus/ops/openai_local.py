@@ -107,7 +107,7 @@ def status(settings: EngineSettings) -> dict[str, object]:
     }
 
 
-async def prepare_database(settings: EngineSettings) -> None:
+async def prepare_database(settings: EngineSettings, *, staged: bool = False) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
@@ -115,14 +115,21 @@ async def prepare_database(settings: EngineSettings) -> None:
     if host is None or host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
     config = dict(_CONFIG)
+    if staged and settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK:
+        raise ValueError("CODEX_STAGED_BACKEND_REQUIRED")
     if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
-        from nexus.agents.codex_sdk import CONFIG_VERSION, MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS
+        from nexus.agents.codex_sdk import (
+            CONFIG_VERSION,
+            MAX_INPUT_TOKENS,
+            MAX_OUTPUT_TOKENS,
+            STAGED_CONFIG_VERSION,
+        )
         from nexus.agents.codex_sdk import MODEL_ID as SDK_MODEL
 
         config.update(
             {
                 "model_id": SDK_MODEL,
-                "version": CONFIG_VERSION,
+                "version": STAGED_CONFIG_VERSION if staged else CONFIG_VERSION,
                 "max_input_tokens": MAX_INPUT_TOKENS,
                 "max_output_tokens": MAX_OUTPUT_TOKENS,
                 "max_tool_calls": 0,
@@ -131,7 +138,7 @@ async def prepare_database(settings: EngineSettings) -> None:
                 # These fields bound configuration validity, not subscription pricing.
                 "pricing_expires_at": "2027-09-02T00:00:00+00:00",
                 "billing_mode": "chatgpt_subscription",
-                "max_sdk_turns": 1,
+                "max_sdk_turns": 3 if staged else 1,
             }
         )
     config_hash = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
@@ -283,6 +290,9 @@ def main() -> int:
     parser.add_argument("--instrument-id", type=UUID)
     parser.add_argument("--accession")
     parser.add_argument("--backend", choices=("codex_sdk", "responses"), default="codex_sdk")
+    parser.add_argument(
+        "--staged", action="store_true", help="Setup the three-stage SDK committee version"
+    )
     parser.add_argument("--as-of", type=datetime.fromisoformat)
     parser.add_argument(
         "--skip-key", action="store_true", help="Prepare local DB only; no key prompt or network"
@@ -290,6 +300,8 @@ def main() -> int:
     args = parser.parse_args()
     root = Path.cwd().resolve()
     try:
+        if args.staged and (args.action != "setup" or args.backend != "codex_sdk"):
+            raise ValueError("CODEX_STAGED_SETUP_ONLY")
         if not (root / "engine/pyproject.toml").is_file():
             raise ValueError("OPENAI_REPOSITORY_ROOT_REQUIRED")
         settings = local_settings(
@@ -299,7 +311,7 @@ def main() -> int:
             backend=args.backend,
         )
         if args.action == "setup":
-            asyncio.run(prepare_database(settings))
+            asyncio.run(prepare_database(settings, staged=args.staged))
             if (
                 args.backend == "responses"
                 and not args.skip_key

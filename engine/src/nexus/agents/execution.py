@@ -174,7 +174,9 @@ async def execute_research_run(
                 output_sequence=output_sequence,
                 event_sequence=event_sequence + 1,
                 status="failed",
-                reason="model_execution_failed",
+                reason="model_usage_uncertain"
+                if getattr(committee, "failure_reason", None) == "model_usage_uncertain"
+                else "model_execution_failed",
             )
         if output.role != role or output.prompt_hash != prompt.content_hash:
             return await _terminal_after_committee(

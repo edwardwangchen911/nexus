@@ -53,6 +53,8 @@ class CommitteeRoleOutput(BaseModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     conflicting_facts: bool = False
+    stage: Literal["research", "critique", "synthesis"] | None = None
+    reviewed_claim_ids: tuple[str, ...] = ()
 
 
 class CommitteeModel(Protocol):

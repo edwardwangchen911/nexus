@@ -102,6 +102,19 @@ def synthesize_intent(
     by_role = {output.role: output for output in role_outputs}
     theses = support_claims or by_role["orchestrator"].claims[:5]
     counter_theses = oppose_claims or by_role["bear"].claims[:5]
+    staged = model.version == "codex-sdk-chatgpt-v2"
+    review_incomplete = staged and by_role["evidence_audit"].vote != "support"
+    if staged:
+        # The final reasoned synthesis owns the proposal, not a count of earlier votes.
+        # Missing evidence still vetoes every actionable candidate.
+        theses = by_role["portfolio"].claims[:5]
+        counter_theses = (by_role["bear"].claims + by_role["evidence_audit"].claims)[:5]
+        stance, exposure_action = ("watch", "none")
+        if not (fundamental_missing or price_missing or review_incomplete):
+            if by_role["portfolio"].vote == "support":
+                stance, exposure_action = "buy_candidate", "eligible_for_increase"
+            elif by_role["portfolio"].vote == "oppose":
+                stance, exposure_action = "reduce_candidate", "reduce"
     condition_evidence = (evidence_refs[0],)
     return ResearchIntent(
         schema_version="research_intent_v1",
@@ -120,6 +133,7 @@ def synthesize_intent(
             for condition, message in (
                 (fundamental_missing, "HKEX fundamental authority is unavailable."),
                 (price_missing, "Price authority is unavailable."),
+                (review_incomplete, "Evidence review has unresolved objections."),
             )
             if condition
         )
@@ -152,7 +166,9 @@ def synthesize_intent(
             ),
         ),
         valid_until=run.decision_time + timedelta(days=7),
-        quality_status="partial" if fundamental_missing or price_missing else "complete",
+        quality_status="partial"
+        if fundamental_missing or price_missing or review_incomplete
+        else "complete",
         evidence_audit="complete",
         role_votes=votes,
         disagreement="support and opposition are both present"

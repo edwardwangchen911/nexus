@@ -199,6 +199,7 @@ def _agent_registry(
                 run,
                 responses_client=responses_client,
                 tools=tools,
+                deadline=context.monotonic_deadline(),
             )
         except ToolInputError:
             committee = _UnavailableResponsesCommittee()
@@ -250,10 +251,13 @@ async def _committee(
     *,
     responses_client: object | None,
     tools: ReadOnlyToolRegistry | None,
+    deadline: float | None = None,
 ) -> CommitteeModel:
     if settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE:
         configured_model = await session.get(AgentModelConfigRecord, run.model_config_id)
-        if configured_model is not None and configured_model.version == "codex-sdk-chatgpt-v1":
+        if configured_model is not None and configured_model.version in {
+            "codex-sdk-chatgpt-v1", "codex-sdk-chatgpt-v2"
+        }:
             return _UnavailableResponsesCommittee()
         return FixtureCommittee()
     allow_fixture_evidence = (
@@ -277,19 +281,28 @@ async def _committee(
         raise ToolInputError("frozen price authority is unavailable")
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
     if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
-        from nexus.agents.codex_sdk import CONFIG_VERSION, MODEL_ID, CodexCommittee
+        from nexus.agents.codex_sdk import (
+            CONFIG_VERSION,
+            MODEL_ID,
+            STAGED_CONFIG_VERSION,
+            CodexCommittee,
+        )
+        from nexus.agents.codex_staged import StagedCodexCommittee
 
         prompts = await load_frozen_prompts(session, run)
         if (
             model is None
             or model.model_id != MODEL_ID
-            or model.version != CONFIG_VERSION
+            or model.version not in {CONFIG_VERSION, STAGED_CONFIG_VERSION}
             or model.input_usd_per_million != 0
             or model.output_usd_per_million != 0
             or prompts is None
         ):
             return _UnavailableResponsesCommittee()
-        return CodexCommittee(
+        committee_type = (
+            StagedCodexCommittee if model.version == STAGED_CONFIG_VERSION else CodexCommittee
+        )
+        return committee_type(
             prompts={
                 role: PromptAsset(
                     role=role,
@@ -306,6 +319,7 @@ async def _committee(
                 allow_fixture_evidence=False,
                 allow_fixture_price_evidence=False,
             ),
+            **({"deadline": deadline} if model.version == STAGED_CONFIG_VERSION else {}),
         )
     if (
         model is None

@@ -29,6 +29,7 @@ from nexus.strategy.intents import ResearchClaim
 
 MODEL_ID = "gpt-5.4-mini"
 CONFIG_VERSION = "codex-sdk-chatgpt-v1"
+STAGED_CONFIG_VERSION = "codex-sdk-chatgpt-v2"
 _PROVIDER = "nexus_openai"
 MAX_INPUT_TOKENS = 64000
 MAX_OUTPUT_TOKENS = 8192
@@ -163,7 +164,9 @@ async def sdk_status() -> dict[str, object]:
     }
 
 
-async def invoke_codex(payload: Mapping[str, object]) -> tuple[str, UsageSnapshot]:
+async def invoke_codex(
+    payload: Mapping[str, object], *, output_model: type[BaseModel] = _Batch
+) -> tuple[str, UsageSnapshot]:
     wire = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     # Bound submitted context; CLI harness usage is checked after the SDK reports it.
     if len(wire.encode()) > MAX_INPUT_TOKENS - 8192:
@@ -200,7 +203,7 @@ async def invoke_codex(payload: Mapping[str, object]) -> tuple[str, UsageSnapsho
                 result = await thread.run(
                     wire,
                     output_schema=cast(
-                        JsonObject, pydantic_function_tool(_Batch)["function"]["parameters"]
+                        JsonObject, pydantic_function_tool(output_model)["function"]["parameters"]
                     ),
                     approval_mode=ApprovalMode.deny_all,
                     sandbox=Sandbox.read_only,

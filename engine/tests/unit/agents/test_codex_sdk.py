@@ -37,6 +37,189 @@ def _batch(citation=0):
     }
 
 
+def _staged_batch(stage, roles):
+    reviewed = (
+        []
+        if stage == "research"
+        else ["bull:0"]
+        if stage == "critique"
+        else ["bear:0", "evidence_audit:0"]
+    )
+    return {
+        "roles": [
+            {**item, "reviewed_claim_ids": reviewed}
+            for item in _batch()["roles"]
+            if item["role"] in roles
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_staged_committee_passes_validated_claims_forward_and_shares_usage(monkeypatch):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    submitted = []
+
+    async def invoke(payload, *, output_model):
+        submitted.append(payload)
+        batch = _staged_batch(payload["stage"], [p["role"] for p in payload["prompts"]])
+        assert output_model.model_validate(batch)
+        return json.dumps(batch), UsageSnapshot(input_tokens=300, output_tokens=80)
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools())
+    outputs = [await model.analyze(role, request, evidence, prompts[role]) for role in ROLE_ORDER]
+    assert [p["stage"] for p in submitted] == ["research", "critique", "synthesis"]
+    assert [len(p["previous_claims"]) for p in submitted] == [0, 5, 7]
+    assert {p["claim_id"] for p in submitted[1]["previous_claims"]} == {
+        f"{role}:0" for role in ROLE_ORDER[:5]
+    }
+    assert all(p["frozen_inputs"] == submitted[0]["frozen_inputs"] for p in submitted)
+    assert model.usage == UsageSnapshot(input_tokens=900, output_tokens=240, provider_calls=3)
+    assert sum(o.input_tokens for o in outputs) == 900
+    assert sum(o.output_tokens for o in outputs) == 240
+    assert outputs[-1].reviewed_claim_ids == ("bear:0", "evidence_audit:0")
+    assert outputs[-1].stage == "synthesis"
+    assert all(o.claims[0].evidence_refs == evidence for o in outputs)
+    assert await model.analyze("portfolio", request, evidence, prompts["portfolio"]) == outputs[-1]
+    assert len(submitted) == 3
+    with pytest.raises(ValueError, match="CODEX_RUN_AUTHORITY_CHANGED"):
+        await model.analyze(
+            "portfolio",
+            request.model_copy(update={"instrument_id": uuid4()}),
+            evidence,
+            prompts["portfolio"],
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reviewed", [[], ["bear:0"], ["bull:99"], ["external:0"]])
+async def test_staged_critique_rejects_missing_self_or_fabricated_references(monkeypatch, reviewed):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    first = _staged_batch("research", ROLE_ORDER[:5])
+    second = _staged_batch("critique", ROLE_ORDER[5:7])
+    second["roles"][0]["reviewed_claim_ids"] = reviewed
+    invoke = AsyncMock(
+        side_effect=[
+            (json.dumps(first), UsageSnapshot(input_tokens=300, output_tokens=80)),
+            (json.dumps(second), UsageSnapshot(input_tokens=300, output_tokens=80)),
+        ]
+    )
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools())
+    await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    with pytest.raises(ValueError, match="CODEX_REVIEW_REFERENCE_INVALID"):
+        await model.analyze("bear", request, evidence, prompts["bear"])
+    with pytest.raises(ValueError, match="CODEX_REQUEST_ALREADY_FAILED"):
+        await model.analyze("bear", request, evidence, prompts["bear"])
+    assert invoke.await_count == 2
+    assert model.usage.input_tokens == 600
+    assert tuple(model._outputs) == ROLE_ORDER[:5]
+
+
+@pytest.mark.asyncio
+async def test_staged_failure_preserves_known_usage_and_does_not_retry_uncertain_call(monkeypatch):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    invoke = AsyncMock(
+        side_effect=[
+            (
+                json.dumps(_staged_batch("research", ROLE_ORDER[:5])),
+                UsageSnapshot(input_tokens=300, output_tokens=80),
+            ),
+            TimeoutError("secret-canary"),
+        ]
+    )
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools())
+    await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    run = SimpleNamespace(retry_count=0)
+    result = await _analyze_with_one_retry(
+        AsyncMock(),
+        run,
+        committee=model,
+        role="bear",
+        request=request,
+        evidence_refs=evidence,
+        prompt=prompts["bear"],
+    )
+    assert result is None and run.retry_count == 0
+    assert model.failure_reason == "model_usage_uncertain"
+    assert model.usage == UsageSnapshot(input_tokens=300, output_tokens=80, provider_calls=2)
+    assert invoke.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_staged_budget_exhaustion_stops_before_next_provider_call(monkeypatch):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    invoke = AsyncMock(
+        return_value=(
+            json.dumps(_staged_batch("research", ROLE_ORDER[:5])),
+            UsageSnapshot(input_tokens=codex_sdk.MAX_INPUT_TOKENS - 1, output_tokens=80),
+        )
+    )
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools())
+    with pytest.raises(ValueError, match="CODEX_STAGE_ORDER_INVALID"):
+        await model.analyze("portfolio", request, evidence, prompts["portfolio"])
+    invoke.assert_not_awaited()
+    await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    with pytest.raises(ValueError, match="CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED"):
+        await model.analyze("bear", request, evidence, prompts["bear"])
+    invoke.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_staged_deadline_leaves_worker_time_to_persist_terminal_state(monkeypatch):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+
+    async def stalled(*args, **kwargs):
+        await asyncio.sleep(1)
+
+    invoke = AsyncMock(side_effect=stalled)
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    deadline = asyncio.get_running_loop().time() + 5.05
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools(), deadline=deadline)
+    with pytest.raises(TimeoutError):
+        await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    assert asyncio.get_running_loop().time() < deadline
+    assert model.failure_reason == "model_usage_uncertain"
+    assert model.usage.provider_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["citation", "synthesis_review"])
+async def test_staged_invalid_evidence_or_ignored_critique_cannot_complete(monkeypatch, invalid):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+
+    async def invoke(payload, **kwargs):
+        batch = _staged_batch(payload["stage"], [p["role"] for p in payload["prompts"]])
+        if payload["stage"] == "synthesis":
+            if invalid == "citation":
+                batch["roles"][0]["claims"][0]["citations"] = [len(evidence)]
+            else:
+                batch["roles"][0]["reviewed_claim_ids"] = ["bull:0"]
+        return json.dumps(batch), UsageSnapshot(input_tokens=300, output_tokens=80)
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools())
+    await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    await model.analyze("bear", request, evidence, prompts["bear"])
+    with pytest.raises(ValueError, match="CODEX_(CITATION|REVIEW_REFERENCE)_INVALID"):
+        await model.analyze("portfolio", request, evidence, prompts["portfolio"])
+    assert tuple(model._outputs) == ROLE_ORDER[:7]
+
+
 def _sdk(monkeypatch):
     result = SimpleNamespace(
         status=TurnStatus.completed,

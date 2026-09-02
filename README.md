@@ -72,6 +72,23 @@ uv run --package nexus-engine nexus-openai-local run-once --backend codex_sdk
 研究状态有独立读取时间，不改写账户快照，也不改变 `decision_readiness` 或交易锁。
 此接线仅新增可选响应字段，无依赖或数据库迁移；回滚应用代码即可撤回展示，已有研究不受影响。
 
+#### 三阶段研究（兼容保留批量 v1）
+
+`nexus-openai-local setup --backend codex_sdk --staged` 只登记 `codex-sdk-chatgpt-v2`，
+不调用模型；后续新准入任务选择最新登记配置，既有任务仍绑定原配置。默认 `setup` 保留 v1。
+v2 复用[官方 Python SDK](https://learn.chatgpt.com/docs/codex-sdk)，不增加依赖、服务或迁移：
+前五个角色研究 → bear/evidence_audit 反证 → portfolio 综合，最多三次隔离、无工具调用。
+后续阶段读取同一批冻结事实和前阶段已校验论点；反证必须引用具体前序论点，综合必须回应
+反方和证据审查。阶段与回应关系保存到既有角色输出，最终报告使用综合结论和反证内容。
+v2 不由早期角色票数覆盖最终综合；价格证据缺失或证据审查未通过时仍只观察、执行锁定。
+
+三阶段共享原有 64,000 输入 / 8,192 输出验收阈值和一次 Job 的截止时间，给终态落库预留
+5 秒，不延长全局 Job 租约。阈值不是套餐费用的硬截断承诺。失败不自动重试；已收到的
+阶段保留，某次模型调用未返回用量时终态标记 `model_usage_uncertain`，已知 token 数只是
+下限。进程崩溃导致事务回滚不保证阶段恢复，不自动重放可能已计费的外部请求。
+回退应用版本不会删除 v2 审计，但旧 Worker 不认识 v2 时会拒绝执行，而不是冒充 v1。
+登记 v1 不能将已登记的 v2 任务改绑；恢复默认选择需显式处理版本，不能改写历史记录。
+
 #### 可选：独立 API Key 的 Responses 接入
 
 复用已有 Responses/委员会和预算逻辑，不新建 Agent 框架。默认固定

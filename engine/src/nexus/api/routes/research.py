@@ -326,7 +326,7 @@ def _response(
         status=cast(AgentRunStatus, status),
         retry_count=run.retry_count,
         billing_mode="chatgpt_subscription"
-        if run.pricing_version == "codex-sdk-chatgpt-v1"
+        if run.pricing_version in {"codex-sdk-chatgpt-v1", "codex-sdk-chatgpt-v2"}
         else None,
         input_tokens=run.input_tokens,
         output_tokens=run.output_tokens,
