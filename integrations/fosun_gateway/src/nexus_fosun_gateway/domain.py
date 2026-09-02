@@ -8,6 +8,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StringConstraints,
     field_validator,
     model_validator,
@@ -169,6 +170,7 @@ class GatewayPage[ItemT: BaseModel](GatewayModel):
 class GatewayBarPage(GatewayPage[GatewayItem]):
     # Adapter-owned request fact, not a claim that the provider verified adjustment.
     sdk_requested_adjustment: Literal["noward"] | None = None
+    provider_reported_delay: StrictBool | None = None
 
 
 class GatewayError(Exception):

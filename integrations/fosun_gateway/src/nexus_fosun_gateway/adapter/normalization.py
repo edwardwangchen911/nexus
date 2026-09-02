@@ -10,6 +10,7 @@ from nexus_fosun_gateway.domain import (
     BarItem,
     CashFlowItem,
     CashItem,
+    GatewayBarPage,
     GatewayError,
     GatewayItem,
     GatewayPage,
@@ -57,7 +58,13 @@ def normalize_provider_response(
             return _list_page(items, data, request_id, received_at, payload)
         if operation == "fosun_get_bars":
             items = _bars(data, payload, received_at)
-            return _page(items, request_id, received_at, quality="PARTIAL")
+            # Preserve the upstream response fact, never infer it from request or age.
+            return GatewayBarPage.model_validate(
+                {
+                    **_page(items, request_id, received_at, quality="PARTIAL").model_dump(),
+                    "provider_reported_delay": data.get("delay"),
+                }
+            )
     except _BarWindowMismatch:
         raise _window_mismatch() from None
     except (KeyError, TypeError, ValueError, InvalidOperation):

@@ -368,6 +368,39 @@ def test_market_parser_rejects_gateway_receipt_time_outside_hmac_window(
             )
 
 
+@pytest.mark.parametrize("delay", [True, False, None, "missing", 0, 1, "true", "false"])
+def test_bar_parser_retains_strict_provider_delay_without_inference(delay) -> None:
+    payload = json.loads(_bar_payload())
+    if delay != "missing":
+        payload["provider_reported_delay"] = delay
+    raw = RawGatewayResponse(
+        operation="fosun_get_bars",
+        gateway_request_id=REQUEST_ID,
+        request_body_sha256="a" * 64,
+        raw_payload=json.dumps(payload).encode(),
+        sent_at=NOW - timedelta(milliseconds=250),
+        received_at=NOW,
+    )
+
+    def parse():
+        return parse_bar_page(
+            raw,
+            expected_code="usAAPL",
+            expected_ktype="day",
+            start=datetime(2026, 8, 1, tzinfo=UTC),
+            end=datetime(2026, 8, 29, tzinfo=UTC),
+            limit=10,
+        )
+
+    if delay is None or type(delay) is bool or delay == "missing":
+        page = parse()
+        assert page.provider_reported_delay is (None if delay == "missing" else delay)
+        assert page.quality == "PARTIAL"
+    else:
+        with pytest.raises(FosunMarketGatewayError):
+            parse()
+
+
 def test_daily_parser_uses_session_date_for_request_window() -> None:
     raw = RawGatewayResponse(
         operation="fosun_get_bars",

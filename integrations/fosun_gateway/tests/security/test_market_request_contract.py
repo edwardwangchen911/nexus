@@ -112,6 +112,7 @@ def test_bar_route_preserves_adapter_request_fact_and_legacy_unknown(gateway_cli
             {
                 **page.model_dump(),
                 "sdk_requested_adjustment": "noward",
+                "provider_reported_delay": False,
             }
         )
 
@@ -123,6 +124,7 @@ def test_bar_route_preserves_adapter_request_fact_and_legacy_unknown(gateway_cli
     )
     assert legacy.status_code == 200
     assert legacy.json()["sdk_requested_adjustment"] is None
+    assert legacy.json()["provider_reported_delay"] is None
     monkeypatch.setattr(gateway_client.app.state.transport, "execute", with_request_fact)
     current = _post_signed(
         gateway_client,
@@ -132,3 +134,4 @@ def test_bar_route_preserves_adapter_request_fact_and_legacy_unknown(gateway_cli
     )
     assert current.status_code == 200
     assert current.json()["sdk_requested_adjustment"] == "noward"
+    assert current.json()["provider_reported_delay"] is False

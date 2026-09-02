@@ -13,6 +13,33 @@ def _raw(data: object) -> dict[str, object]:
     return {"code": 0, "data": data, "requestId": "synthetic-market-request"}
 
 
+@pytest.mark.parametrize("delay", [True, False, None, "missing"])
+def test_bar_response_retains_only_provider_reported_delay(delay):
+    data = {"data": [], "power": 0, "total": 0}
+    if delay != "missing":
+        data["delay"] = delay
+    page = normalize_provider_response(
+        "fosun_get_bars",
+        _raw(data),
+        received_at=RECEIVED_AT,
+        context={"code": "usAAPL", "ktype": "day", "limit": 10, "delay": True},
+    )
+    assert page.model_dump()["provider_reported_delay"] is (None if delay == "missing" else delay)
+    assert page.quality == "PARTIAL"
+
+
+@pytest.mark.parametrize("delay", [0, 1, "true", "false", {}, []])
+def test_bar_response_rejects_non_boolean_delay(delay):
+    with pytest.raises(GatewayError) as error:
+        normalize_provider_response(
+            "fosun_get_bars",
+            _raw({"data": [], "power": 0, "total": 0, "delay": delay}),
+            received_at=RECEIVED_AT,
+            context={"code": "usAAPL", "ktype": "day", "limit": 10},
+        )
+    assert error.value.code == "PROVIDER_MALFORMED_RESPONSE"
+
+
 def test_quotes_preserve_request_order_and_materialize_missing_price() -> None:
     page = normalize_provider_response(
         "fosun_get_quotes",

@@ -23,6 +23,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     SecretStr,
+    StrictBool,
     ValidationError,
     field_validator,
     model_validator,
@@ -200,6 +201,7 @@ class FosunBarPage(BaseModel):
     as_of: datetime
     quality: Literal["PARTIAL"]
     sdk_requested_adjustment: Literal["noward"] | None = None
+    provider_reported_delay: StrictBool | None = None
 
     @field_validator("source_request_id")
     @classmethod

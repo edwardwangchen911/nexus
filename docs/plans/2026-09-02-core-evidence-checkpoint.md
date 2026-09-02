@@ -147,3 +147,27 @@ comparable_variants，诊断因而不能经这条真实路径产生 OPTIMIZATION
 `optimizer/authority.py` 又要求该状态才能创建正式方案。这是本地实现缺口，与外部
 价格证据不足分别处理。现有设计要求至少一个非 hold_current 方案已可比较，不能简单
 放宽状态或伪造比较记录来绕过。首个方案的确定性预比较需接入真实证据后再建立正式绑定。
+
+## 历史行情时效字段丢失修复（20:46 后核查）
+
+只读实库核对：12 个持仓均有日线，但 delivery 全为 unknown、adjustment 全为 raw，
+最新序列可用时间均晚于账户快照 `2026-09-02T03:33:37.175621Z`；价格权威、方案准入
+记录、方案组均为 0，general 队列无待处理/运行任务。`source_policy_v2` 只接受
+real_time/delayed 的 raw 日线。首个方案的生成依赖仍未修复，不能宣称该路径已打通。
+
+复核复星[官方行情合同](https://openapi-docs.fosunxcz.com/specs/public/market/market/openapi.yaml)：
+`quote.KlineData.delay` 是响应布尔字段，`KlineRequest.right` 列出 noward/forward/backward；
+已下载合同 SHA-256 为 `f35cfaa3484d8507723729b68a2b8d60fa85d4d28d06991b4a434995cbfac22a`。
+SDK 暴露 delay/right 参数，但这不证明旧请求或旧响应的具体取值。网关归一化此前确实
+丢弃响应的 data.delay，不能把“本地没保存”直接归咎于上游不提供。
+
+最小修复：K 线专用响应新增可空 `provider_reported_delay`，保留上游实际布尔值，
+Engine 兼容读取并随既有原始响应保存。缺失/null 保持未知；数字、字符串等拒绝；不从
+请求或历史日期推断。源声明不能单独替代 capability 或公司行动证据，原有准入仍须满足。
+这修复未来响应的信息丢失，不恢复旧归档、不证明已有行情已可用于完整决策。
+
+十个网关回归用例先复现失败、再通过；Gateway 52 项、Engine Provider/签名往返 61 项
+测试通过，相关 Ruff/mypy 通过。集中审查确认字段仅来自成功响应的 data.delay，
+不是调用者参数；true/false 均保留，null 不变成 false，配置为 unknown 时不提升行情准入。
+先更新 Engine 兼容读取，再更新 Gateway；回退先停止字段生产并保留旧归档兼容读取。
+无数据库迁移或新增依赖。本轮没有调用真实模型或券商。

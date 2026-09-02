@@ -241,13 +241,17 @@ async def test_daily_provider_resolves_pit_code_and_preserves_exact_bar_values()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("request_adjustment", [None, "noward", "forward"])
+@pytest.mark.parametrize("reported_delay", [None, False, True])
 async def test_daily_adjustment_request_proof_is_preserved_without_delivery_promotion(
     request_adjustment,
+    reported_delay,
 ) -> None:
     gateway = _gateway()
     payload = json.loads(gateway.bar_payload)
     if request_adjustment is not None:
         payload["sdk_requested_adjustment"] = request_adjustment
+    if reported_delay is not None:
+        payload["provider_reported_delay"] = reported_delay
     gateway.bar_payload = json.dumps(payload).encode()
     provider = FosunMarketDataProvider(
         gateway, symbol_resolver=_Resolver(), delivery_mode="unknown"

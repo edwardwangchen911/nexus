@@ -235,6 +235,9 @@ K 线展示链路固定显式发送 `right=noward`（不复权），不依赖 Pr
 原始响应归档。该字段只证明发送的参数，不声称 Provider 确认了复权、行情实时性或公司行动。
 旧响应缺少该字段仍可读取，新归一化结果会带 `FOSUN_ADJUSTMENT_REQUEST_UNVERIFIED`；
 不会修改已入库的旧记录，`delivery_mode=unknown` 仍不能成为研究价格权威。
+Gateway 同时保留 K 线响应的 `data.delay` 为 `provider_reported_delay`，仅接受布尔值；
+未返回时保持 null，不从请求参数或 K 线日期推断。该事实随原始响应归档，不能单独替代
+Provider capability、来源政策或复权证据；本地展示入口仍使用原有 unknown 准入。
 本地更新须先更新 Engine 兼容解析器，再重启 Gateway；回退时先停止新字段生产，保留
 兼容解析器以读取已有归档。无新数据库迁移、依赖、端点或权限，不触发真实刷新。
 
