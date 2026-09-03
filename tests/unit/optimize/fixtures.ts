@@ -13,6 +13,24 @@ export const instrumentIds = {
   spy: "0198d500-1000-7000-8000-000000001308",
 } as const;
 
+export function draftResearchContext(): components["schemas"]["FrozenDailyResearchContext"] {
+  return {
+    schema_version: "daily_research_context_v1", mode: "context_only", execution_locked: true,
+    root_id: "0198d500-1000-7000-8000-000000001321",
+    run_id: "0198d500-1000-7000-8000-000000001322",
+    output_id: "0198d500-1000-7000-8000-000000001323", output_sequence: 1,
+    output_hash: "a".repeat(64), evidence_hash: "b".repeat(64),
+    portfolio_snapshot_id: snapshotId,
+    diagnostic_report_id: "0198d500-1000-7000-8000-000000001312",
+    research_data_snapshot_id: "0198d500-1000-7000-8000-000000001325",
+    instrument_id: instrumentIds.aapl,
+    valuation_time: "2026-08-24T00:00:00Z", research_as_of: "2026-08-25T00:00:00Z",
+    output_available_at: "2026-08-25T00:10:00Z", context_as_of: "2026-08-25T00:15:00Z",
+    run_status: "completed", quality_status: "partial", intent: null,
+    unavailable_reason: "STAGED_ACTION_SEMANTICS_UNVERIFIED",
+  };
+}
+
 type DiagnosticReport = components["schemas"]["PortfolioDiagnosticResponse"];
 type ProposalGroup = components["schemas"]["OptimizationProposalGroupResponse"];
 type Overview = components["schemas"]["OverviewResponse"];

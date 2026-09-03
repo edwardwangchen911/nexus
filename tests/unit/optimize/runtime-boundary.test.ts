@@ -1,13 +1,53 @@
 import { describe, expect, it } from "vitest";
 
 import { sanitizeEngineResponse } from "../../../app/lib/engine/client";
-import { groupId, overviewData, proposalGroup } from "./fixtures";
+import { draftResearchContext, groupId, overviewData, proposalGroup } from "./fixtures";
 import { portfolio, snapshot } from "../portfolio/fixtures";
+import { researchData } from "../research/fixtures";
 
 const meta = { request_id: "0198d500-1000-7000-8000-000000001399", schema_version: "1", as_of: "2026-08-24T00:00:00Z" };
 const shadowGroupId = "0198d500-1000-7000-8000-000000001391";
 
 describe("optimization Engine response boundary", () => {
+  it.each([false, true])("preserves exact intent time identity, mismatch=%s", async (mismatch) => {
+    const intent = researchData().intent!;
+    intent.decision_time = "2026-08-24T20:00:00.000999Z";
+    const context = { ...draftResearchContext(), intent, unavailable_reason: null,
+      instrument_id: intent.instrument_id, research_data_snapshot_id: intent.data_snapshot_id,
+      quality_status: intent.quality_status,
+      research_as_of: mismatch ? "2026-08-24T20:00:00.000001Z" : intent.decision_time,
+    };
+    const data = proposalGroup({ research_context: context });
+    for (const proposal of data.proposals) {
+      proposal.analysis_only = true;
+      proposal.comparison.non_executable = true;
+      proposal.comparison.metrics.ranking_eligible = false;
+    }
+    const response = await sanitizeEngineResponse(json({ data, meta }), undefined, `/internal/v1/optimization-proposals/${groupId}`);
+    expect(response.status).toBe(mismatch ? 500 : 200);
+  });
+  it.each(["valid", "baseline", "diagnostic", "time", "microseconds", "reason", "quality", "permission", "mode"])("validates saved research context %s", async (changed) => {
+    const context = draftResearchContext();
+    const data = proposalGroup({ research_context: context });
+    for (const proposal of data.proposals) {
+      proposal.analysis_only = true;
+      proposal.comparison.non_executable = true;
+      proposal.comparison.metrics.ranking_eligible = false;
+    }
+    if (changed === "baseline") context.portfolio_snapshot_id = context.root_id;
+    if (changed === "diagnostic") context.diagnostic_report_id = context.root_id;
+    if (changed === "time") context.research_as_of = "2026-08-23T00:00:00Z";
+    if (changed === "microseconds") {
+      context.output_available_at = "2026-08-25T00:10:00.000999Z";
+      context.context_as_of = "2026-08-25T00:10:00.000001Z";
+    }
+    if (changed === "reason") context.unavailable_reason = "RESEARCH_FAILED";
+    if (changed === "quality") context.quality_status = "complete";
+    if (changed === "permission") data.shadow_eligibility.eligible = true;
+    if (changed === "mode") Object.assign(context, { mode: "decision_authority" });
+    const response = await sanitizeEngineResponse(json({ data, meta }), undefined, `/internal/v1/optimization-proposals/${groupId}`);
+    expect(response.status).toBe(changed === "valid" ? 200 : 500);
+  });
   it("explains missing FX valuation without forwarding upstream details", async () => {
     const response = await sanitizeEngineResponse(Response.json({ error: {
       code: "DATA_PARTIAL", message: "untrusted", request_id: meta.request_id,

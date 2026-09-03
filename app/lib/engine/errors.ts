@@ -309,7 +309,7 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
         && proposal.comparison.non_executable === true && isPlain(proposal.comparison.metrics)
         && proposal.comparison.metrics.ranking_eligible === false)
       : proposalGroup !== null && sameUuid(data.proposal_group_id, proposalGroup[1]);
-    return bound && economicValid
+    return bound && economicValid && validDraftResearchContext(data)
       && variants.join(":") === "hold_current:minimum_change:strategy_target"
       && ids.every((id) => typeof id === "string") && new Set(ids).size === 3
       ? data
@@ -419,6 +419,47 @@ function allowedSuccessData(data: unknown, requestUrl?: string, schemaPath?: str
       : INVALID_DATA;
   }
   return schemaPath === undefined && isPlain(data) ? data : INVALID_DATA;
+}
+
+// The Engine has already verified the stored hash; keep its context-only/time/identity
+// contract intact at the browser boundary instead of granting authority from prose.
+function validDraftResearchContext(group: Record<string, unknown>): boolean {
+  const context = group.research_context;
+  if (context == null) return true;
+  if (!isPlain(context) || !sameUuid(context.portfolio_snapshot_id, group.baseline_portfolio_snapshot_id)
+    || !isPlain(group.shadow_eligibility) || group.shadow_eligibility.eligible !== false
+    || !Array.isArray(group.proposals) || !group.proposals.every((proposal) =>
+      isPlain(proposal) && proposal.analysis_only === true && isPlain(proposal.comparison)
+      && proposal.comparison.non_executable === true && isPlain(proposal.comparison.metrics)
+      && proposal.comparison.metrics.ranking_eligible === false
+      && isPlain(proposal.comparison.metrics.authority)
+      && sameUuid(context.diagnostic_report_id, proposal.comparison.metrics.authority.diagnostic_report_id))) return false;
+  const values = [context.valuation_time, context.research_as_of, context.output_available_at, context.context_as_of].map(contextMicroseconds);
+  if (!values.every((value): value is bigint => value !== null)) return false;
+  if (values.some((value, index) => index > 0 && value < values[index - 1])) return false;
+  if (context.intent != null) {
+    const intent = context.intent;
+    return isPlain(intent) && context.run_status === "completed" && context.unavailable_reason === null
+      && sameUuid(intent.instrument_id, context.instrument_id)
+      && sameUuid(intent.data_snapshot_id, context.research_data_snapshot_id)
+      && contextMicroseconds(intent.decision_time) === values[1]
+      && intent.quality_status === context.quality_status;
+  }
+  return context.quality_status === "partial" && (
+    context.run_status === "completed" && context.unavailable_reason === "STAGED_ACTION_SEMANTICS_UNVERIFIED"
+    || context.run_status === "failed" && context.unavailable_reason === "RESEARCH_FAILED"
+    || context.run_status === "abstained" && context.unavailable_reason === "RESEARCH_ABSTAINED"
+  );
+}
+
+function contextMicroseconds(value: unknown): bigint | null {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(?:Z|\+00:00)$/.exec(value);
+  if (!match) return null;
+  const seconds = Date.parse(`${match[1]}Z`);
+  return Number.isFinite(seconds)
+    ? BigInt(seconds) * BigInt(1000) + BigInt((match[2] ?? "").padEnd(6, "0"))
+    : null;
 }
 
 function shadowStartValid(data: unknown, groupId: string): data is Record<string, unknown> {

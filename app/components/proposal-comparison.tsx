@@ -5,6 +5,7 @@ import { statusLabel, reasonText, reasonLabel } from "../lib/display-labels";
 import { AlertTriangle, Check, FlaskConical, RefreshCw, X } from "lucide-react";
 import { useState } from "react";
 import type { components } from "../lib/generated/schema";
+import { ProposalResearchContext } from "./proposal-research-context";
 
 type ProposalGroup = components["schemas"]["OptimizationProposalGroupResponse"];
 type Proposal = ProposalGroup["proposals"][number];
@@ -106,6 +107,7 @@ export function ProposalComparison({ group, startShadowEnabled = true, rejectEna
       </header>
 
       <EconomicComparisonSummary comparison={group.economic_comparison} />
+      <ProposalResearchContext context={group.research_context} />
 
       {/* The bounded scroll region must be keyboard-focusable on narrow screens. */}
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
