@@ -98,9 +98,11 @@
 - [x] **Step 2: 跑红后实现精确适配。** executor 对 Codex 传固定 model ID/version 给 resolver；将 worker 剩余 deadline 留出至少 5 秒结算余量，并传递同一绝对 monotonic deadline，不能在 service 预检后从调用开始重新计时而越过 worker 的 45 秒上限。普通 setup 增加显式策略研发选项并注册 exact prompt/config；不复用委员会的 prompt version，不改默认 setup，也不顺带入队或外呼。
 - [x] **Step 3: 订阅用量持久化回归。** 新 Codex version 的 `settled_cost_usd=None`；实际 token（包括超阈值但已知的数字）原样持久化，未知调用三项计数均 null 且失败。新迁移放开 input_tokens/output_tokens/tool_call_count 的 NOT NULL，并约束三项同时已知或同时未知；旧数值/旧行不更新。降级仅在无 null 记录时允许，已有未知记录则明确拒绝，不填零来降级。隔离 PG 覆盖升级、合法/非法插入、历史数值保持和两种降级路径；原 Responses 美元计费和 fixture 回归不变。新版本仅经明确 setup/受控注册存在，不把旧 v1/v2 委员会记录重标成策略研发配置。
 - [x] **Step 4: 隔离 PG 接线。** synthetic authority 经 executor→execute_strategy_rnd→数据库验证：成功只创建一个严格输出；错误、超时、重领不创建 family；无合格调整价格时在外呼前停止；原 OOS/promotion/rollback 测试保持。
-- [ ] **Step 5: 审查并集成。** 集中审查明确区分本地运行时/入口/真实家族，A 合入后复核主线包含变更。真实 family 仍不启动，直到同一合法数据 authority 和普通准备入口都已具备；不代用户选择真实策略动作。
+- [x] **Step 5: 审查并集成。** 集中审查明确区分本地运行时/入口/真实家族，A 合入后复核主线包含变更。真实 family 仍不启动，直到同一合法数据 authority 和普通准备入口都已具备；不代用户选择真实策略动作。
 
   root 基线为 `0872916`（含 B `ac693f3`），运行时接线提交 `9ad78b6`；setup 与依赖它的重领 PG 分成第二个小提交，避免一片超过 800 行。167 项相关 unit、11 项 executor/worker/setup PG、6 源文件 Mypy、Ruff/diff-check通过。独立审查唯一 P2 为 service 预检后的相对 deadline 重起算，先红回归后改为固定绝对截止，59 项定向复核及受影响 3 项生成/重领 PG 再验通过。A 另以 `1d66446` 修复通用研究默认选择/显式准入/worker 对新 RND 配置的隔离，11 PG、独立17 unit通过。以上均无真实模型/券商调用；主线集成及业务运行仍分别记录。
+
+  A 已将 `9ad78b6` / `d734eba` 合为 `2cb24d3` / `9127a5d`，主线最终检查点 `fc88e1d`。root 对全部12个交付文件比较无差异，确认不是仅已发送。A 的80项相关 unit/PG及7源Mypy/Ruff复验通过。业务数据库仍0035、API仍ab29f3f，未执行业务setup或启动E1 worker；不把代码完成当真实家族验收完成。
 
 ## 后续验收边界
 
