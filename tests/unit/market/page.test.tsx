@@ -339,6 +339,49 @@ describe("market vertical slice", () => {
     expect(screen.getByText("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE")).toBeVisible();
   });
 
+  it.each([{ qualityReasons: [] }, { qualityReasons: ["FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE"] }])("uses explicit receipt time without inventing a Fosun source time (flags: %j)", async ({ qualityReasons }) => {
+    const receivedItem: MarketItem = {
+      ...item, source: "fosun", feed: "l1", delivery_mode: "unknown", quality: "PARTIAL",
+      quality_reasons: qualityReasons, source_observed_at: null, received_at: "2026-08-21T21:02:03Z",
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(marketEnvelope({ items: [receivedItem], selectedSeries: null, intradayMonitor: null }))));
+    render(<MarketPage />);
+    const quote = await screen.findByRole("region", { name: "AAPL 报价证据" });
+    expect(quote).toHaveTextContent("本机接收时间（网关响应）2026-08-22 05:02:03 北京时间");
+    expect(quote).toHaveTextContent("报价源时间未知");
+    expect(quote).toHaveTextContent("实时性未获证明");
+    expect(quote).not.toHaveTextContent("行情记录时间");
+    expect(quote).not.toHaveTextContent("2026-08-22 04:00:00");
+    expect(quote).not.toHaveTextContent("分钟延迟");
+  });
+
+  it("shows known source and local receipt times independently for a non-gateway source", async () => {
+    const timedItem: MarketItem = {
+      ...item, source_observed_at: "2026-08-21T19:58:01Z", received_at: "2026-08-21T19:59:02Z",
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(marketEnvelope({ items: [timedItem], selectedSeries: null, intradayMonitor: null }))));
+    render(<MarketPage />);
+    const quote = await screen.findByRole("region", { name: "AAPL 报价证据" });
+    expect(quote).toHaveTextContent("报价源时间2026-08-22 03:58:01 北京时间");
+    expect(quote).toHaveTextContent("本机接收时间2026-08-22 03:59:02 北京时间");
+    expect(quote).not.toHaveTextContent("网关响应");
+    expect(quote).not.toHaveTextContent("2026-08-22 04:00:00");
+  });
+
+  it.each([
+    { source_observed_at: null, received_at: null },
+    { source_observed_at: null },
+    { received_at: null },
+  ])("does not fill explicitly unknown timestamps from legacy as_of (%j)", async (times) => {
+    const unknownItem: MarketItem = { ...item, ...times, source: "fosun", feed: "l1", delivery_mode: "unknown" };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(marketEnvelope({ items: [unknownItem], selectedSeries: null, intradayMonitor: null }))));
+    render(<MarketPage />);
+    const quote = await screen.findByRole("region", { name: "AAPL 报价证据" });
+    expect(quote).toHaveTextContent("报价源时间未知");
+    expect(quote).toHaveTextContent("本机接收时间（网关响应）未知");
+    expect(quote).not.toHaveTextContent("2026-08-22");
+  });
+
   it("keeps stale data visible without causing a business action", () => {
     const onToggleWatchlist = vi.fn();
     render(
@@ -614,6 +657,8 @@ describe("market vertical slice", () => {
   });
 
   it("keeps a newer selected instrument when two market responses resolve out of order", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-22T00:00:30Z"));
     window.history.replaceState(null, "", `/market?selected=${item.instrument_id}`);
     let resolveOldAapl: ((response: Response) => void) | undefined;
     let resolveNewMsft: ((response: Response) => void) | undefined;
@@ -637,6 +682,7 @@ describe("market vertical slice", () => {
     fireEvent.click(screen.getByRole("button", { name: /MSFT/ }));
     await waitFor(() => expect(resolveNewMsft).toBeDefined());
 
+    vi.setSystemTime(new Date("2026-08-22T00:00:31Z"));
     await act(async () => {
       resolveNewMsft?.(jsonResponse(marketEnvelope({
         items: [item, msftItem],
@@ -647,7 +693,9 @@ describe("market vertical slice", () => {
     });
     expect(await screen.findByRole("region", { name: "MSFT 价格图表" })).toBeVisible();
     expect(screen.getByRole("region", { name: "MSFT 盘中证据" })).toBeVisible();
+    expect(screen.getByLabelText("页面成功读取时间")).toHaveTextContent("2026-08-22 08:00:31 北京时间");
 
+    vi.setSystemTime(new Date("2026-08-22T00:00:32Z"));
     await act(async () => {
       resolveOldAapl?.(jsonResponse(marketEnvelope({
         items: [item, msftItem],
@@ -661,6 +709,7 @@ describe("market vertical slice", () => {
     expect(screen.getByRole("region", { name: "MSFT 盘中证据" })).toBeVisible();
     expect(screen.queryByRole("region", { name: "AAPL 价格图表" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "AAPL 盘中证据" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("页面成功读取时间")).toHaveTextContent("2026-08-22 08:00:31 北京时间");
   });
 
   it("switches between persisted Fosun quotes and each instrument's daily bars", async () => {
@@ -754,15 +803,46 @@ describe("market vertical slice", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-22T00:00:30Z"));
     window.history.replaceState(null, "", `/market?selected=${item.instrument_id}&cursor=frozen-page`);
-    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () => jsonResponse(marketEnvelope()));
+    const frozenItem: MarketItem = {
+      ...item, source: "fosun", feed: "l1", source_observed_at: null, received_at: "2026-08-21T21:02:03Z",
+      delivery_mode: "unknown", quality: "PARTIAL", quality_reasons: ["QUOTE_STALE"],
+    };
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () => jsonResponse(marketEnvelope({ items: [frozenItem] })));
     vi.stubGlobal("fetch", fetchMock);
     const view = render(<MarketPage />);
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock.mock.calls.every(([url]) => String(url).includes("cursor=frozen-page"))).toBe(true);
     expect(screen.getByLabelText("查询快照时点")).toHaveTextContent("2026-08-22 08:00:00 北京时间");
-    expect(screen.queryByText(/本次读取时间|本次页面读取时间/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("页面成功读取时间")).toHaveTextContent("2026-08-22 08:01:00 北京时间");
+    const quote = screen.getByRole("region", { name: "AAPL 报价证据" });
+    expect(quote).toHaveTextContent("本机接收时间（网关响应）2026-08-22 05:02:03 北京时间");
+    expect(quote).toHaveTextContent("报价源时间未知");
+    expect(quote).not.toHaveTextContent("08:01:00");
+    expect(screen.getByRole("region", { name: "市场监控页面" })).toHaveAttribute("data-state", "stale");
     expect(screen.getByRole("link", { name: "打开 AAPL 个股研究" })).toHaveAttribute("href", `/research/${item.instrument_id}?as_of=${encodeURIComponent(marketEnvelope().meta.as_of)}`);
+    view.unmount();
+  });
+
+  it("retains the last successful page read time during a pending or failed request", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-22T00:00:30Z"));
+    window.history.replaceState(null, "", `/market?selected=${item.instrument_id}`);
+    let rejectRead: ((reason: Error) => void) | undefined;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(marketEnvelope()))
+      .mockImplementationOnce(() => new Promise<Response>((_resolve, reject) => { rejectRead = reject; }));
+    vi.stubGlobal("fetch", fetchMock);
+    const view = render(<MarketPage />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByLabelText("页面成功读取时间")).toHaveTextContent("2026-08-22 08:00:30 北京时间");
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    fireEvent.click(screen.getByRole("button", { name: "刷新行情" }));
+    expect(screen.getByRole("button", { name: "正在刷新行情" })).toBeDisabled();
+    expect(screen.getByLabelText("页面成功读取时间")).toHaveTextContent("2026-08-22 08:00:30 北京时间");
+    await act(async () => { rejectRead?.(new Error("synthetic read failure")); });
+    expect(screen.getByRole("region", { name: "市场监控页面" })).toHaveAttribute("data-state", "stale");
+    expect(screen.getByLabelText("页面成功读取时间")).toHaveTextContent("2026-08-22 08:00:30 北京时间");
     view.unmount();
   });
 
