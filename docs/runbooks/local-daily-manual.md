@@ -1,6 +1,6 @@
 # 手动快照诊断与单次研究
 
-`admit` / `advance` 把一个明确的已持久化快照串为“日根 → 对账校验 → 正式诊断”，不调用模型。新增 `research-admit` 在诊断成功后登记原生研究，只有显式 `research-run` 才调用一次已有研究 worker。所有命令均不采集券商、不创建方案、paper 或实盘订单，不启动调度。`completed` 只表示对应流程完成，不等于研究内容/投资决策合格。
+`admit` / `advance` 把一个明确的已持久化快照串为“日根 → 对账校验 → 正式诊断”，不调用模型。`research-admit` 在诊断成功后登记原生研究，只有显式 `research-run` 才调用一次已有研究 worker。`proposal-build` 将已保存研究绑定到不可执行草稿。所有命令均不采集券商、不创建 paper 或实盘订单，不启动调度。`completed` 只表示对应流程完成，不等于研究内容/投资决策合格。
 
 ## 配置和输入
 
@@ -41,11 +41,23 @@ python -m nexus.ops.daily_once research-admit --root-id <已有日根UUID> --ins
 python -m nexus.ops.daily_once research-run --root-id <已有日根UUID> --run-id <准入返回的run_id>
 ```
 
-两条研究命令均要求五项对象库配置显式非空及 `AGENT_RUNTIME_MODE=codex_sdk` 或 `responses`，不接受隐式 fixture。Codex 配置须匹配现有 v1/v2 研究模型；Responses 须具备原有 API key 与模型配置且所选模型一致。注册配置复用现有本地研究 setup，不在此处新建凭据或调用外部模型探测。预算沿用 `AGENT_DAILY_BUDGET_USD`，订阅配置中的零 API 计价不意味着订阅使用没有额度限制。
+两条研究命令均要求五项对象库配置显式非空及 `AGENT_RUNTIME_MODE=codex_sdk` 或 `responses`，不接受隐式 fixture。Codex 配置须匹配现有 v1/v2/v3 研究模型，v3 由已有 setup 的 `--structured-synthesis` 显式登记，不自动升级旧配置；Responses 须具备原有 API key 与模型配置且所选模型一致。注册配置复用现有本地研究 setup，不在此处新建凭据或调用外部模型探测。预算沿用 `AGENT_DAILY_BUDGET_USD`，订阅配置中的零 API 计价不意味着订阅使用没有额度限制。
 
 `research-admit` 只在父阶段成功时原子登记快照、原生 run/Job、预算预留及诊断依赖；相同冻结请求返回同一 run，旧 run 若缺少依赖不会被补写。`research-run` 先核验 root/run、冻结上下文、模型与依赖，只领取或回收这一原生 Job，最多一次 worker tick；其他排队作业及过期租约不受影响。不等待未来 available_at、不循环重试；失败先查原 run 的保护状态和日志，不改 cutoff 重放。
 
 研究输出仅含 root/run ID、作业与研究状态、处理数及固定结果码。`prepared` 是已准入而未执行；`pending` 是原作业排队/运行；`blocked` 是失败或不满足完成条件。`completed` 也可能是 partial 研究，必须继续依据现有质量/未知项判断，不生成订单或解锁执行。通信/提交确认不清仍为 `unknown`，不要当作没有产生研究。
+
+### 保存带研究依据的只读草稿
+
+```text
+python -m nexus.ops.daily_once proposal-build --root-id <已有日根UUID> --run-id <该根的终态研究UUID> --context-as-of <结果可用后的实际UTC截止> --idempotency-key <本次稳定请求键>
+```
+
+不调用模型，也不创建或推进 Job。仍须显式五项对象库配置和就绪数据库；直接复用原草稿构造器、冻结源材料读取和事务。通过准确 root/run 自动取得原组合快照与诊断；不选择最新研究或最新账户快照。输出只含草稿/根/运行 ID、`draft_created`、`context_only` 与 `execution_locked=true`，不含持仓、资金或研究原文。
+
+引用截止和请求键须保持稳定：相同请求返回原草稿；不要用新截止冒充旧请求重试。缺少草稿所需流动性等材料或研究绑定无效时返回 `DAILY_ONCE_DRAFT_INPUT_UNAVAILABLE`；通信/提交确认不足仍返回 unknown，先查原请求不盲目重放。失败或弃权研究只能保存明确的不可用原因，不能被当作合格结论。
+
+新草稿输入使用 `optimization_draft_inputs_v2` 保存准确输出 ID、内容摘要、证据及独立时间。原估值时间不变，研究不参与目标仓位计算；页面“冻结研究依据”只展示这一保存值，刷新不调用采集/模型。旧 v1 草稿不补写 context，旧正式优化入口拒绝把 v2 context 当准入权威。这不等于正式研究约束目标或完整经济比较已完成。
 
 ### 保留旧行为
 

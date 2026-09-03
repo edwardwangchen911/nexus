@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import hashlib
 import json
 import sys
 from datetime import UTC, datetime
@@ -31,6 +32,11 @@ from nexus.jobs.daily_research import admit_daily_research, resolve_daily_resear
 from nexus.jobs.models import QueueName
 from nexus.jobs.worker import run_job_worker_once
 from nexus.market.object_store import S3ProviderEvidenceStore
+from nexus.optimizer.initial_draft import InitialDraftUnavailable, create_initial_draft
+from nexus.optimizer.research_context import (
+    DailyResearchContextRequest,
+    freeze_daily_research_context,
+)
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchRunRecord
 from nexus.persistence.models.runtime import Job
@@ -59,6 +65,7 @@ _SAFE_CODES = {
     "MANUAL_DAILY_RESEARCH_DIAGNOSIS_UNAVAILABLE",
     "MANUAL_DAILY_RESEARCH_EVIDENCE_UNAVAILABLE",
     "MANUAL_DAILY_RESEARCH_BINDING_INVALID",
+    "DAILY_ONCE_DRAFT_INPUT_UNAVAILABLE",
 }
 
 
@@ -129,8 +136,17 @@ class DailyResearchRunRequest(BaseModel):
     run_id: UUID
 
 
+class DailyProposalBuildRequest(DailyResearchContextRequest):
+    action: Literal["proposal-build"]
+    idempotency_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+
+
 DailyRequest = (
-    DailyAdmitRequest | DailyAdvanceRequest | DailyResearchAdmitRequest | DailyResearchRunRequest
+    DailyAdmitRequest
+    | DailyAdvanceRequest
+    | DailyResearchAdmitRequest
+    | DailyResearchRunRequest
+    | DailyProposalBuildRequest
 )
 
 
@@ -148,12 +164,17 @@ async def _require_research_model(
 ) -> None:
     model = await session.get(AgentModelConfigRecord, model_id)
     if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
-        from nexus.agents.codex_sdk import CONFIG_VERSION, MODEL_ID, STAGED_CONFIG_VERSION
+        from nexus.agents.codex_sdk import (
+            CONFIG_VERSION,
+            MODEL_ID,
+            STAGED_CONFIG_VERSION,
+            STRUCTURED_CONFIG_VERSION,
+        )
 
         valid = (
             model is not None
             and model.model_id == MODEL_ID
-            and model.version in {CONFIG_VERSION, STAGED_CONFIG_VERSION}
+            and model.version in {CONFIG_VERSION, STAGED_CONFIG_VERSION, STRUCTURED_CONFIG_VERSION}
             and model.input_usd_per_million == 0
             and model.output_usd_per_million == 0
         )
@@ -287,6 +308,49 @@ async def _advance(
     return {"status": status, "root_id": str(root_id), "processed": processed, "stages": stages}
 
 
+async def _proposal(
+    factory: async_sessionmaker[AsyncSession],
+    settings: EngineSettings,
+    request: DailyProposalBuildRequest,
+) -> dict[str, object]:
+    try:
+        reader = S3ProviderEvidenceStore(settings).read_normalized
+    except Exception as error:
+        raise DailyOnceError("DAILY_ONCE_ARTIFACT_READER_UNAVAILABLE") from error
+    reference = DailyResearchContextRequest(
+        root_id=request.root_id,
+        run_id=request.run_id,
+        context_as_of=request.context_as_of,
+    )
+    digest = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
+    async with factory() as session, session.begin():
+        await assert_daily_pipeline_schema_ready(session)
+        try:
+            frozen = await freeze_daily_research_context(session, **reference.model_dump())
+            group = await create_initial_draft(
+                session,
+                portfolio_snapshot_id=frozen.portfolio_snapshot_id,
+                diagnostic_report_id=frozen.diagnostic_report_id,
+                actor_id="local-daily-proposal",
+                idempotency_key=request.idempotency_key,
+                request_hash=digest,
+                now=datetime.now(UTC),
+                artifact_reader=reader,
+                research_context=reference,
+            )
+        except (InitialDraftUnavailable, ValueError) as error:
+            raise DailyOnceError("DAILY_ONCE_DRAFT_INPUT_UNAVAILABLE") from error
+        output: dict[str, object] = {
+            "status": "draft_created",
+            "proposal_group_id": str(group.group_id),
+            "root_id": str(request.root_id),
+            "run_id": str(request.run_id),
+            "mode": "context_only",
+            "execution_locked": True,
+        }
+    return output
+
+
 async def run_once(
     settings: EngineSettings,
     request: DailyRequest,
@@ -307,6 +371,10 @@ async def run_once(
     try:
         if isinstance(request, DailyResearchAdmitRequest | DailyResearchRunRequest):
             _require_research_runtime(settings)
+        if isinstance(request, DailyProposalBuildRequest) and (
+            not isinstance(settings, DailyOnceSettings) or not settings.explicit_artifact_config
+        ):
+            raise DailyOnceError("DAILY_ONCE_ARTIFACT_READER_UNAVAILABLE")
         engine = create_async_engine(settings.database_url)
         try:
             factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -314,6 +382,8 @@ async def run_once(
                 return await _advance(factory, settings, request.root_id)
             if isinstance(request, DailyResearchAdmitRequest | DailyResearchRunRequest):
                 return await _research(factory, settings, request)
+            if isinstance(request, DailyProposalBuildRequest):
+                return await _proposal(factory, settings, request)
             async with factory() as session, session.begin():
                 root = await enqueue_manual_daily_root(
                     session,
@@ -355,6 +425,9 @@ def main() -> None:
     research_run = commands.add_parser("research-run", help="仅运行明确绑定的一项原生研究")
     research_run.add_argument("--root-id", required=True)
     research_run.add_argument("--run-id", required=True)
+    proposal = commands.add_parser("proposal-build", help="将已保存研究绑定到不可执行草稿")
+    for field in ("root-id", "run-id", "context-as-of", "idempotency-key"):
+        proposal.add_argument(f"--{field}", required=True)
     try:
         args = vars(parser.parse_args())
         request_types: dict[
@@ -362,12 +435,14 @@ def main() -> None:
             type[DailyAdmitRequest]
             | type[DailyAdvanceRequest]
             | type[DailyResearchAdmitRequest]
-            | type[DailyResearchRunRequest],
+            | type[DailyResearchRunRequest]
+            | type[DailyProposalBuildRequest],
         ] = {
             "admit": DailyAdmitRequest,
             "advance": DailyAdvanceRequest,
             "research-admit": DailyResearchAdmitRequest,
             "research-run": DailyResearchRunRequest,
+            "proposal-build": DailyProposalBuildRequest,
         }
         request = request_types[args["action"]].model_validate(args)
     except (DailyOnceError, ValidationError):

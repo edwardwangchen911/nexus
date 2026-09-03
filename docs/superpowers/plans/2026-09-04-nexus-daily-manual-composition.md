@@ -100,6 +100,10 @@ Owner=root，基线同步main `70c9e82`，独立分支`edward/nexus-daily-resear
 
 5a-backend：可选请求只接收root/run/UTC截止，服务端冻结可信输出后写`optimization_draft_inputs_v2`全文身份，GET读取原保存值并验证schema/hash/内外ID/时序；无context旧v1不变。15项unit通过；新旧草稿12项PG通过，补充错root/run/未来或早截止零草稿写入、晚追加坏output不改变旧GET、旧formal入口拒绝v2且Job数不变及原read/symbol路径8项PG通过。Ruff/Mypy4及独立集中审查无P1/P2。合成诊断叶子测试不代表真实源端到端验收；本地组合入口、页面及同一真实案例尚待后片。
 
+5a-page：复用现有方案页增加冻结研究依据，分开原估值/研究截止/输出实际可用/引用截止，原生展开显示原论点/未知项/证据定位及版本，无最新查询或模型调用。BFF保持微秒时序与intent时间身份、组合/诊断身份及不可执行边界；23 BFF、6新组件和21旧组件测试通过。独立375/1440浏览器测试通过，含键盘展开、长hash、无外写及局部严重可访问性检查；发现旧comparison/actions隐式grid min-content溢出，以两处minmax修复，不裁剪内容。该浏览器案例是合成响应；真实数据库/BFF/DOM同案例仍待A成组加载验收。
+
+5a-local：`daily_once proposal-build` 只接root/run/UTC引用截止/稳定请求键，由精确研究上下文取得原baseline/diagnostic并复用原同步草稿构造器。显式本地数据库/五项归档配置、schema就绪校验，无Job/采集/模型；只输出安全ID及context-only执行锁。25项ops单测、Mypy2及新9项PG通过，包含原生研究→单次草稿→存储重读幂等且Job数不变。新增v3综合论点/反证审查的全部引用绑定，两个伪造摘要PG先红后绿，另有合法结构化正文通过。独立集中审查ready；不启用定时任务，也不宣称正式优化准入完成。
+
 ### Task5b：正式研究约束目标（仍待实现与条件）
 
 - [ ] 研究输出存在之后的新真实baseline/diagnostic/selection，必须按现有source/quality/cost/风险条件冻结，并显式绑定已验证研究数据身份；不能复制旧持仓抬as_of、改intent或放宽原gate。

@@ -1,5 +1,6 @@
 """A later research context is frozen, not backdated into scenario valuation."""
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -20,9 +21,15 @@ from nexus.jobs.daily_manual import (
 from nexus.jobs.daily_research import admit_daily_research, resolve_daily_research_job
 from nexus.jobs.models import QueueName
 from nexus.jobs.worker import run_job_worker_once
+from nexus.ops.daily_once import DailyOnceSettings, DailyProposalBuildRequest, run_once
 from nexus.ops.openai_local import prepare_database
+from nexus.optimizer.research_context import freeze_daily_research_context
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
-from nexus.persistence.models.agents import AgentModelConfigRecord, AgentResearchOutputRecord
+from nexus.persistence.models.agents import (
+    AgentModelConfigRecord,
+    AgentResearchOutputEvidenceRecord,
+    AgentResearchOutputRecord,
+)
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -244,3 +251,145 @@ async def test_researched_draft_rejects_output_before_available_without_new_draf
             )
             == 0
         )
+
+
+@pytest.mark.asyncio
+async def test_daily_proposal_once_uses_stored_context_without_model_or_new_jobs(
+    migrated_database_url, monkeypatch
+):
+    factory, _, _, context = await _case(migrated_database_url, monkeypatch)
+
+    class Store:
+        def __init__(self, settings):
+            self.read_normalized = FixtureArtifactReader({})
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("proposal-build must never execute model or job worker")
+
+    monkeypatch.setattr("nexus.ops.daily_once.S3ProviderEvidenceStore", Store)
+    monkeypatch.setattr("nexus.ops.daily_once.run_agent_worker_once", forbidden)
+    monkeypatch.setattr("nexus.ops.daily_once.run_job_worker_once", forbidden)
+    configured = DailyOnceSettings(
+        database_url=migrated_database_url,
+        object_store_endpoint="http://127.0.0.1:19000",
+        object_store_region="test-region",
+        object_store_bucket="synthetic-test",
+        object_store_access_key_id="synthetic-key",
+        object_store_secret_access_key="synthetic-secret",
+    )
+    request = DailyProposalBuildRequest(action="proposal-build", idempotency_key="once", **context)
+    async with factory() as session:
+        jobs_before = await session.scalar(select(func.count()).select_from(Job))
+    result = await run_once(configured, request)
+    assert result["status"] == "draft_created" and result["execution_locked"] is True
+    assert await run_once(configured, request) == result
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Job)) == jobs_before
+        assert (
+            await session.scalar(select(func.count()).select_from(OptimizationProposalGroupRecord))
+            == 1
+        )
+        group = await session.get(
+            OptimizationProposalGroupRecord, UUID(result["proposal_group_id"])
+        )
+        data = await session.get(DataSnapshot, group.data_snapshot_id)
+        assert data.payload["research_context"]["run_id"] == context["run_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_group", [None, "claims", "reviews"])
+async def test_context_rejects_unbound_structured_synthesis_evidence(
+    migrated_database_url, monkeypatch, bad_group
+):
+    factory, _, _, context = await _case(migrated_database_url, monkeypatch)
+    async with factory() as session, session.begin():
+        original = await session.scalar(
+            select(AgentResearchOutputRecord)
+            .where(
+                AgentResearchOutputRecord.run_id == UUID(context["run_id"]),
+                AgentResearchOutputRecord.role.is_(None),
+            )
+            .order_by(AgentResearchOutputRecord.sequence.desc())
+        )
+        intent = dict(original.intent)
+        ref = intent["evidence_refs"][0]
+        assessment = {
+            "stance": "watch",
+            "claims": [{"text": "Synthetic support", "evidence_refs": [ref]}],
+            "reviews": [
+                {
+                    "claim_id": "bear:0",
+                    "status": "unresolved",
+                    "rationale": "Synthetic unknown",
+                    "evidence_refs": [ref],
+                    "resolved": False,
+                    "missing_evidence": ["Synthetic missing"],
+                    "prevented_conclusion": "Cannot conclude",
+                }
+            ],
+            "review_conclusion": "limited",
+            "uncertainties": ["Synthetic unknown"],
+        }
+        if bad_group is not None:
+            assessment[bad_group][0]["evidence_refs"] = [{**ref, "content_hash": "e" * 64}]
+        intent["synthesis_assessment"] = assessment
+        content = {
+            "status": original.status,
+            "role": None,
+            "payload": original.payload,
+            "intent": intent,
+        }
+        later = AgentResearchOutputRecord(
+            run_id=original.run_id,
+            sequence=original.sequence + 1,
+            prompt_hash=None,
+            content_hash=hashlib.sha256(
+                json.dumps(content, sort_keys=True, separators=(",", ":"), default=str).encode()
+            ).hexdigest(),
+            created_at=datetime.now(UTC),
+            **content,
+        )
+        session.add(later)
+        await session.flush()
+        bindings = list(
+            await session.scalars(
+                select(AgentResearchOutputEvidenceRecord).where(
+                    AgentResearchOutputEvidenceRecord.output_id == original.id,
+                )
+            )
+        )
+        for binding in bindings:
+            session.add(
+                AgentResearchOutputEvidenceRecord(
+                    output_id=later.id,
+                    **{
+                        name: getattr(binding, name)
+                        for name in (
+                            "evidence_ref_id",
+                            "source",
+                            "provider_object_id",
+                            "revision",
+                            "available_at",
+                            "location",
+                            "content_hash",
+                        )
+                    },
+                )
+            )
+    async with factory() as session:
+        if bad_group is None:
+            frozen = await freeze_daily_research_context(
+                session,
+                root_id=UUID(context["root_id"]),
+                run_id=UUID(context["run_id"]),
+                context_as_of=datetime.now(UTC),
+            )
+            assert frozen.intent.synthesis_assessment is not None
+            return
+        with pytest.raises(ValueError, match="DRAFT_RESEARCH_OUTPUT_INVALID"):
+            await freeze_daily_research_context(
+                session,
+                root_id=UUID(context["root_id"]),
+                run_id=UUID(context["run_id"]),
+                context_as_of=datetime.now(UTC),
+            )

@@ -204,6 +204,8 @@ async def _intent(
             intent.invalidation_conditions,
             intent.entry_conditions,
             intent.exit_conditions,
+            intent.synthesis_assessment.claims if intent.synthesis_assessment is not None else (),
+            intent.synthesis_assessment.reviews if intent.synthesis_assessment is not None else (),
         )
         for claim in collection
         for ref in claim.evidence_refs
