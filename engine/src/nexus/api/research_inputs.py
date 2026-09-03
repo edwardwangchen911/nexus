@@ -1,19 +1,26 @@
-"""Read-only display of the SEC facts already bound to one research snapshot."""
+"""Read-only display of facts already bound to one research snapshot."""
 
 from datetime import datetime
 from typing import Literal, cast
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.portfolio_context import read_portfolio_context
-from nexus.api.schemas.agents import ResearchInputFact, ResearchInputFiling, ResearchInputsSummary
+from nexus.api.schemas.agents import (
+    ResearchInputFact,
+    ResearchInputFiling,
+    ResearchInputIssuerDistribution,
+    ResearchInputsSummary,
+)
 from nexus.domain.decimal import decimal_to_string
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord as Frozen
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.research import Filing, FinancialFactRecord, ResearchEvidenceRef
 from nexus.research.sec_disclosures import read_disclosures
+from nexus.research.ssga_distributions import SOURCE, read_distributions
 
 
 async def read_research_inputs(
@@ -47,7 +54,10 @@ async def read_research_inputs(
             .limit(21)
         )
     )
-    if not rows:
+    issuer_distributions = await _read_issuer_inputs(
+        session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of
+    )
+    if not rows and not issuer_distributions:
         return None
     visible = rows[:20]
     disclosures = await read_disclosures(
@@ -84,6 +94,7 @@ async def read_research_inputs(
         )
     )
     return ResearchInputsSummary(
+        issuer_distributions=issuer_distributions,
         portfolio_context=await read_portfolio_context(session, snapshot_id, instrument_id, as_of),
         display_symbol=symbol,
         filings=tuple(
@@ -125,4 +136,69 @@ async def read_research_inputs(
         ),
         total_facts=total,
         truncated=len(rows) > 20 or total > len(facts),
+    )
+
+
+async def _read_issuer_inputs(
+    session: AsyncSession, *, snapshot_id: UUID, instrument_id: UUID, as_of: datetime
+) -> tuple[ResearchInputIssuerDistribution, ...]:
+    references = {
+        evidence.id: evidence
+        for evidence in await session.scalars(
+            select(ResearchEvidenceRef)
+            .join(Frozen, Frozen.evidence_ref_id == ResearchEvidenceRef.id)
+            .where(
+                Frozen.data_snapshot_id == snapshot_id,
+                Frozen.instrument_id == instrument_id,
+                Frozen.authority_kind == "research",
+                Frozen.source == ResearchEvidenceRef.source,
+                Frozen.provider_object_id == ResearchEvidenceRef.provider_object_id,
+                Frozen.revision == ResearchEvidenceRef.revision,
+                Frozen.available_at == ResearchEvidenceRef.available_at,
+                Frozen.content_hash == ResearchEvidenceRef.content_hash,
+                Frozen.location == ResearchEvidenceRef.location,
+                ResearchEvidenceRef.source == SOURCE,
+                ResearchEvidenceRef.available_at <= as_of,
+                ResearchEvidenceRef.created_at <= as_of,
+            )
+        )
+    }
+    if not references:
+        return ()
+    try:
+        documents = await read_distributions(
+            session, instrument_id=instrument_id, as_of=as_of, evidence_ids=tuple(references)
+        )
+    except ValidationError:
+        # A malformed optional observation must not hide valid frozen SEC facts.
+        return ()
+    return tuple(
+        ResearchInputIssuerDistribution(
+            evidence_ref_id=evidence_id,
+            source="ssga_distribution",
+            revision=references[evidence_id].revision,
+            content_hash=references[evidence_id].content_hash,
+            ex_date=document.ex_date,
+            record_date=document.record_date,
+            payable_date=document.payable_date,
+            currency=document.currency,
+            amount_basis=document.amount_basis,
+            dividend_per_share=decimal_to_string(document.dividend_per_share),
+            short_term_capital_gain=(
+                None
+                if document.short_term_capital_gain is None
+                else decimal_to_string(document.short_term_capital_gain)
+            ),
+            long_term_capital_gain=(
+                None
+                if document.long_term_capital_gain is None
+                else decimal_to_string(document.long_term_capital_gain)
+            ),
+            available_at=document.available_at,
+            # The canonical reader verifies received_at == document.available_at.
+            received_at=document.available_at,
+            source_url=document.source_url,
+            historical_backtest_eligible=document.historical_backtest_eligible,
+        )
+        for evidence_id, document in documents.items()
     )
