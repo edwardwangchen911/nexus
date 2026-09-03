@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 from uuid import UUID
 
+import pytest
 from nexus.agents.committee import (
     ROLE_ORDER,
     CommitteeRoleOutput,
@@ -214,7 +215,7 @@ def test_missing_price_authority_forces_market_abstention_and_watch() -> None:
 def test_staged_synthesis_is_not_outvoted_by_earlier_support_and_keeps_evidence_veto():
     votes = ("support",) * 5 + ("oppose", "support", "oppose")
     intent = _synthesize(votes, staged=True)
-    assert intent.stance == "reduce_candidate"
+    assert intent.stance == "watch"
     assert intent.theses[0].text == "portfolio evidence"
     assert [claim.text for claim in intent.counter_theses] == [
         "bear evidence",
@@ -225,6 +226,15 @@ def test_staged_synthesis_is_not_outvoted_by_earlier_support_and_keeps_evidence_
     unresolved = _synthesize(votes[:6] + ("abstain", "support"), staged=True)
     assert unresolved.stance == "watch" and unresolved.quality_status == "partial"
     assert "Evidence review has unresolved objections." in unresolved.uncertainties
+
+
+@pytest.mark.parametrize("final_vote", ["support", "oppose", "abstain"])
+def test_staged_role_vote_cannot_establish_action_or_resolved_evidence(final_vote):
+    intent = _synthesize(("support",) * 7 + (final_vote,), staged=True)
+    assert (intent.stance, intent.exposure_action) == ("watch", "none")
+    assert intent.quality_status == "partial"
+    assert intent.evidence_audit == "partial"
+    assert "三阶段角色表态未明确投资方向或审查缺口是否解决，仅供研究观察。" in intent.uncertainties
 
 
 def test_price_shaped_strings_do_not_establish_revalidated_authority() -> None:

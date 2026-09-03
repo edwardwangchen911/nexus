@@ -44,7 +44,7 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
           <h2 id="decision-card-title">委员会决策记录</h2>
         </div>
         <div className="decision-card__badges">
-          <Badge data-state={intent?.quality_status === "complete" ? "ready" : "partial"}>{statusLabel(intent?.quality_status ?? research.status)}</Badge>
+          <Badge data-state={intent?.quality_status === "complete" ? "ready" : "partial"}>{statusLabel(intent?.quality_status ?? research.quality_status ?? research.status)}</Badge>
           <Badge variant="secondary">{intent ? stanceLabels[intent.stance] : "未形成研究意图"}</Badge>
         </div>
       </header>
@@ -77,7 +77,7 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
       {terminalReason ? (
         <div className="decision-card__warning" role="note">
           <ShieldAlert aria-hidden="true" size={19} />
-          <div><p>研究未完成：<span>{reasonText(terminalReason)}</span>。保留已验证证据供排查，此状态不能支持策略目标。</p>
+          <div><p>{terminalReason === "staged_action_semantics_unverified" ? "研究流程已完成，意图一致性未通过：" : "研究未完成："}<span>{reasonText(terminalReason)}</span>。保留已验证证据供排查，此状态不能支持策略目标。</p>
           {research.failed_stage_input ? <details><summary>失败调用的输入记录</summary><p>阶段：{({ research: "研究", critique: "反证", synthesis: "综合" } as const)[research.failed_stage_input.stage]}</p><p>请求摘要：<code>{research.failed_stage_input.request_hash}</code></p><p>同源输入：<code>{research.failed_stage_input.frozen_inputs_hash}</code></p></details> : null}
           </div>
         </div>

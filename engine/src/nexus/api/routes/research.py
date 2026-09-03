@@ -16,6 +16,7 @@ from nexus.agents.persistence import (
     load_complete_prompt_authority,
     select_authoritative_snapshot,
 )
+from nexus.agents.synthesis import staged_intent_semantics_valid
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
 from nexus.api.errors import ErrorCode, NexusError
@@ -318,6 +319,12 @@ def _response(
         intent = None
         evidence = ()
         abstention_reason = "evidence_authority_invalid"
+    semantics_invalid = intent is not None and not staged_intent_semantics_valid(
+        intent, run.pricing_version
+    )
+    if semantics_invalid:
+        intent = None
+        abstention_reason = "staged_action_semantics_unverified"
     if output is not None and output.intent is None:
         raw_reason = output.payload.get("reason")
         if isinstance(raw_reason, str) and len(raw_reason) <= 100:
@@ -330,7 +337,7 @@ def _response(
             except ValidationError:
                 pass
     status = run.status
-    if abstention_reason is not None and status == "completed":
+    if abstention_reason is not None and status == "completed" and not semantics_invalid:
         status = "abstained"
     return ResearchRunResponse(
         run_id=run.id,
@@ -353,7 +360,9 @@ def _response(
         role_votes=() if intent is None else intent.role_votes,
         disagreement=None if intent is None else intent.disagreement,
         invalidation_conditions=() if intent is None else intent.invalidation_conditions,
-        quality_status=None if intent is None else intent.quality_status,
+        quality_status="partial"
+        if semantics_invalid
+        else (None if intent is None else intent.quality_status),
         budget_reason="budget_exhausted" if abstention_reason == "budget_exhausted" else None,
         abstention_reason=abstention_reason,
         failed_stage_input=failed_stage_input,

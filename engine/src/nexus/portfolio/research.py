@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from sqlalchemy import select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.synthesis import STAGED_SEMANTICS_UNCERTAINTY, staged_intent_semantics_valid
 from nexus.api.schemas.portfolio import PositionResearchResponse, PositionResearchStatus
 from nexus.persistence.models.agents import (
     AgentDataSnapshotEvidenceRecord,
@@ -103,6 +104,11 @@ async def read_position_research(
                     intent = parsed
             except ValidationError:
                 pass
+        semantics_invalid = intent is not None and not staged_intent_semantics_valid(
+            intent, record.pricing_version
+        )
+        if semantics_invalid:
+            intent = None
         latest = latest_inputs.get(record.instrument_id)
         result[record.instrument_id] = PositionResearchResponse(
             read_at=read_at,
@@ -110,9 +116,13 @@ async def read_position_research(
             run_id=record.id,
             data_snapshot_id=record.data_snapshot_id,
             decision_time=record.decision_time,
-            quality_status=intent.quality_status if intent else None,
+            quality_status="partial"
+            if semantics_invalid
+            else (intent.quality_status if intent else None),
             summary=intent.theses[0].text[:400] if intent and intent.theses else None,
-            uncertainties=tuple(item[:400] for item in intent.uncertainties[:3]) if intent else (),
+            uncertainties=(STAGED_SEMANTICS_UNCERTAINTY,)
+            if semantics_invalid
+            else (tuple(item[:400] for item in intent.uncertainties[:3]) if intent else ()),
             newer_inputs_available=(
                 latest is not None
                 and latest.id != record.data_snapshot_id

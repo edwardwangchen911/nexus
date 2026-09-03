@@ -70,6 +70,7 @@ const reasons: Record<string, string> = {
   LIQUIDITY_REQUIRES_ADV20: "评估流动性需要近 20 个交易日的平均成交额",
   SECTOR_EXPOSURE_REQUIRES_IDENTITIES: "计算行业占比需要标的行业资料",
   CURRENCY_EXPOSURE_REQUIRES_IDENTITIES: "计算币种占比需要标的币种资料",
+  staged_action_semantics_unverified: "角色表态尚不能确定投资方向或证据缺口是否解决",
   model_usage_uncertain: "部分模型调用未返回用量",
   model_execution_failed: "模型执行未完成，具体原因尚未确认",
   conflicting_facts: "研究报告了尚未解决的事实矛盾",

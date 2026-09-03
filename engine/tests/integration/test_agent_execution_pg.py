@@ -449,6 +449,94 @@ async def test_fixture_worker_does_not_synthesize_under_strategy_rnd_identity(
 
 
 @pytest.mark.asyncio
+async def test_old_staged_direction_is_rejected_by_readers_without_rewriting_history(
+    migrated_database_url,
+    monkeypatch,
+):
+    from nexus.agents import execution
+    from nexus.portfolio.research import read_position_research
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    factory = session_factory(settings)
+    await _seed_authority(factory, model_version="codex-sdk-chatgpt-v2")
+    original_synthesis = execution.synthesize_intent
+
+    def historical_synthesis(*args, **kwargs):
+        return original_synthesis(*args, **kwargs).model_copy(
+            update={
+                "stance": "buy_candidate",
+                "exposure_action": "eligible_for_increase",
+                "quality_status": "complete",
+                "evidence_audit": "complete",
+            }
+        )
+
+    monkeypatch.setattr(execution, "synthesize_intent", historical_synthesis)
+    async with factory() as session, session.begin():
+        admission = await admit_research_run(
+            session,
+            actor_id="historical-test",
+            route="/internal/v1/research-runs",
+            idempotency_key="historical-staged-direction",
+            request_hash="c" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID, data_snapshot_id=_SNAPSHOT_ID, decision_time=_NOW
+            ),
+            prompt_version_id=None,
+            model_config_id=_MODEL_ID,
+            daily_limit_usd=Decimal("3"),
+            now=_NOW,
+        )
+        result = await execute_research_run(
+            session, run_id=admission.run_id, committee=FixtureCommittee()
+        )
+        assert result.status == "completed"
+    async with factory() as session:
+        before = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT md5(row_to_json(t)::text) FROM agent_research_outputs t "
+                        "WHERE run_id=:run_id ORDER BY sequence"
+                    ),
+                    {"run_id": admission.run_id},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        index = await read_position_research(session, (_INSTRUMENT_ID,), read_at=datetime.now(UTC))
+        assert index[_INSTRUMENT_ID].status == "completed"
+        assert index[_INSTRUMENT_ID].quality_status == "partial"
+        assert index[_INSTRUMENT_ID].summary is None
+    path = f"/internal/v1/research-runs/{admission.run_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["status"] == "completed"
+    assert data["intent"] is None and data["quality_status"] == "partial"
+    assert data["abstention_reason"] == "staged_action_semantics_unverified"
+    async with factory() as session:
+        after = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT md5(row_to_json(t)::text) FROM agent_research_outputs t "
+                        "WHERE run_id=:run_id ORDER BY sequence"
+                    ),
+                    {"run_id": admission.run_id},
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert after == before
+
+
+@pytest.mark.asyncio
 async def test_fixture_worker_persists_exact_lifecycle_roles_evidence_and_usage(
     migrated_database_url: str,
 ) -> None:

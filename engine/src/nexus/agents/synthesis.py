@@ -18,6 +18,17 @@ from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.strategy.intents import ResearchClaim, ResearchCondition, ResearchIntent, RoleVote
 
+STAGED_SEMANTICS_UNCERTAINTY = "三阶段角色表态未明确投资方向或审查缺口是否解决，仅供研究观察。"
+
+
+def staged_intent_semantics_valid(intent: ResearchIntent, pricing_version: str) -> bool:
+    """Legacy stage votes establish neither an investment action nor resolved objections."""
+    return pricing_version != "codex-sdk-chatgpt-v2" or (
+        intent.stance == "watch"
+        and intent.exposure_action == "none"
+        and intent.quality_status == "partial"
+    )
+
 
 def domain_evidence(record: ResearchEvidenceRef) -> EvidenceRef:
     return EvidenceRef(
@@ -105,16 +116,10 @@ def synthesize_intent(
     staged = model.version == "codex-sdk-chatgpt-v2"
     review_incomplete = staged and by_role["evidence_audit"].vote != "support"
     if staged:
-        # The final reasoned synthesis owns the proposal, not a count of earlier votes.
-        # Missing evidence still vetoes every actionable candidate.
+        # Preserve the final prose and objections; the contract has no action field.
         theses = by_role["portfolio"].claims[:5]
         counter_theses = (by_role["bear"].claims + by_role["evidence_audit"].claims)[:5]
         stance, exposure_action = ("watch", "none")
-        if not (fundamental_missing or price_missing or review_incomplete):
-            if by_role["portfolio"].vote == "support":
-                stance, exposure_action = "buy_candidate", "eligible_for_increase"
-            elif by_role["portfolio"].vote == "oppose":
-                stance, exposure_action = "reduce_candidate", "reduce"
     condition_evidence = (evidence_refs[0],)
     return ResearchIntent(
         schema_version="research_intent_v1",
@@ -131,6 +136,7 @@ def synthesize_intent(
         uncertainties=tuple(
             message
             for condition, message in (
+                (staged, STAGED_SEMANTICS_UNCERTAINTY),
                 (fundamental_missing, "HKEX fundamental authority is unavailable."),
                 (price_missing, "Price authority is unavailable."),
                 (review_incomplete, "Evidence review has unresolved objections."),
@@ -167,9 +173,9 @@ def synthesize_intent(
         ),
         valid_until=run.decision_time + timedelta(days=7),
         quality_status="partial"
-        if fundamental_missing or price_missing or review_incomplete
+        if staged or fundamental_missing or price_missing or review_incomplete
         else "complete",
-        evidence_audit="complete",
+        evidence_audit="partial" if staged else "complete",
         role_votes=votes,
         disagreement="support and opposition are both present"
         if {"support", "oppose"}.issubset(vote_values)

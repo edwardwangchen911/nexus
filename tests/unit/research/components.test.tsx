@@ -120,6 +120,14 @@ describe("issuer cash-distribution inputs", () => {
 });
 
 describe("research evidence docket", () => {
+  it("keeps completed stage work separate from an unverified historical intent", () => {
+    render(<DecisionCard research={researchData({ status: "completed", intent: null, quality_status: "partial", abstention_reason: "staged_action_semantics_unverified" })} />);
+    expect(screen.getByText(/研究流程已完成，意图一致性未通过/)).toBeVisible();
+    expect(screen.getByText(/角色表态尚不能确定投资方向或证据缺口是否解决/)).toBeVisible();
+    expect(document.querySelector(".decision-card__badges")).toHaveTextContent("资料不完整");
+    expect(screen.queryByText(/研究未完成：/)).not.toBeInTheDocument();
+    expect(screen.queryByText("买入候选")).not.toBeInTheDocument();
+  });
   it("uses the same Chinese condition and rounded percentage in the evidence drawer", () => {
     const condition = { ...researchData().invalidation_conditions[0], threshold: "0.123456789" };
     render(<DecisionCard research={researchData({ invalidation_conditions: [condition] })} />);
