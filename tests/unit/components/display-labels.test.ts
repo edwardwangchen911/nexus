@@ -14,6 +14,12 @@ describe("plain-language display labels", () => {
   it("explains why conflicting research evidence abstains", () => {
     expect(reasonLabel("conflicting_facts")).toBe("研究报告了尚未解决的事实矛盾");
   });
+  it("explains invalid review references without guessing the rejected response", () => {
+    expect(reasonLabel("model_stage_review_invalid")).toBe("阶段回应引用不符合前序论点约定，研究已停止");
+  });
+  it("distinguishes missing volume semantics from missing history", () => {
+    expect(reasonLabel("ADV20_VOLUME_UNIT_UNVERIFIED")).toBe("成交量单位未确认，暂无法评估流动性");
+  });
   it.each([["DRAWDOWN_252", 252], ["BETA_CORRELATION_126", 126], ["VOLATILITY_63", 63], ["VOLATILITY_20", 20]])("describes the %s coverage window without requiring every day", (code, days) => {
     expect(reasonLabel(`${code}_COVERAGE_INSUFFICIENT`)).toContain(`${days} 个交易日窗口内有效价格覆盖不足`);
   });
