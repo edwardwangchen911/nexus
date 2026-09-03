@@ -23,6 +23,16 @@ const states: Array<[DataStateKind, string]> = [
 ];
 
 describe("risk-audit page", () => {
+  it.each([["strategy.registry.paused", "自动晋级已暂停", "PAUSED"], ["strategy.registry.resumed", "自动晋级已恢复", "EFFECTIVE"]])("limits %s to automatic promotion without claiming strategy execution stopped", (action, label, status) => {
+    const base = auditPage();
+    render(<RiskAuditPanel state="ready" readiness={readiness("ready")}
+      data={{ ...base, items: [{ ...base.items[0], action, kind: "audit", outcome: { status } }] }}
+      kindFilter="" statusFilter="" fromDate="2026-08-20" toDate="2026-08-27" loadingMore={false} notice={null}
+      onRefresh={vi.fn()} onFilters={vi.fn()} onLoadMore={vi.fn()} onRetry={vi.fn()} onAcknowledge={vi.fn()} onExport={vi.fn()} />);
+    const table = screen.getByRole("table", { name: "脱敏审计事件" });
+    expect(table).toHaveTextContent(`${label}（${action}）`);
+    expect(table).not.toHaveTextContent(/策略已暂停|策略已恢复|已解除锁定/);
+  });
   it("preserves unknown audit codes, hashes and versions without treating them as numbers or dates", () => {
     const base = auditPage();
     const digest = "0123456789abcdef".repeat(4);

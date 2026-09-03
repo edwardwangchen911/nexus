@@ -26,7 +26,7 @@ const statuses: Record<string, string> = {
   hold_current: "保持现状", minimum_change: "最小调整", strategy_target: "策略目标",
   read_only: "只读", promote: "晋级", rollback: "回滚",
   success: "成功", error: "错误", dead_letter: "已停止重试", full: "完整",
-  point_in_time: "按当时可用信息", unlocked: "已解除锁定", recovered: "已恢复", ok: "正常",
+  point_in_time: "按当时可用信息", unlocked: "未锁定", recovered: "已恢复", ok: "正常",
 };
 
 export function statusLabel(value: string | null | undefined): string {

@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { actorLabel, policyScopeLabel, reasonLabel, statusLabel } from "../../../app/lib/display-labels";
 
 describe("plain-language display labels", () => {
+  it("does not infer a past unlock action from an unlocked state", () => {
+    expect(statusLabel("unlocked")).toBe("未锁定");
+  });
   it.each([["disabled", "已禁用"], ["fixture", "离线示例"], ["read_only", "只读"]])("labels the valid integration mode %s", (code, label) => {
     expect(statusLabel(code)).toBe(label);
   });
