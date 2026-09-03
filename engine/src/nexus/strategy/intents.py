@@ -3,10 +3,19 @@
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from nexus.domain.decimal import DecimalString
 from nexus.domain.evidence import EvidenceRef
@@ -78,6 +87,55 @@ class ResearchClaim(_IntentModel):
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
 
 
+class SynthesisClaimReview(_IntentModel):
+    claim_id: str = Field(pattern=r"^(bear|evidence_audit):[0-9]+$")
+    status: Literal["accepted", "rejected", "unresolved"]
+    rationale: str = Field(min_length=1, max_length=500)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1, max_length=3)
+    resolved: StrictBool
+    missing_evidence: tuple[str, ...] = Field(max_length=4)
+    prevented_conclusion: str | None = Field(max_length=500)
+
+    @model_validator(mode="after")
+    def _resolution_is_explicit(self) -> "SynthesisClaimReview":
+        if not self.rationale.strip():
+            raise ValueError("review rationale is required")
+        if self.resolved:
+            if (
+                self.status == "unresolved"
+                or self.missing_evidence
+                or self.prevented_conclusion is not None
+            ):
+                raise ValueError("resolved review contradicts unresolved evidence")
+        elif (
+            not self.missing_evidence
+            or any(not value.strip() for value in self.missing_evidence)
+            or not self.prevented_conclusion
+            or not self.prevented_conclusion.strip()
+        ):
+            raise ValueError("unresolved review requires missing evidence and its consequence")
+        return self
+
+
+class SynthesisAssessment(_IntentModel):
+    stance: Literal["buy_candidate", "reduce_candidate", "hold", "watch"]
+    claims: tuple[ResearchClaim, ...] = Field(min_length=1, max_length=2)
+    reviews: tuple[SynthesisClaimReview, ...] = Field(min_length=1, max_length=4)
+    review_conclusion: Literal["sufficient", "limited", "insufficient"]
+    uncertainties: tuple[str, ...] = Field(max_length=5)
+
+    @model_validator(mode="after")
+    def _consistent_review(self) -> "SynthesisAssessment":
+        ids = tuple(review.claim_id for review in self.reviews)
+        if len(set(ids)) != len(ids):
+            raise ValueError("review claim IDs must be unique")
+        if self.review_conclusion == "sufficient" and any(
+            not review.resolved for review in self.reviews
+        ):
+            raise ValueError("sufficient review cannot contain unresolved issues")
+        return self
+
+
 class ResearchCondition(_IntentModel):
     """A deterministic signal predicate, never an executable expression."""
 
@@ -114,6 +172,15 @@ class RoleVote(_IntentModel):
 
 
 class ResearchIntent(_IntentModel):
+    synthesis_assessment: SynthesisAssessment | None = None
+
+    @model_serializer(mode="wrap")
+    def _legacy_payload(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        payload = cast(dict[str, object], handler(self))
+        if self.synthesis_assessment is None:
+            payload.pop("synthesis_assessment", None)
+        return payload
+
     schema_version: Literal["research_intent_v1"]
     decision_id: UUID
     instrument_id: UUID

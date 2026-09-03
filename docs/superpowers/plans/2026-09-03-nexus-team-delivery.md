@@ -166,6 +166,34 @@ git diff --check
 
 **测试/验收:** 错引用、时间漂移、跨研究compare、矛盾未回应、阶段失败和未知用量、超时后进程清理；读工具无隐式创建。真实验收报告必须能回答原问题，不要求买入/调整；缺材料不是证据充分不调整。
 
+### B3 v3：结构化最终审查（2026-09-04，B负责）
+
+**目标/边界：** 新增`codex-sdk-chatgpt-v3`，复用三阶段、八角色、native run与
+`ResearchIntent v1`。只替换最终synthesis响应合同，不新增执行器、审批或模型调用。
+A统一进行真实调用与运行验收。root的optimizer/research_context/UI不在本片范围。
+
+**第一片（core，<800行）：**
+- `strategy/intents.py`新增`SynthesisClaimReview`、`SynthesisAssessment`：stance沿用
+  buy_candidate/reduce_candidate/hold/watch；逐条review含claim_id、accepted/rejected/
+  unresolved、理由、冻结evidence_refs、显式resolved、missing_evidence和prevented_conclusion。
+  accepted不是resolved；未解决必须说清缺什么及阻止什么结论；sufficient不得含未解决项。
+- `CommitteeRoleOutput`及`ResearchIntent`可选`synthesis_assessment`，None从序列化中
+  仅省略该新字段，旧payload/hash不变，不回填历史。
+- `agents/codex_staged.py`新增结构化committee子类复用现有生命周期；前两阶段不变，
+  最后一阶段schema使用`synthesis_assessment`，reviews按实际全部bear/evidence_audit
+  claim IDs精确覆盖（不只每角色1条），所有引用绑定原冻结evidence索引。
+  本地解析必须调用本次请求实际`output_model.model_validate_json`；保留既有安全失败分类。
+- `agents/synthesis.py`保留综合正文、逐条评估与反证，exposure_action只由确定性映射
+  产生。模型自报审查充分不替代现有价格/财务等确定性准入；当前没有完整复用准入，
+  v3仍watch/none/partial，保留评估内容和明确不充分原因，不以新版本解锁结论。
+- 红测：遗漏第二条反证、重复/未知review ID、越界引用、accepted但未解决、
+  sufficient与未解决项矛盾、实际动态schema本地解析、v2 None序列化原样、
+  模型buy/hold表态不能覆盖价格缺口及目前完整准入缺失。聚焦unit后集中独立审查。
+
+**第二片（版本/运行接线，<800行）：** 第一片交A后再做版本配置、worker选择、持久化
+与trace；worker先同A确认，daily_once所需最小版本识别diff交root。无真实模型重跑，
+由A统一决定一次新输入验收。每片报告代码/测试/集成/运行区别；不修改v2历史读写语义。
+
 ## 6. C 前端：立即可开工的增量
 
 ### C1：行情时间与新鲜度

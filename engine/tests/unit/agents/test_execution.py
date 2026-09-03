@@ -125,6 +125,7 @@ def _synthesize(
     include_price_authority: bool = True,
     price_authority_valid: bool | None = None,
     staged: bool = False,
+    structured: bool = False,
 ):
     now = datetime(2026, 8, 24, tzinfo=UTC)
     content_hash = "a" * 64
@@ -147,6 +148,34 @@ def _synthesize(
         location=location,
         content_hash=content_hash,
     )
+    from nexus.strategy.intents import SynthesisAssessment, SynthesisClaimReview
+
+    assessment = (
+        SynthesisAssessment(
+            stance="buy_candidate",
+            claims=(
+                ResearchClaim(
+                    text="模型认为充分，但不得覆盖确定性准入。", evidence_refs=(evidence,)
+                ),
+            ),
+            reviews=tuple(
+                SynthesisClaimReview(
+                    claim_id=f"{role}:0",
+                    status="accepted",
+                    rationale="已逐条回应。",
+                    evidence_refs=(evidence,),
+                    resolved=True,
+                    missing_evidence=(),
+                    prevented_conclusion=None,
+                )
+                for role in ("bear", "evidence_audit")
+            ),
+            review_conclusion="sufficient",
+            uncertainties=(),
+        )
+        if structured
+        else None
+    )
     outputs = tuple(
         CommitteeRoleOutput(
             role=role,
@@ -155,6 +184,7 @@ def _synthesize(
             prompt_hash="b" * 64,
             input_tokens=1,
             output_tokens=1,
+            synthesis_assessment=assessment if role == "portfolio" else None,
         )
         for role, vote in zip(ROLE_ORDER, votes, strict=True)
     )
@@ -174,7 +204,12 @@ def _synthesize(
         decision_time=now,
     )
     model = AgentModelConfigRecord(
-        model_id="fixture-model", version="codex-sdk-chatgpt-v2" if staged else "fixture-v1"
+        model_id="fixture-model",
+        version="codex-sdk-chatgpt-v3"
+        if structured
+        else "codex-sdk-chatgpt-v2"
+        if staged
+        else "fixture-v1",
     )
     snapshot = DataSnapshot(id=snapshot_id, revision="fixture-v1")
     return synthesize_intent(
@@ -256,3 +291,24 @@ def test_price_shaped_strings_do_not_establish_revalidated_authority() -> None:
     assert market_vote.vote == "abstain"
     assert (intent.stance, intent.exposure_action) == ("watch", "none")
     assert intent.quality_status == "partial"
+
+
+@pytest.mark.parametrize("price_valid", [True, False])
+def test_structured_synthesis_cannot_self_authorize_complete_intent(price_valid):
+    intent = _synthesize(("support",) * 8, structured=True, price_authority_valid=price_valid)
+    assert (intent.stance, intent.exposure_action, intent.quality_status) == (
+        "watch",
+        "none",
+        "partial",
+    )
+    assert intent.synthesis_assessment is not None
+    assert intent.synthesis_assessment.stance == "buy_candidate"
+    assert intent.theses == intent.synthesis_assessment.claims
+    assert "synthesis_assessment" in intent.model_dump(mode="json")
+    if not price_valid:
+        assert "Price authority is unavailable." in intent.uncertainties
+
+
+def test_legacy_intent_serialization_omits_only_new_assessment():
+    intent = _synthesize(("support",) * 8, staged=True)
+    assert "synthesis_assessment" not in intent.model_dump(mode="json")

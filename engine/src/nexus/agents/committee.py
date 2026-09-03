@@ -3,13 +3,13 @@
 import hashlib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final, Literal, Protocol
+from typing import Final, Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from nexus.agents.models import ResearchRequest
 from nexus.domain.evidence import EvidenceRef
-from nexus.strategy.intents import ResearchClaim
+from nexus.strategy.intents import ResearchClaim, SynthesisAssessment
 
 type AgentRole = Literal[
     "orchestrator",
@@ -64,6 +64,15 @@ class CommitteeRoleOutput(BaseModel):
     reviewed_claim_ids: tuple[str, ...] = ()
     stage_input_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     frozen_inputs_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    synthesis_assessment: SynthesisAssessment | None = None
+
+    @model_serializer(mode="wrap")
+    def _legacy_payload(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        payload = cast(dict[str, object], handler(self))
+        if self.synthesis_assessment is None:
+            payload.pop("synthesis_assessment", None)
+        return payload
 
 
 class CommitteeModel(Protocol):

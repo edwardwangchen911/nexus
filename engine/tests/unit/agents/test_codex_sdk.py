@@ -848,3 +848,83 @@ async def test_late_invalid_citation_does_not_publish_partial_batch(monkeypatch)
     with pytest.raises(ValueError, match="CODEX_REQUEST_ALREADY_FAILED"):
         await committee.analyze("orchestrator", request, evidence, prompts["orchestrator"])
     invoke.assert_awaited_once()
+
+
+def _assessment_payload(previous, *, invalid=None):
+    ids = [item["claim_id"] for item in previous if item["role"] in {"bear", "evidence_audit"}]
+    reviews = [
+        {
+            "claim_id": claim_id,
+            "status": "accepted",
+            "rationale": "承认该缺口，仍需冻结证据。",
+            "citations": [0],
+            "resolved": False,
+            "missing_evidence": ["同口径估值"],
+            "prevented_conclusion": "无法完成经济比较。",
+        }
+        for claim_id in ids
+    ]
+    if invalid == "missing":
+        reviews.pop()
+    elif invalid == "duplicate":
+        reviews[-1] = reviews[0]
+    elif invalid == "foreign":
+        reviews[0]["claim_id"] = "bull:0"
+    elif invalid == "citation":
+        reviews[0]["citations"] = [999]
+    return {
+        "synthesis_assessment": {
+            "stance": "buy_candidate",
+            "claims": [{"text": "审查具体回应已保留，现有缺口仍阻止结论。", "citations": [0]}],
+            "reviews": reviews,
+            "review_conclusion": "sufficient" if invalid == "sufficient" else "insufficient",
+            "uncertainties": ["资料仍不充分。"],
+            "conflicting_facts": False,
+        }
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid", [None, "missing", "duplicate", "foreign", "citation", "sufficient"]
+)
+async def test_v3_final_assessment_covers_every_review_claim_and_validates_exact_schema(
+    monkeypatch, invalid
+):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    calls = []
+
+    async def invoke(payload, *, output_model):
+        calls.append(payload["stage"])
+        if payload["stage"] == "synthesis":
+            result = _assessment_payload(payload["previous_claims"], invalid=invalid)
+        else:
+            result = _staged_batch(payload["stage"], payload["requested_roles"])
+            if payload["stage"] == "critique":
+                for role in result["roles"]:
+                    role["claims"].append({"text": "另一项独立反证也必须回应。", "citations": [0]})
+        return json.dumps(result), UsageSnapshot(input_tokens=300, output_tokens=80)
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    model = codex_staged.StructuredStagedCodexCommittee(prompts=prompts, tools=_tools())
+    for role in ROLE_ORDER[:-1]:
+        await model.analyze(role, request, evidence, prompts[role])
+    if invalid:
+        with pytest.raises(ValueError):
+            await model.analyze("portfolio", request, evidence, prompts["portfolio"])
+        assert "portfolio" not in model._outputs
+        assert model.failure_reason is not None
+    else:
+        final = await model.analyze("portfolio", request, evidence, prompts["portfolio"])
+        assert final.synthesis_assessment is not None
+        assert {item.claim_id for item in final.synthesis_assessment.reviews} == {
+            "bear:0",
+            "bear:1",
+            "evidence_audit:0",
+            "evidence_audit:1",
+        }
+        assert all(not item.resolved for item in final.synthesis_assessment.reviews)
+        assert final.vote == "abstain"
+    assert calls == ["research", "critique", "synthesis"]

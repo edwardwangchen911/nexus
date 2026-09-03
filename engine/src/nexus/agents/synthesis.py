@@ -23,10 +23,11 @@ STAGED_SEMANTICS_UNCERTAINTY = "三阶段角色表态未明确投资方向或审
 
 def staged_intent_semantics_valid(intent: ResearchIntent, pricing_version: str) -> bool:
     """Legacy stage votes establish neither an investment action nor resolved objections."""
-    return pricing_version != "codex-sdk-chatgpt-v2" or (
+    return pricing_version not in {"codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3"} or (
         intent.stance == "watch"
         and intent.exposure_action == "none"
         and intent.quality_status == "partial"
+        and (pricing_version != "codex-sdk-chatgpt-v3" or intent.synthesis_assessment is not None)
     )
 
 
@@ -113,15 +114,52 @@ def synthesize_intent(
     by_role = {output.role: output for output in role_outputs}
     theses = support_claims or by_role["orchestrator"].claims[:5]
     counter_theses = oppose_claims or by_role["bear"].claims[:5]
-    staged = model.version == "codex-sdk-chatgpt-v2"
+    structured = model.version == "codex-sdk-chatgpt-v3"
+    staged = model.version in {"codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3"}
+    assessment = by_role["portfolio"].synthesis_assessment if structured else None
     review_incomplete = staged and by_role["evidence_audit"].vote != "support"
     if staged:
         # Preserve the final prose and objections; the contract has no action field.
         theses = by_role["portfolio"].claims[:5]
         counter_theses = (by_role["bear"].claims + by_role["evidence_audit"].claims)[:5]
         stance, exposure_action = ("watch", "none")
+    if structured:
+        if assessment is None:
+            raise ValueError("STRUCTURED_SYNTHESIS_ASSESSMENT_MISSING")
+        review_roles: tuple[AgentRole, ...] = ("bear", "evidence_audit")
+        required = {
+            f"{role}:{index}"
+            for role in review_roles
+            for index, _ in enumerate(by_role[role].claims)
+        }
+        review_claims = tuple(
+            ResearchClaim(text=review.rationale, evidence_refs=review.evidence_refs)
+            for review in assessment.reviews
+        )
+        if {review.claim_id for review in assessment.reviews} != required or not citations_bound(
+            assessment.claims + review_claims, evidence_refs
+        ):
+            raise ValueError("STRUCTURED_SYNTHESIS_REVIEW_INVALID")
+        theses = assessment.claims
+        review_incomplete = assessment.review_conclusion != "sufficient" or any(
+            not review.resolved for review in assessment.reviews
+        )
+        # Structured model assertions are not a complete deterministic decision admission.
+        stance = "watch"
+        exposure_action = exposure_action_for_stance(stance)
+    extra_uncertainties = (
+        ()
+        if assessment is None
+        else assessment.uncertainties
+        + tuple(
+            review.prevented_conclusion
+            for review in assessment.reviews
+            if review.prevented_conclusion
+        )
+    )
     condition_evidence = (evidence_refs[0],)
     return ResearchIntent(
+        synthesis_assessment=assessment,
         schema_version="research_intent_v1",
         decision_id=uuid5(NAMESPACE_URL, f"nexus-research:{run.id}"),
         instrument_id=run.instrument_id,
@@ -133,16 +171,20 @@ def synthesize_intent(
         exposure_action=exposure_action,
         theses=theses,
         counter_theses=counter_theses,
-        uncertainties=tuple(
-            message
-            for condition, message in (
-                (staged, STAGED_SEMANTICS_UNCERTAINTY),
-                (fundamental_missing, "HKEX fundamental authority is unavailable."),
-                (price_missing, "Price authority is unavailable."),
-                (review_incomplete, "Evidence review has unresolved objections."),
+        uncertainties=(
+            tuple(
+                message
+                for condition, message in (
+                    (staged and not structured, STAGED_SEMANTICS_UNCERTAINTY),
+                    (structured, "结构化审查已保存，但尚不具备完整确定性决策准入，仅供研究观察。"),
+                    (fundamental_missing, "HKEX fundamental authority is unavailable."),
+                    (price_missing, "Price authority is unavailable."),
+                    (review_incomplete, "Evidence review has unresolved objections."),
+                )
+                if condition
             )
-            if condition
-        )
+            + extra_uncertainties
+        )[:10]
         or ("Research remains subject to point-in-time evidence quality.",),
         invalidation_conditions=(
             ResearchCondition(
@@ -207,3 +249,15 @@ def _decision(
     if support_count or oppose_count:
         return ("hold", "maintain")
     return ("watch", "none")
+
+
+def exposure_action_for_stance(
+    stance: Literal["buy_candidate", "reduce_candidate", "hold", "watch"],
+) -> Literal["none", "reduce", "maintain", "eligible_for_increase"]:
+    actions: dict[str, Literal["none", "reduce", "maintain", "eligible_for_increase"]] = {
+        "buy_candidate": "eligible_for_increase",
+        "reduce_candidate": "reduce",
+        "hold": "maintain",
+        "watch": "none",
+    }
+    return actions[stance]
