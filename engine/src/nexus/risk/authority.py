@@ -9,6 +9,7 @@ from datetime import UTC, date, datetime
 from typing import Literal, cast
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,6 +61,27 @@ from nexus.risk.models import (
 from nexus.strategy.forward import ForwardStrategyDecision
 
 _QUERY_KINDS = frozenset(("corporate_action", "suspension", "delisting"))
+
+
+class RiskAuthorityInput(BaseModel):
+    """Frozen identity and cutoff for first risk evidence preparation, without a decision."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    decision_session: date
+    execution_session: date
+    decision_time: datetime
+    source_policy_id: UUID
+    calendar_authority_id: UUID
+    universe_snapshot_id: UUID
+    quality_report_id: UUID
+
+    @field_validator("decision_time")
+    @classmethod
+    def _utc_cutoff(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
+            raise ValueError("decision time must use UTC")
+        return value
 
 
 def _valid_source_policy(policy: SourcePolicy) -> bool:
@@ -208,7 +230,7 @@ def canonical_query_authority_hash(
 
 def build_risk_market_snapshot(
     *,
-    decision: ForwardStrategyDecision,
+    decision: ForwardStrategyDecision | RiskAuthorityInput,
     required_instrument_ids: Sequence[UUID],
     whitelisted_instrument_ids: Sequence[UUID],
     prices: Sequence[RiskPrice],
@@ -257,7 +279,7 @@ def require_decision_authority_match(
 
 async def _validate_root_authorities(
     session: AsyncSession,
-    decision: ForwardStrategyDecision,
+    decision: ForwardStrategyDecision | RiskAuthorityInput,
     required: set[UUID],
 ) -> tuple[UUID, ...]:
     source_policy = await session.get(SourcePolicy, decision.source_policy_id)
@@ -336,7 +358,7 @@ async def _validate_root_authorities(
 
 async def _load_prices(
     session: AsyncSession,
-    decision: ForwardStrategyDecision,
+    decision: ForwardStrategyDecision | RiskAuthorityInput,
     required: set[UUID],
 ) -> tuple[RiskPrice, ...]:
     rows = (
@@ -429,7 +451,7 @@ async def _load_prices(
 
 async def _load_sectors(
     session: AsyncSession,
-    decision: ForwardStrategyDecision,
+    decision: ForwardStrategyDecision | RiskAuthorityInput,
     required: set[UUID],
 ) -> tuple[RiskSectorExposure, ...]:
     records = tuple(
@@ -463,7 +485,7 @@ async def _load_sectors(
 
 async def _load_query_proofs(
     session: AsyncSession,
-    decision: ForwardStrategyDecision,
+    decision: ForwardStrategyDecision | RiskAuthorityInput,
     required: set[UUID],
 ) -> tuple[AuthorityQueryProof, ...]:
     records = tuple(
@@ -531,14 +553,45 @@ async def load_risk_market_snapshot(
     decision_instruments = {target.instrument_id for target in decision.targets}
     if not decision_instruments <= required:
         raise ValueError("required risk instruments omit decision targets")
-    whitelist = await _validate_root_authorities(session, decision, required)
-    market = build_risk_market_snapshot(
-        decision=decision,
+    market = await prepare_risk_market_snapshot(
+        session,
+        authority=RiskAuthorityInput(
+            decision_session=decision.decision_session,
+            execution_session=decision.execution_session,
+            decision_time=decision.decision_time,
+            source_policy_id=decision.source_policy_id,
+            calendar_authority_id=decision.calendar_authority_id,
+            universe_snapshot_id=decision.universe_snapshot_id,
+            quality_report_id=decision.quality_report_id,
+        ),
         required_instrument_ids=required_values,
-        whitelisted_instrument_ids=whitelist,
-        prices=await _load_prices(session, decision, required),
-        sector_exposures=await _load_sectors(session, decision, required),
-        query_proofs=await _load_query_proofs(session, decision, required),
     )
     require_decision_authority_match(decision, market)
+    return market
+
+
+async def prepare_risk_market_snapshot(
+    session: AsyncSession,
+    *,
+    authority: RiskAuthorityInput,
+    required_instrument_ids: Sequence[UUID],
+) -> RiskMarketSnapshot:
+    """Prepare first evidence from one caller-owned snapshot; never persist facts.
+
+    This computes evidence identity only, not order eligibility or execution permission.
+    Saved decisions must still use load_risk_market_snapshot to verify their bound hash.
+    """
+    required_values = tuple(required_instrument_ids)
+    required = set(required_values)
+    if not required or len(required) != len(required_values):
+        raise ValueError("required risk instruments must be nonempty and unique")
+    whitelist = await _validate_root_authorities(session, authority, required)
+    market = build_risk_market_snapshot(
+        decision=authority,
+        required_instrument_ids=required_values,
+        whitelisted_instrument_ids=whitelist,
+        prices=await _load_prices(session, authority, required),
+        sector_exposures=await _load_sectors(session, authority, required),
+        query_proofs=await _load_query_proofs(session, authority, required),
+    )
     return market
