@@ -1,5 +1,7 @@
 "use client";
 
+import { integrationNextActionLabel } from "../lib/display-labels";
+
 import { formatDisplayTime } from "../lib/display-format";
 
 import { useEffect, useRef } from "react";
@@ -100,7 +102,7 @@ export function GlobalSystemStatusView({ state, integrations, refreshing, onRefr
             <StatusFact term="权限到期" value={formatTimestamp(selected?.capability_expires_at)} />
             <StatusFact term="契约哈希" value={selected?.contract_hash ?? "未准入"} />
           </dl>
-          {selected?.next_action ? <p className="global-status__next">下一步：{selected.next_action}</p> : null}
+          {selected?.next_action ? <p className="global-status__next">下一步：{integrationNextActionLabel(selected.next_action)}</p> : null}
         </div>
       </details>
     </section>

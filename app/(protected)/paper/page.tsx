@@ -2,6 +2,8 @@
 
 import { marketDeliveryModeLabel } from "../../lib/market-evidence-labels";
 
+import { statusLabel } from "../../lib/display-labels";
+
 import { formatPercent } from "../../lib/display-format";
 
 import { AlertTriangle, Check, RefreshCw, ShieldCheck } from "lucide-react";
@@ -279,14 +281,14 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
 function PerformanceFacts({ portfolio }: { portfolio: PaperPortfolio }): React.ReactElement {
   const performance = portfolio.performance!;
   return <section className="paper-performance" aria-labelledby="paper-performance-title"><header><div><p className="eyebrow">冻结绩效事实</p><h2 id="paper-performance-title">账户绩效</h2></div><p className="numeric-data">截至 {formatPaperTime(performance.as_of)}</p></header><dl aria-label="模拟账户绩效事实">
-    <MoneyFact term="NAV" value={performance.nav} />
+    <MoneyFact term="账户净资产（NAV）" value={performance.nav} />
     <MoneyFact term="可用现金" value={performance.available_cash} />
     <MoneyFact term="预留现金" value={performance.reserved_cash} />
     <MoneyFact term="持仓市值" value={performance.market_value} />
     <MoneyFact term="已实现损益" value={performance.realized_pnl} signed />
     <MoneyFact term="未实现损益" value={performance.unrealized_pnl} signed />
     <MoneyFact term="累计费用" value={performance.fees} />
-    <div><dt>最大回撤</dt><dd className="numeric-data">{formatPercent(performance.drawdown_ratio)}</dd></div>
+    <div><dt title="当前净资产相对历史净资产峰值的回撤，不是历史最大回撤">当前回撤</dt><dd className="numeric-data">{formatPercent(performance.drawdown_ratio)}</dd></div>
   </dl></section>;
 }
 
@@ -299,7 +301,7 @@ function Positions({ portfolio }: { portfolio: PaperPortfolio }): React.ReactEle
 function Attributions({ portfolio }: { portfolio: PaperPortfolio }): React.ReactElement {
   // Bounded horizontal data regions must remain keyboard-scrollable on narrow screens.
   // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
-  return <section className="paper-table-section" aria-labelledby="paper-attribution-title"><header><div><p className="eyebrow">持久化绩效归因</p><h2 id="paper-attribution-title">绩效归因</h2></div><p>行业证据缺失时保留 PARTIAL，不猜测分类。</p></header>{portfolio.attributions.length === 0 ? <p className="paper-orders__empty">尚无归因事实。</p> : <div className="table-scroll" role="region" aria-label="内部模拟绩效归因表，可横向滚动" tabIndex={0}><table className="paper-attribution-table numeric-data" aria-label="内部模拟绩效归因"><caption>现金、标的与行业维度的冻结归因。</caption><thead><tr><th scope="col">维度</th><th scope="col">键</th><th scope="col">市值</th><th scope="col">已实现</th><th scope="col">未实现</th><th scope="col">费用</th><th scope="col">滑点</th><th scope="col">完整性</th></tr></thead><tbody>{portfolio.attributions.map((item) => <tr key={`${item.dimension}:${item.dimension_key}`}><th scope="row">{attributionLabel(item.dimension)}</th><td>{item.dimension_key}</td><td>USD {formatPaperDecimal(item.market_value, 2)}</td><td>USD {formatPaperDecimal(item.realized_pnl, 2)}</td><td>USD {formatPaperDecimal(item.unrealized_pnl, 2)}</td><td>USD {formatPaperDecimal(item.fees, 2)}</td><td>USD {formatPaperDecimal(item.slippage, 2)}</td><td>{item.completeness}</td></tr>)}</tbody></table></div>}</section>;
+  return <section className="paper-table-section" aria-labelledby="paper-attribution-title"><header><div><p className="eyebrow">持久化绩效归因</p><h2 id="paper-attribution-title">绩效归因</h2></div><p>行业证据缺失时标记为资料不完整，不猜测分类。</p></header>{portfolio.attributions.length === 0 ? <p className="paper-orders__empty">尚无归因事实。</p> : <div className="table-scroll" role="region" aria-label="内部模拟绩效归因表，可横向滚动" tabIndex={0}><table className="paper-attribution-table numeric-data" aria-label="内部模拟绩效归因"><caption>现金、标的与行业维度的冻结归因。</caption><thead><tr><th scope="col">维度</th><th scope="col">键</th><th scope="col">市值</th><th scope="col">已实现</th><th scope="col">未实现</th><th scope="col">费用</th><th scope="col">滑点</th><th scope="col">完整性</th></tr></thead><tbody>{portfolio.attributions.map((item) => <tr key={`${item.dimension}:${item.dimension_key}`}><th scope="row">{attributionLabel(item.dimension)}</th><td>{item.dimension_key}</td><td>USD {formatPaperDecimal(item.market_value, 2)}</td><td>USD {formatPaperDecimal(item.realized_pnl, 2)}</td><td>USD {formatPaperDecimal(item.unrealized_pnl, 2)}</td><td>USD {formatPaperDecimal(item.fees, 2)}</td><td>USD {formatPaperDecimal(item.slippage, 2)}</td><td>{statusLabel(item.completeness)}</td></tr>)}</tbody></table></div>}</section>;
 }
 
 function PaperCancelDialog({ pending, submitting, onDismiss, onConfirm }: { pending: PendingCancel; submitting: boolean; onDismiss: () => void; onConfirm: () => void }): React.ReactElement {

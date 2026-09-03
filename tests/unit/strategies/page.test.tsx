@@ -54,13 +54,13 @@ describe("strategy evolution workbench", () => {
   });
 
   it("renders the complete evidence lifecycle without a trade surface", () => {
-    renderPanel("ready");
+    renderPanel("ready", { overview: { ...overview, active_family: { ...overview.active_family, next_step: "Accumulate 5/21/63 session checkpoints." } } });
 
     expect(screen.getByRole("heading", { name: "baseline_v1" })).toBeVisible();
     expect(screen.getByText("策略进化 · 证据账簿")).toBeVisible();
     expect(screen.getByText("01 / 当前主用策略")).toBeVisible();
     expect(screen.getByText("提高流动性门槛可减少成本侵蚀，同时保留中期动量溢价。")).toBeVisible();
-    expect(screen.getByText("近 20 日最低平均成交额 · 3 个候选值")).toBeVisible();
+    expect(screen.getByText("近 20 个交易日最低平均成交额 · 3 个候选值")).toBeVisible();
     expect(screen.getByRole("heading", { name: "证据比较" })).toBeVisible();
     expect(screen.getByText("SPY 比较完整")).toBeVisible();
     expect(screen.getByText("等权白名单比较完整")).toBeVisible();
@@ -74,6 +74,35 @@ describe("strategy evolution workbench", () => {
     expect(screen.getAllByText("通过").length).toBeGreaterThan(0);
     expect(screen.getByRole("heading", { name: "冠军历史" })).toBeVisible();
     expect(screen.queryByRole("button", { name: /下单|交易|买入|卖出/ })).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(/投影版本|权威|门禁|Shadow/);
+    expect(screen.getByText("积累 5、21、63 个交易日的观察检查点。")).toBeVisible();
+  });
+
+  it.each([
+    ["Await deterministic admission.", "等待按固定规则核验准入条件。"],
+    ["Run deterministic paired backtests.", "对候选策略与基准执行配对回测。"],
+    ["Await point-in-time backtest evidence.", "等待按当时可用信息生成的回测证据。"],
+    ["Start isolated Strategy Shadow.", "开始独立的策略前向观察。"],
+    ["Await deterministic handover and boundary activation.", "等待按固定规则完成策略交接，并在规定时点生效。"],
+    ["Champion transition is recorded.", "主用策略切换已记录。"],
+    ["Experiment was vetoed; no promotion is permitted.", "实验已被否决，不允许晋级。"],
+    ["Restart against the current champion generation.", "以当前主用策略版本为基准重新开始。"],
+    ["No further automatic action is permitted.", "不允许继续自动操作。"],
+    ["future_step", "尚无中文说明（future_step）"],
+    ["保留原始说明", "保留原始说明"],
+  ])("explains the fixed next step %s without changing unknown instructions", (next_step, label) => {
+    renderPanel("ready", { overview: { ...overview, active_family: { ...overview.active_family, next_step } } });
+    expect(screen.getByText("下一步").nextElementSibling).toHaveTextContent(label);
+  });
+
+  it.each([["PROMOTE", "晋级"], ["ROLLBACK", "回滚"]])("explains a pending %s transition without changing its session", (transition, label) => {
+    renderPanel("ready", { overview: { ...overview, champion: { ...overview.champion, pending_transition: transition, pending_effective_session: "2026-09-04" } } });
+    expect(screen.getByText("待生效切换").nextElementSibling).toHaveTextContent(`${label} · 2026-09-04`);
+  });
+
+  it("explains missing strategy evidence without internal terminology", () => {
+    renderPanel("empty");
+    expect(screen.getByText(/不使用浏览器默认值/)).not.toHaveTextContent(/权威|门禁|Shadow/);
   });
 
   it.each(["partial", "stale"] as const)("disables every mutation when evidence is %s", (state) => {

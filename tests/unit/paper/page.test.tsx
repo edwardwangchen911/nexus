@@ -50,7 +50,9 @@ describe("internal paper page", () => {
   });
 
   it("renders authoritative cash, PnL, position and attribution facts", () => {
-    render(<PaperPanel state="ready" portfolio={paperPortfolio} orders={[cancellableOrder, filledOrder]}
+    const portfolio = structuredClone(paperPortfolio);
+    portfolio.attributions[1].completeness = "PARTIAL";
+    render(<PaperPanel state="ready" portfolio={portfolio} orders={[cancellableOrder, filledOrder]}
       nextCursor="next" statusFilter="" loadingMore={false} notice={null}
       onRefresh={vi.fn()} onStatusFilter={vi.fn()} onLoadMore={vi.fn()} onCancel={vi.fn()} />);
 
@@ -71,7 +73,26 @@ describe("internal paper page", () => {
     expect(positions).toHaveTextContent("延迟");
     expect(positions).toHaveTextContent("2026-08-27 04:00:00 北京时间");
     expect(screen.getByRole("table", { name: "内部模拟绩效归因" })).toHaveTextContent("information_technology");
+    expect(screen.getByRole("table", { name: "内部模拟绩效归因" })).toHaveTextContent("资料不完整");
+    expect(screen.getByRole("table", { name: "内部模拟绩效归因" })).not.toHaveTextContent("PARTIAL");
+    expect(screen.getByRole("table", { name: "内部模拟绩效归因" })).not.toHaveTextContent("未识别状态");
     expect(document.body).not.toHaveTextContent(/account_id|client_order_id|provider_object/);
+  });
+
+  it("shows current drawdown declining after recovery, not the historical maximum", () => {
+    const props = { state: "ready" as const, orders: [], nextCursor: null, statusFilter: "" as const, loadingMore: false, notice: null, onRefresh: vi.fn(), onStatusFilter: vi.fn(), onLoadMore: vi.fn(), onCancel: vi.fn() };
+    const portfolio = structuredClone(paperPortfolio);
+    Object.assign(portfolio.performance!, { nav: "8000", peak_nav: "10000", drawdown_ratio: "0.2" });
+    const view = render(<PaperPanel {...props} portfolio={portfolio} />);
+    expect(screen.getByText("当前回撤").nextElementSibling).toHaveTextContent("20%");
+    expect(screen.getByText("当前回撤")).toHaveAttribute("title", "当前净资产相对历史净资产峰值的回撤，不是历史最大回撤");
+    expect(screen.getByText("账户净资产（NAV）")).toBeVisible();
+    const recovered = structuredClone(portfolio);
+    Object.assign(recovered.performance!, { nav: "9500", drawdown_ratio: "0.05" });
+    view.rerender(<PaperPanel {...props} portfolio={recovered} />);
+    expect(screen.getByText("当前回撤").nextElementSibling).toHaveTextContent("5%");
+    expect(screen.queryByText("最大回撤")).not.toBeInTheDocument();
+    expect(recovered.performance!.drawdown_ratio).toBe("0.05");
   });
 
   it("loads facts, applies a server status filter, and appends a bounded cursor page", async () => {

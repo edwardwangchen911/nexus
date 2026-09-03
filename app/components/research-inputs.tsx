@@ -71,16 +71,16 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
         <div><dt>本机收到时间</dt><dd>{formatUtc(distribution.received_at)}</dd></div>
         <div><dt>证据可用时间</dt><dd>{formatUtc(distribution.available_at)}</dd></div>
       </dl>
-      <p>金额为每份基金份额，通常显示至 3 位小数；极小非零金额保留原值，精确数值见详情。不推算年化收益、总回报或费用，不代表账户实际到账。</p>
+      <p>金额为每份基金份额，最多显示 3 位小数；舍入为零的非零金额显示范围，精确数值请查看原始来源。不推算年化收益、总回报或费用，不代表账户实际到账。</p>
       <p>收到／可用时间不是历史公告时间。本条仅供当前研究观察，不可用于历史回测；不代表研究已完成，也不授予执行权限。</p>
-      <details className="portfolio-disclosure"><summary>分红证据与精确数值</summary>
+      <details className="portfolio-disclosure"><summary>分红证据与来源</summary>
         <dl className="decision-card__versions">
           <div><dt>证据标识</dt><dd>{distribution.evidence_ref_id}</dd></div>
           <div><dt>版本</dt><dd>{distribution.revision}</dd></div>
           <div><dt>内容 SHA-256</dt><dd>{distribution.content_hash}</dd></div>
-          <div><dt>现金分红原值</dt><dd>{formatDistributionAmount(distribution.dividend_per_share, distribution.currency, true)}</dd></div>
-          <div><dt>短期资本利得原值</dt><dd>{formatDistributionAmount(distribution.short_term_capital_gain, distribution.currency, true)}</dd></div>
-          <div><dt>长期资本利得原值</dt><dd>{formatDistributionAmount(distribution.long_term_capital_gain, distribution.currency, true)}</dd></div>
+          <div><dt>现金分红（展示值）</dt><dd>{formatDistributionAmount(distribution.dividend_per_share, distribution.currency)}</dd></div>
+          <div><dt>短期资本利得（展示值）</dt><dd>{formatDistributionAmount(distribution.short_term_capital_gain, distribution.currency)}</dd></div>
+          <div><dt>长期资本利得（展示值）</dt><dd>{formatDistributionAmount(distribution.long_term_capital_gain, distribution.currency)}</dd></div>
         </dl>
         <a href={distribution.source_url} target="_blank" rel="noreferrer">查看 SSGA 官方原件</a>
       </details>
@@ -125,10 +125,10 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
 
 function formatUtc(value: string | null | undefined): string { return formatDisplayTime(value); }
 
-function formatDistributionAmount(value: string | null, currency: string, exact = false): string {
+function formatDistributionAmount(value: string | null, currency: string): string {
   if (value === null) return "未知";
   const rounded = formatDisplayDecimal(value);
   // Do not convert DecimalString to Number or collapse an actual nonzero amount to zero.
-  const displayed = exact || rounded === "0" && /[1-9]/.test(value) ? value : rounded;
+  const displayed = rounded === "0" && /[1-9]/.test(value) ? (value.startsWith("-") ? "(-0.001, 0)" : "<0.001") : rounded;
   return `${currency} ${displayed} / 每份`;
 }
