@@ -414,6 +414,11 @@ class ProposalComparisonResponse(_StrictOptimizationSchema):
 
 class OptimizationProposalPositionResponse(_StrictOptimizationSchema):
     instrument_id: UUID
+    display_symbol: str | None = Field(
+        default=None,
+        max_length=32,
+        description="Ticker known and effective at the proposal valuation time, or null.",
+    )
     current_weight: DecimalString
     target_weight: DecimalString
     action: Literal["none", "reduce", "maintain", "increase"]

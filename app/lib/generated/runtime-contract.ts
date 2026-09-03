@@ -3521,6 +3521,19 @@ export const runtimeContractSchemas = {
         "title": "Current Weight",
         "type": "string"
       },
+      "display_symbol": {
+        "anyOf": [
+          {
+            "maxLength": 32,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Ticker known and effective at the proposal valuation time, or null.",
+        "title": "Display Symbol"
+      },
       "instrument_id": {
         "format": "uuid",
         "title": "Instrument Id",

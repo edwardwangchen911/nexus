@@ -71,6 +71,7 @@ from nexus.optimizer.models import (
 )
 from nexus.optimizer.repository import has_executable_shadow_authority
 from nexus.optimizer.what_if import evaluate_what_if as evaluate_what_if_weights
+from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.optimization import (
     OptimizationProposalGroupRecord,
     OptimizationProposalRecord,
@@ -374,6 +375,22 @@ async def get_optimization_group(
     variants = ("hold_current", "minimum_change", "strategy_target")
     if tuple(by_variant) != variants:
         raise NexusError(ErrorCode.DATA_PARTIAL, "Proposal group variants are invalid.", status_code=409)
+    symbol_rows = (await session.execute(
+        select(InstrumentAlias.instrument_id, InstrumentAlias.symbol)
+        .join(Instrument, Instrument.id == InstrumentAlias.instrument_id)
+        .join(ProposalPositionRecord, ProposalPositionRecord.instrument_id == Instrument.id)
+        .where(
+            ProposalPositionRecord.proposal_id.in_(child.id for child in children),
+            Instrument.created_at <= group.valuation_time,
+            InstrumentAlias.created_at <= group.valuation_time,
+            InstrumentAlias.alias_type == "ticker",
+            InstrumentAlias.valid_from <= group.valuation_time.date(),
+            InstrumentAlias.valid_to.is_(None)
+            | (InstrumentAlias.valid_to >= group.valuation_time.date()),
+        )
+        .distinct()
+    )).all()
+    symbols = {instrument_id: symbol for instrument_id, symbol in symbol_rows}
     proposal_data: list[OptimizationProposalResponse] = []
     for child in children:
         positions = list(
@@ -402,6 +419,7 @@ async def get_optimization_group(
                     positions=tuple(
                         OptimizationProposalPositionResponse(
                             instrument_id=position.instrument_id,
+                            display_symbol=symbols.get(position.instrument_id),
                             current_weight=decimal_to_string(position.current_weight),
                             target_weight=decimal_to_string(position.target_weight),
                             action=cast(ProposalAction, position.action),

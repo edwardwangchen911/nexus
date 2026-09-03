@@ -2329,6 +2329,11 @@ export interface components {
             /** Current Weight */
             current_weight: string;
             /**
+             * Display Symbol
+             * @description Ticker known and effective at the proposal valuation time, or null.
+             */
+            display_symbol?: string | null;
+            /**
              * Instrument Id
              * Format: uuid
              */
