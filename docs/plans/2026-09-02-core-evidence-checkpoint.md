@@ -971,3 +971,22 @@ A 合入后71项格式/WhatIf/组合单测、类型和生成合同检查通过�
 真实场景没有可展示方案、模拟绩效或活动策略，极小数等边界依靠合成回归，未虚报真实
 观察。实际 DOM 记录为上述保护目录的 real-dom-summary.json 和 real-dom-followup.json；
 API源码为ab29f3f、Web为ed0474d，不把两者版本混称。
+
+## E1 Codex 生成运行时第一切片（2026-09-04，北京时间）
+
+main 9ebb793 合入可注入的 CodexStrategyRNDRuntime，仅负责把现有冻结策略实验输入交给
+既有 SDK 传输并校验现有 proposal schema；builder/worker 尚未选择它，未注册或运行
+真实实验组。一次调用、零模型工具、固定模型配置、同源身份校验和绝对 deadline 保留，
+不复用八角色研究委员会充当策略 DSL 生成器。
+
+独立审查发现两项 P2 后在 bd253e9 修复并定向复核：asyncio.timeout 不能阻止连续同步
+本地读取在耗尽期限后继续外呼，因此在读取后、外呼前、返回后和解析后显式检查同一
+monotonic deadline；Codex SDK 当前 run/turn 没有 max_output_tokens 参数，8,192 只是
+本地验收阈值，失败时不能写成已知消耗。现在请求发出后 SDK 未报告用量则 usage=null，
+有报告则保留实测值，不能用零或阈值代替。README 原已正确说明验收阈值不是计费硬截断，
+不重复新增审批或规则。
+
+root 合并前208项单测及独立72项复核通过；A合入后重新运行72项SDK/RND单测、现有研究
+worker/API 6项隔离PG、Ruff/Mypy/diff均通过。未启动E1 worker、未调用模型、未迁移
+业务库。下一切片才接 executor/worker 和可空用量持久化；其代码与迁移由不同owner
+隔离完成，A只串行集成，不将运行时类存在误报为E1正常入口已可用。
