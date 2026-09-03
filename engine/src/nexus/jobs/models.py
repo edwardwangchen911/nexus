@@ -45,6 +45,7 @@ class RetryPolicy(StrEnum):
 
 class JobType(StrEnum):
     DAILY_PIPELINE = "daily.pipeline"
+    DAILY_MANUAL_PIPELINE = "daily.manual_pipeline"
     BROKER_SYNC = "broker.sync"
     BROKER_RECONCILE = "broker.reconcile"
     BROKER_SIMULATION_DISPATCH = "broker.simulation.dispatch"
@@ -83,6 +84,7 @@ JOB_PRIORITIES: dict[JobType, int] = {
     JobType.OPTIMIZATION_PROPOSE: 180,
     JobType.PAPER_ADMIT_ORDERS: 180,
     JobType.DAILY_PIPELINE: 280,
+    JobType.DAILY_MANUAL_PIPELINE: 280,
     JobType.COLLECT_MARKET: 280,
     JobType.COLLECT_FOSUN_DAILY_INSTRUMENT: 280,
     JobType.PUBLISH_FOSUN_DAILY: 280,

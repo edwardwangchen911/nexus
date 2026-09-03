@@ -31,12 +31,12 @@
 
 **Files:** 新 `jobs/daily_manual.py`、`jobs/models.py`、专属 unit/PG。
 
-- [ ] 新手动 root 类型区分旧 `daily.pipeline`，不改变旧根 schema 或既有同名原生研究任务。Job 表已有字符串类型，无迁移。
-- [ ] 根请求显式绑定 portfolio snapshot ID、真实 UTC 截止及已有 XNYS calendar/session。冻结数据不晚于截止，不选择运行时 latest。幂等身份由此完整冻结输入决定；相同输入不重复建根/诊断，不改变旧根。
-- [ ] 三节点 root → quality validation → diagnostics。root 仅构建两子节点；quality 检查既有快照 READY、对应 sync 的 cash-flow PASS、真实时间/日历关系；不生成质量报告或改变账户快照。
-- [ ] diagnostics 校验 root/target 一致，调用既有 `diagnose_and_persist`，保留 snapshot.as_of 与来源边界。诊断不合格则明确失败/跳过，不伪造“无需动作”。
-- [ ] 保留原 Job lease/fencing/事务/依赖语义，重跑复用同一诊断。失败和等待不扩散到其他 root。
-- [ ] PG 贯穿根入队→原 worker→校验→真实诊断持久化，覆盖晚到证据、缺失/不合格快照、重复输入、依赖失败、越界子节点；只用合成账户数据。
+- [x] 新手动 root 类型区分旧 `daily.pipeline`，不改变旧根 schema 或既有同名原生研究任务。Job 表已有字符串类型，无迁移。
+- [x] 根请求显式绑定 portfolio snapshot ID、真实 UTC 截止及已有 XNYS calendar/session。冻结数据不晚于截止，不选择运行时 latest。幂等身份由此完整冻结输入决定；相同输入不重复建根/诊断，不改变旧根。
+- [x] 三节点 root → quality validation → diagnostics。root 仅构建两子节点；quality 检查既有快照 READY、对应 sync 的 cash-flow PASS、真实时间/日历关系；不生成质量报告或改变账户快照。
+- [x] diagnostics 校验 root/target 一致，调用既有 `diagnose_and_persist`，保留 snapshot.as_of 与来源边界。诊断不合格则明确失败/跳过，不伪造“无需动作”。
+- [x] 保留原 Job lease/fencing/事务/依赖语义，重跑复用同一诊断。失败和等待不扩散到其他 root。
+- [x] PG 贯穿根入队→原 worker→校验→真实诊断持久化，覆盖晚到快照/日历、未对账快照、重复输入、依赖失败、越界子节点；只用合成账户数据。9项新PG与20项job model unit通过，审查发现BLOCKED也被阶段标记成功，补第10项红回归后修成skipped；10项新PG+22项旧daily PG共32通过。artifact reader显式必填，不用缺能力替身冒充业务可用。独立定向复核ready，Ruff/两源Mypy/diff-check通过。普通CLI与业务真实案例尚待Task3，不声称日研究/方案全链路完成。
 
 ## Task 3: 显式单次本地入口
 
