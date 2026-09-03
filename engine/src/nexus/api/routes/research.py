@@ -101,7 +101,9 @@ async def get_research_admission(
             .where(
                 AgentModelConfigRecord.pricing_available_at <= now,
                 AgentModelConfigRecord.pricing_expires_at > now,
-                AgentModelConfigRecord.version != "codex-sdk-chatgpt-v2",
+                AgentModelConfigRecord.version.not_in(
+                    ("codex-sdk-chatgpt-v2", "codex-sdk-strategy-rnd-v1")
+                ),
             )
             .order_by(desc(AgentModelConfigRecord.created_at))
             .limit(1)

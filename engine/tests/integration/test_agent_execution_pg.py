@@ -297,12 +297,15 @@ async def test_registering_staged_config_does_not_activate_it_for_default_admiss
     await _seed_authority(factory)
     # The shared test fixture freezes created_at defaults; use explicit ordered timestamps.
     async with factory() as session, session.begin():
-        for version in (1, 2):
+        for ordinal, version in enumerate(
+            ("codex-sdk-chatgpt-v1", "codex-sdk-chatgpt-v2", "codex-sdk-strategy-rnd-v1"),
+            start=1,
+        ):
             session.add(
                 AgentModelConfigRecord(
                     model_id="gpt-5.4-mini",
-                    version=f"codex-sdk-chatgpt-v{version}",
-                    config_hash=str(version) * 64,
+                    version=version,
+                    config_hash=str(ordinal) * 64,
                     max_input_tokens=64_000,
                     max_tool_calls=0,
                     max_output_tokens=8_192,
@@ -310,7 +313,7 @@ async def test_registering_staged_config_does_not_activate_it_for_default_admiss
                     output_usd_per_million=Decimal("0"),
                     pricing_available_at=_NOW,
                     pricing_expires_at=_NOW + timedelta(days=30),
-                    created_at=_NOW + timedelta(hours=version),
+                    created_at=_NOW + timedelta(hours=ordinal),
                 )
             )
     async with factory() as session, session.begin():
@@ -339,6 +342,109 @@ async def test_registering_staged_config_does_not_activate_it_for_default_admiss
             selected = await session.get(AgentModelConfigRecord, admission.run.model_config_id)
             assert selected.version == (
                 "codex-sdk-chatgpt-v2" if explicit else "codex-sdk-chatgpt-v1"
+            )
+
+
+@pytest.mark.asyncio
+async def test_research_rejects_strategy_rnd_config_at_read_and_write_admission(
+    migrated_database_url,
+    monkeypatch,
+):
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_authority(factory, model_version="codex-sdk-strategy-rnd-v1")
+    monkeypatch.setattr("nexus.api.routes.research.utc_now", lambda: _NOW)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url, now=_NOW)),
+        base_url="http://testserver",
+    ) as client:
+        path = (
+            f"/internal/v1/instruments/{_INSTRUMENT_ID}/research-admission"
+            "?as_of=2026-08-24T12%3A00%3A00Z"
+        )
+        response = await client.get(path, headers=headers("GET", path))
+        assert response.status_code == 200
+        assert response.json()["data"]["eligible"] is False
+        assert response.json()["data"]["reason"] == "model_pricing_unavailable"
+        path = "/internal/v1/research-runs"
+        body = json.dumps(
+            {
+                "instrument_id": str(_INSTRUMENT_ID),
+                "data_snapshot_id": str(_SNAPSHOT_ID),
+                "decision_time": "2026-08-24T12:00:00Z",
+            }
+        ).encode()
+        response = await client.post(
+            path,
+            content=body,
+            headers={
+                **headers("POST", path, body),
+                "Idempotency-Key": "rnd-not-research",
+            },
+        )
+        assert response.status_code == 409
+    async with factory() as session, session.begin():
+        with pytest.raises(ValueError, match="point-in-time data authority"):
+            await admit_research_run(
+                session,
+                actor_id="test",
+                route="/internal/v1/research-runs",
+                idempotency_key="explicit-rnd-not-research",
+                request_hash="a" * 64,
+                request=ResearchRequest(
+                    instrument_id=_INSTRUMENT_ID,
+                    data_snapshot_id=_SNAPSHOT_ID,
+                    decision_time=_NOW,
+                ),
+                prompt_version_id=None,
+                model_config_id=_MODEL_ID,
+                daily_limit_usd=Decimal("3"),
+                now=_NOW,
+            )
+        assert await session.scalar(select(func.count()).select_from(AgentResearchRunRecord)) == 0
+        assert await session.scalar(select(func.count()).select_from(Job)) == 0
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(AgentDailyBudgetReservationRecord)
+            )
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_fixture_worker_does_not_synthesize_under_strategy_rnd_identity(
+    migrated_database_url,
+):
+    from nexus.worker import _committee
+
+    settings = EngineSettings(database_url=migrated_database_url)
+    factory = session_factory(settings)
+    await _seed_authority(factory, model_version="codex-sdk-strategy-rnd-v1")
+    async with factory() as session:
+        committee = await _committee(
+            session,
+            settings,
+            AgentResearchRunRecord(model_config_id=_MODEL_ID),
+            responses_client=None,
+            tools=None,
+        )
+        with pytest.raises(RuntimeError, match="committee is unavailable"):
+            await committee.analyze(
+                "market_state",
+                ResearchRequest(
+                    instrument_id=_INSTRUMENT_ID,
+                    data_snapshot_id=_SNAPSHOT_ID,
+                    decision_time=_NOW,
+                ),
+                (
+                    EvidenceRef(
+                        source="fixture",
+                        object_id="test",
+                        available_at=_NOW,
+                        location="memory://test",
+                        content_hash="e" * 64,
+                    ),
+                ),
+                load_prompt_assets()["market_state"],
             )
 
 
@@ -3487,6 +3593,7 @@ async def _seed_authority(
     symbol: str = "ABC",
     omitted_role: AgentRole | None = None,
     include_base_evidence: bool = True,
+    model_version: str = "fixture-pricing-v1",
 ) -> dict[str, UUID]:
     prompts = load_prompt_assets()
     prompt_ids = {
@@ -3524,7 +3631,7 @@ async def _seed_authority(
             AgentModelConfigRecord(
                 id=_MODEL_ID,
                 model_id="fixture-model",
-                version="fixture-pricing-v1",
+                version=model_version,
                 config_hash="2" * 64,
                 max_input_tokens=1_000_000,
                 max_tool_calls=8,

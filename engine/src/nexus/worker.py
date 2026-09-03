@@ -264,9 +264,11 @@ async def _committee(
     tools: ReadOnlyToolRegistry | None,
     deadline: float | None = None,
 ) -> CommitteeModel:
+    model = await session.get(AgentModelConfigRecord, run.model_config_id)
+    if model is not None and model.version == "codex-sdk-strategy-rnd-v1":
+        return _UnavailableResponsesCommittee()
     if settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE:
-        configured_model = await session.get(AgentModelConfigRecord, run.model_config_id)
-        if configured_model is not None and configured_model.version in {
+        if model is not None and model.version in {
             "codex-sdk-chatgpt-v1", "codex-sdk-chatgpt-v2"
         }:
             return _UnavailableResponsesCommittee()
@@ -290,7 +292,6 @@ async def _committee(
     )
     if price_authority_status is FrozenPriceAuthorityStatus.INVALID:
         raise ToolInputError("frozen price authority is unavailable")
-    model = await session.get(AgentModelConfigRecord, run.model_config_id)
     if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
         from nexus.agents.codex_sdk import (
             CONFIG_VERSION,

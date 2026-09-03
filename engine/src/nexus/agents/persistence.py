@@ -278,8 +278,10 @@ async def admit_research_run(
             .where(
                 AgentModelConfigRecord.pricing_available_at <= now,
                 AgentModelConfigRecord.pricing_expires_at > now,
-                # Experimental staged research requires an explicit immutable model ID.
-                AgentModelConfigRecord.version != "codex-sdk-chatgpt-v2",
+                # Staged research is explicit; strategy generation is a separate consumer.
+                AgentModelConfigRecord.version.not_in(
+                    ("codex-sdk-chatgpt-v2", "codex-sdk-strategy-rnd-v1")
+                ),
             )
             .order_by(AgentModelConfigRecord.created_at.desc())
             .limit(1)
@@ -319,6 +321,7 @@ async def admit_research_run(
         or not evidence_records
         or not any(record.authority_kind == "research" for record in evidence_records)
         or model is None
+        or model.version == "codex-sdk-strategy-rnd-v1"
         or model.pricing_available_at > now
         or model.pricing_expires_at <= now
     ):
