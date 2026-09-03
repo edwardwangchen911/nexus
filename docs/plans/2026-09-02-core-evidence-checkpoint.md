@@ -571,3 +571,26 @@ mTLS 健康接口确认 ready，再开始新的单次读取；未改认证/重�
 两个尝试的网关均正常退出，8081/8082 关闭，原业务 PG/MinIO 未重启。受保护证据在
 `outputs/acceptance/cash-flow-context-20260903/`，成功案例位于其 `after-readiness-fix/`；
 私人字段值不进入代码、测试或本文。错误分类补丁用于后续本地主机 CLI，未为此重建 API。
+
+官方码义核验补充：D2 对当前官方 CashFlowInfo 四字段原文行号/hash、固定 SDK 透传和公开
+说明作了定界核查；本任务复核原文四处引用。`direction` 只确认 1 流入、2 流出，不能替代
+收入/费用/买卖分类。`businessType` 和 `flowType` 只有字段名称，无已找到的官方费种字典；
+不得把其他接口 `productType` 枚举或示例数字移用。`productCode` 仅是产品关联候选，命名
+空间、交易所和日期身份尚须唯一核验，不单凭代码或金额/日期邻近挂订单。当前缺口是码义、
+金额 gross/net/fee-only 口径、结算关联及账户费率适用条件；重复刷新不能弥补这些缺口。
+出处及核查边界保存在 D 的 `cashflow-public-semantics-20260903/source-assertions.json`。
+
+## 调整历史来源后续核查（2026-09-03，北京时间）
+
+从原案例发行商页面实际链接取得官方历史 XLSX，HTTP 200、264010 字节；原件与收件记录
+存于同一受保护 issuer 目录。工作表为 Date / NAV / Shares Outstanding / Total Net Assets，
+没有交易收盘价或调整收盘价列。已取得净值历史不等于取得可用于当前价格合同的复权行情，
+未新增数据源准入、未写行情表，也不为此构建 NAV 回测替代体系。
+
+[Tiingo 官方日线文档](https://www.tiingo.com/documentation/end-of-day) 明确拆股与分红调整
+方法及 adjClose，但需要认证 token；[通用文档](https://www.tiingo.com/documentation/general)
+明确需注册账户。[Alpha Vantage 文档](https://www.alphavantage.co/documentation/) 将
+TIME_SERIES_DAILY_ADJUSTED 标为 Premium，示例 demo 不能代替原案例数据或免费授权。
+本地主项目有效配置及当前进程未发现这两个来源的配置；结论不扩展至用户其他账户或机器。
+目前尚未取得原案例合格调整历史，不将“官方文档有接口”报告成实际可用数据，也不旁路
+付费下载或认证。后续入口应先具备真实可用来源及对应口径，再做最小接入。
