@@ -1,6 +1,6 @@
-# 手动快照诊断（日流程首片）
+# 手动快照诊断与单次研究
 
-本入口只把一个明确的已持久化快照串为“日根 → 对账校验 → 正式诊断”。不采集券商、不调用模型、不创建方案、paper 或实盘订单，不启动调度。`completed` 只表示本次诊断流程完成，不等于研究/投资决策合格。
+`admit` / `advance` 把一个明确的已持久化快照串为“日根 → 对账校验 → 正式诊断”，不调用模型。新增 `research-admit` 在诊断成功后登记原生研究，只有显式 `research-run` 才调用一次已有研究 worker。所有命令均不采集券商、不创建方案、paper 或实盘订单，不启动调度。`completed` 只表示对应流程完成，不等于研究内容/投资决策合格。
 
 ## 配置和输入
 
@@ -32,6 +32,23 @@ python -m nexus.ops.daily_once advance --root-id <admit返回的root_id>
 
 ## 兼容、验证与回滚
 
+### 诊断后的研究
+
+诊断三阶段成功后，使用已登记的显式 model config 与实际新的 UTC 研究冻结时刻。该时刻不能早于诊断作业完成或报告创建；它不改变旧日根 cutoff 或账户快照 as_of。研究始终绑定原日根快照，不自动替换为最新快照。
+
+```text
+python -m nexus.ops.daily_once research-admit --root-id <已有日根UUID> --instrument-id <原快照内证券UUID> --research-as-of <实际研究UTC时刻> --model-config-id <已登记模型配置UUID>
+python -m nexus.ops.daily_once research-run --root-id <已有日根UUID> --run-id <准入返回的run_id>
+```
+
+两条研究命令均要求五项对象库配置显式非空及 `AGENT_RUNTIME_MODE=codex_sdk` 或 `responses`，不接受隐式 fixture。Codex 配置须匹配现有 v1/v2 研究模型；Responses 须具备原有 API key 与模型配置且所选模型一致。注册配置复用现有本地研究 setup，不在此处新建凭据或调用外部模型探测。预算沿用 `AGENT_DAILY_BUDGET_USD`，订阅配置中的零 API 计价不意味着订阅使用没有额度限制。
+
+`research-admit` 只在父阶段成功时原子登记快照、原生 run/Job、预算预留及诊断依赖；相同冻结请求返回同一 run，旧 run 若缺少依赖不会被补写。`research-run` 先核验 root/run、冻结上下文、模型与依赖，只领取或回收这一原生 Job，最多一次 worker tick；其他排队作业及过期租约不受影响。不等待未来 available_at、不循环重试；失败先查原 run 的保护状态和日志，不改 cutoff 重放。
+
+研究输出仅含 root/run ID、作业与研究状态、处理数及固定结果码。`prepared` 是已准入而未执行；`pending` 是原作业排队/运行；`blocked` 是失败或不满足完成条件。`completed` 也可能是 partial 研究，必须继续依据现有质量/未知项判断，不生成订单或解锁执行。通信/提交确认不清仍为 `unknown`，不要当作没有产生研究。
+
+### 保留旧行为
+
 不修改旧 `daily.pipeline` schema，不启用旧同名研究/优化阶段。无新增依赖或迁移。停止使用新命令即可回滚使用方式，不删除历史 Job/诊断。现有长驻入口不是本命令，不能用“启动全部 worker”代替这次显式推进。
 
-测试使用隔离 PostgreSQL 与合成快照：入口→原 worker→真实诊断持久化；验证未对账/未来事实/越界子节点、并行根隔离、未来可用时间立即返回。业务案例、模型研究接线、实际研究证据驱动方案仍是后续独立验收，不能以本片测试通过宣称整个 L1 完成。
+测试使用隔离 PostgreSQL 与合成快照：入口→原 worker→真实诊断/原生研究状态持久化；验证未对账/未来事实/越界子节点、并行根隔离、未来可用时间立即返回、缺依赖旧研究不补写。实际研究证据驱动方案与真实案例全链路仍待独立验收，不能以本片测试通过宣称整个 L1 完成。

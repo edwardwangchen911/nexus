@@ -46,7 +46,7 @@ from nexus.jobs.registry import (
     JobHandlerSpec,
     JobRegistry,
 )
-from nexus.jobs.worker import UnsafeJobError, run_job_worker_once
+from nexus.jobs.worker import PreclaimGuard, UnsafeJobError, run_job_worker_once
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.optimizer.jobs import build_optimization_registry
 from nexus.persistence.migrations import (
@@ -88,6 +88,8 @@ async def run_agent_worker_once(
     *,
     responses_client: object | None = None,
     tools: ReadOnlyToolRegistry | None = None,
+    job_ids: tuple[UUID, ...] | None = None,
+    preclaim_guard: PreclaimGuard | None = None,
 ) -> bool:
     """Claim and terminalize at most one queued Agent job outside any HTTP request."""
     _require_worker_runtime(settings)
@@ -106,6 +108,8 @@ async def run_agent_worker_once(
         migration_head=_MIGRATION_HEAD,
         clock=lambda: datetime.now(UTC),
         claim_registered_only=True,
+        job_ids=job_ids,
+        preclaim_guard=preclaim_guard,
     )
 
 

@@ -10,6 +10,7 @@ from helpers.research_snapshots import INSTRUMENT, NOW, seed_filing
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import admit_research_run
 from nexus.agents.snapshots import prepare_research_snapshot
+from nexus.agents.tools import ToolInputError
 from nexus.jobs.daily_manual import (
     ManualDailyRequest,
     build_manual_daily_registry,
@@ -17,9 +18,17 @@ from nexus.jobs.daily_manual import (
     manual_daily_job_ids,
 )
 from nexus.jobs.daily_research import admit_daily_research, resolve_daily_research_job
-from nexus.jobs.models import QueueName, job_input_hash
+from nexus.jobs.models import JobKeyV1, JobType, QueueName, RetryPolicy, job_input_hash
+from nexus.jobs.repository import claim_next_job, enqueue_job, fail_job
 from nexus.jobs.worker import run_job_worker_once
-from nexus.ops.openai_local import prepare_database
+from nexus.ops.daily_once import (
+    DailyOnceError,
+    DailyOnceSettings,
+    DailyResearchAdmitRequest,
+    DailyResearchRunRequest,
+    run_once,
+)
+from nexus.ops.openai_local import MODEL_ID, prepare_database
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentModelConfigRecord,
@@ -40,7 +49,7 @@ from nexus.persistence.models.portfolio import (
 )
 from nexus.persistence.models.runtime import Job, JobDependency
 from nexus.persistence.session import session_factory
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 from sqlalchemy import func, select
 
 
@@ -420,3 +429,180 @@ async def test_daily_research_never_backfills_dependency_on_existing_native_run(
             )
             == 1
         )
+
+
+def _research_settings(url):
+    return DailyOnceSettings(
+        database_url=url,
+        agent_runtime_mode="responses",
+        openai_api_key="synthetic-test-key",
+        openai_reasoning_model=MODEL_ID,
+        openai_extraction_model=MODEL_ID,
+        object_store_endpoint="http://127.0.0.1:19000",
+        object_store_region="test-region",
+        object_store_bucket="synthetic-test",
+        object_store_access_key_id="synthetic-key",
+        object_store_secret_access_key="synthetic-secret",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("future_availability", [False, True])
+async def test_daily_research_cli_calls_native_worker_only_for_bound_job(
+    migrated_database_url,
+    monkeypatch,
+    future_availability,
+):
+    factory, root, _, model_id = await _daily_case(migrated_database_url)
+    settings = _research_settings(migrated_database_url)
+
+    async def unavailable(*args, **kwargs):
+        raise ToolInputError("synthetic unavailable evidence; no external call")
+
+    monkeypatch.setattr("nexus.worker._committee", unavailable)
+    admission = await run_once(
+        settings,
+        DailyResearchAdmitRequest(
+            action="research-admit",
+            root_id=root.id,
+            instrument_id=INSTRUMENT,
+            research_as_of=datetime.now(UTC),
+            model_config_id=model_id,
+        ),
+    )
+    assert admission["status"] == "prepared"
+    run_id = UUID(admission["run_id"])
+    async with factory() as session, session.begin():
+        others = []
+        for label in ("expired", "queued"):
+            payload = {"run_id": str(UUID(int=500 if label == "expired" else 501))}
+            other = await enqueue_job(
+                session,
+                key=JobKeyV1(
+                    job_type=JobType.AGENT_RESEARCH,
+                    scope_kind="instrument",
+                    scope_id=label,
+                    effective_at=NOW,
+                    input_hash=job_input_hash(payload),
+                ),
+                schema_version="agent_research_job_v1",
+                payload=payload,
+                queue=QueueName.GENERAL,
+                retry_policy=RetryPolicy.AUTOMATIC_SAFE,
+                max_attempts=3,
+                available_at=NOW,
+            )
+            others.append(other.id)
+        assert await claim_next_job(
+            session, queue=QueueName.GENERAL, worker_id="other-owner", now=NOW, job_ids=(others[0],)
+        )
+        if future_availability:
+            target = await resolve_daily_research_job(session, root_id=root.id, run_id=run_id)
+            claim = await claim_next_job(
+                session,
+                queue=QueueName.GENERAL,
+                worker_id="previous-target-owner",
+                now=datetime.now(UTC),
+                job_ids=(target.id,),
+            )
+            assert claim is not None
+            await fail_job(
+                session,
+                claim=claim,
+                now=datetime.now(UTC),
+                error_code="SYNTHETIC_WAIT",
+                retry_delay_seconds=60,
+            )
+    request = DailyResearchRunRequest(action="research-run", root_id=root.id, run_id=run_id)
+    result = await run_once(settings, request)
+    assert result["processed"] == (0 if future_availability else 1)
+    assert result["status"] == ("pending" if future_availability else "blocked")
+    assert result["run_status"] == ("prepared" if future_availability else "failed")
+    assert (await run_once(settings, request))["processed"] == 0
+    async with factory() as session:
+        expired = await session.get(Job, others[0])
+        queued = await session.get(Job, others[1])
+        assert (expired.status, expired.attempt_count) == ("running", 1)
+        assert (queued.status, queued.attempt_count) == ("queued", 0)
+        assert (await session.get(AgentResearchRunRecord, run_id)).status == (
+            "prepared" if future_availability else "failed"
+        )
+
+
+@pytest.mark.asyncio
+async def test_daily_research_cli_wrong_runtime_model_never_reserves(migrated_database_url):
+    factory, root, _, model_id = await _daily_case(migrated_database_url)
+    settings = _research_settings(migrated_database_url).model_copy(
+        update={"agent_runtime_mode": AgentRuntimeMode.CODEX_SDK},
+    )
+    with pytest.raises(DailyOnceError, match="DAILY_ONCE_RESEARCH_MODEL_UNAVAILABLE"):
+        await run_once(
+            settings,
+            DailyResearchAdmitRequest(
+                action="research-admit",
+                root_id=root.id,
+                instrument_id=INSTRUMENT,
+                research_as_of=datetime.now(UTC),
+                model_config_id=model_id,
+            ),
+        )
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(AgentResearchRunRecord)) == 0
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(
+                    AgentDailyBudgetReservationRecord,
+                )
+            )
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_daily_research_claim_guard_rechecks_before_heartbeat_or_claim(
+    migrated_database_url,
+    monkeypatch,
+):
+    from nexus.jobs.daily_pipeline import assert_daily_pipeline_schema_ready
+    from nexus.persistence.models.runtime import WorkerHeartbeat
+
+    factory, root, _, model_id = await _daily_case(migrated_database_url)
+    settings = _research_settings(migrated_database_url)
+    admission = await run_once(
+        settings,
+        DailyResearchAdmitRequest(
+            action="research-admit",
+            root_id=root.id,
+            instrument_id=INSTRUMENT,
+            research_as_of=datetime.now(UTC),
+            model_config_id=model_id,
+        ),
+    )
+    run_id = UUID(admission["run_id"])
+    calls = 0
+
+    async def guard(session):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ValueError("DAILY_PIPELINE_DATABASE_HEAD_MISMATCH")
+        await assert_daily_pipeline_schema_ready(session)
+
+    monkeypatch.setattr("nexus.ops.daily_once.assert_daily_pipeline_schema_ready", guard)
+    async with factory() as session:
+        heartbeats = await session.scalar(select(func.count()).select_from(WorkerHeartbeat))
+    with pytest.raises(DailyOnceError, match="DAILY_PIPELINE_DATABASE_HEAD_MISMATCH"):
+        await run_once(
+            settings,
+            DailyResearchRunRequest(
+                action="research-run",
+                root_id=root.id,
+                run_id=run_id,
+            ),
+        )
+    assert calls == 2
+    async with factory() as session:
+        job = await resolve_daily_research_job(session, root_id=root.id, run_id=run_id)
+        assert (job.status, job.attempt_count) == ("queued", 0)
+        assert (await session.get(AgentResearchRunRecord, run_id)).status == "prepared"
+        assert await session.scalar(select(func.count()).select_from(WorkerHeartbeat)) == heartbeats
