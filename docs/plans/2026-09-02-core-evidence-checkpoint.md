@@ -1415,3 +1415,18 @@ T/Z规范格式后通过，不重放业务导入。ready整体503仅worker unava
 迁移/对象存储均ready；未为绿灯启动常驻worker。历史模型失败仍generic/原因未知，
 新安全错误分类已运行生效，不重标历史失败。NAV资料页投影仍由root接续，不将
 已导入/工具合同当页面可见。所有私有材料与安全摘要保存在issuer-nav-20260904。
+
+
+## NAV 页面真实冻结验收（2026-09-04，北京时间）
+
+root be6a36a→5b26c76已合入并加载API；A57前端/BFFunit、4NAV PG、生成合同及
+TypeScript检查通过。本次仅应用更新，无迁移、重复原件导入或模型调用。API镜像
+及源码hash与5b26c76一致，环境/端口及PG/MinIO实例未变，rollback-before-nav-view
+镜像保留。沿实际已导入NAV的新snapshot/asof检查canonical→API/BFF：32条日期、
+NAV/份额数/基金净资产逐项Decimal完全相等，覆盖期/总数与原件一致。
+
+1440与390真实DOM显示同snapshot/ref、32行、完整覆盖期、截断、USD/份与产品页
+币种依据、未知拆分/再投资/修订、双receipt/hash；执行保持锁定，无页面横溢出。
+旧failedrun原cutoff页面仍无NAV，新资料没有混进旧冻结研究。五类业务表全量行hash
+相等，activejobs0。证据在issuer-nav-view-20260904。新截止的资料卡可与更早研究
+同时出现，已交root核对并补显式版本差异说明，避免用户误认为旧模型已使用新资料。
