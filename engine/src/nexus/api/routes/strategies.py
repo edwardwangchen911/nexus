@@ -58,7 +58,7 @@ async def list_strategies(
     )
     if (
         definition is None
-        or definition.schema_version != "2"
+        or definition.schema_version != "strategy_dsl_v1"
         or definition.expression_hash != expected_strategy.expression_hash
         or definition.document != baseline_v1_document()
         or definition.lifecycle != "champion"

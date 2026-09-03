@@ -28,6 +28,7 @@ from nexus.backtest.engine import (
     SectorClassification,
     UniverseSnapshot,
     UnresolvedDelistingEvent,
+    _audited_data_hash,
     _authority_bundle_hash,
     _mapped_session_on_or_after,
     run_backtest,
@@ -109,6 +110,34 @@ async def load_point_in_time_dataset(
         raise ValueError(f"{BACKTEST_AUTHORITY_INCOMPLETE}: {error}") from error
 
 
+async def load_frozen_point_in_time_dataset(
+    session: AsyncSession,
+    authority_bundle_id: UUID,
+    protocol: BacktestProtocol,
+    as_of: datetime,
+) -> PointInTimeDataset:
+    """Reconstruct first-run inputs; the existing writer still validates and seals the result."""
+    cutoff = require_utc(as_of)
+    try:
+        bundle = await session.get(
+            BacktestAuthorityBundleRecord, authority_bundle_id, populate_existing=True
+        )
+        if (
+            bundle is None or bundle.completed_at > cutoff
+            or bundle.range_start != protocol.start or bundle.range_end != protocol.end
+            or bundle.completeness_status != "complete"
+        ):
+            raise ValueError("frozen bundle is missing, incomplete, or bound to another range")
+        _require_visible((bundle,), cutoff, label="backtest bundle")
+        snapshot = await _require_root_authorities(session, bundle, cutoff)
+        data = await _load_bundle_dataset(session, bundle, cutoff)
+        if snapshot.payload.get("data_hash") != _audited_data_hash(data, protocol):
+            raise ValueError("frozen dataset does not match the requested protocol")
+        return data
+    except (LookupError, TypeError, ValueError) as error:
+        raise ValueError(f"{BACKTEST_AUTHORITY_INCOMPLETE}: {error}") from error
+
+
 async def _load_point_in_time_dataset(
     session: AsyncSession,
     baseline_run_id: UUID,
@@ -159,8 +188,42 @@ async def _load_point_in_time_dataset(
         or bundle.completed_at > as_of
     ):
         raise ValueError("backtest authority bundle is missing or inconsistent")
-    await _require_root_authorities(session, run, bundle, as_of)
+    await _require_root_authorities(session, bundle, as_of, data_hash=run.data_hash)
 
+    data = await _load_bundle_dataset(session, bundle, as_of)
+
+    authority = BacktestPersistenceAuthority(
+        authority_bundle_id=bundle.id,
+        data_snapshot_id=bundle.data_snapshot_id,
+        source_policy_id=bundle.source_policy_id,
+        cost_policy_id=bundle.cost_policy_id,
+        completed_at=run.completed_at,
+        data_cutoff_at=bundle.completed_at,
+    )
+    await _validate_database_authority(
+        session,
+        data,
+        protocol,
+        stored_result,
+        authority,
+        run.authority_frozen_at,
+    )
+    replay = run_backtest(strategy, data, protocol)
+    if replay != stored_result:
+        raise ValueError("stored baseline result does not replay from its authority")
+    return LoadedPointInTimeBacktest(
+        data=data,
+        protocol=protocol,
+        strategy=strategy,
+        stored_result=stored_result,
+        baseline_run_id=run.id,
+    )
+
+
+async def _load_bundle_dataset(
+    session: AsyncSession, bundle: BacktestAuthorityBundleRecord, as_of: datetime
+) -> PointInTimeDataset:
+    """Shared reconstruction for first execution and sealed-run replay."""
     calendar_record = await session.get(
         ExchangeCalendarAuthorityRecord,
         bundle.calendar_authority_id,
@@ -168,6 +231,7 @@ async def _load_point_in_time_dataset(
     )
     if calendar_record is None or calendar_record.published_at > as_of:
         raise ValueError("calendar authority is missing at the cutoff")
+    _require_visible((calendar_record,), as_of, label="calendar authority")
     calendar_rows = tuple(
         await session.scalars(
             select(ExchangeCalendarSessionRecord)
@@ -279,46 +343,22 @@ async def _load_point_in_time_dataset(
             )
         except ValueError:
             continue
-        if _authority_bundle_hash(candidate) == run.authority_hash:
+        if _authority_bundle_hash(candidate) == bundle.content_hash:
             matching_data.append(candidate)
     if len(matching_data) != 1:
         raise ValueError("equal-weight benchmark authority is missing or ambiguous")
     data = matching_data[0]
 
-    authority = BacktestPersistenceAuthority(
-        authority_bundle_id=bundle.id,
-        data_snapshot_id=bundle.data_snapshot_id,
-        source_policy_id=bundle.source_policy_id,
-        cost_policy_id=bundle.cost_policy_id,
-        completed_at=run.completed_at,
-        data_cutoff_at=bundle.completed_at,
-    )
-    await _validate_database_authority(
-        session,
-        data,
-        protocol,
-        stored_result,
-        authority,
-        run.authority_frozen_at,
-    )
-    replay = run_backtest(strategy, data, protocol)
-    if replay != stored_result:
-        raise ValueError("stored baseline result does not replay from its authority")
-    return LoadedPointInTimeBacktest(
-        data=data,
-        protocol=protocol,
-        strategy=strategy,
-        stored_result=stored_result,
-        baseline_run_id=run.id,
-    )
+    return data
 
 
 async def _require_root_authorities(
     session: AsyncSession,
-    run: BacktestRunRecord,
     bundle: BacktestAuthorityBundleRecord,
     as_of: datetime,
-) -> None:
+    *,
+    data_hash: str | None = None,
+) -> DataSnapshot:
     snapshot = await session.get(DataSnapshot, bundle.data_snapshot_id, populate_existing=True)
     source_policy = await session.get(SourcePolicy, bundle.source_policy_id, populate_existing=True)
     cost_policy = await session.get(CostPolicyRecord, bundle.cost_policy_id, populate_existing=True)
@@ -332,10 +372,11 @@ async def _require_root_authorities(
         or source_policy.created_at > as_of
         or cost_policy.available_at > as_of
         or cost_policy.created_at > as_of
-        or snapshot.payload.get("authority_hash") != run.authority_hash
-        or snapshot.payload.get("data_hash") != run.data_hash
+        or snapshot.payload.get("authority_hash") != bundle.content_hash
+        or (data_hash is not None and snapshot.payload.get("data_hash") != data_hash)
     ):
         raise ValueError("root authority facts are incomplete at the cutoff")
+    return snapshot
 
 
 async def _load_collection(
@@ -371,6 +412,7 @@ async def _load_collection(
     )
     if record is None or record.completed_at > as_of:
         raise ValueError(f"{kind} collection is missing at the cutoff")
+    _require_visible((record,), as_of, label=f"{kind} collection")
     return AuthorityCollection(
         authority_id=record.id,
         kind=cast(Literal["universe", "sector", "corporate_action"], record.kind),

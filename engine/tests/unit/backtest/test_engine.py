@@ -1562,7 +1562,7 @@ def _persisted_baseline_definition() -> SimpleNamespace:
     strategy = _compiled_baseline()
     return SimpleNamespace(
         id=uuid4(),
-        schema_version="2",
+        schema_version="strategy_dsl_v1",
         expression_hash=strategy.expression_hash,
         document=baseline_v1_document(),
         lifecycle="champion",
@@ -1603,6 +1603,27 @@ async def test_strategy_listing_exposes_only_locked_deterministic_baseline() -> 
     assert response.data[0].historical_agent_overlay is False
     assert response.data[0].live_execution_enabled is False
     assert response.data[0].latest_backtest is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [
+    ("schema_version", "unknown"), ("lifecycle", "challenger"),
+    ("published_at", datetime(9999, 1, 1, tzinfo=UTC)),
+])
+async def test_strategy_listing_still_rejects_unpublished_or_unknown_definitions(
+    field: str, value: object,
+) -> None:
+    from nexus.api.auth import VerifiedServiceActor
+    from nexus.api.routes.strategies import list_strategies
+
+    definition = _persisted_baseline_definition()
+    setattr(definition, field, value)
+    session = AsyncMock()
+    session.scalar.return_value = definition
+    response = await list_strategies(
+        VerifiedServiceActor(actor_id="web", request_id=uuid4(), key_id="current"), session
+    )
+    assert response.data == ()
 
 
 @pytest.mark.asyncio
