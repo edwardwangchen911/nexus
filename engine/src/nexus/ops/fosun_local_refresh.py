@@ -307,39 +307,18 @@ async def refresh_local_fosun(
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         async with sessions() as session:
             identity = await _load_local_broker_identity(session, holdings=holdings)
-        frozen, cash_flow_result = await _read_broker_facts(
-            broker,
-            account_id=identity.account_id,
-            portfolio_id=identity.portfolio_id,
-            sync_run_id=identity.sync_run_id,
-            external_account_id=external_account_id,
-            instrument_ids=identity.instrument_ids,
-            cash_flow_end=request_end_at.date(),
-            previous_cash_flow_watermark=identity.previous_cash_flow_watermark,
-        )
-    except BaseException:
-        if engine is not None:
-            await engine.dispose()
-        raise
-    finally:
-        await broker.aclose()
-        await market.aclose()
-
-    if engine is None:
-        raise AssertionError("local database engine was not initialized")
-    store = S3ProviderEvidenceStore(settings)
-    try:
+        store = S3ProviderEvidenceStore(settings)
+        # Commit actual market availability before the broker read establishes its cutoff.
+        # If the following broker read fails, keep market facts without a new account snapshot.
         try:
             async with sessions() as session, session.begin():
-                result = await _persist_refresh(
+                market_result = await _persist_market_snapshot(
                     session,
                     store,
                     settings=settings,
                     accounts_page=accounts_page,
                     holdings=holdings,
                     identity=identity,
-                    frozen=frozen,
-                    cash_flow_result=cash_flow_result,
                     market_reads=market_reads,
                     request_start_at=request_start_at,
                     request_end_at=request_end_at,
@@ -350,6 +329,56 @@ async def refresh_local_fosun(
             if isinstance(error, GatewayClientError):
                 raise
             raise RuntimeError("LOCAL_PERSISTENCE_FAILED") from None
+        frozen, cash_flow_result = await _read_broker_facts(
+            broker,
+            account_id=identity.account_id,
+            portfolio_id=identity.portfolio_id,
+            sync_run_id=identity.sync_run_id,
+            external_account_id=external_account_id,
+            instrument_ids=identity.instrument_ids,
+            cash_flow_end=request_end_at.date(),
+            previous_cash_flow_watermark=identity.previous_cash_flow_watermark,
+        )
+        try:
+            async with sessions() as session, session.begin():
+                snapshot = await _persist_ready_broker_snapshot(
+                    session,
+                    account_id=identity.account_id,
+                    portfolio_id=identity.portfolio_id,
+                    frozen=frozen,
+                    holdings=holdings,
+                    instrument_ids=identity.instrument_ids,
+                    valid_from=request_start_at.date(),
+                    completed_at=datetime.now(UTC),
+                    cash_flow_result=cash_flow_result,
+                )
+        except Exception as error:
+            if isinstance(error, GatewayClientError):
+                raise
+            raise RuntimeError("LOCAL_PERSISTENCE_FAILED") from None
+        broker_requests = _broker_request_counts(frozen)
+        provider_requests = {
+            "accounts": 1,
+            "cash": broker_requests["cash"],
+            "holdings": 1 + broker_requests["holdings"],
+            "orders": broker_requests["orders"],
+            "cash_flows": 1,
+            **market_reads.request_counts,
+        }
+        provider_requests["total"] = sum(provider_requests.values())
+        result = {
+            **market_result,
+            "status": "ok",
+            "source": "fosun",
+            "snapshot_status": snapshot.status,
+            "cash_currencies": len(frozen.portfolio_snapshot.cash),
+            "positions": len(frozen.portfolio_snapshot.positions),
+            "open_orders": len(frozen.portfolio_snapshot.open_orders),
+            "cash_flow_quality": cash_flow_result.quality,
+            "cash_flows": len(cash_flow_result.facts),
+            "provider_requests": provider_requests,
+            "portfolio_as_of": snapshot.as_of.isoformat() if snapshot.as_of else None,
+        }
         result["diagnostic"] = await _diagnose_local_snapshot(
             sessions,
             frozen=frozen,
@@ -358,7 +387,10 @@ async def refresh_local_fosun(
         )
         return result
     finally:
-        await engine.dispose()
+        await broker.aclose()
+        await market.aclose()
+        if engine is not None:
+            await engine.dispose()
 
 
 async def _diagnose_local_snapshot(
@@ -713,7 +745,7 @@ async def _read_market_snapshot(
     )
 
 
-async def _persist_refresh(
+async def _persist_market_snapshot(
     session: AsyncSession,
     store: S3ProviderEvidenceStore,
     *,
@@ -721,8 +753,6 @@ async def _persist_refresh(
     accounts_page: GatewayResponsePage,
     holdings: tuple[PositionItem, ...],
     identity: _LocalBrokerIdentity,
-    frozen: BrokerSyncResult,
-    cash_flow_result: CashFlowSyncResult,
     market_reads: _MarketSnapshotReads,
     request_start_at: datetime,
     request_end_at: datetime,
@@ -733,17 +763,19 @@ async def _persist_refresh(
     bars_raw_by_code = dict(market_reads.bars_raw)
     account_page_as_of = accounts_page.as_of
     instrument_ids = identity.instrument_ids
-    snapshot = await _persist_ready_broker_snapshot(
-        session,
-        account_id=identity.account_id,
-        portfolio_id=identity.portfolio_id,
-        frozen=frozen,
-        holdings=holdings,
-        instrument_ids=instrument_ids,
-        valid_from=request_start_at.date(),
-        completed_at=authorized_at,
-        cash_flow_result=cash_flow_result,
-    )
+    for item in holdings:
+        if item.instrument_code not in market_reads.codes:
+            continue
+        expected_id = instrument_ids[item.instrument_code]
+        actual_id = await _ensure_instrument(
+            session,
+            item.instrument_code,
+            currency=item.currency,
+            valid_from=request_start_at.date(),
+            expected_id=expected_id,
+        )
+        if actual_id != expected_id:
+            raise ValueError("LOCAL_BROKER_INSTRUMENT_MISMATCH")
     await _ensure_market_universe(
         session,
         instrument_ids=tuple(instrument_ids[code] for code in market_reads.codes),
@@ -869,34 +901,13 @@ async def _persist_refresh(
             raise ValueError("LOCAL_KLINE_DISPLAY_MODE_INVALID")
         bar_count += len(normalized_bars.items)
     quote_success = sum(item.price is not None for item in quote_page.items)
-    broker_request_counts = _broker_request_counts(frozen)
-    provider_requests = {
-        "accounts": 1,
-        "cash": broker_request_counts["cash"],
-        "holdings": 1 + broker_request_counts["holdings"],
-        "orders": broker_request_counts["orders"],
-        "cash_flows": 1,
-        "quotes": market_reads.request_counts["quotes"],
-        "bars": market_reads.request_counts["bars"],
-    }
-    provider_requests["total"] = sum(provider_requests.values())
     return {
-        "status": "ok",
-        "source": "fosun",
-        "snapshot_status": snapshot.status,
-        "cash_currencies": len(frozen.portfolio_snapshot.cash),
-        "positions": len(frozen.portfolio_snapshot.positions),
-        "open_orders": len(frozen.portfolio_snapshot.open_orders),
-        "cash_flow_quality": cash_flow_result.quality,
-        "cash_flows": len(cash_flow_result.facts),
         "market_symbols": len(market_reads.codes),
         "quotes": len(quote_page.items),
         "quote_success": quote_success,
         "quote_missing": len(quote_page.items) - quote_success,
         "bar_series": len(market_reads.bars_raw),
         "bars": bar_count,
-        "provider_requests": provider_requests,
-        "portfolio_as_of": snapshot.as_of.isoformat() if snapshot.as_of else None,
         "market_as_of": max(quote_raw.received_at, *bars_received_at).isoformat(),
     }
 
