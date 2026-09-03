@@ -1,8 +1,11 @@
 """Synthetic regression cases; real recovery copies never enter tests."""
 
+import asyncio
 import hashlib
 import json
 from asyncio import CancelledError
+from threading import Event
+from types import SimpleNamespace
 
 import pytest
 from nexus.ops.local_recovery import (
@@ -199,3 +202,66 @@ async def test_first_restore_failure_stops_objects_and_still_cleans_owned_target
     report = json.loads((recovery.output / "result.json").read_bytes())
     assert report["status"] == ("cleanup_failed" if cleanup_fails else "failed")
     assert not report.get("object_bindings_verified", False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_twice", [False, True])
+async def test_cancelled_create_finishes_before_owner_cleanup(tmp_path, monkeypatch, cancel_twice):
+    from nexus.ops.local_backup import LocalBackup
+
+    backup = LocalBackup(tmp_path / "backup", tmp_path)
+    loop = asyncio.get_running_loop()
+    create_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_create = Event()
+    events = []
+    created = False
+
+    def run(command, **kwargs):
+        nonlocal created
+        action = command[1]
+        output = b""
+        if action == "create":
+            events.append("create_started")
+            loop.call_soon_threadsafe(create_started.set)
+            assert release_create.wait(timeout=3)
+            created = True
+            events.append("create_finished")
+        elif action == "ps":
+            output = b"synthetic-owned-container" if created else b""
+        elif action == "inspect":
+            output = backup.run_id.encode()
+        elif action == "rm":
+            created = False
+            events.append("removed")
+        return SimpleNamespace(returncode=0, stdout=output)
+
+    async def local_docker():
+        pass
+
+    original_cleanup = backup.cleanup
+
+    async def cleanup():
+        events.append("cleanup_started")
+        cleanup_started.set()
+        await original_cleanup()
+
+    monkeypatch.setattr("nexus.ops.local_recovery.subprocess.run", run)
+    monkeypatch.setattr(backup, "local_docker", local_docker)
+    monkeypatch.setattr(backup, "cleanup", cleanup)
+    operation = asyncio.create_task(backup.execute())
+    try:
+        await asyncio.wait_for(create_started.wait(), timeout=2)
+        operation.cancel()
+        await asyncio.sleep(0)
+        if cancel_twice:
+            operation.cancel()
+            await asyncio.sleep(0)
+        assert not cleanup_started.is_set()
+    finally:
+        release_create.set()
+        with pytest.raises(CancelledError):
+            await asyncio.wait_for(operation, timeout=2)
+    assert events == ["create_started", "create_finished", "cleanup_started", "removed"]
+    assert created is False
+    assert not (backup.backup / "complete.json").exists()

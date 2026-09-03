@@ -230,16 +230,33 @@ class LocalRecovery:
         input_bytes: bytes | None = None,
         environment: dict[str, str] | None = None,
     ) -> bytes:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            (*self.docker, *arguments),
-            input=input_bytes,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={**os.environ, **(environment or {})},
-            timeout=120,
-            check=False,
+        pending_command = asyncio.create_task(
+            asyncio.to_thread(
+                subprocess.run,
+                (*self.docker, *arguments),
+                input=input_bytes,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={**os.environ, **(environment or {})},
+                timeout=120,
+                check=False,
+            )
         )
+        try:
+            result = await asyncio.shield(pending_command)
+        except asyncio.CancelledError:
+            # Cancelling an await cannot stop this thread's subprocess. Let the
+            # issued command settle before the caller performs owner cleanup.
+            while not pending_command.done():
+                try:
+                    await asyncio.shield(pending_command)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not pending_command.cancelled():
+                pending_command.exception()  # Consume failure; cancellation still propagates.
+            raise
         if result.returncode:
             raise RecoveryError("RECOVERY_DOCKER_COMMAND_FAILED")
         return result.stdout
