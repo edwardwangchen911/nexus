@@ -1103,3 +1103,27 @@ root 1a30b9d合为f5d0563，手动daily根只组合冻结快照校验与诊断�
 彻底消除跨测试模块导入；不更改全局path。086da03/4a7f402合为6be5bd1/bae556f，
 A按实际CI importlib入口定向20项通过；其余78项及独立性能复验的证据保持，不重跑
 整组重型测试。该批代码集成与B3运行生效分别记录，L1/S2b尚未在业务环境实际执行。
+
+S2b-3a的81ecad9合为4724f3d，新增持仓rank观察包装，保持原决策序列化/入口签名；
+退出或被限额淘汰的实际持仓仍保留已计算观察，输入缺失明确unavailable、非周末不累加，
+新target不冒充旧held。A复验30项相关unit通过，B另有golden/hash及独立审查证据；尚未
+写checkpoint或接通持续paper。L1 CLI 3f401f1合为3be669c，A14unit+2入口PG、Mypy通过；
+最多三个既有worker tick，显式对象库配置且不默认fixture，准确job范围保持。
+
+## A2 源成交额元数据留存（2026-09-04，北京时间）
+
+复用D现有官方YAML/SDK核验，不重复请求相同缺口。Gateway归一化只留vol/OHLC，源
+turnover和power不会进入现有归档；这只能证明本地未保留，不能推断SDK实际没返回。
+最小修复在bar中留可空provider_raw_turnover，在page留可空provider_scale_power；
+严格整数、零值保留、缺失/null未知，不按币种、volume单位或调整请求推成可用ADV20。
+Engine严格合同同步兼容，既有ProviderPage.raw_payload原样保留，不新增数据表/解析
+框架或修改PriceBar与用途policy。官方缩放规则为raw turnover / 10^power，但币种、
+时段、调整适用性及真实响应字段仍须分别举证，本片不计算或升级经济指标。
+
+9项gateway与3项签名Gateway→Provider归档测试先红；跨层发现exact JSON把数值统一
+解析为Decimal，严格int直收会误拒绝，因此仅无损转换有限整数，再走字段约束。
+最终44项gateway归一化/请求合同、72项Engine相关unit、Mypy3/Ruff/diff通过；一轮
+独立审查ready且75项离线验证通过。旧归档缺新字段仍可读；新producer即使输出null
+也不兼容旧strict consumer，运行切换必须先所有消费者、后Gateway。回滚相反顺序，
+停止新调用后先旧Gateway；已归档新字段需要保留兼容reader，不能删除或改写归档。
+截至此记录没有加载新Gateway或请求供应商，不能将合成留存证明当作真实字段存在。

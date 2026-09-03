@@ -401,6 +401,42 @@ def test_bar_parser_retains_strict_provider_delay_without_inference(delay) -> No
             parse()
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("provider_raw_turnover", True),
+        ("provider_raw_turnover", -1),
+        ("provider_raw_turnover", 1.5),
+        ("provider_raw_turnover", "1"),
+        ("provider_scale_power", True),
+        ("provider_scale_power", -1),
+        ("provider_scale_power", 13),
+        ("provider_scale_power", 1.5),
+    ],
+)
+def test_bar_parser_rejects_invalid_source_numeric_metadata(field, value):
+    payload = json.loads(_bar_payload())
+    target = payload["items"][0] if field == "provider_raw_turnover" else payload
+    target[field] = value
+    raw = RawGatewayResponse(
+        operation="fosun_get_bars",
+        gateway_request_id=REQUEST_ID,
+        request_body_sha256="a" * 64,
+        raw_payload=json.dumps(payload).encode(),
+        sent_at=NOW - timedelta(milliseconds=250),
+        received_at=NOW,
+    )
+    with pytest.raises(FosunMarketGatewayError):
+        parse_bar_page(
+            raw,
+            expected_code="usAAPL",
+            expected_ktype="day",
+            start=datetime(2026, 8, 1, tzinfo=UTC),
+            end=datetime(2026, 8, 29, tzinfo=UTC),
+            limit=10,
+        )
+
+
 def test_daily_parser_uses_session_date_for_request_window() -> None:
     raw = RawGatewayResponse(
         operation="fosun_get_bars",

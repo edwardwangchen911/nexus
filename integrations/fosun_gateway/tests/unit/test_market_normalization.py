@@ -13,6 +13,53 @@ def _raw(data: object) -> dict[str, object]:
     return {"code": 0, "data": data, "requestId": "synthetic-market-request"}
 
 
+@pytest.mark.parametrize("turnover", [None, 0, 900719925474099312345])
+def test_bars_preserve_optional_raw_turnover_and_source_scale(turnover):
+    row = {"time": 20260828, "open": 1234, "high": 1234, "low": 1234, "close": 1234, "vol": 7}
+    if turnover is not None:
+        row["turnover"] = turnover
+    page = normalize_provider_response(
+        "fosun_get_bars",
+        _raw({"data": [row], "power": 2, "total": 1}),
+        received_at=RECEIVED_AT,
+        context={"code": "usAAPL", "ktype": "day", "limit": 10},
+    )
+    document = page.model_dump(mode="json")
+    assert document["items"][0]["provider_raw_turnover"] == turnover
+    assert document["provider_scale_power"] == 2
+    assert document["items"][0]["close"] == "12.34"
+    assert document["items"][0]["volume"] == "7"
+    assert page.quality == "PARTIAL"
+
+
+@pytest.mark.parametrize("turnover", [True, -1, 1.5, "1", {}, []])
+def test_bars_reject_malformed_present_raw_turnover(turnover):
+    with pytest.raises(GatewayError) as error:
+        normalize_provider_response(
+            "fosun_get_bars",
+            _raw(
+                {
+                    "data": [
+                        {
+                            "time": 20260828,
+                            "open": 1234,
+                            "high": 1234,
+                            "low": 1234,
+                            "close": 1234,
+                            "vol": 7,
+                            "turnover": turnover,
+                        }
+                    ],
+                    "power": 2,
+                    "total": 1,
+                }
+            ),
+            received_at=RECEIVED_AT,
+            context={"code": "usAAPL", "ktype": "day", "limit": 10},
+        )
+    assert error.value.code == "PROVIDER_MALFORMED_RESPONSE"
+
+
 @pytest.mark.parametrize("delay", [True, False, None, "missing"])
 def test_bar_response_retains_only_provider_reported_delay(delay):
     data = {"data": [], "power": 0, "total": 0}

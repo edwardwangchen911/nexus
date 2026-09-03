@@ -15,13 +15,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 import httpx
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     SecretStr,
     StrictBool,
     ValidationError,
@@ -139,6 +140,8 @@ class FosunBarItem(BaseModel):
     low: Decimal
     close: Decimal
     volume: Decimal
+    # Archive source facts only; do not infer USD turnover or volume units.
+    provider_raw_turnover: Annotated[int, Field(strict=True, ge=0)] | None = None
 
     @field_validator("instrument_code")
     @classmethod
@@ -154,6 +157,11 @@ class FosunBarItem(BaseModel):
     @classmethod
     def _positive_prices(cls, value: object) -> Decimal:
         return _positive_decimal(value, "bar price")
+
+    @field_validator("provider_raw_turnover", mode="before")
+    @classmethod
+    def _source_turnover_integer(cls, value: object) -> object:
+        return _source_integer(value)
 
     @field_validator("volume", mode="before")
     @classmethod
@@ -202,6 +210,12 @@ class FosunBarPage(BaseModel):
     quality: Literal["PARTIAL"]
     sdk_requested_adjustment: Literal["noward"] | None = None
     provider_reported_delay: StrictBool | None = None
+    provider_scale_power: Annotated[int, Field(strict=True, ge=0, le=12)] | None = None
+
+    @field_validator("provider_scale_power", mode="before")
+    @classmethod
+    def _source_power_integer(cls, value: object) -> object:
+        return _source_integer(value)
 
     @field_validator("source_request_id")
     @classmethod
@@ -621,3 +635,10 @@ def _mtls_context(client_ca: Path, client_cert: Path, client_key: Path) -> ssl.S
     context = ssl.create_default_context(cafile=str(client_ca))
     context.load_cert_chain(certfile=str(client_cert), keyfile=str(client_key))
     return context
+
+
+def _source_integer(value: object) -> object:
+    # The raw-first JSON decoder represents all numeric tokens as exact Decimal.
+    if isinstance(value, Decimal) and value.is_finite() and value == value.to_integral_value():
+        return int(value)
+    return value

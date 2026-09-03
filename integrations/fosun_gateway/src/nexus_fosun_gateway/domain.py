@@ -144,6 +144,8 @@ class BarItem(GatewayModel):
     low: Decimal
     close: Decimal
     volume: Decimal
+    # Source integer before scaling; currency and session semantics remain unknown.
+    provider_raw_turnover: Annotated[int, Field(strict=True, ge=0)] | None = None
 
     @field_validator("timestamp")
     @classmethod
@@ -181,6 +183,7 @@ class GatewayBarPage(GatewayPage[GatewayItem]):
     # Adapter-owned request fact, not a claim that the provider verified adjustment.
     sdk_requested_adjustment: Literal["noward"] | None = None
     provider_reported_delay: StrictBool | None = None
+    provider_scale_power: Annotated[int, Field(strict=True, ge=0, le=12)] | None = None
 
 
 class GatewayError(Exception):

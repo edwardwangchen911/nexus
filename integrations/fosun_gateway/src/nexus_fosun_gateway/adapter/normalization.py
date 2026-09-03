@@ -63,6 +63,9 @@ def normalize_provider_response(
                 {
                     **_page(items, request_id, received_at, quality="PARTIAL").model_dump(),
                     "provider_reported_delay": data.get("delay"),
+                    "provider_scale_power": _power(data["power"])
+                    if data.get("power") is not None
+                    else None,
                 }
             )
     except _BarWindowMismatch:
@@ -331,6 +334,7 @@ def _bars(
             low=_scaled_required(_required_value(item, "low"), power),
             close=_scaled_required(_required_value(item, "close"), power),
             volume=_decimal(item, "vol"),
+            provider_raw_turnover=cast("int | None", item.get("turnover")),
         )
         for item in _mappings(rows)
     )
