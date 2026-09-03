@@ -492,6 +492,8 @@ async def test_market_never_uses_fixture_or_future_alpaca_as_current_fallback(
                 "feed": None,
                 "delivery_mode": "unknown",
                 "as_of": None,
+                "source_observed_at": None,
+                "received_at": None,
                 "quality": "FAIL",
                 "quality_reasons": ["QUOTE_UNAVAILABLE"],
                 "watchlisted": False,

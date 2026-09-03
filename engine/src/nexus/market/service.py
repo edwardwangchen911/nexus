@@ -425,6 +425,9 @@ class MarketService:
             feed=selected.feed,
             delivery_mode=cast(DeliveryMode, selected.delivery_mode),
             as_of=selected.observed_at,
+            # Eligible Fosun snapshots are receipt-only, including historical rows.
+            source_observed_at=None,
+            received_at=selected.received_at,
             quality=quality,
             quality_reasons=_ordered_reasons(reasons),
             watchlisted=watchlisted,
