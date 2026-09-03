@@ -1287,3 +1287,23 @@ B afa61d9摘为2754787：paper_once forward显式JSON绑定账户、幂等键、
 null和锁顺序问题并复核。真实source仍ADJUSTED_AUTHORITY_UNAVAILABLE，不宣称
 forward正向闭环。本轮仅集成主机代码，无模型/采集/paper运行/迁移/服务重启，
 API仍46d5090；root继续草稿消费，B继续B3v3核心输出语义。
+
+
+## A2/D2 官方行业与持仓归档接入核对（2026-09-04，北京时间）
+
+只读复用D的case-fund-current-20260903归档，HTML/XLSX的SHA256与各自receipt均
+匹配，没有外呼。行业块是industry、单位percent，不能当11-sector；原持仓含非正
+权重，差额归属未知，分母未证明。资料日期不是发布时间，publication/valid_until
+未知；只在实际收到后供当前研究读取，不回填旧快照、推断现金或写SectorExposure。
+
+现有DataArtifact保存原件，DataSnapshot.payload保存规范观察，ResearchEvidenceRef
+绑定hash/location/available_at，足以承载资料，无新增表或迁移理由。最小正常入口
+复用agents/snapshots.py冻结引用及database_tools.security_snapshot同级资料输出，
+先不增加正式API schema。拟独立research/ssga_fund_observations.py与本地归档导入
+入口，持久化/读取沿ssga_distributions已有模式；必须保留每份原件received_at、
+原分类标题/标签/Decimal权重/日期、未知发布时间/分母/有效期和原件hash。
+
+合成回归应覆盖身份/标题/日期一致，负权重与缺分类原样保留、不归一化，不把
+差额转现金；内容hash、收件前拒绝、冻结ID隔离及正常研究tool读取，同时不影响
+SEC与distribution。已向协调任务明确两个共享agents文件owner需先对齐，其余
+独占数据模块可独立实施；当前仅完成核对与具体方案，不声称新资料已入库或可读。
