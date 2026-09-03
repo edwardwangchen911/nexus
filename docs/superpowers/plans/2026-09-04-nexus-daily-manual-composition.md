@@ -82,6 +82,28 @@ Task4b2入口验证：先红缺命令/参数，再新增两个显式命令、既
 - 原生研究完成后实际消费其合格证据构造方案；当前优化路径 `research=()` 的事实必须先修复，不能仅添 dependency 就称消费研究。
 - 未知/不充分结论保持原安全语义。paper 仍单独显式入口；自动日程仍是独立产品选择，不在此片偷开。
 
+## Task 5：研究输出真实消费（不能仅连接依赖）
+
+**设计核对：** `optimizer.models` 已有合格ResearchIntent约束确定性selection的consumer，但要求研究data snapshot与selection相同、decision_time不晚于baseline valuation；`optimizer.authority`也要求data在旧估值时已可用。当前日根研究实际产生在诊断之后，不能改intent ID/抬高旧持仓as_of以塞入旧formal路径。现有v2仅watch/none/partial，不获得排名资格。分两条必要交付，前者不替代后者。
+
+### Task5a：输出只读冻结与新草稿上下文
+
+Owner=root，基线同步main `70c9e82`，独立分支`edward/nexus-daily-research-consumption`；A仍唯一运行/集成，B独占forward reader。无新表/依赖/调度。
+
+- [x] 新窄`optimizer/research_context.py`：显式root/run/context_as_of，复用精确resolver；读取终态最终output，核原内容hash、run/instrument/data/decision time、原始证据/最终引用绑定；job.finished_at与output.created_at均不晚于实际context截止。输出保留root/run/output/sequence/hash、研究输入ID/时点、真实输出可用时刻和intent或固定不可用原因。
+- [x] 严格类型区分`context_only`，无执行/排名许可。v2语义保护复用已有函数；failed/abstained/partial不升级。不读取latest研究替换已冻结ID；相同截止和ID得到相同内容。
+- [ ] 在已有`create_initial_draft`中可选接入显式冻结context，写现有DataSnapshot JSONB的新输入schema版本并参与digest；不重写旧v1输入/Job。原valuation保持t0，research/context cutoff为t1，不能把晚生成context放入要求早于valuation的comparison evidence。
+- [ ] 复用现有草稿同步入口新增显式本地调用，草稿目标仍由已有确定性诊断产生；研究作为可读依据及缺口说明，targets/partial/selection/execution flags保持原样。API投影及实际页面读取需验证同一冻结context，不得仅存入不可见JSON宣称交付。
+- [ ] TDD覆盖错root/run、输出/证据hash不符、晚生成、无intent、v2 partial、冻结后新增输出不改变旧引用、相同请求幂等；真实PG→构造器→API可读且原targets及门禁不变。reader、构造/入口、消费者可分小提交，每片<800行。
+
+5a-reader验证：先红缺reader；6项新PG覆盖原生worker实际输出的completed partial/failed（含v2配置）、新追加坏hash/缺输出引用拒绝及原截止内容不变。与原显式快照/准入/单次入口共23项PG通过；显式诊断ID与run/job终态对应收紧后4项终态聚焦PG复验通过，Ruff/Mypy/diff-check及独立审查ready。测试修正共享PG fixture固定created_at导致的“晚追加”假设，仅给新测试行显式实际时间，不改生产时间行为。此片纯只读，无迁移/模型外呼；持久化草稿/读API/页面尚待下一片，不能称方案已消费研究。
+
+### Task5b：正式研究约束目标（仍待实现与条件）
+
+- [ ] 研究输出存在之后的新真实baseline/diagnostic/selection，必须按现有source/quality/cost/风险条件冻结，并显式绑定已验证研究数据身份；不能复制旧持仓抬as_of、改intent或放宽原gate。
+- [ ] 新准入请求/持久化身份需要包含准确run/output/hash/实际可用时刻；复用现有consumer，修复正常formal Job硬编码`research=()`，不默认选择当前latest或给旧作业补研究。具体版本兼容按5a后现有路径细化。
+- [ ] 新完整证据且真正内容合格时才验证研究对确定性target的限制；v2 partial与来源不足仍不能排名。不把只读context完成等同这一条完成。
+
 ## 验收记录
 
 - 设计检查：旧 root 纽约 18:00 截止与手动晚到采集冲突；旧阶段与原生 agent/optimizer 同名 schema 冲突；通用 once 现会回收整个队列。三点分别由新手动根、原生任务后置准入、精确 claim/reclaim 范围解决，不扩展为多 schema 框架。

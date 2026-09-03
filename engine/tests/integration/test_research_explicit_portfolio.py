@@ -7,6 +7,7 @@ from uuid import UUID
 import pytest
 from helpers.diagnostic_artifacts import FixtureArtifactReader
 from helpers.research_snapshots import INSTRUMENT, NOW, seed_filing
+from nexus.agents.committee import FixtureCommittee
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import admit_research_run
 from nexus.agents.snapshots import prepare_research_snapshot
@@ -29,9 +30,11 @@ from nexus.ops.daily_once import (
     run_once,
 )
 from nexus.ops.openai_local import MODEL_ID, prepare_database
+from nexus.optimizer.research_context import freeze_daily_research_context
 from nexus.persistence.models.agents import (
     AgentDailyBudgetReservationRecord,
     AgentModelConfigRecord,
+    AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
 from nexus.persistence.models.backtest import (
@@ -50,6 +53,7 @@ from nexus.persistence.models.portfolio import (
 from nexus.persistence.models.runtime import Job, JobDependency
 from nexus.persistence.session import session_factory
 from nexus.settings import AgentRuntimeMode, EngineSettings
+from nexus.worker import run_agent_worker_once
 from sqlalchemy import func, select
 
 
@@ -205,9 +209,12 @@ async def test_explicit_partial_snapshot_does_not_fall_back_to_ready(migrated_da
         assert context["execution_locked"] is True
 
 
-async def _daily_case(url, *, ready=True, advance=True):
-    settings = EngineSettings(database_url=url)
-    await prepare_database(settings)
+async def _daily_case(url, *, ready=True, advance=True, staged=False):
+    settings = EngineSettings(
+        database_url=url,
+        agent_runtime_mode="codex_sdk" if staged else "fixture",
+    )
+    await prepare_database(settings, staged=staged)
     factory = session_factory(settings)
     close = NOW - timedelta(hours=8)
     async with factory() as session, session.begin():
@@ -606,3 +613,130 @@ async def test_daily_research_claim_guard_rechecks_before_heartbeat_or_claim(
         assert (job.status, job.attempt_count) == ("queued", 0)
         assert (await session.get(AgentResearchRunRecord, run_id)).status == "prepared"
         assert await session.scalar(select(func.count()).select_from(WorkerHeartbeat)) == heartbeats
+
+
+async def _finished_daily_research(url, monkeypatch, *, failed=False, staged=False):
+    factory, root, snapshot, model_id = await _daily_case(url, staged=staged)
+    async with factory() as session, session.begin():
+        admission = await admit_daily_research(session, **_admission(root, model_id))
+        job = await resolve_daily_research_job(session, root_id=root.id, run_id=admission.run_id)
+    if failed:
+
+        async def unavailable(*args, **kwargs):
+            raise ToolInputError("synthetic unavailable evidence")
+
+        monkeypatch.setattr("nexus.worker._committee", unavailable)
+    elif staged:
+
+        async def fixture(*args, **kwargs):
+            return FixtureCommittee()
+
+        monkeypatch.setattr("nexus.worker._committee", fixture)
+    assert await run_agent_worker_once(
+        EngineSettings(
+            database_url=url,
+            agent_runtime_mode="codex_sdk" if staged else "fixture",
+        ),
+        job_ids=(job.id,),
+    )
+    return factory, root, snapshot, admission.run_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize("staged", [False, True])
+async def test_daily_research_context_preserves_actual_output_time_and_unknowns(
+    migrated_database_url,
+    monkeypatch,
+    failed,
+    staged,
+):
+    factory, root, snapshot, run_id = await _finished_daily_research(
+        migrated_database_url,
+        monkeypatch,
+        failed=failed,
+        staged=staged,
+    )
+    at = datetime.now(UTC)
+    async with factory() as session:
+        context = await freeze_daily_research_context(
+            session,
+            root_id=root.id,
+            run_id=run_id,
+            context_as_of=at,
+        )
+        assert context.mode == "context_only" and context.execution_locked
+        assert context.portfolio_snapshot_id == snapshot.id
+        assert context.valuation_time == snapshot.as_of
+        assert context.output_available_at <= at and context.output_available_at > root.effective_at
+        assert context.research_as_of > context.valuation_time
+        assert context.run_status == ("failed" if failed else "completed")
+        assert context.quality_status == "partial"
+        assert (context.intent is None) is failed
+        assert context.unavailable_reason == ("RESEARCH_FAILED" if failed else None)
+        again = await freeze_daily_research_context(
+            session,
+            root_id=root.id,
+            run_id=run_id,
+            context_as_of=at,
+        )
+        assert again == context
+        with pytest.raises(ValueError, match="DRAFT_RESEARCH_OUTPUT_UNAVAILABLE"):
+            await freeze_daily_research_context(
+                session,
+                root_id=root.id,
+                run_id=run_id,
+                context_as_of=root.effective_at,
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["hash", "evidence"])
+async def test_daily_research_context_rejects_new_invalid_output_without_changing_old_context(
+    migrated_database_url,
+    monkeypatch,
+    invalid,
+):
+    factory, root, _, run_id = await _finished_daily_research(migrated_database_url, monkeypatch)
+    cutoff = datetime.now(UTC)
+    async with factory() as session:
+        frozen = await freeze_daily_research_context(
+            session,
+            root_id=root.id,
+            run_id=run_id,
+            context_as_of=cutoff,
+        )
+    async with factory() as session, session.begin():
+        old = await session.get(AgentResearchOutputRecord, frozen.output_id)
+        session.add(
+            AgentResearchOutputRecord(
+                run_id=run_id,
+                sequence=old.sequence + 1,
+                status=old.status,
+                role=None,
+                prompt_hash=None,
+                content_hash="0" * 64 if invalid == "hash" else old.content_hash,
+                payload=old.payload,
+                intent=old.intent,
+                # The shared PG fixture freezes default created_at to an older
+                # clock; this test specifically needs a genuinely later row.
+                created_at=datetime.now(UTC),
+            )
+        )
+    async with factory() as session:
+        assert (
+            await freeze_daily_research_context(
+                session,
+                root_id=root.id,
+                run_id=run_id,
+                context_as_of=cutoff,
+            )
+            == frozen
+        )
+        with pytest.raises(ValueError, match="DRAFT_RESEARCH_OUTPUT_INVALID"):
+            await freeze_daily_research_context(
+                session,
+                root_id=root.id,
+                run_id=run_id,
+                context_as_of=datetime.now(UTC),
+            )
