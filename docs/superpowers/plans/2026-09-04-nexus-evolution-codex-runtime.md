@@ -1,6 +1,6 @@
 # NEXUS evolution Codex 单次运行适配 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. root 独占本切片，A 串行集成；不新建用户任务。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. root 负责运行时/接线，B 负责 Task 2 的用量持久化，A 串行集成；不新建用户任务。
 
 **Goal:** 为既有策略研发服务增加可验证的单次 Codex 运行时，同时保留证据、用量、队列重放和执行权限边界。
 
@@ -16,7 +16,7 @@
 - `local_read_only` 不包含自动调度、账户写入、模拟或实盘下单。
 - 未知结果不重放；不因接通模型放宽调整价格、OOS、promotion、rollback 或人工选择门禁。
 - 模型 ID 复用 SDK 的固定 `MODEL_ID`；64,000 输入 / 8,192 输出 token 是验收阈值，已检查本机 SDK 的 run/turn 没有服务端输出上限参数，不能声称实际消耗被此值限制。0 个模型工具、单次 provider call。
-- 本切片没有真实模型/券商调用，无新依赖、凭据、套餐或外部写入。Task 2 的最小迁移仅允许研发 run 的两项 token 为 null，不改旧行。
+- 本切片没有真实模型/券商调用，无新依赖、凭据、套餐或外部写入。Task 2 的最小迁移仅允许研发 run 的 input/output token 和 tool_call_count 三项用量计数同时为 null，不改旧行。
 - 订阅额度不当作 API 美元花费：持久化结算费用保持 `null`，不能写成“免费”；已知 token 保留实际值，未知为 null，不写成零或伪造的上界。
 - 历史研究、策略、模型配置、请求哈希和结果不回填；当前 Responses/fixture 行为保持兼容。
 
@@ -62,11 +62,13 @@
 
   配置要求固定 SDK model、上述新 version、0 美元 API 费率、0 模型工具、SDK token 验收阈值、`0 < timeout <= 30` 秒。成功响应先保存真实 usage，再校验 token 范围、provider_calls=1、tool_calls=0、严格 proposal schema 与冻结身份/引用。失败的 `CodexInvocationError` 仅携带安全码与已知 usage（可空），不丢弃 incomplete/tool/size 拒绝结果中已报告的数字。沿用 SDK 的关闭与取消清理，不加重试。
 - [x] **Step 4: 补边界并跑绿。** 错配置/错 context/坏工具输出/过大输入均零外呼；错误 schema、身份/引用漂移、用量超限、超时均最多一次调用且不能产生 proposal。相关 56 测试通过；全 evolution unit 使用 `--import-mode=importlib` 避免既有同名 test_models 模块冲突，145 通过。Ruff/format、两个源文件 Mypy、diff-check 通过。
-- [ ] **Step 5: 质量与交付。** 跑相关 pytest、Ruff、Mypy、diff-check；一次独立审查，修复后定向复核；提交并交 A。此时只宣告运行时离线契约完成，不宣告普通入口或真实家族可用。
+- [x] **Step 5: 质量与交付。** 跑相关 pytest、Ruff、Mypy、diff-check；一次独立审查，修复后定向复核；提交并交 A。此时只宣告运行时离线契约完成，不宣告普通入口或真实家族可用。
 
-  首轮审查发现同步工作跨过 asyncio timeout，以及将 SDK 验收阈值误作已实施用量上界两项 P2。已补 8 个先红回归，改为显式单调 deadline、可空未知用量、传输失败保留已报告用量；合并 evolution/SDK/旧 stage trace 回归 208 passed，Ruff/format、3 源文件 Mypy、diff-check 通过。等待同一审查者定向复核，尚不接业务 executor。
+  首轮审查发现同步工作跨过 asyncio timeout，以及将 SDK 验收阈值误作已实施用量上界两项 P2。已补 8 个先红回归，改为显式单调 deadline、可空未知用量、传输失败保留已报告用量；合并 evolution/SDK/旧 stage trace 回归 208 passed，Ruff/format、3 源文件 Mypy、diff-check 通过。同一审查者定向复核 72 passed，两项 P2 关闭，同意合入 `410ab0a` + `bd253e9`；尚不接业务 executor。
 
 ## Task 2: 现有 executor 与一次性运行边界
+
+**Ownership:** root 独占 agent Protocol、executor、authority、worker 和对应 unit/executor PG；B 独占 service、持久化模型、迁移 head、新 0036 迁移及 migration/admission PG。两者在 Task 1 合入主线后同步基线再改，A 统一串行集成。不得交叉编辑对方文件。
 
 **Files:**
 - Modify: `engine/src/nexus/evolution/executor.py`
@@ -89,7 +91,7 @@
 
 - [ ] **Step 1: 先锁定拒绝与身份测试。** Codex builder 不需要 Responses API key；只接新模型版本；Responses/fixture 不消费新 Codex 配置；未知后端仍拒绝。生成操作 `context.claim.attempt_no != 1` 时返回失败且零模型调用，不能因既有队列重领自动重放外呼。
 - [ ] **Step 2: 跑红后实现精确适配。** executor 对 Codex 传固定 model ID/version 给 resolver；将 worker 剩余 deadline 留出至少 5 秒结算余量，不能仅从调用开始重新计 30 秒而越过 worker 的 45 秒上限。
-- [ ] **Step 3: 订阅用量持久化回归。** 新 Codex version 的 `settled_cost_usd=None`；实际 token（包括超阈值但已知的数字）原样持久化，未知调用两项 token 均 null 且失败。新迁移放开这两列 NOT NULL，并约束两项同时已知或同时未知；旧数值/旧行不更新。降级仅在无 null 记录时允许，已有未知记录则明确拒绝，不填零来降级。隔离 PG 覆盖升级、合法/非法插入、历史数值保持和两种降级路径；原 Responses 美元计费和 fixture 回归不变。新版本仅经明确 setup/受控注册存在，不把旧 v1/v2 委员会记录重标成策略研发配置。
+- [ ] **Step 3: 订阅用量持久化回归。** 新 Codex version 的 `settled_cost_usd=None`；实际 token（包括超阈值但已知的数字）原样持久化，未知调用三项计数均 null 且失败。新迁移放开 input_tokens/output_tokens/tool_call_count 的 NOT NULL，并约束三项同时已知或同时未知；旧数值/旧行不更新。降级仅在无 null 记录时允许，已有未知记录则明确拒绝，不填零来降级。隔离 PG 覆盖升级、合法/非法插入、历史数值保持和两种降级路径；原 Responses 美元计费和 fixture 回归不变。新版本仅经明确 setup/受控注册存在，不把旧 v1/v2 委员会记录重标成策略研发配置。
 - [ ] **Step 4: 隔离 PG 接线。** synthetic authority 经 executor→execute_strategy_rnd→数据库验证：成功只创建一个严格输出；错误、超时、重领不创建 family；无合格调整价格时在外呼前停止；原 OOS/promotion/rollback 测试保持。
 - [ ] **Step 5: 审查并集成。** 集中审查明确区分本地运行时/入口/真实家族，A 合入后复核主线包含变更。真实 family 仍不启动，直到同一合法数据 authority 和普通准备入口都已具备；不代用户选择真实策略动作。
 
