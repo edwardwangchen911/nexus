@@ -1222,3 +1222,18 @@ readiness/worker拒绝已升级schema。新PG放入原`test_forward_decision_per
 原准入与非周末无写、projection不符、append-only、迁移空表往返及有数据拒绝。
 Ruff和2源文件Mypy通过。集中独立审查两处P2（schema版本、历史注册绑定）均修复并
 定向复核通过。尚未应用业务DB迁移、重启服务或生成真实checkpoint，不声明S2b整体闭合。
+
+
+## A2 修复后真实留存与并行集成复验（2026-09-04，北京时间）
+
+主机Provider使用5b37f5e修复，自有Gateway按既有流程就绪后仅请求一次同案例日K。
+SDK原件→签名Gateway→Provider.raw_payload全路径通过：窗口正确、非空、turnover逐值
+保留、power保留、原始字节保持。delivery_mode仍unknown，币种/成交量单位/时段和调整
+适用性未获新证据，USD ADV20仍不可用；没有写入业务价格事实或刷新账户。
+原失败归档未改，新的受保护证据在`outputs/acceptance/turnover-retention-fixed-20260904/`。
+验收后SIGTERM停止自有Gateway，ps确认退出，无强杀或重置replay状态。
+
+研究原生准入9b2e5f1摘为f7cc8e9，A13隔离PG/Mypy通过。B0037+原子checkpoint两提交
+摘为b1a1547/70c9e82，8unit+17完整隔离PG、Mypy2/Ruff通过并合主线；文档末尾追加冲突
+保留双方记录，后续由A统一追加。此时业务DB仍0036，API仍61ed430，尚未运行新writer；
+新schema代码不能在旧DB上执行，后续须API与迁移一并切换，不能声称真实排名闭环。
