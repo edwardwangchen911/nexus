@@ -42,10 +42,12 @@
 
 **Files:** 新 `ops/daily_once.py`、专属 unit/PG、现有 runbooks 下手册。
 
-- [ ] 显式 admit 与 advance；读取现有 EngineSettings，不创建配置或凭据。只允许现有本地 PostgreSQL 入口，复用既有校验；固定安全错误码，不输出账户事实或原始异常。
-- [ ] advance 只处理所选 root 及其两个经验证归属的子节点，最多三次原 worker tick。遇未来可用时间或未就绪依赖立即返回，不 sleep/poll、不主动重放外部调用。
-- [ ] 新命令无自动调度与后台 worker，不自动运行研究/方案/paper。输出仅作业阶段/安全状态；完整数据仍在受保护业务存储。
-- [ ] 入口→PG 实际调用链验收；同时布置其他根的高优先级及过期 Job，证明完全未被处理。说明兼容性与回滚：停用新入口即可；不删历史作业/诊断，无迁移回退。
+- [x] 显式 admit 与 advance；读取现有 EngineSettings，不创建配置或凭据。只允许现有本地 PostgreSQL 入口，复用既有校验；固定安全错误码，不输出账户事实或原始异常。
+- [x] advance 只处理所选 root 及其两个经验证归属的子节点，最多三次原 worker tick。遇未来可用时间或未就绪依赖立即返回，不 sleep/poll、不主动重放外部调用。
+- [x] 新命令无自动调度与后台 worker，不自动运行研究/方案/paper。输出仅作业阶段/安全状态；完整数据仍在受保护业务存储。
+- [x] 入口→PG 实际调用链验收；同时布置其他根的高优先级及过期 Job，证明完全未被处理。说明兼容性与回滚：停用新入口即可；不删历史作业/诊断，无迁移回退。
+
+  首批6单测及2入口PG通过。审查发现开发默认对象库会掩盖真实缺配置，先红确认会创建reader，再以局部 `DailyOnceSettings` 在父类填fixture前捕获五项显式非空输入；`advance`缺项先拒绝，不能用外部布尔标记绕过，全局fixture设置不变。14单测、2入口PG通过（标准 `PYTHONPATH=engine/src` + importlib），Ruff/格式/Mypy/diff-check通过，独立定向复核ready。Task1/2已由A合入主线`3f009ad`，root逐文件比较确认一致；Task3待A集成及真实业务快照验收。
 
 ## 后续 L1 切片（不能以首片完成替代）
 
