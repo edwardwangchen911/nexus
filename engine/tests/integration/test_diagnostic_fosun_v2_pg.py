@@ -3,11 +3,12 @@ from decimal import Decimal
 from hashlib import sha256
 from uuid import UUID, uuid4
 
+import exchange_calendars as xcals
 import pytest
 from helpers.diagnostic_artifacts import FixtureArtifactReader
 from helpers.fosun_lineage import seed_fosun_daily_lineage
 from helpers.portfolio_api import settings
-from nexus.diagnostics.assembler import load_diagnostic_source_policy
+from nexus.diagnostics.assembler import _adv20, load_diagnostic_source_policy
 from nexus.diagnostics.series_authority import select_authoritative_series
 from nexus.market.ingestion import serialize_price_bars
 from nexus.market.price_bar_authority import finalize_price_bar_set
@@ -56,7 +57,23 @@ async def test_current_diagnostic_series_uses_exact_fosun_v2_and_replays_status_
         received_at=available_at,
         revision=raw_digest,
     )
-    payload = serialize_price_bars((bar,))
+    calendar = xcals.get_calendar("XNYS")
+    sessions = tuple(
+        label.date()
+        for label in calendar.sessions_in_range(
+            (as_of - timedelta(days=60)).date().isoformat(), as_of.date().isoformat()
+        )
+        if calendar.session_close(label).to_pydatetime() <= observed_at
+    )[-20:]
+    bars = tuple(
+        bar.model_copy(update={
+            "session": day,
+            "observed_at": datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+        })
+        for day in sessions
+    )
+    assert len(bars) == 20
+    payload = serialize_price_bars(bars)
     digest = sha256(payload).hexdigest()
     uri = f"memory://sha256/{digest}"
     async with factory() as session, session.begin():
@@ -105,7 +122,7 @@ async def test_current_diagnostic_series_uses_exact_fosun_v2_and_replays_status_
             mime_type="application/vnd.apache.parquet",
             schema_version="price_bars_v1",
             source="fosun",
-            observed_at=observed_at,
+            observed_at=bars[0].observed_at,
             available_at=available_at,
             received_at=available_at,
         )
@@ -115,7 +132,7 @@ async def test_current_diagnostic_series_uses_exact_fosun_v2_and_replays_status_
             session,
             manifest_id=manifest_id,
             provider_authorized_at=authorized_at,
-            sessions=(bar.session,),
+            sessions=sessions,
             raw_payload=raw_payload,
             received_at=available_at,
             calendar_range_end=(as_of + timedelta(hours=2)).date(),
@@ -141,9 +158,9 @@ async def test_current_diagnostic_series_uses_exact_fosun_v2_and_replays_status_
             delivery_mode="real_time",
             adjustment="raw",
             interval="1Day",
-            start_at=observed_at,
-            end_at=observed_at,
-            row_count=1,
+            start_at=bars[0].observed_at,
+            end_at=bars[-1].observed_at,
+            row_count=len(bars),
             provider_capability_id=capability_id,
             provider_status_id=status_id,
             provider_status_version=1,
@@ -156,22 +173,25 @@ async def test_current_diagnostic_series_uses_exact_fosun_v2_and_replays_status_
         )
         session.add(manifest)
         await session.flush()
-        session.add(
-            PriceBarRecord(
-                price_series_manifest_id=manifest.id,
-                instrument_id=instrument_id,
-                session=bar.session,
-                open=bar.open,
-                high=bar.high,
-                low=bar.low,
-                close=bar.close,
-                volume=bar.volume,
-                observed_at=observed_at,
-                available_at=available_at,
-                received_at=available_at,
-                revision=bar.revision,
-                quality_flags=[],
-            )
+        session.add_all(
+            [
+                PriceBarRecord(
+                    price_series_manifest_id=manifest.id,
+                    instrument_id=instrument_id,
+                    session=bar.session,
+                    open=bar.open,
+                    high=bar.high,
+                    low=bar.low,
+                    close=bar.close,
+                    volume=bar.volume,
+                    observed_at=bar.observed_at,
+                    available_at=available_at,
+                    received_at=available_at,
+                    revision=bar.revision,
+                    quality_flags=[],
+                )
+                for bar in bars
+            ]
         )
         await session.flush()
         assert await finalize_price_bar_set(session, manifest) is not None
@@ -211,6 +231,9 @@ async def test_current_diagnostic_series_uses_exact_fosun_v2_and_replays_status_
     assert first.selected is not None
     assert first.selected[0].source == "fosun"
     assert first.selected[0].contract_hash == contract_hash
+    assert len(first.selected[0].bars) == 20
+    assert first.selected[0].bars[-1].close == Decimal("101")
+    assert _adv20(first.selected[0], sessions) is None
     assert second.selected == first.selected
     assert second.canonical_input == first.canonical_input
     assert expired_capability_replay.selected is not None

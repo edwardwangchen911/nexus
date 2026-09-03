@@ -452,6 +452,10 @@ async def _snapshot_bindings(
 
 
 def _adv20(series: PriceSeries, sessions: tuple[date, ...]) -> Decimal | None:
+    # The current Fosun Kline contract does not establish vol's share unit or
+    # price/volume scaling compatibility. Raw-close authority cannot prove ADV.
+    if series.source == "fosun":
+        return None
     bars = {bar.session: bar for bar in series.bars}
     sample = [bars[session] for session in sessions[-20:] if session in bars]
     if len(sample) < 20:

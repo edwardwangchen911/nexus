@@ -279,6 +279,9 @@ def _liquidity_items(
         code = f"LIQUIDITY_DAYS_TO_EXIT:{position.instrument_id}"
         if metric is None or evidence.reason is not None:
             reason = "ADV20_MISSING" if metric is None else evidence.reason
+            series = market.prices.get(position.instrument_id)
+            if metric is None and series is not None and series.source == "fosun":
+                reason = "ADV20_VOLUME_UNIT_UNVERIFIED"
             assert reason is not None
             result.append(
                 unknown_item(

@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from nexus.diagnostics.assembler import _adv20
 from nexus.diagnostics.models import (
     DiagnosticEvidence,
     DiagnosticHistory,
@@ -40,6 +41,44 @@ def test_partial_raw_history_keeps_independently_proven_liquidity():
     assert report.optimization_need == "RESEARCH_REQUIRED"
     assert items["MARKET_EVIDENCE"].unknown_reason == "MARKET_EVIDENCE_UNAVAILABLE"
     assert not any(code.startswith(("VOLATILITY", "DRAWDOWN", "BETA")) for code in items)
+
+
+@pytest.mark.parametrize("source", ["fosun", "fixture"])
+def test_unknown_fosun_volume_unit_cannot_become_known_liquidity(source):
+    snapshot = _snapshot()
+    market = _market(snapshot)
+    series = PriceSeries(
+        source=source,
+        feed="l1" if source == "fosun" else "fixture",
+        adjustment="raw",
+        bars=market.prices[INSTRUMENT_ID].bars[-20:],
+        mode="read_only" if source == "fosun" else "fixture",
+        delivery_mode="real_time" if source == "fosun" else "fixture",
+        quality="PASS",
+    )
+    adv = _adv20(series, tuple(bar.session for bar in series.bars))
+    assert adv == (None if source == "fosun" else Decimal("100500"))
+    market = market.model_copy(update={
+        "quality": "PARTIAL", "benchmark": None,
+        "prices": {INSTRUMENT_ID: series},
+        "adv20": {} if adv is None else {INSTRUMENT_ID: adv},
+    })
+    report = diagnose_portfolio(
+        snapshot, market, DiagnosticHistory.empty(), RealAdvisoryPolicy.v1()
+    )
+    liquidity = next(
+        item for item in report.items
+        if item.diagnostic_code == f"LIQUIDITY_DAYS_TO_EXIT:{INSTRUMENT_ID}"
+    )
+    if source == "fosun":
+        assert liquidity.metric_value is None
+        assert liquidity.unknown_reason == "ADV20_VOLUME_UNIT_UNVERIFIED"
+    else:
+        assert liquidity.metric_value is not None
+        assert liquidity.unknown_reason is None
+    assert market.prices[INSTRUMENT_ID] == series
+    assert market.prices[INSTRUMENT_ID].bars[-1].close > 0
+    assert report.optimization_need == "RESEARCH_REQUIRED"
 
 
 @pytest.mark.parametrize("price", (None, Decimal(0)))
