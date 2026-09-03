@@ -966,3 +966,57 @@ async def test_sdk_v3_cannot_fall_back_to_other_runtime(monkeypatch, runtime):
     assert isinstance(committee, worker._UnavailableResponsesCommittee)
     frozen_reader.assert_not_awaited()
     assert client.mock_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role_index", [0, 4])
+async def test_stage_domain_rejection_keeps_safe_category_and_atomic_batch(monkeypatch, role_index):
+    from types import SimpleNamespace
+
+    from nexus.agents import codex_staged
+    from nexus.agents.execution import SAFE_MODEL_FAILURES, _analyze_with_one_retry
+
+    request, evidence, prompts = _authority()
+    body = _staged_batch("research", ROLE_ORDER[:5])
+    body["roles"][role_index]["claims"][0]["text"] = "synthetic-private-canary; blocked"
+    raw = json.dumps(body)
+    codex_staged._ResearchBatch.model_validate_json(raw)
+    invoke = AsyncMock(return_value=(raw, UsageSnapshot(input_tokens=300, output_tokens=80)))
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    model = codex_staged.StructuredStagedCodexCommittee(prompts=prompts, tools=_tools())
+    run = SimpleNamespace(retry_count=0)
+    output = await _analyze_with_one_retry(
+        AsyncMock(),
+        run,
+        committee=model,
+        role="orchestrator",
+        request=request,
+        evidence_refs=evidence,
+        prompt=prompts["orchestrator"],
+    )
+    assert output is None and model._outputs == {}
+    assert model.failure_reason == "model_stage_output_invalid"
+    assert model.failure_reason in SAFE_MODEL_FAILURES
+    assert model.usage.input_tokens == 300 and model.usage.output_tokens == 80
+    assert model.last_stage_input.stage == "research"
+    assert run.retry_count == 0 and invoke.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_conversion_bug_is_not_classified_as_model_output(monkeypatch):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    raw = json.dumps(_staged_batch("research", ROLE_ORDER[:5]))
+    invoke = AsyncMock(return_value=(raw, UsageSnapshot(input_tokens=300, output_tokens=80)))
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+
+    def unexpected_bug(**kwargs):
+        raise RuntimeError("synthetic-program-bug")
+
+    monkeypatch.setattr(codex_staged, "ResearchClaim", unexpected_bug)
+    model = codex_staged.StructuredStagedCodexCommittee(prompts=prompts, tools=_tools())
+    with pytest.raises(RuntimeError, match="synthetic-program-bug"):
+        await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    assert model.failure_reason == "model_execution_failed"
+    assert model._outputs == {} and invoke.await_count == 1

@@ -378,20 +378,24 @@ class StagedCodexCommittee(CodexCommittee):
                     else "model_stage_review_invalid"
                 )
                 raise
-            output = CommitteeRoleOutput(
-                role="portfolio",
-                vote="abstain",
-                claims=assessment.claims,
-                prompt_hash=self._prompts["portfolio"].content_hash,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                conflicting_facts=parsed.synthesis_assessment.conflicting_facts,
-                stage="synthesis",
-                reviewed_claim_ids=tuple(review.claim_id for review in assessment.reviews),
-                stage_input_hash=stage_input_hash,
-                frozen_inputs_hash=frozen_inputs_hash,
-                synthesis_assessment=assessment,
-            )
+            try:
+                output = CommitteeRoleOutput(
+                    role="portfolio",
+                    vote="abstain",
+                    claims=assessment.claims,
+                    prompt_hash=self._prompts["portfolio"].content_hash,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    conflicting_facts=parsed.synthesis_assessment.conflicting_facts,
+                    stage="synthesis",
+                    reviewed_claim_ids=tuple(review.claim_id for review in assessment.reviews),
+                    stage_input_hash=stage_input_hash,
+                    frozen_inputs_hash=frozen_inputs_hash,
+                    synthesis_assessment=assessment,
+                )
+            except ValidationError:
+                self.failure_reason = "model_stage_output_invalid"
+                raise ValueError("CODEX_STAGE_OUTPUT_INVALID") from None
             self._outputs["portfolio"] = output
             self.failure_reason = None
             self.last_stage_input = None
@@ -430,27 +434,31 @@ class StagedCodexCommittee(CodexCommittee):
             ):
                 self.failure_reason = "model_stage_citation_invalid"
                 raise ValueError("CODEX_CITATION_INVALID")
-            outputs[item.role] = CommitteeRoleOutput(
-                role=item.role,
-                vote=item.vote,
-                claims=tuple(
-                    ResearchClaim(
-                        text=claim.text,
-                        evidence_refs=tuple(
-                            evidence_refs[citation] for citation in claim.citations
-                        ),
-                    )
-                    for claim in item.claims
-                ),
-                prompt_hash=self._prompts[item.role].content_hash,
-                input_tokens=usage.input_tokens if index == 0 else 0,
-                output_tokens=usage.output_tokens if index == 0 else 0,
-                conflicting_facts=item.conflicting_facts,
-                stage=stage,
-                reviewed_claim_ids=item.reviewed_claim_ids,
-                stage_input_hash=stage_input_hash,
-                frozen_inputs_hash=frozen_inputs_hash,
-            )
+            try:
+                outputs[item.role] = CommitteeRoleOutput(
+                    role=item.role,
+                    vote=item.vote,
+                    claims=tuple(
+                        ResearchClaim(
+                            text=claim.text,
+                            evidence_refs=tuple(
+                                evidence_refs[citation] for citation in claim.citations
+                            ),
+                        )
+                        for claim in item.claims
+                    ),
+                    prompt_hash=self._prompts[item.role].content_hash,
+                    input_tokens=usage.input_tokens if index == 0 else 0,
+                    output_tokens=usage.output_tokens if index == 0 else 0,
+                    conflicting_facts=item.conflicting_facts,
+                    stage=stage,
+                    reviewed_claim_ids=item.reviewed_claim_ids,
+                    stage_input_hash=stage_input_hash,
+                    frozen_inputs_hash=frozen_inputs_hash,
+                )
+            except ValidationError:
+                self.failure_reason = "model_stage_output_invalid"
+                raise ValueError("CODEX_STAGE_OUTPUT_INVALID") from None
         self._outputs.update(outputs)
         self.failure_reason = None
         self.last_stage_input = None

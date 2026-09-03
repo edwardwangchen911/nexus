@@ -4281,3 +4281,83 @@ class _OversizedUsageCommittee(FixtureCommittee):
     ) -> CommitteeRoleOutput:
         output = await super().analyze(role, request, evidence_refs, prompt)
         return output.model_copy(update={"input_tokens": 1_000_001})
+
+
+@pytest.mark.asyncio
+async def test_native_v3_domain_rejection_persists_safe_reason_without_text_or_retry(
+    migrated_database_url,
+    monkeypatch,
+):
+    from nexus.agents import codex_staged
+    from nexus.agents.responses_budget import UsageSnapshot
+    from nexus.ops.openai_local import prepare_database
+
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    factory = session_factory(settings)
+    await _seed_authority(factory, include_base_evidence=False)
+    await _seed_database_tool_authority(
+        factory, link_price=False, bar_count=1, price_quality_flags=("missing",)
+    )
+    await prepare_database(settings, structured_synthesis=True)
+    async with factory() as session, session.begin():
+        model = await session.scalar(
+            select(AgentModelConfigRecord).where(
+                AgentModelConfigRecord.version == "codex-sdk-chatgpt-v3"
+            )
+        )
+        admission = await admit_research_run(
+            session,
+            actor_id="sdk-test",
+            route="/internal/v1/research-runs",
+            idempotency_key="sdk-domain-rejection",
+            request_hash="a" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID, data_snapshot_id=_SNAPSHOT_ID, decision_time=_NOW
+            ),
+            prompt_version_id=None,
+            model_config_id=model.id,
+            daily_limit_usd=Decimal("3"),
+            now=datetime(2026, 9, 2, tzinfo=UTC),
+        )
+    body = {
+        "roles": [
+            {
+                "role": role,
+                "vote": "abstain",
+                "conflicting_facts": False,
+                "claims": [{"text": "synthetic-private-canary; blocked", "citations": [0]}],
+                "reviewed_claim_ids": [],
+            }
+            for role in ROLE_ORDER[:5]
+        ]
+    }
+    raw = json.dumps(body)
+    codex_staged._ResearchBatch.model_validate_json(raw)
+    invoke = AsyncMock(return_value=(raw, UsageSnapshot(input_tokens=300, output_tokens=80)))
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    assert await run_agent_worker_once(settings) is True
+    assert await run_agent_worker_once(settings) is False
+    assert invoke.await_count == 1
+    async with factory() as session:
+        run = await session.get(AgentResearchRunRecord, admission.run_id)
+        assert run.status == "failed" and run.retry_count == 0
+        assert (run.input_tokens, run.output_tokens) == (300, 80)
+        job = await session.scalar(select(Job).where(Job.payload["run_id"].astext == str(run.id)))
+        assert job.attempt_count == job.max_attempts == 1
+        outputs = tuple(
+            await session.scalars(
+                select(AgentResearchOutputRecord).where(AgentResearchOutputRecord.run_id == run.id)
+            )
+        )
+        assert len(outputs) == 1 and outputs[0].role is None and outputs[0].intent is None
+        assert outputs[0].payload["reason"] == "model_stage_output_invalid"
+        assert outputs[0].payload["stage_input"]["stage"] == "research"
+        assert "synthetic-private-canary" not in json.dumps(outputs[0].payload)
+    path = f"/internal/v1/research-runs/{admission.run_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.status_code == 200
+    assert response.json()["data"]["abstention_reason"] == "model_stage_output_invalid"
+    assert "synthetic-private-canary" not in response.text
