@@ -80,6 +80,31 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app u
 重复执行应返回 `existing`。Provider profile 不依赖也不运行这个通用初始化器；它的独立
 bucket/principal/policy 必须在单独批准的权限流程中预置。
 
+## 已取得的发行商分红原件导入
+
+`nexus.ops.issuer_distribution_local` 用于同一证券的当前研究事实，复用本机数据库与
+对象存储，不发起下载、模型调用或券商请求。输入为 SSGA 官方历史分红 XLSX、官方基金
+身份 HTML 及各自收件记录（`url`、`sha256`、实际 `received_at`）。从受保护本地上下文
+传入证券 ID；不要把账户身份或完整命令参数写到日志。目标输出目录须为 `0700`，输出文件
+必须尚不存在。入口接受 `--repo-root`、`--instrument-id`、`--workbook`、
+`--workbook-receipt`、`--identity`、`--identity-receipt`、`--output`。
+
+它复核既有 SEC 497K 份额证据与发行商 ticker/CUSIP，保存并验读原件的版本 URI，选择截至
+实际收件日已到支付日的最新分红。除息、登记、支付日分别保留；金额为每份 USD，空资本利得
+保持未知。新建研究快照经现有 `get_security_snapshot` 提供 `issuer_distribution`；
+旧冻结输入不变。原件缺少历史公告时间与事件生命周期状态，因此明确
+`historical_backtest_eligible=false`，不生成可执行公司行动、复权价格或费用适用性。
+
+前置迁移 `0035_issuer_research_evidence` 只为既有证据所有权函数增加精确来源分支，
+不新增表，不回填旧数据，也不放宽价格或执行条件。应用前保存受保护的一致性数据库备份。
+没有冻结发行商证据时可降至 `0034_capability_versions`，测试验证函数原样恢复；一旦已冻结
+则禁止删除该支持分支，应保留迁移并回退应用或前向修复，避免破坏历史引用。
+
+排障记录：官方目录接口省略页面实际使用的 `ui=fund-finder` 会返回 400；另一分红接口
+曾返回 HTTP 200 HTML，不能按 JSON 成功处理，也不自动重试。基金页面“Sector”可能是
+细分行业分类，未核实统一口径时不得灌入 11 行业指标。SEC 孤立快照、内容 hash 不一致、
+原件 URI 或 schema 冲突均已由导入入口拒绝并有隔离 PG 回归，不能只看存在性或文件长度。
+
 ## 可选的真实美股只读数据
 
 真实美股行情、SEC 财报与 FRED/ALFRED 宏观数据属于独立的 Provider

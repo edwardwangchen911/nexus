@@ -47,6 +47,7 @@ from nexus.quality.source_policy import (
     SOURCE_POLICY_VERSION,
 )
 from nexus.research.sec_disclosures import read_disclosures
+from nexus.research.ssga_distributions import read_distributions
 
 
 async def database_read_only_tools(
@@ -139,6 +140,12 @@ class _BoundDatabaseExecutors:
         await self._require_snapshot_scope(payload)
         if not await self._current_evidence_authority_valid():
             return self._invalid_frozen_evidence_authority("get_security_snapshot")
+        distributions = await read_distributions(
+            self._session,
+            instrument_id=self._instrument_id,
+            as_of=self._decision_time,
+            evidence_ids=self._evidence_ids,
+        )
         return self._result(
             "get_security_snapshot",
             [
@@ -149,6 +156,11 @@ class _BoundDatabaseExecutors:
                     "revision": record.revision,
                     "available_at": _timestamp(record.available_at),
                     "content_hash": record.content_hash,
+                    **(
+                        {"issuer_distribution": distributions[record.id].model_dump(mode="json")}
+                        if record.id in distributions
+                        else {}
+                    ),
                 }
                 for record in self._evidence
             ],

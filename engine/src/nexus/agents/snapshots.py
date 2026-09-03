@@ -1,4 +1,4 @@
-"""Freeze existing SEC filing evidence without network access or model execution."""
+"""Freeze existing filings and verified issuer facts without external calls."""
 
 import hashlib
 import json
@@ -17,6 +17,7 @@ from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
 from nexus.research.sec_disclosures import SEC_RESEARCH_FORMS
+from nexus.research.ssga_distributions import read_distributions
 
 
 async def prepare_research_snapshot(
@@ -24,7 +25,7 @@ async def prepare_research_snapshot(
 ) -> DataSnapshot | None:
     """Bind real filing references; the caller owns the transaction.
 
-    The first local slice deliberately uses the existing SEC filing store only.
+    Issuer observations retain receipt time and do not become historical PIT data.
     Display-only price manifests cannot satisfy research ownership. Price authority
     is selected separately by the existing admission/worker code, never promoted here.
     """
@@ -55,6 +56,14 @@ async def prepare_research_snapshot(
             .limit(MAX_FROZEN_EVIDENCE - 2)
         )
     )
+    distributions = await read_distributions(session, instrument_id=instrument_id, as_of=as_of)
+    if distributions:
+        issuer_refs = list(
+            await session.scalars(
+                select(ResearchEvidenceRef).where(ResearchEvidenceRef.id.in_(distributions))
+            )
+        )
+        evidence = evidence[: MAX_FROZEN_EVIDENCE - 3] + issuer_refs
     if not evidence:
         return None
     context = await freeze_portfolio_context(session, instrument_id, as_of)
@@ -62,7 +71,9 @@ async def prepare_research_snapshot(
         "instrument_id": str(instrument_id),
         "as_of": as_of.isoformat(),
         "evidence_ids": [str(item.id) for item in evidence],
-        "scope": "persisted_sec_filings",
+        "scope": "persisted_sec_filings_and_issuer_distributions"
+        if distributions
+        else "persisted_sec_filings",
     }
     if context is not None:
         payload["portfolio_context"] = context[0].model_dump(mode="json")
