@@ -24,8 +24,8 @@ const needCopy = {
     icon: AlertTriangle,
   },
   NO_ACTION: {
-    title: "保持现状",
-    detail: "现有证据没有证明调整能带来明确、可接受的改善。",
+    title: "未触发优化条件",
+    detail: "当前诊断未触发优化条件；该状态不代表已完成成本收益比较，也不代表保持现状更优。",
     icon: CircleCheck,
   },
 } satisfies Record<DiagnosticReport["optimization_need"], {

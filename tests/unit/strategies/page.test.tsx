@@ -41,6 +41,18 @@ function renderPanel(state: DataStateKind, overrides = {}) {
 }
 
 describe("strategy evolution workbench", () => {
+  it("keeps gate levels as percent and differences as percentage points", () => {
+    const gates = [
+      { stage: "shadow", gate: "nonnegative_excess_return", status: "PASS", observed: ["champion=0.05", "challenger=0.07"], thresholds: ["minimum_delta=0"], reason_code: "PASS" },
+      { stage: "shadow", gate: "maximum_drawdown_degradation", status: "PASS", observed: ["champion=-0.12", "challenger=-0.13"], thresholds: ["minimum_delta=-0.02"], reason_code: "PASS" },
+      { stage: "historical", gate: "double_cost_excess_positive", status: "PASS", observed: ["challenger_minus_champion=0.025"], thresholds: ["minimum_exclusive=0"], reason_code: "PASS" },
+    ];
+    renderPanel("ready", { detail: { ...detail, gates } });
+    expect(screen.getByText("主用策略：5% · 候选策略：7%")).toBeVisible();
+    expect(screen.getByText("主用策略：-12% · 候选策略：-13%")).toBeVisible();
+    expect(screen.getByText("最低差值：-2 个百分点")).toBeVisible();
+    expect(screen.getByText("候选减主用：2.5 个百分点")).toBeVisible();
+  });
   afterEach(() => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();

@@ -120,6 +120,15 @@ describe("issuer cash-distribution inputs", () => {
 });
 
 describe("research evidence docket", () => {
+  it("explains rejected stage content while retaining the failed research boundary", () => {
+    render(<ResearchPanel state="partial" research={researchData({
+      status: "failed", intent: null, quality_status: null, abstention_reason: "model_stage_output_invalid",
+      failed_stage_input: { stage: "research", request_hash: "b".repeat(64), frozen_inputs_hash: "c".repeat(64) },
+    })} admission={null} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
+    expect(screen.getByText(/研究阶段输出未通过内容校验/)).toBeVisible();
+    expect(screen.getAllByText(/不能支持策略目标/).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: /运行冻结研究|重新运行冻结研究/ })).not.toBeInTheDocument();
+  });
   it("keeps completed stage work separate from an unverified historical intent", () => {
     render(<DecisionCard research={researchData({ status: "completed", intent: null, quality_status: "partial", abstention_reason: "staged_action_semantics_unverified" })} />);
     expect(screen.getByText(/研究流程已完成，意图一致性未通过/)).toBeVisible();
@@ -334,7 +343,8 @@ describe("research evidence docket", () => {
     render(<Harness />);
     const trigger = screen.getByRole("button", { name: "查看证据" });
     fireEvent.click(trigger);
-    const dialog = screen.getByRole("dialog", { name: "证据原文与定位" });
+    const dialog = screen.getByRole("dialog", { name: "研究摘录与证据定位" });
+    expect(dialog).toHaveTextContent("摘录来自研究输出，不是来源原文");
     expect(dialog).toHaveTextContent("不可变证据");
     expect(dialog).toHaveTextContent("SEC");
     expect(dialog).toHaveTextContent(evidence.object_id);

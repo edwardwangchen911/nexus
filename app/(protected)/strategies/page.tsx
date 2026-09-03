@@ -622,7 +622,13 @@ function gateValue(gate: string, value: string): string {
   if (!match) return value;
   const [, key, raw] = match;
   const labels: Record<string, string> = { challenger: "候选策略", champion: "主用策略", minimum: "最低要求", cumulative_trials: "累计试验", sharpe_delta: "夏普差值", minimum_sharpe_delta: "最低夏普改善", annual_return_delta: "年化收益差", minimum_annual_return_delta: "最低年化收益改善", challenger_minus_champion: "候选减主用", minimum_delta: "最低差值", minimum_exclusive: "须高于" };
-  const ratio = (gate === "deflated_sharpe_confidence" && key !== "cumulative_trials") || key?.includes("annual_return") || ["maximum_drawdown_degradation", "double_cost_excess_positive"].includes(gate);
-  const formatted = ratio ? formatPercent(raw, gate !== "deflated_sharpe_confidence") : formatDisplayDecimal(raw);
+  const returnOrDrawdown = ["nonnegative_excess_return", "maximum_drawdown_degradation", "double_cost_excess_positive"].includes(gate);
+  const difference = Boolean(key && (
+    gate === "sharpe_or_return_improvement" && ["annual_return_delta", "minimum_annual_return_delta"].includes(key)
+    || returnOrDrawdown && ["challenger_minus_champion", "minimum_delta", "minimum_exclusive"].includes(key)
+  ));
+  const ratio = difference || gate === "deflated_sharpe_confidence" && key !== "cumulative_trials"
+    || returnOrDrawdown && ["champion", "challenger"].includes(key ?? "");
+  const formatted = ratio ? formatPercent(raw, difference) : formatDisplayDecimal(raw);
   return key ? `${labels[key] ?? key}：${formatted}` : formatted;
 }

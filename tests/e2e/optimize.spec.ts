@@ -132,9 +132,17 @@ for (const viewport of [
   });
 }
 
-async function installFixtures(page: Page): Promise<void> {
+test("no diagnostic trigger does not recommend keeping the portfolio", async ({ page }) => {
+  await installFixtures(page, { ...diagnostic, optimization_need: "NO_ACTION", items: [] });
+  await page.goto("/overview");
+  await expect(page.getByRole("heading", { name: "未触发优化条件" })).toBeVisible();
+  await expect(page.getByText(/该状态不代表已完成成本收益比较，也不代表保持现状更优/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "保持现状", exact: true })).toHaveCount(0);
+});
+
+async function installFixtures(page: Page, report = diagnostic): Promise<void> {
   await page.route("**/api/v1/integrations", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: [{ provider: "fosun", mode: "fixture", quality: "PASS", as_of: meta.as_of, capability_expires_at: null, contract_hash: null, next_action: "只读研究模式。", version: 1 }], meta }) }));
-  await page.route("**/api/v1/overview**", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { overview_mode: "DIAGNOSTIC", portfolio_id: portfolioId, portfolio_name: null, provider: null, portfolio_snapshot_id: snapshotId, portfolio_snapshot: null, snapshot_as_of: meta.as_of, trading_day: "2026-08-24", diagnostic_report: diagnostic, proposal_group: { proposal_group_id: groupId, status: "shadowing", version: 5 }, proposal_admission: { portfolio_snapshot_id: snapshotId, data_snapshot_id: "0198d500-1000-7000-8000-000000001309", cost_policy_id: "0198d500-1000-7000-8000-000000001311" }, proposal_admission_reason: null }, meta }) }));
+  await page.route("**/api/v1/overview**", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { overview_mode: "DIAGNOSTIC", portfolio_id: portfolioId, portfolio_name: null, provider: null, portfolio_snapshot_id: snapshotId, portfolio_snapshot: null, snapshot_as_of: meta.as_of, trading_day: "2026-08-24", diagnostic_report: report, proposal_group: { proposal_group_id: groupId, status: "shadowing", version: 5 }, proposal_admission: { portfolio_snapshot_id: snapshotId, data_snapshot_id: "0198d500-1000-7000-8000-000000001309", cost_policy_id: "0198d500-1000-7000-8000-000000001311" }, proposal_admission_reason: null }, meta }) }));
   await page.route(`**/api/v1/optimization-proposals/${groupId}/shadow`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: shadowGroup(), meta }) }));
   await page.route(`**/api/v1/optimization-proposals/${groupId}`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: proposalGroup(), meta }) }));
 }

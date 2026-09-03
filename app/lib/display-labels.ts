@@ -73,6 +73,7 @@ const reasons: Record<string, string> = {
   staged_action_semantics_unverified: "角色表态尚不能确定投资方向或证据缺口是否解决",
   model_usage_uncertain: "部分模型调用未返回用量",
   model_execution_failed: "模型执行未完成，具体原因尚未确认",
+  model_stage_output_invalid: "研究阶段输出未通过内容校验",
   conflicting_facts: "研究报告了尚未解决的事实矛盾",
   model_stage_review_invalid: "阶段回应引用不符合前序论点约定，研究已停止",
   ADV20_VOLUME_UNIT_UNVERIFIED: "成交量单位未确认，暂无法评估流动性",

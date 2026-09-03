@@ -8,6 +8,12 @@ import {
 import { diagnosticReport } from "./fixtures";
 
 describe("portfolio optimization diagnostics", () => {
+  it("does not turn no diagnostic trigger into an economic recommendation", () => {
+    render(<OptimizationNeedPanel report={diagnosticReport("NO_ACTION")} />);
+    expect(screen.getByText(/该状态不代表已完成成本收益比较，也不代表保持现状更优/)).toBeVisible();
+    expect(screen.queryByText(/尚未比较/)).not.toBeInTheDocument();
+    expect(screen.getByText(/不代表保持现状更优/)).toBeVisible();
+  });
   it("labels currency scope and trading-day windows without changing thresholds", () => {
     const report = diagnosticReport();
     report.items = [{ ...report.items[0], diagnostic_code: "VOLATILITY_63", policy_scope: "currency:USD", unit: "ratio", metric_value: "0.123456789", reference_limit: "0.15", headroom: "0.026543211", unknown_reason: "VOLATILITY_63_COVERAGE_INSUFFICIENT", headroom_reason: null }];
@@ -24,7 +30,7 @@ describe("portfolio optimization diagnostics", () => {
     ["BLOCKED", "当前无法判断"],
     ["RESEARCH_REQUIRED", "需要补充证据"],
     ["OPTIMIZATION_CANDIDATE", "值得比较优化方案"],
-    ["NO_ACTION", "保持现状"],
+    ["NO_ACTION", "未触发优化条件"],
   ] as const)("explains %s without a score", (need, label) => {
     render(<OptimizationNeedPanel report={diagnosticReport(need)} />);
 

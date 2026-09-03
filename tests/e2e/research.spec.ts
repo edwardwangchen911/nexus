@@ -56,7 +56,8 @@ for (const viewport of [
     await opener.focus();
     await expect(opener).toBeFocused();
     await opener.press("Enter");
-    const dialog = page.getByRole("dialog", { name: "证据原文与定位" });
+    const dialog = page.getByRole("dialog", { name: "研究摘录与证据定位" });
+    await expect(dialog).toContainText("摘录来自研究输出，不是来源原文");
     await expect(dialog).toContainText("SEC");
     await expect(dialog).toContainText("0000320193-26-000001");
     await expect(dialog).toContainText("memory://sha256/");
@@ -137,7 +138,7 @@ test("desktop evidence sheet contains long content, locks background and restore
   await page.goto(`/research/${instrumentId}?as_of=${encodeURIComponent(decisionTime)}`);
   const opener = page.getByRole("button", { name: "查看证据定位" }).first();
   await opener.click();
-  const dialog = page.getByRole("dialog", { name: "证据原文与定位" });
+  const dialog = page.getByRole("dialog", { name: "研究摘录与证据定位" });
   await expect(dialog).toBeVisible();
   await expect(page.getByRole("button", { name: "重新读取" })).toHaveCount(0);
   const close = dialog.getByRole("button", { name: "关闭证据抽屉" });

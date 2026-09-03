@@ -44,6 +44,24 @@ for (const viewport of releaseViewports) {
   });
 }
 
+test("gate units and source verification time retain their meaning", async ({ page }) => {
+  const value = structuredClone(detail);
+  value.gates = [
+    { stage: "shadow", gate: "nonnegative_excess_return", status: "PASS", observed: ["champion=0.05", "challenger=0.07"], thresholds: ["minimum_delta=0"], reason_code: "PASS" },
+    { stage: "shadow", gate: "maximum_drawdown_degradation", status: "PASS", observed: ["champion=-0.12", "challenger=-0.13"], thresholds: ["minimum_delta=-0.02"], reason_code: "PASS" },
+  ];
+  await installEvolutionFixtures(page, { detailValue: value });
+  await page.goto("/strategies");
+  await expect(page.getByText("主用策略：5% · 候选策略：7%")).toBeVisible();
+  await expect(page.getByText("主用策略：-12% · 候选策略：-13%")).toBeVisible();
+  await expect(page.getByText("最低差值：-2 个百分点")).toBeVisible();
+  const source = page.getByRole("status", { name: "全局系统状态" });
+  await expect(source).toContainText("样例时间");
+  await source.getByText("查看系统证据").click();
+  await expect(source).toContainText("该时间不是行情或账户快照截止");
+  await expect(source.getByText("数据截止", { exact: true })).toHaveCount(0);
+});
+
 for (const [state, label] of [
   ["partial", "数据不完整"],
   ["stale", "显示上次数据"],

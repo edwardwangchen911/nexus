@@ -36,6 +36,13 @@ afterEach(() => {
 });
 
 describe("integrations vertical slice", () => {
+  it.each(["fixture", "read_only"] as const)("does not label %s status time as market cutoff", (mode) => {
+    render(<GlobalSystemStatusView state="ready" integrations={[{ ...fosunFixture, mode }]} refreshing={false} onRefresh={vi.fn()} />);
+    fireEvent.click(screen.getByText("查看系统证据"));
+    expect(screen.getAllByText(mode === "fixture" ? /样例时间/ : /最近成功核验/).length).toBe(2);
+    expect(screen.getByText(/不是行情或账户快照截止/)).toBeVisible();
+    expect(screen.queryByText("数据截止")).not.toBeInTheDocument();
+  });
   it.each([
     ["A successful read-only connectivity check is required.", "需先通过只读连接检查"],
     ["A valid capability admission is required.", "需先完成有效的能力准入核验"],

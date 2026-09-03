@@ -11,6 +11,9 @@ describe("plain-language display labels", () => {
   it("describes a model execution failure without inventing its cause", () => {
     expect(reasonLabel("model_execution_failed")).toBe("模型执行未完成，具体原因尚未确认");
   });
+  it("describes rejected stage content without inventing a schema or citation failure", () => {
+    expect(reasonLabel("model_stage_output_invalid")).toBe("研究阶段输出未通过内容校验");
+  });
   it("explains why conflicting research evidence abstains", () => {
     expect(reasonLabel("conflicting_facts")).toBe("研究报告了尚未解决的事实矛盾");
   });

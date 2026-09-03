@@ -33,11 +33,12 @@ export function EvidenceDrawer({ evidence, excerpt, open, onClose, returnFocusRe
       >
         <SheetHeader>
           <Badge variant="secondary">不可变证据</Badge>
-          <SheetTitle>证据原文与定位</SheetTitle>
+          <SheetTitle>研究摘录与证据定位</SheetTitle>
           <SheetDescription>核验来源、可用时间与内容标识。证据位置仅作文本展示。</SheetDescription>
         </SheetHeader>
         <div className="nexus-evidence-body">
           <h3>关联研究摘录</h3>
+          <p>摘录来自研究输出，不是来源原文；请按下方位置与内容摘要核对原始材料。</p>
           <p className="nexus-evidence-excerpt">{excerpt ?? "当前研究摘要未附原文摘录；请按不可变位置与哈希核验源对象。"}</p>
           <h3>来源与定位</h3>
           <dl className="nexus-evidence-facts">

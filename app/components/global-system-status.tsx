@@ -37,6 +37,7 @@ export function GlobalSystemStatusView({ state, integrations, refreshing, onRefr
   const selected = integrations.find((integration) => integration.provider === "fosun") ?? integrations[0];
   const sourceCode = selected ? `${selected.provider.toUpperCase()} · ${selected.mode.toUpperCase()}` : "NO SOURCE";
   const sourceLabel = selected ? `${providerLabel(selected.provider)} · ${modeLabel(selected.mode)}` : "尚未连接数据源";
+  const evidenceTimeLabel = selected?.mode === "fixture" ? "样例时间" : "最近成功核验";
   const shouldOpenEvidence = state === "error" || state === "forbidden" || Boolean(notice);
   const detailsRef = useRef<HTMLDetailsElement>(null);
 
@@ -66,7 +67,7 @@ export function GlobalSystemStatusView({ state, integrations, refreshing, onRefr
         </div>
         <div className="global-status__headline-facts">
           <span className="state-chip" data-state={state}>数据源：{dataStateLabels[state]}</span>
-          <span>截止 {formatTimestamp(selected?.as_of)}</span>
+          <span>{evidenceTimeLabel} {formatTimestamp(selected?.as_of)}</span>
         </div>
       </div>
       {state === "stale" ? <p className="global-status__scope">数据源证据已过期；页面仍可展示已存快照，不代表当前决策条件已满足。</p> : null}
@@ -86,7 +87,7 @@ export function GlobalSystemStatusView({ state, integrations, refreshing, onRefr
           <ChevronDown aria-hidden="true" size={17} strokeWidth={1.8} />
         </summary>
         <div className="global-status__details-body">
-          <p>此处汇总数据源状态；资产快照质量与决策准入在具体页面单独标明。</p>
+          <p>此处汇总数据源状态；该时间不是行情或账户快照截止。资产快照质量与决策准入在具体页面单独标明。</p>
           <div className="global-status__details-heading">
             <p>状态证据与权限边界</p>
             <button className="button button--quiet" type="button" onClick={onRefresh} disabled={refreshing}>
@@ -98,7 +99,7 @@ export function GlobalSystemStatusView({ state, integrations, refreshing, onRefr
             <StatusFact term="数据状态" value={dataStateLabels[state]} />
             <StatusFact term="执行模式" value={<><span>仅研究</span> <code>RESEARCH_ONLY</code></>} />
             <StatusFact term="质量" value={<><span>{qualityLabel(selected?.quality)}</span> <code>{selected?.quality ?? "UNKNOWN"}</code></>} />
-            <StatusFact term="数据截止" value={formatTimestamp(selected?.as_of)} />
+            <StatusFact term={evidenceTimeLabel} value={formatTimestamp(selected?.as_of)} />
             <StatusFact term="权限到期" value={formatTimestamp(selected?.capability_expires_at)} />
             <StatusFact term="契约哈希" value={selected?.contract_hash ?? "未准入"} />
           </dl>
