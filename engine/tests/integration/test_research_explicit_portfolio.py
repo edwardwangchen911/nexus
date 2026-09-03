@@ -1,11 +1,34 @@
 """A manual root's snapshot must not drift to the later portfolio snapshot."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from helpers.diagnostic_artifacts import FixtureArtifactReader
 from helpers.research_snapshots import INSTRUMENT, NOW, seed_filing
+from nexus.agents.models import ResearchRequest
+from nexus.agents.persistence import admit_research_run
 from nexus.agents.snapshots import prepare_research_snapshot
+from nexus.jobs.daily_manual import (
+    ManualDailyRequest,
+    build_manual_daily_registry,
+    enqueue_manual_daily_root,
+    manual_daily_job_ids,
+)
+from nexus.jobs.daily_research import admit_daily_research, resolve_daily_research_job
+from nexus.jobs.models import QueueName, job_input_hash
+from nexus.jobs.worker import run_job_worker_once
+from nexus.ops.openai_local import prepare_database
+from nexus.persistence.models.agents import (
+    AgentDailyBudgetReservationRecord,
+    AgentModelConfigRecord,
+    AgentResearchRunRecord,
+)
+from nexus.persistence.models.backtest import (
+    ExchangeCalendarAuthorityRecord,
+    ExchangeCalendarSessionRecord,
+)
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.portfolio import (
     Account,
@@ -15,6 +38,7 @@ from nexus.persistence.models.portfolio import (
     PortfolioSnapshotRecord,
     PositionSnapshot,
 )
+from nexus.persistence.models.runtime import Job, JobDependency
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import func, select
@@ -170,3 +194,229 @@ async def test_explicit_partial_snapshot_does_not_fall_back_to_ready(migrated_da
         assert context["portfolio_snapshot_id"] == str(partial.id)
         assert context["snapshot_decision_ready"] is False
         assert context["execution_locked"] is True
+
+
+async def _daily_case(url, *, ready=True, advance=True):
+    settings = EngineSettings(database_url=url)
+    await prepare_database(settings)
+    factory = session_factory(settings)
+    close = NOW - timedelta(hours=8)
+    async with factory() as session, session.begin():
+        portfolio, snapshot = await _seed(session)
+        if not ready:
+            snapshot = await _snapshot(session, portfolio, offset=1, status="PARTIAL")
+        calendar = ExchangeCalendarAuthorityRecord(
+            exchange="XNYS",
+            version="daily-research-test",
+            source="fixture",
+            range_start=close.date(),
+            range_end=close.date(),
+            query_parameters={},
+            completeness_status="complete",
+            content_hash="f" * 64,
+            published_at=close,
+        )
+        session.add(calendar)
+        await session.flush()
+        session.add(
+            ExchangeCalendarSessionRecord(
+                calendar_authority_id=calendar.id,
+                session=close.date(),
+                market_open_at=close - timedelta(hours=6, minutes=30),
+                market_close_at=close,
+                decision_at=close + timedelta(hours=1),
+            )
+        )
+        await session.flush()
+    async with factory() as session, session.begin():
+        root = await enqueue_manual_daily_root(
+            session,
+            request=ManualDailyRequest(
+                snapshot_id=snapshot.id,
+                calendar_authority_id=calendar.id,
+                session=close.date(),
+                cutoff_at=datetime.now(UTC),
+            ),
+            now=datetime.now(UTC),
+        )
+        model_id = await session.scalar(select(AgentModelConfigRecord.id))
+    if advance:
+        for _ in range(3):
+            async with factory() as session:
+                ids = await manual_daily_job_ids(session, root_id=root.id)
+            assert await run_job_worker_once(
+                factory,
+                registry=build_manual_daily_registry(artifact_reader=FixtureArtifactReader({})),
+                queue=QueueName.GENERAL,
+                worker_id="daily-research-test",
+                worker_started_at=NOW,
+                process_version="test",
+                migration_head="0036",
+                clock=lambda: datetime.now(UTC),
+                job_ids=ids,
+                claim_registered_only=True,
+            )
+    return factory, root, snapshot, model_id
+
+
+def _admission(root, model_id, *, at=None):
+    return dict(
+        root_id=root.id,
+        instrument_id=INSTRUMENT,
+        research_as_of=at or datetime.now(UTC),
+        model_config_id=model_id,
+        daily_limit_usd=Decimal("3"),
+        now=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_daily_research_admits_one_native_job_with_exact_dependency_and_frozen_context(
+    migrated_database_url,
+):
+    factory, root, snapshot, model_id = await _daily_case(migrated_database_url)
+    request = _admission(root, model_id)
+    async with factory() as session, session.begin():
+        portfolio = await session.get(Portfolio, snapshot.portfolio_id)
+        await _snapshot(session, portfolio, offset=2)
+        first = await admit_daily_research(session, **request)
+        replay = await admit_daily_research(session, **request)
+        assert not first.replayed and replay.replayed and replay.run_id == first.run_id
+        job = await resolve_daily_research_job(session, root_id=root.id, run_id=first.run_id)
+        assert job.payload == {"run_id": str(first.run_id)}
+        assert job.schema_version == "agent_research_job_v1"
+        assert job.job_type == "agent.research"
+        ids = await manual_daily_job_ids(session, root_id=root.id)
+        assert len(ids) == 3 and job.id not in ids
+        assert tuple(
+            (
+                await session.execute(
+                    select(
+                        JobDependency.depends_on_job_id,
+                        JobDependency.required_outcome,
+                    ).where(JobDependency.job_id == job.id)
+                )
+            ).all()
+        ) == ((ids[-1], "succeeded"),)
+        data = await session.get(DataSnapshot, first.run.data_snapshot_id)
+        assert data.payload["portfolio_context"]["portfolio_snapshot_id"] == str(snapshot.id)
+        assert first.run.decision_time == request["research_as_of"]
+        assert await session.scalar(select(func.count()).select_from(AgentResearchRunRecord)) == 1
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(AgentDailyBudgetReservationRecord)
+            )
+            == 1
+        )
+    async with factory() as session:
+        assert (
+            await resolve_daily_research_job(session, root_id=root.id, run_id=first.run_id)
+        ).id == job.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["pending", "blocked", "before_diagnostic", "future"])
+async def test_daily_research_unready_or_wrong_cutoff_reserves_nothing(migrated_database_url, case):
+    factory, root, _, model_id = await _daily_case(
+        migrated_database_url,
+        ready=case != "blocked",
+        advance=case != "pending",
+    )
+    at = root.effective_at if case == "before_diagnostic" else datetime.now(UTC)
+    if case == "future":
+        at += timedelta(hours=1)
+    async with factory() as session, session.begin():
+        with pytest.raises(ValueError, match="MANUAL_DAILY_RESEARCH_"):
+            await admit_daily_research(session, **_admission(root, model_id, at=at))
+        for table in (AgentResearchRunRecord, AgentDailyBudgetReservationRecord, DataSnapshot):
+            assert await session.scalar(select(func.count()).select_from(table)) == 0
+
+
+@pytest.mark.asyncio
+async def test_daily_research_bad_model_rolls_back_all_new_authority_and_budget(
+    migrated_database_url,
+):
+    factory, root, _, _ = await _daily_case(migrated_database_url)
+    async with factory() as session, session.begin():
+        with pytest.raises(ValueError):
+            await admit_daily_research(session, **_admission(root, UUID(int=999)))
+        for table in (AgentResearchRunRecord, AgentDailyBudgetReservationRecord, DataSnapshot):
+            assert await session.scalar(select(func.count()).select_from(table)) == 0
+        assert await session.scalar(select(func.count()).select_from(Job)) == 3
+
+
+@pytest.mark.asyncio
+async def test_daily_research_resolver_rejects_unrelated_run(migrated_database_url):
+    factory, root, _, model_id = await _daily_case(migrated_database_url)
+    async with factory() as session, session.begin():
+        with pytest.raises(ValueError, match="MANUAL_DAILY_RESEARCH_BINDING_INVALID"):
+            await resolve_daily_research_job(session, root_id=root.id, run_id=UUID(int=999))
+
+
+@pytest.mark.asyncio
+async def test_daily_research_never_backfills_dependency_on_existing_native_run(
+    migrated_database_url,
+):
+    factory, root, snapshot, model_id = await _daily_case(migrated_database_url)
+    request = _admission(root, model_id)
+    async with factory() as session, session.begin():
+        ids = await manual_daily_job_ids(session, root_id=root.id)
+        data = await prepare_research_snapshot(
+            session,
+            INSTRUMENT,
+            as_of=request["research_as_of"],
+            portfolio_snapshot_id=snapshot.id,
+        )
+        digest = job_input_hash(
+            {
+                "schema": "manual-daily-research-v1",
+                "root_id": str(root.id),
+                "diagnostic_job_id": str(ids[-1]),
+                "instrument_id": str(INSTRUMENT),
+                "research_as_of": request["research_as_of"].isoformat(),
+                "model_config_id": str(model_id),
+            }
+        )
+        native = await admit_research_run(
+            session,
+            actor_id="local-daily-research",
+            route="manual-daily-research-v1",
+            idempotency_key=digest,
+            request_hash=digest,
+            request=ResearchRequest(
+                instrument_id=INSTRUMENT,
+                data_snapshot_id=data.id,
+                decision_time=request["research_as_of"],
+            ),
+            prompt_version_id=None,
+            model_config_id=model_id,
+            daily_limit_usd=request["daily_limit_usd"],
+            now=request["now"],
+        )
+    async with factory() as session, session.begin():
+        with pytest.raises(ValueError, match="MANUAL_DAILY_RESEARCH_BINDING_INVALID"):
+            await admit_daily_research(session, **request)
+        job = await session.scalar(
+            select(Job).where(
+                Job.payload["run_id"].as_string() == str(native.run_id),
+            )
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(JobDependency)
+                .where(
+                    JobDependency.job_id == job.id,
+                )
+            )
+            == 0
+        )
+        assert await session.scalar(select(func.count()).select_from(AgentResearchRunRecord)) == 1
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(
+                    AgentDailyBudgetReservationRecord,
+                )
+            )
+            == 1
+        )

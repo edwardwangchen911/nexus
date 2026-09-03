@@ -65,6 +65,17 @@
 
 日根诊断成功后才能准入原生研究，不在等待依赖时创建research run或预算预留。后续研究使用显式的实际研究冻结时刻（不早于诊断实际生成时间），并绑定日根原snapshot；不能用日根早先cutoff假装当时已有后来生成的诊断。原快照as_of、日根截止、研究冻结时刻分别保留。具体native Job关联与单次运行边界按既有admit/worker完善，不新建同名daily agent handler或第二个模型executor。
 
+**Owner/Files:** root，A确认无冲突。新`jobs/daily_research.py`，扩`ops/daily_once.py`，`nexus/worker.py`仅单次Agent函数转发可选exact job_ids；专属测试与现有手册。无迁移。
+
+- [x] `admit_daily_research(session, root_id, instrument_id, research_as_of, model_config_id, daily_limit_usd, now)`：校验日根及两子节点身份完整且诊断成功，诊断实际完成/报告创建不晚于显式研究时刻；指定model config复用既有模型/提示词/预算准入，不自动选择模型。CLI非fixture运行配置校验在下一片完成。
+- [x] 在调用者事务内用savepoint整体完成绑定快照准备→原生admit→既有JobDependency连接诊断。请求hash/幂等键覆盖root、diagnostic job、instrument、research cutoff、model config；只有新准入Job能添加这条边，旧replay必须验证已具备相同边，不给历史作业补归属。任一步失败不遗留新snapshot/run/预算/Job。
+- [x] native Job保留`agent_research_job_v1`和`run_id`原payload；日诊断的三节点selector不扩展为跨业务遍历。新精确resolver以root+run检查该依赖边、研究快照context绑定及原生Job身份后给单个ID。
+- [ ] `run_agent_worker_once(...,job_ids=None)`转发同一范围至通用worker，默认不变。新`research-admit`只准入不运行；`research-run`显式调用此既有单次入口，仅接受已配置非fixture研究runtime和已显式配置对象库。最多一个Job，不重试/调度，不运行方案或paper。
+- [ ] 原模型正常预算取`settings.agent_daily_budget_usd`，不新增额度配置、不将订阅额度写成花费为零；固定安全状态/错误，不输出账户事实。
+- [ ] PG检查前置未完成/blocked零run零预算、成功准入恰好一个native job与已有诊断边、相同请求幂等、模型准入失败整体回滚、错root/run拒绝；单次实际worker隔离外部queued/expired job，旧非scoped调用回归。真实模型是否需要再调用由新证据与验收缺口决定，不能为测编排重复消耗旧case。
+
+Task4b1准入验证：新增8项PG，与既有显式绑定、准备及组合上下文共30项PG通过；标准`PYTHONPATH=engine/src`与importlib。首次成功路径红例捕获request hash与native durable hash混淆，按原生冻结字段分别校验后修复，独立定向复核ready；额外真实native准入无依赖的replay回归确认不补写旧edge且原run/预算不变。Ruff/Mypy/diff-check通过。无模型调用、无迁移；后续CLI/worker与研究证据驱动方案仍未完成。
+
 - 诊断成功后按明确 frozen portfolio context 准备研究快照，再用原生 `admit_research_run` 准入；不能提前创建会被依赖跳过且预算悬挂的 run。
 - 原生研究完成后实际消费其合格证据构造方案；当前优化路径 `research=()` 的事实必须先修复，不能仅添 dependency 就称消费研究。
 - 未知/不充分结论保持原安全语义。paper 仍单独显式入口；自动日程仍是独立产品选择，不在此片偷开。
