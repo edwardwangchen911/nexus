@@ -65,6 +65,20 @@ async def test_staged_committee_passes_validated_claims_forward_and_shares_usage
     async def invoke(payload, *, output_model):
         submitted.append(payload)
         batch = _staged_batch(payload["stage"], [p["role"] for p in payload["prompts"]])
+        if payload["stage"] == "critique":
+            batch["roles"][0]["claims"][0]["text"] = "成交容量未知，不能判断退出速度。"
+            batch["roles"][1]["claims"][0]["text"] = "估值时间缺失，尚不能验证可比性。"
+        elif payload["stage"] == "synthesis":
+            assert "first claim must assess each bear objection" in payload["instructions"]
+            assert "second claim must assess each evidence_audit finding" in payload["instructions"]
+            assert "Restating the orchestrator's question" in payload["instructions"]
+            batch["roles"][0]["claims"] = [
+                {
+                    "text": "未决：bear:0缺少成交容量，需补充证据才能判断退出速度。",
+                    "citations": [0],
+                },
+                {"text": "未决：evidence_audit:0缺少估值时间，需先核实可比性。", "citations": [0]},
+            ]
         assert output_model.model_validate(batch)
         return json.dumps(batch), UsageSnapshot(input_tokens=300, output_tokens=80)
 
@@ -73,6 +87,16 @@ async def test_staged_committee_passes_validated_claims_forward_and_shares_usage
     outputs = [await model.analyze(role, request, evidence, prompts[role]) for role in ROLE_ORDER]
     assert [p["stage"] for p in submitted] == ["research", "critique", "synthesis"]
     assert [len(p["previous_claims"]) for p in submitted] == [0, 5, 7]
+    assert {p["role"]: p["text"] for p in submitted[2]["previous_claims"][-2:]} == {
+        "bear": "成交容量未知，不能判断退出速度。",
+        "evidence_audit": "估值时间缺失，尚不能验证可比性。",
+    }
+    assert all(
+        "mutually incompatible facts" in p["instructions"]
+        and "Missing data, risk concerns or differing opinions alone" in p["instructions"]
+        for p in submitted
+    )
+    assert len(outputs[-1].claims) == 2
     assert {p["claim_id"] for p in submitted[1]["previous_claims"]} == {
         f"{role}:0" for role in ROLE_ORDER[:5]
     }
