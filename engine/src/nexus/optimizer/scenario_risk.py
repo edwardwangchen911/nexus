@@ -119,10 +119,14 @@ def scenario_metrics(
     weights: Mapping[UUID, Decimal],
     evidence: ScenarioEvidence,
 ) -> dict[str, TypedMetric]:
-    """Rebase each asset at a common start; residual cash earns zero in this scenario.
+    """Rebase fixed shares at each metric's common published-window start.
 
     These are historical risk scenarios using today's proposed weights, not a
-    strategy backtest or a prediction. Never bridge a missing published session.
+    strategy backtest or a prediction. Volatility uses 64 closes for 63 returns,
+    correlation 127 closes for 126 returns, and drawdown 252 closes. Each needs
+    its anchor prices and the existing 80% coverage; missing intermediate days
+    never create cross-gap returns. Residual cash earns zero, with no daily
+    rebalancing. Persisted old comparison dimensions are not recomputed here.
     """
     result = {
         name: TypedMetric.unknown(reason)
@@ -145,31 +149,23 @@ def scenario_metrics(
     sessions = evidence.sessions[-253:]
     if (
         not positive
-        or len(sessions) < 253
+        or not sessions
         or any(day > evidence.valuation_time.date() for day in sessions)
-        or any(
-            i not in evidence.closes or evidence.closes[i].get(sessions[0], 0) <= 0
-            for i in positive
-        )
     ):
         return result
-    cash = Decimal(1) - sum(positive.values(), Decimal(0))
-    nav = {
-        day: cash
-        + sum(
-            (
-                weight * evidence.closes[i][day] / evidence.closes[i][sessions[0]]
-                for i, weight in positive.items()
-            ),
-            Decimal(0),
-        )
-        for day in sessions
-        if all(evidence.closes[i].get(day, 0) > 0 for i in positive)
-    }
-    volatility = annualized_volatility_by_session(nav, sessions, 63)
-    drawdown = maximum_drawdown_by_session(nav, sessions, 252)
+    volatility_sessions = sessions[-64:]
+    correlation_sessions = sessions[-127:]
+    drawdown_sessions = sessions[-252:]
+    volatility = annualized_volatility_by_session(
+        _rebased_nav(positive, evidence.closes, volatility_sessions), volatility_sessions, 63
+    )
+    drawdown = maximum_drawdown_by_session(
+        _rebased_nav(positive, evidence.closes, drawdown_sessions), drawdown_sessions, 252
+    )
     correlation = beta_and_correlation_by_session(
-        nav, evidence.benchmark, published_sessions=sessions
+        _rebased_nav(positive, evidence.closes, correlation_sessions),
+        evidence.benchmark,
+        published_sessions=correlation_sessions,
     )
     for name, value in (
         ("volatility", volatility),
@@ -179,3 +175,24 @@ def scenario_metrics(
         if value is not None:
             result[name] = TypedMetric.known(value)
     return result
+
+
+def _rebased_nav(
+    positive: Mapping[UUID, Decimal],
+    closes: Mapping[UUID, Mapping[date, Decimal]],
+    sessions: tuple[date, ...],
+) -> dict[date, Decimal]:
+    # The anchor depends on the published calendar, never on which prices a
+    # particular proposal happens to have. Missing anchors stay unknown.
+    if any(i not in closes or closes[i].get(sessions[0], 0) <= 0 for i in positive):
+        return {}
+    cash = Decimal(1) - sum(positive.values(), Decimal(0))
+    return {
+        day: cash
+        + sum(
+            (weight * closes[i][day] / closes[i][sessions[0]] for i, weight in positive.items()),
+            Decimal(0),
+        )
+        for day in sessions
+        if all(closes[i].get(day, 0) > 0 for i in positive)
+    }

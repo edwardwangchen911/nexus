@@ -451,6 +451,8 @@ async def _add_series(
     artifact_created_at: datetime | None = None,
     manifest_created_at: datetime | None = None,
     omitted_session: date | None = None,
+    session_count: int | None = None,
+    adjustment: str = "all",
 ) -> None:
     bars = _bars(
         instrument_id,
@@ -459,6 +461,8 @@ async def _add_series(
         invalid_session=invalid_session,
         omitted_session=omitted_session,
     )
+    if session_count is not None:
+        bars = bars[-session_count:]
     payload = serialize_price_bars(bars)
     uri = f"memory://{name}"
     payloads[uri] = payload
@@ -483,7 +487,7 @@ async def _add_series(
             source=source,
             feed=feed,
             delivery_mode=delivery_mode,
-            adjustment="all",
+            adjustment=adjustment,
             start_at=bars[0].observed_at,
             end_at=bars[-1].observed_at,
             row_count=len(bars),
