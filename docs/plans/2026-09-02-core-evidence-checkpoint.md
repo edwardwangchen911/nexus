@@ -1156,3 +1156,9 @@ num根，不接收start；单日请求因此拿到窗口前历史，现有window
 研究显式snapshot绑定5db9554合为fb8dc51，缺指定context拒绝退回generic/default latest，
 默认调用保持旧行为/旧hash。A22项新旧PG、Mypy2/Ruff通过；只冻结真实已存在资料，
 不改原snapshot.as_of，不因新增日根而抢占后来最新快照，也未实际调用模型。
+
+S2b-3b1的2dd81cb合为0b6c31e，增加SELECT-only持仓连续性reader，用真实event_seq前缀、
+完整事件内容hash和fill/order/window/ledger关联识别连续持有、重开、关闭及不可用的
+非fill开仓；no_autoflush保持只读。B集中审查修复前缀未绑定完整内容的P2后交付；A复验
+16unit+3隔离PG、Mypy/Ruff通过。该片无migration/writer/gate，不等于持仓rank checkpoint
+已持久化或真实paper已闭环。
