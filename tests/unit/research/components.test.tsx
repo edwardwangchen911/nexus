@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useRef, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -8,6 +8,7 @@ import { DecisionCard } from "../../../app/components/decision-card";
 import { EvidenceDrawer } from "../../../app/components/evidence-drawer";
 import { ResearchInputs } from "../../../app/components/research-inputs";
 import type { DataStateKind } from "../../../app/components/data-state";
+import type { components } from "../../../app/lib/generated/schema";
 import { briefData, evidence, researchAdmissionData, researchData } from "./fixtures";
 
 const states: Array<[DataStateKind, string]> = [
@@ -16,12 +17,110 @@ const states: Array<[DataStateKind, string]> = [
   ["forbidden", "无权访问"],
 ];
 
+type Inputs = components["schemas"]["ResearchInputsSummary"];
+type Distribution = components["schemas"]["ResearchInputIssuerDistribution"];
+
+function issuerInputs(overrides: Partial<Distribution> = {}): Inputs {
+  return {
+    display_symbol: "TEST", total_facts: 0, truncated: false, filings: [], facts: [],
+    issuer_distributions: [{
+      evidence_ref_id: "0198d600-1000-7000-8000-000000009901", source: "ssga_distribution",
+      revision: "issuer-fixture-v1", content_hash: "d".repeat(64),
+      ex_date: "2026-08-03", record_date: "2026-08-04", payable_date: "2026-08-06",
+      currency: "USD", amount_basis: "per_share", dividend_per_share: "0.1256789",
+      short_term_capital_gain: null, long_term_capital_gain: "0",
+      available_at: "2026-09-02T18:05:06Z", received_at: "2026-09-02T18:05:06Z",
+      source_url: "https://www.ssga.com/library-content/products/fund-data/etfs/us/spdr-etf-historical-distributions.xlsx",
+      historical_backtest_eligible: false, ...overrides,
+    }],
+  };
+}
+
+describe("issuer cash-distribution inputs", () => {
+  it("shows issuer-only inputs with event dates, per-share units and distinct knowledge times", () => {
+    const inputs = issuerInputs();
+    render(<ResearchInputs inputs={inputs} asOf="2026-09-02T19:00:00Z" />);
+    expect(screen.getByRole("heading", { name: "TEST · 已冻结发行商资料" })).toBeVisible();
+    expect(screen.queryByText("SEC · 本地只读证据")).not.toBeInTheDocument();
+    const section = screen.getByRole("region", { name: "发行商现金分红资料" });
+    for (const [label, value] of [
+      ["除息日", "2026-08-03"], ["登记日", "2026-08-04"], ["发行商支付日", "2026-08-06"],
+      ["现金分红", "USD 0.126 / 每份"], ["短期资本利得", "未知"], ["长期资本利得", "USD 0 / 每份"],
+      ["本机收到时间", "2026-09-03 02:05:06 北京时间"], ["证据可用时间", "2026-09-03 02:05:06 北京时间"],
+    ]) expect(within(section).getByText(label).nextElementSibling).toHaveTextContent(value);
+    expect(screen.getByText("冻结截止").nextElementSibling).toHaveTextContent("2026-09-03 03:00:00 北京时间");
+    expect(within(section).getByText(/不是历史公告时间/)).toBeVisible();
+    expect(within(section).getByText(/不代表账户实际到账/)).toBeVisible();
+    expect(within(section).getByText(/不可用于历史回测/)).toBeVisible();
+    expect(within(section).getByText(/不代表研究已完成，也不授予执行权限/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /运行|买入|卖出|交易/ })).not.toBeInTheDocument();
+    const toggle = within(section).getByText("分红证据与精确数值");
+    const details = toggle.closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    fireEvent.click(toggle);
+    expect(within(details).getByText("USD 0.1256789 / 每份")).toBeVisible();
+    expect(within(details).getByText(inputs.issuer_distributions[0].content_hash)).toBeVisible();
+    expect(within(details).getByText("issuer-fixture-v1")).toBeVisible();
+    expect(within(details).getByRole("link", { name: "查看 SSGA 官方原件" })).toHaveAttribute("href", inputs.issuer_distributions[0].source_url);
+    expect(section.querySelector("iframe, script")).toBeNull();
+  });
+
+  it.each(["dividend_per_share", "short_term_capital_gain", "long_term_capital_gain"] as const)("keeps a tiny nonzero %s distinct from zero", (field) => {
+    render(<ResearchInputs inputs={issuerInputs({ [field]: "0.00000001" })} asOf="2026-09-02T19:00:00Z" />);
+    expect(screen.getAllByText("USD 0.00000001 / 每份").some((node) => !node.closest("details"))).toBe(true);
+  });
+
+  it("does not coerce DecimalString amounts to floating point", () => {
+    render(<ResearchInputs inputs={issuerInputs({ dividend_per_share: "9007199254740993.123456" })} asOf="2026-09-02T19:00:00Z" />);
+    expect(screen.getByText("现金分红").nextElementSibling).toHaveTextContent("USD 9007199254740993.123 / 每份");
+    fireEvent.click(screen.getByText("分红证据与精确数值"));
+    expect(screen.getByText("USD 9007199254740993.123456 / 每份")).toBeVisible();
+  });
+
+  it("keeps SEC-only counts and truncation separate in mixed input sets", () => {
+    render(<ResearchInputs inputs={{ ...issuerInputs(), total_facts: 101, truncated: true,
+      filings: [{ evidence_ref_id: "sec-fixture", source: "sec", form: "497K", accession_number: "0000000001-26-000001", accepted_at: "2026-08-21T20:00:00Z", received_at: "2026-09-02T05:59:00Z", revision: "sec-v1", content_hash: "a".repeat(64), disclosure_truncated: false }],
+    }} asOf="2026-09-02T19:00:00Z" />);
+    expect(screen.getByRole("heading", { name: "TEST · 已冻结研究资料" })).toBeVisible();
+    expect(screen.getByText("SEC 资料").nextElementSibling).toHaveTextContent("1 份");
+    expect(screen.getByText("财务事实").nextElementSibling).toHaveTextContent("101 条");
+    expect(screen.getByText("分红观察").nextElementSibling).toHaveTextContent("1 条");
+    expect(screen.getByText(/部分冻结 SEC 资料/)).toBeVisible();
+    expect(screen.getByText(/不代表完整分红历史/)).toBeVisible();
+  });
+
+  it.each(["absent", "empty"])("preserves old SEC-only presentation when issuer data is %s", (kind) => {
+    const legacy = { display_symbol: "TEST", total_facts: 0, truncated: false, filings: [], facts: [] };
+    const inputs = kind === "absent" ? legacy : { ...legacy, issuer_distributions: [] };
+    render(<ResearchPanel state="empty" research={null} admission={researchAdmissionData({ inputs })} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "TEST · 已冻结财报" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "发行商现金分红资料" })).not.toBeInTheDocument();
+    expect(screen.getByText(/财报资料已就绪，AI 研究尚未生成/)).toBeVisible();
+  });
+
+  it("labels issuer-only admission as inputs, not a financial report or finished research", () => {
+    render(<ResearchPanel state="empty" research={null} admission={researchAdmissionData({ inputs: issuerInputs(), eligible: false, reason: "prompt_authority_unavailable" })} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
+    expect(screen.getByText("资料已冻结 · 研究待生成")).toBeVisible();
+    expect(screen.getByText(/发行商现金分红资料已就绪，AI 研究尚未生成/)).toBeVisible();
+    expect(screen.queryByText(/财报资料已就绪/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /运行冻结研究/ })).not.toBeInTheDocument();
+  });
+
+  it("does not turn an old failed run into a completed report when newer inputs are visible", () => {
+    render(<ResearchPanel state="partial" research={researchData({ status: "failed", intent: null, quality_status: null })} admission={researchAdmissionData({ inputs: issuerInputs(), decision_time: "2026-09-02T19:00:00Z" })} submitting={false} notice={null} onRefresh={vi.fn()} onRun={vi.fn()} />);
+    expect(screen.getByRole("region", { name: "个股研究证据页" })).toHaveAttribute("data-state", "partial");
+    expect(screen.getByRole("region", { name: "发行商现金分红资料" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /运行冻结研究/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/禁止创建或重跑研究/)).toBeVisible();
+  });
+});
+
 describe("research evidence docket", () => {
   it.each(["6-K", "497K"])("distinguishes inert %s text from financial metrics and expands on demand", (form) => {
     const source = "https://www.sec.gov/Archives/edgar/data/1/000000000126000001/doc.htm";
     const excerpt = "Company has not decided. <script>alert('not executable')</script>";
     render(<ResearchInputs asOf="2026-09-02T06:00:00Z" inputs={{
-      display_symbol: "TEST", total_facts: 0, truncated: false, facts: [],
+      display_symbol: "TEST", total_facts: 0, truncated: false, facts: [], issuer_distributions: [],
       filings: [{ evidence_ref_id: "filing-1", source: "sec", form, accession_number: "0000000001-26-000001", accepted_at: "2026-08-21T20:00:00Z", received_at: "2026-09-02T05:59:00Z", revision: "a".repeat(64), content_hash: "a".repeat(64), disclosure_excerpt: excerpt, disclosure_truncated: true, source_url: source }],
     }} />);
     expect(screen.getByRole("heading", { name: form === "497K" ? "TEST · 已冻结基金资料" : "TEST · 已冻结披露" })).toBeVisible();
@@ -38,7 +137,7 @@ describe("research evidence docket", () => {
   });
   it("shows frozen portfolio context and missing market evidence without a model", () => {
     render(<ResearchInputs asOf="2026-09-02T06:00:00Z" inputs={{
-      display_symbol: "TEST", total_facts: 0, truncated: false, filings: [], facts: [],
+      display_symbol: "TEST", total_facts: 0, truncated: false, filings: [], facts: [], issuer_distributions: [],
       portfolio_context: {
         instrument_id: "instrument", portfolio_snapshot_id: "snapshot",
         snapshot_as_of: "2026-09-02T03:33:00Z", research_as_of: "2026-09-02T06:00:00Z",

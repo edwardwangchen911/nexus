@@ -13,19 +13,25 @@ const factLabels: Record<string, string> = {
 };
 
 export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string }): React.ReactElement {
-  const documentLabel = inputs.filings.some((filing) => filing.form === "497K") ? "已冻结基金资料" : inputs.filings.some((filing) => filing.form === "6-K") ? "已冻结披露" : "已冻结财报";
+  const distributions = inputs.issuer_distributions ?? [];
+  const hasIssuer = distributions.length > 0;
+  const hasSec = inputs.filings.length > 0;
+  const documentLabel = hasIssuer ? (hasSec ? "已冻结研究资料" : "已冻结发行商资料") : inputs.filings.some((filing) => filing.form === "497K") ? "已冻结基金资料" : inputs.filings.some((filing) => filing.form === "6-K") ? "已冻结披露" : "已冻结财报";
   return <article className="decision-card" aria-labelledby="research-inputs-title">
     <header className="decision-card__heading">
-      <div><p className="eyebrow">SEC · 本地只读证据</p><h2 id="research-inputs-title">{inputs.display_symbol ?? "标的"} · {documentLabel}</h2></div>
+      <div><p className="eyebrow">{hasIssuer ? (hasSec ? "SEC / 发行商" : "发行商") : "SEC"} · 本地只读证据</p><h2 id="research-inputs-title">{inputs.display_symbol ?? "标的"} · {documentLabel}</h2></div>
       <span className="mode-badge">资料核验 · 非 AI 结论</span>
     </header>
     <dl className="decision-card__authority">
       <div><dt>冻结截止</dt><dd>{formatUtc(asOf)}</dd></div>
-      <div><dt>SEC 资料</dt><dd>{inputs.filings.length} 份</dd></div>
-      <div><dt>财务事实</dt><dd>{inputs.total_facts} 条</dd></div>
+      {hasSec || !hasIssuer ? <>
+        <div><dt>SEC 资料</dt><dd>{inputs.filings.length} 份</dd></div>
+        <div><dt>财务事实</dt><dd>{inputs.total_facts} 条</dd></div>
+      </> : null}
+      {hasIssuer ? <div><dt>分红观察</dt><dd>{distributions.length} 条</dd></div> : null}
       <div><dt>使用边界</dt><dd>未形成买卖判断，不触发交易</dd></div>
     </dl>
-    {inputs.truncated ? <p role="note">当前仅展示部分冻结资料，不代表完整覆盖。</p> : null}
+    {inputs.truncated ? <p role="note">当前仅展示部分冻结{hasIssuer ? " SEC " : ""}资料，不代表完整覆盖。</p> : null}
     {inputs.portfolio_context ? <section className="decision-card__section">
       {inputs.portfolio_context.research_focus ? <section aria-label="本次组合研究问题">
         <h3>本次组合研究问题</h3>
@@ -52,6 +58,33 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
         <dl className="decision-card__versions"><div><dt>快照标识</dt><dd>{inputs.portfolio_context.portfolio_snapshot_id}</dd></div><div><dt>内容 SHA-256</dt><dd>{inputs.portfolio_context.content_hash}</dd></div></dl>
       </details>
     </section> : null}
+    {distributions.map((distribution) => <section className="decision-card__section" aria-label="发行商现金分红资料" key={distribution.evidence_ref_id}>
+      <h3>发行商现金分红资料</h3>
+      <p>SSGA 官方资料 · 仅展示该冻结集合内最新一条分红观察，不代表完整分红历史。</p>
+      <dl className="decision-card__authority">
+        <div><dt>除息日</dt><dd>{distribution.ex_date}</dd></div>
+        <div><dt>登记日</dt><dd>{distribution.record_date}</dd></div>
+        <div><dt>发行商支付日</dt><dd>{distribution.payable_date}</dd></div>
+        <div><dt>现金分红</dt><dd>{formatDistributionAmount(distribution.dividend_per_share, distribution.currency)}</dd></div>
+        <div><dt>短期资本利得</dt><dd>{formatDistributionAmount(distribution.short_term_capital_gain, distribution.currency)}</dd></div>
+        <div><dt>长期资本利得</dt><dd>{formatDistributionAmount(distribution.long_term_capital_gain, distribution.currency)}</dd></div>
+        <div><dt>本机收到时间</dt><dd>{formatUtc(distribution.received_at)}</dd></div>
+        <div><dt>证据可用时间</dt><dd>{formatUtc(distribution.available_at)}</dd></div>
+      </dl>
+      <p>金额为每份基金份额，通常显示至 3 位小数；极小非零金额保留原值，精确数值见详情。不推算年化收益、总回报或费用，不代表账户实际到账。</p>
+      <p>收到／可用时间不是历史公告时间。本条仅供当前研究观察，不可用于历史回测；不代表研究已完成，也不授予执行权限。</p>
+      <details className="portfolio-disclosure"><summary>分红证据与精确数值</summary>
+        <dl className="decision-card__versions">
+          <div><dt>证据标识</dt><dd>{distribution.evidence_ref_id}</dd></div>
+          <div><dt>版本</dt><dd>{distribution.revision}</dd></div>
+          <div><dt>内容 SHA-256</dt><dd>{distribution.content_hash}</dd></div>
+          <div><dt>现金分红原值</dt><dd>{formatDistributionAmount(distribution.dividend_per_share, distribution.currency, true)}</dd></div>
+          <div><dt>短期资本利得原值</dt><dd>{formatDistributionAmount(distribution.short_term_capital_gain, distribution.currency, true)}</dd></div>
+          <div><dt>长期资本利得原值</dt><dd>{formatDistributionAmount(distribution.long_term_capital_gain, distribution.currency, true)}</dd></div>
+        </dl>
+        <a href={distribution.source_url} target="_blank" rel="noreferrer">查看 SSGA 官方原件</a>
+      </details>
+    </section>)}
     {inputs.filings.map((filing) => <section className="decision-card__section" key={filing.evidence_ref_id}>
       <h3>SEC {filing.form}</h3>
       {filing.form === "497K" ? <p>ETF 摘要招募书：用于研究基金目标、费用与风险，不是公司财报，也不是基金最新持仓。</p> : null}
@@ -91,3 +124,11 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
 }
 
 function formatUtc(value: string | null | undefined): string { return formatDisplayTime(value); }
+
+function formatDistributionAmount(value: string | null, currency: string, exact = false): string {
+  if (value === null) return "未知";
+  const rounded = formatDisplayDecimal(value);
+  // Do not convert DecimalString to Number or collapse an actual nonzero amount to zero.
+  const displayed = exact || rounded === "0" && /[1-9]/.test(value) ? value : rounded;
+  return `${currency} ${displayed} / 每份`;
+}

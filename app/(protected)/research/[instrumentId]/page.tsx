@@ -101,6 +101,7 @@ export default function ResearchPage(): React.ReactElement {
 export function ResearchPanel({ state, research, admission, submitting, notice, onRefresh, onRun }: Props): React.ReactElement {
   const hasData = research !== null && ["ready", "partial", "stale"].includes(state);
   const inputs = state !== "forbidden" && state !== "loading" ? admission?.inputs : null;
+  const hasIssuerInputs = (inputs?.issuer_distributions ?? []).length > 0;
   const canRun = admission?.eligible === true && admission.data_snapshot_id !== null
     && (state === "empty" || state === "ready" && research?.status === "completed");
   return (
@@ -108,7 +109,7 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
       <header className="page-heading">
         <div><p className="eyebrow">时点冻结研究</p><h1>个股研究证据页</h1><p>把委员会结论拆成论点、反证、失效条件和不可变证据；没有分数，也不提供交易动作。</p></div>
         <div className="page-actions">
-          <Badge data-state={state}>{inputs && state === "empty" ? "财报已冻结 · 研究待生成" : dataStateLabels[state]}</Badge>
+          <Badge data-state={state}>{inputs && state === "empty" ? (hasIssuerInputs ? "资料已冻结 · 研究待生成" : "财报已冻结 · 研究待生成") : dataStateLabels[state]}</Badge>
           <Button variant="outline" onClick={onRefresh}><RefreshCw aria-hidden="true" size={16} />重新读取</Button>
           {canRun ? <Button onClick={onRun} disabled={submitting} aria-busy={submitting}><ScanSearch aria-hidden="true" size={16} />{submitting ? "正在登记研究" : state === "empty" ? "运行冻结研究" : "重新运行冻结研究"}</Button> : null}
         </div>
@@ -118,7 +119,7 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
       {admission?.eligible === false ? <p className="research-page__gate" role="note">{researchAdmissionReason(admission.reason)}</p> : null}
       {inputs && admission ? <ResearchInputs inputs={inputs} asOf={admission.decision_time} /> : null}
       {!hasData ? (inputs && state === "empty"
-        ? <p className="research-page__gate" role="note">{admission?.inputs?.filings.some((filing) => ["6-K", "497K"].includes(filing.form)) ? "披露资料已就绪，AI 研究尚未生成。可先核验正文、时间与来源；文本不等于财务指标。" : "财报资料已就绪，AI 研究尚未生成。可先核验数值、期间与来源；模型配置可稍后补充。"}</p>
+        ? <p className="research-page__gate" role="note">{hasIssuerInputs ? `${inputs.filings.length > 0 ? "研究资料" : "发行商现金分红资料"}已就绪，AI 研究尚未生成。可先核验金额、日期与来源；不代表具备历史回测或执行资格。` : admission?.inputs?.filings.some((filing) => ["6-K", "497K"].includes(filing.form)) ? "披露资料已就绪，AI 研究尚未生成。可先核验正文、时间与来源；文本不等于财务指标。" : "财报资料已就绪，AI 研究尚未生成。可先核验数值、期间与来源；模型配置可稍后补充。"}</p>
         : <DataState state={state} title={researchStateTitle(state)} detail={researchStateDetail(state)} />) : <>
         {state !== "ready" ? <p className="research-page__gate" role="note">当前数据为 {dataStateLabels[state]}；保留最后证据供核验，但禁止创建或重跑研究。</p> : null}
         <DecisionCard research={research} />
