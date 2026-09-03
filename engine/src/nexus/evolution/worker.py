@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -13,7 +14,7 @@ from nexus.jobs.models import QueueName
 from nexus.jobs.worker import run_job_worker_once
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 from nexus.persistence.session import session_factory
-from nexus.settings import EngineSettings
+from nexus.settings import AgentRuntimeMode, EngineSettings
 
 STRATEGY_RND_WORKER_PROCESS_VERSION = "nexus-engine-phase2-strategy-rnd-v1"
 
@@ -50,6 +51,8 @@ async def run_strategy_rnd_worker(
     clock: Callable[[], datetime] | None = None,
 ) -> None:
     """Run the isolated queue only after the caller supplies its full capability root."""
+    if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK and run_forever:
+        raise ValueError("CODEX_STRATEGY_RND_RUN_ONCE_REQUIRED")
     runtime_clock = clock or _utc_now
     worker_id = f"strategy-rnd-{new_uuid7()}"
     started_at = runtime_clock()
@@ -72,13 +75,18 @@ def _utc_now() -> datetime:
 
 
 def main() -> None:
-    """Run the reviewed, fail-closed Strategy R&D composition forever."""
+    """Run the fail-closed composition; Codex requires explicit one-shot mode."""
+    parser = argparse.ArgumentParser(description="Run the isolated Strategy R&D worker.")
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args()
     settings = EngineSettings()
+    if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK and not args.once:
+        raise ValueError("CODEX_STRATEGY_RND_RUN_ONCE_REQUIRED")
     executor = build_strategy_rnd_executor(settings)
     asyncio.run(
         run_strategy_rnd_worker(
             settings,
             executor=executor,
-            run_forever=True,
+            run_forever=not args.once,
         )
     )

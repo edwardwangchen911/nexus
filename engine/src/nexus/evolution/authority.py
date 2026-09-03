@@ -22,6 +22,7 @@ from nexus.backtest.canonical import canonical_decimal
 from nexus.domain.time import require_utc
 from nexus.evolution.agent import StrategyRNDRequestV1, load_strategy_rnd_prompt
 from nexus.evolution.agent_tools import StrategyRNDToolContext, StrategyRNDTools
+from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION
 from nexus.evolution.handover import (
     HandoverAuthorityV1,
     HandoverChallengerV1,
@@ -138,9 +139,7 @@ class DatabaseStrategyRNDAuthorityResolver:
     ) -> LoadedCandidateAuthority:
         cutoff = require_utc(as_of)
         if not current_strategy_rnd_adjusted_authority_available():
-            raise StrategyRNDAuthorityError(
-                "BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE"
-            )
+            raise StrategyRNDAuthorityError("BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE")
         try:
             authority = await load_verified_experiment_authority(session, family_id, lock=True)
         except ValueError as error:
@@ -202,13 +201,12 @@ class DatabaseStrategyRNDAuthorityResolver:
         expected_generation: int,
         as_of: datetime,
         model_id: str | None = None,
+        model_version: str | None = None,
     ) -> LoadedGenerationAuthority:
         """Resolve generation exclusively from the effective registry and sealed facts."""
         cutoff = require_utc(as_of)
         if not current_strategy_rnd_adjusted_authority_available():
-            raise StrategyRNDAuthorityError(
-                "BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE"
-            )
+            raise StrategyRNDAuthorityError("BACKTEST_ADJUSTED_AUTHORITY_UNAVAILABLE")
         head = await session.get(StrategyRegistryHeadRecord, "internal_paper")
         lineages = tuple(
             await session.scalars(
@@ -310,6 +308,12 @@ class DatabaseStrategyRNDAuthorityResolver:
         )
         if model_id is not None:
             model_query = model_query.where(AgentModelConfigRecord.model_id == model_id)
+        if model_version is not None:
+            model_query = model_query.where(AgentModelConfigRecord.version == model_version)
+        else:
+            model_query = model_query.where(
+                AgentModelConfigRecord.version != CODEX_RND_CONFIG_VERSION
+            )
         model = await session.scalar(
             model_query.order_by(
                 AgentModelConfigRecord.pricing_available_at.desc(),

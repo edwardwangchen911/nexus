@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 
 from nexus.agents.codex_sdk import (
     MAX_INPUT_TOKENS,
@@ -27,7 +28,9 @@ CODEX_RND_CONFIG_VERSION = "codex-sdk-strategy-rnd-v1"
 class CodexStrategyRNDRuntime:
     """Preload admitted local evidence; the model has no tools and never retries."""
 
-    def __init__(self, *, config: ResponsesModelConfig) -> None:
+    def __init__(
+        self, *, config: ResponsesModelConfig, monotonic_deadline: float | None = None
+    ) -> None:
         if (
             config.model_id != MODEL_ID
             or config.pricing_version != CODEX_RND_CONFIG_VERSION
@@ -37,11 +40,13 @@ class CodexStrategyRNDRuntime:
             or config.input_usd_per_million != 0
             or config.output_usd_per_million != 0
             or not 0 < config.absolute_timeout_seconds <= 30
+            or (monotonic_deadline is not None and not math.isfinite(monotonic_deadline))
         ):
             raise ValueError("CODEX_RND_CONFIG_INVALID")
         self._config = config
         self._usage: UsageSnapshot | None = UsageSnapshot()
         self._attempted = False
+        self._monotonic_deadline = monotonic_deadline
 
     @property
     def configuration(self) -> ResponsesModelConfig:
@@ -59,6 +64,9 @@ class CodexStrategyRNDRuntime:
             raise ValueError("CODEX_RND_ALREADY_ATTEMPTED")
         self._attempted = True
         deadline = asyncio.get_running_loop().time() + float(self._config.absolute_timeout_seconds)
+        if self._monotonic_deadline is not None:
+            deadline = min(deadline, self._monotonic_deadline)
+        self._require_time_remaining(deadline)
         async with asyncio.timeout_at(deadline):
             return await self._generate_once(request, tools, deadline=deadline)
 

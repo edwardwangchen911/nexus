@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from decimal import Decimal
 from typing import cast
@@ -10,6 +11,7 @@ from zoneinfo import ZoneInfo
 from openai import AsyncOpenAI
 from sqlalchemy import func, select
 
+from nexus.agents.codex_sdk import MODEL_ID as CODEX_MODEL_ID
 from nexus.agents.responses import ResponsesClient, ResponsesModelConfig
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.backtest.engine import run_backtest, run_challenger_backtest_v1
@@ -22,6 +24,7 @@ from nexus.evolution.authority import (
     StrategyRNDAuthorityError,
     build_strategy_handover_evaluation,
 )
+from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION, CodexStrategyRNDRuntime
 from nexus.evolution.evaluation import (
     EvolutionEvaluationError,
     load_lineage_oos_trial_count,
@@ -110,6 +113,16 @@ class StrategyRNDExecutor:
         context: JobHandlerContext,
         payload: StrategyRNDJobPayloadV1,
     ) -> JobHandlerResult:
+        if (
+            self._runtime_mode is AgentRuntimeMode.CODEX_SDK
+            and payload.operation == "generate_family"
+            and context.claim.attempt_no != 1
+        ):
+            return JobHandlerResult(
+                outcome="failed",
+                result_code=None,
+                error_code="GENERATION_REPLAY_FORBIDDEN",
+            )
         if not current_strategy_rnd_adjusted_authority_available():
             return JobHandlerResult(
                 outcome="skipped",
@@ -138,11 +151,18 @@ class StrategyRNDExecutor:
                 as_of=now,
                 model_id=(
                     self._reasoning_model
-                    if self._runtime_mode is AgentRuntimeMode.RESPONSES
+                    if self._runtime_mode
+                    in (AgentRuntimeMode.RESPONSES, AgentRuntimeMode.CODEX_SDK)
+                    else None
+                ),
+                model_version=(
+                    CODEX_RND_CONFIG_VERSION
+                    if self._runtime_mode is AgentRuntimeMode.CODEX_SDK
                     else None
                 ),
             )
-            runtime = self._generation_runtime(authority)
+            worker_deadline = getattr(context, "monotonic_deadline", lambda: None)()
+            runtime = self._generation_runtime(authority, deadline=worker_deadline)
             execution = await execute_strategy_rnd(
                 context.session,
                 request=authority.request,
@@ -202,8 +222,13 @@ class StrategyRNDExecutor:
             )
 
     def _generation_runtime(
-        self, authority: LoadedGenerationAuthority
-    ) -> ResponsesStrategyRNDRuntime | _FixedStrategyRNDRuntime:
+        self, authority: LoadedGenerationAuthority, *, deadline: float | None = None
+    ) -> ResponsesStrategyRNDRuntime | CodexStrategyRNDRuntime | _FixedStrategyRNDRuntime:
+        if (
+            self._runtime_mode is not AgentRuntimeMode.CODEX_SDK
+            and authority.model.version == CODEX_RND_CONFIG_VERSION
+        ):
+            raise StrategyRNDAuthorityError("GENERATION_RUNTIME_INCOMPLETE")
         if self._runtime_mode is AgentRuntimeMode.FIXTURE:
             return _FixedStrategyRNDRuntime(config=_model_configuration(authority))
         if self._runtime_mode is AgentRuntimeMode.RESPONSES:
@@ -213,6 +238,26 @@ class StrategyRNDExecutor:
                 client=self._responses_client,
                 config=_model_configuration(authority),
             )
+        if self._runtime_mode is AgentRuntimeMode.CODEX_SDK:
+            config = _model_configuration(authority)
+            if deadline is not None:
+                remaining = deadline - asyncio.get_running_loop().time() - 5
+                if remaining <= 0:
+                    raise StrategyRNDAuthorityError("GENERATION_RUNTIME_INCOMPLETE")
+                config = config.model_copy(
+                    update={
+                        "absolute_timeout_seconds": min(
+                            config.absolute_timeout_seconds, Decimal(str(remaining))
+                        )
+                    }
+                )
+            try:
+                return CodexStrategyRNDRuntime(
+                    config=config,
+                    monotonic_deadline=None if deadline is None else deadline - 5,
+                )
+            except ValueError as error:
+                raise StrategyRNDAuthorityError("GENERATION_RUNTIME_INCOMPLETE") from error
         raise StrategyRNDAuthorityError("GENERATION_RUNTIME_UNSUPPORTED")
 
     async def _evaluate_candidate(
@@ -575,19 +620,28 @@ def build_strategy_rnd_executor(
     ):
         raise ValueError("production Strategy R&D requires explicit Responses authority")
     runtime_mode = settings.agent_runtime_mode
-    if runtime_mode not in (AgentRuntimeMode.FIXTURE, AgentRuntimeMode.RESPONSES):
-        raise ValueError("Strategy R&D runtime requires explicit fixture or responses mode")
+    if runtime_mode not in (
+        AgentRuntimeMode.FIXTURE,
+        AgentRuntimeMode.RESPONSES,
+        AgentRuntimeMode.CODEX_SDK,
+    ):
+        raise ValueError("Strategy R&D runtime requires an explicit supported mode")
     client = responses_client
+    if runtime_mode is AgentRuntimeMode.CODEX_SDK:
+        client = None
     if runtime_mode is AgentRuntimeMode.RESPONSES and not settings.openai_reasoning_model:
         raise ValueError("Responses Strategy R&D requires a reasoning model")
     if runtime_mode is AgentRuntimeMode.RESPONSES and client is None:
         if settings.openai_api_key is None:
             raise ValueError("Responses Strategy R&D requires an API key")
         client = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+    reasoning_model = settings.openai_reasoning_model
+    if runtime_mode is AgentRuntimeMode.CODEX_SDK:
+        reasoning_model = CODEX_MODEL_ID
     return StrategyRNDExecutor(
         authority_resolver=DatabaseStrategyRNDAuthorityResolver(),
         runtime_mode=runtime_mode,
-        reasoning_model=settings.openai_reasoning_model,
+        reasoning_model=reasoning_model,
         responses_client=(None if client is None else cast(ResponsesClient, client)),
     )
 

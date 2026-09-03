@@ -128,9 +128,9 @@ async def test_executor_normalizes_resolver_gate_closure_to_skipped(
 def test_executor_modules_do_not_import_external_execution_capabilities(
     module_name: str,
 ) -> None:
-    source = (
-        Path(__file__).parents[3] / "src" / "nexus" / "evolution" / module_name
-    ).read_text(encoding="utf-8")
+    source = (Path(__file__).parents[3] / "src" / "nexus" / "evolution" / module_name).read_text(
+        encoding="utf-8"
+    )
     tree = ast.parse(source)
     imported = []
     for node in ast.walk(tree):
@@ -139,9 +139,7 @@ def test_executor_modules_do_not_import_external_execution_capabilities(
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             imported.append(node.module)
     assert not any(
-        forbidden in module.lower()
-        for module in imported
-        for forbidden in _FORBIDDEN_IMPORT_PARTS
+        forbidden in module.lower() for module in imported for forbidden in _FORBIDDEN_IMPORT_PARTS
     )
 
 
@@ -155,9 +153,7 @@ def test_registry_contains_only_the_strategy_rnd_queue() -> None:
 
 def test_responses_deadline_fits_inside_strategy_job_timeout() -> None:
     executor = build_strategy_rnd_executor(EngineSettings.for_test())
-    spec = build_strategy_rnd_registry(executor=executor).resolve(
-        JobType.STRATEGY_RND.value
-    )
+    spec = build_strategy_rnd_registry(executor=executor).resolve(JobType.STRATEGY_RND.value)
     assert spec is not None
     config = _model_configuration(
         SimpleNamespace(
@@ -194,19 +190,24 @@ def test_production_executor_requires_explicit_responses_authority() -> None:
         )
 
 
-def test_local_codex_worker_entry_rejects_before_starting_queue_or_database(monkeypatch):
+def test_local_codex_worker_requires_explicit_run_once_before_queue_or_database(
+    monkeypatch,
+):
+    import sys
+
     from nexus.evolution import worker
 
     settings = EngineSettings(environment="development", agent_runtime_mode="codex_sdk")
     run = AsyncMock()
     monkeypatch.setattr(worker, "EngineSettings", lambda: settings)
     monkeypatch.setattr(worker, "run_strategy_rnd_worker", run)
-    with pytest.raises(ValueError, match="Strategy R&D runtime.*fixture or responses"):
+    monkeypatch.setattr(sys, "argv", ["nexus-strategy-rnd-worker"])
+    with pytest.raises(ValueError, match="CODEX_STRATEGY_RND_RUN_ONCE_REQUIRED"):
         worker.main()
     run.assert_not_called()
 
 
-@pytest.mark.parametrize("mode", [AgentRuntimeMode.CODEX_SDK, None, "future_backend"])
+@pytest.mark.parametrize("mode", [None, "future_backend"])
 def test_generation_selector_never_falls_back_for_unhandled_modes(mode):
     executor = StrategyRNDExecutor(
         authority_resolver=SimpleNamespace(),
@@ -219,9 +220,12 @@ def test_generation_selector_never_falls_back_for_unhandled_modes(mode):
     assert error.value.reason_code == "GENERATION_RUNTIME_UNSUPPORTED"
 
 
-@pytest.mark.parametrize("mode", [AgentRuntimeMode.FIXTURE, AgentRuntimeMode.RESPONSES])
+@pytest.mark.parametrize(
+    "mode", [AgentRuntimeMode.FIXTURE, AgentRuntimeMode.RESPONSES, AgentRuntimeMode.CODEX_SDK]
+)
 def test_explicit_supported_runtime_keeps_its_selected_backend(mode):
     from nexus.evolution.agent import ResponsesStrategyRNDRuntime
+    from nexus.evolution.codex import CodexStrategyRNDRuntime
     from nexus.evolution.executor import _FixedStrategyRNDRuntime
 
     settings = EngineSettings(
@@ -231,29 +235,174 @@ def test_explicit_supported_runtime_keeps_its_selected_backend(mode):
         openai_reasoning_model="synthetic-reasoning",
     )
     client = SimpleNamespace(responses=SimpleNamespace(create=AsyncMock()))
-    runtime = build_strategy_rnd_executor(settings, responses_client=client)._generation_runtime(
-        _runtime_authority()
-    )
+    authority = _runtime_authority(codex=mode is AgentRuntimeMode.CODEX_SDK)
+    executor = build_strategy_rnd_executor(settings, responses_client=client)
+    runtime = executor._generation_runtime(authority)
     expected = (
         _FixedStrategyRNDRuntime
         if mode is AgentRuntimeMode.FIXTURE
+        else CodexStrategyRNDRuntime
+        if mode is AgentRuntimeMode.CODEX_SDK
         else ResponsesStrategyRNDRuntime
     )
     assert isinstance(runtime, expected)
+    if mode is AgentRuntimeMode.CODEX_SDK:
+        assert executor._responses_client is None
     client.responses.create.assert_not_called()
 
 
-def _runtime_authority():
+def _runtime_authority(*, codex: bool = False):
+    if codex:
+        from nexus.agents.codex_sdk import MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS, MODEL_ID
+        from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION
+
     return SimpleNamespace(
         model=SimpleNamespace(
-            model_id="synthetic-reasoning",
-            version="synthetic-v1",
-            max_input_tokens=10000,
-            max_output_tokens=1000,
-            max_tool_calls=4,
-            input_usd_per_million=Decimal("1"),
-            output_usd_per_million=Decimal("2"),
+            model_id=MODEL_ID if codex else "synthetic-reasoning",
+            version=CODEX_RND_CONFIG_VERSION if codex else "synthetic-v1",
+            max_input_tokens=MAX_INPUT_TOKENS if codex else 10000,
+            max_output_tokens=MAX_OUTPUT_TOKENS if codex else 1000,
+            max_tool_calls=0 if codex else 4,
+            input_usd_per_million=Decimal("0" if codex else "1"),
+            output_usd_per_million=Decimal("0" if codex else "2"),
         )
+    )
+
+
+@pytest.mark.parametrize("mode", [AgentRuntimeMode.FIXTURE, AgentRuntimeMode.RESPONSES])
+def test_other_runtimes_reject_codex_rnd_configuration_identity(mode):
+    executor = StrategyRNDExecutor(
+        authority_resolver=SimpleNamespace(),
+        runtime_mode=mode,
+        reasoning_model="synthetic-reasoning",
+        responses_client=SimpleNamespace(responses=SimpleNamespace(create=AsyncMock())),
+    )
+    with pytest.raises(StrategyRNDAuthorityError) as caught:
+        executor._generation_runtime(_runtime_authority(codex=True))
+    assert caught.value.reason_code == "GENERATION_RUNTIME_INCOMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_codex_executor_rejects_a_reclaimed_generation_before_dispatch(monkeypatch):
+    executor = build_strategy_rnd_executor(
+        EngineSettings(environment="development", agent_runtime_mode="codex_sdk")
+    )
+    dispatch = AsyncMock()
+    monkeypatch.setattr(executor, "_generate_family", dispatch)
+    monkeypatch.setattr(
+        "nexus.evolution.executor.current_strategy_rnd_adjusted_authority_available",
+        lambda: True,
+    )
+    payload = build_strategy_rnd_job_payload(
+        operation="generate_family",
+        family_id=None,
+        experiment_id=None,
+        expected_champion_generation=1,
+    )
+    result = await executor(SimpleNamespace(claim=SimpleNamespace(attempt_no=2)), payload)
+    assert (result.outcome, result.error_code) == (
+        "failed",
+        "GENERATION_REPLAY_FORBIDDEN",
+    )
+    dispatch.assert_not_awaited()
+
+
+def test_codex_worker_run_once_composes_without_responses_key(monkeypatch):
+    import sys
+
+    from nexus.evolution import worker
+
+    settings = EngineSettings(environment="development", agent_runtime_mode="codex_sdk")
+    run = AsyncMock()
+    monkeypatch.setattr(worker, "EngineSettings", lambda: settings)
+    monkeypatch.setattr(worker, "run_strategy_rnd_worker", run)
+    monkeypatch.setattr(sys, "argv", ["nexus-strategy-rnd-worker", "--once"])
+    worker.main()
+    run.assert_awaited_once()
+    assert run.await_args.kwargs["run_forever"] is False
+
+
+@pytest.mark.asyncio
+async def test_direct_codex_worker_refuses_long_running_mode_before_claim(monkeypatch):
+    from nexus.evolution import worker
+
+    claim = AsyncMock()
+    monkeypatch.setattr(worker, "run_strategy_rnd_worker_once", claim)
+    settings = EngineSettings(environment="development", agent_runtime_mode="codex_sdk")
+    with pytest.raises(ValueError, match="CODEX_STRATEGY_RND_RUN_ONCE_REQUIRED"):
+        await worker.run_strategy_rnd_worker(
+            settings,
+            executor=build_strategy_rnd_executor(settings),
+            run_forever=True,
+        )
+    claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_codex_generation_leaves_worker_deadline_headroom(monkeypatch):
+    executor = build_strategy_rnd_executor(
+        EngineSettings(environment="development", agent_runtime_mode="codex_sdk")
+    )
+    loop = SimpleNamespace(time=lambda: 100.0)
+    monkeypatch.setattr("nexus.evolution.executor.asyncio.get_running_loop", lambda: loop)
+    runtime = executor._generation_runtime(_runtime_authority(codex=True), deadline=108.0)
+    assert runtime.configuration.absolute_timeout_seconds == Decimal("3")
+    with pytest.raises(StrategyRNDAuthorityError) as caught:
+        executor._generation_runtime(_runtime_authority(codex=True), deadline=105.0)
+    assert caught.value.reason_code == "GENERATION_RUNTIME_INCOMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_codex_generation_does_not_restart_deadline_after_service_preflight(monkeypatch):
+    executor = build_strategy_rnd_executor(
+        EngineSettings(environment="development", agent_runtime_mode="codex_sdk")
+    )
+    clock = {"now": 100.0}
+    monkeypatch.setattr(
+        "nexus.evolution.executor.asyncio.get_running_loop",
+        lambda: SimpleNamespace(time=lambda: clock["now"]),
+    )
+    runtime = executor._generation_runtime(_runtime_authority(codex=True), deadline=108.0)
+    dispatch = AsyncMock(return_value=object())
+    monkeypatch.setattr(runtime, "_generate_once", dispatch)
+    # The service resolves persisted prompt/model/evidence after runtime creation.
+    clock["now"] = 104.0
+    with pytest.raises(TimeoutError, match="CODEX_RND_DEADLINE_EXCEEDED"):
+        await runtime.generate(SimpleNamespace(), SimpleNamespace())
+    dispatch.assert_not_awaited()
+    assert runtime.usage.provider_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_codex_generation_resolves_only_its_exact_model_version():
+    from nexus.agents.codex_sdk import MODEL_ID
+    from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION
+
+    load = AsyncMock(side_effect=StrategyRNDAuthorityError("EXPECTED_STOP"))
+    executor = StrategyRNDExecutor(
+        authority_resolver=SimpleNamespace(load_generation=load),
+        runtime_mode=AgentRuntimeMode.CODEX_SDK,
+        reasoning_model=MODEL_ID,
+        responses_client=None,
+    )
+    payload = build_strategy_rnd_job_payload(
+        operation="generate_family",
+        family_id=None,
+        experiment_id=None,
+        expected_champion_generation=1,
+    )
+    now = datetime(2026, 9, 4, tzinfo=UTC)
+    session = object()
+    result = await executor._generate_family(
+        SimpleNamespace(session=session, finished_at=lambda: now), payload
+    )
+    assert (result.outcome, result.error_code) == ("failed", "EXPECTED_STOP")
+    load.assert_awaited_once_with(
+        session,
+        expected_generation=1,
+        as_of=now,
+        model_id=MODEL_ID,
+        model_version=CODEX_RND_CONFIG_VERSION,
     )
 
 
@@ -287,7 +436,7 @@ def test_factory_rechecks_missing_runtime_configuration_before_client_creation(
 
 
 @pytest.mark.asyncio
-async def test_registered_generation_rejects_injected_unsupported_executor_without_agent_output(
+async def test_registered_codex_generation_rejects_wrong_model_authority_without_output(
     monkeypatch,
 ):
     from nexus.evolution import executor as executor_module
@@ -317,7 +466,7 @@ async def test_registered_generation_rejects_injected_unsupported_executor_witho
     )
     context = SimpleNamespace(
         payload=payload,
-        claim=SimpleNamespace(job_id=UUID(int=1)),
+        claim=SimpleNamespace(job_id=UUID(int=1), attempt_no=1),
         session=SimpleNamespace(
             get=AsyncMock(return_value=SimpleNamespace(input_hash=payload.input_hash))
         ),
@@ -325,6 +474,6 @@ async def test_registered_generation_rejects_injected_unsupported_executor_witho
     )
     spec = build_strategy_rnd_registry(executor=executor).resolve(JobType.STRATEGY_RND.value)
     result = await spec.handler(context)
-    assert (result.outcome, result.error_code) == ("failed", "GENERATION_RUNTIME_UNSUPPORTED")
+    assert (result.outcome, result.error_code) == ("failed", "GENERATION_RUNTIME_INCOMPLETE")
     model_run.assert_not_called()
     assert audit.await_args.kwargs["result"] == result

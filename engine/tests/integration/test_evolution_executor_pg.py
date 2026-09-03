@@ -1,5 +1,6 @@
 """Real database authority paths through the restricted Strategy R&D executor."""
 
+import json
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -46,6 +47,7 @@ from nexus.persistence.models.evolution import (
     StrategyPromotionDecisionRecord,
     StrategyRegistryHeadRecord,
     StrategyResearchLineageRecord,
+    StrategyRNDRunRecord,
 )
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.persistence.models.runtime import Job
@@ -89,10 +91,18 @@ def _legacy_adjusted_authority_contract(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("runtime_mode", ["fixture", "codex_sdk"])
 async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidates(
     migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_mode: str,
 ) -> None:
-    settings = EngineSettings(database_url=migrated_database_url)
+    from nexus.agents.codex_sdk import MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS, MODEL_ID
+    from nexus.agents.responses_budget import UsageSnapshot
+    from nexus.evolution import codex
+    from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION
+
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode=runtime_mode)
     factory = session_factory(settings)
     baseline = await _seed_long_generation_baseline(factory)
     generation_time = datetime.now(UTC) + timedelta(minutes=2)
@@ -137,12 +147,14 @@ async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidat
                 ),
                 AgentModelConfigRecord(
                     id=model_id,
-                    model_id="fixture-strategy-rnd",
-                    version="fixture-v1",
+                    model_id=MODEL_ID if runtime_mode == "codex_sdk" else "fixture-strategy-rnd",
+                    version=(
+                        CODEX_RND_CONFIG_VERSION if runtime_mode == "codex_sdk" else "fixture-v1"
+                    ),
                     config_hash="8" * 64,
-                    max_input_tokens=10_000,
-                    max_tool_calls=4,
-                    max_output_tokens=1_000,
+                    max_input_tokens=(MAX_INPUT_TOKENS if runtime_mode == "codex_sdk" else 10_000),
+                    max_tool_calls=0 if runtime_mode == "codex_sdk" else 4,
+                    max_output_tokens=(MAX_OUTPUT_TOKENS if runtime_mode == "codex_sdk" else 1_000),
                     input_usd_per_million=Decimal("0"),
                     output_usd_per_million=Decimal("0"),
                     pricing_available_at=generation_time - timedelta(days=1),
@@ -157,6 +169,24 @@ async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidat
                 ),
             )
         )
+        if runtime_mode == "fixture":
+            # A newer configuration with the same model ID must not shadow the
+            # eligible non-Codex version in fixture or Responses resolution.
+            session.add(
+                AgentModelConfigRecord(
+                    id=uuid4(),
+                    model_id="fixture-strategy-rnd",
+                    version=CODEX_RND_CONFIG_VERSION,
+                    config_hash="6" * 64,
+                    max_input_tokens=MAX_INPUT_TOKENS,
+                    max_tool_calls=0,
+                    max_output_tokens=MAX_OUTPUT_TOKENS,
+                    input_usd_per_million=Decimal("0"),
+                    output_usd_per_million=Decimal("0"),
+                    pricing_available_at=generation_time - timedelta(seconds=30),
+                    pricing_expires_at=generation_time + timedelta(days=1),
+                )
+            )
         await session.flush()
         session.add(
             AgentDataSnapshotEvidenceRecord(
@@ -174,6 +204,46 @@ async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidat
             )
         )
         untouched_before = await _execution_fact_counts(session)
+
+    if runtime_mode == "fixture":
+        from nexus.evolution.authority import DatabaseStrategyRNDAuthorityResolver
+
+        async with factory() as session:
+            resolved = await DatabaseStrategyRNDAuthorityResolver().load_generation(
+                session,
+                expected_generation=1,
+                as_of=generation_time,
+                model_id="fixture-strategy-rnd",
+            )
+            assert resolved.model.id == model_id
+
+    async def codex_invoke(request_payload, *, output_model):
+        del output_model
+        request = request_payload["request"]
+        proposal = {
+            "schema_version": "strategy_experiment_proposal_v1",
+            "parent_strategy_definition_id": request["parent_strategy_definition_id"],
+            "champion_generation": request["champion_generation"],
+            "research_lineage_id": request["research_lineage_id"],
+            "hypothesis": "Registered thresholds may improve robustness.",
+            "expected_mechanism": "A bounded grid tests robustness on frozen evidence.",
+            "invalidation_conditions": ["Frozen paired comparisons do not improve robustness."],
+            "evidence_refs": request["evidence_refs"],
+            "mutation_axes": [
+                {
+                    "axis": "min_adv20_usd",
+                    "values": ["25000000", "50000000", "75000000", "100000000"],
+                },
+                {"axis": "min_close", "values": ["3", "5", "10"]},
+                {"axis": "target_weight", "values": ["0.075", "0.10", "0.125"]},
+            ],
+        }
+        return json.dumps(proposal), UsageSnapshot(
+            input_tokens=300, output_tokens=80, provider_calls=1
+        )
+
+    if runtime_mode == "codex_sdk":
+        monkeypatch.setattr(codex, "invoke_codex", codex_invoke)
 
     payload = build_strategy_rnd_job_payload(
         operation="generate_family",
@@ -193,6 +263,7 @@ async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidat
 
     async with factory() as session:
         stored = await session.get(Job, job.id)
+        rnd_run = await session.scalar(select(StrategyRNDRunRecord))
         family = await session.scalar(select(StrategyExperimentFamilyRecord))
         projection_count = int(
             await session.scalar(
@@ -207,10 +278,21 @@ async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidat
         None if stored is None else stored.last_error_code
     )
     assert stored.result_code == "FAMILY_GENERATED"
+    assert rnd_run is not None
+    assert rnd_run.model_config_id == model_id
+    assert (rnd_run.input_tokens, rnd_run.output_tokens, rnd_run.tool_call_count) == (
+        (300, 80, 0) if runtime_mode == "codex_sdk" else (0, 0, 0)
+    )
+    if runtime_mode == "codex_sdk":
+        assert rnd_run.settled_cost_usd is None
+    else:
+        assert rnd_run.settled_cost_usd == 0
     assert family is not None and family.candidate_count == 24
     assert family.baseline_backtest_run_id == baseline.baseline_run_id
     assert projection_count == 24
     assert untouched_after == untouched_before == (0, 0)
+
+
 
 
 @pytest.mark.asyncio
@@ -237,9 +319,7 @@ async def test_finalize_operation_builds_handover_and_activates_at_boundary(
             group_id=started.group_id,
             session_date=shadow.calendar_sessions[62],
             ordinal=63,
-            observed_at=datetime.combine(
-                shadow.calendar_sessions[62], time(23), tzinfo=UTC
-            ),
+            observed_at=datetime.combine(shadow.calendar_sessions[62], time(23), tzinfo=UTC),
         )
     finalized_at = datetime.combine(shadow.calendar_sessions[62], time(23), tzinfo=UTC)
     payload = build_strategy_rnd_job_payload(
