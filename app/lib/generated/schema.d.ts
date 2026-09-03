@@ -3414,6 +3414,112 @@ export interface components {
             /** Source Url */
             source_url?: string | null;
         };
+        /** ResearchInputFundHolding */
+        ResearchInputFundHolding: {
+            /** Classification */
+            classification: string | null;
+            /** Local Currency */
+            local_currency: string | null;
+            /** Name */
+            name: string;
+            /** Ticker */
+            ticker: string | null;
+            /** Weight Percent */
+            weight_percent: string;
+        };
+        /** ResearchInputFundIndustry */
+        ResearchInputFundIndustry: {
+            /** Label */
+            label: string;
+            /** Weight Percent */
+            weight_percent: string;
+        };
+        /**
+         * ResearchInputFundObservation
+         * @description Bounded original issuer classifications, never inferred sector-risk exposure.
+         */
+        ResearchInputFundObservation: {
+            /**
+             * As Of
+             * Format: date
+             */
+            as_of: string;
+            /**
+             * Available At
+             * Format: date-time
+             */
+            available_at: string;
+            /**
+             * Classification Level
+             * @constant
+             */
+            classification_level: "industry";
+            /** Content Hash */
+            content_hash: string;
+            /** Denominator */
+            denominator: null;
+            /**
+             * Evidence Ref Id
+             * Format: uuid
+             */
+            evidence_ref_id: string;
+            /**
+             * Historical Backtest Eligible
+             * @constant
+             */
+            historical_backtest_eligible: false;
+            /** Holdings */
+            holdings: components["schemas"]["ResearchInputFundHolding"][];
+            /** Html Content Hash */
+            html_content_hash: string;
+            /**
+             * Html Received At
+             * Format: date-time
+             */
+            html_received_at: string;
+            /** Html Url */
+            html_url: string;
+            /** Industries */
+            industries: components["schemas"]["ResearchInputFundIndustry"][];
+            /** Residual Classification */
+            residual_classification: null;
+            /** Revision */
+            revision: string;
+            /**
+             * Sector Risk Eligible
+             * @constant
+             */
+            sector_risk_eligible: false;
+            /**
+             * Source
+             * @constant
+             */
+            source: "ssga_fund_observation";
+            /** Source Published At */
+            source_published_at: null;
+            /** Total Holdings */
+            total_holdings: number;
+            /** Total Industries */
+            total_industries: number;
+            /** Truncated */
+            truncated: boolean;
+            /** Valid Until */
+            valid_until: null;
+            /**
+             * Weight Unit
+             * @constant
+             */
+            weight_unit: "percent";
+            /** Workbook Content Hash */
+            workbook_content_hash: string;
+            /**
+             * Workbook Received At
+             * Format: date-time
+             */
+            workbook_received_at: string;
+            /** Workbook Url */
+            workbook_url: string;
+        };
         /**
          * ResearchInputIssuerDistribution
          * @description Latest bound issuer observation; amounts are USD per fund share.
@@ -3495,6 +3601,11 @@ export interface components {
              * @default []
              */
             issuer_distributions: components["schemas"]["ResearchInputIssuerDistribution"][];
+            /**
+             * Issuer Fund Observations
+             * @default []
+             */
+            issuer_fund_observations: components["schemas"]["ResearchInputFundObservation"][];
             portfolio_context?: components["schemas"]["PortfolioResearchContext"] | null;
             /** Total Facts */
             total_facts: number;

@@ -225,6 +225,12 @@ A统一进行真实调用与运行验收。root的optimizer/research_context/UI�
 
 2026-09-04 展示语义补验：全局 integration `as_of` 来自最近成功核验，非行情/账户快照截止；fixture 单列“样例时间”。证据抽屉明确研究摘录不等于来源原文；诊断 `NO_ACTION` 只表示未触发优化条件，不推断经济上保持现状更优或历史是否已做比较。策略 gate 按生产者的具体字段区分收益/回撤水平（百分比）与差值（百分点），保留夏普等无量纲数值。新固定码 `model_stage_output_invalid` 仅标明内容校验未通过，不推断JSON/引用故障。先红回归后修复，132项聚焦单测、TypeScript、目标lint通过；4项独立端口浏览器回归通过，含390/1440研究抽屉与严重可访问性检查，审查后NO_ACTION文案再次红绿及定向浏览器通过。此轮浏览器使用合成响应，不替代真实数据库同案例验收；无合同、数据精度或交易权限变化。
 
+发行人分类/持仓读侧下一片（root，`edward/nexus-fund-observation-readside`）：已入库0038材料目前仅研究工具读取，复用`read_fund_observations`为`ResearchInputsSummary`添加默认空的可选`issuer_fund_observations`集合（最多一条）。只从指定snapshot/instrument精确匹配全部Frozen引用字段、证据可用与创建时间，再调用canonical reader验证内容hash/原件receipt；不发现latest替代、不外呼、不改变旧研究。分类最多50项、持仓最多100项，保留原次序、完整计数及独立truncated；权重是原始percent数值字符串，非ratio，不归一化或计算现金余量。持仓摘要只投影名称/ticker/原分类/权重/原币种；完整资料由两份官方原件定位。附原观察日期、分别收到时间、实际可用时间、两原件hash和来源URL；发布时刻/有效期/分母/余项分类保持null，两项用途资格保持false。非法可选资料不遮挡合法SEC/分红。
+
+接线文件：`api/research_inputs.py`、`api/schemas/agents.py`、生成客户端、既有`ResearchInputs`及研究空态文案；独立窄组件复用当前表格/展开样式。先PG/API红例验证新旧混合、无SEC仅发行人、晚到/错instrument/错冻结引用/篡改hash排除、旧快照不被补入；界面覆盖0/负值/小非零不显示0、百分数不再乘100、null与截断、恶意文本纯文本、旧字段缺省、移动端键盘/溢出。合入后A用已入库同一真实冻结集合验DB/BFF/DOM，无需模型重跑。无迁移或业务写入；回退应用即可，原材料/旧研究不变。NAV仍由A独立核对，不混入此合同。
+
+读侧验证：原4项PG和旧summary默认字段先红；新旧9 PG通过。独立审查发现canonical合法的极小Decimal超出40字符wire限制时会连带SEC失败，新增第5项PG先红，再在可选投影边界捕获预期转换异常；5项新PG复验通过，不放宽canonical或数值精度限制。2项API单测、92项前端/真实BFF边界单测、Mypy2、Ruff、TypeScript、eslint及生成合同检查通过。390/1440浏览器核验展开/负值与小非零/零写/严重可访问性/无页面溢出；手机实际键盘横滚已验证。原始长名称把桌面权重挤出视野，补精确可视断言先红，局部文本单元格换行修正，不裁切名称。API与UI独立集中审查及定向修复ready；真实业务同案例仍由A集成生效后验，不以合成浏览器替代。
+
 ## 7. D 公告与数据缺口：立即可开工
 
 ### D1：8-K官方公告正文复用

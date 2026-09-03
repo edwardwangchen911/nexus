@@ -1,9 +1,33 @@
 import { describe, expect, it } from "vitest";
 
 import { sanitizeEngineResponse } from "../../../app/lib/engine/client";
-import { briefEnvelope, decisionTime, instrumentId, researchAdmissionData, researchAdmissionEnvelope, researchData, researchEnvelope, runId, sessionDate } from "./fixtures";
+import { briefEnvelope, decisionTime, fundObservationInputs, instrumentId, researchAdmissionData, researchAdmissionEnvelope, researchData, researchEnvelope, runId, sessionDate } from "./fixtures";
 
 describe("research Engine response boundary", () => {
+  it("preserves issuer fund units and unknowns through the real response boundary", async () => {
+    const inputs = fundObservationInputs();
+    const response = await sanitizeEngineResponse(
+      json(researchAdmissionEnvelope(researchAdmissionData({ inputs }))),
+      `https://nexus.test/api/v1/instruments/${instrumentId}/research-admission?as_of=${encodeURIComponent(decisionTime)}`,
+    );
+    expect(response.status).toBe(200);
+    expect((await response.json()).data.inputs).toEqual(inputs);
+  });
+
+  it.each(["external-url", "oversized-holdings", "unexpected-account", "risk-promotion"])("rejects unsafe fund observation %s", async (mutation) => {
+    const inputs = fundObservationInputs();
+    const observation = inputs.issuer_fund_observations[0];
+    if (mutation === "external-url") observation.workbook_url = "https://untrusted.invalid/source";
+    if (mutation === "oversized-holdings") observation.holdings = Array.from({ length: 101 }, () => observation.holdings[0]);
+    if (mutation === "unexpected-account") Object.assign(observation, { account_id: "must-not-escape" });
+    if (mutation === "risk-promotion") Object.assign(observation, { sector_risk_eligible: true });
+    const response = await sanitizeEngineResponse(
+      json(researchAdmissionEnvelope(researchAdmissionData({ inputs }))),
+      `https://nexus.test/api/v1/instruments/${instrumentId}/research-admission?as_of=${encodeURIComponent(decisionTime)}`,
+    );
+    expect(response.status).toBe(500);
+    expect(await response.text()).not.toContain("must-not-escape");
+  });
   it("accepts closed research and brief contracts", async () => {
     const research = await sanitizeEngineResponse(json(researchEnvelope()), undefined, `/internal/v1/research-runs/${runId}`);
     expect(research.status).toBe(200);

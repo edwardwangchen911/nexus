@@ -12,6 +12,31 @@ export const requestId = "0198d600-1000-7000-8000-000000001599";
 export const decisionTime = "2026-08-24T20:00:00Z";
 export const sessionDate = "2026-08-24";
 
+export function fundObservationInputs(): components["schemas"]["ResearchInputsSummary"] {
+  return {
+    display_symbol: "TEST", filings: [], facts: [], total_facts: 0, truncated: false,
+    issuer_distributions: [], issuer_fund_observations: [{
+      evidence_ref_id: "0198d600-1000-7000-8000-000000001581", source: "ssga_fund_observation",
+      revision: "a".repeat(64), content_hash: "a".repeat(64), as_of: "2026-08-20",
+      classification_level: "industry", weight_unit: "percent",
+      industries: [{ label: "Synthetic industry", weight_percent: "100.000000" }],
+      holdings: [
+        { name: "Synthetic holding", ticker: "SYN", classification: null, weight_percent: "-0.125678", local_currency: "USD" },
+        { name: "Zero holding", ticker: null, classification: null, weight_percent: "0", local_currency: null },
+        { name: "Tiny holding", ticker: "TNY", classification: "Synthetic industry", weight_percent: "0.0000001", local_currency: "USD" },
+      ],
+      total_industries: 1, total_holdings: 3, truncated: false,
+      html_url: "https://www.ssga.com/us/en/individual/etfs/synthetic-test",
+      workbook_url: "https://www.ssga.com/library-content/products/fund-data/etfs/us/test.xlsx",
+      html_content_hash: "b".repeat(64), workbook_content_hash: "c".repeat(64),
+      html_received_at: "2026-08-24T18:00:00Z", workbook_received_at: "2026-08-24T18:30:00Z",
+      available_at: "2026-08-24T18:30:00Z", source_published_at: null, valid_until: null,
+      denominator: null, residual_classification: null,
+      historical_backtest_eligible: false, sector_risk_eligible: false,
+    }],
+  };
+}
+
 export const evidence = {
   source: "sec",
   object_id: "0000320193-26-000001",

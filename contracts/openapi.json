@@ -6876,6 +6876,256 @@
         "title": "ResearchInputFiling",
         "type": "object"
       },
+      "ResearchInputFundHolding": {
+        "additionalProperties": false,
+        "properties": {
+          "classification": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classification"
+          },
+          "local_currency": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Currency"
+          },
+          "name": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "ticker": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ticker"
+          },
+          "weight_percent": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Weight Percent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "ticker",
+          "classification",
+          "weight_percent",
+          "local_currency"
+        ],
+        "title": "ResearchInputFundHolding",
+        "type": "object"
+      },
+      "ResearchInputFundIndustry": {
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "weight_percent": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Weight Percent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "weight_percent"
+        ],
+        "title": "ResearchInputFundIndustry",
+        "type": "object"
+      },
+      "ResearchInputFundObservation": {
+        "additionalProperties": false,
+        "description": "Bounded original issuer classifications, never inferred sector-risk exposure.",
+        "properties": {
+          "as_of": {
+            "format": "date",
+            "title": "As Of",
+            "type": "string"
+          },
+          "available_at": {
+            "format": "date-time",
+            "title": "Available At",
+            "type": "string"
+          },
+          "classification_level": {
+            "const": "industry",
+            "title": "Classification Level",
+            "type": "string"
+          },
+          "content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "denominator": {
+            "title": "Denominator",
+            "type": "null"
+          },
+          "evidence_ref_id": {
+            "format": "uuid",
+            "title": "Evidence Ref Id",
+            "type": "string"
+          },
+          "historical_backtest_eligible": {
+            "const": false,
+            "title": "Historical Backtest Eligible",
+            "type": "boolean"
+          },
+          "holdings": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchInputFundHolding"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Holdings",
+            "type": "array"
+          },
+          "html_content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Html Content Hash",
+            "type": "string"
+          },
+          "html_received_at": {
+            "format": "date-time",
+            "title": "Html Received At",
+            "type": "string"
+          },
+          "html_url": {
+            "maxLength": 512,
+            "pattern": "^https://www\\.ssga\\.com/us/en/individual/etfs/[^?#%]+$",
+            "title": "Html Url",
+            "type": "string"
+          },
+          "industries": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchInputFundIndustry"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Industries",
+            "type": "array"
+          },
+          "residual_classification": {
+            "title": "Residual Classification",
+            "type": "null"
+          },
+          "revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Revision",
+            "type": "string"
+          },
+          "sector_risk_eligible": {
+            "const": false,
+            "title": "Sector Risk Eligible",
+            "type": "boolean"
+          },
+          "source": {
+            "const": "ssga_fund_observation",
+            "title": "Source",
+            "type": "string"
+          },
+          "source_published_at": {
+            "title": "Source Published At",
+            "type": "null"
+          },
+          "total_holdings": {
+            "minimum": 1,
+            "title": "Total Holdings",
+            "type": "integer"
+          },
+          "total_industries": {
+            "minimum": 1,
+            "title": "Total Industries",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "valid_until": {
+            "title": "Valid Until",
+            "type": "null"
+          },
+          "weight_unit": {
+            "const": "percent",
+            "title": "Weight Unit",
+            "type": "string"
+          },
+          "workbook_content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Workbook Content Hash",
+            "type": "string"
+          },
+          "workbook_received_at": {
+            "format": "date-time",
+            "title": "Workbook Received At",
+            "type": "string"
+          },
+          "workbook_url": {
+            "maxLength": 512,
+            "pattern": "^https://www\\.ssga\\.com/library-content/products/fund-data/etfs/us/[^?#%]+$",
+            "title": "Workbook Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence_ref_id",
+          "source",
+          "revision",
+          "content_hash",
+          "as_of",
+          "classification_level",
+          "weight_unit",
+          "industries",
+          "holdings",
+          "total_industries",
+          "total_holdings",
+          "truncated",
+          "html_url",
+          "workbook_url",
+          "html_content_hash",
+          "workbook_content_hash",
+          "html_received_at",
+          "workbook_received_at",
+          "available_at",
+          "source_published_at",
+          "valid_until",
+          "denominator",
+          "residual_classification",
+          "historical_backtest_eligible",
+          "sector_risk_eligible"
+        ],
+        "title": "ResearchInputFundObservation",
+        "type": "object"
+      },
       "ResearchInputIssuerDistribution": {
         "additionalProperties": false,
         "description": "Latest bound issuer observation; amounts are USD per fund share.",
@@ -7037,6 +7287,15 @@
             },
             "maxItems": 1,
             "title": "Issuer Distributions",
+            "type": "array"
+          },
+          "issuer_fund_observations": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ResearchInputFundObservation"
+            },
+            "maxItems": 1,
+            "title": "Issuer Fund Observations",
             "type": "array"
           },
           "portfolio_context": {

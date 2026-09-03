@@ -265,6 +265,7 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .market-table th, .market-table td { border-block-end: 1px solid var(--color-border); padding: var(--space-2); text-align: end; white-space: nowrap; }
 .market-table th:first-child, .market-table td:first-child { text-align: start; }
 .market-table tbody tr[data-active="true"] { background: var(--color-canvas); }
+.market-table .research-fund-label { min-inline-size: 8rem; max-inline-size: 22rem; white-space: normal; overflow-wrap: anywhere; text-align: start; }
 .portfolio-page__actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .portfolio-workspace { display: grid; grid-template-columns: minmax(14rem, 19rem) minmax(0, 1fr); gap: var(--space-4); align-items: start; }
 .portfolio-workspace[data-single="true"] { grid-template-columns: minmax(0, 1fr); }

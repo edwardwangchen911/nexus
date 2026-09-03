@@ -167,6 +167,54 @@ class ResearchInputIssuerDistribution(_StrictAgentSchema):
     historical_backtest_eligible: Literal[False]
 
 
+class ResearchInputFundIndustry(_StrictAgentSchema):
+    label: str = Field(min_length=1, max_length=512)
+    weight_percent: DecimalString
+
+
+class ResearchInputFundHolding(_StrictAgentSchema):
+    name: str = Field(min_length=1, max_length=512)
+    ticker: str | None = Field(max_length=100)
+    classification: str | None = Field(max_length=512)
+    weight_percent: DecimalString
+    local_currency: str | None = Field(max_length=100)
+
+
+class ResearchInputFundObservation(_StrictAgentSchema):
+    """Bounded original issuer classifications, never inferred sector-risk exposure."""
+
+    evidence_ref_id: UUID
+    source: Literal["ssga_fund_observation"]
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    as_of: date
+    classification_level: Literal["industry"]
+    weight_unit: Literal["percent"]
+    industries: tuple[ResearchInputFundIndustry, ...] = Field(min_length=1, max_length=50)
+    holdings: tuple[ResearchInputFundHolding, ...] = Field(min_length=1, max_length=100)
+    total_industries: int = Field(ge=1)
+    total_holdings: int = Field(ge=1)
+    truncated: bool
+    html_url: str = Field(
+        max_length=512, pattern=r"^https://www\.ssga\.com/us/en/individual/etfs/[^?#%]+$"
+    )
+    workbook_url: str = Field(
+        max_length=512,
+        pattern=r"^https://www\.ssga\.com/library-content/products/fund-data/etfs/us/[^?#%]+$",
+    )
+    html_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    workbook_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    html_received_at: AwareDatetime
+    workbook_received_at: AwareDatetime
+    available_at: AwareDatetime
+    source_published_at: None
+    valid_until: None
+    denominator: None
+    residual_classification: None
+    historical_backtest_eligible: Literal[False]
+    sector_risk_eligible: Literal[False]
+
+
 class ResearchInputsSummary(_StrictAgentSchema):
     display_symbol: str | None = Field(max_length=100)
     filings: tuple[ResearchInputFiling, ...] = Field(max_length=20)
@@ -175,6 +223,9 @@ class ResearchInputsSummary(_StrictAgentSchema):
     truncated: bool
     portfolio_context: PortfolioResearchContext | None = None
     issuer_distributions: tuple[ResearchInputIssuerDistribution, ...] = Field(
+        default=(), max_length=1
+    )
+    issuer_fund_observations: tuple[ResearchInputFundObservation, ...] = Field(
         default=(), max_length=1
     )
 

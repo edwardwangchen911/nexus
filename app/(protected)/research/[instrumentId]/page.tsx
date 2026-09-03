@@ -101,7 +101,10 @@ export default function ResearchPage(): React.ReactElement {
 export function ResearchPanel({ state, research, admission, submitting, notice, onRefresh, onRun }: Props): React.ReactElement {
   const hasData = research !== null && ["ready", "partial", "stale"].includes(state);
   const inputs = state !== "forbidden" && state !== "loading" ? admission?.inputs : null;
-  const hasIssuerInputs = (inputs?.issuer_distributions ?? []).length > 0;
+  const hasFundObservations = (inputs?.issuer_fund_observations ?? []).length > 0;
+  const hasIssuerInputs = (inputs?.issuer_distributions ?? []).length > 0 || hasFundObservations;
+  const issuerInputsLabel = inputs && (inputs.filings.length > 0 || hasFundObservations && (inputs.issuer_distributions ?? []).length > 0)
+    ? "研究资料" : hasFundObservations ? "发行商分类与持仓资料" : "发行商现金分红资料";
   const canRun = admission?.eligible === true && admission.data_snapshot_id !== null
     && (state === "empty" || state === "ready" && research?.status === "completed");
   return (
@@ -119,7 +122,7 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
       {admission?.eligible === false ? <p className="research-page__gate" role="note">{researchAdmissionReason(admission.reason)}</p> : null}
       {inputs && admission ? <ResearchInputs inputs={inputs} asOf={admission.decision_time} /> : null}
       {!hasData ? (inputs && state === "empty"
-        ? <p className="research-page__gate" role="note">{hasIssuerInputs ? `${inputs.filings.length > 0 ? "研究资料" : "发行商现金分红资料"}已就绪，AI 研究尚未生成。可先核验金额、日期与来源；不代表具备历史回测或执行资格。` : admission?.inputs?.filings.some((filing) => ["6-K", "497K"].includes(filing.form)) ? "披露资料已就绪，AI 研究尚未生成。可先核验正文、时间与来源；文本不等于财务指标。" : "财报资料已就绪，AI 研究尚未生成。可先核验数值、期间与来源；模型配置可稍后补充。"}</p>
+        ? <p className="research-page__gate" role="note">{hasIssuerInputs ? `${issuerInputsLabel}已就绪，AI 研究尚未生成。可先核验数值、日期与来源；不代表具备历史回测或执行资格。` : admission?.inputs?.filings.some((filing) => ["6-K", "497K"].includes(filing.form)) ? "披露资料已就绪，AI 研究尚未生成。可先核验正文、时间与来源；文本不等于财务指标。" : "财报资料已就绪，AI 研究尚未生成。可先核验数值、期间与来源；模型配置可稍后补充。"}</p>
         : <DataState state={state} title={researchStateTitle(state)} detail={researchStateDetail(state)} />) : <>
         {state !== "ready" ? <p className="research-page__gate" role="note">当前数据为 {dataStateLabels[state]}；保留最后证据供核验，但禁止创建或重跑研究。</p> : null}
         <DecisionCard research={research} />
