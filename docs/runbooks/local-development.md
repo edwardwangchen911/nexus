@@ -208,6 +208,20 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app r
 
 如果 readiness 不是 `ready`，按 `database -> migration -> object_store -> worker` 的顺序查询脱敏组件状态；不要通过关闭检查或伪造 heartbeat 绕过。
 
+## 更新所属本地 API
+
+确认实际 Compose project、源码提交和服务归属后，先为当前可寻址的镜像保留独立回滚
+tag，再构建新版本；不要先覆盖 `latest` 再尝试用运行容器的旧 image ID 打标签。
+Docker 可能已不再保留该 ID 的可寻址镜像，即使旧容器仍在运行。若发生此情况，先从
+已核验的旧提交重建回滚镜像并验证源码，再切换服务，不能把更早版本冒充本次回滚点。
+
+构建上下文使用目标提交的 `git archive`，避免将被 Git 忽略的私人验收材料送入镜像。
+仅更新所属 API，沿用其配置与端口，使用 `--no-deps --no-build` 限定切换范围；核对运行
+镜像的实际 image ID、容器内源码、配置未变，以及 PG/MinIO 容器 ID 和启动时间未变。
+先检查 `/health/live` 再检查 BFF readiness；启动期间一次连接错误不应触发业务请求重放。
+本地只读模式未启动通用 worker 时，应逐项报告 readiness，不能把 worker unavailable
+误报为数据库、对象存储或页面读取故障。回滚使用保留的旧镜像和同一配置，仅重建该 API。
+
 ## 停止与精确清理
 
 ```bash
