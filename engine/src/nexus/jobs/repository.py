@@ -247,6 +247,7 @@ async def claim_next_job(
     now: datetime,
     lease_seconds: int = 30,
     job_types: Sequence[str] | None = None,
+    job_ids: tuple[UUID, ...] | None = None,
 ) -> ClaimedJob | None:
     """Claim the highest-priority ready Job without blocking another worker."""
     now = _utc(now, field="now")
@@ -254,6 +255,8 @@ async def claim_next_job(
     if not 1 <= lease_seconds <= 135:
         raise ValueError("lease_seconds must be between 1 and 135")
     if job_types is not None and not job_types:
+        return None
+    if job_ids is not None and not job_ids:
         return None
     dependency = aliased(JobDependency)
     parent = aliased(Job)
@@ -275,6 +278,8 @@ async def claim_next_job(
     ]
     if job_types is not None:
         conditions.append(Job.job_type.in_(tuple(job_types)))
+    if job_ids is not None:
+        conditions.append(Job.id.in_(job_ids))
     job = await session.scalar(
         select(Job)
         .where(*conditions)
@@ -597,21 +602,27 @@ async def reclaim_expired_jobs(
     queue: QueueName,
     now: datetime,
     limit: int = 100,
+    job_ids: tuple[UUID, ...] | None = None,
 ) -> int:
     """Fence expired attempts and requeue only jobs with remaining attempts."""
     now = _utc(now, field="now")
     if not 1 <= limit <= 1_000:
         raise ValueError("limit must be between 1 and 1000")
+    if job_ids is not None and not job_ids:
+        return 0
+    conditions = [
+        Job.queue == queue.value,
+        Job.status == JobStatus.RUNNING.value,
+        JobLease.expires_at <= now,
+    ]
+    if job_ids is not None:
+        conditions.append(Job.id.in_(job_ids))
     rows = tuple(
         (
             await session.execute(
                 select(Job, JobLease)
                 .join(JobLease, JobLease.job_id == Job.id)
-                .where(
-                    Job.queue == queue.value,
-                    Job.status == JobStatus.RUNNING.value,
-                    JobLease.expires_at <= now,
-                )
+                .where(*conditions)
                 .order_by(JobLease.expires_at, Job.id)
                 .with_for_update(skip_locked=True)
                 .limit(limit)

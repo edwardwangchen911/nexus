@@ -7,6 +7,7 @@ import json
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from math import ceil
+from uuid import UUID
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -96,8 +97,12 @@ async def run_job_worker_once(
     clock: Clock,
     claim_registered_only: bool = False,
     preclaim_guard: PreclaimGuard | None = None,
+    job_ids: tuple[UUID, ...] | None = None,
 ) -> bool:
     """Heartbeat, reclaim, claim, and terminalize at most one durable Job."""
+    # Freeze one scope for both operations, including when an untyped caller
+    # supplied a mutable sequence. None retains the existing queue-wide mode.
+    job_ids = None if job_ids is None else tuple(job_ids)
     claim_time = clock()
     # Preserve the normal 60s lease; a bounded research handler needs its full
     # runtime plus the same 15s margin before another worker may reclaim it.
@@ -123,7 +128,7 @@ async def run_job_worker_once(
             started_at=worker_started_at,
             seen_at=claim_time,
         )
-        await reclaim_expired_jobs(session, queue=queue, now=claim_time)
+        await reclaim_expired_jobs(session, queue=queue, now=claim_time, job_ids=job_ids)
         claim = await claim_next_job(
             session,
             queue=queue,
@@ -131,6 +136,7 @@ async def run_job_worker_once(
             now=claim_time,
             lease_seconds=lease_seconds,
             job_types=(tuple(sorted(registry.job_types)) if claim_registered_only else None),
+            job_ids=job_ids,
         )
     if claim is None:
         return False
