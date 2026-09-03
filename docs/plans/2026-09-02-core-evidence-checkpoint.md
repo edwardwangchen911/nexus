@@ -1067,3 +1067,34 @@ none / partial，审查partial并明确不确定性。v1行为保持。历史不
 真实390px页面另发现长引用造成408px溢出，注入overflow-wrap:anywhere后恢复390px，
 采用同一行CSS修复，不新增布局框架。代码修复后须重验同一真实记录的DB→BFF→DOM；
 上述单测和流程成功不等于完整研究质量或策略比较已闭环。
+
+0b58d17集中独立审查ready，无新P1/P2，审查额外10项单测通过。运行API仅更新到该提交，
+源文件摘要匹配，配置/端口/PG/MinIO均保持。随后同一真实run/snapshot的BFF返回
+completed + partial、无intent、staged_action_semantics_unverified；研究/反证/综合
+5/2/1角色完整阶段仍在。原snapshots/runs/outputs逐行摘要全部保持、活动作业为0。
+实际页面partial、没有买入候选、一致性提示可见、交易锁定，桌面及390px均无横向溢出；
+页面验证未发送写请求或外部请求。此轮没有新模型/券商调用，内容质量仍未宣称合格。
+记录保存在本机受保护`outputs/acceptance/b3-intent-semantics-20260904/`。
+
+## L1 与 S2b 首次资料装配集成（2026-09-04，北京时间）
+
+root 539df66合为413d3cb：单次worker按显式job_ids对claim与过期reclaim使用同一范围，
+None保留原队列行为、空tuple不领任务。该切片未启动手动链路或自动调度。B ea0e3e5
+合为34c25e1：首次风控资料可由冻结身份准备，不需要伪造ForwardDecision/hash；读取
+已存决策时仍验证原绑定hash，不放宽用途或执行许可。两项新旧相关隔离PG共25项通过。
+
+B 4d12c67合为f37027f：抽取共用时点价格/行业选择，普通策略输入纯装配要求显式持仓
+状态、200声明交易日、raw/all对齐及完整资产/行业资料；保留回测批量索引与旧导入兼容。
+真实来源资格仍由后续reader核验，不以数字推断价格用途。源码身份hash按真实改动变化，
+旧语义golden保持，历史结果不回填；不等于rank checkpoint或真实forward已接通。
+
+合并验证80项中78通过；新增一致性测试跨测试模块导入在标准pytest入口失败，交原owner
+修正。原性能用例与Docker构建并行时超过25秒门限，构建结束后单独复验通过，未改门限
+或优化代码；后续性能门限测试与重型构建分开，不把资源争用误报为功能回归。6源文件
+Mypy、Ruff通过。普通测试入口与CI importlib入口都要兼容，不能只改sys.path掩盖。
+
+root 1a30b9d合为f5d0563，手动daily根只组合冻结快照校验与诊断两阶段，绑定真实
+日历/快照/截止，不伪造旧收盘接收时点。artifact reader必填；诊断BLOCKED映射为skipped，
+保留诊断本身的snapshot.as_of。root集中审查已先红修复BLOCKED误成功，32项新旧dailyPG
+通过；A合并后10项该入口隔离PG、Mypy2/Ruff通过。此时CLI及业务真实单次验收仍待接入，
+未启用定时调度或研究、方案、交易阶段。
