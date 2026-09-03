@@ -6,6 +6,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from helpers.research_snapshots import INSTRUMENT, NOW, seed_filing
 from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import admit_research_run
@@ -30,8 +31,6 @@ from nexus.persistence.models.portfolio import (
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
 from sqlalchemy import update
-
-from engine.tests.integration.test_research_snapshot_preparation import INSTRUMENT, NOW, seed_filing
 
 
 @pytest.mark.asyncio

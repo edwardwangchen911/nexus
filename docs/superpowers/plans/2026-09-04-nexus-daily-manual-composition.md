@@ -51,6 +51,20 @@
 
 ## 后续 L1 切片（不能以首片完成替代）
 
+### Task 4a：研究快照显式绑定日根持仓快照
+
+**Owner/Files:** root；`agents/portfolio_context.py`、`agents/snapshots.py`，专属PG。基线同步主线`3f009ad`，独立分支`edward/nexus-daily-research-binding`。A独占Gateway来源字段留存，B独占rank continuity，无文件重叠。
+
+- [x] `freeze_portfolio_context(..., *, portfolio_snapshot_id: UUID | None = None)`：None原样选择唯一账户最新可见快照；显式ID只读取这一已知快照，保留原active/source/time/holding/ready检查，不退回另一个READY或latest。
+- [x] `prepare_research_snapshot(..., portfolio_snapshot_id=None)`转交显式选择；存在SEC/issuer证据但指定context无法冻结时明确拒绝，不静默生成不含该组合上下文的通用研究。没有研究证据仍按现有合同返回None、不创建run/Job。
+- [x] 不新增冻结schema字段；所选snapshot ID已经在既有context及规范hash里。相同旧快照、相同时点与旧默认选择结果严格同hash；不改旧研究行。
+- [x] PG覆盖两个可见快照中精确选择较早指定者、无参数仍选择最新、缺失/晚到/不持有目标证券不回退、非READY显式上下文不伪装READY、历史context/hash不变。
+- [x] TDD、Ruff/Mypy/相关PG、独立审查后交A。5项新PG因缺参先红；实现后与原准备/组合上下文共22项PG通过，标准PYTHONPATH仅engine/src+importlib。为复用原synthetic filing并修相关测试跨目录导入，将原seed原样提取至helpers/research_snapshots.py，无fixture业务数据变化。两源Mypy/Ruff/diff-check、独立审查ready。
+
+### Task 4b：原生研究准入接线（接4a后实施）
+
+日根诊断成功后才能准入原生研究，不在等待依赖时创建research run或预算预留。后续研究使用显式的实际研究冻结时刻（不早于诊断实际生成时间），并绑定日根原snapshot；不能用日根早先cutoff假装当时已有后来生成的诊断。原快照as_of、日根截止、研究冻结时刻分别保留。具体native Job关联与单次运行边界按既有admit/worker完善，不新建同名daily agent handler或第二个模型executor。
+
 - 诊断成功后按明确 frozen portfolio context 准备研究快照，再用原生 `admit_research_run` 准入；不能提前创建会被依赖跳过且预算悬挂的 run。
 - 原生研究完成后实际消费其合格证据构造方案；当前优化路径 `research=()` 的事实必须先修复，不能仅添 dependency 就称消费研究。
 - 未知/不充分结论保持原安全语义。paper 仍单独显式入口；自动日程仍是独立产品选择，不在此片偷开。

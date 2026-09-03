@@ -21,7 +21,8 @@ from nexus.research.ssga_distributions import read_distributions
 
 
 async def prepare_research_snapshot(
-    session: AsyncSession, instrument_id: UUID, *, as_of: datetime
+    session: AsyncSession, instrument_id: UUID, *, as_of: datetime,
+    portfolio_snapshot_id: UUID | None = None,
 ) -> DataSnapshot | None:
     """Bind real filing references; the caller owns the transaction.
 
@@ -66,7 +67,11 @@ async def prepare_research_snapshot(
         evidence = evidence[: MAX_FROZEN_EVIDENCE - 3] + issuer_refs
     if not evidence:
         return None
-    context = await freeze_portfolio_context(session, instrument_id, as_of)
+    context = await freeze_portfolio_context(
+        session, instrument_id, as_of, portfolio_snapshot_id=portfolio_snapshot_id,
+    )
+    if portfolio_snapshot_id is not None and context is None:
+        raise ValueError("OPENAI_PORTFOLIO_CONTEXT_UNAVAILABLE")
     payload: dict[str, object] = {
         "instrument_id": str(instrument_id),
         "as_of": as_of.isoformat(),

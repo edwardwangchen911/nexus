@@ -143,8 +143,13 @@ async def freeze_portfolio_context(
     session: AsyncSession,
     instrument_id: UUID,
     as_of: datetime,
+    *,
+    portfolio_snapshot_id: UUID | None = None,
 ) -> tuple[PortfolioResearchContext, ResearchEvidenceRef] | None:
-    """Use the sole account's latest visible snapshot; never fall back to an older READY one."""
+    """Use the explicit snapshot, or the sole account's latest visible one.
+
+    Neither path falls back to a different READY snapshot when facts are missing.
+    """
     candidates = list(
         await session.execute(
             select(PortfolioSnapshotRecord, BrokerSyncRun)
@@ -157,6 +162,9 @@ async def freeze_portfolio_context(
                 PortfolioSnapshotRecord.created_at <= as_of,
                 PortfolioSnapshotRecord.as_of <= as_of,
                 BrokerSyncRun.created_at <= as_of,
+                *(() if portfolio_snapshot_id is None else (
+                    PortfolioSnapshotRecord.id == portfolio_snapshot_id,
+                )),
             )
             .distinct(PortfolioSnapshotRecord.portfolio_id)
             .order_by(
