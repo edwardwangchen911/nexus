@@ -1270,3 +1270,20 @@ B b681218摘为830107d：显式引用calendar/universe/raw+all价格集合/secto
 A28项unit、1项隔离PG真实调用链（200日fixture、引用缺失/raw-all错配/时点拒绝、
 SELECT-only、原adjusted gate不patch）、Mypy3/Ruff/diff通过；B独立审查无P1/P2。
 无迁移及业务写入，本片仅合主机代码，API仍46d5090；3c2单次入口由B继续实施。
+
+
+## 日研究上下文与单次forward入口集成（2026-09-04，北京时间）
+
+root5ebe509摘为7277361：冻结精确日根/run/output上下文，校验job终态与真实可用
+时间、正文hash、manifest/source/output引用及intent内嵌引用；失败、弃权及v2语义
+不足不升级。固定context_only/locked，旧估值时间保持。A23相关PG、Mypy/Ruff通过，
+root独立审查ready。尚未连接新草稿消费者，正式baseline/selection合同仍待后续。
+
+B afa61d9摘为2754787：paper_once forward显式JSON绑定账户、幂等键、时间、策略
+定义/代际和冻结引用；实际adjusted gate在最前，账户锁/投影/读取/风险/排名记录/
+既有admit同事务。锁内重读引用与特征、存canonical引用并绑定input hash，旧None
+记录去除新增外层字段保持旧hash。A30unit+3聚焦PG（fixture读取、实际source拒绝
+零写入、旧checkpoint原子回滚及幂等兼容）、Mypy3/Ruff通过；B集中审查已修复引用
+null和锁顺序问题并复核。真实source仍ADJUSTED_AUTHORITY_UNAVAILABLE，不宣称
+forward正向闭环。本轮仅集成主机代码，无模型/采集/paper运行/迁移/服务重启，
+API仍46d5090；root继续草稿消费，B继续B3v3核心输出语义。
