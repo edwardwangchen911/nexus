@@ -231,9 +231,18 @@ def test_0036_allows_only_coherent_unknown_usage_and_preserves_history(
             )
 
 
-def test_0036_downgrade_refuses_unknown_usage(
+@pytest.mark.parametrize(
+    "usage,reason",
+    [
+        ((None, None, None), "unknown Strategy R&D usage prevents downgrade"),
+        ((25, 10, 5), "legacy-incompatible Strategy R&D usage prevents downgrade"),
+    ],
+)
+def test_0036_downgrade_refuses_unrepresentable_usage(
     monkeypatch: pytest.MonkeyPatch,
     temporary_database_url: str,
+    usage: tuple[int | None, int | None, int | None],
+    reason: str,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", temporary_database_url)
     config = _config()
@@ -244,16 +253,23 @@ def test_0036_downgrade_refuses_unknown_usage(
             temporary_database_url,
             run_id="019d0000-0000-7000-8000-000000003611",
             status="failed",
-            usage=(None, None, None),
+            usage=usage,
         )
     )
 
-    with pytest.raises(RuntimeError, match="unknown Strategy R&D usage prevents downgrade"):
+    with pytest.raises(RuntimeError, match=reason):
         command.downgrade(config, "0035_issuer_research_evidence")
 
     assert (
         asyncio.run(_columns(temporary_database_url, "strategy_rnd_runs"))["input_tokens"] == "YES"
     )
+    assert asyncio.run(
+        _rows(
+            temporary_database_url,
+            "SELECT input_tokens,output_tokens,tool_call_count FROM strategy_rnd_runs "
+            "WHERE id='019d0000-0000-7000-8000-000000003611'",
+        )
+    ) == [{"input_tokens": usage[0], "output_tokens": usage[1], "tool_call_count": usage[2]}]
 
 
 def test_0036_downgrades_when_all_usage_is_known(
