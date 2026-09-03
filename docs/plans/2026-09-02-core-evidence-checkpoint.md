@@ -1430,3 +1430,13 @@ NAV/份额数/基金净资产逐项Decimal完全相等，覆盖期/总数与原�
 旧failedrun原cutoff页面仍无NAV，新资料没有混进旧冻结研究。五类业务表全量行hash
 相等，activejobs0。证据在issuer-nav-view-20260904。新截止的资料卡可与更早研究
 同时出现，已交root核对并补显式版本差异说明，避免用户误认为旧模型已使用新资料。
+
+
+收尾：25fd602→0bb5632的L1跨阶段恢复1PG由A复验通过，证明正常入口失败结果
+已持久化后重建配置/session重入不重复调用，并在本案例草稿缺证据时无残留；不宣称
+kill进程未知结果恢复或所有failedrun一律不能形成context-only草稿。生产代码未改。
+14eaaf2→8260ad9只加snapshot不等时的资料/研究差异提示，A7unit及真实两cutoff
+页面核验通过：新NAV/旧run组合显示，相同snapshot不显示，390无溢出，无外部/写请求。
+API仍5b26c76/DB0039，未为Web提示重build，证据version-notice-summary.json保存在
+issuer-nav-view-20260904。资料源条件与完整正式优化/模拟/演化验收仍独立未满足，
+不以本批页面和恢复回归宣告全平台完成。
