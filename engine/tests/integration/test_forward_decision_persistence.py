@@ -449,3 +449,325 @@ def test_not_week_end_produces_no_strategy_decision_row(
         is None
     )
     assert asyncio.run(_count_decisions(migrated_database_url)) == 0
+
+
+RANK_TIME = datetime(2026, 8, 28, 20, tzinfo=UTC)
+
+
+async def _seed_rank_authority(database_url):
+    await _seed_authority(database_url, published_at=DECISION_TIME)
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO exchange_calendar_sessions "
+                    "(calendar_authority_id, session, decision_at) VALUES "
+                    "(:id, '2026-08-28', '2026-08-28T20:00:00Z'), "
+                    "(:id, '2026-08-31', '2026-08-31T20:00:00Z')"
+                ),
+                {"id": CALENDAR_ID},
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _rank_checkpoint_inputs(session):
+    from nexus.paper.projection import load_paper_projection
+    from nexus.strategy.baseline import BaselineInstrumentSnapshot, StrategyDataSnapshot
+    from nexus.strategy.rank_checkpoint import RankCheckpointAuthority
+
+    projection = await load_paper_projection(session, account_id=PAPER_ACCOUNT_ID, as_of=RANK_TIME)
+    snapshot = StrategyDataSnapshot(
+        decision_session=RANK_TIME.date(),
+        next_session=date(2026, 8, 31),
+        instruments=(
+            BaselineInstrumentSnapshot(
+                instrument_id=CURRENT_ID,
+                symbol="SYNTHETIC",
+                asset_type="stock",
+                sector_exposures=({"sector": "information_technology", "weight": Decimal(1)},),
+                raw_close=Decimal(200),
+                closes=(Decimal(100),) * 195 + (Decimal(200),) * 5,
+                dollar_volumes=(Decimal(60000000),) * 20,
+            ),
+        ),
+    )
+    authority = RankCheckpointAuthority(
+        account_id=PAPER_ACCOUNT_ID,
+        portfolio_id=PORTFOLIO_ID,
+        decision_time=RANK_TIME,
+        execution_session=date(2026, 8, 31),
+        source_policy_id=SOURCE_POLICY_V2_ID,
+        calendar_authority_id=CALENDAR_ID,
+        universe_snapshot_id=UNIVERSE_ID,
+        quality_report_id=QUALITY_REPORT_ID,
+        portfolio_projection_hash=projection.projection_hash,
+        authority_hash="d" * 64,
+    )
+    return snapshot, authority
+
+
+@pytest.mark.asyncio
+async def test_rank_checkpoint_atomic_rollback_and_double_object_idempotency(
+    migrated_database_url,
+    adjusted_v2_authority_available,
+    monkeypatch,
+):
+    from nexus.strategy.rank_checkpoint import evaluate_and_persist_rank_checkpoint
+    from sqlalchemy import event
+
+    await _seed_rank_authority(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory.begin() as session:
+            snapshot, authority = await _rank_checkpoint_inputs(session)
+
+            def fail_checkpoint(conn, cursor, statement, parameters, context, executemany):
+                if statement.startswith("INSERT INTO strategy_rank_checkpoints"):
+                    raise RuntimeError("synthetic checkpoint failure")
+
+            event.listen(engine.sync_engine, "before_cursor_execute", fail_checkpoint)
+            try:
+                with pytest.raises(RuntimeError, match="synthetic checkpoint failure"):
+                    await evaluate_and_persist_rank_checkpoint(
+                        session, snapshot=snapshot, authority=authority
+                    )
+            finally:
+                event.remove(engine.sync_engine, "before_cursor_execute", fail_checkpoint)
+            assert await session.scalar(text("SELECT count(*) FROM strategy_decisions")) == 0
+            assert await session.scalar(text("SELECT count(*) FROM strategy_rank_checkpoints")) == 0
+            first = await evaluate_and_persist_rank_checkpoint(
+                session, snapshot=snapshot, authority=authority
+            )
+            assert first is not None
+
+        # A later registry activation need not be visible at this historical cutoff.
+        async def no_current_event(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(
+            "nexus.strategy.rank_checkpoint._active_registry_event", no_current_event
+        )
+        async with factory.begin() as session:
+            second = await evaluate_and_persist_rank_checkpoint(
+                session, snapshot=snapshot, authority=authority
+            )
+            assert second == first
+            assert await session.scalar(text("SELECT count(*) FROM strategy_rank_checkpoints")) == 1
+            changed = snapshot.model_copy(
+                update={
+                    "instruments": (
+                        snapshot.instruments[0].model_copy(update={"symbol": "DIFFERENT"}),
+                    )
+                }
+            )
+            with pytest.raises(ValueError, match="RANK_CHECKPOINT_CONTENT_CONFLICT"):
+                await evaluate_and_persist_rank_checkpoint(
+                    session, snapshot=changed, authority=authority
+                )
+        async with factory.begin() as session:
+            with pytest.raises(Exception, match="immutable|append.only"):
+                async with session.begin_nested():
+                    await session.execute(
+                        text(
+                            "UPDATE strategy_rank_checkpoints SET checkpoint_hash = repeat('f', 64)"
+                        )
+                    )
+            with pytest.raises(Exception, match="immutable|append.only"):
+                async with session.begin_nested():
+                    await session.execute(text("DELETE FROM strategy_rank_checkpoints"))
+        from pathlib import Path
+
+        from alembic import command
+        from alembic.config import Config
+
+        config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
+        with pytest.raises(RuntimeError, match="rank checkpoint history prevents downgrade"):
+            await asyncio.to_thread(command.downgrade, config, "0036_strategy_rnd_usage_unknown")
+        async with factory() as session:
+            assert await session.scalar(text("SELECT count(*) FROM strategy_rank_checkpoints")) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_session", [True, False])
+async def test_rank_checkpoint_refuses_old_decision_without_checkpoint(
+    migrated_database_url,
+    adjusted_v2_authority_available,
+    same_session,
+):
+    from nexus.strategy.rank_checkpoint import evaluate_and_persist_rank_checkpoint
+
+    await _seed_rank_authority(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    factory = async_sessionmaker(engine)
+    try:
+        async with factory.begin() as session:
+            old = _decision()
+            if same_session:
+                old = old.model_copy(
+                    update={
+                        "decision_session": RANK_TIME.date(),
+                        "decision_time": RANK_TIME,
+                        "execution_session": date(2026, 8, 31),
+                    }
+                )
+                old = old.model_copy(
+                    update={"decision_hash": canonical_forward_strategy_decision_hash(old)}
+                )
+            await persist_forward_strategy_decision(session, old)
+            snapshot, authority = await _rank_checkpoint_inputs(session)
+            with pytest.raises(ValueError, match="RANK_CHECKPOINT_HISTORY_UNAVAILABLE"):
+                await evaluate_and_persist_rank_checkpoint(
+                    session, snapshot=snapshot, authority=authority
+                )
+            assert await session.scalar(text("SELECT count(*) FROM strategy_rank_checkpoints")) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["adjusted", "legacy", "nonweek", "projection"])
+async def test_rank_checkpoint_keeps_original_admission_and_nonweek_no_write(
+    migrated_database_url,
+    kind,
+):
+    from dataclasses import replace
+
+    from nexus.strategy.rank_checkpoint import evaluate_and_persist_rank_checkpoint
+
+    await _seed_rank_authority(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    factory = async_sessionmaker(engine)
+    try:
+        async with factory.begin() as session:
+            snapshot, authority = await _rank_checkpoint_inputs(session)
+            if kind == "legacy":
+                authority = replace(authority, source_policy_id=LEGACY_SOURCE_POLICY_ID)
+            if kind == "projection":
+                authority = replace(authority, portfolio_projection_hash="f" * 64)
+            if kind == "nonweek":
+                snapshot = snapshot.model_copy(
+                    update={
+                        "decision_session": date(2026, 8, 31),
+                        "next_session": date(2026, 9, 1),
+                    }
+                )
+                authority = replace(
+                    authority,
+                    decision_time=datetime(2026, 8, 31, 20, tzinfo=UTC),
+                    execution_session=date(2026, 9, 1),
+                )
+                assert (
+                    await evaluate_and_persist_rank_checkpoint(
+                        session, snapshot=snapshot, authority=authority
+                    )
+                    is None
+                )
+            else:
+                reason = {
+                    "adjusted": "adjusted price authority",
+                    "legacy": "exact source_policy_v2",
+                    "projection": "RANK_CHECKPOINT_PROJECTION_MISMATCH",
+                }[kind]
+                with pytest.raises(ValueError, match=reason):
+                    await evaluate_and_persist_rank_checkpoint(
+                        session, snapshot=snapshot, authority=authority
+                    )
+            assert await session.scalar(text("SELECT count(*) FROM strategy_decisions")) == 0
+            assert await session.scalar(text("SELECT count(*) FROM strategy_rank_checkpoints")) == 0
+    finally:
+        await engine.dispose()
+
+
+def test_rank_checkpoint_empty_migration_roundtrip(migrated_database_url):
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
+
+    config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
+    assert ScriptDirectory.from_config(config).get_heads() == [CURRENT_MIGRATION_HEAD]
+    command.downgrade(config, "0036_strategy_rnd_usage_unknown")
+    command.upgrade(config, CURRENT_MIGRATION_HEAD)
+
+    async def check():
+        engine = create_async_engine(migrated_database_url)
+        try:
+            async with engine.connect() as connection:
+                assert (
+                    await connection.scalar(text("SELECT version_num FROM alembic_version"))
+                    == CURRENT_MIGRATION_HEAD
+                )
+                assert (
+                    await connection.scalar(text("SELECT count(*) FROM strategy_rank_checkpoints"))
+                    == 0
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(check())
+
+
+@pytest.mark.asyncio
+async def test_rank_checkpoint_links_the_previous_decision_atomically(
+    migrated_database_url,
+    adjusted_v2_authority_available,
+):
+    from dataclasses import replace
+
+    from nexus.paper.projection import load_paper_projection
+    from nexus.strategy.rank_checkpoint import evaluate_and_persist_rank_checkpoint
+
+    await _seed_rank_authority(migrated_database_url)
+    engine = create_async_engine(migrated_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory.begin() as session:
+            snapshot, authority = await _rank_checkpoint_inputs(session)
+            first = await evaluate_and_persist_rank_checkpoint(
+                session, snapshot=snapshot, authority=authority
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO exchange_calendar_sessions "
+                    "(calendar_authority_id, session, decision_at) VALUES "
+                    "(:id, '2026-09-04', '2026-09-04T20:00:00Z'), "
+                    "(:id, '2026-09-07', '2026-09-07T20:00:00Z')"
+                ),
+                {"id": CALENDAR_ID},
+            )
+        async with factory.begin() as session:
+            cutoff = datetime(2026, 9, 4, 20, tzinfo=UTC)
+            projection = await load_paper_projection(
+                session, account_id=PAPER_ACCOUNT_ID, as_of=cutoff
+            )
+            second = await evaluate_and_persist_rank_checkpoint(
+                session,
+                snapshot=snapshot.model_copy(
+                    update={"decision_session": cutoff.date(), "next_session": date(2026, 9, 7)}
+                ),
+                authority=replace(
+                    authority,
+                    decision_time=cutoff,
+                    execution_session=date(2026, 9, 7),
+                    portfolio_projection_hash=projection.projection_hash,
+                ),
+            )
+            assert second is not None and first is not None
+            parent_id = await session.scalar(
+                text(
+                    "SELECT previous_decision_id FROM strategy_rank_checkpoints "
+                    "WHERE decision_id=:id"
+                ),
+                {"id": second.forward.decision_id},
+            )
+            assert parent_id == first.forward.decision_id
+            assert second.checkpoint_hash != first.checkpoint_hash
+    finally:
+        await engine.dispose()

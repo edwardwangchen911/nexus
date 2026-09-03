@@ -1176,3 +1176,49 @@ Mypy3/Ruff通过；此前相关75unit/5PG通过，独立审查ready无P1/P2。
 期间旧PG固定的下一交易日已成为过去，调度选中了错误fixture日，不能误判产品失效。
 仅把测试下一session置于未来工作日，保留原案例日期；真实调度和数据不改。
 本次既有范围的读取和修复无需再次批准；原失败记录保留，修复后的单次真实验收另记。
+## S2b-3b2 原子 rank checkpoint 实施锁定（2026-09-04）
+
+A 已确认0037唯一由B使用，基于5f17b59独立worktree实施。目标是让一次周度
+forward decision与真实持仓观察同事务保存，不增加调度，不修改paper执行或原准入。
+
+- 新增`StrategyRankCheckpointRecord`于既有paper模型；0037新增单表
+  `strategy_rank_checkpoints`，decision_id主键/外键，previous_decision_id自外键，
+  schema_version、input_snapshot_hash、observations JSONB、checkpoint_hash、created_at。
+  复用immutable触发器；有数据拒绝downgrade，无数据可删除新表，旧表不变。
+- 新增`strategy/rank_checkpoint.py`：冻结`RankCheckpointAuthority`绑定现有forward
+  所需账户/组合/时点/日历/来源/质量/投影/市场authority；
+  `evaluate_and_persist_rank_checkpoint(session, snapshot, authority)`返回
+  `PersistedRankCheckpoint | None`，非周末返回None、不写任何checkpoint。
+- 在调用方事务的savepoint内先锁1818 internal-paper账户，再account FOR UPDATE，
+  不获取order锁，随后原persist_forward自行获取1709决策锁；不提交调用方事务。
+- 原persist对旧decision会直接返回；wrapper必须先拒绝旧decision缺checkpoint，
+  重新计算两个对象完全相同才幂等。父节点找同账户/定义/代际最近decision，
+  不跳过没有checkpoint的旧decision；拒绝回插到已有未来决策之前。
+- 从DB注册定义compile并用3a包装计算观察。调用方rank数字不作为事实来源；
+  reader及前一checkpoint推导输入，完整冻结snapshot规范化hash绑定实际输入。
+  JSON包含held_rank与各instrument连续性证据，hash绑定decision、parent hash、
+  input hash、JSON；重新读取父checkpoint时复核hash及前缀对应关系。
+- 两端调用load_paper_projection并核对历史hash及reader全标的数量。连续持仓继承
+  前一已知evaluated_streak，重开/新开仅验证BUY开仓可置0；未知不能置0。
+  无父节点要求事件事实和projection皆无持仓历史，非空跨代际不猜状态。
+- 聚焦测试先红再绿：输入状态继承/未知/重开、hash绑定；真实隔离PG覆盖savepoint
+  回滚、重复调用、旧decision缺checkpoint、原v2/adjusted拒绝、非周末、append-only
+  及迁移降级有数据拒绝。运行CI importlib入口，不跨测试模块导入；集中独立审查。
+
+当前真实来源adjusted用途准入仍不满足；新增wrapper不会绕过此限制。合成PG中的
+成功路径仅按既有测试方式隔离替代“来源资格可用”判断，另保留未替代的拒绝测试。
+
+实现核对补充：`design.md:587`定义是“连续两次周评估”，因此漏日历周仍只推进
+下一次真实评估，不新增相邻ISO周限制、不补造遗漏观察；unit覆盖该语义。
+已有checkpoint重放改用decision冻结的definition/event/generation，不依赖当前head；
+PG回归覆盖当前activation在旧cutoff不可见时仍返回原双对象。完整promotion服务
+验收不属于此用例声明。0037同步`CURRENT_MIGRATION_HEAD`，否则旧0036常量会令
+readiness/worker拒绝已升级schema。新PG放入原`test_forward_decision_persistence.py`
+直接复用其本地fixture，避免跨测试模块导入；旧8项测试保持。
+
+验证：8个新unit、当前迁移head一致性1项通过；原forward PG整组15项通过，随后
+补充同session缺checkpoint变体与双节点父链各通过（最终17个PG用例，其中原8个）。
+覆盖真实savepoint回滚后事务可继续、跨事务双对象幂等、输入改变拒绝、两种旧记录缺口、
+原准入与非周末无写、projection不符、append-only、迁移空表往返及有数据拒绝。
+Ruff和2源文件Mypy通过。集中独立审查两处P2（schema版本、历史注册绑定）均修复并
+定向复核通过。尚未应用业务DB迁移、重启服务或生成真实checkpoint，不声明S2b整体闭合。
