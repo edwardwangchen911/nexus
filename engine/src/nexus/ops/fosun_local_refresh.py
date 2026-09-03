@@ -363,7 +363,8 @@ async def refresh_local_fosun(
             "holdings": 1 + broker_requests["holdings"],
             "orders": broker_requests["orders"],
             "cash_flows": 1,
-            **market_reads.request_counts,
+            "quotes": market_reads.request_counts["quotes"],
+            "bars": market_reads.request_counts["bars"],
         }
         provider_requests["total"] = sum(provider_requests.values())
         result = {

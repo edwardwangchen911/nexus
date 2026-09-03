@@ -99,7 +99,9 @@ async def test_refresh_commits_market_before_broker_freeze_without_promoting_fai
         )
 
     async def market_reads(*_args, **_kwargs):
-        return SimpleNamespace(codes=("usAAPL",), request_counts={"quotes": 1, "bars": 1})
+        return SimpleNamespace(
+            codes=("usAAPL",), request_counts={"quotes": 1, "bars": 1, "total": 2}
+        )
 
     async def persist_market(session, *_args, **_kwargs):
         assert not state["broker_read"]
@@ -157,6 +159,8 @@ async def test_refresh_commits_market_before_broker_freeze_without_promoting_fai
     else:
         result = await module.refresh_local_fosun(SimpleNamespace(database_url="synthetic"))
         assert result["snapshot_status"] == "READY" and result["provider_requests"]["total"] == 11
+        counts = result["provider_requests"]
+        assert counts["total"] == sum(value for key, value in counts.items() if key != "total")
     assert state["market"] is (failure != "market")
     assert state["broker"] is (failure is None)
     assert state["broker_read"] is (failure != "market")

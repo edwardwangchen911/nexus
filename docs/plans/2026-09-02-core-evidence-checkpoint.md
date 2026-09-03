@@ -906,8 +906,11 @@ dom-final-summary.json；首次页面尚未加载完成的 false 保留，未覆
 独立审查。测试只用合成数据与隔离数据库，没有重复真实模型或券商调用。
 
 本轮验收脚本异常在测试本身修复：网关合成 request ID 必须用既有 UUIDv7 合同；
-PriceSeries.adjustment 和 manifest.instrument 沿实际类型读取，不猜字段；请求总数
-区分真实 broker fixture 与替身计数。SDK CLI 单测从 engine 子目录运行会按设计返回
+PriceSeries.adjustment 和 manifest.instrument 沿实际类型读取，不猜字段。集中审查发现
+请求统计展开行情 request_counts 后，把其中既有 total 又计入总数；一标的实际 11 次
+误报 13 次，初次 PG 预期也误改成 13。恢复显式累加 quotes/bars，unit 替身保留真实
+total 字段，并核对总数等于明细之和；不把测试失败直接归咎于预期。SDK CLI 单测从
+engine 子目录运行会按设计返回
 OPENAI_REPOSITORY_ROOT_REQUIRED，改用仓库根目录的 uv --package nexus-engine 后
 40 项通过。这些不作为放宽产品校验的理由。当前修复属于代码与隔离回归完成；未重启
 共享 API，未运行新的真实研究或诊断，不宣称真实综合内容已通过或新诊断已在页面生效。

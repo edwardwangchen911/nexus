@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from collections import Counter
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -44,6 +45,7 @@ async def test_normal_refresh_commits_current_raw_evidence_before_snapshot_cutof
         "provider_as_of": None,
     }
     factory = session_factory(settings(migrated_database_url))
+    calls = Counter()
 
     def page(items):
         return GatewayResponsePage(
@@ -73,6 +75,7 @@ async def test_normal_refresh_commits_current_raw_evidence_before_snapshot_cutof
 
     class Broker:
         async def read_accounts(self):
+            calls["accounts"] += 1
             return page(
                 [
                     {
@@ -85,9 +88,11 @@ async def test_normal_refresh_commits_current_raw_evidence_before_snapshot_cutof
             )
 
         async def read_holdings(self, *_args, **_kwargs):
+            calls["holdings"] += 1
             return page([position])
 
         async def read_cash(self, *_args, **_kwargs):
+            calls["cash"] += 1
             # This separate transaction proves publication, not just pending INSERT order.
             async with factory() as session:
                 assert (
@@ -114,9 +119,11 @@ async def test_normal_refresh_commits_current_raw_evidence_before_snapshot_cutof
             )
 
         async def read_orders(self, *_args, **_kwargs):
+            calls["orders"] += 1
             return page([])
 
         async def read_cash_flows(self, *_args, **_kwargs):
+            calls["cash_flows"] += 1
             return page([])
 
         async def aclose(self):
@@ -149,6 +156,7 @@ async def test_normal_refresh_commits_current_raw_evidence_before_snapshot_cutof
 
     class Market:
         async def read_quotes_raw(self, codes):
+            calls["quotes"] += 1
             return raw(
                 "fosun_get_quotes",
                 [
@@ -162,6 +170,7 @@ async def test_normal_refresh_commits_current_raw_evidence_before_snapshot_cutof
             )
 
         async def read_bars_raw(self, *, code, **_kwargs):
+            calls["bars"] += 1
             return raw(
                 "fosun_get_bars",
                 [
@@ -198,7 +207,10 @@ async def test_normal_refresh_commits_current_raw_evidence_before_snapshot_cutof
             result = await module.refresh_local_fosun(configured)
             assert result["snapshot_status"] == "READY"
             assert result["diagnostic"]["status"] == "persisted"
-            assert result["provider_requests"]["total"] == 13
+            assert result["provider_requests"]["total"] == 11
+            counts = result["provider_requests"]
+            assert counts["total"] == sum(value for key, value in counts.items() if key != "total")
+            assert counts == {**calls, "total": sum(calls.values())}
         async with factory() as session:
             authority = await session.scalar(select(PriceBarSetAuthority))
             assert authority is not None
