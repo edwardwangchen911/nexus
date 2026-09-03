@@ -7229,6 +7229,16 @@
             "title": "Strategy Version",
             "type": "string"
           },
+          "synthesis_assessment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisAssessment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "theses": {
             "items": {
               "$ref": "#/components/schemas/ResearchClaim"
@@ -7557,6 +7567,16 @@
           },
           "role": {
             "$ref": "#/components/schemas/AgentRole"
+          },
+          "synthesis_assessment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SynthesisAssessment"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -9379,6 +9399,134 @@
           "FAILED"
         ],
         "type": "string"
+      },
+      "SynthesisAssessment": {
+        "additionalProperties": false,
+        "properties": {
+          "claims": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchClaim"
+            },
+            "maxItems": 2,
+            "minItems": 1,
+            "title": "Claims",
+            "type": "array"
+          },
+          "review_conclusion": {
+            "enum": [
+              "sufficient",
+              "limited",
+              "insufficient"
+            ],
+            "title": "Review Conclusion",
+            "type": "string"
+          },
+          "reviews": {
+            "items": {
+              "$ref": "#/components/schemas/SynthesisClaimReview"
+            },
+            "maxItems": 4,
+            "minItems": 1,
+            "title": "Reviews",
+            "type": "array"
+          },
+          "stance": {
+            "enum": [
+              "buy_candidate",
+              "reduce_candidate",
+              "hold",
+              "watch"
+            ],
+            "title": "Stance",
+            "type": "string"
+          },
+          "uncertainties": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 5,
+            "title": "Uncertainties",
+            "type": "array"
+          }
+        },
+        "required": [
+          "stance",
+          "claims",
+          "reviews",
+          "review_conclusion",
+          "uncertainties"
+        ],
+        "title": "SynthesisAssessment",
+        "type": "object"
+      },
+      "SynthesisClaimReview": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_id": {
+            "pattern": "^(bear|evidence_audit):[0-9]+$",
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "evidence_refs": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceRef"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "missing_evidence": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 4,
+            "title": "Missing Evidence",
+            "type": "array"
+          },
+          "prevented_conclusion": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prevented Conclusion"
+          },
+          "rationale": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "resolved": {
+            "title": "Resolved",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "accepted",
+              "rejected",
+              "unresolved"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_id",
+          "status",
+          "rationale",
+          "evidence_refs",
+          "resolved",
+          "missing_evidence",
+          "prevented_conclusion"
+        ],
+        "title": "SynthesisClaimReview",
+        "type": "object"
       },
       "TypedMetric": {
         "additionalProperties": false,

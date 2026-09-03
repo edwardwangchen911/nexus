@@ -1307,3 +1307,32 @@ API仍46d5090；root继续草稿消费，B继续B3v3核心输出语义。
 差额转现金；内容hash、收件前拒绝、冻结ID隔离及正常研究tool读取，同时不影响
 SEC与distribution。已向协调任务明确两个共享agents文件owner需先对齐，其余
 独占数据模块可独立实施；当前仅完成核对与具体方案，不声称新资料已入库或可读。
+
+
+## 官方行业/持仓观察最小实现与组合合同复验（2026-09-04，北京时间）
+
+前次仅查ORM便说无需迁移不完整：真实冻结PG在0035 ownership trigger处拒绝新类型。
+复用DataSnapshot/ResearchEvidenceRef/DataArtifact，无新表；0038仅追加新issuer类型
+和两原件的精确归属条件，不改旧分红/价格分支。原件内容首次收件时间与新观察本次
+收件分开，内容相同可复用旧artifact；新available取两份本次receipt较晚者，不重标旧原件。
+
+原件重新逐行核对纠正：D all_positive_weights=false在当前XLSX由零权重导致，未见
+负非零或负零，不能转述成存在负权重；实现与合成回归仍支持负权重不裁剪。资料
+保留industry/percent/原标签/date/两receipt和未知发布时间、分母、有效期、差额归属。
+原件两hash及最终解析行数匹配D归档；没有外呼或把原件当测试fixture。
+
+实现af5f96c+44b86aa新增parse/persist/read、冻结快照及既有security_snapshot同级
+issuer_fund_observation字段；现有issuer_distribution_local新增--fund-observation，
+保留SEC份额身份、原件归档与验读。旧SEC/distribution/显式portfolio_snapshot_id保持。
+集中审查修复：缺weight不静默漏行，只有明确A:I合并页尾单独识别，页尾后持仓拒绝；
+JSON parse_float=Decimal，显示百分号与originalValue交叉核验；坏optional payload
+局部不可用，不隐藏有效资料或读未冻结新ID。纯XML矩阵已纳入持久测试，无mock替代。
+17unit、3PG（跨分红共享原件不同收件、新旧冻结/tool、空迁移往返/非空降级拒绝）、
+2旧分红/显式绑定PG、Mypy4/Ruff通过，独立审查ready。尚未应用业务0038或实际导入。
+
+B v3核心7e129a8→7880f20的65unit/Mypy4已复验。后续09dbb82→d8c5eab连同
+root1c720e7→d53d69a一起集成：修复wrap serializer返回注解导致OpenAPI退化为自由
+字典的问题，统一generate/check/typecheck通过；120组合unit、15关键PG、Mypy13/Ruff
+通过。v3需显式选择，当前不自动激活；新草稿context仍context_only/locked，旧估值
+和正式selection边界不改。171对象完整pre-0038备份已完成，业务仍API46d5090/DB0037，
+等待本批页面入口交付后再统一运行切换与真实原件本地验收。

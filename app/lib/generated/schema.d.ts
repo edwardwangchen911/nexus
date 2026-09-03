@@ -3577,6 +3577,7 @@ export interface components {
             stance: "buy_candidate" | "reduce_candidate" | "hold" | "watch";
             /** Strategy Version */
             strategy_version: string;
+            synthesis_assessment?: components["schemas"]["SynthesisAssessment"] | null;
             /** Theses */
             theses: components["schemas"]["ResearchClaim"][];
             /** Uncertainties */
@@ -3670,6 +3671,7 @@ export interface components {
             /** Reviewed Claim Ids */
             reviewed_claim_ids: string[];
             role: components["schemas"]["AgentRole"];
+            synthesis_assessment?: components["schemas"]["SynthesisAssessment"] | null;
         };
         /** ResearchStageSummary */
         ResearchStageSummary: {
@@ -4343,6 +4345,45 @@ export interface components {
         };
         /** @enum {string} */
         SyncRunStatus: "ACTIVE" | "READY" | "PARTIAL" | "STALE" | "RECONCILIATION_REQUIRED" | "FAILED";
+        /** SynthesisAssessment */
+        SynthesisAssessment: {
+            /** Claims */
+            claims: components["schemas"]["ResearchClaim"][];
+            /**
+             * Review Conclusion
+             * @enum {string}
+             */
+            review_conclusion: "sufficient" | "limited" | "insufficient";
+            /** Reviews */
+            reviews: components["schemas"]["SynthesisClaimReview"][];
+            /**
+             * Stance
+             * @enum {string}
+             */
+            stance: "buy_candidate" | "reduce_candidate" | "hold" | "watch";
+            /** Uncertainties */
+            uncertainties: string[];
+        };
+        /** SynthesisClaimReview */
+        SynthesisClaimReview: {
+            /** Claim Id */
+            claim_id: string;
+            /** Evidence Refs */
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            /** Missing Evidence */
+            missing_evidence: string[];
+            /** Prevented Conclusion */
+            prevented_conclusion: string | null;
+            /** Rationale */
+            rationale: string;
+            /** Resolved */
+            resolved: boolean;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "accepted" | "rejected" | "unresolved";
+        };
         /**
          * TypedMetric
          * @description One dimension is explicitly known or carries a stable unknown reason.
