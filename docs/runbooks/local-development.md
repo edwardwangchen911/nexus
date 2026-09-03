@@ -57,7 +57,26 @@ cp infra/env.example infra/.env.local
 
 `DATABASE_URL` 与 `OBJECT_STORE_ENDPOINT` 供容器使用，因此 host 分别应指向 Compose service 名 `postgres` 与 `minio`，而不是 `127.0.0.1`。
 
-Strategy R&D 的独立 worker 仅支持解析后的 `fixture` 或 `responses` 模式；配置 `codex_sdk` 会在启动队列前明确拒绝，不会生成固定结果替代真实模型。Responses 需完整模型配置，仍保留 30 秒模型预算、45 秒 worker 截止及调整价格准入。通用研究的 Codex SDK 单次入口不受此限制变更影响；它与策略演化尚未共享运行时合同，不能据通用研究成功宣称策略演化已接通。
+Strategy R&D 独立 worker 支持显式 `fixture`、`responses`，以及必须带 `--once` 的
+`codex_sdk`。Codex 长驻模式在领取队列前拒绝；不会回退为 fixture。先通过现有本地配置入口
+登记专用提示词和模型版本，不重标通用研究 v1/v2：
+
+```bash
+uv run --package nexus-engine nexus-openai-local setup --backend codex_sdk --strategy-rnd --skip-key
+```
+
+该命令只幂等登记配置，不创建研究或 Job、不调用模型；`--strategy-rnd` 与 `--staged` 互斥。
+已显式注入本地数据库等运行配置的进程可使用
+`AGENT_RUNTIME_MODE=codex_sdk uv run --package nexus-engine nexus-engine-strategy-rnd-worker --once`
+处理最多一个已有策略研发 Job；worker 本身不读取 `infra/.env.local`，不要把数据库凭据复制到
+命令或日志。调用前须完成 `0036_strategy_rnd_usage_unknown` 迁移与合格策略/价格 authority 准备。
+普通 setup 和单次 worker 都不补造这些输入，也不自动排队、晋级或交易。
+
+模型最多一次无工具调用，30 秒局部截止并给 45 秒 worker 总截止至少留出 5 秒结算余量。
+64,000/8,192 token 是本地验收阈值，不是 SDK 服务端消耗上限；已知用量原样保存，未知三项计数
+和订阅美元结算费用保持 null。进程异常后的重领在第二次模型调用前终止，不自动重放未知结果。
+0036 不改旧行；存在未知或不兼容旧约束的用量事实时拒绝降级，不填零、不删历史。
+合成接线通过仍不等于真实家族完成；当前调整价格、长期 OOS、人工选择与执行锁门禁不变。
 
 ## 启动
 

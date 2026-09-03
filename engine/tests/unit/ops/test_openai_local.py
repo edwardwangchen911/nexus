@@ -1,10 +1,82 @@
 """Local OpenAI setup must not expose credentials or silently call a provider."""
 
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from openai import RateLimitError
+
+
+def test_strategy_rnd_setup_dispatches_explicit_offline_registration(monkeypatch, capsys) -> None:
+    from nexus.ops import openai_local
+    from nexus.settings import EngineSettings
+
+    settings = EngineSettings(
+        database_url="postgresql+asyncpg://localhost/nexus",
+        environment="development",
+        agent_runtime_mode="codex_sdk",
+    )
+    prepare = AsyncMock()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "nexus-openai-local",
+            "setup",
+            "--backend",
+            "codex_sdk",
+            "--strategy-rnd",
+            "--skip-key",
+        ],
+    )
+    monkeypatch.setattr(openai_local, "local_settings", lambda *args, **kwargs: settings)
+    monkeypatch.setattr(openai_local, "prepare_database", prepare)
+    monkeypatch.setattr(
+        openai_local,
+        "status",
+        lambda _settings: {
+            "ready_for_model_requests": True,
+            "execution_locked": True,
+        },
+    )
+
+    assert openai_local.main() == 0
+    prepare.assert_awaited_once_with(settings, staged=False, strategy_rnd=True)
+    assert "registered" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "argv,code",
+    [
+        (
+            ["setup", "--backend", "responses", "--strategy-rnd", "--skip-key"],
+            "CODEX_STRATEGY_RND_SETUP_ONLY",
+        ),
+        (
+            [
+                "setup",
+                "--backend",
+                "codex_sdk",
+                "--strategy-rnd",
+                "--staged",
+                "--skip-key",
+            ],
+            "CODEX_STRATEGY_RND_STAGED_CONFLICT",
+        ),
+        (
+            ["status", "--backend", "codex_sdk", "--strategy-rnd"],
+            "CODEX_STRATEGY_RND_SETUP_ONLY",
+        ),
+    ],
+)
+def test_strategy_rnd_setup_rejects_ambiguous_or_non_setup_modes(
+    monkeypatch, capsys, argv: list[str], code: str
+) -> None:
+    from nexus.ops import openai_local
+
+    monkeypatch.setattr("sys.argv", ["nexus-openai-local", *argv])
+    assert openai_local.main() == 1
+    assert code in capsys.readouterr().out
 
 
 def test_local_setup_reports_missing_key_without_enabling_responses(

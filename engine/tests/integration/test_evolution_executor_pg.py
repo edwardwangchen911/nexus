@@ -293,6 +293,183 @@ async def test_real_generate_family_creates_exactly_twenty_four_bounded_candidat
     assert untouched_after == untouched_before == (0, 0)
 
 
+@pytest.mark.asyncio
+async def test_codex_reclaimed_generation_is_terminal_without_a_second_model_call(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.evolution import codex
+    from nexus.evolution import executor as executor_module
+    from nexus.ops.openai_local import prepare_database
+
+    settings = EngineSettings(
+        database_url=migrated_database_url,
+        agent_runtime_mode="codex_sdk",
+    )
+    factory = session_factory(settings)
+    baseline = await _seed_long_generation_baseline(factory)
+    await prepare_database(settings, strategy_rnd=True)
+    generation_time = datetime.now(UTC) + timedelta(minutes=2)
+    evidence_id = uuid4()
+    async with factory() as session, session.begin():
+        search = await session.scalar(
+            select(StrategyEvolutionPolicyRecord).where(
+                StrategyEvolutionPolicyRecord.policy_kind == "evolution_search_space"
+            )
+        )
+        assert search is not None
+        session.add_all(
+            (
+                StrategyResearchLineageRecord(
+                    id=uuid4(),
+                    lineage_key="phase2-reclaim-generation",
+                    evolution_policy_id=search.id,
+                    cumulative_oos_trial_count=0,
+                    status="active",
+                ),
+                QualityReport(
+                    id=uuid4(),
+                    data_snapshot_id=DATA_SNAPSHOT_ID,
+                    status="PASS",
+                    schema_version="v1",
+                    payload={},
+                ),
+                ResearchEvidenceRef(
+                    id=evidence_id,
+                    source="fixture",
+                    provider_object_id="phase2-reclaim-evidence",
+                    revision="v1",
+                    available_at=COMPLETED_AT - timedelta(minutes=1),
+                    location=f"memory://sha256/{'7' * 64}",
+                    content_hash="7" * 64,
+                    byte_length=42,
+                ),
+            )
+        )
+        await session.flush()
+        session.add(
+            AgentDataSnapshotEvidenceRecord(
+                data_snapshot_id=DATA_SNAPSHOT_ID,
+                instrument_id=baseline.data.spy_instrument_id,
+                evidence_ref_id=evidence_id,
+                authority_kind="research",
+                selected_at=None,
+                source="fixture",
+                provider_object_id="phase2-reclaim-evidence",
+                revision="v1",
+                available_at=COMPLETED_AT - timedelta(minutes=1),
+                location=f"memory://sha256/{'7' * 64}",
+                content_hash="7" * 64,
+            )
+        )
+    payload = build_strategy_rnd_job_payload(
+        operation="generate_family",
+        family_id=None,
+        experiment_id=None,
+        expected_champion_generation=1,
+    )
+    async with factory() as session, session.begin():
+        job = await enqueue_strategy_rnd_job(
+            session,
+            payload=payload,
+            effective_at=generation_time,
+        )
+    provider_calls = 0
+
+    async def invoke_codex_once(request_payload, *, output_model):
+        nonlocal provider_calls
+        provider_calls += 1
+        del output_model
+        request = request_payload["request"]
+        proposal = {
+            "schema_version": "strategy_experiment_proposal_v1",
+            "parent_strategy_definition_id": request["parent_strategy_definition_id"],
+            "champion_generation": request["champion_generation"],
+            "research_lineage_id": request["research_lineage_id"],
+            "hypothesis": "Bounded retry evidence.",
+            "expected_mechanism": "The first external result is never replayed.",
+            "invalidation_conditions": ["The process did not cross the external boundary."],
+            "evidence_refs": request["evidence_refs"],
+            "mutation_axes": [
+                {"axis": "min_adv20_usd", "values": ["25000000", "50000000"]},
+                {"axis": "min_close", "values": ["3", "5"]},
+                {"axis": "target_weight", "values": ["0.075", "0.10"]},
+            ],
+        }
+        from nexus.agents.responses_budget import UsageSnapshot
+
+        return json.dumps(proposal), UsageSnapshot(
+            input_tokens=300,
+            output_tokens=80,
+            provider_calls=1,
+        )
+
+    monkeypatch.setattr(codex, "invoke_codex", invoke_codex_once)
+
+    async def crash_after_external_result(
+        _session,
+        *,
+        request,
+        tools,
+        runtime,
+        prompt_version_id,
+        model_config_id,
+        now,
+    ):
+        del _session, prompt_version_id, model_config_id, now
+        await runtime.generate(request, tools)
+        raise RuntimeError("synthetic process loss after external result")
+
+    monkeypatch.setattr(
+        executor_module,
+        "execute_strategy_rnd",
+        crash_after_external_result,
+    )
+    first_worked = await run_strategy_rnd_worker_once(
+        settings,
+        executor=build_strategy_rnd_executor(settings),
+        worker_id="strategy-rnd-crashed-worker",
+        worker_started_at=generation_time,
+        clock=lambda: generation_time + timedelta(seconds=1),
+    )
+    async with factory() as session:
+        requeued = await session.get(Job, job.id)
+        assert requeued is not None
+        assert (requeued.status, requeued.attempt_count, requeued.last_error_code) == (
+            "queued",
+            1,
+            "HANDLER_FAILED",
+        )
+
+    # A previous worker crossed the external-call boundary but failed to commit.
+    # Attempt two must terminate without dispatching the model again.
+    worked = await run_strategy_rnd_worker_once(
+        settings,
+        executor=build_strategy_rnd_executor(settings),
+        worker_id="strategy-rnd-reclaim-test",
+        worker_started_at=generation_time,
+        clock=lambda: generation_time + timedelta(seconds=4),
+    )
+
+    async with factory() as session:
+        stored = await session.get(Job, job.id)
+        run_count = int(
+            await session.scalar(select(func.count()).select_from(StrategyRNDRunRecord)) or 0
+        )
+        family_count = int(
+            await session.scalar(select(func.count()).select_from(StrategyExperimentFamilyRecord))
+            or 0
+        )
+
+    assert first_worked is worked is True
+    assert stored is not None
+    assert (stored.status, stored.attempt_count, stored.last_error_code) == (
+        "failed",
+        2,
+        "GENERATION_REPLAY_FORBIDDEN",
+    )
+    assert (run_count, family_count) == (0, 0)
+    assert provider_calls == 1
 
 
 @pytest.mark.asyncio

@@ -72,9 +72,11 @@
 
 **Files:**
 - Modify: `engine/src/nexus/evolution/executor.py`
+- Modify: `engine/src/nexus/evolution/codex.py`（保留 worker 绝对截止，不能在 service 预检后重新计时）
 - Modify: `engine/src/nexus/evolution/authority.py`
 - Modify: `engine/src/nexus/evolution/service.py`
 - Modify: `engine/src/nexus/evolution/worker.py`
+- Modify: `engine/src/nexus/ops/openai_local.py`（仅增加显式 `--strategy-rnd` setup 注册，不调用模型或入队）
 - Modify: `engine/src/nexus/evolution/agent.py`（Protocol 接受可空 usage）
 - Modify: `engine/src/nexus/persistence/models/evolution.py`
 - Modify: `engine/src/nexus/persistence/migrations.py`
@@ -83,18 +85,23 @@
 - Test: `engine/tests/integration/test_evolution_executor_pg.py`
 - Test: `engine/tests/integration/test_evolution_admission_pg.py`
 - Test: `engine/tests/integration/test_evolution_migration.py`
+- Test: `engine/tests/unit/ops/test_openai_local.py`
+- Test: `engine/tests/integration/test_openai_local.py`
 
 **Interfaces:**
 - `_generation_runtime(authority)` 显式选择新运行时，不 fallback fixture。
 - `load_generation(..., model_id=None, model_version=None)` 增加可选精确版本过滤，原调用默认不变。
 - `run_strategy_rnd_worker(..., run_forever=False)` 复用既有 run-once；Codex 禁止 `run_forever=True`，CLI 保留先于数据库/队列拒绝长驻运行的边界。
+- `nexus-openai-local setup --backend codex_sdk --strategy-rnd --skip-key` 只幂等注册现有 `strategy_rnd_v1` prompt 与固定 Codex R&D config；与 `--staged` 互斥，不创建研究、行情、作业或模型调用。
 
-- [ ] **Step 1: 先锁定拒绝与身份测试。** Codex builder 不需要 Responses API key；只接新模型版本；Responses/fixture 不消费新 Codex 配置；未知后端仍拒绝。生成操作 `context.claim.attempt_no != 1` 时返回失败且零模型调用，不能因既有队列重领自动重放外呼。
-- [ ] **Step 2: 跑红后实现精确适配。** executor 对 Codex 传固定 model ID/version 给 resolver；将 worker 剩余 deadline 留出至少 5 秒结算余量，不能仅从调用开始重新计 30 秒而越过 worker 的 45 秒上限。
-- [ ] **Step 3: 订阅用量持久化回归。** 新 Codex version 的 `settled_cost_usd=None`；实际 token（包括超阈值但已知的数字）原样持久化，未知调用三项计数均 null 且失败。新迁移放开 input_tokens/output_tokens/tool_call_count 的 NOT NULL，并约束三项同时已知或同时未知；旧数值/旧行不更新。降级仅在无 null 记录时允许，已有未知记录则明确拒绝，不填零来降级。隔离 PG 覆盖升级、合法/非法插入、历史数值保持和两种降级路径；原 Responses 美元计费和 fixture 回归不变。新版本仅经明确 setup/受控注册存在，不把旧 v1/v2 委员会记录重标成策略研发配置。
-- [ ] **Step 4: 隔离 PG 接线。** synthetic authority 经 executor→execute_strategy_rnd→数据库验证：成功只创建一个严格输出；错误、超时、重领不创建 family；无合格调整价格时在外呼前停止；原 OOS/promotion/rollback 测试保持。
+- [x] **Step 1: 先锁定拒绝与身份测试。** Codex builder 不需要 Responses API key；只接新模型版本；Responses/fixture 不消费新 Codex 配置；未知后端仍拒绝。生成操作 `context.claim.attempt_no != 1` 时返回失败且零模型调用，不能因既有队列重领自动重放外呼。
+- [x] **Step 2: 跑红后实现精确适配。** executor 对 Codex 传固定 model ID/version 给 resolver；将 worker 剩余 deadline 留出至少 5 秒结算余量，并传递同一绝对 monotonic deadline，不能在 service 预检后从调用开始重新计时而越过 worker 的 45 秒上限。普通 setup 增加显式策略研发选项并注册 exact prompt/config；不复用委员会的 prompt version，不改默认 setup，也不顺带入队或外呼。
+- [x] **Step 3: 订阅用量持久化回归。** 新 Codex version 的 `settled_cost_usd=None`；实际 token（包括超阈值但已知的数字）原样持久化，未知调用三项计数均 null 且失败。新迁移放开 input_tokens/output_tokens/tool_call_count 的 NOT NULL，并约束三项同时已知或同时未知；旧数值/旧行不更新。降级仅在无 null 记录时允许，已有未知记录则明确拒绝，不填零来降级。隔离 PG 覆盖升级、合法/非法插入、历史数值保持和两种降级路径；原 Responses 美元计费和 fixture 回归不变。新版本仅经明确 setup/受控注册存在，不把旧 v1/v2 委员会记录重标成策略研发配置。
+- [x] **Step 4: 隔离 PG 接线。** synthetic authority 经 executor→execute_strategy_rnd→数据库验证：成功只创建一个严格输出；错误、超时、重领不创建 family；无合格调整价格时在外呼前停止；原 OOS/promotion/rollback 测试保持。
 - [ ] **Step 5: 审查并集成。** 集中审查明确区分本地运行时/入口/真实家族，A 合入后复核主线包含变更。真实 family 仍不启动，直到同一合法数据 authority 和普通准备入口都已具备；不代用户选择真实策略动作。
+
+  root 基线为 `0872916`（含 B `ac693f3`），运行时接线提交 `9ad78b6`；setup 与依赖它的重领 PG 分成第二个小提交，避免一片超过 800 行。167 项相关 unit、11 项 executor/worker/setup PG、6 源文件 Mypy、Ruff/diff-check通过。独立审查唯一 P2 为 service 预检后的相对 deadline 重起算，先红回归后改为固定绝对截止，59 项定向复核及受影响 3 项生成/重领 PG 再验通过。A 另以 `1d66446` 修复通用研究默认选择/显式准入/worker 对新 RND 配置的隔离，11 PG、独立17 unit通过。以上均无真实模型/券商调用；主线集成及业务运行仍分别记录。
 
 ## 后续验收边界
 
-运行时及注入接线是 E1 的代码部分，不代替正式 setup 入口、合格历史基线、有效策略 registry 和真实单家族验收。继续任务时先查现有注册入口，复用已有注册/提示资产流程；不能以导入成功或 synthetic family 通过声称 E1 全部完成。真实长期晋级协议与主计划的 S1/S2/S3 依赖保持独立。
+运行时、接线及正式 setup 是 E1 的代码部分，不代替合格历史基线、有效策略 registry 和真实单家族验收。不能以导入成功或 synthetic family 通过声称 E1 全部完成。真实长期晋级协议与主计划的 S1/S2/S3 依赖保持独立。

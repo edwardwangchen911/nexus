@@ -107,7 +107,9 @@ def status(settings: EngineSettings) -> dict[str, object]:
     }
 
 
-async def prepare_database(settings: EngineSettings, *, staged: bool = False) -> None:
+async def prepare_database(
+    settings: EngineSettings, *, staged: bool = False, strategy_rnd: bool = False
+) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
@@ -117,6 +119,10 @@ async def prepare_database(settings: EngineSettings, *, staged: bool = False) ->
     config = dict(_CONFIG)
     if staged and settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK:
         raise ValueError("CODEX_STAGED_BACKEND_REQUIRED")
+    if strategy_rnd and settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK:
+        raise ValueError("CODEX_STRATEGY_RND_SETUP_ONLY")
+    if staged and strategy_rnd:
+        raise ValueError("CODEX_STRATEGY_RND_STAGED_CONFLICT")
     if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
         from nexus.agents.codex_sdk import (
             CONFIG_VERSION,
@@ -126,10 +132,16 @@ async def prepare_database(settings: EngineSettings, *, staged: bool = False) ->
         )
         from nexus.agents.codex_sdk import MODEL_ID as SDK_MODEL
 
+        version = STAGED_CONFIG_VERSION if staged else CONFIG_VERSION
+        if strategy_rnd:
+            from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION
+
+            version = CODEX_RND_CONFIG_VERSION
+
         config.update(
             {
                 "model_id": SDK_MODEL,
-                "version": STAGED_CONFIG_VERSION if staged else CONFIG_VERSION,
+                "version": version,
                 "max_input_tokens": MAX_INPUT_TOKENS,
                 "max_output_tokens": MAX_OUTPUT_TOKENS,
                 "max_tool_calls": 0,
@@ -142,24 +154,33 @@ async def prepare_database(settings: EngineSettings, *, staged: bool = False) ->
             }
         )
     config_hash = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+    prompts: list[tuple[str, str, str, str]] = [
+        (prompt.role, "local-openai-v1", prompt.content, prompt.content_hash)
+        for prompt in load_prompt_assets().values()
+    ]
+    if strategy_rnd:
+        from nexus.evolution.agent import load_strategy_rnd_prompt
+
+        prompt = load_strategy_rnd_prompt()
+        prompts.append((prompt.role, prompt.version, prompt.content, prompt.content_hash))
     async with session_factory(settings)() as session, session.begin():
-        for prompt in load_prompt_assets().values():
+        for role, version, content, content_hash in prompts:
             existing = await session.scalar(
                 select(AgentPromptVersionRecord).where(
-                    AgentPromptVersionRecord.role == prompt.role,
-                    AgentPromptVersionRecord.version == "local-openai-v1",
+                    AgentPromptVersionRecord.role == role,
+                    AgentPromptVersionRecord.version == version,
                 )
             )
             if existing is None:
                 session.add(
                     AgentPromptVersionRecord(
-                        role=prompt.role,
-                        version="local-openai-v1",
-                        content=prompt.content,
-                        content_hash=prompt.content_hash,
+                        role=role,
+                        version=version,
+                        content=content,
+                        content_hash=content_hash,
                     )
                 )
-            elif existing.content_hash != prompt.content_hash or existing.content != prompt.content:
+            elif existing.content_hash != content_hash or existing.content != content:
                 raise ValueError("OPENAI_PROMPT_VERSION_CONFLICT")
         existing_model = await session.scalar(
             select(AgentModelConfigRecord).where(
@@ -296,6 +317,11 @@ def main() -> int:
     parser.add_argument(
         "--staged", action="store_true", help="Setup the three-stage SDK committee version"
     )
+    parser.add_argument(
+        "--strategy-rnd",
+        action="store_true",
+        help="Setup the one-turn Codex Strategy R&D prompt and model version",
+    )
     parser.add_argument("--as-of", type=datetime.fromisoformat)
     parser.add_argument(
         "--skip-key", action="store_true", help="Prepare local DB only; no key prompt or network"
@@ -307,6 +333,10 @@ def main() -> int:
             raise ValueError("SEC_LOCAL_DISCLOSURE_FORM_INVALID")
         if args.staged and (args.action != "setup" or args.backend != "codex_sdk"):
             raise ValueError("CODEX_STAGED_SETUP_ONLY")
+        if args.strategy_rnd and (args.action != "setup" or args.backend != "codex_sdk"):
+            raise ValueError("CODEX_STRATEGY_RND_SETUP_ONLY")
+        if args.strategy_rnd and args.staged:
+            raise ValueError("CODEX_STRATEGY_RND_STAGED_CONFLICT")
         if not (root / "engine/pyproject.toml").is_file():
             raise ValueError("OPENAI_REPOSITORY_ROOT_REQUIRED")
         settings = local_settings(
@@ -316,7 +346,13 @@ def main() -> int:
             backend=args.backend,
         )
         if args.action == "setup":
-            asyncio.run(prepare_database(settings, staged=args.staged))
+            asyncio.run(
+                prepare_database(
+                    settings,
+                    staged=args.staged,
+                    strategy_rnd=args.strategy_rnd,
+                )
+            )
             if (
                 args.backend == "responses"
                 and not args.skip_key
