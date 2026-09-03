@@ -5,6 +5,16 @@ import { ProposalComparison } from "../../../app/components/proposal-comparison"
 import { eligibleProposalGroup, proposalGroup } from "./fixtures";
 
 describe("three-way proposal comparison", () => {
+  it("explains the current price-purpose restriction without offering a doomed start", () => {
+    const onStartShadow = vi.fn();
+    render(<ProposalComparison group={eligibleProposalGroup({ shadow_eligibility: {
+      eligible: false, reasons: ["SHADOW_PRICE_AUTHORITY_UNAVAILABLE"],
+    } })} onStartShadow={onStartShadow} onReject={vi.fn()} />);
+    expect(screen.getByText(/当前价格证据尚不能用于新的前向观察/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "启动影子验证" })).not.toBeInTheDocument();
+    expect(screen.queryByText("可进入影子验证")).not.toBeInTheDocument();
+    expect(onStartShadow).not.toHaveBeenCalled();
+  });
   it.each([undefined, null])("reports legacy economic output %s as unreported, never hold", (economic) => {
     const onStartShadow = vi.fn();
     const onReject = vi.fn();

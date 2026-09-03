@@ -1,5 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
+import { eligibleProposalGroup } from "../unit/optimize/fixtures";
 
 const portfolioId = "0198d500-1000-7000-8000-000000001301";
 const snapshotId = "0198d500-1000-7000-8000-000000001302";
@@ -131,6 +132,29 @@ for (const viewport of [
     expect(serious).toEqual([]);
   });
 }
+
+test("current price purpose blocks a new shadow before any start request", async ({ page }) => {
+  const writes: string[] = [];
+  page.on("request", (request) => {
+    if (!["GET", "HEAD"].includes(request.method())) writes.push(request.url());
+  });
+  await installFixtures(page);
+  await page.route(`**/api/v1/optimization-proposals/${groupId}/shadow`, (route) => route.fulfill({
+    status: 404, json: { error: { code: "NOT_FOUND", message: "Proposal Shadow was not started.",
+      request_id: groupId, details: { reason: "SHADOW_NOT_STARTED" } } },
+  }));
+  await page.route(`**/api/v1/optimization-proposals/${groupId}`, (route) => route.fulfill({ json: {
+    data: eligibleProposalGroup({ shadow_eligibility: {
+      eligible: false, reasons: ["SHADOW_PRICE_AUTHORITY_UNAVAILABLE"],
+    } }), meta,
+  } }));
+  await page.goto(`/optimize/${groupId}`);
+  await expect(page.getByText(/当前价格证据尚不能用于新的前向观察/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "启动影子验证" })).toHaveCount(0);
+  await expect(page.getByText("可进入影子验证")).toHaveCount(0);
+  await expect(page.getByRole("table", { name: "保持现状、最小调整与策略目标的确定性比较" })).toBeVisible();
+  expect(writes).toEqual([]);
+});
 
 test("no diagnostic trigger does not recommend keeping the portfolio", async ({ page }) => {
   await installFixtures(page, { ...diagnostic, optimization_need: "NO_ACTION", items: [] });

@@ -282,6 +282,10 @@ def test_disclosure_script_is_not_research_text():
 
 ### S1 proposal Shadow
 
+2026-09-04 接续核对：现有人工确认启动、单日推进服务及历史GET/BFF/页面均已存在；当前新用途价格判断关闭，reader仍限定旧policy，`shadow_source_query_v1`缺正常生产入口，不能只新增一个必败CLI或开启旧门禁。root下一最小修复是让方案GET的`shadow_eligibility`复用POST同一当前用途判断，返回既有固定`SHADOW_PRICE_AUTHORITY_UNAVAILABLE`并显示中文原因。真实PG测试完整历史compared组在当前条件下GET不可启动、POST拒绝且零新Shadow事实；隔离允许历史合同的合法启动、关闭后已存GET与成功请求replay保持。补实际组件/浏览器禁用回归，无新schema/迁移/权限，不标S1闭环完成。owner=root，独立`edward/nexus-shadow-eligibility`，A不改对应GET区域。
+
+本片验证：新增两项真实API/PG先红，确证同组GET曾返回eligible=true而POST拒绝；修复后与原Shadow/API读取共10 PG通过，37项组件/标签单测、Mypy1、Ruff、TypeScript、eslint/diff-check通过。浏览器最初复用了“已有Shadow”fixture，导致页面正确优先显示旧观察状态；修为本例真实条件“尚未启动”后，固定原因可见、无启动按钮、无写请求通过。独立集中审查无P1/P2。无真实Shadow启动或重复外呼。
+
 - 复用 `backtest/{engine,authority_loader,costs,metrics}.py` 和 `shadow/{authority,start,service,query,repository}.py`。
 - A2的新用途authority就绪后，B补读取适配；人工选择真实方案前只在隔离合成环境建立session，不代用户选择真实组合动作。
 - T1与S1不是全局先后依赖；S1自己的方案/价格用途/人工选择已满足时可先做，不因T1多年历史数据不足而等待。

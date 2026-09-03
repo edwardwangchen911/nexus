@@ -80,6 +80,7 @@ from nexus.persistence.models.optimization import (
     ProposalComparisonRecord,
     ProposalPositionRecord,
 )
+from nexus.quality.source_policy import current_proposal_shadow_price_authority_available
 from nexus.reconciliation.admission_claim import claim_or_lock, validate_request_identity
 from nexus.reconciliation.persistence_errors import (
     BrokerSyncPersistenceError,
@@ -467,6 +468,8 @@ async def get_optimization_group(
                 ErrorCode.DATA_PARTIAL, "Proposal comparison is invalid.", status_code=409
             ) from error
     reasons = _shadow_eligibility_reasons(group, proposal_data)
+    if not reasons and not current_proposal_shadow_price_authority_available(group.source_policy_id):
+        reasons.append("SHADOW_PRICE_AUTHORITY_UNAVAILABLE")
     if not reasons and not await has_executable_shadow_authority(session, group):
         reasons.append("PERSISTED_SHADOW_AUTHORITY_INCOMPLETE")
     return OptimizationProposalGroupEnvelope(
