@@ -902,8 +902,9 @@ dom-final-summary.json；首次页面尚未加载完成的 false 保留，未覆
 合入 A 后，刷新/诊断 60 项单测、正常入口到隔离 PostgreSQL 再到 selector/诊断
 4 项集成用例、SDK 40 项单测和 6 项 worker/API PG 参数例通过，相关 Ruff/Mypy
 通过。PG 明确验证新 cutoff 可选中同轮 raw、旧 cutoff 不可选、券商失败无新快照，
-以及流动性值仍为 null 且有单位未核实原因。SDK 独立审查无问题；刷新修复已送一次
-独立审查。测试只用合成数据与隔离数据库，没有重复真实模型或券商调用。
+以及流动性值仍为 null 且有单位未核实原因。SDK 独立审查无问题；刷新修复的一次
+独立审查发现下述计数 P2，c10abb7 修正后同一审查者定向复核通过。main 已快进
+c10abb7。测试只用合成数据与隔离数据库，没有重复真实模型或券商调用。
 
 本轮验收脚本异常在测试本身修复：网关合成 request ID 必须用既有 UUIDv7 合同；
 PriceSeries.adjustment 和 manifest.instrument 沿实际类型读取，不猜字段。集中审查发现
@@ -914,3 +915,25 @@ engine 子目录运行会按设计返回
 OPENAI_REPOSITORY_ROOT_REQUIRED，改用仓库根目录的 uv --package nexus-engine 后
 40 项通过。这些不作为放宽产品校验的理由。当前修复属于代码与隔离回归完成；未重启
 共享 API，未运行新的真实研究或诊断，不宣称真实综合内容已通过或新诊断已在页面生效。
+
+同一当前案例草案检查：沿用上述新研究冻结的 portfolio_snapshot/diagnostic，直接
+通过正常 create_initial_draft 在显式回滚事务预检，结果为 DRAFT_NO_EVIDENCED_REDUCTION。
+当前既有诊断与减仓规则没有形成可证实的减仓幅度；不是因模型失败、授权不足而拒绝。
+没有为生成方案而改阈值或制造候选，事务回滚后方案数不变，模型/券商调用为零。
+记录位于 outputs/acceptance/draft-current-20260904/preflight-summary.json（0600，
+目录0700）。首次脚本把既有 diagnostic_run_id 误写成 diagnostic_report_id，未提交
+任何修改，读取实际冻结合同后纠正；不新增同义字段来掩盖脚本错误。
+
+## 方案证券代码可信投影（2026-09-04，北京时间）
+
+B 全站展示检查发现权重试算只能获得 UUID，A 的 343079f 在既有方案 GET 返回中补
+可空 display_symbol。单次查询只取方案 valuation_time 当时已经存在、当日有效的
+ticker 别名及证券身份，缺失保留 null；不采用当前别名回填旧方案，不更改方案、权重、
+计算或下单权限，无迁移/新数据源。生成客户端同步，字段可选以兼容旧 API；前端需同时
+兼容 undefined/null，不能假定 BFF 自动补 null。展示消费仍由 B 单一负责人处理。
+
+新增真实 API/隔离 PG 用例先因缺字段失败后通过，覆盖已知、晚录入、未来生效、过期、
+缺失、非 ticker、身份晚到及后续补录不污染旧读取。独立审查无重要问题，补充的截止
+时刻相等、晚一微秒、有效期首末日回归通过；既有方案读取 2 PG、BFF/runtime 24 项
+单测、类型/生成合同/Ruff/Mypy通过。尚未重建本地 API 或完成本字段实际页面验收，
+不把合入和合成回归当作运行生效；回退应用代码即可恢复旧响应，数据库事实不变。

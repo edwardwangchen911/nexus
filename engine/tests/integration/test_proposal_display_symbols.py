@@ -30,6 +30,10 @@ async def test_proposal_symbols_preserve_valuation_identity_and_unknowns(
                 "missing",
                 "other_alias",
                 "late_instrument",
+                "at_cutoff",
+                "microsecond_late",
+                "starts_today",
+                "ends_today",
             )
         )
     }
@@ -68,10 +72,22 @@ async def test_proposal_symbols_preserve_valuation_identity_and_unknowns(
                     instrument_id=instrument_id,
                     symbol=f"SYNTH{chr(65 + index)}",
                     alias_type="provider" if name == "other_alias" else "ticker",
-                    valid_from=date(2026, 8, 25) if name == "future_alias" else date(2020, 1, 1),
-                    valid_to=date(2026, 8, 23) if name == "expired" else None,
+                    valid_from=date(2026, 8, 25)
+                    if name == "future_alias"
+                    else cutoff.date()
+                    if name == "starts_today"
+                    else date(2020, 1, 1),
+                    valid_to=date(2026, 8, 23)
+                    if name == "expired"
+                    else cutoff.date()
+                    if name == "ends_today"
+                    else None,
                     created_at=cutoff + timedelta(days=1)
                     if name == "late_alias"
+                    else cutoff + timedelta(microseconds=1)
+                    if name == "microsecond_late"
+                    else cutoff
+                    if name == "at_cutoff"
                     else cutoff - timedelta(days=1),
                 )
             )
@@ -84,9 +100,11 @@ async def test_proposal_symbols_preserve_valuation_identity_and_unknowns(
         data = first.json()["data"]
         proposal = next(row for row in data["proposals"] if row["proposal_id"] == str(proposal_id))
         positions = {row["instrument_id"]: row for row in proposal["positions"]}
-        for name, instrument_id in ids.items():
+        for index, (name, instrument_id) in enumerate(ids.items()):
             assert positions[str(instrument_id)]["display_symbol"] == (
-                "SYNTHA" if name == "known" else None
+                f"SYNTH{chr(65 + index)}"
+                if name in {"known", "at_cutoff", "starts_today", "ends_today"}
+                else None
             )
         async with factory() as session, session.begin():
             session.add(
