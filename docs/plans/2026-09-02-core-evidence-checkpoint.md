@@ -1258,3 +1258,15 @@ root4b2 de4f49b摘为46d5090，A8unit+4聚焦PG、Mypy2/Ruff通过，实际claim
 unready仍如实显示；个人手动模式无常驻worker，不为状态变绿启动调度。首次直接
 无签名读取health/ready收到401，改用既有BFF签名入口读取，未改变认证设置。
 迁移前只读采集脚本曾引用不存在的表名，已按模型纠正后重读，无业务命令重放。
+
+
+## S2b-3c1 冻结特征读取集成（2026-09-04，北京时间）
+
+B b681218摘为830107d：显式引用calendar/universe/raw+all价格集合/sector读取未排名
+特征，独立UnrankedStrategySnapshot不把缺少排名历史填0；checkpoint依真实持仓历史
+补排名后才形成完整输入。入口只SELECT，无隐式采集或选源。当前live量纲未获证明
+仍拒绝，当前source policy不支持adjusted的守卫保持；fixture装配不等于forward准入。
+
+A28项unit、1项隔离PG真实调用链（200日fixture、引用缺失/raw-all错配/时点拒绝、
+SELECT-only、原adjusted gate不patch）、Mypy3/Ruff/diff通过；B独立审查无P1/P2。
+无迁移及业务写入，本片仅合主机代码，API仍46d5090；3c2单次入口由B继续实施。
