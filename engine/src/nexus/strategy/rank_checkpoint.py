@@ -39,6 +39,7 @@ from nexus.strategy.forward import (
 from nexus.strategy.interpreter import evaluate_compiled_strategy_with_rank_observations
 from nexus.strategy.rank_continuity import PositionContinuity, load_held_position_continuity
 from nexus.strategy.snapshot import UnrankedStrategySnapshot
+from nexus.strategy.snapshot_reader import FrozenStrategyReferences, load_unranked_strategy_features
 
 _SCHEMA = "rank_checkpoint_v1"
 
@@ -55,12 +56,22 @@ class RankCheckpointAuthority:
     quality_report_id: UUID
     portfolio_projection_hash: str
     authority_hash: str
+    input_references: FrozenStrategyReferences | None = None
 
 
 class _Observations(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     held_rank: tuple[HeldRankObservation, ...]
     continuity: tuple[PositionContinuity, ...]
+    input_references: FrozenStrategyReferences | None = None
+
+    def as_payload(self) -> dict[str, object]:
+        payload = self.model_dump(mode="json")
+        if self.input_references is None:
+            payload.pop("input_references")
+        else:
+            payload["input_references"] = self.input_references.canonical_payload
+        return payload
 
 
 @dataclass(frozen=True)
@@ -89,6 +100,15 @@ def _hash(value: object) -> str:
     return hashlib.sha256(
         json.dumps(_normalize(value), sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _snapshot_hash(snapshot: StrategyDataSnapshot, reference_hash: str | None) -> str:
+    content = snapshot.model_dump(mode="python")
+    if reference_hash is None:
+        return _hash(content)
+    if len(reference_hash) != 64 or any(char not in "0123456789abcdef" for char in reference_hash):
+        raise ValueError("RANK_CHECKPOINT_REFERENCE_HASH_INVALID")
+    return _hash({"snapshot": content, "input_reference_hash": reference_hash})
 
 
 def _checkpoint_hash(
@@ -328,6 +348,28 @@ async def evaluate_and_persist_rank_checkpoint(
                 ),
             }
         )
+        references = authority.input_references
+        if references is not None:
+            expected_identity = {
+                "decision_session": frozen.decision_session,
+                "execution_session": authority.execution_session,
+                "decision_time": cutoff,
+                "source_policy_id": authority.source_policy_id,
+                "calendar_authority_id": authority.calendar_authority_id,
+                "universe_snapshot_id": authority.universe_snapshot_id,
+                "quality_report_id": authority.quality_report_id,
+            }
+            if references.market.model_dump() != expected_identity:
+                raise ValueError("RANK_CHECKPOINT_REFERENCE_IDENTITY_MISMATCH")
+            verified = await load_unranked_strategy_features(
+                session,
+                references=references,
+                current_positions=frozen.current_positions,
+            )
+            if _hash(verified.snapshot.with_rank_states(states).model_dump(mode="python")) != _hash(
+                frozen.model_dump(mode="python")
+            ):
+                raise ValueError("RANK_CHECKPOINT_REFERENCE_CONTENT_MISMATCH")
         observed = evaluate_compiled_strategy_with_rank_observations(
             compiled, frozen, frozen.decision_session
         )
@@ -352,10 +394,12 @@ async def evaluate_and_persist_rank_checkpoint(
         )
         if decision is None:
             return None
-        input_hash = _hash(frozen.model_dump(mode="python"))
+        input_hash = _snapshot_hash(frozen, references.content_hash if references else None)
         observations = _Observations(
-            held_rank=observed.held_rank_observations, continuity=continuity.positions
-        ).model_dump(mode="json")
+            held_rank=observed.held_rank_observations,
+            continuity=continuity.positions,
+            input_references=references,
+        ).as_payload()
         checkpoint_hash = _checkpoint_hash(
             decision.decision_hash,
             parent_record.checkpoint_hash if parent_record else None,

@@ -235,3 +235,47 @@ async def test_frozen_feature_reader_and_admission_remain_separate(migrated_data
         assert set(statements) == {"SELECT"}
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_forward_entry_preserves_actual_source_gate_without_writes(migrated_database_url):
+    from nexus.ops.paper_once import PaperForwardRequest, PaperOnceError, run_once
+    from nexus.settings import EngineSettings
+    from sqlalchemy import text
+
+    engine = create_async_engine(migrated_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        references = await seed(factory)
+        request = PaperForwardRequest(
+            action="forward",
+            account_id=UUID("d31672c0-3922-5ebd-8fdb-cd3174266731"),
+            idempotency_key="real-forward-gate",
+            request_time=CUTOFF + timedelta(seconds=1),
+            strategy_definition_id=UUID("019d0000-0000-7000-8000-000000002200"),
+            champion_generation=1,
+            references=references,
+        )
+
+        async def counts():
+            async with factory() as session:
+                return (
+                    await session.execute(
+                        text(
+                            "SELECT (SELECT count(*) FROM strategy_decisions), "
+                            "(SELECT count(*) FROM strategy_rank_checkpoints), "
+                            "(SELECT count(*) FROM paper_order_batches), "
+                            "(SELECT count(*) FROM paper_orders), "
+                            "(SELECT count(*) FROM paper_fills)"
+                        )
+                    )
+                ).one()
+
+        before = await counts()
+        with pytest.raises(
+            PaperOnceError, match="STRATEGY_SNAPSHOT_ADJUSTED_AUTHORITY_UNAVAILABLE"
+        ):
+            await run_once(EngineSettings(database_url=migrated_database_url), request)
+        assert await counts() == before
+    finally:
+        await engine.dispose()

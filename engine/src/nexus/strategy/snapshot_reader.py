@@ -1,5 +1,7 @@
 """Explicit frozen database references for unranked features; no source promotion or I/O."""
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, cast
@@ -46,6 +48,19 @@ class FrozenStrategyReferences(BaseModel):
     raw_bar_set_ids: tuple[UUID, ...]
     adjusted_bar_set_ids: tuple[UUID, ...]
     sector_exposure_ids: tuple[UUID, ...]
+
+    @property
+    def canonical_payload(self) -> dict[str, object]:
+        payload = self.model_dump(mode="json")
+        for field in ("raw_bar_set_ids", "adjusted_bar_set_ids", "sector_exposure_ids"):
+            payload[field] = sorted(payload[field])
+        return payload
+
+    @property
+    def content_hash(self) -> str:
+        return hashlib.sha256(
+            json.dumps(self.canonical_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
 
     @model_validator(mode="after")
     def _unique(self) -> "FrozenStrategyReferences":

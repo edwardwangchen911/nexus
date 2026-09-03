@@ -1,12 +1,54 @@
 # 内部模拟单次操作
 
-`python -m nexus.ops.paper_once` 复用现有内部模拟服务。它不生成策略决策、不创建账户或初始资金、不采集数据、不启用每日调度，也不发送券商订单。使用前须已有明确选择的内部模拟账户及持久化决策或订单。
+`python -m nexus.ops.paper_once` 复用现有内部模拟服务。`forward` 从显式冻结资料准备决策和持仓状态，再调用已有风控准入；`admit` 和 `advance` 使用已存决策或订单。命令不创建账户或初始资金、不采集数据、不启用每日调度，也不发送券商订单。使用前须已有明确选择的内部模拟账户。
 
 在仓库根目录使用项目 Python 环境，沿用已配置的 `DATABASE_URL`。数据库只接受 `postgresql+asyncpg` 和 `localhost`、`127.0.0.1` 或 `::1`；不支持通过 URL 查询参数覆盖连接地址。不要把连接串、账户事实或命令结果粘贴到聊天。
 
 ```sh
 PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.paper_once --help
 ```
+
+从冻结资料准备一次决策并准入：
+
+```text
+python -m nexus.ops.paper_once forward --request-file <本机受保护的JSON文件>
+```
+
+JSON字段均需显式填写，不包含凭据，最多64 Ki字符：
+
+```json
+{
+  "action": "forward",
+  "account_id": "<内部模拟账户UUID>",
+  "idempotency_key": "<固定键>",
+  "request_time": "<UTC时间>",
+  "strategy_definition_id": "<预期已注册策略定义UUID>",
+  "champion_generation": 1,
+  "references": {
+    "market": {
+      "decision_session": "<YYYY-MM-DD>",
+      "execution_session": "<权威日历下一交易日>",
+      "decision_time": "<该日历确定的UTC截止时间>",
+      "source_policy_id": "<已存来源政策UUID>",
+      "calendar_authority_id": "<已存日历UUID>",
+      "universe_snapshot_id": "<已存股票池UUID>",
+      "quality_report_id": "<已存质量报告UUID>"
+    },
+    "raw_bar_set_ids": ["<已存raw BarSet UUID>"],
+    "adjusted_bar_set_ids": ["<已存all BarSet UUID>"],
+    "sector_exposure_ids": ["<已存行业证据UUID>"]
+  }
+}
+```
+
+以上是字段模板，尖括号内容须替换成已核验的本地引用；代际也必须与预期注册状态相符。
+引用覆盖股票池及持仓，特征需要200个交易日。持仓计数由历史事实推导，不接受JSON填零。
+完整引用随checkpoint保存并参与摘要；相同数值但不同来源不能静默复用。决策、checkpoint
+和准入批次同事务提交，任一拒绝整体回滚；`forward` 不推进成交。
+
+当前真实 v2 来源不支持复权用途，`forward` 会返回
+`STRATEGY_SNAPSHOT_ADJUSTED_AUTHORITY_UNAVAILABLE`，不写入决策、checkpoint或订单。
+fixture分层读取测试通过不改变这个准入结论；不能仅凭`all`标签或USD标的推断来源与成交量单位。
 
 创建一次订单批次：
 
@@ -30,7 +72,7 @@ python -m nexus.ops.paper_once advance
   --idempotency-key <本次推进的固定键>
 ```
 
-两种操作分别在单一数据库事务内执行，均拒绝未来时间。`advance` 只评估指定时刻，不等待下一个窗口、不循环推进。`no_data`、`no_capacity`、`not_due` 不代表成交；`partially_filled` 只代表部分成交。
+这些操作分别在单一数据库事务内执行，均拒绝未来时间。`advance` 只评估指定时刻，不等待下一个窗口、不循环推进。`no_data`、`no_capacity`、`not_due` 不代表成交；`partially_filled` 只代表部分成交。
 
 当前不可变价格政策尚未授权新建单所需的复权价格或模拟成交用途。命令保留这些检查：新建单可能返回 `STRATEGY_DECISION_INVALID`，无合格成交窗口不会产生 fill，已有订单在截止时间可能按原规则撤销并释放预留。不得为试运行修改政策开关或重标历史事实。历史合成 PostgreSQL 测试不代表当前真实数据已取得用途授权。
 

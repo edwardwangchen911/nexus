@@ -116,3 +116,18 @@ def test_two_real_weekly_evaluations_across_a_missing_calendar_week():
     )
     assert second.held_rank_observations[0].evaluated_streak == 2
     assert second.decision.exits == (held,)
+
+
+def test_input_hash_binds_frozen_references_without_changing_legacy_hash():
+    from datetime import date
+
+    from nexus.strategy.baseline import StrategyDataSnapshot
+    from nexus.strategy.rank_checkpoint import _hash, _snapshot_hash
+
+    snapshot = StrategyDataSnapshot(
+        decision_session=date(2026, 8, 28), next_session=date(2026, 8, 31), instruments=()
+    )
+    assert _snapshot_hash(snapshot, None) == _hash(snapshot.model_dump(mode="python"))
+    assert _snapshot_hash(snapshot, "a" * 64) != _snapshot_hash(snapshot, "b" * 64)
+    with pytest.raises(ValueError, match="REFERENCE_HASH_INVALID"):
+        _snapshot_hash(snapshot, "not-a-hash")

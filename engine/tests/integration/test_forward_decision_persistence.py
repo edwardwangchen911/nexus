@@ -542,6 +542,11 @@ async def test_rank_checkpoint_atomic_rollback_and_double_object_idempotency(
                 session, snapshot=snapshot, authority=authority
             )
             assert first is not None
+            stored = await session.scalar(
+                text("SELECT observations FROM strategy_rank_checkpoints WHERE decision_id=:id"),
+                {"id": first.forward.decision_id},
+            )
+            assert "input_references" not in stored  # Preserve the pre-reference JSON/hash.
 
         # A later registry activation need not be visible at this historical cutoff.
         async def no_current_event(*args, **kwargs):
