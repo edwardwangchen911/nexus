@@ -1393,3 +1393,25 @@ A复验36unit、6PG（NAV正常/缺任一原件拒绝、旧issuer复用及空迁
 通过；真实归档解析行数与D独立报告相同、canonical roundtrip及32条视图通过。
 证据保存在issuer-nav-20260904，未把原件身份/值写入fixture。代码可用不等于业务
 已加载：本记录时API仍17ca31c/DB0038，0039及实际NAV导入尚待统一运行切换。
+
+
+## 行业持仓可见与 NAV 运行验收（2026-09-04，北京时间）
+
+root42c4169→d17d832已合入，A75前端/BFFunit、5PG、generatedcheck/typecheck通过。
+完整pre-0039备份覆盖174已引用对象且临时残留0；0038→0039后历史业务摘要/检查点
+不变，API已切换d17d832，镜像revision及源码hash匹配，环境/端口不变，PG/MinIO
+未重启。旧API镜像保留rollback-before-0039-20260904。NAV原件沿既有入口实际
+导入一次，原件归档和精确冻结canonical readback通过，未模型调用或创建新研究。
+已有NAV冻结引用后不可降级删除0039支持，回滚需保留兼容读取或前向修复。
+
+同一既有failed run/cutoff的DB→BFF→DOM：snapshot与issuer引用准确一致，分类与
+持仓表行数、原标签、百分比单位、未知分母、观察日期、双receipt与hash均可见。
+1440/390无页面横溢出，failed状态和交易锁不变。旧run正常tool仍不读新NAV；新增
+NAV完整资料经精确引用验读、工具有界视图由PG正向证明，不伪造live run正向结果。
+旧data_snapshots/researchruns/outputs/decisions/portfolios五类行hash全不变、activejobs0。
+
+首轮只读验收把Python风格时间直接传BFF，严格UTC格式校验返回400；修正脚本为
+T/Z规范格式后通过，不重放业务导入。ready整体503仅worker unavailable，数据库/
+迁移/对象存储均ready；未为绿灯启动常驻worker。历史模型失败仍generic/原因未知，
+新安全错误分类已运行生效，不重标历史失败。NAV资料页投影仍由root接续，不将
+已导入/工具合同当页面可见。所有私有材料与安全摘要保存在issuer-nav-20260904。
