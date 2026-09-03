@@ -24,6 +24,9 @@ const statuses: Record<string, string> = {
   buy_candidate: "买入候选", reduce_candidate: "减仓候选", hold: "保持观察", watch: "仅观察",
   buy: "买入", sell: "卖出", limit: "限价单", market: "市价单", day: "当日有效", regular: "常规交易时段",
   hold_current: "保持现状", minimum_change: "最小调整", strategy_target: "策略目标",
+  read_only: "只读", promote: "晋级", rollback: "回滚",
+  success: "成功", error: "错误", dead_letter: "已停止重试", full: "完整",
+  point_in_time: "按当时可用信息", unlocked: "已解除锁定", recovered: "已恢复", ok: "正常",
 };
 
 export function statusLabel(value: string | null | undefined): string {
@@ -43,8 +46,10 @@ const reasons: Record<string, string> = {
   CORRELATION_POST_PROPOSAL_NOT_PROVEN: "调整后的相关性尚未得到验证",
   ADV20_MISSING: "缺少近 20 个交易日的平均成交额",
   PRICE_HISTORY_MISSING: "缺少历史价格",
-  DRAWDOWN_252_COVERAGE_INSUFFICIENT: "不足 252 个交易日，无法可靠计算历史回撤",
-  BETA_CORRELATION_126_COVERAGE_INSUFFICIENT: "相关性计算所需的 126 个交易日数据不足",
+  DRAWDOWN_252_COVERAGE_INSUFFICIENT: "252 个交易日窗口内有效价格覆盖不足",
+  BETA_CORRELATION_126_COVERAGE_INSUFFICIENT: "126 个交易日窗口内有效价格覆盖不足",
+  VOLATILITY_63_COVERAGE_INSUFFICIENT: "63 个交易日窗口内有效价格覆盖不足",
+  VOLATILITY_20_COVERAGE_INSUFFICIENT: "20 个交易日窗口内有效价格覆盖不足",
   MARKET_EVIDENCE_UNAVAILABLE: "历史风险证据尚未齐备",
   FORMAL_DIAGNOSTIC_PENDING: "正式诊断尚未完成",
   CASH_FLOW_RECONCILIATION_PENDING: "现金流水尚未完成对账",
@@ -62,6 +67,7 @@ const reasons: Record<string, string> = {
   SECTOR_EXPOSURE_REQUIRES_IDENTITIES: "计算行业占比需要标的行业资料",
   CURRENCY_EXPOSURE_REQUIRES_IDENTITIES: "计算币种占比需要标的币种资料",
   model_usage_uncertain: "部分模型调用未返回用量",
+  model_execution_failed: "模型执行未完成，具体原因尚未确认",
   "filled at target-session open": "按目标交易日开盘价模拟成交",
 };
 
@@ -93,4 +99,29 @@ export function operatorLabel(value: string): string {
 
 export function signalLabel(value: string): string {
   return ({ revenue_growth_ttm: "近 12 个月收入增长率", close: "收盘价", drawdown: "回撤", volatility: "波动率", position_weight: "持仓权重", cash_ratio: "现金占比" } as Record<string, string>)[value] ?? value;
+}
+
+export function actorLabel(value: string): string {
+  const labels: Record<string, string> = {
+    user: "用户", system: "系统", service: "后台服务",
+    task18: "模拟订单评估服务", task19: "模拟成交服务", reconciliation: "对账服务",
+  };
+  return labels[value] ?? `未识别操作方（${value}）`;
+}
+
+export function policyScopeLabel(value: string): string {
+  if (value === "portfolio") return "组合范围";
+  if (/^currency:[A-Z]{3}$/.test(value)) return `币种范围：${value.slice(9)}`;
+  if (/^instrument:[0-9a-f-]{36}$/i.test(value)) return `标的范围：${value.slice(11)}`;
+  return `未识别范围（${value}）`;
+}
+
+export function integrationNextActionLabel(value: string | null): string {
+  const labels: Record<string, string> = {
+    "A successful read-only connectivity check is required.": "需先通过只读连接检查",
+    "A valid capability admission is required.": "需先完成有效的能力准入核验",
+    "Read-only admission is required.": "需先完成只读准入核验",
+  };
+  if (value === null) return "无需操作";
+  return labels[value] ?? (/[\u3400-\u9fff]/.test(value) ? value : `尚无中文说明（${value}）`);
 }

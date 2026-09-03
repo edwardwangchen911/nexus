@@ -1,6 +1,6 @@
 import { formatDisplayTime } from "../lib/display-format";
 import { formatMetric } from "../lib/display-format";
-import { reasonLabel } from "../lib/display-labels";
+import { reasonLabel, policyScopeLabel } from "../lib/display-labels";
 import { AlertTriangle, Ban, CircleCheck, Search } from "lucide-react";
 import type { components } from "../lib/generated/schema";
 
@@ -48,8 +48,8 @@ const actionLabels: Record<DiagnosticItem["actionability"], string> = {
 };
 
 const metricLabels: Record<string, string> = {
-  VOLATILITY_20: "20 日年化波动率", VOLATILITY_63: "63 日年化波动率",
-  BETA_126: "126 日市场敏感度（Beta）", CORRELATION_126: "126 日相关系数",
+  VOLATILITY_20: "20 个交易日年化波动率", VOLATILITY_63: "63 个交易日年化波动率",
+  BETA_126: "126 个交易日市场敏感度（Beta）", CORRELATION_126: "126 个交易日相关系数",
   CASH_RATIO: "现金占比",
   CONCENTRATION_TOP1: "单一持仓集中度",
   CONCENTRATION_TOP3: "前三大持仓占比",
@@ -105,7 +105,7 @@ export function DiagnosticList({ report, summary = false }: { report: Diagnostic
                 <div>
                   <h3>{diagnosticLabel(item.diagnostic_code)}</h3>
                   <p><code>{item.diagnostic_code}</code></p>
-                  <p><span title={item.policy_scope}>{item.policy_scope === "portfolio" ? "组合范围" : item.policy_scope}</span> · {actionLabels[item.actionability]}</p>
+                  <p><span title={item.policy_scope}>{policyScopeLabel(item.policy_scope)}</span> · {actionLabels[item.actionability]}</p>
                   {item.diagnostic_code.startsWith("CONCENTRATION_") ? <p>集中度按同币种证券市值计算，不含现金。</p> : item.diagnostic_code.split(":")[0] === "CASH_RATIO" ? <p>现金占比按同币种现金与证券总市值计算。</p> : null}
                 </div>
                 <span className="diagnostic-item__severity">{severityLabels[item.severity]}</span>

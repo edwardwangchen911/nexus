@@ -1,6 +1,6 @@
 "use client";
 
-import { statusLabel } from "../../lib/display-labels";
+import { statusLabel, integrationNextActionLabel } from "../../lib/display-labels";
 
 import { formatDisplayTime } from "../../lib/display-format";
 
@@ -212,7 +212,7 @@ function IntegrationCard({ status, pendingAction, onTest, onModeChange }: Omit<I
         <Fact term="接入配置摘要" value={status.contract_hash ?? "未准入"} />
         <Fact term="资源版本" value={String(status.version)} />
       </dl>
-      <p className="integration-card__next">{status.next_action ?? "无需操作"}</p>
+      <p className="integration-card__next">{integrationNextActionLabel(status.next_action)}</p>
       <div className="integration-card__actions">
         {status.provider === "fosun" && status.mode === "fixture" ? (
           <button className={`button ${reconciling ? "button--quiet" : "button--primary"}`} type="button" onClick={() => onTest(status)} disabled={testing}>

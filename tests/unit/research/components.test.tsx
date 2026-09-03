@@ -54,11 +54,12 @@ describe("issuer cash-distribution inputs", () => {
     expect(within(section).getByText(/不可用于历史回测/)).toBeVisible();
     expect(within(section).getByText(/不代表研究已完成，也不授予执行权限/)).toBeVisible();
     expect(screen.queryByRole("button", { name: /运行|买入|卖出|交易/ })).not.toBeInTheDocument();
-    const toggle = within(section).getByText("分红证据与精确数值");
+    const toggle = within(section).getByText("分红证据与来源");
     const details = toggle.closest("details")!;
     expect(details).not.toHaveAttribute("open");
     fireEvent.click(toggle);
-    expect(within(details).getByText("USD 0.1256789 / 每份")).toBeVisible();
+    expect(within(details).getByText("USD 0.126 / 每份")).toBeVisible();
+    expect(section).not.toHaveTextContent(/\d+\.\d{4,}/);
     expect(within(details).getByText(inputs.issuer_distributions[0].content_hash)).toBeVisible();
     expect(within(details).getByText("issuer-fixture-v1")).toBeVisible();
     expect(within(details).getByRole("link", { name: "查看 SSGA 官方原件" })).toHaveAttribute("href", inputs.issuer_distributions[0].source_url);
@@ -67,14 +68,17 @@ describe("issuer cash-distribution inputs", () => {
 
   it.each(["dividend_per_share", "short_term_capital_gain", "long_term_capital_gain"] as const)("keeps a tiny nonzero %s distinct from zero", (field) => {
     render(<ResearchInputs inputs={issuerInputs({ [field]: "0.00000001" })} asOf="2026-09-02T19:00:00Z" />);
-    expect(screen.getAllByText("USD 0.00000001 / 每份").some((node) => !node.closest("details"))).toBe(true);
+    expect(screen.getAllByText("USD <0.001 / 每份").some((node) => !node.closest("details"))).toBe(true);
+    fireEvent.click(screen.getByText("分红证据与来源"));
+    expect(screen.getByRole("region", { name: "发行商现金分红资料" })).not.toHaveTextContent(/\d+\.\d{4,}/);
   });
 
   it("does not coerce DecimalString amounts to floating point", () => {
     render(<ResearchInputs inputs={issuerInputs({ dividend_per_share: "9007199254740993.123456" })} asOf="2026-09-02T19:00:00Z" />);
     expect(screen.getByText("现金分红").nextElementSibling).toHaveTextContent("USD 9007199254740993.123 / 每份");
-    fireEvent.click(screen.getByText("分红证据与精确数值"));
-    expect(screen.getByText("USD 9007199254740993.123456 / 每份")).toBeVisible();
+    fireEvent.click(screen.getByText("分红证据与来源"));
+    expect(screen.getAllByText("USD 9007199254740993.123 / 每份")).toHaveLength(2);
+    expect(screen.queryByText(/9007199254740993\.123456/)).not.toBeInTheDocument();
   });
 
   it("keeps SEC-only counts and truncation separate in mixed input sets", () => {
@@ -116,6 +120,16 @@ describe("issuer cash-distribution inputs", () => {
 });
 
 describe("research evidence docket", () => {
+  it("uses the same Chinese condition and rounded percentage in the evidence drawer", () => {
+    const condition = { ...researchData().invalidation_conditions[0], threshold: "0.123456789" };
+    render(<DecisionCard research={researchData({ invalidation_conditions: [condition] })} />);
+    const section = screen.getByRole("heading", { name: "失效条件" }).closest("section")!;
+    expect(section).toHaveTextContent("近 12 个月收入增长率");
+    expect(section).toHaveTextContent("不高于 12.346%");
+    fireEvent.click(within(section).getByRole("button", { name: "查看证据定位" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("近 12 个月收入增长率 不高于 12.346%");
+    expect(screen.getByRole("dialog")).not.toHaveTextContent("0.123456789");
+  });
   it.each(["6-K", "497K"])("distinguishes inert %s text from financial metrics and expands on demand", (form) => {
     const source = "https://www.sec.gov/Archives/edgar/data/1/000000000126000001/doc.htm";
     const excerpt = "Company has not decided. <script>alert('not executable')</script>";

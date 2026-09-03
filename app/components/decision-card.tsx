@@ -123,13 +123,16 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
             <h3 id="invalidation-title">失效条件</h3>
             {research.invalidation_conditions.length ? (
               <ul className="decision-card__conditions">
-                {research.invalidation_conditions.map((condition, index) => (
-                  <li key={`${condition.signal}:${index}`}>
-                    <span title={condition.signal}>{signalLabel(condition.signal)}</span>
-                    <span>{operatorLabel(condition.operator)} {typeof condition.threshold === "boolean" ? (condition.threshold ? "是" : "否") : formatMetric(condition.threshold, condition.unit, condition.signal)}</span>
-                    <EvidenceButtons evidenceRefs={condition.evidence_refs} excerpt={`${condition.signal} ${condition.operator} ${String(condition.threshold)}`} onOpen={openEvidence} />
-                  </li>
-                ))}
+                {research.invalidation_conditions.map((condition, index) => {
+                  const comparison = `${operatorLabel(condition.operator)} ${typeof condition.threshold === "boolean" ? (condition.threshold ? "是" : "否") : formatMetric(condition.threshold, condition.unit, condition.signal)}`;
+                  return (
+                    <li key={`${condition.signal}:${index}`}>
+                      <span title={condition.signal}>{signalLabel(condition.signal)}</span>
+                      <span>{comparison}</span>
+                      <EvidenceButtons evidenceRefs={condition.evidence_refs} excerpt={`${signalLabel(condition.signal)} ${comparison}`} onOpen={openEvidence} />
+                    </li>
+                  );
+                })}
               </ul>
             ) : <p>未提供可机器判断的失效条件；当前研究不能支持策略目标。</p>}
           </section>

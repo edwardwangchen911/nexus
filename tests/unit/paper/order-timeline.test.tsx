@@ -15,6 +15,9 @@ describe("OrderTimeline", () => {
     expect(events.map((item) => item.getAttribute("data-event-seq"))).toEqual(["1", "2", "3", "4"]);
     expect(events[0]).toHaveTextContent("paper_order_proposed");
     expect(events[3]).toHaveTextContent("已提交 → 部分成交");
+    expect(events[0]).toHaveTextContent("模拟订单评估服务");
+    expect(events[3]).toHaveTextContent("模拟成交服务");
+    expect(timeline).not.toHaveTextContent(/task18|task19/);
 
     const fills = screen.getByRole("table", { name: "AAPL 模拟成交事实" });
     expect(fills).toHaveTextContent("alpaca / iex");

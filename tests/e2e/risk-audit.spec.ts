@@ -99,7 +99,7 @@ test("manual-safe retry preserves focus, version and idempotency", async ({ page
 
   await retry.click();
   await page.getByRole("button", { name: "确认安全重试" }).click();
-  await expect(page.getByText("Job 已重新排队；已刷新权威事实。")).toBeVisible();
+  await expect(page.getByText("任务已重新排队；已更新记录。")).toBeVisible();
   expect(requestBody).toEqual({});
   expect(requestVersion).toBe('"7"');
   expect(requestKey).toMatch(/^risk-retry-[0-9a-f-]{36}$/);
@@ -123,7 +123,7 @@ test("unknown retry result can only continue with the same idempotency key", asy
   await page.getByRole("button", { name: "确认安全重试" }).click();
   await expect(page.getByText("恢复结果未知。保持相同幂等键并关闭其他恢复动作。")).toBeVisible();
   await page.getByRole("button", { name: "继续确认原操作结果" }).click();
-  await expect(page.getByText("Job 已重新排队；已刷新权威事实。")).toBeVisible();
+  await expect(page.getByText("任务已重新排队；已更新记录。")).toBeVisible();
   expect(attempts).toBe(2);
   expect(new Set(keys).size).toBe(1);
 });

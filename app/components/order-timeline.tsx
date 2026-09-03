@@ -1,6 +1,6 @@
 "use client";
 
-import { statusLabel, reasonText } from "../lib/display-labels";
+import { statusLabel, reasonText, actorLabel } from "../lib/display-labels";
 import { marketDeliveryModeLabel } from "../lib/market-evidence-labels";
 
 import { formatDisplayTime } from "../lib/display-format";
@@ -65,7 +65,7 @@ export function OrderTimeline({ order, allowCancel = true, onCancel }: { order: 
               <span className="paper-timeline__seq numeric-data">E{String(event.event_seq).padStart(2, "0")}</span>
               <div>
                 <strong>{event.from_status ? statusLabel(event.from_status) : "初始"} → {statusLabel(event.to_status)}</strong>
-                <p>{event.actor_kind} · {reasonText(event.reason_code)}</p>
+                <p>{actorLabel(event.actor_kind)} · {reasonText(event.reason_code)}</p>
               </div>
               <time className="numeric-data" dateTime={event.occurred_at}>{formatPaperTime(event.occurred_at)}</time>
             </li>

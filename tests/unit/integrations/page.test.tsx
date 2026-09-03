@@ -36,10 +36,29 @@ afterEach(() => {
 });
 
 describe("integrations vertical slice", () => {
+  it.each([
+    ["A successful read-only connectivity check is required.", "需先通过只读连接检查"],
+    ["A valid capability admission is required.", "需先完成有效的能力准入核验"],
+    ["Read-only admission is required.", "需先完成只读准入核验"],
+    [null, "无需操作"],
+    ["future_action", "尚无中文说明（future_action）"],
+  ])("explains the next action %s for the real read-only mode", (next_action, label) => {
+    const status = { ...fosunFixture, mode: "read_only" as const, next_action };
+    render(<IntegrationsPanel state="ready" integrations={[status]} pendingAction={null} notice={null} onTest={vi.fn()} onModeChange={vi.fn()} />);
+    expect(screen.getByText("只读")).toBeVisible();
+    expect(screen.getByText(label)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "测试非交易连接" })).not.toBeInTheDocument();
+  });
   it("distinguishes stale data-source evidence from the displayed snapshot", () => {
     render(<GlobalSystemStatusView state="stale" integrations={[fosunFixture]} refreshing={false} onRefresh={vi.fn()} />);
     expect(screen.getByText("数据源：数据已过期")).toBeVisible();
     expect(screen.getByText("数据源证据已过期；页面仍可展示已存快照，不代表当前决策条件已满足。")).toBeVisible();
+  });
+  it("uses the same next-step wording in the shared system evidence", () => {
+    render(<GlobalSystemStatusView state="ready" integrations={[fosunFixture]} refreshing={false} onRefresh={vi.fn()} />);
+    fireEvent.click(screen.getByText("查看系统证据"));
+    expect(screen.getByText("下一步：需先完成只读准入核验")).toBeVisible();
+    expect(screen.queryByText(/Read-only admission/)).not.toBeInTheDocument();
   });
   it.each(stateLabels)("renders the visible %s data state", (state, label) => {
     render(
@@ -261,7 +280,7 @@ describe("integrations vertical slice", () => {
   it("keeps the live approval route visibly locked with no submit surface", () => {
     render(<LiveApprovalsPage />);
     expect(screen.getByText("实盘能力 · 逐笔批准")).toBeVisible();
-    expect(screen.getByText("阶段 4 前锁定")).toBeVisible();
+    expect(screen.getByText("实盘交易未启用")).toBeVisible();
     expect(screen.queryByRole("form")).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "返回集成状态" })).toHaveClass("button");

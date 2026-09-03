@@ -23,6 +23,18 @@ const states: Array<[DataStateKind, string]> = [
 ];
 
 describe("risk-audit page", () => {
+  it("preserves unknown audit codes, hashes and versions without treating them as numbers or dates", () => {
+    const base = auditPage();
+    const digest = "0123456789abcdef".repeat(4);
+    const outcome = { status: "future_state", retryable: false, error_code: "future_error", policy_version: "0.123456789", authority_hash: digest, event_type: "FUTURE_EVENT", result: true, future_field: "2026-09-03" };
+    render(<RiskAuditPanel state="ready" readiness={readiness("ready")}
+      data={{ ...base, items: [{ ...base.items[0], action: "future.action", actor_kind: "service", outcome }] }}
+      kindFilter="" statusFilter="" fromDate="2026-08-20" toDate="2026-08-27" loadingMore={false} notice={null}
+      onRefresh={vi.fn()} onFilters={vi.fn()} onLoadMore={vi.fn()} onRetry={vi.fn()} onAcknowledge={vi.fn()} onExport={vi.fn()} />);
+    const table = screen.getByRole("table", { name: "脱敏审计事件" });
+    for (const label of ["未识别动作（future.action）", "后台服务", "状态：未识别状态（future_state）", "可重试：否", "错误原因：尚无中文说明（future_error）", "政策版本：0.123456789", `证据摘要：${digest}`, "事件类型：FUTURE_EVENT", "结果：是", "未识别字段（future_field）：2026-09-03"]) expect(table).toHaveTextContent(label);
+    expect(outcome.policy_version).toBe("0.123456789");
+  });
   it.each(states)("renders the visible %s state and closes recovery outside ready", (state, label) => {
     const hasFacts = ["ready", "partial", "stale"].includes(state);
     render(<RiskAuditPanel
@@ -71,10 +83,15 @@ describe("risk-audit page", () => {
     expect(calls).toContain("/api/v1/readiness");
     expect(calls).toContain("/api/v1/risk-audit?from=2026-08-20T00%3A00%3A00Z&kind=job&limit=50&to=2026-08-28T00%3A00%3A00Z");
     expect(screen.getByRole("table", { name: "脱敏审计事件" })).toHaveTextContent("job.failed");
+    expect(screen.getByRole("table", { name: "脱敏审计事件" })).toHaveTextContent("任务失败");
+    expect(screen.getByRole("table", { name: "脱敏审计事件" })).toHaveTextContent("系统");
+    expect(screen.getByRole("table", { name: "脱敏审计事件" })).toHaveTextContent("可重试：是");
+    expect(screen.getByRole("table", { name: "脱敏审计事件" })).toHaveTextContent("状态：失败");
+    expect(screen.getByRole("table", { name: "脱敏审计事件" })).not.toHaveTextContent(/retryable:|status:|true/);
     expect(document.body).not.toHaveTextContent(/account_id|payload|secret/);
 
     fireEvent.change(screen.getByRole("combobox", { name: "结果状态" }), { target: { value: "recovered" } });
-    expect(screen.queryByText("job.failed")).not.toBeInTheDocument();
+    expect(screen.queryByText(/任务失败（job\.failed）/)).not.toBeInTheDocument();
     expect(window.location.search).toContain("status=recovered");
   });
 
@@ -94,11 +111,11 @@ describe("risk-audit page", () => {
     render(<RiskAuditPage />);
     fireEvent.click(await screen.findByRole("button", { name: "重试 daily_pipeline" }));
     const dialog = screen.getByRole("dialog", { name: "确认重试 daily_pipeline" });
-    expect(dialog).toHaveTextContent("只重新排队这个 manual_safe Job");
+    expect(dialog).toHaveTextContent("只重新排队这个允许安全重试的任务");
     expect(within(dialog).getByRole("button", { name: "返回审计" })).toHaveFocus();
     fireEvent.click(within(dialog).getByRole("button", { name: "确认安全重试" }));
 
-    expect(await screen.findByText("Job 已重新排队；已刷新权威事实。")).toBeVisible();
+    expect(await screen.findByText("任务已重新排队；已更新记录。")).toBeVisible();
     const post = requests.find((request) => request.url.endsWith(`/jobs/${jobId}/retry`));
     expect(post?.init?.method).toBe("POST");
     expect(new Headers(post?.init?.headers).get("if-match")).toBe('"7"');
@@ -126,9 +143,9 @@ describe("risk-audit page", () => {
     render(<RiskAuditPage />);
     fireEvent.click(await screen.findByRole("button", { name: "重试 daily_pipeline" }));
     fireEvent.click(screen.getByRole("button", { name: "确认安全重试" }));
-    expect(await screen.findByText("恢复结果未知。保持相同幂等键并关闭其他恢复动作。")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "使用同一幂等键继续确认" }));
-    expect(await screen.findByText("Job 已重新排队；已刷新权威事实。")).toBeVisible();
+    expect(await screen.findByText("恢复结果未知。再次确认会复用原请求；其他恢复操作暂不可用。")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "继续确认原操作结果" }));
+    expect(await screen.findByText("任务已重新排队；已更新记录。")).toBeVisible();
     expect(retries).toBe(2);
     expect(new Set(keys).size).toBe(1);
   });
@@ -152,7 +169,7 @@ describe("risk-audit page", () => {
     const dialog = screen.getByRole("dialog", { name: "确认解除回撤锁" });
     expect(dialog).toHaveTextContent("不会创建或提交订单");
     fireEvent.click(within(dialog).getByRole("button", { name: "确认解除" }));
-    expect(await screen.findByText("回撤锁已确认解除；已刷新权威事实。")).toBeVisible();
+    expect(await screen.findByText("回撤锁已确认解除；已更新记录。")).toBeVisible();
     expect(acknowledgement).toEqual({ body: "{\"expected_event_seq\":12}", version: '"12"' });
   });
 

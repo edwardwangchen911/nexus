@@ -1,6 +1,7 @@
 "use client";
 
 import { formatDisplayTime } from "../../lib/display-format";
+import { actorLabel, reasonText, statusLabel } from "../../lib/display-labels";
 
 import {
   AlertTriangle,
@@ -250,25 +251,25 @@ export default function RiskAuditPage(): React.ReactElement {
         setPendingAction(null);
         const refreshed = await refresh();
         setNotice(refreshed
-          ? { kind: "success", text: isRetry ? "Job 已重新排队；已刷新权威事实。" : "回撤锁已确认解除；已刷新权威事实。" }
+          ? { kind: "success", text: isRetry ? "任务已重新排队；已更新记录。" : "回撤锁已确认解除；已更新记录。" }
           : { kind: "error", text: "恢复动作已接受，但最新事实读取失败；后续恢复动作保持关闭。" });
         return;
       }
       if (response.status >= 500 || response.ok) {
         setPendingAction({ ...pending, unknown: true });
         setState("stale");
-        setNotice({ kind: "error", text: "恢复结果未知。保持相同幂等键并关闭其他恢复动作。" });
+        setNotice({ kind: "error", text: "恢复结果未知。再次确认会复用原请求；其他恢复操作暂不可用。" });
         return;
       }
       setPendingAction(null);
       const refreshed = response.status === 409 ? await refresh() : false;
       setNotice({ kind: "error", text: refreshed
-        ? "权威版本已变化；已刷新事实，请重新评估。"
-        : "恢复动作未执行；请刷新权威事实后重试。" });
+        ? "记录版本已变化；已更新数据，请重新评估。"
+        : "恢复操作未执行；请重新读取记录后重试。" });
     } catch {
       setPendingAction({ ...pending, unknown: true });
       setState("stale");
-      setNotice({ kind: "error", text: "恢复结果未知。保持相同幂等键并关闭其他恢复动作。" });
+      setNotice({ kind: "error", text: "恢复结果未知。再次确认会复用原请求；其他恢复操作暂不可用。" });
     } finally {
       actionInFlight.current = false;
       setSubmitting(false);
@@ -381,17 +382,17 @@ function ReadinessBand({ readiness }: { readiness: Readiness | null }): React.Re
 function AuditSummary({ data, recoveryEnabled, onRetry, onAcknowledge }: { data: RiskAuditData; recoveryEnabled: boolean; onRetry: RiskAuditPanelProps["onRetry"]; onAcknowledge: RiskAuditPanelProps["onAcknowledge"] }): React.ReactElement {
   const lock = data.summary.drawdown_lock;
   return <section className="risk-summary" aria-label="风险审计摘要">
-    <article data-tone={data.summary.data_quality === "PASS" ? "ready" : "attention"}><Archive aria-hidden="true" size={22} /><div><p className="eyebrow">数据质量</p><h2>{dataQualityLabel(data.summary.data_quality)} <code>{data.summary.data_quality}</code></h2><p>质量门结果来自确定性日流水线。</p></div></article>
+    <article data-tone={data.summary.data_quality === "PASS" ? "ready" : "attention"}><Archive aria-hidden="true" size={22} /><div><p className="eyebrow">数据质量</p><h2>{dataQualityLabel(data.summary.data_quality)} <code>{data.summary.data_quality}</code></h2><p>数据质量由每日处理流程按固定规则核验。</p></div></article>
     <article data-tone={lock.state === "unlocked" ? "ready" : "attention"}><ShieldAlert aria-hidden="true" size={22} /><div><p className="eyebrow">回撤锁</p><h2>{drawdownLabel(lock.state)}</h2><p>{lock.event_seq ? `事件版本 ${lock.event_seq}` : "尚无可确认版本"}</p>{lock.acknowledge_allowed && lock.event_seq ? <button className="button button--danger" type="button" disabled={!recoveryEnabled} aria-label="确认解除回撤锁" onClick={(event) => onAcknowledge(lock.event_seq!, event.currentTarget)}>确认解除回撤锁</button> : null}</div></article>
-    <article data-tone={data.summary.failed_jobs.count === 0 ? "ready" : "attention"}><RotateCcw aria-hidden="true" size={22} /><div><p className="eyebrow">失败任务</p><h2>{data.summary.failed_jobs.count}</h2><p>仅 manual_safe 且未超过两次的 Job 可逐个重试。</p></div></article>
-    {data.summary.failed_jobs.retryable.map((job) => <article className="retryable-job" data-tone="attention" key={job.job_id}><AlertTriangle aria-hidden="true" size={22} /><div><p className="eyebrow">安全重试候选 <code>{job.status}</code></p><h2>{job.job_type}</h2><p>版本 {job.version} · 已手动重试 {job.manual_retry_count}/2 · {formatTime(job.finished_at)}</p><p>{job.last_error_code ?? "未公开错误代码"} · Job {shortId(job.job_id)}</p><button className="button button--quiet" type="button" disabled={!recoveryEnabled} aria-label={`重试 ${job.job_type}`} onClick={(event) => onRetry(job, event.currentTarget)}>安全重试</button></div></article>)}
+    <article data-tone={data.summary.failed_jobs.count === 0 ? "ready" : "attention"}><RotateCcw aria-hidden="true" size={22} /><div><p className="eyebrow">失败任务</p><h2>{data.summary.failed_jobs.count}</h2><p>仅标记为可安全重试且未达到两次上限的任务可逐个重试。</p></div></article>
+    {data.summary.failed_jobs.retryable.map((job) => <article className="retryable-job" data-tone="attention" key={job.job_id}><AlertTriangle aria-hidden="true" size={22} /><div><p className="eyebrow">安全重试候选 <code>{statusLabel(job.status)}</code></p><h2>{job.job_type}</h2><p>版本 {job.version} · 已手动重试 {job.manual_retry_count}/2 · {formatTime(job.finished_at)}</p><p>{job.last_error_code ?? "未公开错误代码"} · 任务 {shortId(job.job_id)}</p><button className="button button--quiet" type="button" disabled={!recoveryEnabled} aria-label={`重试 ${job.job_type}`} onClick={(event) => onRetry(job, event.currentTarget)}>安全重试</button></div></article>)}
   </section>;
 }
 
 function AuditTable({ events }: { events: AuditEvent[] }): React.ReactElement {
   // Bounded horizontal data regions must remain keyboard-scrollable on narrow screens.
   // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
-  return <div className="table-scroll" role="region" aria-label="脱敏审计事件表，可横向滚动" tabIndex={0}><table className="risk-audit-table" aria-label="脱敏审计事件"><caption>事件序号、类型、动作和脱敏结果；哈希链由后端验证。</caption><thead><tr><th scope="col">序号</th><th scope="col">发生时间</th><th scope="col">类型</th><th scope="col">动作</th><th scope="col">操作方</th><th scope="col">脱敏结果</th><th scope="col">格式版本</th></tr></thead><tbody>{events.map((event) => <tr key={event.event_seq}><td className="numeric-data">#{event.event_seq}</td><td className="numeric-data">{formatTime(event.occurred_at)}</td><td>{kindLabel(event.kind)}</td><th scope="row">{event.action}</th><td>{event.actor_kind}</td><td>{outcomeText(event.outcome)}</td><td className="numeric-data">v{event.schema_version}</td></tr>)}</tbody></table></div>;
+  return <div className="table-scroll" role="region" aria-label="脱敏审计事件表，可横向滚动" tabIndex={0}><table className="risk-audit-table" aria-label="脱敏审计事件"><caption>事件序号、类型、动作和脱敏结果；哈希链由后端验证。</caption><thead><tr><th scope="col">序号</th><th scope="col">发生时间</th><th scope="col">类型</th><th scope="col">动作</th><th scope="col">操作方</th><th scope="col">脱敏结果</th><th scope="col">格式版本</th></tr></thead><tbody>{events.map((event) => <tr key={event.event_seq}><td className="numeric-data">#{event.event_seq}</td><td className="numeric-data">{formatTime(event.occurred_at)}</td><td>{kindLabel(event.kind)}</td><th scope="row">{auditActionLabel(event.action)}</th><td>{actorLabel(event.actor_kind)}</td><td>{outcomeText(event.outcome)}</td><td className="numeric-data">v{event.schema_version}</td></tr>)}</tbody></table></div>;
 }
 
 function RecoveryDialog({ pending, submitting, onDismiss, onConfirm }: { pending: PendingAction; submitting: boolean; onDismiss: () => void; onConfirm: () => void }): React.ReactElement {
@@ -403,10 +404,10 @@ function RecoveryDialog({ pending, submitting, onDismiss, onConfirm }: { pending
     <div role="dialog" aria-modal="true" aria-label={title}>
       <p className="eyebrow">确定性恢复</p><h3>{title}</h3>
       <p>{retry
-        ? `只重新排队这个 manual_safe Job（版本 ${pending.job.version}），不改变 payload、不创建订单。`
+        ? `只重新排队这个允许安全重试的任务（版本 ${pending.job.version}），不改变原请求内容、不创建订单。`
         : `只确认事件版本 ${pending.eventSeq} 的回撤锁恢复资格；不会创建或提交订单。`}</p>
-      {pending.unknown ? <p className="inline-notice inline-notice--error">上次结果未知；继续会复用同一幂等键。</p> : null}
-      <div className="confirmation-dialog__actions"><button ref={backRef} className="button button--quiet" type="button" onClick={onDismiss} disabled={submitting}>返回审计</button><button className="button button--danger" type="button" onClick={onConfirm} disabled={submitting}>{pending.unknown ? "使用同一幂等键继续确认" : retry ? "确认安全重试" : "确认解除"}</button></div>
+      {pending.unknown ? <p className="inline-notice inline-notice--error">上次结果未知；继续确认会复用原请求。</p> : null}
+      <div className="confirmation-dialog__actions"><button ref={backRef} className="button button--quiet" type="button" onClick={onDismiss} disabled={submitting}>返回审计</button><button className="button button--danger" type="button" onClick={onConfirm} disabled={submitting}>{pending.unknown ? "继续确认原操作结果" : retry ? "确认安全重试" : "确认解除"}</button></div>
     </div>
   </div>;
 }
@@ -520,14 +521,49 @@ function isIsoDate(value: string): boolean {
 }
 
 function outcomeText(outcome: AuditEvent["outcome"]): string {
+  const fields: Record<string, string> = {
+    completeness: "完整性", error_code: "错误原因", outcome: "结果", quality_status: "数据质量",
+    reason_code: "原因", result: "结果", retryable: "可重试", status: "状态",
+    authority_hash: "证据摘要", code_hash: "代码摘要", decision_hash: "决策摘要",
+    event_hash: "事件摘要", event_type: "事件类型", final_authority_hash: "最终证据摘要",
+    gate_code: "核验项", policy_version: "政策版本", proposal_hash: "提案摘要",
+    protocol_hash: "协议摘要", request_hash: "请求摘要",
+  };
   const entries = Object.entries(outcome).sort(([left], [right]) => left.localeCompare(right));
-  return entries.length ? entries.map(([key, value]) => `${key}: ${String(value)}`).join(" · ") : "无公开结果字段";
+  return entries.length ? entries.map(([key, value]) => {
+    let display = String(value);
+    if (typeof value === "boolean") display = value ? "是" : "否";
+    else if (typeof value === "string") {
+      if (["completeness", "outcome", "quality_status", "result", "status"].includes(key)) display = statusLabel(value);
+      else if (["error_code", "reason_code", "gate_code"].includes(key)) display = reasonText(value);
+    }
+    return `${fields[key] ?? `未识别字段（${key}）`}：${display}`;
+  }).join(" · ") : "无公开结果字段";
+}
+
+function auditActionLabel(value: string): string {
+  const labels: Record<string, string> = {
+    "job.failed": "任务失败", "job.manual_retry.queued": "手动重试已排队",
+    "job.paper.performance.succeeded": "模拟账户绩效计算已完成",
+    "drawdown.lock.acknowledged": "回撤锁解除已确认", "quality.freeze.completed": "数据质量记录已冻结",
+    "strategy.backtest.completed": "策略回测已完成",
+    "strategy.experiment.admitted": "策略实验已准入", "strategy.experiment.vetoed": "策略实验已否决",
+    "strategy.promotion.gated": "策略晋级核验已记录",
+    "strategy.registry.promotion_requested": "策略晋级已申请", "strategy.registry.promotion_effective": "策略晋级已生效",
+    "strategy.registry.rollback_requested": "策略回滚已申请", "strategy.registry.rollback_failed": "策略回滚失败",
+    "strategy.registry.rollback_effective": "策略回滚已生效", "strategy.registry.paused": "策略已暂停",
+    "strategy.registry.resumed": "策略已恢复", "strategy.shadow.started": "策略前向观察已开始",
+    "strategy.shadow.advanced": "策略前向观察已推进", "strategy.shadow.finalized": "策略前向观察已结束",
+    "strategy_decision.persisted": "策略决策已保存", "paper.order_batch.evaluated": "模拟订单批次已评估",
+    "paper.reservation.created": "模拟资金预留已创建", "paper.ledger_transaction.posted": "模拟账本记录已入账",
+  };
+  return `${labels[value] ?? "未识别动作"}（${value}）`;
 }
 
 function stateDetail(state: DataStateKind): string {
   if (state === "loading") return "正在读取就绪状态与脱敏审计事实。";
   if (state === "empty") return "当前没有可显示的审计事实。";
-  if (state === "partial") return "数据质量不是 PASS；事实可读，但恢复动作需等待质量门恢复。";
+  if (state === "partial") return "数据质量未通过；记录仍可查看，恢复操作需等待质量核验通过。";
   if (state === "stale") return "依赖状态或审计事实已过期。";
   if (state === "forbidden") return "当前身份不能读取风险审计事实。";
   if (state === "error") return "无法读取风险审计事实，系统保持观望。";

@@ -167,7 +167,7 @@ export default function StrategiesPage(): React.ReactElement {
       || evidenceRef.current === null
       || !evidenceRef.current.overview.experiments.some((item) => item.experiment_id === experimentId)
     ) {
-      invalidateDetailEvidence("无法将该实验绑定到当前策略权威。");
+      invalidateDetailEvidence("无法核对该实验与当前策略记录的对应关系。");
       return;
     }
     try {
@@ -187,7 +187,7 @@ export default function StrategiesPage(): React.ReactElement {
         || detailEtag !== etag
         || nextDetail.experiment.experiment_id !== experimentId
       ) {
-        invalidateDetailEvidence("无法将该实验绑定到当前策略权威。");
+        invalidateDetailEvidence("无法核对该实验与当前策略记录的对应关系。");
         return;
       }
       setDetail(nextDetail);
@@ -277,7 +277,7 @@ export default function StrategiesPage(): React.ReactElement {
     "控制变更已接受，等待注册表确认。",
   ), [performAction]);
   const vetoExperiment = useCallback((experimentId: string) => void performAction(
-    "veto", `/api/v1/strategy-evolution/experiments/${experimentId}/veto`, { reason: "USER_VETO" }, "已记录人工否决。", "否决已接受，等待实验投影更新。",
+    "veto", `/api/v1/strategy-evolution/experiments/${experimentId}/veto`, { reason: "USER_VETO" }, "已记录人工否决。", "否决已接受，等待实验记录更新。",
   ), [performAction]);
   const rollbackRegistry = useCallback(() => void performAction(
     "rollback", "/api/v1/strategy-evolution/registry/rollback", { reason: "USER_REQUESTED" }, "已回滚到上一个兼容冠军。", "回滚已接受，正在等待确定性边界生效。",
@@ -400,8 +400,8 @@ export function StrategiesPanel(props: Props): React.ReactElement {
       {!hasEvidence ? (
         <DataState
           state={state}
-          title={state === "loading" ? "正在读取策略进化权威" : "策略进化证据暂不可用"}
-          detail="不使用浏览器默认值补齐冠军、门禁或 Shadow 结果。"
+          title={state === "loading" ? "正在读取策略研究记录" : "策略进化证据暂不可用"}
+          detail="不使用浏览器默认值补齐主用策略、核验结果或前向观察结果。"
         />
       ) : (
         <>
@@ -461,7 +461,7 @@ function ChampionSection({ overview, canWrite, busyAction, onStartExperiment, on
         <div><dt>事件序列</dt><dd>{champion.event_sequence}</dd></div>
         <div><dt>生效交易日</dt><dd>{champion.effective_session ?? "初始版本"}</dd></div>
         <div><dt>自动晋级</dt><dd>{champion.auto_promotion_paused ? "已暂停" : "已启用"}</dd></div>
-        <div><dt>待生效切换</dt><dd>{champion.pending_transition ? `${champion.pending_transition} · ${champion.pending_effective_session ?? "等待边界"}` : "无"}</dd></div>
+        <div><dt>待生效切换</dt><dd>{champion.pending_transition ? `${statusLabel(champion.pending_transition)} · ${champion.pending_effective_session ?? "等待生效交易日"}` : "无"}</dd></div>
       </dl>
       <div className="evolution-actions">
         <button className="button button--primary" type="button" disabled={!canWrite || !overview.experiment_start_enabled} title={overview.experiment_start_reason} onClick={onStartExperiment}>
@@ -501,12 +501,12 @@ function ExperimentSection({ overview, detail, canWrite, busyAction, onSelectExp
           <dl className="evolution-ledger numeric-data">
             <div><dt>候选数</dt><dd>{family.candidate_count}</dd></div>
             <div><dt>累计样本外试验</dt><dd>{family.cumulative_oos_trial_count}</dd></div>
-            <div><dt>投影版本</dt><dd>{family.projection_version}</dd></div>
-            <div><dt>下一步</dt><dd>{family.next_step}</dd></div>
+            <div><dt>记录版本</dt><dd>{family.projection_version}</dd></div>
+            <div><dt>下一步</dt><dd>{nextStepLabel(family.next_step)}</dd></div>
           </dl>
           {overview.experiments.length > 1 ? <div className="evolution-experiment-selector" role="group" aria-label="实验证据选择">{overview.experiments.map((experiment) => <button className="button button--quiet" type="button" key={experiment.experiment_id} aria-pressed={detail?.experiment.experiment_id === experiment.experiment_id} onClick={() => onSelectExperiment(experiment.experiment_id)}>{experiment.candidate_ordinal} · {experiment.strategy_version}</button>)}</div> : null}
           {detail ? <div className="evolution-actions"><button className="button button--danger" type="button" disabled={!canWrite || !detail.write_enabled} onClick={() => onVetoExperiment(detail.experiment.experiment_id)}><XCircle aria-hidden="true" size={17} />{busyAction === "veto" ? "记录中…" : "否决本次晋级"}</button></div> : null}
-          <HashRail values={[["权威", family.authority_hash], ["协议", family.protocol_hash], ["代码", family.code_hash]]} />
+          <HashRail values={[["证据", family.authority_hash], ["协议", family.protocol_hash], ["代码", family.code_hash]]} />
         </>
       )}
     </section>
@@ -532,9 +532,25 @@ function ComparisonSection({ detail }: { detail: ExperimentDetail | null }): Rea
         <table className="evolution-table numeric-data"><caption>挑战者、当前冠军与差值；所有数值均来自服务端时点正确证据。</caption><thead><tr><th scope="col">指标</th><th scope="col">挑战者</th><th scope="col">冠军</th><th scope="col">差值</th></tr></thead><tbody>{rows.map(([label, metric]) => <tr key={label}><th scope="row">{label === "Sharpe" ? "夏普比率" : label}</th><td>{label === "Sharpe" ? formatMetric(metric.challenger) : formatPercent(metric.challenger)}</td><td>{label === "Sharpe" ? formatMetric(metric.champion) : formatPercent(metric.champion)}</td><td>{label === "Sharpe" ? formatMetric(metric.delta) : formatPercent(metric.delta, true)}</td></tr>)}</tbody></table>
       </div>
       <dl className="evolution-ledger numeric-data"><div><dt>有效样本外窗口</dt><dd>{comparison.valid_oos_window_count ?? "未知"}</dd></div><div><dt>累计试验</dt><dd>{comparison.cumulative_oos_trial_count ?? "未知"}</dd></div></dl>
-      <HashRail values={[["比较", comparison.comparison_hash], ["权威", comparison.authority_hash], ["成本政策", comparison.cost_policy_hash]]} />
+      <HashRail values={[["比较", comparison.comparison_hash], ["证据", comparison.authority_hash], ["成本政策", comparison.cost_policy_hash]]} />
     </section>
   );
+}
+
+function nextStepLabel(value: string): string {
+  const labels: Record<string, string> = {
+    "Await deterministic admission.": "等待按固定规则核验准入条件。",
+    "Run deterministic paired backtests.": "对候选策略与基准执行配对回测。",
+    "Await point-in-time backtest evidence.": "等待按当时可用信息生成的回测证据。",
+    "Start isolated Strategy Shadow.": "开始独立的策略前向观察。",
+    "Accumulate 5/21/63 session checkpoints.": "积累 5、21、63 个交易日的观察检查点。",
+    "Await deterministic handover and boundary activation.": "等待按固定规则完成策略交接，并在规定时点生效。",
+    "Champion transition is recorded.": "主用策略切换已记录。",
+    "Experiment was vetoed; no promotion is permitted.": "实验已被否决，不允许晋级。",
+    "Restart against the current champion generation.": "以当前主用策略版本为基准重新开始。",
+    "No further automatic action is permitted.": "不允许继续自动操作。",
+  };
+  return labels[value] ?? (/[\u3400-\u9fff]/.test(value) ? value : `尚无中文说明（${value}）`);
 }
 
 function ShadowSection({ detail }: { detail: ExperimentDetail | null }): React.ReactElement {
@@ -543,11 +559,11 @@ function ShadowSection({ detail }: { detail: ExperimentDetail | null }): React.R
   return (
     <section className="evolution-section evolution-shadow" aria-labelledby="shadow-title">
       <header className="evolution-section__heading"><div><p className="eyebrow">04 / 前向模拟证据</p><h2 id="shadow-title">策略前向观察</h2></div><span className="state-chip">{statusLabel(shadow.status)}</span></header>
-      <div className="evolution-progress" aria-label={`Shadow 评估已完成 ${shadow.completed_sessions} / ${shadow.evaluation_sessions} 个交易日`}><div style={{ inlineSize: `${Math.min(100, shadow.completed_sessions / shadow.evaluation_sessions * 100)}%` }} /><span>{shadow.completed_sessions} / {shadow.evaluation_sessions} 个交易日</span></div>
-      <div className="evolution-comparison-badges" aria-label="Shadow 宽限进度"><span className="mode-badge">宽限期 {shadow.grace_sessions} 个交易日</span><span className="mode-badge">已等待 {shadow.grace_elapsed_sessions} 个交易日</span></div>
-      <ol className="evolution-checkpoints" aria-label="Shadow 检查点">{[5, 21, 63].map((checkpoint) => <li key={checkpoint} data-complete={shadow.checkpoints_completed.includes(checkpoint as 5 | 21 | 63)}>检查点 {checkpoint} · {shadow.checkpoints_completed.includes(checkpoint as 5 | 21 | 63) ? "已完成" : "等待"}</li>)}</ol>
+      <div className="evolution-progress" aria-label={`前向观察评估已完成 ${shadow.completed_sessions} / ${shadow.evaluation_sessions} 个交易日`}><div style={{ inlineSize: `${Math.min(100, shadow.completed_sessions / shadow.evaluation_sessions * 100)}%` }} /><span>{shadow.completed_sessions} / {shadow.evaluation_sessions} 个交易日</span></div>
+      <div className="evolution-comparison-badges" aria-label="前向观察宽限进度"><span className="mode-badge">宽限期 {shadow.grace_sessions} 个交易日</span><span className="mode-badge">已等待 {shadow.grace_elapsed_sessions} 个交易日</span></div>
+      <ol className="evolution-checkpoints" aria-label="前向观察检查点">{[5, 21, 63].map((checkpoint) => <li key={checkpoint} data-complete={shadow.checkpoints_completed.includes(checkpoint as 5 | 21 | 63)}>检查点 {checkpoint} · {shadow.checkpoints_completed.includes(checkpoint as 5 | 21 | 63) ? "已完成" : "等待"}</li>)}</ol>
       <dl className="evolution-ledger numeric-data"><div><dt>完全成交</dt><dd>{shadow.full_fill_count}</dd></div><div><dt>成本后超额</dt><dd>{formatPercent(shadow.after_cost_excess_return, true)}</dd></div><div><dt>回撤差</dt><dd>{formatPercent(shadow.drawdown_difference, true)}</dd></div><div><dt>硬风控违规</dt><dd>{shadow.hard_risk_violation_count}</dd></div><div><dt>数据完整性</dt><dd>{shadow.data_complete ? "完整" : "不完整"}</dd></div></dl>
-      <HashRail values={[["Shadow 权威", shadow.authority_hash]]} />
+      <HashRail values={[["前向观察证据", shadow.authority_hash]]} />
     </section>
   );
 }
@@ -556,7 +572,7 @@ function GatesSection({ detail }: { detail: ExperimentDetail | null }): React.Re
   if (!detail) return <EmptyEvidence index="05" title="晋级解释" />;
   return (
     <section className="evolution-section" aria-labelledby="gates-title">
-      <header className="evolution-section__heading"><div><p className="eyebrow">05 / 确定性门禁</p><h2 id="gates-title">晋级解释</h2></div><span className="mode-badge">{statusLabel(detail.integrity_status)}</span></header>
+      <header className="evolution-section__heading"><div><p className="eyebrow">05 / 固定规则核验</p><h2 id="gates-title">晋级解释</h2></div><span className="mode-badge">{statusLabel(detail.integrity_status)}</span></header>
       <ol className="evolution-gates">{detail.gates.map((gate, index) => <li key={`${gate.stage}-${gate.gate}`} data-status={gate.status}><span className="evolution-gates__index">{String(index + 1).padStart(2, "0")}</span><div><header><h3>{gateLabel(gate.gate)}</h3><span>{gateStatusLabel(gate.status)}</span></header><dl className="numeric-data"><div><dt>阶段</dt><dd>{({ historical: "历史回测", shadow: "前向观察", handover: "策略交接" } as Record<string, string>)[gate.stage] ?? gate.stage}</dd></div><div><dt>观测</dt><dd>{gate.observed.map((value) => gateValue(gate.gate, value)).join(" · ") || "未知"}</dd></div><div><dt>阈值</dt><dd>{gate.thresholds.map((value) => gateValue(gate.gate, value)).join(" · ") || "未知"}</dd></div><div><dt>理由</dt><dd>{reasonText(gate.reason_code)}</dd></div></dl></div></li>)}</ol>
     </section>
   );
@@ -587,7 +603,7 @@ function HashRail({ values }: { values: Array<[string, string | null | undefined
 }
 
 function axisLabel(axis: components["schemas"]["SearchAxisSummaryResponse"]["axis"]): string {
-  return ({ min_adv20_usd: "近 20 日最低平均成交额", min_close: "最低收盘价", target_weight: "目标权重", ranking_feature: "排名特征", positive_return_filter_enabled: "正收益过滤" })[axis];
+  return ({ min_adv20_usd: "近 20 个交易日最低平均成交额", min_close: "最低收盘价", target_weight: "目标权重", ranking_feature: "排名特征", positive_return_filter_enabled: "正收益过滤" })[axis];
 }
 function gateStatusLabel(status: components["schemas"]["GateResultResponse"]["status"]): string {
   return ({ PASS: "通过", FAIL: "失败", UNKNOWN: "未知", STALE: "过期" })[status];

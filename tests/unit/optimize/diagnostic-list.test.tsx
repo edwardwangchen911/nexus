@@ -8,6 +8,18 @@ import {
 import { diagnosticReport } from "./fixtures";
 
 describe("portfolio optimization diagnostics", () => {
+  it("labels currency scope and trading-day windows without changing thresholds", () => {
+    const report = diagnosticReport();
+    report.items = [{ ...report.items[0], diagnostic_code: "VOLATILITY_63", policy_scope: "currency:USD", unit: "ratio", metric_value: "0.123456789", reference_limit: "0.15", headroom: "0.026543211", unknown_reason: "VOLATILITY_63_COVERAGE_INSUFFICIENT", headroom_reason: null }];
+    render(<DiagnosticList report={report} />);
+    expect(screen.getByRole("heading", { name: "63 个交易日年化波动率" })).toBeVisible();
+    const item = screen.getByRole("listitem");
+    expect(item).toHaveTextContent("币种范围：USD");
+    expect(item).toHaveTextContent("63 个交易日窗口内有效价格覆盖不足");
+    expect(item).toHaveTextContent("12.346%");
+    expect(item).toHaveTextContent("2.654 个百分点");
+    expect(report.items[0].metric_value).toBe("0.123456789");
+  });
   it.each([
     ["BLOCKED", "当前无法判断"],
     ["RESEARCH_REQUIRED", "需要补充证据"],
