@@ -1,8 +1,9 @@
 """Pure, fail-closed strategy inputs; callers retain source and purpose authorization."""
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Literal
+from typing import Literal, Never
 from uuid import UUID
 
 from nexus.domain.time import require_utc
@@ -21,6 +22,32 @@ from nexus.strategy.features import (
     sector_exposures_complete,
     select_sector_exposures,
 )
+
+
+@dataclass(frozen=True)
+class UnrankedStrategySnapshot:
+    """Price features awaiting actual holding history, never a zero-rank decision input."""
+
+    decision_session: date
+    next_session: date
+    instruments: tuple[BaselineInstrumentSnapshot, ...]
+    current_positions: tuple[UUID, ...]
+
+    @property
+    def position_rank_states(self) -> Never:
+        raise ValueError("STRATEGY_RANK_INPUT_REQUIRED")
+
+    def with_rank_states(self, states: tuple[PositionRankState, ...]) -> StrategyDataSnapshot:
+        ids = tuple(state.instrument_id for state in states)
+        if len(set(ids)) != len(ids) or set(ids) != set(self.current_positions):
+            raise ValueError("strategy rank states must exactly cover current positions")
+        return StrategyDataSnapshot(
+            decision_session=self.decision_session,
+            next_session=self.next_session,
+            instruments=self.instruments,
+            current_positions=self.current_positions,
+            position_rank_states=tuple(sorted(states, key=lambda item: item.instrument_id.int)),
+        )
 
 
 def prepare_strategy_data_snapshot(
@@ -47,6 +74,39 @@ def prepare_strategy_data_snapshot(
     Rank states must come from the same account/strategy history; they are never
     inferred here. An empty account supplies an explicit empty state tuple.
     """
+    features = prepare_unranked_strategy_snapshot(
+        decision_session=decision_session,
+        next_session=next_session,
+        decision_time=decision_time,
+        calendar_sessions=calendar_sessions,
+        decision_times=decision_times,
+        raw_bars=raw_bars,
+        adjusted_bars=adjusted_bars,
+        universe_members=universe_members,
+        asset_types=asset_types,
+        sector_classifications=sector_classifications,
+        sector_source=sector_source,
+        current_positions=current_positions,
+    )
+    return features.with_rank_states(position_rank_states)
+
+
+def prepare_unranked_strategy_snapshot(
+    *,
+    decision_session: date,
+    next_session: date,
+    decision_time: datetime,
+    calendar_sessions: tuple[date, ...],
+    decision_times: Mapping[date, datetime],
+    raw_bars: tuple[BacktestBar, ...],
+    adjusted_bars: tuple[BacktestBar, ...],
+    universe_members: tuple[UUID, ...],
+    asset_types: Mapping[UUID, Literal["stock", "equity_etf", "non_equity_etf"]],
+    sector_classifications: tuple[SectorClassification, ...],
+    sector_source: str,
+    current_positions: tuple[UUID, ...],
+) -> UnrankedStrategySnapshot:
+    """Prepare features only; rank history must be supplied by the checkpoint writer."""
     cutoff = require_utc(decision_time)
     if (
         not calendar_sessions
@@ -70,9 +130,6 @@ def prepare_strategy_data_snapshot(
         raise ValueError("strategy universe must be nonempty and unique")
     if len(set(current_positions)) != len(current_positions):
         raise ValueError("strategy current positions must be unique")
-    rank_ids = tuple(state.instrument_id for state in position_rank_states)
-    if len(set(rank_ids)) != len(rank_ids) or set(rank_ids) != set(current_positions):
-        raise ValueError("strategy rank states must exactly cover current positions")
     required = set(universe_members) | set(current_positions)
     if not required <= set(asset_types):
         raise ValueError("strategy asset types do not cover required instruments")
@@ -139,12 +196,9 @@ def prepare_strategy_data_snapshot(
                 eligible_for_new_position=instrument_id in universe_members and not stale,
             )
         )
-    return StrategyDataSnapshot(
+    return UnrankedStrategySnapshot(
         decision_session=decision_session,
         next_session=next_session,
         instruments=tuple(instruments),
         current_positions=tuple(sorted(current_positions, key=lambda item: item.int)),
-        position_rank_states=tuple(
-            sorted(position_rank_states, key=lambda item: item.instrument_id.int)
-        ),
     )

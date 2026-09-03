@@ -38,6 +38,7 @@ from nexus.strategy.forward import (
 )
 from nexus.strategy.interpreter import evaluate_compiled_strategy_with_rank_observations
 from nexus.strategy.rank_continuity import PositionContinuity, load_held_position_continuity
+from nexus.strategy.snapshot import UnrankedStrategySnapshot
 
 _SCHEMA = "rank_checkpoint_v1"
 
@@ -155,7 +156,7 @@ async def _read_checkpoint(
 async def evaluate_and_persist_rank_checkpoint(
     session: AsyncSession,
     *,
-    snapshot: StrategyDataSnapshot,
+    snapshot: StrategyDataSnapshot | UnrankedStrategySnapshot,
     authority: RankCheckpointAuthority,
 ) -> PersistedRankCheckpoint | None:
     """Derive rank inputs and persist both facts in a caller-owned transaction.
@@ -313,7 +314,12 @@ async def evaluate_and_persist_rank_checkpoint(
         states = _derive_rank_states(
             continuity.positions, parent_observations.held_rank if parent_observations else ()
         )
-        frozen = snapshot.model_copy(
+        ranked = (
+            snapshot.with_rank_states(states)
+            if isinstance(snapshot, UnrankedStrategySnapshot)
+            else snapshot
+        )
+        frozen = ranked.model_copy(
             update={
                 "position_rank_states": states,
                 "current_positions": tuple(sorted(snapshot.current_positions, key=str)),

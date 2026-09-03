@@ -206,3 +206,21 @@ def test_non_week_end_keeps_explicit_rank_state():
     decision = evaluate_baseline_v1(snapshot, snapshot.decision_session)
     assert decision.reason == "NOT_WEEK_END"
     assert decision.position_rank_states == values["position_rank_states"]
+
+
+def test_unranked_features_cannot_be_evaluated_as_zero_rank():
+    from nexus.strategy.snapshot import prepare_unranked_strategy_snapshot
+
+    values = inputs()
+    values.pop("position_rank_states")
+    values["current_positions"] = (ID,)
+    features = prepare_unranked_strategy_snapshot(**values)
+    assert features.current_positions == (ID,)
+    with pytest.raises(ValueError, match="STRATEGY_RANK_INPUT_REQUIRED"):
+        evaluate_baseline_v1(features, END)
+    with pytest.raises(ValueError, match="exactly cover"):
+        features.with_rank_states(())
+    ranked = features.with_rank_states(
+        (PositionRankState(instrument_id=ID, consecutive_outside_top20_weeks=2),)
+    )
+    assert ranked.position_rank_states[0].consecutive_outside_top20_weeks == 2
