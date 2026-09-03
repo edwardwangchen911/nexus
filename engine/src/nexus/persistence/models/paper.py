@@ -1456,3 +1456,29 @@ class PaperPerformanceAttributionRecord(ImmutableCreatedAt, Base):
     slippage: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
     completeness: Mapped[str] = mapped_column(String(10))
     content_hash: Mapped[str] = mapped_column(String(64))
+
+
+class StrategyRankCheckpointRecord(ImmutableCreatedAt, Base):
+    """Immutable rank evidence written atomically with its forward decision."""
+
+    __tablename__ = "strategy_rank_checkpoints"
+    __table_args__ = (
+        ForeignKeyConstraint(["decision_id"], ["strategy_decisions.id"]),
+        ForeignKeyConstraint(
+            ["previous_decision_id"], ["strategy_rank_checkpoints.decision_id"]
+        ),
+        CheckConstraint("schema_version = 'rank_checkpoint_v1'", name="schema_version"),
+        CheckConstraint(
+            "input_snapshot_hash ~ '^[0-9a-f]{64}$' AND checkpoint_hash ~ '^[0-9a-f]{64}$'",
+            name="hashes_canonical",
+        ),
+        CheckConstraint("jsonb_typeof(observations) = 'object'", name="observations_object"),
+        CheckConstraint("previous_decision_id IS NULL OR previous_decision_id <> decision_id", name="parent_distinct"),
+    )
+
+    decision_id: Mapped[UUID] = mapped_column(primary_key=True)
+    previous_decision_id: Mapped[UUID | None]
+    schema_version: Mapped[str] = mapped_column(String(30))
+    input_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    observations: Mapped[dict[str, object]] = mapped_column(JSONB)
+    checkpoint_hash: Mapped[str] = mapped_column(String(64))
