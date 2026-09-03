@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from nexus.providers.broker.base import CashFlowBusinessType, CashFlowProductCode
+
 
 class GatewayFact(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -77,6 +79,8 @@ class CashFlowItem(GatewayFact):
     provider_business_date: date | None = None
     direction: Literal[1, 2] | None = None
     flow_type: str
+    business_type: CashFlowBusinessType | None = None
+    product_code: CashFlowProductCode | None = None
 
     @field_validator("direction", mode="before")
     @classmethod

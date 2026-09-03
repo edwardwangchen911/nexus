@@ -55,6 +55,57 @@ def test_aware_created_time_and_distinct_trade_date_are_both_preserved():
     assert item.provider_business_date == date(2026, 8, 21)
 
 
+@pytest.mark.parametrize("business_type", [None, 0, -1, 987654, 2**63 - 1])
+def test_cash_flow_context_is_opaque_bounded_and_has_no_free_text(business_type):
+    page = normalize(
+        response(
+            businessType=business_type,
+            productCode="usSYNTH.A",
+            remark="synthetic private memo",
+            description="synthetic personal description",
+        )
+    )
+    row = page.model_dump(mode="json")["items"][0]
+    assert row["business_type"] == business_type
+    assert row["product_code"] == "usSYNTH.A"
+    assert row["occurred_at"] is None
+    assert row["provider_business_date"] == "2026-08-21"
+    assert "private" not in str(row) and "personal" not in str(row)
+    assert "remark" not in row and "description" not in row
+
+
+@pytest.mark.parametrize(
+    "changes", [{}, {"businessType": None, "productCode": None}, {"productCode": ""}]
+)
+def test_missing_cash_flow_context_stays_unknown(changes):
+    row = normalize(response(**changes)).items[0]
+    assert row.business_type is None
+    assert row.product_code is None
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"businessType": True},
+        {"businessType": "123"},
+        {"businessType": 1.0},
+        {"businessType": 2**63},
+        {"businessType": -(2**63) - 1},
+        {"productCode": 123},
+        {"productCode": "A" * 129},
+        {"productCode": "synthetic private memo"},
+        {"productCode": "usSYNTH\n"},
+        {"productCode": " "},
+        {"productCode": {"remark": "synthetic private memo"}},
+    ],
+)
+def test_invalid_cash_flow_context_fails_without_leaking_value(changes):
+    with pytest.raises(GatewayError) as error:
+        normalize(response(**changes))
+    assert error.value.code == "PROVIDER_MALFORMED_RESPONSE"
+    assert "private" not in str(error.value)
+
+
 @pytest.mark.parametrize(
     "changes",
     [

@@ -32,6 +32,8 @@ async def test_provider_business_date_direction_and_opaque_type_are_preserved(
                     "provider_business_date": "2026-08-21",
                     "direction": direction,
                     "flow_type": "703",
+                    "business_type": 987654,
+                    "product_code": "usSYNTH.A",
                 }
             )
         }
@@ -46,6 +48,8 @@ async def test_provider_business_date_direction_and_opaque_type_are_preserved(
     assert result.quality == "PASS"
     assert result.items[0].amount == Decimal(want)
     assert result.items[0].kind == "fosun:703"
+    assert result.items[0].business_type == 987654
+    assert result.items[0].product_code == "usSYNTH.A"
     assert result.items[0].occurred_at is None
     assert result.items[0].provider_business_date == date(2026, 8, 21)
 
@@ -88,6 +92,49 @@ async def test_invalid_direction_or_amount_cannot_become_decision_cash_flow(dire
             sync_run_id=SYNC_RUN_ID,
             limit=100,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "context",
+    [
+        {"business_type": True},
+        {"business_type": "123"},
+        {"business_type": 1.0},
+        {"business_type": 2**63},
+        {"product_code": 123},
+        {"product_code": "A" * 129},
+        {"product_code": "synthetic private memo"},
+        {"remark": "synthetic private memo"},
+    ],
+)
+async def test_engine_rejects_invalid_cash_flow_context_at_gateway_boundary(context):
+    service = provider(
+        {
+            "cash_flows": page(
+                {
+                    "kind": "cash_flow",
+                    "external_cash_flow_id": "synthetic-flow",
+                    "currency": "USD",
+                    "amount": "12.5",
+                    "occurred_at": None,
+                    "provider_business_date": "2026-08-21",
+                    "direction": 2,
+                    "flow_type": "703",
+                    **context,
+                }
+            )
+        }
+    )
+    with pytest.raises(BrokerProviderError) as error:
+        await service.read_cash_flows(
+            ACCOUNT_ID,
+            DateRange(start=date(2026, 8, 20), end=date(2026, 8, 23)),
+            None,
+            sync_run_id=SYNC_RUN_ID,
+            limit=100,
+        )
+    assert str(error.value) == "gateway facts rejected"
 
 
 class FakeGatewayClient:

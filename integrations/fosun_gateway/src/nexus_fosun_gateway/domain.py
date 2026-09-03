@@ -15,6 +15,14 @@ from pydantic import (
 )
 
 SyntheticSafeId = Annotated[str, StringConstraints(min_length=1, max_length=128)]
+# Local transport bounds, not a claim about the provider's enum or symbol universe.
+CashFlowBusinessType = Annotated[int, Field(strict=True, ge=-(2**63), le=2**63 - 1)]
+CashFlowProductCode = Annotated[
+    str,
+    StringConstraints(
+        strict=True, min_length=1, max_length=128, pattern=r"\A[A-Za-z0-9][A-Za-z0-9._:/-]*\z"
+    ),
+]
 
 
 class GatewayModel(BaseModel):
@@ -99,6 +107,8 @@ class CashFlowItem(GatewayModel):
     provider_business_date: date | None = None
     direction: Literal[1, 2] | None = None
     flow_type: str
+    business_type: CashFlowBusinessType | None = None
+    product_code: CashFlowProductCode | None = None
 
     @field_validator("occurred_at")
     @classmethod

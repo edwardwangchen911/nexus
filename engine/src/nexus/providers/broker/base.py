@@ -2,10 +2,17 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal, Protocol
+from typing import Annotated, Literal, Protocol
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from nexus.domain.time import require_utc
 
@@ -13,6 +20,14 @@ SnapshotStatus = Literal["READY", "PARTIAL", "STALE", "RECONCILIATION_REQUIRED"]
 BrokerPageQuality = Literal["PASS", "PARTIAL"]
 SnapshotTimeBasis = Literal["provider_event", "gateway_observed"]
 BrokerOrderStatus = Literal["pending", "submitted", "partially_filled"]
+# Opaque provider context; local transport bounds do not define fee semantics.
+CashFlowBusinessType = Annotated[int, Field(strict=True, ge=-(2**63), le=2**63 - 1)]
+CashFlowProductCode = Annotated[
+    str,
+    StringConstraints(
+        strict=True, min_length=1, max_length=128, pattern=r"\A[A-Za-z0-9][A-Za-z0-9._:/-]*\z"
+    ),
+]
 
 
 class BrokerFact(BaseModel):
@@ -102,6 +117,8 @@ class BrokerCashFlow(BrokerFact):
     occurred_at: datetime | None
     provider_business_date: date | None = None
     kind: str
+    business_type: CashFlowBusinessType | None = None
+    product_code: CashFlowProductCode | None = None
 
     @field_validator("currency")
     @classmethod

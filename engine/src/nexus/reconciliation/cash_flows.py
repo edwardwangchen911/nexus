@@ -15,6 +15,8 @@ from nexus.providers.broker.base import (
     BrokerCashFlow,
     BrokerProvider,
     BrokerProviderError,
+    CashFlowBusinessType,
+    CashFlowProductCode,
     DateRange,
     SourceObservation,
 )
@@ -39,6 +41,8 @@ class NormalizedCashFlow:
     kind: str
     source_request_id: str
     response_as_of: datetime
+    business_type: CashFlowBusinessType | None = None
+    product_code: CashFlowProductCode | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +186,8 @@ def _normalize(
         kind=item.kind,
         source_request_id=source_request_id,
         response_as_of=response_as_of,
+        business_type=item.business_type,
+        product_code=item.product_code,
     )
 
 

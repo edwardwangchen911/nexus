@@ -269,6 +269,10 @@ def _cash_flow(item: Mapping[str, object]) -> CashFlowItem:
         provider_business_date=business_date,
         direction=cast("Literal[1, 2] | None", direction),
         flow_type=str(flow_type),
+        business_type=cast("int | None", item.get("businessType")),
+        product_code=cast(
+            "str | None", None if item.get("productCode") == "" else item.get("productCode")
+        ),
     )
 
 

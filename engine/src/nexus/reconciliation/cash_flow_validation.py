@@ -1,7 +1,12 @@
 """Fail-closed validation for cash-flow persistence evidence."""
 
+from pydantic import TypeAdapter, ValidationError
+
+from nexus.providers.broker.base import CashFlowBusinessType, CashFlowProductCode
 from nexus.reconciliation.cash_flows import CashFlowSyncResult
 from nexus.reconciliation.persistence_errors import BrokerSyncPersistenceError
+
+_CONTEXT = TypeAdapter(tuple[CashFlowBusinessType | None, CashFlowProductCode | None])
 
 
 def validate_cash_flow_result(result: CashFlowSyncResult) -> None:
@@ -24,6 +29,10 @@ def validate_cash_flow_result(result: CashFlowSyncResult) -> None:
         raise BrokerSyncPersistenceError("cash-flow watermark evidence is incomplete")
     identities: set[str] = set()
     for fact in result.facts:
+        try:
+            _CONTEXT.validate_python((fact.business_type, fact.product_code))
+        except ValidationError:
+            raise BrokerSyncPersistenceError("cash-flow context is invalid") from None
         if (
             fact.provider_cash_flow_id in identities
             or not fact.provider_cash_flow_id

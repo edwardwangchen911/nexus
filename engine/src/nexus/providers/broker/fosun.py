@@ -218,6 +218,8 @@ class FosunBrokerProvider:
                     amount=_cash_flow_amount(item),
                     occurred_at=_optional_utc(item.occurred_at),
                     provider_business_date=item.provider_business_date,
+                    business_type=item.business_type,
+                    product_code=item.product_code,
                     kind=(
                         f"fosun:{item.flow_type}"
                         if item.direction is not None

@@ -3,6 +3,7 @@
 from datetime import datetime
 from typing import cast
 
+from pydantic import TypeAdapter
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +30,8 @@ from nexus.reconciliation.facts import (
 )
 from nexus.reconciliation.finalization import InvalidBrokerSyncResult, validate_broker_sync_result
 from nexus.reconciliation.persistence_errors import BrokerSyncPersistenceError
+
+_CASH_FLOW_ARCHIVE = TypeAdapter(CashFlowSyncResult)
 
 
 async def finalize_broker_sync(
@@ -128,11 +131,21 @@ async def finalize_broker_sync(
                 updated_at=order.updated_at,
             )
         )
-    for index, trace in enumerate(result.attempt_traces, start=1):
-        session.add(_attempt_record(run.id, index, trace))
     quality: CashFlowQuality = "NOT_RUN"
     if cash_flow_result is not None:
         quality = await persist_cash_flows(session, run, provider, cash_flow_result)
+    for index, trace in enumerate(result.attempt_traces, start=1):
+        attempt = _attempt_record(run.id, index, trace)
+        if cash_flow_result is not None and index == result.attempt_count:
+            # A protected observation archive, outside the six-step reconciliation.
+            # Keep each new read even when its ledger identity already exists; never
+            # backfill the old immutable ledger or infer fees from these opaque codes.
+            attempt.raw_facts["_cash_flows"] = {
+                "schema_version": "cash_flow_observation_v1",
+                "ledger_quality": quality,
+                "result": _CASH_FLOW_ARCHIVE.dump_python(cash_flow_result, mode="json"),
+            }
+        session.add(attempt)
     await session.flush()
     run.status = snapshot.status
     run.completed_at = completed_at
