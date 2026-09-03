@@ -868,3 +868,46 @@ DOM 结果为 market-dom-verified.json，组合为 portfolio-dom-summary.json。
 DOM 首次误把交易日行标题 th 当作 td，继而错误采用默认千分位格式，与页面原格式
 不一致；分别核对现有组件与 formatDisplayDecimal 后修正验收预期，五字段最终全部
 相符。初始 false 与最终结果分开保存，未改业务显示或底层价格来通过验收。
+
+## B3 新原始日线复验与最小防复发修复（2026-09-04，北京时间）
+
+正常刷新后沿用同一案例和问题，新冻结输入已实际包含合格 raw 收盘价、证券快照与
+修正后的综合指令；四项复权指标仍不可用。一次真实 staged 运行在 critique 因
+model_stage_review_invalid 停止，输入/输出用量为 28,384/2,127，仅五个 research
+角色保存，未进入 synthesis、未形成意图、没有重试。拒绝的原始输出未持久化，因此
+只能确认审阅引用校验失败，不能断言究竟是空引用还是不存在的 claim ID。
+本次不能证明前一轮综合正文 P2 已治愈。B 对已保存正文的只读复核未发现把 raw 当作
+复权、捏造费用/分红或生成交易指令；完整综合内容验收仍未通过。
+
+DB/API/BFF 对应同一新 run 和 snapshot，stage_trace verified；正常页面显示 partial、
+已保存研究、反方/综合不可用、中文失败原因、已知用量、无研究意图和执行锁。
+三类旧研究行摘要不变、活跃 Job 为零。保护目录为
+outputs/acceptance/b3-raw-recheck-20260904（0700/0600），最终 DOM 为
+dom-final-summary.json；首次页面尚未加载完成的 false 保留，未覆盖成成功。
+
+根因处补了三项有限改动：
+- d9fb3a0：原刷新先冻结券商 cutoff，后提交行情，导致同轮诊断看不到刚形成的
+  manifest/provider binding/authority。现在行情事务提交后才读取并冻结券商，随后
+  单独提交 READY 快照。行情落库失败不继续券商读取；后续券商失败保留真实行情事实，
+  不创建新持仓快照。不回拨时间、不改写旧行、不增加外部请求。
+- d2ee827（B 原提交 47e32ad）：Fosun volume 单位尚无可核实声明，不能由
+  close×volume 推导美元 ADV20。保留 raw 价格可用，ADV20 保持未知，诊断说明为
+  ADV20_VOLUME_UNIT_UNVERIFIED。官方字段与已有精确网关归档均已检查；归档没有
+  单位/成交额字段，不等于未保留的 SDK 原响应也没有，未知边界保持明确。
+- 5d17be1（root 原提交 c96e8ad）：critique/synthesis 的输出 schema 只枚举本次
+  previous_claims 的实际 ID，同一 schema 用于请求摘要和 SDK wire。保留事后引用
+  校验、综合必须覆盖 bear/audit、原预算与首错停止；不添加阶段、重试或内容评分器。
+  30dbe4f 已补引用失败及成交量单位缺口的中文显示。
+
+合入 A 后，刷新/诊断 60 项单测、正常入口到隔离 PostgreSQL 再到 selector/诊断
+4 项集成用例、SDK 40 项单测和 6 项 worker/API PG 参数例通过，相关 Ruff/Mypy
+通过。PG 明确验证新 cutoff 可选中同轮 raw、旧 cutoff 不可选、券商失败无新快照，
+以及流动性值仍为 null 且有单位未核实原因。SDK 独立审查无问题；刷新修复已送一次
+独立审查。测试只用合成数据与隔离数据库，没有重复真实模型或券商调用。
+
+本轮验收脚本异常在测试本身修复：网关合成 request ID 必须用既有 UUIDv7 合同；
+PriceSeries.adjustment 和 manifest.instrument 沿实际类型读取，不猜字段；请求总数
+区分真实 broker fixture 与替身计数。SDK CLI 单测从 engine 子目录运行会按设计返回
+OPENAI_REPOSITORY_ROOT_REQUIRED，改用仓库根目录的 uv --package nexus-engine 后
+40 项通过。这些不作为放宽产品校验的理由。当前修复属于代码与隔离回归完成；未重启
+共享 API，未运行新的真实研究或诊断，不宣称真实综合内容已通过或新诊断已在页面生效。
