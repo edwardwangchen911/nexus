@@ -114,7 +114,7 @@ class ResponsesStrategyRNDRuntime:
     async def generate(
         self, request: StrategyRNDRequestV1, tools: StrategyRNDTools
     ) -> StrategyExperimentProposalV1:
-        self._require_frozen_tool_context(request, tools)
+        require_frozen_rnd_context(request, tools)
         definitions = strategy_rnd_function_tools()
         if tuple(tools.names) != tuple(definitions):
             raise ValueError("fixed Strategy R&D tool registry required")
@@ -199,7 +199,7 @@ class ResponsesStrategyRNDRuntime:
                     )
                 except ValidationError as error:
                     raise ValueError("Strategy R&D structured output is invalid") from error
-                self._require_proposal_identity(request, proposal)
+                require_rnd_proposal_identity(request, proposal)
                 return proposal
 
     async def _execute_tool_call(
@@ -227,32 +227,29 @@ class ResponsesStrategyRNDRuntime:
             "output": json.dumps(result, sort_keys=True, separators=(",", ":")),
         }
 
-    @staticmethod
-    def _require_frozen_tool_context(
-        request: StrategyRNDRequestV1, tools: StrategyRNDTools
-    ) -> None:
-        context = tools.context
-        if (
-            context.parent_strategy_definition_id
-            != request.parent_strategy_definition_id
-            or context.champion_generation != request.champion_generation
-            or context.research_lineage_id != request.research_lineage_id
-            or context.evolution_policy_id != request.evolution_policy_id
-            or context.training_validation_summary_id
-            != request.training_validation_summary_id
-            or context.as_of != request.as_of
-        ):
-            raise ValueError("Strategy R&D tool context identity does not match the request")
 
-    @staticmethod
-    def _require_proposal_identity(
-        request: StrategyRNDRequestV1, proposal: StrategyExperimentProposalV1
-    ) -> None:
-        if (
-            proposal.parent_strategy_definition_id
-            != request.parent_strategy_definition_id
-            or proposal.champion_generation != request.champion_generation
-            or proposal.research_lineage_id != request.research_lineage_id
-            or not set(proposal.evidence_refs) <= set(request.evidence_refs)
-        ):
-            raise ValueError("Strategy R&D proposal identity does not match frozen input")
+def require_frozen_rnd_context(request: StrategyRNDRequestV1, tools: StrategyRNDTools) -> None:
+    """Keep both transports bound to the same server-owned tool identities."""
+    context = tools.context
+    if (
+        context.parent_strategy_definition_id != request.parent_strategy_definition_id
+        or context.champion_generation != request.champion_generation
+        or context.research_lineage_id != request.research_lineage_id
+        or context.evolution_policy_id != request.evolution_policy_id
+        or context.training_validation_summary_id != request.training_validation_summary_id
+        or context.as_of != request.as_of
+    ):
+        raise ValueError("Strategy R&D tool context identity does not match the request")
+
+
+def require_rnd_proposal_identity(
+    request: StrategyRNDRequestV1, proposal: StrategyExperimentProposalV1
+) -> None:
+    """A transport cannot enlarge the frozen proposal or citation authority."""
+    if (
+        proposal.parent_strategy_definition_id != request.parent_strategy_definition_id
+        or proposal.champion_generation != request.champion_generation
+        or proposal.research_lineage_id != request.research_lineage_id
+        or not set(proposal.evidence_refs) <= set(request.evidence_refs)
+    ):
+        raise ValueError("Strategy R&D proposal identity does not match frozen input")
