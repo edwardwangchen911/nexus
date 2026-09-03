@@ -30,6 +30,7 @@ type Notice = { kind: "error" | "success"; text: string } | null;
 type MarketPanelProps = {
   state: DataStateKind;
   researchAsOf?: string | null;
+  lastReadAt?: string | null;
   items: MarketItem[];
   selectedSeries: SelectedMarketSeries | null;
   intradayMonitor?: IntradayMonitorData | null;
@@ -52,6 +53,7 @@ export default function MarketPage(): React.ReactElement {
   const initialLocation = useMemo(() => readMarketLocation(), []);
   const [state, setState] = useState<DataStateKind>("loading");
   const [researchAsOf, setResearchAsOf] = useState<string | null>(null);
+  const [lastReadAt, setLastReadAt] = useState<string | null>(null);
   const [items, setItems] = useState<MarketItem[]>([]);
   const [selectedSeries, setSelectedSeries] = useState<SelectedMarketSeries | null>(null);
   const [intradayMonitor, setIntradayMonitor] = useState<IntradayMonitorData | null>(null);
@@ -103,6 +105,7 @@ export default function MarketPage(): React.ReactElement {
       if (refreshVersion !== refreshVersionRef.current) return;
       if (result.kind === "forbidden") {
         setState("forbidden");
+        setLastReadAt(null);
         itemsRef.current = [];
         setItems([]);
         setSelectedSeries(null);
@@ -129,6 +132,7 @@ export default function MarketPage(): React.ReactElement {
       );
       setNextCursor(data.next_cursor);
       setState(classifyMarketState(data));
+      setLastReadAt(new Date().toISOString());
       if (nextSelectedInstrumentId !== selectedInstrumentId) {
         setSelectedInstrumentId(nextSelectedInstrumentId);
         replaceMarketQuery({
@@ -252,6 +256,7 @@ export default function MarketPage(): React.ReactElement {
     <MarketPanel
       state={state}
       researchAsOf={researchAsOf}
+      lastReadAt={lastReadAt}
       items={items}
       selectedSeries={selectedSeries}
       intradayMonitor={intradayMonitor}
@@ -293,6 +298,7 @@ export default function MarketPage(): React.ReactElement {
 export function MarketPanel({
   state,
   researchAsOf = null,
+  lastReadAt = null,
   items,
   selectedSeries,
   intradayMonitor = null,
@@ -321,6 +327,8 @@ export function MarketPanel({
     ? intradayMonitor
     : null;
   const hasData = ["ready", "partial", "stale"].includes(state) && items.length > 0;
+  const hasExplicitQuoteTimes = selectedItem !== null
+    && (selectedItem.source_observed_at !== undefined || selectedItem.received_at !== undefined);
 
   return (
     <section className="page-stack market-page" aria-label="市场监控页面" data-state={state}>
@@ -341,6 +349,8 @@ export function MarketPanel({
 
       <p>
         <span aria-label="查询快照时点">查询快照时点 {formatUtc(researchAsOf)}</span>
+        <br />
+        <span aria-label="页面成功读取时间">页面成功读取时间 {formatUtc(lastReadAt)}</span>
         <br />
         <span>页面每 15 秒读取已保存数据，后台页每 60 秒；不代表券商每 15 秒采集，分页可能沿用同一快照。</span>
       </p>
@@ -390,8 +400,13 @@ export function MarketPanel({
                     <EvidenceFact term="最新价" value={selectedItem.price === null ? "无可验证报价" : formatDisplayDecimal(selectedItem.price)} highlight />
                     <EvidenceFact term="报价来源" value={marketSourceLabel(selectedItem.source, selectedItem.feed)} />
                     <EvidenceFact term="Feed" value={selectedItem.feed?.toUpperCase() ?? "未选定"} />
-                    <EvidenceFact term={isReceiptOnlyQuote(selectedItem.source, selectedItem.quality_reasons) ? "网关接收时间" : "行情记录时间"} value={formatUtc(selectedItem.as_of)} />
-                    {isReceiptOnlyQuote(selectedItem.source, selectedItem.quality_reasons) ? <EvidenceFact term="报价源时间" value="未知（上游未提供）" /> : null}
+                    {hasExplicitQuoteTimes ? <>
+                      <EvidenceFact term="报价源时间" value={formatUtc(selectedItem.source_observed_at)} />
+                      <EvidenceFact term={selectedItem.source === "fosun" ? "本机接收时间（网关响应）" : "本机接收时间"} value={formatUtc(selectedItem.received_at)} />
+                    </> : <>
+                      <EvidenceFact term={isReceiptOnlyQuote(selectedItem.source, selectedItem.quality_reasons) ? "网关接收时间" : "行情记录时间"} value={formatUtc(selectedItem.as_of)} />
+                      {isReceiptOnlyQuote(selectedItem.source, selectedItem.quality_reasons) ? <EvidenceFact term="报价源时间" value="未知（上游未提供）" /> : null}
+                    </>}
                     <EvidenceFact term="实时性口径" value={marketDeliveryModeLabel(selectedItem.delivery_mode)} />
                     <EvidenceFact term="报价质量" value={`${marketQualityLabel(selectedItem.quality)} · ${selectedItem.quality}`} />
                   </dl>

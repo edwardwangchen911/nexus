@@ -18,7 +18,7 @@ import { createEngineHmacHeaders } from "../../../app/lib/engine/hmac";
 const instrumentId = "018f3f4e-8e8f-7f5b-9f26-a3cc4da1e781";
 const hmacSecret = "nexus-test-hmac-key-32-bytes!!!!";
 
-function engineEnvelope(includeSeries: boolean) {
+function engineEnvelope(includeSeries: boolean, explicitTimes = false) {
   const bars = Array.from({ length: 500 }, (_, index) => ({
     session: new Date(Date.UTC(2025, 0, index + 1)).toISOString().slice(0, 10),
     open: "228.200000000000",
@@ -40,6 +40,7 @@ function engineEnvelope(includeSeries: boolean) {
         feed: "iex",
         delivery_mode: "real_time",
         as_of: "2026-08-21T20:00:00Z",
+        ...(explicitTimes ? { source_observed_at: null, received_at: "2026-08-21T21:02:03Z" } : {}),
         quality: "PASS",
         quality_reasons: [],
         watchlisted: true,
@@ -107,7 +108,7 @@ afterEach(() => {
 });
 
 describe("market UI to Engine boundary", () => {
-  it("passes a signed 500-bar closed envelope through the real BFF client into the UI", async () => {
+  it.each([false, true])("passes a signed 500-bar envelope through the real BFF into the UI (explicit times: %s)", async (explicitTimes) => {
     process.env.NEXUS_ENGINE_BASE_URL = "http://127.0.0.1:8000";
     process.env.NEXUS_ENGINE_HMAC_CURRENT_KEY_ID = "test-current";
     process.env.NEXUS_ENGINE_HMAC_CURRENT_SECRET = hmacSecret;
@@ -125,7 +126,7 @@ describe("market UI to Engine boundary", () => {
       if (engineUrl.origin !== "http://127.0.0.1:8000") throw new Error("unexpected fetch target");
       engineRequests.push({ url: engineUrl, init });
       const includeSeries = engineUrl.searchParams.get("selected_instrument_id") === instrumentId;
-      return Response.json(engineEnvelope(includeSeries));
+      return Response.json(engineEnvelope(includeSeries, explicitTimes));
     }));
 
     const view = render(<MarketPage />);
@@ -133,6 +134,14 @@ describe("market UI to Engine boundary", () => {
     expect(await screen.findByRole("region", { name: "AAPL 价格图表" }, { timeout: 5_000 })).toBeVisible();
     expect(screen.getByText(/共 500 个交易日/)).toBeVisible();
     expect(screen.getByRole("region", { name: "AAPL 报价证据" })).toHaveTextContent("ALPACA");
+    const quote = screen.getByRole("region", { name: "AAPL 报价证据" });
+    if (explicitTimes) {
+      expect(quote).toHaveTextContent("报价源时间未知");
+      expect(quote).toHaveTextContent("本机接收时间2026-08-22 05:02:03 北京时间");
+      expect(quote).not.toHaveTextContent("行情记录时间");
+    } else {
+      expect(quote).toHaveTextContent("行情记录时间2026-08-22 04:00:00 北京时间");
+    }
     expect(screen.getByRole("region", { name: "AAPL 盘中证据" })).toHaveTextContent("实时 IEX（仅 IEX）");
     expect(screen.getByRole("region", { name: "AAPL OHLCV 证据" })).toHaveTextContent("POLYGON");
 
