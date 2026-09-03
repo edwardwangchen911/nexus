@@ -231,6 +231,12 @@ A统一进行真实调用与运行验收。root的optimizer/research_context/UI�
 
 读侧验证：原4项PG和旧summary默认字段先红；新旧9 PG通过。独立审查发现canonical合法的极小Decimal超出40字符wire限制时会连带SEC失败，新增第5项PG先红，再在可选投影边界捕获预期转换异常；5项新PG复验通过，不放宽canonical或数值精度限制。2项API单测、92项前端/真实BFF边界单测、Mypy2、Ruff、TypeScript、eslint及生成合同检查通过。390/1440浏览器核验展开/负值与小非零/零写/严重可访问性/无页面溢出；手机实际键盘横滚已验证。原始长名称把桌面权重挤出视野，补精确可视断言先红，局部文本单元格换行修正，不裁切名称。API与UI独立集中审查及定向修复ready；真实业务同案例仍由A集成生效后验，不以合成浏览器替代。
 
+NAV资料可见性接续（root，`edward/nexus-nav-history-readside`，已同步A/B的`aead83f`）：复用新`ssga_nav_storage.read_nav_histories`与`nav_tool_payload`，同一精确Frozen选择器；summary新增默认空`issuer_nav_histories`（最多一份），只展示同一规范视图最近32项观察及完整覆盖起止/总数/截断。保留观察日期（包括非交易日），NAV用USD/份，流通份额与基金净资产独立可空；Decimal转wire不改变值，超限可选资料局部不可用，不掩盖SEC。双原件URL/hash/receipt、actual available、币种来源均投影；发布/有效期/修订/拆分/再投资口径保持null，市场价格/总收益/历史回测资格false。UI复用既有展开与表格，明确非成交价、非总收益、不代表过去已知，不计算收益或生成交易。
+
+该片Files限定已有API summary/reader/generated、独立NAV小组件、研究空态和测试；不改A的存储/0039/CLI/模型工具。TDD覆盖仅NAV/与SEC混合、冻结前后/错标的/旧快照不污染、原始hash篡改/超wire拒绝、32条截断与非交易日保留、科学计数精确转字符串、0与null区分、旧字段缺省；实测BFF闭合同、桌面/手机展开和数值单位。A先完成当前批运行与fundobs真实验收，再用正常准入冻结新NAV资料（不必调用模型）核对同一新snapshot DB/BFF/DOM。无新增依赖/表/迁移/外呼，回退读侧应用不改已存NAV。
+
+NAV读侧切片验证：新增4项真实PG路径红测复现无NAV字段/仅NAV返回空，接线后与旧fund 5项共9项通过；API旧合同与NAV parser 33项、research UI/BFF 101项、typecheck、定向eslint、Ruff、Mypy两文件和generatedcheck通过。390/1440两项浏览器验证展开、键盘横向滚动、三位/小非零、无页面溢出、无业务POST与无严重可访问性问题；合成截图已目视检查。后端与UI独立审查均无实质P1/P2。此处只记录代码/隔离验收，运行与真实新snapshot验收由A串行执行后记入现有checkpoint，不能据此改变旧failed研究或正式优化资格。
+
 ## 7. D 公告与数据缺口：立即可开工
 
 ### D1：8-K官方公告正文复用

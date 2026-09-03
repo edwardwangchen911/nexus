@@ -7249,6 +7249,234 @@
         "title": "ResearchInputIssuerDistribution",
         "type": "object"
       },
+      "ResearchInputNavHistory": {
+        "additionalProperties": false,
+        "description": "Issuer per-share NAV observations, not executable market-price authority.",
+        "properties": {
+          "available_at": {
+            "format": "date-time",
+            "title": "Available At",
+            "type": "string"
+          },
+          "content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "coverage_end": {
+            "format": "date",
+            "title": "Coverage End",
+            "type": "string"
+          },
+          "coverage_start": {
+            "format": "date",
+            "title": "Coverage Start",
+            "type": "string"
+          },
+          "currency": {
+            "const": "USD",
+            "title": "Currency",
+            "type": "string"
+          },
+          "currency_basis": {
+            "const": "issuer_page_base_currency",
+            "title": "Currency Basis",
+            "type": "string"
+          },
+          "date_semantics": {
+            "const": "issuer_observation_date_not_verified_trading_session",
+            "title": "Date Semantics",
+            "type": "string"
+          },
+          "evidence_ref_id": {
+            "format": "uuid",
+            "title": "Evidence Ref Id",
+            "type": "string"
+          },
+          "historical_backtest_eligible": {
+            "const": false,
+            "title": "Historical Backtest Eligible",
+            "type": "boolean"
+          },
+          "html_content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Html Content Hash",
+            "type": "string"
+          },
+          "html_received_at": {
+            "format": "date-time",
+            "title": "Html Received At",
+            "type": "string"
+          },
+          "html_url": {
+            "maxLength": 512,
+            "pattern": "^https://www\\.ssga\\.com/us/en/individual/etfs/[^?#%]+$",
+            "title": "Html Url",
+            "type": "string"
+          },
+          "market_price_eligible": {
+            "const": false,
+            "title": "Market Price Eligible",
+            "type": "boolean"
+          },
+          "nav_unit": {
+            "const": "currency_per_share",
+            "title": "Nav Unit",
+            "type": "string"
+          },
+          "observations": {
+            "items": {
+              "$ref": "#/components/schemas/ResearchInputNavObservation"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "title": "Observations",
+            "type": "array"
+          },
+          "reinvestment_method": {
+            "title": "Reinvestment Method",
+            "type": "null"
+          },
+          "revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Revision",
+            "type": "string"
+          },
+          "revision_method": {
+            "title": "Revision Method",
+            "type": "null"
+          },
+          "source": {
+            "const": "ssga_nav_history",
+            "title": "Source",
+            "type": "string"
+          },
+          "source_published_at": {
+            "title": "Source Published At",
+            "type": "null"
+          },
+          "split_adjustment": {
+            "title": "Split Adjustment",
+            "type": "null"
+          },
+          "total_observations": {
+            "minimum": 1,
+            "title": "Total Observations",
+            "type": "integer"
+          },
+          "total_return_eligible": {
+            "const": false,
+            "title": "Total Return Eligible",
+            "type": "boolean"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "valid_until": {
+            "title": "Valid Until",
+            "type": "null"
+          },
+          "workbook_content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Workbook Content Hash",
+            "type": "string"
+          },
+          "workbook_received_at": {
+            "format": "date-time",
+            "title": "Workbook Received At",
+            "type": "string"
+          },
+          "workbook_url": {
+            "maxLength": 512,
+            "pattern": "^https://www\\.ssga\\.com/library-content/products/fund-data/etfs/us/[^?#%]+$",
+            "title": "Workbook Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence_ref_id",
+          "source",
+          "revision",
+          "content_hash",
+          "currency",
+          "currency_basis",
+          "nav_unit",
+          "observations",
+          "total_observations",
+          "truncated",
+          "coverage_start",
+          "coverage_end",
+          "date_semantics",
+          "html_url",
+          "workbook_url",
+          "html_content_hash",
+          "workbook_content_hash",
+          "html_received_at",
+          "workbook_received_at",
+          "available_at",
+          "source_published_at",
+          "valid_until",
+          "revision_method",
+          "split_adjustment",
+          "reinvestment_method",
+          "historical_backtest_eligible",
+          "market_price_eligible",
+          "total_return_eligible"
+        ],
+        "title": "ResearchInputNavHistory",
+        "type": "object"
+      },
+      "ResearchInputNavObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "nav": {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "title": "Nav",
+            "type": "string"
+          },
+          "shares_outstanding": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shares Outstanding"
+          },
+          "total_net_assets": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Net Assets"
+          }
+        },
+        "required": [
+          "date",
+          "nav",
+          "shares_outstanding",
+          "total_net_assets"
+        ],
+        "title": "ResearchInputNavObservation",
+        "type": "object"
+      },
       "ResearchInputsSummary": {
         "additionalProperties": false,
         "properties": {
@@ -7296,6 +7524,15 @@
             },
             "maxItems": 1,
             "title": "Issuer Fund Observations",
+            "type": "array"
+          },
+          "issuer_nav_histories": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ResearchInputNavHistory"
+            },
+            "maxItems": 1,
+            "title": "Issuer Nav Histories",
             "type": "array"
           },
           "portfolio_context": {

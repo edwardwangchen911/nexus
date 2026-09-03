@@ -22,7 +22,7 @@ type Distribution = components["schemas"]["ResearchInputIssuerDistribution"];
 
 function issuerInputs(overrides: Partial<Distribution> = {}): Inputs {
   return {
-    display_symbol: "TEST", total_facts: 0, truncated: false, filings: [], facts: [], issuer_fund_observations: [],
+    display_symbol: "TEST", total_facts: 0, truncated: false, filings: [], facts: [], issuer_fund_observations: [], issuer_nav_histories: [],
     issuer_distributions: [{
       evidence_ref_id: "0198d600-1000-7000-8000-000000009901", source: "ssga_distribution",
       revision: "issuer-fixture-v1", content_hash: "d".repeat(64),
@@ -151,7 +151,7 @@ describe("research evidence docket", () => {
     const source = "https://www.sec.gov/Archives/edgar/data/1/000000000126000001/doc.htm";
     const excerpt = "Company has not decided. <script>alert('not executable')</script>";
     render(<ResearchInputs asOf="2026-09-02T06:00:00Z" inputs={{
-      display_symbol: "TEST", total_facts: 0, truncated: false, facts: [], issuer_distributions: [], issuer_fund_observations: [],
+      display_symbol: "TEST", total_facts: 0, truncated: false, facts: [], issuer_distributions: [], issuer_fund_observations: [], issuer_nav_histories: [],
       filings: [{ evidence_ref_id: "filing-1", source: "sec", form, accession_number: "0000000001-26-000001", accepted_at: "2026-08-21T20:00:00Z", received_at: "2026-09-02T05:59:00Z", revision: "a".repeat(64), content_hash: "a".repeat(64), disclosure_excerpt: excerpt, disclosure_truncated: true, source_url: source }],
     }} />);
     expect(screen.getByRole("heading", { name: form === "497K" ? "TEST · 已冻结基金资料" : "TEST · 已冻结披露" })).toBeVisible();
@@ -168,7 +168,7 @@ describe("research evidence docket", () => {
   });
   it("shows frozen portfolio context and missing market evidence without a model", () => {
     render(<ResearchInputs asOf="2026-09-02T06:00:00Z" inputs={{
-      display_symbol: "TEST", total_facts: 0, truncated: false, filings: [], facts: [], issuer_distributions: [], issuer_fund_observations: [],
+      display_symbol: "TEST", total_facts: 0, truncated: false, filings: [], facts: [], issuer_distributions: [], issuer_fund_observations: [], issuer_nav_histories: [],
       portfolio_context: {
         instrument_id: "instrument", portfolio_snapshot_id: "snapshot",
         snapshot_as_of: "2026-09-02T03:33:00Z", research_as_of: "2026-09-02T06:00:00Z",

@@ -3588,6 +3588,124 @@ export interface components {
             /** Source Url */
             source_url: string;
         };
+        /**
+         * ResearchInputNavHistory
+         * @description Issuer per-share NAV observations, not executable market-price authority.
+         */
+        ResearchInputNavHistory: {
+            /**
+             * Available At
+             * Format: date-time
+             */
+            available_at: string;
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Coverage End
+             * Format: date
+             */
+            coverage_end: string;
+            /**
+             * Coverage Start
+             * Format: date
+             */
+            coverage_start: string;
+            /**
+             * Currency
+             * @constant
+             */
+            currency: "USD";
+            /**
+             * Currency Basis
+             * @constant
+             */
+            currency_basis: "issuer_page_base_currency";
+            /**
+             * Date Semantics
+             * @constant
+             */
+            date_semantics: "issuer_observation_date_not_verified_trading_session";
+            /**
+             * Evidence Ref Id
+             * Format: uuid
+             */
+            evidence_ref_id: string;
+            /**
+             * Historical Backtest Eligible
+             * @constant
+             */
+            historical_backtest_eligible: false;
+            /** Html Content Hash */
+            html_content_hash: string;
+            /**
+             * Html Received At
+             * Format: date-time
+             */
+            html_received_at: string;
+            /** Html Url */
+            html_url: string;
+            /**
+             * Market Price Eligible
+             * @constant
+             */
+            market_price_eligible: false;
+            /**
+             * Nav Unit
+             * @constant
+             */
+            nav_unit: "currency_per_share";
+            /** Observations */
+            observations: components["schemas"]["ResearchInputNavObservation"][];
+            /** Reinvestment Method */
+            reinvestment_method: null;
+            /** Revision */
+            revision: string;
+            /** Revision Method */
+            revision_method: null;
+            /**
+             * Source
+             * @constant
+             */
+            source: "ssga_nav_history";
+            /** Source Published At */
+            source_published_at: null;
+            /** Split Adjustment */
+            split_adjustment: null;
+            /** Total Observations */
+            total_observations: number;
+            /**
+             * Total Return Eligible
+             * @constant
+             */
+            total_return_eligible: false;
+            /** Truncated */
+            truncated: boolean;
+            /** Valid Until */
+            valid_until: null;
+            /** Workbook Content Hash */
+            workbook_content_hash: string;
+            /**
+             * Workbook Received At
+             * Format: date-time
+             */
+            workbook_received_at: string;
+            /** Workbook Url */
+            workbook_url: string;
+        };
+        /** ResearchInputNavObservation */
+        ResearchInputNavObservation: {
+            /**
+             * Date
+             * Format: date
+             */
+            date: string;
+            /** Nav */
+            nav: string;
+            /** Shares Outstanding */
+            shares_outstanding: string | null;
+            /** Total Net Assets */
+            total_net_assets: string | null;
+        };
         /** ResearchInputsSummary */
         ResearchInputsSummary: {
             /** Display Symbol */
@@ -3606,6 +3724,11 @@ export interface components {
              * @default []
              */
             issuer_fund_observations: components["schemas"]["ResearchInputFundObservation"][];
+            /**
+             * Issuer Nav Histories
+             * @default []
+             */
+            issuer_nav_histories: components["schemas"]["ResearchInputNavHistory"][];
             portfolio_context?: components["schemas"]["PortfolioResearchContext"] | null;
             /** Total Facts */
             total_facts: number;

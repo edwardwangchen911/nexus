@@ -102,9 +102,11 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
   const hasData = research !== null && ["ready", "partial", "stale"].includes(state);
   const inputs = state !== "forbidden" && state !== "loading" ? admission?.inputs : null;
   const hasFundObservations = (inputs?.issuer_fund_observations ?? []).length > 0;
-  const hasIssuerInputs = (inputs?.issuer_distributions ?? []).length > 0 || hasFundObservations;
-  const issuerInputsLabel = inputs && (inputs.filings.length > 0 || hasFundObservations && (inputs.issuer_distributions ?? []).length > 0)
-    ? "研究资料" : hasFundObservations ? "发行商分类与持仓资料" : "发行商现金分红资料";
+  const hasNavHistory = (inputs?.issuer_nav_histories ?? []).length > 0;
+  const issuerKinds = [hasFundObservations, hasNavHistory, (inputs?.issuer_distributions ?? []).length > 0].filter(Boolean).length;
+  const hasIssuerInputs = issuerKinds > 0;
+  const issuerInputsLabel = inputs && (inputs.filings.length > 0 || issuerKinds > 1)
+    ? "研究资料" : hasNavHistory ? "发行商净值历史资料" : hasFundObservations ? "发行商分类与持仓资料" : "发行商现金分红资料";
   const canRun = admission?.eligible === true && admission.data_snapshot_id !== null
     && (state === "empty" || state === "ready" && research?.status === "completed");
   return (

@@ -215,6 +215,51 @@ class ResearchInputFundObservation(_StrictAgentSchema):
     sector_risk_eligible: Literal[False]
 
 
+class ResearchInputNavObservation(_StrictAgentSchema):
+    date: date
+    nav: DecimalString
+    shares_outstanding: DecimalString | None
+    total_net_assets: DecimalString | None
+
+
+class ResearchInputNavHistory(_StrictAgentSchema):
+    """Issuer per-share NAV observations, not executable market-price authority."""
+
+    evidence_ref_id: UUID
+    source: Literal["ssga_nav_history"]
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    currency: Literal["USD"]
+    currency_basis: Literal["issuer_page_base_currency"]
+    nav_unit: Literal["currency_per_share"]
+    observations: tuple[ResearchInputNavObservation, ...] = Field(min_length=1, max_length=32)
+    total_observations: int = Field(ge=1)
+    truncated: bool
+    coverage_start: date
+    coverage_end: date
+    date_semantics: Literal["issuer_observation_date_not_verified_trading_session"]
+    html_url: str = Field(
+        max_length=512, pattern=r"^https://www\.ssga\.com/us/en/individual/etfs/[^?#%]+$"
+    )
+    workbook_url: str = Field(
+        max_length=512,
+        pattern=r"^https://www\.ssga\.com/library-content/products/fund-data/etfs/us/[^?#%]+$",
+    )
+    html_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    workbook_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    html_received_at: AwareDatetime
+    workbook_received_at: AwareDatetime
+    available_at: AwareDatetime
+    source_published_at: None
+    valid_until: None
+    revision_method: None
+    split_adjustment: None
+    reinvestment_method: None
+    historical_backtest_eligible: Literal[False]
+    market_price_eligible: Literal[False]
+    total_return_eligible: Literal[False]
+
+
 class ResearchInputsSummary(_StrictAgentSchema):
     display_symbol: str | None = Field(max_length=100)
     filings: tuple[ResearchInputFiling, ...] = Field(max_length=20)
@@ -228,6 +273,7 @@ class ResearchInputsSummary(_StrictAgentSchema):
     issuer_fund_observations: tuple[ResearchInputFundObservation, ...] = Field(
         default=(), max_length=1
     )
+    issuer_nav_histories: tuple[ResearchInputNavHistory, ...] = Field(default=(), max_length=1)
 
 
 class ResearchAdmissionResponse(_StrictAgentSchema):

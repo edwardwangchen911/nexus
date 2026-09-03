@@ -15,7 +15,7 @@ export const sessionDate = "2026-08-24";
 export function fundObservationInputs(): components["schemas"]["ResearchInputsSummary"] {
   return {
     display_symbol: "TEST", filings: [], facts: [], total_facts: 0, truncated: false,
-    issuer_distributions: [], issuer_fund_observations: [{
+    issuer_nav_histories: [], issuer_distributions: [], issuer_fund_observations: [{
       evidence_ref_id: "0198d600-1000-7000-8000-000000001581", source: "ssga_fund_observation",
       revision: "a".repeat(64), content_hash: "a".repeat(64), as_of: "2026-08-20",
       classification_level: "industry", weight_unit: "percent",
@@ -33,6 +33,30 @@ export function fundObservationInputs(): components["schemas"]["ResearchInputsSu
       available_at: "2026-08-24T18:30:00Z", source_published_at: null, valid_until: null,
       denominator: null, residual_classification: null,
       historical_backtest_eligible: false, sector_risk_eligible: false,
+    }],
+  };
+}
+
+export function navHistoryInputs(): components["schemas"]["ResearchInputsSummary"] {
+  return {
+    ...fundObservationInputs(), issuer_fund_observations: [],
+    issuer_nav_histories: [{
+      evidence_ref_id: "0198d600-1000-7000-8000-000000001582", source: "ssga_nav_history",
+      revision: "d".repeat(64), content_hash: "d".repeat(64), currency: "USD",
+      currency_basis: "issuer_page_base_currency", nav_unit: "currency_per_share",
+      observations: [
+        { date: "2026-08-22", nav: "12.3456789", shares_outstanding: null, total_net_assets: null },
+        { date: "2026-08-23", nav: "0.0000001", shares_outstanding: "0", total_net_assets: "2500000" },
+      ],
+      total_observations: 45, truncated: true, coverage_start: "2026-07-10", coverage_end: "2026-08-23",
+      date_semantics: "issuer_observation_date_not_verified_trading_session",
+      html_url: "https://www.ssga.com/us/en/individual/etfs/synthetic-test",
+      workbook_url: "https://www.ssga.com/library-content/products/fund-data/etfs/us/nav-test.xlsx",
+      html_content_hash: "e".repeat(64), workbook_content_hash: "f".repeat(64),
+      html_received_at: "2026-08-24T18:00:00Z", workbook_received_at: "2026-08-24T18:30:00Z",
+      available_at: "2026-08-24T18:30:00Z", source_published_at: null, valid_until: null,
+      revision_method: null, split_adjustment: null, reinvestment_method: null,
+      historical_backtest_eligible: false, market_price_eligible: false, total_return_eligible: false,
     }],
   };
 }

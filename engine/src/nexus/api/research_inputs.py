@@ -16,6 +16,8 @@ from nexus.api.schemas.agents import (
     ResearchInputFundIndustry,
     ResearchInputFundObservation,
     ResearchInputIssuerDistribution,
+    ResearchInputNavHistory,
+    ResearchInputNavObservation,
     ResearchInputsSummary,
 )
 from nexus.domain.decimal import decimal_to_string
@@ -26,6 +28,9 @@ from nexus.research.sec_disclosures import read_disclosures
 from nexus.research.ssga_distributions import SOURCE, read_distributions
 from nexus.research.ssga_fund_observations import SOURCE as FUND_SOURCE
 from nexus.research.ssga_fund_observations import IssuerFundObservation, read_fund_observations
+from nexus.research.ssga_nav_history import SOURCE as NAV_SOURCE
+from nexus.research.ssga_nav_history import NavObservation
+from nexus.research.ssga_nav_storage import nav_tool_payload, read_nav_histories
 
 
 async def read_research_inputs(
@@ -65,7 +70,10 @@ async def read_research_inputs(
     fund_observations = await _read_fund_inputs(
         session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of
     )
-    if not rows and not issuer_distributions and not fund_observations:
+    nav_histories = await _read_nav_inputs(
+        session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of
+    )
+    if not rows and not issuer_distributions and not fund_observations and not nav_histories:
         return None
     visible = rows[:20]
     disclosures = await read_disclosures(
@@ -104,6 +112,7 @@ async def read_research_inputs(
     return ResearchInputsSummary(
         issuer_distributions=issuer_distributions,
         issuer_fund_observations=fund_observations,
+        issuer_nav_histories=nav_histories,
         portfolio_context=await read_portfolio_context(session, snapshot_id, instrument_id, as_of),
         display_symbol=symbol,
         filings=tuple(
@@ -240,6 +249,49 @@ async def _read_fund_inputs(
             result.append(_fund_observation_response(document, references[evidence_id]))
         except ValueError:
             # Decimal wire limits and schema validation must not obscure valid SEC inputs.
+            continue
+    return tuple(result)
+
+
+async def _read_nav_inputs(
+    session: AsyncSession, *, snapshot_id: UUID, instrument_id: UUID, as_of: datetime
+) -> tuple[ResearchInputNavHistory, ...]:
+    references = await _frozen_issuer_references(
+        session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of,
+        source=NAV_SOURCE,
+    )
+    if not references:
+        return ()
+    documents = await read_nav_histories(
+        session, instrument_id=instrument_id, as_of=as_of, evidence_ids=tuple(references)
+    )
+    result = []
+    for evidence_id, document in documents.items():
+        try:
+            payload = nav_tool_payload(document)
+            raw_rows = payload.pop("observations")
+            observations = []
+            for raw in cast(list[dict[str, object]], raw_rows):
+                row = NavObservation.model_validate(raw)
+                observations.append(ResearchInputNavObservation(
+                    date=row.date, nav=decimal_to_string(row.nav),
+                    shares_outstanding=None if row.shares_outstanding is None
+                    else decimal_to_string(row.shares_outstanding),
+                    total_net_assets=None if row.total_net_assets is None
+                    else decimal_to_string(row.total_net_assets),
+                ))
+            for key in (
+                "instrument_id", "symbol", "isin", "html_byte_length", "workbook_byte_length",
+            ):
+                payload.pop(key)
+            evidence = references[evidence_id]
+            result.append(ResearchInputNavHistory.model_validate({
+                **payload, "evidence_ref_id": evidence_id, "source": NAV_SOURCE,
+                "revision": evidence.revision, "content_hash": evidence.content_hash,
+                "observations": observations,
+            }))
+        except ValueError:
+            # Optional display wire limits must not obscure valid frozen SEC inputs.
             continue
     return tuple(result)
 

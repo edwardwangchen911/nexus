@@ -15,6 +15,7 @@ def test_old_summary_defaults_issuer_observations_to_empty():
     )
     assert summary.model_dump(mode="json")["issuer_distributions"] == []
     assert summary.model_dump(mode="json")["issuer_fund_observations"] == []
+    assert summary.model_dump(mode="json")["issuer_nav_histories"] == []
 
 
 def test_fund_projection_bounds_rows_without_renormalizing_original_percentages():
