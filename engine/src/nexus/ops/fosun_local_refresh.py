@@ -1269,6 +1269,7 @@ def _safe_failure_code(error: Exception) -> str:
 
 def _gateway_failure_category(message: str) -> str:
     categories = {
+        "gateway rejected request: GATEWAY_REPLAY_DRAINING": "not_ready",
         "gateway rejected request: OPERATION_NOT_ALLOWED": "scope",
         "gateway rejected request: PROVIDER_AUTHENTICATION_FAILED": "auth",
         "gateway rejected request: PROVIDER_PERMISSION_DENIED": "permission",

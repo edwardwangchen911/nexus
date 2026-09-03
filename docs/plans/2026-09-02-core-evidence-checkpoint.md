@@ -550,3 +550,24 @@ object_store 均 ready；worker 未启动，所以整体 `/health/ready` 为 503
 具体源接口异常与分类口径见本地 runbook。切换脚本先因 Docker Env 无等号的未设置项退出
 （尚未迁移），随后在切换后因混用镜像 config digest 与实际 image ID 误报；均先核对真实
 状态再修正校验，未盲目重放迁移或重启。身份和值未进入日志或测试材料。
+
+## 流水上下文真实链路验收（2026-09-03，北京时间）
+
+Engine 先更新，Gateway 从主项目已含 `4a2c993` 的源码加载；复用既有账户发现、持仓
+发现、六步双读对账、流水读取和快照持久化函数，共 9 次业务只读请求，未重复读取行情。
+同一来源请求的 `businessType` / `productCode` 在 SDK 原响应、Gateway 模型、Engine
+HTTP 页、归一化事实、新 `BrokerSyncAttempt.raw_facts._cash_flows` 中逐项一致；两字段
+实际有非空值，空产品代码仍按既有合同保留为 null。新快照 READY、流水质量 PASS，旧流水、
+旧 attempt、旧快照逐行摘要未变。Provider flow type 保留为 `fosun:*`，不据此断言
+commission 或账户费率适用性，不产生 `cost_proven`。本轮无模型调用和订单写入。
+
+首个尝试把监听端口当作业务就绪，1 次本地请求在启动 61 秒认证保护期被拒绝；没有读取
+流水或写入新快照。只读核对重放库的 ready-after 与失败时刻后，修正验收入口先用既有
+mTLS 健康接口确认 ready，再开始新的单次读取；未改认证/重放保护、未自动重试券商请求。
+客户端此前将固定 `GATEWAY_REPLAY_DRAINING` 丢成泛化合同错误，本轮允许保留此安全错误码，
+映射 `not_ready`。HTTP 503 → 客户端 → 本地分类的回归先复现旧错误，再验证新分类、仅一次
+请求和消息不泄露；连同相关客户端/本地操作共 35 项测试通过，独立定向复核无剩余发现。
+
+两个尝试的网关均正常退出，8081/8082 关闭，原业务 PG/MinIO 未重启。受保护证据在
+`outputs/acceptance/cash-flow-context-20260903/`，成功案例位于其 `after-readiness-fix/`；
+私人字段值不进入代码、测试或本文。错误分类补丁用于后续本地主机 CLI，未为此重建 API。

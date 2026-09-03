@@ -215,7 +215,11 @@ CLI 会自动读取已忽略、不入库的 `infra/.env.local`，并映射 `.sec
 `doctor` 只输出缺失的环境变量名和 TLS 文件是否存在，不打印配置值、不连数据库、不连复星。
 `status` 只读本地 PostgreSQL 中最新快照的脱敏汇总；本地数据库未运行时返回稳定的
 `LOCAL_DATABASE_UNAVAILABLE` / `database`，不暴露连接串或底层异常。只有在既有安全 launcher
-已加载本地配置、且 Gateway 为 `local_read_only` 时，才显式执行：
+已加载本地配置、且 Gateway 为 `local_read_only` 时，先使用既有 mTLS 身份检查
+Gateway `/health/ready` 返回 HTTP 200 且 `status=ready`，再显式执行下列刷新。
+网关每次启动有 61 秒认证保护期，端口已监听或 `/health/live` 成功不代表业务就绪；
+本地健康检查不调用券商。保护期内的 `GATEWAY_REPLAY_DRAINING` 归类为 `not_ready`，
+不自动重试业务请求，也不删除重放存储来跳过保护期。
 
 ```bash
 uv run --package nexus-engine nexus-fosun-local refresh

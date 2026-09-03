@@ -42,6 +42,7 @@ _PATHS: dict[GatewayOperation, str] = {
 }
 _SAFE_GATEWAY_ERROR_CODES = frozenset(
     {
+        "GATEWAY_REPLAY_DRAINING",
         "OPERATION_NOT_ALLOWED",
         "PROVIDER_APPLICATION_ERROR",
         "PROVIDER_AUTHENTICATION_FAILED",

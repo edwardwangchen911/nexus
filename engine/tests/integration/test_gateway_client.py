@@ -18,6 +18,35 @@ REQUEST_ID = UUID("0198d400-3000-7000-8000-000000000002")
 HMAC_SECRET = "synthetic-gateway-hmac-secret-at-least-32-bytes"
 
 
+@pytest.mark.asyncio
+async def test_startup_drain_is_reported_as_not_ready_without_retry(tmp_path: Path) -> None:
+    from nexus.ops.fosun_local import safe_failure
+
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            503,
+            json={
+                "error": {
+                    "code": "GATEWAY_REPLAY_DRAINING",
+                    "message": "private-canary",
+                    "next_action": "RETRY_WITH_NEW_SIGNATURE",
+                }
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = FosunGatewayClient(settings(tmp_path), client=http_client)
+        with pytest.raises(GatewayClientError) as failure:
+            await client.read_accounts()
+    assert calls == 1
+    assert safe_failure(failure.value)["category"] == "not_ready"
+    assert "private-canary" not in str(failure.value)
+
+
 def settings(tmp_path: Path) -> BrokerWorkerSettings:
     return BrokerWorkerSettings.for_test(
         database_url="postgresql+asyncpg://synthetic:synthetic@127.0.0.1:5432/synthetic",
