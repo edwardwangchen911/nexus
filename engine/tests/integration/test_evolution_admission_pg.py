@@ -9,12 +9,15 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from nexus.agents.codex_sdk import MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS
+from nexus.agents.codex_sdk import MODEL_ID as CODEX_SDK_MODEL_ID
 from nexus.agents.responses import ResponsesModelConfig
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.audit.canonical import canonical_json
 from nexus.domain.ids import new_uuid7
 from nexus.evolution.agent import StrategyRNDRequestV1
 from nexus.evolution.agent_tools import StrategyRNDToolContext, StrategyRNDTools
+from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION
 from nexus.evolution.models import StrategyExperimentProposalV1
 from nexus.evolution.repository import (
     append_candidate_event,
@@ -209,6 +212,119 @@ async def test_agent_failure_is_recorded_without_output_or_family(
     assert execution.output_id is None and execution.proposal is None
     assert run is not None and run.status == "failed"
     assert (output_count, family_count) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_agent_unknown_usage_is_failed_and_persisted_as_null(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    proposal, _ = await _seed_authority(factory, bind_agent_output=False)
+    request, tools, runtime = await _seed_agent_execution_authority(
+        factory, proposal=proposal, usage=None
+    )
+    async with factory() as session, session.begin():
+        execution = await execute_strategy_rnd(
+            session,
+            request=request,
+            tools=tools,
+            runtime=runtime,
+            prompt_version_id=PROMPT_ID,
+            model_config_id=MODEL_ID,
+            now=NOW,
+        )
+    async with factory() as session:
+        run = await session.get(StrategyRNDRunRecord, execution.run_id)
+        output_count = await session.scalar(text("SELECT count(*) FROM strategy_rnd_outputs"))
+        family_count = await session.scalar(
+            text("SELECT count(*) FROM strategy_experiment_families")
+        )
+    assert execution.status == "failed"
+    assert execution.reason_code == "USAGE_AUTHORITY_INVALID"
+    assert execution.output_id is None and execution.proposal is None
+    assert run is not None
+    assert (run.input_tokens, run.output_tokens, run.tool_call_count) == (None, None, None)
+    assert run.settled_cost_usd is None
+    assert (output_count, family_count) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_codex_over_threshold_usage_keeps_actual_counts_and_unknown_cost(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    proposal, _ = await _seed_authority(factory, bind_agent_output=False)
+    usage = UsageSnapshot(
+        input_tokens=MAX_INPUT_TOKENS + 17,
+        output_tokens=MAX_OUTPUT_TOKENS + 19,
+        tool_calls=0,
+        provider_calls=1,
+    )
+    request, tools, runtime = await _seed_agent_execution_authority(
+        factory,
+        proposal=proposal,
+        config=_codex_runtime_config(),
+        usage=usage,
+    )
+    async with factory() as session, session.begin():
+        execution = await execute_strategy_rnd(
+            session,
+            request=request,
+            tools=tools,
+            runtime=runtime,
+            prompt_version_id=PROMPT_ID,
+            model_config_id=MODEL_ID,
+            now=NOW,
+        )
+    async with factory() as session:
+        run = await session.get(StrategyRNDRunRecord, execution.run_id)
+    assert execution.status == "failed"
+    assert execution.reason_code == "USAGE_AUTHORITY_INVALID"
+    assert execution.output_id is None and execution.proposal is None
+    assert run is not None
+    assert (run.input_tokens, run.output_tokens, run.tool_call_count) == (
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.tool_calls,
+    )
+    assert run.settled_cost_usd is None
+
+
+@pytest.mark.asyncio
+async def test_codex_known_usage_keeps_subscription_cost_unknown(
+    migrated_database_url: str,
+) -> None:
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    proposal, _ = await _seed_authority(factory, bind_agent_output=False)
+    usage = UsageSnapshot(
+        input_tokens=125,
+        output_tokens=45,
+        tool_calls=0,
+        provider_calls=1,
+    )
+    request, tools, runtime = await _seed_agent_execution_authority(
+        factory,
+        proposal=proposal,
+        config=_codex_runtime_config(),
+        usage=usage,
+    )
+    async with factory() as session, session.begin():
+        execution = await execute_strategy_rnd(
+            session,
+            request=request,
+            tools=tools,
+            runtime=runtime,
+            prompt_version_id=PROMPT_ID,
+            model_config_id=MODEL_ID,
+            now=NOW,
+        )
+    async with factory() as session:
+        run = await session.get(StrategyRNDRunRecord, execution.run_id)
+    assert execution.status == "completed"
+    assert execution.output_id is not None and execution.proposal == proposal
+    assert run is not None
+    assert (run.input_tokens, run.output_tokens, run.tool_call_count) == (125, 45, 0)
+    assert run.settled_cost_usd is None
 
 
 @pytest.mark.asyncio
@@ -901,12 +1017,21 @@ async def _seed_bound_agent_output(
 
 
 async def _seed_agent_execution_authority(
-    factory, *, proposal: StrategyExperimentProposalV1
+    factory,
+    *,
+    proposal: StrategyExperimentProposalV1,
+    config: ResponsesModelConfig | None = None,
+    usage: UsageSnapshot | None = UsageSnapshot(
+        input_tokens=25,
+        output_tokens=10,
+        tool_calls=2,
+        provider_calls=1,
+    ),
 ) -> tuple[StrategyRNDRequestV1, StrategyRNDTools, _FixtureRuntime]:
     from nexus.evolution.agent import load_strategy_rnd_prompt
 
     prompt = load_strategy_rnd_prompt()
-    config = _runtime_config()
+    config = config or _runtime_config()
     async with factory() as session, session.begin():
         session.add_all(
             [
@@ -957,7 +1082,11 @@ async def _seed_agent_execution_authority(
             current_family_experiment_ids=(),
         )
     )
-    return request, tools, _FixtureRuntime(proposal=proposal)
+    return request, tools, _FixtureRuntime(
+        proposal=proposal,
+        config=config,
+        usage=usage,
+    )
 
 
 async def _policy_id(factory, *, policy_kind: str) -> UUID:
@@ -984,25 +1113,45 @@ def _runtime_config() -> ResponsesModelConfig:
     )
 
 
+def _codex_runtime_config() -> ResponsesModelConfig:
+    return ResponsesModelConfig(
+        model_id=CODEX_SDK_MODEL_ID,
+        pricing_version=CODEX_RND_CONFIG_VERSION,
+        max_input_tokens=MAX_INPUT_TOKENS,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+        max_tool_calls=0,
+        absolute_timeout_seconds=Decimal("30"),
+        input_usd_per_million=Decimal("0"),
+        output_usd_per_million=Decimal("0"),
+    )
+
+
 class _FixtureRuntime:
     def __init__(
-        self, *, proposal: StrategyExperimentProposalV1, fail: bool = False
-    ) -> None:
-        self._proposal = proposal
-        self._fail = fail
-
-    @property
-    def configuration(self) -> ResponsesModelConfig:
-        return _runtime_config()
-
-    @property
-    def usage(self) -> UsageSnapshot:
-        return UsageSnapshot(
+        self,
+        *,
+        proposal: StrategyExperimentProposalV1,
+        fail: bool = False,
+        config: ResponsesModelConfig | None = None,
+        usage: UsageSnapshot | None = UsageSnapshot(
             input_tokens=25,
             output_tokens=10,
             tool_calls=2,
             provider_calls=1,
-        )
+        ),
+    ) -> None:
+        self._proposal = proposal
+        self._fail = fail
+        self._config = config or _runtime_config()
+        self._usage = usage
+
+    @property
+    def configuration(self) -> ResponsesModelConfig:
+        return self._config
+
+    @property
+    def usage(self) -> UsageSnapshot | None:
+        return self._usage
 
     async def generate(
         self, request: StrategyRNDRequestV1, tools: StrategyRNDTools

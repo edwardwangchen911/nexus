@@ -40,7 +40,11 @@ class StrategyRNDRunRecord(ImmutableCreatedAt, Base):
             name="costs",
         ),
         CheckConstraint(
-            "tool_call_count BETWEEN 0 AND 4 AND input_tokens >= 0 AND output_tokens >= 0",
+            "(input_tokens IS NOT NULL AND output_tokens IS NOT NULL "
+            "AND tool_call_count IS NOT NULL AND input_tokens >= 0 "
+            "AND output_tokens >= 0 AND tool_call_count >= 0) OR "
+            "(input_tokens IS NULL AND output_tokens IS NULL "
+            "AND tool_call_count IS NULL AND status = 'failed')",
             name="usage",
         ),
         CheckConstraint("request_hash ~ '^[0-9a-f]{64}$'", name="request_hash"),
@@ -56,9 +60,9 @@ class StrategyRNDRunRecord(ImmutableCreatedAt, Base):
     status: Mapped[str] = mapped_column(String(24))
     reserved_cost_usd: Mapped[Decimal] = mapped_column(DECIMAL_NUMERIC)
     settled_cost_usd: Mapped[Decimal | None] = mapped_column(DECIMAL_NUMERIC)
-    tool_call_count: Mapped[int] = mapped_column(Integer)
-    input_tokens: Mapped[int] = mapped_column(Integer)
-    output_tokens: Mapped[int] = mapped_column(Integer)
+    tool_call_count: Mapped[int | None] = mapped_column(Integer)
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
     request_hash: Mapped[str] = mapped_column(String(64))
 
 

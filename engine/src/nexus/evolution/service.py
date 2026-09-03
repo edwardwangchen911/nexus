@@ -30,6 +30,7 @@ from nexus.evolution.agent_tools import (
     strategy_rnd_function_tools,
 )
 from nexus.evolution.candidate import apply_candidate_delta, generate_candidate_deltas
+from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION
 from nexus.evolution.models import StrategyExperimentProposalV1
 from nexus.evolution.policies import (
     load_candidate_budget_policy_v1,
@@ -189,7 +190,13 @@ async def execute_strategy_rnd(
         status = "failed"
         proposal = None
         reason_code = "USAGE_AUTHORITY_INVALID"
-    settled_cost = _usage_cost(model_record, usage)
+    settled_cost = (
+        _usage_cost(model_record, usage)
+        if usage_valid
+        and usage is not None
+        and model_record.version != CODEX_RND_CONFIG_VERSION
+        else None
+    )
     run = StrategyRNDRunRecord(
         id=new_uuid7(),
         prompt_version_id=prompt_record.id,
@@ -201,9 +208,9 @@ async def execute_strategy_rnd(
         status=status,
         reserved_cost_usd=model_record.worst_case_cost_usd,
         settled_cost_usd=settled_cost,
-        tool_call_count=usage.tool_calls,
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
+        tool_call_count=None if usage is None else usage.tool_calls,
+        input_tokens=None if usage is None else usage.input_tokens,
+        output_tokens=None if usage is None else usage.output_tokens,
         request_hash=request_hash,
         created_at=now,
     )
@@ -710,8 +717,10 @@ def _require_generated_proposal_identity(
 
 
 def _bounded_usage(
-    usage: UsageSnapshot, model: AgentModelConfigRecord
-) -> tuple[UsageSnapshot, bool]:
+    usage: UsageSnapshot | None, model: AgentModelConfigRecord
+) -> tuple[UsageSnapshot | None, bool]:
+    if usage is None:
+        return None, False
     valid = (
         0 <= usage.input_tokens <= model.max_input_tokens
         and 0 <= usage.output_tokens <= model.max_output_tokens
@@ -720,15 +729,7 @@ def _bounded_usage(
     )
     if valid:
         return usage, True
-    return (
-        UsageSnapshot(
-            input_tokens=model.max_input_tokens,
-            output_tokens=model.max_output_tokens,
-            tool_calls=min(model.max_tool_calls, 4),
-            provider_calls=max(usage.provider_calls, 0),
-        ),
-        False,
-    )
+    return usage, False
 
 
 def _usage_cost(model: AgentModelConfigRecord, usage: UsageSnapshot) -> Decimal:

@@ -152,13 +152,189 @@ async def _seed_legacy_decision(database_url: str) -> UUID:
     return decision_id
 
 
-def test_0023_precedes_the_broker_simulation_head() -> None:
+def test_0023_precedes_the_current_migration_head() -> None:
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0032_ticker_alias_authority"]
+    assert script.get_heads() == ["0036_strategy_rnd_usage_unknown"]
     revision = script.get_revision("0023_evolution_authority")
     assert revision is not None
     assert revision.down_revision == "0022_strategy_evolution"
+
+
+def test_0036_allows_only_coherent_unknown_usage_and_preserves_history(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = _config()
+    command.upgrade(config, "0035_issuer_research_evidence")
+    asyncio.run(_seed_strategy_rnd_run_dependencies(temporary_database_url))
+    asyncio.run(
+        _insert_strategy_rnd_run(
+            temporary_database_url,
+            run_id="019d0000-0000-7000-8000-000000003601",
+            status="completed",
+            usage=(25, 10, 2),
+        )
+    )
+
+    command.upgrade(config, "0036_strategy_rnd_usage_unknown")
+
+    columns = asyncio.run(_columns(temporary_database_url, "strategy_rnd_runs"))
+    assert columns["input_tokens"] == "YES"
+    assert columns["output_tokens"] == "YES"
+    assert columns["tool_call_count"] == "YES"
+    historical = asyncio.run(
+        _rows(
+            temporary_database_url,
+            "SELECT status,input_tokens,output_tokens,tool_call_count "
+            "FROM strategy_rnd_runs WHERE id='019d0000-0000-7000-8000-000000003601'",
+        )
+    )
+    assert historical == [
+        {
+            "status": "completed",
+            "input_tokens": 25,
+            "output_tokens": 10,
+            "tool_call_count": 2,
+        }
+    ]
+    asyncio.run(
+        _insert_strategy_rnd_run(
+            temporary_database_url,
+            run_id="019d0000-0000-7000-8000-000000003602",
+            status="failed",
+            usage=(None, None, None),
+        )
+    )
+    asyncio.run(
+        _insert_strategy_rnd_run(
+            temporary_database_url,
+            run_id="019d0000-0000-7000-8000-000000003603",
+            status="failed",
+            usage=(64_017, 8_211, 5),
+        )
+    )
+    for run_id, status, usage in (
+        ("019d0000-0000-7000-8000-000000003604", "failed", (1, None, None)),
+        ("019d0000-0000-7000-8000-000000003605", "completed", (None, None, None)),
+        ("019d0000-0000-7000-8000-000000003606", "failed", (-1, 0, 0)),
+    ):
+        with pytest.raises(DBAPIError):
+            asyncio.run(
+                _insert_strategy_rnd_run(
+                    temporary_database_url,
+                    run_id=run_id,
+                    status=status,
+                    usage=usage,
+                )
+            )
+
+
+def test_0036_downgrade_refuses_unknown_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = _config()
+    command.upgrade(config, "0036_strategy_rnd_usage_unknown")
+    asyncio.run(_seed_strategy_rnd_run_dependencies(temporary_database_url))
+    asyncio.run(
+        _insert_strategy_rnd_run(
+            temporary_database_url,
+            run_id="019d0000-0000-7000-8000-000000003611",
+            status="failed",
+            usage=(None, None, None),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="unknown Strategy R&D usage prevents downgrade"):
+        command.downgrade(config, "0035_issuer_research_evidence")
+
+    assert (
+        asyncio.run(_columns(temporary_database_url, "strategy_rnd_runs"))["input_tokens"] == "YES"
+    )
+
+
+def test_0036_downgrades_when_all_usage_is_known(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_database_url: str,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", temporary_database_url)
+    config = _config()
+    command.upgrade(config, "0036_strategy_rnd_usage_unknown")
+    asyncio.run(_seed_strategy_rnd_run_dependencies(temporary_database_url))
+    asyncio.run(
+        _insert_strategy_rnd_run(
+            temporary_database_url,
+            run_id="019d0000-0000-7000-8000-000000003621",
+            status="completed",
+            usage=(25, 10, 2),
+        )
+    )
+
+    command.downgrade(config, "0035_issuer_research_evidence")
+
+    columns = asyncio.run(_columns(temporary_database_url, "strategy_rnd_runs"))
+    assert columns["input_tokens"] == "NO"
+    assert columns["output_tokens"] == "NO"
+    assert columns["tool_call_count"] == "NO"
+
+
+async def _seed_strategy_rnd_run_dependencies(database_url: str) -> None:
+    await _execute(
+        database_url,
+        "INSERT INTO agent_prompt_versions (id,role,version,content_hash,content) VALUES "
+        "('019d0000-0000-7000-8000-000000003631','strategy_rnd','migration-v1',"
+        "repeat('a',64),'migration test prompt')",
+    )
+    await _execute(
+        database_url,
+        "INSERT INTO agent_model_configs "
+        "(id,model_id,version,config_hash,max_input_tokens,max_tool_calls,max_output_tokens,"
+        "input_usd_per_million,output_usd_per_million,pricing_available_at,pricing_expires_at) "
+        "VALUES ('019d0000-0000-7000-8000-000000003632','migration-model','migration-v1',"
+        "repeat('b',64),64000,4,8192,1,2,'2026-09-01T00:00:00Z','2026-09-30T00:00:00Z')",
+    )
+    await _execute(
+        database_url,
+        "INSERT INTO data_snapshots "
+        "(id,source,provider_object_id,revision,observed_at,available_at,received_at,"
+        "schema_version,payload) VALUES "
+        "('019d0000-0000-7000-8000-000000003633','fixture','migration-rnd','v1',"
+        "'2026-09-04T00:00:00Z','2026-09-04T00:00:00Z','2026-09-04T00:00:00Z',"
+        "'v1','{}'::jsonb)",
+    )
+
+
+async def _insert_strategy_rnd_run(
+    database_url: str,
+    *,
+    run_id: str,
+    status: str,
+    usage: tuple[int | None, int | None, int | None],
+) -> None:
+    input_tokens, output_tokens, tool_call_count = usage
+    await _execute(
+        database_url,
+        "INSERT INTO strategy_rnd_runs "
+        "(id,prompt_version_id,model_config_id,data_snapshot_id,champion_definition_id,"
+        "champion_generation,as_of,status,reserved_cost_usd,settled_cost_usd,"
+        "input_tokens,output_tokens,tool_call_count,request_hash) "
+        "SELECT :run_id,'019d0000-0000-7000-8000-000000003631',"
+        "'019d0000-0000-7000-8000-000000003632',"
+        "'019d0000-0000-7000-8000-000000003633',active_definition_id,1,"
+        "'2026-09-04T00:00:00Z',:status,1,NULL,:input_tokens,:output_tokens,"
+        ":tool_call_count,repeat('c',64) FROM strategy_registry_heads "
+        "WHERE channel='internal_paper'",
+        {
+            "run_id": run_id,
+            "status": status,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "tool_call_count": tool_call_count,
+        },
+    )
 
 
 def test_0023_adds_authority_facts_and_round_trips(
