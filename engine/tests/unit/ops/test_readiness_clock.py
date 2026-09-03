@@ -31,3 +31,12 @@ async def test_worker_clock_is_sampled_after_the_selected_heartbeat() -> None:
 
     assert status == "ready"
     assert events == ["heartbeat-selected", "clock-sampled"]
+def test_code_migration_head_matches_actual_migration_graph():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
+
+    assert ScriptDirectory.from_config(Config("engine/alembic.ini")).get_heads() == [
+        CURRENT_MIGRATION_HEAD
+    ]
+
