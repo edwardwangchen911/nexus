@@ -1,6 +1,37 @@
-# 备份/恢复演练 runbook
+# 本地备份恢复 runbook
 
-## 使用边界
+## 真实业务备份的隔离恢复
+
+`python -m nexus.ops.local_recovery` 接受已有受保护备份目录，在随机命名、动态回环端口的独立 PostgreSQL 容器中实际执行恢复。它不连接或修改业务数据库，不启动应用、任务或交易；原 fixture 演练入口见下文。
+
+```bash
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.local_recovery \
+  --repo-root /Users/wangchen/Documents/ChatGPT/投资 \
+  --backup /Users/wangchen/Documents/ChatGPT/投资/outputs/backups/pre-0034-20260902T170730Z
+```
+
+前提是本机 Docker、已缓存的固定 PostgreSQL 17 镜像，以及 `--repo-root` 下现有本地对象存储配置。配置仅在内存使用。备份目录必须为 0700，`database.dump` 和 `manifest.json` 为 0600；结果与对象副本也只写入该目录下独占的 `recovery-<run_id>/`，不得作为 fixture、测试输入或提交 Git。
+
+入口按以下顺序执行，任一步失败即停止，不自动重放：
+
+1. 校验 dump 的 SHA-256、长度和备份 manifest；manifest 必须包含 `provider_capabilities`、`portfolio_snapshots`、`price_series_manifests`、`price_bar_records` 四张表的计数/哈希。
+2. 拒绝远程 Docker，只通过本机 Unix socket 新建带本轮所有权标签、无持久 volume、数据使用 tmpfs、关闭容器日志的随机容器。目标端口不得与业务数据库相同；恢复前核验目标无已有关系或额外 schema。
+3. 再校验传入容器的 dump，执行 `pg_restore --no-owner --no-privileges --exit-on-error --single-transaction`。不运行新迁移；恢复的 schema 和四张表须与备份时点一致。
+4. 扫描恢复数据库的 S3 引用，通过同一 URI 关联原始记录的哈希/长度；派生引用可以不重复长度，但其哈希必须一致。仅从现有本机对象存储按精确版本读取，校验版本、SHA-256 和长度，复制为 0600 本地文件，再离线读回校验。单对象上限 64 MiB，总量上限 512 MiB、最多 10000 个，超过时停止而非默默跳过。
+5. 不改写历史 URI，私有 `object-bindings.json` 保存原始 URI 与本地副本的对应关系；`result.json` 只保存安全状态、时间和汇总。终端不打印对象 URI、账户内容、密码或异常原文。
+6. 成功或失败均仅清理本轮标签恒等的精确容器；清理失败即整体失败，保留主错误和清理错误。原始备份及本轮私有结果保留，不覆盖、不递归删除。
+
+这一步验证数据库内容及数据库引用对象的可恢复性。原 `pre-0034` 备份只有数据库；对象是在恢复核验时从仍可用的本机对象存储取得。未被数据库 URI 引用的原始文件不在本片范围内，不能宣称完整离线灾备、角色/权限恢复或应用切换已验证。备份文件修改时间也不是数据库事务的一致性时刻或 RPO 承诺。
+
+### 2026-09-03 实际核验与故障记录
+
+- 实际 `pg_restore` 成功，备份 schema 为 `0033_cash_flow_business_date`；四表计数与 SHA-256 一致，118 个数据库引用对象通过精确版本、哈希、长度和本地读回校验；本次耗时约 4.0 秒，临时容器残留 0。
+- 对应私有记录：`outputs/backups/pre-0034-20260902T170730Z/recovery-29f9e4115ac448238b131aee677be8ab/result.json`。业务 PostgreSQL、MinIO、API 未重启，当前业务 schema 不受恢复影响。
+- 首轮数据库恢复成功后，对象绑定因派生研究引用缺少重复长度而停止，残留 0。原因是恢复入口将派生引用误当作原始证据；已改为关联同 URI 的原始长度并拒绝哈希冲突，使用合成数据补回归，不修改旧记录。
+- 集中审查发现 manifest 只列一张表也可能得到“表校验通过”；现已要求四表齐全，缺表先拒绝。另覆盖主流程失败后停止对象读取、精确 owner 清理和主错误/清理错误同时保留。
+- 中断异常与清理异常组成的 `BaseExceptionGroup` 也须经过 CLI 的固定错误输出；合成回归覆盖该路径，避免中断时意外打印底层异常原文。
+
+## Synthetic fixture 演练的使用边界
 
 `nexus-engine-backup-restore-drill` 是 fixture-only 的本地灾备验证，不接受现有数据库、bucket、前缀或容器名作为参数。它自行生成 32 位随机 run ID，只操作：
 
