@@ -26,9 +26,16 @@ from nexus.persistence.session import session_factory
 from nexus.research.sec_disclosures import read_disclosures
 from nexus.research.ssga_distributions import (
     SOURCE_URL,
+    IssuerDistribution,
     parse_distribution,
     persist_distribution,
     read_distributions,
+)
+from nexus.research.ssga_fund_observations import (
+    IssuerFundObservation,
+    parse_fund_observation,
+    persist_fund_observation,
+    read_fund_observations,
 )
 from nexus.settings import EngineSettings
 
@@ -54,13 +61,14 @@ async def import_originals(
     instrument_id: UUID,
     workbook: tuple[bytes, str, datetime],
     identity: tuple[bytes, str, datetime],
+    fund_observation: bool = False,
 ) -> dict[str, object]:
     local = {"localhost", "127.0.0.1", "::1"}
     if (
         not settings.database_url
         or make_url(settings.database_url).host not in local
         or urlsplit(settings.object_store_endpoint or "").hostname not in local
-        or workbook[1] != SOURCE_URL
+        or (not fund_observation and workbook[1] != SOURCE_URL)
     ):
         raise ValueError("ISSUER_LOCAL_OR_OFFICIAL_SOURCE_REQUIRED")
     received = max(workbook[2], identity[2])
@@ -109,18 +117,31 @@ async def import_originals(
             for item in disclosures.values()
         ):
             raise ValueError("ISSUER_SEC_SHARE_IDENTITY_REQUIRED")
-        document = parse_distribution(
-            raw=workbook[0],
-            identity_html=identity[0],
-            instrument_id=instrument_id,
-            symbol=aliases[0],
-            identity_url=identity[1],
-            received_at=received,
-        )
+        document: IssuerFundObservation | IssuerDistribution
+        if fund_observation:
+            document = parse_fund_observation(
+                html=identity[0],
+                workbook=workbook[0],
+                instrument_id=instrument_id,
+                symbol=aliases[0],
+                html_url=identity[1],
+                workbook_url=workbook[1],
+                html_received_at=identity[2],
+                workbook_received_at=workbook[2],
+            )
+        else:
+            document = parse_distribution(
+                raw=workbook[0],
+                identity_html=identity[0],
+                instrument_id=instrument_id,
+                symbol=aliases[0],
+                identity_url=identity[1],
+                received_at=received,
+            )
         store = S3ProviderEvidenceStore(settings)
         for kind, original, mime in (
             (
-                "distributions",
+                "holdings" if fund_observation else "distributions",
                 workbook,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             ),
@@ -158,13 +179,19 @@ async def import_originals(
                 raise ValueError("ISSUER_ORIGINAL_BINDING_CONFLICT")
         content = document.canonical_bytes()
         digest = hashlib.sha256(content).hexdigest()
+        evidence_kind = "fund-observations" if fund_observation else "distributions"
         uri = await store.put_if_absent(
-            key=f"evidence/ssga/distributions/{digest}.json", content=content
+            key=f"evidence/ssga/{evidence_kind}/{digest}.json",
+            content=content,
         )
-        evidence = await persist_distribution(session, document, location=uri)
+        if isinstance(document, IssuerFundObservation):
+            evidence = await persist_fund_observation(session, document, location=uri)
+        else:
+            evidence = await persist_distribution(session, document, location=uri)
         cutoff = datetime.now(UTC)
         snapshot = await prepare_research_snapshot(session, instrument_id, as_of=cutoff)
-        records = await read_distributions(
+        reader = read_fund_observations if fund_observation else read_distributions
+        records = await reader(
             session,
             instrument_id=instrument_id,
             as_of=cutoff,
@@ -194,6 +221,7 @@ async def import_originals(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--fund-observation", action="store_true")
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--instrument-id", type=UUID, required=True)
     for name in ("workbook", "workbook-receipt", "identity", "identity-receipt", "output"):
@@ -213,6 +241,7 @@ def main() -> int:
                 instrument_id=args.instrument_id,
                 workbook=read_original(args.workbook, args.workbook_receipt),
                 identity=read_original(args.identity, args.identity_receipt),
+                fund_observation=args.fund_observation,
             )
         )
         write_private(args.output, json.dumps(result).encode())

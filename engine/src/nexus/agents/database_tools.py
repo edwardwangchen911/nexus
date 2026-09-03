@@ -48,6 +48,7 @@ from nexus.quality.source_policy import (
 )
 from nexus.research.sec_disclosures import read_disclosures
 from nexus.research.ssga_distributions import read_distributions
+from nexus.research.ssga_fund_observations import read_fund_observations
 
 
 async def database_read_only_tools(
@@ -146,6 +147,12 @@ class _BoundDatabaseExecutors:
             as_of=self._decision_time,
             evidence_ids=self._evidence_ids,
         )
+        observations = await read_fund_observations(
+            self._session,
+            instrument_id=self._instrument_id,
+            as_of=self._decision_time,
+            evidence_ids=self._evidence_ids,
+        )
         return self._result(
             "get_security_snapshot",
             [
@@ -160,6 +167,10 @@ class _BoundDatabaseExecutors:
                         {"issuer_distribution": distributions[record.id].model_dump(mode="json")}
                         if record.id in distributions
                         else {}
+                    ),
+                    **(
+                        {"issuer_fund_observation": observations[record.id].model_dump(mode="json")}
+                        if record.id in observations else {}
                     ),
                 }
                 for record in self._evidence

@@ -18,6 +18,7 @@ from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
 from nexus.research.sec_disclosures import SEC_RESEARCH_FORMS
 from nexus.research.ssga_distributions import read_distributions
+from nexus.research.ssga_fund_observations import read_fund_observations
 
 
 async def prepare_research_snapshot(
@@ -65,6 +66,18 @@ async def prepare_research_snapshot(
             )
         )
         evidence = evidence[: MAX_FROZEN_EVIDENCE - 3] + issuer_refs
+    observations = await read_fund_observations(session, instrument_id=instrument_id, as_of=as_of)
+    if observations:
+        observation_refs = list(
+            await session.scalars(
+                select(ResearchEvidenceRef).where(ResearchEvidenceRef.id.in_(observations))
+            )
+        )
+        # Preserve both issuer kinds and reserve price/portfolio slots.
+        retained_issuer = [item for item in evidence if item.id in distributions]
+        sec_refs = [item for item in evidence if item.id not in distributions]
+        keep = MAX_FROZEN_EVIDENCE - 2 - len(observation_refs) - len(retained_issuer)
+        evidence = sec_refs[:keep] + retained_issuer + observation_refs
     if not evidence:
         return None
     context = await freeze_portfolio_context(
@@ -80,6 +93,8 @@ async def prepare_research_snapshot(
         if distributions
         else "persisted_sec_filings",
     }
+    if observations:
+        payload["scope"] = "persisted_sec_filings_and_issuer_observations"
     if context is not None:
         payload["portfolio_context"] = context[0].model_dump(mode="json")
     revision = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
