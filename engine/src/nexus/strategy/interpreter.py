@@ -13,10 +13,14 @@ from pydantic import BaseModel, ConfigDict
 
 from nexus.strategy.baseline import (
     BaselineInstrumentSnapshot,
+    HeldRankObservation,
     PositionRankState,
+    RankObservedDecision,
     StrategyDataSnapshot,
     StrategyDecision,
     StrategyTarget,
+    _record_held_rank,
+    _record_no_weekly_evaluation,
 )
 from nexus.strategy.dsl import (
     CompiledStrategy,
@@ -167,6 +171,41 @@ def evaluate_compiled_strategy(
     *,
     _parameter_overrides: Mapping[str, Decimal] | None = None,
 ) -> CompiledStrategyDecision:
+    """Evaluate with the unchanged serialized decision contract."""
+    return _evaluate_compiled_strategy(
+        strategy, snapshot, decision_session, _parameter_overrides=_parameter_overrides
+    )
+
+
+def evaluate_compiled_strategy_with_rank_observations(
+    strategy: CompiledStrategy,
+    snapshot: StrategyDataSnapshot,
+    decision_session: date,
+    *,
+    _parameter_overrides: Mapping[str, Decimal] | None = None,
+) -> RankObservedDecision[CompiledStrategyDecision]:
+    """Observe actual held inputs without changing target or exit calculations."""
+    observations: list[HeldRankObservation] = []
+    decision = _evaluate_compiled_strategy(
+        strategy,
+        snapshot,
+        decision_session,
+        _parameter_overrides=_parameter_overrides,
+        _observations=observations,
+    )
+    return RankObservedDecision(
+        decision, tuple(sorted(observations, key=lambda item: item.instrument_id.int))
+    )
+
+
+def _evaluate_compiled_strategy(
+    strategy: CompiledStrategy,
+    snapshot: StrategyDataSnapshot,
+    decision_session: date,
+    *,
+    _parameter_overrides: Mapping[str, Decimal] | None = None,
+    _observations: list[HeldRankObservation] | None = None,
+) -> CompiledStrategyDecision:
     """Evaluate one verified document without dynamic code, I/O, or historical model calls."""
     _verify_strategy(strategy)
     if snapshot.decision_session != decision_session:
@@ -179,6 +218,7 @@ def evaluate_compiled_strategy(
         next_session is not None
         and next_session.isocalendar()[:2] == decision_session.isocalendar()[:2]
     ):
+        _record_no_weekly_evaluation(_observations, snapshot)
         return CompiledStrategyDecision(
             strategy_version=strategy.strategy_version,
             decision_session=decision_session,
@@ -263,12 +303,23 @@ def evaluate_compiled_strategy(
             or ranking_value is None
             or instrument_id in trend_broken
         ):
+            _record_held_rank(
+                _observations,
+                instrument_id,
+                previous_streaks.get(instrument_id),
+                reason="INSTRUMENT_UNAVAILABLE"
+                if retained_instrument is None
+                else "RANKING_VALUE_UNAVAILABLE"
+                if ranking_value is None
+                else "TREND_BROKEN",
+            )
             continue
         streak = (
             0
             if rank is not None and rank <= strategy.ranking.exit_buffer_rank
             else previous_streaks.get(instrument_id, 0) + 1
         )
+        _record_held_rank(_observations, instrument_id, previous_streaks.get(instrument_id), streak)
         if (
             not strategy.exits.ranking_buffer_enabled
             or streak >= strategy.ranking.exit_after_consecutive_evaluations

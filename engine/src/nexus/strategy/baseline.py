@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Literal
@@ -129,11 +130,106 @@ class StrategyDecision(_FrozenModel):
     reason: Literal["WEEKLY_REBALANCE", "NOT_WEEK_END"]
 
 
+RankObservationReason = Literal[
+    "RANK_INPUT_MISSING",
+    "INSTRUMENT_UNAVAILABLE",
+    "RANKING_VALUE_UNAVAILABLE",
+    "TREND_BROKEN",
+    "NOT_WEEK_END",
+]
+
+
+@dataclass(frozen=True)
+class HeldRankObservation:
+    """A fact about an actual held input, including holdings selected for exit."""
+
+    instrument_id: UUID
+    input_streak: int | None
+    evaluated_streak: int | None
+    status: Literal["known", "unavailable", "not_evaluated"]
+    reason: RankObservationReason | None
+
+
+@dataclass(frozen=True)
+class RankObservedDecision[Decision]:
+    decision: Decision
+    held_rank_observations: tuple[HeldRankObservation, ...]
+
+
+def _record_held_rank(
+    observations: list[HeldRankObservation] | None,
+    instrument_id: UUID,
+    input_streak: int | None,
+    evaluated_streak: int | None = None,
+    reason: RankObservationReason | None = None,
+) -> None:
+    if observations is None:
+        return
+    if reason == "NOT_WEEK_END":
+        status: Literal["known", "unavailable", "not_evaluated"] = "not_evaluated"
+    elif input_streak is None:
+        status, reason, evaluated_streak = "unavailable", "RANK_INPUT_MISSING", None
+    else:
+        status = "known" if reason is None else "unavailable"
+    observations.append(
+        HeldRankObservation(
+            instrument_id,
+            input_streak,
+            evaluated_streak,
+            status,
+            reason,
+        )
+    )
+
+
+def _record_no_weekly_evaluation(
+    observations: list[HeldRankObservation] | None,
+    snapshot: StrategyDataSnapshot,
+) -> None:
+    if observations is None:
+        return
+    previous = {
+        state.instrument_id: state.consecutive_outside_top20_weeks
+        for state in snapshot.position_rank_states
+    }
+    for instrument_id in snapshot.current_positions:
+        _record_held_rank(
+            observations, instrument_id, previous.get(instrument_id), reason="NOT_WEEK_END"
+        )
+
+
 def evaluate_baseline_v1(
     snapshot: StrategyDataSnapshot,
     decision_session: date,
     *,
     _min_adv20_usd: Decimal = _MIN_ADV20_USD,
+) -> StrategyDecision:
+    """Evaluate the baseline with its unchanged legacy decision contract."""
+    return _evaluate_baseline_v1(snapshot, decision_session, _min_adv20_usd=_min_adv20_usd)
+
+
+def evaluate_baseline_v1_with_rank_observations(
+    snapshot: StrategyDataSnapshot,
+    decision_session: date,
+    *,
+    _min_adv20_usd: Decimal = _MIN_ADV20_USD,
+) -> RankObservedDecision[StrategyDecision]:
+    """Return held observations alongside, never inside, the legacy decision payload."""
+    observations: list[HeldRankObservation] = []
+    decision = _evaluate_baseline_v1(
+        snapshot, decision_session, _min_adv20_usd=_min_adv20_usd, _observations=observations
+    )
+    return RankObservedDecision(
+        decision, tuple(sorted(observations, key=lambda item: item.instrument_id.int))
+    )
+
+
+def _evaluate_baseline_v1(
+    snapshot: StrategyDataSnapshot,
+    decision_session: date,
+    *,
+    _min_adv20_usd: Decimal = _MIN_ADV20_USD,
+    _observations: list[HeldRankObservation] | None = None,
 ) -> StrategyDecision:
     """Rank the point-in-time universe and apply all baseline portfolio caps."""
     if snapshot.decision_session != decision_session:
@@ -143,6 +239,7 @@ def evaluate_baseline_v1(
         next_session is not None
         and next_session.isocalendar()[:2] == decision_session.isocalendar()[:2]
     ):
+        _record_no_weekly_evaluation(_observations, snapshot)
         return StrategyDecision(
             decision_session=decision_session,
             targets=(),
@@ -229,10 +326,21 @@ def evaluate_baseline_v1(
             or retained_momentum is None
             or instrument_id in trend_broken
         ):
+            _record_held_rank(
+                _observations,
+                instrument_id,
+                previous_streaks.get(instrument_id),
+                reason="INSTRUMENT_UNAVAILABLE"
+                if retained_instrument is None
+                else "RANKING_VALUE_UNAVAILABLE"
+                if retained_momentum is None
+                else "TREND_BROKEN",
+            )
             continue
         streak = (
             0 if rank is not None and rank <= 20 else previous_streaks.get(instrument_id, 0) + 1
         )
+        _record_held_rank(_observations, instrument_id, previous_streaks.get(instrument_id), streak)
         if streak >= 2:
             continue
         retained_candidates.append(
