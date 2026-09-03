@@ -833,3 +833,38 @@ B 的 SDK 37 项与既有冲突/超预算弃权回归 1 项共 38 项通过，Ru
 通过；末次换行后定向用例再次通过。旧阶段读取不重建指令。未再次运行真实模型，
 本次真实 P2 保持“内容验收不通过、指令已修正、尚未真实复验”，不能标记已治愈。
 显示修复的实际 DOM 复核另存 dom-copy-followup.json，三项均真，未覆盖首轮 false。
+
+## 最新完成交易日日线更新（2026-09-04，北京时间）
+
+在 B3 结束后，独立处理日线时效，不再次调用模型。只读核对确认网关此前是验收结束后
+正常 SIGTERM 停止，非用户禁用；8081/8082 空闲、重放库 integrity 正常、ready marker
+不存在、owner lease 未占用，既有本地身份与 TLS 文件齐备。旧日线截止 2026-09-01，
+当前最新完成交易日为 2026-09-02；该交易日收盘后没有失败 provider/broker Job、失败
+同步记录或活跃 Job。未修改凭据、权限、重放库或交易边界。
+
+复用既有安全 launcher 与 refresh_local_fosun，正常经历 61 秒保护期，两套 mTLS
+/health/ready 都返回 ready 后才读取业务。一次刷新实际 22 请求：账户发现 1、
+组合读取 5、批量报价 1、日线 12、订单读取 2、流水 1；与刷新器报告一致，无错误、
+无自动重试、无模型调用。新账户快照 READY、CashFlows PASS，新诊断仍为
+RESEARCH_REQUIRED，未知类型仍包括 ADV20_MISSING 和 MARKET_EVIDENCE_UNAVAILABLE。
+owned Gateway 正常退出码 0，两监听关闭；API、PG、MinIO 的启动时刻与镜像未改变。
+
+12 份新增日线归档均包含 2026-09-02，来源响应形成 delayed/raw 新版本；原 B3 案例
+选中的新价格权威在当前时点通过 owner 与数据库 prepare_price_bar_set 重验证。
+账户快照、流水、同步 attempt、数据快照、研究运行/输出、价格 manifest/bar/authority
+九类旧行按 ID 与内容摘要核对全部未变。未将新价格回填旧研究；raw 不升级为复权，
+流动性局部可计算不等于费用、回测或完整决策证据齐备。
+
+市场 API/BFF 返回同案例，最新 OHLCV 与新 DB 逐值一致、报价等于所选最新 DB 行；
+receipt 有值，source event time 仍未知。正常市场页面核对最新交易日、当前 K 线与
+五项 OHLCV、延迟/未复权说明及限制；报价在验收等待后显示 stale，未为消除该状态
+再次采集。组合 BFF 与新 DB snapshot/portfolio/as_of 相同，正常页面展开详情核对
+新快照北京时间、只读来源、流水已通过及执行已锁定，五项为真。自建验收页已关闭。
+
+受保护证据位于 outputs/acceptance/daily-refresh-20260904（0700/0600），最终市场
+DOM 结果为 market-dom-verified.json，组合为 portfolio-dom-summary.json。
+验收异常保留：第一次市场 BFF GET 抛 HTTPError，未捕获具体响应码，不能猜测根因；
+核对 API 存活 200、近期日志无 error/timeout 后重新只读 GET 成功，未重放业务采集。
+DOM 首次误把交易日行标题 th 当作 td，继而错误采用默认千分位格式，与页面原格式
+不一致；分别核对现有组件与 formatDisplayDecimal 后修正验收预期，五字段最终全部
+相符。初始 false 与最终结果分开保存，未改业务显示或底层价格来通过验收。
