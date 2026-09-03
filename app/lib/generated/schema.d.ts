@@ -2120,8 +2120,18 @@ export interface components {
             quality: "PASS" | "PARTIAL" | "FAIL";
             /** Quality Reasons */
             quality_reasons: string[];
+            /**
+             * Received At
+             * @description Local receipt of the selected quote's gateway response.
+             */
+            received_at?: string | null;
             /** Source */
             source: string | null;
+            /**
+             * Source Observed At
+             * @description Verified source event time; absent for receipt-only quotes.
+             */
+            source_observed_at?: string | null;
             /** Symbol */
             symbol: string;
             /** Watchlisted */

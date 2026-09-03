@@ -26,11 +26,17 @@ class MarketItemResponse(_StrictSchema):
     feed: str | None
     delivery_mode: DeliveryMode
     as_of: datetime | None
+    source_observed_at: datetime | None = Field(
+        default=None, description="Verified source event time; absent for receipt-only quotes."
+    )
+    received_at: datetime | None = Field(
+        default=None, description="Local receipt of the selected quote's gateway response."
+    )
     quality: Literal["PASS", "PARTIAL", "FAIL"]
     quality_reasons: tuple[str, ...]
     watchlisted: bool
 
-    @field_validator("as_of")
+    @field_validator("as_of", "source_observed_at", "received_at")
     @classmethod
     def _aware_as_of(cls, value: datetime | None) -> datetime | None:
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):

@@ -3084,6 +3084,19 @@ export const runtimeContractSchemas = {
         "title": "Quality Reasons",
         "type": "array"
       },
+      "received_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Local receipt of the selected quote's gateway response.",
+        "title": "Received At"
+      },
       "source": {
         "anyOf": [
           {
@@ -3094,6 +3107,19 @@ export const runtimeContractSchemas = {
           }
         ],
         "title": "Source"
+      },
+      "source_observed_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Verified source event time; absent for receipt-only quotes.",
+        "title": "Source Observed At"
       },
       "symbol": {
         "title": "Symbol",
