@@ -204,15 +204,16 @@ class StrategyRNDExecutor:
     def _generation_runtime(
         self, authority: LoadedGenerationAuthority
     ) -> ResponsesStrategyRNDRuntime | _FixedStrategyRNDRuntime:
-        config = _model_configuration(authority)
+        if self._runtime_mode is AgentRuntimeMode.FIXTURE:
+            return _FixedStrategyRNDRuntime(config=_model_configuration(authority))
         if self._runtime_mode is AgentRuntimeMode.RESPONSES:
-            if self._responses_client is None:
+            if self._responses_client is None or not self._reasoning_model:
                 raise StrategyRNDAuthorityError("GENERATION_RUNTIME_INCOMPLETE")
             return ResponsesStrategyRNDRuntime(
                 client=self._responses_client,
-                config=config,
+                config=_model_configuration(authority),
             )
-        return _FixedStrategyRNDRuntime(config=config)
+        raise StrategyRNDAuthorityError("GENERATION_RUNTIME_UNSUPPORTED")
 
     async def _evaluate_candidate(
         self,
@@ -566,15 +567,19 @@ def build_strategy_rnd_executor(
     settings: EngineSettings,
     responses_client: object | None = None,
 ) -> StrategyRNDExecutor:
-    """Build the isolated executor and enforce production runtime authority."""
+    """Build only supported runtimes; a local model selection must never become a fixture."""
     if settings.environment is Environment.PRODUCTION and (
         settings.agent_runtime_mode is not AgentRuntimeMode.RESPONSES
         or settings.openai_api_key is None
         or not settings.openai_reasoning_model
     ):
         raise ValueError("production Strategy R&D requires explicit Responses authority")
-    runtime_mode = settings.agent_runtime_mode or AgentRuntimeMode.FIXTURE
+    runtime_mode = settings.agent_runtime_mode
+    if runtime_mode not in (AgentRuntimeMode.FIXTURE, AgentRuntimeMode.RESPONSES):
+        raise ValueError("Strategy R&D runtime requires explicit fixture or responses mode")
     client = responses_client
+    if runtime_mode is AgentRuntimeMode.RESPONSES and not settings.openai_reasoning_model:
+        raise ValueError("Responses Strategy R&D requires a reasoning model")
     if runtime_mode is AgentRuntimeMode.RESPONSES and client is None:
         if settings.openai_api_key is None:
             raise ValueError("Responses Strategy R&D requires an API key")
@@ -604,7 +609,7 @@ def _model_configuration(authority: LoadedGenerationAuthority) -> ResponsesModel
 
 
 class _FixedStrategyRNDRuntime:
-    """Deterministic non-network runtime for local and test environments."""
+    """Deterministic non-network runtime for the explicit fixture mode only."""
 
     def __init__(self, *, config: ResponsesModelConfig) -> None:
         self._configuration = config

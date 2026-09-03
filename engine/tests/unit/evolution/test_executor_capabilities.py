@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -191,3 +192,139 @@ def test_production_executor_requires_explicit_responses_authority() -> None:
                 engine_hmac_current_secret="fixture",
             )
         )
+
+
+def test_local_codex_worker_entry_rejects_before_starting_queue_or_database(monkeypatch):
+    from nexus.evolution import worker
+
+    settings = EngineSettings(environment="development", agent_runtime_mode="codex_sdk")
+    run = AsyncMock()
+    monkeypatch.setattr(worker, "EngineSettings", lambda: settings)
+    monkeypatch.setattr(worker, "run_strategy_rnd_worker", run)
+    with pytest.raises(ValueError, match="Strategy R&D runtime.*fixture or responses"):
+        worker.main()
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", [AgentRuntimeMode.CODEX_SDK, None, "future_backend"])
+def test_generation_selector_never_falls_back_for_unhandled_modes(mode):
+    executor = StrategyRNDExecutor(
+        authority_resolver=SimpleNamespace(),
+        runtime_mode=mode,
+        reasoning_model=None,
+        responses_client=None,
+    )
+    with pytest.raises(StrategyRNDAuthorityError) as error:
+        executor._generation_runtime(_runtime_authority())
+    assert error.value.reason_code == "GENERATION_RUNTIME_UNSUPPORTED"
+
+
+@pytest.mark.parametrize("mode", [AgentRuntimeMode.FIXTURE, AgentRuntimeMode.RESPONSES])
+def test_explicit_supported_runtime_keeps_its_selected_backend(mode):
+    from nexus.evolution.agent import ResponsesStrategyRNDRuntime
+    from nexus.evolution.executor import _FixedStrategyRNDRuntime
+
+    settings = EngineSettings(
+        agent_runtime_mode=mode,
+        openai_api_key="synthetic-key",
+        openai_extraction_model="synthetic-extraction",
+        openai_reasoning_model="synthetic-reasoning",
+    )
+    client = SimpleNamespace(responses=SimpleNamespace(create=AsyncMock()))
+    runtime = build_strategy_rnd_executor(settings, responses_client=client)._generation_runtime(
+        _runtime_authority()
+    )
+    expected = (
+        _FixedStrategyRNDRuntime
+        if mode is AgentRuntimeMode.FIXTURE
+        else ResponsesStrategyRNDRuntime
+    )
+    assert isinstance(runtime, expected)
+    client.responses.create.assert_not_called()
+
+
+def _runtime_authority():
+    return SimpleNamespace(
+        model=SimpleNamespace(
+            model_id="synthetic-reasoning",
+            version="synthetic-v1",
+            max_input_tokens=10000,
+            max_output_tokens=1000,
+            max_tool_calls=4,
+            input_usd_per_million=Decimal("1"),
+            output_usd_per_million=Decimal("2"),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "updates,client",
+    [
+        ({"agent_runtime_mode": None}, None),
+        (
+            {"agent_runtime_mode": AgentRuntimeMode.RESPONSES, "openai_reasoning_model": None},
+            object(),
+        ),
+        (
+            {
+                "agent_runtime_mode": AgentRuntimeMode.RESPONSES,
+                "openai_reasoning_model": "synthetic",
+            },
+            None,
+        ),
+    ],
+)
+def test_factory_rechecks_missing_runtime_configuration_before_client_creation(
+    updates, client, monkeypatch
+):
+    def forbidden(**kwargs):
+        raise AssertionError("incomplete settings must not construct a model client")
+
+    monkeypatch.setattr("nexus.evolution.executor.AsyncOpenAI", forbidden)
+    settings = EngineSettings.for_test().model_copy(update=updates)
+    with pytest.raises(ValueError):
+        build_strategy_rnd_executor(settings, responses_client=client)
+
+
+@pytest.mark.asyncio
+async def test_registered_generation_rejects_injected_unsupported_executor_without_agent_output(
+    monkeypatch,
+):
+    from nexus.evolution import executor as executor_module
+    from nexus.evolution import jobs
+
+    monkeypatch.setattr(
+        executor_module, "current_strategy_rnd_adjusted_authority_available", lambda: True
+    )
+    monkeypatch.setattr(jobs, "_preflight_strategy_rnd_job", AsyncMock(return_value=None))
+    audit = AsyncMock()
+    monkeypatch.setattr(jobs, "_append_strategy_operation_audit", audit)
+    model_run = AsyncMock()
+    monkeypatch.setattr(executor_module, "execute_strategy_rnd", model_run)
+    executor = StrategyRNDExecutor(
+        authority_resolver=SimpleNamespace(
+            load_generation=AsyncMock(return_value=_runtime_authority())
+        ),
+        runtime_mode=AgentRuntimeMode.CODEX_SDK,
+        reasoning_model=None,
+        responses_client=None,
+    )
+    payload = build_strategy_rnd_job_payload(
+        operation="generate_family",
+        family_id=None,
+        experiment_id=None,
+        expected_champion_generation=1,
+    )
+    context = SimpleNamespace(
+        payload=payload,
+        claim=SimpleNamespace(job_id=UUID(int=1)),
+        session=SimpleNamespace(
+            get=AsyncMock(return_value=SimpleNamespace(input_hash=payload.input_hash))
+        ),
+        finished_at=lambda: datetime(2026, 9, 3, tzinfo=UTC),
+    )
+    spec = build_strategy_rnd_registry(executor=executor).resolve(JobType.STRATEGY_RND.value)
+    result = await spec.handler(context)
+    assert (result.outcome, result.error_code) == ("failed", "GENERATION_RUNTIME_UNSUPPORTED")
+    model_run.assert_not_called()
+    assert audit.await_args.kwargs["result"] == result

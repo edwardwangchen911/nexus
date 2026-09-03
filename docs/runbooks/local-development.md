@@ -57,6 +57,8 @@ cp infra/env.example infra/.env.local
 
 `DATABASE_URL` 与 `OBJECT_STORE_ENDPOINT` 供容器使用，因此 host 分别应指向 Compose service 名 `postgres` 与 `minio`，而不是 `127.0.0.1`。
 
+Strategy R&D 的独立 worker 仅支持解析后的 `fixture` 或 `responses` 模式；配置 `codex_sdk` 会在启动队列前明确拒绝，不会生成固定结果替代真实模型。Responses 需完整模型配置，仍保留 30 秒模型预算、45 秒 worker 截止及调整价格准入。通用研究的 Codex SDK 单次入口不受此限制变更影响；它与策略演化尚未共享运行时合同，不能据通用研究成功宣称策略演化已接通。
+
 ## 启动
 
 先校验解析后的 Compose，不打印完整配置：
