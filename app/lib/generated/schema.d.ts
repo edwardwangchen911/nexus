@@ -852,6 +852,10 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @enum {string} */
+        _RunStatus: "completed" | "failed" | "abstained";
+        /** @enum {string} */
+        _UnavailableReason: "RESEARCH_FAILED" | "RESEARCH_ABSTAINED" | "STAGED_ACTION_SEMANTICS_UNVERIFIED";
         /** ActiveFamilyResponse */
         ActiveFamilyResponse: {
             /** Authority Hash */
@@ -1477,6 +1481,24 @@ export interface components {
             /** Truncated */
             truncated: boolean;
         };
+        /** DailyResearchContextRequest */
+        DailyResearchContextRequest: {
+            /**
+             * Context As Of
+             * Format: date-time
+             */
+            context_as_of: string;
+            /**
+             * Root Id
+             * Format: uuid
+             */
+            root_id: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+        };
         /** @enum {string} */
         DecisionReadiness: "DECISION_READY" | "RECONCILIATION_PENDING" | "DATA_STALE" | "RECONCILIATION_REQUIRED";
         /** DiagnosticItemResponse */
@@ -1752,6 +1774,99 @@ export interface components {
              * @enum {string}
              */
             variant: "hold_current" | "minimum_change" | "strategy_target";
+        };
+        /**
+         * FrozenDailyResearchContext
+         * @description Evidence for reading a historical baseline, never a selection authority.
+         */
+        FrozenDailyResearchContext: {
+            /**
+             * Context As Of
+             * Format: date-time
+             */
+            context_as_of: string;
+            /**
+             * Diagnostic Report Id
+             * Format: uuid
+             */
+            diagnostic_report_id: string;
+            /** Evidence Hash */
+            evidence_hash: string;
+            /**
+             * Execution Locked
+             * @default true
+             * @constant
+             */
+            execution_locked: true;
+            /**
+             * Instrument Id
+             * Format: uuid
+             */
+            instrument_id: string;
+            intent: components["schemas"]["ResearchIntent"] | null;
+            /**
+             * Mode
+             * @default context_only
+             * @constant
+             */
+            mode: "context_only";
+            /**
+             * Output Available At
+             * Format: date-time
+             */
+            output_available_at: string;
+            /** Output Hash */
+            output_hash: string;
+            /**
+             * Output Id
+             * Format: uuid
+             */
+            output_id: string;
+            /** Output Sequence */
+            output_sequence: number;
+            /**
+             * Portfolio Snapshot Id
+             * Format: uuid
+             */
+            portfolio_snapshot_id: string;
+            /**
+             * Quality Status
+             * @enum {string}
+             */
+            quality_status: "complete" | "partial";
+            /**
+             * Research As Of
+             * Format: date-time
+             */
+            research_as_of: string;
+            /**
+             * Research Data Snapshot Id
+             * Format: uuid
+             */
+            research_data_snapshot_id: string;
+            /**
+             * Root Id
+             * Format: uuid
+             */
+            root_id: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            run_status: components["schemas"]["_RunStatus"];
+            /**
+             * Schema Version
+             * @default daily_research_context_v1
+             * @constant
+             */
+            schema_version: "daily_research_context_v1";
+            unavailable_reason: components["schemas"]["_UnavailableReason"] | null;
+            /**
+             * Valuation Time
+             * Format: date-time
+             */
+            valuation_time: string;
         };
         /**
          * FrozenProposalComparison
@@ -2305,6 +2420,7 @@ export interface components {
                 components["schemas"]["OptimizationProposalResponse"],
                 components["schemas"]["OptimizationProposalResponse"]
             ];
+            research_context?: components["schemas"]["FrozenDailyResearchContext"] | null;
             shadow_eligibility: components["schemas"]["ShadowEligibilityResponse"];
             /**
              * Source Policy Id
@@ -3095,6 +3211,7 @@ export interface components {
              * Format: uuid
              */
             portfolio_snapshot_id: string;
+            research_context?: components["schemas"]["DailyResearchContextRequest"] | null;
         };
         /** ReadinessComponents */
         ReadinessComponents: {

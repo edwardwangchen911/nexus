@@ -29,6 +29,10 @@ from nexus.optimizer.production import (
     _minimum_change_inputs,
     create_proposal_group_idempotently,
 )
+from nexus.optimizer.research_context import (
+    DailyResearchContextRequest,
+    freeze_daily_research_context,
+)
 from nexus.optimizer.scenario_risk import load_scenario_evidence
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
@@ -61,6 +65,7 @@ async def create_initial_draft(
     now: datetime,
     expected_data_snapshot_id: UUID | None = None,
     artifact_reader: ArtifactByteReader | None = None,
+    research_context: DailyResearchContextRequest | None = None,
 ) -> PersistedProposalGroup:
     """Create no Job, authority, research call, order, or synthetic candidate diagnosis."""
     record = await session.scalar(
@@ -93,6 +98,22 @@ async def create_initial_draft(
         or diagnostic.optimization_need not in {"RESEARCH_REQUIRED", "OPTIMIZATION_CANDIDATE"}
     ):
         raise InitialDraftUnavailable("DRAFT_BASELINE_OR_DIAGNOSTIC_UNAVAILABLE")
+    frozen_context = None
+    if research_context is not None:
+        if research_context.context_as_of > now:
+            raise InitialDraftUnavailable("DRAFT_RESEARCH_OUTPUT_UNAVAILABLE")
+        try:
+            frozen_context = await freeze_daily_research_context(
+                session, **research_context.model_dump()
+            )
+        except ValueError as error:
+            raise InitialDraftUnavailable("DRAFT_RESEARCH_OUTPUT_UNAVAILABLE") from error
+        if (
+            frozen_context.portfolio_snapshot_id != record.id
+            or frozen_context.diagnostic_report_id != diagnostic.id
+            or frozen_context.valuation_time != record.as_of
+        ):
+            raise InitialDraftUnavailable("DRAFT_RESEARCH_BASELINE_MISMATCH")
     snapshot = await load_frozen_snapshot(
         session,
         portfolio_id=record.portfolio_id,
@@ -177,8 +198,13 @@ async def create_initial_draft(
         or cost_policy.available_at > record.as_of
     ):
         raise ValueError("initial draft policies are unavailable")
+    schema_version = (
+        "optimization_draft_inputs_v2"
+        if frozen_context is not None
+        else "optimization_draft_inputs_v1"
+    )
     inputs: dict[str, object] = {
-        "schema_version": "optimization_draft_inputs_v1",
+        "schema_version": schema_version,
         "portfolio_snapshot_id": str(record.id),
         "diagnostic_report_id": str(diagnostic.id),
         "diagnostic_input_hash": diagnostic.diagnostic_input_hash,
@@ -186,6 +212,8 @@ async def create_initial_draft(
         "cost_policy_id": str(cost_policy.id),
         "optimizer_policy_id": str(optimizer_policy.id),
     }
+    if frozen_context is not None:
+        inputs["research_context"] = frozen_context.model_dump(mode="json")
     if fx is not None:
         inputs["fx_valuation"] = fx.input_identity()
     scenario = await load_scenario_evidence(session, snapshot, artifact_reader)
@@ -205,7 +233,7 @@ async def create_initial_draft(
             observed_at=record.as_of,
             available_at=now,
             received_at=now,
-            schema_version="optimization_draft_inputs_v1",
+            schema_version=schema_version,
             payload=inputs,
         )
         .on_conflict_do_nothing(index_elements=["source", "provider_object_id", "revision"])

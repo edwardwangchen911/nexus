@@ -11,27 +11,36 @@ NOW = datetime(2026, 9, 2, 4, tzinfo=UTC)
 INSTRUMENT = UUID("0198d500-1000-7000-8000-000000002001")
 
 
-async def seed_filing(session, *, source="sec", accepted_at=NOW, created_at=NOW):
-    session.add(
-        Instrument(
-            id=INSTRUMENT,
-            asset_type="equity",
-            exchange="XNAS",
-            currency="USD",
-            tick_size=Decimal("0.01"),
-            risk_bucket="us_equity",
+async def seed_filing(
+    session,
+    *,
+    source="sec",
+    accepted_at=NOW,
+    created_at=NOW,
+    instrument_id=INSTRUMENT,
+    seed_instrument=True,
+):
+    if seed_instrument:
+        session.add(
+            Instrument(
+                id=instrument_id,
+                asset_type="equity",
+                exchange="XNAS",
+                currency="USD",
+                tick_size=Decimal("0.01"),
+                risk_bucket="us_equity",
+            )
         )
-    )
-    await session.flush()
-    session.add(
-        InstrumentAlias(
-            instrument_id=INSTRUMENT,
-            symbol="TEST",
-            alias_type="ticker",
-            valid_from=NOW.date(),
-            valid_to=None,
+        await session.flush()
+        session.add(
+            InstrumentAlias(
+                instrument_id=instrument_id,
+                symbol="TEST",
+                alias_type="ticker",
+                valid_from=NOW.date(),
+                valid_to=None,
+            )
         )
-    )
     evidence = ResearchEvidenceRef(
         source=source,
         provider_object_id="filing:test",
@@ -46,7 +55,7 @@ async def seed_filing(session, *, source="sec", accepted_at=NOW, created_at=NOW)
     await session.flush()
     session.add(
         Filing(
-            instrument_id=INSTRUMENT,
+            instrument_id=instrument_id,
             evidence_ref_id=evidence.id,
             source=source,
             provider_object_id=evidence.provider_object_id,

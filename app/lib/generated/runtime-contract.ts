@@ -2195,6 +2195,153 @@ export const runtimeContractSchemas = {
     "title": "FrozenComparisonVariant",
     "type": "object"
   },
+  "FrozenDailyResearchContext": {
+    "additionalProperties": false,
+    "description": "Evidence for reading a historical baseline, never a selection authority.",
+    "properties": {
+      "context_as_of": {
+        "format": "date-time",
+        "title": "Context As Of",
+        "type": "string"
+      },
+      "diagnostic_report_id": {
+        "format": "uuid",
+        "title": "Diagnostic Report Id",
+        "type": "string"
+      },
+      "evidence_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Evidence Hash",
+        "type": "string"
+      },
+      "execution_locked": {
+        "const": true,
+        "default": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "instrument_id": {
+        "format": "uuid",
+        "title": "Instrument Id",
+        "type": "string"
+      },
+      "intent": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ResearchIntent"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "mode": {
+        "const": "context_only",
+        "default": "context_only",
+        "title": "Mode",
+        "type": "string"
+      },
+      "output_available_at": {
+        "format": "date-time",
+        "title": "Output Available At",
+        "type": "string"
+      },
+      "output_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Output Hash",
+        "type": "string"
+      },
+      "output_id": {
+        "format": "uuid",
+        "title": "Output Id",
+        "type": "string"
+      },
+      "output_sequence": {
+        "minimum": 1,
+        "title": "Output Sequence",
+        "type": "integer"
+      },
+      "portfolio_snapshot_id": {
+        "format": "uuid",
+        "title": "Portfolio Snapshot Id",
+        "type": "string"
+      },
+      "quality_status": {
+        "enum": [
+          "complete",
+          "partial"
+        ],
+        "title": "Quality Status",
+        "type": "string"
+      },
+      "research_as_of": {
+        "format": "date-time",
+        "title": "Research As Of",
+        "type": "string"
+      },
+      "research_data_snapshot_id": {
+        "format": "uuid",
+        "title": "Research Data Snapshot Id",
+        "type": "string"
+      },
+      "root_id": {
+        "format": "uuid",
+        "title": "Root Id",
+        "type": "string"
+      },
+      "run_id": {
+        "format": "uuid",
+        "title": "Run Id",
+        "type": "string"
+      },
+      "run_status": {
+        "$ref": "#/components/schemas/_RunStatus"
+      },
+      "schema_version": {
+        "const": "daily_research_context_v1",
+        "default": "daily_research_context_v1",
+        "title": "Schema Version",
+        "type": "string"
+      },
+      "unavailable_reason": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/_UnavailableReason"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "valuation_time": {
+        "format": "date-time",
+        "title": "Valuation Time",
+        "type": "string"
+      }
+    },
+    "required": [
+      "root_id",
+      "run_id",
+      "output_id",
+      "output_sequence",
+      "output_hash",
+      "portfolio_snapshot_id",
+      "diagnostic_report_id",
+      "research_data_snapshot_id",
+      "instrument_id",
+      "valuation_time",
+      "research_as_of",
+      "output_available_at",
+      "context_as_of",
+      "evidence_hash",
+      "run_status",
+      "quality_status",
+      "intent",
+      "unavailable_reason"
+    ],
+    "title": "FrozenDailyResearchContext",
+    "type": "object"
+  },
   "FrozenProposalComparison": {
     "additionalProperties": false,
     "description": "A saved comparison is evidence, never a recommendation or execution grant.",
@@ -3459,6 +3606,16 @@ export const runtimeContractSchemas = {
         ],
         "title": "Proposals",
         "type": "array"
+      },
+      "research_context": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/FrozenDailyResearchContext"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "shadow_eligibility": {
         "$ref": "#/components/schemas/ShadowEligibilityResponse"
@@ -8495,6 +8652,22 @@ export const runtimeContractSchemas = {
     ],
     "title": "WhatIfResponse",
     "type": "object"
+  },
+  "_RunStatus": {
+    "enum": [
+      "completed",
+      "failed",
+      "abstained"
+    ],
+    "type": "string"
+  },
+  "_UnavailableReason": {
+    "enum": [
+      "RESEARCH_FAILED",
+      "RESEARCH_ABSTAINED",
+      "STAGED_ACTION_SEMANTICS_UNVERIFIED"
+    ],
+    "type": "string"
   }
 } as const;
 

@@ -70,7 +70,9 @@ from nexus.optimizer.models import (
     ProposalVariant,
 )
 from nexus.optimizer.repository import has_executable_shadow_authority
+from nexus.optimizer.research_context import read_draft_research_context
 from nexus.optimizer.what_if import evaluate_what_if as evaluate_what_if_weights
+from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.optimization import (
     OptimizationProposalGroupRecord,
@@ -358,6 +360,17 @@ async def get_optimization_group(
     group = await session.get(OptimizationProposalGroupRecord, proposal_group_id)
     if group is None:
         raise NexusError(ErrorCode.NOT_FOUND, "Proposal group was not found.", status_code=404)
+    try:
+        research_context = read_draft_research_context(
+            await session.get(DataSnapshot, group.data_snapshot_id),
+            portfolio_snapshot_id=group.baseline_portfolio_snapshot_id,
+            diagnostic_report_id=group.diagnostic_report_id,
+            valuation_time=group.valuation_time,
+        )
+    except ValueError as error:
+        raise NexusError(
+            ErrorCode.DATA_PARTIAL, "Proposal research context is invalid.", status_code=409
+        ) from error
     children = list(
         (
             await session.execute(
@@ -469,6 +482,7 @@ async def get_optimization_group(
             cost_policy_id=group.cost_policy_id,
             proposals=(proposal_data[0], proposal_data[1], proposal_data[2]),
             economic_comparison=_economic_comparison(group, proposal_data),
+            research_context=research_context,
             shadow_eligibility=ShadowEligibilityResponse(
                 eligible=not reasons, reasons=tuple(reasons)
             ),
@@ -499,6 +513,7 @@ async def create_optimization_draft(
             diagnostic_report_id=body.diagnostic_report_id, actor_id=actor.actor_id,
             idempotency_key=idempotency_key, request_hash=request_hash, now=_utc_now(request),
             artifact_reader=getattr(request.app.state, "diagnostic_artifact_reader", None),
+            research_context=body.research_context,
         )
     except IdempotencyConflict as error:
         raise NexusError(ErrorCode.IDEMPOTENCY_CONFLICT, "Draft request conflicts with prior request.", status_code=409) from error

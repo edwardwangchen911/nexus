@@ -92,11 +92,13 @@ Owner=root，基线同步main `70c9e82`，独立分支`edward/nexus-daily-resear
 
 - [x] 新窄`optimizer/research_context.py`：显式root/run/context_as_of，复用精确resolver；读取终态最终output，核原内容hash、run/instrument/data/decision time、原始证据/最终引用绑定；job.finished_at与output.created_at均不晚于实际context截止。输出保留root/run/output/sequence/hash、研究输入ID/时点、真实输出可用时刻和intent或固定不可用原因。
 - [x] 严格类型区分`context_only`，无执行/排名许可。v2语义保护复用已有函数；failed/abstained/partial不升级。不读取latest研究替换已冻结ID；相同截止和ID得到相同内容。
-- [ ] 在已有`create_initial_draft`中可选接入显式冻结context，写现有DataSnapshot JSONB的新输入schema版本并参与digest；不重写旧v1输入/Job。原valuation保持t0，research/context cutoff为t1，不能把晚生成context放入要求早于valuation的comparison evidence。
+- [x] 在已有`create_initial_draft`中可选接入显式冻结context，写现有DataSnapshot JSONB的新输入schema版本并参与digest；不重写旧v1输入/Job。原valuation保持t0，research/context cutoff为t1，不能把晚生成context放入要求早于valuation的comparison evidence。
 - [ ] 复用现有草稿同步入口新增显式本地调用，草稿目标仍由已有确定性诊断产生；研究作为可读依据及缺口说明，targets/partial/selection/execution flags保持原样。API投影及实际页面读取需验证同一冻结context，不得仅存入不可见JSON宣称交付。
 - [ ] TDD覆盖错root/run、输出/证据hash不符、晚生成、无intent、v2 partial、冻结后新增输出不改变旧引用、相同请求幂等；真实PG→构造器→API可读且原targets及门禁不变。reader、构造/入口、消费者可分小提交，每片<800行。
 
 5a-reader验证：先红缺reader；6项新PG覆盖原生worker实际输出的completed partial/failed（含v2配置）、新追加坏hash/缺输出引用拒绝及原截止内容不变。与原显式快照/准入/单次入口共23项PG通过；显式诊断ID与run/job终态对应收紧后4项终态聚焦PG复验通过，Ruff/Mypy/diff-check及独立审查ready。测试修正共享PG fixture固定created_at导致的“晚追加”假设，仅给新测试行显式实际时间，不改生产时间行为。此片纯只读，无迁移/模型外呼；持久化草稿/读API/页面尚待下一片，不能称方案已消费研究。
+
+5a-backend：可选请求只接收root/run/UTC截止，服务端冻结可信输出后写`optimization_draft_inputs_v2`全文身份，GET读取原保存值并验证schema/hash/内外ID/时序；无context旧v1不变。15项unit通过；新旧草稿12项PG通过，补充错root/run/未来或早截止零草稿写入、晚追加坏output不改变旧GET、旧formal入口拒绝v2且Job数不变及原read/symbol路径8项PG通过。Ruff/Mypy4及独立集中审查无P1/P2。合成诊断叶子测试不代表真实源端到端验收；本地组合入口、页面及同一真实案例尚待后片。
 
 ### Task5b：正式研究约束目标（仍待实现与条件）
 

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,7 @@ from nexus.persistence.models.agents import (
     AgentResearchOutputRecord,
     AgentResearchRunRecord,
 )
+from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.strategy.intents import ResearchIntent
 
@@ -30,6 +31,18 @@ type _UnavailableReason = Literal[
     "RESEARCH_ABSTAINED",
     "STAGED_ACTION_SEMANTICS_UNVERIFIED",
 ]
+
+
+class DailyResearchContextRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    root_id: UUID
+    run_id: UUID
+    context_as_of: datetime
+
+    @field_validator("context_as_of")
+    @classmethod
+    def _utc(cls, value: datetime) -> datetime:
+        return ManualDailyRequest._utc(value)
 
 
 class FrozenDailyResearchContext(BaseModel):
@@ -57,6 +70,81 @@ class FrozenDailyResearchContext(BaseModel):
     quality_status: Literal["complete", "partial"]
     intent: ResearchIntent | None
     unavailable_reason: _UnavailableReason | None
+
+    @field_validator("valuation_time", "research_as_of", "output_available_at", "context_as_of")
+    @classmethod
+    def _utc(cls, value: datetime) -> datetime:
+        return ManualDailyRequest._utc(value)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "FrozenDailyResearchContext":
+        if (
+            not self.valuation_time
+            <= self.research_as_of
+            <= self.output_available_at
+            <= self.context_as_of
+        ):
+            raise ValueError(_INVALID)
+        if self.intent is not None:
+            if (
+                self.run_status != "completed"
+                or self.unavailable_reason is not None
+                or self.intent.instrument_id != self.instrument_id
+                or self.intent.data_snapshot_id != self.research_data_snapshot_id
+                or self.intent.decision_time != self.research_as_of
+                or self.intent.quality_status != self.quality_status
+            ):
+                raise ValueError(_INVALID)
+        elif (
+            self.quality_status != "partial"
+            or self.unavailable_reason
+            != {
+                "completed": "STAGED_ACTION_SEMANTICS_UNVERIFIED",
+                "failed": "RESEARCH_FAILED",
+                "abstained": "RESEARCH_ABSTAINED",
+            }[self.run_status]
+        ):
+            raise ValueError(_INVALID)
+        return self
+
+
+def read_draft_research_context(
+    data: DataSnapshot | None,
+    *,
+    portfolio_snapshot_id: UUID,
+    diagnostic_report_id: UUID,
+    valuation_time: datetime,
+) -> FrozenDailyResearchContext | None:
+    """Read the original frozen context, never replace it with a newer run/output."""
+    if data is None:
+        raise ValueError(_INVALID)
+    schema = "optimization_draft_inputs_v2"
+    payload = data.payload
+    if data.schema_version != schema and payload.get("schema_version") != schema:
+        return None
+    try:
+        context = FrozenDailyResearchContext.model_validate(payload["research_context"])
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if (
+            data.source != "nexus_optimizer_draft"
+            or data.schema_version != schema
+            or payload["schema_version"] != schema
+            or digest != data.revision
+            or data.observed_at != valuation_time
+            or data.provider_object_id != f"{portfolio_snapshot_id}:{diagnostic_report_id}"
+            or payload["portfolio_snapshot_id"] != str(portfolio_snapshot_id)
+            or payload["diagnostic_report_id"] != str(diagnostic_report_id)
+            or context.portfolio_snapshot_id != portfolio_snapshot_id
+            or context.diagnostic_report_id != diagnostic_report_id
+            or context.valuation_time != valuation_time
+            or context.context_as_of > min(data.available_at, data.received_at)
+        ):
+            raise ValueError(_INVALID)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(_INVALID) from error
+    return context
 
 
 def _binding(record: AgentResearchOutputEvidenceRecord | ResearchEvidenceRef) -> tuple[object, ...]:

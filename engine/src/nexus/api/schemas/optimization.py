@@ -8,6 +8,7 @@ from uuid import UUID
 from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
 from nexus.optimizer.models import ProposalGroupStatus, ProposalVariant
+from nexus.optimizer.research_context import DailyResearchContextRequest, FrozenDailyResearchContext
 from nexus.optimizer.what_if import WhatIfEvaluation
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -54,6 +55,7 @@ class ProposalAdmissionRequest(_StrictOptimizationSchema):
 class ProposalDraftRequest(_StrictOptimizationSchema):
     portfolio_snapshot_id: UUID
     diagnostic_report_id: UUID
+    research_context: DailyResearchContextRequest | None = None
 
 
 class OptimizationLifecycleRequest(_StrictOptimizationSchema):
@@ -476,6 +478,7 @@ class OptimizationProposalGroupResponse(_StrictOptimizationSchema):
     ]
     shadow_eligibility: ShadowEligibilityResponse
     economic_comparison: EconomicComparisonResponse | None = None
+    research_context: FrozenDailyResearchContext | None = None
 
     @model_validator(mode="after")
     def _three_fixed_variants(self) -> "OptimizationProposalGroupResponse":
