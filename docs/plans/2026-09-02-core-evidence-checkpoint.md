@@ -1336,3 +1336,11 @@ root1c720e7→d53d69a一起集成：修复wrap serializer返回注解导致OpenA
 通过。v3需显式选择，当前不自动激活；新草稿context仍context_only/locked，旧估值
 和正式selection边界不改。171对象完整pre-0038备份已完成，业务仍API46d5090/DB0037，
 等待本批页面入口交付后再统一运行切换与真实原件本地验收。
+
+
+真实issuer导入前的只读preflight已通过：D原件ticker经有效别名定位唯一证券，再与
+既有SEC497K份额独立核对；原件hash/receipt和旧artifact兼容，活动job为0，DB仍0037。
+准备脚本最初借用了B3另一研究案例的instrument，SEC身份校验正确拒绝；纠正为
+从该原件定位，未更改资料或重放业务命令。不能把同组合或邻近验收目录当同一证券。
+私有source context与安全摘要保存在`outputs/acceptance/issuer-observation-20260904/`，
+供后续唯一一次本地导入使用；截至记录没有实际导入或模型调用。
