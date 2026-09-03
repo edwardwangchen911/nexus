@@ -1237,3 +1237,24 @@ SDK原件→签名Gateway→Provider.raw_payload全路径通过：窗口正确�
 摘为b1a1547/70c9e82，8unit+17完整隔离PG、Mypy2/Ruff通过并合主线；文档末尾追加冲突
 保留双方记录，后续由A统一追加。此时业务DB仍0036，API仍61ed430，尚未运行新writer；
 新schema代码不能在旧DB上执行，后续须API与迁移一并切换，不能声称真实排名闭环。
+
+
+## 0037 与单次研究入口运行切换（2026-09-04，北京时间）
+
+root4b2 de4f49b摘为46d5090，A8unit+4聚焦PG、Mypy2/Ruff通过，实际claim事务再次
+检查schema，精确Job范围不领取他人任务。没有为编排重复调用同一案例模型。
+
+切换前使用既有完整备份入口保存`outputs/backups/pre-0037-20260904/`，171引用对象
+校验通过、临时容器残留0。0037仅创建空checkpoint表，迁移前后研究、配置、快照和
+策略决策hash保持、活动job为0。API从完整提交46d5090构建并加载，实际源码hash、
+环境和端口匹配，PG/MinIO未重启。回滚镜像`rollback-before-0037-20260904`保留；
+仅新表为空时可按迁移downgrade退0036再配套旧API，有记录时迁移拒绝删除历史，
+应保留新schema兼容代码并前向修复。没有执行paper/调度或写入新checkpoint。
+
+同案例DB→BFF→DOM复核通过：历史五表逐行hash保持，同run/snapshot，三阶段输出
+可读，partial/无intent/语义不足提示/交易锁定保持；桌面和390宽无横溢，页面无写入
+或外部请求。证据在受保护`outputs/acceptance/checkpoint-schema-20260904/`。
+认证readiness的database/migration/object_store均ready，worker unavailable，整体
+unready仍如实显示；个人手动模式无常驻worker，不为状态变绿启动调度。首次直接
+无签名读取health/ready收到401，改用既有BFF签名入口读取，未改变认证设置。
+迁移前只读采集脚本曾引用不存在的表名，已按模型纠正后重读，无业务命令重放。
