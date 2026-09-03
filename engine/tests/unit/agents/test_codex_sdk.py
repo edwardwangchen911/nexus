@@ -928,3 +928,41 @@ async def test_v3_final_assessment_covers_every_review_claim_and_validates_exact
         assert all(not item.resolved for item in final.synthesis_assessment.reviews)
         assert final.vote == "abstain"
     assert calls == ["research", "critique", "synthesis"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", ["fixture", "responses"])
+async def test_sdk_v3_cannot_fall_back_to_other_runtime(monkeypatch, runtime):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from nexus import worker
+    from nexus.settings import EngineSettings
+
+    session = SimpleNamespace(
+        get=AsyncMock(
+            return_value=SimpleNamespace(
+                version="codex-sdk-chatgpt-v3",
+                model_id="gpt-5.4-mini",
+            )
+        )
+    )
+    frozen_reader = AsyncMock(side_effect=AssertionError("must reject before runtime preparation"))
+    monkeypatch.setattr(worker, "load_frozen_evidence", frozen_reader)
+    client = AsyncMock()
+    settings = EngineSettings(
+        agent_runtime_mode=runtime,
+        openai_reasoning_model="gpt-5.4-mini",
+        openai_extraction_model="gpt-5.4-mini",
+        openai_api_key="synthetic-not-a-key",
+    )
+    committee = await worker._committee(
+        session,
+        settings,
+        SimpleNamespace(model_config_id=uuid4()),
+        responses_client=client,
+        tools=None,
+    )
+    assert isinstance(committee, worker._UnavailableResponsesCommittee)
+    frozen_reader.assert_not_awaited()
+    assert client.mock_calls == []

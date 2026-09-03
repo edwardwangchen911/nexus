@@ -1,7 +1,7 @@
 """Strict public shapes for bounded research-run state and evidence summaries."""
 
 from datetime import UTC, date, datetime
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from nexus.agents.committee import AgentRole, StageInputIdentity
@@ -10,8 +10,22 @@ from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
-from nexus.strategy.intents import ResearchClaim, ResearchCondition, ResearchIntent, RoleVote
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from nexus.strategy.intents import (
+    ResearchClaim,
+    ResearchCondition,
+    ResearchIntent,
+    RoleVote,
+    SynthesisAssessment,
+)
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+)
 
 
 class _StrictAgentSchema(BaseModel):
@@ -42,6 +56,16 @@ class ResearchRunCreateRequest(_StrictAgentSchema):
 
 
 class ResearchStageRole(_StrictAgentSchema):
+    synthesis_assessment: SynthesisAssessment | None = None
+
+    @model_serializer(mode="wrap")
+    # A return annotation would replace the closed model serialization schema.
+    def _legacy_payload(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
+        payload = cast(dict[str, object], handler(self))
+        if self.synthesis_assessment is None:
+            payload.pop("synthesis_assessment", None)
+        return payload
+
     role: AgentRole
     claims: tuple[ResearchClaim, ...] = Field(min_length=1, max_length=2)
     reviewed_claim_ids: tuple[str, ...] = Field(max_length=16)

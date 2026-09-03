@@ -193,6 +193,13 @@ A统一进行真实调用与运行验收。root的optimizer/research_context/UI�
 **第二片（版本/运行接线，<800行）：** 第一片交A后再做版本配置、worker选择、持久化
 与trace；worker先同A确认，daily_once所需最小版本识别diff交root。无真实模型重跑，
 由A统一决定一次新输入验收。每片报告代码/测试/集成/运行区别；不修改v2历史读写语义。
+- 接线文件：`agents/{codex_sdk,persistence}.py`、`ops/openai_local.py`、`worker.py`、
+  `api/{research_stages,routes/research,schemas/agents}.py`；不写A的issuer输入或root的daily_once。
+- 通过显式`--structured-synthesis`注册v3，原`--staged`仍登记v2，默认admission排除v3。
+  非SDK runtime拒绝订阅版配置，Job最多一次尝试，deadline沿用三阶段绝对截止。
+- native worker→隔离PG→受保护API回归覆盖成功、critique超时、非法引用、旧v1/v2；
+  trace逐条重验冻结引用与全量review，API保留评估正文；无新表或迁移。
+
 
 ## 6. C 前端：立即可开工的增量
 

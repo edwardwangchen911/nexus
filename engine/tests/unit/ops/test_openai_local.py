@@ -8,7 +8,10 @@ import pytest
 from openai import RateLimitError
 
 
-def test_strategy_rnd_setup_dispatches_explicit_offline_registration(monkeypatch, capsys) -> None:
+@pytest.mark.parametrize("flag", ["--strategy-rnd", "--structured-synthesis"])
+def test_strategy_rnd_setup_dispatches_explicit_offline_registration(
+    monkeypatch, capsys, flag
+) -> None:
     from nexus.ops import openai_local
     from nexus.settings import EngineSettings
 
@@ -25,7 +28,7 @@ def test_strategy_rnd_setup_dispatches_explicit_offline_registration(monkeypatch
             "setup",
             "--backend",
             "codex_sdk",
-            "--strategy-rnd",
+            flag,
             "--skip-key",
         ],
     )
@@ -41,7 +44,12 @@ def test_strategy_rnd_setup_dispatches_explicit_offline_registration(monkeypatch
     )
 
     assert openai_local.main() == 0
-    prepare.assert_awaited_once_with(settings, staged=False, strategy_rnd=True)
+    prepare.assert_awaited_once_with(
+        settings,
+        staged=False,
+        strategy_rnd=flag == "--strategy-rnd",
+        **({"structured_synthesis": True} if flag == "--structured-synthesis" else {}),
+    )
     assert "registered" in capsys.readouterr().out
 
 
@@ -236,3 +244,14 @@ async def test_research_preparation_rejects_remote_database_before_connection() 
             UUID(int=42),
             as_of=datetime(2026, 9, 2, tzinfo=UTC),
         )
+
+
+@pytest.mark.parametrize("extra", [["--backend", "responses"], ["--staged"], ["--strategy-rnd"]])
+def test_structured_setup_rejects_ambiguous_backend_or_version(monkeypatch, capsys, extra):
+    from nexus.ops import openai_local
+
+    monkeypatch.setattr(
+        "sys.argv", ["nexus-openai-local", "setup", "--structured-synthesis", *extra]
+    )
+    assert openai_local.main() == 1
+    assert "CODEX_STRUCTURED_SETUP_" in capsys.readouterr().out

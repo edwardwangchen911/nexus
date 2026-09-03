@@ -73,7 +73,7 @@ _DRIFT_INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000001712")
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_fails", [False, True, "invalid_citation"])
-@pytest.mark.parametrize("staged", [False, True])
+@pytest.mark.parametrize("staged", [False, True, "v3"])
 async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries(
     migrated_database_url,
     monkeypatch,
@@ -91,12 +91,18 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     await _seed_database_tool_authority(
         factory, link_price=False, bar_count=1, price_quality_flags=("missing",)
     )
-    await prepare_database(settings, staged=staged)
+    await prepare_database(settings, staged=staged is True, structured_synthesis=staged == "v3")
     async with factory() as session, session.begin():
         model = await session.scalar(
             select(AgentModelConfigRecord).where(
                 AgentModelConfigRecord.version
-                == (codex_sdk.STAGED_CONFIG_VERSION if staged else codex_sdk.CONFIG_VERSION)
+                == (
+                    codex_sdk.STRUCTURED_CONFIG_VERSION
+                    if staged == "v3"
+                    else codex_sdk.STAGED_CONFIG_VERSION
+                    if staged
+                    else codex_sdk.CONFIG_VERSION
+                )
             )
         )
         admission = await admit_research_run(
@@ -157,6 +163,30 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                     if item["role"] in roles
                 ]
             }
+            if staged == "v3" and payload["stage"] == "synthesis":
+                response = {
+                    "synthesis_assessment": {
+                        "stance": "buy_candidate",
+                        "claims": [
+                            {"text": "收入证据可作研究参考，行情缺口阻止比较。", "citations": [0]}
+                        ],
+                        "reviews": [
+                            {
+                                "claim_id": claim_id,
+                                "status": "accepted",
+                                "rationale": "认可行情缺口。",
+                                "citations": [0],
+                                "resolved": False,
+                                "missing_evidence": ["合格行情"],
+                                "prevented_conclusion": "尚不能比较方案。",
+                            }
+                            for claim_id in reviewed
+                        ],
+                        "review_conclusion": "insufficient",
+                        "uncertainties": ["估值仍未知。"],
+                        "conflicting_facts": False,
+                    }
+                }
             if model_fails == "invalid_citation" and payload["stage"] == "critique":
                 response["roles"][0]["claims"] = [{"text": "invalid", "citations": [999]}]
             return json.dumps(response), UsageSnapshot(input_tokens=300, output_tokens=80)
@@ -248,6 +278,18 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
         assert data["output_tokens"] == (240 if staged else 80)
         assert data["intent"]["stance"] == "watch"
         assert data["intent"]["exposure_action"] == "none"
+        if staged == "v3":
+            assessment = data["intent"]["synthesis_assessment"]
+            assert assessment["stance"] == "buy_candidate"
+            assert len(assessment["reviews"]) == 2
+            assert not any(item["resolved"] for item in assessment["reviews"])
+            assert (
+                data["stage_trace"]["stages"][2]["roles"][0]["synthesis_assessment"] == assessment
+            )
+            assert outputs[-1].payload["synthesis_assessment"] == assessment
+        else:
+            assert "synthesis_assessment" not in data["intent"]
+
         from nexus.agents.snapshots import prepare_research_snapshot
 
         async with factory() as session, session.begin():
@@ -298,7 +340,12 @@ async def test_registering_staged_config_does_not_activate_it_for_default_admiss
     # The shared test fixture freezes created_at defaults; use explicit ordered timestamps.
     async with factory() as session, session.begin():
         for ordinal, version in enumerate(
-            ("codex-sdk-chatgpt-v1", "codex-sdk-chatgpt-v2", "codex-sdk-strategy-rnd-v1"),
+            (
+                "codex-sdk-chatgpt-v1",
+                "codex-sdk-chatgpt-v2",
+                "codex-sdk-chatgpt-v3",
+                "codex-sdk-strategy-rnd-v1",
+            ),
             start=1,
         ):
             session.add(
@@ -317,11 +364,9 @@ async def test_registering_staged_config_does_not_activate_it_for_default_admiss
                 )
             )
     async with factory() as session, session.begin():
-        for explicit in (False, True):
+        for explicit in (None, "codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3"):
             staged_id = await session.scalar(
-                select(AgentModelConfigRecord.id).where(
-                    AgentModelConfigRecord.version == "codex-sdk-chatgpt-v2"
-                )
+                select(AgentModelConfigRecord.id).where(AgentModelConfigRecord.version == explicit)
             )
             admission = await admit_research_run(
                 session,
@@ -340,9 +385,7 @@ async def test_registering_staged_config_does_not_activate_it_for_default_admiss
                 now=datetime(2026, 9, 2, tzinfo=UTC),
             )
             selected = await session.get(AgentModelConfigRecord, admission.run.model_config_id)
-            assert selected.version == (
-                "codex-sdk-chatgpt-v2" if explicit else "codex-sdk-chatgpt-v1"
-            )
+            assert selected.version == (explicit or "codex-sdk-chatgpt-v1")
 
 
 @pytest.mark.asyncio

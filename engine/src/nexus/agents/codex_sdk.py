@@ -32,6 +32,7 @@ from nexus.strategy.intents import ResearchClaim
 MODEL_ID = "gpt-5.4-mini"
 CONFIG_VERSION = "codex-sdk-chatgpt-v1"
 STAGED_CONFIG_VERSION = "codex-sdk-chatgpt-v2"
+STRUCTURED_CONFIG_VERSION = "codex-sdk-chatgpt-v3"
 _PROVIDER = "nexus_openai"
 MAX_INPUT_TOKENS = 64000
 MAX_OUTPUT_TOKENS = 8192

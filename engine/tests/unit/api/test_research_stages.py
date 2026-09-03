@@ -15,7 +15,9 @@ from nexus.strategy.intents import ResearchClaim
 
 
 def _case():
-    run = SimpleNamespace(id=uuid4(), evidence_hash="a" * 64)
+    run = SimpleNamespace(
+        id=uuid4(), evidence_hash="a" * 64, pricing_version="codex-sdk-chatgpt-v2"
+    )
     evidence = EvidenceRef(
         source="sec",
         object_id="filing",
@@ -148,3 +150,39 @@ def test_damaged_trace_does_not_display_unverified_model_text(damage):
     trace = validate_stage_trace(run, records, evidence, prompts)
     assert trace.status == "invalid"
     assert not trace.stages
+
+
+@pytest.mark.parametrize("damage", [None, "missing", "citation", "coverage"])
+def test_v3_trace_checks_and_preserves_full_assessment(damage):
+    run, records, evidence, prompts = _case()
+    run.pricing_version = "codex-sdk-chatgpt-v3"
+    assessment = {
+        "stance": "hold",
+        "claims": records[-1].payload["claims"],
+        "reviews": [
+            {
+                "claim_id": claim_id,
+                "status": "accepted",
+                "rationale": "证据缺口仍在。",
+                "evidence_refs": [evidence[0].model_dump(mode="json")],
+                "resolved": False,
+                "missing_evidence": ["同口径价格"],
+                "prevented_conclusion": "不能比较。",
+            }
+            for claim_id in ("bear:0", "evidence_audit:0")
+        ],
+        "review_conclusion": "limited",
+        "uncertainties": [],
+    }
+    records[-1].payload["synthesis_assessment"] = assessment
+    if damage == "missing":
+        del records[-1].payload["synthesis_assessment"]
+    elif damage == "citation":
+        assessment["reviews"][0]["evidence_refs"][0]["content_hash"] = "f" * 64
+    elif damage == "coverage":
+        assessment["reviews"].pop()
+    _sign(records[-1])
+    trace = validate_stage_trace(run, records, evidence, prompts)
+    assert trace.status == ("verified" if damage is None else "invalid")
+    if damage is None:
+        assert trace.stages[-1].roles[0].synthesis_assessment.model_dump(mode="json") == assessment

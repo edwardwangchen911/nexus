@@ -58,3 +58,19 @@ def test_absent_assessment_does_not_change_legacy_role_payload():
         output_tokens=1,
     )
     assert "synthesis_assessment" not in output.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("kind", ["intent", "role", "trace_role"])
+def test_optional_assessment_keeps_closed_serialization_schema(kind):
+    from nexus.api.schemas.agents import ResearchStageRole
+    from nexus.strategy.intents import ResearchIntent
+
+    model = {
+        "intent": ResearchIntent,
+        "role": CommitteeRoleOutput,
+        "trace_role": ResearchStageRole,
+    }[kind]
+    schema = model.model_json_schema(mode="serialization")
+    assert schema["additionalProperties"] is False
+    assert "synthesis_assessment" in schema["properties"]
+    assert "stance" in schema["properties"] if kind == "intent" else "role" in schema["properties"]

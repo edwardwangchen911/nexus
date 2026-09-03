@@ -271,11 +271,14 @@ async def _committee(
     model = await session.get(AgentModelConfigRecord, run.model_config_id)
     if model is not None and model.version == "codex-sdk-strategy-rnd-v1":
         return _UnavailableResponsesCommittee()
+    if (
+        model is not None
+        and model.version
+        in {"codex-sdk-chatgpt-v1", "codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3"}
+        and settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
+    ):
+        return _UnavailableResponsesCommittee()
     if settings.agent_runtime_mode is AgentRuntimeMode.FIXTURE:
-        if model is not None and model.version in {
-            "codex-sdk-chatgpt-v1", "codex-sdk-chatgpt-v2"
-        }:
-            return _UnavailableResponsesCommittee()
         return FixtureCommittee()
     allow_fixture_evidence = (
         settings.environment is not Environment.PRODUCTION
@@ -301,22 +304,28 @@ async def _committee(
             CONFIG_VERSION,
             MODEL_ID,
             STAGED_CONFIG_VERSION,
+            STRUCTURED_CONFIG_VERSION,
             CodexCommittee,
         )
-        from nexus.agents.codex_staged import StagedCodexCommittee
+        from nexus.agents.codex_staged import StagedCodexCommittee, StructuredStagedCodexCommittee
 
         prompts = await load_frozen_prompts(session, run)
         if (
             model is None
             or model.model_id != MODEL_ID
-            or model.version not in {CONFIG_VERSION, STAGED_CONFIG_VERSION}
+            or model.version
+            not in {CONFIG_VERSION, STAGED_CONFIG_VERSION, STRUCTURED_CONFIG_VERSION}
             or model.input_usd_per_million != 0
             or model.output_usd_per_million != 0
             or prompts is None
         ):
             return _UnavailableResponsesCommittee()
         committee_type = (
-            StagedCodexCommittee if model.version == STAGED_CONFIG_VERSION else CodexCommittee
+            StructuredStagedCodexCommittee
+            if model.version == STRUCTURED_CONFIG_VERSION
+            else StagedCodexCommittee
+            if model.version == STAGED_CONFIG_VERSION
+            else CodexCommittee
         )
         return committee_type(
             prompts={
@@ -335,7 +344,11 @@ async def _committee(
                 allow_fixture_evidence=False,
                 allow_fixture_price_evidence=False,
             ),
-            **({"deadline": deadline} if model.version == STAGED_CONFIG_VERSION else {}),
+            **(
+                {"deadline": deadline}
+                if model.version in {STAGED_CONFIG_VERSION, STRUCTURED_CONFIG_VERSION}
+                else {}
+            ),
         )
     if (
         model is None

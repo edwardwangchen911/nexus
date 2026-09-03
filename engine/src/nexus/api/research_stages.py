@@ -15,12 +15,13 @@ from nexus.agents.synthesis import citations_bound, domain_evidence
 from nexus.api.schemas.agents import ResearchStageRole, ResearchStageSummary, ResearchStageTrace
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import AgentResearchOutputRecord, AgentResearchRunRecord
+from nexus.strategy.intents import ResearchClaim
 
 
 async def read_stage_trace(
     session: AsyncSession, run: AgentResearchRunRecord
 ) -> ResearchStageTrace | None:
-    if run.pricing_version != "codex-sdk-chatgpt-v2":
+    if run.pricing_version not in {"codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3"}:
         return None
     records = tuple(
         await session.scalars(
@@ -98,8 +99,32 @@ def validate_stage_trace(
                 )
             ):
                 return invalid
+            assessment = output.synthesis_assessment
+            if run.pricing_version == "codex-sdk-chatgpt-v3" and stage == "synthesis":
+                required = {
+                    item for item in prior_ids if item.startswith(("bear:", "evidence_audit:"))
+                }
+                if (
+                    assessment is None
+                    or {item.claim_id for item in assessment.reviews} != required
+                    or reviewed != required
+                    or output.claims != assessment.claims
+                    or not citations_bound(
+                        assessment.claims
+                        + tuple(
+                            ResearchClaim(text=item.rationale, evidence_refs=item.evidence_refs)
+                            for item in assessment.reviews
+                        ),
+                        evidence,
+                    )
+                ):
+                    return invalid
+            elif assessment is not None:
+                return invalid
             ResearchStageRole.model_validate(
-                output.model_dump(include={"role", "claims", "reviewed_claim_ids"})
+                output.model_dump(
+                    include={"role", "claims", "reviewed_claim_ids", "synthesis_assessment"}
+                )
             )
             outputs.append(output)
             prior_ids.update(f"{role}:{index}" for index in range(len(output.claims)))
@@ -127,7 +152,10 @@ def validate_stage_trace(
                 else "unavailable",
                 roles=tuple(
                     ResearchStageRole(
-                        role=o.role, claims=o.claims, reviewed_claim_ids=o.reviewed_claim_ids
+                        role=o.role,
+                        claims=o.claims,
+                        reviewed_claim_ids=o.reviewed_claim_ids,
+                        synthesis_assessment=o.synthesis_assessment,
                     )
                     for o in saved
                 ),

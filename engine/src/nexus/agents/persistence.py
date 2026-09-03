@@ -280,7 +280,7 @@ async def admit_research_run(
                 AgentModelConfigRecord.pricing_expires_at > now,
                 # Staged research is explicit; strategy generation is a separate consumer.
                 AgentModelConfigRecord.version.not_in(
-                    ("codex-sdk-chatgpt-v2", "codex-sdk-strategy-rnd-v1")
+                    ("codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3", "codex-sdk-strategy-rnd-v1")
                 ),
             )
             .order_by(AgentModelConfigRecord.created_at.desc())
@@ -461,7 +461,7 @@ async def admit_research_run(
         queue=QueueName.GENERAL,
         retry_policy=RetryPolicy.AUTOMATIC_SAFE,
         max_attempts=1
-        if model.version in {"codex-sdk-chatgpt-v1", "codex-sdk-chatgpt-v2"}
+        if model.version in {"codex-sdk-chatgpt-v1", "codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3"}
         else 3,
         available_at=now,
     )

@@ -108,7 +108,11 @@ def status(settings: EngineSettings) -> dict[str, object]:
 
 
 async def prepare_database(
-    settings: EngineSettings, *, staged: bool = False, strategy_rnd: bool = False
+    settings: EngineSettings,
+    *,
+    staged: bool = False,
+    strategy_rnd: bool = False,
+    structured_synthesis: bool = False,
 ) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
@@ -117,7 +121,11 @@ async def prepare_database(
     if host is None or host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
     config = dict(_CONFIG)
-    if staged and settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK:
+    if structured_synthesis and (staged or strategy_rnd):
+        raise ValueError("CODEX_STRUCTURED_SETUP_CONFLICT")
+    if (
+        staged or structured_synthesis
+    ) and settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK:
         raise ValueError("CODEX_STAGED_BACKEND_REQUIRED")
     if strategy_rnd and settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK:
         raise ValueError("CODEX_STRATEGY_RND_SETUP_ONLY")
@@ -129,10 +137,13 @@ async def prepare_database(
             MAX_INPUT_TOKENS,
             MAX_OUTPUT_TOKENS,
             STAGED_CONFIG_VERSION,
+            STRUCTURED_CONFIG_VERSION,
         )
         from nexus.agents.codex_sdk import MODEL_ID as SDK_MODEL
 
         version = STAGED_CONFIG_VERSION if staged else CONFIG_VERSION
+        if structured_synthesis:
+            version = STRUCTURED_CONFIG_VERSION
         if strategy_rnd:
             from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION
 
@@ -150,7 +161,7 @@ async def prepare_database(
                 # These fields bound configuration validity, not subscription pricing.
                 "pricing_expires_at": "2027-09-02T00:00:00+00:00",
                 "billing_mode": "chatgpt_subscription",
-                "max_sdk_turns": 3 if staged else 1,
+                "max_sdk_turns": 3 if staged or structured_synthesis else 1,
             }
         )
     config_hash = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
@@ -318,6 +329,11 @@ def main() -> int:
         "--staged", action="store_true", help="Setup the three-stage SDK committee version"
     )
     parser.add_argument(
+        "--structured-synthesis",
+        action="store_true",
+        help="Setup v3 structured synthesis (three bounded SDK stages)",
+    )
+    parser.add_argument(
         "--strategy-rnd",
         action="store_true",
         help="Setup the one-turn Codex Strategy R&D prompt and model version",
@@ -331,6 +347,10 @@ def main() -> int:
     try:
         if args.form is not None and args.action != "refresh-disclosure":
             raise ValueError("SEC_LOCAL_DISCLOSURE_FORM_INVALID")
+        if args.structured_synthesis and (args.action != "setup" or args.backend != "codex_sdk"):
+            raise ValueError("CODEX_STRUCTURED_SETUP_ONLY")
+        if args.structured_synthesis and (args.staged or args.strategy_rnd):
+            raise ValueError("CODEX_STRUCTURED_SETUP_CONFLICT")
         if args.staged and (args.action != "setup" or args.backend != "codex_sdk"):
             raise ValueError("CODEX_STAGED_SETUP_ONLY")
         if args.strategy_rnd and (args.action != "setup" or args.backend != "codex_sdk"):
@@ -351,6 +371,7 @@ def main() -> int:
                     settings,
                     staged=args.staged,
                     strategy_rnd=args.strategy_rnd,
+                    **({"structured_synthesis": True} if args.structured_synthesis else {}),
                 )
             )
             if (

@@ -103,7 +103,7 @@ async def get_research_admission(
                 AgentModelConfigRecord.pricing_available_at <= now,
                 AgentModelConfigRecord.pricing_expires_at > now,
                 AgentModelConfigRecord.version.not_in(
-                    ("codex-sdk-chatgpt-v2", "codex-sdk-strategy-rnd-v1")
+                    ("codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3", "codex-sdk-strategy-rnd-v1")
                 ),
             )
             .order_by(desc(AgentModelConfigRecord.created_at))
@@ -347,7 +347,8 @@ def _response(
         status=cast(AgentRunStatus, status),
         retry_count=run.retry_count,
         billing_mode="chatgpt_subscription"
-        if run.pricing_version in {"codex-sdk-chatgpt-v1", "codex-sdk-chatgpt-v2"}
+        if run.pricing_version
+        in {"codex-sdk-chatgpt-v1", "codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3"}
         else None,
         input_tokens=run.input_tokens,
         output_tokens=run.output_tokens,
@@ -381,6 +382,8 @@ def _intent_is_authority_bound(intent: ResearchIntent, evidence: tuple[EvidenceR
             intent.invalidation_conditions,
             intent.entry_conditions,
             intent.exit_conditions,
+            () if intent.synthesis_assessment is None else intent.synthesis_assessment.claims,
+            () if intent.synthesis_assessment is None else intent.synthesis_assessment.reviews,
         )
         for item in collection
         for ref in item.evidence_refs

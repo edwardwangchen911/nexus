@@ -65,7 +65,19 @@ Strategy R&D 独立 worker 支持显式 `fixture`、`responses`，以及必须�
 uv run --package nexus-engine nexus-openai-local setup --backend codex_sdk --strategy-rnd --skip-key
 ```
 
-该命令只幂等登记配置，不创建研究或 Job、不调用模型；`--strategy-rnd` 与 `--staged` 互斥。
+结构化研究综合 v3 使用单独的显式登记入口：
+
+```bash
+uv run --package nexus-engine nexus-openai-local setup --backend codex_sdk --structured-synthesis --skip-key
+```
+
+此入口登记 `codex-sdk-chatgpt-v3`，不创建研究或 Job、不调用模型；与 `--staged`、
+`--strategy-rnd` 互斥。原 `--staged` 仍为 v2，历史配置与研究不升级。研究准入须显式选择
+v3 model config ID，并由 Codex SDK worker 消费；不会自动成为默认研究配置。
+三阶段最终结果保存综合正文及逐条反证审查；缺少完整确定性准入时仍为观察、无执行动作、
+证据不完整。回退时为新任务显式选择原版本配置，保留已有 v3 历史；无需数据库迁移。
+
+`--strategy-rnd` 入口只幂等登记配置，不创建研究或 Job、不调用模型；与 `--staged` 互斥。
 已显式注入本地数据库等运行配置的进程可使用
 `AGENT_RUNTIME_MODE=codex_sdk uv run --package nexus-engine nexus-engine-strategy-rnd-worker --once`
 处理最多一个已有策略研发 Job；worker 本身不读取 `infra/.env.local`，不要把数据库凭据复制到

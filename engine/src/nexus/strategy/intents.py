@@ -175,7 +175,8 @@ class ResearchIntent(_IntentModel):
     synthesis_assessment: SynthesisAssessment | None = None
 
     @model_serializer(mode="wrap")
-    def _legacy_payload(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+    # A return annotation would replace the closed model serialization schema.
+    def _legacy_payload(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
         payload = cast(dict[str, object], handler(self))
         if self.synthesis_assessment is None:
             payload.pop("synthesis_assessment", None)
