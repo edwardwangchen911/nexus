@@ -347,7 +347,7 @@ async def test_codex_rnd_rejects_invalid_response_without_retry(monkeypatch, inv
 
 
 @pytest.mark.asyncio
-async def test_codex_rnd_timeout_preserves_nonzero_usage_bound_without_replay(monkeypatch):
+async def test_codex_rnd_timeout_keeps_usage_unknown_without_replay(monkeypatch):
     from nexus.evolution import codex
 
     async def stall(*args, **kwargs):
@@ -359,11 +359,7 @@ async def test_codex_rnd_timeout_preserves_nonzero_usage_bound_without_replay(mo
     runtime = codex.CodexStrategyRNDRuntime(config=config)
     with pytest.raises(TimeoutError):
         await runtime.generate(_request(), _codex_tools())
-    assert runtime.usage == UsageSnapshot(
-        input_tokens=config.max_input_tokens,
-        output_tokens=config.max_output_tokens,
-        provider_calls=1,
-    )
+    assert runtime.usage is None
     with pytest.raises(ValueError, match="ALREADY_ATTEMPTED"):
         await runtime.generate(_request(), _codex_tools())
     invoke.assert_awaited_once()
@@ -395,3 +391,55 @@ async def test_codex_rnd_deadline_includes_local_evidence_freezing(monkeypatch):
         await runtime.generate(_request(), tools)
     invoke.assert_not_awaited()
     assert runtime.usage == UsageSnapshot()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expires_in", ["lookup", "sdk"])
+async def test_codex_rnd_checks_deadline_after_synchronous_work(monkeypatch, expires_in):
+    from nexus.evolution import codex
+
+    loop = asyncio.get_running_loop()
+    clock = [loop.time()]
+    monkeypatch.setattr(loop, "time", lambda: clock[0])
+    tools = _codex_tools()
+    execute = tools.execute
+
+    async def synchronous_lookup(name, payload):
+        if expires_in == "lookup":
+            clock[0] += 0.02
+        return await execute(name, payload)
+
+    measured = UsageSnapshot(input_tokens=300, output_tokens=80, provider_calls=1)
+
+    async def synchronous_sdk(*args, **kwargs):
+        if expires_in == "sdk":
+            clock[0] += 0.02
+        return json.dumps(_proposal()), measured
+
+    monkeypatch.setattr(tools, "execute", synchronous_lookup)
+    invoke = AsyncMock(side_effect=synchronous_sdk)
+    monkeypatch.setattr(codex, "invoke_codex", invoke)
+    runtime = codex.CodexStrategyRNDRuntime(
+        config=_codex_config(absolute_timeout_seconds=Decimal("0.01"))
+    )
+    with pytest.raises(TimeoutError):
+        await runtime.generate(_request(), tools)
+    assert invoke.await_count == (0 if expires_in == "lookup" else 1)
+    assert runtime.usage == (UsageSnapshot() if expires_in == "lookup" else measured)
+
+
+@pytest.mark.asyncio
+async def test_codex_rnd_retains_measured_usage_from_rejected_sdk_result(monkeypatch):
+    from nexus.agents.codex_sdk import CodexInvocationError
+    from nexus.evolution import codex
+
+    measured = UsageSnapshot(input_tokens=300, output_tokens=9000, provider_calls=1)
+    invoke = AsyncMock(
+        side_effect=CodexInvocationError("CODEX_RESPONSE_INCOMPLETE", usage=measured)
+    )
+    monkeypatch.setattr(codex, "invoke_codex", invoke)
+    runtime = codex.CodexStrategyRNDRuntime(config=_codex_config())
+    with pytest.raises(CodexInvocationError, match="CODEX_RESPONSE_INCOMPLETE"):
+        await runtime.generate(_request(), _codex_tools())
+    assert runtime.usage == measured
+    invoke.assert_awaited_once()

@@ -67,6 +67,14 @@ _DISABLED_FEATURES = (
 )
 
 
+class CodexInvocationError(ValueError):
+    """Safe failure code with measured usage, when the SDK actually reported it."""
+
+    def __init__(self, reason: str, *, usage: UsageSnapshot | None = None) -> None:
+        super().__init__(reason)
+        self.usage = usage
+
+
 class _Claim(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     text: str = Field(min_length=1, max_length=400)
@@ -237,24 +245,28 @@ async def invoke_codex(
             if run_task is not None:
                 with suppress(Exception, asyncio.CancelledError):
                     await asyncio.wait_for(run_task, timeout=1)
+    measured_usage = None
+    if result.usage is not None:
+        reported = result.usage.total
+        if reported.input_tokens >= 0 and reported.output_tokens >= 0:
+            measured_usage = UsageSnapshot(
+                input_tokens=reported.input_tokens,
+                output_tokens=reported.output_tokens,
+                provider_calls=1,
+            )
     if result.status is not TurnStatus.completed or not result.final_response:
-        raise ValueError("CODEX_RESPONSE_INCOMPLETE")
+        raise CodexInvocationError("CODEX_RESPONSE_INCOMPLETE", usage=measured_usage)
     if any(
         item.root.type not in {"userMessage", "agentMessage", "reasoning"} for item in result.items
     ):
-        raise ValueError("CODEX_UNEXPECTED_TOOL")
+        raise CodexInvocationError("CODEX_UNEXPECTED_TOOL", usage=measured_usage)
     if len(result.final_response.encode()) > _MAX_OUTPUT_BYTES:
-        raise ValueError("CODEX_OUTPUT_TOO_LARGE")
+        raise CodexInvocationError("CODEX_OUTPUT_TOO_LARGE", usage=measured_usage)
     if result.usage is None:
-        raise ValueError("CODEX_USAGE_MISSING")
-    usage = result.usage.total
-    if usage.input_tokens < 0 or usage.output_tokens < 0:
-        raise ValueError("CODEX_USAGE_INVALID")
-    return result.final_response, UsageSnapshot(
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        provider_calls=1,
-    )
+        raise CodexInvocationError("CODEX_USAGE_MISSING")
+    if measured_usage is None:
+        raise CodexInvocationError("CODEX_USAGE_INVALID")
+    return result.final_response, measured_usage
 
 
 class CodexCommittee:

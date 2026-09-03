@@ -7,6 +7,7 @@ from nexus.agents.codex_sdk import (
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
     MODEL_ID,
+    CodexInvocationError,
     invoke_codex,
 )
 from nexus.agents.responses import ResponsesModelConfig
@@ -39,7 +40,7 @@ class CodexStrategyRNDRuntime:
         ):
             raise ValueError("CODEX_RND_CONFIG_INVALID")
         self._config = config
-        self._usage = UsageSnapshot()
+        self._usage: UsageSnapshot | None = UsageSnapshot()
         self._attempted = False
 
     @property
@@ -47,7 +48,8 @@ class CodexStrategyRNDRuntime:
         return self._config
 
     @property
-    def usage(self) -> UsageSnapshot:
+    def usage(self) -> UsageSnapshot | None:
+        """Measured counters, known zero before a call, or None after an unknown result."""
         return self._usage
 
     async def generate(
@@ -56,11 +58,12 @@ class CodexStrategyRNDRuntime:
         if self._attempted:
             raise ValueError("CODEX_RND_ALREADY_ATTEMPTED")
         self._attempted = True
-        async with asyncio.timeout(float(self._config.absolute_timeout_seconds)):
-            return await self._generate_once(request, tools)
+        deadline = asyncio.get_running_loop().time() + float(self._config.absolute_timeout_seconds)
+        async with asyncio.timeout_at(deadline):
+            return await self._generate_once(request, tools, deadline=deadline)
 
     async def _generate_once(
-        self, request: StrategyRNDRequestV1, tools: StrategyRNDTools
+        self, request: StrategyRNDRequestV1, tools: StrategyRNDTools, *, deadline: float
     ) -> StrategyExperimentProposalV1:
         require_frozen_rnd_context(request, tools)
         if tuple(tools.names) != tuple(strategy_rnd_function_tools()):
@@ -112,21 +115,30 @@ class CodexStrategyRNDRuntime:
         estimated_input = len(json.dumps(payload, ensure_ascii=False).encode()) + 8192
         if estimated_input > self._config.max_input_tokens:
             raise ValueError("CODEX_RND_INPUT_TOO_LARGE")
-        # Until the SDK returns measured usage, a sent request has unknown usage,
-        # not zero cost. Preserve its conservative token ceiling on any failure.
-        self._usage = UsageSnapshot(
-            input_tokens=self._config.max_input_tokens,
-            output_tokens=self._config.max_output_tokens,
-            provider_calls=1,
-        )
-        raw, self._usage = await invoke_codex(payload, output_model=StrategyExperimentProposalV1)
+        self._require_time_remaining(deadline)
+        # The token limits are acceptance thresholds, not enforced SDK generation
+        # caps. Never substitute either zero or a threshold for unknown consumption.
+        self._usage = None
+        try:
+            raw, usage = await invoke_codex(payload, output_model=StrategyExperimentProposalV1)
+        except CodexInvocationError as error:
+            self._usage = error.usage
+            raise
+        self._usage = usage
+        self._require_time_remaining(deadline)
         if (
-            not 0 <= self._usage.input_tokens <= self._config.max_input_tokens
-            or not 0 <= self._usage.output_tokens <= self._config.max_output_tokens
-            or self._usage.tool_calls != 0
-            or self._usage.provider_calls != 1
+            not 0 <= usage.input_tokens <= self._config.max_input_tokens
+            or not 0 <= usage.output_tokens <= self._config.max_output_tokens
+            or usage.tool_calls != 0
+            or usage.provider_calls != 1
         ):
             raise ValueError("CODEX_RND_USAGE_INVALID")
         proposal = StrategyExperimentProposalV1.model_validate_json(raw)
         require_rnd_proposal_identity(request, proposal)
+        self._require_time_remaining(deadline)
         return proposal
+
+    @staticmethod
+    def _require_time_remaining(deadline: float) -> None:
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError("CODEX_RND_DEADLINE_EXCEEDED")

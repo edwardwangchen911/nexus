@@ -640,6 +640,31 @@ async def test_invalid_usage_is_not_zero_cost_success(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["incomplete", "tool", "size", "missing_usage"])
+async def test_sdk_rejected_result_retains_available_measured_usage(monkeypatch, invalid):
+    client, _, result, _ = _sdk(monkeypatch)
+    result.usage.total.output_tokens = 9000
+    if invalid == "incomplete":
+        result.status = TurnStatus.failed
+    elif invalid == "tool":
+        result.items = [SimpleNamespace(root=SimpleNamespace(type="commandExecution"))]
+    elif invalid == "size":
+        result.final_response = "x" * (codex_sdk._MAX_OUTPUT_BYTES + 1)
+    else:
+        result.usage = None
+    with pytest.raises(codex_sdk.CodexInvocationError) as caught:
+        await codex_sdk.invoke_codex({})
+    expected = (
+        None
+        if invalid == "missing_usage"
+        else UsageSnapshot(input_tokens=300, output_tokens=9000, provider_calls=1)
+    )
+    assert caught.value.usage == expected
+    assert str(caught.value).startswith("CODEX_")
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_eight_roles_share_one_call_and_bind_real_citation_authority(monkeypatch):
     request, evidence, prompts = _authority()
     invoke = AsyncMock(
