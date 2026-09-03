@@ -276,6 +276,8 @@ class RecordingMarketProvider:
 @dataclass
 class RecordingRawFosunProvider:
     calls: list[BarsRequest] = field(default_factory=list)
+    daily_session_counts: list[int | None] = field(default_factory=list)
+    legacy_request_limit: bool = False
     call_started_monotonic: list[float] = field(default_factory=list)
     normalized: int = 0
     received_at: datetime = NOW
@@ -297,6 +299,7 @@ class RecordingRawFosunProvider:
         cursor: str | None = None,
         *,
         symbol: str | None = None,
+        daily_session_count: int | None = None,
     ) -> RawGatewayResponse:
         assert cursor is None
         assert request.interval == "1Day"
@@ -304,6 +307,7 @@ class RecordingRawFosunProvider:
         assert request.end - request.start == timedelta(days=400)
         self.call_started_monotonic.append(perf_counter())
         self.calls.append(request)
+        self.daily_session_counts.append(daily_session_count)
         if self.fetch_started is not None:
             self.fetch_started.set()
         if self.fetch_release is not None:
@@ -329,6 +333,7 @@ class RecordingRawFosunProvider:
             request_body_sha256=await self.expected_bars_request_body_sha256(
                 request,
                 symbol=symbol,
+                daily_session_count=500 if self.legacy_request_limit else daily_session_count,
             ),
             raw_payload=raw_payload,
             sent_at=self.received_at - timedelta(milliseconds=250),
@@ -341,6 +346,7 @@ class RecordingRawFosunProvider:
         cursor: str | None = None,
         *,
         symbol: str | None = None,
+        daily_session_count: int | None = None,
     ) -> str:
         assert cursor is None
         offset = int(request.instrument_id) - INSTRUMENT_ID.int
@@ -350,7 +356,7 @@ class RecordingRawFosunProvider:
             ktype="day",
             start_time=request.start,
             end_time=request.end,
-            limit=500,
+            limit=daily_session_count or 1,
         )
 
     async def normalize_bars(
@@ -730,6 +736,10 @@ async def _seed_universe(
         .where(UniverseSnapshot.id == UNIVERSE_ID)
         .values(published_at=datetime(2026, 8, 1, tzinfo=UTC))
     )
+    # Keep this synthetic successor future so wall-clock scheduling selects the fixture day.
+    next_session = max(date(2026, 8, 31), datetime.now(UTC).date() + timedelta(days=7))
+    while next_session.weekday() >= 5:
+        next_session += timedelta(days=1)
     session.add(
         ExchangeCalendarAuthorityRecord(
             id=CALENDAR_ID,
@@ -737,7 +747,7 @@ async def _seed_universe(
             version="provider-collection-v1",
             source="exchange_calendars",
             range_start=(MARKET_CLOSE - timedelta(days=400)).date(),
-            range_end=date(2026, 8, 31),
+            range_end=next_session,
             query_parameters={},
             completeness_status="complete",
             content_hash="c" * 64,
@@ -755,10 +765,10 @@ async def _seed_universe(
             ),
             ExchangeCalendarSessionRecord(
                 calendar_authority_id=CALENDAR_ID,
-                session=date(2026, 8, 31),
-                decision_at=datetime(2026, 8, 31, 21, tzinfo=UTC),
-                market_open_at=datetime(2026, 8, 31, 13, 30, tzinfo=UTC),
-                market_close_at=datetime(2026, 8, 31, 20, tzinfo=UTC),
+                session=next_session,
+                decision_at=datetime.combine(next_session, time_of_day(21), UTC),
+                market_open_at=datetime.combine(next_session, time_of_day(13, 30), UTC),
+                market_close_at=datetime.combine(next_session, time_of_day(20), UTC),
             ),
         )
     )
@@ -1500,8 +1510,10 @@ async def test_fosun_daily_alias_revalidation_rejects_symbol_owned_by_another_in
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_request_limit", [False, True])
 async def test_fosun_daily_publisher_atomically_publishes_all_staged_children(
     migrated_database_url: str,
+    legacy_request_limit: bool,
 ) -> None:
     checked_at = datetime.now(UTC)
     frozen = _fosun_authority(
@@ -1515,6 +1527,7 @@ async def test_fosun_daily_publisher_atomically_publishes_all_staged_children(
     await _materialize_fosun_daily_jobs(factory, now=checked_at)
     store = InMemoryMarketObjectStore()
     provider = RecordingRawFosunProvider(
+        legacy_request_limit=legacy_request_limit,
         allow_normalize=True,
         delivery_mode="real_time",
         received_at=checked_at,
@@ -1538,6 +1551,10 @@ async def test_fosun_daily_publisher_atomically_publishes_all_staged_children(
         now=checked_at,
         worker_id="fosun-daily-fetch",
     )
+    async with factory() as session:
+        before_staging = dict((await session.execute(text(
+            "SELECT id::text,md5(row_to_json(t)::text) FROM fosun_daily_bar_staging t"
+        ))).all())
     assert await _run_provider_once(
         factory,
         registry=registry,
@@ -1546,7 +1563,12 @@ async def test_fosun_daily_publisher_atomically_publishes_all_staged_children(
     )
 
     assert len(provider.calls) == provider.normalized == 1
+    assert provider.daily_session_counts == [1]
     async with factory() as session:
+        after_staging = dict((await session.execute(text(
+            "SELECT id::text,md5(row_to_json(t)::text) FROM fosun_daily_bar_staging t"
+        ))).all())
+        assert before_staging and all(after_staging.get(k) == v for k, v in before_staging.items())
         publisher = await session.scalar(
             select(Job).where(Job.job_type == JobType.PUBLISH_FOSUN_DAILY.value)
         )

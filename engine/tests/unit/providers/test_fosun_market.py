@@ -108,6 +108,7 @@ class _ReadGuard:
         self.events.append(("after", operation, instrument_codes))
         return self.reject_after != self.after_count
 
+
 def _gateway(
     *,
     bar_timestamp: datetime | None = None,
@@ -221,7 +222,7 @@ async def test_daily_provider_resolves_pit_code_and_preserves_exact_bar_values()
             "ktype": "day",
             "start_time": request.start,
             "end_time": request.end,
-            "limit": 500,
+            "limit": 20,
         }
     ]
     assert page.items[0].close == Decimal("102.30")
@@ -278,13 +279,16 @@ async def test_daily_provider_preserves_gateway_session_date_at_utc_midnight() -
         delivery_mode="unknown",
     )
 
-    page = await provider.normalize_bars(_daily_request(), await gateway.read_bars_raw(
-        code="usAAPL",
-        ktype="day",
-        start_time=datetime(2026, 8, 1, tzinfo=UTC),
-        end_time=datetime(2026, 8, 29, tzinfo=UTC),
-        limit=500,
-    ))
+    page = await provider.normalize_bars(
+        _daily_request(),
+        await gateway.read_bars_raw(
+            code="usAAPL",
+            ktype="day",
+            start_time=datetime(2026, 8, 1, tzinfo=UTC),
+            end_time=datetime(2026, 8, 29, tzinfo=UTC),
+            limit=500,
+        ),
+    )
 
     assert page.items[0].observed_at == datetime(2026, 8, 21, tzinfo=UTC)
     assert page.items[0].session == date(2026, 8, 21)
@@ -753,3 +757,55 @@ async def test_snapshot_evidence_rejects_body_digest_tampering() -> None:
             envelope.model_copy(update={"raw_payload": tampered}),
             request,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "start,end,expected",
+    [
+        (datetime(2026, 8, 28, tzinfo=UTC), datetime(2026, 8, 29, tzinfo=UTC), 1),
+        (datetime(2026, 9, 4, tzinfo=UTC), datetime(2026, 9, 7, 23, tzinfo=UTC), 1),
+    ],
+)
+async def test_daily_requests_count_sessions_instead_of_fetching_500(start, end, expected):
+    gateway = _gateway()
+    provider = FosunMarketDataProvider(
+        gateway, symbol_resolver=_Resolver(), delivery_mode="unknown"
+    )
+    request = _daily_request(start=start, end=end)
+    raw = await provider.fetch_raw_bars(request)
+    assert gateway.bar_calls[0]["limit"] == expected
+    assert raw.request_body_sha256 == await provider.expected_bars_request_body_sha256(request)
+
+
+@pytest.mark.asyncio
+async def test_daily_request_uses_explicit_frozen_count_and_never_calls_for_empty_window():
+    gateway = _gateway()
+    provider = FosunMarketDataProvider(
+        gateway, symbol_resolver=_Resolver(), delivery_mode="unknown"
+    )
+    request = _daily_request()
+    raw = await provider.fetch_raw_bars(request, daily_session_count=19)
+    assert gateway.bar_calls[0]["limit"] == 19
+    assert raw.request_body_sha256 == await provider.expected_bars_request_body_sha256(
+        request, daily_session_count=19
+    )
+    with pytest.raises(MarketProviderPayloadError):
+        await provider.fetch_raw_bars(
+            _daily_request(
+                start=datetime(2026, 8, 29, tzinfo=UTC), end=datetime(2026, 8, 30, tzinfo=UTC)
+            )
+        )
+    assert len(gateway.bar_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [0, True, 1.5, 500])
+async def test_daily_invalid_explicit_count_stops_before_gateway(count):
+    gateway = _gateway()
+    provider = FosunMarketDataProvider(
+        gateway, symbol_resolver=_Resolver(), delivery_mode="unknown"
+    )
+    with pytest.raises(MarketProviderPayloadError):
+        await provider.fetch_raw_bars(_daily_request(), daily_session_count=count)
+    assert not gateway.bar_calls

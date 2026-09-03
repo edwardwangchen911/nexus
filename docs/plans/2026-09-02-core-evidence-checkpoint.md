@@ -1162,3 +1162,17 @@ S2b-3b1的2dd81cb合为0b6c31e，增加SELECT-only持仓连续性reader，用真
 非fill开仓；no_autoflush保持只读。B集中审查修复前缀未绑定完整内容的P2后交付；A复验
 16unit+3隔离PG、Mypy/Ruff通过。该片无migration/writer/gate，不等于持仓rank checkpoint
 已持久化或真实paper已闭环。
+
+
+## A2 日K窗口请求数修复（2026-09-04，北京时间）
+
+通用Provider按XNYS窗口交易日数请求；原生daily child/publisher使用同一冻结日历数量
+生成实际请求和校验hash，分钟入口保持。旧500请求只接受同证券、同窗口和同操作的
+精确旧hash，原归档不改写；原窗口、身份和完整session校验不放宽。
+签名Gateway回归模拟SDK按num向前返回，避免mock忽略参数而漏掉真实错误；非法数量
+与空窗口在外呼前拒绝。40项最终定向unit、2项新旧归档PG（含staging逐行hash保持）、
+Mypy3/Ruff通过；此前相关75unit/5PG通过，独立审查ready无P1/P2。
+
+期间旧PG固定的下一交易日已成为过去，调度选中了错误fixture日，不能误判产品失效。
+仅把测试下一session置于未来工作日，保留原案例日期；真实调度和数据不改。
+本次既有范围的读取和修复无需再次批准；原失败记录保留，修复后的单次真实验收另记。

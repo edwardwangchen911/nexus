@@ -67,6 +67,18 @@ async def test_bar_source_metadata_survives_signed_gateway_and_provider_archive(
         async def execute(self, operation, payload):
             self.calls += 1
             assert operation == "fosun_get_bars"
+            rows = [
+                {
+                    "time": day,
+                    "open": 1234,
+                    "high": 1234,
+                    "low": 1234,
+                    "close": 1234,
+                    "vol": 7,
+                    "turnover": turnover,
+                }
+                for day in (20260827, 20260828)
+            ][-payload["limit"] :]
             return normalize_provider_response(
                 operation,
                 {
@@ -74,18 +86,8 @@ async def test_bar_source_metadata_survives_signed_gateway_and_provider_archive(
                     "requestId": "synthetic-bars",
                     "data": {
                         "power": 2,
-                        "total": 1,
-                        "data": [
-                            {
-                                "time": 20260828,
-                                "open": 1234,
-                                "high": 1234,
-                                "low": 1234,
-                                "close": 1234,
-                                "vol": 7,
-                                "turnover": turnover,
-                            }
-                        ],
+                        "total": len(rows),
+                        "data": rows,
                     },
                 },
                 received_at=datetime.now(UTC),

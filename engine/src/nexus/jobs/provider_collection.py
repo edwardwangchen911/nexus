@@ -89,7 +89,11 @@ from nexus.providers.base import BarsRequest, InstrumentId, PriceBar, ProviderPa
 from nexus.providers.composition import ProviderBundle
 from nexus.providers.fred import FRED_SERIES, normalize_alfred_observation
 from nexus.providers.market.alpaca import MarketProviderPayloadError
-from nexus.providers.market.fosun_gateway import FosunMarketGatewayError, RawGatewayResponse
+from nexus.providers.market.fosun_gateway import (
+    FosunMarketGatewayError,
+    RawGatewayResponse,
+    fosun_bars_request_body_sha256,
+)
 from nexus.providers.sec import (
     SecCompanyFactsClient,
     SecInstrumentIdentity,
@@ -121,6 +125,7 @@ class RawFirstFosunMarketProvider(Protocol):
         cursor: str | None = None,
         *,
         symbol: str | None = None,
+        daily_session_count: int | None = None,
     ) -> RawGatewayResponse: ...
 
     async def normalize_bars(
@@ -138,6 +143,7 @@ class RawFirstFosunMarketProvider(Protocol):
         cursor: str | None = None,
         *,
         symbol: str | None = None,
+        daily_session_count: int | None = None,
     ) -> str: ...
 
 
@@ -396,6 +402,11 @@ def build_provider_collection_registry(
                     interval="1Day",
                     adjustment="raw",
                 )
+                daily_session_count = len(
+                    await _fosun_daily_expected_sessions(context, payload=payload, request=request)
+                )
+                if not daily_session_count:
+                    raise UnsafeJobError("FOSUN_DAILY_CALENDAR_UNAVAILABLE")
                 async with _fosun_daily_call_permit(
                     raw_archive_session_factory,
                     context=context,
@@ -413,6 +424,7 @@ def build_provider_collection_registry(
                         response = await provider.fetch_raw_bars(
                             request,
                             symbol=payload.instrument_symbol,
+                            daily_session_count=daily_session_count,
                         )
         except TimeoutError:
             if current_task.cancelling() > cancellation_baseline:
@@ -1016,10 +1028,22 @@ async def _publish_fosun_daily(
             expected_request_body_sha256 = await provider.expected_bars_request_body_sha256(
                 request,
                 symbol=child_payload.instrument_symbol,
+                daily_session_count=len(
+                    await _fosun_daily_expected_sessions(context, payload=payload, request=request)
+                ),
             )
         except (FosunMarketGatewayError, MarketProviderPayloadError) as error:
             raise UnsafeJobError("FOSUN_DAILY_REQUEST_BODY_MISMATCH") from error
-        if row.request_body_sha256 != expected_request_body_sha256:
+        # Existing staging records used a fixed 500-bar request. Keep their exact
+        # same-code/window hash readable; never rewrite the recorded request fact.
+        legacy_request_hash = fosun_bars_request_body_sha256(
+            code=f"us{child_payload.instrument_symbol}",
+            ktype="day",
+            start_time=request.start,
+            end_time=request.end,
+            limit=500,
+        )
+        if row.request_body_sha256 not in {expected_request_body_sha256, legacy_request_hash}:
             raise UnsafeJobError("FOSUN_DAILY_REQUEST_BODY_MISMATCH")
         try:
             page = await provider.normalize_bars(
@@ -1417,7 +1441,18 @@ async def _fosun_daily_page_is_complete(
     request: BarsRequest,
     page: ProviderPage[PriceBar],
 ) -> bool:
-    expected = tuple(
+    expected = await _fosun_daily_expected_sessions(context, payload=payload, request=request)
+    actual = tuple(item.session for item in page.items)
+    return bool(expected) and actual == expected
+
+
+async def _fosun_daily_expected_sessions(
+    context: JobHandlerContext,
+    *,
+    payload: DailyStagePayload | FosunDailyPublishPayload | FosunDailyInstrumentPayload,
+    request: BarsRequest,
+) -> tuple[date, ...]:
+    return tuple(
         await context.session.scalars(
             select(ExchangeCalendarSessionRecord.session)
             .where(
@@ -1429,8 +1464,6 @@ async def _fosun_daily_page_is_complete(
             .order_by(ExchangeCalendarSessionRecord.session)
         )
     )
-    actual = tuple(item.session for item in page.items)
-    return bool(expected) and actual == expected
 
 
 def _fosun_page_matches_authority(

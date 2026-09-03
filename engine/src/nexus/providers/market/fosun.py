@@ -13,6 +13,7 @@ from typing import Literal, Protocol
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+import exchange_calendars as xcals  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from nexus.audit.canonical import canonical_json
@@ -235,8 +236,9 @@ class FosunMarketDataProvider:
         cursor: str | None = None,
         *,
         symbol: str | None = None,
+        daily_session_count: int | None = None,
     ) -> RawGatewayResponse:
-        limit = _validate_bar_request(request, cursor)
+        limit = _requested_bar_limit(request, cursor, daily_session_count)
         if symbol is None:
             symbol = await self._symbol_resolver.resolve(
                 request.instrument_id,
@@ -256,9 +258,10 @@ class FosunMarketDataProvider:
         cursor: str | None = None,
         *,
         symbol: str | None = None,
+        daily_session_count: int | None = None,
     ) -> str:
         """Return the digest of the exact gateway body for a frozen bar request."""
-        limit = _validate_bar_request(request, cursor)
+        limit = _requested_bar_limit(request, cursor, daily_session_count)
         if symbol is None:
             symbol = await self._symbol_resolver.resolve(
                 request.instrument_id,
@@ -679,6 +682,31 @@ class FosunSnapshotProvider:
                 )
             )
         return result
+
+
+def _requested_bar_limit(
+    request: BarsRequest, cursor: str | None, daily_session_count: int | None
+) -> int:
+    maximum = _validate_bar_request(request, cursor)
+    if request.interval != "1Day":
+        if daily_session_count is not None:
+            raise MarketProviderPayloadError("FOSUN_BAR_REQUEST_INVALID")
+        return maximum
+    count = daily_session_count
+    if count is None:
+        try:
+            count = len(
+                xcals.get_calendar("XNYS").sessions_in_range(
+                    request.start.date(), request.end.date()
+                )
+            )
+        except (ValueError, OverflowError) as error:
+            raise MarketProviderPayloadError("FOSUN_BAR_WINDOW_INVALID") from error
+    if type(count) is not int or not 1 <= count <= min(
+        maximum, (request.end.date() - request.start.date()).days + 1
+    ):
+        raise MarketProviderPayloadError("FOSUN_BAR_WINDOW_INVALID")
+    return count
 
 
 def _validate_bar_request(request: BarsRequest, cursor: str | None) -> int:
