@@ -37,6 +37,8 @@ from nexus.research.ssga_fund_observations import (
     persist_fund_observation,
     read_fund_observations,
 )
+from nexus.research.ssga_nav_history import IssuerNavHistory, parse_nav_history
+from nexus.research.ssga_nav_storage import persist_nav_history, read_nav_histories
 from nexus.settings import EngineSettings
 
 
@@ -62,13 +64,16 @@ async def import_originals(
     workbook: tuple[bytes, str, datetime],
     identity: tuple[bytes, str, datetime],
     fund_observation: bool = False,
+    nav_history: bool = False,
 ) -> dict[str, object]:
+    if fund_observation and nav_history:
+        raise ValueError("ISSUER_IMPORT_KIND_CONFLICT")
     local = {"localhost", "127.0.0.1", "::1"}
     if (
         not settings.database_url
         or make_url(settings.database_url).host not in local
         or urlsplit(settings.object_store_endpoint or "").hostname not in local
-        or (not fund_observation and workbook[1] != SOURCE_URL)
+        or (not fund_observation and not nav_history and workbook[1] != SOURCE_URL)
     ):
         raise ValueError("ISSUER_LOCAL_OR_OFFICIAL_SOURCE_REQUIRED")
     received = max(workbook[2], identity[2])
@@ -117,8 +122,19 @@ async def import_originals(
             for item in disclosures.values()
         ):
             raise ValueError("ISSUER_SEC_SHARE_IDENTITY_REQUIRED")
-        document: IssuerFundObservation | IssuerDistribution
-        if fund_observation:
+        document: IssuerFundObservation | IssuerDistribution | IssuerNavHistory
+        if nav_history:
+            document = parse_nav_history(
+                html=identity[0],
+                workbook=workbook[0],
+                instrument_id=instrument_id,
+                symbol=aliases[0],
+                html_url=identity[1],
+                workbook_url=workbook[1],
+                html_received_at=identity[2],
+                workbook_received_at=workbook[2],
+            )
+        elif fund_observation:
             document = parse_fund_observation(
                 html=identity[0],
                 workbook=workbook[0],
@@ -141,7 +157,9 @@ async def import_originals(
         store = S3ProviderEvidenceStore(settings)
         for kind, original, mime in (
             (
-                "holdings" if fund_observation else "distributions",
+                "nav-history"
+                if nav_history
+                else ("holdings" if fund_observation else "distributions"),
                 workbook,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             ),
@@ -179,18 +197,28 @@ async def import_originals(
                 raise ValueError("ISSUER_ORIGINAL_BINDING_CONFLICT")
         content = document.canonical_bytes()
         digest = hashlib.sha256(content).hexdigest()
-        evidence_kind = "fund-observations" if fund_observation else "distributions"
+        evidence_kind = (
+            "nav-history"
+            if nav_history
+            else ("fund-observations" if fund_observation else "distributions")
+        )
         uri = await store.put_if_absent(
             key=f"evidence/ssga/{evidence_kind}/{digest}.json",
             content=content,
         )
-        if isinstance(document, IssuerFundObservation):
+        if isinstance(document, IssuerNavHistory):
+            evidence = await persist_nav_history(session, document, location=uri)
+        elif isinstance(document, IssuerFundObservation):
             evidence = await persist_fund_observation(session, document, location=uri)
         else:
             evidence = await persist_distribution(session, document, location=uri)
         cutoff = datetime.now(UTC)
         snapshot = await prepare_research_snapshot(session, instrument_id, as_of=cutoff)
-        reader = read_fund_observations if fund_observation else read_distributions
+        reader = (
+            read_nav_histories
+            if nav_history
+            else (read_fund_observations if fund_observation else read_distributions)
+        )
         records = await reader(
             session,
             instrument_id=instrument_id,
@@ -221,7 +249,9 @@ async def import_originals(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fund-observation", action="store_true")
+    kind = parser.add_mutually_exclusive_group()
+    kind.add_argument("--fund-observation", action="store_true")
+    kind.add_argument("--nav-history", action="store_true")
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--instrument-id", type=UUID, required=True)
     for name in ("workbook", "workbook-receipt", "identity", "identity-receipt", "output"):
@@ -242,6 +272,7 @@ def main() -> int:
                 workbook=read_original(args.workbook, args.workbook_receipt),
                 identity=read_original(args.identity, args.identity_receipt),
                 fund_observation=args.fund_observation,
+                nav_history=args.nav_history,
             )
         )
         write_private(args.output, json.dumps(result).encode())

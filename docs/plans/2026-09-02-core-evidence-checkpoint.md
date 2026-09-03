@@ -1372,3 +1372,24 @@ wire→domain校验盲点仅是可能机制，不能认定实际响应有非法�
 B9df8057→d605d00仅为已证实的wire→domain ValidationError加固定安全码
 model_stage_output_invalid，未知程序异常仍generic，引用/安全约束不放宽。
 这是防止下次诊断丢失的最小修复，不修饰历史失败，也不构成真实v3成功验收。
+
+
+## 官方 NAV 历史归档最小接入（2026-09-04，北京时间）
+
+D有界一次官方下载的NAV History与定义归档，A重新核对报告及两原件hash通过。
+NAV是每份净值，USD依据发行商页面Base Currency，不能改称工作簿明示币种或市场
+成交价。完整日期包含非交易日观察，原文未证明拆分、再投资算法或历史publication。
+B独立负责模型/parser与合成XML；A复用现有表、SEC身份入口及冻结tool，0039仅增加
+NAV双原件归属分支，旧0038不重写。工具取最近32观察并显示总数/覆盖期/截断，
+保留完整历史资料，不计算或宣称持有人总收益。没有新增模型或数据外呼。
+
+实现尚待组合PG验证；初次未设DATABASE_URL的pytest被skip，不计验证通过，随后
+在隔离PG确认新模块缺失的red。独立A侧静态审查ready，不能替代parser及真实PG。
+受保护source-preflight在issuer-nav-20260904；尚未业务导入NAV或迁移0039。
+
+B155fc51→7c65abf parser已集成：独立审查发现date-like缺NAV行可能混入页脚、
+UTF16可绕过字节实体检查，两者均用合成红测修复；全部原始行与OOXML逐值匹配。
+A复验36unit、6PG（NAV正常/缺任一原件拒绝、旧issuer复用及空迁移往返）、Mypy5
+通过；真实归档解析行数与D独立报告相同、canonical roundtrip及32条视图通过。
+证据保存在issuer-nav-20260904，未把原件身份/值写入fixture。代码可用不等于业务
+已加载：本记录时API仍17ca31c/DB0038，0039及实际NAV导入尚待统一运行切换。

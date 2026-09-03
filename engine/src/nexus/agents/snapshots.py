@@ -19,10 +19,14 @@ from nexus.persistence.models.research import Filing, ResearchEvidenceRef
 from nexus.research.sec_disclosures import SEC_RESEARCH_FORMS
 from nexus.research.ssga_distributions import read_distributions
 from nexus.research.ssga_fund_observations import read_fund_observations
+from nexus.research.ssga_nav_storage import read_nav_histories
 
 
 async def prepare_research_snapshot(
-    session: AsyncSession, instrument_id: UUID, *, as_of: datetime,
+    session: AsyncSession,
+    instrument_id: UUID,
+    *,
+    as_of: datetime,
     portfolio_snapshot_id: UUID | None = None,
 ) -> DataSnapshot | None:
     """Bind real filing references; the caller owns the transaction.
@@ -78,10 +82,30 @@ async def prepare_research_snapshot(
         sec_refs = [item for item in evidence if item.id not in distributions]
         keep = MAX_FROZEN_EVIDENCE - 2 - len(observation_refs) - len(retained_issuer)
         evidence = sec_refs[:keep] + retained_issuer + observation_refs
+    nav = await read_nav_histories(session, instrument_id=instrument_id, as_of=as_of)
+    if nav:
+        nav_refs = list(
+            await session.scalars(
+                select(ResearchEvidenceRef).where(ResearchEvidenceRef.id.in_(nav))
+            )
+        )
+        retained_issuer = [
+            item for item in evidence if item.id in distributions or item.id in observations
+        ]
+        sec_refs = [
+            item
+            for item in evidence
+            if item.id not in distributions and item.id not in observations
+        ]
+        keep = MAX_FROZEN_EVIDENCE - 2 - len(nav_refs) - len(retained_issuer)
+        evidence = sec_refs[:keep] + retained_issuer + nav_refs
     if not evidence:
         return None
     context = await freeze_portfolio_context(
-        session, instrument_id, as_of, portfolio_snapshot_id=portfolio_snapshot_id,
+        session,
+        instrument_id,
+        as_of,
+        portfolio_snapshot_id=portfolio_snapshot_id,
     )
     if portfolio_snapshot_id is not None and context is None:
         raise ValueError("OPENAI_PORTFOLIO_CONTEXT_UNAVAILABLE")
@@ -95,6 +119,8 @@ async def prepare_research_snapshot(
     }
     if observations:
         payload["scope"] = "persisted_sec_filings_and_issuer_observations"
+    if nav:
+        payload["scope"] = "persisted_sec_filings_and_issuer_nav_history"
     if context is not None:
         payload["portfolio_context"] = context[0].model_dump(mode="json")
     revision = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()

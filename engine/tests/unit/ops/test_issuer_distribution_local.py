@@ -61,3 +61,35 @@ def test_cli_failure_never_prints_original_or_connection(tmp_path, monkeypatch, 
     output = capsys.readouterr()
     assert output.out == ""
     assert json.loads(output.err) == {"status": "failed", "error": "ISSUER_IMPORT_FAILED"}
+
+
+def test_cli_nav_selection_reaches_existing_import_without_model(tmp_path, monkeypatch, capsys):
+    tmp_path.chmod(0o700)
+    arguments = [
+        "issuer",
+        "--nav-history",
+        "--repo-root",
+        str(tmp_path),
+        "--instrument-id",
+        "00000000-0000-0000-0000-000000000031",
+    ]
+    for name in ("workbook", "workbook-receipt", "identity", "identity-receipt", "output"):
+        arguments.extend(["--" + name, str(tmp_path / name)])
+    monkeypatch.setattr(sys, "argv", arguments)
+    monkeypatch.setattr(
+        entry,
+        "read_original",
+        lambda *_: (
+            b"synthetic",
+            "https://www.ssga.com/synthetic",
+            datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+    )
+
+    async def imported(*_args, **kwargs):
+        assert kwargs["nav_history"] is True and kwargs["fund_observation"] is False
+        return {"frozen_readback_verified": True, "model_called": False}
+
+    monkeypatch.setattr(entry, "import_originals", imported)
+    assert entry.main() == 0
+    assert json.loads((tmp_path / "output").read_text())["model_called"] is False
