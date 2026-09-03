@@ -1344,3 +1344,31 @@ root1c720e7→d53d69a一起集成：修复wrap serializer返回注解导致OpenA
 从该原件定位，未更改资料或重放业务命令。不能把同组合或邻近验收目录当同一证券。
 私有source context与安全摘要保存在`outputs/acceptance/issuer-observation-20260904/`，
 供后续唯一一次本地导入使用；截至记录没有实际导入或模型调用。
+
+
+## 0038运行生效、真实issuer与失败研究验收（2026-09-04，北京时间）
+
+171对象完整备份后，业务库0037→0038，API切换17ca31c；环境/端口未变，PG与
+对象存储未重启，旧五类业务行hash全部一致。现有本地导入入口实际导入一次官方
+行业/持仓原件，精确证券身份核验、原件验读、冻结引用与正常research tool读取通过。
+新类型已有冻结证据，不能直接降级0038删除读取支持；保留版本兼容或前向修复。
+
+同一完成的daily root下，新cutoff与同一组合快照准入一次显式v3研究，max_attempts=1。
+research阶段失败，保存model_execution_failed和stage输入hash，无角色输出或intent，
+活动job归零，没有自动重试。已知SDK usage说明模型调用发生；验收摘要provider_calls=0
+仅指行情采集，不是零模型调用。原始SDK响应未保存，精确原因未知；离线复现的
+wire→domain校验盲点仅是可能机制，不能认定实际响应有非法文本或JSON。
+
+失败研究context冻结成功，proposal-build被DRAFT_NO_EVIDENCED_REDUCTION拒绝，
+新context草稿数0。诊断脚本误把DailyOnceError当带code属性的异常，触发AttributeError；
+改为str(e)，随后只读复核已有结果与builder拒绝原因，未重放业务命令。
+不为展示组件制造减仓方案，不以失败研究或旧估值冒充正式研究准入。
+
+真实DB→BFF→DOM核验同run/snapshot：failed/partial、明确具体原因尚未确认、交易
+保持锁定、无买入候选；1440/390无横向溢出，无浏览外呼/写入。旧五类记录hash不变。
+安全摘要与私有证据分别在issuer-observation-20260904及daily-v3-issuer-20260904目录；
+不把账户资料、原件正文或身份写入阶段记录。
+
+B9df8057→d605d00仅为已证实的wire→domain ValidationError加固定安全码
+model_stage_output_invalid，未知程序异常仍generic，引用/安全约束不放宽。
+这是防止下次诊断丢失的最小修复，不修饰历史失败，也不构成真实v3成功验收。
