@@ -117,8 +117,8 @@ export function AppShell({ children }: { children: React.ReactNode }): React.Rea
         </div>
         <NavigationGroups />
         <footer className="app-shell__boundary">
-          <p><Bot aria-hidden="true" size={15} />Agent research layer</p>
-          <p><LockKeyhole aria-hidden="true" size={15} />Live execution locked</p>
+          <p><Bot aria-hidden="true" size={15} />AI 研究辅助</p>
+          <p><LockKeyhole aria-hidden="true" size={15} />实盘执行已锁定</p>
         </footer>
       </aside>
       <details className="app-shell__drawer">

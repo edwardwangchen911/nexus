@@ -24,7 +24,7 @@ for (const viewport of releaseViewports) {
     await expect(page.getByRole("heading", { name: "baseline_v1" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "活动实验" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "证据比较" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Strategy Shadow" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "策略前向观察" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "晋级解释" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "冠军历史" })).toBeVisible();
     await expect(page.getByText("21 / 63 个交易日")).toBeVisible();
@@ -46,7 +46,7 @@ for (const viewport of releaseViewports) {
 
 for (const [state, label] of [
   ["partial", "数据不完整"],
-  ["stale", "数据已过期"],
+  ["stale", "显示上次数据"],
 ] as const) {
 test(`${state} evidence stays visible but closes every mutation`, async ({ page }) => {
   const value = structuredClone(overview);

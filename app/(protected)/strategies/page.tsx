@@ -472,7 +472,8 @@ function ChampionSection({ overview, canWrite, busyAction, onStartExperiment, on
           {busyAction === "control" ? "更新中…" : champion.auto_promotion_paused ? "恢复自动晋级" : "暂停自动晋级"}
         </button>
       </div>
-      <p className="evolution-impact"><ShieldCheck aria-hidden="true" size={18} />暂停只阻止新的自动晋级，不中断已运行的回测或 策略前向观察。</p>
+      {!overview.experiment_start_enabled ? <p className="inline-notice">暂不能启动实验：{reasonText(overview.experiment_start_reason)}</p> : null}
+      <p className="evolution-impact"><ShieldCheck aria-hidden="true" size={18} />暂停只阻止新的自动晋级，不中断已运行的回测或策略前向观察。</p>
     </section>
   );
 }
@@ -529,7 +530,7 @@ function ComparisonSection({ detail }: { detail: ExperimentDetail | null }): Rea
       {/* Bounded horizontal evidence must remain keyboard-scrollable on narrow screens. */}
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
       <div className="table-scroll" role="region" aria-label="挑战者与冠军比较表" tabIndex={0}>
-        <table className="evolution-table numeric-data"><caption>挑战者、当前冠军与差值；所有数值均来自服务端时点正确证据。</caption><thead><tr><th scope="col">指标</th><th scope="col">挑战者</th><th scope="col">冠军</th><th scope="col">差值</th></tr></thead><tbody>{rows.map(([label, metric]) => <tr key={label}><th scope="row">{label === "Sharpe" ? "夏普比率" : label}</th><td>{label === "Sharpe" ? formatMetric(metric.challenger) : formatPercent(metric.challenger)}</td><td>{label === "Sharpe" ? formatMetric(metric.champion) : formatPercent(metric.champion)}</td><td>{label === "Sharpe" ? formatMetric(metric.delta) : formatPercent(metric.delta, true)}</td></tr>)}</tbody></table>
+        <table className="evolution-table numeric-data"><caption>挑战者、当前冠军与差值；使用当时已可获得的数据比较。</caption><thead><tr><th scope="col">指标</th><th scope="col">挑战者</th><th scope="col">冠军</th><th scope="col">差值</th></tr></thead><tbody>{rows.map(([label, metric]) => <tr key={label}><th scope="row">{label === "Sharpe" ? "夏普比率" : label}</th><td>{label === "Sharpe" ? formatMetric(metric.challenger) : formatPercent(metric.challenger)}</td><td>{label === "Sharpe" ? formatMetric(metric.champion) : formatPercent(metric.champion)}</td><td>{label === "Sharpe" ? formatMetric(metric.delta) : formatPercent(metric.delta, true)}</td></tr>)}</tbody></table>
       </div>
       <dl className="evolution-ledger numeric-data"><div><dt>有效样本外窗口</dt><dd>{comparison.valid_oos_window_count ?? "未知"}</dd></div><div><dt>累计试验</dt><dd>{comparison.cumulative_oos_trial_count ?? "未知"}</dd></div></dl>
       <HashRail values={[["比较", comparison.comparison_hash], ["证据", comparison.authority_hash], ["成本政策", comparison.cost_policy_hash]]} />
@@ -599,7 +600,7 @@ function EmptyEvidence({ index, title }: { index: string; title: string }): Reac
 }
 
 function HashRail({ values }: { values: Array<[string, string | null | undefined]> }): React.ReactElement {
-  return <div className="evolution-hash-rail" aria-label="证据链">{values.map(([label, value]) => <span key={label}><small>{label} hash</small><code title={value ?? "未知"}>{value ? shortHash(value) : "未知"}</code></span>)}</div>;
+  return <div className="evolution-hash-rail" aria-label="证据链">{values.map(([label, value]) => <span key={label}><small>{label}摘要</small><code title={value ?? "未知"}>{value ? shortHash(value) : "未知"}</code></span>)}</div>;
 }
 
 function axisLabel(axis: components["schemas"]["SearchAxisSummaryResponse"]["axis"]): string {

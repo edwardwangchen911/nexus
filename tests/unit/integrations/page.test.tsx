@@ -25,7 +25,7 @@ const stateLabels: Array<[DataStateKind, string]> = [
   ["empty", "暂无数据"],
   ["ready", "数据已就绪"],
   ["partial", "数据不完整"],
-  ["stale", "数据已过期"],
+  ["stale", "显示上次数据"],
   ["error", "加载失败"],
   ["forbidden", "无权访问"],
 ];
@@ -51,7 +51,7 @@ describe("integrations vertical slice", () => {
   });
   it("distinguishes stale data-source evidence from the displayed snapshot", () => {
     render(<GlobalSystemStatusView state="stale" integrations={[fosunFixture]} refreshing={false} onRefresh={vi.fn()} />);
-    expect(screen.getByText("数据源：数据已过期")).toBeVisible();
+    expect(screen.getByText("数据源：显示上次数据")).toBeVisible();
     expect(screen.getByText("数据源证据已过期；页面仍可展示已存快照，不代表当前决策条件已满足。")).toBeVisible();
   });
   it("uses the same next-step wording in the shared system evidence", () => {
@@ -114,7 +114,7 @@ describe("integrations vertical slice", () => {
         state="ready"
         integrations={[fosunFixture]}
         pendingAction="fosun:reconcile"
-        notice={{ kind: "error", text: "请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请使用同一幂等键继续确认。" }}
+        notice={{ kind: "error", text: "请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请继续确认原操作结果。" }}
         unresolvedProvider="fosun"
         onTest={vi.fn()}
         onModeChange={vi.fn()}
@@ -122,9 +122,9 @@ describe("integrations vertical slice", () => {
     );
 
     expect(screen.getByRole("button", { name: "正在核对连接状态" })).toBeDisabled();
-    expect(screen.getByText("请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请使用同一幂等键继续确认。")).toBeVisible();
+    expect(screen.getByText("请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请继续确认原操作结果。")).toBeVisible();
     expect(screen.getByRole("button", { name: "禁用复星数据源" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "使用同一幂等键继续确认" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "继续确认原操作结果" })).toBeEnabled();
   });
 
   it("shares one integration source so a mutation updates the global status and page together", async () => {
@@ -180,7 +180,7 @@ describe("integrations vertical slice", () => {
       await vi.advanceTimersByTimeAsync(70_000);
     });
 
-    expect(screen.getByText("请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请使用同一幂等键继续确认。")).toBeVisible();
+    expect(screen.getByText("请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请继续确认原操作结果。")).toBeVisible();
     expect(screen.getByRole("region", { name: "fosun 集成（只读）" })).toBeVisible();
     expect(screen.getByRole("button", { name: "正在核对连接状态" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "禁用复星数据源" })).toBeDisabled();
@@ -189,7 +189,7 @@ describe("integrations vertical slice", () => {
     expect(new Set(idempotencyKeys).size).toBe(1);
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "使用同一幂等键继续确认" }));
+      fireEvent.click(screen.getByRole("button", { name: "继续确认原操作结果" }));
       await Promise.resolve();
     });
 
@@ -224,7 +224,7 @@ describe("integrations vertical slice", () => {
 
     render(<IntegrationStatusProvider><IntegrationsPage /></IntegrationStatusProvider>);
     fireEvent.click(await screen.findByRole("button", { name: "禁用复星数据源" }));
-    expect(await screen.findByText("首次结果未知；已使用同一幂等键确认最终结果。")).toBeVisible();
+    expect(await screen.findByText("上次结果未知；现已确认原操作的最终结果。")).toBeVisible();
 
     expect(screen.getByRole("region", { name: "fosun 集成（已禁用）" })).toBeVisible();
     expect(postCount).toBe(2);

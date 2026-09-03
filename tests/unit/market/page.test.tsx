@@ -118,7 +118,7 @@ const stateLabels: Array<[DataStateKind, string]> = [
   ["empty", "暂无数据"],
   ["ready", "数据已就绪"],
   ["partial", "数据不完整"],
-  ["stale", "数据已过期"],
+  ["stale", "显示上次数据"],
   ["error", "加载失败"],
   ["forbidden", "无权访问"],
 ];
@@ -449,7 +449,7 @@ describe("market vertical slice", () => {
     }} />);
 
     expect(screen.getByRole("region", { name: "AAPL 价格图表" })).toBeVisible();
-    expect(screen.getByRole("region", { name: "AAPL 价格图表" })).toHaveTextContent("行情序列 · ALPACA / SIP");
+    expect(screen.getByRole("region", { name: "AAPL 价格图表" })).toHaveTextContent("行情序列 · ALPACA · SIP");
     expect(screen.getByRole("table", { name: "AAPL OHLCV 数据" })).toHaveTextContent(
       "227.16",
     );

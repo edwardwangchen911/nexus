@@ -17,7 +17,7 @@ for (const viewport of releaseViewports) {
     await expect(currentStage).toBeInViewport();
     await expect(page.getByText("实盘关闭").first()).toBeVisible();
     await expect(page.getByText("USD 1,200.00")).toBeVisible();
-    await expect(page.getByText(/external_activation_blocked/)).toBeVisible();
+    await expect(page.getByText("外部连接未激活")).toBeVisible();
     await expect(page.getByRole("button", { name: /派发|修改订单|取消订单/ })).toHaveCount(0);
     const orderRegion = page.getByRole("region", { name: "服务端订单批次，可横向滚动" });
     await orderRegion.focus();

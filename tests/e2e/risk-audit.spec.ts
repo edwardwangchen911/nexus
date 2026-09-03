@@ -23,7 +23,7 @@ for (const viewport of [
     await expect(page.getByRole("heading", { name: "依赖就绪" })).toBeVisible();
     await expect(page.getByRole("region", { name: "风险与审计控制台" })).toHaveAttribute("data-state", "ready");
     await expect(page.getByRole("table", { name: "脱敏审计事件" })).toContainText("job.failed");
-    await expect(page.getByRole("button", { name: "重试 daily_pipeline" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "重试 每日数据与研究流程" })).toBeEnabled();
     await expect(page.getByText(jobId, { exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: /重跑全部|创建订单|实盘|券商下单/ })).toHaveCount(0);
 
@@ -89,9 +89,9 @@ test("manual-safe retry preserves focus, version and idempotency", async ({ page
   });
   await page.goto("/risk-audit?kind=job&from=2026-08-20&to=2026-08-27&status=attention");
 
-  const retry = page.getByRole("button", { name: "重试 daily_pipeline" });
+  const retry = page.getByRole("button", { name: "重试 每日数据与研究流程" });
   await retry.click();
-  const dialog = page.getByRole("dialog", { name: "确认重试 daily_pipeline" });
+  const dialog = page.getByRole("dialog", { name: "确认重试 每日数据与研究流程" });
   await expect(dialog.getByRole("button", { name: "返回审计" })).toBeFocused();
   await dialog.press("Escape");
   await expect(dialog).toHaveCount(0);
@@ -119,7 +119,7 @@ test("unknown retry result can only continue with the same idempotency key", asy
     },
   });
   await page.goto("/risk-audit?kind=job&from=2026-08-20&to=2026-08-27&status=attention");
-  await page.getByRole("button", { name: "重试 daily_pipeline" }).click();
+  await page.getByRole("button", { name: "重试 每日数据与研究流程" }).click();
   await page.getByRole("button", { name: "确认安全重试" }).click();
   await expect(page.getByText("恢复结果未知。保持相同幂等键并关闭其他恢复动作。")).toBeVisible();
   await page.getByRole("button", { name: "继续确认原操作结果" }).click();
@@ -160,7 +160,7 @@ test("unready dependencies retain facts but close recovery", async ({ page }) =>
   await page.goto("/risk-audit?kind=job&from=2026-08-20&to=2026-08-27&status=attention");
   await expect(page.getByRole("region", { name: "风险与审计控制台" })).toHaveAttribute("data-state", "stale");
   await expect(page.getByText("依赖未就绪；保留最后读取的脱敏事实，恢复动作保持关闭。")).toBeVisible();
-  await expect(page.getByRole("button", { name: "重试 daily_pipeline" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "重试 每日数据与研究流程" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "确认解除回撤锁" })).toBeDisabled();
 });
 
@@ -169,7 +169,7 @@ test("authoritative audit failure exposes no prior facts", async ({ page }) => {
   await page.goto("/risk-audit?kind=job&from=2026-08-20&to=2026-08-27&status=attention");
   await expect(page.getByRole("region", { name: "风险与审计控制台" })).toHaveAttribute("data-state", "error");
   await expect(page.getByText("daily_pipeline")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "重试 daily_pipeline" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "重试 每日数据与研究流程" })).toHaveCount(0);
 });
 
 type RiskAuditFixtureOptions = {

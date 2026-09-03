@@ -29,7 +29,7 @@ const stateCopy: Record<BrokerWorkbenchState, { label: string; detail: string }>
   error: { label: "加载失败", detail: "无法建立权威视图；未触发任何订单动作。" },
   forbidden: { label: "无权访问", detail: "当前会话不能读取模拟盘权威事实。" },
   reconciling: { label: "正在对账", detail: "等待券商回执与内部记录对齐，账户保持锁定。" },
-  unknown: { label: "提交结果未知", detail: "网络边界未返回确定结果；仅可使用同一幂等键恢复。" },
+  unknown: { label: "提交结果未知", detail: "未收到确定结果；请继续核对原操作，不会重复提交。" },
 };
 
 export default function BrokerSimulationPage(): React.ReactElement {
@@ -136,7 +136,7 @@ export default function BrokerSimulationPage(): React.ReactElement {
       setConfirmApproval(false);
       setUnknownAction(command);
       setState("unknown");
-      setNotice({ kind: "error", text: "提交结果未知；已锁定当前批次，仅可使用同一幂等键继续确认。" });
+      setNotice({ kind: "error", text: "提交结果未知；已锁定当前批次，请继续确认原操作结果。" });
     } finally { setBusy(false); }
   }
 
@@ -194,7 +194,7 @@ export function BrokerSimulationPanel({
           <strong>{copy.label}</strong><span>{copy.detail}</span>
         </div>
         {notice ? <p className={`broker-notice broker-notice--${notice.kind}`} role={notice.kind === "error" ? "alert" : undefined}>{notice.text}</p> : null}
-        {state === "unknown" && onRetry ? <button className="button button--danger" type="button" disabled={busy} onClick={onRetry}>使用同一幂等键继续确认</button> : null}
+        {state === "unknown" && onRetry ? <button className="button button--danger" type="button" disabled={busy} onClick={onRetry}>继续确认原操作结果</button> : null}
       </div>
 
       <ExecutionCircuit />
@@ -226,7 +226,7 @@ function ExecutionCircuit(): React.ReactElement {
           </li>
         ))}
       </ol>
-      <p>电路在“外部激活”前物理断开；Phase 3A 只验证前三个节点与离线回放。</p>
+      <p>当前仅支持本地审阅与离线回放，外部订单发送未启用。</p>
     </section>
   );
 }

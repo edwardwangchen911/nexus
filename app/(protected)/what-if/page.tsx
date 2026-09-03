@@ -52,10 +52,10 @@ export default function WhatIfPage(): React.ReactElement {
 
 export function WhatIfPagePanel({ state, group, proposalId, onRefresh, onEvaluate }: Props): React.ReactElement {
   const hasData = group !== null && proposalId !== null && ["ready", "partial", "stale"].includes(state);
-  return <section className="page-stack what-if-page" aria-label="无副作用情景试算页面" data-state={state}>
-    <header className="page-heading"><div><p className="eyebrow">无副作用决策实验</p><h1>有限权重情景试算</h1><p>从已有方案复制允许的标的集，只编辑十进制权重；风险与约束始终由后端评估。</p></div><div className="page-actions"><span className="mode-badge">仅分析，不持久化</span><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />重新读取方案</button></div></header>
+  return <section className="page-stack what-if-page" aria-label="持仓权重情景试算页面" data-state={state}>
+    <header className="page-heading"><div><p className="eyebrow">方案调整预览</p><h1>持仓权重情景试算</h1><p>基于已有方案调整持仓权重，查看风险与约束变化；结果仅供分析。</p></div><div className="page-actions"><span className="mode-badge">仅分析，不保存</span><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />重新读取方案</button></div></header>
     <DecisionPath current="what-if" />
-    {!hasData ? <DataState state={state} title={state === "empty" ? "缺少方案上下文" : "情景试算暂时不可用"} detail="必须从已持久化的方案进入；页面不接受任意标的或本地构造的基准。" /> : <WhatIfEditor group={group} proposalId={proposalId} actionsEnabled={state === "ready"} onEvaluate={onEvaluate} />}
+    {!hasData ? <DataState state={state} title={state === "empty" ? "缺少方案上下文" : "情景试算暂时不可用"} detail="请从已有方案进入试算，当前缺少用于比较的方案。" /> : <WhatIfEditor group={group} proposalId={proposalId} actionsEnabled={state === "ready"} onEvaluate={onEvaluate} />}
   </section>;
 }
 

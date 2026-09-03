@@ -1,6 +1,7 @@
 "use client";
 
-import { formatDisplayTime } from "../../lib/display-format";
+import { statusLabel } from "../../lib/display-labels";
+import { formatDisplayTime, snapshotTimeLabel } from "../../lib/display-format";
 
 import { ChevronDown, RefreshCw, TerminalSquare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -176,7 +177,7 @@ export function PortfolioPanel({ state, portfolios, snapshot, selectedPortfolioI
               <AuthorityLedger snapshotStatus={snapshot.status} displayReadiness={snapshot.display_readiness} decisionReadiness={snapshot.decision_readiness} />
               <details className="portfolio-disclosure portfolio-source">
                 <summary>快照来源与覆盖范围 · {selected.provider === "fosun" ? "复星（只读）" : selected.provider} · {formatTime(snapshot.as_of)}</summary>
-              <div className="portfolio-snapshot-band"><div><p className="eyebrow">冻结快照</p><h2>{selected.name}</h2><p>只读账户事实，不含跨币种推算。</p></div><dl><div><dt>数据来源</dt><dd>{selected.provider === "fosun" ? "复星（只读）" : selected.provider}</dd></div><div><dt>现金流对账</dt><dd>{cashFlowQualityLabel(snapshot.cash_flow_quality)} · {snapshot.cash_flow_count} 条</dd></div><div><dt>执行能力</dt><dd>{snapshot.execution_locked ? "已锁定" : "异常"}</dd></div><div><dt>覆盖范围</dt><dd>{coverageLabel(snapshot.coverage_scope)}</dd></div><div><dt>币种</dt><dd>{currencies.length}</dd></div><div><dt>持仓</dt><dd>{snapshot.positions.length}</dd></div><div><dt>未结订单</dt><dd>{snapshot.open_orders.length}</dd></div><div><dt>{snapshot.time_basis === "gateway_observed" ? "读取时间" : "更新时间"}</dt><dd>{formatTime(snapshot.as_of)}</dd></div></dl></div>
+              <div className="portfolio-snapshot-band"><div><p className="eyebrow">冻结快照</p><h2>{selected.name}</h2><p>只读账户事实，不含跨币种推算。</p></div><dl><div><dt>数据来源</dt><dd>{selected.provider === "fosun" ? "复星（只读）" : selected.provider}</dd></div><div><dt>现金流对账</dt><dd>{cashFlowQualityLabel(snapshot.cash_flow_quality)} · {snapshot.cash_flow_count} 条</dd></div><div><dt>执行能力</dt><dd>{snapshot.execution_locked ? "已锁定" : "异常"}</dd></div><div><dt>覆盖范围</dt><dd>{coverageLabel(snapshot.coverage_scope)}</dd></div><div><dt>币种</dt><dd>{currencies.length}</dd></div><div><dt>持仓</dt><dd>{snapshot.positions.length}</dd></div><div><dt>未结订单</dt><dd>{snapshot.open_orders.length}</dd></div><div><dt>{snapshotTimeLabel(snapshot.time_basis)}</dt><dd>{formatTime(snapshot.as_of)}</dd></div></dl></div>
               {snapshot.time_basis === "gateway_observed" ? <p className="inline-notice">此快照使用网关读取时间；券商未提供逐条更新时间。双读对账只证明读取窗口内一致，不代表逐笔成交回放。</p> : null}
               </details>
               {currencies.map((currency) => <PortfolioSummary key={currency} portfolio={selected} snapshot={snapshot} currency={currency} showValuation={false} />)}
@@ -194,8 +195,8 @@ function LocalRefreshGuidance({ status }: { status: PortfolioItem["last_sync_run
     <details className="portfolio-local-refresh" aria-label="真实刷新仅限本机终端" role="region" open={status === "ACTIVE" || undefined}>
       <summary>
         <span className="portfolio-local-refresh__icon"><TerminalSquare aria-hidden="true" size={17} /></span>
-        <span><small>LOCAL READ-ONLY REFRESH</small><strong>数据刷新与来源</strong></span>
-        <span className="portfolio-local-refresh__state"><span>最近本地刷新状态</span><strong>{status ?? "未登记"}</strong></span>
+        <span><small>本机只读刷新</small><strong>数据刷新与来源</strong></span>
+        <span className="portfolio-local-refresh__state"><span>最近本地刷新状态</span><strong>{status ? statusLabel(status) : "未登记"}</strong></span>
         <ChevronDown aria-hidden="true" size={17} />
       </summary>
       <div className="portfolio-local-refresh__body">

@@ -399,7 +399,7 @@ export function MarketPanel({
                   <dl>
                     <EvidenceFact term="最新价" value={selectedItem.price === null ? "无可验证报价" : formatDisplayDecimal(selectedItem.price)} highlight />
                     <EvidenceFact term="报价来源" value={marketSourceLabel(selectedItem.source, selectedItem.feed)} />
-                    <EvidenceFact term="Feed" value={selectedItem.feed?.toUpperCase() ?? "未选定"} />
+                    <EvidenceFact term="行情通道" value={selectedItem.feed?.toUpperCase() ?? "未选定"} />
                     {hasExplicitQuoteTimes ? <>
                       <EvidenceFact term="报价源时间" value={formatUtc(selectedItem.source_observed_at)} />
                       <EvidenceFact term={selectedItem.source === "fosun" ? "本机接收时间（网关响应）" : "本机接收时间"} value={formatUtc(selectedItem.received_at)} />
@@ -465,7 +465,7 @@ export function MarketPanel({
                     <DatabaseZap aria-hidden="true" size={20} />
                     <div>
                       <h2>历史行情不可用</h2>
-                      <p>没有通过来源策略的 OHLCV；系统不会用最新报价合成 K 线。</p>
+                      <p>暂无通过来源核验的历史 K 线数据；最新报价不会替代历史行情。</p>
                     </div>
                   </section>
                 )}
@@ -601,10 +601,10 @@ function HistoryEvidence({ symbol, series }: { symbol: string; series: SelectedM
       </div>
       <dl>
         <EvidenceFact term="序列来源" value={marketSourceLabel(series.source, series.feed)} />
-        <EvidenceFact term="Feed" value={series.feed?.toUpperCase() ?? "未选定"} />
+        <EvidenceFact term="行情通道" value={series.feed?.toUpperCase() ?? "未选定"} />
         <EvidenceFact term="实时性口径" value={marketDeliveryModeLabel(series.delivery_mode)} />
         <EvidenceFact term="复权口径" value={marketAdjustmentLabel(series.adjustment)} />
-        <EvidenceFact term="周期" value={series.interval ?? "未选定"} />
+        <EvidenceFact term="周期" value={series.interval === "1Day" ? "日线" : series.interval ?? "未选定"} />
         <EvidenceFact term="最新可用时间" value={formatUtc(latestBar?.available_at ?? null)} />
         <EvidenceFact term="最新观测时间" value={formatUtc(latestBar?.observed_at ?? null)} />
         <EvidenceFact term="序列质量" value={`${marketQualityLabel(series.quality)} · ${series.quality}`} />

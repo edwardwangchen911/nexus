@@ -123,7 +123,7 @@ export function IntradayMonitor({ symbol, monitor }: IntradayMonitorProps): Reac
           </button>
         </div>
         <table className="market-table numeric-data" aria-label={`${symbol} 1 分钟行情数据`}>
-          <caption>{symbol} 已通过来源策略的完整 1 分钟 OHLCV 事实</caption>
+          <caption>{symbol} 已核验来源的完整分钟行情：开盘、最高、最低、收盘与成交量</caption>
           <thead>
             <tr>
               <th scope="col">观测时间</th>
@@ -131,7 +131,7 @@ export function IntradayMonitor({ symbol, monitor }: IntradayMonitorProps): Reac
               <th scope="col">最高</th>
               <th scope="col">最低</th>
               <th scope="col">收盘</th>
-              <th scope="col">成交量</th>
+              <th scope="col">{monitor.source === "fosun" ? "成交量（单位未确认）" : "成交量"}</th>
               <th scope="col">可用时间</th>
             </tr>
           </thead>

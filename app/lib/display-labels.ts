@@ -36,6 +36,10 @@ export function statusLabel(value: string | null | undefined): string {
 }
 
 const reasons: Record<string, string> = {
+  ACTIVE_FAMILY_EXISTS: "已有实验组正在进行，请先查看当前实验",
+  REGISTRY_AUTHORITY_INVALID: "策略登记记录未通过核验",
+  EXPERIMENT_PROJECTION_INVALID: "实验记录未通过核验",
+  PROVIDER_UNAVAILABLE: "数据源暂不可用",
   paper_partial_fill: "模拟订单部分成交", paper_fill: "模拟订单成交",
   HEADROOM_UNAVAILABLE: "缺少当前值或阈值，无法计算余量",
   HEADROOM_DIRECTION_UNKNOWN: "该指标未定义阈值方向，无法计算余量",
@@ -78,13 +82,30 @@ export function reasonLabel(value: string): string {
   if (reasons[value]) return reasons[value];
   const market = qualityReasonLabel(value);
   if (market !== "存在未分类的数据质量问题") return market;
-  return /[\u3400-\u9fff]/.test(value) ? value : "尚无中文说明";
+  return /[\u3400-\u9fff]/.test(value) ? value : "原因尚未归类";
 }
 
 export function reasonText(value: string | null | undefined): string {
   if (!value) return "原因未提供";
   const label = reasonLabel(value);
   return label === value ? value : `${label}（${value}）`;
+}
+
+export function jobTypeLabel(value: string): string {
+  const labels: Record<string, string> = {
+    "daily.pipeline": "每日数据与研究流程", daily_pipeline: "每日数据与研究流程",
+    "broker.sync": "账户只读同步", "broker.reconcile": "账户对账",
+    "broker.simulation.dispatch": "券商模拟订单发送", "broker.simulation.reconcile": "券商模拟订单对账",
+    "collect.market": "行情采集", "collect.fosun_daily_instrument": "复星日线采集",
+    "publish.fosun_daily": "复星日线汇总", "collect.sec_macro": "财报与宏观资料采集",
+    "collect.intraday_snapshot": "盘中行情采集", "quality.freeze": "数据质量核验",
+    "diagnostics.run": "组合诊断", "agent.research": "AI 研究生成",
+    "optimization.propose": "优化方案生成", "paper.admit_orders": "内部模拟订单核验",
+    "paper.execute_due": "内部模拟成交", "paper.performance": "内部模拟绩效计算",
+    "shadow.advance_due": "方案前向观察", "daily.brief": "每日简报生成",
+    "audit.manifest": "审计记录汇总", "strategy.rnd": "策略实验",
+  };
+  return labels[value] ?? "后台任务";
 }
 
 export const metricLabels: Record<string, string> = {

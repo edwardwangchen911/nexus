@@ -127,8 +127,5 @@ function formatUtc(value: string | null | undefined): string { return formatDisp
 
 function formatDistributionAmount(value: string | null, currency: string): string {
   if (value === null) return "未知";
-  const rounded = formatDisplayDecimal(value);
-  // Do not convert DecimalString to Number or collapse an actual nonzero amount to zero.
-  const displayed = rounded === "0" && /[1-9]/.test(value) ? (value.startsWith("-") ? "(-0.001, 0)" : "<0.001") : rounded;
-  return `${currency} ${displayed} / 每份`;
+  return `${currency} ${formatDisplayDecimal(value)} / 每份`;
 }

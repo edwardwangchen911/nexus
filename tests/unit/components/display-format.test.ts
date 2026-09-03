@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { formatDisplayTime, formatMetric, formatPercent } from "../../../app/lib/display-format";
+import { formatDisplayTime, formatMetric, formatPercent, snapshotTimeLabel } from "../../../app/lib/display-format";
 
 describe("consistent display semantics", () => {
+  it("does not invent the meaning of an unknown snapshot timestamp", () => {
+    expect(snapshotTimeLabel("gateway_observed")).toBe("本机读取时间");
+    expect(snapshotTimeLabel("provider_event")).toBe("数据源时间");
+    expect(snapshotTimeLabel("unknown")).toBe("快照记录时间（含义未确认）");
+  });
   it("converts offset timestamps to Beijing time including midnight rollover", () => {
     expect(formatDisplayTime("2026-09-02T20:01:02.123456Z")).toBe("2026-09-03 04:01:02 北京时间");
     expect(formatDisplayTime("2026-09-02T16:01:02-04:00")).toBe("2026-09-03 04:01:02 北京时间");
@@ -13,7 +18,7 @@ describe("consistent display semantics", () => {
     expect(formatDisplayTime("invalid")).toBe("无效时间");
     expect(formatDisplayTime("2026-02-30T12:00:00Z")).toBe("无效时间");
   });
-  it.each([["1", "100%"], ["0.1", "10%"], ["0.123456789", "12.346%"], ["-0.0000001", "0%"], ["9007199254740993.12345", "900719925474099312.345%"]])("scales %s before rounding", (value, expected) => {
+  it.each([["1", "100%"], ["0.1", "10%"], ["0.123456789", "12.346%"], ["0.0000001", "<0.001%"], ["-0.0000001", "(-0.001, 0)%"], ["9007199254740993.12345", "900719925474099312.345%"]])("scales %s before rounding", (value, expected) => {
     expect(formatPercent(value)).toBe(expected);
   });
   it("distinguishes percentages, percentage points, coefficients and scaled aggregates", () => {

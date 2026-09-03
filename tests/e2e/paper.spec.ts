@@ -20,7 +20,7 @@ for (const viewport of [
     await expect(page.getByLabel("模拟账户绩效事实")).toContainText("USD 8,500.00");
     await expect(page.getByRole("table", { name: "内部模拟持仓" })).toContainText("alpaca / iex");
     const activeOrder = page.locator("article.paper-order").filter({ hasText: cancellableOrder.order_id });
-    await expect(activeOrder.getByRole("table", { name: "AAPL 模拟成交事实" })).toContainText("10 bps");
+    await expect(activeOrder.getByRole("table", { name: "AAPL 模拟成交事实" })).toContainText("10 基点");
     await expect(page.getByRole("button", { name: "取消 AAPL 模拟订单" })).toBeVisible();
     await expect(page.getByRole("button", { name: /创建订单|下单|实盘买入|实盘卖出/ })).toHaveCount(0);
 

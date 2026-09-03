@@ -10,7 +10,7 @@ const states: Array<[DataStateKind, string]> = [
   ["empty", "暂无数据"],
   ["ready", "数据已就绪"],
   ["partial", "数据不完整"],
-  ["stale", "数据已过期"],
+  ["stale", "显示上次数据"],
   ["error", "加载失败"],
   ["forbidden", "无权访问"],
 ];

@@ -59,8 +59,8 @@ export default function IntegrationsPage(): React.ReactElement {
         setNotice({
           kind: "success",
           text: attempt === 0
-            ? mutation.action === "test" ? "非交易连接测试已完成。" : "Provider 模式已更新。"
-            : "首次结果未知；已使用同一幂等键确认最终结果。",
+            ? mutation.action === "test" ? "非交易连接测试已完成。" : "数据源模式已更新。"
+            : "上次结果未知；现已确认原操作的最终结果。",
         });
         return;
       } catch (error) {
@@ -74,14 +74,14 @@ export default function IntegrationsPage(): React.ReactElement {
         }
         setPendingAction(`${mutation.status.provider}:reconcile`);
         if (attempt === 0) {
-          setNotice({ kind: "error", text: "请求结果未知；正在使用同一幂等键确认最终结果。" });
+          setNotice({ kind: "error", text: "请求结果未知；正在核对原操作的最终结果，不会重复操作。" });
           continue;
         }
         await resource.refresh();
         setUnresolved(mutation);
         setNotice({
           kind: "error",
-          text: "请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请使用同一幂等键继续确认。",
+          text: "请求结果仍未知。当前快照仅供参考，相关操作保持锁定；请继续确认原操作结果。",
         });
         return;
       }
@@ -129,7 +129,7 @@ export function IntegrationsPanel({ state, integrations, pendingAction, notice, 
       {notice ? <p className={`inline-notice inline-notice--${notice.kind}`}>{notice.text}</p> : null}
       {unresolvedProvider ? (
         <button className="button button--primary" type="button" onClick={onResolveUnknown}>
-          使用同一幂等键继续确认
+          继续确认原操作结果
         </button>
       ) : null}
 
@@ -233,4 +233,4 @@ function IntegrationCard({ status, pendingAction, onTest, onModeChange }: Omit<I
 
 function Fact({ term, value }: { term: string; value: string }): React.ReactElement { return <div><dt>{term}</dt><dd className="numeric-data">{value}</dd></div>; }
 function formatDate(value: string | null | undefined): string { return formatDisplayTime(value); }
-function stateDetail(state: DataStateKind): string { const details: Record<DataStateKind, string> = { loading: "正在读取引擎的脱敏 数据源状态。", empty: "尚无可展示的 数据源状态。", ready: "数据源状态已就绪。", partial: "部分数据源 尚未启用或能力未准入。", stale: "显示最后已知状态；截止时间已过，请刷新。", error: "状态读取失败；未开启任何额外能力。", forbidden: "当前身份无权读取集成状态。" }; return details[state]; }
+function stateDetail(state: DataStateKind): string { const details: Record<DataStateKind, string> = { loading: "正在读取引擎的脱敏数据源状态。", empty: "尚无可展示的数据源状态。", ready: "数据源状态已就绪。", partial: "部分数据源尚未启用或能力未准入。", stale: "显示最后已知状态；截止时间已过，请刷新。", error: "状态读取失败；未开启任何额外能力。", forbidden: "当前身份无权读取集成状态。" }; return details[state]; }

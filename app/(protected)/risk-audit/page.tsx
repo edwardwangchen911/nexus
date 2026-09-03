@@ -1,7 +1,7 @@
 "use client";
 
 import { formatDisplayTime } from "../../lib/display-format";
-import { actorLabel, reasonText, statusLabel } from "../../lib/display-labels";
+import { actorLabel, jobTypeLabel, reasonText, statusLabel } from "../../lib/display-labels";
 
 import {
   AlertTriangle,
@@ -385,7 +385,7 @@ function AuditSummary({ data, recoveryEnabled, onRetry, onAcknowledge }: { data:
     <article data-tone={data.summary.data_quality === "PASS" ? "ready" : "attention"}><Archive aria-hidden="true" size={22} /><div><p className="eyebrow">数据质量</p><h2>{dataQualityLabel(data.summary.data_quality)} <code>{data.summary.data_quality}</code></h2><p>数据质量由每日处理流程按固定规则核验。</p></div></article>
     <article data-tone={lock.state === "unlocked" ? "ready" : "attention"}><ShieldAlert aria-hidden="true" size={22} /><div><p className="eyebrow">回撤锁</p><h2>{drawdownLabel(lock.state)}</h2><p>{lock.event_seq ? `事件版本 ${lock.event_seq}` : "尚无可确认版本"}</p>{lock.acknowledge_allowed && lock.event_seq ? <button className="button button--danger" type="button" disabled={!recoveryEnabled} aria-label="确认解除回撤锁" onClick={(event) => onAcknowledge(lock.event_seq!, event.currentTarget)}>确认解除回撤锁</button> : null}</div></article>
     <article data-tone={data.summary.failed_jobs.count === 0 ? "ready" : "attention"}><RotateCcw aria-hidden="true" size={22} /><div><p className="eyebrow">失败任务</p><h2>{data.summary.failed_jobs.count}</h2><p>仅标记为可安全重试且未达到两次上限的任务可逐个重试。</p></div></article>
-    {data.summary.failed_jobs.retryable.map((job) => <article className="retryable-job" data-tone="attention" key={job.job_id}><AlertTriangle aria-hidden="true" size={22} /><div><p className="eyebrow">安全重试候选 <code>{statusLabel(job.status)}</code></p><h2>{job.job_type}</h2><p>版本 {job.version} · 已手动重试 {job.manual_retry_count}/2 · {formatTime(job.finished_at)}</p><p>{job.last_error_code ?? "未公开错误代码"} · 任务 {shortId(job.job_id)}</p><button className="button button--quiet" type="button" disabled={!recoveryEnabled} aria-label={`重试 ${job.job_type}`} onClick={(event) => onRetry(job, event.currentTarget)}>安全重试</button></div></article>)}
+    {data.summary.failed_jobs.retryable.map((job) => <article className="retryable-job" data-tone="attention" key={job.job_id}><AlertTriangle aria-hidden="true" size={22} /><div><p className="eyebrow">安全重试候选 <code>{statusLabel(job.status)}</code></p><h2>{jobTypeLabel(job.job_type)}</h2><p>版本 {job.version} · 已手动重试 {job.manual_retry_count}/2 · {formatTime(job.finished_at)}</p><p>{reasonText(job.last_error_code)}</p><details className="portfolio-disclosure"><summary>任务技术详情</summary><p>{job.job_type} · {job.last_error_code ?? "未公开错误代码"} · 任务 {shortId(job.job_id)}</p></details><button className="button button--quiet" type="button" disabled={!recoveryEnabled} aria-label={`重试 ${jobTypeLabel(job.job_type)}`} onClick={(event) => onRetry(job, event.currentTarget)}>安全重试</button></div></article>)}
   </section>;
 }
 
@@ -397,7 +397,7 @@ function AuditTable({ events }: { events: AuditEvent[] }): React.ReactElement {
 
 function RecoveryDialog({ pending, submitting, onDismiss, onConfirm }: { pending: PendingAction; submitting: boolean; onDismiss: () => void; onConfirm: () => void }): React.ReactElement {
   const retry = pending.kind === "retry";
-  const title = retry ? `确认重试 ${pending.job.job_type}` : "确认解除回撤锁";
+  const title = retry ? `确认重试 ${jobTypeLabel(pending.job.job_type)}` : "确认解除回撤锁";
   const backRef = useRef<HTMLButtonElement>(null);
   useEffect(() => { backRef.current?.focus(); }, []);
   return <div className="confirmation-dialog" role="presentation" onKeyDown={(event) => { if (event.key === "Escape" && !submitting) onDismiss(); }}>

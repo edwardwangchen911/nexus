@@ -46,8 +46,8 @@ for (const viewport of releaseViewports) {
     await installPortfolioFixtures(page);
     await page.goto("/portfolio");
 
-    await expect(page.getByRole("region", { name: "Fosun read-only HKD 组合摘要" })).toContainText("HKD 8,000.00", { timeout: 15_000 });
-    await expect(page.getByRole("region", { name: "Fosun read-only USD 组合摘要" })).toContainText("USD 1,000.00");
+    await expect(page.getByRole("region", { name: "Fosun read-only HKD 组合摘要" })).toContainText("HKD 8,000", { timeout: 15_000 });
+    await expect(page.getByRole("region", { name: "Fosun read-only USD 组合摘要" })).toContainText("USD 1,000");
     await expect(page.getByText("平均成本")).not.toBeVisible();
     await expect(page.getByText("冻结 200")).toBeVisible();
     await page.getByText("成本与数量 · 只读").click();
@@ -56,8 +56,8 @@ for (const viewport of releaseViewports) {
     await page.getByText("成本与数量 · 只读").click();
     const authority = page.getByRole("region", { name: "数据与决策权威边界" });
     await expect(authority).toContainText("可以查看");
-    await expect(authority).toContainText("快照已通过核验");
-    await expect(authority).toContainText("需逐笔人工确认");
+    await expect(authority).toContainText("账户快照核验通过");
+    await expect(authority).toContainText("当前不可执行");
     await expect(page.getByText(/香港交易所财报证据尚未准入/)).toBeVisible();
     await expect(page.getByRole("region", { name: "真实刷新仅限本机终端" }).getByText("最近本地刷新状态")).toBeVisible();
     await expect(page.getByRole("button", { name: "刷新页面数据" })).toBeEnabled();
@@ -70,7 +70,7 @@ for (const viewport of releaseViewports) {
     const authorityBox = await authority.boundingBox();
     expect(metric!.y + metric!.height).toBeLessThan(authorityBox!.y);
     if (viewport.name === "desktop-1440") {
-      expect(authorityBox!.height).toBeLessThan(100);
+      expect(authorityBox!.height).toBeLessThan(140);
       await assets.getByText("配置、来源与估值口径").click();
       const row = assets.locator(".portfolio-allocation li").first();
       const amount = await row.locator("span").nth(1).boundingBox();

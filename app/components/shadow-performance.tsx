@@ -60,6 +60,7 @@ export function ShadowPerformance({ shadow }: { shadow: Shadow }): React.ReactEl
       const chart = createChart(container, {
         autoSize: true,
         height: 320,
+        localization: { locale: "zh-CN", dateFormat: "yyyy-MM-dd", priceFormatter: formatDisplayDecimal },
         layout: {
           attributionLogo: false,
           background: { type: ColorType.Solid, color: token(styles, "--component-chart-background") },

@@ -27,7 +27,7 @@ test("desktop overview separates loaded results from stale sources and leads wit
   }));
   await page.goto("/overview");
   await expect(page.getByText("概览已载入")).toBeVisible();
-  await expect(page.getByRole("status", { name: "全局系统状态" })).toContainText("数据源：数据已过期");
+  await expect(page.getByRole("status", { name: "全局系统状态" })).toContainText("数据源：显示上次数据");
   await expect(page.getByRole("heading", { name: "需要补充证据" })).toBeVisible();
   const highlights = page.getByRole("region", { name: "本次诊断重点" });
   await expect(highlights.getByRole("listitem")).toHaveCount(3);
@@ -58,8 +58,8 @@ test("facts-only overview leads with assets without hiding decision boundaries",
   await expect(assets.getByText("HKD 27,500.00", { exact: true })).toBeVisible();
   const amount = await assets.getByText("HKD 27,500.00", { exact: true }).boundingBox();
   expect(amount!.y + amount!.height).toBeLessThan(844);
-  await expect(page.getByRole("heading", { name: "尚无诊断，保持现状" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "数据与决策权威边界" })).toContainText("需逐笔人工确认");
+  await expect(page.getByRole("heading", { name: "尚无诊断，暂不采取动作" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "数据与决策权威边界" })).toContainText("当前不可执行");
   await expect(page.getByRole("link", { name: "查看组合事实" })).toBeVisible();
   await expect(page.getByRole("link", { name: "打开组合诊断" })).toHaveCount(0);
   await assertReleaseAccessibility(page);

@@ -27,7 +27,7 @@ for (const viewport of [
     await expect(systemEvidence.getByText("状态证据与权限边界")).toBeVisible();
     const card = page.getByRole("region", { name: "fosun 集成（只读）" });
     await expect(card).toContainText("FOSUN");
-    await expect(card).toContainText("FIXTURE");
+    await expect(card).toContainText("离线示例");
     await expect(page.getByText(/api_key|account_id|secret|token/i)).toHaveCount(0);
     await expect(page.getByRole("link", { name: "实盘逐笔批准" })).toBeVisible();
 

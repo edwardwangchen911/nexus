@@ -5,6 +5,15 @@ import { WhatIfEditor } from "../../../app/components/what-if-editor";
 import { proposalGroup, proposalIds } from "./fixtures";
 
 describe("what-if analysis", () => {
+  it("uses the trusted display symbol and retains a missing-name fallback", () => {
+    const group = proposalGroup();
+    Object.assign(group.proposals[1].positions[0], { display_symbol: "AAPL" });
+    Object.assign(group.proposals[1].positions[1], { display_symbol: null });
+    render(<WhatIfEditor group={group} proposalId={proposalIds.minimum_change} onEvaluate={vi.fn()} />);
+    expect(screen.getByRole("textbox", { name: "AAPL 目标权重（0–1）" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "标的 2 目标权重（0–1）" })).toBeVisible();
+    expect(screen.getByText("证券名称未提供，请先核对方案中的标的。")).toBeVisible();
+  });
   it("submits Decimal strings for only the selected proposal universe", async () => {
     const group = proposalGroup();
     const onEvaluate = vi.fn().mockResolvedValue({
@@ -34,7 +43,7 @@ describe("what-if analysis", () => {
         { instrument_id: group.proposals[1].positions[1].instrument_id, weight: "0.10" },
       ],
     });
-    expect(screen.getByText(/仅分析，不持久化/)).toBeVisible();
+    expect(screen.getByText(/试算不会保存修改或生成订单/)).toBeVisible();
     expect(screen.getByText(/VOLATILITY_REQUIRES_PRICE_HISTORY/)).toBeVisible();
     expect(screen.queryByText(/下单|交易/)).not.toBeInTheDocument();
   });

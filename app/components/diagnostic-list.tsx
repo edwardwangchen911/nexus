@@ -72,7 +72,7 @@ export function OptimizationNeedPanel({ report }: { report: DiagnosticReport }):
         <p>{copy.detail}</p>
       </div>
       <span className="state-chip" data-state={needState(report.optimization_need)}>
-        {copy.title} <code>{report.optimization_need}</code>
+        {copy.title}
       </span>
     </section>
   );
@@ -104,7 +104,7 @@ export function DiagnosticList({ report, summary = false }: { report: Diagnostic
               <header>
                 <div>
                   <h3>{diagnosticLabel(item.diagnostic_code)}</h3>
-                  <p><code>{item.diagnostic_code}</code></p>
+                  <details className="portfolio-disclosure"><summary>诊断标识</summary><code>{item.diagnostic_code}</code></details>
                   <p><span title={item.policy_scope}>{policyScopeLabel(item.policy_scope)}</span> · {actionLabels[item.actionability]}</p>
                   {item.diagnostic_code.startsWith("CONCENTRATION_") ? <p>集中度按同币种证券市值计算，不含现金。</p> : item.diagnostic_code.split(":")[0] === "CASH_RATIO" ? <p>现金占比按同币种现金与证券总市值计算。</p> : null}
                 </div>

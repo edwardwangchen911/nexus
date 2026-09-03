@@ -7,7 +7,7 @@ type DecisionStage = "research" | "diagnose" | "what-if" | "paper" | "review";
 const stages: Array<{ id: DecisionStage; label: string; detail: string }> = [
   { id: "research", label: "研究证据", detail: "冻结时点" },
   { id: "diagnose", label: "组合诊断", detail: "确定性规则" },
-  { id: "what-if", label: "情景试算", detail: "不持久化" },
+  { id: "what-if", label: "情景试算", detail: "仅供试算" },
   { id: "paper", label: "内部模拟", detail: "账本事实" },
   { id: "review", label: "离线审核", detail: "外部断开" },
 ];

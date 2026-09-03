@@ -1,5 +1,5 @@
 import { statusLabel } from "../lib/display-labels";
-import { formatDisplayTime } from "../lib/display-format";
+import { formatDisplayTime, snapshotTimeLabel } from "../lib/display-format";
 import { formatDisplayDecimal } from "../lib/display-decimal";
 import { CircleDollarSign, LockKeyhole } from "lucide-react";
 import type { PortfolioItem, PortfolioSnapshot } from "../(protected)/portfolio/page";
@@ -22,7 +22,7 @@ type CurrencyValuation = {
   totalValue: bigint | null;
   missingFacts: string[];
   asOf: string | null;
-  asOfKind: "数据源截止时间" | "快照截止时间" | "快照读取时间";
+  asOfKind: string;
 };
 
 const DECIMAL_PLACES = 12;
@@ -88,7 +88,7 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
       <div className="portfolio-summary__section">
         <h3>持仓</h3>
         {researchPositions.some((position) => position.research) ? <p className="portfolio-evidence-note">
-          Agent 研究输出已生成 {completeResearch + partialResearch} / {researchPositions.length} 个可研究持仓；其中证据完整 {completeResearch}，证据不完整 {partialResearch}。
+          AI 研究输出已生成 {completeResearch + partialResearch} / {researchPositions.length} 个可研究持仓；其中证据完整 {completeResearch}，证据不完整 {partialResearch}。
           研究按各自冻结时点展示，不等于当前组合诊断通过；交易保持锁定。打开报告不会调用模型。
           状态读取：{formatTime(positions.find((position) => position.research)?.research?.read_at ?? null)}。
         </p> : null}
@@ -96,7 +96,7 @@ export function PortfolioSummary({ portfolio, snapshot, currency, showValuation 
           <div className="table-scroll" tabIndex={0} role="region" aria-label={`${currency} 持仓表，可横向滚动`}>
             <table className="portfolio-table portfolio-table--holdings">
               <caption>{portfolio.name} · {currency} · 占比以同币种现金与证券总市值为分母；数值最多显示 3 位小数。</caption>
-              <thead><tr><th>标的</th><th>持仓市值</th><th>资产占比（含现金）</th><th>现价</th><th>总量</th><th>Agent 研究</th><th>账户明细</th></tr></thead>
+              <thead><tr><th>标的</th><th>持仓市值</th><th>资产占比（含现金）</th><th>现价</th><th>总量</th><th>AI 研究</th><th>账户明细</th></tr></thead>
               <tbody>{valuation.positionValues.map(({ position, value }) => (
                 <tr key={position.instrument_id}>
                   <th scope="row">
@@ -237,14 +237,14 @@ function CurrencyValuationSummary({
     <section className="portfolio-valuation" data-compact={compact} aria-label={`${currency} 原币种资产估值`}>
       <header className="portfolio-valuation__heading">
         <div><p className="eyebrow">原币种估值 · 只读</p><h3>{compact ? currency : "资产概览"}</h3></div>
-        <span className="quality-badge" data-quality={snapshot.status}>{snapshotStatusLabel(snapshot.status)} <code>{snapshot.status}</code></span>
+        <span className="quality-badge" data-quality={snapshot.status}>{snapshotStatusLabel(snapshot.status)}</span>
       </header>
       <dl className="portfolio-valuation__facts">
         <Fact term="总资产" value={complete ? `${currency} ${formatMoney(valuation.totalValue!)}` : "无法计算"} />
         <Fact term="持仓市值" value={complete ? `${currency} ${formatMoney(valuation.holdingsValue!)}` : "无法计算"} />
         <Fact term="现金" value={complete ? `${currency} ${formatMoney(valuation.cashValue!)}` : "无法计算"} />
         {!compact ? <><Fact term="数据来源" value={provider === "fosun" ? "复星（只读）" : provider} />
-        <Fact term="质量状态" value={`${snapshotStatusLabel(snapshot.status)} · ${snapshot.status}`} />
+        <Fact term="质量状态" value={snapshotStatusLabel(snapshot.status)} />
         <Fact term={valuation.asOfKind} value={formatTime(valuation.asOf)} /></> : null}
       </dl>
       <details className="portfolio-disclosure portfolio-valuation__detail" open={compact ? undefined : true}>
@@ -290,7 +290,7 @@ function AllocationLine({ label, value, total, currency }: { label: string; valu
       <span>{label}</span>
       <span className="numeric-data">{currency} {formatMoney(value)}</span>
       <strong className="numeric-data">{formatPercent(value, total)}</strong>
-      {value >= BIGINT_ZERO && value <= total && total > BIGINT_ZERO ? <span className="portfolio-allocation__meter" aria-hidden="true"><span style={{ inlineSize: formatPercent(value, total) }} /></span> : null}
+      {value >= BIGINT_ZERO && value <= total && total > BIGINT_ZERO ? <span className="portfolio-allocation__meter" aria-hidden="true"><span style={{ inlineSize: formatPercent(value, total, true) }} /></span> : null}
     </li>
   );
 }
@@ -327,7 +327,7 @@ function currencyValuation(
     totalValue,
     missingFacts,
     asOf,
-    asOfKind: completeProviderTimes ? "数据源截止时间" : snapshot.time_basis === "gateway_observed" ? "快照读取时间" : "快照截止时间",
+    asOfKind: completeProviderTimes ? "数据源截止时间" : snapshot.time_basis === "gateway_observed" ? "快照读取时间" : snapshotTimeLabel(snapshot.time_basis),
   };
 }
 
@@ -350,16 +350,17 @@ function multiplyFixed(left: bigint, right: bigint): bigint {
 }
 
 function formatMoney(value: bigint): string {
-  const cents = roundDivide(value * BIGINT_HUNDRED, DECIMAL_FACTOR);
-  const negative = cents < BIGINT_ZERO;
-  const magnitude = negative ? -cents : cents;
-  const whole = (magnitude / BIGINT_HUNDRED).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `${negative ? "-" : ""}${whole}.${(magnitude % BIGINT_HUNDRED).toString().padStart(2, "0")}`;
+  const magnitude = value < BIGINT_ZERO ? -value : value;
+  const decimal = `${value < BIGINT_ZERO ? "-" : ""}${magnitude / DECIMAL_FACTOR}.${(magnitude % DECIMAL_FACTOR).toString().padStart(DECIMAL_PLACES, "0")}`;
+  return formatDisplayDecimal(decimal, { group: true, fixedDigits: 2 });
 }
 
-function formatPercent(value: bigint, total: bigint): string {
+function formatPercent(value: bigint, total: bigint, forChart = false): string {
   if (total <= BIGINT_ZERO) return "无法计算";
   const hundredths = roundDivide(value * PERCENT_HUNDREDTHS_FACTOR, total);
+  if (!forChart && hundredths === BIGINT_ZERO && value !== BIGINT_ZERO) {
+    return value < BIGINT_ZERO ? "(-0.01, 0)%" : "<0.01%";
+  }
   const negative = hundredths < BIGINT_ZERO;
   const magnitude = negative ? -hundredths : hundredths;
   return `${negative ? "-" : ""}${magnitude / BIGINT_HUNDRED}.${(magnitude % BIGINT_HUNDRED).toString().padStart(2, "0")}%`;

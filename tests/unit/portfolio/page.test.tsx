@@ -12,7 +12,7 @@ import { portfolio, portfolioId, responseMeta, snapshot } from "./fixtures";
 
 const stateLabels: Array<[DataStateKind, string]> = [
   ["loading", "正在加载"], ["empty", "暂无数据"], ["ready", "数据已就绪"],
-  ["partial", "数据不完整"], ["stale", "数据已过期"], ["error", "加载失败"],
+  ["partial", "数据不完整"], ["stale", "显示上次数据"], ["error", "加载失败"],
   ["forbidden", "无权访问"],
 ];
 
@@ -34,8 +34,8 @@ describe("portfolio vertical slice", () => {
       newer_inputs_available: true,
     } };
     render(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot, positions: [position] }} currency="HKD" />);
-    expect(screen.getByText(/Agent 研究输出已生成 1 \/ 1/)).toHaveTextContent("证据完整 0，证据不完整 1");
-    expect(screen.getByText(/Agent 研究输出已生成 1 \/ 1/)).toHaveTextContent("不等于当前组合诊断通过；交易保持锁定");
+    expect(screen.getByText(/AI 研究输出已生成 1 \/ 1/)).toHaveTextContent("证据完整 0，证据不完整 1");
+    expect(screen.getByText(/AI 研究输出已生成 1 \/ 1/)).toHaveTextContent("不等于当前组合诊断通过；交易保持锁定");
     expect(screen.getByText("研究输出已生成 · 证据不完整")).toBeVisible();
     expect(screen.getByText("已有更新的冻结资料，当前报告未使用")).toBeVisible();
     expect(screen.getByRole("link", { name: "查看 TEST 研究报告" })).toHaveAttribute("href", `/research/${position.instrument_id}?as_of=2026-09-02T04%3A00%3A00Z`);
@@ -60,7 +60,7 @@ describe("portfolio vertical slice", () => {
     } };
     render(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot, positions: [position] }} currency="HKD" />);
     expect(screen.getByText(label)).toBeVisible();
-    expect(screen.getByText(/Agent 研究输出已生成 0 \/ 1/)).toBeVisible();
+    expect(screen.getByText(/AI 研究输出已生成 0 \/ 1/)).toBeVisible();
     if (data_snapshot_id) expect(screen.getByRole("link", { name: "查看 TEST 研究资料" })).toBeVisible();
     else expect(screen.queryByRole("link", { name: /研究资料/ })).not.toBeInTheDocument();
   });
@@ -70,7 +70,7 @@ describe("portfolio vertical slice", () => {
       snapshot={{ ...snapshot, time_basis: "gateway_observed" }}
       selectedPortfolioId={portfolioId} notice={null} onSelect={vi.fn()} onRefresh={vi.fn()}
     />);
-    expect(screen.getByText("读取时间")).toBeInTheDocument();
+    expect(screen.getByText("本机读取时间")).toBeInTheDocument();
     expect(screen.getByText(/券商未提供逐条更新时间/)).toBeInTheDocument();
     expect(screen.getByText("执行能力").parentElement).toHaveTextContent("已锁定");
   });
@@ -104,7 +104,7 @@ describe("portfolio vertical slice", () => {
       { ...snapshot.positions[0], instrument_id: "test-a", symbol: "TESTA", research },
       { ...snapshot.positions[0], instrument_id: "test-b", symbol: "TESTB", research: { ...research, quality_status: "partial" } },
     ] }} currency="HKD" />);
-    expect(screen.getByText(/Agent 研究输出已生成 2 \/ 2/)).toHaveTextContent("证据完整 1，证据不完整 1");
+    expect(screen.getByText(/AI 研究输出已生成 2 \/ 2/)).toHaveTextContent("证据完整 1，证据不完整 1");
     expect(screen.getByText("研究输出已生成 · 证据完整")).toBeVisible();
     expect(screen.getByText("只读展示，不生成基本面判断")).toBeVisible();
   });
@@ -176,7 +176,7 @@ describe("portfolio vertical slice", () => {
   it("prioritizes value and allocation while frozen quantities remain visible before opening details", () => {
     render(<PortfolioSummary portfolio={portfolio} snapshot={snapshot} currency="HKD" showValuation={false} />);
     const holdings = screen.getByRole("region", { name: "HKD 持仓表，可横向滚动" });
-    expect(within(holdings).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["标的", "持仓市值", "资产占比（含现金）", "现价", "总量", "Agent 研究", "账户明细"]);
+    expect(within(holdings).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["标的", "持仓市值", "资产占比（含现金）", "现价", "总量", "AI 研究", "账户明细"]);
     expect(screen.getByText("70.91%")).toBeVisible();
     expect(screen.getByText("冻结 200")).toBeVisible();
     expect(screen.getByText("平均成本")).not.toBeVisible();
@@ -250,6 +250,18 @@ describe("portfolio vertical slice", () => {
 
     expect(screen.getByRole("region", { name: "HKD 原币种资产估值" }))
       .toHaveTextContent("HKD 9,007,199,254,740,993.00");
+  });
+
+  it("does not display tiny nonzero cash or allocations as zero", () => {
+    render(<PortfolioValuationSummary provider="fosun" snapshot={{
+      ...snapshot,
+      cash: [{ ...snapshot.cash[0], cash_balance: "0.000001" }],
+    }} currency="HKD" compact />);
+    const valuation = screen.getByRole("region", { name: "HKD 原币种资产估值" });
+    const cash = within(valuation).getByText("现金", { selector: "li > span" }).closest("li")!;
+    expect(cash).toHaveTextContent("HKD <0.01");
+    expect(cash).toHaveTextContent("<0.01%");
+    expect(cash.querySelector(".portfolio-allocation__meter > span")).toHaveStyle({ inlineSize: "0.00%" });
   });
 
   it("withholds allocation percentages when original-currency total assets are zero", () => {
@@ -328,7 +340,7 @@ describe("portfolio vertical slice", () => {
       notice={null} onSelect={vi.fn()} onRefresh={vi.fn()} />);
 
     expect(screen.getByText("显示最后已知快照，不触发业务动作。", { exact: true })).toBeVisible();
-    expect(screen.getByRole("region", { name: "HKD 原币种资产估值" })).toHaveTextContent("STALE");
+    expect(screen.getByRole("region", { name: "HKD 原币种资产估值" })).toHaveTextContent("已过期");
     expect(screen.queryByRole("link", { name: /优化|方案|下单|交易/ })).not.toBeInTheDocument();
   });
 
@@ -338,7 +350,7 @@ describe("portfolio vertical slice", () => {
       selectedPortfolioId={portfolioId} notice={null} onSelect={vi.fn()} onRefresh={vi.fn()} />);
 
     expect(screen.getByText("资产可展示", { exact: true })).toBeVisible();
-    expect(screen.getByText("决策待对账", { exact: true })).toBeVisible();
+    expect(screen.getByText("账户快照等待对账", { exact: true })).toBeVisible();
     expect(screen.getByText("资产事实可展示；订单或现金流尚未完成对账，不能作为优化基线。", { exact: true })).toBeVisible();
   });
 
@@ -397,7 +409,7 @@ describe("portfolio vertical slice", () => {
     const guidance = screen.getByRole("region", { name: "真实刷新仅限本机终端" });
     expect(guidance).toHaveTextContent("浏览器只重新读取已持久化数据");
     expect(guidance).toHaveTextContent("uv run --package nexus-engine nexus-fosun-local refresh");
-    expect(guidance).toHaveTextContent("最近本地刷新状态READY");
+    expect(guidance).toHaveTextContent("最近本地刷新状态已就绪");
     expect(screen.queryByRole("button", { name: "同步复星只读事实" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "刷新同步状态" })).not.toBeInTheDocument();
   });

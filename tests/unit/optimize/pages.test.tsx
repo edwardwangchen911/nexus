@@ -15,7 +15,7 @@ import { portfolio, snapshot } from "../portfolio/fixtures";
 
 const states: Array<[DataStateKind, string]> = [
   ["loading", "正在加载"], ["empty", "暂无数据"], ["ready", "数据已就绪"],
-  ["partial", "数据不完整"], ["stale", "数据已过期"], ["error", "加载失败"],
+  ["partial", "数据不完整"], ["stale", "显示上次数据"], ["error", "加载失败"],
   ["forbidden", "无权访问"],
 ];
 
@@ -67,16 +67,16 @@ describe("optimization pages", () => {
     render(<OverviewPanel state="ready" overview={factsOnlyOverview} onRefresh={vi.fn()} />);
 
     expect(screen.getByRole("heading", { name: "今日资产概览" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "尚无诊断，保持现状" })).toBeVisible();
-    expect(screen.getByText("快照尚未达到 READY，暂不能形成正式诊断；未分析不等于没有风险。")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "尚无诊断，暂不采取动作" })).toBeVisible();
+    expect(screen.getByText("快照尚未通过完整核验，暂不能形成正式诊断；未分析不等于没有风险。")).toBeVisible();
     expect(screen.getAllByText("复星（只读）").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("PARTIAL").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("需要对账").length).toBeGreaterThan(0);
     const authority = screen.getByRole("region", { name: "数据与决策权威边界" });
     expect(authority).toHaveTextContent("可以查看");
-    expect(authority).toHaveTextContent("快照已通过核验");
+    expect(authority).toHaveTextContent("账户快照核验通过");
     expect(screen.getByTitle(snapshot.display_readiness)).toBeVisible();
-    expect(screen.getByTitle(snapshot.decision_readiness)).toBeVisible();
-    expect(authority).toHaveTextContent("需逐笔人工确认");
+    expect(authority).toHaveTextContent("快照核验、研究结论与执行条件分别判断");
+    expect(authority).toHaveTextContent("当前不可执行");
     expect(screen.getByRole("region", { name: "HKD 原币种资产估值" })).toHaveTextContent("HKD 27,500.00");
     expect(screen.getByRole("region", { name: "USD 原币种资产估值" })).toHaveTextContent("USD 1,000.00");
     expect(screen.getByRole("link", { name: "查看组合事实" })).toHaveAttribute("href", "/portfolio");
@@ -317,11 +317,11 @@ describe("optimization pages", () => {
 
   it("requires a persisted proposal context before rendering what-if inputs", () => {
     const { rerender } = render(<WhatIfPagePanel state="empty" group={null} proposalId={null} onRefresh={vi.fn()} onEvaluate={vi.fn()} />);
-    expect(screen.getByText(/必须从已持久化的方案进入/)).toBeVisible();
+    expect(screen.getByText(/请从已有方案进入试算/)).toBeVisible();
 
     rerender(<WhatIfPagePanel state="ready" group={proposalGroup()} proposalId={proposalIds.minimum_change} onRefresh={vi.fn()} onEvaluate={vi.fn()} />);
     expect(screen.getAllByRole("textbox", { name: /目标权重/ })).toHaveLength(2);
-    expect(screen.getAllByText(/仅分析，不持久化/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/仅分析，不保存/).length).toBeGreaterThan(0);
   });
 
   it.each(["partial", "stale"] as const)("shows cached %s what-if context without enabling evaluation", (state) => {

@@ -7,7 +7,9 @@ describe("decimal presentation", () => {
     ["0.123456789012", "0.123"],
     ["999.9995", "1000"],
     ["-1.2345", "-1.235"],
-    ["-0.0004", "0"],
+    ["0.0004", "<0.001"],
+    ["-0.0004", "(-0.001, 0)"],
+    ["-0.0000", "0"],
     ["-0.0005", "-0.001"],
     ["9007199254740993.1235", "9007199254740993.124"],
   ])("rounds %s without binary float conversion", (value, expected) => {
@@ -23,8 +25,12 @@ describe("decimal presentation", () => {
   });
 
   it("retains existing money formatting within the three-decimal limit", () => {
+    expect(formatDisplayDecimal(-0)).toBe("0");
     expect(formatDisplayDecimal("1234.565", { group: true, fixedDigits: 2 })).toBe("1,234.57");
     expect(formatDisplayDecimal("1.123456", { fixedDigits: 6 })).toBe("1.123");
-    expect(formatDisplayDecimal(-0.00001)).toBe("0");
+    expect(formatDisplayDecimal(0.00001)).toBe("<0.001");
+    expect(formatDisplayDecimal(-0.00001)).toBe("(-0.001, 0)");
+    expect(formatDisplayDecimal("0.004", { fixedDigits: 2 })).toBe("<0.01");
+    expect(formatDisplayDecimal("-0.004", { fixedDigits: 2 })).toBe("(-0.01, 0)");
   });
 });

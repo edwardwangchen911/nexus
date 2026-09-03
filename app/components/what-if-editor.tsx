@@ -69,19 +69,21 @@ function WhatIfProposalEditor({ group, proposal, actionsEnabled, onEvaluate }: {
     <section className="what-if-editor" aria-labelledby="what-if-title">
       <header>
         <div>
-          <p className="eyebrow">无副作用评估</p>
+          <p className="eyebrow">仅作情景分析</p>
           <h2 id="what-if-title">持仓权重试算</h2>
-          <p>允许范围冻结自所选方案；仅分析，不持久化，不生成订单。</p>
+          <p>调整所选方案内的持仓权重；试算不会保存修改或生成订单。</p>
         </div>
         <span className="mode-badge">{statusLabel(proposal.variant)}</span>
       </header>
       <div className="what-if-editor__fields">
         {proposal.positions.map((position, index) => {
           const inputId = `what-if-weight-${position.instrument_id}`;
+          const symbol = "display_symbol" in position && typeof position.display_symbol === "string" ? position.display_symbol : null;
           return (
             <div className="what-if-field" key={position.instrument_id}>
-              <label htmlFor={inputId}>目标权重 {index + 1}（0–1）</label>
-              <code>{position.instrument_id}</code>
+              <label htmlFor={inputId}>{symbol ?? `标的 ${index + 1}`} 目标权重（0–1）</label>
+              {!symbol ? <small>证券名称未提供，请先核对方案中的标的。</small> : null}
+              <details className="portfolio-disclosure"><summary>标的标识</summary><code>{position.instrument_id}</code></details>
               <input
                 id={inputId}
                 type="text"
@@ -118,10 +120,10 @@ function WhatIfResult({ result }: { result: WhatIfResponse }): React.ReactElemen
   ];
   return (
     <section className="what-if-result" aria-labelledby="what-if-result-title">
-      <h3 id="what-if-result-title">后端确定性结果</h3>
+      <h3 id="what-if-result-title">情景试算结果</h3>
       <dl>
         <div><dt>标的数量</dt><dd className="numeric-data">{result.instrument_count}</dd></div>
-        <div><dt>约束命中</dt><dd className="numeric-data">{violations.status === "known" ? formatMetric(violations.value, violations.unit) : reasonText(violations.reason)}</dd></div>
+        <div><dt>未满足约束数</dt><dd className="numeric-data">{violations.status === "known" ? formatMetric(violations.value, violations.unit) : reasonText(violations.reason)}</dd></div>
         <div><dt>策略</dt><dd>{result.policy_version}</dd></div>
       </dl>
       {/* The bounded scroll region must be keyboard-focusable on narrow screens. */}

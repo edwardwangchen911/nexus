@@ -43,7 +43,8 @@ for (const viewport of [
     await page.goto("/overview");
 
     await expect(page.getByRole("heading", { name: "值得比较优化方案" })).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByRole("region", { name: "冻结组合事实" })).toContainText("real_advisory_policy_v1");
+    await page.getByText(/报告来源与版本/).click();
+    await expect(page.getByText("real_advisory_policy_v1")).toBeVisible();
     if (viewport.width < 768) {
       const drawer = page.locator(".app-shell__drawer");
       await drawer.locator(":scope > summary").click();
@@ -99,7 +100,7 @@ for (const viewport of [
     await expect(page.getByRole("status", { name: "当前影子交易日详情" })).toContainText("2026-08-25");
     await sessionNavigator.press("End");
     await expect(page.getByRole("status", { name: "当前影子交易日详情" })).toContainText("2026-08-31");
-    await expect(page.getByRole("button", { name: /下单|交易|买入|卖出|审批|验证|晋级|自进化/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /下单|提交交易|买入|卖出|审批|验证|晋级|自进化/ })).toHaveCount(0);
     const overflow = await page.evaluate(() => ({
       clientWidth: document.documentElement.clientWidth,
       scrollWidth: document.documentElement.scrollWidth,
@@ -117,8 +118,8 @@ for (const viewport of [
     expect(shadowSerious).toEqual([]);
     await page.getByRole("link", { name: "试算最小调整权重" }).click();
     await expect(page.getByRole("region", { name: "投资决策证据链，可横向滚动" }).getByRole("listitem").filter({ hasText: "情景试算" })).toHaveAttribute("aria-current", "step");
-    await expect(page.getByRole("heading", { name: "有限权重情景" })).toBeVisible();
-    await expect(page.getByRole("textbox", { name: "目标权重 1" })).toHaveValue("0.15");
+    await expect(page.getByRole("heading", { name: "持仓权重情景试算" })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "AAPL 目标权重（0–1）" })).toHaveValue("0.15");
     await expect(page.getByRole("button", { name: /下单|交易|买入|卖出/ })).toHaveCount(0);
 
     if (viewport.name === "mobile-390" || viewport.name === "desktop-1440") {
@@ -145,7 +146,7 @@ function proposalGroup() {
     portfolio_scope: "real_read_only", diagnostic_input_hash: "b".repeat(64), data_snapshot_id: "0198d500-1000-7000-8000-000000001309", source_policy_id: "0198d500-1000-7000-8000-000000001310", cost_policy_id: "0198d500-1000-7000-8000-000000001311",
     proposals: variants.map((variant, index) => ({
       proposal_id: proposalIds[index], variant, analysis_only: true, strategy_evidence_complete: true, portfolio_scope: "real_read_only",
-      positions: instrumentIds.map((instrument_id, positionIndex) => ({ instrument_id, current_weight: positionIndex === 0 ? "0.20" : "0.10", target_weight: positionIndex === 0 && variant !== "hold_current" ? "0.15" : positionIndex === 0 ? "0.20" : "0.10", action: positionIndex === 0 && variant !== "hold_current" ? "reduce" : "maintain", reason_code: positionIndex === 0 ? "CONCENTRATION_TOP1" : "BASELINE_HOLDING" })),
+      positions: instrumentIds.map((instrument_id, positionIndex) => ({ instrument_id, display_symbol: positionIndex === 0 ? "AAPL" : null, current_weight: positionIndex === 0 ? "0.20" : "0.10", target_weight: positionIndex === 0 && variant !== "hold_current" ? "0.15" : positionIndex === 0 ? "0.20" : "0.10", action: positionIndex === 0 && variant !== "hold_current" ? "reduce" : "maintain", reason_code: positionIndex === 0 ? "CONCENTRATION_TOP1" : "BASELINE_HOLDING" })),
       comparison: comparison(false),
     })),
     shadow_eligibility: { eligible: true, reasons: [] },

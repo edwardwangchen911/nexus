@@ -46,6 +46,14 @@ const monitor: IntradayMonitorData = {
 afterEach(() => vi.useRealTimers());
 
 describe("IntradayMonitor", () => {
+  it("keeps tiny signed returns nonzero and identifies unknown Fosun volume units", () => {
+    render(<IntradayMonitor symbol="AAPL" monitor={{ ...monitor, source: "fosun", feed: "l1", return_5m: "0.0000001", return_30m: "-0.0000001" }} />);
+    const region = screen.getByRole("region", { name: "AAPL 盘中证据" });
+    expect(region).toHaveTextContent("<0.001%");
+    expect(region).toHaveTextContent("(-0.001, 0)%");
+    expect(region).not.toHaveTextContent("+<");
+    expect(screen.getByRole("columnheader", { name: "成交量（单位未确认）" })).toBeVisible();
+  });
   it("renders exact source authority, deterministic metrics and a semantic minute table", () => {
     render(<IntradayMonitor symbol="AAPL" monitor={monitor} />);
 

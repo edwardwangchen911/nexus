@@ -2,6 +2,12 @@ import { formatDisplayDecimal } from "./display-decimal";
 
 type DisplayValue = string | number | null | undefined;
 
+export function snapshotTimeLabel(basis: string | null | undefined): string {
+  if (basis === "gateway_observed") return "本机读取时间";
+  if (basis === "provider_event") return "数据源时间";
+  return "快照记录时间（含义未确认）";
+}
+
 // Presentation only. Keep API values, trading dates and editable inputs unchanged.
 export function formatDisplayTime(value: string | null | undefined): string {
   if (!value) return "未知";

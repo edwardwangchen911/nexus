@@ -110,6 +110,7 @@ main > * { max-inline-size: 96rem; margin-inline: auto; }
 .authority-ledger { display: grid; gap: var(--space-2); min-inline-size: 0; border: 1px solid var(--color-border); background: var(--color-surface); padding: var(--space-3); }
 .authority-ledger > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
 .authority-ledger h2 { margin: 0; color: var(--color-text-muted); font-size: 0.875rem; }
+.authority-ledger > p { grid-column: 1 / -1; margin: 0; color: var(--color-text-muted); font-size: 0.75rem; line-height: 1.5; }
 .authority-ledger__mode { display: inline-flex; align-items: center; gap: var(--space-2); border: 1px solid rgb(123 150 255 / 0.3); background: rgb(123 150 255 / 0.07); padding: var(--space-1) var(--space-2); color: #B9C7FF; font-size: 0.75rem; font-weight: 650; }
 .authority-ledger ol { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
 .authority-ledger li { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-2); align-items: center; min-inline-size: 0; border-block-start: 1px solid var(--color-border); padding: var(--space-3); }

@@ -1,6 +1,6 @@
 "use client";
 
-import { formatDisplayTime } from "../../lib/display-format";
+import { formatDisplayTime, snapshotTimeLabel } from "../../lib/display-format";
 
 import { ArrowRight, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -51,7 +51,7 @@ export function OverviewPanel({ state, overview, onRefresh }: Props): React.Reac
         eyebrow={factsOnly ? "资产事实台" : "每日决策台"}
         title={factsOnly ? "今日资产概览" : "今日组合判断"}
         description={factsOnly ? "展示冻结的复星只读事实；尚未生成诊断、策略或交易建议。" : "先判断是否值得进一步优化。所有结论均来自冻结快照与确定性阈值，不使用 Agent 主观评分。"}
-        actions={<><span className="mode-badge">仅研究 <code>RESEARCH_ONLY</code></span><span className="state-chip" data-state={state}>{overviewReadLabel(state)}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />{factsOnly ? "刷新概览" : "刷新判断"}</button></>}
+        actions={<><span className="mode-badge">仅研究</span><span className="state-chip" data-state={state}>{overviewReadLabel(state)}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />{factsOnly ? "刷新概览" : "刷新判断"}</button></>}
       />
       {hasData && state === "stale" ? <p className="inline-notice inline-notice--error" role="status">显示最后已知结果；当前请求失败，不可用于新动作。</p> : null}
       {hasData ? <OverviewAssets overview={overview} /> : null}
@@ -62,7 +62,7 @@ export function OverviewPanel({ state, overview, onRefresh }: Props): React.Reac
         <DiagnosticList report={overview.diagnostic_report} summary />
         <nav className="overview-links" aria-label="概览后续动作"><a className="button button--primary" href={optimizeHref}>打开组合诊断<ArrowRight aria-hidden="true" size={17} /></a>{overview.proposal_group ? <a className="button button--quiet" href={`/optimize/${overview.proposal_group.proposal_group_id}`}>查看三方案比较</a> : null}</nav>
         <details className="portfolio-disclosure portfolio-source"><summary>报告来源与版本 · {formatUtc(overview.snapshot_as_of)}</summary><dl className="overview-report-meta numeric-data"><div><dt>交易日</dt><dd>{overview.trading_day ?? "未知"}</dd></div><div><dt>诊断策略</dt><dd>{overview.diagnostic_report.policy_version}</dd></div><div><dt>组合 ID</dt><dd>{overview.portfolio_id}</dd></div></dl></details>
-      </> : <DataState state="partial" title="权威证据不完整" detail="默认保持现状，不创建方案或订单。" />}
+      </> : <DataState state="partial" title="证据不完整" detail="暂不采取动作；尚不能判断是否需要调整。" />}
     </section>
   );
 }
@@ -86,11 +86,11 @@ function PortfolioFactsOverview({ overview }: { overview: Overview }): React.Rea
   const snapshot = overview.portfolio_snapshot!;
   return <>
     <section className="overview-fact-band" aria-label="复星只读组合事实">
-      <div><p className="eyebrow">复星只读事实</p><h2>尚无诊断，保持现状</h2><p>{diagnosticUnavailableMessage(overview.diagnostic_unavailable_reason)}</p></div>
+      <div><p className="eyebrow">复星只读事实</p><h2>尚无诊断，暂不采取动作</h2><p>{diagnosticUnavailableMessage(overview.diagnostic_unavailable_reason)}</p></div>
       <dl className="numeric-data">
         <div><dt>数据来源</dt><dd>复星（只读）</dd></div>
-        <div><dt>质量状态</dt><dd>{snapshotStatusLabel(snapshot.status)} <code>{snapshot.status}</code></dd></div>
-        <div><dt>快照截止</dt><dd>{formatUtc(overview.snapshot_as_of)}</dd></div>
+        <div><dt>质量状态</dt><dd>{snapshotStatusLabel(snapshot.status)}</dd></div>
+        <div><dt>{snapshotTimeLabel(snapshot.time_basis)}</dt><dd>{formatUtc(overview.snapshot_as_of)}</dd></div>
         <div><dt>组合</dt><dd>{overview.portfolio_name ?? "复星只读组合"}</dd></div>
       </dl>
     </section>
@@ -103,7 +103,7 @@ function PortfolioFactsOverview({ overview }: { overview: Overview }): React.Rea
 }
 
 function diagnosticUnavailableMessage(reason: Overview["diagnostic_unavailable_reason"]): string {
-  if (reason === "SNAPSHOT_NOT_READY") return "快照尚未达到 READY，暂不能形成正式诊断；未分析不等于没有风险。";
+  if (reason === "SNAPSHOT_NOT_READY") return "快照尚未通过完整核验，暂不能形成正式诊断；未分析不等于没有风险。";
   return "尚无已保存的诊断；未分析不等于没有风险。可先查看资产与行情，不创建方案或订单。";
 }
 
@@ -117,6 +117,6 @@ function stateTitle(state: DataStateKind): string {
   if (state === "partial") return "权威证据不完整";
   return state === "loading" ? "正在读取冻结诊断" : "概览暂时不可用";
 }
-function stateDetail(state: DataStateKind): string { return state === "partial" || state === "stale" ? "默认保持现状，不创建方案或订单。" : "可稍后刷新；页面不会用假数据补齐。"; }
+function stateDetail(state: DataStateKind): string { return state === "partial" || state === "stale" ? "暂不采取动作；尚不能判断是否需要调整。" : "可稍后刷新；页面不会用假数据补齐。"; }
 function snapshotStatusLabel(status: PortfolioSnapshot["status"]): string { return status === "READY" ? "已就绪" : status === "STALE" ? "已过期" : "需要对账"; }
 function formatUtc(value: string | null | undefined): string { return formatDisplayTime(value); }

@@ -105,7 +105,7 @@ for (const viewport of [
     await expect(page.getByRole("region", { name: "AAPL 盘中证据" })).not.toContainText("4.40 bps");
     await expect(page.getByText("上游报价未提供成交时间").first()).toBeVisible();
     await expect(page.getByText("FOSUN_PROVIDER_TIMESTAMP_UNAVAILABLE").first()).toBeVisible();
-    await expect(page.getByRole("table", { name: "AAPL 1 分钟行情数据" })).toContainText("227.500000000000");
+    await expect(page.getByRole("table", { name: "AAPL 1 分钟行情数据" })).toContainText("227.5");
     const intradayTableRight = page.getByRole("button", { name: "向右浏览 AAPL 盘中表格" });
     await intradayTableRight.focus();
     await expect(intradayTableRight).toBeFocused();
@@ -115,7 +115,7 @@ for (const viewport of [
     await expect(page.getByText("未复权价格不可直接用于跨期收益、动量或回撤判断。")).toBeVisible();
     await expect(page.getByRole("region", { name: "AAPL 价格图表" })).toBeVisible();
     await expect(page.locator(".price-chart__canvas canvas").first()).toBeVisible();
-    await expect(page.getByRole("table", { name: "AAPL OHLCV 数据" })).toContainText("227.160000000000");
+    await expect(page.getByRole("table", { name: "AAPL OHLCV 数据" })).toContainText("227.16");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 
     const previous = page.getByRole("button", { name: "上一根 K 线" });
@@ -140,7 +140,21 @@ for (const viewport of [
   });
 }
 
-async function installMarketFixtures(page: Page): Promise<void> {
+test("display formats keep tiny returns, date meaning and unknown volume units visible", async ({ page }) => {
+  await installMarketFixtures(page, { ...intradayMonitor, return_5m: "0.0000001", return_30m: "-0.0000001" });
+  await page.goto("/market");
+  const intraday = page.getByRole("region", { name: "AAPL 盘中证据" });
+  await expect(intraday).toContainText("<0.001%");
+  await expect(intraday).toContainText("(-0.001, 0)%");
+  await expect(intraday).not.toContainText("+<");
+  await expect(page.getByRole("columnheader", { name: "成交量（单位未确认）" })).toHaveCount(2);
+  await expect(page.getByRole("region", { name: "AAPL OHLCV 证据" })).toContainText("2026-08-22 08:01:00 北京时间");
+  await expect(page.getByLabel("当前 K 线详情")).toContainText("2026-08-21");
+  await expect(page.locator(".price-chart__canvas canvas").first()).toBeVisible();
+  await page.screenshot({ path: "test-results/display-formats-market.png", fullPage: true });
+});
+
+async function installMarketFixtures(page: Page, monitor = intradayMonitor): Promise<void> {
   await page.route("**/api/v1/integrations", async (route) => {
     await route.fulfill({
       status: 200,
@@ -170,7 +184,7 @@ async function installMarketFixtures(page: Page): Promise<void> {
           items: [item],
           next_cursor: null,
           selected_series: selected === instrumentId ? selectedSeries : null,
-          intraday_monitor: selected === instrumentId ? intradayMonitor : null,
+          intraday_monitor: selected === instrumentId ? monitor : null,
         },
         meta: { request_id: requestId, schema_version: "1", as_of: "2026-08-22T00:00:00Z" },
       }),

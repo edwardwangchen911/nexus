@@ -213,7 +213,7 @@ export default function PaperPage(): React.ReactElement {
       }
       if (response.status >= 500 || response.ok) {
         setPendingCancel({ ...pending, unknown: true });
-        setNotice({ kind: "error", text: "取消结果未知。该订单保持锁定；请使用同一幂等键继续确认。" });
+        setNotice({ kind: "error", text: "取消结果未知。该订单保持锁定；请继续确认原操作结果。" });
         return;
       }
       if (response.status === 409) {
@@ -221,7 +221,7 @@ export default function PaperPage(): React.ReactElement {
         const refreshed = await refresh();
         setNotice({ kind: "error", text: refreshed
           ? payload.error?.code === "IDEMPOTENCY_CONFLICT"
-            ? "幂等键与另一取消请求冲突；已重新读取订单事实。"
+            ? "原取消请求与另一操作冲突；已重新读取订单记录。"
             : "订单事件版本已变化；已重新读取订单事实。"
           : "订单状态已变化，且最新事实重读失败；取消操作保持关闭。" });
         return;
@@ -230,7 +230,7 @@ export default function PaperPage(): React.ReactElement {
       setNotice({ kind: "error", text: "模拟订单未取消；请刷新订单事实后重试。" });
     } catch {
       setPendingCancel({ ...pending, unknown: true });
-      setNotice({ kind: "error", text: "取消结果未知。该订单保持锁定；请使用同一幂等键继续确认。" });
+      setNotice({ kind: "error", text: "取消结果未知。该订单保持锁定；请继续确认原操作结果。" });
     } finally {
       cancelInFlight.current = false; setCancelling(false);
     }
@@ -269,7 +269,7 @@ export function PaperPanel({ state, portfolio, orders, nextCursor, statusFilter,
         <Positions portfolio={portfolio} />
         <Attributions portfolio={portfolio} />
         <section className="paper-orders" aria-labelledby="paper-orders-title">
-          <header className="paper-orders__heading"><div><p className="eyebrow">服务端订单时间线</p><h2 id="paper-orders-title">订单与模拟成交</h2><p>事件、状态和可取消性均由服务端给出，浏览器不推断状态。</p></div><label className="paper-orders__filter">订单状态筛选<select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value as "" | OrderStatus)} disabled={loadingMore}>{statusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label></header>
+          <header className="paper-orders__heading"><div><p className="eyebrow">已保存的订单记录</p><h2 id="paper-orders-title">订单与模拟成交</h2><p>订单状态与可取消性以已保存的最新记录为准。</p></div><label className="paper-orders__filter">订单状态筛选<select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value as "" | OrderStatus)} disabled={loadingMore}>{statusOptions.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}</select></label></header>
           {orders.length === 0 ? <p className="paper-orders__empty">当前筛选下没有订单事实。</p> : <div className="paper-order-list">{orders.map((order) => <OrderTimeline key={order.order_id} order={order} allowCancel={state === "ready" && !loadingMore} onCancel={onCancel} />)}</div>}
           {nextCursor ? <button className="button button--quiet paper-orders__more" type="button" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? "正在加载" : "加载更多订单"}</button> : null}
         </section>
@@ -295,13 +295,13 @@ function PerformanceFacts({ portfolio }: { portfolio: PaperPortfolio }): React.R
 function Positions({ portfolio }: { portfolio: PaperPortfolio }): React.ReactElement {
   // Bounded horizontal data regions must remain keyboard-scrollable on narrow screens.
   // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
-  return <section className="paper-table-section" aria-labelledby="paper-positions-title"><header><div><p className="eyebrow">持仓 · 准入收盘价</p><h2 id="paper-positions-title">持仓</h2></div><p>参考价格采用已核验的收盘价，并非实时价格。</p></header>{portfolio.positions.length === 0 ? <p className="paper-orders__empty">当前没有模拟持仓。</p> : <div className="table-scroll" role="region" aria-label="内部模拟持仓表，可横向滚动" tabIndex={0}><table className="paper-position-table numeric-data" aria-label="内部模拟持仓"><caption>数量、成本、市值与来源时点均为后端冻结事实。</caption><thead><tr><th scope="col">标的</th><th scope="col">数量</th><th scope="col">可用 / 预留</th><th scope="col">平均成本</th><th scope="col">参考收盘</th><th scope="col">市值</th><th scope="col">未实现损益</th><th scope="col">来源 / 数据通道</th><th scope="col">交付</th><th scope="col">价格时点</th></tr></thead><tbody>{portfolio.positions.map((position) => <tr key={position.instrument_id}><th scope="row">{position.symbol ?? "未知标的"}</th><td>{formatPaperDecimal(position.quantity)}</td><td>{formatPaperDecimal(position.available_quantity)} / {formatPaperDecimal(position.reserved_quantity)}</td><td>USD {formatPaperDecimal(position.average_cost, 2)}</td><td>USD {formatPaperDecimal(position.reference_close, 2)}</td><td>USD {formatPaperDecimal(position.market_value, 2)}</td><td>USD {formatPaperDecimal(position.unrealized_pnl, 2)}</td><td>{position.price_source} / {position.price_feed}</td><td>{marketDeliveryModeLabel(position.delivery_mode)}</td><td>{formatPaperTime(position.price_as_of)}</td></tr>)}</tbody></table></div>}</section>;
+  return <section className="paper-table-section" aria-labelledby="paper-positions-title"><header><div><p className="eyebrow">持仓 · 准入收盘价</p><h2 id="paper-positions-title">持仓</h2></div><p>参考价格采用已核验的收盘价，并非实时价格。</p></header>{portfolio.positions.length === 0 ? <p className="paper-orders__empty">当前没有模拟持仓。</p> : <div className="table-scroll" role="region" aria-label="内部模拟持仓表，可横向滚动" tabIndex={0}><table className="paper-position-table numeric-data" aria-label="内部模拟持仓"><caption>数量、成本、市值与价格时点来自同一份已保存快照。</caption><thead><tr><th scope="col">标的</th><th scope="col">数量</th><th scope="col">可用 / 预留</th><th scope="col">平均成本</th><th scope="col">参考收盘</th><th scope="col">市值</th><th scope="col">未实现损益</th><th scope="col">来源 / 数据通道</th><th scope="col">交付</th><th scope="col">价格时点</th></tr></thead><tbody>{portfolio.positions.map((position) => <tr key={position.instrument_id}><th scope="row">{position.symbol ?? "未知标的"}</th><td>{formatPaperDecimal(position.quantity)}</td><td>{formatPaperDecimal(position.available_quantity)} / {formatPaperDecimal(position.reserved_quantity)}</td><td>USD {formatPaperDecimal(position.average_cost, 2)}</td><td>USD {formatPaperDecimal(position.reference_close, 2)}</td><td>USD {formatPaperDecimal(position.market_value, 2)}</td><td>USD {formatPaperDecimal(position.unrealized_pnl, 2)}</td><td>{position.price_source} / {position.price_feed}</td><td>{marketDeliveryModeLabel(position.delivery_mode)}</td><td>{formatPaperTime(position.price_as_of)}</td></tr>)}</tbody></table></div>}</section>;
 }
 
 function Attributions({ portfolio }: { portfolio: PaperPortfolio }): React.ReactElement {
   // Bounded horizontal data regions must remain keyboard-scrollable on narrow screens.
   // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
-  return <section className="paper-table-section" aria-labelledby="paper-attribution-title"><header><div><p className="eyebrow">持久化绩效归因</p><h2 id="paper-attribution-title">绩效归因</h2></div><p>行业证据缺失时标记为资料不完整，不猜测分类。</p></header>{portfolio.attributions.length === 0 ? <p className="paper-orders__empty">尚无归因事实。</p> : <div className="table-scroll" role="region" aria-label="内部模拟绩效归因表，可横向滚动" tabIndex={0}><table className="paper-attribution-table numeric-data" aria-label="内部模拟绩效归因"><caption>现金、标的与行业维度的冻结归因。</caption><thead><tr><th scope="col">维度</th><th scope="col">键</th><th scope="col">市值</th><th scope="col">已实现</th><th scope="col">未实现</th><th scope="col">费用</th><th scope="col">滑点</th><th scope="col">完整性</th></tr></thead><tbody>{portfolio.attributions.map((item) => <tr key={`${item.dimension}:${item.dimension_key}`}><th scope="row">{attributionLabel(item.dimension)}</th><td>{item.dimension_key}</td><td>USD {formatPaperDecimal(item.market_value, 2)}</td><td>USD {formatPaperDecimal(item.realized_pnl, 2)}</td><td>USD {formatPaperDecimal(item.unrealized_pnl, 2)}</td><td>USD {formatPaperDecimal(item.fees, 2)}</td><td>USD {formatPaperDecimal(item.slippage, 2)}</td><td>{statusLabel(item.completeness)}</td></tr>)}</tbody></table></div>}</section>;
+  return <section className="paper-table-section" aria-labelledby="paper-attribution-title"><header><div><p className="eyebrow">持久化绩效归因</p><h2 id="paper-attribution-title">绩效归因</h2></div><p>行业证据缺失时标记为资料不完整，不猜测分类。</p></header>{portfolio.attributions.length === 0 ? <p className="paper-orders__empty">尚无归因事实。</p> : <div className="table-scroll" role="region" aria-label="内部模拟绩效归因表，可横向滚动" tabIndex={0}><table className="paper-attribution-table numeric-data" aria-label="内部模拟绩效归因"><caption>现金、标的与行业维度的冻结归因。</caption><thead><tr><th scope="col">维度</th><th scope="col">归因对象</th><th scope="col">市值</th><th scope="col">已实现</th><th scope="col">未实现</th><th scope="col">费用</th><th scope="col">滑点</th><th scope="col">完整性</th></tr></thead><tbody>{portfolio.attributions.map((item) => <tr key={`${item.dimension}:${item.dimension_key}`}><th scope="row">{attributionLabel(item.dimension)}</th><td>{item.dimension_key}</td><td>USD {formatPaperDecimal(item.market_value, 2)}</td><td>USD {formatPaperDecimal(item.realized_pnl, 2)}</td><td>USD {formatPaperDecimal(item.unrealized_pnl, 2)}</td><td>USD {formatPaperDecimal(item.fees, 2)}</td><td>USD {formatPaperDecimal(item.slippage, 2)}</td><td>{statusLabel(item.completeness)}</td></tr>)}</tbody></table></div>}</section>;
 }
 
 function PaperCancelDialog({ pending, submitting, onDismiss, onConfirm }: { pending: PendingCancel; submitting: boolean; onDismiss: () => void; onConfirm: () => void }): React.ReactElement {
@@ -317,7 +317,7 @@ function PaperCancelDialog({ pending, submitting, onDismiss, onConfirm }: { pend
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   }
-  return <div className="confirmation-dialog" role="presentation"><dialog open aria-modal="true" aria-labelledby="paper-cancel-title" aria-describedby="paper-cancel-detail" onKeyDown={onKeyDown}><h3 id="paper-cancel-title">确认取消 {symbol} 模拟订单</h3><p id="paper-cancel-detail">将按当前事件版本 <strong className="numeric-data">{pending.order.current_event_seq}</strong> 请求取消剩余 <strong className="numeric-data">{formatPaperDecimal(pending.order.remaining_quantity)}</strong> 股。该操作只影响内部模拟账本，不会发送券商订单。</p>{pending.unknown ? <p className="inline-notice inline-notice--error">上次取消结果未知。继续确认会复用原幂等键，不会创建第二个取消意图。</p> : null}<div className="confirmation-dialog__actions"><button ref={backRef} className="button button--quiet" type="button" onClick={onDismiss} disabled={submitting}>返回订单</button><button className="button button--danger" type="button" onClick={onConfirm} disabled={submitting}><Check aria-hidden="true" size={17} />{submitting ? "正在确认" : pending.unknown ? "使用同一幂等键继续确认" : "确认取消模拟订单"}</button></div></dialog></div>;
+  return <div className="confirmation-dialog" role="presentation"><dialog open aria-modal="true" aria-labelledby="paper-cancel-title" aria-describedby="paper-cancel-detail" onKeyDown={onKeyDown}><h3 id="paper-cancel-title">确认取消 {symbol} 模拟订单</h3><p id="paper-cancel-detail">将按当前事件版本 <strong className="numeric-data">{pending.order.current_event_seq}</strong> 请求取消剩余 <strong className="numeric-data">{formatPaperDecimal(pending.order.remaining_quantity)}</strong> 股。该操作只影响内部模拟账本，不会发送券商订单。</p>{pending.unknown ? <p className="inline-notice inline-notice--error">上次取消结果未知。继续确认会沿用原请求，不会重复发起取消。</p> : null}<div className="confirmation-dialog__actions"><button ref={backRef} className="button button--quiet" type="button" onClick={onDismiss} disabled={submitting}>返回订单</button><button className="button button--danger" type="button" onClick={onConfirm} disabled={submitting}><Check aria-hidden="true" size={17} />{submitting ? "正在确认" : pending.unknown ? "继续确认原操作结果" : "确认取消模拟订单"}</button></div></dialog></div>;
 }
 
 function MoneyFact({ term, value, signed = false }: { term: string; value: string; signed?: boolean }): React.ReactElement {

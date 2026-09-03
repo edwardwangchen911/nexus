@@ -4,7 +4,7 @@ import { formatDisplayDecimal } from "../lib/display-decimal";
 import { ChevronLeft, ChevronRight, RotateCcw } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { components } from "../lib/generated/schema";
-import { marketAdjustmentLabel } from "../lib/market-evidence-labels";
+import { marketAdjustmentLabel, marketSourceLabel } from "../lib/market-evidence-labels";
 
 export type PriceChartBar = components["schemas"]["MarketBarResponse"];
 
@@ -42,6 +42,7 @@ export function PriceChart({ series }: { series: PriceChartSeries }): React.Reac
       const chart = createChart(container, {
         autoSize: true,
         height: 320,
+        localization: { locale: "zh-CN", dateFormat: "yyyy-MM-dd", priceFormatter: formatDisplayDecimal },
         layout: {
           attributionLogo: false,
           background: {
@@ -117,7 +118,7 @@ export function PriceChart({ series }: { series: PriceChartSeries }): React.Reac
     <section className="price-chart" aria-label={`${series.symbol} 价格图表`}>
       <header className="price-chart__heading">
         <div>
-          <p className="eyebrow">行情序列 · {series.source.toUpperCase()} / {series.feed.toUpperCase()}</p>
+          <p className="eyebrow">行情序列 · {marketSourceLabel(series.source, series.feed)}</p>
           <h2>{series.symbol} 日线</h2>
           <p className="price-chart__summary">
             复权口径：{marketAdjustmentLabel(series.adjustment)}；共 {series.bars.length} 个交易日；图形为辅助视图，下方表格使用同口径数据，最多显示 3 位小数。
@@ -155,7 +156,7 @@ export function PriceChart({ series }: { series: PriceChartSeries }): React.Reac
 
       {activeBar ? (
         <p id={activeDetailId} className="price-chart__active numeric-data" aria-label="当前 K 线详情">
-          {activeBar.session} · 开 {formatDisplayDecimal(activeBar.open)} · 高 {formatDisplayDecimal(activeBar.high)} · 低 {formatDisplayDecimal(activeBar.low)} · 收 {formatDisplayDecimal(activeBar.close)} · 量 {formatDisplayDecimal(activeBar.volume)}
+          {activeBar.session} · 开 {formatDisplayDecimal(activeBar.open)} · 高 {formatDisplayDecimal(activeBar.high)} · 低 {formatDisplayDecimal(activeBar.low)} · 收 {formatDisplayDecimal(activeBar.close)} · 成交量{series.source === "fosun" ? "（单位未确认）" : ""} {formatDisplayDecimal(activeBar.volume)}
         </p>
       ) : null}
 
@@ -170,7 +171,7 @@ export function PriceChart({ series }: { series: PriceChartSeries }): React.Reac
           <button className="button button--quiet" type="button" onClick={() => scrollTable(1)}>向右浏览表格</button>
         </div>
         <table className="market-table numeric-data" aria-label={`${series.symbol} OHLCV 数据`}>
-          <caption>{series.symbol} 与图形同源的 OHLCV 数据（最多 3 位小数）</caption>
+          <caption>{series.symbol} 与图形同源的开盘、最高、最低、收盘与成交量（最多 3 位小数）</caption>
           <thead>
             <tr>
               <th scope="col">交易日</th>
@@ -178,7 +179,7 @@ export function PriceChart({ series }: { series: PriceChartSeries }): React.Reac
               <th scope="col">最高</th>
               <th scope="col">最低</th>
               <th scope="col">收盘</th>
-              <th scope="col">成交量</th>
+              <th scope="col">{series.source === "fosun" ? "成交量（单位未确认）" : "成交量"}</th>
             </tr>
           </thead>
           <tbody>

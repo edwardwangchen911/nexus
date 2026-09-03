@@ -12,7 +12,7 @@ afterEach(() => {
 
 const states: Array<[DataStateKind, string]> = [
   ["loading", "正在加载"], ["empty", "暂无数据"], ["ready", "数据已就绪"],
-  ["partial", "数据不完整"], ["stale", "数据已过期"], ["error", "加载失败"],
+  ["partial", "数据不完整"], ["stale", "显示上次数据"], ["error", "加载失败"],
   ["forbidden", "无权访问"],
 ];
 
@@ -199,7 +199,7 @@ describe("internal paper page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "取消 AAPL 模拟订单" }));
     fireEvent.click(screen.getByRole("button", { name: "确认取消模拟订单" }));
     expect((await screen.findAllByText(/取消结果未知/)).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: "使用同一幂等键继续确认" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续确认原操作结果" }));
     await act(async () => { await Promise.resolve(); });
 
     expect(cancels).toBe(2);
