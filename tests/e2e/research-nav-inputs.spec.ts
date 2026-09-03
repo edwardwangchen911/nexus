@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
-import { decisionTime, instrumentId, navHistoryInputs, requestId, researchAdmissionData, researchAdmissionEnvelope } from "../unit/research/fixtures";
+import { decisionTime, instrumentId, navHistoryInputs, requestId, researchAdmissionData, researchAdmissionEnvelope, researchData, researchEnvelope } from "../unit/research/fixtures";
 
 for (const viewport of [{ width: 390, height: 844 }, { width: 1440, height: 1000 }]) {
   test(`frozen NAV remains read-only and distinct from prices at ${viewport.width}px`, async ({ page }) => {
@@ -51,3 +51,31 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 1440, height: 1000
     await page.screenshot({ path: `test-results/nav-inputs-${viewport.width}.png`, fullPage: true });
   });
 }
+
+test("new NAV inputs remain visibly separate from a saved failed research run", async ({ page }) => {
+  const writes: string[] = [];
+  page.on("request", (request) => {
+    if (!["GET", "HEAD"].includes(request.method())) writes.push(request.url());
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route("**/api/v1/**", (route) => route.fulfill({ status: 404, json: {} }));
+  await page.route(`**/api/v1/instruments/${instrumentId}/research?**`, (route) => route.fulfill({ json: researchEnvelope(researchData({
+    status: "failed", intent: null, quality_status: null, abstention_reason: "model_usage_uncertain",
+  })) }));
+  let different = true;
+  await page.route(`**/api/v1/instruments/${instrumentId}/research-admission?**`, (route) => route.fulfill({ json: researchAdmissionEnvelope(researchAdmissionData({
+    inputs: navHistoryInputs(), eligible: false, reason: "prompt_authority_unavailable",
+    ...(different ? { data_snapshot_id: "0198d600-1000-7000-8000-000000001588" } : {}),
+  })) }));
+  await page.goto(`/research/${instrumentId}?as_of=${encodeURIComponent(decisionTime)}`);
+  const notice = page.getByText(/当前资料与下方研究使用不同冻结快照/);
+  await expect(notice).toBeVisible();
+  await expect(page.getByRole("region", { name: "发行商净值历史资料" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "个股研究证据页" })).toHaveAttribute("data-state", "partial");
+  await expect(page.getByRole("button", { name: /运行冻结研究|下单/ })).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  different = false;
+  await page.getByRole("button", { name: "重新读取", exact: true }).click();
+  await expect(notice).toHaveCount(0);
+  expect(writes).toEqual([]);
+});
