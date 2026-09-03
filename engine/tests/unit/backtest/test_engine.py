@@ -1063,6 +1063,7 @@ def test_engine_code_hash_covers_shared_simulation_kernel() -> None:
         root / "simulation" / "engine.py",
         root / "simulation" / "models.py",
         root / "strategy" / "baseline.py",
+        root / "strategy" / "features.py",
         root / "strategy" / "dsl.py",
         root / "strategy" / "interpreter.py",
     )
