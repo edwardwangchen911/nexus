@@ -327,6 +327,8 @@ def test_disclosure_script_is_not_research_text():
 
 ### O1/R1 本地运行、恢复与观察
 
+L1跨阶段恢复接续（root，`edward/nexus-daily-research-recovery`）：已有独立的daily CLI、native worker失败、旧context和proposal原子性回归，不新增入口。补一条隔离PG通过正常`daily_once`的admit→advance→research-admit→research-run；只在SDK传输边界注入调用后故障，不替换worker/诊断/冻结逻辑。失败终态已持久化后重建配置/会话，重入同root/run，核验SDK累计一次、终态不重领、预算与原快照不重复/不改写、其他队列不动；failed context保持partial/locked，本例下游proposal因输入不齐拒绝且无新group/data/job，不表示所有failed研究均禁止context-only草稿。该验证不是进程强制中断恢复。仅合成数据，无真实模型/网络/业务库；首跑1PG通过、独立审查ready，无生产代码修改。
+
 - A复用 `ops/` 本地CLI、现有 backup/restore工具、`docs/runbooks/{local-development,backup-restore,intraday-market-monitor}.md`。只改本次证实过时的命令/状态/审批说明，不整库重写文档。
 - 先读代码与synthetic恢复回归，真实备份若在已授权本地受保护目录中执行不上传；任何恢复只到验证过的空隔离目标，绝不覆盖业务库。需有校验/hash、表/对象对应与停止/回退说明。
 - 故障测试：Provider首错停止、Job终态与进程退出分开、旧数据保留、页面正确标stale、未知调用结果不自动重放、应用版本确实加载。
