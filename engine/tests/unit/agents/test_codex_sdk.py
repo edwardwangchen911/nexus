@@ -1,6 +1,7 @@
 """Offline SDK transport, citation, cleanup and no-retry boundary tests."""
 
 import asyncio
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -402,6 +403,102 @@ def _tools():
             for name in ReadOnlyTools.names
         }
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("staged", [False, True])
+@pytest.mark.parametrize("adjustment", ["raw", "all", None])
+async def test_sdk_keeps_issuer_evidence_and_close_separate_from_adjusted_features(
+    monkeypatch, staged, adjustment
+):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    security = {
+        "status": "ok",
+        "items": [
+            {
+                "source": "ssga",
+                "provider_object_id": "synthetic-issuer-distribution",
+                "revision": "fixture-v1",
+                "available_at": request.decision_time.isoformat(),
+                "content_hash": "d" * 64,
+                "issuer_distribution": {
+                    "dividend_per_share": "0.125000",
+                    "short_term_capital_gain": None,
+                    "historical_backtest_eligible": False,
+                },
+            }
+        ],
+    }
+    unavailable = {"status": "unavailable", "items": [], "reason": "no_frozen_price_authority"}
+    calls = []
+
+    def price(payload):
+        features = payload["features"]
+        calls.append(features)
+        if adjustment is None:
+            return unavailable
+        if adjustment == "raw" and any(feature != "close" for feature in features):
+            return {**unavailable, "reason": "adjusted_price_authority_unavailable"}
+        return {
+            "status": "ok",
+            "items": [
+                {
+                    "adjustment": adjustment,
+                    "features": {feature: "123.456789" for feature in features},
+                }
+            ],
+        }
+
+    tools = ReadOnlyTools(
+        executors={
+            **{name: lambda payload: unavailable for name in ReadOnlyTools.names},
+            "get_security_snapshot": lambda payload: security,
+            "get_price_features": price,
+        }
+    )
+    submitted = []
+
+    async def invoke(payload, **kwargs):
+        submitted.append(payload)
+        batch = _staged_batch(payload["stage"], payload["requested_roles"]) if staged else _batch()
+        return json.dumps(batch), UsageSnapshot(input_tokens=300, output_tokens=80)
+
+    module = codex_staged if staged else codex_sdk
+    monkeypatch.setattr(module, "invoke_codex", invoke)
+    model_class = codex_staged.StagedCodexCommittee if staged else codex_sdk.CodexCommittee
+    model = model_class(prompts=prompts, tools=tools)
+    outputs = [await model.analyze(role, request, evidence, prompts[role]) for role in ROLE_ORDER]
+    assert len(submitted) == (3 if staged else 1)
+    if staged:
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                submitted[0]["frozen_inputs"],
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        assert {output.frozen_inputs_hash for output in outputs} == {fingerprint}
+    for payload in submitted:
+        frozen = payload["frozen_inputs"]
+        assert frozen["security_snapshot"] == security
+        if adjustment is None:
+            assert frozen["price_close"] == frozen["price_features"] == unavailable
+        else:
+            assert frozen["price_close"]["items"] == [
+                {
+                    "adjustment": adjustment,
+                    "features": {"close": "123.456789"},
+                }
+            ]
+            if adjustment == "raw":
+                assert frozen["price_features"]["status"] == "unavailable"
+                assert frozen["price_features"]["reason"] == "adjusted_price_authority_unavailable"
+            else:
+                assert frozen["price_features"]["status"] == "ok"
+    assert calls == [("close",), ("sma_20", "sma_200", "rsi_14", "volatility_20")]
 
 
 def test_child_environment_excludes_secrets_and_parent_app_ipc(monkeypatch):

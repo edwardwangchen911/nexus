@@ -12,6 +12,7 @@ import httpx
 import pytest
 from helpers.fosun_lineage import seed_fosun_daily_lineage
 from helpers.portfolio_api import app, headers
+from nexus.agents.codex_staged import StagedCodexCommittee
 from nexus.agents.committee import (
     ROLE_ORDER,
     AgentRole,
@@ -3103,6 +3104,16 @@ async def test_nonfixture_raw_fosun_prices_expose_close_but_reject_return_featur
                 "features": ["close", "sma_20", "rsi_14", "volatility_20"],
             },
         )
+        committee = StagedCodexCommittee(prompts=load_prompt_assets(), tools=tools)
+        inputs = await committee._inputs(
+            ResearchRequest(
+                instrument_id=_INSTRUMENT_ID,
+                data_snapshot_id=_SNAPSHOT_ID,
+                decision_time=_NOW,
+            )
+        )
+        assert inputs["price_close"] == close
+        assert inputs["price_features"] == derived
     assert close["status"] == "ok"
     assert close["items"][0]["source"] == "fosun"
     assert close["items"][0]["features"] == {"close": "100.000000000000"}

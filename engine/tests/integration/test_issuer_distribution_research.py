@@ -10,6 +10,8 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from integration.test_research_snapshot_preparation import INSTRUMENT, NOW, seed_filing
+from nexus.agents.codex_staged import StagedCodexCommittee
+from nexus.agents.committee import load_prompt_assets
 from nexus.agents.database_tools import database_read_only_tools
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import admit_research_run
@@ -128,6 +130,17 @@ async def test_issuer_fact_reaches_new_frozen_tool_without_leaking_into_old_cuto
         assert facts[0]["short_term_capital_gain"] is None
         assert facts[0]["historical_backtest_eligible"] is False
         assert facts[0]["available_at"] == "2026-09-02T04:01:00Z"
+        committee = StagedCodexCommittee(prompts=load_prompt_assets(), tools=tools)
+        inputs = await committee._inputs(
+            ResearchRequest(
+                instrument_id=INSTRUMENT,
+                data_snapshot_id=frozen.id,
+                decision_time=decision,
+            )
+        )
+        assert inputs["security_snapshot"] == result
+        assert inputs["price_close"]["status"] == "unavailable"
+        assert inputs["price_features"]["status"] == "unavailable"
     with pytest.raises(RuntimeError, match="frozen issuer evidence"):
         await asyncio.to_thread(
             command.downgrade, Config("engine/alembic.ini"), "0034_capability_versions"

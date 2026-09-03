@@ -358,6 +358,7 @@ class CodexCommittee:
         }
         security = await self._tools.execute("get_security_snapshot", scope)
         result: dict[str, object] = {
+            "security_snapshot": security,
             "filing_disclosures": await self._tools.execute(
                 "search_filing_evidence",
                 {
@@ -384,11 +385,16 @@ class CodexCommittee:
                     ],
                 },
             ),
+            # Raw close can be valid even when adjusted indicators are unavailable.
+            "price_close": await self._tools.execute(
+                "get_price_features",
+                {**scope, "features": ["close"]},
+            ),
             "price_features": await self._tools.execute(
                 "get_price_features",
                 {
                     **scope,
-                    "features": ["close", "sma_20", "sma_200", "rsi_14", "volatility_20"],
+                    "features": ["sma_20", "sma_200", "rsi_14", "volatility_20"],
                 },
             ),
             "macro": await self._tools.execute(
