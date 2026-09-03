@@ -68,6 +68,7 @@ const reasons: Record<string, string> = {
   CURRENCY_EXPOSURE_REQUIRES_IDENTITIES: "计算币种占比需要标的币种资料",
   model_usage_uncertain: "部分模型调用未返回用量",
   model_execution_failed: "模型执行未完成，具体原因尚未确认",
+  conflicting_facts: "研究报告了尚未解决的事实矛盾",
   "filled at target-session open": "按目标交易日开盘价模拟成交",
 };
 

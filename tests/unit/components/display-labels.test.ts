@@ -11,6 +11,9 @@ describe("plain-language display labels", () => {
   it("describes a model execution failure without inventing its cause", () => {
     expect(reasonLabel("model_execution_failed")).toBe("模型执行未完成，具体原因尚未确认");
   });
+  it("explains why conflicting research evidence abstains", () => {
+    expect(reasonLabel("conflicting_facts")).toBe("研究报告了尚未解决的事实矛盾");
+  });
   it.each([["DRAWDOWN_252", 252], ["BETA_CORRELATION_126", 126], ["VOLATILITY_63", 63], ["VOLATILITY_20", 20]])("describes the %s coverage window without requiring every day", (code, days) => {
     expect(reasonLabel(`${code}_COVERAGE_INSUFFICIENT`)).toContain(`${days} 个交易日窗口内有效价格覆盖不足`);
   });
