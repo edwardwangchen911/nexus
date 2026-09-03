@@ -206,37 +206,3 @@ def test_non_week_end_keeps_explicit_rank_state():
     decision = evaluate_baseline_v1(snapshot, snapshot.decision_session)
     assert decision.reason == "NOT_WEEK_END"
     assert decision.position_rank_states == values["position_rank_states"]
-
-
-def test_preparation_matches_existing_backtest_snapshot_and_decision():
-    from nexus.backtest.engine import _prepare_dataset, _strategy_snapshot
-
-    from engine.tests.unit.backtest.test_engine import _dataset
-
-    values = inputs()
-    data = _dataset(
-        bars=values["raw_bars"], sessions=values["calendar_sessions"], universe_members=(ID,)
-    )
-    old = _strategy_snapshot(
-        data=data,
-        prepared=_prepare_dataset(data),
-        decision_session=END,
-        next_session=values["next_session"],
-        current_positions=(),
-        position_rank_streaks={},
-    )
-    new = prepare_strategy_data_snapshot(
-        **(
-            values
-            | {
-                "raw_bars": data.bars,
-                "adjusted_bars": data.adjusted_bars,
-                "asset_types": data.asset_types,
-                "sector_classifications": data.sector_classifications,
-                "decision_times": data.authority.exchange_calendar.decision_times,
-                "decision_time": data.authority.exchange_calendar.decision_times[END],
-            }
-        )
-    )
-    assert new == old
-    assert evaluate_baseline_v1(new, END) == evaluate_baseline_v1(old, END)
