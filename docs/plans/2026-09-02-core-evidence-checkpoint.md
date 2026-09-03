@@ -1127,3 +1127,32 @@ Engine严格合同同步兼容，既有ProviderPage.raw_payload原样保留，�
 也不兼容旧strict consumer，运行切换必须先所有消费者、后Gateway。回滚相反顺序，
 停止新调用后先旧Gateway；已归档新字段需要保留兼容reader，不能删除或改写归档。
 截至此记录没有加载新Gateway或请求供应商，不能将合成留存证明当作真实字段存在。
+
+## L1 同一真实快照单次诊断（2026-09-04，北京时间）
+
+主线3be669c的host CLI按真实既存snapshot、已收盘XNYS日历和实际手动截止admit/advance
+各一次；显式DB/对象库沿实际配置加载，不用fixture。三个原worker tick分别完成日根、
+快照校验和DIAGNOSTIC_RESEARCH_REQUIRED，全部attempt=1。数据库逐行hash核验：旧快照、
+诊断report/items、研究run/outputs和旧jobs均保持，仅新增3jobs，活动作业归零；原诊断
+幂等复用而非重复生成，snapshot.as_of保持。BFF返回同一snapshot。验证脚本一处UUID与
+text共用SQL参数类型冲突已修正查询，只重新执行只读核验，没有重放业务命令。
+
+记录在受保护`outputs/acceptance/daily-manual-20260904/`。本次没有采集、模型调用、
+paper或调度；completed仅表示这两阶段诊断完成，研究原生准入/运行仍在后续接线。
+
+61ed430已合入主线并先加载到API消费者，源hash/env/ports保持核验；主机消费者亦使用
+该主线，随后才启动既有受控Gateway，正常等待61秒就绪。对同一案例一个已完成交易日
+只请求一次Kline，SDK原件已捕获：存在整数turnover、有效power，未见币种/单位字段。
+Gateway拒绝PROVIDER_WINDOW_MISMATCH，未形成可消费的Gateway归档，本次不宣称真实
+全路径留存通过。失败后不重试，SIGTERM清理自有Gateway并确认进程退出。
+
+离线复核原因是通用FosunMarketDataProvider固定limit=500，而SDK日K使用结束日前的
+num根，不接收start；单日请求因此拿到窗口前历史，现有window guard正确拒绝。现有
+本地日刷新按冻结calendar的expected_sessions数量传limit，不能将该通用入口缺陷扩大
+为日刷新全部失效。没有放宽guard、裁剪/重标原响应或重放业务调用；源字段存在性与
+适用币种/时段/调整语义仍分别判断。原件和结果留在本机受保护
+`outputs/acceptance/turnover-retention-20260904/`，后续先修正常入口再做有意义的验收。
+
+研究显式snapshot绑定5db9554合为fb8dc51，缺指定context拒绝退回generic/default latest，
+默认调用保持旧行为/旧hash。A22项新旧PG、Mypy2/Ruff通过；只冻结真实已存在资料，
+不改原snapshot.as_of，不因新增日根而抢占后来最新快照，也未实际调用模型。
