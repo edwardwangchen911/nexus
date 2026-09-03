@@ -1,6 +1,44 @@
 # 本地备份恢复 runbook
 
+## 数据库与已引用对象的完整本地备份
+
+`python -m nexus.ops.local_backup` 在一个**尚不存在**的受保护目录中创建数据库及其已引用对象备份。它只读现有本机 PostgreSQL/MinIO，不暂停业务服务，不覆盖旧备份；需要已缓存的固定 PostgreSQL 17 镜像。Mac 上容器内的只读 `pg_dump` 经 `host.docker.internal` 连接已配置的回环源数据库。
+
+```bash
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.local_backup \
+  --repo-root /Users/wangchen/Documents/ChatGPT/投资 \
+  --destination /Users/wangchen/Documents/ChatGPT/投资/outputs/backups/complete-local-YYYYMMDDTHHMMSSZ
+```
+
+备份目录为 0700，文件为 0600，包含 `database.dump`、`objects/`、`object-bindings.json`、`manifest.json` 和最后生成的 `complete.json`，不得提交 Git 或用作测试数据。
+
+1. 在源库的 `REPEATABLE READ READ ONLY` 事务中导出快照；四张关键表摘要、全部 public 表中的对象引用和 `pg_dump --snapshot` 使用同一快照。事务保持到 dump 完成为止，导出期间的新写入不会混入该备份。
+2. 复用精确版本对象读取：每个数据库 S3 引用都必须有一致的 SHA-256/长度绑定，版本、内容、大小全部匹配才保留。缺失或冲突即失败，不能默认为空对象集。备份的原始 URI 不改写；映射文件记录其对应本地副本。
+3. 校验 dump 在工具容器与本地的哈希/长度，对象写入后离线读回；manifest 固定 `nexus_local_backup_v1` 格式并绑定对象清单哈希和数量。dump 上限 512 MiB，对象上限沿用下文，超出即停止。
+4. 只清理本轮随机所有权容器。全部数据验证且清理成功后才写入 `complete.json`，其中绑定 manifest 哈希。中断、缺对象、导出失败或清理失败均不产生完成标记；失败目录保留，下次人工执行必须选择新目录，旧完整备份不受影响。
+
+恢复使用同一个现有入口：
+
+```bash
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.local_recovery \
+  --repo-root /Users/wangchen/Documents/ChatGPT/投资 \
+  --backup /Users/wangchen/Documents/ChatGPT/投资/outputs/backups/complete-local-YYYYMMDDTHHMMSSZ
+```
+
+识别完整格式后，恢复**不读取源凭据、不构造 MinIO 客户端、不访问源数据库或源对象存储**；`--repo-root` 为旧入口兼容参数，这种模式不加载其配置。先校验完成标记及两个清单，再在空的随机 tmpfs PostgreSQL 中恢复。恢复数据库扫描得到的精确 URI/版本/哈希/长度集合必须与备份对象清单完全相等，再从本地副本复制并读回验证。失败不会降级为向源 MinIO 补取。原 URI 和历史数据库行保持不变。
+
+本功能覆盖对应数据库快照及所有必要的已引用对象。未被数据库引用的文件、密钥/配置、数据库角色权限、应用切换和异机恢复不在此验收范围。回滚只需退回旧代码并保留新增备份目录；不需要迁移或删除历史数据。旧代码不能解释新完整格式，应使用本版本恢复它。
+
+### 2026-09-03 完整备份实际验收
+
+- 新备份目录：`outputs/backups/complete-local-20260903T023611Z`，schema `0035_issuer_research_evidence`，146 个已引用对象精确版本及内容校验通过；旧备份未修改。
+- 实际恢复使用不存在的源配置目录，完成标记/数据库/四表摘要/146 个本地对象全部校验通过，`source_object_store_required=false`；恢复约 3.701 秒，临时容器残留 0，业务 PostgreSQL/MinIO/API 未重启。
+- 私有恢复记录：该备份内 `recovery-da49d533ddd64beda73105cf5d090296/result.json`。它只用于业务恢复验收，未作为单元或集成测试输入。
+- 合成跨层测试另行覆盖导出期间的并发写入，以及禁止源配置读取和源 S3 客户端构造后的空库恢复；真实业务服务没有被停止或断网来制造“离线”。
+
 ## 真实业务备份的隔离恢复
+
+本节保留旧 DB-only 备份的恢复兼容路径，它仍需源 MinIO；新备份应使用上面的完整格式。
 
 `python -m nexus.ops.local_recovery` 接受已有受保护备份目录，在随机命名、动态回环端口的独立 PostgreSQL 容器中实际执行恢复。它不连接或修改业务数据库，不启动应用、任务或交易；原 fixture 演练入口见下文。
 

@@ -24,7 +24,7 @@ from uuid import uuid4
 
 from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from nexus.market.object_store import S3ProviderEvidenceStore, _version_id_from_frozen_uri
 from nexus.ops.backup_restore import _POSTGRES_IMAGE
@@ -55,12 +55,43 @@ def write_private(path: Path, content: bytes) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "wb") as output:
         output.write(content)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def private_file(path: Path) -> bytes:
+    if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
+        raise RecoveryError("RECOVERY_PRIVATE_BACKUP_REQUIRED")
+    return path.read_bytes()
 
 
 def read_backup(directory: Path) -> dict[str, Any]:
     manifest = json.loads((directory / "manifest.json").read_bytes())
     if not isinstance(manifest, dict):
         raise RecoveryError("RECOVERY_BACKUP_MANIFEST_INVALID")
+    if "format" not in manifest and any(
+        (directory / name).exists() for name in ("complete.json", "object-bindings.json")
+    ):
+        raise RecoveryError("RECOVERY_BACKUP_FORMAT_INVALID")
+    if "format" in manifest:
+        if manifest["format"] != "nexus_local_backup_v1":
+            raise RecoveryError("RECOVERY_BACKUP_FORMAT_INVALID")
+        marker = json.loads(private_file(directory / "complete.json"))
+        mapping_bytes = private_file(directory / "object-bindings.json")
+        mapping = json.loads(mapping_bytes)
+        if (
+            not isinstance(marker, dict)
+            or marker.get("manifest_sha256")
+            != hashlib.sha256(private_file(directory / "manifest.json")).hexdigest()
+            or hashlib.sha256(mapping_bytes).hexdigest() != manifest.get("objects_sha256")
+            or not isinstance(mapping, list)
+            or type(manifest.get("object_count")) is not int
+            or len(mapping) != manifest["object_count"]
+            or not 0 <= len(mapping) <= _MAX_OBJECTS
+            or type(manifest.get("source_port")) is not int
+            or not 0 < manifest["source_port"] < 65536
+        ):
+            raise RecoveryError("RECOVERY_BACKUP_INCOMPLETE")
     with (directory / "database.dump").open("rb") as archive:
         digest = hashlib.file_digest(archive, "sha256").hexdigest()
     if digest != manifest.get("dump_sha256") or (
@@ -83,6 +114,23 @@ def read_backup(directory: Path) -> dict[str, Any]:
     ):
         raise RecoveryError("RECOVERY_BACKUP_MANIFEST_INVALID")
     return manifest
+
+
+async def database_rows(connection: AsyncConnection) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    tables = await connection.scalars(
+        text("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")
+    )
+    for table in tables:
+        if not _IDENTIFIER.fullmatch(table):
+            raise RecoveryError("RECOVERY_TABLE_NAME_INVALID")
+        rows.extend(
+            json.loads(row)
+            for row in await connection.scalars(
+                text(f'SELECT row_to_json(t)::text FROM public."{table}" t')
+            )
+        )
+    return rows
 
 
 def validate_target(
@@ -167,7 +215,8 @@ def verify_object(
 class LocalRecovery:
     def __init__(self, backup: Path, repo_root: Path) -> None:
         self.backup = backup.resolve()
-        self.environment = load_local_environment(repo_root, {})
+        self.repo_root = repo_root
+        self.environment: dict[str, str] = {}
         self.run_id = uuid4().hex
         self.container = f"nexus-recovery-postgres-{self.run_id}"
         self.database = f"nexus_recovery_{self.run_id}"
@@ -352,25 +401,7 @@ class LocalRecovery:
                         != expected["sha256"]
                     ):
                         raise RecoveryError("RECOVERY_TABLE_DIGEST_MISMATCH")
-                rows: list[dict[str, Any]] = []
-                tables = list(
-                    await connection.scalars(
-                        text(
-                            "SELECT tablename FROM pg_tables "
-                            "WHERE schemaname='public' ORDER BY tablename"
-                        )
-                    )
-                )
-                for table in tables:
-                    if not _IDENTIFIER.fullmatch(table):
-                        raise RecoveryError("RECOVERY_TABLE_NAME_INVALID")
-                    rows.extend(
-                        json.loads(row)
-                        for row in await connection.scalars(
-                            text(f'SELECT row_to_json(t)::text FROM public."{table}" t')
-                        )
-                    )
-                return rows
+                return await database_rows(connection)
         finally:
             await engine.dispose()
 
@@ -411,9 +442,63 @@ class LocalRecovery:
             verify_object(content, "local", "local", binding["sha256"], binding["byte_size"])
         return len(mapping)
 
+    async def recover_local_objects(self, rows: list[dict[str, Any]]) -> int:
+        """Read only the bundle; no source configuration or client is needed."""
+        assert self.output is not None
+        expected = collect_bindings(rows)
+        mapping = json.loads(private_file(self.backup / "object-bindings.json"))
+        if not isinstance(mapping, list) or len(mapping) != len(expected):
+            raise RecoveryError("RECOVERY_OBJECT_SET_MISMATCH")
+        source = self.backup / "objects"
+        if source.is_symlink() or not source.is_dir() or source.stat().st_mode & 0o077:
+            raise RecoveryError("RECOVERY_PRIVATE_BACKUP_REQUIRED")
+        objects = self.output / "objects"
+        objects.mkdir(mode=0o700)
+        seen: set[str] = set()
+        for binding in mapping:
+            if not isinstance(binding, dict) or set(binding) != {
+                "uri",
+                "sha256",
+                "byte_size",
+                "file",
+            }:
+                raise RecoveryError("RECOVERY_OBJECT_BINDING_INVALID")
+            uri, filename = binding["uri"], binding["file"]
+            if (
+                not isinstance(uri, str)
+                or uri in seen
+                or uri not in expected
+                or (binding["sha256"], binding["byte_size"]) != expected[uri]
+                or not isinstance(filename, str)
+                or not re.fullmatch(r"[0-9]{6}\.bin", filename)
+            ):
+                raise RecoveryError("RECOVERY_OBJECT_SET_MISMATCH")
+            parsed = urlsplit(uri)
+            version = _version_id_from_frozen_uri(
+                uri, bucket=parsed.netloc, storage_key=parsed.path.removeprefix("/")
+            )
+            digest, size = expected[uri]
+            if (source / filename).stat().st_size != size:
+                raise RecoveryError("RECOVERY_OBJECT_MISMATCH")
+            content = private_file(source / filename)
+            verify_object(content, version, version, digest, size)
+            write_private(objects / filename, content)
+            verify_object(private_file(objects / filename), version, version, digest, size)
+            seen.add(uri)
+        if seen != set(expected):
+            raise RecoveryError("RECOVERY_OBJECT_SET_MISMATCH")
+        write_private(self.output / "object-bindings.json", json.dumps(mapping).encode())
+        return len(mapping)
+
     async def execute(self) -> dict[str, Any]:
         started = monotonic()
         manifest = read_backup(self.backup)
+        offline = manifest.get("format") == "nexus_local_backup_v1"
+        self.environment = (
+            {"DATABASE_URL": f"postgresql://127.0.0.1:{manifest['source_port']}/source"}
+            if offline
+            else load_local_environment(self.repo_root, {})
+        )
         # Existing backup and every new recovery artifact must remain private.
         for path in (self.backup, self.backup / "database.dump", self.backup / "manifest.json"):
             if path.stat().st_mode & 0o077:
@@ -430,7 +515,10 @@ class LocalRecovery:
             result["backup_schema_verified"] = True
             result["backup_table_digests_verified"] = True
             result["stage"] = "objects"
-            result["object_count"] = await self.recover_objects(rows)
+            result["object_count"] = await (
+                self.recover_local_objects(rows) if offline else self.recover_objects(rows)
+            )
+            result["source_object_store_required"] = not offline
             result["object_bindings_verified"] = True
             result["status"] = "verified"
             result["stage"] = "complete"
