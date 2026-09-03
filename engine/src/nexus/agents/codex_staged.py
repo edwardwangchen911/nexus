@@ -4,9 +4,11 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Mapping
+from enum import Enum
+from types import GenericAlias
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
 from nexus.agents.codex_sdk import (
     MAX_INPUT_TOKENS,
@@ -77,6 +79,32 @@ STAGE_MODELS: dict[str, type[_StageBatch]] = {
     "critique": _CritiqueBatch,
     "synthesis": _SynthesisBatch,
 }
+
+
+def _stage_model_for_prior_claims(stage: str, claim_ids: tuple[str, ...]) -> type[BaseModel]:
+    """Constrain this request without mutating shared schemas or the saved history."""
+    base = STAGE_MODELS[stage]
+    if stage == "research":
+        return base
+    identifiers = Enum(  # type: ignore[misc]  # Request-specific members.
+        "PriorClaimId",
+        {f"claim_{i}": value for i, value in enumerate(claim_ids)},
+        type=str,
+    )
+    role = _CritiqueRole if stage == "critique" else _SynthesisRole
+    bound_role = create_model(
+        f"{role.__name__}ForFrozenClaims",
+        __base__=role,
+        reviewed_claim_ids=(
+            GenericAlias(tuple, (identifiers, Ellipsis)),
+            role.model_fields["reviewed_claim_ids"],
+        ),
+    )
+    return create_model(
+        f"{base.__name__}ForFrozenClaims",
+        __base__=base,
+        roles=(GenericAlias(tuple, (bound_role, Ellipsis)), base.model_fields["roles"]),
+    )
 
 
 class StagedCodexCommittee(CodexCommittee):
@@ -170,8 +198,11 @@ class StagedCodexCommittee(CodexCommittee):
             "frozen_inputs": self._frozen_inputs,
             "previous_claims": previous,
         }
+        output_model = _stage_model_for_prior_claims(
+            stage, tuple(str(item["claim_id"]) for item in previous)
+        )
         estimated_input = len(json.dumps(payload, ensure_ascii=False).encode()) + 8192
-        stage_input_hash = codex_request_hash(payload, STAGE_MODELS[stage])
+        stage_input_hash = codex_request_hash(payload, output_model)
         frozen_inputs_hash = hashlib.sha256(
             json.dumps(
                 self._frozen_inputs, sort_keys=True, ensure_ascii=False, separators=(",", ":")
@@ -198,7 +229,7 @@ class StagedCodexCommittee(CodexCommittee):
             provider_calls=self.usage.provider_calls + 1,
         )
         async with asyncio.timeout_at(self._deadline):
-            raw, usage = await invoke_codex(payload, output_model=STAGE_MODELS[stage])
+            raw, usage = await invoke_codex(payload, output_model=output_model)
         self.usage = UsageSnapshot(
             input_tokens=self.usage.input_tokens + usage.input_tokens,
             output_tokens=self.usage.output_tokens + usage.output_tokens,

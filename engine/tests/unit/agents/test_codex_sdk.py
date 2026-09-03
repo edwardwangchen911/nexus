@@ -61,9 +61,11 @@ async def test_staged_committee_passes_validated_claims_forward_and_shares_usage
 
     request, evidence, prompts = _authority()
     submitted = []
+    submitted_models = {}
 
     async def invoke(payload, *, output_model):
         submitted.append(payload)
+        submitted_models[payload["stage"]] = output_model
         batch = _staged_batch(payload["stage"], [p["role"] for p in payload["prompts"]])
         if payload["stage"] == "critique":
             batch["roles"][0]["claims"][0]["text"] = "成交容量未知，不能判断退出速度。"
@@ -105,14 +107,12 @@ async def test_staged_committee_passes_validated_claims_forward_and_shares_usage
     assert outputs[0].frozen_inputs_hash is not None
     assert len({o.stage_input_hash for o in outputs}) == 3
     for payload in submitted:
-        expected_hash = codex_sdk.codex_request_hash(
-            payload, codex_staged.STAGE_MODELS[payload["stage"]]
-        )
+        expected_hash = codex_sdk.codex_request_hash(payload, submitted_models[payload["stage"]])
         assert all(
             o.stage_input_hash == expected_hash for o in outputs if o.stage == payload["stage"]
         )
     changed = {**submitted[1], "previous_claims": []}
-    assert codex_sdk.codex_request_hash(changed, codex_staged.STAGE_MODELS["critique"]) != (
+    assert codex_sdk.codex_request_hash(changed, submitted_models["critique"]) != (
         outputs[5].stage_input_hash
     )
     assert [p["requested_roles"] for p in submitted] == [
@@ -135,6 +135,60 @@ async def test_staged_committee_passes_validated_claims_forward_and_shares_usage
             evidence,
             prompts["portfolio"],
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra_research_claim", [False, True])
+async def test_submitted_stage_schema_only_allows_the_actual_prior_claim_ids(
+    monkeypatch, extra_research_claim
+):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    checked_stages = []
+
+    async def invoke(payload, *, output_model):
+        stage = payload["stage"]
+        batch = _staged_batch(stage, payload["requested_roles"])
+        if stage == "research":
+            if extra_research_claim:
+                batch["roles"][0]["claims"].append(
+                    {"text": "补充的冻结证据仍不能支持交易。", "citations": [0]}
+                )
+        else:
+            expected_ids = {
+                "orchestrator:0",
+                "fundamental:0",
+                "market_state:0",
+                "macro_sector:0",
+                "bull:0",
+            }
+            if extra_research_claim:
+                expected_ids.add("orchestrator:1")
+            if stage == "synthesis":
+                expected_ids.update(("bear:0", "evidence_audit:0"))
+            # Validate the actual schema handed to the SDK, not a test-only schema.
+            schema = codex_sdk.pydantic_function_tool(output_model)["function"]["parameters"]
+            assert any(
+                set(definition.get("enum", ())) == expected_ids
+                for definition in schema.get("$defs", {}).values()
+            )
+            invalid = json.loads(json.dumps(batch))
+            invalid["roles"][0]["reviewed_claim_ids"] = (
+                ["external:0"] if stage == "critique" else ["bear:0", "portfolio:0"]
+            )
+            with pytest.raises(ValueError):
+                output_model.model_validate(invalid)
+            checked_stages.append(stage)
+        assert output_model.model_validate(batch)
+        return json.dumps(batch), UsageSnapshot(input_tokens=300, output_tokens=80)
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools())
+    for role in ROLE_ORDER:
+        await model.analyze(role, request, evidence, prompts[role])
+    assert checked_stages == ["critique", "synthesis"]
+    assert model.usage.provider_calls == 3
 
 
 @pytest.mark.asyncio
@@ -655,6 +709,22 @@ async def test_sdk_uses_ephemeral_read_only_thread_schema_and_cleanup(monkeypatc
     assert thread.run.call_args.kwargs["approval_mode"] is ApprovalMode.deny_all
     client.close.assert_awaited_once()
     assert not Path(configs[0].cwd).exists()
+
+
+@pytest.mark.asyncio
+async def test_sdk_submits_the_request_bound_review_schema(monkeypatch):
+    from nexus.agents import codex_staged
+
+    client, thread, _, _ = _sdk(monkeypatch)
+    prior_claim_ids = ("orchestrator:0", "bull:0")
+    output_model = codex_staged._stage_model_for_prior_claims("critique", prior_claim_ids)
+    await codex_sdk.invoke_codex({"stage": "critique"}, output_model=output_model)
+    schema = thread.run.call_args.kwargs["output_schema"]
+    assert any(
+        set(definition.get("enum", ())) == set(prior_claim_ids)
+        for definition in schema["$defs"].values()
+    )
+    client.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

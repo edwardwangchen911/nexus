@@ -238,7 +238,8 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
         if not model_fails:
             assert len({stage["frozen_inputs_hash"] for stage in trace["stages"]}) == 1
             assert trace["stages"][2]["roles"][0]["reviewed_claim_ids"] == [
-                "bear:0", "evidence_audit:0"
+                "bear:0",
+                "evidence_audit:0",
             ]
     else:
         assert data["stage_trace"] is None
@@ -268,11 +269,14 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             assert past[_INSTRUMENT_ID].run_id is None
     elif staged:
         assert data["failed_stage_input"]["stage"] == "critique"
+        prior_claim_ids = tuple(item["claim_id"] for item in submitted["previous_claims"])
         assert data["failed_stage_input"]["request_hash"] == codex_sdk.codex_request_hash(
-            submitted, codex_staged.STAGE_MODELS["critique"]
+            submitted,
+            codex_staged._stage_model_for_prior_claims("critique", prior_claim_ids),
         )
-        assert data["failed_stage_input"]["frozen_inputs_hash"] == (
-            data["stage_trace"]["stages"][0]["frozen_inputs_hash"]
+        assert (
+            data["failed_stage_input"]["frozen_inputs_hash"]
+            == (data["stage_trace"]["stages"][0]["frozen_inputs_hash"])
         )
         assert data["abstention_reason"] == (
             "model_stage_citation_invalid"
