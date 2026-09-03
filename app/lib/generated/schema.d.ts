@@ -3282,6 +3282,74 @@ export interface components {
             /** Source Url */
             source_url?: string | null;
         };
+        /**
+         * ResearchInputIssuerDistribution
+         * @description Latest bound issuer observation; amounts are USD per fund share.
+         */
+        ResearchInputIssuerDistribution: {
+            /**
+             * Amount Basis
+             * @constant
+             */
+            amount_basis: "per_share";
+            /**
+             * Available At
+             * Format: date-time
+             */
+            available_at: string;
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Currency
+             * @constant
+             */
+            currency: "USD";
+            /** Dividend Per Share */
+            dividend_per_share: string;
+            /**
+             * Evidence Ref Id
+             * Format: uuid
+             */
+            evidence_ref_id: string;
+            /**
+             * Ex Date
+             * Format: date
+             */
+            ex_date: string;
+            /**
+             * Historical Backtest Eligible
+             * @constant
+             */
+            historical_backtest_eligible: false;
+            /** Long Term Capital Gain */
+            long_term_capital_gain: string | null;
+            /**
+             * Payable Date
+             * Format: date
+             */
+            payable_date: string;
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /**
+             * Record Date
+             * Format: date
+             */
+            record_date: string;
+            /** Revision */
+            revision: string;
+            /** Short Term Capital Gain */
+            short_term_capital_gain: string | null;
+            /**
+             * Source
+             * @constant
+             */
+            source: "ssga_distribution";
+            /** Source Url */
+            source_url: string;
+        };
         /** ResearchInputsSummary */
         ResearchInputsSummary: {
             /** Display Symbol */
@@ -3290,6 +3358,11 @@ export interface components {
             facts: components["schemas"]["ResearchInputFact"][];
             /** Filings */
             filings: components["schemas"]["ResearchInputFiling"][];
+            /**
+             * Issuer Distributions
+             * @default []
+             */
+            issuer_distributions: components["schemas"]["ResearchInputIssuerDistribution"][];
             portfolio_context?: components["schemas"]["PortfolioResearchContext"] | null;
             /** Total Facts */
             total_facts: number;

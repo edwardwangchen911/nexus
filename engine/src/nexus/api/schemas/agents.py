@@ -11,7 +11,7 @@ from nexus.domain.decimal import DecimalString
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
 from nexus.strategy.intents import ResearchClaim, ResearchCondition, ResearchIntent, RoleVote
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 
 class _StrictAgentSchema(BaseModel):
@@ -122,6 +122,27 @@ class ResearchInputFact(_StrictAgentSchema):
     period_end: date
 
 
+class ResearchInputIssuerDistribution(_StrictAgentSchema):
+    """Latest bound issuer observation; amounts are USD per fund share."""
+
+    evidence_ref_id: UUID
+    source: Literal["ssga_distribution"]
+    revision: str = Field(max_length=255)
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    ex_date: date
+    record_date: date
+    payable_date: date
+    currency: Literal["USD"]
+    amount_basis: Literal["per_share"]
+    dividend_per_share: DecimalString
+    short_term_capital_gain: DecimalString | None
+    long_term_capital_gain: DecimalString | None
+    available_at: AwareDatetime
+    received_at: AwareDatetime
+    source_url: str = Field(max_length=512)
+    historical_backtest_eligible: Literal[False]
+
+
 class ResearchInputsSummary(_StrictAgentSchema):
     display_symbol: str | None = Field(max_length=100)
     filings: tuple[ResearchInputFiling, ...] = Field(max_length=20)
@@ -129,6 +150,9 @@ class ResearchInputsSummary(_StrictAgentSchema):
     total_facts: int = Field(ge=0)
     truncated: bool
     portfolio_context: PortfolioResearchContext | None = None
+    issuer_distributions: tuple[ResearchInputIssuerDistribution, ...] = Field(
+        default=(), max_length=1
+    )
 
 
 class ResearchAdmissionResponse(_StrictAgentSchema):

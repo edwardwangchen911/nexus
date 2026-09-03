@@ -5941,6 +5941,129 @@ export const runtimeContractSchemas = {
     "title": "ResearchInputFiling",
     "type": "object"
   },
+  "ResearchInputIssuerDistribution": {
+    "additionalProperties": false,
+    "description": "Latest bound issuer observation; amounts are USD per fund share.",
+    "properties": {
+      "amount_basis": {
+        "const": "per_share",
+        "title": "Amount Basis",
+        "type": "string"
+      },
+      "available_at": {
+        "format": "date-time",
+        "title": "Available At",
+        "type": "string"
+      },
+      "content_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Content Hash",
+        "type": "string"
+      },
+      "currency": {
+        "const": "USD",
+        "title": "Currency",
+        "type": "string"
+      },
+      "dividend_per_share": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Dividend Per Share",
+        "type": "string"
+      },
+      "evidence_ref_id": {
+        "format": "uuid",
+        "title": "Evidence Ref Id",
+        "type": "string"
+      },
+      "ex_date": {
+        "format": "date",
+        "title": "Ex Date",
+        "type": "string"
+      },
+      "historical_backtest_eligible": {
+        "const": false,
+        "title": "Historical Backtest Eligible",
+        "type": "boolean"
+      },
+      "long_term_capital_gain": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Long Term Capital Gain"
+      },
+      "payable_date": {
+        "format": "date",
+        "title": "Payable Date",
+        "type": "string"
+      },
+      "received_at": {
+        "format": "date-time",
+        "title": "Received At",
+        "type": "string"
+      },
+      "record_date": {
+        "format": "date",
+        "title": "Record Date",
+        "type": "string"
+      },
+      "revision": {
+        "maxLength": 255,
+        "title": "Revision",
+        "type": "string"
+      },
+      "short_term_capital_gain": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Short Term Capital Gain"
+      },
+      "source": {
+        "const": "ssga_distribution",
+        "title": "Source",
+        "type": "string"
+      },
+      "source_url": {
+        "maxLength": 512,
+        "title": "Source Url",
+        "type": "string"
+      }
+    },
+    "required": [
+      "evidence_ref_id",
+      "source",
+      "revision",
+      "content_hash",
+      "ex_date",
+      "record_date",
+      "payable_date",
+      "currency",
+      "amount_basis",
+      "dividend_per_share",
+      "short_term_capital_gain",
+      "long_term_capital_gain",
+      "available_at",
+      "received_at",
+      "source_url",
+      "historical_backtest_eligible"
+    ],
+    "title": "ResearchInputIssuerDistribution",
+    "type": "object"
+  },
   "ResearchInputsSummary": {
     "additionalProperties": false,
     "properties": {
@@ -5970,6 +6093,15 @@ export const runtimeContractSchemas = {
         },
         "maxItems": 20,
         "title": "Filings",
+        "type": "array"
+      },
+      "issuer_distributions": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/ResearchInputIssuerDistribution"
+        },
+        "maxItems": 1,
+        "title": "Issuer Distributions",
         "type": "array"
       },
       "portfolio_context": {
