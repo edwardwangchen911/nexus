@@ -1,6 +1,7 @@
 """Strict public shapes for bounded research-run state and evidence summaries."""
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Literal, cast
 from uuid import UUID
 
@@ -25,6 +26,7 @@ from pydantic import (
     SerializerFunctionWrapHandler,
     field_validator,
     model_serializer,
+    model_validator,
 )
 
 
@@ -359,6 +361,100 @@ class ResearchInputMacroObservation(_StrictAgentSchema):
     execution_locked: Literal[True]
 
 
+class ResearchInputPriceTrendFeatures(_StrictAgentSchema):
+    close: DecimalString | None
+    sma_20: DecimalString | None
+    sma_200: DecimalString | None
+    rsi_14: DecimalString | None
+    volatility_20: DecimalString | None
+
+    @model_validator(mode="after")
+    def value_ranges(self) -> "ResearchInputPriceTrendFeatures":
+        for value in (self.close, self.sma_20, self.sma_200):
+            if value is not None and Decimal(value) <= 0:
+                raise ValueError("TREND_PRICE_INVALID")
+        if self.rsi_14 is not None and not 0 <= Decimal(self.rsi_14) <= 100:
+            raise ValueError("TREND_RSI_INVALID")
+        if self.volatility_20 is not None and Decimal(self.volatility_20) < 0:
+            raise ValueError("TREND_VOLATILITY_INVALID")
+        return self
+
+
+class ResearchInputPriceTrend(_StrictAgentSchema):
+    evidence_ref_id: UUID
+    source: Literal["alpaca_current_trends"]
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    feed: Literal["sip"]
+    adjustment: Literal["split"]
+    currency: Literal["USD"]
+    timeframe: Literal["1Day"]
+    identity_asof: date
+    query_start: date
+    query_end: date
+    first_observed_on: date | None
+    last_observed_on: date | None
+    observed_sessions: int = Field(ge=0)
+    expected_sessions: int = Field(ge=0)
+    contiguous_tail_sessions: int = Field(ge=0)
+    missing_sessions: tuple[date, ...] = Field(max_length=20)
+    missing_sessions_total: int = Field(ge=0)
+    missing_sessions_truncated: bool
+    received_at: AwareDatetime
+    available_at: AwareDatetime
+    features: ResearchInputPriceTrendFeatures
+    historical_backtest_eligible: Literal[False]
+    market_price_eligible: Literal[False]
+    total_return_eligible: Literal[False]
+    execution_locked: Literal[True]
+
+    @field_validator("received_at", "available_at")
+    @classmethod
+    def utc_times(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+    @model_validator(mode="after")
+    def scope_consistency(self) -> "ResearchInputPriceTrend":
+        if not self.query_start <= self.query_end <= self.received_at.date():
+            raise ValueError("TREND_QUERY_WINDOW_INVALID")
+        if self.available_at < self.received_at:
+            raise ValueError("TREND_AVAILABILITY_INVALID")
+        if (
+            self.observed_sessions + self.missing_sessions_total != self.expected_sessions
+            or self.contiguous_tail_sessions > self.observed_sessions
+            or len(self.missing_sessions) != min(self.missing_sessions_total, 20)
+            or self.missing_sessions_truncated != (self.missing_sessions_total > 20)
+            or tuple(sorted(set(self.missing_sessions))) != self.missing_sessions
+            or any(not self.query_start <= day <= self.query_end for day in self.missing_sessions)
+        ):
+            raise ValueError("TREND_COVERAGE_INVALID")
+        if self.observed_sessions == 0:
+            if self.first_observed_on is not None or self.last_observed_on is not None:
+                raise ValueError("TREND_OBSERVATION_WINDOW_INVALID")
+        elif (
+            self.first_observed_on is None
+            or self.last_observed_on is None
+            or not self.query_start
+            <= self.first_observed_on
+            <= self.last_observed_on
+            <= self.query_end
+        ):
+            raise ValueError("TREND_OBSERVATION_WINDOW_INVALID")
+        for feature, required in (
+            ("close", 1),
+            ("sma_20", 20),
+            ("sma_200", 200),
+            ("rsi_14", 15),
+            ("volatility_20", 21),
+        ):
+            if (
+                getattr(self.features, feature) is not None
+                and self.contiguous_tail_sessions < required
+            ):
+                raise ValueError("TREND_WARMUP_INSUFFICIENT")
+        return self
+
+
 class ResearchInputsSummary(_StrictAgentSchema):
     display_symbol: str | None = Field(max_length=100)
     filings: tuple[ResearchInputFiling, ...] = Field(max_length=20)
@@ -378,6 +474,7 @@ class ResearchInputsSummary(_StrictAgentSchema):
     )
     company_profiles: tuple[ResearchInputCompanyProfile, ...] = Field(default=(), max_length=1)
     macro_observations: tuple[ResearchInputMacroObservation, ...] = Field(default=(), max_length=8)
+    current_price_trends: tuple[ResearchInputPriceTrend, ...] = Field(default=(), max_length=1)
 
 
 class ResearchAdmissionResponse(_StrictAgentSchema):

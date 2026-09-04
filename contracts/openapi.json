@@ -8291,6 +8291,265 @@
         "title": "ResearchInputNavObservation",
         "type": "object"
       },
+      "ResearchInputPriceTrend": {
+        "additionalProperties": false,
+        "properties": {
+          "adjustment": {
+            "const": "split",
+            "title": "Adjustment",
+            "type": "string"
+          },
+          "available_at": {
+            "format": "date-time",
+            "title": "Available At",
+            "type": "string"
+          },
+          "content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "contiguous_tail_sessions": {
+            "minimum": 0,
+            "title": "Contiguous Tail Sessions",
+            "type": "integer"
+          },
+          "currency": {
+            "const": "USD",
+            "title": "Currency",
+            "type": "string"
+          },
+          "evidence_ref_id": {
+            "format": "uuid",
+            "title": "Evidence Ref Id",
+            "type": "string"
+          },
+          "execution_locked": {
+            "const": true,
+            "title": "Execution Locked",
+            "type": "boolean"
+          },
+          "expected_sessions": {
+            "minimum": 0,
+            "title": "Expected Sessions",
+            "type": "integer"
+          },
+          "features": {
+            "$ref": "#/components/schemas/ResearchInputPriceTrendFeatures"
+          },
+          "feed": {
+            "const": "sip",
+            "title": "Feed",
+            "type": "string"
+          },
+          "first_observed_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Observed On"
+          },
+          "historical_backtest_eligible": {
+            "const": false,
+            "title": "Historical Backtest Eligible",
+            "type": "boolean"
+          },
+          "identity_asof": {
+            "format": "date",
+            "title": "Identity Asof",
+            "type": "string"
+          },
+          "last_observed_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Observed On"
+          },
+          "market_price_eligible": {
+            "const": false,
+            "title": "Market Price Eligible",
+            "type": "boolean"
+          },
+          "missing_sessions": {
+            "items": {
+              "format": "date",
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Missing Sessions",
+            "type": "array"
+          },
+          "missing_sessions_total": {
+            "minimum": 0,
+            "title": "Missing Sessions Total",
+            "type": "integer"
+          },
+          "missing_sessions_truncated": {
+            "title": "Missing Sessions Truncated",
+            "type": "boolean"
+          },
+          "observed_sessions": {
+            "minimum": 0,
+            "title": "Observed Sessions",
+            "type": "integer"
+          },
+          "query_end": {
+            "format": "date",
+            "title": "Query End",
+            "type": "string"
+          },
+          "query_start": {
+            "format": "date",
+            "title": "Query Start",
+            "type": "string"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Revision",
+            "type": "string"
+          },
+          "source": {
+            "const": "alpaca_current_trends",
+            "title": "Source",
+            "type": "string"
+          },
+          "timeframe": {
+            "const": "1Day",
+            "title": "Timeframe",
+            "type": "string"
+          },
+          "total_return_eligible": {
+            "const": false,
+            "title": "Total Return Eligible",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "evidence_ref_id",
+          "source",
+          "revision",
+          "content_hash",
+          "feed",
+          "adjustment",
+          "currency",
+          "timeframe",
+          "identity_asof",
+          "query_start",
+          "query_end",
+          "first_observed_on",
+          "last_observed_on",
+          "observed_sessions",
+          "expected_sessions",
+          "contiguous_tail_sessions",
+          "missing_sessions",
+          "missing_sessions_total",
+          "missing_sessions_truncated",
+          "received_at",
+          "available_at",
+          "features",
+          "historical_backtest_eligible",
+          "market_price_eligible",
+          "total_return_eligible",
+          "execution_locked"
+        ],
+        "title": "ResearchInputPriceTrend",
+        "type": "object"
+      },
+      "ResearchInputPriceTrendFeatures": {
+        "additionalProperties": false,
+        "properties": {
+          "close": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Close"
+          },
+          "rsi_14": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rsi 14"
+          },
+          "sma_20": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sma 20"
+          },
+          "sma_200": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sma 200"
+          },
+          "volatility_20": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volatility 20"
+          }
+        },
+        "required": [
+          "close",
+          "sma_20",
+          "sma_200",
+          "rsi_14",
+          "volatility_20"
+        ],
+        "title": "ResearchInputPriceTrendFeatures",
+        "type": "object"
+      },
       "ResearchInputsSummary": {
         "additionalProperties": false,
         "properties": {
@@ -8310,6 +8569,15 @@
             },
             "maxItems": 1,
             "title": "Corporate Action Observations",
+            "type": "array"
+          },
+          "current_price_trends": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ResearchInputPriceTrend"
+            },
+            "maxItems": 1,
+            "title": "Current Price Trends",
             "type": "array"
           },
           "display_symbol": {

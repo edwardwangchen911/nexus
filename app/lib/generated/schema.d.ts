@@ -4063,6 +4063,118 @@ export interface components {
             /** Total Net Assets */
             total_net_assets: string | null;
         };
+        /** ResearchInputPriceTrend */
+        ResearchInputPriceTrend: {
+            /**
+             * Adjustment
+             * @constant
+             */
+            adjustment: "split";
+            /**
+             * Available At
+             * Format: date-time
+             */
+            available_at: string;
+            /** Content Hash */
+            content_hash: string;
+            /** Contiguous Tail Sessions */
+            contiguous_tail_sessions: number;
+            /**
+             * Currency
+             * @constant
+             */
+            currency: "USD";
+            /**
+             * Evidence Ref Id
+             * Format: uuid
+             */
+            evidence_ref_id: string;
+            /**
+             * Execution Locked
+             * @constant
+             */
+            execution_locked: true;
+            /** Expected Sessions */
+            expected_sessions: number;
+            features: components["schemas"]["ResearchInputPriceTrendFeatures"];
+            /**
+             * Feed
+             * @constant
+             */
+            feed: "sip";
+            /** First Observed On */
+            first_observed_on: string | null;
+            /**
+             * Historical Backtest Eligible
+             * @constant
+             */
+            historical_backtest_eligible: false;
+            /**
+             * Identity Asof
+             * Format: date
+             */
+            identity_asof: string;
+            /** Last Observed On */
+            last_observed_on: string | null;
+            /**
+             * Market Price Eligible
+             * @constant
+             */
+            market_price_eligible: false;
+            /** Missing Sessions */
+            missing_sessions: string[];
+            /** Missing Sessions Total */
+            missing_sessions_total: number;
+            /** Missing Sessions Truncated */
+            missing_sessions_truncated: boolean;
+            /** Observed Sessions */
+            observed_sessions: number;
+            /**
+             * Query End
+             * Format: date
+             */
+            query_end: string;
+            /**
+             * Query Start
+             * Format: date
+             */
+            query_start: string;
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /** Revision */
+            revision: string;
+            /**
+             * Source
+             * @constant
+             */
+            source: "alpaca_current_trends";
+            /**
+             * Timeframe
+             * @constant
+             */
+            timeframe: "1Day";
+            /**
+             * Total Return Eligible
+             * @constant
+             */
+            total_return_eligible: false;
+        };
+        /** ResearchInputPriceTrendFeatures */
+        ResearchInputPriceTrendFeatures: {
+            /** Close */
+            close: string | null;
+            /** Rsi 14 */
+            rsi_14: string | null;
+            /** Sma 20 */
+            sma_20: string | null;
+            /** Sma 200 */
+            sma_200: string | null;
+            /** Volatility 20 */
+            volatility_20: string | null;
+        };
         /** ResearchInputsSummary */
         ResearchInputsSummary: {
             /**
@@ -4075,6 +4187,11 @@ export interface components {
              * @default []
              */
             corporate_action_observations: components["schemas"]["ResearchInputActionObservation"][];
+            /**
+             * Current Price Trends
+             * @default []
+             */
+            current_price_trends: components["schemas"]["ResearchInputPriceTrend"][];
             /** Display Symbol */
             display_symbol: string | null;
             /** Facts */
