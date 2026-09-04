@@ -1679,3 +1679,33 @@ pre-0041-20260904-complete含177引用对象，随后不使用源配置/对象�
 误对复合主键表查询id已修正为全行摘要，只读重查未修改业务数据。材料在受保护
 actions-0041-20260904，回滚镜像rollback-before-0041-20260904保留，DB降级仍遵守
 已冻结公司行动证据的保护，不删除历史对象。以上更新取代前节“运行仍0040”的状态。
+
+### 2026-09-04 恢复本地栈并验收真实Alpaca公司行动
+
+机器恢复时Docker Desktop未运行，原desktop-linux socket不存在，业务/测试/Web
+端口均无监听。按已授权恢复启动既有Docker应用与本项目原PG/MinIO/API容器，未
+安装或重建runtime，也未启动worker、网关、采集调度或交易任务。Web复用原API
+HMAC配置与仅loopback、非production的本地dev模式；vinext使用`--hostname`而非
+`--host`，后者被忽略会仅监听localhost的IPv6。未修改凭据、配置文件或访问范围。
+隔离PG55436另外按协调请求恢复并交给root，未向其中导入业务数据。
+
+当前API仍为55dedb910ef2f3871a0da3cb55b75672f8c04a14、业务库0041_action_observations，
+live200，认证readiness的database/migration/object_store均ready、worker unavailable，
+整体503如实保留。Web3302恢复IPv4监听，实际BFF/页面已核验；恢复未产生业务Job。
+
+root通过正常Alpaca collector取得公开AAPL真实公司行动归档并离线校验；A使用
+已有唯一证券别名身份，经正常alpaca_actions_import一次导入，未从请求构造证券
+身份、未调用模型/订单/再次采集。正常原件存储读回和冻结通过；独立只读核对
+canonical原件与DB完全一致、hash一致、evidence被精确研究快照冻结、真实非空事件
+已绑定，九类旧行摘要仍全部保留，活动Job为0。
+
+375/1440实际浏览器→BFF→API无路由mock验收通过：使用导入输出的原as_of，返回
+同一快照与证据、全部投影字段与DB reader一致，来源字段/版本hash/未知完整性/
+研究用途/执行锁页面可见，无横溢出。页面刷新仅GET，不触发新采集、准入执行或
+模型。该真实样本证明当前研究观察读取链，source_completeness仍unknown，历史
+回测与账本资格仍false；没有把分页耗尽或当前收到时间当成历史完整性。
+
+私有结果和校验位于outputs/acceptance/alpaca-actions-real-20260904；运行恢复记录
+位于local-stack-resume-20260904。证券ID、原件详情和账户事实未进入本记录。验收
+脚本初版误查Instrument.symbol与reader位置参数，均在只读阶段按现有别名模型和
+函数签名修正，未重放导入。保留已追加不可变证据与原件，不以删除数据回退。
