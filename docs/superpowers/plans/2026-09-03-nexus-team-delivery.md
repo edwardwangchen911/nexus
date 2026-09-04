@@ -709,3 +709,9 @@ FMP 与 FRED 分别由既有独立 worktree 实现，root 单独负责共享研�
 这些来源只补当前可追溯研究材料；FMP profile、FRED 宏观或 Alpaca 当期行动观测均不证明历史股票池、行业风控映射、复权完整性、费用或投资方向充分性。真实经济比较与历史回测资格保持原门禁。
 
 增量验证：0042 合法绑定先在旧 guard 下失败，再以 18 项隔离 PG 核验新 guard/负例/有冻结数据拒绝降级/空库往返；该子面集中审查无 P1/P2。FMP 正常 archive→import→prepare→admission→精确工具先因未附加 profile 失败，接线后两项新 PG 连既有 Alpaca 研究共 6 passed；证明新研究可读取公司背景、旧引用不变、profile-only 不创建研究，不证明页面接线。共享两源码 Mypy、Ruff 通过；header/归档/CLI 共 38 unit 通过。共享消费者增量审查 Ready；整片仍待已发现的身份标识冲突 P2 导入/reader 修复及定向验收，未交 A 应用业务迁移。以上 PG 均使用隔离测试数据库，没有修改现有业务数据。
+
+后续闭合：FMP 身份 P2 导入与 reader 均按原 receipt 时点修复，14 项 producer PG 覆盖及定向审查通过；A 已将完整片集成到 main，完成完整备份、0042 迁移与真实原件正常导入/DB/hash/新 prepare→精确工具验收，旧 Alpaca 冻结不改。详情沿用 `docs/plans/2026-09-02-core-evidence-checkpoint.md` 的 FMP 0042 验收记录；仍无 FMP 页面/API展示，不重复采集或导入。
+
+FRED 增量：parser/collector/storage/CLI 使用现有 HTTP bytes、原件和 metadata 单位；正常实际采集公开 DGS10 历史 vintage 得到 metadata + 1 页、4 条观测，单位 Percent、显式缺值 0，已离线 load 校验，不推断缺少经济日期的原因或历史完整性。三项时钟/配置审查问题及内部 replay 的格式/authority 联动均修复：来源 receipt 不变，实际 DB 创建时间逐项限制可见性，adoption 按当前导入时刻核验，未来 available 的内部一致性重放不豁免其他合同，CLI 保留正常进程配置覆盖。producer 11 PG、后续 5 聚焦 PG、55 unit/静态检查通过；旧批采同 revision 跨日期静默丢行先 RED 后以 6 行拒绝检查修复，原正常重放和碰撞 2 PG 通过。
+
+共享 FRED prepare→admission→tool 正常路径先因未附加宏观证据失败，再接入每 series 最新可见经济日期/vintage/receipt 与 calendar 双引用；同钟数值/单位矛盾不选，等价重复选择稳定引用，保留其他研究与两个预留槽。新格式同时按 canonical schema/hash 和 local revision 识别，坏新格式不得回退旧协议，严格结果还须匹配精确 observation ID。同引用异 series 的真实 PG 反例（不关闭 FK/guard）先错误读出额外行，修复后与 FMP/旧 FX 共 5 PG 通过；最新共享及 FRED 聚焦 34 unit、共享两源码 Mypy/Ruff 通过。集中审查与修复定向复核 Spec/Quality Ready。主线负责人可先并行集成已 Ready 的 producer/CLI 与真实导入，再接收共享读端提交；运行/真实消费者验收以接收方结果为准，不把发出交接当作完成。

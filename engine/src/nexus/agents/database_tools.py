@@ -30,6 +30,8 @@ from nexus.persistence.models.agents import (
     AgentResearchRunRecord,
 )
 from nexus.persistence.models.data import (
+    DataArtifact,
+    DataSnapshot,
     MacroObservation,
     PriceBarRecord,
     PriceBarSetAuthority,
@@ -48,6 +50,8 @@ from nexus.quality.source_policy import (
 )
 from nexus.research.alpaca_actions_storage import action_tool_payload, read_action_observations
 from nexus.research.fmp_profile_storage import read_company_profiles
+from nexus.research.fred_observations import SCHEMA as FRED_SCHEMA
+from nexus.research.fred_storage import FredResearchObservation, read_fred_observations
 from nexus.research.sec_disclosures import read_disclosures
 from nexus.research.ssga_distributions import read_distributions
 from nexus.research.ssga_fund_observations import read_fund_observations
@@ -613,6 +617,26 @@ class _BoundDatabaseExecutors:
             raise ToolInputError("tool request exceeds frozen snapshot authority")
         if not await self._current_evidence_authority_valid():
             return self._invalid_frozen_evidence_authority("get_macro_snapshot")
+        observations = await read_fred_observations(
+            self._session, as_of=self._decision_time, evidence_ids=self._evidence_ids
+        )
+        hashes = [record.content_hash for record in self._evidence]
+        new_hashes = set(
+            await self._session.scalars(
+                select(DataSnapshot.revision)
+                .where(
+                    DataSnapshot.schema_version == FRED_SCHEMA, DataSnapshot.revision.in_(hashes)
+                )
+                .union(
+                    select(DataArtifact.sha256).where(
+                        DataArtifact.schema_version == FRED_SCHEMA, DataArtifact.sha256.in_(hashes)
+                    )
+                )
+            )
+        )
+        new_format_ids = {
+            record.id for record in self._evidence if record.content_hash in new_hashes
+        }
         series = cast(tuple[str, ...], payload["series"])
         records = tuple(
             await self._session.scalars(
@@ -640,8 +664,21 @@ class _BoundDatabaseExecutors:
                 "evidence_ref_id": (
                     None if record.evidence_ref_id is None else str(record.evidence_ref_id)
                 ),
+                **(
+                    {
+                        "vintage": observations[record.evidence_ref_id].vintage.isoformat(),
+                        "received_at": _timestamp(
+                            observations[record.evidence_ref_id].received_at
+                        ),
+                        "calendar_evidence_ref_id": str(record.calendar_evidence_ref_id),
+                        "execution_locked": True,
+                    }
+                    if record.evidence_ref_id in observations
+                    else {}
+                ),
             }
             for record in records
+            if _macro_record_valid(record, observations, new_format_ids)
         ]
         return self._result(
             "get_macro_snapshot",
@@ -840,6 +877,17 @@ class _BoundDatabaseExecutors:
             "reason": reason,
             "items": items,
         }
+
+
+def _macro_record_valid(
+    record: MacroObservation,
+    observations: dict[UUID, FredResearchObservation],
+    new_format_ids: set[UUID],
+) -> bool:
+    if not record.revision.startswith("local-") and record.evidence_ref_id not in new_format_ids:
+        return True  # Existing FX/legacy protocol is unchanged.
+    verified = observations.get(record.evidence_ref_id) if record.evidence_ref_id else None
+    return verified is not None and verified.observation_id == record.id
 
 
 def _timestamp(value: datetime) -> str:

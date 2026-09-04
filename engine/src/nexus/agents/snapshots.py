@@ -18,6 +18,7 @@ from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
 from nexus.research.alpaca_actions_storage import read_action_observations
 from nexus.research.fmp_profile_storage import read_company_profiles
+from nexus.research.fred_storage import FredResearchObservation, read_fred_observations
 from nexus.research.sec_disclosures import SEC_RESEARCH_FORMS
 from nexus.research.ssga_distributions import read_distributions
 from nexus.research.ssga_fund_observations import read_fund_observations
@@ -127,6 +128,19 @@ async def prepare_research_snapshot(
         sec_refs = [item for item in evidence if item.source == "sec"]
         keep = MAX_FROZEN_EVIDENCE - 2 - len(profile_refs) - len(retained)
         evidence = sec_refs[:keep] + retained + profile_refs
+    macro_ids = _macro_context_ids(await read_fred_observations(session, as_of=as_of))
+    if macro_ids:
+        macro_refs = list(
+            await session.scalars(
+                select(ResearchEvidenceRef)
+                .where(ResearchEvidenceRef.id.in_(macro_ids))
+                .order_by(ResearchEvidenceRef.id)
+            )
+        )
+        retained = [item for item in evidence if item.source != "sec"]
+        sec_refs = [item for item in evidence if item.source == "sec"]
+        keep = MAX_FROZEN_EVIDENCE - 2 - len(macro_refs) - len(retained)
+        evidence = sec_refs[:keep] + retained + macro_refs
     context = await freeze_portfolio_context(
         session,
         instrument_id,
@@ -147,7 +161,7 @@ async def prepare_research_snapshot(
         payload["scope"] = "persisted_sec_filings_and_issuer_observations"
     if nav:
         payload["scope"] = "persisted_sec_filings_and_issuer_nav_history"
-    if actions or profiles:
+    if actions or profiles or macro_ids:
         payload["scope"] = "persisted_research_observations"
     if context is not None:
         payload["portfolio_context"] = context[0].model_dump(mode="json")
@@ -196,3 +210,20 @@ async def prepare_research_snapshot(
     )
     await session.flush()
     return await session.get(DataSnapshot, snapshot_id)
+
+
+def _macro_context_ids(observations: dict[UUID, FredResearchObservation]) -> set[UUID]:
+    """Latest visible economic period/vintage/receipt, never UUID as source recency."""
+    result: set[UUID] = set()
+    for series in sorted({row.series for row in observations.values()}):
+        candidates = [row for row in observations.values() if row.series == series]
+        rank = max((row.observed_on, row.vintage, row.received_at) for row in candidates)
+        latest = [
+            row for row in candidates if (row.observed_on, row.vintage, row.received_at) == rank
+        ]
+        if len({(row.value, row.unit) for row in latest}) != 1:
+            # Conflicting values at the same source clocks are unknown, not a vote.
+            continue
+        selected = min(latest, key=lambda row: (row.canonical_sha256, str(row.evidence_ref_id)))
+        result.update((selected.evidence_ref_id, selected.calendar_evidence_ref_id))
+    return result
