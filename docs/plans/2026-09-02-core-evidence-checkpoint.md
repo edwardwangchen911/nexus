@@ -1523,3 +1523,25 @@ hello world=2、你好，世界！=4，证明真实编码生效。带公开词�
 实际wire35283仍低于55808。冻结hash与五类旧业务行hash不变，active0/model0/DB写0。
 这不是完整SDK精确计数或严格上界，也不证明第三阶段完成。证据在
 production-token-meter-summary.json；本轮未重跑历史研究，API/schema保持不变。
+
+## 离线计量修复后的新真实研究（2026-09-04，北京时间）
+
+在主线062e434、共享锁定依赖与实际词表验证后，沿正常 research-admit/run 创建一次
+新 run，同 original P/研究问题与既有 NAV/发行商资料，无新增采集、旧run重放或重试。
+实际进程退出0，业务终态failed，attempt=max1，active0。三个SDK阶段均已调用且用量
+已结算：输入51253、输出3540，未触发64000/8192限额。research/critique七角色输出
+持久化，synthesis响应在 assessment_binding 领域校验失败，安全reason为
+model_stage_review_invalid，diagnostic.validation_kind=domain_validation。
+原始综合响应未持久化，具体违反哪一条语义校验仍未知，不据代码猜测回填历史原因。
+
+正文复核：七角色保留价格/宏观/流动性缺口，区分NAV观察与交易价格，反证阶段质疑了
+“龙头”等主观措辞；尚无合法最终综合或intent，不能把角色投票当投资结论。代码比对
+确认wire结构与领域跨字段约束之间仍有差异（解决状态、缺失证据/后果、充分性）；
+后续仅离线补最小契约与固定安全诊断，不放宽约束，不自动再次调用模型。
+
+实际新run终态输出经只读freeze_formal_research拒绝为
+OPTIMIZATION_FORMAL_RESEARCH_NOT_READY，未拼完整策略请求，正式admission/group仍0。
+同案例DB→BFF→DOM1440/390确认同run与两处快照、NAV可见、failed、无intent、执行
+锁定、无重跑按钮、无横溢出；五类旧行按原ID/hash逐项不变，新研究仅新增正常记录。
+API85e3f9c/schema0040未变，材料位于受保护的daily-v3-tokenmeter-20260904。
+本轮解决了先前输入预检阻塞，仍未完成研究结论或正式经济比较。
