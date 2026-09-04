@@ -7,6 +7,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from helpers.migration_helpers import _table_names
+from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD
 
 
 def test_0009_round_trips_from_0008_with_one_head(
@@ -27,7 +28,7 @@ def test_0009_round_trips_from_0008_with_one_head(
         "proposal_positions",
     }
 
-    assert ScriptDirectory.from_config(config).get_heads() == ["0032_ticker_alias_authority"]
+    assert ScriptDirectory.from_config(config).get_heads() == [CURRENT_MIGRATION_HEAD]
     command.upgrade(config, "0008_diagnostics")
     assert optimization_tables.isdisjoint(_table_names(temporary_database_url))
     command.upgrade(config, "0009_optimization")

@@ -419,4 +419,15 @@ L1跨阶段恢复接续（root，`edward/nexus-daily-research-recovery`）：已
 
 **接续责任：** A唯一集成/运行验收；root维护本计划及小切片实现；B负责正式优化绑定设计；D核对合法现成数据来源。等待某项证据不阻塞独立实现，但也不为维持“有任务在跑”新增无消费者的schema、治理表或重复测试。后续记录必须分别注明代码、测试、集成、运行、真实验收，未满足上表条件的项目仍未完成。
 
+### 9.4 恢复独立开发（2026-09-04）
+
+缺少行情访问只阻塞对应真实价格验收，不阻塞以下现有目标的实现。不得据此将全项目停工或把局部完成算作总体完成。
+
+- A：研究 SDK→domain 的失败证据增加固定安全诊断和响应摘要哈希，保留原始敏感内容不进入日志/聊天；先回归，再根据新增 NAV 与真实输入差异做一次正常套餐内新研究，不重放旧失败。A仍唯一负责主线集成与运行/业务迁移。
+- root：独立 `nexus-team-plan` worktree，0040迁移、head常量和隔离PG测试。admission/group各增nullable `decision_cutoff_at`，旧NULL不回填；新schema严格绑定同一P的估值时间、证据截止与实际manifest生成时间；cutoff不可修改，新正式group禁止Shadow。旧数据不变时可降级；有新正式记录必须拒绝降级，不能丢弃证据。
+- root子agent：复用B移交的干净 `nexus-formal-producer` worktree，拥有optimizer正式输入/normal producer/worker消费与ORM，B因本任务新用户只读检查不再写入。A=`optimization_formal_inputs_v2` / source=`nexus_optimization_formal`，P.id、估值、cutoff与materialized在顶层冻结；显式绑定R/run/output/hash/实际可用时间，只有精确同P且原研究有效期内可用。旧job payload/hash及context-only行为不变，非法新binding不回退旧草稿。
+- selection来自既有baseline evaluator与合格冻结输入，不来自模型或调用者旗标；selection和manifest保留实际生成时间，不回填P时点。真实非空持仓缺rank/episode连续性时明确拒绝；正常流程正例使用完整合成cash-only P，另测不匹配/晚到/未知费用/幂等/原子回滚。费用、真实价格与经济政策缺口不被本片消除，不开放交易。
+
+实施顺序：迁移与producer可独立开发，聚焦红绿回归和一轮独立审查后，由A串行集成；ORM/迁移/消费路径统一后再切换运行，不能仅合入无消费者schema就宣告5b完成。真实验收仍按9.3逐项保留。
+
 **D价格源收尾：** 既有Fosun/Alpaca/Tiingo/Alpha Vantage/Yahoo调查见checkpoint历史，不重试Yahoo限流或拿demo代替真实案例。2026-09-04有界核对[Alpaca官方FAQ](https://docs.alpaca.markets/us/docs/market-data-faq)确认，历史请求end早于现在至少15分钟时存在无订阅查询SIP的条件，不应说必须买实时套餐；[官方bars说明](https://docs.alpaca.markets/us/reference/stockbarsingle-1)明确各adjustment选项，但asof是证券映射日期，不是历史vintage，不能直接宣称历史PIT或精确总收益。日线VWAP和volume可能采用不同交易条件，不能把乘积当已证实精确成交额。项目已有固定主机/分页/归档/归一化adapter，缺的是有效访问和真实样本核验，不是全新框架。D所查项目声明配置与shell无非空Alpaca认证字段；A进一步核对实际API容器环境及正常`load_local_environment`启动入口，两认证字段也均无非空值，没有输出值或搜索其他账户目录。结论仅限本项目已知入口，不能推断用户没有其他账户。若既有有效访问可定位，下一步是一个已结束窗口raw样本及已知公司行动窗口对照，原件/实际单位/时段/调整用途分别验收；无既有访问则需用户决定是否接入第三方账户及接受条款。未注册、付费、扩权或静默切换现有source_policy。
