@@ -7,7 +7,7 @@ import sys
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, Never
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
@@ -144,8 +144,13 @@ async def run_once(settings: EngineSettings, request: BacktestOnceRequest) -> di
         await engine.dispose()
 
 
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> Never:
+        raise BacktestOnceError("BACKTEST_REQUEST_INVALID")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         description="运行一次 baseline 历史回测；只读已有冻结数据，不采集、不运行模型、不交易。"
     )
     parser.add_argument("--strategy-version", choices=["baseline_v1"], required=True)
@@ -154,8 +159,8 @@ def main() -> None:
     for name in ("start", "end", "initial-nav", "as-of"):
         parser.add_argument(f"--{name}", required=True)
     parser.epilog = "基准固定为 SPY、同一冻结股票池等权及 baseline；成本使用冻结历史假设。"
-    args = parser.parse_args()
     try:
+        args = parser.parse_args()
         request = BacktestOnceRequest.model_validate(vars(args))
         output = asyncio.run(run_once(EngineSettings(), request))
     except Exception as error:
