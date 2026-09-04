@@ -7,7 +7,7 @@ type Event = components["schemas"]["ResearchInputActionEvent"];
 type NumericField = "rate" | "old_rate" | "new_rate";
 
 const dates = [
-  ["process_date", "来源处理日期"], ["ex_date", "除息日期"],
+  ["process_date", "来源处理日期"], ["ex_date", "来源 ex-date 日期"],
   ["record_date", "登记日期"], ["payable_date", "支付日期"],
   ["declaration_date", "声明日期"],
 ] as const;

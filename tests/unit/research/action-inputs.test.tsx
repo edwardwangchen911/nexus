@@ -12,6 +12,16 @@ function expandEvent() {
 }
 
 describe("frozen action observations", () => {
+  it("does not assign dividend meaning to an unknown category's ex-date", () => {
+    render(<ResearchInputs inputs={{ ...actionInputs(),
+      corporate_action_observations: [actionObservation({ events: [actionEvent({
+        category: "unknown_action_category", ex_date: "2026-08-12",
+      })] })],
+    }} asOf={decisionTime} />);
+    const table = expandEvent();
+    expect(within(table).getByRole("row", { name: /^来源 ex-date 日期/ })).toHaveTextContent("2026-08-12");
+    expect(within(table).queryByText(/^除息日期/)).not.toBeInTheDocument();
+  });
   it("separates zero, tiny, unknown and values outside the presentation contract", () => {
     render(<ResearchInputs inputs={actionInputs()} asOf={decisionTime} />);
     const region = screen.getByRole("region", { name: "公司行动观测资料" });
@@ -26,7 +36,7 @@ describe("frozen action observations", () => {
     expect(within(table).getByRole("row", { name: /^来源数值（rate）/ })).toHaveTextContent("0");
     expect(within(table).getByRole("row", { name: /^原数值（old_rate）/ })).toHaveTextContent("<0.001");
     expect(within(table).getByRole("row", { name: /^新数值（new_rate）/ })).toHaveTextContent("原件数值超出展示范围");
-    expect(within(table).getByRole("row", { name: /^除息日期/ })).toHaveTextContent("未知");
+    expect(within(table).getByRole("row", { name: /^来源 ex-date 日期/ })).toHaveTextContent("未知");
     expect(within(table).getByRole("row", { name: /^来源币种/ })).toHaveTextContent("未知（原件为空）");
     expect(region).not.toHaveTextContent("USD");
     expect(region).toHaveTextContent(actionEvent().provider_event_id);

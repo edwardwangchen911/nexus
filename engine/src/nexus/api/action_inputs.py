@@ -12,6 +12,9 @@ from nexus.research.alpaca_actions import AlpacaActionObservationDocument
 def _display_decimal(value: Decimal | None) -> str | None:
     if value is None:
         return None
+    if value.is_zero():
+        # Zero has no magnitude to expand, regardless of its source exponent/scale.
+        return "-0" if value.is_signed() else "0"
     sign, digits, exponent = value.as_tuple()
     # Canonical validation rejects non-finite values. Bound expansion BEFORE format().
     if not isinstance(exponent, int):
