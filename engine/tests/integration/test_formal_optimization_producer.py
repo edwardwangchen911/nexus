@@ -617,3 +617,62 @@ async def test_formal_loader_rejects_corrupt_selection_provenance(migrated_datab
         set_committed_value(selection, field, value)
         with pytest.raises(ValueError, match="OPTIMIZATION_FORMAL_SELECTION_INVALID"):
             await load_formal_admission_authority(session, authority, data)
+
+
+@pytest.mark.asyncio
+async def test_other_valid_portfolio_snapshot_cannot_reuse_original_research(migrated_database_url):
+    factory, request = await setup(migrated_database_url)
+    async with factory() as session, session.begin():
+        original = await session.get(PortfolioSnapshotRecord, request.portfolio_snapshot_id)
+        sync = await session.get(BrokerSyncRun, original.sync_run_id)
+        # Same account, cash and valuation clock; only the immutable P identity differs.
+        later_sync = BrokerSyncRun(
+            **{
+                column.key: getattr(sync, column.key)
+                for column in BrokerSyncRun.__table__.columns
+                if column.key not in {"id", "idempotency_key"}
+            },
+            idempotency_key="second-synthetic-snapshot",
+        )
+        session.add(later_sync)
+        await session.flush()
+        other = PortfolioSnapshotRecord(
+            **{
+                column.key: getattr(original, column.key)
+                for column in PortfolioSnapshotRecord.__table__.columns
+                if column.key not in {"id", "sync_run_id"}
+            },
+            sync_run_id=later_sync.id,
+        )
+        session.add(other)
+        await session.flush()
+        session.add(
+            CashSnapshot(
+                portfolio_snapshot_id=other.id,
+                currency="USD",
+                cash_balance=100,
+                available_cash=100,
+                provider_as_of=other.as_of,
+            )
+        )
+        await session.flush()
+        await diagnose_and_persist(
+            session,
+            portfolio_id=other.portfolio_id,
+            snapshot_id=other.id,
+            artifact_reader=FixtureArtifactReader({}),
+        )
+        report = await session.scalar(
+            select(PortfolioDiagnosticReportRecord).where(
+                PortfolioDiagnosticReportRecord.portfolio_snapshot_id == other.id
+            )
+        )
+        mismatch = request.model_copy(
+            update={"portfolio_snapshot_id": other.id, "diagnostic_report_id": report.id}
+        )
+    async with factory() as session, session.begin():
+        with pytest.raises(ValueError, match="OPTIMIZATION_FORMAL_PORTFOLIO_MISMATCH"):
+            await admit_formal_optimization(
+                session, request=mismatch, actor_id="test", idempotency_key="other-p"
+            )
+        await _assert_no_formal_writes(session)
