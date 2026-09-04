@@ -847,3 +847,15 @@ D 新限定调查结合 [Alpaca 单证券 bars](https://docs.alpaca.markets/us/r
 - **验收。** B 从正常归档/导入→prepare/admit→实际只读工具和 SDK 输入→worker→DB/受保护 API 测试，mock 仅外部/模型边界；覆盖200日完整、缺日/预热不足、raw拒绝、身份/时点/hash/政策/日历篡改、新旧冻结、零新 BarSet/回测候选与不提权。C 覆盖真实 BFF sanitization→组件及页面。A 先完成公开拆股 raw/split 有界真实归档对照，再以正常来源完成代表性当前窗口的DB→API/BFF→页面和实际工具核验；最后按实质新增输入正常新研究，不重复旧失败调用或放宽原 guard。
 
 独立前置修复：C `e223375`（root `b259bc7`）增加固定 invocation 阶段/类别诊断。9项先红后修复，116 SDK unit、6隔离PG（4新调用失败+2旧validation）及Mypy/Ruff/diff通过；root集中审查无剩余P1/P2，已交A串行集成。无新表/DTO，旧usage/取消/无重试/validation形状保留；不恢复失败阶段计量，也不解释或回填旧失败原因。该代码交付不能代替本节趋势研究或集中度新结果的真实验收。
+
+### 9.24 T1：多年回测严格准入的上游证据结论与独立推进
+
+本项不是全项目总开关。当前趋势研究、已合入功能真实验收和多维方案展示按 §9.23 及后续切片继续；多年回测只阻塞依赖历史 PIT 股票池、身份/行动和行业证据的回测结论，不扩大为当前研究或只读展示不可用。
+
+- 现有严格回测合同要求每根 bar 的 `available_at` 不晚于该 session 的决策时刻；今天取得的 2024/2025 历史 bars 只能记录今天的实际收到/可用时间，不能倒推为当年已知。退市/公司行动同样要求不晚于生效 session 的可用时点；今天取得的旧事件不能补成历史知识。`us_liquid_v1` 的 2026 seed 也不证明更早已发布，当前行业分类不能冒充历史分类。
+- 2026-09-05 仅用既有访问做了两次有界 FMP 实测，均 `max_attempts=1`、无自动重试：historical S&P 500 constituent 返回套餐限制，且即使可用也不是项目内部股票池的历史发布链；delisted companies 返回少量基本退市字段，但没有严格合同所需的首次知悉/公告版本、退出原因、清算或回收信息。响应只留在受限临时原件中，不写业务库、不提升任何资格，也不为相同未知重复调用。
+- [Alpaca historical bars](https://docs.alpaca.markets/us/reference/stockbars) 提供 adjustment、feed、currency 与 `asof` 身份映射，但没有历史发布版本或首次知悉合同。[Alpaca corporate actions](https://docs.alpaca.markets/us/reference/corporateactions-1) 明示已处理记录仍可能不完整，也没有保证历史创建时点；[corporate-actions SSE](https://docs.alpaca.markets/us/reference/subscribetocorporateactionseventssse) 有 insert/update/delete 与 replay 参数，可作为今后前瞻积累候选，但公开文档未证明从起源完整回放、保留期限或当前账户可用性。以上都不能把今天的回收结果回填成历史 PIT 证据。
+- 原 T1 的严格路径是从真实发布时刻开始前瞻保存：内部股票池版本、身份/行动事件、行业/ETF 映射和合格价格分别留原件、receipt、版本与 `available_at`，先以手动有界入口验证，再决定是否另行启用调度；未明确启用前不自动采集或创建长期任务。
+- 可另行设计 `retrospective_research_backtest_v1`，明确标注非 PIT、幸存者偏差/当前分类、不可用于正式方案或执行；它只能是独立产品模式，不能替代或宣告原严格 T1 完成。是否增加该模式属于产品口径选择，当前不阻塞其他开发，也不擅自实施。
+
+结论：§9.14 既有 bundle/calendar/assembler 不重建；严格 T1 保持未完成并独立推进上游前瞻证据链。当前主线优先级固定为“已合入真实验收 → 当前趋势研究 → 多维方案实际展示”，其间不得以 T1 缺口暂停无依赖切片。
