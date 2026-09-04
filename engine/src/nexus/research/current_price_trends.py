@@ -17,7 +17,11 @@ from nexus.diagnostics.calendar_policy import XnysCalendarAdoption
 from nexus.domain.time import require_utc
 from nexus.persistence.models.diagnostics import DiagnosticPolicy
 from nexus.providers.base import BarsRequest, PriceBar
-from nexus.providers.market.alpaca import AlpacaMarketDataProvider, AlpacaRawResponse
+from nexus.providers.market.alpaca import (
+    AlpacaMarketDataProvider,
+    AlpacaRawResponse,
+    MarketProviderPayloadError,
+)
 from nexus.providers.market.alpaca_http import load_exact_json
 from nexus.research.alpaca_prices_archive import ValidatedPriceArchive, validate_price_originals
 
@@ -193,7 +197,10 @@ async def build_current_price_trend(
             delivery_mode="real_time",
             now=lambda: original.received_at,
         )
-        page = await provider.fetch_bars(archive.request)
+        try:
+            page = await provider.fetch_bars(archive.request)
+        except MarketProviderPayloadError:
+            raise ValueError("CURRENT_TRENDS_BARS_INVALID") from None
         if any(
             bar.observed_at is None
             or bar.observed_at > original.received_at

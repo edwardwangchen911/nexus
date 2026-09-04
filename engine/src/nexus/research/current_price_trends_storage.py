@@ -121,15 +121,17 @@ async def _artifact(
         .on_conflict_do_nothing(index_elements=["sha256"])
     )
     row = await session.scalar(select(DataArtifact).where(DataArtifact.sha256 == digest))
-    if row is None or (
-        row.uri,
-        row.source,
-        row.schema_version,
-        row.byte_size,
-        row.observed_at,
-        row.received_at,
-        row.available_at,
-    ) != (uri, SOURCE, schema, len(content), received_at, received_at, received_at):
+    if (
+        row is None
+        or (
+            row.uri,
+            row.source,
+            row.schema_version,
+            row.byte_size,
+        )
+        != (uri, SOURCE, schema, len(content))
+        or max(row.observed_at, row.received_at, row.available_at) > received_at
+    ):
         raise ValueError("CURRENT_TRENDS_ARTIFACT_CONFLICT")
     return uri
 
@@ -161,11 +163,9 @@ async def _artifacts_valid(
             row.source,
             row.schema_version,
             row.byte_size,
-            row.observed_at,
-            row.received_at,
-            row.available_at,
         )
-        == (SOURCE, schema, size, received, received, received)
+        == (SOURCE, schema, size)
+        and max(row.observed_at, row.received_at, row.available_at) <= received
         and received <= min(as_of, document.available_at)
         and (schema != SCHEMA or row.uri == location)
         for digest, size, schema, received in expected

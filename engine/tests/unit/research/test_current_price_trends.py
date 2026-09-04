@@ -17,7 +17,8 @@ from unit.ops.test_alpaca_prices_local import invoke as _invoke
 invoke = _invoke
 
 
-def test_normal_archive_builds_non_authority_trends_document(invoke):
+@pytest.mark.parametrize("bad_close", [False, True])
+def test_normal_archive_builds_non_authority_trends_document(invoke, bad_close):
     from nexus.diagnostics.calendar_policy import (
         XNYS_CALENDAR_ADOPTION_ID,
         XNYS_CALENDAR_ADOPTION_KEY,
@@ -41,7 +42,7 @@ def test_normal_archive_builds_non_authority_trends_document(invoke):
                     "o": str(bar.open),
                     "h": str(bar.high),
                     "l": str(bar.low),
-                    "c": str(bar.close),
+                    "c": None if bad_close else str(bar.close),
                     "v": str(bar.volume),
                 }
                 for bar in bars
@@ -78,6 +79,12 @@ def test_normal_archive_builds_non_authority_trends_document(invoke):
         ),
         now,
     )
+    if bad_close:
+        with pytest.raises(ValueError, match="CURRENT_TRENDS_BARS_INVALID"):
+            asyncio.run(
+                build(archive, calendar=calendar, purpose_policy=purpose, materialized_at=now)
+            )
+        return
     document = asyncio.run(
         build(archive, calendar=calendar, purpose_policy=purpose, materialized_at=now)
     )
