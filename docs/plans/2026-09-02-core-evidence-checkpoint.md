@@ -1509,3 +1509,17 @@ wire（含格式说明）44500→35283 字节，净省 9217；累计估算 62738
 此复测仅证明 critique 输入预检通过，不证明第三阶段、实际累计 token 或研究完成。
 model calls/database writes 均 0，证据 production-projection-summary.json。
 该代码供主机一次性入口使用，API 仍 85e3f9c、schema 0040，无重复运行切换。
+
+本地 token 计量 91295eb/211ac20 集成为 a5413cb/9c1e374；共享主线虚拟环境以
+uv sync --locked --inexact 同步，仅新增 tiktoken0.14.0/regex，保留无关已安装包。
+正常 prepare-tokenizer 入口一次下载固定公开词表且哈希通过，无账户/DB/模型访问。
+hello world=2、你好，世界！=4，证明真实编码生效。带公开词表的 114 单测通过。
+原50ms传输期限测试会被词表冷启动抢先耗尽，先复现失败，再以97fd198仅隔离该测试的
+输入计量耗时；实际生产超时、余量及首错停止均未放宽，独立真实编码测试保留。
+
+生产函数重建旧第一阶段未投影请求，request hash 与原历史一致：payload tokens13084
++strict schema bytes1165+base212+developer45+8192=22698，高于已记录实际输入19263。
+当前投影 critique：10748+1428+212+45+8192=20625，加已用19263=39888，余24112；
+实际wire35283仍低于55808。冻结hash与五类旧业务行hash不变，active0/model0/DB写0。
+这不是完整SDK精确计数或严格上界，也不证明第三阶段完成。证据在
+production-token-meter-summary.json；本轮未重跑历史研究，API/schema保持不变。
