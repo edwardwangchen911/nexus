@@ -149,6 +149,32 @@ export function researchEnvelope(data = researchData()) {
   };
 }
 
+export function synthesisResearchData(
+  overrides: Partial<components["schemas"]["SynthesisAssessment"]> = {},
+): Research {
+  const base = researchData();
+  const assessment: components["schemas"]["SynthesisAssessment"] = {
+    stance: "watch",
+    claims: [{ text: "冻结资料仍不足以支持完整决策。", evidence_refs: [evidence] }],
+    reviews: ["bear:0", "evidence_audit:0"].map((claim_id) => ({
+      claim_id, status: "accepted", resolved: true,
+      rationale: `合成审查理由 ${claim_id}：认可资料缺口。`, evidence_refs: [evidence],
+      missing_evidence: [], prevented_conclusion: null,
+    })),
+    review_conclusion: "sufficient", uncertainties: ["估值依据仍未验证。"], ...overrides,
+  };
+  return researchData({
+    quality_status: "partial", billing_mode: "chatgpt_subscription", input_tokens: 100, output_tokens: 50,
+    intent: { ...base.intent!, stance: "watch", exposure_action: "none", quality_status: "partial",
+      evidence_audit: "partial", synthesis_assessment: assessment, theses: assessment.claims },
+    stage_trace: { status: "verified", evidence_hash: "a".repeat(64), stages: [{
+      stage: "synthesis", status: "complete", input_tokens: 100, output_tokens: 50,
+      roles: [{ role: "portfolio", claims: assessment.claims,
+        reviewed_claim_ids: assessment.reviews.map((review) => review.claim_id), synthesis_assessment: assessment }],
+    }] },
+  });
+}
+
 export function researchAdmissionData(overrides: Record<string, unknown> = {}): ResearchAdmission {
   return {
     eligible: true,

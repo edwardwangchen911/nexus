@@ -99,6 +99,8 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
                   return `${roleLabel(reviewedRole as components["schemas"]["RoleVote"]["role"])} #${Number(index) + 1}`;
                 }).join("、")}</p> : null}
                 <ol>{role.claims.map((claim, index) => <li key={index}><p>{claim.text}</p><EvidenceButtons evidenceRefs={claim.evidence_refs} excerpt={claim.text} onOpen={openEvidence} /></li>)}</ol>
+                {stage.stage === "synthesis" && role.role === "portfolio" && role.synthesis_assessment
+                  ? <SynthesisReviews assessment={role.synthesis_assessment} onOpen={openEvidence} /> : null}
               </section>)}
             </details>
           ))}
@@ -181,6 +183,41 @@ function EvidenceButtons({ evidenceRefs, excerpt, onOpen }: {
 
 function roleLabel(role: components["schemas"]["RoleVote"]["role"]): string {
   return ({ orchestrator: "编排", fundamental: "基本面", market_state: "市场状态", macro_sector: "宏观行业", bull: "多头", bear: "空头", evidence_audit: "证据审计", portfolio: "组合" } as const)[role];
+}
+
+function SynthesisReviews({ assessment, onOpen }: {
+  assessment: components["schemas"]["SynthesisAssessment"];
+  onOpen: (evidence: Evidence, excerpt: string | null, opener: HTMLButtonElement) => void;
+}): React.ReactElement {
+  return (
+    <details className="decision-card__reviews">
+      <summary>逐项审查（模型自评）</summary>
+      <p role="note">以下是已保存的模型自评，不是独立核验结论；认可异议不等于解决缺口，不改变系统证据状态或执行许可。</p>
+      <p>模型自评的审查充分性：{({ sufficient: "充分", limited: "有限", insufficient: "不足" } as const)[assessment.review_conclusion]}</p>
+      {assessment.reviews.map((review) => {
+        const [role, index] = review.claim_id.split(":");
+        const label = `${roleLabel(role as "bear" | "evidence_audit")} #${Number(index) + 1}`;
+        return <section key={review.claim_id} aria-label={`${label} 审查`}>
+          <h5>{label}</h5>
+          <p>模型态度：{({ accepted: "认可异议", rejected: "不认可异议", unresolved: "仍有疑问" } as const)[review.status]}</p>
+          <p>模型自评：{review.resolved ? "已解决" : "未解决"}</p>
+          <p className="decision-card__review-label">审查理由</p>
+          <p>{review.rationale}</p>
+          <EvidenceButtons evidenceRefs={review.evidence_refs} excerpt={review.rationale} onOpen={onOpen} />
+          <p className="decision-card__review-label">模型列出的缺失证据</p>
+          {review.missing_evidence.length
+            ? <ul>{review.missing_evidence.map((item, itemIndex) => <li key={itemIndex}>{item}</li>)}</ul>
+            : <p>模型未列出缺失证据（不等于没有缺口）</p>}
+          <p className="decision-card__review-label">模型列出的受阻结论</p>
+          <p>{review.prevented_conclusion === null ? "模型未列出受阻结论" : review.prevented_conclusion}</p>
+        </section>;
+      })}
+      <p className="decision-card__review-label">模型列出的不确定性</p>
+      {assessment.uncertainties.length
+        ? <ul>{assessment.uncertainties.map((item, index) => <li key={index}>{item}</li>)}</ul>
+        : <p>模型未列出额外不确定性</p>}
+    </details>
+  );
 }
 
 function formatUtc(value: string | null | undefined): string { return formatDisplayTime(value); }
