@@ -1567,3 +1567,11 @@ complete再次调用模型或造完整策略请求。DB→BFF→DOM1440/390为�
 NAV与研究intent可见、执行锁定、无重跑、无横溢出；五类旧业务行ID/hash全不变。
 API85e3f9c/schema0040不变。证据位于daily-v3-synthesis-contract-20260904，尤其
 content-review-summary.json保留本次语义反例，原输出不修改。
+
+后续只读页面/DTO核验：DTO包含模型sufficient/四项resolved=true，但当前DecisionCard
+并未渲染这些字段和逐项rationale；实际“已解决”“充分”标签均0，页面可见的是
+“已保存完整输出”这一阶段保存状态、“仅观察”及交易锁。没有据此新增UI，证据见
+assessment-label-summary.json。另静态确认synthesis.py与staged_intent_semantics_valid
+对v2/v3固定保留watch/none、quality/evidence_audit partial；当前v3只读研究模式没有
+自动升级为正式合格R的路径。正式producer要求complete，因此阻塞不只是价格/费用
+资料缺口，不能承诺补齐数据就能通过正式准入，也不为通过验收修改partial常量。
