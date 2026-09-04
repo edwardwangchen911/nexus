@@ -500,5 +500,7 @@ L1局部审计实际交付：A已将上述五提交串行集成为主线代码`4
 
 - [官网客户服务入口](https://www.fosunwealth.com/download/download)的搜索索引有收费菜单，但本机实际请求为302，转向[星财富App公告](https://www.fotechwealth.com.cn/)，未取得现行收费表正文。D的既有主站归档也记录同类302；不能将索引、推广渠道的免佣条件或本次无法访问，分别当作已验证费率、全账户适用或官网不存在收费表的证明。不注册账户、不改变网络出口、不据此请求用户再次批准普通读取。
 - 新取得的[官方交易OpenAPI](https://openapi-docs.fosunxcz.com/specs/public/trade/openapi.yaml)文本与D既有原件逐字符一致，原始SHA-256仍为`87e4e6601b8da122a504239a1922d8742ecd4072e2d10c30c0d6a97f896fb808`。复用`nexus-public-evidence/outputs/acceptance/official-source-samples-20260903/trade.yaml`原件，不把临时文本副本的末尾换行差异报告为上游版本变化，也不更新SDK/合同准入。
-- 核对`mapping.OrderListItem`、`mapping.CashFlowInfo`及其响应结构仍无股票费率查询或已分类手续费明细；`applyFeeAmount`、`filledFeeAmount`、`feeRate`位于理财订单/RWA票据结构，详情请求限定`productType=17`，不能移用于股票`productType=5/6/7/15`。`businessType`、`flowType`仍只有字段名称，未补充费种字典；本轮未调用账户API，也没有为验证缺口重复刷新流水。
+- 核对`mapping.OrderListItem`、`mapping.CashFlowInfo`及其响应结构仍无股票费率查询或已分类手续费明细；`applyFeeAmount`、`filledFeeAmount`、`feeRate`位于理财订单/RWA票据结构，详情请求限定`productType=17`，不能移用于股票（`productType=5/6/7`）或期权（`15`）。`businessType`、`flowType`仍只有字段名称，未补充费种字典；本轮未调用账户API，也没有为验证缺口重复刷新流水。
 - FINRA官方材料已有D归档，SEC页面此前403；不重复同一失败或把监管机构对会员的费率直接当作私人账户最终扣费。后续真正需要的是股票收费表原件及生效/渠道/账户适用性、结算费种与gross/net映射证据。在此之前不新增费率默认值、`cost_complete`或必败费用入口；与A负责的研究准入使用范围说明并行，互不修改代码。
+
+同期A已完成并验收研究使用范围说明（main `57e27b4`）：现有v2/v3只读研究固定保持partial/watch/none，正式优化要求合格研究，当前没有自动晋级路径。真实手机/桌面页面明确该能力边界，不能再把这个拒绝单独解释为缺行情或等待授权；未修改准入合同、模型和数据。
