@@ -1916,3 +1916,39 @@ DRAFT_NO_EVIDENCED_REDUCTION，页面入口目前依赖formal admission。后续
 扩大成阻止全部已知指标展示。此项保留接续，当前先完成趋势来源及已集成功能验收。
 NVDA现有主数据最早2025-07-27，不能按2024-06-14解析；显式identity_asof补充由B
 负责，Ready后按正常入口采集，不回填alias，也不把当前身份解释成历史PIT证明。
+
+
+### 2026-09-05 正常 Alpaca 价格归档：公开拆股对照与原 B3 当前窗口
+
+B归档cb6a52b→a23e055、3ce589a→94ba56f已串行集成，五文件对owner零差；复用
+52新unit、121联合HTTP/actions、4 cleanup/终态phase及Mypy/Ruff/format、集中审查
+P2修复后Ready结果；本地diff检查通过。运行手册23d8d87→fb678b0。正常CLI直接运行
+主线新代码，本片未重建API，API仍bc54f26；无依赖/迁移/业务写入。
+
+从现有master只读取得公开NVDA身份，以采集当时UTC日期2026-09-04为identity_asof，
+按2024-06-03至06-14先raw后split，各正常采集一次、各1页、分页完成。完整原件、
+receipt/query/hash/实收时间及最终manifest保留；严格reader与原Alpaca provider
+规范化通过，同10个XNYS session覆盖完整且无重复。依据既有官方SEC拆股10:1、
+6/10调整后交易日期，同日比对raw_price/split_price及split_volume/raw_volume。
+
+成交量因子拆股前精确10、拆股后本次精确1；拆前OHLC价格严格比例不等于10，
+exact_ten_to_one_factor_change_all_ohlcv=false保留。离线核对20个拆前OHLC全部等于
+(raw/10).quantize(0.01, ROUND_HALF_UP)，split−raw/10为[-0.003,+0.005]美元。
+这只是实样与按分舍入一致，不是供应商舍入契约；拆后本次因子1也不证明调整锚日。
+[Alpaca官方bars参数](https://docs.alpaca.markets/us/reference/stockbars)仅明确split
+调整价格与量，未在该说明找到固定舍入保证。不默默扩大阈值、修改原值或将其用于
+总收益/完整历史资格；同时不把严格等式不成立误判成HTTP失败或整个当前趋势不可用。
+逐日原始Decimal与差异保留在public-comparison-private.json，后续不重复同一采集。
+
+随后重新只读核对原B3旧snapshot payload、原P/target/问题、当前身份和已采纳日历，
+均匹配；未以公开NVDA替换原案例。计划采用收盘后60分钟缓冲，正常collector自身
+使用30分钟完成窗口校验，最近满足条件session为2026-09-03。原案例split窗口
+2025-09-03至2026-09-03（含首尾366日）正常采集一次：1页253/253session，缺失、
+重复、越界均0，严格reader、原provider规范化与OHLC/非负volume检查通过。覆盖数量
+足够SMA200预热，只证明归档覆盖，不代替正常producer的连续片段/政策/指标准入。
+
+三次采集均max_attempts=1，未重试，无账户/订单操作、业务导入、新prepare或模型。
+归档资格仍research_eligible=false、historical_backtest_eligible=false、执行锁定。
+私有目录outputs/acceptance/alpaca-prices-real-20260905包含nvda-raw、nvda-split和
+original-b3-current-split，原案例绑定存于current-started-private.json。下一步等
+supplemental producer交付后正常导入→新冻结→工具/API/BFF/DOM，不伪造研究已完成。
