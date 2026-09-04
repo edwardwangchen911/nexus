@@ -459,3 +459,7 @@ A的新一次原生研究已独立记录：第一阶段已保存，第二阶段�
 - 历史首阶段原request hash精确匹配，新保守预检为22698，已记录实际输入19263；同critique生产投影与计量的累计预检为39888/64000、余量24112，wire35283小于55808。仅证明调用前本地守卫可通过，不保证第三阶段、实际累计用量或研究内容合格。旧证据、冻结hash和业务行未改变。
 - A继续一次新正常研究，使用同原P/问题与正常新截止，复用现有持久化资料，不重放旧run或重新采集。保留三调用、原用量阈值、超时与首错停；等待实际进程退出，核验正文及同案例DB/BFF/DOM。若输出不合格，保留真实终态并定位具体原因，不自动重试、不把预算修复等同于完整决策完成。
 - 真实回测、Shadow、内部paper绩效、演化仍分别受合格历史/价格用途/人工方案或初始资金选择制约；连续采集、新闻新源、正式券商模拟和实盘/部署仍按原产品与外部影响边界处理。已交付入口不重复开发，局部资料缺口不阻塞本轮研究接续。
+
+**综合合同接续（main `500d26c`）：** 新正常研究三阶段均已调用，实际输入51253/输出3540未超原阈值，七角色已保存；综合响应在assessment_binding/domain_validation被拒。旧记录与同案例页面已验收，具体响应未保留，不能倒推本次违反哪条规则。离线真实staged消费者已复现九种SDK严格schema允许、领域拒绝的组合，包括resolved=true却用空串而不是null表示无后果，以及未解决审查缺具体缺口/后果、空白理由、sufficient含未解决项。
+
+下一片由wire owner唯一修改`codex_staged.py`、`committee.py`与unit：仅向实际v3请求和schema描述明确既有resolved/空数组/null/非空白/充分性规则，不改领域约束或引入新union形状；已有validation_kind增加四个固定值review_rationale_blank、review_resolution_inconsistent、review_evidence_incomplete、review_sufficiency_inconsistent，精确匹配固定校验消息，unsafe优先、未知仍domain_validation，不存原响应/错误输入/位置。新request hash覆盖新实际规则，旧v1/v2行为与历史读取不变。root独立补原生worker→PG终态→API的合成resolved矛盾回归，验证七角色保留、三调用用量、无intent/重试/私密文本；owner覆盖九种反例和合法对照。一轮审查、定向复验后A统一集成。该片使现有合同更明确并改善诊断，不保证模型成功，不借此再自动调用模型或重标旧失败。
