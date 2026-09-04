@@ -12,12 +12,14 @@ from nexus.agents.portfolio_context import read_portfolio_context
 from nexus.api.action_inputs import project_action_observation
 from nexus.api.schemas.agents import (
     ResearchInputActionObservation,
+    ResearchInputCompanyProfile,
     ResearchInputFact,
     ResearchInputFiling,
     ResearchInputFundHolding,
     ResearchInputFundIndustry,
     ResearchInputFundObservation,
     ResearchInputIssuerDistribution,
+    ResearchInputMacroObservation,
     ResearchInputNavHistory,
     ResearchInputNavObservation,
     ResearchInputsSummary,
@@ -28,6 +30,9 @@ from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.research import Filing, FinancialFactRecord, ResearchEvidenceRef
 from nexus.research.alpaca_actions import SOURCE as ACTION_SOURCE
 from nexus.research.alpaca_actions_storage import read_action_observations
+from nexus.research.fmp_profile import SOURCE as PROFILE_SOURCE
+from nexus.research.fmp_profile_storage import read_company_profiles
+from nexus.research.fred_storage import read_fred_observations
 from nexus.research.sec_disclosures import read_disclosures
 from nexus.research.ssga_distributions import SOURCE, read_distributions
 from nexus.research.ssga_fund_observations import SOURCE as FUND_SOURCE
@@ -117,6 +122,12 @@ async def read_research_inputs(
         )
     )
     return ResearchInputsSummary(
+        company_profiles=await _read_profile_inputs(
+            session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of
+        ),
+        macro_observations=await _read_macro_inputs(
+            session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of
+        ),
         issuer_distributions=issuer_distributions,
         issuer_fund_observations=fund_observations,
         issuer_nav_histories=nav_histories,
@@ -163,6 +174,70 @@ async def read_research_inputs(
         total_facts=total,
         truncated=len(rows) > 20 or total > len(facts),
     )
+
+
+async def _read_profile_inputs(
+    session: AsyncSession, *, snapshot_id: UUID, instrument_id: UUID, as_of: datetime,
+) -> tuple[ResearchInputCompanyProfile, ...]:
+    references = await _frozen_issuer_references(
+        session, snapshot_id=snapshot_id, instrument_id=instrument_id,
+        as_of=as_of, source=PROFILE_SOURCE,
+    )
+    if not references:
+        return ()
+    documents = await read_company_profiles(
+        session, instrument_id=instrument_id, as_of=as_of, evidence_ids=tuple(references)
+    )
+    result = []
+    for evidence_id, document in documents.items():
+        evidence = references[evidence_id]
+        try:
+            result.append(ResearchInputCompanyProfile.model_validate({
+                **document.model_dump(exclude={
+                    "instrument_id", "raw_byte_length", "receipt_byte_length",
+                }),
+                "evidence_ref_id": evidence_id, "source": PROFILE_SOURCE,
+                "revision": evidence.revision, "content_hash": evidence.content_hash,
+            }))
+        except ValueError:
+            continue
+    return tuple(result[:1])
+
+
+async def _read_macro_inputs(
+    session: AsyncSession, *, snapshot_id: UUID, instrument_id: UUID, as_of: datetime,
+) -> tuple[ResearchInputMacroObservation, ...]:
+    references = await _frozen_issuer_references(
+        session, snapshot_id=snapshot_id, instrument_id=instrument_id,
+        as_of=as_of, source="fred",
+    )
+    calendars = await _frozen_issuer_references(
+        session, snapshot_id=snapshot_id, instrument_id=instrument_id,
+        as_of=as_of, source="exchange_calendars",
+    )
+    if not references or not calendars:
+        return ()
+    documents = await read_fred_observations(session, as_of=as_of, evidence_ids=tuple(references))
+    result = []
+    for evidence_id, document in documents.items():
+        if document.calendar_evidence_ref_id not in calendars:
+            continue
+        evidence = references[evidence_id]
+        try:
+            result.append(ResearchInputMacroObservation(
+                observation_id=document.observation_id, evidence_ref_id=evidence_id,
+                calendar_evidence_ref_id=document.calendar_evidence_ref_id,
+                source="fred", revision=evidence.revision, content_hash=evidence.content_hash,
+                raw_content_hash=document.raw_sha256, series=document.series,
+                observed_on=document.observed_on, vintage=document.vintage,
+                value=decimal_to_string(document.value), unit=document.unit,
+                received_at=document.received_at, available_at=document.available_at,
+                revision_semantics="local_content_hash", historical_backtest_eligible=False,
+                execution_locked=True,
+            ))
+        except ValueError:
+            continue
+    return tuple(result[:8])
 
 
 async def _read_action_inputs(
