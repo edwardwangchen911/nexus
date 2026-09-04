@@ -550,3 +550,14 @@ L1局部审计实际交付：A已将上述五提交串行集成为主线代码`4
 - TDD覆盖正常归档→冻结PG→实际API、actions-only/SEC混合、空事件/未绑定、32条截断、零/微小/超大指数、错误版本和坏可选观测。界面测试覆盖旧响应、混合来源、精确历史回放、只读刷新和手机/桌面。一次集中审查后A串行集成、统一应用0041/更新运行并验证现有业务不受影响；真实Alpaca样本未就绪仍单列，不以合成样本冒充真实验收。
 
 实施时核对出精确run GET原先并未返回inputs，不能假设它已有冻结原件消费者。root同时拥有 `api/routes/research.py`，为 `ResearchRunResponse` 增加默认null的inputs，并在既有GET hydrate中使用run本身的snapshot/instrument/decision_time读取；POST继续默认null，回放不查admission、不增加请求或回退最新资料。新旧观测双版本PG反例先复现字段缺失，再补接线；前端回放仅使用run.inputs与run.decision_time。A已确认该route独占分工。
+
+### 9.11 B3 新冻结集中度研究前提核验（独立开发合同）
+
+本片解决现有 `_concentration_focus` 只核比例却信任诊断任意限额/政策字符串的问题。A已确认无人占用 `agents/portfolio_context.py` 与相关unit/PG测试；独立子agent拥有该范围，A仍唯一主线集成人。与A2展示分开提交，不更改共享API/schema、运行服务、数据库迁移或模型调用；PG窗口待协调。
+
+- 只在生成新冻结context时独立核验既有TOP1建议预警：P估值时点同币种全部证券的quantity×current_price之和为分母，排除现金、不跨币折算；目标证券须为最大项，并列最大允许。缺价、异常数量、分母不全/非正、时点不合、P非READY/对账非PASS不能确证。维持现有最小脱敏输出，不向模型扩散其他持仓或账户事实。
+- 必须绑定原P、D的id/input hash/估值时点和冻结引用，以及实际已发布canonical `real_advisory_policy_v1` 的id/version/内容/可用时间。复用现有policy loader和诊断计算口径；unit=ratio、policy_scope=currency:XXX、无unknown_reason，原指标、限额、severity必须匹配。既有政策严格w>0.30为critical，否则w>0.15为warning；计算不从页面三位数倒推，存储指标比对沿用12位量化口径。不得把任意0.35或非canonical policy fixture当正例，不发明阈值。
+- 上述只证明“同币种证券范围的建议阈值偏离”，不是硬风控违例，也不证明减仓或维持更优。任何缺口保持focus不可确证，沿用现有可选输入降级，不删partial、不改intent、optimizer或formal准入。不新增完整性资格；狭窄事实充分不能升级成全局ResearchIntent.complete。
+- 历史context/R按原冻结合同继续读取，不重算、回填、改hash或重标旧资料。本片不将新校验塞进旧读取路径。测试覆盖15%/30%等值及跨界、并列最大、现金改变不变分母、跨币隔离、坏/晚到事实、错P/D/hash、错政策/阈值/单位/等级；实际native输入读取确认核验后的focus来自同一冻结context，旧R/hash不变。先红后绿，集中审查和定向回归后单独交A串行集成。
+
+正式R完整生产者仍未完成：现有complete方向会约束optimizer目标（reduce_candidate甚至置零），集中度事实本身不能证明该方向。后续仍须明确支持方向、反证与有效条件的充分证据合同；这一缺口不能用重复模型调用或放宽冻结门槛消除。
