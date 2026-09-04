@@ -540,7 +540,7 @@ L1局部审计实际交付：A已将上述五提交串行集成为主线代码`4
 
 本轮仅代码与合成整链交付；业务库未应用0041、API未重启，运行仍沿用0040及原API版本。新的主机入口要求0041，联合更新前不能直接用于当前业务库；后续API/UI接线完成后由A按备份和兼容流程统一更新。真实样本、页面展示和历史回测准入仍未验收；不得从本轮测试推断已完成。
 
-### 9.10 A2 冻结公司行动研究页（开发合同）
+### 9.10 A2 冻结公司行动研究页（已集成并更新本地运行，真实源样本待验）
 
 - 在既有 `ResearchInputsSummary` 增加可选默认空数组 `corporate_action_observations`（最多1项），不新建endpoint。只从精确快照绑定的source/object/revision/hash/时间/location引用调用既有canonical reader；新版本、错证券、截止之后或损坏的可选观测不进入旧快照，也不遮住有效SEC。准入和精确run回放共用现有读取路径，不采集、不调用模型、不改资格或历史。
 - 新DTO `ResearchInputActionObservation`：evidence_ref_id、source=`alpaca_action_observation`、revision、content_hash、symbol、query_start/query_end、available_at、manifest_content_hash、page_count、total_event_count、bound_event_count、unbound_event_count、truncated、events（最多32）。保留固定pagination_exhausted=true、source_completeness=unknown、revision_semantics=local_content_hash、historical_backtest_eligible=false、ledger_eligible=false、execution_locked=true和available_at_semantics=maximum_page_receipt_not_historical_availability。
@@ -557,7 +557,7 @@ L1局部审计实际交付：A已将上述五提交串行集成为主线代码`4
 
 该实际入口验收另外复现import私有结果as_of的`+00:00`被既有BFF的Z格式校验拒绝。`863cfa7`仅将生产者输出改为同一UTC时点的Z后缀，保留微秒，不改冻结值或放宽BFF；正常CLI先红后4项PG定向通过，实际import结果未转换即通过上述BFF/DOM，定向审查Ready。整片36项扩大PG（包含8新展示及正常CLI）通过，修正后4项import另行复测；前端147研究单测、Python76相关单测、TypeScript、定向lint/Ruff/Mypy、生成合同与build通过。主线/共享业务库0041迁移与API更新仍待A串行集成后执行，不把分支验收或合成源当真实Alpaca准入。
 
-### 9.11 B3 新冻结集中度研究前提核验（独立开发合同）
+### 9.11 B3 新冻结集中度研究前提核验（已集成并更新本地运行）
 
 本片解决现有 `_concentration_focus` 只核比例却信任诊断任意限额/政策字符串的问题。A已确认无人占用 `agents/portfolio_context.py` 与相关unit/PG测试；独立子agent拥有该范围，A仍唯一主线集成人。与A2展示分开提交，不更改共享API/schema、运行服务、数据库迁移或模型调用；PG窗口待协调。
 
@@ -571,3 +571,13 @@ L1局部审计实际交付：A已将上述五提交串行集成为主线代码`4
 分支交付为`1765b96`，在已同步A2主线的协调分支吸收为`96a353f`，仅portfolio_context与两测试文件。新freeze调用独立核验helper，未更改旧read/_bytes/schema；同时实际NaN反例证明会抛InvalidOperation，已在现有cash/price/quantity入口补finite校验，坏估值降级而非隐藏整个冻结流程。纯计算6红→25绿、真实缺/错/晚引用4红→6绿，最终整文件21项PG通过；root独立44项研究/optimizer相关单测、Ruff/Mypy与diff检查通过。
 
 集中审查`0e37cce..96a353f`结论Spec通过、Code quality Ready，无确认P1/P2。审查对照真实诊断evaluator/top_weights/_stored_decimal，核对完整同币证券分母、并列最大、未量化严格阈值与12位metric；canonical policy的身份/内容与不晚于P时点检查保留。PG正例实际走prepare→admit→database_read_only_tools，D为合法合成存储fixture，不能称为全诊断input_hash重演或正式R生产验收；旧focus 0.35原值及hash继续照原合同读取。本片只确定新研究前提，主线集成与运行交A，原正式研究方向/成本/来源数据缺口保留。
+
+### 9.12 A 串行集成与实际运行更新（2026-09-04）
+
+A2八增量按序集成为`e236ea5/beb23b2/27ff42f/4f93103/60191d9/afaaa08/de13833/757321c`；B3为`2c31750/6b1fe17`。A独立147项研究前端单测、64项定向Python单测、8项新API隔离PG、25项集中度单测、TypeScript与生成合同一致性检查通过，B3 Ruff/Mypy通过；不重复子代理原提交或合并协调分支历史。
+
+更新前完整备份暴露此前daily audit新增对象未被完整备份支持：审计清单采用规范内容寻址路径且无versionId，旧备份只接受provider路径/版本，因此首对象前拒绝。另无网络复核证实本地S3请求会使用环境代理，这是独立潜在问题。`e7e5b81/ffe8472`分别修复局部代理与严格审计清单兼容；后者集中审查Ready且指纹一致，47相关回归及Ruff/Mypy通过。失败目录不覆盖、无完成标记；新的`pre-0041-20260904-complete`覆盖177个引用对象，并用不存在源配置路径实际离线恢复通过，schema/摘要/对象绑定一致、残留0。
+
+实际运行已更新到API代码`55dedb910ef2f3871a0da3cb55b75672f8c04a14`、schema `0041_action_observations`。镜像与源码摘要匹配，原环境/端口不变，PG/MinIO未重启。九类历史表全部旧行摘要一致、活动Job为0、未注入公司行动测试证据。两个真实旧研究在375/1440共四组BFF/DOM通过：精确run/snapshot、原响应除新增inputs外完全相同，inputs按原冻结读取，公司行动列表为空，刷新无准入读取或写请求、执行锁保留、无横溢出。真实Alpaca公司行动样本仍未验收，不能把旧案例兼容验收等同新增资料的真实源正例。
+
+受认证的readiness为HTTP503：database/migration/object_store ready，worker unavailable；live通过，不为改绿启动常驻worker。现存D/P只读新focus核验返回None，落在“非唯一匹配CONCENTRATION_TOP1”条件，不记录为合格正例、不重建旧研究。验收产物在受保护actions-0041-20260904。回退保留rollback-before-0041-20260904镜像；仅在0041降级保护允许时回到0040与旧镜像，不删除冻结证据或备份对象。
