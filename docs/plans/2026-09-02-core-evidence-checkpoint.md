@@ -1818,3 +1818,24 @@ DB/迁移/对象存储ready、worker unavailable整体503如实保留。只读�
 前后十一类行（含financial_facts）逐行摘要与行数完全未变，active Job为0；未采集、
 调用模型、新建研究、重算优化或改写历史输出。私有核验位于
 outputs/acceptance/financial-pit-20260904。该消费者修复不代表v4/B3或经济比较完成。
+
+### 2026-09-04 研究提出的失效条件：真实旧run页面语义验收
+
+前端小片b247b68等效3d21c1e、计划a101957等效b6be880已合入；生产及两测试文件
+对owner交付无净差，复用已Ready的102相关unit、TS/eslint/diff与375/1440两E2E，
+不重复重型验证。现有Web3302直接加载主线b6be880，本片没有重启或重建API；
+实际API镜像仍2c6e9b8e5f5aa4c72dc0fcf7fb73c240d89da4eb，业务库0042不变。
+
+只读找到已有含布尔条件与证据的真实旧run，正常DB hydration→受保护exact-run
+GET→BFF→375/1440实际DOM核对原run、snapshot和全部invalidation_conditions
+完全一致。条件区明确“研究提出的待核验条件、本页未提供系统求值结果”；布尔
+operator和threshold原样呈现，不把true/false当观察状态。逐条打开原生证据抽屉，
+待核验/不是求值结果提示、原布尔表达式、证据object/hash均一致；页面与抽屉均无
+横溢出。全部浏览器请求仅GET/HEAD/OPTIONS、无admission读取或外部访问。
+
+前后九类历史行摘要与行数完全未变，active Job为0；未创建研究/模型/采集/业务
+写入。私有证据在outputs/acceptance/proposed-conditions-dom-20260904。首次浏览器
+脚本按所有包含标题的section定位，匹配到多个祖先；改为该标题的直接父section
+后通过，属于验收定位歧义，不改产品或业务数据。空条件语义沿用已有单测证明，
+不为真实验收人为删掉条件。本片仅完成C展示，B冻结事实/系统求值仍由原owner推进，
+原B3总体目标尚未完成。

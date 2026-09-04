@@ -793,3 +793,5 @@ D 对官方公开文档和本地定义的限定调查已完成，无业务 API�
 - [Alpaca corporate actions](https://docs.alpaca.markets/us/reference/corporateactions-1) 不保证事件即时到达；分页结束或 `data_quality=complete` 不能证明全区间无漏、字段齐全或已获历史准入。继续复用现有采集/导入入口，不为相同未知重采。
 - [FMP delisted companies](https://site.financialmodelingprep.com/developer/docs/stable/delisted-companies) 比指数成员更接近身份退出缺口，但免费端点权限、覆盖、首次发布/版本及清算对价均未证实；profile 成功不能外推。项目已核的官方推荐社区 fmpsdk 有 `delisted_companies(page, limit)` 和 `historical_sp500_constituent()`；这既不是 FMP 自营 SDK，也不解决内部池历史定义，不据此新增依赖或要求付费。
 - 下一可兼容方向是内部真实发布新版本后，结合外部身份/行动/行业证据开展前瞻观察；尚未发布或启用，也不替代原多年 T1。若需要另一套多年 PIT 股票池，必须先明确其定义及历史证据要求，不能暗换池。原池历史发布链、身份/行动完整性、行业/ETF穿透、合格价格与端点使用条件仍为具体未完成项，不视为“免费源不存在”。
+
+§9.20 C独立交付：A已集成b247b68等效3d21c1e，Web主线b6be880实际加载，API保持2c6e9b8无需重建。已有真实含布尔条件旧run通过DB→受保护API/BFF→375/1440 DOM，表达式/证据定位未变、条件及抽屉明确待核验，九类历史行完全不变、active0。详见原checkpoint研究条件真实页面段；C展示不等待B，也不代表B事实求值或B3总体完成。
