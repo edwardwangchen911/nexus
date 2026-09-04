@@ -62,6 +62,9 @@ export function OptimizePanel({ state, overview, creating, notice, onCreate, onR
   const diagnosticOverview = overview?.diagnostic_report ? overview : null;
   const hasData = diagnosticOverview !== null && ["ready", "partial", "stale"].includes(state);
   const admission = diagnosticOverview?.proposal_admission ?? null;
+  const hasReduceOnlyFinding = diagnosticOverview?.diagnostic_report?.items.some(
+    (item) => item.actionability === "reduce_only",
+  ) ?? false;
   return (
     <section className="page-stack optimize-page" aria-label="组合优化页面" data-state={state}>
       <header className="page-heading"><div><p className="eyebrow">组合决策诊断</p><h1>组合诊断与优化</h1><p>先确认问题和准入边界，再比较同口径三方案。风险和权重始终由后端确定性计算。</p></div><div className="page-actions"><span className="state-chip" data-state={state}>{dataStateLabels[state]}</span><button className="button button--quiet" type="button" onClick={onRefresh}><RefreshCw aria-hidden="true" size={17} />刷新诊断</button></div></header>
@@ -76,6 +79,18 @@ export function OptimizePanel({ state, overview, creating, notice, onCreate, onR
           {diagnosticOverview.proposal_group ? <a className="button button--quiet" href={`/optimize/${diagnosticOverview.proposal_group.proposal_group_id}`}>打开已有三方案</a> : admission && state === "ready" ? <button className="button button--primary" type="button" disabled={creating} onClick={() => void onCreate(admission).catch(() => undefined)}><Layers3 aria-hidden="true" size={17} />{creating ? "正在创建" : "创建三方案比较"}</button> : null}
         </section>
         {notice ? <p className={`inline-notice inline-notice--${notice.kind}`} role="status">{notice.text}</p> : null}
+        {!diagnosticOverview.proposal_group ? (
+          <section className="proposal-admission" aria-label="已保存三方案状态">
+            <div>
+              <p className="eyebrow">已保存结果</p>
+              <h2>当前没有已保存的三方案比较</h2>
+              <p>{hasReduceOnlyFinding
+                ? "存在降低仓位候选条件，但服务器尚未形成完整方案，仍待估值、流动性、币种、证据与策略绑定核验。"
+                : "当前诊断未提供可直接用于确定性减仓的条目，最小调整候选尚未形成。"}</p>
+              <p>下方仅展示诊断基线事实，不是三方案 13 维比较。</p>
+            </div>
+          </section>
+        ) : null}
         <DiagnosticList report={diagnosticOverview.diagnostic_report!} />
       </>}
     </section>

@@ -112,6 +112,49 @@ describe("optimization pages", () => {
     expect(screen.queryByRole("button", { name: /下单|交易/ })).not.toBeInTheDocument();
   });
 
+  it.each(["NO_ACTION", "RESEARCH_REQUIRED", "BLOCKED"] as const)(
+    "%s 无方案组且尚无可确定减仓条目时，不推断保持现状",
+    (optimizationNeed) => {
+      const overview = overviewData({ proposal_group: null });
+      overview.diagnostic_report!.optimization_need = optimizationNeed;
+      overview.diagnostic_report!.items = overview.diagnostic_report!.items.map((item) => ({
+        ...item,
+        actionability: item.actionability === "reduce_only" ? "research" : item.actionability,
+      }));
+      render(<OptimizePanel state="ready" overview={overview} creating={false} notice={null} onCreate={vi.fn()} onRefresh={vi.fn()} />);
+
+      const region = screen.getByRole("region", { name: "已保存三方案状态" });
+      expect(region).toHaveTextContent("当前没有已保存的三方案比较");
+      expect(region).toHaveTextContent("当前诊断未提供可直接用于确定性减仓的条目，最小调整候选尚未形成");
+      expect(region).toHaveTextContent("下方仅展示诊断基线事实，不是三方案 13 维比较");
+      expect(region).not.toHaveTextContent(/保持现状更优|建议保持|无需调整|DRAFT_NO_EVIDENCED_REDUCTION/);
+    },
+  );
+
+  it("仅把 reduce_only 诊断显示为候选条件，不伪造完整方案", () => {
+    const overview = overviewData({
+      proposal_group: null,
+      proposal_admission: null,
+      proposal_admission_reason: "OPTIMIZATION_AUTHORITY_MISSING",
+    });
+    render(<OptimizePanel state="ready" overview={overview} creating={false} notice={null} onCreate={vi.fn()} onRefresh={vi.fn()} />);
+
+    const availability = screen.getByRole("region", { name: "已保存三方案状态" });
+    expect(availability).toHaveTextContent("存在降低仓位候选条件，但服务器尚未形成完整方案");
+    expect(availability).toHaveTextContent("仍待估值、流动性、币种、证据与策略绑定核验");
+    expect(screen.getByRole("region", { name: "三方案准入" })).toHaveTextContent("缺少有效的三方案准入记录");
+    expect(screen.queryByRole("table", { name: /三方案/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/比较结果：|推荐/)).not.toBeInTheDocument();
+  });
+
+  it("已有方案组时只保留原链接，不显示 no-group 状态", () => {
+    render(<OptimizePanel state="ready" overview={overviewData()} creating={false} notice={null} onCreate={vi.fn()} onRefresh={vi.fn()} />);
+
+    expect(screen.getByRole("link", { name: "打开已有三方案" })).toHaveAttribute("href", `/optimize/${groupId}`);
+    expect(screen.queryByRole("region", { name: "已保存三方案状态" })).not.toBeInTheDocument();
+    expect(screen.queryByText("当前没有已保存的三方案比较")).not.toBeInTheDocument();
+  });
+
   it.each(["OPTIMIZATION_AUTHORITY_MISSING", null] as const)("explains unavailable admission %s without enabling creation", (reason) => {
     const onCreate = vi.fn();
     render(<OptimizePanel state="ready" overview={overviewData({ proposal_group: null,

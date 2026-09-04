@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
-import { draftResearchContext, groupId, proposalGroup } from "../unit/optimize/fixtures";
+import { draftResearchContext, groupId, overviewData, proposalGroup } from "../unit/optimize/fixtures";
 
 for (const viewport of [{ width: 375, height: 812 }, { width: 1440, height: 900 }]) {
   test(`frozen research stays readable at ${viewport.width}px`, async ({ page }) => {
@@ -59,5 +59,46 @@ for (const viewport of [{ width: 375, height: 812 }, { width: 1440, height: 900 
     expect(violations.filter((violation) => ["serious", "critical"].includes(violation.impact ?? ""))).toEqual([]);
     expect(writes).toEqual([]);
     await page.screenshot({ path: `test-results/frozen-research-${viewport.width}.png`, fullPage: true });
+  });
+
+  test(`no-group diagnosis stays read-only at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const requests: Array<{ method: string; url: string }> = [];
+    page.on("request", (request) => {
+      if (request.url().includes("/api/v1/")) requests.push({ method: request.method(), url: request.url() });
+    });
+    await page.route("**/api/v1/overview*", (route) => route.fulfill({ json: {
+      data: overviewData({ proposal_group: null }),
+      meta: { request_id: groupId, schema_version: "1", as_of: "2026-08-24T00:00:00Z" },
+    } }));
+
+    await page.goto("/optimize");
+    await page.waitForLoadState("networkidle");
+    const availability = page.getByRole("region", { name: "已保存三方案状态" });
+    await expect(availability).toContainText("当前没有已保存的三方案比较");
+    await expect(availability).toContainText("存在降低仓位候选条件");
+    await expect(availability).toContainText("不是三方案 13 维比较");
+    await expect(page.getByText(/比较结果：|推荐/)).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /启动影子验证|下单|交易|买入|卖出/ })).toHaveCount(0);
+
+    const readsBeforeRefresh = requests.filter((request) => request.method === "GET" && request.url.includes("/api/v1/overview")).length;
+    const requestsBeforeRefresh = requests.length;
+    await page.getByRole("button", { name: "刷新诊断" }).click();
+    await expect.poll(() => requests.filter((request) => request.method === "GET" && request.url.includes("/api/v1/overview")).length)
+      .toBe(readsBeforeRefresh + 1);
+    expect(requests.filter((request) => !["GET", "HEAD"].includes(request.method))).toEqual([]);
+    expect(requests.slice(requestsBeforeRefresh)).toEqual([
+      expect.objectContaining({ method: "GET", url: expect.stringContaining("/api/v1/overview") }),
+    ]);
+
+    const width = await page.evaluate(() => ({
+      client: document.documentElement.clientWidth,
+      scroll: document.documentElement.scrollWidth,
+    }));
+    expect(width.scroll, JSON.stringify(width)).toBeLessThanOrEqual(width.client);
+    const violations = (await new AxeBuilder({ page }).include(".optimize-page").analyze()).violations;
+    expect(violations.filter((violation) => ["serious", "critical"].includes(violation.impact ?? ""))).toEqual([]);
+    await page.screenshot({ path: `test-results/no-proposal-group-${viewport.width}.png`, fullPage: true });
   });
 }
