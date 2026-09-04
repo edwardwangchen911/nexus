@@ -717,3 +717,30 @@ FRED 增量：parser/collector/storage/CLI 使用现有 HTTP bytes、原件和 m
 共享 FRED prepare→admission→tool 正常路径先因未附加宏观证据失败，再接入每 series 最新可见经济日期/vintage/receipt 与 calendar 双引用；同钟数值/单位矛盾不选，等价重复选择稳定引用，保留其他研究与两个预留槽。新格式同时按 canonical schema/hash 和 local revision 识别，坏新格式不得回退旧协议，严格结果还须匹配精确 observation ID。同引用异 series 的真实 PG 反例（不关闭 FK/guard）先错误读出额外行，修复后与 FMP/旧 FX 共 5 PG 通过；最新共享及 FRED 聚焦 34 unit、共享两源码 Mypy/Ruff 通过。集中审查与修复定向复核 Spec/Quality Ready。主线负责人可先并行集成已 Ready 的 producer/CLI 与真实导入，再接收共享读端提交；运行/真实消费者验收以接收方结果为准，不把发出交接当作完成。
 
 实际闭合：A已将FRED五项交付串行合入，API源码/镜像6200c38，业务库仍0042；真实归档正常CLI一次导入4条，原件/canonical/calendar对象hash与DB reader一致。新prepare双引用→精确get_macro_snapshot通过，旧FMP/Alpaca冻结不回填；临时admit事务回滚，无持久研究/预算/Job/模型。详情见现有core-evidence-checkpoint的FRED真实验收段。FMP/FRED页面/API仍未接线，不能把本片当作整体产品目标完成。
+
+### 9.17 C2/V1：冻结公司背景与宏观资料到既有研究页面
+
+目标：把 §9.16 已正常入库且冻结的两类材料接到现有 ResearchInputsSummary → BFF → ResearchInputs，不建新页面、端点、数据库表或采集调度。沿用既有准入和 exact run 路由；旧快照不得读最新，刷新不调用提供方或模型。不把完成展示当作完整研究或投资决策。
+
+#### 共享 DTO（API owner 唯一维护生成物）
+
+- ResearchInputsSummary 增加 `company_profiles`（默认空 tuple，最多 1）及 `macro_observations`（默认空 tuple，最多 8）；旧 JSON 缺字段仍可读。下列日期为 ISO date，时间为 AwareDatetime，UUID/hash 沿用现有类型约束；未特别标注的字段均必填。
+- `ResearchInputCompanyProfile`：evidence_ref_id UUID；source 固定 `fmp_company_profile`；revision/content_hash/raw_content_hash/receipt_content_hash 为 64 位十六进制；symbol string；company_name/description/cik/isin/cusip/industry/sector 为 nullable string（长度沿用 canonical）；source_url 为 canonical 中已验证的无 key URL；received_at/available_at 时间；source_published_at/valid_until/sector_taxonomy 固定 null；revision_semantics=`local_content_hash`；sector_risk_eligible/financial_fact_eligible/price_authority_eligible/historical_backtest_eligible 固定 false，execution_locked 固定 true。
+- `ResearchInputMacroObservation`：observation_id/evidence_ref_id/calendar_evidence_ref_id UUID；source 固定 `fred`；revision string（沿用已绑定本地 revision）；content_hash/raw_content_hash 为 64 位十六进制；series string；observed_on/vintage 日期；value DecimalString；unit string（真实 metadata 单位，不以 series 猜）；received_at/available_at 时间；revision_semantics=`local_content_hash`；historical_backtest_eligible 固定 false、execution_locked 固定 true。value 复用现有十进制合同，单位 Percent 的 4.25 只能显示 4.25%，不能乘 100；Index 等其他单位不转百分比。
+- 每个可见项均来自本 instrument/snapshot/as_of 的 Frozen 精确引用匹配（source/object/revision/hash/location/available_at/authority），再调用既有 canonical reader。FRED 必须同时有精确 macro 和 calendar 冻结引用；只冻结 macro 或缺/坏 calendar 一律不展示；同引用的伪 observation 不借用有效行。仅新 fred_vintage_json_v1 观察用于本 DTO，旧 FX 数据不冒充新格式。无符合 DTO 的有效值只跳过相应 optional，不遮蔽有效 SEC/issuer/actions。
+- 本片不修改 prepare 选择策略、不扩展研究准入。summary 的有无规则保持原研究基底要求，profile/macro-only 不绕过原门禁。
+
+#### 分工、顺序与回归
+
+| 负责人 | 独占文件与交付 | 依赖/核对 |
+| --- | --- | --- |
+| API（既有 FMP owner） | engine/src/nexus/api/research_inputs.py、api/schemas/agents.py，必要的小投影模块；contracts/openapi.json、app/lib/generated/*；新增 engine/tests/integration/test_research_provider_inputs.py、必要 schema 单测和 tests/unit/research/provider-runtime-boundary.test.ts | 从 main 0374318 同步；先产 schema/生成物独立提交并交 UI，继续 reader/API 的 TDD；不改 UI 文件 |
+| UI（既有 FRED owner） | app/components/research-inputs.tsx、新 research-company-profile.tsx/research-macro-observations.tsx；tests/unit/research/provider-inputs.test.tsx、provider-fixtures.ts；tests/e2e/research-provider-inputs.spec.ts | 同基线按上述 DTO 并行写组件/用例；收到生成物提交后类型核对；不编辑 schema/生成物/服务/业务数据 |
+| root / A | root 合同协调与集中审查；A 唯一 main、运行及业务 DB 集成者 | API 与 UI 独立 worktree，一个写入者；PG 55436 仅 API owner；A 留到 Ready 后串行验收，避免独立开发空等 |
+
+- [ ] API 先运行新增正常归档导入→prepare→admission/exact run HTTP 读端反例，确认缺新字段失败，再接线。边界：新字段完整、旧 run 不回填、future/错误 instrument/ref/hash/缺 calendar、坏 optional 不遮有效 SEC、零和负宏观值、无基底不准入。复用旧 producer 的原件/真实 guard，不 mock reader/normalizer。BFF runtime 需保留合法 DTO、兼容缺字段、拒绝 false→true 资格提升、额外敏感字段及错误 Decimal。
+- [ ] UI 先写渲染/语义 RED，再实现。现有卡片与统一格式函数、只读原生 details；明确公司描述不是 SEC 财务事实，行业标签不是已验证风控分类；经济日期、vintage、收到时间、可用时间各自标注。长描述/标识可展开且窄屏不溢出；null 显示未知，非零小值不显示零，最多 3 位小数；仅宏观/公司测试资料不显示误导的 SEC 标题。正常旧资料布局不回归。页面无采集/研究/交易副作用。
+- [ ] 集中 Spec/Quality 审查；聚焦 pytest/Ruff/Mypy、前端单测/typecheck/lint、生成物一致性与该页 E2E。修复后定向复核；不重复同环境未变代码的重型验证。
+- [ ] A 在当前真实 FMP/FRED 冻结样本上串行集成，核对同一案例 DB→受保护 API/BFF→实际 DOM（桌面/窄屏）、旧冻结无新字段，保持执行锁；不重复采集/导入或模型调用。API 已生效不等于页面已验收，证据继续写原 checkpoint。
+
+本片不新增依赖、迁移或凭据配置。回滚为回退本片应用提交，新增 optional JSON 不影响旧响应读取，既有原件、行与研究冻结不改。原计划 A2/B3/T1/S/E/L/R/X 等未完成条目及人工选择/外部操作门禁继续保留。
