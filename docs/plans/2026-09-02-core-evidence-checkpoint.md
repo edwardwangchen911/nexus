@@ -1588,3 +1588,11 @@ assessment-label-summary.json。另静态确认synthesis.py与staged_intent_sema
 五类业务表包含当前run在内的原ID/hash保持不变，active0，正式研究只读准入仍拒绝；
 无模型、采集、写请求或API重启，运行API85e3f9c/schema0040不变。真实验收摘要在
 synthesis-review-ui-20260904。此片补可核验展示，不更改模型自评，也不建立合格R晋级。
+
+## 历史简报精确研究回放（2026-09-04，北京时间）
+
+0bd03c1→068bac8 已集成；A9定向unit通过。真实简报点击同证券较旧failed run，
+375/390/1440均保持原run/instrument/snapshot/decision_time及阶段输入hash，不跳到
+后来的completed run。刷新仍只读同一run GET，不读admission/最新研究；不存在run
+实际返回404且不fallback。原证据抽屉可见、执行锁定、无研究按钮、无横溢出。
+没有模型、采集或写请求，API/schema不变；真实证据在exact-run-ui-20260904。
