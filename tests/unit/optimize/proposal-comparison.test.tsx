@@ -131,9 +131,13 @@ describe("three-way proposal comparison", () => {
     expect(region).toHaveTextContent("比较证据不完整");
   });
 
-  it("marks an evidence-incomplete strategy copy of hold as not yet formed", () => {
+  it("marks matching strategy targets as not formed even when actions and reasons differ", () => {
     const group = proposalGroup();
-    group.proposals[2].positions = group.proposals[0].positions.map((position) => ({ ...position }));
+    group.proposals[2].positions = group.proposals[0].positions.map((position, index) => ({
+      ...position,
+      action: index === 0 ? "reduce" : "increase",
+      reason_code: index === 0 ? "STRATEGY_RESEARCH_PENDING" : "STRATEGY_SCOPE_PENDING",
+    }));
     group.proposals[2].strategy_evidence_complete = false;
     render(<ProposalComparison group={group} onStartShadow={vi.fn()} onReject={vi.fn()} />);
 
@@ -143,10 +147,38 @@ describe("three-way proposal comparison", () => {
     expect(region).not.toHaveTextContent("策略目标已形成");
   });
 
-  it("does not present a recommendation or shadow action when any proposal is not rankable", () => {
-    const group = proposalGroup({ economic_comparison: {
-      status: "compared", recommendation: "minimum_change", reasons: [],
-    } });
+  it("does not mark matching strategy targets as pending when strategy evidence is complete", () => {
+    const group = eligibleProposalGroup();
+    group.proposals[2].positions = group.proposals[0].positions.map((position) => ({ ...position }));
+    render(<ProposalComparison group={group} onStartShadow={vi.fn()} onReject={vi.fn()} />);
+
+    const region = screen.getByRole("region", { name: "策略目标仓位目标与完整性" });
+    expect(region).not.toHaveTextContent("策略目标尚未形成");
+  });
+
+  const proposalGates: ReadonlyArray<[
+    string,
+    (group: ReturnType<typeof eligibleProposalGroup>) => void,
+    0 | 1 | 2,
+  ]> = [
+    ["策略证据", (group) => { group.proposals[2].strategy_evidence_complete = false; }, 2],
+    ["约束核验", (group) => { group.proposals[1].comparison.metrics.constraint_complete = false; }, 1],
+    ["适用性核验", (group) => { group.proposals[1].comparison.metrics.eligibility_complete = false; }, 1],
+    ["比较证据", (group) => { group.proposals[1].comparison.metrics.evidence_complete = false; }, 1],
+    ["成本依据", (group) => { group.proposals[1].comparison.cost_complete = false; }, 1],
+    ["数据过期", (group) => { group.proposals[1].comparison.metrics.stale = true; }, 1],
+    ["需要外汇换算", (group) => { group.proposals[1].comparison.requires_fx = true; }, 1],
+    ["未知指标", (group) => { group.proposals[1].comparison.metrics.unknown_metrics = ["cost"]; }, 1],
+    ["排名资格", (group) => { group.proposals[1].comparison.metrics.ranking_eligible = false; }, 1],
+    ["非可执行", (group) => { group.proposals[1].comparison.non_executable = true; }, 1],
+  ];
+
+  it.each(proposalGates)("hides recommendations and shadow actions when %s alone is incomplete", (_name, breakGate, proposalIndex) => {
+    const group = eligibleProposalGroup({
+      economic_comparison: { status: "compared", recommendation: "minimum_change", reasons: [] },
+      shadow_eligibility: { eligible: true, reasons: [] },
+    });
+    breakGate(group);
     render(<ProposalComparison group={group} onStartShadow={vi.fn()} onReject={vi.fn()} />);
 
     const summary = screen.getByRole("region", { name: "经济比较结论" });
@@ -154,6 +186,9 @@ describe("three-way proposal comparison", () => {
     expect(summary).not.toHaveTextContent("比较结果：最小调整");
     expect(screen.queryByRole("button", { name: "启动影子验证" })).not.toBeInTheDocument();
     expect(screen.queryByText(/启动影子验证/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "拒绝方案组" })).toBeVisible();
+    const variant = ["保持现状", "最小调整", "策略目标"][proposalIndex];
+    expect(screen.getByRole("region", { name: `${variant}仓位目标与完整性` })).toHaveTextContent(/暂不可比较|非可执行/);
   });
 
   it("requires a separate explicit confirmation before starting shadow validation", async () => {

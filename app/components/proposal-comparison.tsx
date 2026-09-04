@@ -51,8 +51,7 @@ export function ProposalComparison({ group, startShadowEnabled = true, rejectEna
     ? null
     : group.shadow_eligibility.reasons.map(reasonText).join("；") || "服务器未授予影子验证资格。";
   const terminal = ["expired", "rejected", "validated"].includes(group.status);
-  const comparisonUsable = complete && ordered.every((proposal) =>
-    proposal.comparison.metrics.ranking_eligible && !proposal.comparison.non_executable);
+  const comparisonUsable = complete && ordered.every(proposalIsComparable);
   const canShadow = startShadowEnabled && comparisonUsable && group.status === "compared" && shadowReason === null;
   const canReject = rejectEnabled && ["draft", "compared", "shadowing"].includes(group.status);
   const blockedReason = !startShadowEnabled
@@ -253,6 +252,7 @@ const actionLabels = {
 
 function ProposalAllocation({ proposal, hold }: { proposal: Proposal; hold: Proposal }): React.ReactElement {
   const metrics = proposal.comparison.metrics;
+  const comparable = proposalIsComparable(proposal);
   const strategyPending = proposal.variant === "strategy_target"
     && !proposal.strategy_evidence_complete
     && sameTargets(proposal, hold);
@@ -264,7 +264,11 @@ function ProposalAllocation({ proposal, hold }: { proposal: Proposal; hold: Prop
     <article className="proposal-allocation" role="region" aria-label={`${variantLabels[proposal.variant]}仓位目标与完整性`}>
       <header>
         <h4>{variantLabels[proposal.variant]}</h4>
-        <span className="mode-badge">{strategyPending ? "策略目标尚未形成" : proposal.comparison.non_executable ? "非可执行" : "可比较"}</span>
+        <span className="mode-badge">{strategyPending
+          ? "策略目标尚未形成"
+          : proposal.comparison.non_executable
+            ? "非可执行"
+            : comparable ? "可比较" : "暂不可比较"}</span>
       </header>
       {strategyPending ? <p>策略研究证据未完成，保存内容与保持现状相同；不能视为第三个已形成候选。</p> : null}
       {/* The bounded table is intentionally keyboard-focusable on narrow screens. */}
@@ -303,9 +307,25 @@ function CheckState({ label, ok }: { label: string; ok: boolean }): React.ReactE
   return <div><dt>{label}</dt><dd>{ok ? "完整" : `${label}不完整`}</dd></div>;
 }
 
+function proposalIsComparable(proposal: Proposal): boolean {
+  const metrics = proposal.comparison.metrics;
+  return (
+    (proposal.variant !== "strategy_target" || proposal.strategy_evidence_complete)
+    && metrics.constraint_complete
+    && metrics.eligibility_complete
+    && metrics.evidence_complete
+    && proposal.comparison.cost_complete
+    && !metrics.stale
+    && !proposal.comparison.requires_fx
+    && metrics.unknown_metrics.length === 0
+    && metrics.ranking_eligible
+    && !proposal.comparison.non_executable
+  );
+}
+
 function sameTargets(left: Proposal, right: Proposal): boolean {
   const values = (proposal: Proposal) => proposal.positions.map((item) =>
-    `${item.instrument_id}:${item.current_weight}:${item.target_weight}:${item.action}:${item.reason_code}`).sort();
+    `${item.instrument_id}:${item.target_weight}`).sort();
   return JSON.stringify(values(left)) === JSON.stringify(values(right));
 }
 
