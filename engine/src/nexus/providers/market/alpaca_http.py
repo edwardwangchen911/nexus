@@ -77,6 +77,7 @@ class AlpacaHttpTransport:
         secret: SecretStr,
         feed: Literal["iex", "sip"],
         symbol_resolver: InstrumentSymbolResolver,
+        identity_asof: date | None = None,
     ) -> None:
         if not key_id.get_secret_value().strip() or not secret.get_secret_value().strip():
             raise ValueError("ALPACA_CREDENTIALS_REQUIRED")
@@ -85,13 +86,14 @@ class AlpacaHttpTransport:
         self._secret = secret
         self._feed = feed
         self._symbol_resolver = symbol_resolver
+        self._identity_asof = identity_asof
 
     async def fetch_bars(
         self,
         request: BarsRequest,
         cursor: str | None,
     ) -> AlpacaRawResponse:
-        identity_date = request.end.date()
+        identity_date = self._identity_asof or request.end.date()
         symbol = _validated_us_symbol(
             await self._symbol_resolver.resolve(request.instrument_id, identity_date)
         )
