@@ -760,3 +760,13 @@ FRED 增量：parser/collector/storage/CLI 使用现有 HTTP bytes、原件和 m
 增量验证：原清仓断言改为未完成/保持基线先 RED，修复后 80 optimizer unit 通过；审查发现合法旧 schema 的 reduce_candidate/eligible_for_increase 组合可能反向增配，新增 model_validate 回归先读出 0.125，再以 stance veto 修复并复跑 80 unit。原 builder 5 PG 通过；新增 PG 初次误读不存在的 ORM 现金字段为测试错误，去除此断言（现金由单位测试核验）后正常 builder→DB→受保护 GET 1 PG 通过，明确 STRATEGY_EVIDENCE_INCOMPLETE 与 non_executable。一源 Mypy、三文件 Ruff/diff 检查通过；旧文件全量格式原已非绿，仅格式化修改区，未混入无关重排。主线和实际运行以 A 接收后验收为准。
 
 运行闭合：A已集成95c1265等效8b72b89并随ce91b81应用镜像生效；减仓测试复用已审查同代码80unit/6PG，不运行真实账户优化、不重算历史结果。
+
+### 9.19 B3：财务事实的实际入库时点
+
+主线 ce91b81 的精确研究工具只按 fact.accepted_at 和原冻结引用选择财务事实，未限制 fact.created_at；合法原件/引用的存在不能证明每条归一化事实已经在旧决策时点入库。API SEC 读取和 prepare 本来已有限制，本片不修改它们。
+
+- 唯一生产变更：`agents/database_tools.py` 的 financial_facts 查询增加 `FinancialFactRecord.created_at <= self._decision_time`，复用原精确 instrument/ref/accepted/field 条件；不重写原件、fact、旧快照或 hash，不增加 schema/迁移/依赖。
+- 新 `test_financial_fact_visibility.py` 从正常 SEC mock transport→实际 producer→prepare/admit→精确工具和鉴权 GET 验证；另明确手工追加合成边界事实，沿用旧 ref/accepted_at 但 created_at 晚于原截止。旧工具多出该值先 RED，修复后旧截止排除、新截止可读、旧合法和等截止事实保留，原 snapshot payload/hash 不变；不把手插边界事实冒称正常来源生产。
+- owner `2c3b2b`（root `14420dd`）经集中 Spec/Quality 代码审查无 P1/P2；最终新链及既有工具完整性/权限/冻结漂移/空结果共 4 PG、2 unit、一源 Mypy、Ruff、新测试 format、diff 检查通过。root 吸收后两文件与 owner 净差为零，复用相同环境验证。PG 窗口已释放，A 接收后串行更新运行；不重复真实采集、模型调用或重算旧研究。
+
+本片补上既有财务事实 PIT 消费者，不构成正式 v4 研究。已核三个 committee.* 条件仍是统一引用首项证据的占位表达式，无实际布尔求值；集中度触发可复用原政策与分母，FRED/SEC 比率还须精确单位/期间及已选择的经济阈值。完整 B3 与 T1 的原任务继续保留，不能以消费者修复替代它们。
