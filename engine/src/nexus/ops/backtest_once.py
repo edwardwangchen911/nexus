@@ -18,6 +18,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from nexus.backtest.authority_loader import load_frozen_point_in_time_dataset
 from nexus.backtest.bundle import BundleRequest, prepare_bundle
+from nexus.backtest.calendar import (
+    CalendarPreparationError,
+    calendar_definition,
+    prepare_calendar,
+)
 from nexus.backtest.cost_policy import load_backtest_cost_policy_v1
 from nexus.backtest.costs import CostModel
 from nexus.backtest.engine import BacktestProtocol, run_backtest
@@ -206,11 +211,37 @@ async def prepare_and_run(settings: EngineSettings, request: BundleRequest) -> d
     )
 
 
+async def prepare_calendar_once(
+    settings: EngineSettings, start: date, end: date
+) -> dict[str, object]:
+    """Prepare only an installed-library calendar; never run or collect market evidence."""
+    if settings.database_url is None:
+        raise BacktestOnceError("BACKTEST_DATABASE_UNCONFIGURED")
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory.begin() as session:
+            calendar = await prepare_calendar(session, start, end)
+        return {
+            "status": "BACKTEST_CALENDAR_PREPARED",
+            "calendar_authority_id": str(calendar.authority_id),
+            "content_hash": calendar.content_hash,
+            "version": calendar.version,
+            "start": calendar.range_start.isoformat(),
+            "end": calendar.range_end.isoformat(),
+            "backtest_executed": False,
+            "execution_locked": True,
+        }
+    finally:
+        await engine.dispose()
+
+
 def main() -> None:
     parser = _Parser(
         description="运行一次 baseline 历史回测；只读已有冻结数据，不采集、不运行模型、不交易。"
     )
     parser.add_argument("--prepare-request-file")
+    parser.add_argument("--prepare-calendar", action="store_true")
     parser.add_argument("--strategy-version", choices=["baseline_v1"])
     for name in ("authority-bundle-id", "data-snapshot-id", "source-policy-id", "cost-policy-id"):
         parser.add_argument(f"--{name}")
@@ -221,7 +252,19 @@ def main() -> None:
         args = parser.parse_args()
         values = vars(args)
         path = values.pop("prepare_request_file")
-        if path is not None:
+        calendar_mode = values.pop("prepare_calendar")
+        if calendar_mode:
+            if path is not None or any(
+                value is not None for key, value in values.items() if key not in {"start", "end"}
+            ):
+                raise BacktestOnceError("BACKTEST_REQUEST_INVALID")
+            try:
+                start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
+            except (TypeError, ValueError) as error:
+                raise BacktestOnceError("BACKTEST_REQUEST_INVALID") from error
+            calendar_definition(start, end)  # Reject unsupported ranges before loading settings.
+            output = asyncio.run(prepare_calendar_once(EngineSettings(), start, end))
+        elif path is not None:
             if any(value is not None for value in values.values()):
                 raise BacktestOnceError("BACKTEST_REQUEST_INVALID")
             prepared_request = _prepare_request(path)
@@ -232,7 +275,11 @@ def main() -> None:
             request = BacktestOnceRequest.model_validate(values)
             output = asyncio.run(run_once(EngineSettings(), request))
     except Exception as error:
-        code = str(error) if isinstance(error, BacktestOnceError) else "BACKTEST_RUN_FAILED"
+        code = (
+            str(error)
+            if isinstance(error, BacktestOnceError | CalendarPreparationError)
+            else "BACKTEST_RUN_FAILED"
+        )
         sys.stderr.write(json.dumps({"status": "failed", "code": code}) + "\n")
         raise SystemExit(1) from None
     sys.stdout.write(json.dumps(output, sort_keys=True) + "\n")

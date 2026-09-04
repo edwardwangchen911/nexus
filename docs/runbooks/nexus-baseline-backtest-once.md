@@ -1,6 +1,23 @@
 # baseline 首次回测
 
-入口复用现有点时数据加载、回测引擎和事务写入器。只使用数据库内已有的完整源证据集合；不采集行情、不调用模型、不创建源市场证据，不连接交易接口。可以直接运行已有数据包，也可以先从完整源集合装配新数据包再运行。
+入口复用现有点时数据加载、回测引擎和事务写入器。回测只使用数据库内已有的完整源证据集合；不采集行情、不调用模型、不创建历史股票池、行业或公司行动证据，不连接交易接口。可以单独准备本地库的规范日历、直接运行已有数据包，或从完整源集合装配新数据包再运行。
+
+## 单独准备规范日历
+
+使用当前 Python 环境安装的 `exchange_calendars` 生成 XNYS 日历。此模式只接收以下三个参数，与下方两种模式的其他参数互斥：
+
+```sh
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.backtest_once \
+  --prepare-calendar --start '2021-01-08' --end '2021-01-11'
+```
+
+开始和结束必须都是库支持范围内的实际交易日，且有序；不自动截断或将节假日移动到临近交易日。日期是格式示例；实际日历须覆盖拟用历史及策略预热区间，不仅是回测起止两日。所有 session、开闭市及收盘后 30 分钟决策时点均取当前安装库，节假日、提前收市及夏令时由该版本日历确定。
+
+成功只返回 `BACKTEST_CALENDAR_PREPARED`、`calendar_authority_id`、`content_hash`、实际包版本组成的 `version`、`start/end`、`backtest_executed=false` 与 `execution_locked=true`。将此 ID 填入下方 `calendar_authority_id`；本命令不创建数据包、回测结果或订单，不调用外部接口或模型。
+
+根和全部 sessions 在同一事务写入，创建/发布时间取实际物化时刻，不倒填到历史日期。同版本、同区间精确核验并复用原 ID；并发不会重复创建。发现已存在记录字段、hash、时点或 session 集不一致时拒绝，不修补或重标旧根。现有 Fosun display 日历保持原样，不能因同属 XNYS 而当作本日历复用。
+
+这里的完整性只表示当前安装库对应区间的规范输出，不宣称交易所原始官方归档、历史版本修订或源市场数据已验收。缺失 universe/sector/actions、历史价格或来源资格时，下方组包仍拒绝；日历成功不代表 T1 历史输入已齐备。
 
 ## 从现有完整源集合准备后运行
 
@@ -72,6 +89,9 @@ ID 来自现有 `backtest_authority_bundles`，与其 `data_snapshot_id`、`sour
 | 错误码 | 含义 |
 | --- | --- |
 | `BACKTEST_DATABASE_UNCONFIGURED` | 当前入口未取得数据库配置 |
+| `BACKTEST_REQUEST_INVALID` | 缺少必要参数或混用互斥模式；不加载运行配置 |
+| `BACKTEST_CALENDAR_RANGE_INVALID` | 日期无序、端点不是实际 session 或超出安装库支持范围 |
+| `BACKTEST_CALENDAR_AUTHORITY_INVALID` | 同自然键的既有日历不完整、不一致或时点不可见；不修补历史 |
 | `BACKTEST_CUTOFF_IN_FUTURE` | 读取截止时刻在未来 |
 | `BACKTEST_FROZEN_AUTHORITY_MISSING` | 指定的冻结回测证据集合不存在 |
 | `BACKTEST_AUTHORITY_BINDING_MISMATCH` | 集合与快照、来源或成本政策不一致 |
@@ -80,4 +100,4 @@ ID 来自现有 `backtest_authority_bundles`，与其 `data_snapshot_id`、`sour
 | `BACKTEST_AUTHORITY_OR_DATA_INCOMPLETE` | 时点、区间、数据哈希、公司行动、股票池、基准或来源核验未通过 |
 | `BACKTEST_RUN_FAILED` | 参数、配置、连接或执行失败；先排查，不自动重试 |
 
-本入口无调度或共享服务注册。停用可停止调用该模块；已提交数据包及结果保留为不可变证据，不通过删除结果或改写历史来回滚。无新增迁移，旧参数模式和旧包哈希/回放语义保持。
+本入口无调度或共享服务注册。停用相应准备/运行模式即可回退入口；已提交日历、数据包及结果保留为不可变证据，不通过删除记录或改写历史来回滚。无新增迁移或依赖，旧参数模式和旧包哈希/回放语义保持。
