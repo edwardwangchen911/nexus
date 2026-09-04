@@ -4351,6 +4351,11 @@ async def test_native_v3_domain_rejection_persists_safe_reason_without_text_or_r
         )
         assert len(outputs) == 1 and outputs[0].role is None and outputs[0].intent is None
         assert outputs[0].payload["reason"] == "model_stage_output_invalid"
+        diagnostic = outputs[0].payload["diagnostic"]
+        assert diagnostic["boundary"] == "role_binding"
+        assert diagnostic["validation_kind"] == "unsafe_text"
+        assert diagnostic["response_hash"] == hashlib.sha256(raw.encode()).hexdigest()
+        assert diagnostic["role"] == "orchestrator"
         assert outputs[0].payload["stage_input"]["stage"] == "research"
         assert "synthetic-private-canary" not in json.dumps(outputs[0].payload)
     path = f"/internal/v1/research-runs/{admission.run_id}"

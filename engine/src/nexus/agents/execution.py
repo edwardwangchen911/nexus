@@ -15,6 +15,7 @@ from nexus.agents.committee import (
     CommitteeModel,
     CommitteeRoleOutput,
     PromptAsset,
+    StageFailureDiagnostic,
     StageInputIdentity,
 )
 from nexus.agents.execution_authority import (
@@ -455,6 +456,7 @@ async def _terminal_after_committee(
     else:
         await release_daily_budget_if_reserved(session, run_id=run.id)
     stage_input = getattr(committee, "last_stage_input", None)
+    diagnostic = getattr(committee, "failure_diagnostic", None)
     return await _persist_terminal(
         session,
         run,
@@ -463,6 +465,13 @@ async def _terminal_after_committee(
         status=status,
         reason=reason,
         stage_input=stage_input if isinstance(stage_input, StageInputIdentity) else None,
+        diagnostic=diagnostic
+        if (
+            isinstance(diagnostic, StageFailureDiagnostic)
+            and isinstance(stage_input, StageInputIdentity)
+            and diagnostic.stage == stage_input.stage
+        )
+        else None,
     )
 
 
@@ -513,6 +522,7 @@ async def _persist_terminal(
     status: Literal["failed", "abstained"],
     reason: str,
     stage_input: StageInputIdentity | None = None,
+    diagnostic: StageFailureDiagnostic | None = None,
 ) -> ResearchRunResult:
     await _append_output(
         session,
@@ -524,6 +534,7 @@ async def _persist_terminal(
         payload={
             "reason": reason,
             **({"stage_input": stage_input.model_dump(mode="json")} if stage_input else {}),
+            **({"diagnostic": diagnostic.model_dump(mode="json")} if diagnostic else {}),
         },
         intent=None,
     )

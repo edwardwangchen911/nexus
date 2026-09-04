@@ -1000,6 +1000,15 @@ async def test_stage_domain_rejection_keeps_safe_category_and_atomic_batch(monke
     assert model.usage.input_tokens == 300 and model.usage.output_tokens == 80
     assert model.last_stage_input.stage == "research"
     assert run.retry_count == 0 and invoke.await_count == 1
+    diagnostic = model.failure_diagnostic.model_dump(mode="json")
+    assert diagnostic == {
+        "stage": "research",
+        "boundary": "role_binding",
+        "role": ROLE_ORDER[role_index],
+        "response_hash": hashlib.sha256(raw.encode()).hexdigest(),
+        "validation_kind": "unsafe_text",
+    }
+    assert "synthetic-private-canary" not in json.dumps(diagnostic)
 
 
 @pytest.mark.asyncio
@@ -1020,3 +1029,26 @@ async def test_unknown_conversion_bug_is_not_classified_as_model_output(monkeypa
         await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
     assert model.failure_reason == "model_execution_failed"
     assert model._outputs == {} and invoke.await_count == 1
+    assert model.failure_diagnostic.boundary == "role_binding"
+    assert model.failure_diagnostic.validation_kind is None
+
+
+@pytest.mark.asyncio
+async def test_staged_request_advertises_existing_text_restrictions_and_clears_diagnostic(
+    monkeypatch,
+):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+
+    async def invoke(payload, *, output_model):
+        constraints = payload["text_constraints"]["forbidden_substrings_case_insensitive"]
+        assert ";" in constraints and "sh " in constraints and "https://" in constraints
+        return json.dumps(_staged_batch("research", ROLE_ORDER[:5])), UsageSnapshot(
+            input_tokens=300, output_tokens=80
+        )
+
+    monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
+    model = codex_staged.StructuredStagedCodexCommittee(prompts=prompts, tools=_tools())
+    result = await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    assert result.role == "orchestrator" and model.failure_diagnostic is None

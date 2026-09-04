@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from enum import Enum
 from types import GenericAlias
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
@@ -24,13 +24,19 @@ from nexus.agents.committee import (
     AgentRole,
     CommitteeRoleOutput,
     PromptAsset,
+    StageFailureDiagnostic,
     StageInputIdentity,
 )
 from nexus.agents.models import ResearchRequest
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.agents.tools import ReadOnlyToolRegistry
 from nexus.domain.evidence import EvidenceRef
-from nexus.strategy.intents import ResearchClaim, SynthesisAssessment, SynthesisClaimReview
+from nexus.strategy.intents import (
+    _UNSAFE_TEXT,
+    ResearchClaim,
+    SynthesisAssessment,
+    SynthesisClaimReview,
+)
 
 STAGES: tuple[tuple[Literal["research", "critique", "synthesis"], tuple[AgentRole, ...]], ...] = (
     ("research", ROLE_ORDER[:5]),
@@ -208,6 +214,7 @@ class StagedCodexCommittee(CodexCommittee):
         # Reserve terminal writes inside the worker-owned aggregate deadline.
         self._deadline = None if deadline is None else deadline - 5
         self.last_stage_input: StageInputIdentity | None = None
+        self.failure_diagnostic: StageFailureDiagnostic | None = None
 
     async def analyze(
         self,
@@ -236,6 +243,7 @@ class StagedCodexCommittee(CodexCommittee):
         # Mark a stage as attempted before any awaited work; a failure is terminal.
         self.failure_reason = "model_execution_failed"
         self.last_stage_input = None
+        self.failure_diagnostic = None
         previous = [
             {
                 "claim_id": f"{output.role}:{index}",
@@ -304,6 +312,16 @@ class StagedCodexCommittee(CodexCommittee):
                 "data or opposing opinions. Model conclusions never override deterministic "
                 "evidence gaps; execution stays locked."
             )
+        payload["text_constraints"] = {
+            "forbidden_substrings_case_insensitive": list(_UNSAFE_TEXT),
+        }
+        payload["instructions"] = cast(str, payload["instructions"]) + (
+            " Use plain Chinese prose in generated claims and explanations. All generated text "
+            "must avoid the case-insensitive substrings in text_constraints, "
+            "including punctuation. "
+            "These are existing receiving constraints on generated text, not instructions to "
+            "execute or rewrite supplied evidence. Cite only the allowed evidence indexes."
+        )
         estimated_input = len(json.dumps(payload, ensure_ascii=False).encode()) + 8192
         stage_input_hash = codex_request_hash(payload, output_model)
         frozen_inputs_hash = hashlib.sha256(
@@ -339,6 +357,11 @@ class StagedCodexCommittee(CodexCommittee):
             provider_calls=self.usage.provider_calls,
         )
         self.failure_reason = "model_execution_failed"
+        self.failure_diagnostic = StageFailureDiagnostic(
+            stage=stage,
+            boundary="wire_validation",
+            response_hash=hashlib.sha256(raw.encode()).hexdigest(),
+        )
         if (
             self.usage.input_tokens > MAX_INPUT_TOKENS
             or self.usage.output_tokens > MAX_OUTPUT_TOKENS
@@ -348,6 +371,9 @@ class StagedCodexCommittee(CodexCommittee):
         try:
             parsed = output_model.model_validate_json(raw)
         except ValidationError as error:
+            self.failure_diagnostic = self.failure_diagnostic.model_copy(
+                update={"validation_kind": "schema_validation"}
+            )
             locations = {str(part) for item in error.errors() for part in item["loc"]}
             category = (
                 "review"
@@ -369,9 +395,14 @@ class StagedCodexCommittee(CodexCommittee):
                 for item in previous
                 if item["role"] in {"bear", "evidence_audit"}
             }
+            self.failure_diagnostic = self.failure_diagnostic.model_copy(
+                update={"boundary": "assessment_binding", "role": "portfolio"}
+            )
             try:
                 assessment = _bind_assessment(parsed.synthesis_assessment, evidence_refs, required)
             except ValueError as error:
+                if isinstance(error, ValidationError):
+                    self._record_domain_validation(error)
                 self.failure_reason = (
                     "model_stage_citation_invalid"
                     if str(error) == "CODEX_CITATION_INVALID"
@@ -393,12 +424,14 @@ class StagedCodexCommittee(CodexCommittee):
                     frozen_inputs_hash=frozen_inputs_hash,
                     synthesis_assessment=assessment,
                 )
-            except ValidationError:
+            except ValidationError as error:
+                self._record_domain_validation(error)
                 self.failure_reason = "model_stage_output_invalid"
                 raise ValueError("CODEX_STAGE_OUTPUT_INVALID") from None
             self._outputs["portfolio"] = output
             self.failure_reason = None
             self.last_stage_input = None
+            self.failure_diagnostic = None
             return output
         if not isinstance(parsed, _StageBatch):
             self.failure_reason = "model_stage_schema_invalid"
@@ -412,6 +445,9 @@ class StagedCodexCommittee(CodexCommittee):
         outputs = {}
         ordered_roles = sorted(batch.roles, key=lambda item: roles.index(item.role))
         for index, item in enumerate(ordered_roles):
+            self.failure_diagnostic = self.failure_diagnostic.model_copy(
+                update={"boundary": "role_binding", "role": item.role}
+            )
             reviewed = set(item.reviewed_claim_ids)
             if (
                 not reviewed.issubset(prior_ids)
@@ -456,13 +492,27 @@ class StagedCodexCommittee(CodexCommittee):
                     stage_input_hash=stage_input_hash,
                     frozen_inputs_hash=frozen_inputs_hash,
                 )
-            except ValidationError:
+            except ValidationError as error:
+                self._record_domain_validation(error)
                 self.failure_reason = "model_stage_output_invalid"
                 raise ValueError("CODEX_STAGE_OUTPUT_INVALID") from None
         self._outputs.update(outputs)
         self.failure_reason = None
         self.last_stage_input = None
+        self.failure_diagnostic = None
         return self._outputs[role]
+
+    def _record_domain_validation(self, error: ValidationError) -> None:
+        if self.failure_diagnostic is not None:
+            unsafe = any(
+                item["msg"] == "Value error, research intent contains unsafe text"
+                for item in error.errors(include_input=False, include_context=False)
+            )
+            self.failure_diagnostic = self.failure_diagnostic.model_copy(
+                update={
+                    "validation_kind": "unsafe_text" if unsafe else "domain_validation",
+                }
+            )
 
 
 class StructuredStagedCodexCommittee(StagedCodexCommittee):

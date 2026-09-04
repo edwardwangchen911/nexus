@@ -50,6 +50,17 @@ class StageInputIdentity(BaseModel):
     frozen_inputs_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class StageFailureDiagnostic(BaseModel):
+    """Safe local terminal metadata, never response text or exception context."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    stage: Literal["research", "critique", "synthesis"]
+    boundary: Literal["wire_validation", "role_binding", "assessment_binding"]
+    role: AgentRole | None = None
+    response_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    validation_kind: Literal["schema_validation", "unsafe_text", "domain_validation"] | None = None
+
+
 class CommitteeRoleOutput(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
