@@ -8,6 +8,7 @@ import { ResearchNavHistory } from "./research-nav-history";
 import { ResearchActionObservation } from "./research-action-observation";
 import { ResearchCompanyProfile } from "./research-company-profile";
 import { ResearchMacroObservations } from "./research-macro-observations";
+import { ResearchPriceTrend } from "./research-price-trend";
 
 type Inputs = components["schemas"]["ResearchInputsSummary"];
 
@@ -24,12 +25,13 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
   const actions = inputs.corporate_action_observations ?? [];
   const profiles = inputs.company_profiles ?? [];
   const macros = inputs.macro_observations ?? [];
-  const hasProviderInputs = profiles.length > 0 || macros.length > 0;
+  const trends = inputs.current_price_trends ?? [];
+  const hasProviderInputs = profiles.length > 0 || macros.length > 0 || trends.length > 0;
   const hasActions = actions.length > 0;
   const hasIssuer = distributions.length > 0 || observations.length > 0 || navHistories.length > 0;
   const hasSec = inputs.filings.length > 0;
   const documentLabel = hasProviderInputs ? "已冻结研究资料" : hasActions ? (hasIssuer || hasSec ? "已冻结研究资料" : "已冻结公司行动资料") : hasIssuer ? (hasSec ? "已冻结研究资料" : "已冻结发行商资料") : inputs.filings.some((filing) => filing.form === "497K") ? "已冻结基金资料" : inputs.filings.some((filing) => filing.form === "6-K") ? "已冻结披露" : "已冻结财报";
-  const sourceLabel = [hasSec ? "SEC" : null, hasIssuer ? "发行商" : null, hasActions ? "Alpaca" : null, profiles.length ? "FMP" : null, macros.length ? "FRED" : null].filter(Boolean).join(" / ") || "SEC";
+  const sourceLabel = [hasSec ? "SEC" : null, hasIssuer ? "发行商" : null, hasActions || trends.length ? "Alpaca" : null, profiles.length ? "FMP" : null, macros.length ? "FRED" : null].filter(Boolean).join(" / ") || "SEC";
   return <article className="decision-card" aria-labelledby="research-inputs-title">
     <header className="decision-card__heading">
       <div><p className="eyebrow">{sourceLabel} · 本地只读证据</p><h2 id="research-inputs-title">{inputs.display_symbol ?? "标的"} · {documentLabel}</h2></div>
@@ -47,6 +49,7 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
       {hasActions ? <div><dt>公司行动查询</dt><dd>{actions.length} 份</dd></div> : null}
       {profiles.length > 0 ? <div><dt>公司背景</dt><dd>{profiles.length} 份</dd></div> : null}
       {macros.length > 0 ? <div><dt>宏观观察</dt><dd>{macros.length} 条</dd></div> : null}
+      {trends.length > 0 ? <div><dt>当前趋势资料</dt><dd>{trends.length} 份</dd></div> : null}
       <div><dt>使用边界</dt><dd>未形成买卖判断，不触发交易</dd></div>
     </dl>
     {inputs.truncated ? <p role="note">当前仅展示部分冻结{hasIssuer ? " SEC " : ""}资料，不代表完整覆盖。</p> : null}
@@ -81,6 +84,7 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
     {actions.map((observation) => <ResearchActionObservation key={observation.evidence_ref_id} observation={observation} />)}
     {profiles.map((profile) => <ResearchCompanyProfile key={profile.evidence_ref_id} profile={profile} />)}
     {macros.length > 0 ? <ResearchMacroObservations observations={macros} /> : null}
+    {trends.map((trend) => <ResearchPriceTrend key={trend.evidence_ref_id} trend={trend} />)}
     {distributions.map((distribution) => <section className="decision-card__section" aria-label="发行商现金分红资料" key={distribution.evidence_ref_id}>
       <h3>发行商现金分红资料</h3>
       <p>SSGA 官方资料 · 仅展示该冻结集合内最新一条分红观察，不代表完整分红历史。</p>

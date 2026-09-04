@@ -10,7 +10,7 @@ def trend():
         evidence_ref_id="00000000-0000-0000-0000-000000000001",
         source="alpaca_current_trends",
         revision="a" * 64,
-        content_hash="b" * 64,
+        content_hash="a" * 64,
         feed="sip",
         adjustment="split",
         currency="USD",
@@ -94,3 +94,9 @@ def test_fixed_feature_keys_values_and_warmup_are_closed(change):
     value["features"].update(change)
     with pytest.raises(ValidationError):
         agents.ResearchInputPriceTrend.model_validate(value)
+
+
+@pytest.mark.parametrize("change", [{"identity_asof": "2026-08-30"}, {"revision": "b" * 64}])
+def test_identity_cannot_postdate_receipt_and_revision_is_local_content_hash(change):
+    with pytest.raises(ValidationError):
+        agents.ResearchInputPriceTrend.model_validate({**trend(), **change})

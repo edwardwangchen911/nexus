@@ -123,7 +123,8 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
   const hasActionInputs = (inputs?.corporate_action_observations ?? []).length > 0;
   const hasCompanyInputs = (inputs?.company_profiles ?? []).length > 0;
   const hasMacroInputs = (inputs?.macro_observations ?? []).length > 0;
-  const hasProviderInputs = hasCompanyInputs || hasMacroInputs;
+  const hasTrendInputs = (inputs?.current_price_trends ?? []).length > 0;
+  const hasProviderInputs = hasCompanyInputs || hasMacroInputs || hasTrendInputs;
   const hasObservationInputs = hasIssuerInputs || hasActionInputs || hasProviderInputs;
   const issuerInputsLabel = inputs && (inputs.filings.length > 0 || issuerKinds > 1)
     ? "研究资料" : hasNavHistory ? "发行商净值历史资料" : hasFundObservations ? "发行商分类与持仓资料" : "发行商现金分红资料";

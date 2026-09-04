@@ -853,6 +853,7 @@ function responseIdentityValid(data: unknown, meta: Record<string, unknown>, req
 }
 
 function researchAdmissionValid(data: Record<string, unknown>): boolean {
+  if (!researchTrendsValid(data)) return false;
   if (typeof data.eligible !== "boolean") return false;
   const hasSnapshot = typeof data.data_snapshot_id === "string" && validateUuid(data.data_snapshot_id);
   if (data.eligible) return data.reason === null && hasSnapshot;
@@ -864,6 +865,7 @@ function researchAdmissionValid(data: Record<string, unknown>): boolean {
 }
 
 function researchAuthorityValid(data: Record<string, unknown>): boolean {
+  if (!researchTrendsValid(data)) return false;
   if (data.intent === null) return true;
   if (!isPlain(data.intent)) return false;
   return sameUuid(data.intent.instrument_id, data.instrument_id)
@@ -871,6 +873,40 @@ function researchAuthorityValid(data: Record<string, unknown>): boolean {
     && typeof data.intent.decision_time === "string"
     && typeof data.decision_time === "string"
     && Date.parse(data.intent.decision_time) === Date.parse(data.decision_time);
+}
+
+function researchTrendsValid(data: Record<string, unknown>): boolean {
+  // Only this optional supplemental source; no latest-data joins or indicator calculations.
+  if (!isPlain(data.inputs) || data.inputs.current_price_trends === undefined) return true;
+  const trends = data.inputs.current_price_trends;
+  const cutoff = contextMicroseconds(data.decision_time);
+  if (!Array.isArray(trends) || cutoff === null) return false;
+  return trends.every((trend) => {
+    if (!isPlain(trend) || !isPlain(trend.features) || !Array.isArray(trend.missing_sessions)) return false;
+    const received = contextMicroseconds(trend.received_at);
+    const available = contextMicroseconds(trend.available_at);
+    if (received === null || available === null || received > available || available > cutoff) return false;
+    if (String(trend.identity_asof) > String(trend.received_at).slice(0, 10) || trend.revision !== trend.content_hash) return false;
+    const start = String(trend.query_start), end = String(trend.query_end);
+    if (start > end || end > String(trend.received_at).slice(0, 10)) return false;
+    const observed = Number(trend.observed_sessions), expected = Number(trend.expected_sessions);
+    const tail = Number(trend.contiguous_tail_sessions), total = Number(trend.missing_sessions_total);
+    const missing = trend.missing_sessions as string[];
+    if (observed + total !== expected || tail > observed
+      || missing.length !== Math.min(total, 20) || trend.missing_sessions_truncated !== (total > 20)
+      || missing.some((day, index) => day < start || day > end || index > 0 && day <= missing[index - 1])) return false;
+    if (observed === 0) {
+      if (trend.first_observed_on !== null || trend.last_observed_on !== null) return false;
+    } else if (trend.first_observed_on === null || trend.last_observed_on === null
+      || String(trend.first_observed_on) < start || String(trend.first_observed_on) > String(trend.last_observed_on)
+      || String(trend.last_observed_on) > end) return false;
+    const features = trend.features;
+    if ([features.close, features.sma_20, features.sma_200].some((value) => value !== null && !decimalPositive(value))) return false;
+    if (features.rsi_14 !== null && (!decimalNonnegative(features.rsi_14) || decimalCompare(features.rsi_14, "100") > 0)) return false;
+    if (features.volatility_20 !== null && !decimalNonnegative(features.volatility_20)) return false;
+    return Object.entries({ close: 1, sma_20: 20, sma_200: 200, rsi_14: 15, volatility_20: 21 })
+      .every(([key, required]) => features[key] === null || tail >= required);
+  });
 }
 
 function strategyEvidenceValid(data: Record<string, unknown>): boolean {

@@ -415,6 +415,8 @@ class ResearchInputPriceTrend(_StrictAgentSchema):
 
     @model_validator(mode="after")
     def scope_consistency(self) -> "ResearchInputPriceTrend":
+        if self.identity_asof > self.received_at.date() or self.revision != self.content_hash:
+            raise ValueError("TREND_IDENTITY_INVALID")
         if not self.query_start <= self.query_end <= self.received_at.date():
             raise ValueError("TREND_QUERY_WINDOW_INVALID")
         if self.available_at < self.received_at:
