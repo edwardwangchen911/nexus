@@ -8,12 +8,27 @@ from nexus.agents.price_features import compute_price_features
 from nexus.persistence.models.data import PriceBarRecord
 
 
+def test_current_trends_use_identical_pure_close_arithmetic_without_fake_orm_rows() -> None:
+    from nexus.agents import price_features
+
+    compute = getattr(price_features, "compute_close_features", None)
+    assert compute is not None, "current trend closes need a pure normal calculation entrypoint"
+    closes = tuple(Decimal(index) for index in range(1, 201))
+    result = compute(closes, ("close", "sma_20", "sma_200", "rsi_14", "volatility_20"))
+    assert result.values == {
+        "close": "200.000000000000",
+        "sma_20": "190.500000000000",
+        "sma_200": "100.500000000000",
+        "rsi_14": "100.000000000000",
+        "volatility_20": "0.002554228858",
+    }
+    assert result.missing == ()
+
+
 def test_price_features_compute_literal_trend_and_nonzero_realized_volatility() -> None:
     bars = tuple(_bar(index, Decimal(index)) for index in range(1, 201))
 
-    result = compute_price_features(
-        bars, ("close", "sma_20", "sma_200", "rsi_14", "volatility_20")
-    )
+    result = compute_price_features(bars, ("close", "sma_20", "sma_200", "rsi_14", "volatility_20"))
 
     assert result.missing == ()
     assert result.values == {

@@ -4,7 +4,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from hashlib import sha256
@@ -174,7 +174,11 @@ def _read_collection(
             if os.fstat(descriptor).st_mode & 0o077:
                 raise ValueError
             return _load(
-                descriptor, instrument_id, require_utc(now or datetime.now(UTC)), manifest_name
+                lambda name, limit: _read(descriptor, name, limit),
+                set(os.listdir(descriptor)),
+                instrument_id,
+                require_utc(now or datetime.now(UTC)),
+                manifest_name,
             )
         finally:
             os.close(descriptor)
@@ -190,10 +194,38 @@ def _read_collection(
         raise ValueError("ALPACA_PRICES_ARCHIVE_INVALID") from None
 
 
-def _load(
-    directory: int, instrument_id: UUID, now: datetime, manifest_name: str
+def validate_price_originals(
+    originals: Mapping[str, bytes], *, instrument_id: UUID, now: datetime
 ) -> ValidatedPriceArchive:
-    manifest_raw = _read(directory, manifest_name, 128 * 1024)
+    """Revalidate persisted original bytes using the same archive contract, without disk IO."""
+
+    def read(name: str, limit: int) -> bytes:
+        content = originals[name]
+        if not isinstance(content, bytes) or not 0 < len(content) <= limit:
+            raise ValueError
+        return content
+
+    try:
+        return _load(read, set(originals), instrument_id, require_utc(now), "manifest.json")
+    except (
+        ValueError,
+        TypeError,
+        KeyError,
+        IndexError,
+        RecursionError,
+        MarketProviderPayloadError,
+    ):
+        raise ValueError("ALPACA_PRICES_ARCHIVE_INVALID") from None
+
+
+def _load(
+    read: Callable[[str, int], bytes],
+    names: set[str],
+    instrument_id: UUID,
+    now: datetime,
+    manifest_name: str,
+) -> ValidatedPriceArchive:
+    manifest_raw = read(manifest_name, 128 * 1024)
     manifest = _metadata(manifest_raw)
     if (
         set(manifest)
@@ -266,8 +298,8 @@ def _load(
         ):
             raise ValueError
         expected_files.update((raw_name, receipt_name))
-        raw = _read(directory, raw_name, MAX_PAGE_BYTES)
-        receipt_raw = _read(directory, receipt_name, 64 * 1024)
+        raw = read(raw_name, MAX_PAGE_BYTES)
+        receipt_raw = read(receipt_name, 64 * 1024)
         receipt = _metadata(receipt_raw)
         if (
             set(receipt)
@@ -303,7 +335,7 @@ def _load(
                 PriceOriginal(receipt_name, receipt_raw, received),
             )
         )
-    if set(os.listdir(directory)) != expected_files:
+    if names != expected_files:
         raise ValueError
     originals.append(PriceOriginal(manifest_name, manifest_raw, completed))
     return ValidatedPriceArchive(

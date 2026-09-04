@@ -7,9 +7,7 @@ from typing import Literal, cast
 
 from nexus.persistence.models.data import PriceBarRecord
 
-type PriceFeatureName = Literal[
-    "close", "sma_20", "sma_200", "rsi_14", "volatility_20"
-]
+type PriceFeatureName = Literal["close", "sma_20", "sma_200", "rsi_14", "volatility_20"]
 
 _SCALE = Decimal("0.000000000001")
 
@@ -25,11 +23,16 @@ def compute_price_features(
 ) -> PriceFeatureSet:
     """Compute only allowlisted features; insufficient warmup remains explicit."""
     ordered = tuple(sorted(bars, key=lambda bar: (bar.observed_at, bar.id)))
+    return compute_close_features(tuple(bar.close for bar in ordered), requested)
+
+
+def compute_close_features(closes: Sequence[Decimal], requested: Sequence[str]) -> PriceFeatureSet:
+    """Same arithmetic for an already validated, ordered contiguous close sequence."""
     values: dict[str, str] = {}
     missing: list[str] = []
     for raw_name in requested:
         name = cast(PriceFeatureName, raw_name)
-        value = _feature(name, ordered)
+        value = _feature(name, tuple(closes))
         if value is None:
             missing.append(name)
         else:
@@ -37,8 +40,7 @@ def compute_price_features(
     return PriceFeatureSet(values=values, missing=tuple(missing))
 
 
-def _feature(name: PriceFeatureName, bars: tuple[PriceBarRecord, ...]) -> Decimal | None:
-    closes = tuple(bar.close for bar in bars)
+def _feature(name: PriceFeatureName, closes: tuple[Decimal, ...]) -> Decimal | None:
     if name == "close":
         return None if not closes else closes[-1]
     if name == "sma_20":
@@ -77,8 +79,7 @@ def _volatility_20(closes: tuple[Decimal, ...]) -> Decimal | None:
         return None
     window = closes[-21:]
     returns = tuple(
-        current / previous - Decimal(1)
-        for previous, current in zip(window, window[1:])
+        current / previous - Decimal(1) for previous, current in zip(window, window[1:])
     )
     mean = sum(returns, Decimal(0)) / Decimal(20)
     variance = sum(((value - mean) ** 2 for value in returns), Decimal(0)) / Decimal(20)
