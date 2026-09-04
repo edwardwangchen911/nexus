@@ -1545,3 +1545,25 @@ OPTIMIZATION_FORMAL_RESEARCH_NOT_READY，未拼完整策略请求，正式admiss
 锁定、无重跑按钮、无横溢出；五类旧行按原ID/hash逐项不变，新研究仅新增正常记录。
 API85e3f9c/schema0040未变，材料位于受保护的daily-v3-tokenmeter-20260904。
 本轮解决了先前输入预检阻塞，仍未完成研究结论或正式经济比较。
+
+## 综合契约修复后的真实三阶段完成（2026-09-04，北京时间）
+
+7bce7f/a2305be/21f7b62 集成为6b619c7/322712a/01f38b7；A102联合unit与native
+Worker→PG→API回归通过，Ruff通过。生产重建前次七角色的synthesis：新增规则同时
+进入实际请求/strict schema，hash覆盖实际视图；累计预检56371，余7629，wire36542
+低于55808，旧冻结及历史hash不变。随后只做一次正常新研究，同P/问题/既有资料，
+无新采集、旧任务重放或重试。
+
+实际进程退出0，run completed/job succeeded，八角色和三个阶段完成；实际输入51743/
+输出2892，attempt=max1，active0，无失败诊断。但正文验收不合格：综合把四项异议
+均标accepted/resolved=true，missing为空、prevented=null、review_conclusion=sufficient；
+理由主要承认缺口或说明保持观察合理，并未解决所承认的证据缺失。综合同时仍列四项
+价格/宏观/流动性/集中度相对优势的不确定性。接受异议不等于解决异议，结构验证通过
+不代表内容合格，不能以completed或sufficient字段宣称研究审查闭环。
+
+确定性最终intent仍quality/evidence_audit partial、watch/none；实际只读正式研究绑定
+仍OPTIMIZATION_FORMAL_RESEARCH_NOT_READY，formal admissions/groups均0。未为追求
+complete再次调用模型或造完整策略请求。DB→BFF→DOM1440/390为同run与两处snapshot，
+NAV与研究intent可见、执行锁定、无重跑、无横溢出；五类旧业务行ID/hash全不变。
+API85e3f9c/schema0040不变。证据位于daily-v3-synthesis-contract-20260904，尤其
+content-review-summary.json保留本次语义反例，原输出不修改。
