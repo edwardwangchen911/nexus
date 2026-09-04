@@ -33,6 +33,11 @@ from nexus.backtest.persistence import (
     _validate_strategy_definition,
     persist_backtest_result,
 )
+from nexus.backtest.universe import (
+    UniversePreflightError,
+    preflight_us_liquid_v1,
+    require_xnys_session,
+)
 from nexus.domain.time import require_utc
 from nexus.persistence.models.backtest import (
     BacktestAuthorityBundleRecord,
@@ -236,12 +241,34 @@ async def prepare_calendar_once(
         await engine.dispose()
 
 
+async def preflight_universe_once(
+    settings: EngineSettings, effective_session: date
+) -> dict[str, object]:
+    """Check the fixed future universe without creating or repairing any authority."""
+    if settings.database_url is None:
+        raise BacktestOnceError("BACKTEST_DATABASE_UNCONFIGURED")
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session, session.begin():
+            result = await preflight_us_liquid_v1(session, effective_session)
+        return {
+            "status": result.status,
+            "member_count": result.member_count,
+            "gap_categories": list(result.gap_categories),
+        }
+    finally:
+        await engine.dispose()
+
+
 def main() -> None:
     parser = _Parser(
         description="运行一次 baseline 历史回测；只读已有冻结数据，不采集、不运行模型、不交易。"
     )
     parser.add_argument("--prepare-request-file")
     parser.add_argument("--prepare-calendar", action="store_true")
+    parser.add_argument("--preflight-universe", action="store_true")
+    parser.add_argument("--effective-session")
     parser.add_argument("--strategy-version", choices=["baseline_v1"])
     for name in ("authority-bundle-id", "data-snapshot-id", "source-policy-id", "cost-policy-id"):
         parser.add_argument(f"--{name}")
@@ -253,9 +280,18 @@ def main() -> None:
         values = vars(args)
         path = values.pop("prepare_request_file")
         calendar_mode = values.pop("prepare_calendar")
+        universe_mode = values.pop("preflight_universe")
+        effective_session_value = values.pop("effective_session")
         if calendar_mode:
-            if path is not None or any(
-                value is not None for key, value in values.items() if key not in {"start", "end"}
+            if (
+                universe_mode
+                or path is not None
+                or effective_session_value is not None
+                or any(
+                    value is not None
+                    for key, value in values.items()
+                    if key not in {"start", "end"}
+                )
             ):
                 raise BacktestOnceError("BACKTEST_REQUEST_INVALID")
             try:
@@ -264,20 +300,39 @@ def main() -> None:
                 raise BacktestOnceError("BACKTEST_REQUEST_INVALID") from error
             calendar_definition(start, end)  # Reject unsupported ranges before loading settings.
             output = asyncio.run(prepare_calendar_once(EngineSettings(), start, end))
+        elif universe_mode:
+            if (
+                path is not None
+                or effective_session_value is None
+                or any(value is not None for value in values.values())
+            ):
+                raise BacktestOnceError("BACKTEST_REQUEST_INVALID")
+            try:
+                effective_session = date.fromisoformat(effective_session_value)
+                require_xnys_session(effective_session)
+            except (TypeError, ValueError) as error:
+                raise BacktestOnceError("BACKTEST_REQUEST_INVALID") from error
+            output = asyncio.run(preflight_universe_once(EngineSettings(), effective_session))
         elif path is not None:
-            if any(value is not None for value in values.values()):
+            if effective_session_value is not None or any(
+                value is not None for value in values.values()
+            ):
                 raise BacktestOnceError("BACKTEST_REQUEST_INVALID")
             prepared_request = _prepare_request(path)
             output = asyncio.run(prepare_and_run(EngineSettings(), prepared_request))
         else:
-            if any(value is None for value in values.values()):
+            if effective_session_value is not None or any(
+                value is None for value in values.values()
+            ):
                 raise BacktestOnceError("BACKTEST_REQUEST_INVALID")
             request = BacktestOnceRequest.model_validate(values)
             output = asyncio.run(run_once(EngineSettings(), request))
     except Exception as error:
         code = (
             str(error)
-            if isinstance(error, BacktestOnceError | CalendarPreparationError)
+            if isinstance(
+                error, BacktestOnceError | CalendarPreparationError | UniversePreflightError
+            )
             else "BACKTEST_RUN_FAILED"
         )
         sys.stderr.write(json.dumps({"status": "failed", "code": code}) + "\n")
