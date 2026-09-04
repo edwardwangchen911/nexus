@@ -24,6 +24,8 @@ PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.alpaca_actions_local \
 - 每页 receipt：精确查询条件、页序、原件 SHA-256/长度及本机实际接收时间。不会保存认证头。
 - `manifest.json`：此次采集范围、已保存页及终态。`collected` / `pagination_exhausted=true` 仅指该次查询翻页结束，**不等于历史公司行动完整**；超页数、循环游标和错误不得报告完成。原件与 receipt 需一起保存，不能只保留事件摘要。
 
+手动中断、进程被终止或写盘故障可能留下原件而没有最终 manifest；这类目录一律视为未完成。入口不会自动删除、补写成功状态或复用该目录重放请求。对外 HTTP 沿用既有环境路由，不修改或绕过用户的代理配置。
+
 固定请求为 `GET https://data.alpaca.markets/v1/corporate-actions`，显式使用单证券、`region=us`、`data_quality=all`、`sort=asc`，不限制事件类型。`start/end` 按当前接口日期语义查询，文档以 `process_date` 描述排序；不是除息日窗口，也没有 `date_type=ex_date` 参数。
 
 当前官方事件按类型分桶，未提供旧适配器要求的 `status/revision`。金额按 Decimal 解码并保留原件；空币种、缺失日期及未知字段不填默认值。`data_quality=complete` 也可能返回已处理但字段不全的事件。接收时间不是公告时间，内容哈希不是上游修订号；分页结束不能证明历史时点可见或没有遗漏事件。
