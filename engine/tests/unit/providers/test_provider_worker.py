@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from nexus.jobs.models import JobType, QueueName
 from nexus.provider_worker import (
     _PROVIDER_POLICY_EXPRESSIONS,
@@ -382,10 +384,16 @@ async def test_provider_worker_requires_the_exact_database_migration_head() -> N
         async def scalar(self, _statement: object) -> str | None:
             return self.head
 
-    await _assert_provider_migration_head(  # type: ignore[arg-type]
-        _Session("0032_ticker_alias_authority")
-    )
-    for head in (None, "0030_fosun_daily_staging", "unexpected"):
+    # Derive the accepted head independently of the runtime constant, so a new
+    # migration catches a stale worker contract without freezing this fixture.
+    config = Config(str(Path(__file__).resolve().parents[3] / "alembic.ini"))
+    scripts = ScriptDirectory.from_config(config)
+    current = scripts.get_current_head()
+    assert current is not None
+    revision = scripts.get_revision(current)
+    assert revision is not None
+    await _assert_provider_migration_head(_Session(current))  # type: ignore[arg-type]
+    for head in (None, "0032_ticker_alias_authority", revision.down_revision, "unexpected"):
         with pytest.raises(
             RuntimeError,
             match="PROVIDER_DATABASE_MIGRATION_HEAD_MISMATCH",
