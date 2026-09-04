@@ -745,3 +745,14 @@ FRED 增量：parser/collector/storage/CLI 使用现有 HTTP bytes、原件和 m
 - [ ] A 在当前真实 FMP/FRED 冻结样本上串行集成，核对同一案例 DB→受保护 API/BFF→实际 DOM（桌面/窄屏）、旧冻结无新字段，保持执行锁；不重复采集/导入或模型调用。API 已生效不等于页面已验收，证据继续写原 checkpoint。
 
 本片不新增依赖、迁移或凭据配置。回滚为回退本片应用提交，新增 optional JSON 不影响旧响应读取，既有原件、行与研究冻结不改。原计划 A2/B3/T1/S/E/L/R/X 等未完成条目及人工选择/外部操作门禁继续保留。
+
+### 9.18 B3：减仓方向不产生未经授权的清仓幅度
+
+只读核对 main 0374318 发现 `optimizer/models.py` 将 legacy complete 的 reduce_candidate 直接变成 target=0，原单测亦断言清仓；ResearchIntent 没有减仓数量合同。这是消费者错误，不是已发生真实账户交易（v3/formal 门禁仍在）。root 在独立 worktree 修复，仅改 models 与相应 unit/production builder 回归，与 §9.17 两 owner 文件无交叉；PG 等待当前 owner 释放，不并发占用。
+
+- 任一正持仓收到 reduce_candidate 但没有确定性幅度时，复用既有 incomplete 分支：所有原权重和现金不动、strategy_evidence_complete=false，表示未生成合格策略目标，不是充分证据支持持有。无研究的 baseline 规则、hold_current、minimum_change 不改。
+- 未持有标的仍可被研究否决新增，不能因删除清仓分支而允许矛盾的 reduce_candidate/eligible_for_increase 组合新增仓位；兼容旧合法 schema，不改历史输出或 schema。
+- 先改旧清仓断言 RED，再覆盖正持仓被选中/未被选中、原现金保留、partial/watch/无研究对照；新增实际 builder→持久化→鉴权 GET，核验策略未完成、comparison non_executable、Shadow eligibility 的 STRATEGY_EVIDENCE_INCOMPLETE。使用标明 synthetic 的 legacy ResearchIntent，仅证明消费者，不证明真实 v4 研究生成。
+- 不新增数量策略、迁移、依赖或业务写入，不重算已存结果。完整 B3 仍需要冻结条件求值、合格研究内容、减仓幅度/经济取舍等正式合同与必要用户选择，本修复不能替代那些交付。代码回退不删除历史资料，亦不可为通过后续验收恢复方向直接授权数量。
+
+增量验证：原清仓断言改为未完成/保持基线先 RED，修复后 80 optimizer unit 通过；审查发现合法旧 schema 的 reduce_candidate/eligible_for_increase 组合可能反向增配，新增 model_validate 回归先读出 0.125，再以 stance veto 修复并复跑 80 unit。原 builder 5 PG 通过；新增 PG 初次误读不存在的 ORM 现金字段为测试错误，去除此断言（现金由单位测试核验）后正常 builder→DB→受保护 GET 1 PG 通过，明确 STRATEGY_EVIDENCE_INCOMPLETE 与 non_executable。一源 Mypy、三文件 Ruff/diff 检查通过；旧文件全量格式原已非绿，仅格式化修改区，未混入无关重排。主线和实际运行以 A 接收后验收为准。

@@ -1,14 +1,17 @@
 """Production composition from frozen PostgreSQL authority."""
 
 import asyncio
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
+import httpx
 import pytest
 from helpers.portfolio_api import (
     INSTRUMENT_ID,
     PORTFOLIOS,
+    app,
+    headers,
     seed_portfolio_list,
     settings,
 )
@@ -31,6 +34,7 @@ from nexus.persistence.models.optimization import (
 )
 from nexus.persistence.session import session_factory
 from nexus.quality.source_policy import SOURCE_POLICY_ID
+from nexus.strategy.intents import ResearchIntent
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
@@ -290,6 +294,92 @@ async def test_production_builder_absent_selection_is_only_strategy_noop(
     assert strategy_position is not None
     assert strategy_position.current_weight == strategy_position.target_weight
     assert comparison is not None and comparison.non_executable is True
+
+
+@pytest.mark.asyncio
+async def test_reduce_direction_without_size_remains_incomplete_through_builder_and_api(
+    migrated_database_url: str,
+) -> None:
+    """A legacy complete direction must not become a persisted full-exit target."""
+    await _seed_authority(migrated_database_url)
+    intent = ResearchIntent.model_validate(
+        {
+            "schema_version": "research_intent_v1",
+            "decision_id": UUID(int=909),
+            "instrument_id": INSTRUMENT_ID,
+            "display_symbol": "TEST",
+            "decision_time": _CLOCK,
+            "data_snapshot_id": _DATA_ID,
+            "horizon": "medium_term",
+            "stance": "reduce_candidate",
+            "exposure_action": "reduce",
+            "theses": [],
+            "counter_theses": [],
+            "uncertainties": [],
+            "invalidation_conditions": [],
+            "entry_conditions": [],
+            "exit_conditions": [],
+            "valid_until": _CLOCK + timedelta(days=1),
+            "quality_status": "complete",
+            "evidence_audit": "complete",
+            "role_votes": [{"role": "evidence_audit", "vote": "support"}],
+            "disagreement": "none",
+            "strategy_version": "baseline_v1",
+            "model_version": "fixture_v1",
+            "prompt_version": "fixture_v1",
+            "data_version": "fixture_v1",
+            "evidence_refs": [
+                {
+                    "source": "fixture",
+                    "object_id": "reduce-direction",
+                    "available_at": _CLOCK,
+                    "location": "fixture://reduce-direction",
+                    "content_hash": "b" * 64,
+                }
+            ],
+        }
+    )
+    original_intent = intent.model_dump(mode="json")
+    factory = session_factory(settings(migrated_database_url))
+    async with factory() as session, session.begin():
+        result = await build_and_persist_proposal_group(
+            session,
+            actor_id="builder",
+            idempotency_key="reduce-without-size",
+            request_hash="9" * 64,
+            admission_authority_id=_ADMISSION_ID,
+            research=(intent,),
+        )
+    async with factory() as session:
+        strategy = await session.scalar(
+            select(OptimizationProposalRecord).where(
+                OptimizationProposalRecord.proposal_group_id == result.group_id,
+                OptimizationProposalRecord.variant == "strategy_target",
+            )
+        )
+        assert strategy is not None and strategy.strategy_evidence_complete is False
+        position = await session.scalar(
+            select(ProposalPositionRecord).where(
+                ProposalPositionRecord.proposal_id == strategy.id,
+            )
+        )
+        assert position is not None and position.current_weight > 0
+        assert position.target_weight == position.current_weight
+    assert intent.model_dump(mode="json") == original_intent
+    path = f"/internal/v1/optimization-proposals/{result.group_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.status_code == 200
+    data = response.json()["data"]
+    visible = next(p for p in data["proposals"] if p["variant"] == "strategy_target")
+    assert visible["strategy_evidence_complete"] is False
+    assert visible["comparison"]["non_executable"] is True
+    assert visible["positions"][0]["target_weight"] == visible["positions"][0]["current_weight"]
+    assert data["shadow_eligibility"]["eligible"] is False
+    assert "STRATEGY_EVIDENCE_INCOMPLETE" in data["shadow_eligibility"]["reasons"]
 
 
 @pytest.mark.asyncio

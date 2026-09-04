@@ -185,7 +185,28 @@ def test_research_can_veto_a_deterministic_addition_but_cannot_create_one() -> N
         selection_authority=authority,
     )
     strategy = group.proposals[2]
-    assert next(item for item in strategy.positions if item.instrument_id == candidate).target_weight == 0
+    assert (
+        next(item for item in strategy.positions if item.instrument_id == candidate).target_weight
+        == 0
+    )
+
+    # Legacy schemas permit this contradictory pair. It must not turn a
+    # reduction direction for an unheld candidate into a new buy allocation.
+    contradictory = ResearchIntent.model_validate(
+        {
+            **intent.model_dump(mode="json"),
+            "stance": "reduce_candidate",
+            "exposure_action": "eligible_for_increase",
+        }
+    )
+    vetoed = build_proposal_group(
+        snapshot,
+        report,
+        (contradictory,),
+        OptimizationPolicy.v1(),
+        selection_authority=authority,
+    ).proposals[2]
+    assert next(p for p in vetoed.positions if p.instrument_id == candidate).target_weight == 0
 
     existing_authority = authority.__class__(
         policy_version="baseline_v1",
@@ -204,26 +225,41 @@ def test_research_can_veto_a_deterministic_addition_but_cannot_create_one() -> N
             "exposure_action": "reduce",
         }
     )
-    reduced = build_proposal_group(
-        snapshot,
+    # A direction has no quantity. Neither selecting nor excluding the held
+    # instrument permits the research consumer to interpret it as full exit.
+    for selection in (existing_authority, authority):
+        reduced_group = build_proposal_group(
+            snapshot,
+            report,
+            (reduce_intent,),
+            OptimizationPolicy.v1(),
+            selection_authority=selection,
+        )
+        reduced = reduced_group.proposals[2]
+        assert reduced.strategy_evidence_complete is False
+        assert len(reduced.positions) == 1
+        assert reduced.positions[0].instrument_id == existing
+        assert reduced.positions[0].target_weight == Decimal("1")
+        assert reduced.cash_target_weight == Decimal("0")
+        assert reduced_group.proposals[0].turnover == Decimal("0")
+
+    cash_snapshot = snapshot.model_copy(
+        update={"cash": (CashBalance(currency="USD", cash_balance="0.4", available_cash="0.4"),)}
+    )
+    reduced_with_cash = build_proposal_group(
+        cash_snapshot,
         report,
         (reduce_intent,),
         OptimizationPolicy.v1(),
         selection_authority=existing_authority,
     ).proposals[2]
-    assert reduced.positions[0].target_weight == Decimal("0")
-    assert reduced.cash_target_weight == Decimal("1")
-
-    cash_snapshot = snapshot.model_copy(
-        update={
-            "cash": (
-                CashBalance(currency="USD", cash_balance="0.4", available_cash="0.4"),
-            )
-        }
+    assert reduced_with_cash.strategy_evidence_complete is False
+    assert (
+        reduced_with_cash.positions[0].target_weight
+        == reduced_with_cash.positions[0].current_weight
     )
-    incomplete = intent.model_copy(
-        update={"instrument_id": existing, "quality_status": "partial"}
-    )
+    assert reduced_with_cash.cash_target_weight == reduced_with_cash.cash_current_weight
+    incomplete = intent.model_copy(update={"instrument_id": existing, "quality_status": "partial"})
     baseline = build_proposal_group(
         cash_snapshot,
         report,

@@ -313,32 +313,38 @@ def _compose_group(
                 or formal_inputs.valuation_time != snapshot.as_of
                 or set(bindings) != set(by_instrument)
                 or any(
-                    intent.data_snapshot_id != bindings[intent.instrument_id].research_data_snapshot_id
+                    intent.data_snapshot_id
+                    != bindings[intent.instrument_id].research_data_snapshot_id
                     or intent.decision_time != bindings[intent.instrument_id].research_as_of
                     or intent.valid_until < formal_inputs.decision_cutoff_at
                     for intent in research
                 )
             ):
                 raise ValueError("research intent does not bind the formal authority")
-        if any(
+        current_by_id = dict(current_weights)
+        # ResearchIntent specifies direction, not an authorized reduction size.
+        # Retaining the baseline here means an unavailable strategy target, not
+        # a supported hold recommendation. Baseline-only selection is unchanged.
+        reduction_size_missing = any(
+            intent.stance == "reduce_candidate"
+            and current_by_id.get(intent.instrument_id, _ZERO) > _ZERO
+            for intent in research
+        )
+        if reduction_size_missing or any(
             intent.quality_status != "complete" or intent.evidence_audit != "complete"
             for intent in research
         ):
             effective_selection = None
             strategy_result = build_strategy_target(current_weights, authority=None)
         else:
-            current_by_id = dict(current_weights)
             controlled_targets = tuple(
                 (
                     instrument_id,
-                    _ZERO
+                    min(target, current_by_id.get(instrument_id, _ZERO))
                     if (intent := by_instrument.get(instrument_id)) is not None
-                    and intent.stance == "reduce_candidate"
-                    else min(target, current_by_id.get(instrument_id, _ZERO))
-                    if intent is not None
                     and (
                         intent.exposure_action != "eligible_for_increase"
-                        or intent.stance == "watch"
+                        or intent.stance in {"watch", "reduce_candidate"}
                     )
                     else target,
                 )
@@ -346,8 +352,7 @@ def _compose_group(
             )
             strategy_result = strategy_result.__class__(
                 targets=controlled_targets,
-                cash_target_weight=_ONE
-                - sum((target for _, target in controlled_targets), _ZERO),
+                cash_target_weight=_ONE - sum((target for _, target in controlled_targets), _ZERO),
                 evidence_complete=True,
             )
     if effective_selection is None:
