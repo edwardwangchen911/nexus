@@ -97,23 +97,43 @@ _NEW = """              ) OR EXISTS (
                   AND calendar.created_at <= trends.available_at
                   AND jsonb_typeof(trends.payload->'originals') = 'array'
                   AND jsonb_array_length(trends.payload->'originals') BETWEEN 3 AND 21
+                  AND (SELECT count(DISTINCT item->>'name')
+                    FROM jsonb_array_elements(trends.payload->'originals') AS item)
+                    = jsonb_array_length(trends.payload->'originals')
                   AND NOT EXISTS (
                     SELECT 1 FROM jsonb_array_elements(trends.payload->'originals') AS item
                     LEFT JOIN public.data_artifacts AS original
                       ON original.sha256 = item->>'content_hash'
-                    WHERE original.id IS NULL OR original.source <> NEW.source
-                      OR original.schema_version <> CASE
+                    WHERE (
+                      jsonb_typeof(item) = 'object'
+                      AND jsonb_typeof(item->'name') = 'string'
+                      AND item->>'name' ~ '^(manifest[.]json|page-[0-9]{3}([.]receipt)?[.]json)$'
+                      AND jsonb_typeof(item->'raw_text') = 'string'
+                      AND jsonb_typeof(item->'byte_length') = 'number'
+                      AND jsonb_typeof(item->'received_at') = 'string'
+                      AND jsonb_typeof(item->'content_hash') = 'string'
+                      AND item->>'content_hash' ~ '^[0-9a-f]{64}$'
+                      AND original.id IS NOT NULL AND original.source = NEW.source
+                      AND original.schema_version = CASE
                         WHEN item->>'name' = 'manifest.json' THEN 'alpaca_trends_manifest_v1'
                         WHEN item->>'name' LIKE 'page-%.receipt.json' THEN 'alpaca_trends_receipt_v1'
                         ELSE 'alpaca_trends_raw_v1' END
-                      OR original.byte_size <> (item->>'byte_length')::bigint
-                      OR original.byte_size NOT BETWEEN 1 AND 2097152
-                      OR octet_length(item->>'raw_text') <> original.byte_size
-                      OR original.created_at > snapshot_time
-                      OR original.received_at > (item->>'received_at')::timestamptz
-                      OR original.observed_at > (item->>'received_at')::timestamptz
-                      OR original.available_at > (item->>'received_at')::timestamptz
-                      OR (item->>'received_at')::timestamptz > trends.available_at
+                      AND original.byte_size = (item->>'byte_length')::bigint
+                      AND original.byte_size BETWEEN 1 AND 2097152
+                      AND octet_length(item->>'raw_text') = original.byte_size
+                      AND original.created_at <= snapshot_time
+                      AND original.received_at <= (item->>'received_at')::timestamptz
+                      AND original.observed_at <= (item->>'received_at')::timestamptz
+                      AND original.available_at <= (item->>'received_at')::timestamptz
+                      AND (item->>'received_at')::timestamptz <= trends.available_at
+                      AND (item->>'name' = 'manifest.json' OR EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(trends.payload->'originals') AS paired
+                        WHERE paired->>'name' = CASE
+                          WHEN item->>'name' LIKE '%.receipt.json'
+                            THEN replace(item->>'name', '.receipt.json', '.json')
+                          ELSE replace(item->>'name', '.json', '.receipt.json') END
+                      ))
+                    ) IS NOT TRUE
                   )
                   AND EXISTS (
                     SELECT 1 FROM jsonb_array_elements(trends.payload->'originals') AS item
@@ -137,13 +157,34 @@ def _replace(old: str, new: str) -> None:
 
 
 def upgrade() -> None:
-    op.get_bind().execute(
+    connection = op.get_bind()
+    existing = connection.execute(
         text(
-            "INSERT INTO public.diagnostic_policies (id, key, version, schema_version, payload) "
-            "VALUES (:id, 'alpaca_current_trends', 'alpaca_current_trends_v1', '1', CAST(:payload AS jsonb))"
+            "SELECT id::text, key, version, schema_version, payload FROM public.diagnostic_policies "
+            "WHERE id=:id OR (key='alpaca_current_trends' AND version='alpaca_current_trends_v1')"
         ),
-        {"id": _PURPOSE_ID, "payload": json.dumps(_PURPOSE)},
-    )
+        {"id": _PURPOSE_ID},
+    ).all()
+    if existing and (
+        len(existing) != 1
+        or tuple(existing[0])
+        != (
+            _PURPOSE_ID,
+            "alpaca_current_trends",
+            "alpaca_current_trends_v1",
+            "1",
+            _PURPOSE,
+        )
+    ):
+        raise RuntimeError("current trends purpose conflicts with the published policy")
+    if not existing:
+        connection.execute(
+            text(
+                "INSERT INTO public.diagnostic_policies (id, key, version, schema_version, payload) "
+                "VALUES (:id, 'alpaca_current_trends', 'alpaca_current_trends_v1', '1', CAST(:payload AS jsonb))"
+            ),
+            {"id": _PURPOSE_ID, "payload": json.dumps(_PURPOSE)},
+        )
     _replace(_OLD, _NEW)
 
 
@@ -156,6 +197,4 @@ def downgrade() -> None:
     ):
         raise RuntimeError("cannot remove ownership support for persisted current trends")
     _replace(_NEW, _OLD)
-    op.get_bind().execute(
-        text("DELETE FROM public.diagnostic_policies WHERE id = :id"), {"id": _PURPOSE_ID}
-    )
+    # The published policy is append-only, including across a schema rollback.
