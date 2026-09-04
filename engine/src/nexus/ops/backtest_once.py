@@ -3,6 +3,8 @@
 import argparse
 import asyncio
 import json
+import os
+import stat
 import sys
 from dataclasses import replace
 from datetime import UTC, date, datetime
@@ -15,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from nexus.backtest.authority_loader import load_frozen_point_in_time_dataset
+from nexus.backtest.bundle import BundleRequest, prepare_bundle
 from nexus.backtest.cost_policy import load_backtest_cost_policy_v1
 from nexus.backtest.costs import CostModel
 from nexus.backtest.engine import BacktestProtocol, run_backtest
@@ -81,34 +84,45 @@ async def run_once(settings: EngineSettings, request: BacktestOnceRequest) -> di
             if bundle is None:
                 raise BacktestOnceError("BACKTEST_FROZEN_AUTHORITY_MISSING")
             if (bundle.data_snapshot_id, bundle.source_policy_id, bundle.cost_policy_id) != (
-                request.data_snapshot_id, request.source_policy_id, request.cost_policy_id,
+                request.data_snapshot_id,
+                request.source_policy_id,
+                request.cost_policy_id,
             ):
                 raise BacktestOnceError("BACKTEST_AUTHORITY_BINDING_MISMATCH")
             cost_policy = await load_backtest_cost_policy_v1(session)
             if cost_policy.id != request.cost_policy_id:
                 raise BacktestOnceError("BACKTEST_COST_POLICY_MISMATCH")
             protocol = BacktestProtocol(
-                start=request.start, end=request.end, initial_nav=request.initial_nav,
-                cost_model=CostModel(**{
-                    name: Decimal(str(cost_policy.parameters[name]))
-                    for name in ("commission_bps", "spread_bps", "slippage_bps")
-                }),
+                start=request.start,
+                end=request.end,
+                initial_nav=request.initial_nav,
+                cost_model=CostModel(
+                    **{
+                        name: Decimal(str(cost_policy.parameters[name]))
+                        for name in ("commission_bps", "spread_bps", "slippage_bps")
+                    }
+                ),
             )
             data = await load_frozen_point_in_time_dataset(
                 session, bundle.id, protocol, request.as_of
             )
             strategy = compile_strategy(baseline_v1_document(), baseline_feature_registry())
-            definition = await session.scalar(select(StrategyDefinitionRecord).where(
-                StrategyDefinitionRecord.strategy_version == request.strategy_version
-            ))
+            definition = await session.scalar(
+                select(StrategyDefinitionRecord).where(
+                    StrategyDefinitionRecord.strategy_version == request.strategy_version
+                )
+            )
             if definition is None or definition.created_at > request.as_of:
                 raise BacktestOnceError("BACKTEST_STRATEGY_UNAVAILABLE")
             _validate_strategy_definition(definition, strategy, request.as_of)
             result = run_backtest(strategy, data, protocol)
             authority = BacktestPersistenceAuthority(
-                authority_bundle_id=bundle.id, data_snapshot_id=bundle.data_snapshot_id,
-                source_policy_id=bundle.source_policy_id, cost_policy_id=bundle.cost_policy_id,
-                completed_at=datetime.now(UTC), data_cutoff_at=bundle.completed_at,
+                authority_bundle_id=bundle.id,
+                data_snapshot_id=bundle.data_snapshot_id,
+                source_policy_id=bundle.source_policy_id,
+                cost_policy_id=bundle.cost_policy_id,
+                completed_at=datetime.now(UTC),
+                data_cutoff_at=bundle.completed_at,
             )
             # Use the writer's lock order before resolving replay completion time.
             # The writer repeats these transaction-local locks and all integrity checks.
@@ -125,14 +139,18 @@ async def run_once(settings: EngineSettings, request: BacktestOnceRequest) -> di
             )
             output: dict[str, object] = {
                 "status": "BACKTEST_REPLAYED" if existing is not None else "BACKTEST_COMPLETED",
-                "run_id": str(record.id), "strategy_version": strategy.strategy_version,
-                "result_hash": record.result_hash, "authority_hash": record.authority_hash,
-                "data_hash": record.data_hash, "data_snapshot_id": str(record.data_snapshot_id),
+                "run_id": str(record.id),
+                "strategy_version": strategy.strategy_version,
+                "result_hash": record.result_hash,
+                "authority_hash": record.authority_hash,
+                "data_hash": record.data_hash,
+                "data_snapshot_id": str(record.data_snapshot_id),
                 "benchmarks": [item.comparison_key for item in result.comparisons],
                 "cost_policy_version": cost_policy.version,
                 "cost_basis": "historical_assumption_not_broker_fee",
                 "history_requirement_met": record.history_requirement_met,
-                "promotable": record.promotable, "execution_locked": True,
+                "promotable": record.promotable,
+                "execution_locked": True,
                 "read_path": "/internal/v1/strategies",
             }
         return output
@@ -149,20 +167,70 @@ class _Parser(argparse.ArgumentParser):
         raise BacktestOnceError("BACKTEST_REQUEST_INVALID")
 
 
+def _prepare_request(path: str) -> BundleRequest:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise BacktestOnceError("BACKTEST_REQUEST_INVALID")
+        raw = handle.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        raise BacktestOnceError("BACKTEST_REQUEST_INVALID")
+    return BundleRequest.model_validate_json(raw)
+
+
+async def prepare_and_run(settings: EngineSettings, request: BundleRequest) -> dict[str, object]:
+    """Commit the legitimate input package, then invoke the unchanged execution path."""
+    if settings.database_url is None:
+        raise BacktestOnceError("BACKTEST_DATABASE_UNCONFIGURED")
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory.begin() as session:
+            prepared = await prepare_bundle(session, request)
+    finally:
+        await engine.dispose()
+    # New package materialization is not backdated to a caller-supplied as_of.
+    return await run_once(
+        settings,
+        BacktestOnceRequest(
+            strategy_version=request.strategy_version,
+            authority_bundle_id=prepared.authority_bundle_id,
+            data_snapshot_id=prepared.data_snapshot_id,
+            source_policy_id=request.source_policy_id,
+            cost_policy_id=request.cost_policy_id,
+            start=request.start,
+            end=request.end,
+            initial_nav=request.initial_nav,
+            as_of=datetime.now(UTC),
+        ),
+    )
+
+
 def main() -> None:
     parser = _Parser(
         description="运行一次 baseline 历史回测；只读已有冻结数据，不采集、不运行模型、不交易。"
     )
-    parser.add_argument("--strategy-version", choices=["baseline_v1"], required=True)
+    parser.add_argument("--prepare-request-file")
+    parser.add_argument("--strategy-version", choices=["baseline_v1"])
     for name in ("authority-bundle-id", "data-snapshot-id", "source-policy-id", "cost-policy-id"):
-        parser.add_argument(f"--{name}", required=True)
+        parser.add_argument(f"--{name}")
     for name in ("start", "end", "initial-nav", "as-of"):
-        parser.add_argument(f"--{name}", required=True)
+        parser.add_argument(f"--{name}")
     parser.epilog = "基准固定为 SPY、同一冻结股票池等权及 baseline；成本使用冻结历史假设。"
     try:
         args = parser.parse_args()
-        request = BacktestOnceRequest.model_validate(vars(args))
-        output = asyncio.run(run_once(EngineSettings(), request))
+        values = vars(args)
+        path = values.pop("prepare_request_file")
+        if path is not None:
+            if any(value is not None for value in values.values()):
+                raise BacktestOnceError("BACKTEST_REQUEST_INVALID")
+            prepared_request = _prepare_request(path)
+            output = asyncio.run(prepare_and_run(EngineSettings(), prepared_request))
+        else:
+            if any(value is None for value in values.values()):
+                raise BacktestOnceError("BACKTEST_REQUEST_INVALID")
+            request = BacktestOnceRequest.model_validate(values)
+            output = asyncio.run(run_once(EngineSettings(), request))
     except Exception as error:
         code = str(error) if isinstance(error, BacktestOnceError) else "BACKTEST_RUN_FAILED"
         sys.stderr.write(json.dumps({"status": "failed", "code": code}) + "\n")
