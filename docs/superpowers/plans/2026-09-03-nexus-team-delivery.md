@@ -671,6 +671,18 @@ A2八增量按序集成为`e236ea5/beb23b2/27ff42f/4f93103/60191d9/afaaa08/de138
 
 FMP 与 FRED 分别由既有独立 worktree 实现，root 单独负责共享研究快照/工具及 FMP 冻结 guard，A 串行主线集成。没有其他源调用或并行业务写入；重型隔离 PG 分时，普通单测可并行。
 
+#### SDK 选择（2026-09-04 核验）
+
+用户要求先评估提供方 SDK，避免自行维护兼容库。选择以当前端点和所需证据为单位；优先官方/官方推荐 SDK 的公开接口，不把“有 SDK”当作必须迁移，也不把未直接满足本片合同说成整个 SDK 不可用。业务归一化、时点和冻结证据校验仍由 NEXUS 负责；不复制 SDK 的通用端点体系。
+
+- 复星：现有 gateway 已调用提供方 `fsopenapi`，固定版本和必要 TLS/日志/权限边界见 [既有说明](../../runbooks/fosun-sdk-admission.md)。不是重新实现其认证协议；本轮不升级或更换。
+- Alpaca：[官方 SDK](https://docs.alpaca.markets/us/docs/sdks-and-tools) 是 `alpaca-py`。本次读取的 [CorporateActionsClient](https://github.com/alpacahq/alpaca-py/blob/master/alpaca/data/historical/corporate_actions.py) 和 [REST 源码](https://github.com/alpacahq/alpaca-py/blob/master/alpaca/common/rest.py)显示：`raw_data=True` 返回已解码/合并的字典而非每页原始响应；该客户端未公开 session/timeout/retry 注入，底层 `retry_attempts=0` 也未覆盖默认值。因此当前已验证的 bars/actions 原件采集继续使用既有窄 HTTP 边界，不通过修改 SDK 私有成员再造一层兼容。本结论只针对当前读取的源码和本片端点；不预判未来交易或其他 SDK 功能。
+- FMP：[官方资源页](https://site.financialmodelingprep.com/developer/docs/resources)推荐社区维护的 `daxm/fmpsdk`，不是提供方自维护；已核 [20260824.0 对应源码](https://github.com/daxm/fmpsdk/blob/6505e711a917851ee25febe1e2b9381bc38c6833/fmpsdk/client.py)，确实支持 stable/profile、公开 Session 注入、超时与零重试，不能按过时索引称其废弃。公开 Session 可捕获原件，技术上能适配；但仍需新增有界 requests/重定向/原件捕获并再解析，当前唯一 profile GET 相比复用现有 httpx 没有减码收益。本片暂不加依赖，仅保留固定端点；采纳其官方支持的 `apikey` 请求头，避免 key 进入查询 URL。后续增加足够多已需要的端点时再衡量 SDK 的净维护收益，不预先实现通用库。
+- FRED：[官方 API](https://fred.stlouisfed.org/docs/api/fred/overview.html)提供 REST/XML/JSON；本次未找到美联储自维护 Python SDK。[fredapi](https://github.com/mortada/fredapi/blob/master/fredapi/fred.py)、[FRB](https://github.com/avelkoski/FRB/blob/master/fred/helpers/__init__.py)、[zachwill/fred](https://github.com/zachwill/fred/blob/master/fred/core.py)是第三方候选。其公开接口未直接同时保留原件、显式 metadata vintage 和有界请求；部分还将值转换为 float/NaN 或默认缓存。复用现有 bytes 基础设施，仅接 series/observations 两端点，不另造 FRED SDK。`order_by` 仅在已核 observations 响应出现，不添加到未列明的请求参数。
+- SEC：当前消费官方 [EDGAR JSON API](https://www.sec.gov/search-filings/edgar-application-programming-interfaces)，既有 `SecHttpTransport` 仅映射所需固定路径。本轮没有发现必须替换为提供方 SDK 的证据，不为固定 JSON 文件读取增加第三方包。
+
+本轮 SDK 核验无业务外呼、无依赖安装/升级、无凭据或权限变更。FMP/FRED 恢复按上述选择实施；保留既有原件、精度、首错停止和安全错误测试。不因 SDK 检查阻塞独立存储/读端开发，也不把连接成功当作 SDK/证据合同已通过。
+
 #### FMP 公司背景观察
 
 - 既有 `/stable/profile` 的单 symbol 原件与无 key receipt 先保存，再精确解析唯一匹配响应；1 MiB 上限、固定 origin、首错停止、无重试。正常 `load_local_environment` 读取 FMP_API_KEY，不保存认证 URL，不修改凭据。只绑定当前既有 Instrument/唯一 ticker，已有标识冲突拒绝，不新增/重标证券或别名。
@@ -695,3 +707,5 @@ FMP 与 FRED 分别由既有独立 worktree 实现，root 单独负责共享研�
 - [ ] 用各源正常入口采集一份公开代表样本并保存原件，不重复早先连接探测；A 按已就绪依赖完成实际存储与精确消费者核验。页面/API展示若尚未接线须明确标为未完成，不能用工具测试声称 DOM 验收。
 
 这些来源只补当前可追溯研究材料；FMP profile、FRED 宏观或 Alpaca 当期行动观测均不证明历史股票池、行业风控映射、复权完整性、费用或投资方向充分性。真实经济比较与历史回测资格保持原门禁。
+
+增量验证：0042 合法绑定先在旧 guard 下失败，再以 18 项隔离 PG 核验新 guard/负例/有冻结数据拒绝降级/空库往返；该子面集中审查无 P1/P2。FMP 正常 archive→import→prepare→admission→精确工具先因未附加 profile 失败，接线后两项新 PG 连既有 Alpaca 研究共 6 passed；证明新研究可读取公司背景、旧引用不变、profile-only 不创建研究，不证明页面接线。共享两源码 Mypy、Ruff 通过；header/归档/CLI 共 38 unit 通过。共享消费者增量审查 Ready；整片仍待已发现的身份标识冲突 P2 导入/reader 修复及定向验收，未交 A 应用业务迁移。以上 PG 均使用隔离测试数据库，没有修改现有业务数据。

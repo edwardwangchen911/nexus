@@ -47,6 +47,7 @@ from nexus.quality.source_policy import (
     SOURCE_POLICY_VERSION,
 )
 from nexus.research.alpaca_actions_storage import action_tool_payload, read_action_observations
+from nexus.research.fmp_profile_storage import read_company_profiles
 from nexus.research.sec_disclosures import read_disclosures
 from nexus.research.ssga_distributions import read_distributions
 from nexus.research.ssga_fund_observations import read_fund_observations
@@ -167,6 +168,12 @@ class _BoundDatabaseExecutors:
             as_of=self._decision_time,
             evidence_ids=self._evidence_ids,
         )
+        profiles = await read_company_profiles(
+            self._session,
+            instrument_id=self._instrument_id,
+            as_of=self._decision_time,
+            evidence_ids=self._evidence_ids,
+        )
         return self._result(
             "get_security_snapshot",
             [
@@ -195,6 +202,11 @@ class _BoundDatabaseExecutors:
                     **(
                         {"corporate_action_observation": action_tool_payload(actions[record.id])}
                         if record.id in actions
+                        else {}
+                    ),
+                    **(
+                        {"company_profile": profiles[record.id].model_dump(mode="json")}
+                        if record.id in profiles
                         else {}
                     ),
                 }
