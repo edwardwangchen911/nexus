@@ -8,6 +8,8 @@ from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
 from nexus.agents.committee import AgentRole, CommitteeRoleOutput
+from nexus.agents.concentration import evaluate_frozen_concentration_conditions
+from nexus.agents.portfolio_context import PortfolioResearchContext
 from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.agents import (
     AgentModelConfigRecord,
@@ -74,6 +76,7 @@ def synthesize_intent(
     role_outputs: Sequence[CommitteeRoleOutput],
     *,
     price_authority_valid: bool,
+    portfolio_context: PortfolioResearchContext | None = None,
 ) -> ResearchIntent:
     """Reuse role claims verbatim so synthesis cannot introduce an uncited fact."""
     fundamental_missing = symbol == "00656.HK"
@@ -158,8 +161,14 @@ def synthesize_intent(
         )
     )
     condition_evidence = (evidence_refs[0],)
+    if portfolio_context is not None and (
+        portfolio_context.instrument_id != run.instrument_id
+        or portfolio_context.research_as_of > run.decision_time
+    ):
+        raise ValueError("research observation context does not bind the run")
     return ResearchIntent(
         synthesis_assessment=assessment,
+        condition_evaluations=evaluate_frozen_concentration_conditions(portfolio_context),
         schema_version="research_intent_v1",
         decision_id=uuid5(NAMESPACE_URL, f"nexus-research:{run.id}"),
         instrument_id=run.instrument_id,

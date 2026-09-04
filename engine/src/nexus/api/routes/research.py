@@ -10,12 +10,14 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.committee import StageInputIdentity
+from nexus.agents.concentration import condition_evaluations_match
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import (
     admit_research_run,
     load_complete_prompt_authority,
     select_authoritative_snapshot,
 )
+from nexus.agents.portfolio_context import PortfolioResearchContext, read_portfolio_context
 from nexus.agents.synthesis import staged_intent_semantics_valid
 from nexus.api.auth import VerifiedServiceActor
 from nexus.api.dependencies import get_settings, require_service_actor, transactional_session
@@ -288,7 +290,10 @@ async def _hydrate_response(
                 .order_by(AgentResearchOutputEvidenceRecord.evidence_ref_id)
             )
         )
-    response = _response(run, output, evidence_records)
+    context = await read_portfolio_context(
+        session, run.data_snapshot_id, run.instrument_id, run.decision_time
+    )
+    response = _response(run, output, evidence_records, portfolio_context=context)
     return response.model_copy(update={
         "stage_trace": await read_stage_trace(session, run),
         "inputs": await read_research_inputs(
@@ -302,6 +307,8 @@ def _response(
     run: AgentResearchRunRecord,
     output: AgentResearchOutputRecord | None,
     evidence_records: tuple[AgentResearchOutputEvidenceRecord, ...] = (),
+    *,
+    portfolio_context: PortfolioResearchContext | None = None,
 ) -> ResearchRunResponse:
     intent = None
     abstention_reason = None
@@ -325,6 +332,9 @@ def _response(
         intent = None
         evidence = ()
         abstention_reason = "evidence_authority_invalid"
+    if intent is not None and not condition_evaluations_match(intent, portfolio_context):
+        intent = None
+        abstention_reason = "condition_evaluation_invalid"
     semantics_invalid = intent is not None and not staged_intent_semantics_valid(
         intent, run.pricing_version
     )
@@ -390,6 +400,7 @@ def _intent_is_authority_bound(intent: ResearchIntent, evidence: tuple[EvidenceR
             intent.exit_conditions,
             () if intent.synthesis_assessment is None else intent.synthesis_assessment.claims,
             () if intent.synthesis_assessment is None else intent.synthesis_assessment.reviews,
+            tuple(item.condition for item in intent.condition_evaluations or ()),
         )
         for item in collection
         for ref in item.evidence_refs

@@ -157,6 +157,35 @@ class ResearchCondition(_IntentModel):
         return self
 
 
+class ResearchConditionEvaluation(_IntentModel):
+    """A frozen research observation, never an entry/exit or execution grant."""
+
+    schema_version: Literal["research_condition_evaluation_v1"] = "research_condition_evaluation_v1"
+    purpose: Literal["research_observation"] = "research_observation"
+    condition: ResearchCondition
+    result: Literal["true", "false", "unknown"]
+    reason: Literal["frozen_concentration_unavailable"] | None = None
+    observed_at: datetime
+
+    @field_validator("observed_at")
+    @classmethod
+    def _utc(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+    @model_validator(mode="after")
+    def _closed_observation(self) -> "ResearchConditionEvaluation":
+        if (
+            self.condition.signal not in {
+                "portfolio.top1_warning_exceeded", "portfolio.top1_critical_exceeded"
+            }
+            or self.condition.operator != "is_true" or self.condition.threshold is not True
+            or self.condition.unit != "boolean"
+            or ((self.result == "unknown") != (self.reason is not None))
+        ):
+            raise ValueError("invalid frozen research observation")
+        return self
+
+
 class RoleVote(_IntentModel):
     role: Literal[
         "orchestrator",
@@ -173,6 +202,9 @@ class RoleVote(_IntentModel):
 
 class ResearchIntent(_IntentModel):
     synthesis_assessment: SynthesisAssessment | None = None
+    condition_evaluations: tuple[ResearchConditionEvaluation, ...] | None = Field(
+        default=None, min_length=2, max_length=2
+    )
 
     @model_serializer(mode="wrap")
     # A return annotation would replace the closed model serialization schema.
@@ -180,6 +212,8 @@ class ResearchIntent(_IntentModel):
         payload = cast(dict[str, object], handler(self))
         if self.synthesis_assessment is None:
             payload.pop("synthesis_assessment", None)
+        if self.condition_evaluations is None:
+            payload.pop("condition_evaluations", None)
         return payload
 
     schema_version: Literal["research_intent_v1"]
@@ -215,6 +249,13 @@ class ResearchIntent(_IntentModel):
 
     @model_validator(mode="after")
     def _point_in_time_and_complete_evidence(self) -> "ResearchIntent":
+        if self.condition_evaluations is not None and (
+            len({item.condition.signal for item in self.condition_evaluations}) != 2
+            or any(item.observed_at > self.decision_time for item in self.condition_evaluations)
+            or any(ref not in self.evidence_refs for item in self.condition_evaluations
+                   for ref in item.condition.evidence_refs)
+        ):
+            raise ValueError("research observations must bind original evidence and time")
         if self.valid_until <= self.decision_time:
             raise ValueError("valid_until must follow decision_time")
         if any(ref.available_at > self.decision_time for ref in self.evidence_refs):

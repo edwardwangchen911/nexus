@@ -126,6 +126,7 @@ def _synthesize(
     price_authority_valid: bool | None = None,
     staged: bool = False,
     structured: bool = False,
+    portfolio_context=None,
 ):
     now = datetime(2026, 8, 24, tzinfo=UTC)
     content_hash = "a" * 64
@@ -218,11 +219,25 @@ def _synthesize(
         snapshot,
         prompts,
         model,
-        (evidence,),
+        (evidence,)
+        + (
+            (
+                EvidenceRef(
+                    source="nexus_portfolio_context",
+                    object_id=f"{portfolio_context.portfolio_snapshot_id}:{instrument_id}",
+                    available_at=portfolio_context.research_as_of,
+                    location=f"memory://sha256/{portfolio_context.content_hash}",
+                    content_hash=portfolio_context.content_hash,
+                ),
+            )
+            if portfolio_context is not None
+            else ()
+        ),
         outputs,
         price_authority_valid=(
             include_price_authority if price_authority_valid is None else price_authority_valid
         ),
+        **({"portfolio_context": portfolio_context} if portfolio_context is not None else {}),
     )
 
 

@@ -7,11 +7,20 @@ from decimal import Decimal, localcontext
 from typing import Literal, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    model_serializer,
+    model_validator,
+)
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.concentration import FrozenConcentrationFacts
 from nexus.agents.proposal_context import FrozenProposalComparison, read_comparison_for_freeze
 from nexus.diagnostics.assembler import _snapshot_bindings
 from nexus.diagnostics.models import DiagnosticEvidence, OptimizationNeed
@@ -90,9 +99,28 @@ class PortfolioResearchContext(BaseModel):
     diagnostics: tuple[ContextDiagnostic, ...] = Field(max_length=100)
     diagnostics_truncated: bool
     research_focus: ConcentrationResearchFocus | None = None
+    concentration_facts: FrozenConcentrationFacts | None = None
     proposal_comparison: FrozenProposalComparison | None = None
     evidence_ref_id: UUID | None = None
     content_hash: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
+
+    @model_serializer(mode="wrap")
+    def _legacy_payload(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
+        payload = handler(self)
+        if self.concentration_facts is None:
+            payload.pop("concentration_facts", None)
+        return payload
+
+    @model_validator(mode="after")
+    def _concentration_binding(self) -> "PortfolioResearchContext":
+        if self.concentration_facts is not None and (
+            self.concentration_facts.policy_scope != f"currency:{self.currency}"
+            or self.diagnostic_run_id is None or self.diagnostic_input_hash is None
+            or any(ref.available_at > self.snapshot_as_of
+                   for ref in self.concentration_facts.policy_evidence_refs)
+        ):
+            raise ValueError("invalid concentration context binding")
+        return self
 
 
 def _bytes(context: PortfolioResearchContext) -> bytes:
@@ -102,6 +130,8 @@ def _bytes(context: PortfolioResearchContext) -> bytes:
         excluded.add("research_focus")
     if context.proposal_comparison is None:
         excluded.add("proposal_comparison")
+    if context.concentration_facts is None:
+        excluded.add("concentration_facts")
     return json.dumps(
         context.model_dump(mode="json", exclude=excluded),
         sort_keys=True,
@@ -109,12 +139,12 @@ def _bytes(context: PortfolioResearchContext) -> bytes:
     ).encode()
 
 
-def _concentration_focus(
+def _concentration_metric(
     held: PositionSnapshot,
     positions: list[PositionSnapshot],
     items: list[PortfolioDiagnosticItemRecord],
     report: PortfolioDiagnosticReportRecord | None,
-) -> ConcentrationResearchFocus | None:
+) -> tuple[Decimal, PortfolioDiagnosticItemRecord] | None:
     if (
         report is None or report.policy_id != REAL_ADVISORY_POLICY_ID
         or report.policy_version != REAL_ADVISORY_POLICY_VERSION
@@ -145,7 +175,7 @@ def _concentration_focus(
         elif weight > policy.single_name_warning:
             severity, limit = "warning", policy.single_name_warning
         else:
-            return None
+            severity, limit = "info", policy.single_name_warning
         matches = [item for item in candidates if (
             item.unknown_reason is None
             and item.unit == "ratio" and item.severity == severity
@@ -157,6 +187,19 @@ def _concentration_focus(
     if len(matches) != 1:
         return None
     trigger = matches[0]
+    return weight, trigger
+
+
+def _concentration_focus(
+    held: PositionSnapshot,
+    positions: list[PositionSnapshot],
+    items: list[PortfolioDiagnosticItemRecord],
+    report: PortfolioDiagnosticReportRecord | None,
+) -> ConcentrationResearchFocus | None:
+    metric = _concentration_metric(held, positions, items, report)
+    if metric is None or metric[1].severity == "info" or report is None:
+        return None
+    trigger = metric[1]
     assert trigger.metric_value is not None and trigger.reference_limit is not None
     return ConcentrationResearchFocus(
         question="该持仓触发单一标的集中度预警：现有证据支持维持，还是需要研究减仓？",
@@ -167,7 +210,7 @@ def _concentration_focus(
     )
 
 
-async def _verified_concentration_focus(
+async def _verified_concentration_facts(
     session: AsyncSession,
     snapshot: PortfolioSnapshotRecord,
     sync: BrokerSyncRun,
@@ -176,10 +219,10 @@ async def _verified_concentration_focus(
     items: list[PortfolioDiagnosticItemRecord],
     report: PortfolioDiagnosticReportRecord | None,
     as_of: datetime,
-) -> ConcentrationResearchFocus | None:
+) -> FrozenConcentrationFacts | None:
     """Verify only a new question; historical contexts retain their original bytes."""
-    focus = _concentration_focus(held, positions, items, report)
-    if focus is None or report is None or (
+    metric = _concentration_metric(held, positions, items, report)
+    if metric is None or report is None or (
         snapshot.status != "READY" or sync.status != "READY" or sync.cash_flow_quality != "PASS"
         or sync.portfolio_id != snapshot.portfolio_id or sync.id != snapshot.sync_run_id
         or report.portfolio_id != snapshot.portfolio_id
@@ -210,10 +253,7 @@ async def _verified_concentration_focus(
         expected = set(evidence.snapshot.refs)
         for position in positions:
             expected.update(evidence.position_prices[position.instrument_id].refs)
-        trigger = next(item for item in items if (
-            item.diagnostic_code == focus.diagnostic_code
-            and item.policy_scope == focus.policy_scope
-        ))
+        trigger = metric[1]
         refs = list(await session.scalars(
             select(PortfolioDiagnosticEvidenceRefRecord).where(
                 PortfolioDiagnosticEvidenceRefRecord.item_id == trigger.id,
@@ -232,7 +272,28 @@ async def _verified_concentration_focus(
     except (ValueError, KeyError):
         # Missing/invalid optional authority must not prevent generic research.
         return None
-    return focus
+    return FrozenConcentrationFacts(
+        observed_ratio=decimal_to_string(metric[0]),
+        policy_id=report.policy_id,
+        policy_evidence_refs=policy.authority_refs,
+        policy_scope=trigger.policy_scope,
+    )
+
+
+async def _verified_concentration_focus(
+    session: AsyncSession,
+    snapshot: PortfolioSnapshotRecord,
+    sync: BrokerSyncRun,
+    held: PositionSnapshot,
+    positions: list[PositionSnapshot],
+    items: list[PortfolioDiagnosticItemRecord],
+    report: PortfolioDiagnosticReportRecord | None,
+    as_of: datetime,
+    *,
+    facts: FrozenConcentrationFacts | None,
+) -> ConcentrationResearchFocus | None:
+    """Retain the original question only when the newly verified facts support it."""
+    return _concentration_focus(held, positions, items, report) if facts is not None else None
 
 
 async def freeze_portfolio_context(
@@ -375,6 +436,11 @@ async def freeze_portfolio_context(
         if report
         else []
     )
+    facts = (
+        await _verified_concentration_facts(
+            session, snapshot, sync, held, currency_positions, items, report, as_of,
+        ) if ready and valid and held is not None else None
+    )
     context = PortfolioResearchContext(
         instrument_id=instrument_id,
         portfolio_snapshot_id=snapshot.id,
@@ -400,9 +466,11 @@ async def freeze_portfolio_context(
             for item in items[:100]
         ),
         diagnostics_truncated=len(items) > 100,
+        concentration_facts=facts,
         research_focus=(
             await _verified_concentration_focus(
                 session, snapshot, sync, held, currency_positions, items, report, as_of,
+                facts=facts,
             )
             if ready and valid and held is not None else None
         ),

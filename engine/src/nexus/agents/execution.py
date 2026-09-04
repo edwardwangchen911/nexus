@@ -29,6 +29,7 @@ from nexus.agents.persistence import (
     require_reserved_daily_budget,
     settle_daily_budget,
 )
+from nexus.agents.portfolio_context import read_portfolio_context
 from nexus.agents.price_authority import (
     FrozenPriceAuthorityStatus,
     revalidate_frozen_price_authority,
@@ -290,6 +291,9 @@ async def execute_research_run(
         evidence_refs,
         role_outputs,
         price_authority_valid=(final_price_authority_status is FrozenPriceAuthorityStatus.VALID),
+        portfolio_context=await read_portfolio_context(
+            session, run.data_snapshot_id, run.instrument_id, run.decision_time
+        ),
     )
     await _append_output(
         session,

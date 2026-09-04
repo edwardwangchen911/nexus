@@ -2195,6 +2195,75 @@ export const runtimeContractSchemas = {
     "title": "FrozenComparisonVariant",
     "type": "object"
   },
+  "FrozenConcentrationFacts": {
+    "additionalProperties": false,
+    "description": "The original Decimal(precision=28) ratio, before NUMERIC(38,12) rounding.\n\nIdentity, P/D hashes, currency and clocks are bound by the enclosing immutable\nportfolio context; this record contains no peer identities or position amounts.",
+    "properties": {
+      "critical_limit": {
+        "const": "0.30",
+        "default": "0.30",
+        "title": "Critical Limit",
+        "type": "string"
+      },
+      "observed_ratio": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Observed Ratio",
+        "type": "string"
+      },
+      "policy_evidence_refs": {
+        "items": {
+          "$ref": "#/components/schemas/EvidenceRef"
+        },
+        "maxItems": 1,
+        "minItems": 1,
+        "title": "Policy Evidence Refs",
+        "type": "array"
+      },
+      "policy_id": {
+        "format": "uuid",
+        "title": "Policy Id",
+        "type": "string"
+      },
+      "policy_scope": {
+        "pattern": "^currency:[A-Z]{3}$",
+        "title": "Policy Scope",
+        "type": "string"
+      },
+      "policy_version": {
+        "const": "real_advisory_policy_v1",
+        "default": "real_advisory_policy_v1",
+        "title": "Policy Version",
+        "type": "string"
+      },
+      "schema_version": {
+        "const": "concentration_facts_v1",
+        "default": "concentration_facts_v1",
+        "title": "Schema Version",
+        "type": "string"
+      },
+      "warning_limit": {
+        "const": "0.15",
+        "default": "0.15",
+        "title": "Warning Limit",
+        "type": "string"
+      },
+      "weight_basis": {
+        "const": "same_currency_securities_excluding_cash",
+        "default": "same_currency_securities_excluding_cash",
+        "title": "Weight Basis",
+        "type": "string"
+      }
+    },
+    "required": [
+      "observed_ratio",
+      "policy_id",
+      "policy_evidence_refs",
+      "policy_scope"
+    ],
+    "title": "FrozenConcentrationFacts",
+    "type": "object"
+  },
   "FrozenDailyResearchContext": {
     "additionalProperties": false,
     "description": "Evidence for reading a historical baseline, never a selection authority.",
@@ -4919,6 +4988,16 @@ export const runtimeContractSchemas = {
         ],
         "title": "Cash Weight"
       },
+      "concentration_facts": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/FrozenConcentrationFacts"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "content_hash": {
         "anyOf": [
           {
@@ -5974,6 +6053,60 @@ export const runtimeContractSchemas = {
       "evidence_refs"
     ],
     "title": "ResearchCondition",
+    "type": "object"
+  },
+  "ResearchConditionEvaluation": {
+    "additionalProperties": false,
+    "description": "A frozen research observation, never an entry/exit or execution grant.",
+    "properties": {
+      "condition": {
+        "$ref": "#/components/schemas/ResearchCondition"
+      },
+      "observed_at": {
+        "format": "date-time",
+        "title": "Observed At",
+        "type": "string"
+      },
+      "purpose": {
+        "const": "research_observation",
+        "default": "research_observation",
+        "title": "Purpose",
+        "type": "string"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "const": "frozen_concentration_unavailable",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "result": {
+        "enum": [
+          "true",
+          "false",
+          "unknown"
+        ],
+        "title": "Result",
+        "type": "string"
+      },
+      "schema_version": {
+        "const": "research_condition_evaluation_v1",
+        "default": "research_condition_evaluation_v1",
+        "title": "Schema Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "condition",
+      "result",
+      "observed_at"
+    ],
+    "title": "ResearchConditionEvaluation",
     "type": "object"
   },
   "ResearchInputActionEvent": {
@@ -7537,6 +7670,22 @@ export const runtimeContractSchemas = {
   "ResearchIntent": {
     "additionalProperties": false,
     "properties": {
+      "condition_evaluations": {
+        "anyOf": [
+          {
+            "items": {
+              "$ref": "#/components/schemas/ResearchConditionEvaluation"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Condition Evaluations"
+      },
       "counter_theses": {
         "items": {
           "$ref": "#/components/schemas/ResearchClaim"

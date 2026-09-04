@@ -10,7 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.concentration import condition_evaluations_match
 from nexus.agents.execution_authority import load_frozen_evidence
+from nexus.agents.portfolio_context import read_portfolio_context
 from nexus.agents.synthesis import domain_evidence, staged_intent_semantics_valid
 from nexus.jobs.daily_manual import ManualDailyRequest
 from nexus.jobs.daily_research import resolve_daily_research_job
@@ -211,6 +213,11 @@ async def _intent(
         for ref in claim.evidence_refs
     )
     if any(ref not in expected for ref in nested):
+        raise ValueError(_INVALID)
+    context = await read_portfolio_context(
+        session, run.data_snapshot_id, run.instrument_id, run.decision_time
+    )
+    if not condition_evaluations_match(intent, context):
         raise ValueError(_INVALID)
     return intent
 

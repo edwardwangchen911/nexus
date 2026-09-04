@@ -1776,6 +1776,56 @@ export interface components {
             variant: "hold_current" | "minimum_change" | "strategy_target";
         };
         /**
+         * FrozenConcentrationFacts
+         * @description The original Decimal(precision=28) ratio, before NUMERIC(38,12) rounding.
+         *
+         *     Identity, P/D hashes, currency and clocks are bound by the enclosing immutable
+         *     portfolio context; this record contains no peer identities or position amounts.
+         */
+        FrozenConcentrationFacts: {
+            /**
+             * Critical Limit
+             * @default 0.30
+             * @constant
+             */
+            critical_limit: "0.30";
+            /** Observed Ratio */
+            observed_ratio: string;
+            /** Policy Evidence Refs */
+            policy_evidence_refs: components["schemas"]["EvidenceRef"][];
+            /**
+             * Policy Id
+             * Format: uuid
+             */
+            policy_id: string;
+            /** Policy Scope */
+            policy_scope: string;
+            /**
+             * Policy Version
+             * @default real_advisory_policy_v1
+             * @constant
+             */
+            policy_version: "real_advisory_policy_v1";
+            /**
+             * Schema Version
+             * @default concentration_facts_v1
+             * @constant
+             */
+            schema_version: "concentration_facts_v1";
+            /**
+             * Warning Limit
+             * @default 0.15
+             * @constant
+             */
+            warning_limit: "0.15";
+            /**
+             * Weight Basis
+             * @default same_currency_securities_excluding_cash
+             * @constant
+             */
+            weight_basis: "same_currency_securities_excluding_cash";
+        };
+        /**
          * FrozenDailyResearchContext
          * @description Evidence for reading a historical baseline, never a selection authority.
          */
@@ -2916,6 +2966,7 @@ export interface components {
         PortfolioResearchContext: {
             /** Cash Weight */
             cash_weight: string | null;
+            concentration_facts?: components["schemas"]["FrozenConcentrationFacts"] | null;
             /** Content Hash */
             content_hash?: string | null;
             /** Currency */
@@ -3339,6 +3390,37 @@ export interface components {
              * @enum {string}
              */
             unit: "ratio" | "basis_points" | "days" | "currency" | "boolean" | "count" | "state";
+        };
+        /**
+         * ResearchConditionEvaluation
+         * @description A frozen research observation, never an entry/exit or execution grant.
+         */
+        ResearchConditionEvaluation: {
+            condition: components["schemas"]["ResearchCondition"];
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /**
+             * Purpose
+             * @default research_observation
+             * @constant
+             */
+            purpose: "research_observation";
+            /** Reason */
+            reason?: "frozen_concentration_unavailable" | null;
+            /**
+             * Result
+             * @enum {string}
+             */
+            result: "true" | "false" | "unknown";
+            /**
+             * Schema Version
+             * @default research_condition_evaluation_v1
+             * @constant
+             */
+            schema_version: "research_condition_evaluation_v1";
         };
         /** ResearchInputActionEvent */
         ResearchInputActionEvent: {
@@ -4027,6 +4109,8 @@ export interface components {
         };
         /** ResearchIntent */
         ResearchIntent: {
+            /** Condition Evaluations */
+            condition_evaluations?: components["schemas"]["ResearchConditionEvaluation"][] | null;
             /** Counter Theses */
             counter_theses: components["schemas"]["ResearchClaim"][];
             /**
