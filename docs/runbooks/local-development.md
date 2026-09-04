@@ -77,6 +77,24 @@ v3 model config ID，并由 Codex SDK worker 消费；不会自动成为默认�
 三阶段最终结果保存综合正文及逐条反证审查；缺少完整确定性准入时仍为观察、无执行动作、
 证据不完整。回退时为新任务显式选择原版本配置，保留已有 v3 历史；无需数据库迁移。
 
+研究输入的本地计量使用锁定的 `tiktoken==0.14.0` 和已验哈希的官方公开词表。
+依赖通过既有 `uv sync --locked` 流程同步后，在仓库根目录显式准备一次：
+
+```bash
+uv run --package nexus-engine nexus-openai-local prepare-tokenizer --backend codex_sdk
+```
+
+该动作只准备约3.6 MB的公开词表到 `~/.cache/nexus/tokenizers/o200k_base.tiktoken`，
+不读取账户配置/凭据，不访问数据库或调用模型。已有有效文件不联网；缺失时仅一次固定来源
+的限时、有大小上限请求，拒绝重定向和错误哈希后原子保存。它不是 `setup --skip-key`
+的一部分；不要用“只做setup”暗中触发下载。
+
+研究过程中不会下载词表。固定模型/包版本或缓存不满足条件时，保留字节预检；不能以
+缺少缓存为由重试研究。文本token计数不等于整个SDK请求的精确计数：预检还计入实际
+严格输出schema、显式系统/开发者指令的字节量和原8192运行器余量。原wire字节上限、
+累计实际64000/8192阈值、三次调用和超时仍保持；预检通过不保证研究结论合格。
+回退代码与依赖锁即可恢复旧预检，无DB迁移；公共缓存可保留，已有研究及证据不改写。
+
 `--strategy-rnd` 入口只幂等登记配置，不创建研究或 Job、不调用模型；与 `--staged` 互斥。
 已显式注入本地数据库等运行配置的进程可使用
 `AGENT_RUNTIME_MODE=codex_sdk uv run --package nexus-engine nexus-engine-strategy-rnd-worker --once`
