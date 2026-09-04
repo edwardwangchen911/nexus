@@ -191,11 +191,13 @@ BROKER_SIMULATION_TABLES = {
 EXPECTED_TABLES = EXPECTED_TABLES | BROKER_SIMULATION_TABLES
 INTRADAY_MARKET_TABLES = {"intraday_bar_set_authorities"}
 EXPECTED_TABLES = EXPECTED_TABLES | INTRADAY_MARKET_TABLES
+EXPECTED_TABLES = EXPECTED_TABLES | {"strategy_rank_checkpoints"}
 NO_CREATED_AT_TRIGGER_TABLES = {
     "strategy_experiment_state_projections",
     "strategy_research_lineage_projections",
     "strategy_experiment_candidate_projections",
     "strategy_registry_heads",
+    "strategy_rank_checkpoints",  # Its all-column immutable trigger is checked separately.
 }
 
 OPTIONAL_MIGRATION_TABLE_GROUPS = (
@@ -269,6 +271,7 @@ OPTIONAL_MIGRATION_TABLE_GROUPS = (
     frozenset(BROKER_SIMULATION_TABLES),
     frozenset(INTRADAY_MARKET_TABLES),
     frozenset({"fosun_daily_bar_staging"}),
+    frozenset({"strategy_rank_checkpoints"}),
 )
 
 EXPECTED_FOREIGN_KEYS = {

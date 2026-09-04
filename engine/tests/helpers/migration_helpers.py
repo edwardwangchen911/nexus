@@ -343,6 +343,15 @@ def _assert_reflected_schema(connection: Connection) -> None:
     assert macro_value["type"].scale == 12
     for table_name in expected_tables - NO_CREATED_AT_TRIGGER_TABLES:
         assert created_at_trigger_exists(connection, table_name)
+    if "strategy_rank_checkpoints" in expected_tables:
+        assert connection.scalar(text(
+            "SELECT EXISTS (SELECT 1 FROM pg_trigger t "
+            "JOIN pg_proc p ON p.oid = t.tgfoid "
+            "WHERE t.tgrelid = 'strategy_rank_checkpoints'::regclass "
+            "AND t.tgname = 'trg_strategy_rank_checkpoints_immutable' "
+            "AND NOT t.tgisinternal AND t.tgenabled IN ('O', 'A') "
+            "AND t.tgtype = 27 AND p.proname = 'nexus_reject_paper_fact_mutation')"
+        ))
     if diagnostic_tables <= actual_tables:
         evidence_columns = {
             column["name"]: column
@@ -354,7 +363,8 @@ def _assert_reflected_schema(connection: Connection) -> None:
 
     context = MigrationContext.configure(connection)
     if diagnostic_tables <= actual_tables:
-        assert compare_metadata(context, Base.metadata) == []
+        differences = compare_metadata(context, Base.metadata)
+        assert differences == [], differences
 
 
 def _table_names(database_url: str) -> set[str]:

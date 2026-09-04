@@ -103,7 +103,7 @@ def upgrade() -> None:
     for table, _ in _TABLES:
         op.add_column(table, sa.Column("decision_cutoff_at", sa.DateTime(timezone=True)))
         op.create_check_constraint(
-            "decision_cutoff_after_valuation",
+            "decision_cutoff_order",
             table,
             "decision_cutoff_at IS NULL OR decision_cutoff_at >= valuation_time",
         )
@@ -138,5 +138,5 @@ def downgrade() -> None:
         op.execute(f"DROP TRIGGER {trigger} ON public.{table}")
     op.execute("DROP FUNCTION public.nexus_validate_formal_optimization_clock()")
     for table, _ in _TABLES:
-        op.drop_constraint("decision_cutoff_after_valuation", table, type_="check")
+        op.drop_constraint("decision_cutoff_order", table, type_="check")
         op.drop_column(table, "decision_cutoff_at")

@@ -434,4 +434,8 @@ L1跨阶段恢复接续（root，`edward/nexus-daily-research-recovery`）：已
 
 新版“正式”仅指A/R/P来源身份被严格绑定，不等于经济判断就绪。正常现金组合诊断可能仍是RESEARCH_REQUIRED，因此只在新schema下保留原诊断并允许只读不完整比较，diagnostic_complete=False/partial=True传至group与全部comparison；NO_ACTION/BLOCKED不转为优化候选，旧v1前提不变。Fosun真实费用无证据时cost_complete=False、成本unknown、不排名、不执行，不拿0bps模拟方法标为真实费用。正例必须区分正常freeze/诊断/producer路径与纯存储合同fixture，不手插不存在的候选诊断来声称全流程可达。
 
+本轮实现/验证交接：正式producer、worker消费、0040/ORM及`formal-proposal-admit/run`一次性入口已在独立worktree完成，尚待A集成与运行验收。集中审查发现并关闭跨请求键返回绑定不一致、晚到现金/诊断子记录越过截止、selection来源列表未精确复核三项问题；正式输入失败不回退旧路径。producer新旧聚焦回归104通过，另合法不同P复用研究反例通过；root联合迁移精确schema升级/降级/升级、0040数据/并发保护、真实CLI→producer→worker及入口单测19通过。全schema检查暴露0037表清单遗漏与新约束长名截断，已补实际不可变触发器校验并统一短名，未改历史迁移。合成正例研究输出是合法存储fixture，不是原生模型完成证明；费用、历史与真实合格研究仍未齐，不宣告5b真实闭环完成。
+
+A的新一次原生研究已独立记录：第一阶段已保存，第二阶段在调用SDK之前由本地阶段预算守卫拒绝，不是等待授权、网络失败或账户额度耗尽；旧研究不重放。普通本地独立实现继续，真实经济/执行门槛不随代码接线而降低。
+
 **D价格源收尾：** 既有Fosun/Alpaca/Tiingo/Alpha Vantage/Yahoo调查见checkpoint历史，不重试Yahoo限流或拿demo代替真实案例。2026-09-04有界核对[Alpaca官方FAQ](https://docs.alpaca.markets/us/docs/market-data-faq)确认，历史请求end早于现在至少15分钟时存在无订阅查询SIP的条件，不应说必须买实时套餐；[官方bars说明](https://docs.alpaca.markets/us/reference/stockbarsingle-1)明确各adjustment选项，但asof是证券映射日期，不是历史vintage，不能直接宣称历史PIT或精确总收益。日线VWAP和volume可能采用不同交易条件，不能把乘积当已证实精确成交额。项目已有固定主机/分页/归档/归一化adapter，缺的是有效访问和真实样本核验，不是全新框架。D所查项目声明配置与shell无非空Alpaca认证字段；A进一步核对实际API容器环境及正常`load_local_environment`启动入口，两认证字段也均无非空值，没有输出值或搜索其他账户目录。结论仅限本项目已知入口，不能推断用户没有其他账户。若既有有效访问可定位，下一步是一个已结束窗口raw样本及已知公司行动窗口对照，原件/实际单位/时段/调整用途分别验收；无既有访问则需用户决定是否接入第三方账户及接受条款。未注册、付费、扩权或静默切换现有source_policy。
