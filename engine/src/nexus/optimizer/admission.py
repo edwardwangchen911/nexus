@@ -31,7 +31,7 @@ async def admit_queued_job(
     route: str,
     idempotency_key: str,
     request_hash: str,
-    payload: dict[str, str],
+    payload: dict[str, object],
     portfolio_id: UUID,
     effective_at: datetime,
     after_authority: Callable[[], Awaitable[None]] | None = None,

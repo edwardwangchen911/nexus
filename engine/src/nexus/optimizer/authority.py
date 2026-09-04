@@ -53,6 +53,18 @@ async def load_admission_authority(
         return None
     report = await session.get(PortfolioDiagnosticReportRecord, authority.diagnostic_report_id)
     data_snapshot = await session.get(DataSnapshot, authority.data_snapshot_id)
+    if authority.decision_cutoff_at is not None or (
+        data_snapshot is not None and (
+            data_snapshot.source == "nexus_optimization_formal"
+            or data_snapshot.schema_version == "optimization_formal_inputs_v2"
+        )
+    ):
+        if data_snapshot is None:
+            return None
+        from nexus.optimizer.formal_producer import load_formal_admission_authority
+
+        # Invalid explicit formal data must never enter the legacy/draft path.
+        return await load_formal_admission_authority(session, authority, data_snapshot)
     optimizer_policy = await session.get(OptimizationPolicyRecord, authority.optimizer_policy_id)
     try:
         source_policy = await load_source_policy_v1(session, instrument_tick_size=None)

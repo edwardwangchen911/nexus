@@ -15,6 +15,7 @@ from nexus.domain.time import require_utc
 from nexus.providers.broker.base import PortfolioSnapshot
 
 if TYPE_CHECKING:
+    from nexus.optimizer.formal_inputs import FormalOptimizationInputs
     from nexus.optimizer.minimum_change import MinimumChangeResult, ReductionCandidate
     from nexus.optimizer.strategy_target import DeterministicSelectionAuthority
     from nexus.strategy.intents import ResearchIntent
@@ -183,9 +184,12 @@ def build_proposal_group(
     excess_weight: Decimal = _ZERO,
     minimum_change_result: "MinimumChangeResult | None" = None,
     portfolio_scope: PortfolioScope = "real_read_only",
+    formal_inputs: "FormalOptimizationInputs | None" = None,
 ) -> OptimizationProposalGroup:
     """Compose three simultaneous deterministic variants without accepting Agent weights."""
-    if report.optimization_need != "OPTIMIZATION_CANDIDATE":
+    if report.optimization_need != "OPTIMIZATION_CANDIDATE" and not (
+        formal_inputs is not None and report.optimization_need == "RESEARCH_REQUIRED"
+    ):
         raise ValueError("diagnostic report is not an optimization candidate")
     return _compose_group(
         snapshot, report, research, policy,
@@ -193,6 +197,7 @@ def build_proposal_group(
         minimum_change_candidates=minimum_change_candidates,
         minimum_change_result=minimum_change_result,
         excess_weight=excess_weight, portfolio_scope=portfolio_scope,
+        formal_inputs=formal_inputs,
     )
 
 
@@ -229,6 +234,7 @@ def _compose_group(
     excess_weight: Decimal,
     minimum_change_result: "MinimumChangeResult | None" = None,
     portfolio_scope: PortfolioScope,
+    formal_inputs: "FormalOptimizationInputs | None" = None,
 ) -> OptimizationProposalGroup:
     if snapshot.status != "READY":
         raise ValueError("READY baseline is required")
@@ -292,13 +298,28 @@ def _compose_group(
         by_instrument = {intent.instrument_id: intent for intent in research}
         if len(by_instrument) != len(research):
             raise ValueError("research intents must be unique per instrument")
-        if any(
-            intent.data_snapshot_id != selection_authority.data_snapshot_id
-            or intent.decision_time > snapshot.as_of
-            or intent.valid_until < snapshot.as_of
-            for intent in research
-        ):
-            raise ValueError("research intent does not bind the frozen authority")
+        if formal_inputs is None:
+            if any(
+                intent.data_snapshot_id != selection_authority.data_snapshot_id
+                or intent.decision_time > snapshot.as_of
+                or intent.valid_until < snapshot.as_of
+                for intent in research
+            ):
+                raise ValueError("research intent does not bind the frozen authority")
+        else:
+            bindings = {r.instrument_id: r for r in formal_inputs.research_bindings}
+            if (
+                formal_inputs.portfolio_snapshot_id != snapshot.id
+                or formal_inputs.valuation_time != snapshot.as_of
+                or set(bindings) != set(by_instrument)
+                or any(
+                    intent.data_snapshot_id != bindings[intent.instrument_id].research_data_snapshot_id
+                    or intent.decision_time != bindings[intent.instrument_id].research_as_of
+                    or intent.valid_until < formal_inputs.decision_cutoff_at
+                    for intent in research
+                )
+            ):
+                raise ValueError("research intent does not bind the formal authority")
         if any(
             intent.quality_status != "complete" or intent.evidence_audit != "complete"
             for intent in research

@@ -19,13 +19,30 @@ async def load_selection_authority(
     *,
     data_snapshot_id: UUID,
     valuation_time: datetime,
+    decision_cutoff_at: datetime | None = None,
 ) -> DeterministicSelectionAuthority:
     """Project a strict immutable record only when it predates the valuation."""
+    maximum_time = valuation_time
+    if decision_cutoff_at is not None:
+        from nexus.optimizer.formal_inputs import read_formal_inputs
+        from nexus.persistence.models.data import DataSnapshot
+
+        data = await session.get(DataSnapshot, data_snapshot_id)
+        if data is None:
+            raise ValueError("formal selection manifest is unavailable")
+        inputs = read_formal_inputs(data)
+        if (
+            inputs.decision_cutoff_at != decision_cutoff_at
+            or inputs.valuation_time != valuation_time
+        ):
+            raise ValueError("formal selection clock is invalid")
+        maximum_time = inputs.materialized_at
     record = await session.get(BaselineSelectionAuthorityRecord, selection_authority_id)
     if (
         record is None
         or record.data_snapshot_id != data_snapshot_id
-        or record.available_at > valuation_time
+        or record.available_at > maximum_time
+        or (decision_cutoff_at is not None and record.available_at < decision_cutoff_at)
     ):
         raise ValueError("baseline selection authority is missing or unavailable")
     try:
@@ -48,6 +65,6 @@ async def load_selection_authority(
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("baseline selection authority is malformed") from error
-    if authority.decision_at > valuation_time:
+    if authority.decision_at > maximum_time:
         raise ValueError("baseline selection decision is after valuation")
     return authority

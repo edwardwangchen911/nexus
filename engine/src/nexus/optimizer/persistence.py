@@ -41,8 +41,11 @@ class ProposalPersistenceAuthority:
     portfolio_scope: str = "real_read_only"
     selection_authority_id: UUID | None = None
     selection_evidence_hash: str | None = None
+    decision_cutoff_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        if self.decision_cutoff_at is not None and self.decision_cutoff_at < self.valuation_time:
+            raise ValueError("decision cutoff precedes valuation")
         if len(self.diagnostic_input_hash) != 64:
             raise ValueError("diagnostic_input_hash must be a SHA-256 digest")
         if (self.selection_authority_id is None) != (self.selection_evidence_hash is None):
@@ -159,6 +162,7 @@ async def persist_proposal_group(
         cost_policy_id=authority.cost_policy_id,
         diagnostic_input_hash=authority.diagnostic_input_hash,
         valuation_time=authority.valuation_time,
+        decision_cutoff_at=authority.decision_cutoff_at,
         baseline_ready=authority.baseline_ready,
         diagnostic_complete=authority.diagnostic_complete,
         source_conflict=authority.source_conflict,
@@ -221,6 +225,7 @@ async def _validate_strategy_binding(
         authority.selection_authority_id,
         data_snapshot_id=authority.data_snapshot_id,
         valuation_time=authority.valuation_time,
+        decision_cutoff_at=authority.decision_cutoff_at,
     )
     if selection.evidence_hash != authority.selection_evidence_hash:
         raise ValueError("strategy target is not bound to selection evidence")

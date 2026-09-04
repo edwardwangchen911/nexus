@@ -69,7 +69,8 @@ async def has_executable_shadow_authority(
 ) -> bool:
     """Re-read all frozen authority rows before a non-executable shadow transition."""
     if (
-        group.diagnostic_report_id is None
+        group.decision_cutoff_at is not None
+        or group.diagnostic_report_id is None
         or group.data_snapshot_id is None
         or group.source_policy_id is None
         or group.cost_policy_id is None

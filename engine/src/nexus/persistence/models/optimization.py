@@ -75,6 +75,10 @@ class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
 
     __tablename__ = "optimization_admission_authorities"
     __table_args__ = (
+        CheckConstraint(
+            "decision_cutoff_at IS NULL OR decision_cutoff_at >= valuation_time",
+            name="decision_cutoff_after_valuation",
+        ),
         UniqueConstraint(
             "portfolio_snapshot_id",
             "data_snapshot_id",
@@ -107,6 +111,7 @@ class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
     cost_policy_id: Mapped[UUID] = mapped_column(ForeignKey("cost_policies.id"))
     diagnostic_input_hash: Mapped[str] = mapped_column(String(64))
     valuation_time: Mapped[datetime] = mapped_column(UTCDateTime())
+    decision_cutoff_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     baseline_ready: Mapped[bool] = mapped_column(Boolean)
     diagnostic_complete: Mapped[bool] = mapped_column(Boolean)
     source_conflict: Mapped[bool] = mapped_column(Boolean)
@@ -124,6 +129,10 @@ class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
 class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
     __tablename__ = "optimization_proposal_groups"
     __table_args__ = (
+        CheckConstraint(
+            "decision_cutoff_at IS NULL OR decision_cutoff_at >= valuation_time",
+            name="decision_cutoff_after_valuation",
+        ),
         CheckConstraint(
             "status IN ('draft','compared','shadowing','validated','rejected','expired')",
             name="status_allowed",
@@ -166,6 +175,7 @@ class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
     cost_policy_id: Mapped[UUID] = mapped_column(ForeignKey("cost_policies.id"))
     diagnostic_input_hash: Mapped[str] = mapped_column(String(64))
     valuation_time: Mapped[datetime] = mapped_column(UTCDateTime())
+    decision_cutoff_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     baseline_ready: Mapped[bool] = mapped_column(Boolean, default=False)
     diagnostic_complete: Mapped[bool] = mapped_column(Boolean, default=False)
     source_conflict: Mapped[bool] = mapped_column(Boolean, default=False)

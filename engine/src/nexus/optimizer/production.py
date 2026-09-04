@@ -93,6 +93,18 @@ async def build_and_persist_proposal_group(
     if report_record is None:
         raise ValueError("optimization diagnostic authority is missing")
     report = await _read_report(session, report_record)
+    formal_inputs = None
+    if loaded.persistence.decision_cutoff_at is not None:
+        from nexus.optimizer.formal_inputs import load_formal_research, read_formal_inputs
+        from nexus.persistence.models.data import DataSnapshot
+
+        data = await session.get(DataSnapshot, loaded.persistence.data_snapshot_id)
+        if data is None:
+            raise ValueError("OPTIMIZATION_FORMAL_BINDING_INVALID")
+        formal_inputs = read_formal_inputs(data)
+        exact_research = await load_formal_research(session, formal_inputs)
+        if research != exact_research:
+            raise ValueError("OPTIMIZATION_FORMAL_RESEARCH_BINDING_CHANGED")
     cost_policy = await load_cost_policy_v1(session)
     selection = (
         None
@@ -102,6 +114,7 @@ async def build_and_persist_proposal_group(
             loaded.persistence.selection_authority_id,
             data_snapshot_id=loaded.persistence.data_snapshot_id,
             valuation_time=loaded.persistence.valuation_time,
+            decision_cutoff_at=loaded.persistence.decision_cutoff_at,
         )
     )
     minimum_inputs = _minimum_change_inputs(snapshot, report)
@@ -115,6 +128,7 @@ async def build_and_persist_proposal_group(
         excess_weight=minimum_inputs.excess_weight,
         minimum_change_result=minimum_inputs.reduction,
         portfolio_scope=loaded.persistence.portfolio_scope,  # type: ignore[arg-type]
+        formal_inputs=formal_inputs,
     ).model_copy(
         update={
             "diagnostic_input_hash": loaded.persistence.diagnostic_input_hash,
@@ -127,6 +141,10 @@ async def build_and_persist_proposal_group(
     comparisons = _comparison_inputs(
         group, report, minimum_inputs, snapshot, cost_policy.parameters, scenario
     )
+    if formal_inputs is not None:
+        comparisons = tuple(  # type: ignore[assignment]
+            replace(item, partial=loaded.persistence.partial) for item in comparisons
+        )
     return await create_proposal_group_idempotently(
         session,
         actor_id=actor_id,
