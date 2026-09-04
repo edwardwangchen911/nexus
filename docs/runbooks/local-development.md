@@ -323,6 +323,26 @@ float/NaN，公开 metadata 接口不接受 vintage，也不返回逐页原始 b
 显式指定 vintage 和小观察窗，原件先私有保存；`units=lin` 是变换码，实际单位取 metadata。
 分页按 `count/offset` 核验，不把短页或 SDK 成功视为完整证据；历史 vintage 不回填今天才收件的可用时间。
 
+单次采集与导入分别运行，目录必须是尚不存在的私有路径（父目录应已存在）：
+
+```bash
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.fred_local --repo-root "$PWD" collect \
+  --series DGS10 --start 2026-08-24 --end 2026-08-28 --vintage 2026-08-28 \
+  --output-dir /absolute/private/new-fred-capture
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.fred_local --repo-root "$PWD" import \
+  --collection-dir /absolute/private/new-fred-capture
+```
+
+`collect` 只需已配置的 `FRED_API_KEY`，固定官方 origin、单请求不重试、全轮 60 秒，
+最多 metadata 加 4 页；每个已收原件及不含密钥的请求 receipt 均先保存，首次错误立即停止。
+失败目录不复用，不能据此自动重采。`import` 不外呼 FRED，要求显式本地数据库和五项
+对象存储配置，重核原件/分页/metadata/calendar 后才在一个事务内创建日期独立的宏观事实与引用。
+正常进程环境变量覆盖本地配置文件，不改变调用进程的环境。
+相同归档导入幂等；本地内容修订不改旧行。`.` 保留缺值而不生成零值；超出数据库精度的值拒绝导入，
+不静默四舍五入。当前研究可见时间还受各层实际创建时点约束，不能按旧收件时间读到后来才落库的事实。
+命令只返回安全状态、数量及 ID；不运行模型、创建订单或改旧研究快照。`FRED_RESULT_UNKNOWN`
+不代表已回滚，原件或数据库提交可能已存在，应先核对原目录及命令状态，不自动重试。
+
 ## 更新所属本地 API
 
 确认实际 Compose project、源码提交和服务归属后，先为当前可寻址的镜像保留独立回滚
