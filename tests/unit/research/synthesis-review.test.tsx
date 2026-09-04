@@ -17,6 +17,7 @@ describe("saved synthesis self-assessment", () => {
     const research = synthesisResearchData();
     const original = JSON.stringify(research);
     render(<DecisionCard research={research} />);
+    expect(screen.getByText(/当前三阶段结果仅供研究观察，不能直接用于正式方案优化/)).toBeVisible();
     const details = openReviews();
     expect(within(details).getByText(/不是独立核验结论/)).toBeVisible();
     expect(within(details).getByText("模型自评的审查充分性：充分")).toBeVisible();

@@ -86,7 +86,8 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
       {research.stage_trace ? (
         <section className="decision-card__section" aria-label="三阶段研究过程">
           <h3>研究 → 反证 → 综合</h3>
-          <p>实验流程 · 仅展示已保存的阶段。各阶段使用同一冻结证据，阶段用量仅包含已保存输出，失败调用以总用量说明为准。</p>
+          <p>当前三阶段结果仅供研究观察，不能直接用于正式方案优化。模型自评“充分”不会改变这一使用范围。</p>
+          <p>仅展示已保存的阶段。各阶段使用同一冻结证据，阶段用量仅包含已保存输出，失败调用以总用量说明为准。</p>
           {research.stage_trace.status === "invalid" ? <p role="note">阶段记录校验失败，暂不展示论点。</p> : research.stage_trace.stages.map((stage) => (
             <details key={stage.stage} open={stage.stage === "synthesis"}>
               <summary>{({ research: "研究", critique: "反证", synthesis: "综合" } as const)[stage.stage]} · {({ complete: "已保存完整输出", partial: "仅保存部分输出", unavailable: "未保存有效输出" } as const)[stage.status]}</summary>
