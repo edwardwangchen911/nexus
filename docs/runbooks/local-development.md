@@ -279,6 +279,34 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app r
 
 如果 readiness 不是 `ready`，按 `database -> migration -> object_store -> worker` 的顺序查询脱敏组件状态；不要通过关闭检查或伪造 heartbeat 绕过。
 
+## 单次 Shadow 价格查询（不启动或推进 Shadow）
+
+入口只为已有 Shadow 根采集一个已结束纽约自然日的 Alpaca 原始日价格，证券来自冻结方案。
+使用已就绪的本地 PostgreSQL/对象存储和现有本地配置入口中的
+`ALPACA_API_KEY_ID`、`ALPACA_API_SECRET_KEY`，不把密钥放入参数、聊天或仓库。
+不需要切换 `NEXUS_MARKET_PROVIDER`、启动 Provider Worker 或打开调度。接口未取得访问时，
+只运行隔离 mock 测试；此命令没有向业务库写入 mock 数据的开关。
+
+```sh
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.shadow_price_query \
+  --repo-root . \
+  --shadow-group-id '<已有 Shadow 根 ID>' \
+  --session-date '<已结束且属于该根的交易日 YYYY-MM-DD>' \
+  --idempotency-key '<本次明确查询的唯一键>' \
+  --feed sip \
+  --delivery-mode delayed
+```
+
+feed/delivery-mode 应与实际来源配置一致，不因传入参数就视为已验证实时权限。
+命令保存精确原件、逐页请求凭证、归一化价格及返回集合证明；空响应只表示该窗口返回零条。
+成功仍为 `price_use_authorized=false`、`execution_locked=true`，不代表价格用途已获准，
+不会调用 Shadow start/advance、模型或交易接口。历史实际可用时间不回填。
+
+成功同 key 重放先重验既有证明，零外部请求；同 key 已收包但没有完整证明时拒绝重新采集。
+错误退出使用固定 `SHADOW_PRICE_RESULT_UNKNOWN`，可能已经保存部分原件/凭证或提交完成，
+不能据此声称已回滚或自动换 key 重试。先检查该 key 的已存记录和实际命令状态。
+停用只需停止调用模块；不删除或改写原件与既有证据。历史 v1 读取不变，本片无迁移。
+
 ## 更新所属本地 API
 
 确认实际 Compose project、源码提交和服务归属后，先为当前可寻址的镜像保留独立回滚
