@@ -179,7 +179,7 @@ async def import_collection(
             "instrument_id": str(instrument_id),
             "evidence_id": str(evidence.id),
             "research_snapshot_id": str(snapshot.id),
-            "as_of": cutoff.isoformat(),
+            "as_of": cutoff.isoformat().replace("+00:00", "Z"),
             "raw_objects_verified": True,
             "frozen_readback_verified": True,
             "historical_backtest_eligible": False,

@@ -145,6 +145,7 @@ async def test_normal_cli_import_freezes_actual_archived_bytes_and_replays_evide
     assert len(client.objects) == 4
     assert raw in client.objects.values()
     result = references[0]
+    assert result["as_of"].endswith("Z"), "Import cutoff must work unchanged in the research BFF"
     decision = datetime.fromisoformat(result["as_of"])
     async with factory() as session, session.begin():
         evidence_id = UUID(result["evidence_id"])
