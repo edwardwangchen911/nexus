@@ -1764,3 +1764,38 @@ calendar引用与锁定。旧FMP及Alpaca快照没有新宏观回填；新快照
 受保护证据在outputs/acceptance/fred-real-20260904。原件仅证明当前已收到的指定
 vintage观察，不回推历史可用性，不推断缺少经济日期的原因或历史完整性；不替代
 复权、费用、行业风控或正式经济比较。FMP/FRED仍无新增页面/API，本片不宣称DOM。
+
+### 2026-09-04 FMP/FRED真实资料到研究页面及减仓安全修复生效
+
+按交付顺序集成2c9be35→785468d、7c83261→6f9005b、95c1265→8b72b89、3ea0d1c→
+f746001、95f8b53→d53bd11、edd494c→ce91b81；生产/生成/测试净diff与root最终
+审查版effe1f6为空。复用同代码已通过的API11PG、35Python、14BFF、UI208unit/
+3E2E/TS/lint/build、联合75unit/typecheck/generated，以及减仓80unit/6builderPG/
+Ruff/Mypy；不重复占用重型测试库。API实际镜像和源码为
+ce91b8152c4f5498c9508d12edc7f26f82863a41，Web3302已读取同版主线文件；无依赖、
+迁移或配置变化。API源码hash、环境端口及PG/MinIO未重启核对通过；业务库仍0042，
+live正常，认证readiness三组件ready/worker unavailable整体503保留。
+
+使用既有真实公开样本的三个正常冻结时点，独立DB读端→受保护API→BFF→实际
+浏览器375/1440核对：旧Alpaca快照公司/宏观数组均空，旧FMP快照仅公司背景，
+最新快照公司与宏观各一条；精确snapshot ID与完整新增DTO字段相同。展开原生
+详情后，公司描述/行业标签/标识/证据和原件receipt哈希可见；宏观值按Percent原值
+展示，经济日期/vintage/收到时间/证据可用时间、原macro/calendar ID及原件哈希
+均与DB投影一致。两屏宽无横溢出，未知状态和资格限制、执行锁可见；所有请求
+仅GET/HEAD/OPTIONS，无外部请求，无采集/导入/模型/预算/Job/交易调用。
+
+公开样本没有旧模型run，旧run回放改用另一已有真实记录，未为测试新建研究；
+两屏宽均绑定该run原快照、资料与DB一致，exact回放未请求admission。当前真实
+组合响应不含newer_inputs_available=true，双链接实际点击条件不适用；实现与
+已有组件/E2E已覆盖旧run_id和更新资料read_at分离，不把fixture E2E称为真实
+组合双入口验收，不通过更改业务数据制造该条件。
+
+十类历史行（含快照、研究、决策、宏观观察、审计）逐行摘要和行数完全未变，
+活动Job为0。减仓修复已在运行代码生效，只复用正常builder隔离PG验收，不对真实
+账户重跑优化或改写旧结果；没有将此修复宣称B3目标完成。当前FMP/FRED资料页面
+交付已验证，完整研究/策略目标及经济比较仍以原计划实际证据和后续合同为准。
+
+私有材料在outputs/acceptance/provider-inputs-dom-20260904。验收脚本首次假设
+公开样本存在历史run，核对DB后改用已有真实run；另一处直接比较数据库尾零与
+页面字符串失败，按统一展示口径去尾零后核对通过。两者均为验收假设错误，未
+改产品/历史数据或重放业务操作；不把这些失败扩大为接口/权限缺失。

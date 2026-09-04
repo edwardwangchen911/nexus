@@ -738,13 +738,15 @@ FRED 增量：parser/collector/storage/CLI 使用现有 HTTP bytes、原件和 m
 | UI（既有 FRED owner） | app/components/research-inputs.tsx、新 research-company-profile.tsx/research-macro-observations.tsx、现有 research/[instrumentId]/page.tsx 和 portfolio-summary.tsx；tests/unit/research/provider-inputs.test.tsx、provider-fixtures.ts、现有 portfolio/page.test.tsx；tests/e2e/research-provider-inputs.spec.ts | 同基线按上述 DTO 并行写组件/用例；收到生成物提交后类型核对；不编辑 schema/生成物/服务/业务数据 |
 | root / A | root 合同协调与集中审查；A 唯一 main、运行及业务 DB 集成者 | API 与 UI 独立 worktree，一个写入者；PG 55436 仅 API owner；A 留到 Ready 后串行验收，避免独立开发空等 |
 
-- [ ] API 先运行新增正常归档导入→prepare→admission/exact run HTTP 读端反例，确认缺新字段失败，再接线。边界：新字段完整、旧 run 不回填、future/错误 instrument/ref/hash/缺 calendar、坏 optional 不遮有效 SEC、零和负宏观值、无基底不准入。复用旧 producer 的原件/真实 guard，不 mock reader/normalizer。BFF runtime 需保留合法 DTO、兼容缺字段、拒绝 false→true 资格提升、额外敏感字段及错误 Decimal。
-- [ ] UI 先写渲染/语义 RED，再实现。现有卡片与统一格式函数、只读原生 details；明确公司描述不是 SEC 财务事实，行业标签不是已验证风控分类；经济日期、vintage、收到时间、可用时间各自标注。长描述/标识可展开且窄屏不溢出；null 显示未知，非零小值不显示零，最多 3 位小数；仅宏观/公司测试资料不显示误导的 SEC 标题。正常旧资料布局不回归。页面无采集/研究/交易副作用。
-- [ ] 可发现性沿用组合页服务端 `PositionResearchResponse.read_at`：`newer_inputs_available=true` 时另给“查看更新资料”链接，以该服务端 cutoff 查询已有冻结资料，不取浏览器当前时间；旧报告有 run_id 时使用 exact run 链接，无 run 时保留旧 as_of 兼容。两链接分别代表旧研究与当前材料，不能隐式替换旧报告。A已实际核对新资料带 canonical UTC Z 的 as_of 入口能读取现有新快照，且无写请求；不需要先创建研究 run。
-- [ ] 集中 Spec/Quality 审查；聚焦 pytest/Ruff/Mypy、前端单测/typecheck/lint、生成物一致性与该页 E2E。修复后定向复核；不重复同环境未变代码的重型验证。
-- [ ] A 在当前真实 FMP/FRED 冻结样本上串行集成，核对同一案例 DB→受保护 API/BFF→实际 DOM（桌面/窄屏）、旧冻结无新字段，保持执行锁；不重复采集/导入或模型调用。API 已生效不等于页面已验收，证据继续写原 checkpoint。
+- [x] API 先运行新增正常归档导入→prepare→admission/exact run HTTP 读端反例，确认缺新字段失败，再接线。边界：新字段完整、旧 run 不回填、future/错误 instrument/ref/hash/缺 calendar、坏 optional 不遮有效 SEC、零和负宏观值、无基底不准入。复用旧 producer 的原件/真实 guard，不 mock reader/normalizer。BFF runtime 需保留合法 DTO、兼容缺字段、拒绝 false→true 资格提升、额外敏感字段及错误 Decimal。
+- [x] UI 先写渲染/语义 RED，再实现。现有卡片与统一格式函数、只读原生 details；明确公司描述不是 SEC 财务事实，行业标签不是已验证风控分类；经济日期、vintage、收到时间、可用时间各自标注。长描述/标识可展开且窄屏不溢出；null 显示未知，非零小值不显示零，最多 3 位小数；仅宏观/公司测试资料不显示误导的 SEC 标题。正常旧资料布局不回归。页面无采集/研究/交易副作用。
+- [x] 可发现性沿用组合页服务端 `PositionResearchResponse.read_at`：`newer_inputs_available=true` 时另给“查看更新资料”链接，以该服务端 cutoff 查询已有冻结资料，不取浏览器当前时间；旧报告有 run_id 时使用 exact run 链接，无 run 时保留旧 as_of 兼容。两链接分别代表旧研究与当前材料，不能隐式替换旧报告。A已实际核对新资料带 canonical UTC Z 的 as_of 入口能读取现有新快照，且无写请求；不需要先创建研究 run。
+- [x] 集中 Spec/Quality 审查；聚焦 pytest/Ruff/Mypy、前端单测/typecheck/lint、生成物一致性与该页 E2E。修复后定向复核；不重复同环境未变代码的重型验证。
+- [x] A 在当前真实 FMP/FRED 冻结样本上串行集成，核对同一案例 DB→受保护 API/BFF→实际 DOM（桌面/窄屏）、旧冻结无新字段，保持执行锁；不重复采集/导入或模型调用。API 已生效不等于页面已验收，证据继续写原 checkpoint。
 
 本片不新增依赖、迁移或凭据配置。回滚为回退本片应用提交，新增 optional JSON 不影响旧响应读取，既有原件、行与研究冻结不改。原计划 A2/B3/T1/S/E/L/R/X 等未完成条目及人工选择/外部操作门禁继续保留。
+
+实际交付：A运行ce91b81，schema0042，已用既有真实新旧FMP/FRED快照完成DB→受保护API/BFF→375/1440实际DOM的完整新增投影、来源/单位/四时点/hash/双引用核验；旧快照与另一已有真实旧run回放不回填，十类历史行完全未变，active Job为0。当前真实组合无newer_inputs_available=true，双入口实际点击条件未覆盖，沿用已通过条件组件/E2E证据，不制造业务数据。详细证据与边界见现有checkpoint的FMP/FRED真实页面段；本节展示完成不代表B3研究或经济比较完成。
 
 ### 9.18 B3：减仓方向不产生未经授权的清仓幅度
 
@@ -756,3 +758,5 @@ FRED 增量：parser/collector/storage/CLI 使用现有 HTTP bytes、原件和 m
 - 不新增数量策略、迁移、依赖或业务写入，不重算已存结果。完整 B3 仍需要冻结条件求值、合格研究内容、减仓幅度/经济取舍等正式合同与必要用户选择，本修复不能替代那些交付。代码回退不删除历史资料，亦不可为通过后续验收恢复方向直接授权数量。
 
 增量验证：原清仓断言改为未完成/保持基线先 RED，修复后 80 optimizer unit 通过；审查发现合法旧 schema 的 reduce_candidate/eligible_for_increase 组合可能反向增配，新增 model_validate 回归先读出 0.125，再以 stance veto 修复并复跑 80 unit。原 builder 5 PG 通过；新增 PG 初次误读不存在的 ORM 现金字段为测试错误，去除此断言（现金由单位测试核验）后正常 builder→DB→受保护 GET 1 PG 通过，明确 STRATEGY_EVIDENCE_INCOMPLETE 与 non_executable。一源 Mypy、三文件 Ruff/diff 检查通过；旧文件全量格式原已非绿，仅格式化修改区，未混入无关重排。主线和实际运行以 A 接收后验收为准。
+
+运行闭合：A已集成95c1265等效8b72b89并随ce91b81应用镜像生效；减仓测试复用已审查同代码80unit/6PG，不运行真实账户优化、不重算历史结果。
