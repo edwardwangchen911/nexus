@@ -1500,3 +1500,12 @@ API live 正常；readiness 的 database/migration/object_store 为 ready，work
 含 190 字节格式说明后，critique wire 从 44500 降为 38368 字节，净省 6132；
 加入既有用量和余量仍为 65823，超限 1823，故不实现编码层、不追加模型调用。
 各工具节省与还原证据保存在 columnar-measurement-summary.json。
+
+增加共同 scope 后的独立测量可通过第二阶段预检，因此实现最小临时发送视图；
+不改变原工具结果、冻结输入或证据。97eea19/cd79d91 已集成为 cbcdd6c/42db796，
+A 75 单测通过。复用实际 project_staged_payload 与 staged 路径，替换传输为禁止外呼的
+stub：canonical JSON 逆变换相等，原 payload 和 frozen_inputs_hash 不变，实际紧凑
+wire（含格式说明）44500→35283 字节，净省 9217；累计估算 62738/64000，余量1262。
+此复测仅证明 critique 输入预检通过，不证明第三阶段、实际累计 token 或研究完成。
+model calls/database writes 均 0，证据 production-projection-summary.json。
+该代码供主机一次性入口使用，API 仍 85e3f9c、schema 0040，无重复运行切换。
