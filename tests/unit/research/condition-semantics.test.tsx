@@ -12,7 +12,7 @@ describe("research conditions are proposals, not evaluated results", () => {
     })} />);
     const region = screen.getByRole("heading", { name: "失效条件" }).closest("section")!;
     expect(region).toHaveTextContent("研究提出的待核验条件");
-    expect(region).toHaveTextContent("未提供系统求值结果");
+    expect(region).toHaveTextContent("这些失效条件尚无系统求值结果");
     expect(region).toHaveTextContent("不代表进入、退出或失效条件已经成立");
     expect(region).toHaveTextContent("committee.evidence_valid");
     expect(region).toHaveTextContent("运算符 is_false · 阈值 true");

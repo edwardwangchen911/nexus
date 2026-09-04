@@ -9,6 +9,7 @@ import { useRef, useState } from "react";
 
 import type { components } from "../lib/generated/schema";
 import { EvidenceDrawer } from "./evidence-drawer";
+import { ResearchConcentrationObservations } from "./research-concentration-observations";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 
@@ -122,9 +123,10 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
             </ul>
             <p>{research.disagreement}</p>
           </section>
+          {intent.condition_evaluations?.length ? <ResearchConcentrationObservations evaluations={intent.condition_evaluations} onOpenEvidence={openEvidence} /> : null}
           <section className="decision-card__section" aria-labelledby="invalidation-title">
             <h3 id="invalidation-title">失效条件</h3>
-            <p role="note">以下是研究提出的待核验条件，本页未提供系统求值结果；列出表达式或附有证据，不代表进入、退出或失效条件已经成立，也不授予执行权限。</p>
+            <p role="note">以下是研究提出的待核验条件，这些失效条件尚无系统求值结果；列出表达式或附有证据，不代表进入、退出或失效条件已经成立，也不授予执行权限。</p>
             {research.invalidation_conditions.length ? (
               <ul className="decision-card__conditions">
                 {research.invalidation_conditions.map((condition, index) => {
