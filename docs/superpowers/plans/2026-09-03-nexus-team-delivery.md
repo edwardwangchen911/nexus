@@ -463,3 +463,7 @@ A的新一次原生研究已独立记录：第一阶段已保存，第二阶段�
 **综合合同接续（main `500d26c`）：** 新正常研究三阶段均已调用，实际输入51253/输出3540未超原阈值，七角色已保存；综合响应在assessment_binding/domain_validation被拒。旧记录与同案例页面已验收，具体响应未保留，不能倒推本次违反哪条规则。离线真实staged消费者已复现九种SDK严格schema允许、领域拒绝的组合，包括resolved=true却用空串而不是null表示无后果，以及未解决审查缺具体缺口/后果、空白理由、sufficient含未解决项。
 
 下一片由wire owner唯一修改`codex_staged.py`、`committee.py`与unit：仅向实际v3请求和schema描述明确既有resolved/空数组/null/非空白/充分性规则，不改领域约束或引入新union形状；已有validation_kind增加四个固定值review_rationale_blank、review_resolution_inconsistent、review_evidence_incomplete、review_sufficiency_inconsistent，精确匹配固定校验消息，unsafe优先、未知仍domain_validation，不存原响应/错误输入/位置。新request hash覆盖新实际规则，旧v1/v2行为与历史读取不变。root独立补原生worker→PG终态→API的合成resolved矛盾回归，验证七角色保留、三调用用量、无intent/重试/私密文本；owner覆盖九种反例和合法对照。一轮审查、定向复验后A统一集成。该片使现有合同更明确并改善诊断，不保证模型成功，不借此再自动调用模型或重标旧失败。
+
+**C2逐项审查可见性（main `32d30ce`）：** 综合合同修复已集成并通过新真实八角色研究，但正文将认可缺口误当解决，系统仍partial/watch/none，v3当前没有自动升级正式合格R的路径。DTO保存了逐项自评与理由，实际页面未渲染这些字段；不是页面把sufficient直接标为充分。root在独立worktree唯一实现现有DecisionCard综合角色内的只读展开区：仅消费已验证stage_trace的synthesis_assessment，逐项显示回应对象、模型态度/解决自评、原理由、缺失项和受阻结论，复用原证据抽屉。明确“模型自评，未独立核验，不改变系统证据状态或执行许可”，不用绿色就绪标识；空列表/null写为模型未列出，不当作没有缺口。保留原保存值，不根据不确定性重写resolved，不隐藏内容缺陷。
+
+只改现有组件、必要局部样式与合成测试，不新增API/依赖/模型调用/审批或发布。旧无assessment及invalid trace不展示新段；测试真实DecisionCard路径的真假resolved、充分性、空值、静态文本安全、证据抽屉和原partial/locked，浏览器用隔离端口的375/390/1440视口与键盘展开、无写请求/横溢出核验。集中审查后A串行集成，用同一新run的真实DB/BFF/DOM核验四项原理由与自评、旧hash不变，不为本片重跑研究。界面依旧是本地工作台，hosting配置不改、无云发布。
