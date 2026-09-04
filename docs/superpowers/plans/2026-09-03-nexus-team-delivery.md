@@ -531,3 +531,7 @@ L1局部审计实际交付：A已将上述五提交串行集成为主线代码`4
 - 两个实现面以本合同并行；先红后绿、正常入口到真实隔离PG及工具路径、错证券/时间/篡改/缺原件/重复导入/历史截止反例，一轮集中审查后串行集成。原件解析样本全为明确合成fixture，真实访问未就绪仍待验；不重复查凭据或模型调用。回滚应用即可停用新读取者，迁移按上述保护回退，不删除已有原件。
 
 独立B3复核：现有v2/v3 synthesis生成器固定partial/watch/none而正式消费者要求complete，因此当前真实formal R生产路径不可达。集成测试的complete研究是合法存储fixture，不是原生producer正例；另立下一小片的范围内事实充分性合同，保留旧版本和不执行语义，不靠删partial、相信resolved=true或再调用模型“解除”该缺口。
+
+分支联合验证：原件归档/canonical/storage为`94014e9`（root吸收`96217be`），正常import/S3薄补充为`5a40fa7`（root吸收`a65cab9`），0041/head初版为`6d292f0`，后续消费者与观测时点校验一并验证。旧guard拒新source、缺canonical未拒、工具未冻结/未带正文先后红测，接线后正常collector→配置/CLI→实际S3 adapter（底层合成client）→隔离PG→冻结研究工具通过；重导只一份evidence和四份artifact，旧快照hash不变，不建账本/价格authority。原件篡改、错证券、最后canonical读回损坏均不留下部分DB证据，已写不可变对象保留。
+
+集中审查前，308项相关单测通过，6项既有离线token词表用例因未提供显式fixture跳过（未为此联网或调用模型）；47项隔离PG通过，含18项0041 guard/降级保护、当前工具/坏可选观测、4项正常导入/回滚及既有SEC/issuer/完整schema升级降级回归。完整schema反射仍有两项既有SQLAlchemy dialect-option告警，不影响比较结果；7源Mypy、15文件Ruff、帮助入口和diff校验通过。新增本地导入没有依赖变更；仅显式本地S3客户端关闭环境代理，新增evidence前缀读回受原bucket/prefix/version约束。实际账户样本、页面/API展示与主线运行尚未因此完成，待一轮集中审查、定向修复及A串行集成。

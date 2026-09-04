@@ -80,7 +80,9 @@ async def seed_observation(session, invalid=None):
                 mime_type="application/json",
                 schema_version=f"alpaca_actions_{kind}_v1",
                 source="other" if invalid == "wrong_source" and kind == "raw" else "alpaca",
-                observed_at=arrival,
+                observed_at=NOW + timedelta(seconds=1)
+                if invalid == "future_observation"
+                else arrival,
                 available_at=arrival,
                 received_at=arrival,
                 created_at=NOW + timedelta(seconds=1) if invalid == "late_artifact" else receipt,
@@ -188,6 +190,7 @@ async def test_complete_current_archive_can_bind_and_prevents_unsafe_downgrade(
         "wrong_source",
         "wrong_size",
         "future_raw",
+        "future_observation",
         "late_artifact",
         "late_document",
         "wrong_instrument",

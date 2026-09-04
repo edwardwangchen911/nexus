@@ -36,6 +36,7 @@ _NEW = """              ) OR EXISTS (
                   AND (observation.payload->>'available_at')::timestamptz = NEW.available_at
                   AND observation.available_at = NEW.available_at
                   AND observation.received_at = NEW.available_at
+                  AND observation.observed_at = NEW.available_at
                   AND observation.created_at <= snapshot_time
                   AND observation.received_at <= snapshot_time
                   AND authority.created_at <= snapshot_time
@@ -46,12 +47,14 @@ _NEW = """              ) OR EXISTS (
                   AND canonical.created_at <= snapshot_time
                   AND canonical.received_at <= observation.available_at
                   AND canonical.available_at <= observation.available_at
+                  AND canonical.observed_at <= observation.available_at
                   AND manifest.source = 'alpaca'
                   AND manifest.schema_version = 'alpaca_actions_manifest_v1'
                   AND manifest.byte_size = (observation.payload->>'manifest_byte_length')::bigint
                   AND manifest.created_at <= snapshot_time
                   AND manifest.received_at <= observation.available_at
                   AND manifest.available_at <= observation.available_at
+                  AND manifest.observed_at <= observation.available_at
                   AND jsonb_typeof(observation.payload->'pages') = 'array'
                   AND jsonb_array_length(observation.payload->'pages') BETWEEN 1 AND 100
                   AND observation.available_at = (
@@ -76,6 +79,8 @@ _NEW = """              ) OR EXISTS (
                         AND receipt.received_at <= (page->>'received_at')::timestamptz
                         AND raw.available_at <= (page->>'received_at')::timestamptz
                         AND receipt.available_at <= (page->>'received_at')::timestamptz
+                        AND raw.observed_at <= (page->>'received_at')::timestamptz
+                        AND receipt.observed_at <= (page->>'received_at')::timestamptz
                     )
                   )
               ) OR EXISTS (

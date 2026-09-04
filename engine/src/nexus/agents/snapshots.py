@@ -16,6 +16,7 @@ from nexus.domain.time import require_utc
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
+from nexus.research.alpaca_actions_storage import read_action_observations
 from nexus.research.sec_disclosures import SEC_RESEARCH_FORMS
 from nexus.research.ssga_distributions import read_distributions
 from nexus.research.ssga_fund_observations import read_fund_observations
@@ -99,6 +100,18 @@ async def prepare_research_snapshot(
         ]
         keep = MAX_FROZEN_EVIDENCE - 2 - len(nav_refs) - len(retained_issuer)
         evidence = sec_refs[:keep] + retained_issuer + nav_refs
+    actions = await read_action_observations(session, instrument_id=instrument_id, as_of=as_of)
+    if actions:
+        action_refs = list(
+            await session.scalars(
+                select(ResearchEvidenceRef).where(ResearchEvidenceRef.id.in_(actions))
+            )
+        )
+        retained_ids = distributions.keys() | observations.keys() | nav.keys()
+        retained = [item for item in evidence if item.id in retained_ids]
+        sec_refs = [item for item in evidence if item.id not in retained_ids]
+        keep = MAX_FROZEN_EVIDENCE - 2 - len(action_refs) - len(retained)
+        evidence = sec_refs[:keep] + retained + action_refs
     if not evidence:
         return None
     context = await freeze_portfolio_context(
@@ -121,6 +134,8 @@ async def prepare_research_snapshot(
         payload["scope"] = "persisted_sec_filings_and_issuer_observations"
     if nav:
         payload["scope"] = "persisted_sec_filings_and_issuer_nav_history"
+    if actions:
+        payload["scope"] = "persisted_research_observations"
     if context is not None:
         payload["portfolio_context"] = context[0].model_dump(mode="json")
     revision = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
