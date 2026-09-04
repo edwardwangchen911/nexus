@@ -1596,3 +1596,22 @@ synthesis-review-ui-20260904。此片补可核验展示，不更改模型自评�
 后来的completed run。刷新仍只读同一run GET，不读admission/最新研究；不存在run
 实际返回404且不fallback。原证据抽屉可见、执行锁定、无研究按钮、无横溢出。
 没有模型、采集或写请求，API/schema不变；真实证据在exact-run-ui-20260904。
+
+## 手动日根局部审计真实封存（2026-09-04，北京时间）
+
+合同/实现/代理修复/文档五提交已集成，代码4e9f4b7；A14新CLI+2存储单测通过。
+使用现存三阶段成功日根及其精确绑定的已完成研究，正常daily_once audit首次
+recorded/sealed，第二次相同事实复用同event/manifest。实际仅1事件/1清单，active0，
+不启动业务worker、采集、模型或订单。观察范围仅root/质量/诊断与所选研究，明确排除
+proposals/paper/performance，不宣称完整L1。
+
+实际MinIO对象长度/SHA/gzip通过，脱敏文档与既有redacted_audit_document逐项一致，
+不含真实root/run身份；序号连续且覆盖目标event、链hash/head一致。原cutoff早于
+observed_at，后者不晚于recorded_at，分别保留冻结、观察、记录含义。八表所有旧行
+ID/hash不变，仅正常追加审计行/清单与对象。现有risk-audit BFF200及页面可见新事件
+序号与recorded脱敏摘要，不展示root细节；无额外接口或API重启，schema0040不变。
+
+验收脚本曾误用普通EngineSettings构造要求显式配置的局部adapter，以及只hash正文
+而漏前链hash；已改用DailyOnceSettings及既有audit_event_hash完成只读核验，没有重跑
+业务审计或修改对象。证据位于受保护daily-audit-20260904。回滚仅停用新命令/代码，
+已追加审计事实和封存对象必须保留。
