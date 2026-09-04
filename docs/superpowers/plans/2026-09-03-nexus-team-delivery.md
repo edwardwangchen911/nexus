@@ -772,3 +772,24 @@ FRED 增量：parser/collector/storage/CLI 使用现有 HTTP bytes、原件和 m
 本片补上既有财务事实 PIT 消费者，不构成正式 v4 研究。已核三个 committee.* 条件仍是统一引用首项证据的占位表达式，无实际布尔求值；集中度触发可复用原政策与分母，FRED/SEC 比率还须精确单位/期间及已选择的经济阈值。完整 B3 与 T1 的原任务继续保留，不能以消费者修复替代它们。
 
 §9.19运行闭合：A已集成5823120并以2c6e9b8镜像生效，schema0042；现有真实旧研究精确财务工具/受保护GET核对通过，返回事实不晚于原cutoff，十一类旧行完全未变、active0。同代码4PG/2unit和静态结果复用，未创建业务反例、重采集/研究或重跑DOM；详情见现有checkpoint财务事实入库时点段，v4/B3仍未完成。
+
+### 9.20 B3/C2：冻结集中度事实求值与未核验条件展示
+
+**目的：** 原三个 `committee.*` 条件只有表达式和引用，没有实际求值。为正常研究提供可复核的组合问题前提；不把集中度触发等同应减仓、完整投资研究或交易许可，不改原进入/退出/失效占位条件的历史含义。
+
+- B 独占 Python 合同、生成物及相关测试。`PortfolioResearchContext` 增加可空 `concentration_facts`，固定 `concentration_facts_v1`：原 Decimal 精度计算的未量化证券分母占比、两条既有政策阈值、分母枚举、政策版本和 authority refs；P/D/hash、标的、币种和时点复用外层绑定。不能用含现金的 `position_weight` 或 12 位数据库 metric 重新判断严格边界。
+- 正常 freeze 提取复用现有 P/D/policy、时点、完整同币种证券分母及原估值引用验证，支持合法 info/并列最大。缺失、非有限、非目标最大持仓、政策/引用/身份不符保持 unknown；`research_focus` 缺失本身不证明未触发。新事实由正常精确组合工具读取，不增加无消费者 schema。
+- 只支持固定观察信号 `portfolio.top1_warning_exceeded` 与 `portfolio.top1_critical_exceeded`，按原政策严格 `>` 求值，等于为 false。条件绑定该冻结 context 原证据，非任意首项引用；不是可执行表达式或通用规则引擎。
+- 正常 execution/synthesis 从原 run 的精确冻结 context 生成可空 `condition_evaluations`（版本、条件、true/false/unknown、封闭原因），不让模型填确定性结果。精确研究 reader 重算核验后由现有 API 读取；含新 facts 的结果不得通过删掉 evaluations 或伪造结果/引用绕过核验。没有 context 不伪造引用；旧记录不从当前 P/D 补算。新可空字段未提供时从序列化省略，保留历史 bytes/hash。
+- C 独立修改既有 DecisionCard 失效条件区及测试：标为研究提出、待核验，表达式/引用不等于成立；空数组只表示未提供，不表示无风险。保留原表达式与证据抽屉，不预造后端字段，不把本片扩成进入/退出新界面。未来展示新增观察结果另按实际合同接续。
+- 验证：unit 覆盖 15%/30% 等值及两侧、量化后相同但真值不同、并列最大、现金/异币排除、缺失/NaN、旧 context；PG 经正常 diagnose/prepare/admit/worker/synthesis/output/精确 reader/API，mock 仅外部和模型边界。补晚到政策/子行、篡改结果/refs/删字段、新旧冻结不互改回归；v3 仍 partial/watch/none，原正式门禁及减仓幅度限制不变。C 组件及正常页面路径覆盖文案、布尔条件、空值、证据和无隐式写入。
+- 不新增依赖、数据库表、迁移、外部调用或策略阈值。A 串行集成、运行和真实案例验收；根任务集中审查。可按冻结 producer 与结果消费者分两个提交，回退应用代码时保留已存原件和 JSON，兼容读取已生成的新字段，不删除或回填业务历史。以上为开发合同，尚非完成记录；完整 B3/v4 和所有原未完成条目继续保留。
+
+### 9.21 T1：内部股票池与供应商历史数据的边界
+
+D 对官方公开文档和本地定义的限定调查已完成，无业务 API、凭据修改或 SDK 安装。原设计 §4.4 明确 `us_liquid_v1` 是内部 42 股票及 7 ETF 的工程池，不是标普 500 成分；seed 的 `valid_from=2026-01-01` 不证明当时已公开可用。正式 assembler 固定读取 `us_liquid`，不能以供应商历史指数成员替换并宣告 T1 完成。
+
+- [Alpaca assets](https://docs.alpaca.markets/us/reference/get-v2-assets-1) 与公开 SDK `TradingClient.get_all_assets/get_asset` 可提供当前身份观测，没有历史 as-of 合同；inactive 也可能源于 CUSIP 更换，不能直接当退市或历史退出收益。
+- [Alpaca corporate actions](https://docs.alpaca.markets/us/reference/corporateactions-1) 不保证事件即时到达；分页结束或 `data_quality=complete` 不能证明全区间无漏、字段齐全或已获历史准入。继续复用现有采集/导入入口，不为相同未知重采。
+- [FMP delisted companies](https://site.financialmodelingprep.com/developer/docs/stable/delisted-companies) 比指数成员更接近身份退出缺口，但免费端点权限、覆盖、首次发布/版本及清算对价均未证实；profile 成功不能外推。项目已核的官方推荐社区 fmpsdk 有 `delisted_companies(page, limit)` 和 `historical_sp500_constituent()`；这既不是 FMP 自营 SDK，也不解决内部池历史定义，不据此新增依赖或要求付费。
+- 下一可兼容方向是内部真实发布新版本后，结合外部身份/行动/行业证据开展前瞻观察；尚未发布或启用，也不替代原多年 T1。若需要另一套多年 PIT 股票池，必须先明确其定义及历史证据要求，不能暗换池。原池历史发布链、身份/行动完整性、行业/ETF穿透、合格价格与端点使用条件仍为具体未完成项，不视为“免费源不存在”。
