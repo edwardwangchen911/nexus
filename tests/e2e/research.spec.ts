@@ -7,10 +7,43 @@ import {
   decisionTime,
   instrumentId,
   researchAdmissionEnvelope,
+  researchData,
   researchEnvelope,
   runId,
   sessionDate,
 } from "../unit/research/fixtures";
+
+test("saved boolean research conditions remain unverified through page and evidence drawer", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await installShellFixture(page);
+  const base = researchData();
+  const condition = { ...base.invalidation_conditions[0], signal: "committee.evidence_valid", operator: "is_false" as const, threshold: true, unit: "boolean" };
+  const data = researchData({ invalidation_conditions: [condition], intent: { ...base.intent!, invalidation_conditions: [condition] } });
+  const requests: { method: string; path: string }[] = [];
+  page.on("request", (request) => { if (request.url().includes("/api/v1/")) requests.push({ method: request.method(), path: new URL(request.url()).pathname }); });
+  await page.route(`**/api/v1/research-runs/${runId}`, (route) => route.fulfill({ json: researchEnvelope(data) }));
+  await page.goto(`/research/${instrumentId}?run_id=${runId}`);
+  const section = page.getByRole("heading", { name: "失效条件", exact: true }).locator("..");
+  await expect(section).toContainText("研究提出的待核验条件");
+  await expect(section).toContainText("未提供系统求值结果");
+  await expect(section).toContainText("运算符 is_false · 阈值 true");
+  const opener = section.getByRole("button", { name: "查看证据定位" });
+  await opener.focus();
+  await opener.press("Enter");
+  const drawer = page.getByRole("dialog", { name: "研究摘录与证据定位" });
+  await expect(drawer).toContainText("待核验条件");
+  await expect(drawer).toContainText("不是求值结果");
+  await expect(drawer).toContainText(condition.evidence_refs[0].content_hash);
+  await drawer.press("Escape");
+  await expect(opener).toBeFocused();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  await expect(page.getByRole("button", { name: /运行冻结研究|下单|买入|卖出/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "重新读取", exact: true }).click();
+  await expect.poll(() => requests.filter(({ path }) => path === `/api/v1/research-runs/${runId}`).length).toBe(2);
+  expect(requests.filter(({ method }) => method !== "GET")).toEqual([]);
+  expect(requests.filter(({ path }) => path.includes("research-admission"))).toEqual([]);
+});
 
 for (const viewport of [
   { name: "mobile-375", width: 375, height: 812 },

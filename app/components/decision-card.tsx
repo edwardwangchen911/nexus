@@ -124,20 +124,23 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
           </section>
           <section className="decision-card__section" aria-labelledby="invalidation-title">
             <h3 id="invalidation-title">失效条件</h3>
+            <p role="note">以下是研究提出的待核验条件，本页未提供系统求值结果；列出表达式或附有证据，不代表进入、退出或失效条件已经成立，也不授予执行权限。</p>
             {research.invalidation_conditions.length ? (
               <ul className="decision-card__conditions">
                 {research.invalidation_conditions.map((condition, index) => {
-                  const comparison = `${operatorLabel(condition.operator)} ${typeof condition.threshold === "boolean" ? (condition.threshold ? "是" : "否") : formatMetric(condition.threshold, condition.unit, condition.signal)}`;
+                  const comparison = typeof condition.threshold === "boolean"
+                    ? `运算符 ${condition.operator} · 阈值 ${String(condition.threshold)}`
+                    : `${operatorLabel(condition.operator)} ${formatMetric(condition.threshold, condition.unit, condition.signal)}`;
                   return (
                     <li key={`${condition.signal}:${index}`}>
                       <span title={condition.signal}>{signalLabel(condition.signal)}</span>
                       <span>{comparison}</span>
-                      <EvidenceButtons evidenceRefs={condition.evidence_refs} excerpt={`${signalLabel(condition.signal)} ${comparison}`} onOpen={openEvidence} />
+                      <EvidenceButtons evidenceRefs={condition.evidence_refs} excerpt={`待核验条件：${signalLabel(condition.signal)} ${comparison}。这是研究提出的表达式，不是求值结果。`} onOpen={openEvidence} />
                     </li>
                   );
                 })}
               </ul>
-            ) : <p>未提供可机器判断的失效条件；当前研究不能支持策略目标。</p>}
+            ) : <p>研究未提供失效条件；不代表不存在失效风险，当前研究不能支持策略目标。</p>}
           </section>
           <dl className="decision-card__versions">
             <div><dt>策略版本</dt><dd>{intent.strategy_version}</dd></div>
