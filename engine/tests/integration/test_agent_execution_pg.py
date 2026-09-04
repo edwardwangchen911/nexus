@@ -4284,9 +4284,11 @@ class _OversizedUsageCommittee(FixtureCommittee):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("assessment_rejection", [False, True])
 async def test_native_v3_domain_rejection_persists_safe_reason_without_text_or_retry(
     migrated_database_url,
     monkeypatch,
+    assessment_rejection,
 ):
     from nexus.agents import codex_staged
     from nexus.agents.responses_budget import UsageSnapshot
@@ -4334,14 +4336,64 @@ async def test_native_v3_domain_rejection_persists_safe_reason_without_text_or_r
     raw = json.dumps(body)
     codex_staged._ResearchBatch.model_validate_json(raw)
     invoke = AsyncMock(return_value=(raw, UsageSnapshot(input_tokens=300, output_tokens=80)))
+    if assessment_rejection:
+
+        async def staged_invoke(payload, *, output_model):
+            nonlocal raw
+            if payload["stage"] == "synthesis":
+                response = {
+                    "synthesis_assessment": {
+                        "stance": "watch",
+                        "claims": [{"text": "冻结资料不足以形成结论。", "citations": [0]}],
+                        "reviews": [
+                            {
+                                "claim_id": item["claim_id"],
+                                "status": "accepted",
+                                "rationale": "synthetic-private-canary",
+                                "citations": [0],
+                                "resolved": True,
+                                "missing_evidence": [],
+                                # Empty text is schema-valid but not the required null.
+                                "prevented_conclusion": "",
+                            }
+                            for item in payload["previous_claims"]
+                            if item["role"] in {"bear", "evidence_audit"}
+                        ],
+                        "review_conclusion": "sufficient",
+                        "uncertainties": [],
+                        "conflicting_facts": False,
+                    }
+                }
+            else:
+                response = {
+                    "roles": [
+                        {
+                            "role": role,
+                            "vote": "abstain",
+                            "conflicting_facts": False,
+                            "claims": [{"text": "缺少合格行情。", "citations": [0]}],
+                            "reviewed_claim_ids": (
+                                [] if payload["stage"] == "research" else ["bull:0"]
+                            ),
+                        }
+                        for role in payload["requested_roles"]
+                    ]
+                }
+            raw = json.dumps(response)
+            output_model.model_validate_json(raw)
+            return raw, UsageSnapshot(input_tokens=300, output_tokens=80)
+
+        invoke.side_effect = staged_invoke
     monkeypatch.setattr(codex_staged, "invoke_codex", invoke)
     assert await run_agent_worker_once(settings) is True
     assert await run_agent_worker_once(settings) is False
-    assert invoke.await_count == 1
+    calls = 3 if assessment_rejection else 1
+    reason = "model_stage_review_invalid" if assessment_rejection else "model_stage_output_invalid"
+    assert invoke.await_count == calls
     async with factory() as session:
         run = await session.get(AgentResearchRunRecord, admission.run_id)
         assert run.status == "failed" and run.retry_count == 0
-        assert (run.input_tokens, run.output_tokens) == (300, 80)
+        assert (run.input_tokens, run.output_tokens) == (300 * calls, 80 * calls)
         job = await session.scalar(select(Job).where(Job.payload["run_id"].astext == str(run.id)))
         assert job.attempt_count == job.max_attempts == 1
         outputs = tuple(
@@ -4349,20 +4401,31 @@ async def test_native_v3_domain_rejection_persists_safe_reason_without_text_or_r
                 select(AgentResearchOutputRecord).where(AgentResearchOutputRecord.run_id == run.id)
             )
         )
-        assert len(outputs) == 1 and outputs[0].role is None and outputs[0].intent is None
-        assert outputs[0].payload["reason"] == "model_stage_output_invalid"
-        diagnostic = outputs[0].payload["diagnostic"]
-        assert diagnostic["boundary"] == "role_binding"
-        assert diagnostic["validation_kind"] == "unsafe_text"
+        assert len(outputs) == (8 if assessment_rejection else 1)
+        assert {output.role for output in outputs if output.role is not None} == (
+            set(ROLE_ORDER[:7]) if assessment_rejection else set()
+        )
+        assert all(output.intent is None for output in outputs)
+        terminal = next(output for output in outputs if output.role is None)
+        assert terminal.payload["reason"] == reason
+        diagnostic = terminal.payload["diagnostic"]
+        assert diagnostic["boundary"] == (
+            "assessment_binding" if assessment_rejection else "role_binding"
+        )
+        assert diagnostic["validation_kind"] == (
+            "review_resolution_inconsistent" if assessment_rejection else "unsafe_text"
+        )
         assert diagnostic["response_hash"] == hashlib.sha256(raw.encode()).hexdigest()
-        assert diagnostic["role"] == "orchestrator"
-        assert outputs[0].payload["stage_input"]["stage"] == "research"
-        assert "synthetic-private-canary" not in json.dumps(outputs[0].payload)
+        assert diagnostic["role"] == ("portfolio" if assessment_rejection else "orchestrator")
+        assert terminal.payload["stage_input"]["stage"] == (
+            "synthesis" if assessment_rejection else "research"
+        )
+        assert "synthetic-private-canary" not in json.dumps([output.payload for output in outputs])
     path = f"/internal/v1/research-runs/{admission.run_id}"
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
     ) as client:
         response = await client.get(path, headers=headers("GET", path))
     assert response.status_code == 200
-    assert response.json()["data"]["abstention_reason"] == "model_stage_output_invalid"
+    assert response.json()["data"]["abstention_reason"] == reason
     assert "synthetic-private-canary" not in response.text
