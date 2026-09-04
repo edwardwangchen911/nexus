@@ -662,6 +662,164 @@ async def test_staged_view_reaches_real_sdk_wire_without_mutating_frozen_inputs(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("version", [1, 2, 3])
+async def test_sdk_wire_preserves_current_trend_scope_separately_from_raw_close(
+    monkeypatch, version
+):
+    """Catch lost source/coverage/null/qualification fields at the real SDK wire.
+
+    Tool responses are synthetic boundary fixtures, not a DB/import acceptance.
+    Only the SDK client is replaced; prefetch, projection and all stages are real.
+    """
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    security = _view_payload()["frozen_inputs"]["security"]
+    scope = {
+        "schema_version": "agent_read_only_tool_result_v1",
+        "instrument_id": str(request.instrument_id),
+        "data_snapshot_id": str(request.data_snapshot_id),
+        "as_of": request.decision_time.isoformat(),
+        "evidence_hash": "a" * 64,
+        "portfolio_scope": None,
+    }
+    security.update(scope)
+    unavailable = {**scope, "status": "unavailable", "reason": "missing", "items": []}
+    raw_close = {
+        **scope,
+        "status": "ok",
+        "reason": None,
+        "items": [
+            {
+                "evidence_ref_id": "00000000-0000-4000-8000-000000000001",
+                "source": "alpaca",
+                "feed": "sip",
+                "adjustment": "raw",
+                "as_of_session": "2026-08-31",
+                "features": {"close": "246.913578"},
+            }
+        ],
+    }
+    split_trend = {
+        **scope,
+        "status": "partial",
+        "reason": "insufficient_price_history",
+        "items": [
+            {
+                "evidence_ref_id": "00000000-0000-4000-8000-000000000002",
+                "source": "alpaca_current_trends",
+                "feed": "sip",
+                "adjustment": "split",
+                "currency": "USD",
+                "timeframe": "1Day",
+                "identity_asof": "2026-09-01",
+                "as_of_session": "2026-08-31",
+                "last_observed_on": "2026-08-31",
+                "received_at": "2026-09-01T12:00:00Z",
+                "available_at": "2026-09-01T12:01:00Z",
+                "coverage": {
+                    "observed_sessions": 21,
+                    "expected_sessions": 22,
+                    "contiguous_tail_sessions": 21,
+                    "missing_sessions": ["2026-07-31"],
+                },
+                "features": {
+                    "sma_20": "123.456789",
+                    "sma_200": None,
+                    "rsi_14": "0",
+                    "volatility_20": "0.000000000001",
+                },
+                "missing_features": ["sma_200"],
+                "historical_backtest_eligible": False,
+                "market_price_eligible": False,
+                "total_return_eligible": False,
+                "execution_locked": True,
+            }
+        ],
+    }
+    expected_inputs = deepcopy(
+        {
+            "security_snapshot": security,
+            "filing_disclosures": unavailable,
+            "financial_facts": unavailable,
+            "price_close": raw_close,
+            "price_features": split_trend,
+            "macro": unavailable,
+        }
+    )
+    expected_hash = hashlib.sha256(
+        json.dumps(
+            expected_inputs, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+    price_calls = []
+
+    def price(payload):
+        price_calls.append(payload["features"])
+        return raw_close if payload["features"] == ("close",) else split_trend
+
+    tools = ReadOnlyTools(
+        executors={
+            **{name: lambda payload: unavailable for name in ReadOnlyTools.names},
+            "get_security_snapshot": lambda payload: security,
+            "get_price_features": price,
+        }
+    )
+    _, thread, result, _ = _sdk(monkeypatch)
+    sent = []
+
+    async def run(wire, **options):
+        payload = json.loads(wire)
+        sent.append((payload, options["output_schema"]))
+        stage = payload.get("stage")
+        batch = (
+            _batch()
+            if stage is None
+            else (
+                _assessment_payload(payload["previous_claims"])
+                if version == 3 and stage == "synthesis"
+                else _staged_batch(stage, payload["requested_roles"])
+            )
+        )
+        result.final_response = json.dumps(batch)
+        return result
+
+    thread.run.side_effect = run
+    committee = {
+        1: codex_sdk.CodexCommittee,
+        2: codex_staged.StagedCodexCommittee,
+        3: codex_staged.StructuredStagedCodexCommittee,
+    }[version](prompts=prompts, tools=tools)
+    outputs = [
+        await committee.analyze(role, request, evidence, prompts[role]) for role in ROLE_ORDER
+    ]
+    assert [payload.get("stage") for payload, _ in sent] == (
+        [None] if version == 1 else ["research", "critique", "synthesis"]
+    )
+    assert price_calls == [("close",), ("sma_20", "sma_200", "rsi_14", "volatility_20")]
+    assert raw_close == expected_inputs["price_close"]
+    assert split_trend == expected_inputs["price_features"]
+    for payload, schema in sent:
+        actual = _restore_view(payload["frozen_inputs"])
+        assert actual == expected_inputs
+        if version > 1:
+            assert payload["frozen_inputs"]["$nexus_view"] == 1
+            wire_hash = hashlib.sha256(
+                json.dumps(
+                    {"payload": payload, "output_schema": schema},
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            assert {
+                output.stage_input_hash for output in outputs if output.stage == payload["stage"]
+            } == {wire_hash}
+    if version > 1:
+        assert {output.frozen_inputs_hash for output in outputs} == {expected_hash}
+
+
+@pytest.mark.asyncio
 async def test_worker_allows_three_individually_bounded_stages_past_40_seconds(monkeypatch):
     from nexus.agents import codex_staged
     from nexus.worker import _agent_registry
