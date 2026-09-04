@@ -9,8 +9,10 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from helpers.diagnostic_artifacts import FixtureArtifactReader
+from helpers.portfolio_api import app, headers
 from integration import test_agent_execution_pg as research_fixtures
 from integration.test_strategy_snapshot_reader_pg import CUTOFF, ID, seed
 from nexus.agents import codex_staged
@@ -346,6 +348,26 @@ async def test_legacy_offline_fixture_native_research_reaches_formal_worker(
         assert binding["research_data_snapshot_id"] == output.intent["data_snapshot_id"]
         retained = await session.get(AgentResearchOutputRecord, output.id)
         assert retained.content_hash == output.content_hash and retained.intent == output.intent
+
+    # Read the normally generated group through the actual authenticated API;
+    # source fixtures must not turn into economic or execution permission.
+    path = f"/internal/v1/optimization-proposals/{group.id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url, now=datetime.now(UTC))),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(path, headers=headers("GET", path))
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["proposal_group_id"] == str(group.id)
+    assert data["data_snapshot_id"] == str(admitted.data_snapshot_id)
+    assert len(data["proposals"]) == 3
+    assert not data["shadow_eligibility"]["eligible"]
+    assert all(
+        proposal["comparison"]["non_executable"]
+        and not proposal["comparison"]["metrics"]["ranking_eligible"]
+        for proposal in data["proposals"]
+    )
 
 
 @pytest.mark.asyncio

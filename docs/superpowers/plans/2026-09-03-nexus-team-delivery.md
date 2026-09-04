@@ -618,3 +618,5 @@ A2八增量按序集成为`e236ea5/beb23b2/27ff42f/4f93103/60191d9/afaaa08/de138
 独立研究测试使用明确合成的旧 P/原 calendar 与独立旧市场 quality snapshot，实际新研究与 worker 时钟不回填。先证明旧同钟校验阻断正常链，再验证正例到原正式 worker；坏边界覆盖 P 晚于策略时点、策略时点晚于 cutoff、篡改策略时间不匹配日历、cutoff 早于研究实际完成，以及 v3 自评充分仍拒绝。root unit 两个合法异钟例先红，并与原等时行为和越界拒绝共同回归；修复集中审查通过后交 A，不宣告这已完成 v4 研究充分性设计。
 
 本片联合验证：正常研究 6 项 PG 已通过，另既有正式生产者 15 项 PG 通过；14 项 formal inputs/research intents 单测、Ruff/Mypy 两生产文件通过。集中审查 `15f5289..177f996` 为 Spec/质量 Ready，无可操作 P1/P2；首次联合验证中新增测试把 reservation 的 `state` 写作 `status`，已按真实 ORM 修正并重跑 6 项全绿，没有修改产品预算合同。legacy 正例确实通过 prepare→admit→研究 worker→synthesis→正式 producer→优化 worker，原生生成并保留 R/hash，三方案输出仍 partial、费用未知、不可排名/执行；v3 mocked SDK 三阶段自称 sufficient 仍 partial 并被拒绝。市场/质量/账户资料是明确合成存储 fixture，只有研究及方案是通过正常生产路径生成，不声称上游全采集、v4、真实模型或真实来源已经验收。
+
+读取侧补验：同一个正常生成的 legacy 正例继续经过真实 HMAC 鉴权 GET `/internal/v1/optimization-proposals/{group_id}`，核对返回的新 group、冻结 snapshot、三方案及全部不可执行/不可排名、Shadow 不合格状态；追加后该完整正例隔离 PG 1 项通过（6.90s），Ruff/format/diff 通过。没有 mock API、另插 group 或修改生产代码；这是后端 API 读取证据，不替代 BFF/DOM、真实来源或 v4 验收。
