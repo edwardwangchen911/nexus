@@ -1,6 +1,6 @@
 "use client";
 
-import { formatMetric } from "../lib/display-format";
+import { formatMetric, formatPercent } from "../lib/display-format";
 import { statusLabel, reasonText, reasonLabel } from "../lib/display-labels";
 import { AlertTriangle, Check, FlaskConical, RefreshCw, X } from "lucide-react";
 import { useState } from "react";
@@ -51,13 +51,17 @@ export function ProposalComparison({ group, startShadowEnabled = true, rejectEna
     ? null
     : group.shadow_eligibility.reasons.map(reasonText).join("；") || "服务器未授予影子验证资格。";
   const terminal = ["expired", "rejected", "validated"].includes(group.status);
-  const canShadow = startShadowEnabled && group.status === "compared" && shadowReason === null;
+  const comparisonUsable = complete && ordered.every((proposal) =>
+    proposal.comparison.metrics.ranking_eligible && !proposal.comparison.non_executable);
+  const canShadow = startShadowEnabled && comparisonUsable && group.status === "compared" && shadowReason === null;
   const canReject = rejectEnabled && ["draft", "compared", "shadowing"].includes(group.status);
   const blockedReason = !startShadowEnabled
     ? "当前数据状态不允许发起操作；请先重新读取方案。"
     : group.status !== "compared"
       ? `当前状态 ${statusLabel(group.status)} 不允许再次启动影子验证。`
-      : shadowReason;
+      : !comparisonUsable
+        ? "至少一个方案不具备排名或执行适用性；只能核对已保存内容。"
+        : shadowReason;
 
   async function startShadow(): Promise<void> {
     if (!canShadow) return;
@@ -106,8 +110,25 @@ export function ProposalComparison({ group, startShadowEnabled = true, rejectEna
         <span className="state-chip" data-state={terminal ? "stale" : "ready"}>{statusLabel(group.status)}</span>
       </header>
 
-      <EconomicComparisonSummary comparison={group.economic_comparison} />
+      <EconomicComparisonSummary comparison={group.economic_comparison} usable={comparisonUsable} />
       <ProposalResearchContext context={group.research_context} />
+
+      <section className="proposal-allocations" aria-labelledby="proposal-allocations-title">
+        <header>
+          <p className="eyebrow">已保存仓位目标</p>
+          <h3 id="proposal-allocations-title">各方案调整内容与适用边界</h3>
+          <p>权重和变动均来自已保存方案；标的名称未知时不使用当前代码回填。非可执行或证据不完整的内容仅供核对。</p>
+        </header>
+        <div className="proposal-allocations__grid">
+          {ordered.map((proposal) => (
+            <ProposalAllocation
+              key={proposal.proposal_id}
+              proposal={proposal}
+              hold={ordered[0]}
+            />
+          ))}
+        </div>
+      </section>
 
       {/* The bounded scroll region must be keyboard-focusable on narrow screens. */}
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
@@ -194,8 +215,8 @@ const economicReasons = new Map([
   ["ECONOMIC_COMPARISON_POLICY_MISSING", "尚未明确风险改善与新增成本如何权衡，需先确定比较判据。"],
 ]);
 
-function EconomicComparisonSummary({ comparison }: { comparison: ProposalGroup["economic_comparison"] }): React.ReactElement {
-  const compared = comparison?.status === "compared" && comparison.recommendation !== null;
+function EconomicComparisonSummary({ comparison, usable }: { comparison: ProposalGroup["economic_comparison"]; usable: boolean }): React.ReactElement {
+  const compared = usable && comparison?.status === "compared" && comparison.recommendation !== null;
   const label = !comparison
     ? "经济比较结论未报告"
     : compared
@@ -209,7 +230,9 @@ function EconomicComparisonSummary({ comparison }: { comparison: ProposalGroup["
         ? "当前响应没有报告经济比较结论，不据此判断哪种方案更优。"
         : compared
           ? "这是基于已保存证据计算的比较结果，不代表已作出人工选择，也不授予执行权限。"
-          : "尚未形成经济比较结论，不能据此认定保持现状或调整更优。"}</p>
+          : !usable
+            ? "尚未形成经济比较结论；至少一个方案不具备排名或执行适用性，不能展示推荐，也不能作为后续操作依据。"
+            : "尚未形成经济比较结论，不能据此认定保持现状或调整更优。"}</p>
       {comparison?.reasons.length ? (
         <>
           <p>{[...new Set(comparison.reasons.map((reason) => economicReasons.get(reason)
@@ -222,6 +245,83 @@ function EconomicComparisonSummary({ comparison }: { comparison: ProposalGroup["
       ) : null}
     </section>
   );
+}
+
+const actionLabels = {
+  none: "无动作", reduce: "减持", maintain: "维持", increase: "增持",
+} satisfies Record<Proposal["positions"][number]["action"], string>;
+
+function ProposalAllocation({ proposal, hold }: { proposal: Proposal; hold: Proposal }): React.ReactElement {
+  const metrics = proposal.comparison.metrics;
+  const strategyPending = proposal.variant === "strategy_target"
+    && !proposal.strategy_evidence_complete
+    && sameTargets(proposal, hold);
+  const unknownReasons = [...new Set(Object.values(metrics.dimensions)
+    .filter((item): item is { status: "unknown"; value: null; reason: string | null } =>
+      typeof item === "object" && item !== null && "status" in item && item.status === "unknown")
+    .map((item) => item.reason).filter((reason): reason is string => Boolean(reason)))];
+  return (
+    <article className="proposal-allocation" role="region" aria-label={`${variantLabels[proposal.variant]}仓位目标与完整性`}>
+      <header>
+        <h4>{variantLabels[proposal.variant]}</h4>
+        <span className="mode-badge">{strategyPending ? "策略目标尚未形成" : proposal.comparison.non_executable ? "非可执行" : "可比较"}</span>
+      </header>
+      {strategyPending ? <p>策略研究证据未完成，保存内容与保持现状相同；不能视为第三个已形成候选。</p> : null}
+      {/* The bounded table is intentionally keyboard-focusable on narrow screens. */}
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
+      <div className="table-scroll proposal-allocation__scroll" role="region" aria-label={`${variantLabels[proposal.variant]}仓位表，可横向滚动`} tabIndex={0}>
+        <table>
+          <thead><tr><th scope="col">标的</th><th scope="col">当前</th><th scope="col">目标</th><th scope="col">变动</th><th scope="col">动作与依据</th></tr></thead>
+          <tbody>{proposal.positions.map((position) => (
+            <tr key={position.instrument_id}>
+              <th scope="row">{position.display_symbol ?? "标的名称未知"}</th>
+              <td className="numeric-data">{formatPercent(position.current_weight)}</td>
+              <td className="numeric-data">{formatPercent(position.target_weight)}</td>
+              <td className="numeric-data">{formatPercent(decimalDifference(position.target_weight, position.current_weight), true)}</td>
+              <td>{actionLabels[position.action]}<br /><code>{position.reason_code}</code></td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+      <dl className="proposal-allocation__checks">
+        <CheckState label="约束核验" ok={metrics.constraint_complete} />
+        <CheckState label="适用性核验" ok={metrics.eligibility_complete} />
+        <CheckState label="比较证据" ok={metrics.evidence_complete} />
+        <CheckState label="成本依据" ok={proposal.comparison.cost_complete} />
+        <CheckState label="排名资格" ok={metrics.ranking_eligible} />
+        <div><dt>数据时效</dt><dd>{metrics.stale ? "已过期" : "未标记过期"}</dd></div>
+        <div><dt>外汇换算</dt><dd>{proposal.comparison.requires_fx ? "需要换算" : "不需要换算"}</dd></div>
+        <div><dt>执行边界</dt><dd>{proposal.comparison.non_executable ? "非可执行" : "仍需独立许可"}</dd></div>
+      </dl>
+      {metrics.unknown_metrics.length ? <p className="proposal-allocation__unknown">未完整指标：{metrics.unknown_metrics.map((metric) => <code key={metric}>{metric}</code>)}</p> : null}
+      {unknownReasons.length ? <div className="proposal-allocation__unknown"><p>未知指标原因</p>{unknownReasons.map((reason) => <p key={reason}>{reasonLabel(reason)} · <code>{reason}</code></p>)}</div> : null}
+    </article>
+  );
+}
+
+function CheckState({ label, ok }: { label: string; ok: boolean }): React.ReactElement {
+  return <div><dt>{label}</dt><dd>{ok ? "完整" : `${label}不完整`}</dd></div>;
+}
+
+function sameTargets(left: Proposal, right: Proposal): boolean {
+  const values = (proposal: Proposal) => proposal.positions.map((item) =>
+    `${item.instrument_id}:${item.current_weight}:${item.target_weight}:${item.action}:${item.reason_code}`).sort();
+  return JSON.stringify(values(left)) === JSON.stringify(values(right));
+}
+
+function decimalDifference(left: string, right: string): string {
+  const parts = (value: string) => {
+    const [whole, fraction = ""] = value.split(".");
+    return { whole, fraction };
+  };
+  const a = parts(left); const b = parts(right);
+  const scale = Math.max(a.fraction.length, b.fraction.length);
+  const units = (value: ReturnType<typeof parts>) => BigInt(`${value.whole}${value.fraction.padEnd(scale, "0")}`);
+  const difference = units(a) - units(b);
+  const negative = difference < BigInt(0); const digits = (negative ? -difference : difference).toString().padStart(scale + 1, "0");
+  const whole = scale ? digits.slice(0, -scale) : digits;
+  const fraction = scale ? digits.slice(-scale).replace(/0+$/, "") : "";
+  return `${negative ? "-" : ""}${whole}${fraction ? `.${fraction}` : ""}`;
 }
 
 function ProposalBadges({ proposal, shadowEligible }: { proposal: Proposal; shadowEligible: boolean }): React.ReactElement {

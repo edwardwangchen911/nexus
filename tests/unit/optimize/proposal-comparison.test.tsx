@@ -47,7 +47,10 @@ describe("three-way proposal comparison", () => {
   it.each(["hold_current", "minimum_change", "strategy_target"] as const)("shows the reported %s result without changing lifecycle eligibility", (recommendation) => {
     const labels = { hold_current: "保持现状", minimum_change: "最小调整", strategy_target: "策略目标" };
     const onStartShadow = vi.fn();
-    render(<ProposalComparison group={proposalGroup({ economic_comparison: { status: "compared", recommendation, reasons: [] } })} onStartShadow={onStartShadow} onReject={vi.fn()} />);
+    render(<ProposalComparison group={eligibleProposalGroup({
+      economic_comparison: { status: "compared", recommendation, reasons: [] },
+      shadow_eligibility: { eligible: false, reasons: ["SHADOW_PRICE_AUTHORITY_UNAVAILABLE"] },
+    })} onStartShadow={onStartShadow} onReject={vi.fn()} />);
     const region = screen.getByRole("region", { name: "经济比较结论" });
     expect(region).toHaveTextContent(`比较结果：${labels[recommendation]}`);
     expect(region).toHaveTextContent("不代表已作出人工选择，也不授予执行权限");
@@ -100,6 +103,57 @@ describe("three-way proposal comparison", () => {
     expect(screen.getAllByText(/COST_NOT_PROVEN/).length).toBeGreaterThan(0);
     expect(screen.getAllByTitle("TAX_DATA_UNAVAILABLE").length).toBe(3);
     expect(screen.queryByRole("button", { name: /下单|交易|买入|卖出/ })).not.toBeInTheDocument();
+  });
+
+  it("shows exact saved position targets, unknown symbols, action reasons, and tiny deltas", () => {
+    const group = proposalGroup();
+    group.proposals[1].positions[0].display_symbol = "AAPL";
+    group.proposals[1].positions[0].target_weight = "0.1999999";
+    group.proposals[1].positions[0].reason_code = "MINIMUM_CHANGE_HEURISTIC";
+    group.proposals[1].positions[1].display_symbol = null;
+    group.proposals[1].comparison.cost_complete = false;
+    group.proposals[1].comparison.non_executable = true;
+    group.proposals[1].comparison.metrics.evidence_complete = false;
+    group.proposals[1].comparison.metrics.ranking_eligible = false;
+    group.proposals[1].comparison.metrics.dimensions.cost = {
+      status: "unknown", value: null, reason: "COST_NOT_PROVEN",
+    };
+    render(<ProposalComparison group={group} onStartShadow={vi.fn()} onReject={vi.fn()} />);
+
+    const region = screen.getByRole("region", { name: "最小调整仓位目标与完整性" });
+    expect(within(region).getByRole("rowheader", { name: "AAPL" }).closest("tr")).toHaveTextContent(
+      "20%20%(-0.001, 0) 个百分点减持MINIMUM_CHANGE_HEURISTIC",
+    );
+    expect(within(region).getByRole("rowheader", { name: "标的名称未知" })).toBeVisible();
+    expect(within(region).getByText("成本依据不完整")).toBeVisible();
+    expect(within(region).getByText("COST_NOT_PROVEN")).toBeVisible();
+    expect(region).toHaveTextContent("非可执行");
+    expect(region).toHaveTextContent("比较证据不完整");
+  });
+
+  it("marks an evidence-incomplete strategy copy of hold as not yet formed", () => {
+    const group = proposalGroup();
+    group.proposals[2].positions = group.proposals[0].positions.map((position) => ({ ...position }));
+    group.proposals[2].strategy_evidence_complete = false;
+    render(<ProposalComparison group={group} onStartShadow={vi.fn()} onReject={vi.fn()} />);
+
+    const region = screen.getByRole("region", { name: "策略目标仓位目标与完整性" });
+    expect(region).toHaveTextContent("策略目标尚未形成");
+    expect(region).toHaveTextContent("保存内容与保持现状相同");
+    expect(region).not.toHaveTextContent("策略目标已形成");
+  });
+
+  it("does not present a recommendation or shadow action when any proposal is not rankable", () => {
+    const group = proposalGroup({ economic_comparison: {
+      status: "compared", recommendation: "minimum_change", reasons: [],
+    } });
+    render(<ProposalComparison group={group} onStartShadow={vi.fn()} onReject={vi.fn()} />);
+
+    const summary = screen.getByRole("region", { name: "经济比较结论" });
+    expect(summary).toHaveTextContent("至少一个方案不具备排名或执行适用性");
+    expect(summary).not.toHaveTextContent("比较结果：最小调整");
+    expect(screen.queryByRole("button", { name: "启动影子验证" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/启动影子验证/)).not.toBeInTheDocument();
   });
 
   it("requires a separate explicit confirmation before starting shadow validation", async () => {
