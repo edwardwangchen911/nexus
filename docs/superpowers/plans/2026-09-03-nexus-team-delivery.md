@@ -581,3 +581,30 @@ A2八增量按序集成为`e236ea5/beb23b2/27ff42f/4f93103/60191d9/afaaa08/de138
 实际运行已更新到API代码`55dedb910ef2f3871a0da3cb55b75672f8c04a14`、schema `0041_action_observations`。镜像与源码摘要匹配，原环境/端口不变，PG/MinIO未重启。九类历史表全部旧行摘要一致、活动Job为0、未注入公司行动测试证据。两个真实旧研究在375/1440共四组BFF/DOM通过：精确run/snapshot、原响应除新增inputs外完全相同，inputs按原冻结读取，公司行动列表为空，刷新无准入读取或写请求、执行锁保留、无横溢出。真实Alpaca公司行动样本仍未验收，不能把旧案例兼容验收等同新增资料的真实源正例。
 
 受认证的readiness为HTTP503：database/migration/object_store ready，worker unavailable；live通过，不为改绿启动常驻worker。现存D/P只读新focus核验返回None，落在“非唯一匹配CONCENTRATION_TOP1”条件，不记录为合格正例、不重建旧研究。验收产物在受保护actions-0041-20260904。回退保留rollback-before-0041-20260904镜像；仅在0041降级保护允许时回到0040与旧镜像，不删除冻结证据或备份对象。
+
+### 9.13 外部接口 mock 与正常生产链分离推进（2026-09-04）
+
+用户明确允许尚未取得访问的外部 OpenAPI 先 mock 开发，申请后另验真实来源。这取代“必须先完成 Alpaca 配置才能恢复全部开发”的判断；不是允许 mock 业务准入、修改真实 source policy 或把合成资料标为真实。HTTP/对象客户端/模型传输可在隔离测试替换，内部归一化、冻结、Job、研究生成、正式读取及目标约束仍走实际实现。无真实账户调用、新调度、业务数据注入或交易。
+
+**并行分工与顺序：** root 保持既有协调 worktree，负责 Alpaca 分页校验及本计划；独立价格 owner 负责 S1 正常查询生产者；独立研究 owner 负责正常研究到正式消费者的 PG 回归。A 已确认主线 `a35efa6` 无重叠写入，仍独占 main/共享服务。重型 PG 串行分配，各 owner 的纯单测和实现不互等。
+
+#### A2/S1 分页边界修复
+
+- `providers/market/alpaca.py` 不再通过 `payload.get` 把缺失 token 当查询结束；必须有显式 `next_page_token=null` 或非空续页字符串。缺字段/空串/错误类型返回固定不含源值的错误，不重试、不返回成功页。显式空结果与缺少结束证据是两种结果；这是一项保守完整性要求，不把缺字段本身解释成上游必然违反公开协议。
+- unit 使用真实 `AlpacaHttpTransport→AlpacaMarketDataProvider`，只替换最底层字节请求，缺 token 与空串先红；显式 null/非空 token、精确原件和数值保留作为对照。真实 `collect.market` handler 的隔离 PG 必须证明缺 token 不能返回 `MARKET_NO_DATA`，不新增 artifact/manifest/bar，合法 null 空页保持原明确无数据结果。
+- 不回填旧原件、不新增迁移。当前改动 `39eb841` 已有 20 项 provider 单测、Ruff/Mypy 通过；新增两项 PG 与集中审查完成后交 A 集成。
+
+#### S1 价格查询正常生产者
+
+普通 `collect.market` 固定过去 400 天与 `adjustment=all`，且不持久化空页，不能充当 Shadow 单日 raw 查询证明。新增专用 `shadow/source_queries.py`、`shadow/price_collection.py` 和 `ops/shadow_price_query.py` 单次入口，复用现有 provider、对象存储、`ingest_price_page`，不扩建调度系统。只接受明确已有 Shadow 根与交易日，证券集合来自冻结方案；不接收 `complete`、member IDs 或“分页耗尽”旗标。
+
+- [官方单证券 bars 合同](https://docs.alpaca.markets/us/reference/stockbarsingle-1)的 start/end 均包含端点，短页不证明终止；[官方 FAQ](https://docs.alpaca.markets/us/docs/market-data-faq)说明日 bar 的 timestamp 是纽约日初，不是收盘时刻。专用请求固定 `1Day/raw/sort=asc/limit=10000`、明确 feed 和 `asof=session` 的证券映射；纽约当日 00:00 至次日 00:00 减一秒转 UTC，使用 zoneinfo 处理 DST。只处理已结束自然日；不从时间戳推断实时性或最终收盘资格，旧 transport 默认行为不变。
+- 每页含空页保留实际路径/查询参数、证券与输入 token、原始 artifact ID/hash/字节数/实际接收时间、原件中输出 token、归一化 manifest/BarSet/成员。实际 producer 核对归档与数据库绑定、连续分页链、显式终止、日初时点/窗/证券一致，才能产生来源返回集合证明。缺页、循环、错误原件或成员、未知终止、晚到证据均不得生成完整证明。零条仅表示该来源在该窗口返回零条，不解释成停牌、退市或无公司行动。
+- `shadow_source_query_v2` 哈希绑定请求窗口和 collection receipt；`shadow/authority.py`、`shadow/canonical.py` 新增对应读取/哈希分支，旧 v1 严格字段、读法及 hash 不变，不回填历史。重放先核对现存证明再零 HTTP；首错停止，保留原始归档，不覆盖已有冻结资料。不新增表/依赖或 source policy。
+- TDD 单测覆盖终止/循环/DST/边界及无秘密输出；集中 PG 走底层 HTTP mock→实际 provider/持久化→producer→authority reader，覆盖多页、空页、错窗口/证券/hash、晚到、成员错配和重放。价格用途与新 Shadow 启动仍由原门禁决定。authority-reader 的合成事件对照须明确来自已有 fixture，不把当前完整性未知的 Alpaca actions 观测升级为完整事件集。
+
+#### B3 正常研究生成到正式消费者的 mock 验收
+
+新增 `engine/tests/integration/test_formal_native_research.py`，替代“直接插入最终 complete R 即证明研究生产”的证据缺口。测试通过正常 prepare/admit、研究 worker/execute/synthesize、最终 output，接 formal producer 和优化 worker；不 mock synthesis/quality/正式读取，不手填最终 R。已存在的离线委员会正例标为 legacy fixture，不能称作 v3/v4 原生模型充分性；v3 的 mocked SDK 自评 sufficient 仍必须经实际生成保持 partial 并被正式入口拒绝。实际完成时刻和 cutoff 不回填，保持原冻结引用、用量、Job 终态和时间约束。
+
+正式 v4 仍需要生产实现，不能用该 legacy 正例替代：当前 `models.py` 对 complete 的 reduce_candidate 直接将目标置零，ResearchCondition 只核引用而不求值；现 formal producer 还严格只支持具备来源条件的 cash-only P。后续合同须分开“研究内容/证据核验”与“投资方向许可”，模型自评不能写入确定性通过结果，进入/退出/失效条件应由原冻结事实实际求值，未知保持拒绝。不能为了跨过门槛把 baseline 适用性单独命名为完整投资研究，也不能擅自选择减仓幅度或成本换风险阈值。本节新增测试是该实现的正常链路基线，不是完整 B3 或经济排名验收。
