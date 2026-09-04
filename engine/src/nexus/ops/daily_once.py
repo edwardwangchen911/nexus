@@ -6,6 +6,7 @@ import hashlib
 import json
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal, Never
 from uuid import UUID, uuid4
 
@@ -14,7 +15,6 @@ from pydantic import (
     ConfigDict,
     Field,
     SecretStr,
-    ValidationError,
     field_validator,
     model_validator,
 )
@@ -29,10 +29,12 @@ from nexus.jobs.daily_manual import (
 )
 from nexus.jobs.daily_pipeline import assert_daily_pipeline_schema_ready
 from nexus.jobs.daily_research import admit_daily_research, resolve_daily_research_job
-from nexus.jobs.models import QueueName
+from nexus.jobs.models import JobType, QueueName
 from nexus.jobs.worker import run_job_worker_once
 from nexus.market.object_store import S3ProviderEvidenceStore
+from nexus.optimizer.formal_producer import FormalOptimizationRequest, admit_formal_optimization
 from nexus.optimizer.initial_draft import InitialDraftUnavailable, create_initial_draft
+from nexus.optimizer.jobs import OptimizationConstructionPayload, build_optimization_registry
 from nexus.optimizer.research_context import (
     DailyResearchContextRequest,
     freeze_daily_research_context,
@@ -66,6 +68,8 @@ _SAFE_CODES = {
     "MANUAL_DAILY_RESEARCH_EVIDENCE_UNAVAILABLE",
     "MANUAL_DAILY_RESEARCH_BINDING_INVALID",
     "DAILY_ONCE_DRAFT_INPUT_UNAVAILABLE",
+    "DAILY_ONCE_FORMAL_INPUT_UNAVAILABLE",
+    "DAILY_ONCE_FORMAL_JOB_UNAVAILABLE",
 }
 
 
@@ -141,12 +145,26 @@ class DailyProposalBuildRequest(DailyResearchContextRequest):
     idempotency_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
 
 
+class DailyFormalProposalAdmitRequest(FormalOptimizationRequest):
+    action: Literal["formal-proposal-admit"]
+    idempotency_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+
+
+class DailyFormalProposalRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    action: Literal["formal-proposal-run"]
+    job_id: UUID
+
+
 DailyRequest = (
     DailyAdmitRequest
     | DailyAdvanceRequest
     | DailyResearchAdmitRequest
     | DailyResearchRunRequest
     | DailyProposalBuildRequest
+    | DailyFormalProposalAdmitRequest
+    | DailyFormalProposalRunRequest
 )
 
 
@@ -351,6 +369,70 @@ async def _proposal(
     return output
 
 
+async def _formal_admit(
+    factory: async_sessionmaker[AsyncSession], request: DailyFormalProposalAdmitRequest,
+) -> dict[str, object]:
+    async with factory() as session, session.begin():
+        await assert_daily_pipeline_schema_ready(session)
+        try:
+            result = await admit_formal_optimization(
+                session,
+                request=FormalOptimizationRequest.model_validate(
+                    request.model_dump(exclude={"action", "idempotency_key"}),
+                ),
+                actor_id="local-daily-formal-proposal", idempotency_key=request.idempotency_key,
+            )
+        except ValueError as error:
+            raise DailyOnceError("DAILY_ONCE_FORMAL_INPUT_UNAVAILABLE") from error
+        return {
+            "status": "admitted", "job_id": str(result.job_id),
+            "data_snapshot_id": str(result.data_snapshot_id), "replayed": result.replayed,
+            "mode": "formal_bound_read_only", "execution_locked": True,
+        }
+
+
+async def _formal_run(
+    factory: async_sessionmaker[AsyncSession], settings: EngineSettings,
+    request: DailyFormalProposalRunRequest,
+) -> dict[str, object]:
+    async with factory() as session:
+        await assert_daily_pipeline_schema_ready(session)
+        job = await session.get(Job, request.job_id)
+        if (
+            job is None or job.job_type != JobType.OPTIMIZATION_PROPOSE.value
+            or job.schema_version != "optimization_job_v1" or job.queue != QueueName.GENERAL.value
+        ):
+            raise DailyOnceError("DAILY_ONCE_FORMAL_JOB_UNAVAILABLE")
+        try:
+            payload = OptimizationConstructionPayload.model_validate(job.payload)
+        except ValueError as error:
+            raise DailyOnceError("DAILY_ONCE_FORMAL_JOB_UNAVAILABLE") from error
+        if payload.formal_binding is None:
+            raise DailyOnceError("DAILY_ONCE_FORMAL_JOB_UNAVAILABLE")
+    try:
+        reader = S3ProviderEvidenceStore(settings).read_normalized
+    except Exception as error:
+        raise DailyOnceError("DAILY_ONCE_ARTIFACT_READER_UNAVAILABLE") from error
+    processed = await run_job_worker_once(
+        factory, registry=build_optimization_registry(artifact_reader=reader),
+        queue=QueueName.GENERAL, worker_id=f"daily-formal-{uuid4().hex}",
+        worker_started_at=datetime.now(UTC), process_version="nexus-daily-formal-v1",
+        migration_head=CURRENT_MIGRATION_HEAD, clock=lambda: datetime.now(UTC),
+        claim_registered_only=True, job_ids=(request.job_id,),
+        preclaim_guard=assert_daily_pipeline_schema_ready,
+    )
+    async with factory() as session:
+        job = await session.get(Job, request.job_id)
+        if job is None:
+            raise DailyOnceError("DAILY_ONCE_FORMAL_JOB_UNAVAILABLE")
+        return {
+            "status": "completed" if job.status == "succeeded" else
+            "pending" if job.status in {"queued", "running"} else "blocked",
+            "job_id": str(job.id), "job_status": job.status, "processed": int(processed),
+            "mode": "formal_bound_read_only", "execution_locked": True,
+        }
+
+
 async def run_once(
     settings: EngineSettings,
     request: DailyRequest,
@@ -371,7 +453,7 @@ async def run_once(
     try:
         if isinstance(request, DailyResearchAdmitRequest | DailyResearchRunRequest):
             _require_research_runtime(settings)
-        if isinstance(request, DailyProposalBuildRequest) and (
+        if isinstance(request, DailyProposalBuildRequest | DailyFormalProposalRunRequest) and (
             not isinstance(settings, DailyOnceSettings) or not settings.explicit_artifact_config
         ):
             raise DailyOnceError("DAILY_ONCE_ARTIFACT_READER_UNAVAILABLE")
@@ -384,6 +466,10 @@ async def run_once(
                 return await _research(factory, settings, request)
             if isinstance(request, DailyProposalBuildRequest):
                 return await _proposal(factory, settings, request)
+            if isinstance(request, DailyFormalProposalAdmitRequest):
+                return await _formal_admit(factory, request)
+            if isinstance(request, DailyFormalProposalRunRequest):
+                return await _formal_run(factory, settings, request)
             async with factory() as session, session.begin():
                 root = await enqueue_manual_daily_root(
                     session,
@@ -428,24 +514,45 @@ def main() -> None:
     proposal = commands.add_parser("proposal-build", help="将已保存研究绑定到不可执行草稿")
     for field in ("root-id", "run-id", "context-as-of", "idempotency-key"):
         proposal.add_argument(f"--{field}", required=True)
+    formal_admit = commands.add_parser(
+        "formal-proposal-admit", help="精确绑定研究和策略资料，仅登记只读方案Job",
+    )
+    formal_admit.add_argument("--request-file", required=True)
+    formal_run = commands.add_parser(
+        "formal-proposal-run", help="最多消费一个明确的只读正式绑定方案Job，不调用模型",
+    )
+    formal_run.add_argument("--job-id", required=True)
     try:
         args = vars(parser.parse_args())
+        if args["action"] == "formal-proposal-admit":
+            with Path(args["request_file"]).open("rb") as request_file:
+                content = request_file.read(1_048_577)
+            if len(content) > 1_048_576:
+                raise DailyOnceError("DAILY_ONCE_REQUEST_INVALID")
+            loaded = json.loads(content)
+            if not isinstance(loaded, dict) or "action" in loaded:
+                raise DailyOnceError("DAILY_ONCE_REQUEST_INVALID")
+            args = {"action": "formal-proposal-admit", **loaded}
         request_types: dict[
             str,
             type[DailyAdmitRequest]
             | type[DailyAdvanceRequest]
             | type[DailyResearchAdmitRequest]
             | type[DailyResearchRunRequest]
-            | type[DailyProposalBuildRequest],
+            | type[DailyProposalBuildRequest]
+            | type[DailyFormalProposalAdmitRequest]
+            | type[DailyFormalProposalRunRequest],
         ] = {
             "admit": DailyAdmitRequest,
             "advance": DailyAdvanceRequest,
             "research-admit": DailyResearchAdmitRequest,
             "research-run": DailyResearchRunRequest,
             "proposal-build": DailyProposalBuildRequest,
+            "formal-proposal-admit": DailyFormalProposalAdmitRequest,
+            "formal-proposal-run": DailyFormalProposalRunRequest,
         }
         request = request_types[args["action"]].model_validate(args)
-    except (DailyOnceError, ValidationError):
+    except (ValueError, OSError, RecursionError):
         sys.stderr.write(
             json.dumps({"status": "failed", "code": "DAILY_ONCE_REQUEST_INVALID"}) + "\n"
         )

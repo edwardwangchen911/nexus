@@ -2,6 +2,23 @@
 
 `admit` / `advance` 把一个明确的已持久化快照串为“日根 → 对账校验 → 正式诊断”，不调用模型。`research-admit` 在诊断成功后登记原生研究，只有显式 `research-run` 才调用一次已有研究 worker。`proposal-build` 将已保存研究绑定到不可执行草稿。所有命令均不采集券商、不创建 paper 或实盘订单，不启动调度。`completed` 只表示对应流程完成，不等于研究内容/投资决策合格。
 
+`formal-proposal-admit` / `formal-proposal-run` 是独立的正式来源绑定分析入口，复用上述本地配置，不需要重新研究或把非日根研究补写成日根依赖。“正式绑定”只证明身份/时间关联，不表示经济比较或执行就绪。
+
+```sh
+python -m nexus.ops.daily_once formal-proposal-admit --request-file /绝对路径/formal-request.json
+python -m nexus.ops.daily_once formal-proposal-run --job-id <上一步返回的Job UUID>
+```
+
+请求文件为UTF-8 JSON对象（最多1MiB），不含`action`或密钥。字段为：
+
+- `portfolio_snapshot_id`、`diagnostic_report_id`：同一明确、已持久化组合快照与诊断；不自动选最新。
+- `decision_cutoff_at`：真实UTC证据截止，不替换组合原估值时间。
+- `research_outputs`：`[{"run_id":"…","output_id":"…"}]`，覆盖既有baseline选择的标的，所有研究原始组合身份相同；不使用失败/部分研究替代合格研究。
+- `strategy_references`：现有 `FrozenStrategyReferences`，含 `market`（decision/execution session、decision_time、source_policy_id、calendar_authority_id、universe_snapshot_id、quality_report_id）以及 `raw_bar_set_ids`、`adjusted_bar_set_ids`、`sector_exposure_ids`。填写已存在且用途、时点合格的记录，不从NAV/未核单位行情伪造复权历史。
+- `idempotency_key`：同一请求重复使用同一稳定键，结果未知时先核已有Job，不换键重放。
+
+入队只从正常确定性选择器生成绑定和Job，调用者不能指定目标仓位或就绪旗标。`formal-proposal-run` 仅消费所给正式绑定Job最多一次，其他任务不受影响；运行需要显式配置的现有对象存储读权限。数据库必须已应用与代码一致的迁移，不能只复制脚本绕过版本检查。未知费用、RESEARCH_REQUIRED诊断和不完整比较保持可见、不可排名与不可执行；新正式绑定方案不会开放Shadow。实际来源/研究不齐时明确拒绝，合成测试通过不代表真实数据就绪。
+
 ## 配置和输入
 
 使用项目 Python 虚拟环境，`PYTHONPATH=engine/src`。命令通过 `EngineSettings` 读取当前进程已注入的环境；不会自动读取 `infra.env`，也不创建/打印密钥。数据库必须是已有本地 `postgresql+asyncpg` 地址，主机为 `localhost`、`127.0.0.1` 或 `::1`，不能用查询参数重定向到另一数据库。
