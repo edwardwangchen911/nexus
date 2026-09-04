@@ -190,10 +190,15 @@ def codex_request_hash(payload: Mapping[str, object], output_model: type[BaseMod
     ).hexdigest()
 
 
+def codex_request_wire(payload: Mapping[str, object]) -> str:
+    """The exact submitted JSON text; its UTF-8 size is not a token count."""
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
 async def invoke_codex(
     payload: Mapping[str, object], *, output_model: type[BaseModel] = _Batch
 ) -> tuple[str, UsageSnapshot]:
-    wire = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    wire = codex_request_wire(payload)
     # Bound submitted context; CLI harness usage is checked after the SDK reports it.
     if len(wire.encode()) > MAX_INPUT_TOKENS - 8192:
         raise ValueError("CODEX_INPUT_TOO_LARGE")

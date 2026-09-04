@@ -17,6 +17,7 @@ from nexus.agents.codex_sdk import (
     _Claim,
     _Role,
     codex_request_hash,
+    codex_request_wire,
     invoke_codex,
 )
 from nexus.agents.committee import (
@@ -322,7 +323,7 @@ class StagedCodexCommittee(CodexCommittee):
             "These are existing receiving constraints on generated text, not instructions to "
             "execute or rewrite supplied evidence. Cite only the allowed evidence indexes."
         )
-        estimated_input = len(json.dumps(payload, ensure_ascii=False).encode()) + 8192
+        estimated_input = len(codex_request_wire(payload).encode()) + 8192
         stage_input_hash = codex_request_hash(payload, output_model)
         frozen_inputs_hash = hashlib.sha256(
             json.dumps(

@@ -340,6 +340,74 @@ async def test_staged_budget_exhaustion_stops_before_next_provider_call(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("over_budget", [0, 1])
+async def test_staged_budget_uses_actual_compact_utf8_wire(monkeypatch, over_budget):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    _, thread, result, _ = _sdk(monkeypatch)
+    frozen = {"status": "available", "items": [{"text": "合成资料"}] * 1000}
+    tools = ReadOnlyTools(executors={
+        name: (lambda payload: frozen) if name == "get_security_snapshot"
+        else (lambda payload: {"status": "unavailable", "items": []})
+        for name in ReadOnlyTools.names
+    })
+    sent = []
+    first_stage_usage = 0
+
+    async def run(wire, **options):
+        sent.append(wire)
+        payload = json.loads(wire)
+        result.final_response = json.dumps(
+            _staged_batch(payload["stage"], payload["requested_roles"])
+        )
+        result.usage.total.input_tokens = first_stage_usage if payload["stage"] == "research" else 0
+        return result
+
+    thread.run.side_effect = run
+    # Capture the real invoke_codex wire with a zero-usage synthetic transport.
+    # The boundary case below changes only reported usage, never frozen facts.
+    probe = codex_staged.StagedCodexCommittee(prompts=prompts, tools=tools)
+    await probe.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    expected = await probe.analyze("bear", request, evidence, prompts["bear"])
+    expected_wire = sent[-1]
+    wire_bytes = len(expected_wire.encode("utf-8"))
+    assert wire_bytes > len(expected_wire)
+    assert len(json.dumps(json.loads(expected_wire), ensure_ascii=False).encode()) > wire_bytes
+    first_stage_usage = 64000 - 8192 - wire_bytes + over_budget
+    assert first_stage_usage > 0
+    sent.clear()
+
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=tools)
+    await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    if over_budget:
+        with pytest.raises(ValueError, match="CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED"):
+            await model.analyze("bear", request, evidence, prompts["bear"])
+        assert len(sent) == 1 and model.usage.provider_calls == 1
+        assert tuple(model._outputs) == ROLE_ORDER[:5]
+    else:
+        output = await model.analyze("bear", request, evidence, prompts["bear"])
+        assert sent[-1] == expected_wire
+        assert output.stage_input_hash == expected.stage_input_hash
+        assert output.frozen_inputs_hash == expected.frozen_inputs_hash
+        assert json.loads(sent[-1])["frozen_inputs"]["security_snapshot"] == frozen
+        assert model.usage.input_tokens == first_stage_usage
+        assert model.usage.provider_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_sdk_keeps_compact_unicode_wire_and_request_hash(monkeypatch):
+    _, thread, _, _ = _sdk(monkeypatch)
+    payload = {"title": "合成 中文", "facts": [0, None, "引号\"与换行\n"]}
+    before = codex_sdk.codex_request_hash(payload, codex_sdk._Batch)
+    await codex_sdk.invoke_codex(payload)
+    assert thread.run.call_args.args[0] == (
+        '{"title":"合成 中文","facts":[0,null,"引号\\\"与换行\\n"]}'
+    )
+    assert codex_sdk.codex_request_hash(payload, codex_sdk._Batch) == before
+
+
+@pytest.mark.asyncio
 async def test_worker_allows_three_individually_bounded_stages_past_40_seconds(monkeypatch):
     from nexus.agents import codex_staged
     from nexus.worker import _agent_registry
