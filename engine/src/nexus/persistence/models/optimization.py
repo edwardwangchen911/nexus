@@ -77,7 +77,7 @@ class OptimizationAdmissionAuthorityRecord(ImmutableCreatedAt, Base):
     __table_args__ = (
         CheckConstraint(
             "decision_cutoff_at IS NULL OR decision_cutoff_at >= valuation_time",
-            name="decision_cutoff_after_valuation",
+            name="decision_cutoff_order",
         ),
         UniqueConstraint(
             "portfolio_snapshot_id",
@@ -131,7 +131,7 @@ class OptimizationProposalGroupRecord(ImmutableCreatedAt, Base):
     __table_args__ = (
         CheckConstraint(
             "decision_cutoff_at IS NULL OR decision_cutoff_at >= valuation_time",
-            name="decision_cutoff_after_valuation",
+            name="decision_cutoff_order",
         ),
         CheckConstraint(
             "status IN ('draft','compared','shadowing','validated','rejected','expired')",
