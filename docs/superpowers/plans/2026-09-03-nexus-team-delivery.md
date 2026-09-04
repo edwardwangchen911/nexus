@@ -607,6 +607,8 @@ A2八增量按序集成为`e236ea5/beb23b2/27ff42f/4f93103/60191d9/afaaa08/de138
 
 #### B3 正常研究生成到正式消费者的 mock 验收
 
+主线接续：A按序集成`74f988a→06243cd`、`e0c43a9→4e8945f`、`177f996→1b05782`、`bb9905c→814882f`，独立11项formal inputs单测、4文件Ruff、2源Mypy及diff检查通过。复用下述已通过的6+15项隔离PG证据，不占S1正在使用的测试窗口。仅主线代码交付，未调用账户或模型、未构造业务正例；无迁移，API保持`55dedb9`、schema保持`0041_action_observations`，不为此单独重启服务。
+
 新增 `engine/tests/integration/test_formal_native_research.py`，替代“直接插入最终 complete R 即证明研究生产”的证据缺口。测试通过正常 prepare/admit、研究 worker/execute/synthesize、最终 output，接 formal producer 和优化 worker；不 mock synthesis/quality/正式读取，不手填最终 R。已存在的离线委员会正例标为 legacy fixture，不能称作 v3/v4 原生模型充分性；v3 的 mocked SDK 自评 sufficient 仍必须经实际生成保持 partial 并被正式入口拒绝。实际完成时刻和 cutoff 不回填，保持原冻结引用、用量、Job 终态和时间约束。
 
 正式 v4 仍需要生产实现，不能用该 legacy 正例替代：当前 `models.py` 对 complete 的 reduce_candidate 直接将目标置零，ResearchCondition 只核引用而不求值；现 formal producer 还严格只支持具备来源条件的 cash-only P。后续合同须分开“研究内容/证据核验”与“投资方向许可”，模型自评不能写入确定性通过结果，进入/退出/失效条件应由原冻结事实实际求值，未知保持拒绝。不能为了跨过门槛把 baseline 适用性单独命名为完整投资研究，也不能擅自选择减仓幅度或成本换风险阈值。本节新增测试是该实现的正常链路基线，不是完整 B3 或经济排名验收。
