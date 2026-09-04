@@ -517,3 +517,17 @@ L1局部审计实际交付：A已将上述五提交串行集成为主线代码`4
 扩展回归同时在未改动main复现一项旧测试失败：迁移正例仍硬编码0032，而当前0040。`3e191e3`仅将测试正例从本worktree实际Alembic目录独立取得，并拒绝旧0032、当前父迁移、空值和未知值；不从运行时常量生成预期，也不修改生产准入。
 
 主线交付：集中独立审查Ready后，A按指定顺序串行集成六提交为`3d3c868`、`47be12f`、`52f9413`、`3cc70c3`、`82702ab`、`e48fc6c`，未合入协调分支的其他历史。A独立运行完整providers目录与新增CLI共384项离线测试全部通过，5文件Ruff、2个新模块Mypy、实际模块帮助入口及diff检查通过，主线已快进至`e48fc6c`。本次未读取凭据、访问账户/外网、改数据库或重启服务；交付的是可运行的本地采集入口，真实样本、公司行动完整性与历史回测准入尚未验收。回滚本次代码即可停用新入口，已保存原件应保留，无迁移或依赖变更。
+
+### 9.9 A2 原件进入冻结研究工具（开发合同）
+
+本片交付正常本地导入→对象原件/数据库→研究快照→`get_security_snapshot`的实际消费者链；页面/API展示紧随其后，不能以本片测试代替真实样本或页面验收。复用既有表，不将当前响应写入要求旧status/revision的CorporateActionRecord，不改source policy、账本、行情或历史资格。
+
+- canonical source=`alpaca_action_observation`，schema=`alpaca_action_observation_v1`。文档冻结instrument_id、symbol、query_start/query_end、available_at、逐页原件与receipt哈希/长度/实际接收时间、manifest哈希/长度、事件观测。固定`source_completeness="unknown"`、`historical_backtest_eligible=false`、`ledger_eligible=false`、`revision_semantics="local_content_hash"`；内容SHA仅是本地观测版本。available_at为各页receipt最大值，不是公告/历史可用时刻。provider_object_id由instrument与query窗口确定，revision为canonical SHA；重导同内容幂等，旧证据不改写。
+- 归档验证只接受上一片正常collector的collected、分页耗尽、无error的完整归档；未完成原件仍保留在私有目录，但不伪装成完成查询。固定文件名page-NNN.json/receipt及manifest，拒绝符号链接/路径穿越、重复键、哈希/长度/源/路径/查询不一致、未来或逆序接收时间、token链断裂/循环/提前终止/多余页。最多100页、累计原件32MiB、10000事件；超过界限明确拒绝，不截掉数据后入库。没有网络、模型或账户读取。
+- 事件保持来源类别、原id和page/index定位；只有原件`symbol`、`old_symbol`或`new_symbol`显式等于该本地证券symbol才进入已绑定观测，缺身份/错配计入`unbound_event_count`，不由请求参数补造身份。保留reported symbol字段及官方已提供的process/ex/record/payable/declaration日期、rate/old_rate/new_rate和currency；缺失保持null，数值用Decimal精确保存，未知字段仍可从原件定位。非法已提供字段拒绝，空币种不默认USD，不由比率生成拆股账本事件。无匹配事件不代表没有事件，报告总量/未绑定量及unknown完整性。
+- Python合同位于`research/alpaca_actions.py`与`research/alpaca_actions_storage.py`：`AlpacaActionObservationDocument.canonical_bytes()`；`persist_action_observation(session, document, *, location)`；`read_action_observations(session, *, instrument_id, as_of, evidence_ids=None)`；`action_tool_payload(document)`。reader绑定同source/object/revision/hash/时间/证券，按实际created_at及receipt控制截止；坏的可选观测不得遮住有效SEC。工具最多展示32事件，保留总量、truncated、未绑定量和接收时间语义，不改变冻结全文hash。
+- 本地入口为`python -m nexus.ops.alpaca_actions_import --repo-root ... --instrument-id ... --collection-dir ... --output ...`，复用正常配置和私有输出。仅本地DB/对象服务；核对当前Instrument ticker，保存manifest、receipt、page与canonical到既有内容寻址对象存储，并读回校验后绑定DataArtifact（source=`alpaca`；schema分别`alpaca_actions_manifest_v1`/`alpaca_actions_receipt_v1`/`alpaca_actions_raw_v1`）。最后prepare正常研究快照并核对新evidence确已冻结；结果仅私有输出不透明id/固定状态，失败固定安全错误。对象先于DB提交，孤立不可变对象允许保留，失败不宣称全部回滚。没有模型、订单、调度或共享服务重启。
+- root拥有新增0041冻结ownership guard/head、snapshots与database_tools接线和隔离PG回归；子agent独占canonical/归档验证/storage/import入口及其测试。guard保留既有全部分支，校验同证券/版本、固定只读语义、manifest与每页raw/receipt实际DataArtifact绑定、长度和不晚于冻结时刻；降级若已有该类冻结evidence则拒绝，无数据时可降级/再升级。不重写0039/0040。A已确认无其他相关写入，仍唯一main与共享运行owner。
+- 两个实现面以本合同并行；先红后绿、正常入口到真实隔离PG及工具路径、错证券/时间/篡改/缺原件/重复导入/历史截止反例，一轮集中审查后串行集成。原件解析样本全为明确合成fixture，真实访问未就绪仍待验；不重复查凭据或模型调用。回滚应用即可停用新读取者，迁移按上述保护回退，不删除已有原件。
+
+独立B3复核：现有v2/v3 synthesis生成器固定partial/watch/none而正式消费者要求complete，因此当前真实formal R生产路径不可达。集成测试的complete研究是合法存储fixture，不是原生producer正例；另立下一小片的范围内事实充分性合同，保留旧版本和不执行语义，不靠删partial、相信resolved=true或再调用模型“解除”该缺口。
