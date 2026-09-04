@@ -17,6 +17,13 @@ from nexus.persistence.models.research import ResearchEvidenceRef
 from nexus.research.fmp_profile import RAW_SCHEMA, RECEIPT_SCHEMA, SCHEMA, SOURCE, FmpCompanyProfile
 
 
+def _identifier(kind: str, value: str) -> str:
+    # SEC CIK is a numeric identifier conventionally padded to ten digits.
+    if kind == "cik" and value.isascii() and value.isdigit() and len(value) <= 10:
+        return value.zfill(10)
+    return value
+
+
 async def require_profile_identity(session: AsyncSession, document: FmpCompanyProfile) -> None:
     instrument = await session.get(Instrument, document.instrument_id)
     aliases = tuple(
@@ -42,6 +49,24 @@ async def require_profile_identity(session: AsyncSession, document: FmpCompanyPr
         or aliases[0].instrument_id != document.instrument_id
     ):
         raise ValueError("FMP_PROFILE_IDENTITY_INVALID")
+    identifiers = await session.scalars(
+        select(InstrumentAlias).where(
+            InstrumentAlias.instrument_id == document.instrument_id,
+            InstrumentAlias.alias_type.in_(("cik", "isin", "cusip")),
+            InstrumentAlias.valid_from <= document.received_at.date(),
+            or_(
+                InstrumentAlias.valid_to.is_(None),
+                InstrumentAlias.valid_to >= document.received_at.date(),
+            ),
+            InstrumentAlias.created_at <= document.received_at,
+        )
+    )
+    for alias in identifiers:
+        reported = getattr(document, alias.alias_type)
+        if reported is not None and _identifier(alias.alias_type, reported) != _identifier(
+            alias.alias_type, alias.symbol
+        ):
+            raise ValueError("FMP_PROFILE_IDENTITY_INVALID")
 
 
 async def save_profile_artifact(
@@ -246,6 +271,7 @@ async def read_company_profiles(
         for snapshot, evidence in await session.execute(query):
             try:
                 document = FmpCompanyProfile.model_validate(snapshot.payload)
+                await require_profile_identity(session, document)
                 content = document.canonical_bytes()
                 if (
                     document.instrument_id == instrument_id

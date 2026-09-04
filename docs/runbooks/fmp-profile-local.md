@@ -18,7 +18,7 @@ PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.fmp_profile_local \
 
 ## 导入已有归档
 
-本地 PostgreSQL/对象存储须已就绪；对应应用需包含 `0042_fmp_profile` 冻结 guard，迁移按既有流程由运行环境负责人执行，不在此入口自动迁移。
+本地 PostgreSQL/对象存储须已就绪；对应应用需包含 `0042_fmp_profiles` 冻结 guard，迁移按既有流程由运行环境负责人执行，不在此入口自动迁移。
 
 ```sh
 PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.fmp_profile_local \
