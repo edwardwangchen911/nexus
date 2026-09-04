@@ -230,6 +230,7 @@ class _BoundDatabaseExecutors:
                     FinancialFactRecord.instrument_id == self._instrument_id,
                     FinancialFactRecord.evidence_ref_id.in_(self._evidence_ids),
                     FinancialFactRecord.accepted_at <= self._decision_time,
+                    FinancialFactRecord.created_at <= self._decision_time,
                     FinancialFactRecord.canonical_fact.in_(fields),
                 )
                 .order_by(
