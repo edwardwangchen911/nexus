@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,163 @@ from nexus.domain.evidence import EvidenceRef
 from nexus.settings import EngineSettings
 from openai_codex import ApprovalMode, Sandbox
 from openai_codex.generated.v2_all import ChatgptAccount, TurnStatus
+
+
+def _restore_view(value):
+    """Test-only inverse of the documented model-facing JSON view."""
+    if isinstance(value, list):
+        return [_restore_view(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if "$nexus_view" in value:
+        common = _restore_view(value["common_scope"])
+        return {name: {**common, **_restore_view(tool)} for name, tool in value["tools"].items()}
+    if "$nexus_columns" in value:
+        return [
+            dict(zip(value["$nexus_columns"], [_restore_view(cell) for cell in row], strict=True))
+            for row in value["rows"]
+        ]
+    return {key: _restore_view(item) for key, item in value.items()}
+
+
+def _view_payload():
+    scope = {
+        "schema_version": "agent_read_only_tool_result_v1",
+        "instrument_id": "synthetic-instrument",
+        "data_snapshot_id": "synthetic-snapshot",
+        "as_of": "2026-09-04T00:00:00Z",
+        "evidence_hash": "a" * 64,
+        "portfolio_scope": {"portfolio_snapshot_id": "synthetic-p", "diagnostic_run_id": None},
+    }
+    rows = [
+        {
+            "exact_decimal_string": "0.00000000000001",
+            "unknown": None,
+            "boolean": False,
+            "count": index,
+            "text": "中文证据",
+            "nested": [{"metric": "x", "value": 0}] * 10,
+        }
+        for index in range(20)
+    ]
+    return {
+        "instructions": "Frozen evidence only.",
+        "request": {"id": "synthetic"},
+        "frozen_inputs": {
+            "security": {**scope, "status": "ok", "reason": None, "items": rows},
+            "macro": {**scope, "status": "unavailable", "reason": "missing", "items": []},
+        },
+    }
+
+
+def test_staged_input_view_is_lossless_and_smaller_including_format_note():
+    from nexus.agents.codex_input_view import project_staged_payload
+
+    payload = _view_payload()
+    original = deepcopy(payload)
+    view = project_staged_payload(payload)
+    assert view is not payload and payload == original
+    assert len(codex_sdk.codex_request_wire(view).encode()) < len(
+        codex_sdk.codex_request_wire(payload).encode()
+    )
+    assert "$nexus_columns" in view["instructions"] and "common_scope" in view["instructions"]
+    assert view["instructions"].startswith(original["instructions"])
+    assert json.dumps(_restore_view(view["frozen_inputs"]), sort_keys=True) == json.dumps(
+        original["frozen_inputs"], sort_keys=True
+    )
+    assert view["request"] == original["request"]
+    assert set(view["frozen_inputs"]["common_scope"]) == {
+        "schema_version",
+        "instrument_id",
+        "data_snapshot_id",
+        "as_of",
+        "evidence_hash",
+        "portfolio_scope",
+    }
+    encoded_rows = view["frozen_inputs"]["tools"]["security"]["items"]
+    assert encoded_rows["$nexus_columns"] == list(original["frozen_inputs"]["security"]["items"][0])
+    assert _restore_view(encoded_rows)[-1]["count"] == 19
+
+
+@pytest.mark.parametrize("left,right", [(True, 1), (1, 1.0), (None, "missing")])
+def test_staged_input_view_does_not_hoist_different_json_types(left, right):
+    from nexus.agents.codex_input_view import project_staged_payload
+
+    payload = _view_payload()
+    payload["frozen_inputs"]["security"]["instrument_id"] = left
+    if right == "missing":
+        del payload["frozen_inputs"]["macro"]["instrument_id"]
+    else:
+        payload["frozen_inputs"]["macro"]["instrument_id"] = right
+    view = project_staged_payload(payload)
+    assert "instrument_id" not in view["frozen_inputs"]["common_scope"]
+    assert json.dumps(_restore_view(view["frozen_inputs"]), sort_keys=True) == json.dumps(
+        payload["frozen_inputs"], sort_keys=True
+    )
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [],
+        [{"a": 1}],
+        [{"a": 1}, {"b": 2}],
+        [{"a": 1, "b": 2}, {"b": 3, "a": 4}],
+        [None, False, 0, "中文"],
+    ],
+)
+def test_staged_input_view_preserves_non_columnar_lists(rows):
+    from nexus.agents.codex_input_view import project_staged_payload
+
+    payload = _view_payload()
+    payload["frozen_inputs"]["security"]["other"] = rows
+    view = project_staged_payload(payload)
+    assert view["frozen_inputs"]["tools"]["security"]["other"] == rows
+
+
+@pytest.mark.parametrize("marker", ["$nexus_view", "$nexus_columns"])
+def test_staged_input_view_marker_collision_falls_back_to_complete_input(marker):
+    from nexus.agents.codex_input_view import project_staged_payload
+
+    payload = _view_payload()
+    payload["frozen_inputs"]["security"]["items"][0]["nested"].append({marker: 1})
+    before = deepcopy(payload)
+    assert project_staged_payload(payload) is payload
+    assert payload == before
+
+
+def test_staged_input_view_without_net_savings_keeps_original_payload():
+    from nexus.agents.codex_input_view import project_staged_payload
+
+    payload = {"instructions": "Frozen only", "frozen_inputs": {"tool": {"items": [{"x": 0}]}}}
+    assert project_staged_payload(payload) is payload
+
+
+def test_staged_input_view_counts_format_note_before_accepting_savings():
+    from nexus.agents.codex_input_view import project_staged_payload
+
+    keys = ["exact_source_financial_metric_name", "exact_source_financial_metric_value"]
+    rows = [dict(zip(keys, ["synthetic", 0], strict=True)) for _ in range(4)]
+    payload = {"instructions": "Frozen only", "frozen_inputs": {"tool": {"items": rows}}}
+    without_note = {
+        **payload,
+        "frozen_inputs": {
+            "$nexus_view": 1,
+            "common_scope": {},
+            "tools": {
+                "tool": {
+                    "items": {
+                        "$nexus_columns": keys,
+                        "rows": [["synthetic", 0]] * 4,
+                    }
+                }
+            },
+        },
+    }
+    assert len(codex_sdk.codex_request_wire(without_note).encode()) < len(
+        codex_sdk.codex_request_wire(payload).encode()
+    )
+    assert project_staged_payload(payload) is payload
 
 
 def _batch(citation=0):
@@ -347,11 +505,14 @@ async def test_staged_budget_uses_actual_compact_utf8_wire(monkeypatch, over_bud
     request, evidence, prompts = _authority()
     _, thread, result, _ = _sdk(monkeypatch)
     frozen = {"status": "available", "items": [{"text": "合成资料"}] * 1000}
-    tools = ReadOnlyTools(executors={
-        name: (lambda payload: frozen) if name == "get_security_snapshot"
-        else (lambda payload: {"status": "unavailable", "items": []})
-        for name in ReadOnlyTools.names
-    })
+    tools = ReadOnlyTools(
+        executors={
+            name: (lambda payload: frozen)
+            if name == "get_security_snapshot"
+            else (lambda payload: {"status": "unavailable", "items": []})
+            for name in ReadOnlyTools.names
+        }
+    )
     sent = []
     first_stage_usage = 0
 
@@ -390,7 +551,7 @@ async def test_staged_budget_uses_actual_compact_utf8_wire(monkeypatch, over_bud
         assert sent[-1] == expected_wire
         assert output.stage_input_hash == expected.stage_input_hash
         assert output.frozen_inputs_hash == expected.frozen_inputs_hash
-        assert json.loads(sent[-1])["frozen_inputs"]["security_snapshot"] == frozen
+        assert _restore_view(json.loads(sent[-1])["frozen_inputs"])["security_snapshot"] == frozen
         assert model.usage.input_tokens == first_stage_usage
         assert model.usage.provider_calls == 2
 
@@ -398,13 +559,90 @@ async def test_staged_budget_uses_actual_compact_utf8_wire(monkeypatch, over_bud
 @pytest.mark.asyncio
 async def test_sdk_keeps_compact_unicode_wire_and_request_hash(monkeypatch):
     _, thread, _, _ = _sdk(monkeypatch)
-    payload = {"title": "合成 中文", "facts": [0, None, "引号\"与换行\n"]}
+    payload = {"title": "合成 中文", "facts": [0, None, '引号"与换行\n']}
     before = codex_sdk.codex_request_hash(payload, codex_sdk._Batch)
     await codex_sdk.invoke_codex(payload)
     assert thread.run.call_args.args[0] == (
-        '{"title":"合成 中文","facts":[0,null,"引号\\\"与换行\\n"]}'
+        '{"title":"合成 中文","facts":[0,null,"引号\\"与换行\\n"]}'
     )
     assert codex_sdk.codex_request_hash(payload, codex_sdk._Batch) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", [1, 2, 3])
+async def test_staged_view_reaches_real_sdk_wire_without_mutating_frozen_inputs(
+    monkeypatch, version
+):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    wrappers = _view_payload()["frozen_inputs"]
+    for wrapper in wrappers.values():
+        wrapper["portfolio_scope"] = None
+    original = deepcopy(wrappers)
+    tools = ReadOnlyTools(
+        executors={
+            name: (lambda payload: wrappers["security"])
+            if name == "get_security_snapshot"
+            else (lambda payload: wrappers["macro"])
+            for name in ReadOnlyTools.names
+        }
+    )
+    _, thread, result, _ = _sdk(monkeypatch)
+    sent = []
+
+    async def run(wire, **options):
+        payload = json.loads(wire)
+        sent.append((payload, options["output_schema"]))
+        stage = payload.get("stage")
+        batch = (
+            _batch()
+            if stage is None
+            else (
+                _assessment_payload(payload["previous_claims"])
+                if version == 3 and stage == "synthesis"
+                else _staged_batch(stage, payload["requested_roles"])
+            )
+        )
+        result.final_response = json.dumps(batch)
+        return result
+
+    thread.run.side_effect = run
+    committee_type = {
+        1: codex_sdk.CodexCommittee,
+        2: codex_staged.StagedCodexCommittee,
+        3: codex_staged.StructuredStagedCodexCommittee,
+    }[version]
+    model = committee_type(prompts=prompts, tools=tools)
+    outputs = [await model.analyze(role, request, evidence, prompts[role]) for role in ROLE_ORDER]
+    assert len(outputs) == 8 and wrappers == original
+    if version == 1:
+        assert len(sent) == 1 and "$nexus_view" not in sent[0][0]["frozen_inputs"]
+        assert sent[0][0]["frozen_inputs"]["security_snapshot"] == original["security"]
+    else:
+        assert len(sent) == 3
+        original_hash = hashlib.sha256(
+            json.dumps(
+                model._frozen_inputs, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+        for payload, schema in sent:
+            assert payload["frozen_inputs"]["$nexus_view"] == 1
+            assert _restore_view(payload["frozen_inputs"]) == model._frozen_inputs
+            actual_hash = hashlib.sha256(
+                json.dumps(
+                    {"payload": payload, "output_schema": schema},
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            assert all(
+                output.stage_input_hash == actual_hash
+                for output in outputs
+                if output.stage == payload["stage"]
+            )
+        assert all(output.frozen_inputs_hash == original_hash for output in outputs)
 
 
 @pytest.mark.asyncio
