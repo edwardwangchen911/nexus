@@ -3995,6 +3995,7 @@ export interface components {
             failed_stage_input?: components["schemas"]["StageInputIdentity"] | null;
             /** Input Tokens */
             input_tokens?: number | null;
+            inputs?: components["schemas"]["ResearchInputsSummary"] | null;
             /**
              * Instrument Id
              * Format: uuid

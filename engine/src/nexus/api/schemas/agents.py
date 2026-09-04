@@ -109,6 +109,7 @@ class ResearchRunResponse(_StrictAgentSchema):
     abstention_reason: str | None = Field(default=None, max_length=100)
     stage_trace: ResearchStageTrace | None = None
     failed_stage_input: StageInputIdentity | None = None
+    inputs: "ResearchInputsSummary | None" = None
 
 
 class ResearchRunEnvelope(_StrictAgentSchema):

@@ -548,3 +548,5 @@ L1局部审计实际交付：A已将上述五提交串行集成为主线代码`4
 - 页面复用ResearchInputs/ResearchPanel和独立只读 `ResearchActionObservation` 组件、现有格式函数、原生details及表格容器。行动独有资料不得标成SEC/发行商财报；显示查询窗（不冒称除息覆盖）、分页与绑定/未绑定数量、实际接收时间语义、观测定位、日期和来源数值；不推断单位、拆股比率或入账。显式说明完整性未知及回测/账本不可用，长标识可展开且窄屏不撑宽页面。旧响应无字段继续可读。
 - root独占API/schema/read-side辅助模块、生成合同与Python单测/PG回归；复用子agent在独立worktree独占ResearchInputs、ResearchPanel、新组件及其前端unit/e2e测试。A已确认无重叠写入并将隔离PG窗口交root，仍是唯一主线/共享服务owner。本片无迁移、依赖或运行配置变更；应用回滚即停用新展示，已有原件和冻结数据不删除。
 - TDD覆盖正常归档→冻结PG→实际API、actions-only/SEC混合、空事件/未绑定、32条截断、零/微小/超大指数、错误版本和坏可选观测。界面测试覆盖旧响应、混合来源、精确历史回放、只读刷新和手机/桌面。一次集中审查后A串行集成、统一应用0041/更新运行并验证现有业务不受影响；真实Alpaca样本未就绪仍单列，不以合成样本冒充真实验收。
+
+实施时核对出精确run GET原先并未返回inputs，不能假设它已有冻结原件消费者。root同时拥有 `api/routes/research.py`，为 `ResearchRunResponse` 增加默认null的inputs，并在既有GET hydrate中使用run本身的snapshot/instrument/decision_time读取；POST继续默认null，回放不查admission、不增加请求或回退最新资料。新旧观测双版本PG反例先复现字段缺失，再补接线；前端回放仅使用run.inputs与run.decision_time。A已确认该route独占分工。

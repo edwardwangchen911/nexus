@@ -289,7 +289,13 @@ async def _hydrate_response(
             )
         )
     response = _response(run, output, evidence_records)
-    return response.model_copy(update={"stage_trace": await read_stage_trace(session, run)})
+    return response.model_copy(update={
+        "stage_trace": await read_stage_trace(session, run),
+        "inputs": await read_research_inputs(
+            session, snapshot_id=run.data_snapshot_id,
+            instrument_id=run.instrument_id, as_of=run.decision_time,
+        ),
+    })
 
 
 def _response(

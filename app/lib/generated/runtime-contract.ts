@@ -7506,6 +7506,16 @@ export const runtimeContractSchemas = {
         ],
         "title": "Input Tokens"
       },
+      "inputs": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ResearchInputsSummary"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "instrument_id": {
         "format": "uuid",
         "title": "Instrument Id",

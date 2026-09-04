@@ -9,7 +9,9 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.portfolio_context import read_portfolio_context
+from nexus.api.action_inputs import project_action_observation
 from nexus.api.schemas.agents import (
+    ResearchInputActionObservation,
     ResearchInputFact,
     ResearchInputFiling,
     ResearchInputFundHolding,
@@ -24,6 +26,8 @@ from nexus.domain.decimal import decimal_to_string
 from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord as Frozen
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.research import Filing, FinancialFactRecord, ResearchEvidenceRef
+from nexus.research.alpaca_actions import SOURCE as ACTION_SOURCE
+from nexus.research.alpaca_actions_storage import read_action_observations
 from nexus.research.sec_disclosures import read_disclosures
 from nexus.research.ssga_distributions import SOURCE, read_distributions
 from nexus.research.ssga_fund_observations import SOURCE as FUND_SOURCE
@@ -73,7 +77,10 @@ async def read_research_inputs(
     nav_histories = await _read_nav_inputs(
         session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of
     )
-    if not rows and not issuer_distributions and not fund_observations and not nav_histories:
+    action_observations = await _read_action_inputs(
+        session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of
+    )
+    if not any((rows, issuer_distributions, fund_observations, nav_histories, action_observations)):
         return None
     visible = rows[:20]
     disclosures = await read_disclosures(
@@ -113,6 +120,7 @@ async def read_research_inputs(
         issuer_distributions=issuer_distributions,
         issuer_fund_observations=fund_observations,
         issuer_nav_histories=nav_histories,
+        corporate_action_observations=action_observations,
         portfolio_context=await read_portfolio_context(session, snapshot_id, instrument_id, as_of),
         display_symbol=symbol,
         filings=tuple(
@@ -155,6 +163,32 @@ async def read_research_inputs(
         total_facts=total,
         truncated=len(rows) > 20 or total > len(facts),
     )
+
+
+async def _read_action_inputs(
+    session: AsyncSession, *, snapshot_id: UUID, instrument_id: UUID, as_of: datetime,
+) -> tuple[ResearchInputActionObservation, ...]:
+    references = await _frozen_issuer_references(
+        session, snapshot_id=snapshot_id, instrument_id=instrument_id,
+        as_of=as_of, source=ACTION_SOURCE,
+    )
+    if not references:
+        return ()
+    documents = await read_action_observations(
+        session, instrument_id=instrument_id, as_of=as_of, evidence_ids=tuple(references)
+    )
+    result = []
+    for evidence_id, document in documents.items():
+        evidence = references[evidence_id]
+        try:
+            result.append(project_action_observation(
+                document, evidence_ref_id=evidence_id,
+                revision=evidence.revision, content_hash=evidence.content_hash,
+            ))
+        except ValidationError:
+            # An optional display mismatch cannot suppress independently valid SEC inputs.
+            continue
+    return tuple(result)
 
 
 async def _frozen_issuer_references(
