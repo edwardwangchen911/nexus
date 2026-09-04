@@ -57,7 +57,10 @@ from nexus.worker import run_agent_worker_once
 from sqlalchemy import func, select
 
 
-async def _snapshot(session, portfolio, *, offset=0, held=True, status="READY"):
+async def _snapshot(
+    session, portfolio, *, offset=0, held=True, status="READY", cash_quality=None,
+    cash_amount=Decimal("100"),
+):
     at = NOW + timedelta(seconds=offset)
     sync = BrokerSyncRun(
         account_id=portfolio.account_id,
@@ -71,7 +74,7 @@ async def _snapshot(session, portfolio, *, offset=0, held=True, status="READY"):
         accepted_at=at,
         completed_at=at,
         attempt_count=1,
-        cash_flow_quality="PASS" if status == "READY" else "NOT_RUN",
+        cash_flow_quality=cash_quality or ("PASS" if status == "READY" else "NOT_RUN"),
         created_at=at,
     )
     session.add(sync)
@@ -95,8 +98,8 @@ async def _snapshot(session, portfolio, *, offset=0, held=True, status="READY"):
         CashSnapshot(
             portfolio_snapshot_id=snapshot.id,
             currency="USD",
-            cash_balance=100,
-            available_cash=100,
+            cash_balance=cash_amount,
+            available_cash=cash_amount,
             provider_as_of=at,
             created_at=at,
         )
@@ -167,7 +170,7 @@ async def test_explicit_binding_preserves_old_hash_and_does_not_choose_later_sna
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["missing", "future", "not_held"])
+@pytest.mark.parametrize("case", ["missing", "future"])
 async def test_explicit_missing_context_does_not_fall_back_to_generic_research(
     migrated_database_url,
     case,
@@ -188,6 +191,97 @@ async def test_explicit_missing_context_does_not_fall_back_to_generic_research(
                 portfolio_snapshot_id=target_id,
             )
         assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 0
+
+
+@pytest.mark.asyncio
+async def test_explicit_cash_only_context_reaches_frozen_inputs_without_generic_fallback(
+    migrated_database_url,
+):
+    """A known empty position list is different from missing position evidence."""
+    from nexus.agents.portfolio_context import read_portfolio_context
+    from nexus.api.research_inputs import read_research_inputs
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        portfolio, _ = await _seed(session)
+        cash_only = await _snapshot(session, portfolio, offset=1, held=False)
+        at = NOW + timedelta(seconds=2)
+        generic = await prepare_research_snapshot(session, INSTRUMENT, as_of=at)
+        assert generic.payload.get("portfolio_context") is None
+        explicit = await prepare_research_snapshot(
+            session, INSTRUMENT, as_of=at, portfolio_snapshot_id=cash_only.id,
+        )
+        context = await read_portfolio_context(session, explicit.id, INSTRUMENT, at)
+        assert context is not None
+        assert context.portfolio_snapshot_id == cash_only.id
+        assert context.currency == "USD"
+        assert (context.position_weight, context.cash_weight) == ("0", "1")
+        assert context.valuation_reason is None
+        assert context.snapshot_decision_ready is True
+        assert context.execution_locked is True
+        assert context.research_focus is None
+        assert explicit.id != generic.id
+        inputs = await read_research_inputs(
+            session, snapshot_id=explicit.id, instrument_id=INSTRUMENT, as_of=at,
+        )
+        assert inputs.portfolio_context == context
+        assert await session.scalar(select(func.count()).select_from(PositionSnapshot).where(
+            PositionSnapshot.portfolio_snapshot_id == cash_only.id,
+        )) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["partial", "cash_quality", "missing_cash", "other_holding"])
+async def test_nonheld_research_does_not_infer_zero_from_incomplete_or_nonempty_portfolio(
+    migrated_database_url, case,
+):
+    from nexus.agents.portfolio_context import freeze_portfolio_context
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        portfolio, _ = await _seed(session)
+        target = await _snapshot(
+            session, portfolio, offset=1, held=case == "other_holding",
+            status="PARTIAL" if case == "partial" else "READY",
+            cash_quality="NOT_RUN" if case == "cash_quality" else None,
+        )
+        at = NOW + timedelta(seconds=2)
+        # A different instrument's currency has no cash row; neither absent cash
+        # nor a missing requested holding in a nonempty portfolio means cash-only.
+        instrument_id = INSTRUMENT
+        if case in {"missing_cash", "other_holding"}:
+            from nexus.persistence.models.market import Instrument
+
+            instrument_id = UUID(int=812)
+            session.add(Instrument(
+                id=instrument_id, asset_type="equity", exchange="XNAS", currency="EUR",
+                tick_size=Decimal("0.01"), risk_bucket="test", created_at=NOW,
+            ))
+            await session.flush()
+        assert await freeze_portfolio_context(
+            session, instrument_id, at, portfolio_snapshot_id=target.id,
+        ) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cash_amount", [Decimal("0"), Decimal("-1")])
+async def test_cash_only_invalid_denominator_remains_unknown(migrated_database_url, cash_amount):
+    from nexus.agents.portfolio_context import freeze_portfolio_context
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        portfolio, _ = await _seed(session)
+        target = await _snapshot(
+            session, portfolio, offset=1, held=False, cash_amount=cash_amount,
+        )
+        result = await freeze_portfolio_context(
+            session, INSTRUMENT, NOW + timedelta(seconds=2), portfolio_snapshot_id=target.id,
+        )
+        assert result is not None
+        context, _ = result
+        assert context.position_weight is None and context.cash_weight is None
+        assert context.valuation_reason == "INCOMPLETE_CURRENCY_VALUATION"
+        assert context.execution_locked is True
 
 
 @pytest.mark.asyncio

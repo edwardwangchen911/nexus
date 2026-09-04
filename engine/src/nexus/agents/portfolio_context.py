@@ -20,6 +20,7 @@ from nexus.persistence.models.diagnostics import (
     PortfolioDiagnosticItemRecord,
     PortfolioDiagnosticReportRecord,
 )
+from nexus.persistence.models.market import Instrument
 from nexus.persistence.models.portfolio import (
     Account,
     BrokerSyncRun,
@@ -186,19 +187,36 @@ async def freeze_portfolio_context(
         )
     )
     held = next((p for p in positions if p.instrument_id == instrument_id), None)
-    if held is None or held.created_at > as_of:
+    if held is not None and held.created_at > as_of:
         return None
-    currency_positions = [p for p in positions if p.currency == held.currency]
+    if held is None:
+        # Only an explicitly selected, reconciled, actually empty portfolio can
+        # establish absence. Do not attach arbitrary accounts to watchlist research.
+        if (
+            portfolio_snapshot_id is None or positions or snapshot.status != "READY"
+            or sync.status != "READY" or sync.cash_flow_quality != "PASS"
+        ):
+            return None
+        instrument = await session.get(Instrument, instrument_id)
+        if instrument is None or instrument.created_at > as_of:
+            return None
+        currency = instrument.currency
+    else:
+        currency = held.currency
+    currency_positions = [p for p in positions if p.currency == currency]
     cash = await session.scalar(
         select(CashSnapshot).where(
             CashSnapshot.portfolio_snapshot_id == snapshot.id,
-            CashSnapshot.currency == held.currency,
+            CashSnapshot.currency == currency,
         )
     )
+    if held is None and (cash is None or cash.created_at > as_of):
+        return None
     valid = (
         cash is not None
         and cash.created_at <= as_of
         and cash.cash_balance >= 0
+        and (held is not None or cash.cash_balance > 0)
         and (cash.provider_as_of is None or cash.provider_as_of <= snapshot.as_of)
         and all(
             p.created_at <= as_of
@@ -211,14 +229,18 @@ async def freeze_portfolio_context(
     )
     position_weight = cash_weight = None
     if valid:
-        assert cash is not None and held.current_price is not None
+        assert cash is not None
         with localcontext() as decimal_context:
             decimal_context.prec = 28
             total = cash.cash_balance + sum(
                 (p.quantity * cast(Decimal, p.current_price) for p in currency_positions),
                 Decimal(0),
             )
-            position_weight = decimal_to_string(held.quantity * held.current_price / total)
+            if held is None:
+                position_weight = "0"
+            else:
+                assert held.current_price is not None
+                position_weight = decimal_to_string(held.quantity * held.current_price / total)
             cash_weight = decimal_to_string(cash.cash_balance / total)
     ready = snapshot.status == "READY" and sync.cash_flow_quality == "PASS"
     report = (
@@ -260,7 +282,7 @@ async def freeze_portfolio_context(
         portfolio_snapshot_id=snapshot.id,
         snapshot_as_of=snapshot.as_of,
         research_as_of=as_of,
-        currency=held.currency,
+        currency=currency,
         position_weight=position_weight,
         cash_weight=cash_weight,
         valuation_reason=None if valid else "INCOMPLETE_CURRENCY_VALUATION",
@@ -282,7 +304,7 @@ async def freeze_portfolio_context(
         diagnostics_truncated=len(items) > 100,
         research_focus=(
             _concentration_focus(held, currency_positions, items, report)
-            if ready and valid else None
+            if ready and valid and held is not None else None
         ),
         proposal_comparison=(
             await read_comparison_for_freeze(
