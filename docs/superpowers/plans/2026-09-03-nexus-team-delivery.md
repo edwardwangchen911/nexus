@@ -567,3 +567,7 @@ L1局部审计实际交付：A已将上述五提交串行集成为主线代码`4
 - 历史context/R按原冻结合同继续读取，不重算、回填、改hash或重标旧资料。本片不将新校验塞进旧读取路径。测试覆盖15%/30%等值及跨界、并列最大、现金改变不变分母、跨币隔离、坏/晚到事实、错P/D/hash、错政策/阈值/单位/等级；实际native输入读取确认核验后的focus来自同一冻结context，旧R/hash不变。先红后绿，集中审查和定向回归后单独交A串行集成。
 
 正式R完整生产者仍未完成：现有complete方向会约束optimizer目标（reduce_candidate甚至置零），集中度事实本身不能证明该方向。后续仍须明确支持方向、反证与有效条件的充分证据合同；这一缺口不能用重复模型调用或放宽冻结门槛消除。
+
+分支交付为`1765b96`，在已同步A2主线的协调分支吸收为`96a353f`，仅portfolio_context与两测试文件。新freeze调用独立核验helper，未更改旧read/_bytes/schema；同时实际NaN反例证明会抛InvalidOperation，已在现有cash/price/quantity入口补finite校验，坏估值降级而非隐藏整个冻结流程。纯计算6红→25绿、真实缺/错/晚引用4红→6绿，最终整文件21项PG通过；root独立44项研究/optimizer相关单测、Ruff/Mypy与diff检查通过。
+
+集中审查`0e37cce..96a353f`结论Spec通过、Code quality Ready，无确认P1/P2。审查对照真实诊断evaluator/top_weights/_stored_decimal，核对完整同币证券分母、并列最大、未量化严格阈值与12位metric；canonical policy的身份/内容与不晚于P时点检查保留。PG正例实际走prepare→admit→database_read_only_tools，D为合法合成存储fixture，不能称为全诊断input_hash重演或正式R生产验收；旧focus 0.35原值及hash继续照原合同读取。本片只确定新研究前提，主线集成与运行交A，原正式研究方向/成本/来源数据缺口保留。
