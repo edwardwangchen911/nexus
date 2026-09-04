@@ -3460,6 +3460,91 @@ export interface components {
             /** Unbound Event Count */
             unbound_event_count: number;
         };
+        /** ResearchInputCompanyProfile */
+        ResearchInputCompanyProfile: {
+            /**
+             * Available At
+             * Format: date-time
+             */
+            available_at: string;
+            /** Cik */
+            cik: string | null;
+            /** Company Name */
+            company_name: string | null;
+            /** Content Hash */
+            content_hash: string;
+            /** Cusip */
+            cusip: string | null;
+            /** Description */
+            description: string | null;
+            /**
+             * Evidence Ref Id
+             * Format: uuid
+             */
+            evidence_ref_id: string;
+            /**
+             * Execution Locked
+             * @constant
+             */
+            execution_locked: true;
+            /**
+             * Financial Fact Eligible
+             * @constant
+             */
+            financial_fact_eligible: false;
+            /**
+             * Historical Backtest Eligible
+             * @constant
+             */
+            historical_backtest_eligible: false;
+            /** Industry */
+            industry: string | null;
+            /** Isin */
+            isin: string | null;
+            /**
+             * Price Authority Eligible
+             * @constant
+             */
+            price_authority_eligible: false;
+            /** Raw Content Hash */
+            raw_content_hash: string;
+            /** Receipt Content Hash */
+            receipt_content_hash: string;
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /** Revision */
+            revision: string;
+            /**
+             * Revision Semantics
+             * @constant
+             */
+            revision_semantics: "local_content_hash";
+            /** Sector */
+            sector: string | null;
+            /**
+             * Sector Risk Eligible
+             * @constant
+             */
+            sector_risk_eligible: false;
+            /** Sector Taxonomy */
+            sector_taxonomy: null;
+            /**
+             * Source
+             * @constant
+             */
+            source: "fmp_company_profile";
+            /** Source Published At */
+            source_published_at: null;
+            /** Source Url */
+            source_url: string;
+            /** Symbol */
+            symbol: string;
+            /** Valid Until */
+            valid_until: null;
+        };
         /** ResearchInputFact */
         ResearchInputFact: {
             /**
@@ -3708,6 +3793,76 @@ export interface components {
             /** Source Url */
             source_url: string;
         };
+        /** ResearchInputMacroObservation */
+        ResearchInputMacroObservation: {
+            /**
+             * Available At
+             * Format: date-time
+             */
+            available_at: string;
+            /**
+             * Calendar Evidence Ref Id
+             * Format: uuid
+             */
+            calendar_evidence_ref_id: string;
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Evidence Ref Id
+             * Format: uuid
+             */
+            evidence_ref_id: string;
+            /**
+             * Execution Locked
+             * @constant
+             */
+            execution_locked: true;
+            /**
+             * Historical Backtest Eligible
+             * @constant
+             */
+            historical_backtest_eligible: false;
+            /**
+             * Observation Id
+             * Format: uuid
+             */
+            observation_id: string;
+            /**
+             * Observed On
+             * Format: date
+             */
+            observed_on: string;
+            /** Raw Content Hash */
+            raw_content_hash: string;
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /** Revision */
+            revision: string;
+            /**
+             * Revision Semantics
+             * @constant
+             */
+            revision_semantics: "local_content_hash";
+            /** Series */
+            series: string;
+            /**
+             * Source
+             * @constant
+             */
+            source: "fred";
+            /** Unit */
+            unit: string;
+            /** Value */
+            value: string;
+            /**
+             * Vintage
+             * Format: date
+             */
+            vintage: string;
+        };
         /**
          * ResearchInputNavHistory
          * @description Issuer per-share NAV observations, not executable market-price authority.
@@ -3829,6 +3984,11 @@ export interface components {
         /** ResearchInputsSummary */
         ResearchInputsSummary: {
             /**
+             * Company Profiles
+             * @default []
+             */
+            company_profiles: components["schemas"]["ResearchInputCompanyProfile"][];
+            /**
              * Corporate Action Observations
              * @default []
              */
@@ -3854,6 +4014,11 @@ export interface components {
              * @default []
              */
             issuer_nav_histories: components["schemas"]["ResearchInputNavHistory"][];
+            /**
+             * Macro Observations
+             * @default []
+             */
+            macro_observations: components["schemas"]["ResearchInputMacroObservation"][];
             portfolio_context?: components["schemas"]["PortfolioResearchContext"] | null;
             /** Total Facts */
             total_facts: number;

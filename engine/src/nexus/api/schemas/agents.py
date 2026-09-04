@@ -308,6 +308,57 @@ class ResearchInputActionObservation(_StrictAgentSchema):
     available_at_semantics: Literal["maximum_page_receipt_not_historical_availability"]
 
 
+class ResearchInputCompanyProfile(_StrictAgentSchema):
+    evidence_ref_id: UUID
+    source: Literal["fmp_company_profile"]
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    raw_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receipt_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    symbol: str = Field(pattern=r"^[A-Z][A-Z0-9.-]{0,14}$")
+    company_name: str | None = Field(max_length=1000)
+    description: str | None = Field(max_length=16000)
+    cik: str | None = Field(max_length=1000)
+    isin: str | None = Field(max_length=1000)
+    cusip: str | None = Field(max_length=1000)
+    industry: str | None = Field(max_length=1000)
+    sector: str | None = Field(max_length=1000)
+    source_url: str = Field(
+        pattern=r"^https://financialmodelingprep\.com/stable/profile\?symbol=[A-Z][A-Z0-9.-]{0,14}$"
+    )
+    received_at: AwareDatetime
+    available_at: AwareDatetime
+    source_published_at: None
+    valid_until: None
+    sector_taxonomy: None
+    revision_semantics: Literal["local_content_hash"]
+    sector_risk_eligible: Literal[False]
+    financial_fact_eligible: Literal[False]
+    price_authority_eligible: Literal[False]
+    historical_backtest_eligible: Literal[False]
+    execution_locked: Literal[True]
+
+
+class ResearchInputMacroObservation(_StrictAgentSchema):
+    observation_id: UUID
+    evidence_ref_id: UUID
+    calendar_evidence_ref_id: UUID
+    source: Literal["fred"]
+    revision: str = Field(max_length=255)
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    raw_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    series: str = Field(max_length=100)
+    observed_on: date
+    vintage: date
+    value: DecimalString
+    unit: str = Field(max_length=255)
+    received_at: AwareDatetime
+    available_at: AwareDatetime
+    revision_semantics: Literal["local_content_hash"]
+    historical_backtest_eligible: Literal[False]
+    execution_locked: Literal[True]
+
+
 class ResearchInputsSummary(_StrictAgentSchema):
     display_symbol: str | None = Field(max_length=100)
     filings: tuple[ResearchInputFiling, ...] = Field(max_length=20)
@@ -325,6 +376,8 @@ class ResearchInputsSummary(_StrictAgentSchema):
     corporate_action_observations: tuple[ResearchInputActionObservation, ...] = Field(
         default=(), max_length=1
     )
+    company_profiles: tuple[ResearchInputCompanyProfile, ...] = Field(default=(), max_length=1)
+    macro_observations: tuple[ResearchInputMacroObservation, ...] = Field(default=(), max_length=8)
 
 
 class ResearchAdmissionResponse(_StrictAgentSchema):

@@ -6334,6 +6334,217 @@ export const runtimeContractSchemas = {
     "title": "ResearchInputActionObservation",
     "type": "object"
   },
+  "ResearchInputCompanyProfile": {
+    "additionalProperties": false,
+    "properties": {
+      "available_at": {
+        "format": "date-time",
+        "title": "Available At",
+        "type": "string"
+      },
+      "cik": {
+        "anyOf": [
+          {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Cik"
+      },
+      "company_name": {
+        "anyOf": [
+          {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Company Name"
+      },
+      "content_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Content Hash",
+        "type": "string"
+      },
+      "cusip": {
+        "anyOf": [
+          {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Cusip"
+      },
+      "description": {
+        "anyOf": [
+          {
+            "maxLength": 16000,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Description"
+      },
+      "evidence_ref_id": {
+        "format": "uuid",
+        "title": "Evidence Ref Id",
+        "type": "string"
+      },
+      "execution_locked": {
+        "const": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "financial_fact_eligible": {
+        "const": false,
+        "title": "Financial Fact Eligible",
+        "type": "boolean"
+      },
+      "historical_backtest_eligible": {
+        "const": false,
+        "title": "Historical Backtest Eligible",
+        "type": "boolean"
+      },
+      "industry": {
+        "anyOf": [
+          {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Industry"
+      },
+      "isin": {
+        "anyOf": [
+          {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Isin"
+      },
+      "price_authority_eligible": {
+        "const": false,
+        "title": "Price Authority Eligible",
+        "type": "boolean"
+      },
+      "raw_content_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Raw Content Hash",
+        "type": "string"
+      },
+      "receipt_content_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Receipt Content Hash",
+        "type": "string"
+      },
+      "received_at": {
+        "format": "date-time",
+        "title": "Received At",
+        "type": "string"
+      },
+      "revision": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Revision",
+        "type": "string"
+      },
+      "revision_semantics": {
+        "const": "local_content_hash",
+        "title": "Revision Semantics",
+        "type": "string"
+      },
+      "sector": {
+        "anyOf": [
+          {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Sector"
+      },
+      "sector_risk_eligible": {
+        "const": false,
+        "title": "Sector Risk Eligible",
+        "type": "boolean"
+      },
+      "sector_taxonomy": {
+        "title": "Sector Taxonomy",
+        "type": "null"
+      },
+      "source": {
+        "const": "fmp_company_profile",
+        "title": "Source",
+        "type": "string"
+      },
+      "source_published_at": {
+        "title": "Source Published At",
+        "type": "null"
+      },
+      "source_url": {
+        "pattern": "^https://financialmodelingprep\\.com/stable/profile\\?symbol=[A-Z][A-Z0-9.-]{0,14}$",
+        "title": "Source Url",
+        "type": "string"
+      },
+      "symbol": {
+        "pattern": "^[A-Z][A-Z0-9.-]{0,14}$",
+        "title": "Symbol",
+        "type": "string"
+      },
+      "valid_until": {
+        "title": "Valid Until",
+        "type": "null"
+      }
+    },
+    "required": [
+      "evidence_ref_id",
+      "source",
+      "revision",
+      "content_hash",
+      "raw_content_hash",
+      "receipt_content_hash",
+      "symbol",
+      "company_name",
+      "description",
+      "cik",
+      "isin",
+      "cusip",
+      "industry",
+      "sector",
+      "source_url",
+      "received_at",
+      "available_at",
+      "source_published_at",
+      "valid_until",
+      "sector_taxonomy",
+      "revision_semantics",
+      "sector_risk_eligible",
+      "financial_fact_eligible",
+      "price_authority_eligible",
+      "historical_backtest_eligible",
+      "execution_locked"
+    ],
+    "title": "ResearchInputCompanyProfile",
+    "type": "object"
+  },
   "ResearchInputFact": {
     "additionalProperties": false,
     "properties": {
@@ -6868,6 +7079,118 @@ export const runtimeContractSchemas = {
     "title": "ResearchInputIssuerDistribution",
     "type": "object"
   },
+  "ResearchInputMacroObservation": {
+    "additionalProperties": false,
+    "properties": {
+      "available_at": {
+        "format": "date-time",
+        "title": "Available At",
+        "type": "string"
+      },
+      "calendar_evidence_ref_id": {
+        "format": "uuid",
+        "title": "Calendar Evidence Ref Id",
+        "type": "string"
+      },
+      "content_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Content Hash",
+        "type": "string"
+      },
+      "evidence_ref_id": {
+        "format": "uuid",
+        "title": "Evidence Ref Id",
+        "type": "string"
+      },
+      "execution_locked": {
+        "const": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "historical_backtest_eligible": {
+        "const": false,
+        "title": "Historical Backtest Eligible",
+        "type": "boolean"
+      },
+      "observation_id": {
+        "format": "uuid",
+        "title": "Observation Id",
+        "type": "string"
+      },
+      "observed_on": {
+        "format": "date",
+        "title": "Observed On",
+        "type": "string"
+      },
+      "raw_content_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Raw Content Hash",
+        "type": "string"
+      },
+      "received_at": {
+        "format": "date-time",
+        "title": "Received At",
+        "type": "string"
+      },
+      "revision": {
+        "maxLength": 255,
+        "title": "Revision",
+        "type": "string"
+      },
+      "revision_semantics": {
+        "const": "local_content_hash",
+        "title": "Revision Semantics",
+        "type": "string"
+      },
+      "series": {
+        "maxLength": 100,
+        "title": "Series",
+        "type": "string"
+      },
+      "source": {
+        "const": "fred",
+        "title": "Source",
+        "type": "string"
+      },
+      "unit": {
+        "maxLength": 255,
+        "title": "Unit",
+        "type": "string"
+      },
+      "value": {
+        "maxLength": 40,
+        "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+        "title": "Value",
+        "type": "string"
+      },
+      "vintage": {
+        "format": "date",
+        "title": "Vintage",
+        "type": "string"
+      }
+    },
+    "required": [
+      "observation_id",
+      "evidence_ref_id",
+      "calendar_evidence_ref_id",
+      "source",
+      "revision",
+      "content_hash",
+      "raw_content_hash",
+      "series",
+      "observed_on",
+      "vintage",
+      "value",
+      "unit",
+      "received_at",
+      "available_at",
+      "revision_semantics",
+      "historical_backtest_eligible",
+      "execution_locked"
+    ],
+    "title": "ResearchInputMacroObservation",
+    "type": "object"
+  },
   "ResearchInputNavHistory": {
     "additionalProperties": false,
     "description": "Issuer per-share NAV observations, not executable market-price authority.",
@@ -7099,6 +7422,15 @@ export const runtimeContractSchemas = {
   "ResearchInputsSummary": {
     "additionalProperties": false,
     "properties": {
+      "company_profiles": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/ResearchInputCompanyProfile"
+        },
+        "maxItems": 1,
+        "title": "Company Profiles",
+        "type": "array"
+      },
       "corporate_action_observations": {
         "default": [],
         "items": {
@@ -7161,6 +7493,15 @@ export const runtimeContractSchemas = {
         },
         "maxItems": 1,
         "title": "Issuer Nav Histories",
+        "type": "array"
+      },
+      "macro_observations": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/ResearchInputMacroObservation"
+        },
+        "maxItems": 8,
+        "title": "Macro Observations",
         "type": "array"
       },
       "portfolio_context": {
