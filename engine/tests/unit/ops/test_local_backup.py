@@ -1,5 +1,6 @@
 """Only synthetic backup files and sources enter these tests."""
 
+import gzip
 import hashlib
 import io
 import json
@@ -20,6 +21,72 @@ from nexus.ops.local_recovery import (
 CONTENT = b"synthetic immutable evidence"
 URI = "s3://synthetic/provider/market/item?versionId=v1"
 ROW = {"uri": URI, "sha256": hashlib.sha256(CONTENT).hexdigest(), "byte_size": len(CONTENT)}
+
+
+@pytest.mark.asyncio
+async def test_mixed_audit_and_provider_objects_survive_offline_copy(tmp_path, monkeypatch):
+    from nexus.ops import local_recovery
+
+    content = gzip.compress(b'{"synthetic":"audit"}\n', mtime=0)
+    digest = hashlib.sha256(content).hexdigest()
+    key = f"audit/manifests/2026-09-04/{digest}.ndjson.gz"
+    audit = {"uri": f"s3://synthetic/{key}", "sha256": digest, "byte_size": len(content)}
+    calls = []
+
+    def get_object(**request):
+        calls.append(request)
+        if request["Key"] == key:
+            assert "VersionId" not in request
+            return {"Body": io.BytesIO(content)}
+        assert request["Key"] == "provider/market/item" and request["VersionId"] == "v1"
+        return {"VersionId": "v1", "Body": io.BytesIO(CONTENT)}
+
+    monkeypatch.setattr(
+        local_recovery, "S3ProviderEvidenceStore",
+        lambda settings, **kwargs: S3ProviderEvidenceStore(
+            settings, client=SimpleNamespace(get_object=get_object), **kwargs
+        ),
+    )
+    recovery = LocalRecovery(tmp_path, tmp_path)
+    recovery.output = tmp_path
+    recovery.environment = {
+        "OBJECT_STORE_ENDPOINT": "http://127.0.0.1:59999",
+        "OBJECT_STORE_REGION": "us-east-1", "OBJECT_STORE_BUCKET": "synthetic",
+        "OBJECT_STORE_ACCESS_KEY_ID": "synthetic", "OBJECT_STORE_SECRET_ACCESS_KEY": "synthetic",
+    }
+    assert await recovery.recover_objects([ROW, audit]) == 2
+    recovery.output = tmp_path / "restored"
+    recovery.output.mkdir(mode=0o700)
+    recovery.environment = {}
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("offline restore must not construct a source client")
+
+    monkeypatch.setattr(local_recovery, "S3ProviderEvidenceStore", forbidden)
+    assert await recovery.recover_local_objects([ROW, audit]) == 2
+    assert len(calls) == 2
+    assert sorted(p.read_bytes() for p in (recovery.output / "objects").iterdir()) == sorted(
+        [content, CONTENT]
+    )
+
+
+@pytest.mark.parametrize("change", ["digest", "date", "bucket", "query", "fragment", "path"])
+def test_unversioned_audit_binding_must_be_exact(change):
+    from nexus.ops.local_recovery import _backup_object_version
+
+    digest = "a" * 64
+    key = f"audit/manifests/2026-09-04/{digest}.ndjson.gz"
+    if change == "date":
+        key = key.replace("2026-09-04", "2026-99-04")
+    if change == "path":
+        key = key.replace("audit/manifests", "arbitrary")
+    uri = f"s3://{'other' if change == 'bucket' else 'synthetic'}/{key}"
+    uri += "?versionId=v1" if change == "query" else "#fragment" if change == "fragment" else ""
+    with pytest.raises((ValueError, RecoveryError)):
+        _backup_object_version(
+            uri, bucket="synthetic", storage_key=key,
+            digest="b" * 64 if change == "digest" else digest,
+        )
 
 
 @pytest.mark.asyncio

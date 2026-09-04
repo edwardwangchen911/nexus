@@ -15,7 +15,7 @@ import re
 import secrets
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -201,8 +201,24 @@ def collect_bindings(rows: list[dict[str, Any]]) -> dict[str, tuple[str, int]]:
     return bindings
 
 
+def _backup_object_version(uri: str, *, bucket: str, storage_key: str, digest: str) -> str | None:
+    """Audit manifests use immutable content addresses; provider objects use versions."""
+    match = re.fullmatch(
+        r"audit/manifests/(\d{4}-\d{2}-\d{2})/([0-9a-f]{64})\.ndjson\.gz", storage_key
+    )
+    if match is not None:
+        if uri != f"s3://{bucket}/{storage_key}" or match.group(2) != digest:
+            raise RecoveryError("RECOVERY_OBJECT_BINDING_INVALID")
+        try:
+            date.fromisoformat(match.group(1))
+        except ValueError:
+            raise RecoveryError("RECOVERY_OBJECT_BINDING_INVALID") from None
+        return None
+    return _version_id_from_frozen_uri(uri, bucket=bucket, storage_key=storage_key)
+
+
 def verify_object(
-    content: bytes, actual_version: str, expected_version: str, digest: str, size: int
+    content: bytes, actual_version: str | None, expected_version: str | None, digest: str, size: int
 ) -> None:
     if (
         actual_version != expected_version
@@ -210,6 +226,21 @@ def verify_object(
         or hashlib.sha256(content).hexdigest() != digest
     ):
         raise RecoveryError("RECOVERY_OBJECT_MISMATCH")
+
+
+def _read_audit_manifest(store: S3ProviderEvidenceStore, bucket: str, key: str, size: int) -> bytes:
+    response = store._get_object(Bucket=bucket, Key=key)
+    body: Any = response.get("Body")
+    if body is None or not callable(getattr(body, "read", None)):
+        raise RecoveryError("RECOVERY_OBJECT_MISMATCH")
+    try:
+        content = body.read(size + 1)
+    finally:
+        if callable(getattr(body, "close", None)):
+            body.close()
+    if not isinstance(content, bytes) or not content.startswith(b"\x1f\x8b"):
+        raise RecoveryError("RECOVERY_OBJECT_MISMATCH")
+    return content
 
 
 class LocalRecovery:
@@ -435,19 +466,24 @@ class LocalRecovery:
         for index, (uri, (digest, size)) in enumerate(sorted(bindings.items())):
             storage_key = urlsplit(uri).path.removeprefix("/")
             prefix = settings.object_store_prefix + "/"
-            if not storage_key.startswith(prefix):
-                raise RecoveryError("RECOVERY_OBJECT_PREFIX_MISMATCH")
-            version = _version_id_from_frozen_uri(
+            version = _backup_object_version(
                 uri,
                 bucket=settings.object_store_bucket or "",
                 storage_key=storage_key,
+                digest=digest,
             )
-            # Reuse the existing bounded, no-retry, version-checking local reader.
-            content = await asyncio.to_thread(
-                store._read_bounded,
-                storage_key.removeprefix(prefix),
-                version_id=version,
-            )
+            if version is None:
+                content = await asyncio.to_thread(
+                    _read_audit_manifest, store, settings.object_store_bucket or "",
+                    storage_key, size,
+                )
+            else:
+                if not storage_key.startswith(prefix):
+                    raise RecoveryError("RECOVERY_OBJECT_PREFIX_MISMATCH")
+                # Reuse the bounded, no-retry, exact-version provider reader.
+                content = await asyncio.to_thread(
+                    store._read_bounded, storage_key.removeprefix(prefix), version_id=version
+                )
             verify_object(content, version, version, digest, size)
             filename = f"{index:06d}.bin"
             write_private(objects / filename, content)
@@ -491,10 +527,10 @@ class LocalRecovery:
             ):
                 raise RecoveryError("RECOVERY_OBJECT_SET_MISMATCH")
             parsed = urlsplit(uri)
-            version = _version_id_from_frozen_uri(
-                uri, bucket=parsed.netloc, storage_key=parsed.path.removeprefix("/")
-            )
             digest, size = expected[uri]
+            version = _backup_object_version(
+                uri, bucket=parsed.netloc, storage_key=parsed.path.removeprefix("/"), digest=digest
+            )
             if (source / filename).stat().st_size != size:
                 raise RecoveryError("RECOVERY_OBJECT_MISMATCH")
             content = private_file(source / filename)
