@@ -18,7 +18,9 @@ from nexus.backtest.engine import (
     BacktestResult,
     CorporateActionEvent,
     DelistingEvent,
+    ExchangeCalendarAuthority,
     PointInTimeDataset,
+    PriceSourceSelectionAuthority,
     UnresolvedDelistingEvent,
     _audited_data_hash,
     _authority_bundle_hash,
@@ -270,7 +272,16 @@ async def persist_backtest_result(
 def expected_data_snapshot_payload(
     data: PointInTimeDataset, result: BacktestResult
 ) -> dict[str, object]:
-    """Canonical immutable payload produced by the backtest authority bundler."""
+    """Preserve the original result-based payload API and historical hashes."""
+    return input_data_snapshot_payload(
+        data, authority_hash=result.authority_hash, data_hash=result.data_hash
+    )
+
+
+def input_data_snapshot_payload(
+    data: PointInTimeDataset, *, authority_hash: str, data_hash: str
+) -> dict[str, object]:
+    """Canonical input-only payload; preparation never fabricates a BacktestResult."""
     events: list[CorporateActionEvent | DelistingEvent | UnresolvedDelistingEvent] = [
         *data.corporate_actions,
         *data.delistings,
@@ -293,8 +304,8 @@ def expected_data_snapshot_payload(
     return {
         "kind": "backtest_authority_v1",
         "authority_bundle_id": str(data.authority.authority_bundle_id),
-        "authority_hash": result.authority_hash,
-        "data_hash": result.data_hash,
+        "authority_hash": authority_hash,
+        "data_hash": data_hash,
         "calendar_version": data.authority.exchange_calendar.version,
         "calendar_authority_id": str(data.authority.exchange_calendar.authority_id),
         "calendar_hash": data.authority.exchange_calendar.content_hash,
@@ -418,6 +429,34 @@ async def _validate_database_authority(
     authority: BacktestPersistenceAuthority,
     authority_frozen_at: datetime,
 ) -> None:
+    expected_ids = (
+        data.authority.authority_bundle_id,
+        data.authority.data_snapshot_id,
+        data.authority.source_policy_id,
+        data.authority.cost_policy_id,
+    )
+    result_ids = (
+        result.authority_bundle_id,
+        result.data_snapshot_id,
+        result.source_policy_id,
+        result.cost_policy_id,
+    )
+    if (
+        result_ids != expected_ids
+        or result.cost_policy_version != data.authority.cost_policy_version
+    ):
+        raise ValueError("backtest result authority does not match the frozen dataset")
+    await validate_bundle_inputs(session, data, protocol, authority, authority_frozen_at)
+
+
+async def validate_bundle_inputs(
+    session: AsyncSession,
+    data: PointInTimeDataset,
+    protocol: BacktestProtocol,
+    authority: BacktestPersistenceAuthority,
+    authority_frozen_at: datetime,
+) -> None:
+    """Shared full database checks for input preparation and result persistence."""
     completed_at = authority.authority_cutoff_at
     expected_ids = (
         data.authority.authority_bundle_id,
@@ -431,13 +470,7 @@ async def _validate_database_authority(
         authority.source_policy_id,
         authority.cost_policy_id,
     )
-    result_ids = (
-        result.authority_bundle_id,
-        result.data_snapshot_id,
-        result.source_policy_id,
-        result.cost_policy_id,
-    )
-    if actual_ids != expected_ids or result_ids != expected_ids:
+    if actual_ids != expected_ids:
         raise ValueError("backtest authority IDs do not match the frozen dataset")
 
     source_policy = await load_source_policy_v1(session, instrument_tick_size=None)
@@ -449,7 +482,7 @@ async def _validate_database_authority(
         raise ValueError("backtest source policy is not the published authority")
     if (
         cost_policy.id != authority.cost_policy_id
-        or cost_policy.version != result.cost_policy_version
+        or cost_policy.version != data.authority.cost_policy_version
         or cost_policy.available_at > completed_at
     ):
         raise ValueError("backtest cost policy is not the published authority")
@@ -470,7 +503,12 @@ async def _validate_database_authority(
         snapshot is None
         or snapshot.source != "nexus_backtest_bundle"
         or snapshot.schema_version != "backtest_authority_v1"
-        or snapshot.payload != expected_data_snapshot_payload(data, result)
+        or snapshot.payload
+        != input_data_snapshot_payload(
+            data,
+            authority_hash=_authority_bundle_hash(data),
+            data_hash=_audited_data_hash(data, protocol),
+        )
         or not snapshot.observed_at <= snapshot.available_at <= snapshot.received_at
         or snapshot.available_at > completed_at
         or snapshot.received_at > completed_at
@@ -481,13 +519,11 @@ async def _validate_database_authority(
         session,
         data,
         protocol,
-        result,
+        _authority_bundle_hash(data),
         completed_at,
         authority_frozen_at,
     )
-    await _validate_source_selection_authorities(
-        session, data, completed_at, authority_frozen_at
-    )
+    await _validate_source_selection_authorities(session, data, completed_at, authority_frozen_at)
     await _validate_price_authorities(session, data, completed_at, authority_frozen_at)
     await _validate_universe_authorities(session, data, completed_at)
     await _validate_sector_authorities(session, data, completed_at)
@@ -498,7 +534,7 @@ async def _validate_bundle_authority(
     session: AsyncSession,
     data: PointInTimeDataset,
     protocol: BacktestProtocol,
-    result: BacktestResult,
+    authority_hash: str,
     completed_at: datetime,
     authority_frozen_at: datetime,
 ) -> None:
@@ -611,7 +647,7 @@ async def _validate_bundle_authority(
             or record.query_parameters != dict(expected.query_parameters)
             or record.completeness_status != expected.completeness_status
             or record.content_hash != expected.content_hash
-            or record.completed_at != completed_at
+            or record.completed_at > completed_at
             or member_ids != set(expected.member_ids)
         ):
             raise ValueError(f"{kind} collection authority is missing or incomplete")
@@ -629,7 +665,7 @@ async def _validate_bundle_authority(
         or bundle.range_start != protocol.start
         or bundle.range_end != protocol.end
         or bundle.completeness_status != "complete"
-        or bundle.content_hash != result.authority_hash
+        or bundle.content_hash != authority_hash
         or bundle.source_selection_reports != _source_selection_reports(data)
         or bundle.completed_at != completed_at
     ):
@@ -917,200 +953,195 @@ async def _validate_source_selection_authorities(
     completed_at: datetime,
     authority_frozen_at: datetime,
 ) -> None:
-    selected_by_identity = {
-        (item.instrument_id, item.adjustment): item for item in data.authority.price_series
-    }
     for report in data.authority.source_selections:
-        expected = selected_by_identity[(report.instrument_id, report.adjustment)]
-        request_sessions = {
-            value
-            for value in data.authority.exchange_calendar.sessions
-            if report.request_start_session <= value <= report.request_end_session
-        }
-        instrument = await session.get(Instrument, report.instrument_id, populate_existing=True)
-        if (
-            report.decision_time != completed_at
-            or report.request_start_session != data.authority.exchange_calendar.range_start
-            or report.request_end_session != data.authority.exchange_calendar.range_end
-            or request_sessions != set(data.authority.exchange_calendar.sessions)
-            or instrument is None
-            or instrument.tick_size != report.tick_size
-        ):
-            raise ValueError("source_policy_v1 selection clock or tick-size authority is invalid")
-        rows = tuple(
-            await session.execute(
-                select(PriceBarSetAuthority, PriceSeriesManifest)
-                .join(
-                    PriceSeriesManifest,
-                    PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
-                )
-                .join(
-                    BacktestAuthorityPublicationMarkRecord,
-                    (BacktestAuthorityPublicationMarkRecord.domain == "price")
-                    & (BacktestAuthorityPublicationMarkRecord.record_id == PriceBarSetAuthority.id),
-                )
-                .where(
-                    PriceBarSetAuthority.source_policy_id == data.authority.source_policy_id,
-                    PriceBarSetAuthority.available_at <= report.decision_time,
-                    PriceBarSetAuthority.created_at <= report.decision_time,
-                    PriceSeriesManifest.created_at <= report.decision_time,
-                    PriceSeriesManifest.instrument == str(report.instrument_id),
-                    PriceSeriesManifest.adjustment == report.adjustment,
-                    PriceSeriesManifest.interval == expected.interval,
-                    PriceSeriesManifest.id.in_(
-                        select(PriceBarRecord.price_series_manifest_id).where(
-                            PriceBarRecord.session >= report.request_start_session,
-                            PriceBarRecord.session <= report.request_end_session,
-                        )
-                    ),
-                    BacktestAuthorityPublicationMarkRecord.created_at <= authority_frozen_at,
-                )
-            )
+        replay = await select_source_authority(
+            session,
+            instrument_id=report.instrument_id,
+            adjustment=report.adjustment,
+            calendar=data.authority.exchange_calendar,
+            source_policy_id=data.authority.source_policy_id,
+            completed_at=completed_at,
+            authority_frozen_at=authority_frozen_at,
+            expected_candidate_ids=set(report.candidate_price_bar_set_authority_ids),
         )
-        if {row[0].id for row in rows} != set(report.candidate_price_bar_set_authority_ids):
-            raise ValueError("source_policy_v1 candidate set is incomplete")
-        candidates: list[PriceSeries] = []
-        series_by_authority_id: dict[UUID, PriceSeries] = {}
-        for authority_record, manifest in rows:
-            if authority_record.source != manifest.source:
-                raise ValueError("source_policy_v1 candidate provenance is inconsistent")
-            artifact = await session.get(
-                DataArtifact, manifest.data_artifact_id, populate_existing=True
-            )
-            database_bars = tuple(
-                await session.scalars(
-                    select(PriceBarRecord)
-                    .where(PriceBarRecord.price_series_manifest_id == manifest.id)
-                    .order_by(
-                        PriceBarRecord.session,
-                        PriceBarRecord.observed_at,
-                        PriceBarRecord.revision,
+        normalized = report.model_copy(
+            update={
+                "candidate_price_bar_set_authority_ids": tuple(
+                    sorted(
+                        report.candidate_price_bar_set_authority_ids, key=lambda value: value.int
                     )
                 )
-            )
-            request_bar_records = tuple(
-                bar for bar in database_bars if bar.session in request_sessions
-            )
-            if any(
-                bar.available_at
-                < data.authority.exchange_calendar.decision_times[bar.session]
-                - timedelta(minutes=30)
-                for bar in request_bar_records
-            ):
-                raise ValueError("daily price candidate is available before official close")
-            base_complete = (
-                artifact is not None
-                and artifact.created_at <= report.decision_time
-                and authority_record.bar_count == manifest.row_count == len(database_bars)
-                and not any(bar.quality_flags for bar in database_bars)
-                and all(bar.created_at <= report.decision_time for bar in database_bars)
-            )
-            mode = cast(
-                Literal["fixture", "delayed", "read_only"],
-                "fixture"
-                if manifest.delivery_mode == "fixture"
-                else "delayed"
-                if manifest.delivery_mode == "delayed"
-                else "read_only",
-            )
-            provider_bars = tuple(
-                PriceBar(
-                    instrument_id=InstrumentId(bar.instrument_id),
-                    session=bar.session,
-                    open=bar.open,
-                    high=bar.high,
-                    low=bar.low,
-                    close=bar.close,
-                    volume=bar.volume,
-                    observed_at=bar.observed_at,
-                    available_at=bar.available_at,
-                    received_at=bar.received_at,
-                    revision=bar.revision,
-                    quality_flags=tuple(bar.quality_flags),
-                )
-                for bar in request_bar_records
-            )
-            provisional = PriceSeries(
-                source=manifest.source,
-                feed=manifest.feed,
-                adjustment=manifest.adjustment,
-                interval=manifest.interval,
-                mode=mode,
-                delivery_mode=manifest.delivery_mode,
-                quality="PARTIAL",
-                bars=provider_bars,
-            )
-            visible_at_historical_cutoffs = tuple(
-                bar
-                for bar in provisional.bars
-                if bar.available_at <= data.authority.exchange_calendar.decision_times[bar.session]
-            )
-            historical_request_bars = canonical_price_bars(
-                provisional, visible_at_historical_cutoffs
-            )
-            canonical_request_bars = canonical_price_bars(
-                provisional,
-                tuple(bar for bar in provisional.bars if bar.available_at <= report.decision_time),
-            )
-            complete = (
-                base_complete
-                and {bar.session for bar in historical_request_bars} == request_sessions
-            )
-            series = provisional.model_copy(
-                update={
-                    "bars": canonical_request_bars,
-                    "quality": "PASS" if complete else "PARTIAL",
-                }
-            )
-            candidates.append(series)
-            series_by_authority_id[authority_record.id] = series
-        policy = await load_source_policy_v1(session, instrument_tick_size=report.tick_size)
-        selection = apply_source_policy_v1(
-            candidates,
-            policy,
-            report.decision_time,
-            None,
+            }
         )
-        selected_series = series_by_authority_id.get(report.selected_price_bar_set_authority_id)
-        selected_at_cutoff = (
-            None
-            if selected_series is None
-            else selected_series.model_copy(
-                update={
-                    "bars": canonical_price_bars(
-                        selected_series,
-                        tuple(
-                            bar
-                            for bar in selected_series.bars
-                            if bar.available_at <= report.decision_time
-                        ),
-                    )
-                }
-            )
-        )
-        matching_candidate_ids = {
-            authority_id
-            for authority_id, series in series_by_authority_id.items()
-            if series.model_copy(
-                update={
-                    "bars": canonical_price_bars(
-                        series,
-                        tuple(
-                            bar for bar in series.bars if bar.available_at <= report.decision_time
-                        ),
-                    )
-                }
-            )
-            == selection.selected
-        }
-        if (
-            selected_at_cutoff is None
-            or selection.selected != selected_at_cutoff
-            or matching_candidate_ids != {report.selected_price_bar_set_authority_id}
-            or selection.quality != report.quality
-            or selection.reasons != report.reasons
-        ):
+        if replay != normalized:
             raise ValueError("source_policy_v1 selection report is not replayable")
+
+
+async def select_source_authority(
+    session: AsyncSession,
+    *,
+    instrument_id: UUID,
+    adjustment: Literal["raw", "all"],
+    calendar: ExchangeCalendarAuthority,
+    source_policy_id: UUID,
+    completed_at: datetime,
+    authority_frozen_at: datetime,
+    expected_candidate_ids: set[UUID] | None = None,
+) -> PriceSourceSelectionAuthority:
+    """One exact candidate query and historical-close policy path for builder and writer."""
+    request_sessions = set(calendar.sessions)
+    instrument = await session.get(Instrument, instrument_id, populate_existing=True)
+    if instrument is None or instrument.tick_size is None:
+        raise ValueError("source_policy_v1 instrument missing")
+    rows = tuple(
+        await session.execute(
+            select(PriceBarSetAuthority, PriceSeriesManifest)
+            .join(
+                PriceSeriesManifest,
+                PriceSeriesManifest.id == PriceBarSetAuthority.price_series_manifest_id,
+            )
+            .join(
+                BacktestAuthorityPublicationMarkRecord,
+                (BacktestAuthorityPublicationMarkRecord.domain == "price")
+                & (BacktestAuthorityPublicationMarkRecord.record_id == PriceBarSetAuthority.id),
+            )
+            .where(
+                PriceBarSetAuthority.source_policy_id == source_policy_id,
+                PriceBarSetAuthority.available_at <= completed_at,
+                PriceBarSetAuthority.created_at <= completed_at,
+                PriceSeriesManifest.created_at <= completed_at,
+                PriceSeriesManifest.instrument == str(instrument_id),
+                PriceSeriesManifest.adjustment == adjustment,
+                PriceSeriesManifest.interval == "1Day",
+                PriceSeriesManifest.id.in_(
+                    select(PriceBarRecord.price_series_manifest_id).where(
+                        PriceBarRecord.session >= calendar.range_start,
+                        PriceBarRecord.session <= calendar.range_end,
+                    )
+                ),
+                BacktestAuthorityPublicationMarkRecord.created_at <= authority_frozen_at,
+            )
+        )
+    )
+    if expected_candidate_ids is not None and {row[0].id for row in rows} != expected_candidate_ids:
+        raise ValueError("source_policy_v1 candidate set is incomplete")
+    candidates: list[PriceSeries] = []
+    series_by_authority_id: dict[UUID, PriceSeries] = {}
+    for authority_record, manifest in rows:
+        if authority_record.source != manifest.source:
+            raise ValueError("source_policy_v1 candidate provenance is inconsistent")
+        artifact = await session.get(
+            DataArtifact, manifest.data_artifact_id, populate_existing=True
+        )
+        database_bars = tuple(
+            await session.scalars(
+                select(PriceBarRecord)
+                .where(PriceBarRecord.price_series_manifest_id == manifest.id)
+                .order_by(
+                    PriceBarRecord.session,
+                    PriceBarRecord.observed_at,
+                    PriceBarRecord.revision,
+                )
+            )
+        )
+        request_bar_records = tuple(bar for bar in database_bars if bar.session in request_sessions)
+        if any(
+            bar.available_at < calendar.decision_times[bar.session] - timedelta(minutes=30)
+            for bar in request_bar_records
+        ):
+            raise ValueError("daily price candidate is available before official close")
+        base_complete = (
+            artifact is not None
+            and artifact.created_at <= completed_at
+            and authority_record.bar_count == manifest.row_count == len(database_bars)
+            and not any(bar.quality_flags for bar in database_bars)
+            and all(bar.created_at <= completed_at for bar in database_bars)
+        )
+        mode = cast(
+            Literal["fixture", "delayed", "read_only"],
+            "fixture"
+            if manifest.delivery_mode == "fixture"
+            else "delayed"
+            if manifest.delivery_mode == "delayed"
+            else "read_only",
+        )
+        provider_bars = tuple(
+            PriceBar(
+                instrument_id=InstrumentId(bar.instrument_id),
+                session=bar.session,
+                open=bar.open,
+                high=bar.high,
+                low=bar.low,
+                close=bar.close,
+                volume=bar.volume,
+                observed_at=bar.observed_at,
+                available_at=bar.available_at,
+                received_at=bar.received_at,
+                revision=bar.revision,
+                quality_flags=tuple(bar.quality_flags),
+            )
+            for bar in request_bar_records
+        )
+        provisional = PriceSeries(
+            source=manifest.source,
+            feed=manifest.feed,
+            adjustment=manifest.adjustment,
+            interval=manifest.interval,
+            mode=mode,
+            delivery_mode=manifest.delivery_mode,
+            quality="PARTIAL",
+            bars=provider_bars,
+        )
+        visible_at_historical_cutoffs = tuple(
+            bar
+            for bar in provisional.bars
+            if bar.available_at <= calendar.decision_times[bar.session]
+        )
+        historical_request_bars = canonical_price_bars(provisional, visible_at_historical_cutoffs)
+        canonical_request_bars = canonical_price_bars(
+            provisional,
+            tuple(bar for bar in provisional.bars if bar.available_at <= completed_at),
+        )
+        complete = (
+            base_complete and {bar.session for bar in historical_request_bars} == request_sessions
+        )
+        series = provisional.model_copy(
+            update={
+                "bars": canonical_request_bars,
+                "quality": "PASS" if complete else "PARTIAL",
+            }
+        )
+        candidates.append(series)
+        series_by_authority_id[authority_record.id] = series
+    policy = await load_source_policy_v1(session, instrument_tick_size=instrument.tick_size)
+    selection = apply_source_policy_v1(
+        candidates,
+        policy,
+        completed_at,
+        None,
+    )
+
+    matching = {
+        authority_id
+        for authority_id, series in series_by_authority_id.items()
+        if series == selection.selected
+    }
+    if len(matching) != 1 or selection.quality != "PASS" or selection.reasons:
+        raise ValueError("source_policy_v1 selection is unavailable or ambiguous")
+    return PriceSourceSelectionAuthority(
+        instrument_id=instrument_id,
+        adjustment=adjustment,
+        request_start_session=calendar.range_start,
+        request_end_session=calendar.range_end,
+        decision_time=completed_at,
+        tick_size=instrument.tick_size,
+        candidate_price_bar_set_authority_ids=tuple(
+            sorted(series_by_authority_id, key=lambda v: v.int)
+        ),
+        selected_price_bar_set_authority_id=next(iter(matching)),
+        quality=selection.quality,
+        reasons=selection.reasons,
+    )
 
 
 async def _validate_price_authorities(

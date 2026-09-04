@@ -123,8 +123,10 @@ async def load_frozen_point_in_time_dataset(
             BacktestAuthorityBundleRecord, authority_bundle_id, populate_existing=True
         )
         if (
-            bundle is None or bundle.completed_at > cutoff
-            or bundle.range_start != protocol.start or bundle.range_end != protocol.end
+            bundle is None
+            or bundle.completed_at > cutoff
+            or bundle.range_start != protocol.start
+            or bundle.range_end != protocol.end
             or bundle.completeness_status != "complete"
         ):
             raise ValueError("frozen bundle is missing, incomplete, or bound to another range")
@@ -221,50 +223,29 @@ async def _load_point_in_time_dataset(
 
 
 async def _load_bundle_dataset(
-    session: AsyncSession, bundle: BacktestAuthorityBundleRecord, as_of: datetime
+    session: AsyncSession,
+    bundle: BacktestAuthorityBundleRecord,
+    as_of: datetime,
+    *,
+    instrument_ids: tuple[UUID, ...] | None = None,
+    price_member_ids: set[UUID] | None = None,
+    benchmark_universe_id: UUID | None = None,
 ) -> PointInTimeDataset:
     """Shared reconstruction for first execution and sealed-run replay."""
-    calendar_record = await session.get(
-        ExchangeCalendarAuthorityRecord,
-        bundle.calendar_authority_id,
-        populate_existing=True,
-    )
-    if calendar_record is None or calendar_record.published_at > as_of:
-        raise ValueError("calendar authority is missing at the cutoff")
-    _require_visible((calendar_record,), as_of, label="calendar authority")
-    calendar_rows = tuple(
-        await session.scalars(
-            select(ExchangeCalendarSessionRecord)
-            .where(ExchangeCalendarSessionRecord.calendar_authority_id == calendar_record.id)
-            .order_by(ExchangeCalendarSessionRecord.session)
-        )
-    )
-    _require_visible(calendar_rows, as_of, label="calendar sessions")
-    calendar = ExchangeCalendarAuthority(
-        authority_id=calendar_record.id,
-        exchange=cast(Literal["XNYS"], calendar_record.exchange),
-        version=calendar_record.version,
-        source=calendar_record.source,
-        range_start=calendar_record.range_start,
-        range_end=calendar_record.range_end,
-        query_parameters=calendar_record.query_parameters,
-        completeness_status=cast(Literal["complete"], calendar_record.completeness_status),
-        content_hash=calendar_record.content_hash,
-        sessions=tuple(row.session for row in calendar_rows),
-        decision_times={row.session: row.decision_at for row in calendar_rows},
-    )
+    calendar = await _load_calendar(session, bundle.calendar_authority_id, as_of)
 
     collections = {
         kind: await _load_collection(session, bundle, kind, as_of)
         for kind in ("universe", "sector", "corporate_action")
     }
-    instrument_ids = tuple(
-        await session.scalars(
-            select(BacktestInstrumentAuthorityMemberRecord.instrument_id)
-            .where(BacktestInstrumentAuthorityMemberRecord.bundle_id == bundle.id)
-            .order_by(BacktestInstrumentAuthorityMemberRecord.instrument_id)
+    if instrument_ids is None:
+        instrument_ids = tuple(
+            await session.scalars(
+                select(BacktestInstrumentAuthorityMemberRecord.instrument_id)
+                .where(BacktestInstrumentAuthorityMemberRecord.bundle_id == bundle.id)
+                .order_by(BacktestInstrumentAuthorityMemberRecord.instrument_id)
+            )
         )
-    )
     instruments = tuple(
         await session.scalars(select(Instrument).where(Instrument.id.in_(instrument_ids)))
     )
@@ -283,7 +264,7 @@ async def _load_bundle_dataset(
         session, collections["corporate_action"], calendar.sessions, as_of
     )
     price_series, source_selections, bars, adjusted_bars = await _load_prices(
-        session, bundle, as_of
+        session, bundle, as_of, member_ids=price_member_ids
     )
 
     spy_alias = await session.get(
@@ -343,7 +324,11 @@ async def _load_bundle_dataset(
             )
         except ValueError:
             continue
-        if _authority_bundle_hash(candidate) == bundle.content_hash:
+        if (
+            snapshot.authority_id == benchmark_universe_id
+            if benchmark_universe_id is not None
+            else _authority_bundle_hash(candidate) == bundle.content_hash
+        ):
             matching_data.append(candidate)
     if len(matching_data) != 1:
         raise ValueError("equal-weight benchmark authority is missing or ambiguous")
@@ -389,23 +374,26 @@ async def _load_collection(
     record = await session.get(
         BacktestAuthorityCollectionRecord, collection_id, populate_existing=True
     )
-    collection_id_column, member_column = {
+    collection_id_column, member_column, created_column = {
         "universe": (
             BacktestUniverseAuthorityMemberRecord.collection_id,
             BacktestUniverseAuthorityMemberRecord.universe_snapshot_id,
+            BacktestUniverseAuthorityMemberRecord.created_at,
         ),
         "sector": (
             BacktestSectorAuthorityMemberRecord.collection_id,
             BacktestSectorAuthorityMemberRecord.sector_exposure_id,
+            BacktestSectorAuthorityMemberRecord.created_at,
         ),
         "corporate_action": (
             BacktestCorporateActionAuthorityMemberRecord.collection_id,
             BacktestCorporateActionAuthorityMemberRecord.corporate_action_id,
+            BacktestCorporateActionAuthorityMemberRecord.created_at,
         ),
     }[kind]
-    members = tuple(
-        await session.scalars(
-            select(member_column)
+    member_rows = tuple(
+        await session.execute(
+            select(member_column, created_column)
             .where(collection_id_column == collection_id)
             .order_by(member_column)
         )
@@ -413,6 +401,7 @@ async def _load_collection(
     if record is None or record.completed_at > as_of:
         raise ValueError(f"{kind} collection is missing at the cutoff")
     _require_visible((record,), as_of, label=f"{kind} collection")
+    _require_visible(member_rows, as_of, label=f"{kind} collection members")
     return AuthorityCollection(
         authority_id=record.id,
         kind=cast(Literal["universe", "sector", "corporate_action"], record.kind),
@@ -420,7 +409,7 @@ async def _load_collection(
         range_start=record.range_start,
         range_end=record.range_end,
         query_parameters=record.query_parameters,
-        member_ids=members,
+        member_ids=tuple(row[0] for row in member_rows),
         completeness_status=cast(Literal["complete"], record.completeness_status),
         content_hash=record.content_hash,
     )
@@ -617,6 +606,8 @@ async def _load_prices(
     session: AsyncSession,
     bundle: BacktestAuthorityBundleRecord,
     as_of: datetime,
+    *,
+    member_ids: set[UUID] | None = None,
 ) -> tuple[
     tuple[PriceSeriesAuthority, ...],
     tuple[PriceSourceSelectionAuthority, ...],
@@ -628,13 +619,14 @@ async def _load_prices(
         for item in bundle.source_selection_reports
     )
     selected_ids = {item.selected_price_bar_set_authority_id for item in source_selections}
-    member_ids = set(
-        await session.scalars(
-            select(BacktestPriceAuthorityMemberRecord.price_bar_set_authority_id).where(
-                BacktestPriceAuthorityMemberRecord.bundle_id == bundle.id
+    if member_ids is None:
+        member_ids = set(
+            await session.scalars(
+                select(BacktestPriceAuthorityMemberRecord.price_bar_set_authority_id).where(
+                    BacktestPriceAuthorityMemberRecord.bundle_id == bundle.id
+                )
             )
         )
-    )
     expected_member_ids = {
         authority_id
         for item in source_selections
@@ -739,3 +731,39 @@ def _require_visible(rows: tuple[object, ...], as_of: datetime, *, label: str) -
         for row in rows
     ):
         raise ValueError(f"{label} are not visible at the cutoff")
+
+
+async def _load_calendar(
+    session: AsyncSession, calendar_id: UUID, as_of: datetime
+) -> ExchangeCalendarAuthority:
+    calendar_record = await session.get(
+        ExchangeCalendarAuthorityRecord,
+        calendar_id,
+        populate_existing=True,
+    )
+    if calendar_record is None or calendar_record.published_at > as_of:
+        raise ValueError("calendar authority is missing at the cutoff")
+    _require_visible((calendar_record,), as_of, label="calendar authority")
+    calendar_rows = tuple(
+        await session.scalars(
+            select(ExchangeCalendarSessionRecord)
+            .where(ExchangeCalendarSessionRecord.calendar_authority_id == calendar_record.id)
+            .order_by(ExchangeCalendarSessionRecord.session)
+        )
+    )
+    _require_visible(calendar_rows, as_of, label="calendar sessions")
+    calendar = ExchangeCalendarAuthority(
+        authority_id=calendar_record.id,
+        exchange=cast(Literal["XNYS"], calendar_record.exchange),
+        version=calendar_record.version,
+        source=calendar_record.source,
+        range_start=calendar_record.range_start,
+        range_end=calendar_record.range_end,
+        query_parameters=calendar_record.query_parameters,
+        completeness_status=cast(Literal["complete"], calendar_record.completeness_status),
+        content_hash=calendar_record.content_hash,
+        sessions=tuple(row.session for row in calendar_rows),
+        decision_times={row.session: row.decision_at for row in calendar_rows},
+    )
+
+    return calendar
