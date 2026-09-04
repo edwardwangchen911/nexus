@@ -511,3 +511,7 @@ L1局部审计实际交付：A已将上述五提交串行集成为主线代码`4
 - 重新核对当前官方`/v1/corporate-actions`：事件分桶，无旧归一化器要求的`status/revision`；`data_quality=complete`不保证字段完整，日期窗口不能冒称ex-date窗口，币种空值不能默认USD。因此不把当前响应硬塞旧账本结构，也不先改迁移、source policy或历史authority。
 - 此切片先补真正可运行的有界GET→逐页私有原件/receipt→终态manifest。复用固定源HTTP与精确Decimal JSON解析，单证券/包含端点的日期窗、所有事件类型、显式`region=us/data_quality=all`；原件先保存后解析。仅显式null游标表示分页结束，预算截断、循环、限流或坏响应保留已收页并停止，不自动重试。
 - 无DB/对象服务/模型/订单/调度调用；不把分页耗尽写为事件完整或回测合格。命令与输出含义见[运行手册](../../runbooks/alpaca-corporate-actions-local.md)。测试覆盖实际HTTP路径/过滤条件、原件字节、未知字段与精度、分页与失败保留、凭据和错误脱敏；后续真实访问再验样本，不用离线fixture替代真实准入。
+
+分支验证：provider `ac16e2b`、CLI `6eb7c5c`（协调分支集成为`1b0b69f`）完成；协调分支独立执行完整providers目录与新增CLI测试共384项通过，Ruff/Mypy与实际`python -m nexus.ops.alpaca_actions_local --help`通过。其中20项CLI测试经正常配置入口、真实固定源HTTP层、合成HTTP响应到私有目录原件/receipt/manifest，覆盖中断、120秒截止、8MiB上限、重定向、限流/游标停止及零敏感输出。没有真实账户调用或DB/页面验收。
+
+扩展回归同时在未改动main复现一项旧测试失败：迁移正例仍硬编码0032，而当前0040。`3e191e3`仅将测试正例从本worktree实际Alembic目录独立取得，并拒绝旧0032、当前父迁移、空值和未知值；不从运行时常量生成预期，也不修改生产准入。当前仍待最终集中审查与A串行集成，不将分支通过报告为主线完成。
