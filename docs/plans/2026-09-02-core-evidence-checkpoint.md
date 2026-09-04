@@ -1440,3 +1440,33 @@ kill进程未知结果恢复或所有failedrun一律不能形成context-only草�
 API仍5b26c76/DB0039，未为Web提示重build，证据version-notice-summary.json保存在
 issuer-nav-view-20260904。资料源条件与完整正式优化/模拟/演化验收仍独立未满足，
 不以本批页面和恢复回归宣告全平台完成。
+
+## 新 NAV 三阶段研究与额度诊断（2026-09-04，北京时间）
+
+24fef39 已合入主线：阶段输出失败仅保存固定阶段、边界、校验类别和响应哈希，
+不保存异常原文或模型原始响应；生成提示明确已有文本约束，未放宽约束、预算或重试。
+56 单测、1 原生 Worker→PG→API 回归、Ruff/Mypy、生成合同检查及独立审查通过。
+历史 generic 失败仍原因未知，不用本次发现重标历史。
+
+在既有套餐和正常入口下，新 NAV 证据创建一次新研究，旧任务未重放。预检确认同一
+original P 和研究问题，正常工具同时读取发行商持仓观察与 NAV。research 阶段五角色
+已持久化，已知输入 19263 / 输出 934 tokens；critique 调用前以
+model_stage_allowance_exhausted 终止，attempt=max_attempts=1，active jobs=0，无意图、
+无自动重试、无券商采集。SDK 调用为一次，不能把 market_provider_calls=0 写成模型零调用。
+
+用原冻结输入和持久化角色输出离线重建 critique，禁用模型传输并给予未过期本地期限，
+精确复现输入估算 54418 + 已用 19263 = 73681 > 64000。当前估算使用 UTF-8 JSON
+字节数加 8192 余量，是保守输入预检，不等于模型实际 tokens 或套餐余额耗尽。
+第二阶段尚无响应，因此响应诊断为空。输入主要为真实 SEC 摘录、持仓与 NAV，未找到
+足以解决超限的无损重复正文；项目未安装 tokenizer。本轮不提高上限、猜换算系数、
+删必需证据或追加模型调用。后续须先完成可验证的输入计量/精简修复。
+
+DB→BFF→DOM 在 1440/390 核验新 run、研究 snapshot、资料 snapshot 一致，NAV 可见，
+状态 failed、无 intent、交易锁定、隐藏重跑且无横溢出。旧输出 hash 不变，新旧 P 与
+research_focus 相同；上下文仅 research_as_of、content_hash、evidence_ref_id 随新冻结变化。
+验收脚本最初比较整个上下文导致误报，改为核对稳定 P/问题和上述明确时间派生字段；
+离线重建须复用 domain_evidence 和 PromptAsset，不直接传 ORM 记录。
+
+私有证据位于 daily-v3-nav-20260904，目录 700、文件 600。主线代码 24fef39，原生
+一次性研究使用新主线代码；API 仍 5b26c76、业务库仍 0039，未重启或迁移。此次失败
+是输入额度边界，普通套餐内研究无需新增批准，且不阻塞其他已授权的本地实现。
