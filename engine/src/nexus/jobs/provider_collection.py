@@ -1855,6 +1855,7 @@ async def _collect_macro(
             or len(observations) > 10_000
         ):
             raise RuntimeError("FRED_PAYLOAD_INVALID")
+        revision_dates: dict[str, date] = {}
         for raw_observation in observations:
             if not isinstance(raw_observation, Mapping):
                 raise RuntimeError("FRED_PAYLOAD_INVALID")
@@ -1883,6 +1884,11 @@ async def _collect_macro(
                 ),
                 next_session_open=next_session_open,
             )
+            if normalized.revision in revision_dates and (
+                revision_dates[normalized.revision] != normalized.observed_on
+            ):
+                raise RuntimeError("FRED_OBSERVATION_IDENTITY_COLLISION")
+            revision_dates[normalized.revision] = normalized.observed_on
             existing = await context.session.scalar(
                 select(ResearchEvidenceRef).where(
                     ResearchEvidenceRef.source == "fred",
