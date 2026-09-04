@@ -1709,3 +1709,32 @@ canonical原件与DB完全一致、hash一致、evidence被精确研究快照冻
 位于local-stack-resume-20260904。证券ID、原件详情和账户事实未进入本记录。验收
 脚本初版误查Instrument.symbol与reader位置参数，均在只读阶段按现有别名模型和
 函数签名修正，未重放导入。保留已追加不可变证据与原件，不以删除数据回退。
+
+### 2026-09-04 FMP真实归档导入与冻结工具验收
+
+主线仅集成已交付FMP七项提交，未夹带FRED开发中改动；API实际运行代码为
+7a54e973088b152dc8d49f0e4b0bd807e310fb8b。完整pre-0042-20260904备份完成并核验
+manifest摘要后，业务库由0041升级0042_fmp_profiles；迁移前后历史业务行与检查点
+未变、活动Job为0。API镜像标签和源码摘要吻合，环境与端口保持原值，PG/MinIO
+容器和启动时间未变。live正常，认证readiness的DB/迁移/对象存储ready；手动模式
+worker unavailable仍使整体503，不为通过检查启动调度。
+
+复用既有真实FMP归档，经正常fmp_profile_local import一次导入；原件/receipt/
+canonical存储读回通过，独立核对DB content_hash与归档完全一致、精确reader相同。
+正常prepare_research_snapshot创建新冻结快照，原生get_security_snapshot中公司
+资料与归档全字段一致。旧真实Alpaca快照不含新FMP资料，原快照内容和revision未变，
+既有真实公司行动仍可精确读取。工具验收使用正常admit路径但整个准入事务回滚，
+没有持久化研究、预算预留或Job，也未调用模型；新证据和新快照正常保留。
+九类旧行摘要全部保留，研究输出/决策/组合快照未新增或改写，活动Job为0。
+
+该切片只提供公司背景：financial_fact_eligible和historical_backtest_eligible仍false，
+execution_locked仍true；没有价格、行业风险或历史完整性资格提升。当前未交付FMP
+API/UI，本次不宣称FMP页面验收。真实采集未重复；私有结果位于
+outputs/acceptance/fmp-0042-20260904，真实身份与原件详情不进入记录。
+
+本轮续接发现前批备份/构建实际上已完成：先检查完成标记与进程，再继续迁移，
+没有重放O_EXCL导入或重新采集。readiness返回为data.components，首次汇总读顶层
+导致显示null，改读现有响应包装后确认状态，无需重试业务请求。此类工具返回被
+截断或汇总字段错误，不当成任务失败、缺权限或新审批要求。历史额外三阶段预算
+审批已在本记录废止，不恢复为常规验收前置条件。新证据已冻结，降级必须遵守0042
+既有保护；保留备份与回滚镜像，不通过删除历史证据绕开降级限制。
