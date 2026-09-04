@@ -601,9 +601,13 @@ A2八增量按序集成为`e236ea5/beb23b2/27ff42f/4f93103/60191d9/afaaa08/de138
 普通 `collect.market` 固定过去 400 天与 `adjustment=all`，且不持久化空页，不能充当 Shadow 单日 raw 查询证明。新增专用 `shadow/source_queries.py`、`shadow/price_collection.py` 和 `ops/shadow_price_query.py` 单次入口，复用现有 provider、对象存储、`ingest_price_page`，不扩建调度系统。只接受明确已有 Shadow 根与交易日，证券集合来自冻结方案；不接收 `complete`、member IDs 或“分页耗尽”旗标。
 
 - [官方单证券 bars 合同](https://docs.alpaca.markets/us/reference/stockbarsingle-1)的 start/end 均包含端点，短页不证明终止；[官方 FAQ](https://docs.alpaca.markets/us/docs/market-data-faq)说明日 bar 的 timestamp 是纽约日初，不是收盘时刻。专用请求固定 `1Day/raw/sort=asc/limit=10000`、明确 feed 和 `asof=session` 的证券映射；纽约当日 00:00 至次日 00:00 减一秒转 UTC，使用 zoneinfo 处理 DST。只处理已结束自然日；不从时间戳推断实时性或最终收盘资格，旧 transport 默认行为不变。
-- 每页含空页保留实际路径/查询参数、证券与输入 token、原始 artifact ID/hash/字节数/实际接收时间、原件中输出 token、归一化 manifest/BarSet/成员。实际 producer 核对归档与数据库绑定、连续分页链、显式终止、日初时点/窗/证券一致，才能产生来源返回集合证明。缺页、循环、错误原件或成员、未知终止、晚到证据均不得生成完整证明。零条仅表示该来源在该窗口返回零条，不解释成停牌、退市或无公司行动。
+- 每页含空页保留实际路径/查询参数、证券与输入 token、原始 artifact ID/hash/字节数/实际接收时间、原件中输出 token、归一化 manifest/BarSet/成员。实际 producer 核对归档与数据库绑定、连续分页链、显式终止、日初时点/窗/证券一致，才能产生来源返回集合证明。缺页、循环、错误原件或成员、未知终止不得生成完整证明；晚于读取 cutoff 的证据不可采纳。已结束自然日之后收包可形成当时的返回集合证明，保持实际可用时间与 late_backfill，不回填旧 decision_at 或赋予历史价格用途资格。零条仅表示该来源在该窗口返回零条，不解释成停牌、退市或无公司行动。
 - `shadow_source_query_v2` 哈希绑定请求窗口和 collection receipt；`shadow/authority.py`、`shadow/canonical.py` 新增对应读取/哈希分支，旧 v1 严格字段、读法及 hash 不变，不回填历史。重放先核对现存证明再零 HTTP；首错停止，保留原始归档，不覆盖已有冻结资料。不新增表/依赖或 source policy。
 - TDD 单测覆盖终止/循环/DST/边界及无秘密输出；集中 PG 走底层 HTTP mock→实际 provider/持久化→producer→authority reader，覆盖多页、空页、错窗口/证券/hash、晚到、成员错配和重放。价格用途与新 Shadow 启动仍由原门禁决定。authority-reader 的合成事件对照须明确来自已有 fixture，不把当前完整性未知的 Alpaca actions 观测升级为完整事件集。
+
+专用来源校验补充：[官方 BarsResponse schema](https://raw.githubusercontent.com/alpacahq/alpaca-docs/master/oas/data/openapi.yaml)包含响应 `symbol`，新 v2 路径要求其与固定请求/receipt 的证券一致，缺失或错配均拒绝，不改旧通用 provider。集中审查核实：外部 Alpaca HTTP 沿用现有本机环境代理，本地 S3 独立禁用代理；原件之外，每页请求/接收凭证使用既有 DataSnapshot 的独立 `shadow_price_receipt_v1` 保存，最终 v2 引用并重验。坏 JSON 或后续页失败时仍能定位原件对应的 root/证券/path/query/input cursor/实际收包时间；该凭证不是完整查询证明，输出 token 由原件解析，完整证明与价格归一化保持整轮原子性。无新表、迁移或通用任务框架。
+
+同 key 的收包凭证还保存 idempotency key；已有该 key 的原件而没有 final proof 时，固定 `SHADOW_PRICE_INCOMPLETE_REPLAY`、零 HTTP，不能自动换 key 重放。成功 v2 须绑定该 key 的完整 receipt ID 集合，不能漏页或夹入别次采集。代码 `3288012` 已由 root 吸收为 `38dd8a4`，八个相关文件净差异为零；70 项单测（41 旧/29 新）、8 项新 PG（含真实 CLI）、5 项旧 v1/启动/推进/历史 replay PG、4 源 Mypy、8 文件 Ruff 和 diff 检查已通过。新 PG 明确验证失败原件与请求归属保留、同 key 失败重放与并发锁零 HTTP、提前 cutoff 非 complete、伪造成员/manifest 拒绝。正常结果仍 `price_use_authorized=false`、`execution_locked=true`，不调用 start/advance。最终两项 P2 及 key 闭合的定向复核通过后交 A 集成；此处不是实际来源或 S1 总闭环验收。
 
 #### B3 正常研究生成到正式消费者的 mock 验收
 
@@ -620,3 +624,17 @@ A2八增量按序集成为`e236ea5/beb23b2/27ff42f/4f93103/60191d9/afaaa08/de138
 本片联合验证：正常研究 6 项 PG 已通过，另既有正式生产者 15 项 PG 通过；14 项 formal inputs/research intents 单测、Ruff/Mypy 两生产文件通过。集中审查 `15f5289..177f996` 为 Spec/质量 Ready，无可操作 P1/P2；首次联合验证中新增测试把 reservation 的 `state` 写作 `status`，已按真实 ORM 修正并重跑 6 项全绿，没有修改产品预算合同。legacy 正例确实通过 prepare→admit→研究 worker→synthesis→正式 producer→优化 worker，原生生成并保留 R/hash，三方案输出仍 partial、费用未知、不可排名/执行；v3 mocked SDK 三阶段自称 sufficient 仍 partial 并被拒绝。市场/质量/账户资料是明确合成存储 fixture，只有研究及方案是通过正常生产路径生成，不声称上游全采集、v4、真实模型或真实来源已经验收。
 
 读取侧补验：同一个正常生成的 legacy 正例继续经过真实 HMAC 鉴权 GET `/internal/v1/optimization-proposals/{group_id}`，核对返回的新 group、冻结 snapshot、三方案及全部不可执行/不可排名、Shadow 不合格状态；追加后该完整正例隔离 PG 1 项通过（6.90s），Ruff/format/diff 通过。没有 mock API、另插 group 或修改生产代码；这是后端 API 读取证据，不替代 BFF/DOM、真实来源或 v4 验收。
+
+### 9.14 T1 冻结数据包的正常装配接续（开发合同）
+
+当前 `ops/backtest_once.run_once → authority_loader.load_frozen_point_in_time_dataset → run_backtest → persist_backtest_result → /internal/v1/strategies` 已存在且有实际 CLI/PG/GET 回归，不重建入口或引擎。缺口在上游：生产代码没有 `BacktestAuthorityBundleRecord` 的正常写入者；原正例由 `test_backtest_writer._seed_data_snapshot` 直接插入最终 bundle、snapshot 及成员。A 已确认无重叠写入。由既有独立研究 owner 接续实现，root 维护合同/协调，A 串行集成；与 S1 收尾不共享写入或测试库。
+
+- **范围与输入：** 新增小型 `backtest/bundle.py` 装配服务，复用现有 ORM、loader、policy、hash 和 writer。只接收已存 calendar、universe/sector/corporate_action collection、SPY alias、等权 benchmark universe snapshot 的 ID，以及既有 source/cost policy ID、baseline 区间、initial NAV 与有界 idempotency key。不接收 complete/PASS、caller 计算的 hash、source selection、收益或任意成员列表。benchmark 必须属于指定历史 universe collection，不能用当前名单代替。
+- **集合与价格：** 从已有集合读取精确成员，核对种类/范围、完整性、hash、来源与时点；所需证券来自历史 universe 与 SPY，raw/all 候选从数据库按已发布 source policy、原日历和 publication marks 确定性读取。复用 `persistence._validate_source_selection_authorities` 的候选集合、历史收盘可用性与 `apply_source_policy_v1` 逻辑，不另写一套宽松选择器。必要时抽取共享内部函数，旧 writer 必须继续使用同一验证。
+- **时间与并发：** 使用既有 `backtest-authority-global` 与 calendar/collection 锁顺序协调成员发布。新装配记录实际冻结时刻，不把新 bundle/snapshot 的 created/completed 时间改成旧数据日期；source selection 的 decision time 与 bundle freeze 保持原合同。新 CLI 装配后的读取时刻须不早于物化完成，不能重现研究同钟问题。旧已存 bundle 的 `--as-of` 读取行为不变。
+- **构造与复核：** 在内存构造 `PointInTimeDataset`，复用 `_authority_bundle_hash`、`_audited_data_hash` 与 snapshot payload 规范；可以抽取输入 hash 版本的 payload helper，保留原 `expected_data_snapshot_payload(data, result)` 的输出和调用兼容，不伪造 BacktestResult 或为组包重复运行整个回测。新 snapshot、bundle、price/instrument members 在同事务入库，并通过真实 frozen loader 和共享数据库权威核验后提交；禁止先提交占位 complete 根再补事实。旧历史 hash/读取/回放保持。
+- **幂等与失败：** 同 key 同输入先验证既有完整冻结包并复用，不重新选择后来数据；同 key 不同参数拒绝。不改写源集合、旧 snapshot/bundle 或 publication marks。非法集合、晚到/错绑定/成员不全/选择冲突时不留下新包或半成品 snapshot。合法组包可以独立存在；若随后回测失败，不声称整个 CLI 零写入，重入复用原包。
+- **正常消费者：** 在既有 `ops/backtest_once.py` 增加明确的准备后运行模式，旧“给 bundle/snapshot ID 运行”参数与语义兼容；新旧参数互斥，准备模式不接受倒填物化时间。构造完成后调用原 `run_once`，沿用实际成本假设、历史年限/晋级限制、`execution_locked=true` 与原 GET。不增加 Job、迁移、调度、交易或外部采集，也不改变 source policy。
+- **验证和交付：** 先写失败回归，隔离源 fixture 只构造已有 calendar/集合/价格等权威，不手插最终 bundle/snapshot、不 mock loader/policy/engine/writer。原 v1 policy 本身允许显式 fixture，无需放宽门禁。验证实际 CLI 准备→组包→原回测→持久化→鉴权 GET；覆盖重放/参数冲突、未知集合、晚到成员、错绑定/候选集、失败回滚及旧入口回放。聚焦 Ruff/Mypy/unit 与串行 PG，一轮集中 review 后定向复核，交 A 精确提交清单。
+
+本片不生产历史源集合；现有完整集合的正常上游生产仍是后续缺口，真实历史 universe、行业、公司行动及价格适用性仍须来源证据。合成集合只能证明组包/运行接线，不证明真实历史完整、多年 OOS、收益或晋级已达标。
