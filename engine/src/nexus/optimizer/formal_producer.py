@@ -296,7 +296,11 @@ async def admit_formal_optimization(
             raise ValueError("OPTIMIZATION_FORMAL_CUTOFF_UNAVAILABLE")
         baseline, report = await _baseline(session, request)
         assert baseline.as_of is not None
-        if request.strategy_references.market.decision_time != request.decision_cutoff_at:
+        # The strategy retains its calendar clock; research can finish later.
+        # Never retime market facts or the original calendar to the research cutoff.
+        if not baseline.as_of <= request.strategy_references.market.decision_time <= (
+            request.decision_cutoff_at
+        ):
             raise ValueError("OPTIMIZATION_FORMAL_BINDING_INVALID")
         cost = await load_cost_policy_v1(session)
         if request.cost_policy_id != cost.id or cost.available_at > request.decision_cutoff_at:

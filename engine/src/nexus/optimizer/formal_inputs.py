@@ -77,7 +77,9 @@ class FormalOptimizationInputs(_Closed):
     def _binding(self) -> "FormalOptimizationInputs":
         if (
             not self.valuation_time <= self.decision_cutoff_at <= self.materialized_at
-            or self.strategy_references.market.decision_time != self.decision_cutoff_at
+            or not self.valuation_time
+            <= self.strategy_references.market.decision_time
+            <= self.decision_cutoff_at
             or self.strategy_references_hash != self.strategy_references.content_hash
             or len({r.instrument_id for r in self.research_bindings}) != len(self.research_bindings)
             or len({r.run_id for r in self.research_bindings}) != len(self.research_bindings)

@@ -51,9 +51,7 @@ def test_explicit_null_formal_binding_cannot_fall_back_to_legacy():
         OptimizationConstructionPayload.model_validate({**payload, "formal_binding": None})
 
 
-def test_formal_manifest_rejects_backdated_computation_and_duplicate_research():
-    from nexus.optimizer.formal_inputs import FormalOptimizationInputs
-
+def _formal_payload():
     at = datetime(2026, 8, 28, 21, tzinfo=UTC)
     references = {
         "market": {
@@ -97,6 +95,13 @@ def test_formal_manifest_rejects_backdated_computation_and_duplicate_research():
             references
         ).content_hash,
     }
+    return payload, binding, at
+
+
+def test_formal_manifest_rejects_backdated_computation_and_duplicate_research():
+    from nexus.optimizer.formal_inputs import FormalOptimizationInputs
+
+    payload, binding, at = _formal_payload()
     result = FormalOptimizationInputs.model_validate(payload)
     assert result.research_bindings[0].research_data_snapshot_id == UUID(int=21)
     for changes in (
@@ -108,6 +113,47 @@ def test_formal_manifest_rejects_backdated_computation_and_duplicate_research():
     ):
         with pytest.raises(ValidationError):
             FormalOptimizationInputs.model_validate({**payload, **changes})
+
+
+@pytest.mark.parametrize("offset_seconds", [-120, -60, 0])
+def test_formal_manifest_keeps_original_strategy_clock_before_later_research_cutoff(
+    offset_seconds: int,
+):
+    from nexus.optimizer.formal_inputs import FormalOptimizationInputs
+    from nexus.strategy.snapshot_reader import FrozenStrategyReferences
+
+    payload, _, cutoff = _formal_payload()
+    market_time = cutoff + timedelta(seconds=offset_seconds)
+    payload["strategy_references"]["market"]["decision_time"] = market_time
+    references = FrozenStrategyReferences.model_validate(payload["strategy_references"])
+    payload["strategy_references_hash"] = references.content_hash
+
+    result = FormalOptimizationInputs.model_validate(payload)
+
+    assert result.strategy_references.market.decision_time == market_time
+    assert result.decision_cutoff_at == cutoff
+    assert result.research_bindings[0].actual_available_at == cutoff
+    assert result.materialized_at == cutoff + timedelta(seconds=1)
+    assert result.strategy_references_hash == references.content_hash
+
+
+@pytest.mark.parametrize("offset_seconds", [-121, 1])
+def test_formal_manifest_rejects_strategy_clock_outside_valuation_and_cutoff(
+    offset_seconds: int,
+):
+    from nexus.optimizer.formal_inputs import FormalOptimizationInputs
+    from nexus.strategy.snapshot_reader import FrozenStrategyReferences
+
+    payload, _, cutoff = _formal_payload()
+    payload["strategy_references"]["market"]["decision_time"] = cutoff + timedelta(
+        seconds=offset_seconds
+    )
+    payload["strategy_references_hash"] = FrozenStrategyReferences.model_validate(
+        payload["strategy_references"]
+    ).content_hash
+
+    with pytest.raises(ValidationError, match="OPTIMIZATION_FORMAL_BINDING_INVALID"):
+        FormalOptimizationInputs.model_validate(payload)
 
 
 @pytest.mark.asyncio
