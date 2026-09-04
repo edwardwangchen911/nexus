@@ -230,6 +230,9 @@ export function eligibleProposalGroup(
         ranking_eligible: true,
         dimensions: {
           ...item.comparison.metrics.dimensions,
+          volatility: { status: "known" as const, value: "0.14", reason: null },
+          drawdown: { status: "known" as const, value: "-0.08", reason: null },
+          correlation: { status: "known" as const, value: "0.30", reason: null },
           cost: { status: "known" as const, value: "0.001", reason: null },
         },
       },

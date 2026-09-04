@@ -135,6 +135,7 @@ describe("three-way proposal comparison", () => {
     const group = proposalGroup();
     group.proposals[2].positions = group.proposals[0].positions.map((position, index) => ({
       ...position,
+      target_weight: index === 0 ? "0.200" : "0.1000",
       action: index === 0 ? "reduce" : "increase",
       reason_code: index === 0 ? "STRATEGY_RESEARCH_PENDING" : "STRATEGY_SCOPE_PENDING",
     }));
@@ -189,6 +190,22 @@ describe("three-way proposal comparison", () => {
     expect(screen.getByRole("button", { name: "拒绝方案组" })).toBeVisible();
     const variant = ["保持现状", "最小调整", "策略目标"][proposalIndex];
     expect(screen.getByRole("region", { name: `${variant}仓位目标与完整性` })).toHaveTextContent(/暂不可比较|非可执行/);
+  });
+
+  it("fails closed when a ranked dimension is unknown despite an empty unknown_metrics list", () => {
+    const group = eligibleProposalGroup({
+      economic_comparison: { status: "compared", recommendation: "minimum_change", reasons: [] },
+      shadow_eligibility: { eligible: true, reasons: [] },
+    });
+    group.proposals[1].comparison.metrics.dimensions.volatility = {
+      status: "unknown", value: null, reason: "VOLATILITY_POST_PROPOSAL_NOT_PROVEN",
+    };
+    render(<ProposalComparison group={group} onStartShadow={vi.fn()} onReject={vi.fn()} />);
+
+    expect(screen.getByRole("region", { name: "经济比较结论" })).not.toHaveTextContent("比较结果：最小调整");
+    expect(screen.queryByRole("button", { name: "启动影子验证" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "拒绝方案组" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "最小调整仓位目标与完整性" })).toHaveTextContent("暂不可比较");
   });
 
   it("requires a separate explicit confirmation before starting shadow validation", async () => {

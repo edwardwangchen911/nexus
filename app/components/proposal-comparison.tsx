@@ -40,6 +40,10 @@ const metricRows = [
   ["cost", "成本占比", "ratio"],
   ["tax_impact", "税务影响", "state"],
 ] as const;
+const rankedDimensionNames = [
+  "top1", "top3", "hhi", "sector_exposure", "currency_exposure", "volatility",
+  "drawdown", "correlation", "liquidity", "turnover", "cost",
+] as const;
 
 export function ProposalComparison({ group, startShadowEnabled = true, rejectEnabled = true, onStartShadow, onReject }: Props): React.ReactElement {
   const [confirming, setConfirming] = useState(false);
@@ -318,15 +322,20 @@ function proposalIsComparable(proposal: Proposal): boolean {
     && !metrics.stale
     && !proposal.comparison.requires_fx
     && metrics.unknown_metrics.length === 0
+    && rankedDimensionNames.every((name) => metrics.dimensions[name].status === "known")
     && metrics.ranking_eligible
     && !proposal.comparison.non_executable
   );
 }
 
 function sameTargets(left: Proposal, right: Proposal): boolean {
-  const values = (proposal: Proposal) => proposal.positions.map((item) =>
-    `${item.instrument_id}:${item.target_weight}`).sort();
-  return JSON.stringify(values(left)) === JSON.stringify(values(right));
+  const values = (proposal: Proposal) => [...proposal.positions].sort((a, b) =>
+    a.instrument_id < b.instrument_id ? -1 : a.instrument_id > b.instrument_id ? 1 : 0);
+  const leftValues = values(left); const rightValues = values(right);
+  return leftValues.length === rightValues.length && leftValues.every((item, index) => (
+    item.instrument_id === rightValues[index]?.instrument_id
+    && decimalDifference(item.target_weight, rightValues[index].target_weight) === "0"
+  ));
 }
 
 function decimalDifference(left: string, right: string): string {
