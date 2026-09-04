@@ -1952,3 +1952,49 @@ exact_ten_to_one_factor_change_all_ohlcv=false保留。离线核对20个拆前OH
 私有目录outputs/acceptance/alpaca-prices-real-20260905包含nvda-raw、nvda-split和
 original-b3-current-split，原案例绑定存于current-started-private.json。下一步等
 supplemental producer交付后正常导入→新冻结→工具/API/BFF/DOM，不伪造研究已完成。
+
+
+### 2026-09-05 当前趋势真实导入、页面与一次新研究闭环
+
+最终GET严格读端59b0db2→b7de12e已串行合入；生产/测试对owner无净差，复用2PG、
+30APIunit、Mypy/Ruff及Jason集中/定向Ready结果。完整主线b7de12e构建为同revision
+API镜像并实际切换，环境/端口不变、PG/MinIO未重启、live正常。迁移前创建并验证
+nexus_local_backup_v1完整备份（188个已引用对象、residue0），随后正常升级0042→
+0043_current_price_trends。旧十一类行精确不变、active Jobs=0；用途政策精确1条。
+最终认证readiness为DB/migration/object_store ready，按需worker stale，整体503保留。
+
+首次真实import返回CURRENT_TRENDS_IMPORT_OUTCOME_UNKNOWN；结果文件、匹配evidence/
+snapshot/artifact及本次对象均不存在，确认没有提交或对象副作用，未自动重试。根因
+是验收wrapper先调用历史preflight.settings，把容器内OBJECT_STORE_ENDPOINT写入
+子进程环境；正常load_local_environment按process优先级覆盖本应localize到59000的
+地址，入口在首个put前按本地存储边界拒绝。主repo和DB55433均正确。这是验收wrapper
+污染，不是产品CLI、MinIO或原件失败。改用不设置配置环境的正常CLI，以主根自身配置
+执行一次有效修复验收，stored_context成功、model_called=false/research_created=false。
+迁移后脚本另有两次非产品错误：预期策略key写错使升级已提交后断言失败，以及复用
+readiness输出名被O_EXCL拒绝；均只读核实真实状态后继续，没有重跑迁移或覆盖证据。
+
+导入复用original-b3-current-split原253日归档，无新采集。严格reader、身份、已采纳
+日历、用途政策、canonical<2MiB、对象存储readback及DB exact reader全部通过；生成
+一份独立current trend evidence，不写PriceSeriesManifest/BarSet/历史回测资格。
+正常prepare显式绑定原portfolio snapshot，同原instrument/target/question，冻结新趋势
+ref且旧snapshot/run不回填。模型前正常v3 admit仅1个queued Job，max_attempts=1；临时
+SDK首阶段投影拦截/回滚证明新趋势进入实际frozen inputs，三阶段旧同案例长度预测
+56804<64000，仍不承诺未来实际用量。
+
+实际get_price_features从趋势ref返回split close、SMA20/200、RSI14及20日价格波动，
+五项均known、缺失session为0、证据用途保持非市场价格/非回测/执行锁定。该原案例
+没有既有raw价格权威，因此close也明确来自split趋势，未冒充可成交raw close。模型前
+受保护exact-run与admission API投影同一趋势；BFF及375/1440 DOM显示全部指标、证据、
+日期/缺口/限制，无横溢出，浏览器仅GET/HEAD/OPTIONS。旧run current_price_trends为空，
+原snapshot与intent完全不变。
+
+以上全部通过后，仅运行一次正常native worker。run completed、Job succeeded，attempt=1/
+max1；实际input_tokens=44412、output_tokens=3490，quality=partial、stance=watch，组合
+condition evaluations与冻结事实精确一致。完成后DB→严格GET→BFF→375/1440 DOM再次
+核对趋势、研究结果、待核验条件与交易锁定均可见；旧行保留、active Jobs=0。没有
+订单、方案、正式准入、资格提升或重试旧失败。私有证据在
+outputs/acceptance/current-trends-real-20260905，目录0700、文件0600已核验。
+
+本片完成当前趋势资料到一次真实研究结果页面的用户可见闭环；结果仍为partial/watch，
+不是充分证据的不调整结论，也不完成多年回测、真实候选方案或经济比较。后续按优先级
+接多维方案的真实基线与候选缺失原因；多年历史缺口只阻塞其自身，不再作全局总开关。
