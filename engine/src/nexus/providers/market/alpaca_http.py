@@ -36,7 +36,7 @@ class InstrumentSymbolResolver(Protocol):
 
 
 class SqlInstrumentSymbolResolver:
-    """Resolve one point-in-time ticker through the instrument master."""
+    """Resolve one ticker valid on an identity date, not a historical knowledge cutoff."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -91,10 +91,11 @@ class AlpacaHttpTransport:
         request: BarsRequest,
         cursor: str | None,
     ) -> AlpacaRawResponse:
+        identity_date = request.end.date()
         symbol = _validated_us_symbol(
-            await self._symbol_resolver.resolve(request.instrument_id, request.end.date())
+            await self._symbol_resolver.resolve(request.instrument_id, identity_date)
         )
-        query = _bars_query(request, cursor, self._feed)
+        query = _bars_query(request, cursor, self._feed, identity_date)
         raw = await self._client.get_bytes(
             ("v2", "stocks", symbol, "bars"),
             query,
@@ -106,6 +107,9 @@ class AlpacaHttpTransport:
         value = load_exact_json(raw)
         if not isinstance(value, Mapping):
             raise MarketProviderPayloadError("ALPACA_OBJECT_REQUIRED")
+        # stock_bars_resp_single requires symbol, including on an empty page.
+        if not isinstance(value.get("symbol"), str) or value["symbol"] != symbol:
+            raise MarketProviderPayloadError("ALPACA_RESPONSE_SYMBOL_INVALID")
         request_id = _optional_request_id(value.get("request_id"))
         return AlpacaRawResponse(
             payload=value,
@@ -118,11 +122,15 @@ def _bars_query(
     request: BarsRequest,
     cursor: str | None,
     feed: Literal["iex", "sip"],
+    identity_date: date,
 ) -> tuple[tuple[str, str], ...]:
     if request.end <= request.start:
         raise MarketProviderPayloadError("BAR_RANGE_INVALID")
     query = [
         ("adjustment", request.adjustment),
+        # Alpaca asof controls ticker-name mapping, not source availability.
+        ("asof", identity_date.isoformat()),
+        ("currency", "USD"),
         ("end", _format_utc(request.end)),
         ("feed", feed),
         ("limit", "10000"),

@@ -3280,7 +3280,8 @@ async def test_alpaca_market_collection_requires_explicit_page_exhaustion(
     async with factory() as session, session.begin():
         await _seed_universe(session)
     client = RecordingFixedOriginClient(
-        payload=b'{"bars":[],"next_page_token":null}' if terminal_present else b'{"bars":[]}'
+        payload=b'{"symbol":"AAPL","bars":[],"next_page_token":null}'
+        if terminal_present else b'{"symbol":"AAPL","bars":[]}'
     )
     provider = AlpacaMarketDataProvider(
         AlpacaHttpTransport(

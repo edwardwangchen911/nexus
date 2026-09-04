@@ -223,7 +223,9 @@ def test_default_production_bundle_constructs_only_three_exact_origins() -> None
 @pytest.mark.asyncio
 async def test_alpaca_factory_uses_configured_feed_and_delivery_authority() -> None:
     """Hard-coded SIP/delayed provenance would misstate the purchased data authority."""
-    recorder = RecordingFixedOriginClient(payload=b'{"bars": []}')
+    recorder = RecordingFixedOriginClient(
+        payload=b'{"symbol":"AAPL","bars":[],"next_page_token":null}'
+    )
     provider = build_alpaca_market_provider(
         _production_settings(),
         client=recorder,
