@@ -178,6 +178,8 @@ Responses 使用 `store=false`，工具续调用显式携带上下文；预算�
 
 ### 常用开发命令
 
+Alpaca 已结束交易日日线的显式本地原件采集见[运行手册](docs/runbooks/alpaca-prices-local.md)；归档完成不自动授予研究、回测或交易资格。
+
 ```bash
 npm install
 npm run lint
