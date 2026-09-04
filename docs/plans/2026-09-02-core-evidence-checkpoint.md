@@ -1839,3 +1839,49 @@ operator和threshold原样呈现，不把true/false当观察状态。逐条打�
 后通过，属于验收定位歧义，不改产品或业务数据。空条件语义沿用已有单测证明，
 不为真实验收人为删掉条件。本片仅完成C展示，B冻结事实/系统求值仍由原owner推进，
 原B3总体目标尚未完成。
+
+### 2026-09-05 冻结集中度事实实际交付及一次正常研究未完成
+
+联合包依次合入：ede8c2a→4cd5356、031f349→7b71879、b50c1cb→dd6427c，三项
+计划记录→9ca1c1d/c43755b/42a2596；生产、生成物及测试对最终918469c无净差。
+复用最终Ready的12PG、旧context21PG、62unit/静态/generated及C191unit/3E2E、
+联合TS/generated/14组件测试，不重复重型验证。API实际镜像和源码为
+42a25963936b473346053fe87d3a5dbcf9964cb5，Web同版已生效；schema0042不变，
+环境端口不变、PG/MinIO未重启。live正常，认证readiness三组件ready、worker
+unavailable整体503仍保留。更新后、任何新生产前，十一类历史行摘要及数量全不变。
+
+定位复用b3-research-current-20260903保存的原集中度问题，而非最近daily-v3样本：
+原target与原P分别不同于后者，原target在原P内确为同币最大，原P仍READY。显式
+绑定该原P正常prepare一次，同原证券/原问题产生新快照与hash。严格reader核验
+facts与policy引用，独立按Decimal precision=28重算原同币证券分母（不含现金），
+原比值和严格>15%/>30%结果完全一致；旧D/P/政策/旧focus未修改。新FRED宏观双
+引用正常冻结，原标的没有适用FMP，未把公开AAPL样本冒充原案例资料。
+
+在正常临时admit回滚事务中，原native v3委员会生成的实际首阶段请求经原wire/
+token/strict-schema guard通过，request hash核对一致；新facts和FRED确实进入
+SDK投影视图，facts解码后与冻结内容完全一致。三阶段预算预测使用旧同案例claim
+长度，仅作离线估算、不送入新模型，合计53060输入单位低于64000；输出上限8192。
+这不是未来实际用量承诺，各阶段仍使用原累计guard/deadline。临时准入全部回滚后，
+按既有授权正常新admit并仅执行一次native worker，不放宽上限、不自动重试。
+
+实际run/job均failed、attempt=max_attempts=1，native进程正常退出，active Job为0。
+首research阶段未取得有效角色输出，reason=model_usage_uncertain，输入/输出用量
+均unknown，不能记为0或宣称未消耗。已保存stage_input请求及冻结输入hash，实际
+请求与预检完全一致；无响应校验diagnostic、worker文本日志为空。任务耗时36.3秒
+接近单次35秒期限，但缺少底层异常分类，不能认定超时、认证、网络或schema是原因。
+未重试同一模型请求；该失败记录与新快照保留，不删除预算/历史记录掩盖未知状态。
+
+正常DB hydration→受保护exact-run API→BFF→375/1440实际DOM：原B3旧run保持
+原snapshot/intent/条件，新失败run绑定新snapshot和相同资料，失败原因与请求/
+冻结摘要可见，FRED原macro/calendar/hash可见，执行锁保持。无intent时不渲染虚假
+组合预警结果；因此本轮没有完成“真实模型intent观察结果区”验收，不能用既有
+fixture E2E替代。所有浏览器请求只读、admission读取0、外部访问0，页面无横溢出。
+原十一类行全部保留，决策/组合/宏观/财务事实行数及内容未变；新增仅正常研究快照、
+准入和失败研究相关记录，无采集、账户API、交易、优化重算或调度。
+
+私有证据位于outputs/acceptance/concentration-real-20260904，包括原case绑定、独立
+facts复算、实际SDK请求、预算预测、native退出、失败终态及真实API/DOM记录。
+本次将“最近v3≠原集中度案例”沉淀为证据定位反例；后续按原P/D/target追溯，不为
+取得true换问题。仍需诊断首阶段未返回用量的原因；传输异常分类当前未留存是明确
+可观测性缺口，不增加逐次审批或循环调用。代码/事实生产已交付，模型研究及真实
+观察结果展示未完成，v4/B3/正式经济比较未闭合。
