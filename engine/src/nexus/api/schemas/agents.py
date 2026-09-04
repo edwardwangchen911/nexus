@@ -260,6 +260,53 @@ class ResearchInputNavHistory(_StrictAgentSchema):
     total_return_eligible: Literal[False]
 
 
+class ResearchInputActionEvent(_StrictAgentSchema):
+    category: str = Field(min_length=1, max_length=255)
+    provider_event_id: str = Field(min_length=1, max_length=255)
+    page_number: int = Field(ge=1, le=100)
+    index: int = Field(ge=0, le=999)
+    symbol: str | None = Field(max_length=255)
+    old_symbol: str | None = Field(max_length=255)
+    new_symbol: str | None = Field(max_length=255)
+    process_date: date | None
+    ex_date: date | None
+    record_date: date | None
+    payable_date: date | None
+    declaration_date: date | None
+    rate: DecimalString | None
+    old_rate: DecimalString | None
+    new_rate: DecimalString | None
+    currency: str | None = Field(max_length=32)
+    unavailable_numeric_fields: tuple[Literal["rate", "old_rate", "new_rate"], ...] = Field(
+        max_length=3
+    )
+
+
+class ResearchInputActionObservation(_StrictAgentSchema):
+    evidence_ref_id: UUID
+    source: Literal["alpaca_action_observation"]
+    revision: str = Field(pattern="^[0-9a-f]{64}$")
+    content_hash: str = Field(pattern="^[0-9a-f]{64}$")
+    symbol: str = Field(min_length=1, max_length=255)
+    query_start: date
+    query_end: date
+    available_at: AwareDatetime
+    manifest_content_hash: str = Field(pattern="^[0-9a-f]{64}$")
+    page_count: int = Field(ge=1, le=100)
+    total_event_count: int = Field(ge=0, le=10000)
+    bound_event_count: int = Field(ge=0, le=10000)
+    unbound_event_count: int = Field(ge=0, le=10000)
+    truncated: bool
+    events: tuple[ResearchInputActionEvent, ...] = Field(max_length=32)
+    pagination_exhausted: Literal[True]
+    source_completeness: Literal["unknown"]
+    revision_semantics: Literal["local_content_hash"]
+    historical_backtest_eligible: Literal[False]
+    ledger_eligible: Literal[False]
+    execution_locked: Literal[True]
+    available_at_semantics: Literal["maximum_page_receipt_not_historical_availability"]
+
+
 class ResearchInputsSummary(_StrictAgentSchema):
     display_symbol: str | None = Field(max_length=100)
     filings: tuple[ResearchInputFiling, ...] = Field(max_length=20)
@@ -274,6 +321,9 @@ class ResearchInputsSummary(_StrictAgentSchema):
         default=(), max_length=1
     )
     issuer_nav_histories: tuple[ResearchInputNavHistory, ...] = Field(default=(), max_length=1)
+    corporate_action_observations: tuple[ResearchInputActionObservation, ...] = Field(
+        default=(), max_length=1
+    )
 
 
 class ResearchAdmissionResponse(_StrictAgentSchema):

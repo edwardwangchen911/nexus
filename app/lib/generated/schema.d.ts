@@ -3340,6 +3340,126 @@ export interface components {
              */
             unit: "ratio" | "basis_points" | "days" | "currency" | "boolean" | "count" | "state";
         };
+        /** ResearchInputActionEvent */
+        ResearchInputActionEvent: {
+            /** Category */
+            category: string;
+            /** Currency */
+            currency: string | null;
+            /** Declaration Date */
+            declaration_date: string | null;
+            /** Ex Date */
+            ex_date: string | null;
+            /** Index */
+            index: number;
+            /** New Rate */
+            new_rate: string | null;
+            /** New Symbol */
+            new_symbol: string | null;
+            /** Old Rate */
+            old_rate: string | null;
+            /** Old Symbol */
+            old_symbol: string | null;
+            /** Page Number */
+            page_number: number;
+            /** Payable Date */
+            payable_date: string | null;
+            /** Process Date */
+            process_date: string | null;
+            /** Provider Event Id */
+            provider_event_id: string;
+            /** Rate */
+            rate: string | null;
+            /** Record Date */
+            record_date: string | null;
+            /** Symbol */
+            symbol: string | null;
+            /** Unavailable Numeric Fields */
+            unavailable_numeric_fields: ("rate" | "old_rate" | "new_rate")[];
+        };
+        /** ResearchInputActionObservation */
+        ResearchInputActionObservation: {
+            /**
+             * Available At
+             * Format: date-time
+             */
+            available_at: string;
+            /**
+             * Available At Semantics
+             * @constant
+             */
+            available_at_semantics: "maximum_page_receipt_not_historical_availability";
+            /** Bound Event Count */
+            bound_event_count: number;
+            /** Content Hash */
+            content_hash: string;
+            /** Events */
+            events: components["schemas"]["ResearchInputActionEvent"][];
+            /**
+             * Evidence Ref Id
+             * Format: uuid
+             */
+            evidence_ref_id: string;
+            /**
+             * Execution Locked
+             * @constant
+             */
+            execution_locked: true;
+            /**
+             * Historical Backtest Eligible
+             * @constant
+             */
+            historical_backtest_eligible: false;
+            /**
+             * Ledger Eligible
+             * @constant
+             */
+            ledger_eligible: false;
+            /** Manifest Content Hash */
+            manifest_content_hash: string;
+            /** Page Count */
+            page_count: number;
+            /**
+             * Pagination Exhausted
+             * @constant
+             */
+            pagination_exhausted: true;
+            /**
+             * Query End
+             * Format: date
+             */
+            query_end: string;
+            /**
+             * Query Start
+             * Format: date
+             */
+            query_start: string;
+            /** Revision */
+            revision: string;
+            /**
+             * Revision Semantics
+             * @constant
+             */
+            revision_semantics: "local_content_hash";
+            /**
+             * Source
+             * @constant
+             */
+            source: "alpaca_action_observation";
+            /**
+             * Source Completeness
+             * @constant
+             */
+            source_completeness: "unknown";
+            /** Symbol */
+            symbol: string;
+            /** Total Event Count */
+            total_event_count: number;
+            /** Truncated */
+            truncated: boolean;
+            /** Unbound Event Count */
+            unbound_event_count: number;
+        };
         /** ResearchInputFact */
         ResearchInputFact: {
             /**
@@ -3708,6 +3828,11 @@ export interface components {
         };
         /** ResearchInputsSummary */
         ResearchInputsSummary: {
+            /**
+             * Corporate Action Observations
+             * @default []
+             */
+            corporate_action_observations: components["schemas"]["ResearchInputActionObservation"][];
             /** Display Symbol */
             display_symbol: string | null;
             /** Facts */

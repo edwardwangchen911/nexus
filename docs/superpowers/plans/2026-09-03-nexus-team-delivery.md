@@ -539,3 +539,12 @@ L1局部审计实际交付：A已将上述五提交串行集成为主线代码`4
 主线接续：集中审查Spec通过、Code quality Ready、无P1/P2后，A仅按指定顺序集成`6d292f0→25da974`、`96217be→f8a859e`、`a65cab9→7242b76`、`b20da9d→0c191a8`。A定向复核79项新模块/对象存储单测与6项隔离PG全部通过；PG包含4项正常import/失败原子性、0041合法冻结后拒绝不安全降级、空数据升级降级往返。8文件Ruff、7源Mypy、实际import帮助入口及diff检查通过。主线代码已至`0c191a8`，未重复取子代理原提交或合并整条协调分支历史。
 
 本轮仅代码与合成整链交付；业务库未应用0041、API未重启，运行仍沿用0040及原API版本。新的主机入口要求0041，联合更新前不能直接用于当前业务库；后续API/UI接线完成后由A按备份和兼容流程统一更新。真实样本、页面展示和历史回测准入仍未验收；不得从本轮测试推断已完成。
+
+### 9.10 A2 冻结公司行动研究页（开发合同）
+
+- 在既有 `ResearchInputsSummary` 增加可选默认空数组 `corporate_action_observations`（最多1项），不新建endpoint。只从精确快照绑定的source/object/revision/hash/时间/location引用调用既有canonical reader；新版本、错证券、截止之后或损坏的可选观测不进入旧快照，也不遮住有效SEC。准入和精确run回放共用现有读取路径，不采集、不调用模型、不改资格或历史。
+- 新DTO `ResearchInputActionObservation`：evidence_ref_id、source=`alpaca_action_observation`、revision、content_hash、symbol、query_start/query_end、available_at、manifest_content_hash、page_count、total_event_count、bound_event_count、unbound_event_count、truncated、events（最多32）。保留固定pagination_exhausted=true、source_completeness=unknown、revision_semantics=local_content_hash、historical_backtest_eligible=false、ledger_eligible=false、execution_locked=true和available_at_semantics=maximum_page_receipt_not_historical_availability。
+- 事件DTO `ResearchInputActionEvent` 保留category/provider_event_id/page_number/index/symbol/old_symbol/new_symbol、process_date/ex_date/record_date/payable_date/declaration_date、rate/old_rate/new_rate/currency。数值输出沿用DecimalString的40字符纯十进制合同；先按Decimal元组计算格式长度再转换，避免极大指数分配。超出合同的有效值只将相应展示字段置null，并在 `unavailable_numeric_fields` 列出rate/old_rate/new_rate；UI区别“原件数值超出展示范围”和“未知”，不修改canonical精度、不把未知币种补USD。
+- 页面复用ResearchInputs/ResearchPanel和独立只读 `ResearchActionObservation` 组件、现有格式函数、原生details及表格容器。行动独有资料不得标成SEC/发行商财报；显示查询窗（不冒称除息覆盖）、分页与绑定/未绑定数量、实际接收时间语义、观测定位、日期和来源数值；不推断单位、拆股比率或入账。显式说明完整性未知及回测/账本不可用，长标识可展开且窄屏不撑宽页面。旧响应无字段继续可读。
+- root独占API/schema/read-side辅助模块、生成合同与Python单测/PG回归；复用子agent在独立worktree独占ResearchInputs、ResearchPanel、新组件及其前端unit/e2e测试。A已确认无重叠写入并将隔离PG窗口交root，仍是唯一主线/共享服务owner。本片无迁移、依赖或运行配置变更；应用回滚即停用新展示，已有原件和冻结数据不删除。
+- TDD覆盖正常归档→冻结PG→实际API、actions-only/SEC混合、空事件/未绑定、32条截断、零/微小/超大指数、错误版本和坏可选观测。界面测试覆盖旧响应、混合来源、精确历史回放、只读刷新和手机/桌面。一次集中审查后A串行集成、统一应用0041/更新运行并验证现有业务不受影响；真实Alpaca样本未就绪仍单列，不以合成样本冒充真实验收。

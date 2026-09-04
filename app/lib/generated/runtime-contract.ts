@@ -5976,6 +5976,364 @@ export const runtimeContractSchemas = {
     "title": "ResearchCondition",
     "type": "object"
   },
+  "ResearchInputActionEvent": {
+    "additionalProperties": false,
+    "properties": {
+      "category": {
+        "maxLength": 255,
+        "minLength": 1,
+        "title": "Category",
+        "type": "string"
+      },
+      "currency": {
+        "anyOf": [
+          {
+            "maxLength": 32,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Currency"
+      },
+      "declaration_date": {
+        "anyOf": [
+          {
+            "format": "date",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Declaration Date"
+      },
+      "ex_date": {
+        "anyOf": [
+          {
+            "format": "date",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Ex Date"
+      },
+      "index": {
+        "maximum": 999,
+        "minimum": 0,
+        "title": "Index",
+        "type": "integer"
+      },
+      "new_rate": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "New Rate"
+      },
+      "new_symbol": {
+        "anyOf": [
+          {
+            "maxLength": 255,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "New Symbol"
+      },
+      "old_rate": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Old Rate"
+      },
+      "old_symbol": {
+        "anyOf": [
+          {
+            "maxLength": 255,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Old Symbol"
+      },
+      "page_number": {
+        "maximum": 100,
+        "minimum": 1,
+        "title": "Page Number",
+        "type": "integer"
+      },
+      "payable_date": {
+        "anyOf": [
+          {
+            "format": "date",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Payable Date"
+      },
+      "process_date": {
+        "anyOf": [
+          {
+            "format": "date",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Process Date"
+      },
+      "provider_event_id": {
+        "maxLength": 255,
+        "minLength": 1,
+        "title": "Provider Event Id",
+        "type": "string"
+      },
+      "rate": {
+        "anyOf": [
+          {
+            "maxLength": 40,
+            "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Rate"
+      },
+      "record_date": {
+        "anyOf": [
+          {
+            "format": "date",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Record Date"
+      },
+      "symbol": {
+        "anyOf": [
+          {
+            "maxLength": 255,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Symbol"
+      },
+      "unavailable_numeric_fields": {
+        "items": {
+          "enum": [
+            "rate",
+            "old_rate",
+            "new_rate"
+          ],
+          "type": "string"
+        },
+        "maxItems": 3,
+        "title": "Unavailable Numeric Fields",
+        "type": "array"
+      }
+    },
+    "required": [
+      "category",
+      "provider_event_id",
+      "page_number",
+      "index",
+      "symbol",
+      "old_symbol",
+      "new_symbol",
+      "process_date",
+      "ex_date",
+      "record_date",
+      "payable_date",
+      "declaration_date",
+      "rate",
+      "old_rate",
+      "new_rate",
+      "currency",
+      "unavailable_numeric_fields"
+    ],
+    "title": "ResearchInputActionEvent",
+    "type": "object"
+  },
+  "ResearchInputActionObservation": {
+    "additionalProperties": false,
+    "properties": {
+      "available_at": {
+        "format": "date-time",
+        "title": "Available At",
+        "type": "string"
+      },
+      "available_at_semantics": {
+        "const": "maximum_page_receipt_not_historical_availability",
+        "title": "Available At Semantics",
+        "type": "string"
+      },
+      "bound_event_count": {
+        "maximum": 10000,
+        "minimum": 0,
+        "title": "Bound Event Count",
+        "type": "integer"
+      },
+      "content_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Content Hash",
+        "type": "string"
+      },
+      "events": {
+        "items": {
+          "$ref": "#/components/schemas/ResearchInputActionEvent"
+        },
+        "maxItems": 32,
+        "title": "Events",
+        "type": "array"
+      },
+      "evidence_ref_id": {
+        "format": "uuid",
+        "title": "Evidence Ref Id",
+        "type": "string"
+      },
+      "execution_locked": {
+        "const": true,
+        "title": "Execution Locked",
+        "type": "boolean"
+      },
+      "historical_backtest_eligible": {
+        "const": false,
+        "title": "Historical Backtest Eligible",
+        "type": "boolean"
+      },
+      "ledger_eligible": {
+        "const": false,
+        "title": "Ledger Eligible",
+        "type": "boolean"
+      },
+      "manifest_content_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Manifest Content Hash",
+        "type": "string"
+      },
+      "page_count": {
+        "maximum": 100,
+        "minimum": 1,
+        "title": "Page Count",
+        "type": "integer"
+      },
+      "pagination_exhausted": {
+        "const": true,
+        "title": "Pagination Exhausted",
+        "type": "boolean"
+      },
+      "query_end": {
+        "format": "date",
+        "title": "Query End",
+        "type": "string"
+      },
+      "query_start": {
+        "format": "date",
+        "title": "Query Start",
+        "type": "string"
+      },
+      "revision": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Revision",
+        "type": "string"
+      },
+      "revision_semantics": {
+        "const": "local_content_hash",
+        "title": "Revision Semantics",
+        "type": "string"
+      },
+      "source": {
+        "const": "alpaca_action_observation",
+        "title": "Source",
+        "type": "string"
+      },
+      "source_completeness": {
+        "const": "unknown",
+        "title": "Source Completeness",
+        "type": "string"
+      },
+      "symbol": {
+        "maxLength": 255,
+        "minLength": 1,
+        "title": "Symbol",
+        "type": "string"
+      },
+      "total_event_count": {
+        "maximum": 10000,
+        "minimum": 0,
+        "title": "Total Event Count",
+        "type": "integer"
+      },
+      "truncated": {
+        "title": "Truncated",
+        "type": "boolean"
+      },
+      "unbound_event_count": {
+        "maximum": 10000,
+        "minimum": 0,
+        "title": "Unbound Event Count",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "evidence_ref_id",
+      "source",
+      "revision",
+      "content_hash",
+      "symbol",
+      "query_start",
+      "query_end",
+      "available_at",
+      "manifest_content_hash",
+      "page_count",
+      "total_event_count",
+      "bound_event_count",
+      "unbound_event_count",
+      "truncated",
+      "events",
+      "pagination_exhausted",
+      "source_completeness",
+      "revision_semantics",
+      "historical_backtest_eligible",
+      "ledger_eligible",
+      "execution_locked",
+      "available_at_semantics"
+    ],
+    "title": "ResearchInputActionObservation",
+    "type": "object"
+  },
   "ResearchInputFact": {
     "additionalProperties": false,
     "properties": {
@@ -6741,6 +7099,15 @@ export const runtimeContractSchemas = {
   "ResearchInputsSummary": {
     "additionalProperties": false,
     "properties": {
+      "corporate_action_observations": {
+        "default": [],
+        "items": {
+          "$ref": "#/components/schemas/ResearchInputActionObservation"
+        },
+        "maxItems": 1,
+        "title": "Corporate Action Observations",
+        "type": "array"
+      },
       "display_symbol": {
         "anyOf": [
           {
