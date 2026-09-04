@@ -13,10 +13,20 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.agents.proposal_context import FrozenProposalComparison, read_comparison_for_freeze
-from nexus.diagnostics.models import OptimizationNeed
+from nexus.diagnostics.assembler import _snapshot_bindings
+from nexus.diagnostics.models import DiagnosticEvidence, OptimizationNeed
+from nexus.diagnostics.policy import (
+    REAL_ADVISORY_POLICY_ID,
+    REAL_ADVISORY_POLICY_VERSION,
+    RealAdvisoryPolicy,
+    load_real_advisory_policy_v1,
+)
+from nexus.diagnostics.repository import _stored_decimal, load_frozen_snapshot
 from nexus.domain.decimal import DecimalString, decimal_to_string
+from nexus.domain.evidence import EvidenceRef
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.diagnostics import (
+    PortfolioDiagnosticEvidenceRefRecord,
     PortfolioDiagnosticItemRecord,
     PortfolioDiagnosticReportRecord,
 )
@@ -105,27 +115,44 @@ def _concentration_focus(
     items: list[PortfolioDiagnosticItemRecord],
     report: PortfolioDiagnosticReportRecord | None,
 ) -> ConcentrationResearchFocus | None:
-    if report is None or not positions or any(
-        p.currency != held.currency or p.current_price is None or p.current_price <= 0
-        or p.quantity <= 0 for p in positions
+    if (
+        report is None or report.policy_id != REAL_ADVISORY_POLICY_ID
+        or report.policy_version != REAL_ADVISORY_POLICY_VERSION
+        or not positions or len({p.instrument_id for p in positions}) != len(positions)
+    ) or any(
+        p.currency != held.currency or p.current_price is None
+        or not p.current_price.is_finite() or p.current_price <= 0
+        or not p.quantity.is_finite() or p.quantity <= 0 for p in positions
     ):
         return None
+    candidates = [item for item in items if (
+        item.diagnostic_code == "CONCENTRATION_TOP1"
+        and item.policy_scope == f"currency:{held.currency}"
+    )]
+    if len(candidates) != 1:
+        return None
     with localcontext() as context:
-        context.prec = 38
+        # Match the diagnostic Decimal calculation, before NUMERIC(38, 12) storage.
+        context.prec = 28
         values = {p.instrument_id: p.quantity * cast(Decimal, p.current_price) for p in positions}
         held_value = values.get(held.instrument_id)
         if held_value is None or held_value != max(values.values()):
             return None
         weight = held_value / sum(values.values(), Decimal(0))
-        matches = [item for item in items if (
-            item.diagnostic_code == "CONCENTRATION_TOP1"
-            and item.policy_scope == f"currency:{held.currency}"
-            and item.unknown_reason is None
-            and item.severity in {"warning", "critical"}
+        policy = RealAdvisoryPolicy.v1()
+        if weight > policy.single_name_critical:
+            severity, limit = "critical", policy.single_name_critical
+        elif weight > policy.single_name_warning:
+            severity, limit = "warning", policy.single_name_warning
+        else:
+            return None
+        matches = [item for item in candidates if (
+            item.unknown_reason is None
+            and item.unit == "ratio" and item.severity == severity
             and item.metric_value is not None and item.reference_limit is not None
-            and item.metric_value > item.reference_limit
+            and item.metric_value.is_finite() and item.reference_limit == limit
             # Database ratios use NUMERIC(38, 12).
-            and abs(item.metric_value - weight) <= Decimal("0.000000000001")
+            and item.metric_value == _stored_decimal(str(weight))
         )]
     if len(matches) != 1:
         return None
@@ -138,6 +165,74 @@ def _concentration_focus(
         observed_weight=decimal_to_string(trigger.metric_value),
         reference_limit=decimal_to_string(trigger.reference_limit),
     )
+
+
+async def _verified_concentration_focus(
+    session: AsyncSession,
+    snapshot: PortfolioSnapshotRecord,
+    sync: BrokerSyncRun,
+    held: PositionSnapshot,
+    positions: list[PositionSnapshot],
+    items: list[PortfolioDiagnosticItemRecord],
+    report: PortfolioDiagnosticReportRecord | None,
+    as_of: datetime,
+) -> ConcentrationResearchFocus | None:
+    """Verify only a new question; historical contexts retain their original bytes."""
+    focus = _concentration_focus(held, positions, items, report)
+    if focus is None or report is None or (
+        snapshot.status != "READY" or sync.status != "READY" or sync.cash_flow_quality != "PASS"
+        or sync.portfolio_id != snapshot.portfolio_id or sync.id != snapshot.sync_run_id
+        or report.portfolio_id != snapshot.portfolio_id
+        or report.portfolio_snapshot_id != snapshot.id or report.snapshot_as_of != snapshot.as_of
+        or report.created_at > as_of or report.optimization_need == "BLOCKED"
+        or len(items) > 100
+        or any(p.portfolio_snapshot_id != snapshot.id or p.created_at > as_of
+               or (p.provider_as_of is not None and p.provider_as_of > snapshot.as_of)
+               for p in positions)
+    ):
+        return None
+    try:
+        policy = await load_real_advisory_policy_v1(session)
+        if not policy.authority_refs or any(
+            ref.available_at > snapshot.as_of for ref in policy.authority_refs
+        ):
+            return None
+        frozen = await load_frozen_snapshot(
+            session, portfolio_id=snapshot.portfolio_id, snapshot_id=snapshot.id,
+        )
+        if {p.instrument_id for p in frozen.positions if p.currency == held.currency} != {
+            p.instrument_id for p in positions
+        }:
+            return None
+        bindings, _ = await _snapshot_bindings(session, frozen)
+        evidence = DiagnosticEvidence.model_validate(bindings)
+        assert evidence.snapshot is not None
+        expected = set(evidence.snapshot.refs)
+        for position in positions:
+            expected.update(evidence.position_prices[position.instrument_id].refs)
+        trigger = next(item for item in items if (
+            item.diagnostic_code == focus.diagnostic_code
+            and item.policy_scope == focus.policy_scope
+        ))
+        refs = list(await session.scalars(
+            select(PortfolioDiagnosticEvidenceRefRecord).where(
+                PortfolioDiagnosticEvidenceRefRecord.item_id == trigger.id,
+            )
+        ))
+        if any(ref.created_at > as_of or ref.available_at > snapshot.as_of for ref in refs):
+            return None
+        # TOP1 also carries instrument identity refs. Check the complete original
+        # valuation denominator, not unrelated market/issuer evidence or the full D hash.
+        actual = {
+            EvidenceRef.model_validate(ref, from_attributes=True) for ref in refs
+            if ref.object_id.startswith(("portfolio-snapshot:", "position-snapshot:"))
+        }
+        if actual != expected:
+            return None
+    except (ValueError, KeyError):
+        # Missing/invalid optional authority must not prevent generic research.
+        return None
+    return focus
 
 
 async def freeze_portfolio_context(
@@ -215,13 +310,16 @@ async def freeze_portfolio_context(
     valid = (
         cash is not None
         and cash.created_at <= as_of
+        and cash.cash_balance.is_finite()
         and cash.cash_balance >= 0
         and (held is not None or cash.cash_balance > 0)
         and (cash.provider_as_of is None or cash.provider_as_of <= snapshot.as_of)
         and all(
             p.created_at <= as_of
             and p.current_price is not None
+            and p.current_price.is_finite()
             and p.current_price > 0
+            and p.quantity.is_finite()
             and p.quantity > 0
             and (p.provider_as_of is None or p.provider_as_of <= snapshot.as_of)
             for p in currency_positions
@@ -303,7 +401,9 @@ async def freeze_portfolio_context(
         ),
         diagnostics_truncated=len(items) > 100,
         research_focus=(
-            _concentration_focus(held, currency_positions, items, report)
+            await _verified_concentration_focus(
+                session, snapshot, sync, held, currency_positions, items, report, as_of,
+            )
             if ready and valid and held is not None else None
         ),
         proposal_comparison=(
