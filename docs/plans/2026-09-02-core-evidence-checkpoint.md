@@ -1470,3 +1470,27 @@ research_focus 相同；上下文仅 research_as_of、content_hash、evidence_re
 私有证据位于 daily-v3-nav-20260904，目录 700、文件 600。主线代码 24fef39，原生
 一次性研究使用新主线代码；API 仍 5b26c76、业务库仍 0039，未重启或迁移。此次失败
 是输入额度边界，普通套餐内研究无需新增批准，且不阻塞其他已授权的本地实现。
+
+## 正式来源绑定入口运行集成（2026-09-04，北京时间）
+
+root 八个交接提交已逐个集成，代码与 API 镜像均为 85e3f9c，业务 schema 已升级
+0040_formal_decision_cutoff。旧现金上下文提交未重复合入。A 联合 39 项迁移、producer、
+CLI 和模型合同测试通过，生成客户端检查通过；升级前完整备份 pre-0040-20260904
+包含 176 个数据库引用对象，精确校验通过、临时残留 0。镜像及关键源码 hash 一致，
+环境与端口不变，PG/MinIO 未重启；保留 rollback-before-0040-20260904 镜像。
+0040 只加可空截止与校验，旧记录不回填。有正式绑定记录后不允许降级删除证据。
+
+当前真实 NAV 研究的实际终态输出沿 freeze_formal_research 只读入口返回
+OPTIMIZATION_FORMAL_RESEARCH_NOT_READY。缺合格完整研究，未构造完整策略引用请求，
+未用虚构参数调用 producer 来冒充正例；formal admission/group 均 0、active jobs 0。
+这证明真实拒绝路径，成功的 CLI→producer→worker→partial 组仍只由隔离合成案例证明。
+费用未知、diagnostic partial、不可排名及应用/DB 双层禁止 Shadow 的边界不变。
+
+真实 DB→BFF→DOM 的 1440/390 页面核验仍为相同 run/研究快照/资料快照，NAV 可见、
+failed、无 intent、交易锁定、隐藏重跑、无横溢出。五类历史业务表行 hash 全不变。
+API live 正常；readiness 的 database/migration/object_store 为 ready，worker unavailable
+导致整体 503，未为绿灯启动常驻任务。无模型、行情采集或业务数据写入。
+验收材料保存在受保护的 formal-0040-20260904。
+
+额外离线计量确认：同一 critique 请求用紧凑 JSON 可将阶段估算由 54418 降至 52692，
+加首阶段 19263 后仍为 71955，超过 64000。空格计量修复不能被宣称解决真实研究阻塞。
