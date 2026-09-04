@@ -625,7 +625,7 @@ A2八增量按序集成为`e236ea5/beb23b2/27ff42f/4f93103/60191d9/afaaa08/de138
 
 读取侧补验：同一个正常生成的 legacy 正例继续经过真实 HMAC 鉴权 GET `/internal/v1/optimization-proposals/{group_id}`，核对返回的新 group、冻结 snapshot、三方案及全部不可执行/不可排名、Shadow 不合格状态；追加后该完整正例隔离 PG 1 项通过（6.90s），Ruff/format/diff 通过。没有 mock API、另插 group 或修改生产代码；这是后端 API 读取证据，不替代 BFF/DOM、真实来源或 v4 验收。
 
-### 9.14 T1 冻结数据包的正常装配接续（开发合同）
+### 9.14 T1 冻结数据包的正常装配接续（实现与验收合同）
 
 当前 `ops/backtest_once.run_once → authority_loader.load_frozen_point_in_time_dataset → run_backtest → persist_backtest_result → /internal/v1/strategies` 已存在且有实际 CLI/PG/GET 回归，不重建入口或引擎。缺口在上游：生产代码没有 `BacktestAuthorityBundleRecord` 的正常写入者；原正例由 `test_backtest_writer._seed_data_snapshot` 直接插入最终 bundle、snapshot 及成员。A 已确认无重叠写入。由既有独立研究 owner 接续实现，root 维护合同/协调，A 串行集成；与 S1 收尾不共享写入或测试库。
 
@@ -639,3 +639,11 @@ A2八增量按序集成为`e236ea5/beb23b2/27ff42f/4f93103/60191d9/afaaa08/de138
 - **验证和交付：** 先写失败回归，隔离源 fixture 只构造已有 calendar/集合/价格等权威，不手插最终 bundle/snapshot、不 mock loader/policy/engine/writer。原 v1 policy 本身允许显式 fixture，无需放宽门禁。验证实际 CLI 准备→组包→原回测→持久化→鉴权 GET；覆盖重放/参数冲突、未知集合、晚到成员、错绑定/候选集、失败回滚及旧入口回放。聚焦 Ruff/Mypy/unit 与串行 PG，一轮集中 review 后定向复核，交 A 精确提交清单。
 
 本片不生产历史源集合；现有完整集合的正常上游生产仍是后续缺口，真实历史 universe、行业、公司行动及价格适用性仍须来源证据。合成集合只能证明组包/运行接线，不证明真实历史完整、多年 OOS、收益或晋级已达标。
+
+实现交付：共享时点/候选与输入验证 `398c956`（root `c199222`）、生产者/CLI/单测/运行手册 `4f051f5`（root `822fbd3`）、正常链与边界 PG `78c1ec4`（root `b29da5b`）。七个交付文件与原提交净差异为零。实际入口为既有 `nexus.ops.backtest_once --prepare-request-file`；普通 JSON 文件上限 1 MiB，拒绝符号链接、FIFO 与新旧模式混用，金额保持 Decimal。准备事务提交后调用原回测入口，失败后可保留合法冻结包，重入仍复用同包而不是重选来源。
+
+新晚到成员 PG 还复现 `_load_collection` 原先只取成员 ID、丢失关联 created_at 的漏洞；现共享 reader 同时读取关联时间并拒绝整个不可见集合，不过滤晚到成员后冒充完整。旧候选集合错误优先级与旧 CLI 缺参数错误码均经原回归恢复兼容。源集合完成时间仅要求不晚于实际冻结 cutoff，包/选择的等时、原历史可用性与 hash 门禁不变。
+
+验证：新 12 项 PG 加旧 CLI/writer/loader 38 项 PG，共 50 项通过（联合 49 项 164.03s，另两阶段失败 1 项 9.54s）；29 项单测、四源 Mypy、六文件 Ruff/format、help 与 diff 检查通过。实际 CLI→正常组包→原 run_once→持久化→鉴权 GET 已贯通；覆盖原包重放与后来数据不重选、并发单包、非法来源/未来集合或成员拒绝、准备回滚，以及策略尚不可用时一个合法包/零结果的两阶段失败。无 source policy/loader/engine/writer mock，无最终包或结果手工种入；只使用隔离的合成上游源集合与价格。
+
+集中审查代码层无剩余 P1/P2；最终测试通过，四个生产文件 SHA256 与审查指纹完全一致，满足集成 Ready 条件，不重跑同环境同代码的完整 PG。没有迁移、依赖、外部接口/模型调用或共享服务变更；旧业务数据不回写，停用新准备模式即可回退入口。真实来源资格和完整历史仍独立待验，本片不能替代 T1 全部历史验收或正式投资结论。
