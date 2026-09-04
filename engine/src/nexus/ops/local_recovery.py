@@ -430,7 +430,7 @@ class LocalRecovery:
         bindings = collect_bindings(rows)
         objects = self.output / "objects"
         objects.mkdir(mode=0o700)
-        store = S3ProviderEvidenceStore(settings)
+        store = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
         mapping = []
         for index, (uri, (digest, size)) in enumerate(sorted(bindings.items())):
             storage_key = urlsplit(uri).path.removeprefix("/")

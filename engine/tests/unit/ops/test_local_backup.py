@@ -23,6 +23,47 @@ ROW = {"uri": URI, "sha256": hashlib.sha256(CONTENT).hexdigest(), "byte_size": l
 
 
 @pytest.mark.asyncio
+async def test_local_object_recovery_bypasses_proxy_at_actual_store_boundary(tmp_path, monkeypatch):
+    from nexus.ops import local_recovery
+
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example.invalid:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example.invalid:8080")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    endpoint = "http://127.0.0.1:59999"
+    recovery = LocalRecovery(tmp_path, tmp_path)
+    recovery.output = tmp_path
+    recovery.environment = {
+        "OBJECT_STORE_ENDPOINT": endpoint,
+        "OBJECT_STORE_REGION": "us-east-1",
+        "OBJECT_STORE_BUCKET": "synthetic",
+        "OBJECT_STORE_ACCESS_KEY_ID": "synthetic",
+        "OBJECT_STORE_SECRET_ACCESS_KEY": "synthetic",
+    }
+    stores = []
+
+    def build_store(settings, **kwargs):
+        store = S3ProviderEvidenceStore(settings, **kwargs)
+        stores.append(store)
+
+        def read(*args, **options):
+            proxy = store._client._endpoint.http_session._proxy_config.proxy_url_for(endpoint)
+            assert proxy is None
+            return CONTENT
+
+        monkeypatch.setattr(store, "_read_bounded", read)
+        return store
+
+    monkeypatch.setattr(local_recovery, "S3ProviderEvidenceStore", build_store)
+    try:
+        assert await recovery.recover_objects([ROW]) == 1
+        assert (tmp_path / "objects/000000.bin").read_bytes() == CONTENT
+    finally:
+        for store in stores:
+            store._client.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [None, "missing", "cancel", "cleanup", "cancel_cleanup"])
 async def test_complete_marker_requires_objects_and_successful_cleanup(
     tmp_path, monkeypatch, failure
@@ -101,8 +142,8 @@ async def test_source_object_mismatch_prevents_complete_backup(tmp_path, monkeyp
     monkeypatch.setattr(
         local_recovery,
         "S3ProviderEvidenceStore",
-        lambda settings: S3ProviderEvidenceStore(
-            settings, client=SimpleNamespace(get_object=get_object)
+        lambda settings, **kwargs: S3ProviderEvidenceStore(
+            settings, client=SimpleNamespace(get_object=get_object), **kwargs
         ),
     )
     backup = LocalBackup(tmp_path / "bundle", tmp_path)
