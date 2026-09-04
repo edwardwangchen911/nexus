@@ -128,6 +128,11 @@ def shadow_source_query_content_hash(
     )
 
 
+def shadow_price_query_content_hash(payload: dict[str, object]) -> str:
+    """V2 also binds the complete request/receipt chain; v1 hashes are unchanged."""
+    return _content_hash({key: value for key, value in payload.items() if key != "query_hash"})
+
+
 def shadow_query_bundle_content_hash(values: tuple[object, ...]) -> str:
     """Hash already-canonical source summaries without provider payloads."""
     return _content_hash(

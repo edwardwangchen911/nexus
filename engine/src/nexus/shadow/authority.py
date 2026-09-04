@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.market.ingestion import MarketObjectStore
 from nexus.market.price_bar_authority import prepare_price_bar_set
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
@@ -406,6 +407,7 @@ async def load_shadow_session_input(
     observed_at: datetime,
     required_instruments: tuple[UUID, ...],
     initial_execution_instruments: tuple[UUID, ...],
+    query_artifact_reader: MarketObjectStore | None = None,
 ) -> ShadowSessionInput:
     """Select one complete exact authority set under the frozen source policy."""
     observed_at = _require_utc(observed_at, "observed_at")
@@ -481,6 +483,7 @@ async def load_shadow_session_input(
         kind="price_bars",
         instruments=instruments,
         cutoff=observed_at,
+        query_artifact_reader=query_artifact_reader,
     )
     event_proofs = await _load_query_proofs(
         session,
@@ -728,18 +731,53 @@ async def _load_query_proofs(
     kind: ShadowQueryKind,
     instruments: tuple[UUID, ...],
     cutoff: datetime,
+    query_artifact_reader: MarketObjectStore | None = None,
 ) -> tuple[_QueryProof, ...]:
     rows = tuple(
         await session.scalars(
             select(DataSnapshot).where(
-                DataSnapshot.schema_version == "shadow_source_query_v1",
+                DataSnapshot.schema_version.in_(
+                    ("shadow_source_query_v1", "shadow_source_query_v2")
+                ),
                 DataSnapshot.available_at <= cutoff,
             )
         )
     )
     parsed: list[_QueryProof] = []
     for row in rows:
-        proof = _parse_query_proof(row)
+        proof: _QueryProof | None
+        if row.schema_version == "shadow_source_query_v2":
+            if (
+                row.payload.get("shadow_group_id") != str(root.shadow_group_id)
+                or row.payload.get("session") != session_date.isoformat()
+                or row.payload.get("kind") != kind
+            ):
+                continue
+            if query_artifact_reader is None:
+                return ()
+            from nexus.shadow.source_queries import verify_price_query
+
+            try:
+                verified = await verify_price_query(
+                    session, row, query_artifact_reader, as_of=cutoff
+                )
+            except (ValueError, OSError, KeyError):
+                return ()
+            proof = _QueryProof(
+                snapshot_id=row.id,
+                source=verified.source,
+                kind=verified.kind,
+                delivery_mode=verified.delivery_mode,
+                complete=True,
+                query_hash=verified.query_hash,
+                instrument_ids=verified.instrument_ids,
+                member_ids=verified.member_ids,
+                negative_instrument_ids=verified.negative_instrument_ids,
+                available_at=row.available_at,
+                revision=row.revision,
+            )
+        else:
+            proof = _parse_query_proof(row)
         if (
             proof is not None
             and proof.kind == kind
