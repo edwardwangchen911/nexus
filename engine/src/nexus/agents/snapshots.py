@@ -17,6 +17,7 @@ from nexus.persistence.models.agents import AgentDataSnapshotEvidenceRecord
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
 from nexus.research.alpaca_actions_storage import read_action_observations
+from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.research.fmp_profile_storage import read_company_profiles
 from nexus.research.fred_storage import FredResearchObservation, read_fred_observations
 from nexus.research.sec_disclosures import SEC_RESEARCH_FORMS
@@ -116,6 +117,17 @@ async def prepare_research_snapshot(
         evidence = sec_refs[:keep] + retained + action_refs
     if not evidence:
         return None
+    trends = await read_current_price_trends(session, instrument_id=instrument_id, as_of=as_of)
+    if trends:
+        trend_refs = list(
+            await session.scalars(
+                select(ResearchEvidenceRef).where(ResearchEvidenceRef.id.in_(trends))
+            )
+        )
+        retained = [item for item in evidence if item.source != "sec"]
+        sec_refs = [item for item in evidence if item.source == "sec"]
+        keep = MAX_FROZEN_EVIDENCE - 2 - len(trend_refs) - len(retained)
+        evidence = sec_refs[:keep] + retained + trend_refs
     # A current vendor profile supplements research; it cannot create its base.
     profiles = await read_company_profiles(session, instrument_id=instrument_id, as_of=as_of)
     if profiles:
@@ -161,7 +173,7 @@ async def prepare_research_snapshot(
         payload["scope"] = "persisted_sec_filings_and_issuer_observations"
     if nav:
         payload["scope"] = "persisted_sec_filings_and_issuer_nav_history"
-    if actions or profiles or macro_ids:
+    if actions or profiles or macro_ids or trends:
         payload["scope"] = "persisted_research_observations"
     if context is not None:
         payload["portfolio_context"] = context[0].model_dump(mode="json")

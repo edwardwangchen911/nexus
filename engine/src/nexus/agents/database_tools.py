@@ -49,6 +49,7 @@ from nexus.quality.source_policy import (
     SOURCE_POLICY_VERSION,
 )
 from nexus.research.alpaca_actions_storage import action_tool_payload, read_action_observations
+from nexus.research.current_price_trends_storage import read_current_price_trends
 from nexus.research.fmp_profile_storage import read_company_profiles
 from nexus.research.fred_observations import SCHEMA as FRED_SCHEMA
 from nexus.research.fred_storage import FredResearchObservation, read_fred_observations
@@ -327,6 +328,17 @@ class _BoundDatabaseExecutors:
             if record.provider_object_id.startswith("price-bar-set:")
             and record.location.startswith("db://price-bar-set/")
         )
+        expected_trends = tuple(
+            record for record in self._frozen_evidence if record.source == "alpaca_current_trends"
+        )
+        requested = cast(tuple[str, ...], payload["features"])
+        # Split observations answer trend questions, never the existing raw market-price authority.
+        if expected_trends and (
+            not expected_price_evidence or any(name != "close" for name in requested)
+        ):
+            return await self._current_trend_features(
+                requested, tuple(row.id for row in expected_trends)
+            )
         if not expected_price_evidence:
             return self._result(
                 "get_price_features",
@@ -576,6 +588,40 @@ class _BoundDatabaseExecutors:
             reason=None if not features.missing else "insufficient_price_history",
         )
 
+    async def _current_trend_features(
+        self,
+        requested: tuple[str, ...],
+        evidence_ids: tuple[UUID, ...],
+    ) -> Mapping[str, object]:
+        documents = await read_current_price_trends(
+            self._session,
+            instrument_id=self._instrument_id,
+            as_of=self._decision_time,
+            evidence_ids=evidence_ids,
+        )
+        if len(evidence_ids) != 1 or set(documents) != set(evidence_ids):
+            return self._result(
+                "get_price_features",
+                [],
+                status="unavailable",
+                reason="current_price_trends_invalid",
+            )
+        evidence_id = evidence_ids[0]
+        document = documents[evidence_id]
+        item = document.model_dump(mode="json", exclude={"originals", "calendar", "purpose_policy"})
+        item["evidence_ref_id"] = str(evidence_id)
+        item["revision"] = item["content_hash"] = document.content_hash
+        item["as_of_session"] = item["last_observed_on"]
+        item["features"] = {name: document.features[name] for name in requested}
+        missing = [name for name in requested if document.features[name] is None]
+        item["missing_features"] = missing
+        return self._result(
+            "get_price_features",
+            [item],
+            status="partial" if missing else "ok",
+            reason="insufficient_price_history" if missing else None,
+        )
+
     def _price_evidence(
         self,
         authority: PriceBarSetAuthority,
@@ -668,9 +714,7 @@ class _BoundDatabaseExecutors:
                 **(
                     {
                         "vintage": observations[record.evidence_ref_id].vintage.isoformat(),
-                        "received_at": _timestamp(
-                            observations[record.evidence_ref_id].received_at
-                        ),
+                        "received_at": _timestamp(observations[record.evidence_ref_id].received_at),
                         "calendar_evidence_ref_id": str(record.calendar_evidence_ref_id),
                         "execution_locked": True,
                     }
@@ -754,10 +798,14 @@ class _BoundDatabaseExecutors:
     async def proposal_comparison(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         await self._require_common_scope(payload)
         context = await read_portfolio_context(
-            self._session, self._snapshot_id, self._instrument_id, self._decision_time,
+            self._session,
+            self._snapshot_id,
+            self._instrument_id,
+            self._decision_time,
         )
         if (
-            context is None or context.proposal_comparison is None
+            context is None
+            or context.proposal_comparison is None
             or not await self._current_evidence_authority_valid()
             or context.evidence_ref_id not in self._evidence_ids
         ):
@@ -765,12 +813,17 @@ class _BoundDatabaseExecutors:
         comparison = context.proposal_comparison
         if payload["proposal_group_id"] != comparison.proposal_group_id:
             raise ToolInputError("tool request exceeds frozen proposal authority")
-        return self._result("get_proposal_comparison", [{
-            **comparison.model_dump(mode="json"),
-            "economic_comparison": assess_frozen_comparison(comparison),
-            "evidence_ref_id": str(context.evidence_ref_id),
-            "content_hash": context.content_hash,
-        }])
+        return self._result(
+            "get_proposal_comparison",
+            [
+                {
+                    **comparison.model_dump(mode="json"),
+                    "economic_comparison": assess_frozen_comparison(comparison),
+                    "evidence_ref_id": str(context.evidence_ref_id),
+                    "content_hash": context.content_hash,
+                }
+            ],
+        )
 
     async def _require_snapshot_scope(self, payload: Mapping[str, object]) -> None:
         await self._require_common_scope(payload)
