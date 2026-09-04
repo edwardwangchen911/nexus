@@ -307,6 +307,22 @@ feed/delivery-mode 应与实际来源配置一致，不因传入参数就视为�
 不能据此声称已回滚或自动换 key 重试。先检查该 key 的已存记录和实际命令状态。
 停用只需停止调用模块；不删除或改写原件与既有证据。历史 v1 读取不变，本片无迁移。
 
+## FRED 接入与 Python wrapper 选择
+
+本地宏观原件采集复用已有 `httpx` 固定 origin GET 边界，不新增通用 SDK 兼容层。
+[FRED 官方契约](https://fred.stlouisfed.org/docs/api/fred/overview.html)是 REST/XML/JSON；
+社区库不是 Fed 维护的官方 SDK。本轮核对的
+[`fredapi`](https://github.com/mortada/fredapi/blob/master/fredapi/fred.py)将观测转成
+float/NaN，公开 metadata 接口不接受 vintage，也不返回逐页原始 bytes；
+[`FRB`](https://github.com/avelkoski/FRB/blob/master/fred/helpers/__init__.py)当前源码默认
+磁盘缓存和等待重试，底层未设置 timeout；
+[`fred`](https://github.com/zachwill/fred/blob/master/fred/core.py)也没有有界 timeout/响应尺寸。
+因此暂不新增这些依赖，避免为满足原件、实际收件时间与首错停止而覆写其传输内部。
+新采集只使用官方 [series metadata](https://fred.stlouisfed.org/docs/api/fred/series.html)
+及 [observations](https://fred.stlouisfed.org/docs/api/fred/series_observations.html)两端点，
+显式指定 vintage 和小观察窗，原件先私有保存；`units=lin` 是变换码，实际单位取 metadata。
+分页按 `count/offset` 核验，不把短页或 SDK 成功视为完整证据；历史 vintage 不回填今天才收件的可用时间。
+
 ## 更新所属本地 API
 
 确认实际 Compose project、源码提交和服务归属后，先为当前可寻址的镜像保留独立回滚

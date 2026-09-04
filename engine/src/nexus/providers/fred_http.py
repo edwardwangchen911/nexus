@@ -34,10 +34,16 @@ class FredHttpTransport:
 
     async def get(self, path: str) -> bytes:
         parsed = urlsplit(path)
-        if parsed.scheme or parsed.netloc or parsed.fragment or parsed.path not in {
-            _FRED_PATH,
-            _ALFRED_PATH,
-        }:
+        if (
+            parsed.scheme
+            or parsed.netloc
+            or parsed.fragment
+            or parsed.path
+            not in {
+                _FRED_PATH,
+                _ALFRED_PATH,
+            }
+        ):
             raise FredValidationError("FRED_PATH_NOT_ALLOWED")
         try:
             pairs = parse_qsl(
@@ -68,6 +74,48 @@ class FredHttpTransport:
             tuple(sorted(query.items())),
             (),
         )
+
+    async def fetch_vintage(
+        self,
+        *,
+        series: str,
+        vintage: date,
+        observation_start: date | None = None,
+        observation_end: date | None = None,
+        offset: int | None = None,
+    ) -> bytes:
+        """Opt-in bounded single-vintage query; the old transport seam is unchanged."""
+        if series not in FRED_SERIES:
+            raise FredValidationError("UNAPPROVED_SERIES")
+        query = {
+            "series_id": series,
+            "file_type": "json",
+            "realtime_start": vintage.isoformat(),
+            "realtime_end": vintage.isoformat(),
+        }
+        path: tuple[str, ...] = ("fred", "series")
+        if observation_start is not None or observation_end is not None or offset is not None:
+            if (
+                observation_start is None
+                or observation_end is None
+                or type(offset) is not int
+                or not 0 <= offset <= 32
+                or not observation_start <= observation_end <= vintage
+                or (observation_end - observation_start).days > 31
+            ):
+                raise FredValidationError("FRED_QUERY_INVALID")
+            path += ("observations",)
+            query.update(
+                observation_start=observation_start.isoformat(),
+                observation_end=observation_end.isoformat(),
+                units="lin",
+                output_type="1",
+                sort_order="asc",
+                limit="16",
+                offset=str(offset),
+            )
+        query["api_key"] = self._api_key.get_secret_value()
+        return await self._client.get_bytes(path, tuple(sorted(query.items())), ())
 
 
 def _unique_query(pairs: list[tuple[str, str]]) -> dict[str, str]:
