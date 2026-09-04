@@ -831,3 +831,19 @@ D 新限定调查结合 [Alpaca 单证券 bars](https://docs.alpaca.markets/us/r
 - 先做有界身份修复（B 独立 WT，A 不同时编辑这些文件）：`providers/market/alpaca_http.py` 已按 `request.end.date()` 解析本地 alias，而远端省略 asof 会按默认今天映射。新请求应显式传同一 identity-asof 和 USD，保留现有 resolver 的 US/USD 限制；按实际官方 response.symbol 合同核请求/响应身份，缺失或不匹配安全拒绝。实施者须再核官方必需性/更名返回语义，未证实时不凭猜测增加拒绝规则。
 - 验证覆盖 resolver→FixedOrigin transport→Alpaca provider 的正常新请求、历史更名日期对齐、分页同日期/币种、错身份/缺字段/空页、精确原件和安全错误；先红后绿，不改公共 BarsRequest schema、normalizer 金融计算、旧保存响应或 authority。旧 receipt 没有这些显式参数就仍保持未知，不追溯补写。
 - 后续调整序列正常归档/冻结、用途限定 authority、原工具特征与页面仍待真实证据和具体消费者合同；不能复用需要 Shadow 根的一日 raw 入口来伪造根，也不重复造 SDK。身份修复只是前置交付，不等于研究价格、A2、T1、订单或会计已准入；完整原计划继续保留。
+
+接续身份合同：默认仍按 `end.date()` 同时解析本地 ticker 与传远端 asof。真实只读预检发现既有 master 不能解析 NVDA 的 2024-06-14 身份；不造 alias 或回填有效期。官方 bars 文档明确 asof 用于身份而独立于价格区间，故专用归档入口允许显式 `--identity-asof`，本地 resolver、远端 query、receipt 和 reader 必须同值，不允许未来日期。可按本次已知身份查询旧窗口，不把它解释成当年的知识或发布证据。公开拆股样本依据 [NVIDIA 2024-06-07 SEC 8-K](https://www.sec.gov/Archives/edgar/data/1045810/000104581024000144/nvda-20240607.htm) 的 10:1 与 6/10 调整后交易日期；raw/split 对照只证明该新采集样本，不替换原 B3 案例或宣称完整历史事件账本。
+
+### 9.23 A2/B3：当前趋势输入的正常消费者合同
+
+**选择：** 使用现有研究补充资料路径，不为本片新增 BarSet v3。已核普通 ingestion 会将非 Fosun 自动签成旧 v1；旧 BarSet、manifest、冻结 guard 亦含固定版本/来源约束。因此本片复用 `DataSnapshot`、`DataArtifact`、`ResearchEvidenceRef`，使用独立 `alpaca_current_trends` 来源和专用 schema/object 前缀；不写 `PriceSeriesManifest`、`PriceBarSetAuthority`、`PriceBarRecord` 或回测 publication mark。这是当前趋势输入，不替代多年回测数据集或完整决策资格。
+
+- **B：生产与严格读取。** 复用有界归档 reader、原件存储和原 Alpaca 规范化，不复制 HTTP 或指标算法。只有 SIP/split/USD/1Day 可以成为本用途候选；raw 归档用于对照，不经本入口提升用途。新 canonical 绑定 instrument、解析身份日期、完整 query、各原件/receipt/hash、实际收件/可用时间、已采纳日历版本和固定用途政策。分页完成、交易日覆盖、指标预热分别判断；有缺口不补零、不跨缺日串接收益。历史回测、总收益、估值和订单资格均不可由该资料授予，执行保持锁定。
+- **日历与指标。** 复用已采纳 XNYS 日历，核正常已结束 session、重复/越界和实际覆盖。指标使用最后一个连续已覆盖交易日片段：SMA20/200 分别需 20/200 收盘，现有 RSI14 需 15 收盘、年化价格波动20需21收盘。不足指标明确缺失；不把该波动称总收益波动。计算复用 `agents/price_features.py` 的 Decimal 口径，必要时仅抽取同等纯 close 序列入口，不伪造 ORM 已持久化记录、不改旧算法。结束日与实际收到/可用时间分开；可用时间不得早于本次实收及所依赖政策/日历材料的可用时点。
+- **存储与迁移。** 正常显式 import CLI 用 caller transaction，原件先落现有受保护对象存储并 readback；同归档幂等，不覆盖旧内容。canonical/归一化数量有界，超限保留归档但不准入。新增一条窄 ownership guard 迁移（当前链从0042接续，实施前复核head），参照0042的专用来源分支核 canonical、原件、政策/日历引用、时间、instrument 与不可执行用途；不新增表，不借 FMP/FRED 身份。旧冻结数据存在时禁止撤掉其 reader/guard；回滚先停止新生产并保留读取兼容，不删事实或重写旧迁移。
+- **正常冻结与工具。** `prepare_research_snapshot` 仅为已有研究基底选择截止前的一份合法趋势资料，绑定原 research refs/manifest；新资料不能单独冒充完整研究。原 `get_price_features` 识别新用途精确引用并调用严格 reader，输出来源、口径、session、覆盖/缺失和实际指标，不能临时拼最新数据。close-only 与趋势请求的来源选择须在实际字段中可辨，不将 split close 当可成交现价。SDK 原输入投影必须保留此语义和引用。旧 run 不自动增加资料。
+- **资格与再核验。** 新 supplemental 完整性独立于原 PriceAuthority 判断；不得因新资料有效把 `price_authority_valid` 置 true 或改变 v1/v2/v3 合成、正式方案/Shadow/交易资格。worker 前后、精确研究读端及实际工具对已声明的新引用执行同一严格核验；引用存在但 canonical/原件/政策/日历损坏不得悄悄改读另一份。可选新资料缺失不遮蔽有效旧 SEC/FRED 等输入。
+- **C：API/BFF/页面。** 独立接现有研究输入区，消费同一 canonical reader 派生的 typed DTO，字段合同先与 B 对齐；不另算指标或由前端改资格。支持精确旧 run 与当前已持久化资料两个入口；旧字段缺失隐藏、新片段按状态显示日期/单位/缺口/来源证据，不依赖模型成功才能查看输入，但不把输入展示称为研究结论验收。保持页面只读、统一三位小数格式和小非零值，覆盖375/1440与证据键盘操作。
+- **验收。** B 从正常归档/导入→prepare/admit→实际只读工具和 SDK 输入→worker→DB/受保护 API 测试，mock 仅外部/模型边界；覆盖200日完整、缺日/预热不足、raw拒绝、身份/时点/hash/政策/日历篡改、新旧冻结、零新 BarSet/回测候选与不提权。C 覆盖真实 BFF sanitization→组件及页面。A 先完成公开拆股 raw/split 有界真实归档对照，再以正常来源完成代表性当前窗口的DB→API/BFF→页面和实际工具核验；最后按实质新增输入正常新研究，不重复旧失败调用或放宽原 guard。
+
+独立前置修复：C `e223375`（root `b259bc7`）增加固定 invocation 阶段/类别诊断。9项先红后修复，116 SDK unit、6隔离PG（4新调用失败+2旧validation）及Mypy/Ruff/diff通过；root集中审查无剩余P1/P2，已交A串行集成。无新表/DTO，旧usage/取消/无重试/validation形状保留；不恢复失败阶段计量，也不解释或回填旧失败原因。该代码交付不能代替本节趋势研究或集中度新结果的真实验收。
