@@ -664,3 +664,34 @@ A2八增量按序集成为`e236ea5/beb23b2/27ff42f/4f93103/60191d9/afaaa08/de138
 集中审查最终 Spec/Quality Ready，无剩余 P1/P2；代码审查后生产增量只有 exchange_calendars 的类型标注，最终指纹 calendar.py `9469b846`、backtest_once.py `2c24d0f2`。复核新增测试/文档后复用同代码验证，不重复整组测试。其他上游历史资料仍为明确 synthetic 测试输入，不能据此宣告真实历史、正式经济排名、Shadow/paper 激活或总目标完成。
 
 精确交付 `4a2c8cc`，root 吸收为 `555360c`；五个交付文件与原提交净差异为零，root 实际 help 与运行手册参数一致、diff 检查通过。无新迁移、依赖或业务运行变更，A 仍按单提交及本合同串行集成，不合并开发分支的同步历史。
+
+### 9.16 已配置 FMP/FRED/Alpaca 的正常真实接续
+
+用户确认三源均已配置并要求持续推进。D 已用公开样本各一次 GET 验证 Alpaca bars、FRED observations、FMP stable/profile 非空，但未保存原件；不重复连接探测，也不把该摘要导入业务。正常入口须另行采集并保存原件/receipt。三源目前为免费套餐，不改变主行情来源、开启调度/模型/交易或扩大付费权限。root 本次正常 Alpaca actions collector 已采集公开样本，现有 archive reader 核验 1 页 1 个显式绑定事件通过；完整性仍 unknown、historical/ledger false。A 唯一负责已停机本地必要栈恢复与该真实包的 import→DB/API/BFF/DOM，受保护引用不写本文。
+
+FMP 与 FRED 分别由既有独立 worktree 实现，root 单独负责共享研究快照/工具及 FMP 冻结 guard，A 串行主线集成。没有其他源调用或并行业务写入；重型隔离 PG 分时，普通单测可并行。
+
+#### FMP 公司背景观察
+
+- 既有 `/stable/profile` 的单 symbol 原件与无 key receipt 先保存，再精确解析唯一匹配响应；1 MiB 上限、固定 origin、首错停止、无重试。正常 `load_local_environment` 读取 FMP_API_KEY，不保存认证 URL，不修改凭据。只绑定当前既有 Instrument/唯一 ticker，已有标识冲突拒绝，不新增/重标证券或别名。
+- 独立 `fmp_company_profile` / `fmp_company_profile_v1`；`FmpCompanyProfile` 保存 instrument_id/symbol、可空 company_name/description/cik/isin/cusip/industry/sector、固定无密钥 source_url、received_at=available_at、raw/receipt 的 hash/长度。source_published_at/valid_until/sector_taxonomy 均 null，revision_semantics=local_content_hash，sector_risk_eligible/financial_fact_eligible/price_authority_eligible/historical_backtest_eligible=false，execution_locked=true。不投影价格、市值、beta，不进入 SEC facts、SectorExposure 或价格 authority。
+- 原件/receipt/canonical 使用既有 DataArtifact（source=fmp，schema=fmp_profile_raw_v1/fmp_profile_receipt_v1/fmp_company_profile_v1）；DataSnapshot/EvidenceRef 的 object=`profile:{instrument_id}:{symbol}`，revision/content_hash 为 canonical_bytes SHA256，三个时间均为实际 receipt。正常本地 collect/import 入口及存储复用现有对象服务；对象先于 DB，失败可能留下不可变孤立对象，不宣称全局回滚。
+- Python 合同：`read_company_profiles(session, *, instrument_id, as_of, evidence_ids=None)->dict[UUID,FmpCompanyProfile]`；`persist_company_profile(session,document,*,location)->ResearchEvidenceRef`。读端核原件/receipt/canonical 绑定、身份、时间和 false 资格。root 在已有 SEC/issuer/actions 基底非空时才附加 profile；profile-only 不创建研究快照，不绕过旧 price 或 v3 partial 门禁。正常精确 `get_security_snapshot` 增加 company_profile 项，旧 run 仅用原冻结 ID，不回退最新；坏 optional 不遮有效 SEC。
+- root 新增 `0042_fmp_profiles`，只增量扩展现有冻结 source guard 与 head；不改历史迁移、不新增表。绑定精确 instrument/object/revision/hash/时间、原件/receipt/canonical Artifact 的 source/schema/长度，拒未来、缺原件与资格提升。有已冻结 FMP 证据时拒绝降级；无该证据可恢复原 guard，再升级不损数据。业务迁移由 A 在备份/兼容验证后执行。
+
+#### FRED 单序列原件与宏观研究
+
+- 现有批任务是 collect.sec_macro，并非独立宏观入口；旧强制 observation.revision、同 series/revision 跳过其他日期、误把 units 变换码当单位的问题已由代码核实。新增小型单序列采集/导入，复用 `research/fx.py` 的证据/日历与既有 research_macro_v1 表，不建设通用采集框架。
+- `FredVintageRequest(series, observation_start, observation_end, vintage)` 限现有 8 序列及 31 天观察窗、显式历史 vintage；固定 HTTPS origin，读取 observations 完整分页和 series 元数据，max_attempts=1。原件先保存、无 key 的参数/分页/实际收包凭证完整；没有原件的 D 摘要不冒充来源。observations.units 必须为 lin 原值变换，实际单位来自匹配的 series metadata.units，不能从 fixture 或列名猜单位。
+- 每个经济日期身份独立，revision=`local-{vintage}:{observed}:{canonical_sha}`、object=`{series}:{revision}`，本地 hash 不称作上游修订号。小数精度保留；`.` 缺值保存于原件/canonical missing_dates，不写零；全缺值不产生合格行。available_at 至少为全部原件 receipt、calendar adoption 发布时间、vintage 后下一 XNYS 开盘的最大值；新取得的历史 vintage 不提前暴露到旧研究。
+- 合同为 `research/fred_observations.py` 的 request/parser、`research/fred_storage.py` 的 `import_fred_vintage(session, *, collection, store)->tuple[UUID,...]` 与 `read_fred_observations(session, *, as_of, evidence_ids=None)->dict[UUID,FredResearchObservation]`。值含 observation_id/calendar_evidence_ref_id、series/observed_on/value/unit/vintage/available_at 及 receipt/hash。读端核新 canonical/原件/metadata 与两份证据的精确可见性；旧 fx/legacy 数据保持原读法，不误认为新格式。
+- root 仅在原研究基底非空时附加宏观上下文，每个 series 取最新可见日期/版本并同时冻结 macro/calendar 两个 ID；保留原 issuer/action/profile、price/context 预留和 100 引用上限，不只截取 macro ID。`get_macro_snapshot` 精确读取双绑定并保留旧 v1 回放。旧批采另补同 identity 不同经济期间的 fail-closed 回归，不能继续静默漏行；不借本片启动旧批任务或扩大采集。
+
+#### 执行与验收顺序
+
+- [ ] 两 owner 按冻结合同先红后绿完成 adapter/原件/canonical/storage 的单位、时间、身份与安全单测；root 同时先用旧 guard 红测 FMP 合法绑定，再实现 0042/降级保护。
+- [ ] root 吸收合同稳定代码后接正常 prepare→精确工具，补 profile/macro-only 不启动研究、同 vintage 多日期、旧冻结不变、坏 optional/截断/未来/缺原件/重放与原子性 PG。HTTP/S3 只允许边界 fixture，不 mock guard/reader/normalizer 或手填最终研究。
+- [ ] 集中一轮审查、必要修复定向复核，逐个小提交交 A 串行集成；同代码环境合同的验证复用，增量记录在本节。
+- [ ] 用各源正常入口采集一份公开代表样本并保存原件，不重复早先连接探测；A 按已就绪依赖完成实际存储与精确消费者核验。页面/API展示若尚未接线须明确标为未完成，不能用工具测试声称 DOM 验收。
+
+这些来源只补当前可追溯研究材料；FMP profile、FRED 宏观或 Alpaca 当期行动观测均不证明历史股票池、行业风控映射、复权完整性、费用或投资方向充分性。真实经济比较与历史回测资格保持原门禁。
