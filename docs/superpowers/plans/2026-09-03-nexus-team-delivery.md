@@ -551,6 +551,12 @@ L1局部审计实际交付：A已将上述五提交串行集成为主线代码`4
 
 实施时核对出精确run GET原先并未返回inputs，不能假设它已有冻结原件消费者。root同时拥有 `api/routes/research.py`，为 `ResearchRunResponse` 增加默认null的inputs，并在既有GET hydrate中使用run本身的snapshot/instrument/decision_time读取；POST继续默认null，回放不查admission、不增加请求或回退最新资料。新旧观测双版本PG反例先复现字段缺失，再补接线；前端回放仅使用run.inputs与run.decision_time。A已确认该route独占分工。
 
+分支接线已交付：`fb42dca`定义DTO/有界数值投影，`dead164`接精确API读取，`df40dd7`更新运行手册，前端`aa5ba35`吸收为`33c2528`。旧无字段响应继续可读，32条截断/空与未绑定保留语义。集中审查发现的零值大指数误标与通用ex_date过度解释由`98d1abb`修复，三条零值和未知类别日期用例先红后绿；定向复核Spec通过、Code quality Ready，无剩余P1/P2。
+
+正常collector/归档/导入→隔离PG→真实API→真实BFF→浏览器同一合成案例验收完成，375/1440两宽度各测普通准入和精确run回放，共4项，无浏览器API路由mock。逐层evidence id、snapshot id和内容hash一致，显示精度0.123而API仍保留0.123456789012345678901；缺币种为未知。刷新仅GET，回放不查admission，8张相关业务/冻结表前后hash一致。HTTP来源和S3底层client明确为合成fixture，未调用真实账户/模型；隔离环境只确认数据库/迁移读取依赖ready，未启业务worker/外部S3服务，整体readiness仍unready，不把此次页面验收报告为完整运行就绪。临时API/Web已退出，临时库由现有隔离fixture清理；截图和逐层核对在协调worktree的`outputs/acceptance/actions-research-display-20260904/`。
+
+该实际入口验收另外复现import私有结果as_of的`+00:00`被既有BFF的Z格式校验拒绝。`863cfa7`仅将生产者输出改为同一UTC时点的Z后缀，保留微秒，不改冻结值或放宽BFF；正常CLI先红后4项PG定向通过，实际import结果未转换即通过上述BFF/DOM，定向审查Ready。整片36项扩大PG（包含8新展示及正常CLI）通过，修正后4项import另行复测；前端147研究单测、Python76相关单测、TypeScript、定向lint/Ruff/Mypy、生成合同与build通过。主线/共享业务库0041迁移与API更新仍待A串行集成后执行，不把分支验收或合成源当真实Alpaca准入。
+
 ### 9.11 B3 新冻结集中度研究前提核验（独立开发合同）
 
 本片解决现有 `_concentration_focus` 只核比例却信任诊断任意限额/政策字符串的问题。A已确认无人占用 `agents/portfolio_context.py` 与相关unit/PG测试；独立子agent拥有该范围，A仍唯一主线集成人。与A2展示分开提交，不更改共享API/schema、运行服务、数据库迁移或模型调用；PG窗口待协调。
