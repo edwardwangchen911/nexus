@@ -438,4 +438,8 @@ L1跨阶段恢复接续（root，`edward/nexus-daily-research-recovery`）：已
 
 A的新一次原生研究已独立记录：第一阶段已保存，第二阶段在调用SDK之前由本地阶段预算守卫拒绝，不是等待授权、网络失败或账户额度耗尽；旧研究不重放。普通本地独立实现继续，真实经济/执行门槛不随代码接线而降低。
 
+**研究输入体积修复接续：** 默认JSON空格与SDK紧凑wire计量不一致的小修复已合入，59单测及独立审查通过；真实输入仅省1726字节，仍超限，不能重跑来证明修好。A离线进一步验证现有工具结果的无损表示：仅在节省字节时将同键同键序对象数组改为columns/rows，并把所有工具都存在且JSON类型/值严格相等的六个wrapper字段（schema_version、instrument_id、data_snapshot_id、as_of、evidence_hash、portfolio_scope）提到common_scope。保留每工具status/reason/items、缺失/null区别、行序、单位/时点/来源和全部原始值；有异值或缺键不提取。含格式解释的同critique紧凑wire为35362字节，加原已用及8192余量为62817，仅证明这一阶段静态预检可行，不证明第三阶段/实际累计tokens合格。
+
+由独立wire worktree owner实现staged v2/v3的临时模型视图，原工具输出、冻结事实及其hash、数据库不变；stage request hash覆盖实际投影和解释，额度、余量、调用数、超时与首错停止不变。编码标记碰撞或整体无收益时保留原完整输入，不加依赖、计数框架或新配置。以无损逆变换、类型/缺失/null/异构边界、实际SDK发送与hash、恰好预算及超1字节拒绝、旧v1路径作回归。root维护方案并审查，A负责集成和用生产函数复测真实输入；未经该核验不重复模型调用，旧失败记录不改写。
+
 **D价格源收尾：** 既有Fosun/Alpaca/Tiingo/Alpha Vantage/Yahoo调查见checkpoint历史，不重试Yahoo限流或拿demo代替真实案例。2026-09-04有界核对[Alpaca官方FAQ](https://docs.alpaca.markets/us/docs/market-data-faq)确认，历史请求end早于现在至少15分钟时存在无订阅查询SIP的条件，不应说必须买实时套餐；[官方bars说明](https://docs.alpaca.markets/us/reference/stockbarsingle-1)明确各adjustment选项，但asof是证券映射日期，不是历史vintage，不能直接宣称历史PIT或精确总收益。日线VWAP和volume可能采用不同交易条件，不能把乘积当已证实精确成交额。项目已有固定主机/分页/归档/归一化adapter，缺的是有效访问和真实样本核验，不是全新框架。D所查项目声明配置与shell无非空Alpaca认证字段；A进一步核对实际API容器环境及正常`load_local_environment`启动入口，两认证字段也均无非空值，没有输出值或搜索其他账户目录。结论仅限本项目已知入口，不能推断用户没有其他账户。若既有有效访问可定位，下一步是一个已结束窗口raw样本及已知公司行动窗口对照，原件/实际单位/时段/调整用途分别验收；无既有访问则需用户决定是否接入第三方账户及接受条款。未注册、付费、扩权或静默切换现有source_policy。
