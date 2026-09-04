@@ -19,6 +19,7 @@ dependencies = [
     "pyarrow>=23.0.1,<24",
     "pydantic-settings>=2.10,<3",
     "sqlalchemy[asyncio]>=2.0,<3",
+    "tiktoken==0.14.0",
     "uuid6>=2025.0.1,<2026",
     "uvicorn>=0.35,<1",
 ]

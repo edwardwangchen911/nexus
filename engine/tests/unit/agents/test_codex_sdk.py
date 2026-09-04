@@ -499,11 +499,13 @@ async def test_staged_budget_exhaustion_stops_before_next_provider_call(monkeypa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("over_budget", [0, 1])
-async def test_staged_budget_uses_actual_compact_utf8_wire(monkeypatch, over_budget):
-    from nexus.agents import codex_staged
+async def test_staged_budget_uses_actual_compact_utf8_wire(monkeypatch, tmp_path, over_budget):
+    from nexus.agents import codex_staged, codex_token_budget
+
+    monkeypatch.setattr(codex_token_budget, "tokenizer_cache_path", lambda: tmp_path / "missing")
 
     request, evidence, prompts = _authority()
-    _, thread, result, _ = _sdk(monkeypatch)
+    client, thread, result, _ = _sdk(monkeypatch)
     frozen = {"status": "available", "items": [{"text": "合成资料"}] * 1000}
     tools = ReadOnlyTools(
         executors={
@@ -535,7 +537,18 @@ async def test_staged_budget_uses_actual_compact_utf8_wire(monkeypatch, over_bud
     wire_bytes = len(expected_wire.encode("utf-8"))
     assert wire_bytes > len(expected_wire)
     assert len(json.dumps(json.loads(expected_wire), ensure_ascii=False).encode()) > wire_bytes
-    first_stage_usage = 64000 - 8192 - wire_bytes + over_budget
+    strict_schema_bytes = len(
+        json.dumps(
+            thread.run.call_args.kwargs["output_schema"], ensure_ascii=False, separators=(",", ":")
+        ).encode()
+    )
+    instructions_bytes = sum(
+        len(client.thread_start.call_args.kwargs[name].encode())
+        for name in ("base_instructions", "developer_instructions")
+    )
+    first_stage_usage = (
+        64000 - 8192 - wire_bytes - strict_schema_bytes - instructions_bytes + over_budget
+    )
     assert first_stage_usage > 0
     sent.clear()
 
@@ -943,6 +956,89 @@ async def test_invalid_usage_is_not_zero_cost_success(monkeypatch):
     with pytest.raises(ValueError, match="CODEX_USAGE_INVALID"):
         await codex_sdk.invoke_codex({})
     client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over_budget", [0, 1])
+async def test_invoke_preflight_includes_actual_strict_schema_and_instructions(
+    monkeypatch, tmp_path, over_budget
+):
+    from nexus.agents import codex_token_budget
+    from openai import pydantic_function_tool
+
+    monkeypatch.setattr(codex_token_budget, "tokenizer_cache_path", lambda: tmp_path / "missing")
+    client, thread, _, configs = _sdk(monkeypatch)
+    await codex_sdk.invoke_codex({"text": ""})
+    schema = pydantic_function_tool(codex_sdk._Batch)["function"]["parameters"]
+    assert thread.run.call_args.kwargs["output_schema"] == schema
+    explicit_bytes = len(json.dumps(schema, ensure_ascii=False, separators=(",", ":")).encode())
+    explicit_bytes += sum(
+        len(client.thread_start.call_args.kwargs[name].encode())
+        for name in ("base_instructions", "developer_instructions")
+    )
+    payload = {"text": "x" * (64000 - 8192 - explicit_bytes - len('{"text":""}') + over_budget)}
+    configs.clear()
+    thread.run.reset_mock()
+    if over_budget:
+        with pytest.raises(ValueError, match="CODEX_INPUT_TOO_LARGE"):
+            await codex_sdk.invoke_codex(payload)
+        assert not configs
+        thread.run.assert_not_awaited()
+    else:
+        await codex_sdk.invoke_codex(payload)
+        assert thread.run.call_args.args[0] == codex_sdk.codex_request_wire(payload)
+
+
+@pytest.mark.asyncio
+async def test_original_wire_byte_guard_still_applies_with_small_token_count(monkeypatch):
+    from nexus.agents import codex_token_budget
+
+    monkeypatch.setattr(codex_token_budget, "payload_input_units", lambda *args, **kwargs: 1)
+    _, thread, _, configs = _sdk(monkeypatch)
+    with pytest.raises(ValueError, match="CODEX_INPUT_TOO_LARGE"):
+        await codex_sdk.invoke_codex({"text": "中" * 19000})
+    assert not configs
+    thread.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", [1, 2, 3])
+@pytest.mark.parametrize("usage_field, limit", [("input_tokens", 64000), ("output_tokens", 8192)])
+async def test_actual_usage_gate_still_rejects_after_preflight(
+    monkeypatch, version, usage_field, limit
+):
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    _, thread, result, _ = _sdk(monkeypatch)
+    setattr(result.usage.total, usage_field, limit + 1)
+    model = {
+        1: codex_sdk.CodexCommittee,
+        2: codex_staged.StagedCodexCommittee,
+        3: codex_staged.StructuredStagedCodexCommittee,
+    }[version](prompts=prompts, tools=_tools())
+    with pytest.raises(ValueError, match="CODEX_TOKEN_LIMIT_EXCEEDED"):
+        await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    assert not model._outputs
+    assert getattr(model.usage, usage_field) == limit + 1
+    thread.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_staged_oversized_wire_is_rejected_before_counting_a_provider_call(monkeypatch):
+    from nexus.agents import codex_staged, codex_token_budget
+
+    monkeypatch.setattr(codex_token_budget, "payload_input_units", lambda *args, **kwargs: 1)
+    request, evidence, prompts = _authority()
+    _, thread, _, configs = _sdk(monkeypatch)
+    tools = ReadOnlyTools(
+        executors={name: lambda payload: {"text": "中" * 19000} for name in ReadOnlyTools.names}
+    )
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=tools)
+    with pytest.raises(ValueError, match="CODEX_AGGREGATE_ALLOWANCE_EXHAUSTED"):
+        await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    assert model.usage.provider_calls == 0 and not configs
+    thread.run.assert_not_awaited()
 
 
 @pytest.mark.asyncio

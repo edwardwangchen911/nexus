@@ -17,6 +17,8 @@ from nexus.agents.codex_sdk import (
     CodexCommittee,
     _Claim,
     _Role,
+    codex_input_allowance,
+    codex_output_schema,
     codex_request_hash,
     codex_request_wire,
     invoke_codex,
@@ -325,7 +327,8 @@ class StagedCodexCommittee(CodexCommittee):
             "execute or rewrite supplied evidence. Cite only the allowed evidence indexes."
         )
         payload = project_staged_payload(payload)
-        estimated_input = len(codex_request_wire(payload).encode()) + 8192
+        wire = codex_request_wire(payload)
+        estimated_input = codex_input_allowance(wire, codex_output_schema(output_model))
         stage_input_hash = codex_request_hash(payload, output_model)
         frozen_inputs_hash = hashlib.sha256(
             json.dumps(
@@ -333,7 +336,8 @@ class StagedCodexCommittee(CodexCommittee):
             ).encode()
         ).hexdigest()
         if (
-            self.usage.input_tokens + estimated_input > MAX_INPUT_TOKENS
+            len(wire.encode()) > MAX_INPUT_TOKENS - 8192
+            or self.usage.input_tokens + estimated_input > MAX_INPUT_TOKENS
             or self.usage.output_tokens >= MAX_OUTPUT_TOKENS
             or self.usage.provider_calls >= len(STAGES)
             or self._deadline is None

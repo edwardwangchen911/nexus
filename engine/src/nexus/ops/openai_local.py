@@ -8,9 +8,11 @@ import json
 import os
 import stat
 import sys
+from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -20,6 +22,7 @@ from openai import AsyncOpenAI
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 
+from nexus.agents import codex_token_budget
 from nexus.agents.committee import load_prompt_assets
 from nexus.ops.fosun_local import _localize_compose_endpoints
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentPromptVersionRecord
@@ -41,6 +44,53 @@ _CONFIG: dict[str, str | int] = {
     "pricing_expires_at": "2026-10-02T00:00:00+00:00",
 }
 _KEY_PATH = Path(".secrets/nexus-openai-local/api-key")
+_TOKENIZER_TIMEOUT_SECONDS = 30
+
+
+async def prepare_tokenizer(*, allow_network: bool = True) -> dict[str, object]:
+    """Explicitly prepare one fixed public vocabulary, without loading app settings."""
+    result: dict[str, object] = {
+        "status": "prepared",
+        "tokenizer": "o200k_base",
+        "downloaded": False,
+        "execution_locked": True,
+    }
+    if codex_token_budget.local_vocabulary() is not None:
+        return result
+    if not allow_network:
+        raise ValueError("CODEX_TOKENIZER_NETWORK_DISABLED")
+    try:
+        async with asyncio.timeout(_TOKENIZER_TIMEOUT_SECONDS):
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(20, connect=5), follow_redirects=False, trust_env=False
+            ) as client:
+                async with client.stream("GET", codex_token_budget.VOCABULARY_URL) as response:
+                    if response.status_code != 200:
+                        raise ValueError("CODEX_TOKENIZER_DOWNLOAD_FAILED")
+                    data = bytearray()
+                    async for chunk in response.aiter_bytes(chunk_size=65536):
+                        if len(data) + len(chunk) > codex_token_budget.MAX_VOCABULARY_BYTES:
+                            raise ValueError("CODEX_TOKENIZER_TOO_LARGE")
+                        data.extend(chunk)
+        if not codex_token_budget.valid_vocabulary(bytes(data)):
+            raise ValueError("CODEX_TOKENIZER_HASH_INVALID")
+    except (httpx.HTTPError, TimeoutError) as error:
+        raise ValueError("CODEX_TOKENIZER_DOWNLOAD_FAILED") from error
+    path = codex_token_budget.tokenizer_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with NamedTemporaryFile(dir=path.parent, prefix=".o200k-", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            with suppress(FileNotFoundError):
+                temporary.unlink()
+    return {**result, "downloaded": True}
 
 
 def local_settings(
@@ -310,6 +360,7 @@ def main() -> int:
         "action",
         choices=(
             "setup",
+            "prepare-tokenizer",
             "status",
             "verify",
             "prepare-research",
@@ -357,6 +408,9 @@ def main() -> int:
             raise ValueError("CODEX_STRATEGY_RND_SETUP_ONLY")
         if args.strategy_rnd and args.staged:
             raise ValueError("CODEX_STRATEGY_RND_STAGED_CONFLICT")
+        if args.action == "prepare-tokenizer":
+            print(json.dumps(asyncio.run(prepare_tokenizer(allow_network=not args.skip_key))))
+            return 0
         if not (root / "engine/pyproject.toml").is_file():
             raise ValueError("OPENAI_REPOSITORY_ROOT_REQUIRED")
         settings = local_settings(
