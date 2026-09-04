@@ -1799,3 +1799,22 @@ live正常，认证readiness三组件ready/worker unavailable整体503保留。
 公开样本存在历史run，核对DB后改用已有真实run；另一处直接比较数据库尾零与
 页面字符串失败，按统一展示口径去尾零后核对通过。两者均为验收假设错误，未
 改产品/历史数据或重放业务操作；不把这些失败扩大为接口/权限缺失。
+
+### 2026-09-04 财务事实入库时点保护运行生效
+
+已集成2c3b2be等效5823120与§9.19记录9b367a6等效2c6e9b8；唯一生产改动为
+financial_facts工具查询增加created_at<=冻结decision_time，与既有API/prepare边界
+一致。生产与回归文件对最终审查版14420dd无差异，复用已通过4PG/2unit、Mypy/
+Ruff/格式及集中审查，不重跑上一片DOM全套，不插入真实业务late事实制造反例。
+
+API镜像/运行源码已核对2c6e9b8e5f5aa4c72dc0fcf7fb73c240d89da4eb；环境/端口
+保持、PG/MinIO容器与启动时间未变，schema仍0042。live正常，认证readiness
+DB/迁移/对象存储ready、worker unavailable整体503如实保留。只读使用已存在
+真实研究调用精确财务工具，所有返回事实均匹配原证券/证据/期间/值且created_at
+和accepted_at不晚于该run原decision_time；受保护exact-run GET返回原run/快照。
+真实样本核验只证明现有读取正常；late/equal/new-cutoff边界仍由已通过synthetic
+正常producer→prepare/admit→工具/HTTP回归证明。
+
+前后十一类行（含financial_facts）逐行摘要与行数完全未变，active Job为0；未采集、
+调用模型、新建研究、重算优化或改写历史输出。私有核验位于
+outputs/acceptance/financial-pit-20260904。该消费者修复不代表v4/B3或经济比较完成。
