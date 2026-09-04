@@ -1885,3 +1885,34 @@ facts复算、实际SDK请求、预算预测、native退出、失败终态及真
 取得true换问题。仍需诊断首阶段未返回用量的原因；传输异常分类当前未留存是明确
 可观测性缺口，不增加逐次审批或循环调用。代码/事实生产已交付，模型研究及真实
 观察结果展示未完成，v4/B3/正式经济比较未闭合。
+
+
+### 2026-09-05 Alpaca 身份修复与模型调用失败诊断运行生效
+
+Alpaca owner 2a9f5b0→e162ac4，文档→aa5c1a3/6d179d6：四个生产/测试文件与
+owner无净差，复用73unit、2collector PG及静态检查；6d179d6镜像已实际生效。
+C调用诊断e223375→bc54f26：五个文件与owner无净差，复用集中审查无P1/P2、
+116 SDK单测、6隔离PG、Mypy/Ruff结果，本地diff检查通过。当前实际API镜像与
+源码为bc54f26566002a2af391f88102d55cc592031e43；后续c70115b只合入趋势合同文档。
+
+两次切换均仅更新API，环境/端口不变、PG与MinIO未重启，live正常；认证readiness
+数据库/迁移/对象存储ready，按需worker为stale，整体503如实保留，不为变绿启动
+空worker。各自前后十一类历史行摘要和数量完全一致，active Jobs=0，schema0042。
+私有证据分别在outputs/acceptance/alpaca-identity-20260905及
+outputs/acceptance/invocation-diagnostics-20260905；后者回滚镜像为
+nexus-fosun-live-api:rollback-before-invocation-diagnostics-20260905，保留现有冻结
+集中度字段读取兼容性。未发起外部采集或实际模型研究。
+
+防复发修复直接落在SDK调用边界：终态保存白名单invocation_phase/kind，覆盖超时、
+缺少/无效用量等分类与取消/异常路径；旧validation序列化保持不变，不存原始响应。
+旧model_usage_uncertain没有底层证据，不能由新代码追认其原因；本次也不重复同一
+真实调用来验收诊断。既有套餐调用无需新增三阶段预算审批，按当前AGENTS执行。
+
+只读核实后续多维方案缺口：现有三候选/13维API与页面已实现，当前真实P仍无方案组；
+估值与所需FX满足，但minimum_change没有可证实减仓幅度，正常初稿仍会报
+DRAFT_NO_EVIDENCED_REDUCTION，页面入口目前依赖formal admission。后续最小切片应
+展示真实当前基线及候选缺失原因，再接非正式草稿能力；固定三候选DTO不能只加按钮
+就承载未知候选，不编造目标权重或宣称保持现状最优。成本/偏好不足阻止排序，不能
+扩大成阻止全部已知指标展示。此项保留接续，当前先完成趋势来源及已集成功能验收。
+NVDA现有主数据最早2025-07-27，不能按2024-06-14解析；显式identity_asof补充由B
+负责，Ready后按正常入口采集，不回填alias，也不把当前身份解释成历史PIT证明。
