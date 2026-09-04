@@ -701,6 +701,9 @@ async def test_staged_deadline_leaves_worker_time_to_persist_terminal_state(monk
     from nexus.agents import codex_staged
 
     request, evidence, prompts = _authority()
+    # This test reserves only 50ms for transport; tokenizer cold-start cost is
+    # covered separately and must not decide which deadline boundary is tested.
+    monkeypatch.setattr(codex_staged, "codex_input_allowance", lambda *args: 8192)
 
     async def stalled(*args, **kwargs):
         await asyncio.sleep(1)
