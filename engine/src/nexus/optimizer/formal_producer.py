@@ -28,7 +28,11 @@ from nexus.optimizer.formal_inputs import (
     read_formal_inputs,
 )
 from nexus.persistence.models.data import DataSnapshot, QualityReport
-from nexus.persistence.models.diagnostics import PortfolioDiagnosticReportRecord
+from nexus.persistence.models.diagnostics import (
+    PortfolioDiagnosticEvidenceRefRecord,
+    PortfolioDiagnosticItemRecord,
+    PortfolioDiagnosticReportRecord,
+)
 from nexus.persistence.models.optimization import (
     BaselineSelectionAuthorityRecord,
     OptimizationAdmissionAuthorityRecord,
@@ -37,6 +41,7 @@ from nexus.persistence.models.optimization import (
 from nexus.persistence.models.portfolio import (
     Account,
     BrokerSyncRun,
+    CashSnapshot,
     Portfolio,
     PortfolioSnapshotRecord,
 )
@@ -112,6 +117,16 @@ async def _baseline(
         or sync.completed_at > cutoff
     ):
         raise ValueError("OPTIMIZATION_FORMAL_BASELINE_NOT_READY")
+    late_cash = await session.scalar(
+        select(CashSnapshot.id)
+        .where(
+            CashSnapshot.portfolio_snapshot_id == record.id,
+            CashSnapshot.created_at > cutoff,
+        )
+        .limit(1)
+    )
+    if late_cash is not None:
+        raise ValueError("OPTIMIZATION_FORMAL_BASELINE_NOT_READY")
     snapshot = await load_frozen_snapshot(session, portfolio_id=portfolio.id, snapshot_id=record.id)
     if snapshot.positions:
         # Broker positions do not establish account/strategy rank continuity.
@@ -137,6 +152,29 @@ async def _baseline(
         or report.policy_version != "real_advisory_policy_v1"
         or report.optimization_need not in {"OPTIMIZATION_CANDIDATE", "RESEARCH_REQUIRED"}
     ):
+        raise ValueError("OPTIMIZATION_FORMAL_DIAGNOSTIC_NOT_READY")
+    late_item = await session.scalar(
+        select(PortfolioDiagnosticItemRecord.id)
+        .where(
+            PortfolioDiagnosticItemRecord.report_id == report.id,
+            PortfolioDiagnosticItemRecord.created_at > cutoff,
+        )
+        .limit(1)
+    )
+    late_evidence = await session.scalar(
+        select(PortfolioDiagnosticEvidenceRefRecord.id)
+        .join(
+            PortfolioDiagnosticItemRecord,
+            PortfolioDiagnosticItemRecord.id == PortfolioDiagnosticEvidenceRefRecord.item_id,
+        )
+        .where(
+            PortfolioDiagnosticItemRecord.report_id == report.id,
+            PortfolioDiagnosticEvidenceRefRecord.created_at > cutoff,
+        )
+        .limit(1)
+    )
+    if late_item is not None or late_evidence is not None:
+        # Do not silently filter a changed historical report into apparent completeness.
         raise ValueError("OPTIMIZATION_FORMAL_DIAGNOSTIC_NOT_READY")
     domain = await _read_report(session, report)
     if any(
@@ -189,6 +227,20 @@ async def _selection(
     return features, decision
 
 
+def _selection_provenance(references: FrozenStrategyReferences) -> list[str]:
+    return [
+        str(value)
+        for value in (
+            *references.raw_bar_set_ids,
+            *references.adjusted_bar_set_ids,
+            *references.sector_exposure_ids,
+            references.market.calendar_authority_id,
+            references.market.universe_snapshot_id,
+            references.market.quality_report_id,
+        )
+    ]
+
+
 async def admit_formal_optimization(
     session: AsyncSession,
     *,
@@ -218,6 +270,25 @@ async def admit_formal_optimization(
                 UUID(str(claim.response_payload["job_id"])),
                 UUID(str(claim.response_payload["data_snapshot_id"])),
                 UUID(str(claim.response_payload["admission_authority_id"])),
+                True,
+            )
+        # The existing Job key is global to the frozen input, not to the caller's
+        # request key. Reuse its whole A/admission binding before materializing.
+        canonical, canonical_owner = await claim_or_lock(
+            session,
+            "optimizer-formal-producer",
+            "optimization-formal-inputs",
+            digest,
+            digest,
+            FORMAL_SCHEMA,
+        )
+        if not canonical_owner:
+            claim.response_payload = dict(canonical.response_payload)
+            await session.flush()
+            return FormalOptimizationAdmission(
+                UUID(str(canonical.response_payload["job_id"])),
+                UUID(str(canonical.response_payload["data_snapshot_id"])),
+                UUID(str(canonical.response_payload["admission_authority_id"])),
                 True,
             )
         now = await session.scalar(select(func.clock_timestamp()))
@@ -283,17 +354,7 @@ async def admit_formal_optimization(
         )
         session.add(data)
         await session.flush()
-        provenance = [
-            str(value)
-            for value in (
-                *request.strategy_references.raw_bar_set_ids,
-                *request.strategy_references.adjusted_bar_set_ids,
-                *request.strategy_references.sector_exposure_ids,
-                request.strategy_references.market.calendar_authority_id,
-                request.strategy_references.market.universe_snapshot_id,
-                request.strategy_references.market.quality_report_id,
-            )
-        ]
+        provenance = _selection_provenance(request.strategy_references)
         selection_hash = canonical_hash(
             {
                 "data_snapshot_hash": data.revision,
@@ -367,6 +428,7 @@ async def admit_formal_optimization(
             "data_snapshot_id": str(data.id),
             "admission_authority_id": str(authority.id),
         }
+        canonical.response_payload = dict(claim.response_payload)
         await session.flush()
         return FormalOptimizationAdmission(queued.job_id, data.id, authority.id, False)
 
@@ -434,6 +496,7 @@ async def load_formal_admission_authority(
             "decision": decision.model_dump(mode="json"),
         }
     )
+    provenance = _selection_provenance(inputs.strategy_references)
     if (
         selection is None
         or selection.data_snapshot_id != data.id
@@ -447,8 +510,12 @@ async def load_formal_admission_authority(
         or selection.selected_instrument_ids != [str(t.instrument_id) for t in decision.targets]
         or {str(t.instrument_id) for t in decision.targets}
         - {str(r.instrument_id) for r in inputs.research_bindings}
-        or {c["instrument_id"] for c in selection.candidates}
-        != {str(i.instrument_id) for i in features.snapshot.instruments}
+        or selection.evidence_refs != provenance
+        or selection.candidates
+        != [
+            {"instrument_id": str(item.instrument_id), "provenance_refs": provenance}
+            for item in features.snapshot.instruments
+        ]
     ):
         raise ValueError("OPTIMIZATION_FORMAL_SELECTION_INVALID")
     return LoadedProposalAuthority(

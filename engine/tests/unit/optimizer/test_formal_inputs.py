@@ -1,13 +1,12 @@
 """Formal inputs separate valuation, evidence cutoff and actual computation clocks."""
 
-from datetime import UTC, datetime, timedelta
 import json
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
-from pydantic import ValidationError
-
 from nexus.optimizer.jobs import OptimizationConstructionPayload
+from pydantic import ValidationError
 
 
 def test_legacy_job_payload_does_not_gain_null_formal_binding():
@@ -34,16 +33,20 @@ def test_formal_job_binds_the_exact_manifest_and_rejects_incomplete_binding():
     }
     result = OptimizationConstructionPayload.model_validate(payload)
     assert result.model_dump(mode="json") == payload
-    assert OptimizationConstructionPayload.model_validate_json(json.dumps(payload), strict=True) == result
+    assert (
+        OptimizationConstructionPayload.model_validate_json(json.dumps(payload), strict=True)
+        == result
+    )
     payload["formal_binding"]["data_snapshot_id"] = str(UUID(int=999))
     with pytest.raises(ValidationError):
         OptimizationConstructionPayload.model_validate(payload)
 
 
 def test_explicit_null_formal_binding_cannot_fall_back_to_legacy():
-    payload = {name: str(UUID(int=i)) for i, name in enumerate(
-        ("portfolio_snapshot_id", "data_snapshot_id", "cost_policy_id"), 1
-    )}
+    payload = {
+        name: str(UUID(int=i))
+        for i, name in enumerate(("portfolio_snapshot_id", "data_snapshot_id", "cost_policy_id"), 1)
+    }
     with pytest.raises(ValidationError):
         OptimizationConstructionPayload.model_validate({**payload, "formal_binding": None})
 

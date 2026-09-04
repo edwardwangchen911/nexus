@@ -33,7 +33,11 @@ class OptimizationConstructionPayload(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _explicit_binding(cls, value: object) -> object:
-        if isinstance(value, dict) and "formal_binding" in value and value["formal_binding"] is None:
+        if (
+            isinstance(value, dict)
+            and "formal_binding" in value
+            and value["formal_binding"] is None
+        ):
             raise ValueError("OPTIMIZATION_FORMAL_BINDING_INVALID")
         return value
 
