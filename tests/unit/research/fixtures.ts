@@ -15,6 +15,7 @@ export const sessionDate = "2026-08-24";
 export function fundObservationInputs(): components["schemas"]["ResearchInputsSummary"] {
   return {
     display_symbol: "TEST", filings: [], facts: [], total_facts: 0, truncated: false, corporate_action_observations: [],
+    company_profiles: [], macro_observations: [],
     issuer_nav_histories: [], issuer_distributions: [], issuer_fund_observations: [{
       evidence_ref_id: "0198d600-1000-7000-8000-000000001581", source: "ssga_fund_observation",
       revision: "a".repeat(64), content_hash: "a".repeat(64), as_of: "2026-08-20",

@@ -175,8 +175,12 @@ function PositionResearch({ position }: { position: Position }): React.ReactElem
       ? "研究输出已生成 · 证据完整" : research.quality_status === "partial" ? "研究输出已生成 · 证据不完整" : "结果待核验",
     failed: "研究失败 · 保持观望", abstained: "证据不足 · 未形成研究",
   } as const;
-  const href = research.data_snapshot_id && research.decision_time
+  const href = research.run_id
+    ? `/research/${encodeURIComponent(position.instrument_id)}?run_id=${encodeURIComponent(research.run_id)}`
+    : research.data_snapshot_id && research.decision_time
     ? `/research/${encodeURIComponent(position.instrument_id)}?as_of=${encodeURIComponent(research.decision_time)}` : null;
+  const updatedInputsHref = research.newer_inputs_available
+    ? `/research/${encodeURIComponent(position.instrument_id)}?as_of=${encodeURIComponent(research.read_at)}` : null;
   const linkLabel = research.run_id ? research.status === "completed" ? "研究报告" : "研究状态" : "研究资料";
   return <div className="portfolio-position-research">
     <span>{labels[research.status]}</span>
@@ -184,6 +188,7 @@ function PositionResearch({ position }: { position: Position }): React.ReactElem
     {href ? <a className="portfolio-market-link" href={href} aria-label={`查看 ${position.symbol ?? "该持仓"} ${linkLabel}`}>
       查看{linkLabel}
     </a> : <small>尚无可引用的研究快照</small>}
+    {updatedInputsHref ? <a className="portfolio-market-link" href={updatedInputsHref} aria-label={`查看 ${position.symbol ?? "该持仓"} 更新资料`}>查看更新资料</a> : null}
     {research.run_id ? <small>研究截止 {formatTime(research.decision_time ?? null)}</small> : null}
     {research.summary || research.uncertainties.length ? <details className="portfolio-disclosure">
       <summary>摘要与证据缺口</summary>

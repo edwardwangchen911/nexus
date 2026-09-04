@@ -38,7 +38,8 @@ describe("portfolio vertical slice", () => {
     expect(screen.getByText(/AI 研究输出已生成 1 \/ 1/)).toHaveTextContent("不等于当前组合诊断通过；交易保持锁定");
     expect(screen.getByText("研究输出已生成 · 证据不完整")).toBeVisible();
     expect(screen.getByText("已有更新的冻结资料，当前报告未使用")).toBeVisible();
-    expect(screen.getByRole("link", { name: "查看 TEST 研究报告" })).toHaveAttribute("href", `/research/${position.instrument_id}?as_of=2026-09-02T04%3A00%3A00Z`);
+    expect(screen.getByRole("link", { name: "查看 TEST 研究报告" })).toHaveAttribute("href", `/research/${position.instrument_id}?run_id=${position.research.run_id}`);
+    expect(screen.getByRole("link", { name: "查看 TEST 更新资料" })).toHaveAttribute("href", `/research/${position.instrument_id}?as_of=2026-09-02T08%3A00%3A00Z`);
     expect(screen.getByText("研究截止 2026-09-02 12:00:00 北京时间")).toBeVisible();
     fireEvent.click(screen.getByText("摘要与证据缺口"));
     expect(screen.getByText("冻结财报收入有变化。")).toBeVisible();
@@ -61,8 +62,9 @@ describe("portfolio vertical slice", () => {
     render(<PortfolioSummary portfolio={portfolio} snapshot={{ ...snapshot, positions: [position] }} currency="HKD" />);
     expect(screen.getByText(label)).toBeVisible();
     expect(screen.getByText(/AI 研究输出已生成 0 \/ 1/)).toBeVisible();
-    if (data_snapshot_id) expect(screen.getByRole("link", { name: "查看 TEST 研究资料" })).toBeVisible();
+    if (data_snapshot_id) expect(screen.getByRole("link", { name: "查看 TEST 研究资料" })).toHaveAttribute("href", `/research/${position.instrument_id}?as_of=2026-09-02T04%3A00%3A00Z`);
     else expect(screen.queryByRole("link", { name: /研究资料/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /更新资料/ })).not.toBeInTheDocument();
   });
 
   it("labels observed snapshots without inventing provider update timestamps", () => {
