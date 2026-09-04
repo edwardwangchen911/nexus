@@ -848,6 +848,8 @@ D 新限定调查结合 [Alpaca 单证券 bars](https://docs.alpaca.markets/us/r
 
 独立前置修复：C `e223375`（root `b259bc7`）增加固定 invocation 阶段/类别诊断。9项先红后修复，116 SDK unit、6隔离PG（4新调用失败+2旧validation）及Mypy/Ruff/diff通过；root集中审查无剩余P1/P2，已交A串行集成。无新表/DTO，旧usage/取消/无重试/validation形状保留；不恢复失败阶段计量，也不解释或回填旧失败原因。该代码交付不能代替本节趋势研究或集中度新结果的真实验收。
 
+§9.23 实际闭合（2026-09-05）：A 在 188 对象完整备份后应用 0043 和最新 API；原 253 个已结束 XNYS session 的私有 SIP/split/USD/1Day 归档经正常 CLI 导入，得到 1 evidence、1 snapshot、4 artifact，旧 11 类业务行不变。prepare 保留原 P/target/question，旧 run 不回填；精确工具的 split close、SMA20/200、RSI14、价格波动20均可读且缺 session 为 0，原案例无 raw price authority 时不冒称现价。鉴权 exact/admission API→BFF→375/1440 DOM 在模型前后读取同一趋势证据并保持执行锁、无写请求和横溢出。全链绿后仅运行一次正常 native v3：attempt 1/max 1，实际输入 44412、输出 3490，run completed/job succeeded，系统仍 `partial/watch`；无自动重试、订单、方案或资格提升，active Job 为 0。首次 import 的 unknown 已证实是验收 wrapper 将容器 endpoint 写入 process env、在首个 PUT 前被本地校验拒绝；正常 CLI 不受影响，不为该脚本错误修改产品代码。详细私有证据及异常边界沿用 checkpoint 的 current-trends-real-20260905 记录。
+
 ### 9.24 T1：多年回测严格准入的上游证据结论与独立推进
 
 本项不是全项目总开关。当前趋势研究、已合入功能真实验收和多维方案展示按 §9.23 及后续切片继续；多年回测只阻塞依赖历史 PIT 股票池、身份/行动和行业证据的回测结论，不扩大为当前研究或只读展示不可用。
@@ -870,4 +872,4 @@ D 新限定调查结合 [Alpaca 单证券 bars](https://docs.alpaca.markets/us/r
 - C 独占 `proposal-comparison.tsx`、必要 token 样式和对应 unit/E2E；不改 schema/生成物、producer、API、迁移或业务数据。TDD 覆盖三方案明细、正负/微小差值、symbol 缺失、未形成策略目标、各未知原因、不可排名/不可执行、静态文本安全、375/1440 键盘与横溢出，以及原 13 维不回归。实际有 group 后再做同 P/D/cutoff 的 DB→受保护 API/BFF→DOM 验收；旧 group 不重算或补新趋势。
 - **候选形成的后续选择点：** 若同 P/D 的冻结集中度观察为 true，且同标的研究为 `reduce_candidate`，是否允许确定性代码仅生成“降至既有政策阈值”的不可执行分析情景。这会改变预警到方案数量的产品语义，不能由实现者静默开启；即使开启也只得到 hold 与 minimum-change，第三个 strategy-target 仍需合格 selection/连续性证据或另一个明确版本化的策略目标政策。
 
-执行顺序不变：C 可先完成无冲突读侧切片；A 先闭合 §9.23 实际趋势输入与研究结果。只有真实趋势结果确实给出减仓方向时，才评估上述窄分析情景，不为制造三列提前决定政策或编造目标。
+执行结果接续：§9.23 的真实趋势研究为 `partial/watch`，没有给出减仓方向，所以上述“集中度观察 + reduce_candidate”窄分析情景本例不成立，不启动相应 producer 改动。C 继续完成无冲突读侧切片，真实页面应展示已有维度和候选未形成原因；不能为制造三列改写本次研究、预警语义或目标。
