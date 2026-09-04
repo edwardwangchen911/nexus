@@ -66,6 +66,23 @@ async def _prepare(url, monkeypatch, *, structured=False, portfolio_after_market
     references = await seed(factory)
     at = (datetime.now(UTC) if portfolio_after_market else CUTOFF) - timedelta(minutes=2)
     async with factory.begin() as session:
+        if not structured:
+            # The same explicitly legacy fixture config used by research-worker
+            # tests, never a claim that a paid model generated qualified research.
+            session.add(
+                AgentModelConfigRecord(
+                    model_id="fixture-model",
+                    version="fixture-pricing-v1",
+                    config_hash="2" * 64,
+                    max_input_tokens=1_000_000,
+                    max_tool_calls=8,
+                    max_output_tokens=10_000,
+                    input_usd_per_million=Decimal("1"),
+                    output_usd_per_million=Decimal("2"),
+                    pricing_available_at=at - timedelta(days=1),
+                    pricing_expires_at=datetime.now(UTC) + timedelta(days=30),
+                )
+            )
         # Adapt only a test-source fixture to the strategy instrument. This dummy
         # snapshot is not the research R admitted below; prepare creates exact R/P.
         session.add(
@@ -155,7 +172,12 @@ async def _prepare(url, monkeypatch, *, structured=False, portfolio_after_market
             session, ID, as_of=research_at, portfolio_snapshot_id=portfolio_snapshot.id
         )
         assert snapshot is not None
-        model = await session.scalar(select(AgentModelConfigRecord))
+        model = await session.scalar(
+            select(AgentModelConfigRecord).where(
+                AgentModelConfigRecord.version
+                == ("codex-sdk-chatgpt-v3" if structured else "fixture-pricing-v1")
+            )
+        )
         admission = await admit_research_run(
             session,
             actor_id="test",
