@@ -1,6 +1,7 @@
 """Receipt-bound supplementary trends; never writes the market-price authority tables."""
 
 from datetime import UTC, datetime
+from decimal import InvalidOperation
 from hashlib import sha256
 from uuid import UUID
 
@@ -252,7 +253,7 @@ async def read_current_price_trends(
                 result[evidence.id] = await _read_one(
                     session, snapshot, evidence, instrument_id=instrument_id, as_of=cutoff
                 )
-            except (ValueError, TypeError, KeyError, OverflowError):
+            except (ValueError, TypeError, KeyError, OverflowError, InvalidOperation):
                 continue
     return result
 

@@ -1,5 +1,6 @@
 """Synthetic HTTP/S3 only; real archive, policies, persistence and exact reader."""
 
+import asyncio
 import importlib
 import json
 from datetime import UTC, date, datetime, timedelta
@@ -31,7 +32,7 @@ from unit.research.test_current_price_trends import source_bars
 INSTRUMENT = UUID("00000000-0000-4000-8000-000000000001")
 
 
-async def setup_trends(url, directory, monkeypatch, *, seed_master=True):
+async def setup_trends(url, directory, monkeypatch, *, seed_master=True, adjustment="split"):
     directory.mkdir(mode=0o700)
     settings = EngineSettings(database_url=url).model_copy(
         update={
@@ -96,7 +97,7 @@ async def setup_trends(url, directory, monkeypatch, *, seed_master=True):
         }
     ).encode()
     request, calendar = collection_window(
-        INSTRUMENT, sessions[0], sessions[-1], "split", now=datetime.now(UTC)
+        INSTRUMENT, sessions[0], sessions[-1], adjustment, now=datetime.now(UTC)
     )
     symbol = await _resolve_identity(url, request, request.end.date())
     original_client = httpx.AsyncClient
@@ -229,7 +230,9 @@ async def test_new_receipt_for_same_raw_bytes_preserves_old_artifact_and_both_ve
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_value", ["null", "extreme_exponent"])
 async def test_bad_optional_normalized_original_does_not_hide_valid_sec(
+    bad_value,
     migrated_database_url,
     tmp_path,
     monkeypatch,
@@ -255,8 +258,10 @@ async def test_bad_optional_normalized_original_does_not_hide_valid_sec(
         payload = json.loads(json.dumps(row.payload))
         originals = payload["originals"]
         raw = json.loads(originals[0]["raw_text"])
-        raw["bars"][0]["c"] = None
-        raw_bytes = json.dumps(raw).encode()
+        raw["bars"][0]["c"] = None if bad_value == "null" else "extreme-marker"
+        raw_bytes = (
+            json.dumps(raw).encode().replace(b'"extreme-marker"', b"1e999999999999999999999")
+        )
         receipt = json.loads(originals[1]["raw_text"])
         receipt["sha256"] = sha256(raw_bytes).hexdigest()
         receipt["byte_length"] = len(raw_bytes)
@@ -290,3 +295,43 @@ async def test_bad_optional_normalized_original_does_not_hide_valid_sec(
         frozen = await prepare_research_snapshot(session, INSTRUMENT, as_of=datetime.now(UTC))
         assert frozen is not None and str(ref_id) not in frozen.payload["evidence_ids"]
         assert len(frozen.payload["evidence_ids"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_archive_materializes_once(
+    migrated_database_url, tmp_path, monkeypatch
+):
+    from nexus.research.current_price_trends_storage import persist_current_price_trends
+
+    _, factory, store, client, archive = await setup_trends(
+        migrated_database_url, tmp_path / "archive", monkeypatch
+    )
+
+    async def persist():
+        async with factory.begin() as session:
+            return (await persist_current_price_trends(session, archive, store=store)).id
+
+    ids = await asyncio.gather(*(persist() for _ in range(3)))
+    assert len(set(ids)) == 1 and len(client.objects) == 4
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 1
+        assert await session.scalar(select(func.count()).select_from(ResearchEvidenceRef)) == 1
+
+
+@pytest.mark.asyncio
+async def test_raw_comparison_archive_cannot_be_imported_as_split_trends(
+    migrated_database_url, tmp_path, monkeypatch
+):
+    from nexus.ops.alpaca_prices_import import import_trends
+
+    settings, factory, store, client, _ = await setup_trends(
+        migrated_database_url, tmp_path / "raw", monkeypatch, adjustment="raw"
+    )
+    with pytest.raises(ValueError, match="CURRENT_TRENDS_PURPOSE_INVALID"):
+        await import_trends(
+            settings, instrument_id=INSTRUMENT, collection_dir=tmp_path / "raw", store=store
+        )
+    assert not client.objects
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 0
+        assert await session.scalar(select(func.count()).select_from(ResearchEvidenceRef)) == 0

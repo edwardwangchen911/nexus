@@ -145,8 +145,8 @@ async def test_native_v3_trends_keep_partial_and_revalidate_before_and_after_mod
             )
         )
         final = outputs[-1]
-        assert run.input_tokens == (0 if corruption == "before" else 900)
-        assert run.output_tokens == (0 if corruption == "before" else 240)
+        assert run.input_tokens == (None if corruption == "before" else 900)
+        assert run.output_tokens == (None if corruption == "before" else 240)
         if corruption:
             assert run.status != "completed"
             assert all(output.intent is None for output in outputs)
