@@ -92,15 +92,43 @@ STAGE_MODELS: dict[str, type[_StageBatch]] = {
 }
 
 
+_REVIEW_RESOLUTION_RULES = (
+    "When resolved=true, status must be accepted or rejected, missing_evidence must be [], "
+    "and prevented_conclusion must be null, not an empty string. "
+    "When resolved=false, missing_evidence must contain 1-4 non-whitespace strings and "
+    "prevented_conclusion must be a non-whitespace string, not null."
+)
+_REVIEW_RATIONALE_RULE = "Every rationale must contain non-whitespace text."
+_REVIEW_SUFFICIENCY_RULE = (
+    "review_conclusion=sufficient requires every review to have resolved=true. "
+    "If any review has resolved=false, use limited or insufficient."
+)
+_REVIEW_VALIDATION_KINDS = {
+    "Value error, review rationale is required": "review_rationale_blank",
+    "Value error, resolved review contradicts "
+    "unresolved evidence": "review_resolution_inconsistent",
+    "Value error, unresolved review requires missing evidence "
+    "and its consequence": "review_evidence_incomplete",
+    "Value error, sufficient review cannot contain "
+    "unresolved issues": "review_sufficiency_inconsistent",
+}
+
+
 class _ClaimReview(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     claim_id: str
     status: Literal["accepted", "rejected", "unresolved"]
-    rationale: str = Field(min_length=1, max_length=500)
+    rationale: str = Field(min_length=1, max_length=500, description=_REVIEW_RATIONALE_RULE)
     citations: tuple[int, ...] = Field(min_length=1, max_length=3)
-    resolved: bool
-    missing_evidence: tuple[str, ...] = Field(max_length=4)
-    prevented_conclusion: str | None = Field(max_length=500)
+    resolved: bool = Field(description=_REVIEW_RESOLUTION_RULES)
+    missing_evidence: tuple[str, ...] = Field(
+        max_length=4, description="Use [] if resolved=true, otherwise 1-4 non-whitespace strings."
+    )
+    prevented_conclusion: str | None = Field(
+        max_length=500,
+        description="Use null, not an empty string, if resolved=true. "
+        "Otherwise non-whitespace text.",
+    )
 
 
 class _Assessment(BaseModel):
@@ -108,7 +136,9 @@ class _Assessment(BaseModel):
     stance: Literal["buy_candidate", "reduce_candidate", "hold", "watch"]
     claims: tuple[_Claim, ...] = Field(min_length=1, max_length=2)
     reviews: tuple[_ClaimReview, ...] = Field(min_length=2, max_length=4)
-    review_conclusion: Literal["sufficient", "limited", "insufficient"]
+    review_conclusion: Literal["sufficient", "limited", "insufficient"] = Field(
+        description=_REVIEW_SUFFICIENCY_RULE
+    )
     uncertainties: tuple[str, ...] = Field(max_length=5)
     conflicting_facts: bool
 
@@ -315,6 +345,7 @@ class StagedCodexCommittee(CodexCommittee):
                 "count votes. Conflicting facts means incompatible cited facts, not missing "
                 "data or opposing opinions. Model conclusions never override deterministic "
                 "evidence gaps; execution stays locked."
+                f" {_REVIEW_RESOLUTION_RULES} {_REVIEW_RATIONALE_RULE} {_REVIEW_SUFFICIENCY_RULE}"
             )
         payload["text_constraints"] = {
             "forbidden_substrings_case_insensitive": list(_UNSAFE_TEXT),
@@ -511,14 +542,23 @@ class StagedCodexCommittee(CodexCommittee):
 
     def _record_domain_validation(self, error: ValidationError) -> None:
         if self.failure_diagnostic is not None:
-            unsafe = any(
-                item["msg"] == "Value error, research intent contains unsafe text"
-                for item in error.errors(include_input=False, include_context=False)
+            messages = {
+                item["msg"] for item in error.errors(include_input=False, include_context=False)
+            }
+            kind = (
+                "unsafe_text"
+                if "Value error, research intent contains unsafe text" in messages
+                else next(
+                    (
+                        kind
+                        for message, kind in _REVIEW_VALIDATION_KINDS.items()
+                        if message in messages
+                    ),
+                    "domain_validation",
+                )
             )
             self.failure_diagnostic = self.failure_diagnostic.model_copy(
-                update={
-                    "validation_kind": "unsafe_text" if unsafe else "domain_validation",
-                }
+                update={"validation_kind": kind}
             )
 
 

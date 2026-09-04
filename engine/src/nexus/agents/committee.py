@@ -58,7 +58,18 @@ class StageFailureDiagnostic(BaseModel):
     boundary: Literal["wire_validation", "role_binding", "assessment_binding"]
     role: AgentRole | None = None
     response_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    validation_kind: Literal["schema_validation", "unsafe_text", "domain_validation"] | None = None
+    validation_kind: (
+        Literal[
+            "schema_validation",
+            "unsafe_text",
+            "domain_validation",
+            "review_rationale_blank",
+            "review_resolution_inconsistent",
+            "review_evidence_incomplete",
+            "review_sufficiency_inconsistent",
+        ]
+        | None
+    ) = None
 
 
 class CommitteeRoleOutput(BaseModel):

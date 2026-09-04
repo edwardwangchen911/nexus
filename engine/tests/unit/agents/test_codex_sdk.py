@@ -1291,6 +1291,218 @@ def _assessment_payload(previous, *, invalid=None):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "changes, conclusion, expected_kind",
+    [
+        (
+            {"resolved": True, "missing_evidence": [], "prevented_conclusion": ""},
+            "insufficient",
+            "review_resolution_inconsistent",
+        ),
+        (
+            {"resolved": True, "prevented_conclusion": None},
+            "insufficient",
+            "review_resolution_inconsistent",
+        ),
+        (
+            {
+                "resolved": True,
+                "status": "unresolved",
+                "missing_evidence": [],
+                "prevented_conclusion": None,
+            },
+            "insufficient",
+            "review_resolution_inconsistent",
+        ),
+        ({"missing_evidence": []}, "insufficient", "review_evidence_incomplete"),
+        ({"missing_evidence": [" "]}, "insufficient", "review_evidence_incomplete"),
+        ({"prevented_conclusion": None}, "insufficient", "review_evidence_incomplete"),
+        ({"prevented_conclusion": " "}, "insufficient", "review_evidence_incomplete"),
+        ({"rationale": " "}, "insufficient", "review_rationale_blank"),
+        ({}, "sufficient", "review_sufficiency_inconsistent"),
+    ],
+)
+async def test_v3_schema_valid_semantic_failure_keeps_precise_safe_terminal_diagnostic(
+    monkeypatch, changes, conclusion, expected_kind
+):
+    import jsonschema
+    from nexus.agents import codex_staged
+    from nexus.agents.committee import StageFailureDiagnostic
+
+    request, evidence, prompts = _authority()
+    _, thread, result, _ = _sdk(monkeypatch)
+    sent = []
+    canary = "synthetic-private-assessment-canary"
+
+    async def run(wire, **options):
+        payload = json.loads(wire)
+        sent.append(payload["stage"])
+        if payload["stage"] == "synthesis":
+            body = _assessment_payload(payload["previous_claims"])
+            body["synthesis_assessment"]["reviews"][0].update(changes)
+            body["synthesis_assessment"]["review_conclusion"] = conclusion
+            body["synthesis_assessment"]["uncertainties"] = [canary]
+        else:
+            body = _staged_batch(payload["stage"], payload["requested_roles"])
+        jsonschema.validate(body, options["output_schema"])
+        result.final_response = json.dumps(body)
+        return result
+
+    thread.run.side_effect = run
+    model = codex_staged.StructuredStagedCodexCommittee(prompts=prompts, tools=_tools())
+    for role in ROLE_ORDER[:-1]:
+        await model.analyze(role, request, evidence, prompts[role])
+    prior = dict(model._outputs)
+    run_state = SimpleNamespace(retry_count=0)
+    output = await _analyze_with_one_retry(
+        AsyncMock(),
+        run_state,
+        committee=model,
+        role="portfolio",
+        request=request,
+        evidence_refs=evidence,
+        prompt=prompts["portfolio"],
+    )
+    assert output is None and model._outputs == prior and len(prior) == 7
+    assert sent == ["research", "critique", "synthesis"] and run_state.retry_count == 0
+    assert model.usage == UsageSnapshot(input_tokens=900, output_tokens=240, provider_calls=3)
+    assert model.failure_reason == "model_stage_review_invalid"
+    diagnostic = model.failure_diagnostic.model_dump(mode="json")
+    assert diagnostic == {
+        "stage": "synthesis",
+        "boundary": "assessment_binding",
+        "role": "portfolio",
+        "response_hash": hashlib.sha256(result.final_response.encode()).hexdigest(),
+        "validation_kind": expected_kind,
+    }
+    StageFailureDiagnostic.model_validate(diagnostic)
+    assert canary not in json.dumps(diagnostic)
+    with pytest.raises(ValueError, match="CODEX_REQUEST_ALREADY_FAILED"):
+        await model.analyze("portfolio", request, evidence, prompts["portfolio"])
+    assert len(sent) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resolved", [False, True])
+async def test_v3_actual_request_schema_explains_resolution_contract_and_preserves_hash(
+    monkeypatch, resolved
+):
+    import jsonschema
+    from nexus.agents import codex_staged
+
+    request, evidence, prompts = _authority()
+    _, thread, result, _ = _sdk(monkeypatch)
+    expected_hash = None
+
+    async def run(wire, **options):
+        nonlocal expected_hash
+        payload = json.loads(wire)
+        if payload["stage"] == "synthesis":
+            # Inspect the actual SDK-bound schema and wire, not a detached helper.
+            descriptions = " ".join(
+                field.get("description", "")
+                for definition in options["output_schema"]["$defs"].values()
+                for field in definition.get("properties", {}).values()
+            )
+            for text in (
+                "resolved=true",
+                "resolved=false",
+                "null",
+                "empty string",
+                "non-whitespace",
+                "sufficient",
+            ):
+                assert text in payload["instructions"] and text in descriptions
+            expected_hash = hashlib.sha256(
+                json.dumps(
+                    {"payload": payload, "output_schema": options["output_schema"]},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            body = _assessment_payload(payload["previous_claims"])
+            if resolved:
+                for review in body["synthesis_assessment"]["reviews"]:
+                    review.update(resolved=True, missing_evidence=[], prevented_conclusion=None)
+                body["synthesis_assessment"]["review_conclusion"] = "sufficient"
+        else:
+            assert "resolved=true" not in payload["instructions"]
+            body = _staged_batch(payload["stage"], payload["requested_roles"])
+        jsonschema.validate(body, options["output_schema"])
+        result.final_response = json.dumps(body)
+        return result
+
+    thread.run.side_effect = run
+    model = codex_staged.StructuredStagedCodexCommittee(prompts=prompts, tools=_tools())
+    for role in ROLE_ORDER:
+        output = await model.analyze(role, request, evidence, prompts[role])
+    assert len(model._outputs) == 8 and model.failure_diagnostic is None
+    assert all(review.resolved is resolved for review in output.synthesis_assessment.reviews)
+    assert output.stage_input_hash == expected_hash
+
+
+@pytest.mark.parametrize(
+    "messages, expected",
+    [
+        (["unrecognized synthetic-private-canary"], "domain_validation"),
+        (["review rationale is required synthetic-private-canary"], "domain_validation"),
+        (["review rationale is required", "research intent contains unsafe text"], "unsafe_text"),
+    ],
+)
+def test_review_diagnostic_never_serializes_unknown_error_input_or_context(messages, expected):
+    from nexus.agents import codex_staged
+    from nexus.agents.committee import StageFailureDiagnostic
+    from pydantic import ValidationError
+
+    _, _, prompts = _authority()
+    model = codex_staged.StructuredStagedCodexCommittee(prompts=prompts, tools=_tools())
+    model.failure_diagnostic = StageFailureDiagnostic(
+        stage="synthesis",
+        boundary="assessment_binding",
+        role="portfolio",
+        response_hash="a" * 64,
+    )
+    error = ValidationError.from_exception_data(
+        "synthetic",
+        [
+            {
+                "type": "value_error",
+                "loc": ("synthetic-private-location",),
+                "input": "synthetic-private-input",
+                "ctx": {"error": ValueError(message)},
+            }
+            for message in messages
+        ],
+    )
+    model._record_domain_validation(error)
+    wire = model.failure_diagnostic.model_dump_json()
+    assert model.failure_diagnostic.validation_kind == expected
+    assert "synthetic-private" not in wire
+    StageFailureDiagnostic.model_validate_json(wire)
+
+
+def test_v3_semantic_descriptions_do_not_change_v1_v2_schema_hashes():
+    from nexus.agents import codex_staged
+
+    models = [
+        codex_sdk._Batch,
+        codex_staged._ResearchBatch,
+        codex_staged._stage_model_for_prior_claims("critique", ("bull:0",)),
+        codex_staged._stage_model_for_prior_claims("synthesis", ("bear:0", "evidence_audit:0")),
+    ]
+    expected = [
+        "5399522d63aa78bc385c356d6ebecd7a825c741426bcfdf98103e710b65fd981",
+        "9753c1495a862ec39a5119fb7e01de85065ce67f805aadace87e4eff5d44c52a",
+        "7b9dd3a2300b103671e0ebddf2ecd5c455f95b09ac48e7eaa78e24b090ec0f9a",
+        "2a64f99511dfc90e4f0140b2bd0a6b00ee6c0b0ad9cfe2bc9ab13fcdadfbc71c",
+    ]
+    assert [
+        codex_sdk.codex_request_hash({"input": "synthetic"}, model) for model in models
+    ] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "invalid", [None, "missing", "duplicate", "foreign", "citation", "sufficient"]
 )
 async def test_v3_final_assessment_covers_every_review_claim_and_validates_exact_schema(
