@@ -873,3 +873,5 @@ D 新限定调查结合 [Alpaca 单证券 bars](https://docs.alpaca.markets/us/r
 - **候选形成的后续选择点：** 若同 P/D 的冻结集中度观察为 true，且同标的研究为 `reduce_candidate`，是否允许确定性代码仅生成“降至既有政策阈值”的不可执行分析情景。这会改变预警到方案数量的产品语义，不能由实现者静默开启；即使开启也只得到 hold 与 minimum-change，第三个 strategy-target 仍需合格 selection/连续性证据或另一个明确版本化的策略目标政策。
 
 执行结果接续：§9.23 的真实趋势研究为 `partial/watch`，没有给出减仓方向，所以上述“集中度观察 + reduce_candidate”窄分析情景本例不成立，不启动相应 producer 改动。C 继续完成无冲突读侧切片，真实页面应展示已有维度和候选未形成原因；不能为制造三列改写本次研究、预警语义或目标。
+
+§9.25 C 实际交付（2026-09-05）：已存 group 的三方案仓位 current/target/delta、动作原因、完整性与未知原因展示已合 main；DecimalString 数值等价、11 个排名维度及所有门禁均前端 fail-closed，策略目标复制基线且证据不足时明确尚未形成。122 项 optimize unit、typecheck/ESLint、375/1440 E2E 和集中审查 Ready；不改变 API/producer。当前真实 P 没有 group，因此另在 `/optimize` 显示“无已保存三方案”，按实际无 `reduce_only` 说明最小调整尚未形成，并明确下方诊断不是方案 13 维。真实 overview→375/1440 DOM、刷新仅一次 GET、无推荐/Shadow/交易、无横溢出、11 类业务行不变和 active Job 0 均通过。该结果闭合了有组/无组的诚实展示，但不冒充当前真实三个候选已经生成；候选 producer 和完整经济比较仍按证据缺口单列。
