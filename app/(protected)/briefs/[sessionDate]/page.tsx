@@ -60,22 +60,22 @@ export function BriefPanel({ state, brief, onRefresh }: { state: DataStateKind; 
           </dl>
         </section>
         <div className="brief-grid">
-          <BriefSection title="研究候选" items={brief.candidates} asOf={brief.generated_at} />
-          <BriefSection title="持仓风险" items={brief.holding_risks} asOf={brief.generated_at} />
-          <BriefSection title="被否决项" items={brief.rejected} asOf={brief.generated_at} />
-          <BriefSection title="预算降级观察" items={brief.budget_exhausted_watch} asOf={brief.generated_at} />
+          <BriefSection title="研究候选" items={brief.candidates} />
+          <BriefSection title="持仓风险" items={brief.holding_risks} />
+          <BriefSection title="被否决项" items={brief.rejected} />
+          <BriefSection title="预算降级观察" items={brief.budget_exhausted_watch} />
         </div>
-        <section className="brief-ledger" aria-labelledby="brief-disagreement-title"><h2 id="brief-disagreement-title">委员会分歧</h2>{brief.disagreements.length ? <ul>{brief.disagreements.map((item) => <li key={item.run_id}><a href={researchHref(item.instrument_id, brief.generated_at)}>{item.instrument_id}</a><p>{item.summary}</p></li>)}</ul> : <p>没有记录到分歧。</p>}</section>
-        <section className="brief-ledger" aria-labelledby="brief-invalidation-title"><h2 id="brief-invalidation-title">失效条件</h2>{brief.invalidations.length ? <ul>{brief.invalidations.map((item) => <li key={item.run_id}><a href={researchHref(item.instrument_id, brief.generated_at)}>{item.instrument_id}</a><p>{item.conditions.map((condition) => `${signalLabel(condition.signal)} ${operatorLabel(condition.operator)} ${typeof condition.threshold === "boolean" ? (condition.threshold ? "是" : "否") : formatMetric(condition.threshold, condition.unit, condition.signal)}`).join("；")}</p></li>)}</ul> : <p>没有可展示的失效条件。</p>}</section>
+        <section className="brief-ledger" aria-labelledby="brief-disagreement-title"><h2 id="brief-disagreement-title">委员会分歧</h2>{brief.disagreements.length ? <ul>{brief.disagreements.map((item) => <li key={item.run_id}><a href={researchHref(item.instrument_id, item.run_id)}>{item.instrument_id}</a><p>{item.summary}</p></li>)}</ul> : <p>没有记录到分歧。</p>}</section>
+        <section className="brief-ledger" aria-labelledby="brief-invalidation-title"><h2 id="brief-invalidation-title">失效条件</h2>{brief.invalidations.length ? <ul>{brief.invalidations.map((item) => <li key={item.run_id}><a href={researchHref(item.instrument_id, item.run_id)}>{item.instrument_id}</a><p>{item.conditions.map((condition) => `${signalLabel(condition.signal)} ${operatorLabel(condition.operator)} ${typeof condition.threshold === "boolean" ? (condition.threshold ? "是" : "否") : formatMetric(condition.threshold, condition.unit, condition.signal)}`).join("；")}</p></li>)}</ul> : <p>没有可展示的失效条件。</p>}</section>
       </>}
     </section>
   );
 }
 
-function BriefSection({ title, items, asOf }: { title: string; items: BriefItem[]; asOf: string }): React.ReactElement {
-  return <section className="brief-section" aria-label={title}><h2>{title}</h2>{items.length ? <ul>{items.map((item) => <li key={item.run_id}><a href={researchHref(item.instrument_id, asOf)}>{item.instrument_id}</a><span>{statusLabel(item.stance ?? item.status)}</span>{item.reason ? <span>{reasonText(item.reason)}</span> : null}</li>)}</ul> : <p>本交易日没有此类记录。</p>}</section>;
+function BriefSection({ title, items }: { title: string; items: BriefItem[] }): React.ReactElement {
+  return <section className="brief-section" aria-label={title}><h2>{title}</h2>{items.length ? <ul>{items.map((item) => <li key={item.run_id}><a href={researchHref(item.instrument_id, item.run_id)}>{item.instrument_id}</a><span>{statusLabel(item.stance ?? item.status)}</span>{item.reason ? <span>{reasonText(item.reason)}</span> : null}</li>)}</ul> : <p>本交易日没有此类记录。</p>}</section>;
 }
 
-function researchHref(instrumentId: string, asOf: string): string {
-  return `/research/${instrumentId}?as_of=${encodeURIComponent(asOf)}`;
+function researchHref(instrumentId: string, runId: string): string {
+  return `/research/${encodeURIComponent(instrumentId)}?run_id=${encodeURIComponent(runId)}`;
 }

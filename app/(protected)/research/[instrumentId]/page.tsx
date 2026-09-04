@@ -26,6 +26,7 @@ type Props = {
   notice: Notice;
   onRefresh: () => void;
   onRun: () => void;
+  replay?: boolean;
 };
 
 export default function ResearchPage(): React.ReactElement {
@@ -33,7 +34,13 @@ export default function ResearchPage(): React.ReactElement {
   const search = useSearchParams();
   const instrumentId = params?.instrumentId ?? "";
   const asOf = search.get("as_of") ?? "";
-  const [state, setState] = useState<DataStateKind>(instrumentId && asOf ? "loading" : "empty");
+  const runId = search.get("run_id");
+  return <ResearchView key={JSON.stringify([instrumentId, asOf, runId])} instrumentId={instrumentId} asOf={asOf} runId={runId} />;
+}
+
+function ResearchView({ instrumentId, asOf, runId }: { instrumentId: string; asOf: string; runId: string | null }): React.ReactElement {
+  const replay = runId !== null;
+  const [state, setState] = useState<DataStateKind>(instrumentId && (replay || asOf) ? "loading" : "empty");
   const [research, setResearch] = useState<Research | null>(null);
   const [admission, setAdmission] = useState<ResearchAdmission | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -42,21 +49,25 @@ export default function ResearchPage(): React.ReactElement {
   const idempotencyKeys = useRef(new Map<string, string>());
 
   const refresh = useCallback(async () => {
-    if (!instrumentId || !asOf) { setResearch(null); setAdmission(null); setState("empty"); return; }
+    if (!instrumentId || (!replay && !asOf)) { setResearch(null); setAdmission(null); setState("empty"); return; }
+    if (replay && !runId) { setState("error"); return; }
     setNotice(null);
     if (!researchRef.current) setState("loading");
     try {
       const suffix = `?as_of=${encodeURIComponent(asOf)}`;
       const [response, admissionResponse] = await Promise.all([
-        fetch(`/api/v1/instruments/${encodeURIComponent(instrumentId)}/research${suffix}`, { headers: { accept: "application/json" } }),
-        fetch(`/api/v1/instruments/${encodeURIComponent(instrumentId)}/research-admission${suffix}`, { headers: { accept: "application/json" } }),
+        fetch(replay ? `/api/v1/research-runs/${encodeURIComponent(runId!)}` : `/api/v1/instruments/${encodeURIComponent(instrumentId)}/research${suffix}`, { headers: { accept: "application/json" } }),
+        replay ? Promise.resolve(null) : fetch(`/api/v1/instruments/${encodeURIComponent(instrumentId)}/research-admission${suffix}`, { headers: { accept: "application/json" } }),
       ]);
-      if (response.status === 403 || admissionResponse.status === 403) { researchRef.current = null; setResearch(null); setAdmission(null); setState("forbidden"); return; }
-      const nextAdmission = admissionResponse.ok ? (await admissionResponse.json() as ResearchAdmissionEnvelope).data : null;
+      if (response.status === 403 || admissionResponse?.status === 403) { researchRef.current = null; setResearch(null); setAdmission(null); setState("forbidden"); return; }
+      const nextAdmission = admissionResponse?.ok ? (await admissionResponse.json() as ResearchAdmissionEnvelope).data : null;
       setAdmission(nextAdmission);
-      if (response.status === 404) { researchRef.current = null; setResearch(null); setState(admissionResponse.ok ? "empty" : "error"); return; }
+      if (response.status === 404) { researchRef.current = null; setResearch(null); setState(replay || admissionResponse?.ok ? "empty" : "error"); return; }
       if (!response.ok) { setState(researchRef.current ? "stale" : response.status === 409 || response.status === 422 ? "partial" : "error"); return; }
       const data = (await response.json() as ResearchEnvelope).data;
+      if (replay && (data.run_id.toLowerCase() !== runId!.toLowerCase() || data.instrument_id.toLowerCase() !== instrumentId.toLowerCase())) {
+        researchRef.current = null; setResearch(null); setState("error"); return;
+      }
       researchRef.current = data;
       setResearch(data);
       setState(classifyResearch(data));
@@ -64,11 +75,12 @@ export default function ResearchPage(): React.ReactElement {
       setState(researchRef.current ? "stale" : "error");
       setNotice({ kind: "error", text: "研究读取失败；如有最后已知证据会继续保留，但不能创建策略目标。" });
     }
-  }, [asOf, instrumentId]);
+  }, [asOf, instrumentId, replay, runId]);
 
   useEffect(() => { const timer = globalThis.setTimeout(() => void refresh(), 0); return () => globalThis.clearTimeout(timer); }, [refresh]);
 
   async function runFrozenResearch(): Promise<void> {
+    if (replay) return;
     const canRun = admission?.eligible === true && admission.data_snapshot_id !== null
       && (state === "empty" || state === "ready" && research?.status === "completed");
     if (!canRun) return;
@@ -95,10 +107,10 @@ export default function ResearchPage(): React.ReactElement {
     } finally { setSubmitting(false); }
   }
 
-  return <ResearchPanel state={state} research={research} admission={admission} submitting={submitting} notice={notice} onRefresh={() => void refresh()} onRun={() => void runFrozenResearch()} />;
+  return <ResearchPanel state={state} research={research} admission={admission} submitting={submitting} notice={notice} replay={replay} onRefresh={() => void refresh()} onRun={() => void runFrozenResearch()} />;
 }
 
-export function ResearchPanel({ state, research, admission, submitting, notice, onRefresh, onRun }: Props): React.ReactElement {
+export function ResearchPanel({ state, research, admission, submitting, notice, onRefresh, onRun, replay = false }: Props): React.ReactElement {
   const hasData = research !== null && ["ready", "partial", "stale"].includes(state);
   const inputs = state !== "forbidden" && state !== "loading" ? admission?.inputs : null;
   const differentInputSnapshot = hasData && inputs && admission?.data_snapshot_id
@@ -109,7 +121,7 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
   const hasIssuerInputs = issuerKinds > 0;
   const issuerInputsLabel = inputs && (inputs.filings.length > 0 || issuerKinds > 1)
     ? "研究资料" : hasNavHistory ? "发行商净值历史资料" : hasFundObservations ? "发行商分类与持仓资料" : "发行商现金分红资料";
-  const canRun = admission?.eligible === true && admission.data_snapshot_id !== null
+  const canRun = !replay && admission?.eligible === true && admission.data_snapshot_id !== null
     && (state === "empty" || state === "ready" && research?.status === "completed");
   return (
     <section className="page-stack research-page" aria-label="个股研究证据页" data-state={state}>
@@ -122,6 +134,7 @@ export function ResearchPanel({ state, research, admission, submitting, notice, 
         </div>
       </header>
       <DecisionPath current="research" />
+      {replay ? <p className="research-page__gate" role="note">正在回放指定的历史研究；重新读取不改选其他运行，也不创建新研究。</p> : null}
       {notice ? <p className="inline-notice" data-kind={notice.kind} role="status" aria-live="polite">{notice.text}</p> : null}
       {admission?.eligible === false ? <p className="research-page__gate" role="note">{researchAdmissionReason(admission.reason)}</p> : null}
       {inputs && admission ? <ResearchInputs inputs={inputs} asOf={admission.decision_time} /> : null}
@@ -157,5 +170,5 @@ function researchStateTitle(state: DataStateKind): string {
 }
 
 function researchStateDetail(state: DataStateKind): string {
-  return state === "empty" ? "请从市场或每日简报进入，并保留 URL 中的 as_of。" : "系统不会从浏览器状态补造证据、结论或交易动作。";
+  return state === "empty" ? "请从市场或每日简报进入，并保留链接中的时点或研究运行编号。" : "系统不会从浏览器状态补造证据、结论或交易动作。";
 }

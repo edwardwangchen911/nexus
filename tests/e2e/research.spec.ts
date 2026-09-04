@@ -8,6 +8,7 @@ import {
   instrumentId,
   researchAdmissionEnvelope,
   researchEnvelope,
+  runId,
   sessionDate,
 } from "../unit/research/fixtures";
 
@@ -21,6 +22,8 @@ for (const viewport of [
 ]) {
   test(`${viewport.name} brief to evidence journey is traceable and non-transactional`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    const requests: { method: string; path: string }[] = [];
+    page.on("request", (request) => { if (request.url().includes("/api/v1/")) requests.push({ method: request.method(), path: new URL(request.url()).pathname }); });
     await installFixtures(page);
     await page.goto(`/briefs/${sessionDate}`);
 
@@ -45,8 +48,14 @@ for (const viewport of [
     }
     await page.getByRole("link", { name: instrumentId }).first().click();
 
-    await expect(page).toHaveURL(new RegExp(`/research/${instrumentId}\\?as_of=`));
+    await expect(page).toHaveURL(new RegExp(`/research/${instrumentId}\\?run_id=${runId}$`));
     await expect(page.getByRole("heading", { name: "委员会决策记录" })).toBeVisible();
+    await expect(page.getByText(/正在回放指定的历史研究/)).toBeVisible();
+    await expect(page.getByRole("button", { name: /运行冻结研究/ })).toHaveCount(0);
+    await page.getByRole("button", { name: "重新读取" }).click();
+    await expect.poll(() => requests.filter(({ path }) => path === `/api/v1/research-runs/${runId}`).length).toBe(2);
+    expect(requests.filter(({ path }) => path.includes(`/instruments/${instrumentId}/research`))).toEqual([]);
+    expect(requests.filter(({ method }) => method !== "GET")).toEqual([]);
     await expect(page.getByRole("region", { name: "投资决策证据链，可横向滚动" }).getByRole("listitem").filter({ hasText: "研究证据" })).toHaveAttribute("aria-current", "step");
     await expect(page.getByRole("heading", { name: "支持论点" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "反方论点" })).toBeVisible();
@@ -168,6 +177,7 @@ test("desktop evidence sheet contains long content, locks background and restore
 async function installFixtures(page: Page): Promise<void> {
   await installShellFixture(page);
   await page.route(`**/api/v1/briefs/${sessionDate}`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(briefEnvelope()) }));
+  await page.route(`**/api/v1/research-runs/${runId}`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(researchEnvelope()) }));
   await page.route(`**/api/v1/instruments/${instrumentId}/research-admission?**`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(researchAdmissionEnvelope()) }));
   await page.route(`**/api/v1/instruments/${instrumentId}/research?**`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(researchEnvelope()) }));
 }
