@@ -8,6 +8,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Never
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from pydantic import (
@@ -21,6 +22,8 @@ from pydantic import (
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from nexus.audit.manifest import S3AuditManifestObjectStore
+from nexus.jobs.daily_audit import audit_manual_daily
 from nexus.jobs.daily_manual import (
     ManualDailyRequest,
     build_manual_daily_registry,
@@ -70,6 +73,9 @@ _SAFE_CODES = {
     "DAILY_ONCE_DRAFT_INPUT_UNAVAILABLE",
     "DAILY_ONCE_FORMAL_INPUT_UNAVAILABLE",
     "DAILY_ONCE_FORMAL_JOB_UNAVAILABLE",
+    "DAILY_AUDIT_BINDING_INVALID",
+    "DAILY_AUDIT_ISOLATION_UNAVAILABLE",
+    "DAILY_ONCE_AUDIT_STORE_UNAVAILABLE",
 }
 
 
@@ -132,6 +138,14 @@ class DailyResearchAdmitRequest(BaseModel):
         return ManualDailyRequest._utc(value)
 
 
+class DailyAuditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    action: Literal["audit"]
+    root_id: UUID
+    run_id: UUID | None = None
+
+
 class DailyResearchRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
@@ -165,7 +179,25 @@ DailyRequest = (
     | DailyProposalBuildRequest
     | DailyFormalProposalAdmitRequest
     | DailyFormalProposalRunRequest
+    | DailyAuditRequest
 )
+
+
+def _audit_store(settings: EngineSettings) -> S3AuditManifestObjectStore:
+    if not isinstance(settings, DailyOnceSettings) or not settings.explicit_artifact_config:
+        raise DailyOnceError("DAILY_ONCE_AUDIT_STORE_UNAVAILABLE")
+    endpoint = urlsplit(settings.object_store_endpoint or "")
+    if (
+        endpoint.scheme not in {"http", "https"}
+        or endpoint.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or endpoint.username is not None
+        or endpoint.password is not None
+        or endpoint.query
+        or endpoint.fragment
+        or endpoint.path not in {"", "/"}
+    ):
+        raise DailyOnceError("DAILY_ONCE_AUDIT_STORE_UNAVAILABLE")
+    return S3AuditManifestObjectStore(settings)
 
 
 def _require_research_runtime(settings: EngineSettings) -> None:
@@ -370,7 +402,8 @@ async def _proposal(
 
 
 async def _formal_admit(
-    factory: async_sessionmaker[AsyncSession], request: DailyFormalProposalAdmitRequest,
+    factory: async_sessionmaker[AsyncSession],
+    request: DailyFormalProposalAdmitRequest,
 ) -> dict[str, object]:
     async with factory() as session, session.begin():
         await assert_daily_pipeline_schema_ready(session)
@@ -380,27 +413,34 @@ async def _formal_admit(
                 request=FormalOptimizationRequest.model_validate(
                     request.model_dump(exclude={"action", "idempotency_key"}),
                 ),
-                actor_id="local-daily-formal-proposal", idempotency_key=request.idempotency_key,
+                actor_id="local-daily-formal-proposal",
+                idempotency_key=request.idempotency_key,
             )
         except ValueError as error:
             raise DailyOnceError("DAILY_ONCE_FORMAL_INPUT_UNAVAILABLE") from error
         return {
-            "status": "admitted", "job_id": str(result.job_id),
-            "data_snapshot_id": str(result.data_snapshot_id), "replayed": result.replayed,
-            "mode": "formal_bound_read_only", "execution_locked": True,
+            "status": "admitted",
+            "job_id": str(result.job_id),
+            "data_snapshot_id": str(result.data_snapshot_id),
+            "replayed": result.replayed,
+            "mode": "formal_bound_read_only",
+            "execution_locked": True,
         }
 
 
 async def _formal_run(
-    factory: async_sessionmaker[AsyncSession], settings: EngineSettings,
+    factory: async_sessionmaker[AsyncSession],
+    settings: EngineSettings,
     request: DailyFormalProposalRunRequest,
 ) -> dict[str, object]:
     async with factory() as session:
         await assert_daily_pipeline_schema_ready(session)
         job = await session.get(Job, request.job_id)
         if (
-            job is None or job.job_type != JobType.OPTIMIZATION_PROPOSE.value
-            or job.schema_version != "optimization_job_v1" or job.queue != QueueName.GENERAL.value
+            job is None
+            or job.job_type != JobType.OPTIMIZATION_PROPOSE.value
+            or job.schema_version != "optimization_job_v1"
+            or job.queue != QueueName.GENERAL.value
         ):
             raise DailyOnceError("DAILY_ONCE_FORMAL_JOB_UNAVAILABLE")
         try:
@@ -414,11 +454,16 @@ async def _formal_run(
     except Exception as error:
         raise DailyOnceError("DAILY_ONCE_ARTIFACT_READER_UNAVAILABLE") from error
     processed = await run_job_worker_once(
-        factory, registry=build_optimization_registry(artifact_reader=reader),
-        queue=QueueName.GENERAL, worker_id=f"daily-formal-{uuid4().hex}",
-        worker_started_at=datetime.now(UTC), process_version="nexus-daily-formal-v1",
-        migration_head=CURRENT_MIGRATION_HEAD, clock=lambda: datetime.now(UTC),
-        claim_registered_only=True, job_ids=(request.job_id,),
+        factory,
+        registry=build_optimization_registry(artifact_reader=reader),
+        queue=QueueName.GENERAL,
+        worker_id=f"daily-formal-{uuid4().hex}",
+        worker_started_at=datetime.now(UTC),
+        process_version="nexus-daily-formal-v1",
+        migration_head=CURRENT_MIGRATION_HEAD,
+        clock=lambda: datetime.now(UTC),
+        claim_registered_only=True,
+        job_ids=(request.job_id,),
         preclaim_guard=assert_daily_pipeline_schema_ready,
     )
     async with factory() as session:
@@ -426,10 +471,16 @@ async def _formal_run(
         if job is None:
             raise DailyOnceError("DAILY_ONCE_FORMAL_JOB_UNAVAILABLE")
         return {
-            "status": "completed" if job.status == "succeeded" else
-            "pending" if job.status in {"queued", "running"} else "blocked",
-            "job_id": str(job.id), "job_status": job.status, "processed": int(processed),
-            "mode": "formal_bound_read_only", "execution_locked": True,
+            "status": "completed"
+            if job.status == "succeeded"
+            else "pending"
+            if job.status in {"queued", "running"}
+            else "blocked",
+            "job_id": str(job.id),
+            "job_status": job.status,
+            "processed": int(processed),
+            "mode": "formal_bound_read_only",
+            "execution_locked": True,
         }
 
 
@@ -451,6 +502,7 @@ async def run_once(
     ):
         raise DailyOnceError("DAILY_ONCE_DATABASE_NOT_LOCAL")
     try:
+        audit_store = _audit_store(settings) if isinstance(request, DailyAuditRequest) else None
         if isinstance(request, DailyResearchAdmitRequest | DailyResearchRunRequest):
             _require_research_runtime(settings)
         if isinstance(request, DailyProposalBuildRequest | DailyFormalProposalRunRequest) and (
@@ -460,6 +512,14 @@ async def run_once(
         engine = create_async_engine(settings.database_url)
         try:
             factory = async_sessionmaker(engine, expire_on_commit=False)
+            if isinstance(request, DailyAuditRequest):
+                assert audit_store is not None
+                return await audit_manual_daily(
+                    factory,
+                    root_id=request.root_id,
+                    run_id=request.run_id,
+                    object_store=audit_store,
+                )
             if isinstance(request, DailyAdvanceRequest):
                 return await _advance(factory, settings, request.root_id)
             if isinstance(request, DailyResearchAdmitRequest | DailyResearchRunRequest):
@@ -503,6 +563,9 @@ def main() -> None:
         admit.add_argument(f"--{field}", required=True)
     advance = commands.add_parser("advance", help="最多推进所选日根的三个本地阶段")
     advance.add_argument("--root-id", required=True)
+    audit = commands.add_parser("audit", help="仅审计所选日根和可选研究，不执行任何业务阶段")
+    audit.add_argument("--root-id", required=True)
+    audit.add_argument("--run-id")
     research_admit = commands.add_parser(
         "research-admit", help="诊断成功后准入原生研究，不调用模型"
     )
@@ -515,11 +578,13 @@ def main() -> None:
     for field in ("root-id", "run-id", "context-as-of", "idempotency-key"):
         proposal.add_argument(f"--{field}", required=True)
     formal_admit = commands.add_parser(
-        "formal-proposal-admit", help="精确绑定研究和策略资料，仅登记只读方案Job",
+        "formal-proposal-admit",
+        help="精确绑定研究和策略资料，仅登记只读方案Job",
     )
     formal_admit.add_argument("--request-file", required=True)
     formal_run = commands.add_parser(
-        "formal-proposal-run", help="最多消费一个明确的只读正式绑定方案Job，不调用模型",
+        "formal-proposal-run",
+        help="最多消费一个明确的只读正式绑定方案Job，不调用模型",
     )
     formal_run.add_argument("--job-id", required=True)
     try:
@@ -541,7 +606,8 @@ def main() -> None:
             | type[DailyResearchRunRequest]
             | type[DailyProposalBuildRequest]
             | type[DailyFormalProposalAdmitRequest]
-            | type[DailyFormalProposalRunRequest],
+            | type[DailyFormalProposalRunRequest]
+            | type[DailyAuditRequest],
         ] = {
             "admit": DailyAdmitRequest,
             "advance": DailyAdvanceRequest,
@@ -550,6 +616,7 @@ def main() -> None:
             "proposal-build": DailyProposalBuildRequest,
             "formal-proposal-admit": DailyFormalProposalAdmitRequest,
             "formal-proposal-run": DailyFormalProposalRunRequest,
+            "audit": DailyAuditRequest,
         }
         request = request_types[args["action"]].model_validate(args)
     except (ValueError, OSError, RecursionError):
