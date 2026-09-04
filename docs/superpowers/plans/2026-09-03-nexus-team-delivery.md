@@ -24,7 +24,7 @@
 
 状态缩写：进行中=分支实现/验证；待做=当前目标的代码或验收；待依赖=可开发但真实启用条件不足；后续门禁=列入剩余范围、不擅自激活。
 
-下表保留初始排期口径；接续执行先读第 9.3 节的最新核验进度及其证据，不根据初始“待做”重复实现。
+下表保留初始排期口径；接续执行以第 9.3 节的依赖分类及对应后续专题交付记录为准，不根据初始“待做”重复实现。T1 的正常组包/日历见 9.14–9.15，S1 查询生产者及 B3 正常研究链见 9.13；仍须区分代码交付与真实来源验收。
 
 | ID | 剩余交付 | Owner | 状态与依赖 | 估算开发人日 |
 | --- | --- | --- | --- | --- |
@@ -647,3 +647,20 @@ A2八增量按序集成为`e236ea5/beb23b2/27ff42f/4f93103/60191d9/afaaa08/de138
 验证：新 12 项 PG 加旧 CLI/writer/loader 38 项 PG，共 50 项通过（联合 49 项 164.03s，另两阶段失败 1 项 9.54s）；29 项单测、四源 Mypy、六文件 Ruff/format、help 与 diff 检查通过。实际 CLI→正常组包→原 run_once→持久化→鉴权 GET 已贯通；覆盖原包重放与后来数据不重选、并发单包、非法来源/未来集合或成员拒绝、准备回滚，以及策略尚不可用时一个合法包/零结果的两阶段失败。无 source policy/loader/engine/writer mock，无最终包或结果手工种入；只使用隔离的合成上游源集合与价格。
 
 集中审查代码层无剩余 P1/P2；最终测试通过，四个生产文件 SHA256 与审查指纹完全一致，满足集成 Ready 条件，不重跑同环境同代码的完整 PG。没有迁移、依赖、外部接口/模型调用或共享服务变更；旧业务数据不回写，停用新准备模式即可回退入口。真实来源资格和完整历史仍独立待验，本片不能替代 T1 全部历史验收或正式投资结论。
+
+### 9.15 T1 规范回测日历正常生产（实现与验收合同）
+
+§9.14 已由 A 精确集成为 `116bbce/64aba5b/a4d1d23/4f8b8f8`，root 与 main 净差异为零。接续只补确实缺失的规范日历写入者：现有 Fosun 本地日历为 display 合同，不能重标为回测日历；内部 paper 的 forward/admit/advance 入口已齐，本轮不重复开发 S2。三类历史 source collection 的真实来源资格仍保持未知，不用分页结束或数据库 hash 假造 complete。
+
+- 使用已安装 `exchange_calendars` 及现有 `ExchangeCalendarAuthority`、`exchange_calendar_content_hash`，新增小型 `backtest/calendar.py`。固定现有 XNYS 合同，只接收 start/end；要求有序、均为首末实际 session 且在库支持范围内，不悄悄截断或归一化端点。版本为实际包版本生成的 `exchange_calendars_<version>_XNYS`，query 为 exchange/package_version；session/open/close 均取真实安装库，decision 为 close+30 分钟，完整性只指该版本给定区间日历。
+- 复用现有全局 backtest publication 锁，再按版本/区间查询或锁定已有根。自然唯一键 exchange/version/range 已存在；同输入精确重放，核验根字段/hash、完整 session 集、开闭市及决策时间，冲突拒绝，不修补旧根。不改旧 Fosun 日历、旧包、历史 hash 或 publication 机制；没有新表、依赖、政策或调度。
+- 新根与全部 sessions 在单个事务/保存点写入，published_at 与 created_at 保持实际物化时间，使用现有 loader 在实际截止重读验证后提交；末条插入失败不残留 complete 根。生成日历不是将历史市场证据回填到过去，不能让缺失 universe/sector/actions 或价格证据变得合格。
+- 复用 `nexus.ops.backtest_once` 增加显式 `--prepare-calendar --start ... --end ...` 模式，只允许这三个参数，与已有 bundle 准备/旧运行参数互斥。输出固定状态、calendar ID/hash/version/区间及只准备不执行语义；不接受用户 complete、hash、session 表或倒填时间。旧模式参数和错误码保持；错误不泄露请求正文/数据库异常。日历 ID 由正常 `--prepare-request-file` 消费，不建立第二套回测流程。
+- Owner 复用独立 `nexus-codex-wire-budget` worktree，先安全合并最新 main；拥有新服务、现有 CLI/手册、新 unit/PG，root 只维护本节，A 唯一集成。单测先红后绿覆盖节假日、提前收市、DST、非法范围/hash/参数；隔离 PG 走实际日历 CLI→bundle CLI→原回测→鉴权 GET，不手插最终日历/包，不 mock loader/policy/engine/writer，其他来源明确 synthetic。覆盖幂等、并发、冲突、失败原子性和实际创建时点，并复用 §9.14 既有回归。
+- 一轮集中审查与针对性复核后小提交交 A。无业务库/共享服务操作；回滚为停用日历准备入口，已经提交的不可变日历保留。该日历是当前安装库的规范输出，不宣称交易所原始官方归档或历史版本修订已独立验收。
+
+实施验收：旧 CLI 对新模式报参数错误、日历模块缺失先红；完成后实际 calendar CLI→正常 bundle CLI→原回测→鉴权 GET 贯通，没有手插最终日历/数据包或 mock 内部校验。缺少 actions 集合仍拒绝。15 项新隔离 PG 与 2 项旧 CLI 入口 PG 通过（新增正例追加缺集合断言后另重跑），48 项新旧单测、两源 Mypy、四文件 Ruff/format、help/diff 通过。PG 覆盖实际物化时间、提前收市/DST 日历读取、同版本区间并发单根、错 hash/时点/session/开闭市/发布时间拒绝、插入及重读失败保存点回滚，以及旧 Fosun display 日历未改变。服务不采集、不准备其他源集合、不运行回测；实际消费者另使用其输出的 ID。
+
+集中审查最终 Spec/Quality Ready，无剩余 P1/P2；代码审查后生产增量只有 exchange_calendars 的类型标注，最终指纹 calendar.py `9469b846`、backtest_once.py `2c24d0f2`。复核新增测试/文档后复用同代码验证，不重复整组测试。其他上游历史资料仍为明确 synthetic 测试输入，不能据此宣告真实历史、正式经济排名、Shadow/paper 激活或总目标完成。
+
+精确交付 `4a2c8cc`，root 吸收为 `555360c`；五个交付文件与原提交净差异为零，root 实际 help 与运行手册参数一致、diff 检查通过。无新迁移、依赖或业务运行变更，A 仍按单提交及本合同串行集成，不合并开发分支的同步历史。
