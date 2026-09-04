@@ -810,3 +810,13 @@ D 对官方公开文档和本地定义的限定调查已完成，无业务 API�
 C `b50c1cb` 接独立“组合预警核验”区，直接消费同intent结果，中文区分已触发/未触发/无法核验、原估值时点/证券分母/证据与非交易含义；不从最新summary拼接比例或政策，不由前端求值。原失效区文案限定为“这些失效条件尚无系统求值结果”，与观察结果不矛盾。191单测、375/1440与旧条件共3页面E2E、类型/静态通过；跨run旧字段缺失不残留，键盘证据/焦点、无横溢与零写覆盖。两片集中代码审查均无剩余P1/P2，B最终测试与固定提交条件已满足；root吸收后三方源码/生成物净差零，联合TS/check:generated及14组件测试通过。此记录不替代真实新facts→研究→页面验收；不得回填旧run，实际新研究须先证明同问题有实质新增冻结输入并通过原token预检，不能仅为界面绿灯重复调用。
 
 §9.20实际交付（2026-09-05）：A运行42a2596/schema0042；按保存的原B3 target/P/问题（不是最近daily-v3样本）正常newprepare，facts原精度/政策/严格比较和新FRED双引用核验通过，SDK投影实含新输入。原首请求guard通过、三阶段预算预测53060<64000，按授权一次native v3实际首阶段failed/model_usage_uncertain，进程已退出、attempt=max1、用量unknown、stage_input留存，不自动重试。原旧run兼容及新失败run的受保护API/BFF/375-1440 DOM通过，失败/输入摘要/锁定真实可见；无intent故未完成真实观察结果区验收。旧业务行保留，未换标的/改旧P/采集/交易。完整记录及传输原因未知边界见现有checkpoint“冻结集中度事实实际交付及一次正常研究未完成”；v4/B3仍未完成。
+
+### 9.22 A2：拆股调整价格的当前研究候选与身份前置修复
+
+D 新限定调查结合 [Alpaca 单证券 bars](https://docs.alpaca.markets/us/reference/stockbarsingle-1)、[市场数据 FAQ](https://docs.alpaca.markets/us/docs/market-data-faq) 与 [套餐文档](https://docs.alpaca.markets/us/docs/about-market-data-api) 的实页，区分了价格特征和完整回测账本：`agents/price_features.py` 的 SMA/RSI/波动只消费冻结 close 序列，不以公司行动账本为数学输入；`backtest/engine.py` 的信号/执行配对、数量和现金记账仍需要完整事件。不能把后者扩大成“所有价格研究都不可做”，也不能用前者删去 T1 的经济记账要求。
+
+- 原范围候选：本次实收冻结的 SIP/split/USD 已结束交易日日线，用于当前研究的拆股调整价格趋势/波动，不称总收益或历史知识时点序列。官方说明 split 对正反拆股调整价格和量，dividend 仅现金股息价格调整，all 还含其它调整；asof 是身份映射，不是知识截止。调整锚日、end 以后事件、历史修订重取、精确总收益算法未由这些资料证明。IEX 是单所，不能冒 SIP 合并数据；`vw*v` 也不能冒精确成交额。
+- 免费历史 SIP 的日期限制属于文档证据，不代表本账户全部标的/窗口/adjustment 已实际通过；常规已授权读取无需再按端点审批，但不启用付费、改变现有 provider 或直接翻开不可变 v2 常量。下一实样须保持原始页、完整分页、receipt/hash、查询与实收时间、交易日覆盖；available_at 不早于实收。公开拆股案例应核 raw/split 价格与量关系，验证前不颁新用途资格。
+- 先做有界身份修复（B 独立 WT，A 不同时编辑这些文件）：`providers/market/alpaca_http.py` 已按 `request.end.date()` 解析本地 alias，而远端省略 asof 会按默认今天映射。新请求应显式传同一 identity-asof 和 USD，保留现有 resolver 的 US/USD 限制；按实际官方 response.symbol 合同核请求/响应身份，缺失或不匹配安全拒绝。实施者须再核官方必需性/更名返回语义，未证实时不凭猜测增加拒绝规则。
+- 验证覆盖 resolver→FixedOrigin transport→Alpaca provider 的正常新请求、历史更名日期对齐、分页同日期/币种、错身份/缺字段/空页、精确原件和安全错误；先红后绿，不改公共 BarsRequest schema、normalizer 金融计算、旧保存响应或 authority。旧 receipt 没有这些显式参数就仍保持未知，不追溯补写。
+- 后续调整序列正常归档/冻结、用途限定 authority、原工具特征与页面仍待真实证据和具体消费者合同；不能复用需要 Shadow 根的一日 raw 入口来伪造根，也不重复造 SDK。身份修复只是前置交付，不等于研究价格、A2、T1、订单或会计已准入；完整原计划继续保留。
