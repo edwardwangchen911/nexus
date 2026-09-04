@@ -248,3 +248,44 @@ def test_tool_truncates_only_view_not_canonical_evidence(tmp_path):
     assert payload["source_completeness"] == "unknown"
     assert payload["available_at_semantics"] == "maximum_page_receipt_not_historical_availability"
     assert doc.canonical_bytes() == before and len(doc.events) == 33
+
+
+def test_more_than_ten_thousand_events_are_rejected_not_truncated(tmp_path):
+    pages = [
+        json.dumps(
+            {
+                "corporate_actions": {
+                    "future": [{"id": str(j), "symbol": "TEST"} for j in range(1000)]
+                },
+                "next_page_token": str(i + 1) if i < 10 else None,
+            }
+        ).encode()
+        for i in range(11)
+    ]
+    receipts = {i: {"received_at": NOW.isoformat()} for i in range(1, 12)}
+    with pytest.raises(ValueError, match="^ALPACA_ACTIONS_ARCHIVE_INVALID$"):
+        load(archive(tmp_path, pages=pages, receipts=receipts))
+
+
+def test_cumulative_original_budget_is_enforced_before_loading_another_page(tmp_path):
+    pages = [
+        json.dumps(
+            {
+                "corporate_actions": {},
+                "padding": "x" * (7 * 1024 * 1024),
+                "next_page_token": str(i + 1) if i < 4 else None,
+            }
+        ).encode()
+        for i in range(5)
+    ]
+    with pytest.raises(ValueError, match="^ALPACA_ACTIONS_ARCHIVE_INVALID$"):
+        load(archive(tmp_path, pages=pages))
+
+
+def test_declared_page_count_cannot_exceed_one_hundred(tmp_path):
+    entries = [
+        {"raw_file": f"page-{i:03}.json", "receipt_file": f"page-{i:03}.receipt.json"}
+        for i in range(1, 102)
+    ]
+    with pytest.raises(ValueError, match="^ALPACA_ACTIONS_ARCHIVE_INVALID$"):
+        load(archive(tmp_path, manifest_changes={"pages": entries}))

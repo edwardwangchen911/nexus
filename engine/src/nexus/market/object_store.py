@@ -97,6 +97,7 @@ class S3ProviderEvidenceStore:
         settings: ObjectStoreSettings,
         *,
         client: _S3Client | None = None,
+        disable_environment_proxies: bool = False,
     ) -> None:
         endpoint = settings.object_store_endpoint
         region = settings.object_store_region
@@ -131,6 +132,7 @@ class S3ProviderEvidenceStore:
                     retries={"total_max_attempts": 1},
                     max_pool_connections=_OBJECT_IO_WORKERS,
                     s3={"addressing_style": "path"},
+                    proxies={} if disable_environment_proxies else None,
                 ),
             ),
         )
@@ -162,6 +164,15 @@ class S3ProviderEvidenceStore:
         if not key.startswith("normalized/market/"):
             raise ValueError("normalized market object key is invalid")
         return await self.put_if_absent(key=key, content=payload)
+
+    async def read_evidence(self, key: str, *, uri: str) -> bytes:
+        """Read one exact frozen canonical object, never another namespace/version."""
+        if not key.startswith("evidence/") or not _object_key_is_safe(key):
+            raise ValueError("provider evidence object key is invalid")
+        version_id = _version_id_from_frozen_uri(
+            uri, bucket=self._bucket, storage_key=self._storage_key(key)
+        )
+        return await _run_object_io(self._read_bounded, key, version_id=version_id)
 
     async def read_normalized(self, uri: str) -> bytes:
         """Read a frozen diagnostic artifact only from this store's market prefix."""
