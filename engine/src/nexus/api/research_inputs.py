@@ -1,5 +1,6 @@
 """Read-only display of facts already bound to one research snapshot."""
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Literal, cast
 from uuid import UUID
@@ -22,6 +23,7 @@ from nexus.api.schemas.agents import (
     ResearchInputMacroObservation,
     ResearchInputNavHistory,
     ResearchInputNavObservation,
+    ResearchInputPriceTrend,
     ResearchInputsSummary,
 )
 from nexus.domain.decimal import decimal_to_string
@@ -122,6 +124,9 @@ async def read_research_inputs(
         )
     )
     return ResearchInputsSummary(
+        current_price_trends=await _read_price_trend_inputs(
+            session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of
+        ),
         company_profiles=await _read_profile_inputs(
             session, snapshot_id=snapshot_id, instrument_id=instrument_id, as_of=as_of
         ),
@@ -174,6 +179,60 @@ async def read_research_inputs(
         total_facts=total,
         truncated=len(rows) > 20 or total > len(facts),
     )
+
+
+def _project_price_trend(
+    payload: Mapping[str, object], *, evidence_ref_id: UUID, revision: str, content_hash: str
+) -> ResearchInputPriceTrend:
+    """Project verified canonical fields only; never recompute indicators or expose originals."""
+    missing = payload["missing_sessions"]
+    if not isinstance(missing, list):
+        raise ValueError("TREND_MISSING_SESSIONS_INVALID")
+    provenance = {
+        "evidence_ref_id": evidence_ref_id, "revision": revision, "content_hash": content_hash,
+        "missing_sessions": missing[:20], "missing_sessions_total": len(missing),
+        "missing_sessions_truncated": len(missing) > 20,
+    }
+    return ResearchInputPriceTrend.model_validate({
+        **{name: payload[name] for name in ResearchInputPriceTrend.model_fields
+           if name not in provenance},
+        **provenance,
+    })
+
+
+async def _read_price_trend_inputs(
+    session: AsyncSession, *, snapshot_id: UUID, instrument_id: UUID, as_of: datetime,
+) -> tuple[ResearchInputPriceTrend, ...]:
+    references = await _frozen_issuer_references(
+        session, snapshot_id=snapshot_id, instrument_id=instrument_id,
+        as_of=as_of, source="alpaca_current_trends",
+    )
+    if not references:
+        return ()
+    # Supplemental storage is a real dependency, not an optional empty reader.
+    from nexus.research.current_price_trends_storage import read_current_price_trends
+
+    try:
+        documents = await read_current_price_trends(
+            session, instrument_id=instrument_id, as_of=as_of, evidence_ids=tuple(references)
+        )
+    except ValueError:
+        # Malformed optional evidence cannot hide independently valid SEC inputs.
+        return ()
+    result = []
+    for evidence_id, document in documents.items():
+        evidence = references.get(evidence_id)
+        if (evidence is None or document.instrument_id != instrument_id
+            or document.available_at != evidence.available_at or document.available_at > as_of):
+            continue
+        try:
+            result.append(_project_price_trend(
+                document.model_dump(mode="json"), evidence_ref_id=evidence_id,
+                revision=evidence.revision, content_hash=evidence.content_hash,
+            ))
+        except (ValueError, KeyError):
+            continue
+    return tuple(result[:1])
 
 
 async def _read_profile_inputs(

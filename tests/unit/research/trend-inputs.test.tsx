@@ -38,6 +38,17 @@ describe("frozen current price trends", () => {
     expect(region).toHaveTextContent("2026-08-25 02:00:00 北京时间");
   });
 
+  it("does not label last observed indicators with a missing query-end date", () => {
+    const inputs = trendInputs();
+    Object.assign(inputs.current_price_trends[0], { last_observed_on: "2026-08-20", observed_sessions: 159,
+      missing_sessions: ["2026-07-01", "2026-08-21"], missing_sessions_total: 2 });
+    render(<ResearchInputs inputs={inputs} asOf={decisionTime} />);
+    const region = screen.getByRole("region", { name: "拆股调整价格趋势" });
+    expect(within(region).getByText("实际观察日期范围").nextElementSibling).toHaveTextContent("2026-01-02 至 2026-08-20");
+    expect(within(region).getByText("查询交易日范围").nextElementSibling).toHaveTextContent("2026-01-02 至 2026-08-21");
+    expect(region).toHaveTextContent("末观察日拆股调整收盘价");
+  });
+
   it("does not retain new trends when switching to old frozen inputs", () => {
     const inputs = trendInputs();
     const { rerender } = render(<ResearchInputs inputs={inputs} asOf={decisionTime} />);
