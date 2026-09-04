@@ -735,11 +735,12 @@ FRED 增量：parser/collector/storage/CLI 使用现有 HTTP bytes、原件和 m
 | 负责人 | 独占文件与交付 | 依赖/核对 |
 | --- | --- | --- |
 | API（既有 FMP owner） | engine/src/nexus/api/research_inputs.py、api/schemas/agents.py，必要的小投影模块；contracts/openapi.json、app/lib/generated/*；新增 engine/tests/integration/test_research_provider_inputs.py、必要 schema 单测和 tests/unit/research/provider-runtime-boundary.test.ts | 从 main 0374318 同步；先产 schema/生成物独立提交并交 UI，继续 reader/API 的 TDD；不改 UI 文件 |
-| UI（既有 FRED owner） | app/components/research-inputs.tsx、新 research-company-profile.tsx/research-macro-observations.tsx；tests/unit/research/provider-inputs.test.tsx、provider-fixtures.ts；tests/e2e/research-provider-inputs.spec.ts | 同基线按上述 DTO 并行写组件/用例；收到生成物提交后类型核对；不编辑 schema/生成物/服务/业务数据 |
+| UI（既有 FRED owner） | app/components/research-inputs.tsx、新 research-company-profile.tsx/research-macro-observations.tsx、现有 research/[instrumentId]/page.tsx 和 portfolio-summary.tsx；tests/unit/research/provider-inputs.test.tsx、provider-fixtures.ts、现有 portfolio/page.test.tsx；tests/e2e/research-provider-inputs.spec.ts | 同基线按上述 DTO 并行写组件/用例；收到生成物提交后类型核对；不编辑 schema/生成物/服务/业务数据 |
 | root / A | root 合同协调与集中审查；A 唯一 main、运行及业务 DB 集成者 | API 与 UI 独立 worktree，一个写入者；PG 55436 仅 API owner；A 留到 Ready 后串行验收，避免独立开发空等 |
 
 - [ ] API 先运行新增正常归档导入→prepare→admission/exact run HTTP 读端反例，确认缺新字段失败，再接线。边界：新字段完整、旧 run 不回填、future/错误 instrument/ref/hash/缺 calendar、坏 optional 不遮有效 SEC、零和负宏观值、无基底不准入。复用旧 producer 的原件/真实 guard，不 mock reader/normalizer。BFF runtime 需保留合法 DTO、兼容缺字段、拒绝 false→true 资格提升、额外敏感字段及错误 Decimal。
 - [ ] UI 先写渲染/语义 RED，再实现。现有卡片与统一格式函数、只读原生 details；明确公司描述不是 SEC 财务事实，行业标签不是已验证风控分类；经济日期、vintage、收到时间、可用时间各自标注。长描述/标识可展开且窄屏不溢出；null 显示未知，非零小值不显示零，最多 3 位小数；仅宏观/公司测试资料不显示误导的 SEC 标题。正常旧资料布局不回归。页面无采集/研究/交易副作用。
+- [ ] 可发现性沿用组合页服务端 `PositionResearchResponse.read_at`：`newer_inputs_available=true` 时另给“查看更新资料”链接，以该服务端 cutoff 查询已有冻结资料，不取浏览器当前时间；旧报告有 run_id 时使用 exact run 链接，无 run 时保留旧 as_of 兼容。两链接分别代表旧研究与当前材料，不能隐式替换旧报告。A已实际核对新资料带 canonical UTC Z 的 as_of 入口能读取现有新快照，且无写请求；不需要先创建研究 run。
 - [ ] 集中 Spec/Quality 审查；聚焦 pytest/Ruff/Mypy、前端单测/typecheck/lint、生成物一致性与该页 E2E。修复后定向复核；不重复同环境未变代码的重型验证。
 - [ ] A 在当前真实 FMP/FRED 冻结样本上串行集成，核对同一案例 DB→受保护 API/BFF→实际 DOM（桌面/窄屏）、旧冻结无新字段，保持执行锁；不重复采集/导入或模型调用。API 已生效不等于页面已验收，证据继续写原 checkpoint。
 
