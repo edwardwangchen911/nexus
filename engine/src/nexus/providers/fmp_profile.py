@@ -72,5 +72,5 @@ async def fetch_profile(client: httpx.AsyncClient, *, symbol: str, key: SecretSt
         client=client,
     )
     return await fixed.get_bytes(
-        ("stable", "profile"), (("symbol", symbol), ("apikey", secret)), ()
+        ("stable", "profile"), (("symbol", symbol),), (("apikey", secret),)
     )

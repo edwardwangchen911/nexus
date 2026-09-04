@@ -66,7 +66,30 @@ async def test_profile_transport_stops_at_first_error_without_secret_logs(status
                     client, symbol="AAPL", key=SecretStr("synthetic-secret")
                 )
     assert len(calls) == 1
+    assert str(calls[0].url) == "https://financialmodelingprep.com/stable/profile?symbol=AAPL"
+    assert calls[0].headers["apikey"] == "synthetic-secret"
     assert "synthetic-secret" not in caplog.text and "apikey" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_profile_success_uses_header_and_returns_exact_raw_without_secret_logs(caplog):
+    raw = b'[{"symbol":"AAPL","price":1.234567890123456789}]'
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, content=raw)
+
+    with caplog.at_level(logging.DEBUG):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            result = await provider().fetch_profile(
+                client, symbol="AAPL", key=SecretStr("synthetic-secret")
+            )
+    assert result == raw
+    assert len(calls) == 1
+    assert str(calls[0].url) == "https://financialmodelingprep.com/stable/profile?symbol=AAPL"
+    assert calls[0].headers["apikey"] == "synthetic-secret"
+    assert "synthetic-secret" not in caplog.text
 
 
 @pytest.mark.asyncio

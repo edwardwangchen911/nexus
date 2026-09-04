@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import UUID
@@ -35,7 +36,8 @@ async def test_collect_then_read_archive_preserves_identity_unknowns_and_exact_b
         )
     assert result["status"] == "collected" and len(calls) == 1
     assert calls[0].url.path == "/stable/profile"
-    assert dict(calls[0].url.params) == {"symbol": "AAPL", "apikey": "synthetic-secret"}
+    assert dict(calls[0].url.params) == {"symbol": "AAPL"}
+    assert calls[0].headers["apikey"] == "synthetic-secret"
     assert (directory / "profile.json").read_bytes() == raw
     receipt = (directory / "receipt.json").read_bytes()
     assert b"synthetic-secret" not in receipt and b"apikey" not in receipt
@@ -117,3 +119,40 @@ def test_canonical_cannot_claim_source_clocks_or_promote_eligibility():
             model.model_validate({**base, **change})
     doc = model.model_validate(base)
     assert json.loads(doc.canonical_bytes())["industry"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "problem", ["tamper", "receipt", "extra_key", "permissions", "symlink", "fifo"]
+)
+async def test_archive_rejects_tampering_or_nonprivate_nonregular_originals(problem, tmp_path):
+    from nexus.ops.fmp_profile_local import collect_profile
+    from nexus.research.fmp_profile_archive import load_profile_archive
+
+    directory = tmp_path / "archive"
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=b'[{"symbol":"AAPL"}]'),
+        )
+    ) as client:
+        await collect_profile(
+            symbol="AAPL", key=SecretStr("synthetic-secret"), output_dir=directory, client=client
+        )
+    raw = directory / "profile.json"
+    receipt = directory / "receipt.json"
+    if problem == "tamper":
+        raw.write_bytes(b'[{"symbol":"MSFT"}]')
+    elif problem in {"receipt", "extra_key"}:
+        content = json.loads(receipt.read_bytes())
+        content["raw_sha256" if problem == "receipt" else "apikey"] = "synthetic-canary"
+        receipt.write_text(json.dumps(content))
+    elif problem == "permissions":
+        raw.chmod(0o644)
+    elif problem in {"symlink", "fifo"}:
+        raw.unlink()
+        if problem == "symlink":
+            raw.symlink_to(receipt)
+        else:
+            os.mkfifo(raw, 0o600)
+    with pytest.raises(ValueError, match="FMP_PROFILE_ARCHIVE_INVALID"):
+        load_profile_archive(directory, instrument_id=INSTRUMENT, symbol="AAPL")
