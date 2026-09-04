@@ -701,10 +701,10 @@ FMP 与 FRED 分别由既有独立 worktree 实现，root 单独负责共享研�
 
 #### 执行与验收顺序
 
-- [ ] 两 owner 按冻结合同先红后绿完成 adapter/原件/canonical/storage 的单位、时间、身份与安全单测；root 同时先用旧 guard 红测 FMP 合法绑定，再实现 0042/降级保护。
-- [ ] root 吸收合同稳定代码后接正常 prepare→精确工具，补 profile/macro-only 不启动研究、同 vintage 多日期、旧冻结不变、坏 optional/截断/未来/缺原件/重放与原子性 PG。HTTP/S3 只允许边界 fixture，不 mock guard/reader/normalizer 或手填最终研究。
-- [ ] 集中一轮审查、必要修复定向复核，逐个小提交交 A 串行集成；同代码环境合同的验证复用，增量记录在本节。
-- [ ] 用各源正常入口采集一份公开代表样本并保存原件，不重复早先连接探测；A 按已就绪依赖完成实际存储与精确消费者核验。页面/API展示若尚未接线须明确标为未完成，不能用工具测试声称 DOM 验收。
+- [x] 两 owner 按冻结合同先红后绿完成 adapter/原件/canonical/storage 的单位、时间、身份与安全单测；root 同时先用旧 guard 红测 FMP 合法绑定，再实现 0042/降级保护。
+- [x] root 吸收合同稳定代码后接正常 prepare→精确工具，补 profile/macro-only 不启动研究、同 vintage 多日期、旧冻结不变、坏 optional/截断/未来/缺原件/重放与原子性 PG。HTTP/S3 只允许边界 fixture，不 mock guard/reader/normalizer 或手填最终研究。
+- [x] 集中一轮审查、必要修复定向复核，逐个小提交交 A 串行集成；同代码环境合同的验证复用，增量记录在本节。
+- [x] 用各源正常入口采集一份公开代表样本并保存原件，不重复早先连接探测；A 按已就绪依赖完成实际存储与精确消费者核验。页面/API展示若尚未接线须明确标为未完成，不能用工具测试声称 DOM 验收。
 
 这些来源只补当前可追溯研究材料；FMP profile、FRED 宏观或 Alpaca 当期行动观测均不证明历史股票池、行业风控映射、复权完整性、费用或投资方向充分性。真实经济比较与历史回测资格保持原门禁。
 
@@ -715,3 +715,5 @@ FMP 与 FRED 分别由既有独立 worktree 实现，root 单独负责共享研�
 FRED 增量：parser/collector/storage/CLI 使用现有 HTTP bytes、原件和 metadata 单位；正常实际采集公开 DGS10 历史 vintage 得到 metadata + 1 页、4 条观测，单位 Percent、显式缺值 0，已离线 load 校验，不推断缺少经济日期的原因或历史完整性。三项时钟/配置审查问题及内部 replay 的格式/authority 联动均修复：来源 receipt 不变，实际 DB 创建时间逐项限制可见性，adoption 按当前导入时刻核验，未来 available 的内部一致性重放不豁免其他合同，CLI 保留正常进程配置覆盖。producer 11 PG、后续 5 聚焦 PG、55 unit/静态检查通过；旧批采同 revision 跨日期静默丢行先 RED 后以 6 行拒绝检查修复，原正常重放和碰撞 2 PG 通过。
 
 共享 FRED prepare→admission→tool 正常路径先因未附加宏观证据失败，再接入每 series 最新可见经济日期/vintage/receipt 与 calendar 双引用；同钟数值/单位矛盾不选，等价重复选择稳定引用，保留其他研究与两个预留槽。新格式同时按 canonical schema/hash 和 local revision 识别，坏新格式不得回退旧协议，严格结果还须匹配精确 observation ID。同引用异 series 的真实 PG 反例（不关闭 FK/guard）先错误读出额外行，修复后与 FMP/旧 FX 共 5 PG 通过；最新共享及 FRED 聚焦 34 unit、共享两源码 Mypy/Ruff 通过。集中审查与修复定向复核 Spec/Quality Ready。主线负责人可先并行集成已 Ready 的 producer/CLI 与真实导入，再接收共享读端提交；运行/真实消费者验收以接收方结果为准，不把发出交接当作完成。
+
+实际闭合：A已将FRED五项交付串行合入，API源码/镜像6200c38，业务库仍0042；真实归档正常CLI一次导入4条，原件/canonical/calendar对象hash与DB reader一致。新prepare双引用→精确get_macro_snapshot通过，旧FMP/Alpaca冻结不回填；临时admit事务回滚，无持久研究/预算/Job/模型。详情见现有core-evidence-checkpoint的FRED真实验收段。FMP/FRED页面/API仍未接线，不能把本片当作整体产品目标完成。

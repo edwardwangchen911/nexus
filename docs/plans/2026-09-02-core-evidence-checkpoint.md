@@ -1738,3 +1738,29 @@ outputs/acceptance/fmp-0042-20260904，真实身份与原件详情不进入记�
 截断或汇总字段错误，不当成任务失败、缺权限或新审批要求。历史额外三阶段预算
 审批已在本记录废止，不恢复为常规验收前置条件。新证据已冻结，降级必须遵守0042
 既有保护；保留备份与回滚镜像，不通过删除历史证据绕开降级限制。
+
+### 2026-09-04 FRED真实归档、运行与精确宏观工具验收
+
+已按交付顺序集成五项FRED改动：76d4079→e691c40、afade10→7d121ca、5a67983→
+864ff2c、95e7436→71af3e7、bc7e70c→6200c38。共享消费者、存储与旧批采修复源码
+与最终审查版无差异；本地聚焦34 unit通过，既有同代码PG/静态审查结果复用，未
+重复占用测试库。本片无迁移，业务库仍0042_fmp_profiles。
+
+API运行源码与镜像标签核对为6200c38144199940503877e59a363dc8c9cb615c；本地切换
+仅更新API，原环境/端口保持，PG/MinIO容器及启动时间不变，保留切换前回滚镜像。
+live正常，认证readiness DB/migration/object_store ready；worker unavailable使整体
+503如实保留，没有启动worker、网关、模型、调度或交易。
+
+复用已正常采集的DGS10既有metadata与单页原件，经fred_local import一次导入4条
+观察；未重新采集、未重复连通探测。独立核对4条日期/值/Percent单位/vintage与
+归档完全相同，raw原件、canonical、calendar冻结对象按实际版本URI读回并核hash。
+新的正常prepare仅选择最新可见经济日期，同时绑定macro/calendar两份精确引用；
+get_macro_snapshot核对数值、单位、日期、available/received、vintage、revision、
+calendar引用与锁定。旧FMP及Alpaca快照没有新宏观回填；新快照仍读取FMP背景，
+旧快照内容/revision与十类历史行摘要保持，研究输出/决策/组合快照未新增或修改。
+正常admit仅在回滚事务内用于原生工具验收，没有持久化研究/预算/Job，活动Job为0，
+没有调用模型。新FRED观察、证据、原件与正常新研究快照保留在业务存储。
+
+受保护证据在outputs/acceptance/fred-real-20260904。原件仅证明当前已收到的指定
+vintage观察，不回推历史可用性，不推断缺少经济日期的原因或历史完整性；不替代
+复权、费用、行业风控或正式经济比较。FMP/FRED仍无新增页面/API，本片不宣称DOM。
