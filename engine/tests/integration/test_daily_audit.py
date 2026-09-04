@@ -367,7 +367,12 @@ async def test_selected_unknown_research_is_bound_and_audited_through_normal_cli
     for name in ("run_job_worker_once", "run_agent_worker_once", "S3ProviderEvidenceStore"):
         monkeypatch.setattr(daily_once, name, forbidden)
     store = Store()
-    monkeypatch.setattr(daily_once, "S3AuditManifestObjectStore", lambda _: store)
+
+    def local_store(_, *, disable_environment_proxies):
+        assert disable_environment_proxies is True
+        return store
+
+    monkeypatch.setattr(daily_once, "S3AuditManifestObjectStore", local_store)
     request = daily_once.DailyAuditRequest(action="audit", root_id=root, run_id=run_id)
     result = await daily_once.run_once(config, request)
     assert result["status"] == "recorded" and result["scope"]["research"] == "selected"

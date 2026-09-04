@@ -56,6 +56,7 @@ class S3AuditManifestObjectStore:
         settings: EngineSettings,
         *,
         client: _AuditManifestS3Client | None = None,
+        disable_environment_proxies: bool = False,
     ) -> None:
         endpoint = settings.object_store_endpoint
         region = settings.object_store_region
@@ -84,6 +85,8 @@ class S3AuditManifestObjectStore:
                 read_timeout=5,
                 retries={"max_attempts": 1},
                 s3={"addressing_style": "path"},
+                # Local-only callers must not send signed requests through an env proxy.
+                proxies={} if disable_environment_proxies else None,
             ),
         )
 

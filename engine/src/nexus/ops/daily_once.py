@@ -197,7 +197,7 @@ def _audit_store(settings: EngineSettings) -> S3AuditManifestObjectStore:
         or endpoint.path not in {"", "/"}
     ):
         raise DailyOnceError("DAILY_ONCE_AUDIT_STORE_UNAVAILABLE")
-    return S3AuditManifestObjectStore(settings)
+    return S3AuditManifestObjectStore(settings, disable_environment_proxies=True)
 
 
 def _require_research_runtime(settings: EngineSettings) -> None:

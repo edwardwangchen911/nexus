@@ -1,6 +1,9 @@
 """Manual audit is explicit and rejects private input without echoing it."""
 
 import json
+import subprocess
+import sys
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -97,3 +100,60 @@ async def test_audit_rejects_implicit_or_remote_storage_before_database(monkeypa
             config,
             daily_once.DailyAuditRequest(action="audit", root_id=UUID(int=101)),
         )
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+@pytest.mark.parametrize("lowercase", [False, True])
+def test_real_local_audit_client_ignores_environment_proxy_without_changing_legacy(
+    tmp_path,
+    scheme,
+    lowercase,
+):
+    # A clean child environment cannot load real credentials or alter the test runner's env.
+    environment = {
+        "PYTHONPATH": str(Path(__file__).resolve().parents[3] / "src"),
+        "AWS_CONFIG_FILE": "/dev/null",
+        "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
+        "AWS_EC2_METADATA_DISABLED": "true",
+    }
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        environment[name.lower() if lowercase else name] = "http://proxy.example.invalid:8080"
+    source = """
+import json
+import sys
+from nexus.audit.manifest import S3AuditManifestObjectStore
+from nexus.ops.daily_once import DailyOnceSettings, _audit_store
+
+def deny_network(event, args):
+    if event in {"socket.connect", "socket.getaddrinfo"}:
+        raise AssertionError("no network allowed in client configuration test")
+sys.addaudithook(deny_network)
+endpoint = sys.argv[1] + "://127.0.0.1:19000"
+settings = DailyOnceSettings(
+    object_store_endpoint=endpoint, object_store_region="us-east-1",
+    object_store_bucket="synthetic-audit", object_store_access_key_id="synthetic-key",
+    object_store_secret_access_key="synthetic-secret",
+)
+local = _audit_store(settings)._client
+legacy = S3AuditManifestObjectStore(settings)._client
+try:
+    local_proxy = local._endpoint.http_session._proxy_config.proxy_url_for(endpoint)
+    legacy_proxy = legacy._endpoint.http_session._proxy_config.proxy_url_for(endpoint)
+    print(json.dumps({
+        "local_direct": local_proxy is None,
+        "legacy_proxy": legacy_proxy == "http://proxy.example.invalid:8080",
+    }))
+finally:
+    local.close()
+    legacy.close()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", source, scheme],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+    assert json.loads(result.stdout) == {"local_direct": True, "legacy_proxy": True}
