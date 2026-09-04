@@ -4284,6 +4284,149 @@ class _OversizedUsageCommittee(FixtureCommittee):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["research", "critique"])
+@pytest.mark.parametrize("timeout", [False, True])
+async def test_native_sdk_invocation_failure_keeps_safe_diagnostic_and_usage(
+    migrated_database_url, monkeypatch, failure_stage, timeout
+):
+    """Only the SDK process is replaced; admission, adapter, worker, DB and API are real."""
+    from types import SimpleNamespace
+
+    from nexus.agents import codex_sdk
+    from nexus.ops.openai_local import prepare_database
+    from openai_codex.generated.v2_all import ChatgptAccount, TurnStatus
+
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    factory = session_factory(settings)
+    await _seed_authority(factory, include_base_evidence=False)
+    await _seed_database_tool_authority(
+        factory, link_price=False, bar_count=1, price_quality_flags=("missing",)
+    )
+    await prepare_database(settings, structured_synthesis=True)
+    async with factory() as session, session.begin():
+        model = await session.scalar(
+            select(AgentModelConfigRecord).where(
+                AgentModelConfigRecord.version == "codex-sdk-chatgpt-v3"
+            )
+        )
+        admission = await admit_research_run(
+            session,
+            actor_id="sdk-test",
+            route="/internal/v1/research-runs",
+            idempotency_key="sdk-invocation-failure",
+            request_hash="b" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID, data_snapshot_id=_SNAPSHOT_ID, decision_time=_NOW
+            ),
+            prompt_version_id=None,
+            model_config_id=model.id,
+            daily_limit_usd=Decimal("3"),
+            now=datetime(2026, 9, 2, tzinfo=UTC),
+        )
+    requests = []
+
+    async def sdk_turn(wire, **kwargs):
+        payload = json.loads(wire)
+        requests.append(payload)
+        if payload["stage"] == failure_stage:
+            if timeout:
+                raise TimeoutError("synthetic-private-invocation-canary")
+            raise RuntimeError("synthetic-private-invocation-canary")
+        return SimpleNamespace(
+            status=TurnStatus.completed,
+            items=[],
+            usage=SimpleNamespace(total=SimpleNamespace(input_tokens=300, output_tokens=80)),
+            final_response=json.dumps(
+                {
+                    "roles": [
+                        {
+                            "role": role,
+                            "vote": "abstain",
+                            "conflicting_facts": False,
+                            "claims": [{"text": "缺少合格行情。", "citations": [0]}],
+                            "reviewed_claim_ids": [],
+                        }
+                        for role in payload["requested_roles"]
+                    ]
+                }
+            ),
+        )
+
+    thread = SimpleNamespace(run=AsyncMock(side_effect=sdk_turn))
+    client = SimpleNamespace(
+        account=AsyncMock(
+            return_value=SimpleNamespace(
+                account=SimpleNamespace(root=ChatgptAccount.model_construct())
+            )
+        ),
+        _client=SimpleNamespace(
+            request=AsyncMock(return_value=SimpleNamespace(config=SimpleNamespace(model_extra={})))
+        ),
+        thread_start=AsyncMock(return_value=thread),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(codex_sdk, "AsyncCodex", lambda config: client)
+    assert await run_agent_worker_once(settings) is True
+    assert await run_agent_worker_once(settings) is False
+    calls = 1 if failure_stage == "research" else 2
+    assert len(requests) == calls
+    assert client.close.await_count == calls
+    async with factory() as session:
+        run = await session.get(AgentResearchRunRecord, admission.run_id)
+        assert run.status == "failed" and run.retry_count == 0
+        expected_usage = (None, None) if calls == 1 else (300, 80)
+        assert (run.input_tokens, run.output_tokens) == expected_usage
+        job = await session.scalar(select(Job).where(Job.payload["run_id"].astext == str(run.id)))
+        assert job.attempt_count == job.max_attempts == 1
+        outputs = tuple(
+            await session.scalars(
+                select(AgentResearchOutputRecord).where(AgentResearchOutputRecord.run_id == run.id)
+            )
+        )
+        assert len(outputs) == (1 if calls == 1 else 6)
+        assert all(output.intent is None for output in outputs)
+        terminal = next(output for output in outputs if output.role is None)
+        assert terminal.payload["reason"] == "model_usage_uncertain"
+        assert terminal.payload["diagnostic"] == {
+            "stage": failure_stage,
+            "boundary": "invocation",
+            "role": None,
+            "response_hash": None,
+            "validation_kind": None,
+            "invocation_phase": "turn_run",
+            "invocation_kind": "timeout" if timeout else "unexpected_exception",
+        }
+        stage_input = terminal.payload["stage_input"]
+        assert stage_input["stage"] == failure_stage
+        assert len(stage_input["request_hash"]) == len(stage_input["frozen_inputs_hash"]) == 64
+        assert "synthetic-private-invocation-canary" not in json.dumps([o.payload for o in outputs])
+        assert (
+            terminal.content_hash
+            == hashlib.sha256(
+                json.dumps(
+                    {"status": "failed", "role": None, "payload": terminal.payload, "intent": None},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode()
+            ).hexdigest()
+        )
+    path = f"/internal/v1/research-runs/{admission.run_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
+    ) as client_http:
+        response = await client_http.get(path, headers=headers("GET", path))
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["status"] == "failed" and data["intent"] is None
+    assert data["abstention_reason"] == "model_usage_uncertain"
+    assert (data["input_tokens"], data["output_tokens"]) == expected_usage
+    assert data["failed_stage_input"] == stage_input
+    assert "diagnostic" not in data  # This slice does not expand the public DTO.
+    assert "synthetic-private-invocation-canary" not in response.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("assessment_rejection", [False, True])
 async def test_native_v3_domain_rejection_persists_safe_reason_without_text_or_retry(
     migrated_database_url,

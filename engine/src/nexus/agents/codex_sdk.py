@@ -8,12 +8,12 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Mapping
-from contextlib import suppress
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
 from codex_cli_bin import bundled_codex_path  # type: ignore[import-untyped]
 from openai import pydantic_function_tool
@@ -23,7 +23,14 @@ from openai_codex.models import JsonObject
 from pydantic import BaseModel, ConfigDict, Field
 
 from nexus.agents.codex_token_budget import input_preflight_units
-from nexus.agents.committee import ROLE_ORDER, AgentRole, CommitteeRoleOutput, PromptAsset
+from nexus.agents.committee import (
+    ROLE_ORDER,
+    AgentRole,
+    CommitteeRoleOutput,
+    InvocationKind,
+    InvocationPhase,
+    PromptAsset,
+)
 from nexus.agents.models import ResearchRequest
 from nexus.agents.responses_budget import UsageSnapshot
 from nexus.agents.tools import ReadOnlyToolRegistry
@@ -78,9 +85,47 @@ _DISABLED_FEATURES = (
 class CodexInvocationError(ValueError):
     """Safe failure code with measured usage, when the SDK actually reported it."""
 
-    def __init__(self, reason: str, *, usage: UsageSnapshot | None = None) -> None:
-        super().__init__(reason)
+    def __init__(
+        self,
+        reason: str,
+        *,
+        usage: UsageSnapshot | None = None,
+        phase: InvocationPhase = "response_check",
+    ) -> None:
+        kinds: dict[str, InvocationKind] = {
+            "CODEX_INPUT_TOO_LARGE": "input_too_large",
+            "CODEX_CHATGPT_LOGIN_REQUIRED": "login_required",
+            "CODEX_RESPONSE_INCOMPLETE": "response_incomplete",
+            "CODEX_UNEXPECTED_TOOL": "unexpected_tool",
+            "CODEX_OUTPUT_TOO_LARGE": "output_too_large",
+            "CODEX_USAGE_MISSING": "usage_missing",
+            "CODEX_USAGE_INVALID": "usage_invalid",
+            "CODEX_TIMEOUT": "timeout",
+            "CODEX_UNEXPECTED_EXCEPTION": "unexpected_exception",
+        }
+        self.reason = reason if reason in kinds else "CODEX_UNEXPECTED_EXCEPTION"
+        self.kind = kinds[self.reason]
+        self.phase: InvocationPhase = (
+            phase if phase in get_args(InvocationPhase.__value__) else "preflight"
+        )
+        super().__init__(self.reason)
         self.usage = usage
+
+
+class _CodexInvocationTimeout(CodexInvocationError, TimeoutError):
+    """Retain the existing TimeoutError catch contract without retaining its text."""
+
+
+@contextmanager
+def _invocation_boundary(phase: InvocationPhase) -> Iterator[None]:
+    try:
+        yield
+    except CodexInvocationError:
+        raise
+    except TimeoutError:
+        raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase) from None
+    except Exception:
+        raise CodexInvocationError("CODEX_UNEXPECTED_EXCEPTION", phase=phase) from None
 
 
 class _Claim(BaseModel):
@@ -219,77 +264,102 @@ def codex_input_allowance(wire: str, output_schema: JsonObject) -> int:
 async def invoke_codex(
     payload: Mapping[str, object], *, output_model: type[BaseModel] = _Batch
 ) -> tuple[str, UsageSnapshot]:
+    with _invocation_boundary("preflight"):
+        return await _invoke_codex(payload, output_model=output_model)
+
+
+async def _invoke_codex(
+    payload: Mapping[str, object], *, output_model: type[BaseModel]
+) -> tuple[str, UsageSnapshot]:
     wire = codex_request_wire(payload)
     # Bound submitted context; CLI harness usage is checked after the SDK reports it.
     if len(wire.encode()) > MAX_INPUT_TOKENS - 8192:
-        raise ValueError("CODEX_INPUT_TOO_LARGE")
+        raise CodexInvocationError("CODEX_INPUT_TOO_LARGE", phase="preflight")
     output_schema = codex_output_schema(output_model)
     if codex_input_allowance(wire, output_schema) > MAX_INPUT_TOKENS:
-        raise ValueError("CODEX_INPUT_TOO_LARGE")
+        raise CodexInvocationError("CODEX_INPUT_TOO_LARGE", phase="preflight")
     with TemporaryDirectory(prefix="nexus-codex-") as temporary:
         directory = Path(temporary)
-        client = AsyncCodex(sdk_config(directory))
+        with _invocation_boundary("client_init"):
+            client = AsyncCodex(sdk_config(directory))
         run_task = None
+        phase: InvocationPhase = "account"
         try:
             async with asyncio.timeout(TIMEOUT_SECONDS):
-                account = await client.account(refresh_token=False)
-                if account.account is None or not isinstance(account.account.root, ChatgptAccount):
-                    raise ValueError("CODEX_CHATGPT_LOGIN_REQUIRED")
+                with _invocation_boundary("account"):
+                    account = await client.account(refresh_token=False)
+                    if account.account is None or not isinstance(
+                        account.account.root, ChatgptAccount
+                    ):
+                        raise CodexInvocationError("CODEX_CHATGPT_LOGIN_REQUIRED", phase="account")
                 # Config maps merge: an empty mcp_servers table does NOT clear
                 # user servers. Disable every resolved entry before thread start.
-                resolved = await client._client.request(
-                    "config/read", {"includeLayers": False}, response_model=ConfigReadResponse
-                )
-                servers = (resolved.config.model_extra or {}).get("mcp_servers", {})
-                thread = await client.thread_start(
-                    config={"mcp_servers": {name: {"enabled": False} for name in servers}},
-                    model=MODEL_ID,
-                    model_provider=_PROVIDER,
-                    ephemeral=True,
-                    cwd=str(directory),
-                    sandbox=Sandbox.read_only,
-                    approval_mode=ApprovalMode.deny_all,
-                    base_instructions=BASE_INSTRUCTIONS,
-                    developer_instructions=DEVELOPER_INSTRUCTIONS,
-                )
-                run_task = asyncio.create_task(
-                    thread.run(
-                        wire,
-                        output_schema=output_schema,
-                        approval_mode=ApprovalMode.deny_all,
-                        sandbox=Sandbox.read_only,
+                phase = "config_read"
+                with _invocation_boundary(phase):
+                    resolved = await client._client.request(
+                        "config/read", {"includeLayers": False}, response_model=ConfigReadResponse
                     )
-                )
-                # SDK streaming blocks in to_thread(queue.get). Keep its queue registered
-                # until close wakes the reader; cancellation first would orphan the waiter.
-                result = await asyncio.shield(run_task)
+                    servers = (resolved.config.model_extra or {}).get("mcp_servers", {})
+                phase = "thread_start"
+                with _invocation_boundary(phase):
+                    thread = await client.thread_start(
+                        config={"mcp_servers": {name: {"enabled": False} for name in servers}},
+                        model=MODEL_ID,
+                        model_provider=_PROVIDER,
+                        ephemeral=True,
+                        cwd=str(directory),
+                        sandbox=Sandbox.read_only,
+                        approval_mode=ApprovalMode.deny_all,
+                        base_instructions=BASE_INSTRUCTIONS,
+                        developer_instructions=DEVELOPER_INSTRUCTIONS,
+                    )
+                phase = "turn_run"
+                with _invocation_boundary(phase):
+                    run_task = asyncio.create_task(
+                        thread.run(
+                            wire,
+                            output_schema=output_schema,
+                            approval_mode=ApprovalMode.deny_all,
+                            sandbox=Sandbox.read_only,
+                        )
+                    )
+                    # SDK streaming blocks in to_thread(queue.get). Keep its queue registered
+                    # until close wakes the reader; cancellation first would orphan the waiter.
+                    result = await asyncio.shield(run_task)
+        except TimeoutError as error:
+            if isinstance(error, CodexInvocationError):
+                raise
+            raise _CodexInvocationTimeout("CODEX_TIMEOUT", phase=phase) from None
         finally:
-            await client.close()
+            with _invocation_boundary("client_close"):
+                await client.close()
             if run_task is not None:
                 with suppress(Exception, asyncio.CancelledError):
                     await asyncio.wait_for(run_task, timeout=1)
-    measured_usage = None
-    if result.usage is not None:
-        reported = result.usage.total
-        if reported.input_tokens >= 0 and reported.output_tokens >= 0:
-            measured_usage = UsageSnapshot(
-                input_tokens=reported.input_tokens,
-                output_tokens=reported.output_tokens,
-                provider_calls=1,
-            )
-    if result.status is not TurnStatus.completed or not result.final_response:
-        raise CodexInvocationError("CODEX_RESPONSE_INCOMPLETE", usage=measured_usage)
-    if any(
-        item.root.type not in {"userMessage", "agentMessage", "reasoning"} for item in result.items
-    ):
-        raise CodexInvocationError("CODEX_UNEXPECTED_TOOL", usage=measured_usage)
-    if len(result.final_response.encode()) > _MAX_OUTPUT_BYTES:
-        raise CodexInvocationError("CODEX_OUTPUT_TOO_LARGE", usage=measured_usage)
-    if result.usage is None:
-        raise CodexInvocationError("CODEX_USAGE_MISSING")
-    if measured_usage is None:
-        raise CodexInvocationError("CODEX_USAGE_INVALID")
-    return result.final_response, measured_usage
+    with _invocation_boundary("response_check"):
+        measured_usage = None
+        if result.usage is not None:
+            reported = result.usage.total
+            if reported.input_tokens >= 0 and reported.output_tokens >= 0:
+                measured_usage = UsageSnapshot(
+                    input_tokens=reported.input_tokens,
+                    output_tokens=reported.output_tokens,
+                    provider_calls=1,
+                )
+        if result.status is not TurnStatus.completed or not result.final_response:
+            raise CodexInvocationError("CODEX_RESPONSE_INCOMPLETE", usage=measured_usage)
+        if any(
+            item.root.type not in {"userMessage", "agentMessage", "reasoning"}
+            for item in result.items
+        ):
+            raise CodexInvocationError("CODEX_UNEXPECTED_TOOL", usage=measured_usage)
+        if len(result.final_response.encode()) > _MAX_OUTPUT_BYTES:
+            raise CodexInvocationError("CODEX_OUTPUT_TOO_LARGE", usage=measured_usage)
+        if result.usage is None:
+            raise CodexInvocationError("CODEX_USAGE_MISSING")
+        if measured_usage is None:
+            raise CodexInvocationError("CODEX_USAGE_INVALID")
+        return result.final_response, measured_usage
 
 
 class CodexCommittee:

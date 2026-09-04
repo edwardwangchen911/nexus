@@ -5,7 +5,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from nexus.agents.models import ResearchRequest
 from nexus.domain.evidence import EvidenceRef
@@ -50,14 +57,40 @@ class StageInputIdentity(BaseModel):
     frozen_inputs_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+type InvocationPhase = Literal[
+    "preflight",
+    "client_init",
+    "account",
+    "config_read",
+    "thread_start",
+    "turn_run",
+    "client_close",
+    "response_check",
+    "aggregate_wait",
+]
+type InvocationKind = Literal[
+    "input_too_large",
+    "login_required",
+    "response_incomplete",
+    "unexpected_tool",
+    "output_too_large",
+    "usage_missing",
+    "usage_invalid",
+    "timeout",
+    "unexpected_exception",
+]
+
+
 class StageFailureDiagnostic(BaseModel):
     """Safe local terminal metadata, never response text or exception context."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     stage: Literal["research", "critique", "synthesis"]
-    boundary: Literal["wire_validation", "role_binding", "assessment_binding"]
+    boundary: Literal["invocation", "wire_validation", "role_binding", "assessment_binding"]
     role: AgentRole | None = None
-    response_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    response_hash: str | None = Field(pattern=r"^[0-9a-f]{64}$")
+    invocation_phase: InvocationPhase | None = None
+    invocation_kind: InvocationKind | None = None
     validation_kind: (
         Literal[
             "schema_validation",
@@ -70,6 +103,33 @@ class StageFailureDiagnostic(BaseModel):
         ]
         | None
     ) = None
+
+    @model_validator(mode="after")
+    def _boundary_fields(self) -> "StageFailureDiagnostic":
+        if self.boundary == "invocation":
+            if (
+                self.response_hash is not None
+                or self.role is not None
+                or self.validation_kind is not None
+                or self.invocation_phase is None
+                or self.invocation_kind is None
+            ):
+                raise ValueError("INVOCATION_DIAGNOSTIC_INVALID")
+        elif (
+            self.response_hash is None
+            or self.invocation_phase is not None
+            or self.invocation_kind is not None
+        ):
+            raise ValueError("VALIDATION_DIAGNOSTIC_INVALID")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _legacy_payload(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
+        payload = cast(dict[str, object], handler(self))
+        if self.boundary != "invocation":
+            payload.pop("invocation_phase", None)
+            payload.pop("invocation_kind", None)
+        return payload
 
 
 class CommitteeRoleOutput(BaseModel):

@@ -15,6 +15,7 @@ from nexus.agents.codex_sdk import (
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
     CodexCommittee,
+    CodexInvocationError,
     _Claim,
     _Role,
     codex_input_allowance,
@@ -387,8 +388,22 @@ class StagedCodexCommittee(CodexCommittee):
             output_tokens=self.usage.output_tokens,
             provider_calls=self.usage.provider_calls + 1,
         )
-        async with asyncio.timeout_at(self._deadline):
-            raw, usage = await invoke_codex(payload, output_model=output_model)
+        try:
+            async with asyncio.timeout_at(self._deadline):
+                raw, usage = await invoke_codex(payload, output_model=output_model)
+        except Exception as error:
+            self.failure_diagnostic = StageFailureDiagnostic(
+                stage=stage,
+                boundary="invocation",
+                response_hash=None,
+                invocation_phase=error.phase
+                if isinstance(error, CodexInvocationError)
+                else "aggregate_wait",
+                invocation_kind=error.kind
+                if isinstance(error, CodexInvocationError)
+                else ("timeout" if isinstance(error, TimeoutError) else "unexpected_exception"),
+            )
+            raise
         self.usage = UsageSnapshot(
             input_tokens=self.usage.input_tokens + usage.input_tokens,
             output_tokens=self.usage.output_tokens + usage.output_tokens,

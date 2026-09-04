@@ -471,6 +471,9 @@ async def test_staged_failure_preserves_known_usage_and_does_not_retry_uncertain
     assert model.usage == UsageSnapshot(input_tokens=300, output_tokens=80, provider_calls=2)
     assert invoke.await_count == 2
     assert model.last_stage_input.stage == "critique"
+    assert model.failure_diagnostic.invocation_phase == "aggregate_wait"
+    assert model.failure_diagnostic.invocation_kind == "timeout"
+    assert model.failure_diagnostic.response_hash is None
 
 
 @pytest.mark.asyncio
@@ -717,6 +720,8 @@ async def test_staged_deadline_leaves_worker_time_to_persist_terminal_state(monk
     assert asyncio.get_running_loop().time() < deadline
     assert model.failure_reason == "model_usage_uncertain"
     assert model.usage.provider_calls == 1
+    assert model.failure_diagnostic.invocation_phase == "aggregate_wait"
+    assert model.failure_diagnostic.invocation_kind == "timeout"
 
 
 @pytest.mark.asyncio
@@ -776,6 +781,196 @@ def _sdk(monkeypatch):
 
     monkeypatch.setattr(codex_sdk, "AsyncCodex", create)
     return client, thread, result, configs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase", ["client_init", "account", "config_read", "thread_start", "turn_run", "client_close"]
+)
+async def test_sdk_invocation_failure_retains_only_safe_phase(monkeypatch, phase):
+    client, thread, _, _ = _sdk(monkeypatch)
+    error = RuntimeError("private-exception-canary")
+    if phase == "client_init":
+
+        def fail(config):
+            raise error
+
+        monkeypatch.setattr(codex_sdk, "AsyncCodex", fail)
+    else:
+        target = {
+            "account": client.account,
+            "config_read": client._client.request,
+            "thread_start": client.thread_start,
+            "turn_run": thread.run,
+            "client_close": client.close,
+        }[phase]
+        target.side_effect = error
+    with pytest.raises(codex_sdk.CodexInvocationError) as caught:
+        await codex_sdk.invoke_codex({})
+    assert caught.value.phase == phase
+    assert caught.value.kind == "unexpected_exception"
+    assert "private-exception-canary" not in str(caught.value)
+    if phase != "client_init":
+        client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout", [False, True])
+async def test_staged_real_sdk_failure_builds_invocation_diagnostic(monkeypatch, timeout):
+    from nexus.agents import codex_staged
+
+    client, thread, _, _ = _sdk(monkeypatch)
+    thread.run.side_effect = (
+        TimeoutError("private-canary") if timeout else RuntimeError("private-canary")
+    )
+    request, evidence, prompts = _authority()
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools())
+    run = SimpleNamespace(retry_count=0)
+    assert (
+        await _analyze_with_one_retry(
+            AsyncMock(),
+            run,
+            committee=model,
+            role="orchestrator",
+            request=request,
+            evidence_refs=evidence,
+            prompt=prompts["orchestrator"],
+        )
+        is None
+    )
+    diagnostic = model.failure_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.model_dump(mode="json") == {
+        "stage": "research",
+        "boundary": "invocation",
+        "role": None,
+        "response_hash": None,
+        "validation_kind": None,
+        "invocation_phase": "turn_run",
+        "invocation_kind": "timeout" if timeout else "unexpected_exception",
+    }
+    assert model.failure_reason == "model_usage_uncertain"
+    assert model.usage == UsageSnapshot(provider_calls=1)
+    assert run.retry_count == 0
+    thread.run.assert_awaited_once()
+    client.close.assert_awaited_once()
+
+
+def test_invocation_diagnostic_is_disjoint_from_legacy_validation():
+    from nexus.agents.committee import StageFailureDiagnostic
+    from pydantic import ValidationError
+
+    old = {
+        "stage": "research",
+        "boundary": "wire_validation",
+        "role": None,
+        "response_hash": "a" * 64,
+        "validation_kind": "schema_validation",
+    }
+    assert StageFailureDiagnostic.model_validate(old).model_dump(mode="json") == old
+    new = {
+        **old,
+        "boundary": "invocation",
+        "response_hash": None,
+        "validation_kind": None,
+        "invocation_phase": "turn_run",
+        "invocation_kind": "timeout",
+    }
+    assert StageFailureDiagnostic.model_validate(new).model_dump(mode="json") == new
+    for update in (
+        {"response_hash": "a" * 64},
+        {"role": "bull"},
+        {"validation_kind": "unsafe_text"},
+        {"invocation_kind": "private-canary"},
+        {"invocation_phase": None},
+    ):
+        with pytest.raises(ValidationError):
+            StageFailureDiagnostic.model_validate({**new, **update})
+    with pytest.raises(ValidationError):
+        StageFailureDiagnostic.model_validate({**old, "response_hash": None})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "response_incomplete",
+        "unexpected_tool",
+        "output_too_large",
+        "usage_missing",
+        "usage_invalid",
+    ],
+)
+async def test_staged_sdk_rejection_retains_safe_typed_reason_not_raw(monkeypatch, kind):
+    from nexus.agents import codex_staged
+
+    _, thread, result, _ = _sdk(monkeypatch)
+    if kind == "response_incomplete":
+        result.status = TurnStatus.failed
+    elif kind == "unexpected_tool":
+        result.items = [SimpleNamespace(root=SimpleNamespace(type="commandExecution"))]
+    elif kind == "output_too_large":
+        result.final_response = "private-canary" * codex_sdk._MAX_OUTPUT_BYTES
+    elif kind == "usage_missing":
+        result.usage = None
+    else:
+        result.usage.total.input_tokens = -1
+    request, evidence, prompts = _authority()
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools())
+    with pytest.raises(codex_sdk.CodexInvocationError) as caught:
+        await model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    assert caught.value.kind == kind
+    assert model.failure_diagnostic.invocation_kind == kind
+    assert model.failure_diagnostic.invocation_phase == "response_check"
+    assert model.failure_diagnostic.response_hash is None
+    assert "private-canary" not in model.failure_diagnostic.model_dump_json()
+    assert model.usage == UsageSnapshot(provider_calls=1)  # Existing uncertain-call accounting.
+    assert model.failure_reason == "model_usage_uncertain"
+    thread.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_plain_exception_cannot_spoof_typed_sdk_failure(monkeypatch):
+    _, thread, _, _ = _sdk(monkeypatch)
+    thread.run.side_effect = ValueError("CODEX_CHATGPT_LOGIN_REQUIRED private-canary")
+    with pytest.raises(codex_sdk.CodexInvocationError) as caught:
+        await codex_sdk.invoke_codex({})
+    assert caught.value.kind == "unexpected_exception"
+    assert caught.value.phase == "turn_run"
+    assert str(caught.value) == "CODEX_UNEXPECTED_EXCEPTION"
+
+
+@pytest.mark.asyncio
+async def test_staged_external_cancel_propagates_without_invented_diagnostic(monkeypatch):
+    from nexus.agents import codex_staged
+
+    client, thread, _, _ = _sdk(monkeypatch)
+    started = asyncio.Event()
+    released = asyncio.Event()
+
+    async def waiting(*args, **kwargs):
+        started.set()
+        await released.wait()
+        raise RuntimeError("private-cancel-canary")
+
+    async def close():
+        released.set()
+
+    thread.run.side_effect = waiting
+    client.close.side_effect = close
+    request, evidence, prompts = _authority()
+    model = codex_staged.StagedCodexCommittee(prompts=prompts, tools=_tools())
+    task = asyncio.create_task(
+        model.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert model.failure_diagnostic is None
+    assert model.usage == UsageSnapshot(provider_calls=1)
+    thread.run.assert_awaited_once()
+    client.close.assert_awaited_once()
 
 
 def _authority():
@@ -1235,7 +1430,7 @@ async def test_missing_login_never_starts_model_and_startup_failure_closes(monke
     client.close.assert_awaited_once()
     client.close.reset_mock()
     client.account.side_effect = RuntimeError("startup failure")
-    with pytest.raises(RuntimeError, match="startup failure"):
+    with pytest.raises(codex_sdk.CodexInvocationError, match="CODEX_UNEXPECTED_EXCEPTION"):
         await codex_sdk.invoke_codex({})
     client.close.assert_awaited_once()
 
