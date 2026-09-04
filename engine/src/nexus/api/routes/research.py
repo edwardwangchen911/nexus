@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from nexus.agents.budget import BudgetExhausted
 from nexus.agents.committee import StageInputIdentity
 from nexus.agents.concentration import condition_evaluations_match
+from nexus.agents.execution_authority import load_frozen_evidence
 from nexus.agents.models import ResearchRequest
 from nexus.agents.persistence import (
     admit_research_run,
@@ -290,6 +291,12 @@ async def _hydrate_response(
                 .order_by(AgentResearchOutputEvidenceRecord.evidence_ref_id)
             )
         )
+    if _declares_current_trends(run) and not await load_frozen_evidence(
+        session, run, allow_fixture_evidence=False
+    ):
+        # A saved conclusion cannot outlive the exact supplemental source it declares.
+        # _response turns the now-unbound output into the existing safe abstained view.
+        evidence_records = ()
     context = await read_portfolio_context(
         session, run.data_snapshot_id, run.instrument_id, run.decision_time
     )
@@ -301,6 +308,14 @@ async def _hydrate_response(
             instrument_id=run.instrument_id, as_of=run.decision_time,
         ),
     })
+
+
+def _declares_current_trends(run: AgentResearchRunRecord) -> bool:
+    manifest = run.evidence_manifest
+    return isinstance(manifest, list) and any(
+        isinstance(item, dict) and item.get("source") == "alpaca_current_trends"
+        for item in manifest
+    )
 
 
 def _response(
