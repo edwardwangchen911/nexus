@@ -432,6 +432,7 @@ async def test_new_concentration_focus_rejects_unbound_diagnostic_evidence(
         else:
             assert inputs.portfolio_context is not None
             assert inputs.portfolio_context.research_focus is None
+            assert inputs.portfolio_context.concentration_facts is None
             assert inputs.portfolio_context.execution_locked is True
 
 

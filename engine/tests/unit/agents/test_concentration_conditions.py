@@ -1,6 +1,6 @@
 """Concentration conditions are exact frozen observations, not trading permissions."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -195,3 +195,73 @@ def test_existing_frozen_facts_require_exact_output_evaluations(defect):
     assert not condition_evaluations_match(
         intent.model_copy(update={"condition_evaluations": broken}), context
     )
+
+
+def test_declared_context_cannot_be_missing_even_when_evaluations_are_deleted():
+    from nexus.agents.concentration import condition_evaluations_match
+
+    from .test_execution import _synthesize
+
+    legacy = _synthesize(("support",) * 8)
+    assert condition_evaluations_match(legacy, None)
+    intent = _synthesize(("support",) * 8, portfolio_context=frozen_context())
+    assert not condition_evaluations_match(
+        intent.model_copy(update={"condition_evaluations": None}),
+        None,
+    )
+    old_context = frozen_context().model_copy(update={"concentration_facts": None})
+    assert condition_evaluations_match(
+        intent.model_copy(update={"condition_evaluations": None}),
+        old_context,
+    )
+
+
+@pytest.mark.parametrize("field", ["instrument_id", "data_snapshot_id", "decision_time"])
+def test_api_requires_intent_identity_not_just_valid_models_and_references(field):
+    from nexus.api.routes.research import _response
+    from nexus.persistence.models.agents import (
+        AgentResearchOutputEvidenceRecord,
+        AgentResearchOutputRecord,
+        AgentResearchRunRecord,
+    )
+    from nexus.strategy.intents import ResearchIntent
+
+    from .test_execution import _synthesize
+
+    intent = _synthesize(("support",) * 8, structured=True)
+    run = AgentResearchRunRecord(
+        id=UUID(int=1),
+        instrument_id=intent.instrument_id,
+        data_snapshot_id=intent.data_snapshot_id,
+        decision_time=intent.decision_time,
+        status="completed",
+        retry_count=0,
+        pricing_version="codex-sdk-chatgpt-v3",
+        reserved_cost_usd=Decimal(0),
+        settled_cost_usd=None,
+        input_tokens=10,
+        output_tokens=2,
+    )
+    evidence = tuple(
+        AgentResearchOutputEvidenceRecord(
+            source=ref.source,
+            provider_object_id=ref.object_id,
+            available_at=ref.available_at,
+            location=ref.location,
+            content_hash=ref.content_hash,
+        )
+        for ref in intent.evidence_refs
+    )
+    output = AgentResearchOutputRecord(intent=intent.model_dump(mode="json"), payload={})
+    assert _response(run, output, evidence).intent == intent
+    altered = intent.model_dump(mode="json")
+    altered[field] = (
+        (intent.decision_time + timedelta(seconds=1)).isoformat()
+        if field == "decision_time"
+        else str(UUID(int=999))
+    )
+    assert ResearchIntent.model_validate(altered)  # Valid schema, wrong run identity.
+    output.intent = altered
+    result = _response(run, output, evidence)
+    assert result.intent is None
+    assert result.abstention_reason == "evidence_authority_invalid"

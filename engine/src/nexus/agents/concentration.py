@@ -95,6 +95,12 @@ def condition_evaluations_match(
     context: "PortfolioResearchContext | None",
 ) -> bool:
     """Legacy absent fields remain readable; new frozen facts cannot lose their result."""
+    if context is None and any(
+        ref.source == "nexus_portfolio_context" for ref in intent.evidence_refs
+    ):
+        # The independently verified run/output manifest declares this context.
+        # A strict-reader failure is not a legacy record without context.
+        return False
     if intent.condition_evaluations is None and (
         context is None or context.concentration_facts is None
     ):

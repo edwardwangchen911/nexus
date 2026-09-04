@@ -328,7 +328,12 @@ def _response(
         )
         for record in evidence_records
     )
-    if intent is not None and not _intent_is_authority_bound(intent, evidence):
+    if intent is not None and (
+        intent.instrument_id != run.instrument_id
+        or intent.data_snapshot_id != run.data_snapshot_id
+        or intent.decision_time != run.decision_time
+        or not _intent_is_authority_bound(intent, evidence)
+    ):
         intent = None
         evidence = ()
         abstention_reason = "evidence_authority_invalid"
