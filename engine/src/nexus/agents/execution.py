@@ -242,6 +242,24 @@ async def execute_research_run(
         "audited",
         {"evidence_count": len(evidence_records)},
     )
+    if any(
+        record.source == "alpaca_current_trends" for record in evidence_records
+    ) and not await load_frozen_evidence(
+        session,
+        run,
+        allow_fixture_evidence=allow_fixture_evidence,
+    ):
+        return await _terminal_after_committee(
+            session,
+            run,
+            model=model,
+            committee=committee,
+            role_outputs=role_outputs,
+            output_sequence=output_sequence,
+            event_sequence=event_sequence + 1,
+            status="abstained",
+            reason="current_price_trends_invalid",
+        )
     final_price_authority_status = await revalidate_frozen_price_authority(
         session,
         run=run,

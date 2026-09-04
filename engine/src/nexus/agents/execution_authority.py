@@ -13,6 +13,7 @@ from nexus.agents.committee import ROLE_ORDER, AgentRole
 from nexus.persistence.models.agents import AgentPromptVersionRecord, AgentResearchRunRecord
 from nexus.persistence.models.market import InstrumentAlias
 from nexus.persistence.models.research import ResearchEvidenceRef
+from nexus.research.current_price_trends_storage import read_current_price_trends
 
 MAX_FROZEN_EVIDENCE = 100
 
@@ -24,11 +25,7 @@ async def load_frozen_evidence(
     allow_fixture_evidence: bool,
 ) -> tuple[ResearchEvidenceRef, ...]:
     manifest = run.evidence_manifest
-    if (
-        not isinstance(manifest, list)
-        or not manifest
-        or len(manifest) > MAX_FROZEN_EVIDENCE
-    ):
+    if not isinstance(manifest, list) or not manifest or len(manifest) > MAX_FROZEN_EVIDENCE:
         return ()
     canonical_hash = hashlib.sha256(
         json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
@@ -60,6 +57,16 @@ async def load_frozen_evidence(
         or not _evidence_matches_manifest(record, manifest[index])
         for index, record in enumerate(ordered)
     ):
+        return ()
+    trend_ids = tuple(record.id for record in ordered if record.source == "alpaca_current_trends")
+    if trend_ids and set(
+        await read_current_price_trends(
+            session,
+            instrument_id=run.instrument_id,
+            as_of=run.decision_time,
+            evidence_ids=trend_ids,
+        )
+    ) != set(trend_ids):
         return ()
     return ordered
 
