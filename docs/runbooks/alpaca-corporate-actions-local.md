@@ -50,8 +50,16 @@ PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.alpaca_actions_import \
 
 成功后保存原件、receipt、manifest 和规范化文档到既有内容寻址对象存储，逐个读回，再绑定数据库证据及新研究快照。相同归档复用证据版本和对象；再次显式导入可以生成新截止时刻的研究输入快照，不重写历史。私有结果记录精确 evidence/snapshot 引用，终端只报告固定状态；成功不表示已经运行研究模型。
 
-研究工具 `get_security_snapshot` 读取已冻结的 `corporate_action_observation`。工具只展示最多 32 个已绑定观测，同时保留总量、未绑定数量、是否截断和查询窗口；完整版本仍有原件/页索引可回溯。金额保持 Decimal，缺日期保持 null，空币种不变成 USD；接收时刻不被称为公告或历史可用时刻。`source_completeness=unknown`、`ledger_eligible=false`、`historical_backtest_eligible=false` 和执行锁保持。此切片尚不新增页面/API展示，也不替代真实样本验收。
+研究工具 `get_security_snapshot` 读取已冻结的 `corporate_action_observation`。工具只展示最多 32 个已绑定观测，同时保留总量、未绑定数量、是否截断和查询窗口；完整版本仍有原件/页索引可回溯。金额保持 Decimal，缺日期保持 null，空币种不变成 USD；接收时刻不被称为公告或历史可用时刻。`source_completeness=unknown`、`ledger_eligible=false`、`historical_backtest_eligible=false` 和执行锁保持；这不替代真实样本验收。
 
 对象写入先于数据库事务提交，故障可能留下可恢复的不可变孤立对象；固定失败状态不能证明所有写入均已回滚。先检查私有结果及既有存储，不自动重跑。停用新入口可回滚应用代码，保留归档；迁移只在没有该类冻结证据时允许降级至 0040，已有冻结记录会拒绝降级，禁止为降级删除证据。仅本地对象客户端显式不使用环境代理，其他 HTTP 和既有调用者路由不变。
 
 来源：[官方接口与完整性说明](https://docs.alpaca.markets/us/reference/corporateactions-1)、[官方响应 schema](https://docs.alpaca.markets/us/reference/corporateactions-1.md)。
+
+## 查看冻结研究资料
+
+应用更新后，在既有研究页打开导入结果对应的证券与 `as_of`，可查看“公司行动观测资料”。页面只读数据库；刷新不会重新采集、导入或调用模型。查询范围、分页、已绑定/未绑定数量先显示，逐项原字段与证据版本可展开；窗口不是除息覆盖范围，未绑定或空列表不是无事件证明。
+
+现有准入与研究 GET 的 `inputs.corporate_action_observations` 最多返回一个冻结观测、32条事件；其余保留于原件，截断会明确显示。展示沿用最多3位小数，微小非零显示范围；超出API既有40字符十进制合同的值标为“原件数值超出展示范围”，不冒充未知或零，不改变底层数值。未提供的字段保持未知。
+
+从历史简报进入 `?run_id=...` 时，资料来自该运行自己的快照与研究截止，不读取当前准入或新版本。旧运行没有适用的冻结资料时不补新资料。执行权限、研究质量和历史回测/账本资格不因能查看资料而改变。停用展示只需回滚应用，不能删除已冻结证据来回滚。
