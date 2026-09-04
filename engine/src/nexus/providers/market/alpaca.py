@@ -70,6 +70,13 @@ class AlpacaMarketDataProvider:
         raw_bars = payload.get("bars")
         if not isinstance(raw_bars, list) or len(raw_bars) > 10_000:
             raise MarketProviderPayloadError("bars must be a list")
+        if "next_page_token" not in payload:
+            raise MarketProviderPayloadError("next_page_token is required")
+        next_cursor = payload["next_page_token"]
+        if next_cursor is not None and (
+            not isinstance(next_cursor, str) or not next_cursor
+        ):
+            raise MarketProviderPayloadError("next_page_token must be null or a nonempty string")
         received_at = self._now()
         items: list[PriceBar] = []
         for raw_bar in raw_bars:
@@ -101,9 +108,6 @@ class AlpacaMarketDataProvider:
                     quality_flags=tuple(flags),
                 )
             )
-        next_cursor = payload.get("next_page_token")
-        if next_cursor is not None and not isinstance(next_cursor, str):
-            raise MarketProviderPayloadError("next_page_token must be a string")
         return ProviderPage(
             items=tuple(items),
             next_cursor=next_cursor,

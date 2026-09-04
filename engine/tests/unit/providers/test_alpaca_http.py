@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -19,6 +20,59 @@ from tests.support.provider_fakes import (
     RecordingFixedOriginClient,
     canonical_bars_request,
 )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        b'{"bars":[]}',
+        b'{"bars":[],"next_page_token":""}',
+        b'{"bars":[],"next_page_token":false}',
+    ),
+)
+@pytest.mark.asyncio
+async def test_provider_cannot_infer_page_exhaustion_from_invalid_cursor(raw: bytes) -> None:
+    recorder = RecordingFixedOriginClient(payload=raw)
+    transport = AlpacaHttpTransport(
+        recorder,
+        key_id=SecretStr("id-canary"),
+        secret=SecretStr("secret-canary"),
+        feed="sip",
+        symbol_resolver=FixedInstrumentSymbolResolver("AAPL"),
+    )
+    provider = AlpacaMarketDataProvider(transport, feed="sip", delivery_mode="delayed")
+
+    with pytest.raises(MarketProviderPayloadError, match="next_page_token"):
+        await provider.fetch_bars(canonical_bars_request())
+
+    assert len(recorder.calls) == 1
+
+
+@pytest.mark.parametrize("cursor", (None, "page_token-1=="))
+@pytest.mark.asyncio
+async def test_provider_retains_explicit_terminal_or_continuation_cursor(
+    cursor: str | None,
+) -> None:
+    raw = json.dumps({"bars": [], "next_page_token": cursor}).encode()
+    recorder = RecordingFixedOriginClient(payload=raw)
+    provider = AlpacaMarketDataProvider(
+        AlpacaHttpTransport(
+            recorder,
+            key_id=SecretStr("id-canary"),
+            secret=SecretStr("secret-canary"),
+            feed="sip",
+            symbol_resolver=FixedInstrumentSymbolResolver("AAPL"),
+        ),
+        feed="sip",
+        delivery_mode="delayed",
+    )
+
+    page = await provider.fetch_bars(canonical_bars_request())
+
+    assert page.next_cursor == cursor
+    assert page.raw_payload == raw
+    assert page.items == ()
+    assert len(recorder.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -139,7 +193,7 @@ async def test_provider_preserves_raw_bytes_and_uses_conservative_availability()
     """Re-serializing evidence or backdating availability would break point-in-time safety."""
     raw = (
         b'{ "bars": [{"t":"2026-08-21T20:00:00Z","o":"100","h":"101",'
-        b'"l":"99","c":"100.5","v":"1000"}] }\n'
+        b'"l":"99","c":"100.5","v":"1000"}], "next_page_token":null }\n'
     )
     transport = _ScriptedRawTransport(
         AlpacaRawResponse(
@@ -153,7 +207,8 @@ async def test_provider_preserves_raw_bytes_and_uses_conservative_availability()
                         "c": "100.5",
                         "v": "1000",
                     }
-                ]
+                ],
+                "next_page_token": None,
             },
             raw_payload=raw,
             request_id=None,

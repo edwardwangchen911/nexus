@@ -3262,6 +3262,62 @@ async def test_explicit_alpaca_market_preserves_retryable_object_io_stop_code(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_present", [False, True])
+async def test_alpaca_market_collection_requires_explicit_page_exhaustion(
+    migrated_database_url: str,
+    terminal_present: bool,
+) -> None:
+    from nexus.providers.market.alpaca import AlpacaMarketDataProvider
+    from nexus.providers.market.alpaca_http import AlpacaHttpTransport
+    from pydantic import SecretStr
+
+    from tests.support.provider_fakes import (
+        FixedInstrumentSymbolResolver,
+        RecordingFixedOriginClient,
+    )
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    async with factory() as session, session.begin():
+        await _seed_universe(session)
+    client = RecordingFixedOriginClient(
+        payload=b'{"bars":[],"next_page_token":null}' if terminal_present else b'{"bars":[]}'
+    )
+    provider = AlpacaMarketDataProvider(
+        AlpacaHttpTransport(
+            client,
+            key_id=SecretStr("id-canary"),
+            secret=SecretStr("secret-canary"),
+            feed="sip",
+            symbol_resolver=FixedInstrumentSymbolResolver("AAPL"),
+        ),
+        feed="sip",
+        delivery_mode="delayed",
+        now=lambda: NOW,
+    )
+    registry = build_provider_collection_registry(
+        _bundle(cast(RecordingMarketProvider, provider)),
+        cast(MarketObjectStore, InMemoryMarketObjectStore()),
+        InMemoryRawEvidenceStore(),
+        lambda: NOW,
+    )
+    spec = registry.resolve(JobType.COLLECT_MARKET.value)
+    assert spec is not None
+    async with factory() as session, session.begin():
+        if terminal_present:
+            result = await spec.handler(_context(session, _payload()))
+            assert (result.outcome, result.result_code) == ("skipped", "MARKET_NO_DATA")
+        else:
+            with pytest.raises(MarketProviderPayloadError, match="next_page_token"):
+                await spec.handler(_context(session, _payload()))
+
+    assert len(client.calls) == 1
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(DataArtifact)) == 0
+        assert await session.scalar(select(func.count()).select_from(PriceSeriesManifest)) == 0
+        assert await session.scalar(select(func.count()).select_from(PriceBarRecord)) == 0
+
+
+@pytest.mark.asyncio
 async def test_sec_macro_collection_persists_exact_evidence_and_replays(
     migrated_database_url: str,
 ) -> None:
