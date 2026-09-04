@@ -859,3 +859,15 @@ D 新限定调查结合 [Alpaca 单证券 bars](https://docs.alpaca.markets/us/r
 - 可另行设计 `retrospective_research_backtest_v1`，明确标注非 PIT、幸存者偏差/当前分类、不可用于正式方案或执行；它只能是独立产品模式，不能替代或宣告原严格 T1 完成。是否增加该模式属于产品口径选择，当前不阻塞其他开发，也不擅自实施。
 
 结论：§9.14 既有 bundle/calendar/assembler 不重建；严格 T1 保持未完成并独立推进上游前瞻证据链。当前主线优先级固定为“已合入真实验收 → 当前趋势研究 → 多维方案实际展示”，其间不得以 T1 缺口暂停无依赖切片。
+
+### 9.25 B3/C2：多维方案的真实内容可见性与候选形成边界
+
+只读代码核对确认现有 group 已固定 `hold_current / minimum_change / strategy_target` 三列，并由 API/页面承载约束计数及 Top1、Top3、HHI、行业、币种、波动、回撤、相关性、流动性、换手、成本、税务共 13 维。当前缺口不是再造比较框架，而是正常 producer 尚不能为真实持仓形成三个不同的候选，页面也未把已有 group 的实际仓位目标和完整性门禁充分展示。
+
+- 当前真实 `DRAFT_NO_EVIDENCED_REDUCTION` 表示诊断没有 `reduce_only` 的确定性减仓项；估值/所需 FX 可用不等于已有减仓幅度。`ResearchIntent` 明确不承载 weight/quantity/amount，当前趋势即使给出 `reduce_candidate` 也只证明方向，消费者继续保持原权重并标记策略证据不完整。
+- 当前 formal producer 仅支持 cash-only 连续性；`strategy_target` 还依赖合格 `baseline_v1` selection、raw/all 价格、真实成交额单位、行业和排序连续性。多年 PIT 回测不是整个项目开关，但这些严格历史/策略证据目前确实限制第三个真实策略候选，不能用 split 当前趋势或等同 hold 的占位列替代。
+- **可立即并行的 C 读侧切片：** 只扩展现有 proposal comparison，逐方案显示当时冻结的 symbol、current/target/delta、action/reason，以及 constraints/applicability/evidence/cost/freshness/FX 完整性和 `unknown_metrics` 原因。未知 symbol 不回填当前 ticker；差值用百分点且最多三位，小非零不显示为零；成本/税务/风险未知不填零。`strategy_target` 与基线相同且证据不完整时明确“策略目标尚未形成”，`ranking_eligible=false` 或 `non_executable=true` 时不出现推荐、Shadow 或交易暗示。保持原三列 13 维及人工选择边界。
+- C 独占 `proposal-comparison.tsx`、必要 token 样式和对应 unit/E2E；不改 schema/生成物、producer、API、迁移或业务数据。TDD 覆盖三方案明细、正负/微小差值、symbol 缺失、未形成策略目标、各未知原因、不可排名/不可执行、静态文本安全、375/1440 键盘与横溢出，以及原 13 维不回归。实际有 group 后再做同 P/D/cutoff 的 DB→受保护 API/BFF→DOM 验收；旧 group 不重算或补新趋势。
+- **候选形成的后续选择点：** 若同 P/D 的冻结集中度观察为 true，且同标的研究为 `reduce_candidate`，是否允许确定性代码仅生成“降至既有政策阈值”的不可执行分析情景。这会改变预警到方案数量的产品语义，不能由实现者静默开启；即使开启也只得到 hold 与 minimum-change，第三个 strategy-target 仍需合格 selection/连续性证据或另一个明确版本化的策略目标政策。
+
+执行顺序不变：C 可先完成无冲突读侧切片；A 先闭合 §9.23 实际趋势输入与研究结果。只有真实趋势结果确实给出减仓方向时，才评估上述窄分析情景，不为制造三列提前决定政策或编造目标。
