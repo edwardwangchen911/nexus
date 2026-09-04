@@ -251,7 +251,7 @@ async def _completed(factory, run_id):
                 AgentDailyBudgetReservationRecord.run_id == run_id
             )
         )
-        assert reservation.status == "settled"
+        assert reservation is not None and reservation.state == "settled"
         assert {row.role for row in outputs if row.role} == set(ROLE_ORDER)
         final = next(row for row in outputs if row.status == "completed")
         assert final.intent is not None
