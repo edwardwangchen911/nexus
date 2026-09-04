@@ -1494,3 +1494,9 @@ API live 正常；readiness 的 database/migration/object_store 为 ready，work
 
 额外离线计量确认：同一 critique 请求用紧凑 JSON 可将阶段估算由 54418 降至 52692，
 加首阶段 19263 后仍为 71955，超过 64000。空格计量修复不能被宣称解决真实研究阻塞。
+
+后续有界内存试验将同键且同键序对象数组表示为 columns/rows，空与异构列表不变。
+逆变换紧凑 JSON 逐字节相等，包含原键序、数组顺序和 null；原请求与证据未修改。
+含 190 字节格式说明后，critique wire 从 44500 降为 38368 字节，净省 6132；
+加入既有用量和余量仍为 65823，超限 1823，故不实现编码层、不追加模型调用。
+各工具节省与还原证据保存在 columnar-measurement-summary.json。
