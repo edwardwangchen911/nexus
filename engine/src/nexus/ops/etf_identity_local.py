@@ -8,7 +8,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import BinaryIO, Protocol, cast
 from uuid import UUID
 
 import httpx
@@ -31,6 +31,10 @@ from nexus.providers.sec import SecCompanyFactsClient
 from nexus.providers.sec_http import SecHttpTransport
 from nexus.research.sec_funds import fetch_fund_disclosure, resolve_fund
 from nexus.settings import EngineSettings
+
+
+class _VersionListing(Protocol):
+    def list_object_versions(self, **kwargs: object) -> dict[str, object]: ...
 
 
 async def verify_mapping_origin(
@@ -63,8 +67,22 @@ async def verify_mapping_origin(
             content = body.read(MAX_SEC_BYTES + 1)
         finally:
             body.close()
-        stored = response["LastModified"]
         version = response["VersionId"]
+        # GetObject's HTTP-date drops subsecond precision; version listing preserves it.
+        listing = cast(_VersionListing, storage._client).list_object_versions(
+            Bucket=storage._bucket, Prefix=key, MaxKeys=1000
+        )
+        versions = listing.get("Versions", [])
+        if listing.get("IsTruncated") or not isinstance(versions, list):
+            raise ValueError("CURRENT_ETF_MAPPING_ORIGIN_INVALID")
+        matches = [
+            v
+            for v in versions
+            if isinstance(v, dict) and v.get("Key") == key and v.get("VersionId") == version
+        ]
+        if len(matches) != 1:
+            raise ValueError("CURRENT_ETF_MAPPING_ORIGIN_INVALID")
+        stored = matches[0]["LastModified"]
         if not isinstance(stored, datetime) or not isinstance(version, str):
             raise ValueError("CURRENT_ETF_MAPPING_ORIGIN_INVALID")
         return content, stored, version
