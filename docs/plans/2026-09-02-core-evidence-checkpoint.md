@@ -2558,3 +2558,26 @@ roundtrip保持。新增内部JSON子类型，无数据库迁移或依赖；回�
 资格 false、执行锁定。CLI已从main新代码完成验收，未擅自重启现有Web/API；这不是
 历史回测、经济比较或研究内容资格已闭合。下一来源仍按最小合法证据逐项推进，局部
 scope/继任桥接缺口不扩展成全局阻塞，也不恢复额外三阶段预算批准。
+
+
+### 当前研究页面补齐模型原始方向与系统状态的分层展示
+
+优先级转回真实当前趋势研究/多维方案后，只读正常overview确认无group/正式准入、
+无reduce_only。同P/D正常create_initial_draft在PG READ ONLY内实际返回
+DRAFT_NO_EVIDENCED_REDUCTION；未写入、未调用模型。多维有组/无组原375/1440
+证据继续有效，不以补齐49身份或多年回测作总开关。
+
+协调审查发现既有DTO有synthesis_assessment.stance，但DecisionCard仅展示审查充分性，
+漏掉模型原始方向。A5eae970两文件最小修复经集中Ready合入main8bd09bc，净差零：
+综合角色中默认可见“模型综合判断（仅供研究）”与“系统最终研究状态”，复用词表；
+明确模型方向/自评充分性不代表独立核验、执行许可或有充分证据的不调整结论。
+模型buy/reduce/hold/watch与系统watch双层、limited/unresolved及旧v1/v2无assessment
+均有回归。先7失败/5通过确认遗漏，再组件相关60通过，补旧v2后定向13通过；
+typecheck/ESLint通过，协调独立13通过。无schema/API、依赖或策略政策变更。
+
+既有当前趋势同一run在3302真实375/1440 DOM通过：两层方向在逐项审查折叠之外可见，
+限制可见，键盘展开审查正常，无横溢出或交易按钮，只发本地GET/HEAD/OPTIONS。
+原intent JSON精确保持，19业务表全部旧行精确保持。证据复用原私有目录：
+outputs/acceptance/current-trends-real-20260905/model-stance-dom-summary.json，
+及model-stance-before-hashes.json。Web从main热更新生效；API未重启，无迁移、采集
+或研究重跑。本例模型与系统均watch，未伪造减仓候选或三个真实策略方案。
