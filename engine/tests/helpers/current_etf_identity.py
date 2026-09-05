@@ -178,3 +178,50 @@ Tax Information Taxes apply.</body></html>"""
         receipt["sha256"] = sha256(raw).hexdigest()
     values[6] = json.dumps(receipts).encode()
     return tuple(values)
+
+
+def treasury_originals(change=None):
+    name = "Synthetic Treasury Fund"
+    document = """<html><body>FORM 497K Synthetic Treasury Fund TLT | Nasdaq
+Summary Prospectus — January 2, 2026 Before you invest.
+Investment Objective The Synthetic Treasury Fund (the “Fund”) seeks to track the investment results
+of an index composed of U.S. Treasury bonds with remaining maturities greater than twenty years.
+Fees and Expenses Details.
+Principal Investment Strategies The Fund seeks to track the investment results of the ICE
+U.S. Treasury 20+ Year Bond Index (the “Underlying Index”), which measures the performance
+of public obligations of the U.S. Treasury that have a remaining maturity greater than twenty years.
+The Fund will invest at least 80% of its assets in the component securities of the Underlying Index,
+and the Fund will invest at least 90% of its assets in U.S. Treasury securities that BFA believes
+will help the Fund track the Underlying Index.
+Summary of Principal Risks Details.
+Purchase and Sale of Fund Shares The Fund is an exchange-traded fund
+(commonly referred to as an ETF).
+Individual shares of the Fund may only be bought and sold in the secondary market
+through a broker-dealer.
+Tax Information Details.</body></html>""".encode()
+    values = list(originals(symbol="TLT", exchange="NASDAQ", company_name=name, document=document))
+    values[4] = f"""<html><body><div id="seriesDiv"><table>
+<tr><td>Series S000000001</td><td></td><td>{name}</td></tr>
+<tr><td>Class/Contract C000000002</td><td></td><td>{name}</td><td>TLT</td></tr>
+</table></div><a href="https://www.sec.gov/Archives/edgar/data/123456/000012345626000001/sample.htm">497K</a></body></html>""".encode()
+    if change == "alias_spacing":
+        values[5] = (
+            values[5]
+            .replace("“Fund”)".encode(), "“ Fund ” )".encode())
+            .replace("“Underlying Index”)".encode(), "“ Underlying Index ” )".encode())
+        )
+    if change == "class":
+        values[4] = values[4].replace(b"C000000002", b"C000000099")
+    if change == "ticker":
+        values[4] = values[4].replace(b">TLT<", b">TLT.A<")
+    if change == "stock":
+        values[5] = values[5].replace(b"Treasury bonds", b"common stocks")
+    if change == "corporate":
+        values[5] = values[5].replace(b"U.S. Treasury that", b"corporate issuers that")
+    if change == "threshold":
+        values[5] = values[5].replace(b"90%", b"60%")
+    receipts = json.loads(values[6])
+    for receipt, raw in zip(receipts, values[3:6], strict=True):
+        receipt["sha256"] = sha256(raw).hexdigest()
+    values[6] = json.dumps(receipts).encode()
+    return tuple(values)

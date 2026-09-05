@@ -170,6 +170,7 @@ async def import_identity(
     sec_archive: Path,
     mapping_file: Path | None,
     store: IdentityStore | None = None,
+    allow_treasury: bool = False,
 ) -> CurrentIdentityImportResult:
     _local(settings)
     storage = store or S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
@@ -186,6 +187,7 @@ async def import_identity(
                 fmp_archive=fmp_archive,
                 sec_archive=sec_archive,
                 mapping_file=mapping_file,
+                allow_treasury=allow_treasury,
             )
         async with factory() as session, session.begin():
             await session.execute(text("SET TRANSACTION READ ONLY"))
@@ -225,6 +227,10 @@ def main() -> None:
         uit.add_argument("--" + name, type=Path, required=True)
     uit.add_argument("--symbol", required=True)
     uit.set_defaults(mapping_file=None)
+    treasury = commands.add_parser("import-treasury")
+    for name in ("fmp-archive", "sec-archive", "mapping-file", "output"):
+        treasury.add_argument("--" + name, type=Path, required=True)
+    treasury.add_argument("--symbol", required=True)
     reader = commands.add_parser("read")
     reader.add_argument("--snapshot-id", type=UUID, required=True)
     try:
@@ -244,7 +250,7 @@ def main() -> None:
                 )
             )
             status: str = "collected"
-        elif args.action in {"import", "import-uit"}:
+        elif args.action in {"import", "import-uit", "import-treasury"}:
             if args.output.exists() or args.output.is_symlink():
                 raise ValueError("CURRENT_ETF_NEW_OUTPUT_REQUIRED")
             result = asyncio.run(
@@ -254,6 +260,7 @@ def main() -> None:
                     fmp_archive=args.fmp_archive,
                     sec_archive=args.sec_archive,
                     mapping_file=args.mapping_file,
+                    allow_treasury=args.action == "import-treasury",
                 )
             )
             write_private(

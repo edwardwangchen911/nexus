@@ -414,3 +414,71 @@ async def test_nasdaq_index_optional_header_end_keeps_target_strict(variant):
             await validate_etf_originals(
                 symbol="QQQ", contents=tuple(values), now=datetime.now(UTC)
             )
+
+
+def test_treasury_collection_preserves_non_equity_definition():
+    from nexus.market.current_etf_identity import member_for
+
+    member = member_for("TLT")
+    assert member.asset_type == "non_equity_etf" and member.risk_bucket == "US_TREASURY"
+    with pytest.raises(ValueError):
+        member_for("GLD")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spacing", [None, "alias_spacing"])
+async def test_treasury_explicit_source_identity_keeps_non_equity(spacing):
+    from helpers.current_etf_identity import treasury_originals
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    proof = await validate_etf_originals(
+        symbol="TLT",
+        contents=treasury_originals(spacing),
+        now=datetime.now(UTC),
+        allow_treasury=True,
+    )
+    assert proof.identity.asset_type == "non_equity_etf" and proof.identity.exchange == "XNAS"
+    with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+        await validate_etf_originals(
+            symbol="TLT", contents=treasury_originals(spacing), now=datetime.now(UTC)
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["class", "ticker", "stock", "corporate", "threshold"])
+async def test_treasury_rejects_wrong_subject_type_or_source_threshold(change):
+    from helpers.current_etf_identity import treasury_originals
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+        await validate_etf_originals(
+            symbol="TLT",
+            contents=treasury_originals(change),
+            now=datetime.now(UTC),
+            allow_treasury=True,
+        )
+
+
+def test_treasury_rejects_wrong_definition_risk_bucket(monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    import nexus.market.current_etf_identity as module
+
+    wrong = replace(module.member_for("TLT"), risk_bucket="US_LARGE_CAP")
+    monkeypatch.setattr(
+        module, "load_us_liquid_v1_definition", lambda day: SimpleNamespace(members=[wrong])
+    )
+    with pytest.raises(ValueError):
+        module.member_for("TLT")
+
+
+@pytest.mark.asyncio
+async def test_treasury_explicit_route_does_not_accept_equity_fund():
+    from helpers.current_etf_identity import originals
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+        await validate_etf_originals(
+            symbol="IWM", contents=originals(), now=datetime.now(UTC), allow_treasury=True
+        )

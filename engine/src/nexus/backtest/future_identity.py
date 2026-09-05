@@ -13,6 +13,7 @@ from nexus.market.current_etf_identity import SOURCE as ETF_SOURCE
 from nexus.market.current_etf_identity import (
     CurrentEtfShareClassIdentity,
     CurrentNasdaqEtfIdentity,
+    CurrentTreasuryEtfIdentity,
     CurrentUitIdentity,
 )
 from nexus.market.current_etf_identity_storage import EtfProof, read_current_etf
@@ -85,7 +86,15 @@ async def prepare_future_identity_bindings(
             binding.update(listing_exchange=None, identity_contract=None)
         snapshot = latest.get(f"identity:{member.symbol}")
         if member.asset_type != "common_stock" and not (
-            use_etf_identities and member.asset_type == "equity_etf"
+            use_etf_identities
+            and (
+                member.asset_type == "equity_etf"
+                or (
+                    member.symbol == "TLT"
+                    and member.asset_type == "non_equity_etf"
+                    and member.risk_bucket == "US_TREASURY"
+                )
+            )
         ):
             binding["gap"] = "IDENTITY_TYPE_UNSUPPORTED"
         elif snapshot is None:
@@ -152,6 +161,8 @@ async def prepare_future_identity_bindings(
                             fmp_name=proof.identity.fmp_name,
                             fmp_name_matches_sec=proof.identity.fmp_name_matches_sec,
                         )
+                    if isinstance(proof.identity, CurrentTreasuryEtfIdentity):
+                        binding.update(underlying_asset_class=proof.identity.underlying_asset_class)
                     if isinstance(proof.identity, CurrentUitIdentity):
                         binding.update(
                             legal_structure=proof.identity.legal_structure,

@@ -25,7 +25,14 @@ SCHEMA = "current_etf_identity_v1"
 
 def member_for(symbol: str) -> UniverseDefinitionMember:
     for member in load_us_liquid_v1_definition(date(2026, 1, 1)).members:
-        if member.symbol == symbol and member.asset_type == "equity_etf":
+        if member.symbol == symbol and (
+            member.asset_type == "equity_etf"
+            or (
+                symbol == "TLT"
+                and member.asset_type == "non_equity_etf"
+                and member.risk_bucket == "US_TREASURY"
+            )
+        ):
             return member
     raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
 
@@ -47,6 +54,27 @@ class CurrentEtfIdentity(BaseModel):
     legal_type_statement: str
     mapping_stored_at: datetime
     mapping_original_received_at: None = None
+
+
+class CurrentTreasuryEtfIdentity(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    symbol: str
+    cik: str
+    series_id: str
+    class_id: str
+    legal_name: str
+    asset_type: Literal["non_equity_etf"] = "non_equity_etf"
+    currency: Literal["USD"] = "USD"
+    exchange: Literal["XNAS"] = "XNAS"
+    fmp_exchange: str
+    listing_basis: Literal["bound_sec_497k_cover"] = "bound_sec_497k_cover"
+    fmp_exchange_precision: Literal["provider_label_only"] = "provider_label_only"
+    objective: str
+    legal_type_statement: str
+    mapping_stored_at: datetime
+    mapping_original_received_at: None = None
+
+    underlying_asset_class: Literal["us_treasury_bonds"] = "us_treasury_bonds"
 
 
 class CurrentEtfShareClassIdentity(CurrentEtfIdentity):
@@ -269,6 +297,113 @@ def _nasdaq_identity(
     )
 
 
+def _treasury_identity(
+    *,
+    text: str,
+    index: bytes,
+    symbol: str,
+    identifier: str,
+    series: str,
+    share_class: str,
+    fmp_name: str,
+    fmp_exchange: str,
+    stored_at: datetime,
+    now: datetime,
+) -> CurrentTreasuryEtfIdentity:
+    parser = _IndexRows()
+    parser.feed(index.decode("utf-8-sig"))
+    series_rows = [r for r in parser.rows if r and r[0].startswith("Series ")]
+    class_rows = [r for r in parser.rows if r and r[0].startswith("Class/Contract ")]
+    if (
+        not parser.scope_seen
+        or parser.scope_depth is not None
+        or len(series_rows) != 1
+        or len(class_rows) != 1
+    ):
+        raise ValueError
+    sr, cr = series_rows[0], class_rows[0]
+    if (
+        len(sr) != 3
+        or len(cr) != 4
+        or sr[0] != "Series " + series
+        or cr[0] != "Class/Contract " + share_class
+        or sr[2] != cr[2]
+        or cr[3] != symbol
+        or sr[2] != fmp_name
+        or fmp_exchange not in {"NASDAQ", "XNAS"}
+    ):
+        raise ValueError
+    name = sr[2]
+    cover = re.search(
+        r"FORM 497K (.+?) TLT \| Nasdaq Summary Prospectus — "
+        r"([A-Za-z]+ [0-9]+, [0-9]{4}) Before you invest",
+        text[:1000],
+    )
+    if (
+        symbol != "TLT"
+        or not cover
+        or " ".join(cover[1].replace("®", "").split()).casefold() != name.casefold()
+        or datetime.strptime(cover[2], "%B %d, %Y").date() > now.date()
+        or text.count("FORM 497K") != 1
+    ):
+        raise ValueError
+    for marker in (
+        "Investment Objective",
+        "Fees and Expenses",
+        "Principal Investment Strategies",
+        "Summary of Principal Risks",
+        "Purchase and Sale of Fund Shares",
+        "Tax Information",
+    ):
+        if text.count(marker) != 1:
+            raise ValueError
+    objective = re.search(r"Investment Objective (.+?) Fees and Expenses", text)
+    strategy = re.search(r"Principal Investment Strategies (.+?) Summary of Principal Risks", text)
+    legal = re.search(r"Purchase and Sale of Fund Shares (.+?) Tax Information", text)
+    if (
+        not objective
+        or not strategy
+        or not legal
+        or re.fullmatch(
+            re.escape(f"The {name} ")
+            + r"\(the “\s*Fund\s*”\s*\) seeks to track the investment results "
+            r"of an index composed of U\.S\. Treasury bonds with remaining maturities "
+            r"greater than twenty years\.",
+            objective[1],
+        )
+        is None
+        or not re.match(
+            r"The Fund seeks to track the investment results of the ICE(?: ?®)? "
+            r"U\.S\. Treasury 20\+ Year Bond Index \(the “\s*Underlying Index\s*”\s*\), "
+            r"which measures the performance of public obligations of the U\.S\. "
+            r"Treasury that have a remaining maturity greater than twenty years\.",
+            strategy[1],
+        )
+        or "The Fund will invest at least 80% of its assets in the component securities of the "
+        "Underlying Index, and the Fund will invest at least 90% of its assets in U.S. Treasury "
+        "securities that BFA believes will help the Fund track the Underlying Index."
+        not in strategy[1]
+        or not legal[1].startswith(
+            "The Fund is an exchange-traded fund (commonly referred to as an"
+        )
+        or "Individual shares of the Fund may only be bought and sold in the secondary market "
+        "through a broker-dealer."
+        not in legal[1]
+    ):
+        raise ValueError
+    return CurrentTreasuryEtfIdentity(
+        symbol=symbol,
+        cik=identifier,
+        series_id=series,
+        class_id=share_class,
+        legal_name=name,
+        fmp_exchange=fmp_exchange,
+        objective=objective[1] + " Principal Investment Strategies " + strategy[1],
+        legal_type_statement=legal[1],
+        mapping_stored_at=stored_at,
+    )
+
+
 def _share_class_identity(
     *,
     text: str,
@@ -347,7 +482,7 @@ def _share_class_identity(
 
 @dataclass(frozen=True)
 class EtfInputs:
-    identity: CurrentEtfIdentity | CurrentUitIdentity
+    identity: CurrentEtfIdentity | CurrentUitIdentity | CurrentTreasuryEtfIdentity
     contents: tuple[bytes, ...]
     sec_url: str
     received: tuple[datetime | None, ...]
@@ -387,10 +522,12 @@ class _Replay:
 
 
 async def validate_etf_originals(
-    *, symbol: str, contents: tuple[bytes, ...], now: datetime
+    *, symbol: str, contents: tuple[bytes, ...], now: datetime, allow_treasury: bool = False
 ) -> EtfInputs:
     try:
-        member_for(symbol)
+        member = member_for(symbol)
+        if allow_treasury != (member.asset_type == "non_equity_etf"):
+            raise ValueError
         cutoff = require_utc(now)
         if len(contents) != 8 or any(not b or len(b) > MAX_SEC_BYTES for b in contents):
             raise ValueError
@@ -480,8 +617,21 @@ async def validate_etf_originals(
         if not isinstance(name, str) or not name.strip():
             raise ValueError
         name = " ".join(name.split())
-        identity: CurrentEtfIdentity | CurrentUitIdentity
-        if row["exchange"] in {"NASDAQ", "XNAS"}:
+        identity: CurrentEtfIdentity | CurrentUitIdentity | CurrentTreasuryEtfIdentity
+        if member.asset_type == "non_equity_etf":
+            identity = _treasury_identity(
+                text=text,
+                index=index,
+                symbol=symbol,
+                identifier=identifier,
+                series=series,
+                share_class=share_class,
+                fmp_name=name,
+                fmp_exchange=row["exchange"],
+                stored_at=stored_at,
+                now=cutoff,
+            )
+        elif row["exchange"] in {"NASDAQ", "XNAS"}:
             identity = _nasdaq_identity(
                 text=text,
                 index=index,

@@ -18,6 +18,7 @@ from nexus.market.current_etf_identity import (
     CurrentEtfIdentity,
     CurrentEtfShareClassIdentity,
     CurrentNasdaqEtfIdentity,
+    CurrentTreasuryEtfIdentity,
     CurrentUitIdentity,
     EtfInputs,
     member_for,
@@ -40,7 +41,8 @@ from nexus.research.fmp_profile_archive import _read
 class EtfProof(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     identity: (
-        CurrentUitIdentity
+        CurrentTreasuryEtfIdentity
+        | CurrentUitIdentity
         | CurrentNasdaqEtfIdentity
         | CurrentEtfShareClassIdentity
         | CurrentEtfIdentity
@@ -67,7 +69,13 @@ def _private_files(directory: Path, names: tuple[str, ...]) -> tuple[bytes, ...]
 
 
 async def load_etf_archives(
-    *, symbol: str, fmp_archive: Path, sec_archive: Path, mapping_file: Path | None, now: datetime
+    *,
+    symbol: str,
+    fmp_archive: Path,
+    sec_archive: Path,
+    mapping_file: Path | None,
+    now: datetime,
+    allow_treasury: bool = False,
 ) -> EtfInputs:
     contents = _private_files(fmp_archive, ("profile.json", "receipt.json"))
     if mapping_file is None:
@@ -82,6 +90,8 @@ async def load_etf_archives(
                 "disclosure-receipt.json",
             ),
         )
+        if allow_treasury:
+            raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
         return validate_uit_originals(symbol=symbol, contents=contents + sec, now=now)
     mapping = _private_files(mapping_file.parent, (mapping_file.name,))
     sec = _private_files(
@@ -94,7 +104,9 @@ async def load_etf_archives(
             "mapping-binding.json",
         ),
     )
-    return await validate_etf_originals(symbol=symbol, contents=contents + mapping + sec, now=now)
+    return await validate_etf_originals(
+        symbol=symbol, contents=contents + mapping + sec, now=now, allow_treasury=allow_treasury
+    )
 
 
 async def _current_aliases(
@@ -122,6 +134,7 @@ async def import_current_etf(
     fmp_archive: Path,
     sec_archive: Path,
     mapping_file: Path | None,
+    allow_treasury: bool = False,
 ) -> CurrentIdentityImportResult:
     member = member_for(symbol)
     async with session.begin_nested():
@@ -137,7 +150,10 @@ async def import_current_etf(
             sec_archive=sec_archive,
             mapping_file=mapping_file,
             now=now,
+            allow_treasury=allow_treasury,
         )
+        if inputs.identity.asset_type != member.asset_type:
+            raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
         existing = await session.scalar(
             select(DataSnapshot).where(
                 DataSnapshot.source == SOURCE,
@@ -194,7 +210,7 @@ async def import_current_etf(
         assert isinstance(checked, datetime)
         instrument = Instrument(
             id=member.instrument_id,
-            asset_type="equity_etf",
+            asset_type=inputs.identity.asset_type,
             exchange=inputs.identity.exchange,
             currency="USD",
             tick_size=None,
@@ -273,7 +289,10 @@ async def read_current_etf(
             )
         else:
             inputs = await validate_etf_originals(
-                symbol=proof.identity.symbol, contents=tuple(contents), now=proof.checked_at
+                symbol=proof.identity.symbol,
+                contents=tuple(contents),
+                now=proof.checked_at,
+                allow_treasury=isinstance(proof.identity, CurrentTreasuryEtfIdentity),
             )
         member = member_for(proof.identity.symbol)
         if (
@@ -289,7 +308,8 @@ async def read_current_etf(
         aliases = await _current_aliases(session, proof.identity.symbol, proof.instrument_id, now)
         if (
             instrument is None
-            or instrument.asset_type != "equity_etf"
+            or instrument.asset_type != proof.identity.asset_type
+            or proof.identity.asset_type != member.asset_type
             or instrument.exchange != proof.identity.exchange
             or instrument.currency != "USD"
             or instrument.risk_bucket != member.risk_bucket

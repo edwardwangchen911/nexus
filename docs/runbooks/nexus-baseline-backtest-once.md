@@ -293,3 +293,15 @@ DIA 复用八原件显式 import-uit 路径，但校验独立的 Dow Jones Indus
 目标与 DJIA 普通股组合策略；SPY 仍要求 S&P 500，不跨基金替换目标。DIA 旧名中的
 已证实商标 SM 仅在封面旧名的 INDUSTRIAL AVERAGE 与 ETF TRUST 之间规范化，
 原始封面声明与原件仍保留，不全局删字符。无新增 JSON 字段、数据库或迁移。
+
+
+国债基金当前身份仅 TLT 使用 `etf_identity_local import-treasury`，参数与原 import
+相同（包括 mapping-file），采集复用现有 collect-sec。原 import/UIT 入口仍拒绝
+非股票身份；新入口也拒绝股票基金。TLT 固定保留定义中的 non_equity_etf 与
+US_TREASURY，精确目录 series/class、索引 ticker、完整 497K 封面 Nasdaq、同基金
+二十年以上国债目标及原文 80%/90% 策略共同校验。比例是来源事实，不设新风控规则。
+独立内部 JSON 子类型记录 underlying_asset_class=us_treasury_bonds，旧 ETF proof
+JSON 不变。存储/严格读取同时核对原件、master 与原池资产类型和风险分类。
+未来 prepare 只在显式ETF选项下消费该 TLT 合同，默认仍拒绝；GLD 仍单列类型未支持。
+没有改写股票池定义、历史资格或数据库 schema，也没有新增迁移。回退停用显式入口/消费者，并保留
+新 JSON 的兼容 reader 与不可变原件；采集收据保留每份实际收到时间。
