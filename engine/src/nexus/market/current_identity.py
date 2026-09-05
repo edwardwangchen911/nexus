@@ -38,6 +38,8 @@ _EXCHANGES = {
     "The NASDAQ Global Select Market": "XNAS",
     "Nasdaq Global Select Market": "XNAS",
     "The Nasdaq Global Select Market": "XNAS",
+    "NASDAQ Global Select Market": "XNAS",
+    "Nasdaq Stock Market LLC": "XNAS",
     "NYSE American": "XASE",
     "AMEX": "XASE",
 }
@@ -115,6 +117,7 @@ class _Cover(HTMLParser):
         self.root_seen = False
         # Parser-only proof: do not change the serialized context of old identity archives.
         self.plain_contexts: set[str] = set()
+        self.class_contexts: set[str] = set()
         self._context_nodes: list[tuple[str, str, dict[str, str | None]]] = []
         self._context_extra_text = False
 
@@ -236,6 +239,21 @@ class _Cover(HTMLParser):
                 ("xbrli:enddate", "xbrli:period", {}),
             ]:
                 self.plain_contexts.add(self.context["id"])
+            if not self._context_extra_text and self._context_nodes == [
+                ("xbrli:context", "", {"id": self.context["id"]}),
+                ("xbrli:entity", "xbrli:context", {}),
+                ("xbrli:identifier", "xbrli:entity", {"scheme": "http://www.sec.gov/CIK"}),
+                ("xbrli:segment", "xbrli:entity", {}),
+                (
+                    "xbrldi:explicitmember",
+                    "xbrli:segment",
+                    {"dimension": "us-gaap:StatementClassOfStockAxis"},
+                ),
+                ("xbrli:period", "xbrli:context", {}),
+                ("xbrli:startdate", "xbrli:period", {}),
+                ("xbrli:enddate", "xbrli:period", {}),
+            ]:
+                self.class_contexts.add(self.context["id"])
             self.contexts[self.context["id"]] = self.context
             self.context = None
         self.stack.pop()
@@ -323,17 +341,34 @@ def parse_current_common_stock(
         class_dimension = {"us-gaap:StatementClassOfStockAxis": "us-gaap:CommonStockMember"}
         exchange_dimension = {"dei:EntityListingsExchangeAxis": f"exch:{exchange}"}
         plain_stock = not dimensions and stock["context"] in parser.plain_contexts
-        if not plain_stock and dimensions not in (
-            class_dimension,
-            class_dimension | exchange_dimension,
+        # FASB Subsequent Events guide, Fig. 1.2: CommonClassAMember is Common Class A.
+        # https://xbrl.fasb.org/impdocs/SE2_TIG/subsequentevents_2.pdf
+        class_a = (
+            dimensions == {"us-gaap:StatementClassOfStockAxis": "us-gaap:CommonClassAMember"}
+            and stock["context"] in parser.class_contexts
+        )
+        if (
+            not plain_stock
+            and not class_a
+            and dimensions
+            not in (
+                class_dimension,
+                class_dimension | exchange_dimension,
+            )
         ):
             raise invalid()
         if "dei:EntityListingsExchangeAxis" in dimensions and not exchange_namespace:
             raise invalid()
         values = {f["name"]: f["value"] for f in record}
         title = values["dei:Security12bTitle"]
+        title_pattern = (
+            r"^Class A Common Stock\b"
+            if class_a
+            else r"^(?:Common Stock|Common Shares|Ordinary Shares)\b"
+        )
         if (
-            not re.match(r"^(?:Common Stock|Common Shares|Ordinary Shares)\b", title, re.I)
+            not re.match(title_pattern, title, re.I)
+            or (class_a and re.search(r"\bclass\b", title[len("Class A Common Stock") :], re.I))
             or re.search(
                 r"preferred|depositary|warrant|\bunits?\b|\bnotes?\b|\bbonds?\b|\bfund\b",
                 title,

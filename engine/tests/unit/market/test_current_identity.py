@@ -297,6 +297,8 @@ def test_plain_cover_keeps_same_security_and_exchange_guards(before, after):
         "The NASDAQ Global Select Market",
         "Nasdaq Global Select Market",
         "The Nasdaq Global Select Market",
+        "NASDAQ Global Select Market",
+        "Nasdaq Stock Market LLC",
     ],
 )
 def test_global_select_exact_cover_alias_binds_nasdaq_not_separate_exchange(label):
@@ -324,4 +326,87 @@ def test_global_select_alias_is_not_a_substring_or_fuzzy_match(label):
     with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
         module.parse_current_common_stock(
             symbol="AAPL", fmp_raw=profile(exchange="NASDAQ"), sec_raw=raw
+        )
+
+
+def _class_a_cover():
+    return (
+        filing()
+        .replace(b"us-gaap:CommonStockMember", b"us-gaap:CommonClassAMember")
+        .replace(b">Common Stock<", b">Class A Common Stock<")
+        .replace(
+            b'<xbrldi:explicitMember dimension="dei:EntityListingsExchangeAxis">'
+            b"exch:XNYS</xbrldi:explicitMember>",
+            b"",
+        )
+    )
+
+
+def test_class_a_archive_preserves_explicit_class_and_registration_title(tmp_path):
+    module = importlib.import_module("nexus.market.current_identity")
+    fm, sc = archives(tmp_path, sec=_class_a_cover())
+    identity = module.load_identity_archives(symbol="AAPL", fmp_archive=fm, sec_archive=sc).identity
+    assert identity.sec_title == "Class A Common Stock"
+    assert identity.symbol == "AAPL"
+    assert identity.exchange == "XNYS"
+    assert [
+        f["value"] for f in identity.context["fields"] if f["tag"] == "xbrldi:explicitmember"
+    ] == ["us-gaap:CommonClassAMember"]
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        (b"us-gaap:CommonClassAMember", b"us-gaap:CommonStockMember"),
+        (b"us-gaap:CommonClassAMember", b"us-gaap:CommonClassBMember"),
+        (b">Class A Common Stock<", b">Common Stock<"),
+        (b">Class A Common Stock<", b">Class B Common Stock<"),
+        (b">Class A Common Stock<", b">Class A Common Stock / Class B Common Stock<"),
+        (b">Class A Common Stock<", b">Class A Preferred Stock<"),
+        (b">Class A Common Stock<", b">Class A Common Stock Notes<"),
+        (b">Class A Common Stock<", b">Class A Common Stock Warrants<"),
+        (b">Class A Common Stock<", b">Class A Common Stock Fund<"),
+        (
+            b"</xbrli:segment>",
+            b'<xbrldi:explicitMember dimension="dei:OtherAxis">'
+            b"us-gaap:CommonClassAMember</xbrldi:explicitMember></xbrli:segment>",
+        ),
+        (
+            b"</xbrli:segment>",
+            b'<xbrldi:typedMember dimension="dei:OtherAxis">'
+            b"<dei:Other>Preferred</dei:Other></xbrldi:typedMember></xbrli:segment>",
+        ),
+        (b"</xbrli:period>", b"</xbrli:period><xbrli:scenario></xbrli:scenario>"),
+        (b"</xbrli:segment>", b"<dei:Other>Preferred</dei:Other></xbrli:segment>"),
+        (b"<xbrli:segment>", b'<xbrli:segment other="unknown">'),
+        (b"<xbrli:segment>", b"<xbrli:segment>Preferred"),
+        (b'contextRef="stock">AAPL', b'contextRef="other">AAPL'),
+        (b'<td><ix:nonNumeric id="exchange"', b'</tr><tr><td><ix:nonNumeric id="exchange"'),
+        (b"New York Stock Exchange", b"Nasdaq Stock Market LLC"),
+        (b">AAPL<", b">MSFT<"),
+    ],
+)
+def test_class_a_requires_exact_class_security_structure_and_exchange(before, after):
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL", fmp_raw=profile(), sec_raw=_class_a_cover().replace(before, after)
+        )
+
+
+def test_class_a_cannot_substitute_another_fmp_symbol_with_same_cik():
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL", fmp_raw=profile(symbol="MSFT"), sec_raw=_class_a_cover()
+        )
+
+
+def test_plain_context_cannot_imply_a_class_a_member_from_title():
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL",
+            fmp_raw=profile(),
+            sec_raw=_cover_without_segment().replace(b">Common Stock<", b">Class A Common Stock<"),
         )
