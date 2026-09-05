@@ -31,6 +31,7 @@ from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
 from nexus.ops.sec_local import _BoundedBytes, _Budget
 from nexus.persistence.session import session_factory
+from nexus.providers.http import HttpPolicyError
 from nexus.settings import EngineSettings
 
 
@@ -76,6 +77,15 @@ async def collect_sec(
             http_status=200,
         )
         write_private(output_dir / "receipt.json", json.dumps(receipt, sort_keys=True).encode())
+    except HttpPolicyError as error:
+        codes = {
+            "STATUS_REJECTED": "CURRENT_IDENTITY_SEC_STATUS_REJECTED",
+            "REDIRECT_REJECTED": "CURRENT_IDENTITY_SEC_REDIRECT_REJECTED",
+            "RESPONSE_TOO_LARGE": "CURRENT_IDENTITY_SEC_RESPONSE_TOO_LARGE",
+            "DEADLINE_EXCEEDED": "CURRENT_IDENTITY_SEC_DEADLINE_EXCEEDED",
+            "RETRY_BUDGET_EXHAUSTED": "CURRENT_IDENTITY_SEC_RETRY_BUDGET_EXHAUSTED",
+        }
+        raise ValueError(codes.get(str(error), "CURRENT_IDENTITY_FAILED")) from None
     finally:
         transport.event_hooks["response"].remove(record_status)
         if owned:

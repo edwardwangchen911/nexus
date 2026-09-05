@@ -149,6 +149,71 @@ async def test_normal_sec_collector_one_request_preserves_actual_status(tmp_path
 
 
 @pytest.mark.parametrize(
+    "case,expected_code",
+    [
+        ("status", "CURRENT_IDENTITY_SEC_STATUS_REJECTED"),
+        ("redirect", "CURRENT_IDENTITY_SEC_REDIRECT_REJECTED"),
+        ("size", "CURRENT_IDENTITY_SEC_RESPONSE_TOO_LARGE"),
+        ("deadline", "CURRENT_IDENTITY_SEC_DEADLINE_EXCEEDED"),
+        ("budget", "CURRENT_IDENTITY_SEC_RETRY_BUDGET_EXHAUSTED"),
+        ("unknown", "CURRENT_IDENTITY_FAILED"),
+        ("unknown_policy", "CURRENT_IDENTITY_FAILED"),
+    ],
+)
+def test_sec_cli_preserves_only_safe_policy_failures_without_retry(
+    tmp_path, monkeypatch, capsys, case, expected_code
+):
+    import json
+    import sys
+
+    import httpx
+    from helpers.current_identity import URL
+    from nexus.providers.http import HttpPolicyError
+
+    module = importlib.import_module("nexus.ops.instrument_identity_local")
+    requests = []
+    sensitive_error = "https://example.invalid/private?secret=synthetic_secret private_body"
+
+    def respond(request):
+        requests.append(request)
+        if case == "deadline":
+            raise TimeoutError(sensitive_error)
+        if case == "unknown":
+            raise RuntimeError(sensitive_error)
+        if case == "unknown_policy":
+            raise HttpPolicyError("STATUS_REJECTED " + sensitive_error)
+        if case == "size":
+            return httpx.Response(200, headers={"content-length": str(8 * 1024 * 1024 + 1)})
+        status = {"status": 403, "redirect": 302, "budget": 503}[case]
+        return httpx.Response(status, text=sensitive_error)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond), follow_redirects=False)
+    monkeypatch.setattr(module.httpx, "AsyncClient", lambda **kwargs: client)
+    monkeypatch.setattr(
+        module, "load_local_environment", lambda *_: {"SEC_CONTACT": "test@example.invalid"}
+    )
+    directory = tmp_path / "sec"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["identity", "collect-sec", "--source-url", URL, "--output-dir", str(directory)],
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        module.main()
+    assert exit_info.value.code == 1
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {"status": "failed", "code": expected_code}
+    assert not any(
+        value in output.out + output.err
+        for value in ("example.invalid", "synthetic_secret", "private_body")
+    )
+    assert len(requests) == 1
+    assert client.is_closed
+    assert directory.is_dir()
+    assert list(directory.iterdir()) == []
+
+
+@pytest.mark.parametrize(
     "before,after", [(b"xbrli:entity", b"example:entity"), (b"table>", b"div>")]
 )
 def test_context_entity_and_registration_table_must_be_supported(before, after):
