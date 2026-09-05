@@ -49,6 +49,7 @@ _FACTS = {
     "dei:SecurityExchangeName",
     "dei:EntityCentralIndexKey",
 }
+_REGISTRANT_FACTS = {"dei:EntityRegistrantName", "dei:EntityTaxIdentificationNumber"}
 _VOID = {
     "area",
     "base",
@@ -103,8 +104,9 @@ class CurrentCommonStockIdentity(BaseModel):
 class _Cover(HTMLParser):
     """Only the demonstrated inline-XBRL registration row; never resolve remote resources."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, registrants: bool = False) -> None:
         super().__init__(convert_charrefs=True)
+        self.fact_names = _FACTS | _REGISTRANT_FACTS if registrants else _FACTS
         self.stack: list[tuple[str, dict[str, str | None], int | None]] = []
         self.ids: set[str] = set()
         self.facts: list[dict[str, Any]] = []
@@ -118,6 +120,7 @@ class _Cover(HTMLParser):
         # Parser-only proof: do not change the serialized context of old identity archives.
         self.plain_contexts: set[str] = set()
         self.class_contexts: set[str] = set()
+        self.legal_contexts: set[str] = set()
         self._context_nodes: list[tuple[str, str, dict[str, str | None]]] = []
         self._context_extra_text = False
 
@@ -180,16 +183,15 @@ class _Cover(HTMLParser):
             self.field = {"tag": tag, "attrs": a, "parts": []}
         if tag.startswith("ix:") and self.active is not None:
             raise invalid()
-        if tag == "ix:nonnumeric" and a.get("name") in _FACTS:
+        if tag == "ix:nonnumeric" and a.get("name") in self.fact_names:
             if self.active is not None or not identifier or not a.get("contextref"):
                 raise invalid()
             if a.get("continuedat") or a.get("xsi:nil") or a.get("escape"):
                 raise invalid()
-            if a["name"] != "dei:EntityCentralIndexKey" and not any(
-                node[0] == "table" for node in self.stack
-            ):
+            security = a["name"] in _FACTS - {"dei:EntityCentralIndexKey"}
+            if security and not any(node[0] == "table" for node in self.stack):
                 raise invalid()
-            if a["name"] != "dei:EntityCentralIndexKey" and any(
+            if security and any(
                 node[0] == "ix:hidden"
                 or re.search(r"display\s*:\s*none", node[1].get("style") or "", re.I)
                 for node in self.stack
@@ -254,6 +256,17 @@ class _Cover(HTMLParser):
                 ("xbrli:enddate", "xbrli:period", {}),
             ]:
                 self.class_contexts.add(self.context["id"])
+            if not self._context_extra_text and self._context_nodes == [
+                ("xbrli:context", "", {"id": self.context["id"]}),
+                ("xbrli:entity", "xbrli:context", {}),
+                ("xbrli:identifier", "xbrli:entity", {"scheme": "http://www.sec.gov/CIK"}),
+                ("xbrli:segment", "xbrli:entity", {}),
+                ("xbrldi:explicitmember", "xbrli:segment", {"dimension": "dei:LegalEntityAxis"}),
+                ("xbrli:period", "xbrli:context", {}),
+                ("xbrli:startdate", "xbrli:period", {}),
+                ("xbrli:enddate", "xbrli:period", {}),
+            ]:
+                self.legal_contexts.add(self.context["id"])
             self.contexts[self.context["id"]] = self.context
             self.context = None
         self.stack.pop()
@@ -279,6 +292,87 @@ def _context(context: dict[str, Any], expected_cik: str) -> dict[str, str]:
     if len(dimensions) != len(members):
         raise invalid()
     return dimensions
+
+
+def _period(context: dict[str, Any]) -> dict[str, str]:
+    return {
+        f["tag"]: f["value"]
+        for f in context["fields"]
+        if f["tag"] in {"xbrli:startdate", "xbrli:enddate"}
+    }
+
+
+def _issuer_scope(
+    parser: _Cover,
+    ciks: list[dict[str, Any]],
+    stock_context: dict[str, Any],
+    identifier: str,
+    raw: bytes,
+) -> None:
+    if len(ciks) == 1:
+        if cik(ciks[0]["value"]) != identifier:
+            raise invalid()
+        _context(parser.contexts[ciks[0]["context"]], identifier)
+        return
+    # SEC EDGAR XBRL Guide 6.2.7: a shared identifier plus explicit LegalEntityAxis
+    # distinguishes co-registrants; the default registrant omits that dimension.
+    # https://www.sec.gov/files/edgar/filer-information/specifications/xbrl-guide-2025-07-10.pdf
+    values = [cik(f["value"]) for f in ciks]
+    targets = [f for f in ciks if cik(f["value"]) == identifier]
+    if (
+        len(targets) != 1
+        or len(set(values)) != len(values)
+        or len({f["context"] for f in ciks}) != len(ciks)
+        or targets[0]["context"] not in parser.plain_contexts
+        or stock_context["id"] not in parser.plain_contexts | parser.class_contexts
+    ):
+        raise invalid()
+    # Extra facts are parsed only on this new branch, preserving single-CIK behavior.
+    registrants = _Cover(registrants=True)
+    registrants.feed(raw.decode("utf-8-sig"))
+    registrants.close()
+    members: set[tuple[str, str]] = set()
+    for fact in ciks:
+        context = parser.contexts[fact["context"]]
+        dimensions = _context(context, identifier)
+        if _period(context) != _period(stock_context):
+            raise invalid()
+        if fact is not targets[0]:
+            if context["id"] not in parser.legal_contexts or set(dimensions) != {
+                "dei:LegalEntityAxis"
+            }:
+                raise invalid()
+            member = re.fullmatch(
+                r"([A-Za-z_][A-Za-z0-9_.-]*):([A-Za-z_][A-Za-z0-9_.-]*Member)",
+                dimensions["dei:LegalEntityAxis"],
+            )
+            if not member or member[1] in {
+                "dei",
+                "us-gaap",
+                "srt",
+                "ix",
+                "xbrli",
+                "xbrldi",
+                "exch",
+            }:
+                raise invalid()
+            namespace = parser.namespaces.get("xmlns:" + member[1]) or ""
+            if re.fullmatch(r"https?://[^\s<>]+", namespace) is None or re.match(
+                r"https?://(?:www\.)?(?:fasb\.org|xbrl\.sec\.gov|xbrl\.org)(?:/|$)", namespace
+            ):
+                raise invalid()
+            expanded = (namespace, member[2])
+            if expanded in members:
+                raise invalid()
+            members.add(expanded)
+        elif dimensions:
+            raise invalid()
+        for name in _REGISTRANT_FACTS:
+            matches = [
+                f for f in registrants.facts if f["name"] == name and f["context"] == context["id"]
+            ]
+            if len(matches) != 1 or not matches[0]["value"]:
+                raise invalid()
 
 
 def parse_current_common_stock(
@@ -324,7 +418,7 @@ def parse_current_common_stock(
             f for f in parser.facts if f["name"] == "dei:TradingSymbol" and f["value"] == symbol
         ]
         ciks = [f for f in parser.facts if f["name"] == "dei:EntityCentralIndexKey"]
-        if len(symbols) != 1 or len(ciks) != 1 or cik(ciks[0]["value"]) != identifier:
+        if len(symbols) != 1 or not ciks:
             raise invalid()
         stock = symbols[0]
         record = [f for f in parser.facts if f["row"] == stock["row"]]
@@ -337,7 +431,7 @@ def parse_current_common_stock(
             raise invalid()
         context = parser.contexts[stock["context"]]
         dimensions = _context(context, identifier)
-        _context(parser.contexts[ciks[0]["context"]], identifier)
+        _issuer_scope(parser, ciks, context, identifier, sec_raw)
         class_dimension = {"us-gaap:StatementClassOfStockAxis": "us-gaap:CommonStockMember"}
         exchange_dimension = {"dei:EntityListingsExchangeAxis": f"exch:{exchange}"}
         plain_stock = not dimensions and stock["context"] in parser.plain_contexts
@@ -388,7 +482,7 @@ def parse_current_common_stock(
             sec_title=title,
             sec_exchange=values["dei:SecurityExchangeName"],
             context_id=stock["context"],
-            facts=tuple([*record, ciks[0]]),
+            facts=tuple([*record, *ciks]),
             context=context,
         )
     except (ValueError, TypeError, KeyError, RecursionError, UnicodeError) as error:

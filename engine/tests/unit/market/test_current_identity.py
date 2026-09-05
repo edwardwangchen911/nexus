@@ -475,3 +475,195 @@ def test_plain_context_cannot_imply_a_class_a_member_from_title():
             fmp_raw=profile(),
             sec_raw=_cover_without_segment().replace(b">Common Stock<", b">Class A Common Stock<"),
         )
+
+
+def _multiple_registrant_cover():
+    raw = filing().replace(b"<html ", b'<html xmlns:sample="https://example.invalid/2025" ')
+    raw = raw.replace(
+        b'<xbrldi:explicitMember dimension="dei:EntityListingsExchangeAxis">'
+        b"exch:XNYS</xbrldi:explicitMember>",
+        b"",
+    )
+    stock_context = re.search(rb'<xbrli:context id="stock">.*?</xbrli:context>', raw, re.S)[0]
+    primary = re.sub(rb"<xbrli:segment>.*?</xbrli:segment>", b"", stock_context, flags=re.S)
+    primary = primary.replace(b'id="stock"', b'id="primary"')
+    other = primary.replace(b'id="primary"', b'id="other"').replace(
+        b"</xbrli:entity>",
+        b"<xbrli:segment><xbrldi:explicitMember "
+        b'dimension="dei:LegalEntityAxis">sample:OtherMember</xbrldi:explicitMember>'
+        b"</xbrli:segment></xbrli:entity>",
+    )
+    raw = raw.replace(b"</ix:header>", primary + other + b"</ix:header>")
+    raw = raw.replace(b'contextRef="stock">0000123456', b'contextRef="primary">0000123456')
+    return raw.replace(
+        b"</body>",
+        b"""
+<ix:nonNumeric id="primary-name" name="dei:EntityRegistrantName"
+ contextRef="primary">Primary Example</ix:nonNumeric>
+<ix:nonNumeric id="primary-tax" name="dei:EntityTaxIdentificationNumber"
+ contextRef="primary">00-0000001</ix:nonNumeric>
+<ix:nonNumeric id="other-cik" name="dei:EntityCentralIndexKey"
+ contextRef="other">0000654321</ix:nonNumeric>
+<ix:nonNumeric id="other-name" name="dei:EntityRegistrantName"
+ contextRef="other">Other Example</ix:nonNumeric>
+<ix:nonNumeric id="other-tax" name="dei:EntityTaxIdentificationNumber"
+ contextRef="other">00-0000002</ix:nonNumeric>
+</body>""",
+    )
+
+
+def test_multiple_registrants_bind_default_entity_without_discarding_other_cik(tmp_path):
+    module = importlib.import_module("nexus.market.current_identity")
+    fm, sc = archives(tmp_path, sec=_multiple_registrant_cover())
+    identity = module.load_identity_archives(symbol="AAPL", fmp_archive=fm, sec_archive=sc).identity
+    assert identity.cik == "0000123456"
+    assert identity.symbol == "AAPL"
+    assert {f["value"] for f in identity.facts if f["name"] == "dei:EntityCentralIndexKey"} == {
+        "0000123456",
+        "0000654321",
+    }
+
+
+def test_default_registrant_is_not_selected_by_cik_fact_document_order():
+    module = importlib.import_module("nexus.market.current_identity")
+    raw = _multiple_registrant_cover()
+    primary = re.search(rb'<ix:nonNumeric id="cik".*?</ix:nonNumeric>', raw, re.S)[0]
+    raw = raw.replace(primary, b"").replace(b"</body>", primary + b"</body>")
+    assert (
+        module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw).cik
+        == "0000123456"
+    )
+
+
+def test_two_other_ciks_cannot_alias_the_same_expanded_legal_member():
+    module = importlib.import_module("nexus.market.current_identity")
+    raw = _multiple_registrant_cover().replace(
+        b"<html ", b'<html xmlns:alias="https://example.invalid/2025" '
+    )
+    context = re.search(rb'<xbrli:context id="other">.*?</xbrli:context>', raw, re.S)[0]
+    third = context.replace(b'id="other"', b'id="third"').replace(
+        b"sample:OtherMember", b"alias:OtherMember"
+    )
+    facts = re.search(rb'<ix:nonNumeric id="other-cik".*?(?=</body>)', raw, re.S)[0]
+    third_facts = (
+        facts.replace(b'id="other-', b'id="third-')
+        .replace(b'contextRef="other"', b'contextRef="third"')
+        .replace(b"0000654321", b"0000999999")
+        .replace(b"Other Example", b"Third Example")
+    )
+    raw = raw.replace(b"</ix:header>", third + b"</ix:header>").replace(
+        b"</body>", third_facts + b"</body>"
+    )
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "unbound_member",
+        "bad_member_qname",
+        "standard_member",
+        "standard_namespace_alias",
+        "wrong_axis",
+        "typed_member",
+        "scenario",
+        "extra_element",
+        "unscoped_other_cik",
+        "duplicate_target",
+        "duplicate_other",
+        "wrong_primary_period",
+        "wrong_other_period",
+        "wrong_context_entity",
+        "missing_name",
+        "missing_tax",
+        "name_wrong_context",
+        "duplicate_name",
+        "wrong_stock_context",
+        "wrong_stock_symbol",
+        "wrong_fmp_symbol",
+        "cross_registration_row",
+        "same_scope_two_ciks",
+    ],
+)
+def test_multiple_registrant_scope_must_be_complete_and_unambiguous(case):
+    module = importlib.import_module("nexus.market.current_identity")
+    raw = _multiple_registrant_cover()
+    fm = profile()
+    if case == "unbound_member":
+        raw = raw.replace(b'xmlns:sample="https://example.invalid/2025"', b"")
+    elif case == "bad_member_qname":
+        raw = raw.replace(b"sample:OtherMember", b"sample:OtherMember:Invalid")
+    elif case == "standard_member":
+        raw = raw.replace(b"sample:OtherMember", b"us-gaap:ParentCompanyMember")
+    elif case == "standard_namespace_alias":
+        raw = raw.replace(b"https://example.invalid/2025", b"http://fasb.org/us-gaap/2025")
+    elif case == "wrong_axis":
+        raw = raw.replace(b"dei:LegalEntityAxis", b"dei:OtherAxis")
+    elif case == "typed_member":
+        raw = raw.replace(
+            b'<xbrli:segment><xbrldi:explicitMember dimension="dei:LegalEntityAxis">',
+            b'<xbrli:segment><xbrldi:typedMember dimension="dei:OtherAxis">'
+            b"sample:OtherMember</xbrldi:typedMember>"
+            b'<xbrldi:explicitMember dimension="dei:LegalEntityAxis">',
+        )
+    elif case in {"scenario", "extra_element", "wrong_other_period", "wrong_context_entity"}:
+        other = re.search(rb'<xbrli:context id="other">.*?</xbrli:context>', raw, re.S)[0]
+        changed = other
+        if case == "scenario":
+            changed = other.replace(
+                b"</xbrli:context>", b"<xbrli:scenario></xbrli:scenario></xbrli:context>"
+            )
+        elif case == "extra_element":
+            changed = other.replace(
+                b"</xbrli:segment>", b"<sample:Unknown></sample:Unknown></xbrli:segment>"
+            )
+        elif case == "wrong_other_period":
+            changed = other.replace(b"2025-12-31", b"2025-12-30")
+        else:
+            changed = other.replace(b"0000123456", b"0000999999")
+        raw = raw.replace(other, changed)
+    elif case == "unscoped_other_cik":
+        raw = raw.replace(b'contextRef="other">0000654321', b'contextRef="primary">0000654321')
+    elif case == "duplicate_target":
+        raw = raw.replace(b">0000654321<", b">0000123456<")
+    elif case == "duplicate_other":
+        raw = raw.replace(
+            b"</body>",
+            b'<ix:nonNumeric id="other-again" name="dei:EntityCentralIndexKey" '
+            b'contextRef="other">0000654321</ix:nonNumeric></body>',
+        )
+    elif case == "wrong_primary_period":
+        primary = re.search(rb'<xbrli:context id="primary">.*?</xbrli:context>', raw, re.S)[0]
+        raw = raw.replace(primary, primary.replace(b"2025-12-31", b"2025-12-30"))
+    elif case in {"missing_name", "missing_tax"}:
+        key = b"other-name" if case == "missing_name" else b"other-tax"
+        raw = re.sub(rb'<ix:nonNumeric id="' + key + rb'".*?</ix:nonNumeric>', b"", raw, flags=re.S)
+    elif case == "name_wrong_context":
+        raw = raw.replace(
+            b'contextRef="other">Other Example', b'contextRef="primary">Other Example'
+        )
+    elif case == "duplicate_name":
+        raw = raw.replace(
+            b"</body>",
+            b'<ix:nonNumeric id="other-name-again" name="dei:EntityRegistrantName" '
+            b'contextRef="other">Other Example</ix:nonNumeric></body>',
+        )
+    elif case == "wrong_stock_context":
+        raw = raw.replace(b'contextRef="stock">AAPL', b'contextRef="other">AAPL')
+    elif case == "wrong_stock_symbol":
+        raw = raw.replace(b">AAPL<", b">MSFT<")
+    elif case == "wrong_fmp_symbol":
+        fm = profile(symbol="MSFT")
+    elif case == "cross_registration_row":
+        raw = raw.replace(
+            b'<td><ix:nonNumeric id="exchange"', b'</tr><tr><td><ix:nonNumeric id="exchange"'
+        )
+    else:
+        raw = raw.replace(
+            b"</body>",
+            b'<ix:nonNumeric id="third-cik" name="dei:EntityCentralIndexKey" '
+            b'contextRef="other">0000999999</ix:nonNumeric></body>',
+        )
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(symbol="AAPL", fmp_raw=fm, sec_raw=raw)
