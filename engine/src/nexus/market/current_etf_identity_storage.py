@@ -18,6 +18,7 @@ from nexus.market.current_etf_identity import (
     CurrentEtfIdentity,
     CurrentEtfShareClassIdentity,
     CurrentNasdaqEtfIdentity,
+    CurrentUitIdentity,
     EtfInputs,
     member_for,
     validate_etf_originals,
@@ -30,6 +31,7 @@ from nexus.market.current_identity_storage import (
     _binding,
     _read_artifact,
 )
+from nexus.market.current_uit_identity import validate_uit_originals
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.research.fmp_profile_archive import _read
@@ -37,7 +39,12 @@ from nexus.research.fmp_profile_archive import _read
 
 class EtfProof(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
-    identity: CurrentNasdaqEtfIdentity | CurrentEtfShareClassIdentity | CurrentEtfIdentity
+    identity: (
+        CurrentUitIdentity
+        | CurrentNasdaqEtfIdentity
+        | CurrentEtfShareClassIdentity
+        | CurrentEtfIdentity
+    )
     instrument_id: UUID
     alias_id: UUID
     alias_valid_from: date
@@ -60,9 +67,22 @@ def _private_files(directory: Path, names: tuple[str, ...]) -> tuple[bytes, ...]
 
 
 async def load_etf_archives(
-    *, symbol: str, fmp_archive: Path, sec_archive: Path, mapping_file: Path, now: datetime
+    *, symbol: str, fmp_archive: Path, sec_archive: Path, mapping_file: Path | None, now: datetime
 ) -> EtfInputs:
     contents = _private_files(fmp_archive, ("profile.json", "receipt.json"))
+    if mapping_file is None:
+        sec = _private_files(
+            sec_archive,
+            (
+                "submissions.raw",
+                "submissions-receipt.json",
+                "filing-index.raw",
+                "index-receipt.json",
+                "disclosure.raw",
+                "disclosure-receipt.json",
+            ),
+        )
+        return validate_uit_originals(symbol=symbol, contents=contents + sec, now=now)
     mapping = _private_files(mapping_file.parent, (mapping_file.name,))
     sec = _private_files(
         sec_archive,
@@ -101,7 +121,7 @@ async def import_current_etf(
     symbol: str,
     fmp_archive: Path,
     sec_archive: Path,
-    mapping_file: Path,
+    mapping_file: Path | None,
 ) -> CurrentIdentityImportResult:
     member = member_for(symbol)
     async with session.begin_nested():
@@ -247,9 +267,14 @@ async def read_current_etf(
             ):
                 raise ValueError
             contents.append(await _read_artifact(store, binding))
-        inputs = await validate_etf_originals(
-            symbol=proof.identity.symbol, contents=tuple(contents), now=proof.checked_at
-        )
+        if isinstance(proof.identity, CurrentUitIdentity):
+            inputs = validate_uit_originals(
+                symbol=proof.identity.symbol, contents=tuple(contents), now=proof.checked_at
+            )
+        else:
+            inputs = await validate_etf_originals(
+                symbol=proof.identity.symbol, contents=tuple(contents), now=proof.checked_at
+            )
         member = member_for(proof.identity.symbol)
         if (
             inputs.identity != proof.identity

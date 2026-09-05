@@ -271,3 +271,20 @@ NASDAQ 股票ETF窄分支以当前目录的精确 CIK/series/class、完整 497K
 改制日期仅记录来源事实，当前 alias 仍从本次核验日期起，不回填历史身份或类型。
 新增内部 JSON 子类型携带 XNAS、原件空字段及改制日期，旧 IWM/VTI JSON 兼容；
 回滚继续采用关闭显式消费者并保留兼容 reader，不删除已存证据。无新增迁移或依赖。
+
+
+股票型 UIT 当前身份首个代表仅支持 SPY，使用 `etf_identity_local import-uit`，
+参数为 `--symbol SPY --fmp-archive PATH --sec-archive PATH --output NEW_PATH`。
+FMP 目录仍为 profile.json/receipt.json；SEC 目录为 submissions.raw、
+submissions-receipt.json、filing-index.raw、index-receipt.json、disclosure.raw、
+disclosure-receipt.json，共八份原件。正文及索引复用 instrument_identity_local
+collect-sec 的正常收据格式，submissions 使用既有 SEC client 单次有界读取并保存
+相同收据字段；归档组装仅复制原字节，不重写收到时间或来源。
+
+此分支不要求 mutual-fund 目录中不存在的 series/class。以精确 CIK、submissions
+当前唯一 ticker 和唯一目标 497 记录、索引正文链接、完整招募说明书的当前/旧名及
+本体上市代码、股票目标与策略绑定；NYSE Arca 来自封面，FMP AMEX 和 submissions
+NYSE 仅保留来源标签。独立子类型保存 `legal_structure=unit_investment_trust`，
+法律名称/旧名/展示名不互相覆盖。旧三种 ETF JSON 及默认消费者不变，未来准备仍须
+显式 ETF 选项，当前身份不授予历史资格或执行许可。无 schema 迁移；回退停用新入口
+与显式消费，但须保留新 JSON 的兼容 reader 和不可变原件。

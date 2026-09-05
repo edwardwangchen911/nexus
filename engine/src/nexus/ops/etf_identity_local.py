@@ -168,12 +168,12 @@ async def import_identity(
     symbol: str,
     fmp_archive: Path,
     sec_archive: Path,
-    mapping_file: Path,
+    mapping_file: Path | None,
     store: IdentityStore | None = None,
 ) -> CurrentIdentityImportResult:
     _local(settings)
     storage = store or S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
-    if store is None:
+    if store is None and mapping_file is not None:
         assert isinstance(storage, S3ProviderEvidenceStore)
         await verify_mapping_origin(storage, mapping_file=mapping_file, sec_archive=sec_archive)
     factory = session_factory(settings)
@@ -220,6 +220,11 @@ def main() -> None:
     for name in ("fmp-archive", "sec-archive", "mapping-file", "output"):
         importer.add_argument("--" + name, type=Path, required=True)
     importer.add_argument("--symbol", required=True)
+    uit = commands.add_parser("import-uit")
+    for name in ("fmp-archive", "sec-archive", "output"):
+        uit.add_argument("--" + name, type=Path, required=True)
+    uit.add_argument("--symbol", required=True)
+    uit.set_defaults(mapping_file=None)
     reader = commands.add_parser("read")
     reader.add_argument("--snapshot-id", type=UUID, required=True)
     try:
@@ -239,7 +244,7 @@ def main() -> None:
                 )
             )
             status: str = "collected"
-        elif args.action == "import":
+        elif args.action in {"import", "import-uit"}:
             if args.output.exists() or args.output.is_symlink():
                 raise ValueError("CURRENT_ETF_NEW_OUTPUT_REQUIRED")
             result = asyncio.run(

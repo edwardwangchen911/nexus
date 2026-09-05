@@ -66,6 +66,26 @@ class CurrentNasdaqEtfIdentity(CurrentEtfShareClassIdentity):
     )
 
 
+class CurrentUitIdentity(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    symbol: str
+    cik: str
+    legal_name: str
+    former_name: str
+    fmp_name: str
+    fmp_name_matches_sec: bool
+    asset_type: Literal["equity_etf"] = "equity_etf"
+    currency: Literal["USD"] = "USD"
+    exchange: Literal["ARCX"] = "ARCX"
+    legal_structure: Literal["unit_investment_trust"] = "unit_investment_trust"
+    listing_basis: Literal["bound_sec_497_cover"] = "bound_sec_497_cover"
+    fmp_exchange: str
+    sec_exchange: str
+    fmp_exchange_precision: Literal["provider_label_only"] = "provider_label_only"
+    objective: str
+    legal_type_statement: str
+
+
 class _IndexRows(_VisibleText):
     def __init__(self) -> None:
         super().__init__()
@@ -327,7 +347,7 @@ def _share_class_identity(
 
 @dataclass(frozen=True)
 class EtfInputs:
-    identity: CurrentEtfIdentity
+    identity: CurrentEtfIdentity | CurrentUitIdentity
     contents: tuple[bytes, ...]
     sec_url: str
     received: tuple[datetime | None, ...]
@@ -460,7 +480,7 @@ async def validate_etf_originals(
         if not isinstance(name, str) or not name.strip():
             raise ValueError
         name = " ".join(name.split())
-        identity: CurrentEtfIdentity
+        identity: CurrentEtfIdentity | CurrentUitIdentity
         if row["exchange"] in {"NASDAQ", "XNAS"}:
             identity = _nasdaq_identity(
                 text=text,

@@ -277,3 +277,89 @@ async def test_nasdaq_normal_import_read_and_future_keep_old_identity_json(
         assert report["candidate"] is None and len(report["members"]) == 49
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_uit_normal_import_read_future_preserves_existing_etf_json(
+    migrated_database_url, tmp_path
+):
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    import exchange_calendars
+    from helpers.current_etf_identity import archives
+    from helpers.current_identity import MemoryStore
+    from helpers.current_uit_identity import originals
+    from nexus.backtest.future_identity import prepare_future_identity_bindings
+    from nexus.market.current_etf_identity_storage import read_current_etf
+    from nexus.ops.etf_identity_local import import_identity
+    from nexus.persistence.models.data import DataSnapshot
+    from nexus.persistence.session import session_factory
+    from nexus.settings import EngineSettings
+
+    settings = EngineSettings(database_url=migrated_database_url).model_copy(
+        update={"object_store_endpoint": "http://127.0.0.1:9000"}
+    )
+    factory = session_factory(settings)
+    store = MemoryStore()
+    fm, sc, mapping = archives(tmp_path / "old")
+    try:
+        old = await import_identity(
+            settings,
+            symbol="IWM",
+            fmp_archive=fm,
+            sec_archive=sc,
+            mapping_file=mapping,
+            store=store,
+        )
+        async with factory() as session:
+            old_json = json.dumps(
+                (await session.get(DataSnapshot, old.snapshot_id)).payload, sort_keys=True
+            )
+        folder = tmp_path / "uit"
+        folder.mkdir(mode=0o700)
+        names = (
+            "profile.json",
+            "receipt.json",
+            "submissions.raw",
+            "submissions-receipt.json",
+            "filing-index.raw",
+            "index-receipt.json",
+            "disclosure.raw",
+            "disclosure-receipt.json",
+        )
+        for name, raw in zip(names, originals(), strict=True):
+            path = folder / name
+            path.write_bytes(raw)
+            path.chmod(0o600)
+        new = await import_identity(
+            settings,
+            symbol="SPY",
+            fmp_archive=folder,
+            sec_archive=folder,
+            mapping_file=None,
+            store=store,
+        )
+        async with factory() as session:
+            proof = await read_current_etf(session, store, snapshot_id=new.snapshot_id)
+            assert proof.identity.legal_structure == "unit_investment_trust"
+            assert proof.alias_valid_from == proof.checked_at.date()
+            assert "series_id" not in proof.identity.model_dump()
+            legacy = await read_current_etf(session, store, snapshot_id=old.snapshot_id)
+            assert json.dumps(legacy.model_dump(mode="json"), sort_keys=True) == old_json
+        effective = (
+            exchange_calendars.get_calendar("XNYS")
+            .date_to_session(datetime.now(UTC).date() + timedelta(days=7), direction="next")
+            .date()
+        )
+        async with factory() as session:
+            result = await prepare_future_identity_bindings(
+                session, store, effective_session=effective, use_etf_identities=True
+            )
+        bound = next(m for m in result["members"] if m["symbol"] == "SPY")
+        assert bound["gap"] is None and bound["legal_structure"] == "unit_investment_trust"
+        assert bound["listing_exchange"] == "ARCX"
+        assert len(result["members"]) == 49 and result["candidate"] is None
+        assert result["execution_locked"] and not result["historical_backtest_eligible"]
+    finally:
+        await factory.kw["bind"].dispose()
