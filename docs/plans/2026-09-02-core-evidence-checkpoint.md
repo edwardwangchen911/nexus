@@ -2127,3 +2127,23 @@ daily root为0，未声称完成真实历史root冻结验收，该行为由隔�
 现有3302行情BFF返回HTTP200 JSON；这是当前服务兼容性检查，非新镜像生效证明。
 未向真实库插入假池、未启动scheduler、未调用模型、未重启服务；后续正常
 运行版本更新才加载该自动消费者修复。不因本项阻塞已验收的手动研究与页面。
+
+### 2026-09-05 本地 API 加载累计主线并完成只读验收
+
+主线1e0964f按现有local-development运行手册加载到所属nexus-fosun-live/api。
+协调任务让出维护窗口；切换前无running Job/研究，无常驻worker。先保留精确旧镜像
+rollback-before-1e0964f，再以git archive构建、仅api --no-deps --no-build重建一次。
+运行image ID与新tag一致，容器内engine/src和alembic共434个文件与提交归档逐项
+SHA256一致，live返回200。配置hash/端口/mount未变，PG/MinIO容器ID和启动时间
+未变；前后21张业务表整行hash集合相同。未运行迁移、模型、daily或券商采集。
+
+受保护internal market与3302 BFF均返回200，保存行情items与切换前逐字段一致；
+运行容器内以同一API as_of执行只读selector，选择预期local池，返回行情项全部
+属于该池。组合快照正常详情入口execution_locked=true。readiness数据库/迁移/
+对象存储均ready，worker仍stale而整体503，符合未启通用worker的手动本地模式；
+没有为了消除503启动调度。至此补齐运行生效，原“长驻新版本待正常更新”已关闭。
+
+验收脚本首次从组合列表查execution_locked，因该列表合同不含字段而断言失败；
+未判断成产品解锁，也未重放业务。改读既有snapshots/latest详情并确认true。
+私有前后摘要、源码比对、正常API/BFF响应与运行池绑定结果保存于主项目
+outputs/acceptance/api-refresh-1e0964f，目录0700、文件0600；无原始账户事实入库外输出。
