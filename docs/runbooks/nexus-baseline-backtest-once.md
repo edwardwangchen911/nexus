@@ -114,3 +114,53 @@ ID 来自现有 `backtest_authority_bundles`，与其 `data_snapshot_id`、`sour
 | `BACKTEST_RUN_FAILED` | 参数、配置、连接或执行失败；先排查，不自动重试 |
 
 本入口无调度或共享服务注册。停用相应准备/运行模式即可回退入口；已提交日历、数据包及结果保留为不可变证据，不通过删除记录或改写历史来回滚。无新增迁移或依赖，旧参数模式和旧包哈希/回放语义保持。
+
+## 有来源的当前普通股首次建档
+
+`instrument_identity_local` 只处理固定 `us_liquid_v1` 定义中的普通股，不建假持仓、
+不发布股票池、不创建研究、不授予交易许可。它将 SEC 同证券登记行的普通股标题、
+TradingSymbol、Exchange/context/CIK，与当前 FMP profile 的 symbol、CIK、USD、交易所
+及类型冲突标记核对。普通股结论来自 SEC 明确标题和 CommonStockMember，不能由
+`isEtf=false` 推断。当前窄解析只支持已验证的根命名空间、同一表行/上下文、XNYS/XNAS
+结构；其他结构明确拒绝，不拼接债券、优先股或另一证券的信息。
+
+已有 FMP 原件沿 `fmp_profile_local collect` 取得，格式见对应运行手册。需要 SEC 原件时
+使用一次显式收集，复用正常 `SEC_CONTACT`，不重试、跳转或调用模型：
+
+```bash
+.venv/bin/python -m nexus.ops.instrument_identity_local --repo-root "$PWD" collect-sec \
+  --source-url 'https://www.sec.gov/Archives/edgar/data/1551152/000155115226000008/abbv-20251231.htm' \
+  --output-dir /absolute/private/new-sec-archive
+```
+
+SEC 目录必须仅有 URL 指定的 HTML 文件和 `receipt.json`，目录0700、文件0600；receipt
+包含 `source_url/received_at/sha256/byte_length/http_status=200`。已有诊断归档可复制原件
+和原 receipt 到新标准目录，保留实际接收时间，不改原归档、不把适配时间当采集时间。
+SEC accession 前缀是提交者（可能为代理）CIK，不要求等于发行人；URL发行人目录、
+上下文 entity identifier、CIK事实及FMP必须一致。收据未来时间、符号链接、重复键、
+原件hash不符或缺失都拒绝。SEC报告期和当前观察分别保存，不证明其间从未发生更名。
+
+完全离线导入和精确重读；输出文件必须尚不存在，父目录预先设为私有：
+
+```bash
+.venv/bin/python -m nexus.ops.instrument_identity_local --repo-root "$PWD" import \
+  --symbol ABBV --fmp-archive /absolute/private/fmp-archive \
+  --sec-archive /absolute/private/sec-archive --output /absolute/private/import-result.json
+.venv/bin/python -m nexus.ops.instrument_identity_local --repo-root "$PWD" read \
+  --snapshot-id '<snapshot_id from the private import result>'
+```
+
+入口自行读取正常本地配置，数据库和对象存储限定本地地址。完全缺失时使用该定义的
+stable UUID，alias从数据库本次核验UTC日开始，tick_size保留unknown。有效既有身份可
+复用，但历史同symbol冲突、类型/币种/交易所或源标识冲突、期望UUID被占用均拒绝，
+不合并或改旧行。同symbol事务锁加现有唯一/排斥约束处理并发；精确重放返回同一证明。
+证明与新身份同事务提交，失败不留下部分身份；已经写入的孤立对象按既有回收规则处理。
+
+相同内容优先复用已有 DataArtifact URI/schema 并核读原件；证明仅存入
+`DataSnapshot(source=current_instrument_identity)`，不改研究authority。精确reader检查
+原件、收据、证明绑定及当前数据库日期下的唯一有效身份，不能把旧证明当当前可用。
+`created/existing/verified` 都不表示49成员预检通过、股票池发布或历史回测可用。
+安全错误统一 `CURRENT_IDENTITY_*`：先诊断状态/原件/合同，不重复采集或重放未知结果。
+
+回退方式是停止该import入口，保留已提交身份、证明和读取兼容。无需新表、迁移、
+依赖或服务重启；不删事实、改写历史，亦不回退券商刷新身份校验。

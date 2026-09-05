@@ -1,0 +1,158 @@
+import importlib
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from helpers.current_identity import archives, filing, profile
+
+
+def test_explicit_same_security_identity():
+    module = importlib.import_module("nexus.market.current_identity")
+    result = module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=filing())
+    assert result.cik == "0000123456"
+    assert result.exchange == "XNYS"
+    assert result.context_id == "stock"
+    assert result.sec_title == "Common Stock"
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        (b">AAPL<", b">MSFT<"),
+        (b'contextRef="stock">AAPL', b'contextRef="bond">AAPL'),
+        (b'id="exchange"', b'id="title"'),
+        (b"us-gaap:CommonStockMember", b"us-gaap:PreferredStockMember"),
+        (b">Common Stock<", b">Preferred Stock<"),
+        (b">Common Stock<", b">Common Stock Warrants<"),
+        (b">exch:XNYS<", b">exch:XNAS<"),
+        (b">0000123456<", b">0000654321<"),
+        (b'<td><ix:nonNumeric id="exchange"', b'</tr><tr><td><ix:nonNumeric id="exchange"'),
+        (
+            b"</body>",
+            b'<ix:nonNumeric id="again" name="dei:TradingSymbol" '
+            b'contextRef="stock">AAPL</ix:nonNumeric></body>',
+        ),
+    ],
+)
+def test_rejects_cross_security_or_unsupported_structure(before, after):
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL", fmp_raw=profile(), sec_raw=filing().replace(before, after)
+        )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [dict(isEtf=0), dict(isFund=None), dict(isAdr=True), dict(currency="HKD"), dict(cik="12.3")],
+)
+def test_rejects_bad_fmp_identity(updates):
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL", fmp_raw=profile(**updates), sec_raw=filing()
+        )
+
+
+@pytest.mark.parametrize("case", ["future", "tampered", "symlink", "duplicate_receipt_key"])
+def test_strict_local_archives(tmp_path, case):
+    module = importlib.import_module("nexus.market.current_identity")
+    received = (datetime.now(UTC) + timedelta(days=1)).isoformat() if case == "future" else None
+    fm, sc = archives(tmp_path, received=received)
+    if case == "tampered":
+        (sc / "sample.htm").write_bytes(b"changed")
+    elif case == "symlink":
+        (sc / "sample.htm").rename(sc / "target")
+        (sc / "sample.htm").symlink_to(sc / "target")
+    elif case == "duplicate_receipt_key":
+        path = sc / "receipt.json"
+        path.write_text(path.read_text().replace("{", '{"http_status":200,', 1))
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.load_identity_archives(symbol="AAPL", fmp_archive=fm, sec_archive=sc)
+
+
+def test_nested_unknown_fact_cannot_hide_security_suffix():
+    module = importlib.import_module("nexus.market.current_identity")
+    raw = filing().replace(
+        b">Common Stock</ix:nonNumeric>",
+        b'><ix:nonNumeric name="example:Other" contextRef="stock">Common Stock'
+        b"</ix:nonNumeric> Warrants</ix:nonNumeric>",
+    )
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+
+
+def test_late_sibling_namespace_does_not_bind_cover_facts():
+    module = importlib.import_module("nexus.market.current_identity")
+    raw = filing().replace(b'xmlns:dei="http://xbrl.sec.gov/dei/2025"', b"")
+    raw = raw.replace(b"</body>", b'<div xmlns:dei="http://xbrl.sec.gov/dei/2025"></div></body>')
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+
+
+def test_accession_submitter_can_differ_from_issuer(tmp_path):
+    module = importlib.import_module("nexus.market.current_identity")
+    fm, sc = archives(tmp_path)
+    receipt = sc / "receipt.json"
+    receipt.write_text(receipt.read_text().replace("000012345626000001", "000099999926000001"))
+    assert (
+        module.load_identity_archives(symbol="AAPL", fmp_archive=fm, sec_archive=sc).identity.cik
+        == "0000123456"
+    )
+
+
+def test_archive_issuer_directory_must_match_context(tmp_path):
+    module = importlib.import_module("nexus.market.current_identity")
+    fm, sc = archives(tmp_path)
+    receipt = sc / "receipt.json"
+    receipt.write_text(receipt.read_text().replace("/data/123456/", "/data/654321/"))
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.load_identity_archives(symbol="AAPL", fmp_archive=fm, sec_archive=sc)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 201, 503])
+async def test_normal_sec_collector_one_request_preserves_actual_status(tmp_path, status):
+    import json
+
+    import httpx
+    from helpers.current_identity import URL
+
+    module = importlib.import_module("nexus.ops.instrument_identity_local")
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(status, content=filing())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        if status == 200:
+            await module.collect_sec(
+                source_url=URL,
+                contact="test@example.invalid",
+                output_dir=tmp_path / "sec",
+                client=client,
+            )
+            assert json.loads((tmp_path / "sec/receipt.json").read_text())["http_status"] == 200
+            assert (tmp_path / "sec/sample.htm").read_bytes() == filing()
+        else:
+            with pytest.raises((ValueError, RuntimeError)):
+                await module.collect_sec(
+                    source_url=URL,
+                    contact="test@example.invalid",
+                    output_dir=tmp_path / "sec",
+                    client=client,
+                )
+            assert not (tmp_path / "sec/receipt.json").exists()
+    assert len(calls) == 1
+    assert str(calls[0].url) == URL
+
+
+@pytest.mark.parametrize(
+    "before,after", [(b"xbrli:entity", b"example:entity"), (b"table>", b"div>")]
+)
+def test_context_entity_and_registration_table_must_be_supported(before, after):
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL", fmp_raw=profile(), sec_raw=filing().replace(before, after)
+        )

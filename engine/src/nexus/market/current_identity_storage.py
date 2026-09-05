@@ -1,0 +1,379 @@
+"""Append one current identity proof, preserving existing identities and archived bytes."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime
+from hashlib import sha256
+from pathlib import Path
+from typing import Literal, Protocol
+from urllib.parse import urlsplit
+from uuid import UUID
+
+from pydantic import AwareDatetime, BaseModel, ConfigDict
+from sqlalchemy import func, or_, select, text
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from nexus.market.current_identity import (
+    SCHEMA,
+    SOURCE,
+    CurrentCommonStockIdentity,
+    IdentityInputs,
+    cik,
+    load_identity_archives,
+    member_for,
+    validate_identity_originals,
+)
+from nexus.market.scope import US_EQUITY_EXCHANGES
+from nexus.persistence.models.data import DataArtifact, DataSnapshot
+from nexus.persistence.models.market import Instrument, InstrumentAlias
+
+
+class IdentityStore(Protocol):
+    async def put_if_absent(self, *, key: str, content: bytes) -> str: ...
+    async def read_raw(self, key: str, *, uri: str) -> bytes: ...
+
+
+class ArtifactBinding(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    uri: str
+    sha256: str
+    byte_size: int
+    source: str
+    schema_version: str
+
+
+class CurrentIdentityProof(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    identity: CurrentCommonStockIdentity
+    instrument_id: UUID
+    alias_id: UUID
+    alias_valid_from: date
+    checked_at: AwareDatetime
+    definition: Literal["us_liquid_v1"] = "us_liquid_v1"
+    definition_instrument_id: UUID
+    sec_url: str
+    artifacts: tuple[ArtifactBinding, ArtifactBinding, ArtifactBinding, ArtifactBinding]
+    historical_backtest_eligible: Literal[False] = False
+    execution_locked: Literal[True] = True
+
+
+@dataclass(frozen=True)
+class CurrentIdentityImportResult:
+    status: Literal["created", "existing"]
+    instrument_id: UUID
+    snapshot_id: UUID
+
+
+def _binding(artifact: DataArtifact) -> ArtifactBinding:
+    return ArtifactBinding(
+        uri=artifact.uri,
+        sha256=artifact.sha256,
+        byte_size=artifact.byte_size,
+        source=artifact.source,
+        schema_version=artifact.schema_version,
+    )
+
+
+async def _read_artifact(store: IdentityStore, binding: ArtifactBinding) -> bytes:
+    path = urlsplit(binding.uri).path
+    if "/raw/" not in path:
+        raise ValueError("CURRENT_IDENTITY_ARTIFACT_INVALID")
+    key = "raw/" + path.split("/raw/", 1)[1]
+    content = await store.read_raw(key, uri=binding.uri)
+    if len(content) != binding.byte_size or sha256(content).hexdigest() != binding.sha256:
+        raise ValueError("CURRENT_IDENTITY_ARTIFACT_INVALID")
+    return content
+
+
+async def _archive(
+    session: AsyncSession, store: IdentityStore, inputs: IdentityInputs
+) -> tuple[ArtifactBinding, ArtifactBinding, ArtifactBinding, ArtifactBinding]:
+    result = []
+    schemas = (
+        "fmp_profile_raw_v1",
+        "fmp_profile_receipt_v1",
+        "sec_identity_raw_v1",
+        "sec_identity_receipt_v1",
+    )
+    for number, content in enumerate(inputs.contents):
+        digest = sha256(content).hexdigest()
+        source = "fmp" if number < 2 else "sec"
+        artifact = await session.scalar(select(DataArtifact).where(DataArtifact.sha256 == digest))
+        if artifact is None:
+            key = f"raw/{source}/current-identity/{schemas[number]}/{digest}.json"
+            uri = await store.put_if_absent(key=key, content=content)
+            received = inputs.received[number // 2]
+            await session.execute(
+                insert(DataArtifact)
+                .values(
+                    uri=uri,
+                    sha256=digest,
+                    byte_size=len(content),
+                    source=source,
+                    schema_version=schemas[number],
+                    mime_type="text/html" if number == 2 else "application/json",
+                    received_at=received,
+                    observed_at=received,
+                    available_at=received,
+                )
+                .on_conflict_do_nothing(index_elements=["sha256"])
+            )
+            artifact = await session.scalar(
+                select(DataArtifact).where(DataArtifact.sha256 == digest)
+            )
+        if artifact is None or artifact.source != source:
+            raise ValueError("CURRENT_IDENTITY_ARTIFACT_CONFLICT")
+        binding = _binding(artifact)
+        if await _read_artifact(store, binding) != content:
+            raise ValueError("CURRENT_IDENTITY_ARTIFACT_INVALID")
+        result.append(binding)
+    return result[0], result[1], result[2], result[3]
+
+
+def _compatible(instrument: Instrument, identity: CurrentCommonStockIdentity) -> bool:
+    exchange = instrument.exchange
+    # Only reviewed equivalent listing labels; the broad market set alone does not prove equality.
+    aliases = {"XNYS": {"XNYS", "NYSE"}, "XNAS": {"XNAS", "NASDAQ"}}
+    return (
+        exchange in US_EQUITY_EXCHANGES
+        and exchange in aliases[identity.exchange]
+        and instrument.currency == identity.currency
+        and instrument.asset_type == "common_stock"
+        and instrument.risk_bucket == member_for(identity.symbol).risk_bucket
+    )
+
+
+async def _select_identity(
+    session: AsyncSession, identity: CurrentCommonStockIdentity, checked_at: datetime
+) -> tuple[Instrument, InstrumentAlias, bool]:
+    member = member_for(identity.symbol)
+    aliases = tuple(
+        await session.scalars(
+            select(InstrumentAlias).where(
+                InstrumentAlias.alias_type == "ticker",
+                or_(
+                    InstrumentAlias.symbol == identity.symbol,
+                    InstrumentAlias.instrument_id == member.instrument_id,
+                ),
+            )
+        )
+    )
+    expected = await session.get(Instrument, member.instrument_id)
+    current = [
+        a
+        for a in aliases
+        if a.valid_from <= checked_at.date()
+        and (a.valid_to is None or a.valid_to >= checked_at.date())
+    ]
+    if aliases or expected is not None:
+        if (
+            len(current) != 1
+            or current[0].symbol != identity.symbol
+            or any(
+                a.symbol != identity.symbol or a.instrument_id != current[0].instrument_id
+                for a in aliases
+            )
+            or (expected is not None and expected.id != current[0].instrument_id)
+        ):
+            raise ValueError("CURRENT_IDENTITY_MASTER_CONFLICT")
+        alias = current[0]
+        instrument = await session.get(Instrument, alias.instrument_id)
+        if instrument is None or not _compatible(instrument, identity):
+            raise ValueError("CURRENT_IDENTITY_MASTER_CONFLICT")
+        identifiers = await session.scalars(
+            select(InstrumentAlias).where(
+                InstrumentAlias.instrument_id == instrument.id,
+                InstrumentAlias.alias_type.in_(("cik", "isin", "cusip")),
+            )
+        )
+        for known in identifiers:
+            reported = getattr(identity, known.alias_type)
+            if (known.alias_type == "cik" and cik(known.symbol) != reported) or (
+                known.alias_type != "cik" and reported is not None and known.symbol != reported
+            ):
+                raise ValueError("CURRENT_IDENTITY_SOURCE_CONFLICT")
+        previous = await session.scalars(
+            select(DataSnapshot).where(
+                DataSnapshot.source == SOURCE,
+                DataSnapshot.provider_object_id == f"identity:{identity.symbol}",
+            )
+        )
+        for snapshot in previous:
+            proof = CurrentIdentityProof.model_validate(snapshot.payload)
+            if (
+                proof.instrument_id != instrument.id
+                or proof.identity.cik != identity.cik
+                or any(
+                    getattr(proof.identity, key) is not None
+                    and getattr(identity, key) is not None
+                    and getattr(proof.identity, key) != getattr(identity, key)
+                    for key in ("isin", "cusip")
+                )
+            ):
+                raise ValueError("CURRENT_IDENTITY_SOURCE_CONFLICT")
+        return instrument, alias, False
+    instrument = Instrument(
+        id=member.instrument_id,
+        asset_type="common_stock",
+        exchange=identity.exchange,
+        currency="USD",
+        tick_size=None,
+        risk_bucket=member.risk_bucket,
+    )
+    session.add(instrument)
+    await session.flush()
+    alias = InstrumentAlias(
+        instrument_id=instrument.id,
+        symbol=identity.symbol,
+        alias_type="ticker",
+        valid_from=checked_at.date(),
+        valid_to=None,
+    )
+    session.add(alias)
+    await session.flush()
+    return instrument, alias, True
+
+
+async def import_current_common_stock(
+    session: AsyncSession,
+    store: IdentityStore,
+    *,
+    symbol: str,
+    fmp_archive: Path,
+    sec_archive: Path,
+) -> CurrentIdentityImportResult:
+    member_for(symbol)
+    try:
+        async with session.begin_nested():
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:symbol, 0))"),
+                {"symbol": f"current_identity:{symbol}"},
+            )
+            checked_at = await session.scalar(select(func.clock_timestamp()))
+            assert isinstance(checked_at, datetime)
+            inputs = load_identity_archives(
+                symbol=symbol, fmp_archive=fmp_archive, sec_archive=sec_archive, now=checked_at
+            )
+            instrument, alias, created = await _select_identity(
+                session, inputs.identity, checked_at
+            )
+            previous = await session.scalar(
+                select(DataSnapshot).where(
+                    DataSnapshot.source == SOURCE,
+                    DataSnapshot.provider_object_id == f"identity:{symbol}",
+                    DataSnapshot.revision == inputs.revision,
+                )
+            )
+            if previous is not None:
+                proof = await read_current_identity(session, store, snapshot_id=previous.id)
+                if proof.instrument_id != instrument.id or proof.alias_id != alias.id:
+                    raise ValueError("CURRENT_IDENTITY_MASTER_CONFLICT")
+                return CurrentIdentityImportResult("existing", instrument.id, previous.id)
+            artifacts = await _archive(session, store, inputs)
+            proof = CurrentIdentityProof(
+                identity=inputs.identity,
+                instrument_id=instrument.id,
+                alias_id=alias.id,
+                alias_valid_from=alias.valid_from,
+                checked_at=checked_at,
+                definition_instrument_id=member_for(symbol).instrument_id,
+                sec_url=inputs.sec_url,
+                artifacts=artifacts,
+            )
+            snapshot = DataSnapshot(
+                source=SOURCE,
+                provider_object_id=f"identity:{symbol}",
+                revision=inputs.revision,
+                schema_version=SCHEMA,
+                observed_at=checked_at,
+                received_at=checked_at,
+                available_at=checked_at,
+                payload=proof.model_dump(mode="json"),
+            )
+            session.add(snapshot)
+            await session.flush()
+            await read_current_identity(session, store, snapshot_id=snapshot.id)
+            return CurrentIdentityImportResult(
+                "created" if created else "existing", instrument.id, snapshot.id
+            )
+    except IntegrityError as error:
+        raise ValueError("CURRENT_IDENTITY_CONCURRENT_CONFLICT") from error
+
+
+async def read_current_identity(
+    session: AsyncSession, store: IdentityStore, *, snapshot_id: UUID
+) -> CurrentIdentityProof:
+    try:
+        snapshot = await session.get(DataSnapshot, snapshot_id)
+        if snapshot is None or snapshot.source != SOURCE or snapshot.schema_version != SCHEMA:
+            raise ValueError
+        proof = CurrentIdentityProof.model_validate(snapshot.payload)
+        if (snapshot.observed_at, snapshot.received_at, snapshot.available_at) != (
+            proof.checked_at,
+        ) * 3:
+            raise ValueError
+        contents = []
+        for binding in proof.artifacts:
+            artifact = await session.scalar(
+                select(DataArtifact).where(DataArtifact.sha256 == binding.sha256)
+            )
+            if artifact is None or _binding(artifact) != binding:
+                raise ValueError
+            contents.append(await _read_artifact(store, binding))
+        inputs = validate_identity_originals(
+            symbol=proof.identity.symbol,
+            contents=(contents[0], contents[1], contents[2], contents[3]),
+            now=proof.checked_at,
+        )
+        if (
+            inputs.identity != proof.identity
+            or inputs.sec_url != proof.sec_url
+            or inputs.revision != snapshot.revision
+            or snapshot.provider_object_id != f"identity:{proof.identity.symbol}"
+            or member_for(proof.identity.symbol).instrument_id != proof.definition_instrument_id
+        ):
+            raise ValueError
+        instrument = await session.get(Instrument, proof.instrument_id)
+        alias = await session.get(InstrumentAlias, proof.alias_id)
+        if (
+            instrument is None
+            or not _compatible(instrument, proof.identity)
+            or alias is None
+            or alias.instrument_id != instrument.id
+            or alias.symbol != proof.identity.symbol
+            or alias.alias_type != "ticker"
+            or alias.valid_from != proof.alias_valid_from
+            or alias.valid_from > proof.checked_at.date()
+            or (alias.valid_to is not None and alias.valid_to < proof.checked_at.date())
+        ):
+            raise ValueError
+        current_time = await session.scalar(select(func.clock_timestamp()))
+        assert isinstance(current_time, datetime)
+        current_aliases = tuple(
+            await session.scalars(
+                select(InstrumentAlias).where(
+                    InstrumentAlias.alias_type == "ticker",
+                    or_(
+                        InstrumentAlias.symbol == proof.identity.symbol,
+                        InstrumentAlias.instrument_id == proof.instrument_id,
+                    ),
+                    InstrumentAlias.valid_from <= current_time.date(),
+                    or_(
+                        InstrumentAlias.valid_to.is_(None),
+                        InstrumentAlias.valid_to >= current_time.date(),
+                    ),
+                )
+            )
+        )
+        if (
+            proof.checked_at > current_time
+            or len(current_aliases) != 1
+            or current_aliases[0].id != proof.alias_id
+        ):
+            raise ValueError
+        return proof
+    except (ValueError, TypeError, KeyError) as error:
+        raise ValueError("CURRENT_IDENTITY_READBACK_INVALID") from error
