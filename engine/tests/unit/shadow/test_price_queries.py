@@ -32,6 +32,73 @@ def test_unfinished_new_york_day_is_rejected():
         daily_request(UUID(int=1), date(2026, 9, 2), datetime(2026, 9, 3, 3, tzinfo=UTC))
 
 
+@pytest.mark.parametrize("day", [None, "2026-09-02", datetime(2026, 9, 2, tzinfo=UTC)])
+def test_identity_day_must_be_explicit_date(day):
+    from nexus.shadow.price_collection import daily_request
+
+    with pytest.raises(ValueError, match="SHADOW_PRICE_DAY_NOT_CLOSED"):
+        daily_request(UUID(int=1), day, datetime(2026, 9, 3, 5, tzinfo=UTC))
+
+
+@pytest.mark.asyncio
+async def test_transport_and_original_reader_keep_historical_identity_through_pagination():
+    from nexus.shadow.price_collection import ShadowPriceTransport, daily_request
+    from nexus.shadow.source_queries import InstrumentPriceReceipt, verify_original_pages
+
+    at = datetime(2026, 9, 3, 5, tzinfo=UTC)
+    # Historical DST boundary: neither UTC request.end nor receipt date is the identity day.
+    day = date(2026, 3, 8)
+    base = (
+        ("adjustment", "raw"), ("asof", "2026-03-08"), ("currency", "USD"),
+        ("end", "2026-03-09T03:59:59Z"), ("feed", "sip"), ("limit", "10000"),
+        ("sort", "asc"), ("start", "2026-03-08T05:00:00Z"), ("timeframe", "1Day"),
+    )
+    raw_pages = (
+        b'{"symbol":"TEST","bars":[],"next_page_token":"next"}',
+        b'{"symbol":"TEST","bars":[],"next_page_token":null}',
+    )
+    queries, archived = [], []
+
+    class Http:
+        async def get_bytes(self, path_segments, query, headers):
+            queries.append(query)
+            return raw_pages[len(queries) - 1]
+
+    async def archive(raw, received):
+        archived.append((raw, received))
+        return UUID(int=10 + len(archived))
+
+    transport = ShadowPriceTransport(
+        Http(), symbol="TEST", session_date=day, feed="sip",
+        key_id=SecretStr("test"), secret=SecretStr("test"), archive=archive, now=lambda: at,
+    )
+    pages = []
+    for index, cursor in enumerate((None, "next")):
+        response = await transport.fetch_bars(daily_request(UUID(int=1), day, at), cursor)
+        pages.append({
+            "raw_receipt_id": UUID(int=20 + index),
+            "raw_artifact_id": transport.raw_artifact_id,
+            "raw_hash": sha256(response.raw_payload).hexdigest(),
+            "raw_byte_length": len(response.raw_payload), "received_at": at,
+            "path": ("v2", "stocks", "TEST", "bars"), "query": transport.query,
+            "input_cursor": cursor, "output_cursor": "next" if index == 0 else None,
+            "manifest_id": None, "bar_set_id": None, "member_ids": (),
+        })
+    assert queries == [base, (*base, ("page_token", "next"))]
+    assert archived == [(raw_pages[0], at), (raw_pages[1], at)]
+    receipt = InstrumentPriceReceipt.model_validate({
+        "instrument_id": UUID(int=1), "alias_id": UUID(int=2), "symbol": "TEST",
+        "session_date": day, "feed": "sip", "delivery_mode": "delayed", "pages": pages,
+    })
+
+    async def read_raw(page):
+        return raw_pages[0 if page.input_cursor is None else 1]
+
+    verified = await verify_original_pages(receipt, read_raw)
+    assert len(verified) == 2 and all(page.items == () for page in verified)
+    assert [page.next_cursor for page in verified] == ["next", None]
+
+
 @pytest.mark.asyncio
 async def test_actual_transport_pins_asof_and_archives_malformed_original_first():
     from nexus.providers.market.alpaca import MarketProviderPayloadError
@@ -45,6 +112,7 @@ async def test_actual_transport_pins_asof_and_archives_malformed_original_first(
             assert path_segments == ("v2", "stocks", "TEST", "bars")
             assert dict(query) == {
                 "adjustment": "raw",
+                "currency": "USD",
                 "start": "2026-09-02T04:00:00Z",
                 "end": "2026-09-03T03:59:59Z",
                 "asof": "2026-09-02",
@@ -53,6 +121,7 @@ async def test_actual_transport_pins_asof_and_archives_malformed_original_first(
                 "sort": "asc",
                 "timeframe": "1Day",
             }
+            assert len([key for key, _ in query if key == "asof"]) == 1
             events.append("http")
             return b"malformed original"
 
@@ -178,7 +247,7 @@ def test_collection_request_cannot_supply_complete_or_cursor_state():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("defect", ["digest", "terminal", "query", "missing_page"])
+@pytest.mark.parametrize("defect", [None, "digest", "terminal", "query", "missing_page"])
 async def test_claimed_receipt_cannot_override_original_query_or_page_chain(defect):
     from nexus.shadow.source_queries import InstrumentPriceReceipt, verify_original_pages
 
@@ -201,13 +270,14 @@ async def test_claimed_receipt_cannot_override_original_query_or_page_chain(defe
                 "path": ["v2", "stocks", "TEST", "bars"],
                 "query": [
                     ["adjustment", "raw"],
+                    ["asof", "2026-09-02"],
+                    ["currency", "USD"],
                     ["end", "2026-09-03T03:59:59Z"],
                     ["feed", "sip"],
                     ["limit", "10000"],
                     ["sort", "asc"],
                     ["start", "2026-09-02T04:00:00Z"],
                     ["timeframe", "1Day"],
-                    ["asof", "2026-09-02"],
                 ],
                 "input_cursor": None,
                 "output_cursor": None,
@@ -223,8 +293,8 @@ async def test_claimed_receipt_cannot_override_original_query_or_page_chain(defe
     elif defect == "terminal":
         page["output_cursor"] = "invented"
     elif defect == "query":
-        page["query"][-1][1] = "2026-09-03"
-    else:
+        page["query"][1][1] = "2026-09-03"
+    elif defect == "missing_page":
         raw = b'{"symbol":"TEST","bars":[],"next_page_token":"next"}'
         page.update(
             raw_hash=sha256(raw).hexdigest(), raw_byte_length=len(raw), output_cursor="next"
@@ -233,8 +303,14 @@ async def test_claimed_receipt_cannot_override_original_query_or_page_chain(defe
     async def read_raw(_page):
         return raw
 
-    with pytest.raises(ValueError, match="SHADOW_PRICE_RECEIPT_INVALID"):
-        await verify_original_pages(InstrumentPriceReceipt.model_validate(receipt), read_raw)
+    if defect is None:
+        pages = await verify_original_pages(
+            InstrumentPriceReceipt.model_validate(receipt), read_raw
+        )
+        assert len(pages) == 1 and pages[0].items == () and pages[0].next_cursor is None
+    else:
+        with pytest.raises(ValueError, match="SHADOW_PRICE_RECEIPT_INVALID"):
+            await verify_original_pages(InstrumentPriceReceipt.model_validate(receipt), read_raw)
 
 
 @pytest.mark.asyncio

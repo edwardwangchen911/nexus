@@ -359,10 +359,7 @@ async def verify_original_pages(
     try:
         for index, stored in enumerate(receipt.pages):
             request = daily_request(receipt.instrument_id, receipt.session_date, stored.received_at)
-            query = (
-                *_bars_query(request, cursor, receipt.feed),
-                ("asof", receipt.session_date.isoformat()),
-            )
+            query = _bars_query(request, cursor, receipt.feed, receipt.session_date)
             if (
                 stored.input_cursor != cursor
                 or stored.query != query

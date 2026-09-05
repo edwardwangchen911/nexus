@@ -424,10 +424,7 @@ class ShadowPriceTransport:
         expected = daily_request(request.instrument_id, self.session_date, self.now())
         if request != expected:
             raise ValueError("SHADOW_PRICE_REQUEST_MISMATCH")
-        self.query = (
-            *_bars_query(request, cursor, self.feed),
-            ("asof", self.session_date.isoformat()),
-        )
+        self.query = _bars_query(request, cursor, self.feed, self.session_date)
         raw = await self.client.get_bytes(
             ("v2", "stocks", self.symbol, "bars"),
             self.query,
