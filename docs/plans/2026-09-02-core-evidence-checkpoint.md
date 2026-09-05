@@ -2634,3 +2634,27 @@ outputs/acceptance/common-stock-tenth-item2-import-4b7ad9b/acceptance-summary.js
 同目录artifact-preflight-summary.json保留去重结果。无代码变化、额外PG/全量单测、
 新采集、模型或API重启。全批item1/3仍CURRENT_IDENTITY_ARCHIVE_INVALID，D仅离线
 诊断；不重导入已合格item2、不把全批计作成功，局部拒绝不阻塞其它已授权工作。
+
+
+### 第十批两项标题与上下文兼容的正常存储回归
+
+D仅以原件定位item1/3拒绝，补两种精确组合：plain上下文可保留明确Class A标题但
+不伪造Class A维度；标准CommonClassAMember可保留generic Common Stock标题，
+独立notes行不能混入目标四事实。D a0a7045通过集中404unit/Ruff/Mypy与22旧common
+及custom JSON exact兼容核验，无新schema/storage/CLI。A9b0661c吸收后以2054539
+补正常ops import→独立stored strictreader→future两参数PG，原context/title与4目标
+facts保持、旧single JSON保持、SEC raw/receipt损坏拒绝，2 passed8.26s。
+
+定向审查Ready后串行main e2e2021/1f5cc06，四文件与已审版本净差零。不能用标题
+推导未披露维度，也不能把generic标题与任意维度组合；复发防护在实际作用域和正常
+存储路径验证，不重标原失败/mapping或重新采集来“修复”原件。
+
+
+仅第十index1/3各正常首次import一次、独立strictread verified；default/listing/两开关
+prepare均核本次snapshot，旧item2不重放。实际存储身份与正常原件loader完整结构
+相等，两项均保留原context/title和4目标facts。导入前8uniquehash、0复用，实际仅
+新增instruments2、aliases2、artifacts8、snapshots2；19表旧行多重集完整保持。
+显式34 verified、15普通股缺证明；49保留、candidate null、历史资格 false、执行锁定。
+私有摘要：outputs/acceptance/common-stock-tenth-items13-title-a0a7045/acceptance-summary.json，
+同目录artifact-preflight-summary.json记录去重。无新采集、模型或API重启，原mapping
+失败与诊断文件保留；身份补证不改变当前研究和策略候选资格。
