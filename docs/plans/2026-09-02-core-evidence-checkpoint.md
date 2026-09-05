@@ -2880,3 +2880,35 @@ stage1 allowance 从 26965 降至 24995，仅省 1970；不足覆盖实际累计
 身份，不构成财务事实、历史 PIT 身份或核心研究完成；外部采集和模型调用均为零。
 证据：outputs/acceptance/common-stock-recovered-item3-import-da9c81a/，包括源路径
 解析、原件预检、唯一导入回执、独立回读、三种 prepare 和前后旧行保护摘要。
+
+### B3 核心可达性只读收拢及精确交易所别名单项恢复
+
+当前同一真实研究仍为 v3 failed、retry 0，未改预算或重新调用。代码核查确认：
+`synthesis.py` 固定 v2/v3 为 watch/none/partial，而 `formal_inputs.freeze_formal_research`
+要求已完成且 quality/evidence_audit 均 complete。扩大单次运行额度本身不会跨过该
+合同。旧非 staged 分支的 HK 符号/价格布尔检查也不是完整研究内容审查，不能借用
+它把模型自报 sufficient 标为确定性通过。
+
+内容与事实核验、投资方向/目标数量、执行许可必须分别判断。既有
+`evaluate_frozen_concentration_conditions` 只求值两项原冻结集中度观察，不是进入/
+退出许可；引用/hash/时点可校验，但自然语言风险判断不能仅凭引用齐全认定正确。
+同案例已结构化财务事实最新为 2026-05-03，8 月 2 日经营材料目前是完整附件文本；
+研究价格工具返回 ok 的实际内容是 current trend，market_price_eligible、历史回测及
+总回报用途均 false，不能充作正式市场价格准入。
+
+`formal_producer._baseline` 目前只支持 cash-only，有持仓会报
+OPTIMIZATION_FORMAL_CONTINUITY_NOT_READY；不能删除此判断就把真实持仓纳入既有
+baseline_v1。草稿需真实 reduce_only/超限证据，减仓方向不能替代幅度，既有费用
+完整度 false 也不能变成可排名或可执行。事实核对接线可继续实施；采用何种现持仓
+策略、减仓目标及风险/成本取舍不能由观察阈值或模型投票代定。下一经营事实片先对
+已归档 99.1 做零网络可行性核查，再确定最小合同，不另建框架或宣称 v4 已实现。
+
+并行队列唯一实施：91a1449 → main 7c36158，仅接受精确
+The New York Stock Exchange → XNYS 别名并保留原文；两文件与已审版精确一致，
+复用 root 253 unit，通过 diffcheck。仅正常导入新 8-K batch index 2，使用接收方
+已解析的绝对归档路径并先通过当前主线 loader；import created 一次、strict read
+verified，default/listing/explicit 三种 prepare 精确绑定新 proof_snapshot_id。
+新增 1 instrument、1 alias、4 artifacts、1 snapshot，19 表旧行与原件字节保持。
+实测 46 verified、3 缺证明、49 成员保留、candidate null、历史资格 false、执行锁定；
+外部采集/模型调用为零，无服务重建。未处理 index 1、index 4 或 successor。
+证据：outputs/acceptance/common-stock-recovered-item2-import-91a1449/。
