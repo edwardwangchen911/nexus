@@ -355,6 +355,23 @@ def normalize_company_facts(
                 )
     if not normalized:
         raise SecNormalizationError("NO_CANONICAL_FACTS")
+    revenue_bases: dict[tuple[object, ...], str] = {}
+    for fact in normalized:
+        if fact.canonical_fact != "revenue":
+            continue
+        key = (
+            fact.period_kind,
+            fact.period_start,
+            fact.period_end,
+            fact.unit,
+            fact.accession_number,
+            fact.revision,
+        )
+        previous = revenue_bases.setdefault(key, fact.raw_tag)
+        if previous != fact.raw_tag:
+            # Equal amounts do not prove equal accounting scopes. Never pick one
+            # tag to satisfy the storage key, which deliberately has no raw_tag.
+            raise SecNormalizationError("AMBIGUOUS_REVENUE_BASIS")
     return tuple(normalized)
 
 

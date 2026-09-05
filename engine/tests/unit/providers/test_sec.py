@@ -269,6 +269,31 @@ def test_contract_revenue_mapping_does_not_guess_other_taxonomies_or_bases(
         sec_provider.canonical_fact_for_raw_tag(taxonomy, tag)
 
 
+@pytest.mark.parametrize("contract_value", [100, 80])
+def test_distinct_revenue_bases_for_the_same_period_are_not_arbitrarily_selected(
+    contract_value: int,
+) -> None:
+    payload = json.loads((FIXTURES / "companyfacts.json").read_bytes())
+    tags = payload["facts"]["us-gaap"]
+    contract_entry = dict(tags["Revenues"]["units"]["USD"][0], val=contract_value)
+    tags["RevenueFromContractWithCustomerExcludingAssessedTax"] = {
+        "units": {"USD": [contract_entry]},
+    }
+    with pytest.raises(SecNormalizationError, match="AMBIGUOUS_REVENUE_BASIS"):
+        normalize_company_facts(
+            json.dumps(payload).encode(),
+            (
+                (FIXTURES / "submissions.json").read_bytes(),
+                (FIXTURES / "submissions-001.json").read_bytes(),
+            ),
+            instrument=_identity(),
+            evidence_by_accession={
+                ACCESSION: _evidence(),
+                ARCHIVED_ACCESSION: _evidence(ARCHIVED_ACCESSION),
+            },
+        )
+
+
 @pytest.mark.parametrize(
     ("symbol", "exchange", "currency"),
     [("00656.HK", "HKEX", "HKD"), ("AAPL", "HKEX", "HKD")],
