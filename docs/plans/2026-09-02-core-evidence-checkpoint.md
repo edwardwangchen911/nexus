@@ -2203,3 +2203,38 @@ PG首轮28通过，追加订单独有未知US拒绝PG1通过。新存量交易�
 保存的12身份经新_ensure强制只读事务全部复用，代码由已有alias重构，非新鲜券商验收。
 私有资料、失败结果、前后hash、兼容性与定位在outputs/acceptance/existing-identity-reuse，
 目录0700/文件0600；没有新来源请求或业务写入来消除冲突。
+
+### 2026-09-05 同一真实UUID的当前上市修订完成正常入口验收
+
+Instrument/alias/data_snapshot等由0012冻结上游约束保护；旧研究/价格仍引用原记录与
+冻结资料，未接入新source。新增current_listing_revision_v1仅追加当前上市信息，
+保留同一instrument/alias UUID、original_exchange、两原记录指纹、严格双源identity
+和原件绑定。仅允许上市所差异，币种/类型/risk/CIK/已知身份标识冲突仍拒绝。
+旧current_identity_storage/reader/_compatible未改。使用既有DataSnapshot和_archive，
+无新表、迁移、通用主数据系统或历史覆盖。
+
+checked/effective/available取归档后的数据库事务内导入核验时间，非来源receipt、
+非精确commit timestamp；单snapshot按事务可见性读取，不建立任意历史commit还原。
+正常read-listing-revision精确重验原件、指纹、当前唯一alias和四个可见性时间；
+默认prepare-universe原合同不变，只有显式--use-listing-revisions使用新reader并
+输出listing_exchange及proof合同，新报告/候选版本独立，49项和ETF缺口保留。
+
+集中25相关PG通过71.81秒；新reader晚创建行反例先红后绿。最后补非seed实际UUID
+上的OTHER当前alias反例，旧查询只查symbol/seed会漏，RED确认后增加actual UUID
+当前唯一性核对；定稿9新PG通过27.13秒，覆盖并发幂等、旧proof保留、非上市字段
+冲突、坏原件/指纹、最新坏证明不回退、as_of早于修订及晚创建。Ruff格式/check、
+三生产文件Mypy、diffcheck通过，集中审查及增量复核Ready。
+539d2f0已串行集成main4fdee6c；仅CLI新进程受益，不为本片重启常驻API。
+
+同一代表复用已取得FMP/SEC原件，正常revise-listing仅一次created，随后独立新reader
+verified；未再调用失败的旧import，零新增采集。默认prepare仍为该项缺proof；
+显式新prepare绑定相同实际非seed UUID、新proof与新上市所，全部49项保留，验证
+绑定由1增至2，剩40项IDENTITY_PROOF_MISSING、7项IDENTITY_TYPE_UNSUPPORTED，
+仍BLOCKED/candidate=null、historical_backtest_eligible=false、execution_locked=true。
+19张相关表（含身份、旧proof、研究、价格、股票池和订单）旧行hash集合完全保留，
+仅data_artifacts+4、data_snapshots+1；原exchange未改，也不追认过去字段正确。
+既有备份绑定扫描识别4原件引用，未重跑全备份。
+
+私有证据在outputs/acceptance/existing-identity-reuse/listing-revision，0700/0600，包含
+新正常入口结果、默认/显式准备对照、前后hash与安全摘要。当前身份显式reader和
+未来准备已受益；旧行情/研究/价格、旧v1预检不自动切换，不宣告完整T1完成。
