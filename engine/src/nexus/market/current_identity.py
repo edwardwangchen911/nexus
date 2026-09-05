@@ -30,6 +30,7 @@ SEC_URL = re.compile(
 _EXCHANGES = {
     "NYSE": "XNYS",
     "New York Stock Exchange": "XNYS",
+    "The New York Stock Exchange": "XNYS",
     "NASDAQ": "XNAS",
     "Nasdaq": "XNAS",
     "The Nasdaq Stock Market LLC": "XNAS",

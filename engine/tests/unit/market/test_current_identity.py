@@ -16,6 +16,17 @@ def test_explicit_same_security_identity():
     assert result.sec_title == "Common Stock"
 
 
+def test_exact_the_new_york_stock_exchange_alias_preserves_source_text():
+    """Omitting the evidenced exact label would reject an otherwise valid NYSE identity."""
+    module = importlib.import_module("nexus.market.current_identity")
+    raw = filing().replace(b"New York Stock Exchange", b"The New York Stock Exchange")
+
+    result = module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+
+    assert result.exchange == "XNYS"
+    assert result.sec_exchange == "The New York Stock Exchange"
+
+
 def test_dual_listing_rejects_cik_fact_from_another_period():
     raw = dual_listing_filing()
     context = re.search(rb'<xbrli:context id="stock">.*?</xbrli:context>', raw, re.S)[0]
