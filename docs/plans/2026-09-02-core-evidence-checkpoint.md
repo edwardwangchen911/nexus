@@ -2822,3 +2822,25 @@ latest-operating-disclosure/v2-acceptance-fixed-listing/。
 未调用模型或写入 run。不得绕过该校验；正常 API 又明确不默认选择 v2/v3，因此
 在既有本地 CLI 增加显式 admit-research，沿现有幂等、预算和证据事务登记真实 run，
 再针对同一 run 预检。入口不调用模型，第一阶段预检不代表后续真实阶段必过。
+
+本次新研究正常入口及终态：CLI b957c1a → main 9100342，集中审查 Ready；
+正常 CLI→隔离 PG 显式 v3、幂等、换模型/快照冲突及未来/未知快照拒绝 1 passed，
+16 unit、Ruff/Mypy 通过。正常本地 admit 首次 prepared，无重复研究；确认队列仅
+目标且 max_attempts=1 后，正常 run-once 一次，进程退出 0、job_processed=true。
+第一阶段实际冻结输入预检 wire 53696/55808 bytes、input allowance 26965，完整
+附件保留，未预测后续阶段。实际 research 与 critique 完成，分别 input 23785/24236、
+output 1498/1126；synthesis 调用前被累计 guard 拒绝，最终 failed、retry_count=0、
+model_stage_allowance_exhausted，输入 48021、输出 2624，未生成最终研究意图。
+
+复用同 run 已保存、校验的七个角色输出和完整冻结输入，只读重建 synthesis 请求，
+不调用模型、不写回历史：wire 55526/55808 bytes 未超限，但下一阶段预留 29372，
+累计需 77393 > 原限 64000。该证据明确是累计预留不足，而非附件缺失、授权待批
+或本轮 wire 过大；未提高预算、截断原件、重建研究或自动重试。后续若优化，应先
+离线验证正常模型输入中重复开销的减少是否足够，不能用更高额度掩盖本次失败。
+本轮仅前两阶段完成，不称正式研究/不调整理由/方案比较已合格。
+
+UI 原先未映射该终态代码，99e1ef4 → main b1676ab 补一条覆盖现有复合 guard 的
+中文说明，15 label tests 通过。失败研究实际 375/1440 BFF/DOM exact run，显示
+研究未完成、运行上限与未形成意图，无溢出或交易操作，本地只读请求 blocked 0。
+证据在同一私有目录：budget-summary、synthesis-budget-summary、research-api-private、
+research-dom-summary、final-state-summary 以及唯一 admit/run-once 进程回执。
