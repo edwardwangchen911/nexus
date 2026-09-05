@@ -1949,7 +1949,8 @@ async def test_v3_final_assessment_covers_every_review_claim_and_validates_exact
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("runtime", ["fixture", "responses"])
-async def test_sdk_v3_cannot_fall_back_to_other_runtime(monkeypatch, runtime):
+@pytest.mark.parametrize("version", ["codex-sdk-chatgpt-v3", "codex-sdk-chatgpt-v3-input96k"])
+async def test_sdk_v3_cannot_fall_back_to_other_runtime(monkeypatch, runtime, version):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
@@ -1959,7 +1960,7 @@ async def test_sdk_v3_cannot_fall_back_to_other_runtime(monkeypatch, runtime):
     session = SimpleNamespace(
         get=AsyncMock(
             return_value=SimpleNamespace(
-                version="codex-sdk-chatgpt-v3",
+                version=version,
                 model_id="gpt-5.4-mini",
             )
         )

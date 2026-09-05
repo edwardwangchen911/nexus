@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
+from nexus.agents.codex_versions import STAGED_CONFIG_VERSIONS, STRUCTURED_CONFIG_VERSIONS
 from nexus.agents.committee import AgentRole, CommitteeRoleOutput
 from nexus.agents.concentration import evaluate_frozen_concentration_conditions
 from nexus.agents.portfolio_context import PortfolioResearchContext
@@ -25,11 +26,14 @@ STAGED_SEMANTICS_UNCERTAINTY = "三阶段角色表态未明确投资方向或审
 
 def staged_intent_semantics_valid(intent: ResearchIntent, pricing_version: str) -> bool:
     """Legacy stage votes establish neither an investment action nor resolved objections."""
-    return pricing_version not in {"codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3"} or (
+    return pricing_version not in STAGED_CONFIG_VERSIONS or (
         intent.stance == "watch"
         and intent.exposure_action == "none"
         and intent.quality_status == "partial"
-        and (pricing_version != "codex-sdk-chatgpt-v3" or intent.synthesis_assessment is not None)
+        and (
+            pricing_version not in STRUCTURED_CONFIG_VERSIONS
+            or intent.synthesis_assessment is not None
+        )
     )
 
 
@@ -117,8 +121,8 @@ def synthesize_intent(
     by_role = {output.role: output for output in role_outputs}
     theses = support_claims or by_role["orchestrator"].claims[:5]
     counter_theses = oppose_claims or by_role["bear"].claims[:5]
-    structured = model.version == "codex-sdk-chatgpt-v3"
-    staged = model.version in {"codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3"}
+    structured = model.version in STRUCTURED_CONFIG_VERSIONS
+    staged = model.version in STAGED_CONFIG_VERSIONS
     assessment = by_role["portfolio"].synthesis_assessment if structured else None
     review_incomplete = staged and by_role["evidence_audit"].vote != "support"
     if staged:

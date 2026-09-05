@@ -66,10 +66,17 @@ def test_explicit_proposal_cli_parses_without_echoing_inputs(monkeypatch, capsys
 
 
 @pytest.mark.asyncio
-async def test_explicit_structured_model_is_recognized_without_selection_or_execution():
+@pytest.mark.parametrize(
+    "version,limit", [("codex-sdk-chatgpt-v3", 64000), ("codex-sdk-chatgpt-v3-input96k", 96000)]
+)
+async def test_explicit_structured_model_is_recognized_without_selection_or_execution(
+    version, limit
+):
     model = AgentModelConfigRecord(
         model_id="gpt-5.4",
-        version="codex-sdk-chatgpt-v3",
+        version=version,
+        max_input_tokens=limit,
+        max_output_tokens=8192,
         input_usd_per_million=0,
         output_usd_per_million=0,
     )

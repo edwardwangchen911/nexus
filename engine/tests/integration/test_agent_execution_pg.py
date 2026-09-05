@@ -73,7 +73,7 @@ _DRIFT_INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000001712")
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_fails", [False, True, "invalid_citation"])
-@pytest.mark.parametrize("staged", [False, True, "v3"])
+@pytest.mark.parametrize("staged", [False, True, "v3", "v3_96k"])
 async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries(
     migrated_database_url,
     monkeypatch,
@@ -91,14 +91,21 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     await _seed_database_tool_authority(
         factory, link_price=False, bar_count=1, price_quality_flags=("missing",)
     )
-    await prepare_database(settings, staged=staged is True, structured_synthesis=staged == "v3")
+    await prepare_database(
+        settings,
+        staged=staged is True,
+        structured_synthesis=staged in {"v3", "v3_96k"},
+        aggregate_input_tokens=96000 if staged == "v3_96k" else 64000,
+    )
     async with factory() as session, session.begin():
         model = await session.scalar(
             select(AgentModelConfigRecord).where(
                 AgentModelConfigRecord.version
                 == (
-                    codex_sdk.STRUCTURED_CONFIG_VERSION
-                    if staged == "v3"
+                    "codex-sdk-chatgpt-v3-input96k"
+                    if staged == "v3_96k"
+                    else codex_sdk.STRUCTURED_CONFIG_VERSION
+                    if staged in {"v3", "v3_96k"}
                     else codex_sdk.STAGED_CONFIG_VERSION
                     if staged
                     else codex_sdk.CONFIG_VERSION
@@ -163,7 +170,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                     if item["role"] in roles
                 ]
             }
-            if staged == "v3" and payload["stage"] == "synthesis":
+            if staged in {"v3", "v3_96k"} and payload["stage"] == "synthesis":
                 response = {
                     "synthesis_assessment": {
                         "stance": "buy_candidate",
@@ -189,7 +196,9 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                 }
             if model_fails == "invalid_citation" and payload["stage"] == "critique":
                 response["roles"][0]["claims"] = [{"text": "invalid", "citations": [999]}]
-            return json.dumps(response), UsageSnapshot(input_tokens=300, output_tokens=80)
+            return json.dumps(response), UsageSnapshot(
+                input_tokens=30000 if staged == "v3_96k" else 300, output_tokens=80
+            )
 
         invoke.side_effect = staged_invoke
     elif model_fails:
@@ -198,7 +207,10 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     assert await run_agent_worker_once(settings) is True
     assert invoke.await_count == (2 if model_fails else 3) if staged else invoke.await_count == 1
     submitted = invoke.call_args.args[0]
-    assert submitted["frozen_inputs"]["financial_facts"]["items"][0]["period_start"] == "2026-04-01"
+    from unit.agents.test_codex_sdk import _restore_view
+
+    frozen_inputs = _restore_view(submitted["frozen_inputs"])
+    assert frozen_inputs["financial_facts"]["items"][0]["period_start"] == "2026-04-01"
     async with factory() as session:
         run = await session.get(AgentResearchRunRecord, admission.run_id)
         assert run.retry_count == 0
@@ -218,7 +230,9 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             assert "Price authority is unavailable." in research.uncertainties
             assert research.summary
         if not model_fails:
-            assert (run.input_tokens, run.output_tokens) == ((900, 240) if staged else (300, 80))
+            assert (run.input_tokens, run.output_tokens) == (
+                (90000, 240) if staged == "v3_96k" else (900, 240) if staged else (300, 80)
+            )
             assert (
                 await session.scalar(
                     select(func.count())
@@ -262,7 +276,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
         assert [stage["status"] for stage in trace["stages"]] == (
             ["complete", "unavailable", "unavailable"] if model_fails else ["complete"] * 3
         )
-        assert trace["stages"][0]["input_tokens"] == 300
+        assert trace["stages"][0]["input_tokens"] == (30000 if staged == "v3_96k" else 300)
         assert trace["stages"][0]["input_hash"] is not None
         assert trace["stages"][0]["frozen_inputs_hash"] is not None
         if not model_fails:
@@ -274,11 +288,11 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     else:
         assert data["stage_trace"] is None
     if not model_fails:
-        assert data["input_tokens"] == (900 if staged else 300)
+        assert data["input_tokens"] == (90000 if staged == "v3_96k" else 900 if staged else 300)
         assert data["output_tokens"] == (240 if staged else 80)
         assert data["intent"]["stance"] == "watch"
         assert data["intent"]["exposure_action"] == "none"
-        if staged == "v3":
+        if staged in {"v3", "v3_96k"}:
             assessment = data["intent"]["synthesis_assessment"]
             assert assessment["stance"] == "buy_candidate"
             assert len(assessment["reviews"]) == 2
@@ -326,7 +340,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             else "model_usage_uncertain"
         )
         multiplier = 2 if model_fails == "invalid_citation" else 1
-        assert data["input_tokens"] == 300 * multiplier
+        assert data["input_tokens"] == (30000 if staged == "v3_96k" else 300) * multiplier
         assert data["output_tokens"] == 80 * multiplier
 
 

@@ -77,6 +77,19 @@ v3 model config ID，并由 Codex SDK worker 消费；不会自动成为默认�
 三阶段最终结果保存综合正文及逐条反证审查；缺少完整确定性准入时仍为观察、无执行动作、
 证据不完整。回退时为新任务显式选择原版本配置，保留已有 v3 历史；无需数据库迁移。
 
+同模型、同套餐的较大累计输入预算使用显式新版本：
+
+```bash
+uv run --package nexus-engine nexus-openai-local setup --backend codex_sdk --structured-synthesis --aggregate-input-tokens 96000 --skip-key
+```
+
+此命令只登记不可变 `codex-sdk-chatgpt-v3-input96k`，不修改原 v1/v2/v3 的 64k
+配置或创建研究。正常 `admit-research` 请求须显式选择这个配置 ID；worker 校验冻结
+版本/哈希和 96k 累计输入上限，预检及最终用量按同一配置判断。每次 wire 仍限
+55,808 字节，累计输出 8,192、最多三阶段、时限与单次 Job 尝试均不变；研究语义
+仍为 partial/watch/none，不授予方案或执行资格。输入增加后仍须先检查完整请求大小。
+停止选择新版本即可停止新增该预算研究；保留新配置及历史记录，无迁移或新增依赖。
+
 研究输入的本地计量使用锁定的 `tiktoken==0.14.0` 和已验哈希的官方公开词表。
 依赖通过既有 `uv sync --locked` 流程同步后，在仓库根目录显式准备一次：
 
@@ -92,7 +105,8 @@ uv run --package nexus-engine nexus-openai-local prepare-tokenizer --backend cod
 研究过程中不会下载词表。固定模型/包版本或缓存不满足条件时，保留字节预检；不能以
 缺少缓存为由重试研究。文本token计数不等于整个SDK请求的精确计数：预检还计入实际
 严格输出schema、显式系统/开发者指令的字节量和原8192运行器余量。原wire字节上限、
-累计实际64000/8192阈值、三次调用和超时仍保持；预检通过不保证研究结论合格。
+原版本累计实际64000/8192阈值（显式 input96k 版本仅累计输入为96000）、三次调用和
+超时仍保持；预检通过不保证研究结论合格。
 回退代码与依赖锁即可恢复旧预检，无DB迁移；公共缓存可保留，已有研究及证据不改写。
 
 `--strategy-rnd` 入口只幂等登记配置，不创建研究或 Job、不调用模型；与 `--staged` 互斥。

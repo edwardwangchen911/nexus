@@ -22,6 +22,7 @@ from pydantic import (
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from nexus.agents.codex_versions import SDK_CONFIG_VERSIONS, aggregate_input_limit
 from nexus.audit.manifest import S3AuditManifestObjectStore
 from nexus.jobs.daily_audit import audit_manual_daily
 from nexus.jobs.daily_manual import (
@@ -215,16 +216,15 @@ async def _require_research_model(
     model = await session.get(AgentModelConfigRecord, model_id)
     if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
         from nexus.agents.codex_sdk import (
-            CONFIG_VERSION,
             MODEL_ID,
-            STAGED_CONFIG_VERSION,
-            STRUCTURED_CONFIG_VERSION,
         )
 
         valid = (
             model is not None
             and model.model_id == MODEL_ID
-            and model.version in {CONFIG_VERSION, STAGED_CONFIG_VERSION, STRUCTURED_CONFIG_VERSION}
+            and model.version in SDK_CONFIG_VERSIONS
+            and model.max_input_tokens == aggregate_input_limit(model.version)
+            and model.max_output_tokens == 8192
             and model.input_usd_per_million == 0
             and model.output_usd_per_million == 0
         )

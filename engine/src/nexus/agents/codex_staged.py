@@ -244,8 +244,12 @@ class StagedCodexCommittee(CodexCommittee):
         prompts: Mapping[AgentRole, PromptAsset],
         tools: ReadOnlyToolRegistry,
         deadline: float | None = None,
+        aggregate_input_tokens: int = MAX_INPUT_TOKENS,
     ) -> None:
+        if type(aggregate_input_tokens) is not int or aggregate_input_tokens not in {64000, 96000}:
+            raise ValueError("CODEX_AGGREGATE_INPUT_INVALID")
         super().__init__(prompts=prompts, tools=tools)
+        self._aggregate_input_tokens = aggregate_input_tokens
         # Reserve terminal writes inside the worker-owned aggregate deadline.
         self._deadline = None if deadline is None else deadline - 5
         self.last_stage_input: StageInputIdentity | None = None
@@ -369,7 +373,7 @@ class StagedCodexCommittee(CodexCommittee):
         ).hexdigest()
         if (
             len(wire.encode()) > MAX_INPUT_TOKENS - 8192
-            or self.usage.input_tokens + estimated_input > MAX_INPUT_TOKENS
+            or self.usage.input_tokens + estimated_input > self._aggregate_input_tokens
             or self.usage.output_tokens >= MAX_OUTPUT_TOKENS
             or self.usage.provider_calls >= len(STAGES)
             or self._deadline is None
@@ -416,7 +420,7 @@ class StagedCodexCommittee(CodexCommittee):
             response_hash=hashlib.sha256(raw.encode()).hexdigest(),
         )
         if (
-            self.usage.input_tokens > MAX_INPUT_TOKENS
+            self.usage.input_tokens > self._aggregate_input_tokens
             or self.usage.output_tokens > MAX_OUTPUT_TOKENS
         ):
             self.failure_reason = "model_token_limit_exceeded"

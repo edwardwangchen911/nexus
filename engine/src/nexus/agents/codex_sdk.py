@@ -23,6 +23,9 @@ from openai_codex.models import JsonObject
 from pydantic import BaseModel, ConfigDict, Field
 
 from nexus.agents.codex_token_budget import input_preflight_units
+from nexus.agents.codex_versions import CONFIG_VERSION as CONFIG_VERSION
+from nexus.agents.codex_versions import STAGED_CONFIG_VERSION as STAGED_CONFIG_VERSION
+from nexus.agents.codex_versions import STRUCTURED_CONFIG_VERSION as STRUCTURED_CONFIG_VERSION
 from nexus.agents.committee import (
     ROLE_ORDER,
     AgentRole,
@@ -38,9 +41,6 @@ from nexus.domain.evidence import EvidenceRef
 from nexus.strategy.intents import ResearchClaim
 
 MODEL_ID = "gpt-5.4-mini"
-CONFIG_VERSION = "codex-sdk-chatgpt-v1"
-STAGED_CONFIG_VERSION = "codex-sdk-chatgpt-v2"
-STRUCTURED_CONFIG_VERSION = "codex-sdk-chatgpt-v3"
 _PROVIDER = "nexus_openai"
 MAX_INPUT_TOKENS = 64000
 MAX_OUTPUT_TOKENS = 8192

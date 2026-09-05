@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from nexus.agents.budget import BudgetExhausted
+from nexus.agents.codex_versions import SDK_CONFIG_VERSIONS, STAGED_CONFIG_VERSIONS
 from nexus.agents.committee import StageInputIdentity
 from nexus.agents.concentration import condition_evaluations_match
 from nexus.agents.execution_authority import load_frozen_evidence
@@ -106,7 +107,7 @@ async def get_research_admission(
                 AgentModelConfigRecord.pricing_available_at <= now,
                 AgentModelConfigRecord.pricing_expires_at > now,
                 AgentModelConfigRecord.version.not_in(
-                    ("codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3", "codex-sdk-strategy-rnd-v1")
+                    (*STAGED_CONFIG_VERSIONS, "codex-sdk-strategy-rnd-v1")
                 ),
             )
             .order_by(desc(AgentModelConfigRecord.created_at))
@@ -384,7 +385,7 @@ def _response(
         retry_count=run.retry_count,
         billing_mode="chatgpt_subscription"
         if run.pricing_version
-        in {"codex-sdk-chatgpt-v1", "codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3"}
+        in SDK_CONFIG_VERSIONS
         else None,
         input_tokens=run.input_tokens,
         output_tokens=run.output_tokens,

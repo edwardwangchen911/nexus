@@ -10,6 +10,12 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.agents.codex_versions import (
+    SDK_CONFIG_VERSIONS,
+    STAGED_CONFIG_VERSIONS,
+    STRUCTURED_CONFIG_VERSIONS,
+    aggregate_input_limit,
+)
 from nexus.agents.committee import (
     AgentRole,
     CommitteeModel,
@@ -273,8 +279,7 @@ async def _committee(
         return _UnavailableResponsesCommittee()
     if (
         model is not None
-        and model.version
-        in {"codex-sdk-chatgpt-v1", "codex-sdk-chatgpt-v2", "codex-sdk-chatgpt-v3"}
+        and model.version in SDK_CONFIG_VERSIONS
         and settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
     ):
         return _UnavailableResponsesCommittee()
@@ -301,10 +306,8 @@ async def _committee(
         raise ToolInputError("frozen price authority is unavailable")
     if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
         from nexus.agents.codex_sdk import (
-            CONFIG_VERSION,
             MODEL_ID,
             STAGED_CONFIG_VERSION,
-            STRUCTURED_CONFIG_VERSION,
             CodexCommittee,
         )
         from nexus.agents.codex_staged import StagedCodexCommittee, StructuredStagedCodexCommittee
@@ -313,8 +316,11 @@ async def _committee(
         if (
             model is None
             or model.model_id != MODEL_ID
-            or model.version
-            not in {CONFIG_VERSION, STAGED_CONFIG_VERSION, STRUCTURED_CONFIG_VERSION}
+            or model.version not in SDK_CONFIG_VERSIONS
+            or model.version != run.pricing_version
+            or model.config_hash != run.model_hash
+            or model.max_input_tokens != aggregate_input_limit(model.version)
+            or model.max_output_tokens != 8192
             or model.input_usd_per_million != 0
             or model.output_usd_per_million != 0
             or prompts is None
@@ -322,7 +328,7 @@ async def _committee(
             return _UnavailableResponsesCommittee()
         committee_type = (
             StructuredStagedCodexCommittee
-            if model.version == STRUCTURED_CONFIG_VERSION
+            if model.version in STRUCTURED_CONFIG_VERSIONS
             else StagedCodexCommittee
             if model.version == STAGED_CONFIG_VERSION
             else CodexCommittee
@@ -345,8 +351,8 @@ async def _committee(
                 allow_fixture_price_evidence=False,
             ),
             **(
-                {"deadline": deadline}
-                if model.version in {STAGED_CONFIG_VERSION, STRUCTURED_CONFIG_VERSION}
+                {"deadline": deadline, "aggregate_input_tokens": model.max_input_tokens}
+                if model.version in STAGED_CONFIG_VERSIONS
                 else {}
             ),
         )

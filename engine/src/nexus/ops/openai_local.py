@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import make_url
 
 from nexus.agents import codex_token_budget
+from nexus.agents.codex_versions import STRUCTURED_96K_CONFIG_VERSION
 from nexus.agents.committee import load_prompt_assets
 from nexus.ops.fosun_local import _localize_compose_endpoints
 from nexus.ops.research_admit_local import admit_local_research
@@ -164,6 +165,7 @@ async def prepare_database(
     staged: bool = False,
     strategy_rnd: bool = False,
     structured_synthesis: bool = False,
+    aggregate_input_tokens: int = 64000,
 ) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
@@ -172,6 +174,10 @@ async def prepare_database(
     if host is None or host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
     config = dict(_CONFIG)
+    if aggregate_input_tokens not in {64000, 96000} or (
+        aggregate_input_tokens != 64000 and not structured_synthesis
+    ):
+        raise ValueError("CODEX_AGGREGATE_SETUP_INVALID")
     if structured_synthesis and (staged or strategy_rnd):
         raise ValueError("CODEX_STRUCTURED_SETUP_CONFLICT")
     if (
@@ -185,7 +191,6 @@ async def prepare_database(
     if settings.agent_runtime_mode is AgentRuntimeMode.CODEX_SDK:
         from nexus.agents.codex_sdk import (
             CONFIG_VERSION,
-            MAX_INPUT_TOKENS,
             MAX_OUTPUT_TOKENS,
             STAGED_CONFIG_VERSION,
             STRUCTURED_CONFIG_VERSION,
@@ -194,7 +199,11 @@ async def prepare_database(
 
         version = STAGED_CONFIG_VERSION if staged else CONFIG_VERSION
         if structured_synthesis:
-            version = STRUCTURED_CONFIG_VERSION
+            version = (
+                STRUCTURED_96K_CONFIG_VERSION
+                if aggregate_input_tokens == 96000
+                else STRUCTURED_CONFIG_VERSION
+            )
         if strategy_rnd:
             from nexus.evolution.codex import CODEX_RND_CONFIG_VERSION
 
@@ -204,7 +213,7 @@ async def prepare_database(
             {
                 "model_id": SDK_MODEL,
                 "version": version,
-                "max_input_tokens": MAX_INPUT_TOKENS,
+                "max_input_tokens": aggregate_input_tokens,
                 "max_output_tokens": MAX_OUTPUT_TOKENS,
                 "max_tool_calls": 0,
                 "input_usd_per_million": "0",
@@ -379,6 +388,7 @@ def main() -> int:
     parser.add_argument("--filing-id", type=UUID)
     parser.add_argument("--identity-snapshot-id", type=UUID)
     parser.add_argument("--quarter-metrics", action="store_true")
+    parser.add_argument("--aggregate-input-tokens", type=int, choices=(64000, 96000), default=64000)
     for part in ("submissions", "parent", "exhibit"):
         parser.add_argument(f"--sec-{part}", type=Path)
         parser.add_argument(f"--sec-{part}-receipt", type=Path)
@@ -407,6 +417,10 @@ def main() -> int:
     args = parser.parse_args()
     root = Path.cwd().resolve()
     try:
+        if args.aggregate_input_tokens != 64000 and (
+            args.action != "setup" or not args.structured_synthesis or args.backend != "codex_sdk"
+        ):
+            raise ValueError("CODEX_AGGREGATE_SETUP_INVALID")
         if (args.action == "admit-research") != (args.research_request is not None):
             raise ValueError("CODEX_ADMISSION_ARGUMENTS_INVALID")
         if args.action == "admit-research" and any(
@@ -476,6 +490,11 @@ def main() -> int:
                     staged=args.staged,
                     strategy_rnd=args.strategy_rnd,
                     **({"structured_synthesis": True} if args.structured_synthesis else {}),
+                    **(
+                        {"aggregate_input_tokens": args.aggregate_input_tokens}
+                        if args.aggregate_input_tokens != 64000
+                        else {}
+                    ),
                 )
             )
             if (
