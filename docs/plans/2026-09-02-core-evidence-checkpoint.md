@@ -2239,17 +2239,17 @@ verified；未再调用失败的旧import，零新增采集。默认prepare仍�
 新正常入口结果、默认/显式准备对照、前后hash与安全摘要。当前身份显式reader和
 未来准备已受益；旧行情/研究/价格、旧v1预检不自动切换，不宣告完整T1完成。
 
-### 2026-09-05 首个股票ETF及七项普通股原件完成正常身份入口
+### 2026-09-05 首个股票ETF及九项普通股原件完成正常身份入口
 
-当前身份准备的可验证绑定从2增至10（49项保留）：两批六项普通股及第三批已合格
-一项均完成正常CLI导入/独立read；另IWM完成首份股票ETF身份导入。普通股已有身份
-的两项只追加listing revision、保留实际UUID及旧exchange，其余五项新增首份身份。
+当前身份准备的可验证绑定从2增至12（49项保留）：三批九项普通股均完成正常CLI
+导入/独立read；另IWM完成首份股票ETF身份导入。普通股已有身份的三项只追加
+listing revision、保留实际UUID及旧exchange，其余六项新增首份身份。
 此处“可验证绑定”仅指当前身份证据，不代表历史回测资料或研究结论齐全。
 
 普通股源合同修复由D交付、协调任务集中审查、A串行集成：cf018b9→main6f8d355
 接纳严格纯entity/duration上下文，保留旧维度分支并拒未知结构；ae7ae4b→main7d39c7a
 仅补已核实Nasdaq精确名称。分别复用D的58/96与60相关单测、静态结果，不重复全量。
-两批原件此前拒绝的旧validation保留，不把新解析成功回写成旧运行成功。所有导入
+三批原件此前拒绝的旧validation保留，不把新解析成功回写成旧运行成功。所有导入
 均先在当前主线离线复核来源和现有身份，再调用既有import或revise-listing，无重采。
 
 ETF 2f57f59→main39f5852、4b70077→main88a0d79。复用sec_funds严格绑定
@@ -2280,7 +2280,7 @@ Ruff检查/格式与diffcheck通过；集中审查和时间精度增量复核均
 ETF，新显式--use-etf-identities与listing开关组合正确绑定IWM。ETF本次19表旧行hash
 完全保留，仅Instrument+1/alias+1/artifacts+8/snapshot+1；备份绑定读取识别8份原件。
 普通股三个完成批次的旧行hash也分别全保留，仅追加预期身份/alias/原件/proof。
-最新第三批item2后，两显式开关报告10项已验证，剩33普通股+6ETF：合计37项缺proof、
+最新第三批全部完成后，两显式开关报告12项已验证，剩31普通股+6ETF：合计35项缺proof、
 2项类型未支持，candidate=null、execution_locked=true；不缩池，也不宣告T1完成。
 
 私有验收（均在main outputs/acceptance）：
@@ -2288,7 +2288,14 @@ ETF，新显式--use-etf-identities与listing开关组合正确绑定IWM。ETF�
 - common-stock-next-item2-import-6f8d355及common-stock-next-remaining-import-ae7ae4b：
   分开串行接入，不重复item2，共2 import+1 revision、3独立read。
 - etf-identity-inventory/current-identity：ETF完整正常入口/三种准备对照/19表hash/8绑定。
-- common-stock-third-item2-import-88a0d79：1 import/read、显式10项绑定。
+- common-stock-third-item2-import-88a0d79：1 import/read、当时显式10项绑定。
+- common-stock-third-remaining-import-2f0fd20：1 import+1 revision、2独立read，
+  19表旧行保留，仅1/1/8/2预期追加，最新显式12项绑定。
+
+第三批普通股窄修复2f0fd20→main782ef22：A类必须CommonClassAMember与
+Class A Common Stock精确一致，限定8节点结构，额外结构拒绝；旧纯上下文与
+CommonStockMember结果不变。122相关单测及静态结果复用D已完成验证，协调任务
+完整审查Ready后串行合入。第三批item2先完成，余两项只在新代码离线通过后导入。
 
 以上身份消费仅在明确的新CLI/reader生效；未更换常驻API镜像，不自动改旧研究或旧行情。
 剩余身份来源与独立历史T1数据继续分别推进，不要求用户代为协调或再次批准常规读取。
