@@ -1995,6 +1995,15 @@ condition evaluations与冻结事实精确一致。完成后DB→严格GET→BFF
 订单、方案、正式准入、资格提升或重试旧失败。私有证据在
 outputs/acceptance/current-trends-real-20260905，目录0700、文件0600已核验。
 
+同一已保存结果的接续只读聚合：synthesis_assessment.review_conclusion=sufficient，
+3项reviews均accepted/resolved，unresolved=0、missing_evidence条目=0、prevented_conclusion=0；
+assessment自身stance也为watch，不能把watch完全归因为程序。8个冻结工具段均status=ok。
+v3仍在synthesis.py固定生成quality/evidence_audit partial及watch/none；模型自评通过不
+等于该确定性门禁已满足，也不表示用户应授权重跑。可选issuer/actions/company-profile
+集合为空不能直接认作必需缺口。仅1项committee.evidence_valid is_false仍是待核验条件，
+两项组合condition evaluations已求值，二者不混同。原件足够重放已有输入，不能自行
+补历史PIT、确定性仓位幅度或新版本充分性/方向许可政策。未新采集/模型或修改旧结果。
+
 本片完成当前趋势资料到一次真实研究结果页面的用户可见闭环；结果仍为partial/watch，
 不是充分证据的不调整结论，也不完成多年回测、真实候选方案或经济比较。后续按优先级
 接多维方案的真实基线与候选缺失原因；多年历史缺口只阻塞其自身，不再作全局总开关。
