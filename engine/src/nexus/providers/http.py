@@ -38,6 +38,23 @@ _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 class HttpPolicyError(RuntimeError):
     """A safe code for a rejected or exhausted provider request."""
 
+    def __init__(
+        self,
+        code: str,
+        *,
+        content_length: int | None = None,
+        bytes_read_boundary: int | None = None,
+    ) -> None:
+        super().__init__(code)
+        self.content_length = (
+            content_length if type(content_length) is int and content_length >= 0 else None
+        )
+        self.bytes_read_boundary = (
+            bytes_read_boundary
+            if type(bytes_read_boundary) is int and bytes_read_boundary >= 0
+            else None
+        )
+
 
 @dataclass(frozen=True)
 class AllowedOrigin:
@@ -171,12 +188,20 @@ class FixedOriginHttpClient:
             or not content_length.isdecimal()
             or int(content_length) > self._policy.max_response_bytes
         ):
-            raise HttpPolicyError("RESPONSE_TOO_LARGE")
+            raise HttpPolicyError(
+                "RESPONSE_TOO_LARGE",
+                content_length=(
+                    int(content_length)
+                    if content_length.isascii() and content_length.isdecimal()
+                    else None
+                ),
+                bytes_read_boundary=0,
+            )
         payload = bytearray()
         async for chunk in response.aiter_bytes():
             payload.extend(chunk)
             if len(payload) > self._policy.max_response_bytes:
-                raise HttpPolicyError("RESPONSE_TOO_LARGE")
+                raise HttpPolicyError("RESPONSE_TOO_LARGE", bytes_read_boundary=len(payload))
         return bytes(payload)
 
     async def _wait_before_retry(
@@ -233,10 +258,7 @@ def _enforce_http_dependency_log_boundary() -> None:
             name
             for name in logging.Logger.manager.loggerDict
             if isinstance(name, str)
-            and any(
-                name.startswith(f"{namespace}.")
-                for namespace in _HTTP_DEPENDENCY_NAMESPACES
-            )
+            and any(name.startswith(f"{namespace}.") for namespace in _HTTP_DEPENDENCY_NAMESPACES)
         )
         for name in names:
             dependency_logger = logging.getLogger(name)

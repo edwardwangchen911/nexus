@@ -136,6 +136,10 @@ TradingSymbol、Exchange/context/CIK，与当前 FMP profile 的 symbol、CIK、
 SEC 目录必须仅有 URL 指定的 HTML 文件和 `receipt.json`，目录0700、文件0600；receipt
 包含 `source_url/received_at/sha256/byte_length/http_status=200`。已有诊断归档可复制原件
 和原 receipt 到新标准目录，保留实际接收时间，不改原归档、不把适配时间当采集时间。
+若本次新目录的收集失败，则不生成成功 receipt，而仅保存私有 `failure.json`：其中只有
+固定阶段、固定错误码、已见 HTTP 状态、有效数值 `Content-Length` 和实际已读字节边界；
+未观测值为 `null`。它不保存正文、请求参数、headers、联系人或原始异常文本，也不改变
+单次请求、无自动重试及 8 MiB 上限。
 SEC accession 前缀是提交者（可能为代理）CIK，不要求等于发行人；URL发行人目录、
 上下文 entity identifier、CIK事实及FMP必须一致。收据未来时间、符号链接、重复键、
 原件hash不符或缺失都拒绝。SEC报告期和当前观察分别保存，不证明其间从未发生更名。

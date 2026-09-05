@@ -53,9 +53,18 @@ async def collect_sec(
     owned = client is None
     transport = client or httpx.AsyncClient(follow_redirects=False, timeout=30)
     statuses: list[int] = []
+    content_lengths: list[int | None] = []
+    stage = "request"
+    bytes_read_boundary: int | None = None
 
     async def record_status(response: httpx.Response) -> None:
+        nonlocal stage
+        stage = "response_read"
         statuses.append(response.status_code)
+        value = response.headers.get("content-length")
+        content_lengths.append(
+            int(value) if value is not None and value.isascii() and value.isdecimal() else None
+        )
 
     transport.event_hooks["response"].append(record_status)
     try:
@@ -69,6 +78,8 @@ async def collect_sec(
             raise ValueError("CURRENT_IDENTITY_SEC_STATUS_INVALID")
         if contact.encode() in raw:
             raise ValueError("CURRENT_IDENTITY_CONTACT_REFLECTION")
+        bytes_read_boundary = len(raw)
+        stage = "archive_write"
         write_private(output_dir / match[3], raw)
         receipt = dict(
             source_url=source_url,
@@ -78,7 +89,7 @@ async def collect_sec(
             http_status=200,
         )
         write_private(output_dir / "receipt.json", json.dumps(receipt, sort_keys=True).encode())
-    except HttpPolicyError as error:
+    except Exception as error:
         codes = {
             "STATUS_REJECTED": "CURRENT_IDENTITY_SEC_STATUS_REJECTED",
             "REDIRECT_REJECTED": "CURRENT_IDENTITY_SEC_REDIRECT_REJECTED",
@@ -86,7 +97,32 @@ async def collect_sec(
             "DEADLINE_EXCEEDED": "CURRENT_IDENTITY_SEC_DEADLINE_EXCEEDED",
             "RETRY_BUDGET_EXHAUSTED": "CURRENT_IDENTITY_SEC_RETRY_BUDGET_EXHAUSTED",
         }
-        raise ValueError(codes.get(str(error), "CURRENT_IDENTITY_FAILED")) from None
+        code = (
+            codes.get(str(error), "CURRENT_IDENTITY_FAILED")
+            if isinstance(error, HttpPolicyError)
+            else "CURRENT_IDENTITY_FAILED"
+        )
+        policy_content_length = getattr(error, "content_length", None)
+        policy_bytes_read = getattr(error, "bytes_read_boundary", None)
+        failure = {
+            "stage": stage,
+            "code": code,
+            "http_status": statuses[-1] if statuses else None,
+            "content_length": (
+                policy_content_length
+                if type(policy_content_length) is int
+                else content_lengths[-1]
+                if content_lengths
+                else None
+            ),
+            "bytes_read_boundary": (
+                policy_bytes_read if type(policy_bytes_read) is int else bytes_read_boundary
+            ),
+        }
+        write_private(output_dir / "failure.json", json.dumps(failure, sort_keys=True).encode())
+        if isinstance(error, HttpPolicyError):
+            raise ValueError(code) from None
+        raise
     finally:
         transport.event_hooks["response"].remove(record_status)
         if owned:

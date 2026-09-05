@@ -332,6 +332,7 @@ async def test_normal_sec_collector_one_request_preserves_actual_status(tmp_path
             )
             assert json.loads((tmp_path / "sec/receipt.json").read_text())["http_status"] == 200
             assert (tmp_path / "sec/sample.htm").read_bytes() == filing()
+            assert not (tmp_path / "sec/failure.json").exists()
         else:
             with pytest.raises((ValueError, RuntimeError)):
                 await module.collect_sec(
@@ -343,6 +344,162 @@ async def test_normal_sec_collector_one_request_preserves_actual_status(tmp_path
             assert not (tmp_path / "sec/receipt.json").exists()
     assert len(calls) == 1
     assert str(calls[0].url) == URL
+
+
+@pytest.mark.asyncio
+async def test_sec_collector_records_safe_header_size_failure(tmp_path):
+    """Losing the declared size would leave an oversized rejection undiagnosable."""
+    import json
+
+    import httpx
+    from helpers.current_identity import URL
+
+    module = importlib.import_module("nexus.ops.instrument_identity_local")
+    calls = 0
+
+    def respond(_request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, headers={"content-length": str(8 * 1024 * 1024 + 1)})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ValueError, match="CURRENT_IDENTITY_SEC_RESPONSE_TOO_LARGE"):
+            await module.collect_sec(
+                source_url=URL,
+                contact="test@example.invalid",
+                output_dir=tmp_path / "sec",
+                client=client,
+            )
+
+    assert calls == 1
+    assert json.loads((tmp_path / "sec/failure.json").read_text()) == {
+        "stage": "response_read",
+        "code": "CURRENT_IDENTITY_SEC_RESPONSE_TOO_LARGE",
+        "http_status": 200,
+        "content_length": 8 * 1024 * 1024 + 1,
+        "bytes_read_boundary": 0,
+    }
+    assert not (tmp_path / "sec/receipt.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_sec_collector_records_safe_stream_boundary_failure(tmp_path):
+    """Losing the streamed boundary would conflate an overflow with a header rejection."""
+    import json
+
+    import httpx
+    from helpers.current_identity import URL
+
+    module = importlib.import_module("nexus.ops.instrument_identity_local")
+
+    class OversizedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"x" * (8 * 1024 * 1024)
+            yield b"y"
+
+    calls = 0
+
+    def respond(_request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, stream=OversizedStream())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ValueError, match="CURRENT_IDENTITY_SEC_RESPONSE_TOO_LARGE"):
+            await module.collect_sec(
+                source_url=URL,
+                contact="test@example.invalid",
+                output_dir=tmp_path / "sec",
+                client=client,
+            )
+
+    assert calls == 1
+    assert json.loads((tmp_path / "sec/failure.json").read_text()) == {
+        "stage": "response_read",
+        "code": "CURRENT_IDENTITY_SEC_RESPONSE_TOO_LARGE",
+        "http_status": 200,
+        "content_length": None,
+        "bytes_read_boundary": 8 * 1024 * 1024 + 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_sec_collector_records_sanitized_transport_failure(tmp_path):
+    """Persisting the transport exception would leak provider and request material."""
+    import json
+
+    import httpx
+    from helpers.current_identity import URL
+
+    module = importlib.import_module("nexus.ops.instrument_identity_local")
+    calls = 0
+    secret = "https://private.invalid/path?token=synthetic-secret"
+
+    def respond(request):
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError(secret, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ValueError, match="CURRENT_IDENTITY_SEC_RETRY_BUDGET_EXHAUSTED"):
+            await module.collect_sec(
+                source_url=URL,
+                contact="test@example.invalid",
+                output_dir=tmp_path / "sec",
+                client=client,
+            )
+
+    saved = (tmp_path / "sec/failure.json").read_text()
+    assert json.loads(saved) == {
+        "stage": "request",
+        "code": "CURRENT_IDENTITY_SEC_RETRY_BUDGET_EXHAUSTED",
+        "http_status": None,
+        "content_length": None,
+        "bytes_read_boundary": None,
+    }
+    assert calls == 1
+    assert "private.invalid" not in saved
+    assert "synthetic-secret" not in saved
+
+
+@pytest.mark.asyncio
+async def test_sec_collector_records_archive_write_failure_without_false_receipt(
+    tmp_path, monkeypatch
+):
+    """A raw-file write failure must not disappear or create a successful receipt."""
+    import json
+
+    import httpx
+    from helpers.current_identity import URL
+
+    module = importlib.import_module("nexus.ops.instrument_identity_local")
+    real_write_private = module.write_private
+
+    def fail_raw_only(path, payload):
+        if path.name == "sample.htm":
+            raise OSError("sensitive local path")
+        return real_write_private(path, payload)
+
+    monkeypatch.setattr(module, "write_private", fail_raw_only)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=filing()))
+    ) as client:
+        with pytest.raises(OSError, match="sensitive local path"):
+            await module.collect_sec(
+                source_url=URL,
+                contact="test@example.invalid",
+                output_dir=tmp_path / "sec",
+                client=client,
+            )
+
+    assert json.loads((tmp_path / "sec/failure.json").read_text()) == {
+        "stage": "archive_write",
+        "code": "CURRENT_IDENTITY_FAILED",
+        "http_status": 200,
+        "content_length": len(filing()),
+        "bytes_read_boundary": len(filing()),
+    }
+    assert not (tmp_path / "sec/receipt.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -407,7 +564,12 @@ def test_sec_cli_preserves_only_safe_policy_failures_without_retry(
     assert len(requests) == 1
     assert client.is_closed
     assert directory.is_dir()
-    assert list(directory.iterdir()) == []
+    assert [path.name for path in directory.iterdir()] == ["failure.json"]
+    saved = (directory / "failure.json").read_text()
+    assert json.loads(saved)["code"] == expected_code
+    assert not any(
+        value in saved for value in ("example.invalid", "synthetic_secret", "private_body")
+    )
 
 
 @pytest.mark.parametrize(

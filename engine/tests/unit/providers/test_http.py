@@ -40,6 +40,19 @@ def _client(
     )
 
 
+def test_policy_error_metadata_accepts_only_nonnegative_integers() -> None:
+    """Permissive metadata could carry sensitive exception text into an archive."""
+    error = HttpPolicyError(
+        "RESPONSE_TOO_LARGE",
+        content_length="sensitive-header",  # type: ignore[arg-type]
+        bytes_read_boundary=-1,
+    )
+
+    assert str(error) == "RESPONSE_TOO_LARGE"
+    assert error.content_length is None
+    assert error.bytes_read_boundary is None
+
+
 @pytest.mark.asyncio
 async def test_url_shaped_path_is_rejected_before_transport() -> None:
     """Removing segment validation would allow a caller-controlled origin/path."""
@@ -112,9 +125,7 @@ async def test_logs_exclude_request_and_response_material(
 ) -> None:
     """Adding URL or body logging would expose secrets and account data."""
     client = _client(
-        httpx.MockTransport(
-            lambda _: httpx.Response(200, content=b"fixture-secret-response-body")
-        ),
+        httpx.MockTransport(lambda _: httpx.Response(200, content=b"fixture-secret-response-body")),
         max_response_bytes=128,
     )
     caplog.set_level(logging.INFO, logger="nexus.providers.http")
@@ -157,9 +168,7 @@ async def test_ambiguous_path_segments_never_reach_transport(
     segments: tuple[str, ...],
 ) -> None:
     """Any path escape or ambiguous encoding must fail before an HTTP call."""
-    client = _client(
-        httpx.MockTransport(lambda request: pytest.fail(f"network called: {request}"))
-    )
+    client = _client(httpx.MockTransport(lambda request: pytest.fail(f"network called: {request}")))
 
     with pytest.raises(HttpPolicyError, match="PATH_SEGMENT_INVALID"):
         await client.get_bytes(segments, (), ())
