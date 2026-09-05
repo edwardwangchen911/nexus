@@ -2621,3 +2621,16 @@ default/listing/两开关三个prepare均保存，逐项核对新snapshot绑定�
 acceptance-summary.json；原件去重见同目录artifact-preflight-summary.json。
 验收0网络/模型，未重启API，不重采或重导入前八批案例。身份补证仍与当前研究及
 多维方案资格分离，不因数量增加宣告真实策略候选或历史回测闭合。
+
+
+### 第十批仅合格 item2 完成真实验收
+
+协调main正常loader独立核合格后，A严格按index2复用main4b7ad9b正常首次import，
+独立strictread verified；default/listing/两开关prepare均核本次snapshot绑定且gap为空。
+导入前4原件hash查库复用0，实际仅新增instruments1、aliases1、artifacts4、snapshots1；
+19表旧行多重集完整保持。显式32 verified、17普通股缺证明，49保留、candidate null、
+历史资格 false、执行锁定。私有摘要：
+outputs/acceptance/common-stock-tenth-item2-import-4b7ad9b/acceptance-summary.json；
+同目录artifact-preflight-summary.json保留去重结果。无代码变化、额外PG/全量单测、
+新采集、模型或API重启。全批item1/3仍CURRENT_IDENTITY_ARCHIVE_INVALID，D仅离线
+诊断；不重导入已合格item2、不把全批计作成功，局部拒绝不阻塞其它已授权工作。
