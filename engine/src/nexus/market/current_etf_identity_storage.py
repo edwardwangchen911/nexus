@@ -17,6 +17,7 @@ from nexus.market.current_etf_identity import (
     SOURCE,
     CurrentEtfIdentity,
     CurrentEtfShareClassIdentity,
+    CurrentNasdaqEtfIdentity,
     EtfInputs,
     member_for,
     validate_etf_originals,
@@ -36,7 +37,7 @@ from nexus.research.fmp_profile_archive import _read
 
 class EtfProof(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
-    identity: CurrentEtfShareClassIdentity | CurrentEtfIdentity
+    identity: CurrentNasdaqEtfIdentity | CurrentEtfShareClassIdentity | CurrentEtfIdentity
     instrument_id: UUID
     alias_id: UUID
     alias_valid_from: date
@@ -174,7 +175,7 @@ async def import_current_etf(
         instrument = Instrument(
             id=member.instrument_id,
             asset_type="equity_etf",
-            exchange="ARCX",
+            exchange=inputs.identity.exchange,
             currency="USD",
             tick_size=None,
             risk_bucket=member.risk_bucket,
@@ -264,7 +265,7 @@ async def read_current_etf(
         if (
             instrument is None
             or instrument.asset_type != "equity_etf"
-            or instrument.exchange != "ARCX"
+            or instrument.exchange != proof.identity.exchange
             or instrument.currency != "USD"
             or instrument.risk_bucket != member.risk_bucket
             or instrument.tick_size is not None

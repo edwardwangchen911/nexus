@@ -103,8 +103,8 @@ Tax Information</body></html>"""
     return (fmp, receipt, mapping, submissions, index, document, receipts, mapping_receipt)
 
 
-def archives(root, **changes):
-    values = originals(**changes)
+def archives(root, *, original_values=None, **changes):
+    values = original_values or originals(**changes)
     fm, sec = root / "fmp", root / "sec"
     fm.mkdir(mode=0o700, parents=True)
     sec.mkdir(mode=0o700)
@@ -138,3 +138,43 @@ Under normal circumstances, the Fund invests at least 80% of its net assets,
 plus the amount of any borrowings for investment purposes,
 in the stocks that make up the Target Index.
 Principal Risks The investment may lose value.</body></html>"""
+
+
+def nasdaq_originals(*, document=None, index_ticker="", class_name="QQQ Synthetic Trust, Series 1"):
+    name = "Invesco QQQ Synthetic Trust, Series 1"
+    document = (
+        document
+        or b"""<html><body>497K 1 sample.htm 497K
+Summary Prospectus January 3, 2026 QQQ Invesco QQQ Synthetic Trust SM , Series 1
+The Nasdaq Stock Market LLC Before you invest, read the prospectus.
+Investment Objective The Invesco QQQ Synthetic Trust SM , Series 1 (the Fund or Trust)
+seeks to track the investment results, before fees and expenses, of the Synthetic Index
+(the Underlying Index).
+Fund Fees and Expenses Expenses apply.
+Principal Investment Strategies The Fund will invest substantially all of its assets
+in the securities that comprise the Underlying Index.
+Eligible securities are common stocks and tracking stocks as well as American Depositary Receipts.
+Principal Risks of Investing in the Fund Risks apply.
+Performance Effective after market close on December 19, 2025, the Fund was reclassified
+as an open-end management investment company (the Reclassification).
+Prior to the Reclassification, the Fund operated as a unit investment trust (UIT).
+Management of the Fund Management information.
+Purchase and Sale of Shares The Fund issues and redeems Shares at NAV only with APs
+and only in large blocks. Individual Shares may only be bought and sold in the secondary
+market (i.e., on a national securities exchange) through a broker or dealer at a market price.
+Tax Information Taxes apply.</body></html>"""
+    )
+    values = list(originals(symbol="QQQ", exchange="NASDAQ", company_name=name, document=document))
+    submissions = json.loads(values[3])
+    submissions["name"] = name.upper()
+    values[3] = json.dumps(submissions).encode()
+    values[4] = f"""<html><body><div id="seriesDiv"><table>
+<tr><td>Series S000000001</td><td></td><td>{class_name}</td></tr>
+<tr><td>Class/Contract C000000002</td><td></td><td>{class_name}</td><td>{index_ticker}</td></tr>
+</table></div><a href="https://www.sec.gov/Archives/edgar/data/123456/000012345626000001/sample.htm">497K</a>
+</body></html>""".encode()
+    receipts = json.loads(values[6])
+    for receipt, raw in zip(receipts, values[3:6], strict=True):
+        receipt["sha256"] = sha256(raw).hexdigest()
+    values[6] = json.dumps(receipts).encode()
+    return tuple(values)

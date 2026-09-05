@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.backtest.universe import load_us_liquid_v1_definition, require_future_xnys_session
 from nexus.market.current_etf_identity import SOURCE as ETF_SOURCE
-from nexus.market.current_etf_identity import CurrentEtfShareClassIdentity
+from nexus.market.current_etf_identity import CurrentEtfShareClassIdentity, CurrentNasdaqEtfIdentity
 from nexus.market.current_etf_identity_storage import EtfProof, read_current_etf
 from nexus.market.current_identity import SOURCE
 from nexus.market.current_identity_storage import (
@@ -145,6 +145,12 @@ async def prepare_future_identity_bindings(
                             legal_name=proof.identity.legal_name,
                             fmp_name=proof.identity.fmp_name,
                             fmp_name_matches_sec=proof.identity.fmp_name_matches_sec,
+                        )
+                    if isinstance(proof.identity, CurrentNasdaqEtfIdentity):
+                        binding.update(
+                            filing_index_ticker=proof.identity.filing_index_ticker,
+                            ticker_binding_basis=proof.identity.ticker_binding_basis,
+                            reclassification_date=proof.identity.reclassification_date.isoformat(),
                         )
             except ValueError:
                 binding["gap"] = "IDENTITY_PROOF_INVALID"

@@ -39,7 +39,7 @@ class CurrentEtfIdentity(BaseModel):
     legal_name: str
     asset_type: Literal["equity_etf"] = "equity_etf"
     currency: Literal["USD"] = "USD"
-    exchange: Literal["ARCX"] = "ARCX"
+    exchange: Literal["ARCX", "XNAS"] = "ARCX"
     fmp_exchange: str
     listing_basis: Literal["bound_sec_497k_cover"] = "bound_sec_497k_cover"
     fmp_exchange_precision: Literal["provider_label_only"] = "provider_label_only"
@@ -54,6 +54,199 @@ class CurrentEtfShareClassIdentity(CurrentEtfIdentity):
 
     fmp_name: str
     fmp_name_matches_sec: bool
+
+
+class CurrentNasdaqEtfIdentity(CurrentEtfShareClassIdentity):
+    exchange: Literal["XNAS"] = "XNAS"
+    filing_index_ticker: str | None
+    filing_index_class_name: str
+    reclassification_date: date
+    ticker_binding_basis: Literal["current_directory_and_bound_497k_cover"] = (
+        "current_directory_and_bound_497k_cover"
+    )
+
+
+class _IndexRows(_VisibleText):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[tuple[str, ...]] = []
+        self.cells: list[list[str]] | None = None
+        self.in_cell = False
+        self.scope_depth: int | None = None
+        self.scope_seen = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # SEC headers omit </tr>; a new row closes only a completed non-target row.
+        if tag == "tr" and self.scope_depth is not None and self.cells is not None:
+            first = " ".join("".join(self.cells[0]).split()) if self.cells else ""
+            if self.in_cell or first.startswith(("Series ", "Class/Contract ")):
+                raise ValueError
+            self.handle_endtag("tr")
+        super().handle_starttag(tag, attrs)
+        if tag == "div" and dict(attrs).get("id") == "seriesDiv":
+            if self.scope_seen or self.hidden:
+                raise ValueError
+            self.scope_depth = len(self.stack)
+            self.scope_seen = True
+        if self.scope_depth is None:
+            return
+        if tag == "tr" and not self.hidden:
+            if self.cells is not None:
+                raise ValueError
+            self.cells = []
+        if tag in {"td", "th"} and self.cells is not None:
+            if self.in_cell:
+                raise ValueError
+            self.cells.append([])
+            self.in_cell = True
+
+    def handle_data(self, data: str) -> None:
+        if self.in_cell and self.cells is not None and not self.hidden:
+            self.cells[-1].append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "div" and self.scope_depth == len(self.stack):
+            if self.cells is not None or self.in_cell:
+                raise ValueError
+            self.scope_depth = None
+        if tag in {"td", "th"}:
+            self.in_cell = False
+        if tag == "tr" and self.cells is not None:
+            if self.in_cell:
+                raise ValueError
+            self.rows.append(tuple(" ".join("".join(cell).split()) for cell in self.cells))
+            self.cells = None
+        super().handle_endtag(tag)
+
+
+def _nasdaq_identity(
+    *,
+    text: str,
+    index: bytes,
+    submissions: bytes,
+    symbol: str,
+    identifier: str,
+    series: str,
+    share_class: str,
+    fmp_name: str,
+    fmp_exchange: str,
+    stored_at: datetime,
+    now: datetime,
+) -> CurrentNasdaqEtfIdentity:
+    parser = _IndexRows()
+    parser.feed(index.decode("utf-8-sig"))
+    if not parser.scope_seen or parser.scope_depth is not None:
+        raise ValueError
+    series_rows = [r for r in parser.rows if r and r[0].startswith("Series ")]
+    class_rows = [r for r in parser.rows if r and r[0].startswith("Class/Contract ")]
+    if (
+        len(series_rows) != 1
+        or len(class_rows) != 1
+        or len(series_rows[0]) != 3
+        or len(class_rows[0]) != 4
+    ):
+        raise ValueError
+    sr, cr = series_rows[0], class_rows[0]
+    if (
+        sr[0] != "Series " + series
+        or cr[0] != "Class/Contract " + share_class
+        or sr[2] != cr[2]
+        or cr[3] not in {"", symbol}
+    ):
+        raise ValueError
+    for marker in (
+        "Investment Objective",
+        "Fund Fees and Expenses",
+        "Principal Investment Strategies",
+        "Principal Risks of Investing in the Fund",
+        "Purchase and Sale of Shares",
+        "Tax Information",
+    ):
+        if text.count(marker) != 1:
+            raise ValueError
+    cover = re.search(
+        rf"Summary Prospectus ([A-Z][a-z]+ [0-9]{{1,2}}, [0-9]{{4}}) {symbol} "
+        r"(.+?) The Nasdaq Stock Market LLC Before you invest",
+        text[:1400],
+    )
+    if not cover:
+        raise ValueError
+    rendered_name = cover[2]
+    name = re.sub(r"\s+SM\s*(?=,)", "", rendered_name)
+    issuer_name = _json(submissions).get("name")
+    if (
+        not isinstance(issuer_name, str)
+        or issuer_name.casefold() != name.casefold()
+        or name.removeprefix("Invesco ") != cr[2]
+        or datetime.strptime(cover[1], "%B %d, %Y").date() > now.date()
+    ):
+        raise ValueError
+    objective = re.search(r"Investment Objective (.+?) Fund Fees and Expenses", text)
+    strategy = re.search(
+        r"Principal Investment Strategies (.+?) Principal Risks of Investing in the Fund", text
+    )
+    purchase = re.search(r"Purchase and Sale of Shares (.+?) Tax Information", text)
+    if (
+        not objective
+        or not strategy
+        or not purchase
+        or re.fullmatch(
+            "The "
+            + re.escape(rendered_name)
+            + r' \(the (?:“Fund” or “Trust”|"Fund" or "Trust"|Fund or Trust)\) '
+            r"seeks to track the investment results, before fees and expenses, of the .+? "
+            r'\(the (?:“Underlying Index”|"Underlying Index"|Underlying Index)\)\.',
+            objective[1],
+        )
+        is None
+        or not strategy[1].startswith(
+            "The Fund will invest substantially all of its assets in the securities "
+            "that comprise the Underlying Index."
+        )
+        or "common stocks and tracking stocks as well as American Depositary Receipts"
+        not in strategy[1]
+        or not purchase[1].startswith("The Fund issues and redeems Shares at NAV only with APs")
+        or (
+            "Individual Shares may only be bought and sold in the secondary market "
+            "(i.e., on a national securities exchange) through a broker or dealer "
+            "at a market price."
+        )
+        not in purchase[1]
+    ):
+        raise ValueError
+    legal = re.findall(
+        r"Effective after market close on ([A-Z][a-z]+ [0-9]{1,2}, [0-9]{4}), "
+        r"the Fund was reclassified as an open-end management investment company",
+        text,
+    )
+    if len(legal) != 1:
+        raise ValueError
+    changed = datetime.strptime(legal[0], "%B %d, %Y").date()
+    if (
+        changed >= now.date()
+        or changed > datetime.strptime(cover[1], "%B %d, %Y").date()
+        or "Prior to the Reclassification, the Fund operated as a unit investment trust" not in text
+    ):
+        raise ValueError
+    return CurrentNasdaqEtfIdentity(
+        symbol=symbol,
+        cik=identifier,
+        series_id=series,
+        class_id=share_class,
+        legal_name=name,
+        fmp_name=fmp_name,
+        fmp_name_matches_sec=fmp_name == name,
+        fmp_exchange=fmp_exchange,
+        objective=objective[1] + " Principal Investment Strategies " + strategy[1],
+        legal_type_statement="Effective after market close on "
+        + legal[0]
+        + ", the Fund was reclassified as an open-end management investment company. "
+        + purchase[1],
+        mapping_stored_at=stored_at,
+        filing_index_ticker=cr[3] or None,
+        filing_index_class_name=cr[2],
+        reclassification_date=changed,
+    )
 
 
 def _share_class_identity(
@@ -188,7 +381,8 @@ async def validate_etf_originals(
             cik(row.get("cik")) != identifier
             or row.get("currency") != "USD"
             or row.get("isEtf") is not True
-            or row.get("exchange") not in {"AMEX", "ARCA", "NYSE Arca", "NYSEARCA"}
+            or row.get("exchange")
+            not in {"AMEX", "ARCA", "NYSE Arca", "NYSEARCA", "NASDAQ", "XNAS"}
         ):
             raise ValueError
         f = _json(fm_receipt)
@@ -266,25 +460,12 @@ async def validate_etf_originals(
         if not isinstance(name, str) or not name.strip():
             raise ValueError
         name = " ".join(name.split())
-        cover = re.search(
-            rf"FORM 497K {re.escape(name)} {re.escape(symbol)} \| NYSE Arca Summary Prospectus\b",
-            text[:1000],
-        )
-        objective = re.search(r"Investment Objective (.+?) Fees and Expenses", text)
-        legal = re.search(
-            r"Purchase and Sale of Fund Shares (The Fund is an exchange-traded fund\b[^.]*\.)", text
-        )
-        if (
-            not cover
-            or not objective
-            or not legal
-            or name not in objective[1]
-            or not re.search(r"index composed of [^.]*U\.S\. equities\.", objective[1])
-            or len(re.findall(r"\bFORM 497K\b", text)) != 1
-        ):
-            identity: CurrentEtfIdentity = _share_class_identity(
+        identity: CurrentEtfIdentity
+        if row["exchange"] in {"NASDAQ", "XNAS"}:
+            identity = _nasdaq_identity(
                 text=text,
                 index=index,
+                submissions=submissions,
                 symbol=symbol,
                 identifier=identifier,
                 series=series,
@@ -292,19 +473,50 @@ async def validate_etf_originals(
                 fmp_name=name,
                 fmp_exchange=row["exchange"],
                 stored_at=stored_at,
+                now=cutoff,
             )
         else:
-            identity = CurrentEtfIdentity(
-                symbol=symbol,
-                cik=identifier,
-                series_id=series,
-                class_id=share_class,
-                legal_name=name,
-                fmp_exchange=row["exchange"],
-                objective=objective[1],
-                legal_type_statement=legal[1],
-                mapping_stored_at=stored_at,
+            cover = re.search(
+                rf"FORM 497K {re.escape(name)} {re.escape(symbol)} "
+                r"\| NYSE Arca Summary Prospectus\b",
+                text[:1000],
             )
+            objective = re.search(r"Investment Objective (.+?) Fees and Expenses", text)
+            legal = re.search(
+                r"Purchase and Sale of Fund Shares (The Fund is an exchange-traded fund\b[^.]*\.)",
+                text,
+            )
+            if (
+                not cover
+                or not objective
+                or not legal
+                or name not in objective[1]
+                or not re.search(r"index composed of [^.]*U\.S\. equities\.", objective[1])
+                or len(re.findall(r"\bFORM 497K\b", text)) != 1
+            ):
+                identity = _share_class_identity(
+                    text=text,
+                    index=index,
+                    symbol=symbol,
+                    identifier=identifier,
+                    series=series,
+                    share_class=share_class,
+                    fmp_name=name,
+                    fmp_exchange=row["exchange"],
+                    stored_at=stored_at,
+                )
+            else:
+                identity = CurrentEtfIdentity(
+                    symbol=symbol,
+                    cik=identifier,
+                    series_id=series,
+                    class_id=share_class,
+                    legal_name=name,
+                    fmp_exchange=row["exchange"],
+                    objective=objective[1],
+                    legal_type_statement=legal[1],
+                    mapping_stored_at=stored_at,
+                )
         fmp_received = require_utc(datetime.fromisoformat(f["received_at"]))
         sec_received = tuple(
             require_utc(datetime.fromisoformat(r["received_at"])) for r in receipts

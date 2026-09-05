@@ -301,3 +301,116 @@ async def test_share_class_index_requires_entire_ticker(index_symbol):
             ),
             now=datetime.now(UTC),
         )
+
+
+@pytest.mark.asyncio
+async def test_nasdaq_reclassified_current_etf_preserves_blank_index_ticker():
+    from helpers.current_etf_identity import nasdaq_originals
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    result = await validate_etf_originals(
+        symbol="QQQ", contents=nasdaq_originals(), now=datetime.now(UTC)
+    )
+    assert result.identity.exchange == "XNAS"
+    assert result.identity.filing_index_ticker is None
+    assert result.identity.reclassification_date.isoformat() == "2025-12-19"
+    assert result.identity.fmp_name_matches_sec is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        "ticker_suffix",
+        "class_name",
+        "duplicate",
+        "other_objective",
+        "other_strategy",
+        "future_reclassification",
+        "bond",
+        "wrong_exchange",
+    ],
+)
+async def test_nasdaq_etf_rejects_mixed_identity_or_wrong_current_classification(change):
+    from helpers.current_etf_identity import nasdaq_originals
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    kwargs = {}
+    document = nasdaq_originals()[5]
+    if change == "ticker_suffix":
+        kwargs["index_ticker"] = "QQQ.A"
+    elif change == "class_name":
+        kwargs["class_name"] = "Other Trust, Series 1"
+    elif change == "duplicate":
+        document += document
+    elif change == "other_objective":
+        document = document.replace(b"(the Fund or Trust)", b"II (the Fund or Trust)")
+    elif change == "other_strategy":
+        document = document.replace(b"The Fund will invest", b"Other Fund will invest")
+    elif change == "future_reclassification":
+        document = document.replace(b"December 19, 2025", b"December 19, 2099")
+    elif change == "bond":
+        document = document.replace(b"common stocks and tracking stocks", b"bonds and loans")
+    else:
+        document = document.replace(b"The Nasdaq Stock Market LLC", b"NYSE Arca")
+    with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+        await validate_etf_originals(
+            symbol="QQQ",
+            contents=nasdaq_originals(document=document, **kwargs),
+            now=datetime.now(UTC),
+        )
+
+
+@pytest.mark.asyncio
+async def test_nasdaq_index_ignores_unrelated_nested_layout_tables():
+    import json
+    from hashlib import sha256
+
+    from helpers.current_etf_identity import nasdaq_originals
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    values = list(nasdaq_originals())
+    values[4] = values[4].replace(
+        b"<body>", b"<body><table><tr><td><table><tr><td>Layout</td></tr></table></td></tr></table>"
+    )
+    receipts = json.loads(values[6])
+    receipts[1]["sha256"] = sha256(values[4]).hexdigest()
+    values[6] = json.dumps(receipts).encode()
+    result = await validate_etf_originals(
+        symbol="QQQ", contents=tuple(values), now=datetime.now(UTC)
+    )
+    assert result.identity.filing_index_ticker is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["omitted_header_end", "duplicate_scope", "unclosed_target"])
+async def test_nasdaq_index_optional_header_end_keeps_target_strict(variant):
+    import json
+    from hashlib import sha256
+
+    from helpers.current_etf_identity import nasdaq_originals
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    values = list(nasdaq_originals())
+    if variant == "omitted_header_end":
+        values[4] = values[4].replace(
+            b"<table>",
+            b"<table><tr><td>Status</td><td>Name</td><td>Ticker Symbol</td><tr></tr>",
+        )
+    elif variant == "duplicate_scope":
+        values[4] = values[4].replace(b"</body>", b'<div id="seriesDiv"></div></body>')
+    else:
+        values[4] = values[4].replace(b"</tr>", b"", 1)
+    receipts = json.loads(values[6])
+    receipts[1]["sha256"] = sha256(values[4]).hexdigest()
+    values[6] = json.dumps(receipts).encode()
+    if variant == "omitted_header_end":
+        result = await validate_etf_originals(
+            symbol="QQQ", contents=tuple(values), now=datetime.now(UTC)
+        )
+        assert result.identity.filing_index_ticker is None
+    else:
+        with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+            await validate_etf_originals(
+                symbol="QQQ", contents=tuple(values), now=datetime.now(UTC)
+            )

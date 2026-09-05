@@ -261,3 +261,13 @@ fmp_name_matches_sec，差异不删除、不改名或宣称一致。不接受错
 这是内部JSON合同增量，旧IWM原proof字段/序列化及默认读取保持兼容；新proof落库后，
 回滚可关闭显式ETF消费者，但必须保留新子类型兼容reader，不直接退回只认旧字段的
 应用或裁剪已存proof。原件仍8份，未增加来源、数据库schema或迁移。
+
+
+NASDAQ 股票ETF窄分支以当前目录的精确 CIK/series/class、完整 497K 封面代码、
+同基金股票目标/策略及开放式基金改制声明绑定当前身份。QQQ 索引页 ticker 单元格
+为空时保留 `filing_index_ticker=null`，不从名称猜代码；绑定依据单独保留为
+`current_directory_and_bound_497k_cover`。索引表头允许省略行结束标签，但不合并
+目标 series/class 行，也不放宽唯一性。非目标页面布局表不参与身份解析。
+改制日期仅记录来源事实，当前 alias 仍从本次核验日期起，不回填历史身份或类型。
+新增内部 JSON 子类型携带 XNAS、原件空字段及改制日期，旧 IWM/VTI JSON 兼容；
+回滚继续采用关闭显式消费者并保留兼容 reader，不删除已存证据。无新增迁移或依赖。

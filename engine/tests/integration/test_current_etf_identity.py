@@ -213,3 +213,67 @@ async def test_share_class_proof_preserves_iwm_serialization_and_name_difference
         assert report["candidate"] is None and report["execution_locked"]
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_nasdaq_normal_import_read_and_future_keep_old_identity_json(
+    migrated_database_url, tmp_path
+):
+    from helpers.current_etf_identity import nasdaq_originals
+    from nexus.market.current_etf_identity_storage import EtfProof
+
+    settings = config(migrated_database_url)
+    store = MemoryStore()
+    fm, sec, mapping = archives(tmp_path / "old")
+    old = await import_identity(
+        settings, symbol="IWM", fmp_archive=fm, sec_archive=sec, mapping_file=mapping, store=store
+    )
+    factory = session_factory(settings)
+    try:
+        async with factory() as s:
+            prior = (await read_current_etf(s, store, snapshot_id=old.snapshot_id)).model_dump(
+                mode="json"
+            )
+        fm, sec, mapping = archives(tmp_path / "new", original_values=nasdaq_originals())
+        new = await import_identity(
+            settings,
+            symbol="QQQ",
+            fmp_archive=fm,
+            sec_archive=sec,
+            mapping_file=mapping,
+            store=store,
+        )
+        async with factory() as s:
+            proof = await read_current_etf(s, store, snapshot_id=new.snapshot_id)
+            assert proof.identity.exchange == "XNAS"
+            assert (await s.get(Instrument, proof.instrument_id)).exchange == "XNAS"
+            assert proof.identity.filing_index_ticker is None
+            assert proof.alias_valid_from == proof.checked_at.date()
+            assert not proof.historical_backtest_eligible and proof.execution_locked
+            assert (await read_current_etf(s, store, snapshot_id=old.snapshot_id)).model_dump(
+                mode="json"
+            ) == prior
+            payload = proof.model_dump(mode="json")
+            assert EtfProof.model_validate(payload).model_dump(mode="json") == payload
+            payload["identity"]["invented"] = "ignored?"
+            with pytest.raises(ValueError):
+                EtfProof.model_validate(payload)
+        effective = (
+            exchange_calendars.get_calendar("XNYS")
+            .date_to_session(datetime.now(UTC).date() + timedelta(days=7), direction="next")
+            .date()
+        )
+        report = await prepare_universe(
+            settings,
+            effective_session=effective,
+            store=store,
+            use_listing_revisions=True,
+            use_etf_identities=True,
+        )
+        bound = next(m for m in report["members"] if m["symbol"] == "QQQ")
+        assert bound["gap"] is None and bound["listing_exchange"] == "XNAS"
+        assert bound["filing_index_ticker"] is None
+        assert bound["ticker_binding_basis"] == "current_directory_and_bound_497k_cover"
+        assert report["candidate"] is None and len(report["members"]) == 49
+    finally:
+        await factory.kw["bind"].dispose()
