@@ -291,16 +291,22 @@ def test_plain_cover_keeps_same_security_and_exchange_guards(before, after):
         )
 
 
-def test_global_select_exact_cover_alias_binds_nasdaq_not_separate_exchange():
+@pytest.mark.parametrize(
+    "label",
+    [
+        "The NASDAQ Global Select Market",
+        "Nasdaq Global Select Market",
+        "The Nasdaq Global Select Market",
+    ],
+)
+def test_global_select_exact_cover_alias_binds_nasdaq_not_separate_exchange(label):
     module = importlib.import_module("nexus.market.current_identity")
-    raw = _cover_without_exchange_axis().replace(
-        b"The Nasdaq Stock Market LLC", b"The NASDAQ Global Select Market"
-    )
+    raw = _cover_without_exchange_axis().replace(b"The Nasdaq Stock Market LLC", label.encode())
     result = module.parse_current_common_stock(
         symbol="AAPL", fmp_raw=profile(exchange="NASDAQ"), sec_raw=raw
     )
     assert result.exchange == "XNAS"
-    assert result.sec_exchange == "The NASDAQ Global Select Market"
+    assert result.sec_exchange == label
 
 
 @pytest.mark.parametrize(

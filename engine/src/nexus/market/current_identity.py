@@ -36,6 +36,8 @@ _EXCHANGES = {
     # Nasdaq Listing Center FAQ 1081: Global Select is a tier of Nasdaq Stock Market LLC.
     # https://listingcenter.nasdaq.com/Material_Search.aspx?cid=38&mcd=LQ&sub_cid=67
     "The NASDAQ Global Select Market": "XNAS",
+    "Nasdaq Global Select Market": "XNAS",
+    "The Nasdaq Global Select Market": "XNAS",
     "NYSE American": "XASE",
     "AMEX": "XASE",
 }
