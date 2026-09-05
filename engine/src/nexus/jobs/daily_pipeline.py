@@ -51,6 +51,7 @@ from nexus.jobs.registry import (
 )
 from nexus.jobs.repository import JobDependencyInput, enqueue_job
 from nexus.market.scope import US_EQUITY_EXCHANGES
+from nexus.market.universe_selection import select_market_universe
 from nexus.persistence.migrations import CURRENT_MIGRATION_HEAD, SCHEMA_ADMISSION_LOCK_KEY
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
@@ -199,19 +200,8 @@ async def schedule_due_daily_pipeline(
         ):
             raise RuntimeError("daily pipeline logical root is invalid")
         return existing
-    universe = await session.scalar(
-        select(UniverseSnapshot)
-        .where(
-            UniverseSnapshot.effective_from <= schedule.session,
-            UniverseSnapshot.published_at.is_not(None),
-            UniverseSnapshot.published_at <= schedule.planned_at,
-        )
-        .order_by(
-            UniverseSnapshot.published_at.desc(),
-            UniverseSnapshot.effective_from.desc(),
-            UniverseSnapshot.id.desc(),
-        )
-        .limit(1)
+    universe = await select_market_universe(
+        session, effective_session=schedule.session, published_by=schedule.planned_at
     )
     payload = DailyPipelinePayload(
         calendar_authority_id=str(calendar.calendar_authority_id),

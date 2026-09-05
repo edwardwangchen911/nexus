@@ -313,7 +313,7 @@ async def _seed_calendar(
                 UniverseSnapshot(
                     id=_UNIVERSE_ID,
                     key="us_liquid",
-                    version="daily-pipeline-fixture-v1",
+                    version="us_liquid_v1",
                     effective_from=_THURSDAY,
                     source="fixture",
                     content_hash="a" * 64,
@@ -329,7 +329,7 @@ async def _seed_us_universe_members(
         snapshot = UniverseSnapshot(
             id=_UNIVERSE_ID,
             key="us_liquid",
-            version="daily-pipeline-fixture-v1",
+            version="us_liquid_v1",
             effective_from=_THURSDAY,
             source="fixture",
             content_hash="a" * 64,
@@ -427,7 +427,7 @@ async def _seed_us_universe_with_duplicate_ticker_symbol(
         snapshot = UniverseSnapshot(
             id=_UNIVERSE_ID,
             key="us_liquid",
-            version="daily-duplicate-ticker-fixture-v1",
+            version="us_liquid_v1",
             effective_from=_THURSDAY,
             source="fixture",
             content_hash="a" * 64,
@@ -493,7 +493,7 @@ async def _seed_us_universe_with_noncanonical_ticker_symbol(
         snapshot = UniverseSnapshot(
             id=_UNIVERSE_ID,
             key="us_liquid",
-            version="daily-noncanonical-ticker-fixture-v1",
+            version="us_liquid_v1",
             effective_from=_THURSDAY,
             source="fixture",
             content_hash="a" * 64,
@@ -1911,3 +1911,159 @@ async def test_daily_performance_skips_open_position_without_current_price_autho
         "PERFORMANCE_PRICE_AUTHORITY_UNAVAILABLE",
     )
     assert after_counts == before_counts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "other_key",
+        "other_version",
+        "wrong_local_source",
+        "future_effective",
+        "future_published",
+        "valid_local",
+        "fallback_only",
+        "no_eligible",
+    ],
+)
+async def test_daily_universe_selection_cannot_be_taken_over_by_unrelated_pool(
+    migrated_database_url, case
+):
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_calendar(factory, include_universe=False)
+    fallback_id, other_id = UUID(int=820001), UUID(int=820002)
+    now = _FRIDAY_CLOSE + timedelta(minutes=31)
+    try:
+        async with factory() as s, s.begin():
+            if case != "no_eligible":
+                s.add(
+                    UniverseSnapshot(
+                        id=fallback_id,
+                        key="us_liquid",
+                        version="us_liquid_v1",
+                        effective_from=_THURSDAY,
+                        source="fixture",
+                        content_hash="a" * 64,
+                        published_at=_FRIDAY_CLOSE
+                        if case == "valid_local"
+                        else datetime(2026, 8, 1, tzinfo=UTC),
+                    )
+                )
+            if case != "fallback_only":
+                s.add(
+                    UniverseSnapshot(
+                        id=other_id,
+                        key="internal_backtest"
+                        if case in {"other_key", "no_eligible"}
+                        else ("us_liquid" if case == "other_version" else "fosun_local_holdings"),
+                        version="newer-pool",
+                        effective_from=_MONDAY if case == "future_effective" else _THURSDAY,
+                        source="unrelated_source"
+                        if case == "wrong_local_source"
+                        else "fosun_local_read_only",
+                        content_hash="b" * 64,
+                        published_at=now + timedelta(hours=1)
+                        if case == "future_published"
+                        else _FRIDAY_CLOSE - timedelta(hours=1),
+                    )
+                )
+        async with factory() as s, s.begin():
+            root = await schedule_due_daily_pipeline(s, now=now, profile_id=_PROFILE)
+            expected = (
+                None
+                if case == "no_eligible"
+                else (other_id if case == "valid_local" else fallback_id)
+            )
+            assert root.payload["universe_snapshot_id"] == (str(expected) if expected else None)
+            assert root.payload["universe_content_hash"] == (
+                None if expected is None else ("b" if case == "valid_local" else "a") * 64
+            )
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_existing_daily_root_keeps_its_frozen_pool_after_new_local_pool(
+    migrated_database_url,
+):
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    await _seed_calendar(factory, include_universe=False)
+    now = _FRIDAY_CLOSE + timedelta(minutes=31)
+    try:
+        async with factory() as s, s.begin():
+            s.add(
+                UniverseSnapshot(
+                    id=UUID(int=821001),
+                    key="us_liquid",
+                    version="us_liquid_v1",
+                    effective_from=_THURSDAY,
+                    source="fixture",
+                    content_hash="a" * 64,
+                    published_at=datetime(2026, 8, 1, tzinfo=UTC),
+                )
+            )
+        async with factory() as s, s.begin():
+            first = await schedule_due_daily_pipeline(s, now=now, profile_id=_PROFILE)
+            frozen = dict(first.payload)
+        async with factory() as s, s.begin():
+            s.add(
+                UniverseSnapshot(
+                    id=UUID(int=821002),
+                    key="fosun_local_holdings",
+                    version="new-local",
+                    effective_from=_THURSDAY,
+                    source="fosun_local_read_only",
+                    content_hash="b" * 64,
+                    published_at=_FRIDAY_CLOSE - timedelta(hours=1),
+                )
+            )
+        async with factory() as s, s.begin():
+            replay = await schedule_due_daily_pipeline(s, now=now, profile_id=_PROFILE)
+            assert replay.id == first.id and replay.payload == frozen
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_market_selector_keeps_session_separate_from_publication_cutoff(
+    migrated_database_url,
+):
+    from nexus.market.service import MarketService
+    from nexus.market.universe_selection import select_market_universe
+
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    cutoff = datetime(2026, 8, 31, 21, 0, tzinfo=UTC)
+    try:
+        async with factory() as s, s.begin():
+            s.add_all(
+                [
+                    UniverseSnapshot(
+                        id=UUID(int=822001),
+                        key="us_liquid",
+                        version="us_liquid_v1",
+                        effective_from=_THURSDAY,
+                        source="fixture",
+                        content_hash="a" * 64,
+                        published_at=datetime(2026, 8, 1, tzinfo=UTC),
+                    ),
+                    UniverseSnapshot(
+                        id=UUID(int=822002),
+                        key="fosun_local_holdings",
+                        version="monday",
+                        effective_from=_MONDAY,
+                        source="fosun_local_read_only",
+                        content_hash="b" * 64,
+                        published_at=_FRIDAY_CLOSE,
+                    ),
+                ]
+            )
+        async with factory() as s:
+            daily_scope = await select_market_universe(
+                s, effective_session=_FRIDAY, published_by=cutoff
+            )
+            assert daily_scope.id == UUID(int=822001)
+            market = MarketService(s, cutoff, cursor_signing_secrets=["synthetic"])
+            assert await market._active_market_universe_id(cutoff) == UUID(int=822002)
+    finally:
+        await factory.kw["bind"].dispose()

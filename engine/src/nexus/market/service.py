@@ -39,6 +39,7 @@ from nexus.market.intraday_metrics import (
     compute_intraday_metrics,
 )
 from nexus.market.scope import US_EQUITY_EXCHANGES
+from nexus.market.universe_selection import select_market_universe
 from nexus.persistence.models.data import DataArtifact, ProviderCapability
 from nexus.persistence.models.market import (
     Instrument,
@@ -64,9 +65,6 @@ _CURSOR_MAX_LENGTH = 2048
 _CURSOR_MAX_AGE = timedelta(minutes=5)
 _STALE_AFTER = timedelta(seconds=45)
 _SELECTED_SERIES_BAR_LIMIT = 500
-_UNIVERSE_KEY = "us_liquid"
-_UNIVERSE_VERSION = "us_liquid_v1"
-_LOCAL_FOSUN_UNIVERSE_KEY = "fosun_local_holdings"
 
 
 class PriceSeriesLoader(Protocol):
@@ -646,38 +644,10 @@ class MarketService:
         )
 
     async def _active_market_universe_id(self, decision_time: datetime) -> UUID | None:
-        local = await self._session.scalar(
-            select(UniverseSnapshot.id)
-            .where(
-                UniverseSnapshot.key == _LOCAL_FOSUN_UNIVERSE_KEY,
-                UniverseSnapshot.source == "fosun_local_read_only",
-                UniverseSnapshot.effective_from <= decision_time.date(),
-                UniverseSnapshot.published_at.is_not(None),
-                UniverseSnapshot.published_at <= decision_time,
-            )
-            .order_by(
-                UniverseSnapshot.published_at.desc(),
-                UniverseSnapshot.created_at.desc(),
-                UniverseSnapshot.id.desc(),
-            )
-            .limit(1)
+        universe = await select_market_universe(
+            self._session, effective_session=decision_time.date(), published_by=decision_time
         )
-        if local is not None:
-            return local
-        return cast(
-            UUID | None,
-            await self._session.scalar(
-                select(UniverseSnapshot.id)
-                .where(
-                    UniverseSnapshot.key == _UNIVERSE_KEY,
-                    UniverseSnapshot.version == _UNIVERSE_VERSION,
-                    UniverseSnapshot.effective_from <= decision_time.date(),
-                    UniverseSnapshot.published_at.is_not(None),
-                    UniverseSnapshot.published_at <= decision_time,
-                )
-                .limit(1)
-            ),
-        )
+        return universe.id if universe is not None else None
 
     async def _require_instrument(self, instrument_id: UUID, decision_time: datetime) -> None:
         if await self._active_instrument(instrument_id, decision_time) is None:

@@ -2103,3 +2103,27 @@ SEC collector将实际非200响应拒绝，不写伪HTTP200 receipt；只发一�
 私有证据位于outputs/acceptance/current-identity-abbv-20260905T031239Z，原件与标准归档
 0700/0600；onboarding下保留正常CLI输出、前后hash和聚合结果。当前证明可被既有
 备份绑定读取器识别4个原件引用；未重跑全备份或另建恢复框架。
+
+### 2026-09-05 自动日常选池隔离：复用行情既有规则
+
+确认 daily scheduler 原来只按全表最新发布时间选池，较新的内部回测/研究池可能
+抢占日常范围；当前 daily_manual 使用显式快照，不受该自动选择入口影响。
+将 MarketService 既有选择提取为共享函数：优先 key=fosun_local_holdings 且
+source=fosun_local_read_only，回退仅 us_liquid/us_liquid_v1。daily 仍分别使用
+schedule.session 与 planned_at；MarketService 保留 decision_time 日期语义。
+已存在逻辑 root 的校验和冻结返回仍在选池之前，不重写历史 payload。
+
+最小旧代码 RED 为3失败/5通过；新增回归覆盖不同key、同key不同version、
+错误source、未来生效/发布、local优先于发布时间更晚的fallback、无合格池、
+已存在root与两个时间边界。集中审查无P1/P2。隔离PG55436的 daily pipeline、
+market API 与 daily schedule 合计71项：首轮68通过、3个旧ticker夹具失败；
+原因是4处既有us_liquid夹具使用任意version。仅统一为合法us_liquid_v1，
+保留异常alias和断言，3项定向复跑全部通过；不重复全量。Ruff check/format、
+Mypy三生产文件与 diffcheck 通过。防复发位于共享消费者选择和真实调度PG测试，
+没有新增规则系统、配置、迁移、模型调用或股票池发布入口。
+
+真实库事务强制只读核查：新源码selector当前选择预期本地持仓池。库中自动
+daily root为0，未声称完成真实历史root冻结验收，该行为由隔离回归证明。
+现有3302行情BFF返回HTTP200 JSON；这是当前服务兼容性检查，非新镜像生效证明。
+未向真实库插入假池、未启动scheduler、未调用模型、未重启服务；后续正常
+运行版本更新才加载该自动消费者修复。不因本项阻塞已验收的手动研究与页面。
