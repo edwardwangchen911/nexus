@@ -206,6 +206,69 @@ def test_sec_normalization_uses_archived_submission_acceptance_metadata_without_
     assert archived[0].revision == "0000320193-25-000123@2025-08-20T20:00:00+00:00"
 
 
+def test_contract_revenue_is_normalized_without_losing_its_source_basis() -> None:
+    payload = json.loads((FIXTURES / "companyfacts.json").read_bytes())
+    tags = payload["facts"]["us-gaap"]
+    tag = "RevenueFromContractWithCustomerExcludingAssessedTax"
+    tags[tag] = tags.pop("Revenues")
+    raw = json.dumps(payload).encode()
+    facts = normalize_company_facts(
+        raw,
+        (
+            (FIXTURES / "submissions.json").read_bytes(),
+            (FIXTURES / "submissions-001.json").read_bytes(),
+        ),
+        instrument=_identity(),
+        evidence_by_accession={
+            ACCESSION: _evidence(),
+            ARCHIVED_ACCESSION: _evidence(ARCHIVED_ACCESSION),
+        },
+    )
+    revenue = [fact for fact in facts if fact.canonical_fact == "revenue"]
+    assert len(revenue) == 2
+    assert [str(fact.value) for fact in revenue] == ["100", "90"]
+    assert {fact.raw_tag for fact in revenue} == {tag}
+    assert all(fact.raw_taxonomy == "us-gaap" for fact in revenue)
+    assert all(fact.period_kind == "duration" and fact.unit == "USD" for fact in revenue)
+    original = normalize_company_facts(
+        (FIXTURES / "companyfacts.json").read_bytes(),
+        (
+            (FIXTURES / "submissions.json").read_bytes(),
+            (FIXTURES / "submissions-001.json").read_bytes(),
+        ),
+        instrument=_identity(),
+        evidence_by_accession={
+            ACCESSION: _evidence(),
+            ARCHIVED_ACCESSION: _evidence(ARCHIVED_ACCESSION),
+        },
+    )
+    # Only the reported tag differs; values, periods, revisions and provenance survive.
+    assert {
+        (fact.canonical_fact, fact.accession_number): fact.model_dump(exclude={"raw_tag"})
+        for fact in facts
+    } == {
+        (fact.canonical_fact, fact.accession_number): fact.model_dump(exclude={"raw_tag"})
+        for fact in original
+    }
+    assert json.dumps(payload).encode() == raw
+
+
+@pytest.mark.parametrize(
+    ("taxonomy", "tag"),
+    [
+        ("custom", "RevenueFromContractWithCustomerExcludingAssessedTax"),
+        ("us-gaap", "RevenueFromContractWithCustomerIncludingAssessedTax"),
+        ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTaxExtra"),
+    ],
+)
+def test_contract_revenue_mapping_does_not_guess_other_taxonomies_or_bases(
+    taxonomy: str,
+    tag: str,
+) -> None:
+    with pytest.raises(SecNormalizationError, match="AMBIGUOUS_OR_UNKNOWN_TAG"):
+        sec_provider.canonical_fact_for_raw_tag(taxonomy, tag)
+
+
 @pytest.mark.parametrize(
     ("symbol", "exchange", "currency"),
     [("00656.HK", "HKEX", "HKD"), ("AAPL", "HKEX", "HKD")],

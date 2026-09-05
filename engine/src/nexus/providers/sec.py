@@ -35,6 +35,8 @@ class SecNormalizationError(ValueError):
 
 _SEC_TAG_TO_CANONICAL_FACT = {
     ("us-gaap", "Revenues"): "revenue",
+    # ASC 606 contract revenue excludes assessed tax; preserve raw_tag as its basis.
+    ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"): "revenue",
     ("us-gaap", "GrossProfit"): "gross_profit",
     ("us-gaap", "OperatingIncomeLoss"): "operating_income",
     ("us-gaap", "NetIncomeLoss"): "net_income",
