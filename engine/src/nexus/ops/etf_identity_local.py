@@ -171,6 +171,7 @@ async def import_identity(
     mapping_file: Path | None,
     store: IdentityStore | None = None,
     allow_treasury: bool = False,
+    allow_gold: bool = False,
 ) -> CurrentIdentityImportResult:
     _local(settings)
     storage = store or S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
@@ -188,6 +189,7 @@ async def import_identity(
                 sec_archive=sec_archive,
                 mapping_file=mapping_file,
                 allow_treasury=allow_treasury,
+                allow_gold=allow_gold,
             )
         async with factory() as session, session.begin():
             await session.execute(text("SET TRANSACTION READ ONLY"))
@@ -231,6 +233,11 @@ def main() -> None:
     for name in ("fmp-archive", "sec-archive", "mapping-file", "output"):
         treasury.add_argument("--" + name, type=Path, required=True)
     treasury.add_argument("--symbol", required=True)
+    gold = commands.add_parser("import-gold")
+    for name in ("fmp-archive", "sec-archive", "output"):
+        gold.add_argument("--" + name, type=Path, required=True)
+    gold.add_argument("--symbol", required=True)
+    gold.set_defaults(mapping_file=None)
     reader = commands.add_parser("read")
     reader.add_argument("--snapshot-id", type=UUID, required=True)
     try:
@@ -250,7 +257,7 @@ def main() -> None:
                 )
             )
             status: str = "collected"
-        elif args.action in {"import", "import-uit", "import-treasury"}:
+        elif args.action in {"import", "import-uit", "import-treasury", "import-gold"}:
             if args.output.exists() or args.output.is_symlink():
                 raise ValueError("CURRENT_ETF_NEW_OUTPUT_REQUIRED")
             result = asyncio.run(
@@ -261,6 +268,7 @@ def main() -> None:
                     sec_archive=args.sec_archive,
                     mapping_file=args.mapping_file,
                     allow_treasury=args.action == "import-treasury",
+                    allow_gold=args.action == "import-gold",
                 )
             )
             write_private(

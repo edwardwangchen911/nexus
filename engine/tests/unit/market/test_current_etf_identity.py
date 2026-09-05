@@ -421,8 +421,7 @@ def test_treasury_collection_preserves_non_equity_definition():
 
     member = member_for("TLT")
     assert member.asset_type == "non_equity_etf" and member.risk_bucket == "US_TREASURY"
-    with pytest.raises(ValueError):
-        member_for("GLD")
+    assert member_for("GLD").risk_bucket == "GOLD"
 
 
 @pytest.mark.asyncio

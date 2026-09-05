@@ -32,6 +32,11 @@ def member_for(symbol: str) -> UniverseDefinitionMember:
                 and member.asset_type == "non_equity_etf"
                 and member.risk_bucket == "US_TREASURY"
             )
+            or (
+                symbol == "GLD"
+                and member.asset_type == "non_equity_etf"
+                and member.risk_bucket == "GOLD"
+            )
         ):
             return member
     raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
@@ -92,6 +97,30 @@ class CurrentNasdaqEtfIdentity(CurrentEtfShareClassIdentity):
     ticker_binding_basis: Literal["current_directory_and_bound_497k_cover"] = (
         "current_directory_and_bound_497k_cover"
     )
+
+
+class CurrentGoldTrustIdentity(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    symbol: str
+    cik: str
+    legal_name: str
+    shares_name: str
+    fmp_name: str
+    fmp_name_matches_sec: bool
+    asset_type: Literal["non_equity_etf"] = "non_equity_etf"
+    currency: Literal["USD"] = "USD"
+    exchange: Literal["ARCX"] = "ARCX"
+    legal_structure: Literal["new_york_investment_trust"] = "new_york_investment_trust"
+    underlying_asset_class: Literal["gold_bullion"] = "gold_bullion"
+    listing_basis: Literal["bound_sec_10k_registration"] = "bound_sec_10k_registration"
+    fmp_exchange: str
+    sec_exchange: str
+    fmp_exchange_precision: Literal["provider_label_only"] = "provider_label_only"
+    objective: str
+    legal_type_statement: str
+    share_statement: str
+    registration_facts: tuple[dict[str, Any], ...]
+    registration_context: dict[str, Any]
 
 
 class CurrentUitIdentity(BaseModel):
@@ -482,7 +511,12 @@ def _share_class_identity(
 
 @dataclass(frozen=True)
 class EtfInputs:
-    identity: CurrentEtfIdentity | CurrentUitIdentity | CurrentTreasuryEtfIdentity
+    identity: (
+        CurrentEtfIdentity
+        | CurrentUitIdentity
+        | CurrentTreasuryEtfIdentity
+        | CurrentGoldTrustIdentity
+    )
     contents: tuple[bytes, ...]
     sec_url: str
     received: tuple[datetime | None, ...]
@@ -617,7 +651,12 @@ async def validate_etf_originals(
         if not isinstance(name, str) or not name.strip():
             raise ValueError
         name = " ".join(name.split())
-        identity: CurrentEtfIdentity | CurrentUitIdentity | CurrentTreasuryEtfIdentity
+        identity: (
+            CurrentEtfIdentity
+            | CurrentUitIdentity
+            | CurrentTreasuryEtfIdentity
+            | CurrentGoldTrustIdentity
+        )
         if member.asset_type == "non_equity_etf":
             identity = _treasury_identity(
                 text=text,

@@ -17,6 +17,7 @@ from nexus.market.current_etf_identity import (
     SOURCE,
     CurrentEtfIdentity,
     CurrentEtfShareClassIdentity,
+    CurrentGoldTrustIdentity,
     CurrentNasdaqEtfIdentity,
     CurrentTreasuryEtfIdentity,
     CurrentUitIdentity,
@@ -24,6 +25,7 @@ from nexus.market.current_etf_identity import (
     member_for,
     validate_etf_originals,
 )
+from nexus.market.current_gold_identity import validate_gold_originals
 from nexus.market.current_identity import MAX_SEC_BYTES
 from nexus.market.current_identity_storage import (
     ArtifactBinding,
@@ -41,7 +43,8 @@ from nexus.research.fmp_profile_archive import _read
 class EtfProof(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
     identity: (
-        CurrentTreasuryEtfIdentity
+        CurrentGoldTrustIdentity
+        | CurrentTreasuryEtfIdentity
         | CurrentUitIdentity
         | CurrentNasdaqEtfIdentity
         | CurrentEtfShareClassIdentity
@@ -76,8 +79,11 @@ async def load_etf_archives(
     mapping_file: Path | None,
     now: datetime,
     allow_treasury: bool = False,
+    allow_gold: bool = False,
 ) -> EtfInputs:
     contents = _private_files(fmp_archive, ("profile.json", "receipt.json"))
+    if allow_gold and (mapping_file is not None or allow_treasury):
+        raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
     if mapping_file is None:
         sec = _private_files(
             sec_archive,
@@ -90,6 +96,8 @@ async def load_etf_archives(
                 "disclosure-receipt.json",
             ),
         )
+        if allow_gold:
+            return validate_gold_originals(symbol=symbol, contents=contents + sec, now=now)
         if allow_treasury:
             raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
         return validate_uit_originals(symbol=symbol, contents=contents + sec, now=now)
@@ -135,6 +143,7 @@ async def import_current_etf(
     sec_archive: Path,
     mapping_file: Path | None,
     allow_treasury: bool = False,
+    allow_gold: bool = False,
 ) -> CurrentIdentityImportResult:
     member = member_for(symbol)
     async with session.begin_nested():
@@ -151,6 +160,7 @@ async def import_current_etf(
             mapping_file=mapping_file,
             now=now,
             allow_treasury=allow_treasury,
+            allow_gold=allow_gold,
         )
         if inputs.identity.asset_type != member.asset_type:
             raise ValueError("CURRENT_ETF_IDENTITY_INVALID")
@@ -283,7 +293,11 @@ async def read_current_etf(
             ):
                 raise ValueError
             contents.append(await _read_artifact(store, binding))
-        if isinstance(proof.identity, CurrentUitIdentity):
+        if isinstance(proof.identity, CurrentGoldTrustIdentity):
+            inputs = validate_gold_originals(
+                symbol=proof.identity.symbol, contents=tuple(contents), now=proof.checked_at
+            )
+        elif isinstance(proof.identity, CurrentUitIdentity):
             inputs = validate_uit_originals(
                 symbol=proof.identity.symbol, contents=tuple(contents), now=proof.checked_at
             )

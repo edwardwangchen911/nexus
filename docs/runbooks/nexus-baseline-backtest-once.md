@@ -335,3 +335,17 @@ JSON 不变。存储/严格读取同时核对原件、master 与原池资产类�
 未来 prepare 只在显式ETF选项下消费该 TLT 合同，默认仍拒绝；GLD 仍单列类型未支持。
 没有改写股票池定义、历史资格或数据库 schema，也没有新增迁移。回退停用显式入口/消费者，并保留
 新 JSON 的兼容 reader 与不可变原件；采集收据保留每份实际收到时间。
+
+
+黄金信托当前身份仅 GLD 使用 `etf_identity_local import-gold`，参数为
+`--symbol GLD --fmp-archive <目录> --sec-archive <目录> --output <私有结果文件>`，
+不接收基金 series/class 映射。八原件布局同 import-uit，但证据来自绑定的完整 10-K：
+同一注册行的黄金受益份额、ticker、NYSE Arca 与同上下文 CIK，以及该信托正文的
+纽约法投资信托、实物黄金、受益份额和非 1940 Act 注册公司声明。不能从税务 grantor
+称谓推断 UIT。SEC 索引的 `/ix?doc=` 只接受精确同源、同 CIK、同 accession 正文路径；
+保留原索引和正文收据，不重新标记来源。
+
+GLD 保留 `non_equity_etf/GOLD`，新内部 JSON 子类型记录 `gold_bullion` 和
+`new_york_investment_trust`，不影响旧六种已存 ETF JSON；无迁移或新增依赖。
+正常读取重新核对原件，股票池仍需显式 `--use-etf-identities`；当前身份不授予历史
+资格、不生成候选或解除执行锁。回滚关闭新导入与显式消费，保留兼容 reader 和原件。

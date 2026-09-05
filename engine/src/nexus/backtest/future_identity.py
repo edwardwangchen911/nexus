@@ -12,6 +12,7 @@ from nexus.backtest.universe import load_us_liquid_v1_definition, require_future
 from nexus.market.current_etf_identity import SOURCE as ETF_SOURCE
 from nexus.market.current_etf_identity import (
     CurrentEtfShareClassIdentity,
+    CurrentGoldTrustIdentity,
     CurrentNasdaqEtfIdentity,
     CurrentTreasuryEtfIdentity,
     CurrentUitIdentity,
@@ -94,6 +95,11 @@ async def prepare_future_identity_bindings(
                     and member.asset_type == "non_equity_etf"
                     and member.risk_bucket == "US_TREASURY"
                 )
+                or (
+                    member.symbol == "GLD"
+                    and member.asset_type == "non_equity_etf"
+                    and member.risk_bucket == "GOLD"
+                )
             )
         ):
             binding["gap"] = "IDENTITY_TYPE_UNSUPPORTED"
@@ -154,16 +160,21 @@ async def prepare_future_identity_bindings(
                             identity_contract=snapshot.schema_version,
                         )
                     if isinstance(
-                        proof.identity, CurrentEtfShareClassIdentity | CurrentUitIdentity
+                        proof.identity,
+                        CurrentEtfShareClassIdentity
+                        | CurrentUitIdentity
+                        | CurrentGoldTrustIdentity,
                     ):
                         binding.update(
                             legal_name=proof.identity.legal_name,
                             fmp_name=proof.identity.fmp_name,
                             fmp_name_matches_sec=proof.identity.fmp_name_matches_sec,
                         )
-                    if isinstance(proof.identity, CurrentTreasuryEtfIdentity):
+                    if isinstance(
+                        proof.identity, CurrentTreasuryEtfIdentity | CurrentGoldTrustIdentity
+                    ):
                         binding.update(underlying_asset_class=proof.identity.underlying_asset_class)
-                    if isinstance(proof.identity, CurrentUitIdentity):
+                    if isinstance(proof.identity, CurrentUitIdentity | CurrentGoldTrustIdentity):
                         binding.update(
                             legal_structure=proof.identity.legal_structure,
                             listing_basis=proof.identity.listing_basis,

@@ -444,11 +444,111 @@ async def test_treasury_explicit_import_read_future_preserves_type_and_old_json(
         assert bound["underlying_asset_class"] == "us_treasury_bonds"
         assert (
             next(m for m in report["members"] if m["symbol"] == "GLD")["gap"]
-            == "IDENTITY_TYPE_UNSUPPORTED"
+            == "IDENTITY_PROOF_MISSING"
         )
         default = await prepare_universe(settings, effective_session=effective, store=store)
         assert (
             next(m for m in default["members"] if m["symbol"] == "TLT")["gap"]
+            == "IDENTITY_TYPE_UNSUPPORTED"
+        )
+        assert report["candidate"] is None and len(report["members"]) == 49
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_gold_explicit_import_read_future_preserves_type_and_old_json(
+    migrated_database_url, tmp_path
+):
+    from helpers.current_gold_identity import gold_originals
+    from nexus.market.current_etf_identity_storage import EtfProof
+
+    settings = config(migrated_database_url)
+    store = MemoryStore()
+    fm, sec, mapping = archives(tmp_path / "old")
+    old = await import_identity(
+        settings, symbol="IWM", fmp_archive=fm, sec_archive=sec, mapping_file=mapping, store=store
+    )
+    factory = session_factory(settings)
+    try:
+        async with factory() as s:
+            prior = (await read_current_etf(s, store, snapshot_id=old.snapshot_id)).model_dump(
+                mode="json"
+            )
+        fm = sec = tmp_path / "gold"
+        fm.mkdir(mode=0o700)
+        mapping = None
+        names = (
+            "profile.json",
+            "receipt.json",
+            "submissions.raw",
+            "submissions-receipt.json",
+            "filing-index.raw",
+            "index-receipt.json",
+            "disclosure.raw",
+            "disclosure-receipt.json",
+        )
+        for name, raw in zip(names, gold_originals("viewer"), strict=True):
+            path = fm / name
+            path.write_bytes(raw)
+            path.chmod(0o600)
+        with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+            await import_identity(
+                settings,
+                symbol="GLD",
+                fmp_archive=fm,
+                sec_archive=sec,
+                mapping_file=mapping,
+                store=store,
+            )
+        new = await import_identity(
+            settings,
+            symbol="GLD",
+            allow_gold=True,
+            fmp_archive=fm,
+            sec_archive=sec,
+            mapping_file=mapping,
+            store=store,
+        )
+        async with factory() as s:
+            proof = await read_current_etf(s, store, snapshot_id=new.snapshot_id)
+            assert proof.identity.exchange == "ARCX"
+            assert (await s.get(Instrument, proof.instrument_id)).exchange == "ARCX"
+            assert proof.identity.asset_type == "non_equity_etf"
+            instrument = await s.get(Instrument, proof.instrument_id)
+            assert instrument.asset_type == "non_equity_etf" and instrument.risk_bucket == "GOLD"
+            assert proof.alias_valid_from == proof.checked_at.date()
+            assert not proof.historical_backtest_eligible and proof.execution_locked
+            assert (await read_current_etf(s, store, snapshot_id=old.snapshot_id)).model_dump(
+                mode="json"
+            ) == prior
+            payload = proof.model_dump(mode="json")
+            assert EtfProof.model_validate(payload).model_dump(mode="json") == payload
+            payload["identity"]["invented"] = "ignored?"
+            with pytest.raises(ValueError):
+                EtfProof.model_validate(payload)
+        effective = (
+            exchange_calendars.get_calendar("XNYS")
+            .date_to_session(datetime.now(UTC).date() + timedelta(days=7), direction="next")
+            .date()
+        )
+        report = await prepare_universe(
+            settings,
+            effective_session=effective,
+            store=store,
+            use_listing_revisions=True,
+            use_etf_identities=True,
+        )
+        bound = next(m for m in report["members"] if m["symbol"] == "GLD")
+        assert bound["gap"] is None and bound["listing_exchange"] == "ARCX"
+        assert bound["asset_type"] == "non_equity_etf"
+        assert bound["underlying_asset_class"] == "gold_bullion"
+        assert bound["legal_structure"] == "new_york_investment_trust"
+        assert len(proof.identity.registration_facts) == 4
+        assert "series_id" not in proof.identity.model_dump()
+        default = await prepare_universe(settings, effective_session=effective, store=store)
+        assert (
+            next(m for m in default["members"] if m["symbol"] == "GLD")["gap"]
             == "IDENTITY_TYPE_UNSUPPORTED"
         )
         assert report["candidate"] is None and len(report["members"]) == 49
