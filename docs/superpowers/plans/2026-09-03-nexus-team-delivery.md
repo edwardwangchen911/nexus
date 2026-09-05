@@ -875,3 +875,33 @@ D 新限定调查结合 [Alpaca 单证券 bars](https://docs.alpaca.markets/us/r
 执行结果接续：§9.23 的真实趋势研究为 `partial/watch`，没有给出减仓方向，所以上述“集中度观察 + reduce_candidate”窄分析情景本例不成立，不启动相应 producer 改动。C 继续完成无冲突读侧切片，真实页面应展示已有维度和候选未形成原因；不能为制造三列改写本次研究、预警语义或目标。
 
 §9.25 C 实际交付（2026-09-05）：已存 group 的三方案仓位 current/target/delta、动作原因、完整性与未知原因展示已合 main；DecimalString 数值等价、11 个排名维度及所有门禁均前端 fail-closed，策略目标复制基线且证据不足时明确尚未形成。122 项 optimize unit、typecheck/ESLint、375/1440 E2E 和集中审查 Ready；不改变 API/producer。当前真实 P 没有 group，因此另在 `/optimize` 显示“无已保存三方案”，按实际无 `reduce_only` 说明最小调整尚未形成，并明确下方诊断不是方案 13 维。真实 overview→375/1440 DOM、刷新仅一次 GET、无推荐/Shadow/交易、无横溢出、11 类业务行不变和 active Job 0 均通过。该结果闭合了有组/无组的诚实展示，但不冒充当前真实三个候选已经生成；候选 producer 和完整经济比较仍按证据缺口单列。
+
+### 9.26 T1：有来源的当前普通股首次建档
+
+**目标与边界。** 补齐非持仓证券的正常首次身份入口，不借券商持仓刷新造数据。先完成一个普通股真实案例的归档→严格解析→当前身份落库→精确重读及既有预检消费；不缩减原49成员或多年回测目标。ETF分类、7项既有broker UUID的未来池绑定、股票池发布与daily选池接线分别仍未完成。本片不创建UniverseSnapshot/UniverseMember，不改变源政策、证券排名、交易许可或原v3研究。
+
+**已取得证据。** 公开ABBV样本的FMP当前profile已一次正常采集；SEC 2025 10-K原件已一次正常采集，封面`Security12bTitle / TradingSymbol / SecurityExchangeName`同一表行、同一`c-2`上下文，含`CommonStockMember`及交易所`XNYS`维度；该上下文和CIK事实的entity identifier与FMP CIK一致。SEC原文为`https://www.sec.gov/Archives/edgar/data/1551152/000155115226000008/abbv-20251231.htm`。样本私有归档位于`outputs/acceptance/current-identity-abbv-20260905T031239Z`，不提交原件或复制真实数据进测试。Nasdaq目录一次超时后未重试；Alpaca assets未配置对应origin，保持零请求，均不作为本片依赖。
+
+**所有权与文件。** A在现有593c worktree独占实现及集成，root集中审查。新增`engine/src/nexus/market/current_identity.py`负责纯两源绑定及窄iXBRL解析；`engine/src/nexus/market/current_identity_storage.py`负责原件/证明与身份事务；`engine/src/nexus/ops/instrument_identity_local.py`负责正常本地入口。测试分别放`engine/tests/unit/market/test_current_identity.py`、`engine/tests/integration/test_current_identity_import.py`，操作说明追加既有`docs/runbooks/nexus-baseline-backtest-once.md`。不引入SDK、通用主数据框架、解析服务或新数据库表；如现有数据库约束不支持下述存储，先报告具体约束，不绕过触发器。
+
+**输入与解析合同。** 入口只接固定49成员定义中的`common_stock` symbol、FMP既有归档目录及SEC归档目录；无调用方asset_type/有效期/目标UUID/成功旗标。FMP复用现有archive安全规则与parser，另严格核symbol、十进制规范化CIK、USD、受支持交易所及布尔类型的isEtf/isFund/isAdr；这些否定标记只用于冲突检查，不生成普通股结论。SEC归档必须绑定固定官方HTTPS Archives路径、CIK/accession、原件长度/hash、实际接收时间；不接受任意URL、符号链接、重复JSON键、未来receipt或不完整原件。沿现有有界byte transport提供一次显式SEC collect动作，保留User-Agent隐私与首错停止；import完全离线，不重新采集已取得原件。私有诊断归档格式若与正常receipt不同，做可验证的本地适配并保留原接收时间，不能重标为新采集。
+
+普通股证据必须是目标TradingSymbol唯一对应的SEC注册证券记录：同一表格行和context中的title、symbol、exchange；引用的context恰有一个与URL/FMP一致的entity CIK，显式普通股维度与title一致。解析器按已证实的iXBRL结构处理，拒绝缺失/重复/冲突ID、跨行/跨context拼接、债券/优先股/基金、损坏或不支持的结构；不执行脚本、外部实体或远程schema。交易所使用现有显式代码映射，保留原字符串及映射结果，未知映射拒绝。保存原件hash、元素ID/context/定位信息及源字段，不从报告年份推导有效期；FMP当前观察与SEC报告时点分别保留，不声称报告以后绝无身份变更。
+
+**存储与并发合同。** 在本地事务中只处理一个symbol。先按symbol级事务锁串行化本入口，再核现有Instrument/当前唯一ticker alias：有效且币种/类型/风险桶/源身份无冲突时复用；任何历史同symbol冲突、重复当前别名、期望ID被其他身份占用或字段不符均固定错误拒绝，不合并/改名/修补旧行。完全无既有身份时沿该成员已有`stable_instrument_id`创建Instrument，风险桶来自固定内部定义；alias从本次实际核验UTC日开始，created_at由数据库产生，不回溯行情窗口或SEC报告日。与其他写入口竞争时，依赖已有唯一/排斥约束并将冲突作为安全拒绝，不能自动重试创建。
+
+复用DataArtifact及受保护对象存储保留两源raw/receipt并readback；以`DataSnapshot(source="current_instrument_identity", schema_version="current_instrument_identity_v1")`保存窄证明，绑定实际instrument/alias、两源hash、上下文定位、内部定义及实际建档时点。证明与新身份同事务提交；精确重读须重验原件/hash、证明绑定和现有身份，而不是仅检查行存在。相同原件精确重放不新增身份或重复证明；不同原件不得覆盖旧证明。已存对象在事务失败后可能成为孤立对象，沿现有备份/回收规则处理，不删源文件。证明只是当前身份来源，不是价格/行业/历史回测authority。
+
+建议窄接口（具体类型在同一模块定义，不跨会话并写合同）：
+
+```python
+def parse_current_common_stock(*, symbol: str, fmp_raw: bytes, sec_raw: bytes) -> CurrentCommonStockIdentity: ...
+async def import_current_common_stock(session, store, *, symbol: str, fmp_archive: Path, sec_archive: Path) -> CurrentIdentityImportResult: ...
+```
+
+返回安全的created/existing状态及非敏感缺口分类；正常CLI明确未发布股票池、未创建研究、执行仍锁定，不输出密钥、请求头或真实账户资料。
+
+- [ ] 先写纯解析红测，再实现最小解析：同股记录通过；同CIK不同证券、股票/债券context调换、重复标签/ID、缺普通股维度、交易所冲突、坏CIK、非布尔FMP标记及未来/篡改receipt拒绝。合成HTML与JSON独立手写，不截取真实个人研究资料。
+- [ ] 写正常import→原件readback→数据库证明/Instrument/alias→精确reader→既有preflight的PG红测；覆盖零主数据首次建档、已有合法身份复用、命名空间冲突不合并、事务失败无部分身份、并发/幂等、旧行hash不变及零Universe/研究/订单新增。示例断言：`assert alias.valid_from == checked_at.date()`、`assert replay.instrument_id == first.instrument_id`、`assert universe_rows_after == universe_rows_before`；期望值不能由被测解析器自行生成。
+- [ ] 最小实现后跑新增unit/PG、相关FMP/SEC及身份回归、Ruff/Mypy/diffcheck；一轮集中审查后串行集成。实际验证只复用已取ABBV原件，通过正常CLI建档并精确重读；再用正常未来session预检确认该成员被消费，其他缺口仍诚实保留，不为凑全绿写入其余成员。
+- [ ] 将正常命令、来源字段、验证及剩余依赖增量写入已有runbook/checkpoint。回滚停止新import入口并保留读取兼容/已存证明及身份；不得删除新事实、回填历史或回退刚修好的券商身份校验。完整T1/B3/经济比较和其余计划条目继续保留。
