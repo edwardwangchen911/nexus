@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
+from hashlib import sha256
 from threading import Lock
 from typing import Protocol
 from uuid import UUID
@@ -355,6 +356,11 @@ def normalize_company_facts(
                 )
     if not normalized:
         raise SecNormalizationError("NO_CANONICAL_FACTS")
+    _validate_revenue_bases(normalized)
+    return tuple(normalized)
+
+
+def _validate_revenue_bases(normalized: Iterable[FinancialFact]) -> None:
     revenue_bases: dict[tuple[object, ...], str] = {}
     for fact in normalized:
         if fact.canonical_fact != "revenue":
@@ -372,6 +378,82 @@ def normalize_company_facts(
             # Equal amounts do not prove equal accounting scopes. Never pick one
             # tag to satisfy the storage key, which deliberately has no raw_tag.
             raise SecNormalizationError("AMBIGUOUS_REVENUE_BASIS")
+
+
+def normalize_saved_accession_facts(
+    payload: bytes,
+    *,
+    instrument_id: UUID,
+    accession: str,
+    accepted_at: datetime,
+    form: str,
+    evidence_ref: EvidenceRef,
+) -> tuple[FinancialFact, ...]:
+    """Read the stored accession projection, not a fabricated Company Facts document.
+
+    The caller binds instrument and filing metadata to the existing immutable
+    Filing/ref pair. This format has no issuer CIK; none is inferred from accession.
+    """
+    if (
+        evidence_ref.source != "sec"
+        or evidence_ref.object_id != accession
+        or sha256(payload).hexdigest() != evidence_ref.content_hash
+    ):
+        raise SecNormalizationError("SEC_EVIDENCE_CONFLICT")
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise SecNormalizationError("SEC_ACCESSION_ARCHIVE_INVALID")
+            result[key] = value
+        return result
+
+    try:
+        body = json.loads(payload, parse_float=Decimal, object_pairs_hook=unique_object)
+        if not isinstance(body, dict) or set(body) != {"accession", "accepted_at", "form", "facts"}:
+            raise ValueError("shape")
+        archived_at = require_utc(datetime.fromisoformat(body["accepted_at"]))
+        if (
+            not is_canonical_sec_accession_number(accession)
+            or body["accession"] != accession
+            or archived_at != require_utc(accepted_at)
+            or body["form"] != form
+            or form not in {"10-K", "10-Q"}
+            or not isinstance(body["facts"], list)
+        ):
+            raise ValueError("binding")
+    except (TypeError, ValueError, KeyError) as error:
+        raise SecNormalizationError("SEC_ACCESSION_ARCHIVE_INVALID") from error
+    normalized = []
+    for tagged in body["facts"]:
+        if (
+            not isinstance(tagged, dict)
+            or set(tagged) != {"taxonomy", "tag", "unit", "fact"}
+            or not all(isinstance(tagged[key], str) for key in ("taxonomy", "tag", "unit"))
+            or not isinstance(tagged["fact"], dict)
+            or tagged["fact"].get("accn") != accession
+        ):
+            raise SecNormalizationError("SEC_ACCESSION_ARCHIVE_INVALID")
+        try:
+            canonical = canonical_fact_for_raw_tag(tagged["taxonomy"], tagged["tag"])
+        except SecNormalizationError:
+            continue
+        normalized.append(
+            _normalize_company_fact_entry(
+                tagged["fact"],
+                canonical_fact=canonical,
+                taxonomy=tagged["taxonomy"],
+                raw_tag=tagged["tag"],
+                unit=tagged["unit"],
+                instrument_id=instrument_id,
+                accepted_by_accession={accession: (accepted_at, form)},
+                evidence_by_accession={accession: evidence_ref},
+            )
+        )
+    if not normalized:
+        raise SecNormalizationError("NO_CANONICAL_FACTS")
+    _validate_revenue_bases(normalized)
     return tuple(normalized)
 
 
