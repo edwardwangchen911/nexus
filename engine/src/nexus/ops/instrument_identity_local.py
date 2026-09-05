@@ -6,7 +6,7 @@ import json
 import os
 import re
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import NoReturn
@@ -17,6 +17,7 @@ import httpx
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 
+from nexus.backtest.future_identity import prepare_future_identity_bindings
 from nexus.market.current_identity import SEC_URL
 from nexus.market.current_identity_storage import (
     CurrentIdentityImportResult,
@@ -134,6 +135,21 @@ async def read_identity(settings: EngineSettings, *, snapshot_id: UUID) -> None:
         await factory.kw["bind"].dispose()
 
 
+async def prepare_universe(
+    settings: EngineSettings, *, effective_session: date, store: IdentityStore | None = None
+) -> dict[str, object]:
+    _local(settings)
+    storage = store or S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            return await prepare_future_identity_bindings(
+                session, storage, effective_session=effective_session
+            )
+    finally:
+        await factory.kw["bind"].dispose()
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         raise ValueError("CURRENT_IDENTITY_REQUEST_INVALID")
@@ -151,6 +167,9 @@ def main() -> None:
     importer.add_argument("--fmp-archive", type=Path, required=True)
     importer.add_argument("--sec-archive", type=Path, required=True)
     importer.add_argument("--output", type=Path, required=True)
+    prepare = commands.add_parser("prepare-universe")
+    prepare.add_argument("--effective-session", required=True, type=date.fromisoformat)
+    prepare.add_argument("--output", required=True, type=Path)
     reader = commands.add_parser("read")
     reader.add_argument("--snapshot-id", type=UUID, required=True)
     try:
@@ -167,7 +186,15 @@ def main() -> None:
             status = "collected"
         else:
             settings = EngineSettings.model_validate(environment)
-            if args.action == "import":
+            if args.action == "prepare-universe":
+                if args.output.exists() or args.output.is_symlink():
+                    raise ValueError("CURRENT_IDENTITY_NEW_OUTPUT_REQUIRED")
+                prepared = asyncio.run(
+                    prepare_universe(settings, effective_session=args.effective_session)
+                )
+                write_private(args.output, json.dumps(prepared, sort_keys=True).encode())
+                status = str(prepared["status"])
+            elif args.action == "import":
                 if args.output.exists() or args.output.is_symlink():
                     raise ValueError("CURRENT_IDENTITY_NEW_OUTPUT_REQUIRED")
                 result = asyncio.run(
@@ -199,7 +226,7 @@ def main() -> None:
         code = (
             str(error)
             if isinstance(error, ValueError)
-            and re.fullmatch(r"CURRENT_IDENTITY_[A-Z_]+", str(error))
+            and re.fullmatch(r"(?:CURRENT_IDENTITY|BACKTEST_UNIVERSE)_[A-Z_]+", str(error))
             else "CURRENT_IDENTITY_FAILED"
         )
         print(json.dumps(dict(status="failed", code=code)))

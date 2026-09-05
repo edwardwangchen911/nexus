@@ -164,3 +164,26 @@ stable UUID，alias从数据库本次核验UTC日开始，tick_size保留unknown
 
 回退方式是停止该import入口，保留已提交身份、证明和读取兼容。无需新表、迁移、
 依赖或服务重启；不删事实、改写历史，亦不回退券商刷新身份校验。
+
+## 只读准备未来身份绑定
+
+当既有合法证券使用 broker UUID 时，旧 `us_liquid_v1` 固定 UUID 预检仍按原合同报告
+错配。以下入口重验已导入的当前来源证明，输出独立的未来绑定准备报告：
+
+```sh
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.instrument_identity_local \
+  --repo-root "$PWD" prepare-universe --effective-session '<未来交易日 YYYY-MM-DD>' \
+  --output '/absolute/private/new-universe-preparation.json'
+```
+
+复用现有本地配置、对象存储和严格身份 reader，不外部采集。输出文件须为新路径，
+明细仅存私有文件；终端仅报状态。报告保留全部49成员、原定义hash、未来交易日、
+实际核验时间及各成员缺口。成功绑定记录实际UUID、proof snapshot/hash与alias，
+另用未来交易日重验唯一有效ticker；当前证明不能代替未来适用性。
+
+新候选版本为 `us_liquid_current_identity_v1`，与旧定义隔离。任何成员缺口都会
+返回 `BLOCKED` 和 `candidate=null`；当前proof仅支持普通股，ETF明确返回
+`IDENTITY_TYPE_UNSUPPORTED`，无证明普通股返回 `IDENTITY_PROOF_MISSING`。
+报告hash固定本次检查结果，不授予发布资格。此入口不写数据库、不修改旧UUID、
+旧定义、股票池或成员，也不生成历史PIT或回测资格。后续发布若实施，须重核当时
+来源及身份，不直接信任这个可编辑的本地报告。停止使用该只读入口即可回退。
