@@ -104,7 +104,7 @@ class CurrentCommonStockIdentity(BaseModel):
 class _Cover(HTMLParser):
     """Only the demonstrated inline-XBRL registration row; never resolve remote resources."""
 
-    def __init__(self, *, registrants: bool = False) -> None:
+    def __init__(self, *, registrants: bool = False, dual_listing: bool = False) -> None:
         super().__init__(convert_charrefs=True)
         self.fact_names = _FACTS | _REGISTRANT_FACTS if registrants else _FACTS
         self.stack: list[tuple[str, dict[str, str | None], int | None]] = []
@@ -123,6 +123,11 @@ class _Cover(HTMLParser):
         self.legal_contexts: set[str] = set()
         self._context_nodes: list[tuple[str, str, dict[str, str | None]]] = []
         self._context_extra_text = False
+        self.dual_listing = dual_listing
+        self.parents: list[dict[str, Any]] = []
+        self.fact_scope: dict[str, dict[str, Any]] = {}
+        self.scope_exceptions: set[str] = set()
+        self.exchange_contexts: set[str] = set()
 
     def handle_decl(self, decl: str) -> None:
         if decl.lower() != "doctype html":
@@ -182,21 +187,38 @@ class _Cover(HTMLParser):
                 raise invalid()
             self.field = {"tag": tag, "attrs": a, "parts": []}
         if tag.startswith("ix:") and self.active is not None:
-            raise invalid()
+            if (
+                not self.dual_listing
+                or tag != "ix:nonnumeric"
+                or self.parents
+                or a.get("name") != self.active["name"]
+                or a.get("name") not in {"dei:Security12bTitle", "dei:TradingSymbol"}
+            ):
+                raise invalid()
+            self.parents.append(self.active)
+            self.active = None
         if tag == "ix:nonnumeric" and a.get("name") in self.fact_names:
             if self.active is not None or not identifier or not a.get("contextref"):
                 raise invalid()
             if a.get("continuedat") or a.get("xsi:nil") or a.get("escape"):
                 raise invalid()
             security = a["name"] in _FACTS - {"dei:EntityCentralIndexKey"}
-            if security and not any(node[0] == "table" for node in self.stack):
-                raise invalid()
-            if security and any(
+            visible = not any(
                 node[0] == "ix:hidden"
                 or re.search(r"display\s*:\s*none", node[1].get("style") or "", re.I)
                 for node in self.stack
-            ):
-                raise invalid()
+            )
+            in_table = any(node[0] == "table" for node in self.stack)
+            if security and (not in_table or not visible):
+                if not self.dual_listing or a["name"] != "dei:SecurityExchangeName":
+                    raise invalid()
+                self.scope_exceptions.add(identifier)
+            self.fact_scope[identifier] = dict(
+                visible=visible,
+                parent_fact_id=self.parents[-1]["id"] if self.parents else None,
+                ix_ancestors={t for t, _, _ in self.stack if t.startswith("ix:")},
+                attrs=a,
+            )
             self.active = dict(
                 name=a["name"],
                 id=identifier,
@@ -212,6 +234,8 @@ class _Cover(HTMLParser):
             self._context_extra_text = True
         if self.active is not None:
             self.active["parts"].append(data)
+        for parent in self.parents:
+            parent["parts"].append(data)
         if self.field is not None:
             self.field["parts"].append(data)
 
@@ -223,7 +247,7 @@ class _Cover(HTMLParser):
         if tag == "ix:nonnumeric" and self.active is not None:
             self.active["value"] = " ".join("".join(self.active.pop("parts")).split())
             self.facts.append(self.active)
-            self.active = None
+            self.active = self.parents.pop() if self.parents else None
         if self.field is not None and self.field["tag"] == tag:
             self.field["value"] = "".join(self.field.pop("parts")).strip()
             assert self.context is not None
@@ -232,6 +256,31 @@ class _Cover(HTMLParser):
         if tag == "xbrli:context":
             if self.context is None:
                 raise invalid()
+            nodes = self._context_nodes
+            if (
+                not self._context_extra_text
+                and len(nodes) == 9
+                and nodes[:4]
+                == [
+                    ("xbrli:context", "", {"id": self.context["id"]}),
+                    ("xbrli:entity", "xbrli:context", {}),
+                    ("xbrli:identifier", "xbrli:entity", {"scheme": "http://www.sec.gov/CIK"}),
+                    ("xbrli:segment", "xbrli:entity", {}),
+                ]
+                and all(n[0:2] == ("xbrldi:explicitmember", "xbrli:segment") for n in nodes[4:6])
+                and {tuple(n[2].items()) for n in nodes[4:6]}
+                == {
+                    (("dimension", "us-gaap:StatementClassOfStockAxis"),),
+                    (("dimension", "dei:EntityListingsExchangeAxis"),),
+                }
+                and nodes[6:]
+                == [
+                    ("xbrli:period", "xbrli:context", {}),
+                    ("xbrli:startdate", "xbrli:period", {}),
+                    ("xbrli:enddate", "xbrli:period", {}),
+                ]
+            ):
+                self.exchange_contexts.add(self.context["id"])
             if not self._context_extra_text and self._context_nodes == [
                 ("xbrli:context", "", {"id": self.context["id"]}),
                 ("xbrli:entity", "xbrli:context", {}),
@@ -375,6 +424,102 @@ def _issuer_scope(
                 raise invalid()
 
 
+def _dual_listing_record(
+    parser: _Cover, symbols: list[dict[str, Any]], identifier: str, exchange: str
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """One demonstrated NYSE/Chicago dual tag, not a general Inline XBRL processor.
+
+    Inline XBRL 1.1 Part 1 section 11 permits nested nonNumeric facts. SEC XBRL
+    Guide 3.2.4.2-3 requires exchange-axis scope and same-context title/exchange.
+    """
+    if len(symbols) != 2 or exchange != "XNYS":
+        raise invalid()
+    rows = {f["row"] for f in symbols}
+    contexts = {f["context"] for f in symbols}
+    if None in rows or len(rows) != 1 or len(contexts) != 2:
+        raise invalid()
+    by_exchange = {}
+    for context_id in contexts:
+        if context_id not in parser.exchange_contexts:
+            raise invalid()
+        context = parser.contexts[context_id]
+        dimensions = _context(context, identifier)
+        if dimensions.get("us-gaap:StatementClassOfStockAxis") != "us-gaap:CommonStockMember":
+            raise invalid()
+        mic = dimensions.get("dei:EntityListingsExchangeAxis")
+        if mic not in {"exch:XNYS", "exch:XCHI"} or mic in by_exchange:
+            raise invalid()
+        by_exchange[mic] = context_id
+    chosen, other = by_exchange["exch:XNYS"], by_exchange["exch:XCHI"]
+    if _period(parser.contexts[chosen]) != _period(parser.contexts[other]):
+        raise invalid()
+    row = [f for f in parser.facts if f["row"] in rows]
+    if len(row) != 5 or any(not parser.fact_scope[f["id"]]["visible"] for f in row):
+        raise invalid()
+    pairs = []
+    for name in ("dei:Security12bTitle", "dei:TradingSymbol"):
+        pair = [f for f in row if f["name"] == name]
+        if len(pair) != 2 or {f["context"] for f in pair} != contexts:
+            raise invalid()
+        if len({f["value"] for f in pair}) != 1:
+            raise invalid()
+        edges = [(f["id"], parser.fact_scope[f["id"]]["parent_fact_id"]) for f in pair]
+        if not any(parent == peer["id"] for _, parent in edges for peer in pair):
+            raise invalid()
+        pairs.extend(pair)
+    nested_ids = {key for key, value in parser.fact_scope.items() if value["parent_fact_id"]}
+    if nested_ids != {f["id"] for f in pairs if parser.fact_scope[f["id"]]["parent_fact_id"]}:
+        raise invalid()
+    record = [f for f in row if f["context"] == chosen]
+    if len(record) != 3 or {f["name"] for f in record} != _FACTS - {"dei:EntityCentralIndexKey"}:
+        raise invalid()
+    auxiliary = [
+        f for f in parser.facts if f["context"] == other and f["name"] == "dei:SecurityExchangeName"
+    ]
+    if len(auxiliary) != 1:
+        raise invalid()
+    aux = auxiliary[0]
+    if aux["value"] != "CHX" or parser.fact_scope[aux["id"]]["visible"] or aux["row"] is not None:
+        raise invalid()
+    if parser.scope_exceptions != {aux["id"]}:
+        raise invalid()
+    relevant = [*row, aux]
+    # No hidden/second-row fact may silently become another fact for either context.
+    if {
+        f["id"]
+        for f in parser.facts
+        if f["context"] in contexts and f["name"] != "dei:EntityCentralIndexKey"
+    } != {f["id"] for f in relevant}:
+        raise invalid()
+    evidence = []
+    for fact in relevant:
+        scope = parser.fact_scope[fact["id"]]
+        if scope["ix_ancestors"] - {"ix:nonnumeric", "ix:header", "ix:hidden"}:
+            raise invalid()
+        if any(k in scope["attrs"] for k in ("target", "tupleref", "order", "xml:base")):
+            raise invalid()
+        if "format" in scope["attrs"] and not (
+            fact["name"] == "dei:SecurityExchangeName"
+            and fact["context"] == chosen
+            and scope["attrs"]["format"] == "ixt-sec:exchnameen"
+            and parser.namespaces.get("xmlns:ixt-sec")
+            == "http://www.sec.gov/inlineXBRL/transformation/2015-08-31"
+            and _EXCHANGES.get(fact["value"]) == exchange
+        ):
+            raise invalid()
+        evidence.append(
+            {
+                **fact,
+                "listing_context": parser.contexts[fact["context"]],
+                "parent_fact_id": scope["parent_fact_id"],
+                "visible": scope["visible"],
+                "format": scope["attrs"].get("format"),
+                "selected_listing": fact["context"] == chosen,
+            }
+        )
+    return next(f for f in record if f["name"] == "dei:TradingSymbol"), record, evidence
+
+
 def parse_current_common_stock(
     *, symbol: str, fmp_raw: bytes, sec_raw: bytes
 ) -> CurrentCommonStockIdentity:
@@ -389,10 +534,10 @@ def parse_current_common_stock(
         exchange = _EXCHANGES.get(row.get("exchange", ""))
         if exchange not in {"XNYS", "XNAS"} or not 0 < len(sec_raw) <= MAX_SEC_BYTES:
             raise invalid()
-        parser = _Cover()
+        parser = _Cover(dual_listing=True)
         parser.feed(sec_raw.decode("utf-8-sig"))
         parser.close()
-        if parser.stack or parser.active or parser.context:
+        if parser.stack or parser.active or parser.parents or parser.context:
             raise invalid()
         fixed_ns = {
             "xmlns:ix": "http://www.xbrl.org/2013/inlineXBRL",
@@ -418,10 +563,22 @@ def parse_current_common_stock(
             f for f in parser.facts if f["name"] == "dei:TradingSymbol" and f["value"] == symbol
         ]
         ciks = [f for f in parser.facts if f["name"] == "dei:EntityCentralIndexKey"]
-        if len(symbols) != 1 or not ciks:
+        if not ciks:
             raise invalid()
-        stock = symbols[0]
-        record = [f for f in parser.facts if f["row"] == stock["row"]]
+        expanded = None
+        if parser.scope_exceptions or any(s["parent_fact_id"] for s in parser.fact_scope.values()):
+            if len(ciks) != 1:
+                raise invalid()
+            stock, record, expanded = _dual_listing_record(parser, symbols, identifier, exchange)
+            if _period(parser.contexts[ciks[0]["context"]]) != _period(
+                parser.contexts[stock["context"]]
+            ):
+                raise invalid()
+        else:
+            if len(symbols) != 1:
+                raise invalid()
+            stock = symbols[0]
+            record = [f for f in parser.facts if f["row"] == stock["row"]]
         if (
             stock["row"] is None
             or len(record) != 3
@@ -460,8 +617,17 @@ def parse_current_common_stock(
             if class_a
             else r"^(?:Common Stock|Common Shares|Ordinary Shares)\b"
         )
+        # Only the fully validated dual-listing CommonStockMember scope can support
+        # this neutral legal title; capital stock alone does not prove common equity.
+        capital = (
+            re.fullmatch(r"Capital Stock, par value \$([0-9]*\.[0-9]+) per share", title, re.I)
+            if expanded is not None
+            else None
+        )
+        capital_common = capital is not None and any(c in "123456789" for c in capital[1])
         if (
-            not re.match(title_pattern, title, re.I)
+            (not re.match(title_pattern, title, re.I) and not capital_common)
+            or (expanded is not None and re.search(r"\bclass\b", title, re.I))
             or (class_a and re.search(r"\bclass\b", title[len("Class A Common Stock") :], re.I))
             or re.search(
                 r"preferred|depositary|warrant|\bunits?\b|\bnotes?\b|\bbonds?\b|\bfund\b",
@@ -482,7 +648,7 @@ def parse_current_common_stock(
             sec_title=title,
             sec_exchange=values["dei:SecurityExchangeName"],
             context_id=stock["context"],
-            facts=tuple([*record, *ciks]),
+            facts=tuple([*(expanded if expanded is not None else record), *ciks]),
             context=context,
         )
     except (ValueError, TypeError, KeyError, RecursionError, UnicodeError) as error:

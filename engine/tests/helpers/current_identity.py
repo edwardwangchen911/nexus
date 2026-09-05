@@ -86,6 +86,28 @@ def multiple_registrant_filing():
     )
 
 
+def dual_listing_filing():
+    """Synthetic same-text dual tagging, not a captured issuer filing."""
+    raw = filing()
+    context = re.search(rb'<xbrli:context id="stock">.*?</xbrli:context>', raw, re.S)[0]
+    other = context.replace(b'id="stock"', b'id="chicago"').replace(b"exch:XNYS", b"exch:XCHI")
+    hidden = (
+        b'<ix:hidden><ix:nonNumeric id="chicago-exchange" '
+        b'name="dei:SecurityExchangeName" contextRef="chicago">CHX</ix:nonNumeric></ix:hidden>'
+    )
+    raw = raw.replace(b"</ix:header>", other + hidden + b"</ix:header>")
+    for name, identifier in [("Security12bTitle", "title"), ("TradingSymbol", "symbol")]:
+        pattern = (
+            rb'(<ix:nonNumeric id="' + identifier.encode() + rb'"[^>]*>)(.*?)(</ix:nonNumeric>)'
+        )
+        match = re.search(pattern, raw, re.S)
+        inner = (
+            f'<ix:nonNumeric id="chicago-{identifier}" name="dei:{name}" contextRef="chicago">'
+        ).encode()
+        raw = raw[: match.start()] + inner + match[0] + b"</ix:nonNumeric>" + raw[match.end() :]
+    return raw
+
+
 def archives(root: Path, *, fmp=None, sec=None, received=None):
     received = received or datetime.now(UTC).isoformat()
     fmp = fmp or profile()

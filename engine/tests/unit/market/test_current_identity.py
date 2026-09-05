@@ -3,7 +3,7 @@ import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from helpers.current_identity import archives, filing, profile
+from helpers.current_identity import archives, dual_listing_filing, filing, profile
 from helpers.current_identity import multiple_registrant_filing as _multiple_registrant_cover
 
 
@@ -14,6 +14,202 @@ def test_explicit_same_security_identity():
     assert result.exchange == "XNYS"
     assert result.context_id == "stock"
     assert result.sec_title == "Common Stock"
+
+
+def test_dual_listing_rejects_cik_fact_from_another_period():
+    raw = dual_listing_filing()
+    context = re.search(rb'<xbrli:context id="stock">.*?</xbrli:context>', raw, re.S)[0]
+    old = context.replace(b'id="stock"', b'id="issuer"').replace(b"2025-01-01", b"2024-01-01")
+    raw = raw.replace(b"</ix:header>", old + b"</ix:header>").replace(
+        b'contextRef="stock">0000123456', b'contextRef="issuer">0000123456'
+    )
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+
+
+def test_dual_listing_uses_exact_visible_listing_and_preserves_auxiliary_evidence(tmp_path):
+    module = importlib.import_module("nexus.market.current_identity")
+    fm, sc = archives(tmp_path, sec=dual_listing_filing())
+    result = module.load_identity_archives(symbol="AAPL", fmp_archive=fm, sec_archive=sc).identity
+    assert result.context_id == "stock"
+    assert result.exchange == "XNYS"
+    assert result.sec_title == "Common Stock"
+    assert result.sec_exchange == "New York Stock Exchange"
+    assert len(result.facts) == 7
+    listings = [f for f in result.facts if "listing_context" in f]
+    assert len(listings) == 6
+    assert {f["listing_context"]["id"] for f in listings} == {"stock", "chicago"}
+    assert sum(f["selected_listing"] for f in listings) == 3
+    hidden = next(f for f in listings if f["id"] == "chicago-exchange")
+    assert hidden["visible"] is False and hidden["value"] == "CHX"
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        (b'contextRef="chicago">CHX', b'contextRef="chicago">NASDAQ'),
+        (b"exch:XCHI", b"exch:XNAS"),
+        (b'id="symbol"', b'id="symbol" style="display:none"'),
+        (
+            b">Common Stock</ix:nonNumeric></ix:nonNumeric>",
+            b">Common Stock</ix:nonNumeric> Preferred</ix:nonNumeric>",
+        ),
+        (
+            b'contextRef="chicago"><ix:nonNumeric id="symbol"',
+            b'contextRef="stock"><ix:nonNumeric id="symbol"',
+        ),
+        (b'<td><ix:nonNumeric id="exchange"', b'</tr><tr><td><ix:nonNumeric id="exchange"'),
+        (b">AAPL</ix:nonNumeric>", b"><ix:exclude>AAPL</ix:exclude></ix:nonNumeric>"),
+        (
+            b"</body>",
+            b'<table><tr><td><ix:nonNumeric id="extra" name="dei:TradingSymbol" '
+            b'contextRef="stock">AAPL</ix:nonNumeric></td></tr></table></body>',
+        ),
+    ],
+)
+def test_dual_listing_rejects_ambiguous_or_mismatched_scope(before, after):
+    raw = dual_listing_filing()
+    assert before in raw
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL", fmp_raw=profile(), sec_raw=raw.replace(before, after)
+        )
+
+
+def _dual_exchange_transform():
+    return (
+        dual_listing_filing()
+        .replace(
+            b"<html ",
+            b'<html xmlns:ixt-sec="http://www.sec.gov/inlineXBRL/transformation/2015-08-31" ',
+        )
+        .replace(b'id="exchange"', b'id="exchange" format="ixt-sec:exchnameen"')
+    )
+
+
+def test_dual_listing_accepts_exact_sec_exchange_transform():
+    module = importlib.import_module("nexus.market.current_identity")
+    result = module.parse_current_common_stock(
+        symbol="AAPL", fmp_raw=profile(), sec_raw=_dual_exchange_transform()
+    )
+    assert result.exchange == "XNYS" and result.sec_exchange == "New York Stock Exchange"
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        (
+            b"http://www.sec.gov/inlineXBRL/transformation/2015-08-31",
+            b"https://example.invalid/transformation",
+        ),
+        (b"ixt-sec:exchnameen", b"ixt-sec:unknown"),
+        (b'id="title"', b'id="title" format="ixt-sec:exchnameen"'),
+        (b'contextRef="chicago">CHX', b'contextRef="chicago" target="other">CHX'),
+    ],
+)
+def test_dual_listing_rejects_unverified_transform(before, after):
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL",
+            fmp_raw=profile(),
+            sec_raw=_dual_exchange_transform().replace(before, after),
+        )
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        (b"0000123456", b"0000654321"),
+        (b"2025-01-01", b"2024-01-01"),
+        (b"us-gaap:CommonStockMember", b"us-gaap:PreferredStockMember"),
+        (b"</xbrli:entity>", b"<xbrli:scenario></xbrli:scenario></xbrli:entity>"),
+    ],
+)
+def test_dual_listing_rejects_secondary_entity_period_class_or_shape_mismatch(before, after):
+    raw = dual_listing_filing()
+    context = re.search(rb'<xbrli:context id="chicago">.*?</xbrli:context>', raw, re.S)[0]
+    assert before in context
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL",
+            fmp_raw=profile(),
+            sec_raw=raw.replace(context, context.replace(before, after)),
+        )
+
+
+def test_dual_listing_does_not_choose_exchange_without_fmp_intersection():
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL", fmp_raw=profile(exchange="NASDAQ"), sec_raw=dual_listing_filing()
+        )
+
+
+def test_dual_listing_capital_stock_requires_explicit_common_member():
+    module = importlib.import_module("nexus.market.current_identity")
+    raw = dual_listing_filing().replace(
+        b">Common Stock<", b">Capital Stock, par value $.01 per share<"
+    )
+    result = module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+    assert result.sec_title == "Capital Stock, par value $.01 per share"
+    assert result.exchange == "XNYS"
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        b"Capital Stock",
+        b"Capital Stock, par value $.01 per share Preferred",
+        b"Capital Stock, par value $.01 per share Class B",
+        b"Capital Stock Units",
+        b"Capital Stock, par value $.01 per share Depositary",
+        b"Capital Stock, par value $.01 per share; additional rights",
+        b"Capital Stock, par value $-0.01 per share",
+        b"Capital Stock, par value $NaN per share",
+        b"Capital Stock, par value $0.00 per share",
+        b"Capital Stock, par value $1e-2 per share",
+    ],
+)
+def test_dual_listing_rejects_unproven_capital_stock_title(title):
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL",
+            fmp_raw=profile(),
+            sec_raw=dual_listing_filing().replace(b">Common Stock<", b">" + title + b"<"),
+        )
+
+
+def test_single_listing_capital_stock_policy_is_unchanged():
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL",
+            fmp_raw=profile(),
+            sec_raw=filing().replace(
+                b">Common Stock<", b">Capital Stock, par value $.01 per share<"
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        (b">Common Stock<", b">Common Stock Class B<"),
+        (b"<table><tr>", b"<ix:unknown><table><tr>"),
+    ],
+)
+def test_dual_listing_rejects_class_tail_or_unknown_ix_ancestor(before, after):
+    raw = dual_listing_filing().replace(before, after)
+    if b"<ix:unknown>" in raw:
+        raw = raw.replace(b"</table>", b"</table></ix:unknown>")
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
 
 
 @pytest.mark.parametrize(
