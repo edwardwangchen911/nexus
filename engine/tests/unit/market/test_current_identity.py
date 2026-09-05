@@ -156,3 +156,60 @@ def test_context_entity_and_registration_table_must_be_supported(before, after):
         module.parse_current_common_stock(
             symbol="AAPL", fmp_raw=profile(), sec_raw=filing().replace(before, after)
         )
+
+
+def _cover_without_exchange_axis():
+    return (
+        filing()
+        .replace(b'xmlns:exch="http://xbrl.sec.gov/exch/2025"', b"")
+        .replace(
+            b'<xbrldi:explicitMember dimension="dei:EntityListingsExchangeAxis">'
+            b"exch:XNYS</xbrldi:explicitMember>",
+            b"",
+        )
+        .replace(b"New York Stock Exchange", b"The Nasdaq Stock Market LLC")
+    )
+
+
+def test_common_stock_cover_can_bind_exchange_by_same_registration_row():
+    module = importlib.import_module("nexus.market.current_identity")
+    result = module.parse_current_common_stock(
+        symbol="AAPL",
+        fmp_raw=profile(exchange="NASDAQ"),
+        sec_raw=_cover_without_exchange_axis(),
+    )
+    assert result.exchange == "XNAS"
+    assert not any(
+        f["attrs"].get("dimension") == "dei:EntityListingsExchangeAxis"
+        for f in result.context["fields"]
+    )
+
+
+@pytest.mark.parametrize(
+    "case", ["wrong_exchange", "wrong_class", "unbound_axis", "bad_namespace", "unknown_axis"]
+)
+def test_exchange_without_axis_still_requires_exact_security_evidence(case):
+    module = importlib.import_module("nexus.market.current_identity")
+    raw = _cover_without_exchange_axis()
+    if case == "wrong_exchange":
+        raw = raw.replace(b"The Nasdaq Stock Market LLC", b"New York Stock Exchange")
+    elif case == "wrong_class":
+        raw = raw.replace(b"us-gaap:CommonStockMember", b"us-gaap:PreferredStockMember")
+    elif case == "unbound_axis":
+        raw = raw.replace(
+            b"</xbrli:segment>",
+            b'<xbrldi:explicitMember dimension="dei:EntityListingsExchangeAxis">'
+            b"exch:XNAS</xbrldi:explicitMember></xbrli:segment>",
+        )
+    elif case == "unknown_axis":
+        raw = raw.replace(
+            b"</xbrli:segment>",
+            b'<xbrldi:explicitMember dimension="dei:OtherAxis">'
+            b"us-gaap:CommonStockMember</xbrldi:explicitMember></xbrli:segment>",
+        )
+    else:
+        raw = raw.replace(b"<html ", b'<html xmlns:exch="http://example.invalid/exch" ')
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL", fmp_raw=profile(exchange="NASDAQ"), sec_raw=raw
+        )

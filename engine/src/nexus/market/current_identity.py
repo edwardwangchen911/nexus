@@ -267,8 +267,14 @@ def parse_current_common_stock(
             for key, pattern in {
                 "xmlns:dei": r"http://xbrl\.sec\.gov/dei/[0-9]{4}",
                 "xmlns:us-gaap": r"http://fasb\.org/us-gaap/[0-9]{4}",
-                "xmlns:exch": r"http://xbrl\.sec\.gov/exch/[0-9]{4}",
             }.items()
+        ):
+            raise invalid()
+        exchange_namespace = parser.namespaces.get("xmlns:exch")
+        if (
+            "xmlns:exch" in parser.namespaces
+            and re.fullmatch(r"http://xbrl\.sec\.gov/exch/[0-9]{4}", exchange_namespace or "")
+            is None
         ):
             raise invalid()
         symbols = [
@@ -289,10 +295,11 @@ def parse_current_common_stock(
         context = parser.contexts[stock["context"]]
         dimensions = _context(context, identifier)
         _context(parser.contexts[ciks[0]["context"]], identifier)
-        if dimensions != {
-            "us-gaap:StatementClassOfStockAxis": "us-gaap:CommonStockMember",
-            "dei:EntityListingsExchangeAxis": f"exch:{exchange}",
-        }:
+        class_dimension = {"us-gaap:StatementClassOfStockAxis": "us-gaap:CommonStockMember"}
+        exchange_dimension = {"dei:EntityListingsExchangeAxis": f"exch:{exchange}"}
+        if dimensions not in (class_dimension, class_dimension | exchange_dimension):
+            raise invalid()
+        if "dei:EntityListingsExchangeAxis" in dimensions and not exchange_namespace:
             raise invalid()
         values = {f["name"]: f["value"] for f in record}
         title = values["dei:Security12bTitle"]
