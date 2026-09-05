@@ -2718,3 +2718,37 @@ Ruff及diff-check通过。防复发落实在非空数量与精确内容断言，
 协调独立定向复核Ready，6个SDK路径测试再次通过（7.48s）；消费者与测试已串行
 集成main8626d69/00bb324。主线三文件与A验证版本净差零；未重启API或调用模型，
 真实消费者验收随原件补录→新prepare一并完成，不能宣称旧研究已包含标签。
+
+### SEC 合同收入补录与真实页面验收
+
+原件实际含 excluding-assessed-tax 合同收入，旧映射只识别 Revenues；这是本地映射
+遗漏，不是上游缺失。root 四片经 D 集中审查，依次合 main bac14e9/abd67a5/0172c5d/
+c6f52a4，关键源及 PG 与交付净差零。保留原标签，拒绝双 basis 冲突；锁既有 Filing，
+校验原件和全部旧事实后原子追加，使用实际 DB created_at，不改历史版本或截止。
+54 unit 通过；隔离 PG 先失败于缺入口，实现后正常 producer→补录→重复零新增→
+新旧截止工具/API 1 passed 6.75s；hash、长度、等值/异值双 basis、缺归属五例拒绝
+且零事实变化，5 passed 16.96s。无依赖或迁移，普通采集重放行为不变。
+
+真实唯一绑定既有研究 SEC 引用的 instrument/accession/hash/location 及 frozen
+filing 引用，仅一次正常 CLI 补 4 条收入，逐条金额、单位、期间、raw_tag、revision
+和归属与原件精确一致；一次正常新截止 prepare 创建 1 snapshot 和 1 组合上下文
+引用。后者经正常 read_portfolio_context 严格校验且为该表唯一新增，原 SEC 引用
+不变。19 表旧行多重集完整保留，原件字节未变；旧 run 实际工具、输入 reader、
+受保护 API 的 intent/stage_trace/inputs/snapshot/decision_time 精确不变。
+
+新 prepare→输入 reader→受保护 admission API→BFF→375/1440 DOM 均显示 4 条
+收入，逐条核数值/单位/期间/raw_tag；页面明确当前资料未被旧研究采用，无横溢出
+或交易控件，仅本地读取、blocked 0。API/BFF/DOM 后 19 表精确不变。未伪造或
+admit 新 run、未排 Job、未调用模型/采集；新工具→SDK 复用隔离 PG 及已修正的
+六个非空 wire 场景，不称旧模型采用了补录内容或新研究已完成。
+
+验收脚本首次漏计 prepare 正常新增的组合上下文 ref，在补录成功后停止；保留
+回执，只读确认该唯一 ref 精确归属后完成检查，没有重放 CLI/prepare 或修改产品。
+readiness 首次漏签名返回 401；签名后 DB/迁移/对象存储 ready、worker stale。
+只读 API 实际成功，不称全服务 ready，不为验收启动 worker 或重启 API。
+证据位于原案例 sec-projection/ 的 acceptance-summary.json、api-summary.json、
+dom-summary.json、post-dom-summary.json 及私有目标、规划、CLI 回执和前后 hash。
+
+独立 Shadow ae1aadb 在真实操作完成后合 main 5be1397，三文件净差零；仅显式传
+既定 session_date 并移除重复 as_of。复用 D 104 unit、协调独立 25 query unit 及
+Mypy 通过；修复 ops 传导的两处旧缺参，未运行 Shadow、采集或额外 PG。
