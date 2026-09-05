@@ -33,6 +33,9 @@ _EXCHANGES = {
     "NASDAQ": "XNAS",
     "Nasdaq": "XNAS",
     "The Nasdaq Stock Market LLC": "XNAS",
+    # Nasdaq Listing Center FAQ 1081: Global Select is a tier of Nasdaq Stock Market LLC.
+    # https://listingcenter.nasdaq.com/Material_Search.aspx?cid=38&mcd=LQ&sub_cid=67
+    "The NASDAQ Global Select Market": "XNAS",
     "NYSE American": "XASE",
     "AMEX": "XASE",
 }
@@ -108,6 +111,10 @@ class _Cover(HTMLParser):
         self.rows = 0
         self.namespaces: dict[str, str | None] = {}
         self.root_seen = False
+        # Parser-only proof: do not change the serialized context of old identity archives.
+        self.plain_contexts: set[str] = set()
+        self._context_nodes: list[tuple[str, str, dict[str, str | None]]] = []
+        self._context_extra_text = False
 
     def handle_decl(self, decl: str) -> None:
         if decl.lower() != "doctype html":
@@ -147,6 +154,11 @@ class _Cover(HTMLParser):
             if self.context is not None or not identifier:
                 raise invalid()
             self.context = {"id": identifier, "fields": []}
+            self._context_nodes = []
+            self._context_extra_text = False
+        if self.context is not None:
+            parent = "" if tag == "xbrli:context" else self.stack[-2][0]
+            self._context_nodes.append((tag, parent, a))
         if self.context is not None and tag in {
             "xbrli:identifier",
             "xbrli:startdate",
@@ -189,6 +201,8 @@ class _Cover(HTMLParser):
             )
 
     def handle_data(self, data: str) -> None:
+        if self.context is not None and self.field is None and data.strip():
+            self._context_extra_text = True
         if self.active is not None:
             self.active["parts"].append(data)
         if self.field is not None:
@@ -211,6 +225,15 @@ class _Cover(HTMLParser):
         if tag == "xbrli:context":
             if self.context is None:
                 raise invalid()
+            if not self._context_extra_text and self._context_nodes == [
+                ("xbrli:context", "", {"id": self.context["id"]}),
+                ("xbrli:entity", "xbrli:context", {}),
+                ("xbrli:identifier", "xbrli:entity", {"scheme": "http://www.sec.gov/CIK"}),
+                ("xbrli:period", "xbrli:context", {}),
+                ("xbrli:startdate", "xbrli:period", {}),
+                ("xbrli:enddate", "xbrli:period", {}),
+            ]:
+                self.plain_contexts.add(self.context["id"])
             self.contexts[self.context["id"]] = self.context
             self.context = None
         self.stack.pop()
@@ -297,7 +320,11 @@ def parse_current_common_stock(
         _context(parser.contexts[ciks[0]["context"]], identifier)
         class_dimension = {"us-gaap:StatementClassOfStockAxis": "us-gaap:CommonStockMember"}
         exchange_dimension = {"dei:EntityListingsExchangeAxis": f"exch:{exchange}"}
-        if dimensions not in (class_dimension, class_dimension | exchange_dimension):
+        plain_stock = not dimensions and stock["context"] in parser.plain_contexts
+        if not plain_stock and dimensions not in (
+            class_dimension,
+            class_dimension | exchange_dimension,
+        ):
             raise invalid()
         if "dei:EntityListingsExchangeAxis" in dimensions and not exchange_namespace:
             raise invalid()

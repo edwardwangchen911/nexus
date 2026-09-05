@@ -1,4 +1,5 @@
 import importlib
+import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -209,6 +210,111 @@ def test_exchange_without_axis_still_requires_exact_security_evidence(case):
         )
     else:
         raw = raw.replace(b"<html ", b'<html xmlns:exch="http://example.invalid/exch" ')
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL", fmp_raw=profile(exchange="NASDAQ"), sec_raw=raw
+        )
+
+
+def _cover_without_segment():
+    return re.sub(rb"<xbrli:segment>.*?</xbrli:segment>", b"", filing(), flags=re.S)
+
+
+def test_plain_entity_duration_cover_loads_without_inventing_stock_dimension(tmp_path):
+    module = importlib.import_module("nexus.market.current_identity")
+    fm, sc = archives(tmp_path, sec=_cover_without_segment())
+    result = module.load_identity_archives(symbol="AAPL", fmp_archive=fm, sec_archive=sc)
+    assert result.identity.sec_title == "Common Stock"
+    assert result.identity.exchange == "XNYS"
+    assert [f["tag"] for f in result.identity.context["fields"]] == [
+        "xbrli:identifier",
+        "xbrli:startdate",
+        "xbrli:enddate",
+    ]
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        (b"</xbrli:entity>", b"<xbrli:segment></xbrli:segment></xbrli:entity>"),
+        (b"</xbrli:period>", b"</xbrli:period><xbrli:scenario></xbrli:scenario>"),
+        (
+            b"</xbrli:entity>",
+            b'<xbrldi:typedMember dimension="dei:OtherAxis">'
+            b"<dei:Other>Preferred</dei:Other></xbrldi:typedMember></xbrli:entity>",
+        ),
+        (
+            b"</xbrli:entity>",
+            b'<xbrldi:explicitMember dimension="dei:OtherAxis">'
+            b"us-gaap:CommonStockMember</xbrldi:explicitMember></xbrli:entity>",
+        ),
+        (b"</xbrli:entity>", b"<dei:Other>Preferred</dei:Other></xbrli:entity>"),
+        (b"<xbrli:period>", b'<xbrli:period other="unknown">'),
+        (b"<xbrli:period>", b"<xbrli:period>Preferred"),
+        (b"<xbrli:startDate>", b"<dei:Other><xbrli:startDate>"),
+        (b"</xbrli:entity>", b"</xbrli:entity><xbrli:entity></xbrli:entity>"),
+    ],
+)
+def test_plain_cover_rejects_unproven_context_structure(before, after):
+    module = importlib.import_module("nexus.market.current_identity")
+    raw = _cover_without_segment().replace(before, after)
+    if before == b"<xbrli:startDate>":
+        raw = raw.replace(b"</xbrli:startDate>", b"</xbrli:startDate></dei:Other>")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        (b">Common Stock<", b">Preferred Stock<"),
+        (b">Common Stock<", b">Common Stock Notes<"),
+        (b">Common Stock<", b">Common Stock Warrants<"),
+        (b">0000123456<", b">0000654321<"),
+        (b"New York Stock Exchange", b"The Nasdaq Stock Market LLC"),
+        (b'<td><ix:nonNumeric id="exchange"', b'</tr><tr><td><ix:nonNumeric id="exchange"'),
+        (b'contextRef="stock">AAPL', b'contextRef="other">AAPL'),
+        (
+            b"</body>",
+            b'<ix:nonNumeric id="again" name="dei:TradingSymbol" '
+            b'contextRef="stock">AAPL</ix:nonNumeric></body>',
+        ),
+    ],
+)
+def test_plain_cover_keeps_same_security_and_exchange_guards(before, after):
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL",
+            fmp_raw=profile(),
+            sec_raw=_cover_without_segment().replace(before, after),
+        )
+
+
+def test_global_select_exact_cover_alias_binds_nasdaq_not_separate_exchange():
+    module = importlib.import_module("nexus.market.current_identity")
+    raw = _cover_without_exchange_axis().replace(
+        b"The Nasdaq Stock Market LLC", b"The NASDAQ Global Select Market"
+    )
+    result = module.parse_current_common_stock(
+        symbol="AAPL", fmp_raw=profile(exchange="NASDAQ"), sec_raw=raw
+    )
+    assert result.exchange == "XNAS"
+    assert result.sec_exchange == "The NASDAQ Global Select Market"
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        b"The NASDAQ Global Select Market Other",
+        b"Not The NASDAQ Global Select Market",
+        b"The-NASDAQ-Global-Select-Market",
+        b"New York Stock Exchange",
+    ],
+)
+def test_global_select_alias_is_not_a_substring_or_fuzzy_match(label):
+    module = importlib.import_module("nexus.market.current_identity")
+    raw = _cover_without_exchange_axis().replace(b"The Nasdaq Stock Market LLC", label)
     with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
         module.parse_current_common_stock(
             symbol="AAPL", fmp_raw=profile(exchange="NASDAQ"), sec_raw=raw
