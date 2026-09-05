@@ -137,6 +137,7 @@ class _Cover(HTMLParser):
         self.context_scope: dict[str, list[tuple[str, dict[str, str | None], int | None]]] = {}
         self.context_nodes: dict[str, list[tuple[str, str, dict[str, str | None]]]] = {}
         self.relationships: list[dict[str, str | None]] = []
+        self.context_extra_text: dict[str, bool] = {}
 
     def handle_decl(self, decl: str) -> None:
         if decl.lower() != "doctype html":
@@ -362,6 +363,7 @@ class _Cover(HTMLParser):
                 self.legal_contexts.add(self.context["id"])
             self.contexts[self.context["id"]] = self.context
             self.context_nodes[self.context["id"]] = list(self._context_nodes)
+            self.context_extra_text[self.context["id"]] = self._context_extra_text
             self.context = None
         self.stack.pop()
 
@@ -805,6 +807,137 @@ def _class_title_scope(
             raise invalid()
 
 
+def _single_exchange_record(
+    parser: _Cover, symbols: list[dict[str, Any]], identifier: str, exchange: str
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """One Common Shares listing; the independent hidden exchange is not linked to it.
+
+    SEC XBRL Guide 3.2.4.2, 11.12 and 11.14 allow exchange-axis contexts,
+    exchange-name formatting and hidden DEI facts without a CSS display reference.
+    Keep the ancillary lexical value: do not turn the transform into an alias.
+    """
+    if len(parser.facts) != 5 or len(symbols) != 1 or exchange != "XNYS":
+        raise invalid()
+    stock = symbols[0]
+    record = [f for f in parser.facts if f["row"] == stock["row"]]
+    ciks = [f for f in parser.facts if f["name"] == "dei:EntityCentralIndexKey"]
+    auxiliary = [f for f in parser.facts if f["id"] in parser.scope_exceptions]
+    if (
+        stock["row"] is None
+        or len(record) != 3
+        or len(ciks) != 1
+        or len(auxiliary) != 1
+        or {f["context"] for f in record} != {stock["context"]}
+        or {f["name"] for f in record} != _FACTS - {"dei:EntityCentralIndexKey"}
+    ):
+        raise invalid()
+    aux, issuer = auxiliary[0], ciks[0]
+    if (
+        aux["name"] != "dei:SecurityExchangeName"
+        or aux["row"] is not None
+        or aux["value"] not in {"Chicago Stock Exchange, Inc", "Chicago Stock Exchange, Inc."}
+        or len({stock["context"], aux["context"], issuer["context"]}) != 3
+        or issuer["context"] not in parser.plain_contexts
+        or cik(issuer["value"]) != identifier
+        or not any(
+            f["name"] == "dei:Security12bTitle" and re.match(r"^Common Shares\b", f["value"], re.I)
+            for f in record
+        )
+    ):
+        raise invalid()
+    forbidden = {"target", "tupleref", "order", "xml:base"}
+    for fact, mic in ((stock, "XNYS"), (aux, "XCHI"), (issuer, None)):
+        cid = fact["context"]
+        context = parser.contexts[cid]
+        expected = {} if mic is None else {"dei:EntityListingsExchangeAxis": f"exch:{mic}"}
+        if _context(context, identifier) != expected or _period(context) != _period(
+            parser.contexts[stock["context"]]
+        ):
+            raise invalid()
+        if mic is not None and parser.context_nodes[cid] != [
+            ("xbrli:context", "", {"id": cid}),
+            ("xbrli:entity", "xbrli:context", {}),
+            ("xbrli:identifier", "xbrli:entity", {"scheme": "http://www.sec.gov/CIK"}),
+            ("xbrli:segment", "xbrli:entity", {}),
+            (
+                "xbrldi:explicitmember",
+                "xbrli:segment",
+                {"dimension": "dei:EntityListingsExchangeAxis"},
+            ),
+            ("xbrli:period", "xbrli:context", {}),
+            ("xbrli:startdate", "xbrli:period", {}),
+            ("xbrli:enddate", "xbrli:period", {}),
+        ]:
+            raise invalid()
+        if (
+            parser.context_extra_text[cid]
+            or any(forbidden & a.keys() for _, _, a in parser.context_nodes[cid])
+            or any(
+                forbidden & a.keys()
+                or (t.startswith("ix:") and t not in {"ix:header", "ix:resources"})
+                for t, a, _ in parser.context_scope[cid]
+            )
+        ):
+            raise invalid()
+    bound_ids = {f["id"] for f in parser.facts} | {f["context"] for f in parser.facts}
+    if any(
+        bound_ids & set((r.get(k) or "").split())
+        for r in parser.relationships
+        for k in ("fromrefs", "torefs", "contextref")
+    ):
+        raise invalid()
+    if any(
+        bound_ids
+        & {
+            v.strip()
+            for v in re.findall(
+                r"(?:^|;)\s*-sec-ix-hidden\s*:\s*([^;]+)", n["attrs"]["style"], re.I
+            )
+        }
+        for n in parser.display_nodes
+    ):
+        raise invalid()
+    for fact in parser.facts:
+        scope = parser.fact_scope[fact["id"]]
+        allowed_ix = {"ix:nonnumeric"} | (
+            {"ix:header", "ix:hidden"} if fact in (aux, issuer) else set()
+        )
+        if (
+            scope["parent_fact_id"]
+            or scope["hidden_descendant"]
+            or scope["unsupported_descendant"]
+            or scope["ix_ancestors"] - allowed_ix
+            or any(forbidden & a.keys() for _, a, _ in scope["ancestors"])
+            or set(scope["attrs"]) - {"id", "name", "contextref", "format"}
+        ):
+            raise invalid()
+        if fact in record and (
+            not _directly_visible(scope["ancestors"])
+            or sum(t == "tr" for t, _, _ in scope["ancestors"]) != 1
+        ):
+            raise invalid()
+        if fact is aux and "ix:hidden" not in scope["ix_ancestors"]:
+            raise invalid()
+        if fact["name"] == "dei:SecurityExchangeName":
+            if (
+                scope["attrs"].get("format") != "ixt-sec:exchnameen"
+                or parser.namespaces.get("xmlns:ixt-sec")
+                != "http://www.sec.gov/inlineXBRL/transformation/2015-08-31"
+            ):
+                raise invalid()
+        elif "format" in scope["attrs"]:
+            raise invalid()
+    proof = dict(
+        aux,
+        visible=False,
+        identity_linked=False,
+        evidence_role="unlinked_exchange",
+        format=parser.fact_scope[aux["id"]]["attrs"]["format"],
+        context_evidence=parser.contexts[aux["context"]],
+    )
+    return stock, record, [*record, proof]
+
+
 def parse_current_common_stock(
     *,
     symbol: str,
@@ -855,6 +988,7 @@ def parse_current_common_stock(
         if not ciks:
             raise invalid()
         expanded = None
+        exchange_only = False
         if parser.scope_exceptions or any(s["parent_fact_id"] for s in parser.fact_scope.values()):
             if len(ciks) != 1:
                 raise invalid()
@@ -866,6 +1000,9 @@ def parse_current_common_stock(
                 )
                 else _dual_listing_record
             )
+            if resolver is _dual_listing_record and len(symbols) == 1 and len(parser.facts) == 5:
+                resolver = _single_exchange_record
+                exchange_only = True
             stock, record, expanded = resolver(parser, symbols, identifier, exchange)
             if _period(parser.contexts[ciks[0]["context"]]) != _period(
                 parser.contexts[stock["context"]]
@@ -907,6 +1044,7 @@ def parse_current_common_stock(
             not plain_stock
             and not class_a
             and not custom
+            and not exchange_only
             and dimensions
             not in (
                 class_dimension,
