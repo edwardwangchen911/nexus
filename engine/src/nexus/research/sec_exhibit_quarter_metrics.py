@@ -215,6 +215,13 @@ def _decimal(raw: str) -> tuple[str, int]:
     return format(value, "f"), max(0, -exponent)
 
 
+def _value_at(row: tuple[_Cell, ...], column: int) -> tuple[str, int]:
+    cell = _cell_at(row, column)
+    if cell.start != column or cell.end != column + 1:
+        _fail()
+    return _decimal(cell.text)
+
+
 def _metric(
     metric: Literal["net_revenue", "gaap_net_income", "gaap_diluted_eps"],
     path: tuple[str, ...],
@@ -223,8 +230,8 @@ def _metric(
 ) -> ExhibitQuarterMetric:
     if not _exact_cell(row, 6, 7, "$") or not _exact_cell(row, 18, 19, "$"):
         _fail()
-    current, current_scale = _decimal(_cell_at(row, 7).text)
-    comparable, comparable_scale = _decimal(_cell_at(row, 19).text)
+    current, current_scale = _value_at(row, 7)
+    comparable, comparable_scale = _value_at(row, 19)
     return ExhibitQuarterMetric(
         metric=metric,
         row_path=path,
@@ -348,6 +355,7 @@ def parse_exhibit_quarter_metrics(raw: bytes) -> ExhibitQuarterMetrics:
         summary_current != non_gaap_current
         or summary_comparable != non_gaap_comparable
         or summary_current[0] != summary_comparable[0]
+        or summary_current[0] != "3"
         or summary_current[1] != dates[0].strftime("%y")
         or summary_comparable[1] != dates[2].strftime("%y")
     ):
@@ -362,8 +370,8 @@ def parse_exhibit_quarter_metrics(raw: bytes) -> ExhibitQuarterMetrics:
         if not _exact_cell(row, 6, 7, "$") or not _exact_cell(row, 12, 13, "$"):
             _fail()
         if (
-            _decimal(_cell_at(row, 7).text)[0] != metric.current_value
-            or _decimal(_cell_at(row, 13).text)[0] != metric.comparable_value
+            _value_at(row, 7)[0] != metric.current_value
+            or _value_at(row, 13)[0] != metric.comparable_value
         ):
             _fail()
 

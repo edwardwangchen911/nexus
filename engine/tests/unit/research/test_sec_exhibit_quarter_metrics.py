@@ -220,3 +220,21 @@ def test_visibility_hidden_and_void_tags_cannot_supply_values():
     )
     with pytest.raises(ValueError, match="SEC_EXHIBIT_QUARTER_METRICS"):
         parse(raw)
+
+
+def test_summary_quarter_must_match_three_fiscal_quarters_ended():
+    raw = exhibit_html().replace(b"Q3 26", b"Q1 26").replace(b"Q3 25", b"Q1 25")
+    with pytest.raises(ValueError, match="SEC_EXHIBIT_QUARTER_METRICS"):
+        parse(raw)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (b"<td>1,234</td><td></td>", b"<td colspan=2>1,234</td>"),
+        (b"<td>987</td><td></td>", b"<td colspan=2>987</td>"),
+    ],
+)
+def test_metric_value_cell_cannot_span_into_an_adjacent_column(old: bytes, new: bytes):
+    with pytest.raises(ValueError, match="SEC_EXHIBIT_QUARTER_METRICS"):
+        parse(exhibit_html().replace(old, new, 1))
