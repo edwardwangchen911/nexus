@@ -255,3 +255,21 @@ def test_structured_setup_rejects_ambiguous_backend_or_version(monkeypatch, caps
     )
     assert openai_local.main() == 1
     assert "CODEX_STRUCTURED_SETUP_" in capsys.readouterr().out
+
+
+def test_explicit_research_admission_uses_normal_configuration(monkeypatch, tmp_path, capsys):
+    from nexus.ops import openai_local
+    from nexus.settings import EngineSettings
+
+    request = tmp_path / "request.json"
+    request.write_text("{}")
+    settings = EngineSettings(database_url="postgresql+asyncpg://localhost/nexus")
+    admit = AsyncMock(return_value={"status": "prepared", "model_requests": 0})
+    monkeypatch.setattr(openai_local, "admit_local_research", admit, raising=False)
+    monkeypatch.setattr(openai_local, "local_settings", lambda *a, **kw: settings)
+    monkeypatch.setattr(
+        "sys.argv", ["nexus-openai-local", "admit-research", "--research-request", str(request)]
+    )
+    assert openai_local.main() == 0
+    admit.assert_awaited_once_with(settings, request)
+    assert '"model_requests": 0' in capsys.readouterr().out

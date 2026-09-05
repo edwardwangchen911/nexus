@@ -2798,3 +2798,27 @@ primaryDocument，reader 没有父文→精确附件来源链。因此不能把�
 当已存 CompanyFacts 结构化事实；需要窄入口支持后再真实冻结。当前仅私有归档，
 业务写入/prepare/model 均为 0。证据：latest-operating-disclosure/exhibit-99-1/
 content-contract-summary.json、父 href 计划、raw/receipt 及完整可见文本。
+
+### 完整业绩附件正常导入与页面验收（2026-09-06）
+
+窄 v2 合同分别保留 8-K 父文和 99.1 完整文本、三份原件及回执绑定；未增加表、
+迁移或依赖，未把新闻稿投影为 FinancialFact。消费者已主线 237932d，当前本地 API
+镜像由该主线重新构建并加载。正常 CLI 导入及 prepare 各成功一次，完整附件
+23151 字符。新增 6 artifacts、2 snapshots、2 refs、1 filing；20 表所有旧行保留，
+未采集或调用模型。受保护 API、新快照 BFF、375/1440 实际 DOM 精确一致，附件
+尾部、来源链接、原件 hash 和旧新研究边界可见，无页面溢出或交易操作。
+旧研究 API 语义保持（新增可选 exhibit:null 不重写旧证据）。readiness 的 DB、迁移、
+对象存储 ready，worker stale，不称整体 ready。私有证据位于既有案例
+latest-operating-disclosure/v2-acceptance-fixed-listing/。
+
+首次正常导入在身份类型判断失败，20 表逐行 hash 证实零变更；保留首次回执，
+修复后新 attempt 未重放未知结果。根因是实际凭证为 current_listing_revision_v1，
+新增入口仅调普通身份 reader；现按 source 分派既有严格 reader，并传冻结 as_of。
+完整 PostgreSQL 回归参数化普通/修订身份：红 1 failed → 绿 2 passed，覆盖导入、
+冻结、数据库工具、SDK 请求和 API；此前只用普通身份和离线 builder 的验证不足。
+另以真实 ClientError/NoSuchKey 补缺件回归，原件不可读时明确不可用而非整页错误。
+
+只读预算检查首次尝试临时内存 authority，被工具的真实 run 绑定校验正确拒绝，
+未调用模型或写入 run。不得绕过该校验；正常 API 又明确不默认选择 v2/v3，因此
+在既有本地 CLI 增加显式 admit-research，沿现有幂等、预算和证据事务登记真实 run，
+再针对同一 run 预检。入口不调用模型，第一阶段预检不代表后续真实阶段必过。

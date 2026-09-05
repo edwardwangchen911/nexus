@@ -25,6 +25,7 @@ from sqlalchemy.engine import make_url
 from nexus.agents import codex_token_budget
 from nexus.agents.committee import load_prompt_assets
 from nexus.ops.fosun_local import _localize_compose_endpoints
+from nexus.ops.research_admit_local import admit_local_research
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentPromptVersionRecord
 from nexus.persistence.session import session_factory
 from nexus.settings import AgentRuntimeMode, EngineSettings
@@ -369,9 +370,11 @@ def main() -> int:
             "refresh-fund",
             "project-sec-facts",
             "import-sec-exhibit",
+            "admit-research",
             "run-once",
         ),
     )
+    parser.add_argument("--research-request", type=Path)
     parser.add_argument("--instrument-id", type=UUID)
     parser.add_argument("--filing-id", type=UUID)
     parser.add_argument("--identity-snapshot-id", type=UUID)
@@ -403,12 +406,19 @@ def main() -> int:
     args = parser.parse_args()
     root = Path.cwd().resolve()
     try:
+        if (args.action == "admit-research") != (args.research_request is not None):
+            raise ValueError("CODEX_ADMISSION_ARGUMENTS_INVALID")
+        if args.action == "admit-research" and any(
+            v is not None for v in (args.instrument_id, args.as_of, args.accession)
+        ):
+            raise ValueError("CODEX_ADMISSION_ARGUMENTS_INVALID")
         exhibit_archives = [
             (getattr(args, f"sec_{part}"), getattr(args, f"sec_{part}_receipt"))
             for part in ("submissions", "parent", "exhibit")
         ]
         exhibit_arguments = [
-            args.identity_snapshot_id, *(p for pair in exhibit_archives for p in pair)
+            args.identity_snapshot_id,
+            *(p for pair in exhibit_archives for p in pair),
         ]
         if args.action == "import-sec-exhibit":
             if not all(p is not None for p in exhibit_arguments) or any(
@@ -448,8 +458,13 @@ def main() -> int:
             root,
             load_model_key=args.action
             not in {
-                "prepare-research", "refresh-research", "refresh-disclosure",
-                "refresh-fund", "project-sec-facts", "import-sec-exhibit",
+                "prepare-research",
+                "refresh-research",
+                "refresh-disclosure",
+                "refresh-fund",
+                "project-sec-facts",
+                "import-sec-exhibit",
+                "admit-research",
             },
             backend=args.backend,
         )
@@ -513,9 +528,15 @@ def main() -> int:
         elif args.action == "import-sec-exhibit":
             from nexus.ops.sec_exhibit_local import import_sec_exhibit
 
-            result = asyncio.run(import_sec_exhibit(
-                settings, identity_snapshot_id=args.identity_snapshot_id, archives=exhibit_archives,
-            ))
+            result = asyncio.run(
+                import_sec_exhibit(
+                    settings,
+                    identity_snapshot_id=args.identity_snapshot_id,
+                    archives=exhibit_archives,
+                )
+            )
+        elif args.action == "admit-research":
+            result = asyncio.run(admit_local_research(settings, args.research_request))
         elif args.action == "run-once":
             if args.backend == "responses" and settings.openai_api_key is None:
                 raise ValueError("OPENAI_API_KEY_MISSING")

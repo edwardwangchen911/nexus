@@ -311,3 +311,12 @@ Provider capability、来源政策或复权证据。迁移 `0034_capability_vers
 - `00656.HK` 仅作只读展示；Agent 只能创建可追溯的研究意图，不能下单或修改风控。
 - 数据缺失、过期、未对账或证据不足时，系统应观望，不生成订单。
 - 不要把密钥、券商凭据、账户数据或生产配置写入仓库、日志、测试快照或响应内容。
+
+已有冻结资料的显式三阶段研究可使用
+`nexus-openai-local admit-research --research-request /绝对路径/request.json`。
+请求文件包含 `request`（`instrument_id`、`data_snapshot_id`、UTC `decision_time`）、
+已登记的 `model_config_id` 和 `idempotency_key`；目前仅支持既有 Codex SDK 研究配置。
+此入口复用本地配置解析、证据准入和预算控制，只登记研究及最多尝试一次的 Job，
+不调用模型、不自动登记模型配置。相同 key 和完整请求返回原研究；修改模型、快照
+或截止时间须使用新请求，不能重用旧 key。随后现有 `nexus-openai-local run-once`
+消费队列；执行前须确认待处理队列仅包含目标研究，不因观察超时重放。
