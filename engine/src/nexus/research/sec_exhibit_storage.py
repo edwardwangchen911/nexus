@@ -128,6 +128,7 @@ async def verify_exhibit_originals(
         issuer_cik=proof.identity.cik,
         archives=archives,
         now=as_of,
+        include_quarter_metrics=document.quarter_metrics is not None,
     )
     if rebuilt.canonical_bytes() != document.canonical_bytes():
         raise ValueError("SEC_EXHIBIT_FROZEN_ORIGINAL_MISMATCH")
@@ -140,6 +141,7 @@ async def persist_exhibit_archive(
     identity_snapshot_id: UUID,
     archives: Sequence[tuple[bytes, bytes]],
     now: datetime,
+    include_quarter_metrics: bool = False,
 ) -> dict[str, str]:
     # Serialize imports sharing this identity without changing its immutable proof.
     identity = await session.scalar(
@@ -154,6 +156,7 @@ async def persist_exhibit_archive(
         issuer_cik=proof.identity.cik,
         archives=archives,
         now=now,
+        include_quarter_metrics=include_quarter_metrics,
     )
     if proof.checked_at > now or document.filed_at > document.available_at:
         raise ValueError("SEC_EXHIBIT_RECEIPT_INVALID")

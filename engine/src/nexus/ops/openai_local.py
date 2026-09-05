@@ -378,6 +378,7 @@ def main() -> int:
     parser.add_argument("--instrument-id", type=UUID)
     parser.add_argument("--filing-id", type=UUID)
     parser.add_argument("--identity-snapshot-id", type=UUID)
+    parser.add_argument("--quarter-metrics", action="store_true")
     for part in ("submissions", "parent", "exhibit"):
         parser.add_argument(f"--sec-{part}", type=Path)
         parser.add_argument(f"--sec-{part}-receipt", type=Path)
@@ -426,7 +427,7 @@ def main() -> int:
                 for p in (args.as_of, args.instrument_id, args.filing_id, args.accession)
             ):
                 raise ValueError("SEC_EXHIBIT_ARGUMENTS_INVALID")
-        elif any(p is not None for p in exhibit_arguments):
+        elif args.quarter_metrics or any(p is not None for p in exhibit_arguments):
             raise ValueError("SEC_EXHIBIT_ARGUMENTS_INVALID")
         if args.filing_id is not None and args.action != "project-sec-facts":
             raise ValueError("SEC_FACT_PROJECTION_ARGUMENTS_INVALID")
@@ -533,6 +534,7 @@ def main() -> int:
                     settings,
                     identity_snapshot_id=args.identity_snapshot_id,
                     archives=exhibit_archives,
+                    include_quarter_metrics=args.quarter_metrics,
                 )
             )
         elif args.action == "admit-research":

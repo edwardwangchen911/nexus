@@ -9,9 +9,20 @@ from typing import Any, Literal
 from urllib.parse import urljoin, urlsplit
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+)
 
 from nexus.research.sec_disclosures import SecDisclosure, _VisibleText, disclosure_excerpt
+from nexus.research.sec_exhibit_quarter_metrics import (
+    ExhibitQuarterMetrics,
+    parse_exhibit_quarter_metrics,
+)
 
 SCHEMA_VERSION: Literal["sec_8k_exhibit_v2"] = "sec_8k_exhibit_v2"
 MAX_EXHIBIT_TEXT = 32000
@@ -47,6 +58,14 @@ class SecExhibitDisclosure(SecDisclosure):
     originals: tuple[OriginalReceipt, OriginalReceipt, OriginalReceipt]
     receipt_hashes: tuple[str, str, str]
     exhibit: ExhibitText
+    quarter_metrics: ExhibitQuarterMetrics | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_disclosure(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        result = handler(self)
+        if self.quarter_metrics is None:
+            result.pop("quarter_metrics", None)
+        return result
 
     @property
     def available_at(self) -> datetime:
@@ -123,6 +142,7 @@ def build_exhibit_disclosure(
     issuer_cik: str,
     archives: Sequence[tuple[bytes, bytes]],
     now: datetime,
+    include_quarter_metrics: bool = False,
 ) -> SecExhibitDisclosure:
     """Validate all three originals before returning a persistable, self-contained contract."""
     if len(archives) != 3 or now.tzinfo is None or not re.fullmatch(r"[0-9]{10}", issuer_cik):
@@ -211,6 +231,9 @@ def build_exhibit_disclosure(
     ):
         raise ValueError("SEC_EXHIBIT_SEMANTICS_UNSUPPORTED")
     return SecExhibitDisclosure(
+        quarter_metrics=(
+            parse_exhibit_quarter_metrics(archives[2][0]) if include_quarter_metrics else None
+        ),
         instrument_id=instrument_id,
         identity_snapshot_id=identity_snapshot_id,
         issuer_cik=issuer_cik,

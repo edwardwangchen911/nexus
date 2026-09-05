@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,25 +42,41 @@ async def prepare_research_snapshot(
     require_utc(as_of)
     if as_of > datetime.now(UTC):
         raise ValueError("OPENAI_RESEARCH_TIME_IN_FUTURE")
+    # Select one revision per filing before applying the evidence cap. Cutoff
+    # filters run first so a later import cannot change an older frozen request.
+    revisions = (
+        select(
+            ResearchEvidenceRef.id.label("evidence_id"),
+            func.row_number()
+            .over(
+                partition_by=(Filing.instrument_id, Filing.source, Filing.accession_number),
+                order_by=(
+                    ResearchEvidenceRef.available_at.desc(),
+                    ResearchEvidenceRef.created_at.desc(),
+                    ResearchEvidenceRef.id.desc(),
+                ),
+            )
+            .label("revision_rank"),
+        )
+        .join(Filing, Filing.evidence_ref_id == ResearchEvidenceRef.id)
+        .where(
+            ResearchEvidenceRef.source == "sec",
+            ResearchEvidenceRef.available_at <= as_of,
+            ResearchEvidenceRef.created_at <= as_of,
+            Filing.instrument_id == instrument_id,
+            Filing.source == "sec",
+            Filing.form.in_(SEC_RESEARCH_FORMS),
+            Filing.filed_at <= as_of,
+            Filing.accepted_at <= as_of,
+            Filing.created_at <= as_of,
+        )
+        .subquery()
+    )
     evidence = list(
         await session.scalars(
             select(ResearchEvidenceRef)
-            .where(
-                ResearchEvidenceRef.source == "sec",
-                ResearchEvidenceRef.available_at <= as_of,
-                ResearchEvidenceRef.created_at <= as_of,
-                select(Filing.id)
-                .where(
-                    Filing.evidence_ref_id == ResearchEvidenceRef.id,
-                    Filing.instrument_id == instrument_id,
-                    Filing.source == "sec",
-                    Filing.form.in_(SEC_RESEARCH_FORMS),
-                    Filing.filed_at <= as_of,
-                    Filing.accepted_at <= as_of,
-                    Filing.created_at <= as_of,
-                )
-                .exists(),
-            )
+            .join(revisions, revisions.c.evidence_id == ResearchEvidenceRef.id)
+            .where(revisions.c.revision_rank == 1)
             .order_by(ResearchEvidenceRef.available_at.desc(), ResearchEvidenceRef.id)
             # Leave room for one price reference and one separate portfolio context.
             .limit(MAX_FROZEN_EVIDENCE - 2)

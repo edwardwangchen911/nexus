@@ -2912,3 +2912,13 @@ verified，default/listing/explicit 三种 prepare 精确绑定新 proof_snapsho
 实测 46 verified、3 缺证明、49 成员保留、candidate null、历史资格 false、执行锁定；
 外部采集/模型调用为零，无服务重建。未处理 index 1、index 4 或 successor。
 证据：outputs/acceptance/common-stock-recovered-item2-import-91a1449/。
+
+### 附件可选季度投影接线与同申报修订去重（2026-09-06，隔离验证）
+
+正常导入同一 accession 的两个有效修订后，prepare 曾同时冻结两份附件；红测已实际复现两个 SEC 引用，非缺少投影参数造成。修复在原选择入口按 instrument/source/accession 分组，先应用 as-of 条件，再按 available_at、created_at、id 选最新，最后应用证据数量上限。旧 cutoff 重放保持原快照及 payload。这里的有效性仍沿用原数据库准入与严格读取合同，不把排序当作研究内容合格。
+
+`import-sec-exhibit --quarter-metrics` 显式生成可选投影；默认路径完全省略该字段，固定旧 canonical SHA 回归不变。新投影形成新修订，读取时按冻结字段重建并逐字核对；同六原件的 DataArtifact 全列不变，无新增表或 FinancialFact。现有原件冲突忽略与严格校验已足够，未增加原件复用框架。
+
+验证：入口/旧序列化 31 unit；修订选择及既有 prepare 11 PG；原有附件与新修订 4 PG；增补篡改拒绝、正常 prepare→tools→模拟 SDK 后，新修订文件 2 PG。模拟 SDK 请求仅含最新一份附件及精确投影，未调用真实模型。Ruff 与五个生产文件 Mypy 通过。旧、新读取及重复导入 existing/对象不增均已核验。
+
+当前仅 A 独立工作区接线验证，依赖 D 的季度/累计、GAAP 列绑定修复通过集中审查；未做真实业务导入、服务更新或新研究。解析器此前单测通过不等于财务口径已经完整核验，不据此宣告真实结果可用。

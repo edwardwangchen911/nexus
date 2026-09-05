@@ -205,3 +205,13 @@ def test_invalid_original_chain_is_rejected_before_any_storage(damage):
         archives[1] = archive(parent, DIRECTORY + "primary.htm")
     with pytest.raises(ValueError):
         build(archives)
+
+
+def test_legacy_exhibit_has_no_quarter_projection_or_serialized_null():
+    report = build()
+    assert sha256(report.canonical_bytes()).hexdigest() == (
+        "fd855c162cf521f6f6ca8a736a6d0427602791f27bd899c9bde3b83485869454"
+    )
+    assert report.quarter_metrics is None
+    assert "quarter_metrics" not in report.model_dump(mode="json")
+    assert "quarter_metrics" not in report.canonical_bytes().decode()

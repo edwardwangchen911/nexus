@@ -22,6 +22,7 @@ async def import_sec_exhibit(
     identity_snapshot_id: UUID,
     archives: Sequence[tuple[Path, Path]],
     store: ExhibitStore | None = None,
+    include_quarter_metrics: bool = False,
 ) -> dict[str, object]:
     if not settings.database_url or make_url(settings.database_url).host not in {
         "127.0.0.1",
@@ -55,6 +56,7 @@ async def import_sec_exhibit(
                 identity_snapshot_id=identity_snapshot_id,
                 archives=contents,
                 now=now,
+                include_quarter_metrics=include_quarter_metrics,
             )
             return {
                 **result,
