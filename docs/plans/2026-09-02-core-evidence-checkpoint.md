@@ -2390,3 +2390,50 @@ outputs/acceptance/etf-identity-inventory/qqq-current-identity/acceptance-summar
 2 类型不支持。candidate 仍 null、历史回测资格 false、执行锁定，当前身份补证不
 冒充历史适用性、正式研究结论或整个阶段完成。其他基金结构继续按实际原件判定，
 不将 UIT、债券基金或商品信托强行套入本股票ETF合同。
+
+
+### 双上市同文事实完成正常身份证据入口
+
+D f3e664f 经集中审查及 151 单测后由 A 集成 main ddeefe8；新增隔离正常存储回归
+cd553da→main1c2e789，精确用双上市合成原件完成 import、stored reader、future，
+6 个 listing facts、两 context、selected 3 以及旧 single 原 JSON 全部核对通过。
+真实第五批 item1 的现有 master 与原件交易所一致，应走 normal import 保留身份；
+初次复用 revision 验收脚本在只读预检停止，未调用业务写入口，不能记作采集失败。
+确认当前状态后改用 normal import 一次完成，旧 UUID、alias、master 不变。
+
+独立 read 与双显式 prepare 通过，19 表旧行多重集全部保留，仅追加 4 artifacts、
+1 snapshot；协调任务独立复核相同摘要及多重集。私有证据：
+outputs/acceptance/common-stock-fifth-item1-normal-f3e664f/acceptance-summary.json。
+当前 18 verified、29 缺证明、2 类型不支持；49 项保留、candidate null、历史资格
+false、执行锁定。没有重新请求原件，也未重放已完成的 item3。
+防复发：existing 只表示本地有身份，入口选择须比对实际 master 与新来源；交易所
+一致时用普通证据导入，不因 existing 标签默认修订。预检失败与已提交写入分开判断。
+
+
+### SPY 股票型 UIT 当前身份正常入口验收
+
+SPY 不在已归档 mutual-fund series/class 目录中，旧 497K 入口不适用；这不是永久
+类型不支持的证据。以官方完整 497(b) 招募说明书、同 CIK 当前 submissions 及精确
+索引绑定本体身份，equity_etf 保留股票投资类别，另存 unit_investment_trust 法律结构。
+原件封面明确当前名/旧名、SPY、NYSE Arca 及同 Trust 股票目标和策略；FMP AMEX、
+submissions NYSE 仅保留来源标签，法律名/旧名/展示名差异不覆盖。八原件不虚构目录、
+series/class 或旧 remote receipt。FMP、正文、索引、submissions 各一次正常有界采集
+已完整归档，此后加载、导入与验收均不重采。
+
+A a8c20eb 集中审查 Ready 后集成 main6c75e05，九文件净差零。协调任务独立 47
+ETF/UIT 单测通过；新增正常 PG import→stored reader→future 与旧 ETF JSON 回归
+1 passed；Ruff/Mypy 通过。真实 SPY 原件 loader exit0 后，真实旧 IWM/VTI/QQQ
+三份 proof 严格重读及原 JSON round-trip 均通过。私有来源归档在
+outputs/acceptance/etf-identity-inventory/spy-fmp、spy-sec-body、spy-sec-index、
+spy-sec-submissions；spy-uit-sec 是不改变字节及收据的正常加载目录。
+
+main import-uit 仅一次 created，独立 read verified，默认/仅 listing/双开关 prepare
+对照完成。19 表旧行多重集全部保留，仅 Instrument+1、alias+1、artifacts+8、
+snapshot+1，八备份原件绑定齐全。证据：
+outputs/acceptance/etf-identity-inventory/spy-current-identity/acceptance-summary.json。
+当前 49 项保留、19 verified，剩 27 普通股+3 ETF（28 缺证明、2 类型不支持），
+candidate=null、历史资格 false、执行锁定。无模型重跑、迁移或不相关服务重启。
+
+防复发：基金目录缺行先查法律结构与实际来源合同；不猜不存在的 series/class，
+也不因 UIT 不是开放式基金就直接永久拒绝。封面/本体来源决定精确上市所，上游粗
+标签不可升级为精确市场证明；当前身份成功不代表历史资格或完整阶段完成。
