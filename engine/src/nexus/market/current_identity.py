@@ -601,6 +601,13 @@ def _unrelated_hidden_title_record(
         len(rows) != 8
         or sum(len(row) == 3 for row in rows.values()) != 7
         or len(incomplete) != 1
+        or any(
+            {f["name"] for f in row} != _FACTS - {"dei:EntityCentralIndexKey"}
+            or any(not f["value"] for f in row)
+            for row in rows.values()
+            if len(row) == 3
+        )
+        or any(not f["value"] for f in (*incomplete[0], auxiliary))
         or len(record) != 3
         or {f["name"] for f in record} != _FACTS - {"dei:EntityCentralIndexKey"}
         or {f["context"] for f in record} != {stock["context"]}
@@ -619,7 +626,7 @@ def _unrelated_hidden_title_record(
         raise invalid()
 
     target_period = _period(parser.contexts[stock["context"]])
-    members = set()
+    members: set[tuple[str, str]] = set()
     for contexts in row_contexts:
         context_id = next(iter(contexts))
         if context_id not in parser.class_contexts:
@@ -631,6 +638,7 @@ def _unrelated_hidden_title_record(
         if context_id == stock["context"]:
             if member != "us-gaap:CommonStockMember":
                 raise invalid()
+            expanded_member = (parser.namespaces["xmlns:us-gaap"] or "", "CommonStockMember")
         else:
             match = re.fullmatch(
                 r"([A-Za-z_][A-Za-z0-9_.-]*):([A-Za-z_][A-Za-z0-9_.-]*Member)", member
@@ -651,9 +659,10 @@ def _unrelated_hidden_title_record(
                 namespace,
             ):
                 raise invalid()
-        if member in members or _period(parser.contexts[context_id]) != target_period:
+            expanded_member = (namespace, match[2])
+        if expanded_member in members or _period(parser.contexts[context_id]) != target_period:
             raise invalid()
-        members.add(member)
+        members.add(expanded_member)
     if _period(parser.contexts[issuer["context"]]) != target_period:
         raise invalid()
 

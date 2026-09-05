@@ -75,3 +75,22 @@ def test_hidden_title_must_not_become_visible_unscoped_material():
     )
     with pytest.raises(ValueError, match="CURRENT_IDENTITY_INVALID"):
         parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+
+
+def test_each_complete_non_target_row_requires_the_exact_listing_fact_names():
+    raw = cover().replace(
+        b'id="security-1-symbol" name="dei:TradingSymbol"',
+        b'id="security-1-symbol" name="dei:Security12bTitle"',
+    )
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_INVALID"):
+        parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+
+
+def test_custom_members_are_unique_by_expanded_name_not_lexical_prefix():
+    raw = cover().replace(
+        b'xmlns:sample="https://example.invalid/2025"',
+        b'xmlns:sample="https://example.invalid/2025" '
+        b'xmlns:alias="https://example.invalid/2025"',
+    ).replace(b"sample:Security2Member", b"alias:Security1Member")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_INVALID"):
+        parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
