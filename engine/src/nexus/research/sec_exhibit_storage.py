@@ -11,7 +11,13 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexus.market.current_identity_storage import IdentityStore, read_current_identity
+from nexus.market.current_identity_storage import (
+    CurrentIdentityProof,
+    IdentityStore,
+    read_current_identity,
+)
+from nexus.market.current_listing_revision import SOURCE as LISTING_SOURCE
+from nexus.market.current_listing_revision import read_listing_revision
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
 from nexus.persistence.models.research import Filing, ResearchEvidenceRef
@@ -35,6 +41,15 @@ def configured_exhibit_store(session: AsyncSession) -> ExhibitStore:
     if not isinstance(settings, EngineSettings):
         raise ValueError("SEC_EXHIBIT_STORE_UNAVAILABLE")
     return S3ProviderEvidenceStore(settings)
+
+
+async def _read_identity(
+    session: AsyncSession, store: ExhibitStore, *, snapshot_id: UUID, as_of: datetime
+) -> CurrentIdentityProof:
+    snapshot = await session.get(DataSnapshot, snapshot_id)
+    if snapshot is not None and snapshot.source == LISTING_SOURCE:
+        return await read_listing_revision(session, store, snapshot_id=snapshot_id, as_of=as_of)
+    return await read_current_identity(session, store, snapshot_id=snapshot_id)
 
 
 def _schema(index: int, receipt: bool) -> str:
@@ -79,7 +94,9 @@ async def verify_exhibit_originals(
     *,
     as_of: datetime,
 ) -> None:
-    proof = await read_current_identity(session, store, snapshot_id=document.identity_snapshot_id)
+    proof = await _read_identity(
+        session, store, snapshot_id=document.identity_snapshot_id, as_of=as_of
+    )
     if (
         proof.instrument_id != document.instrument_id
         or proof.identity.cik != document.issuer_cik
@@ -130,7 +147,7 @@ async def persist_exhibit_archive(
     )
     if identity is None or identity.created_at > now:
         raise ValueError("SEC_EXHIBIT_IDENTITY_INVALID")
-    proof = await read_current_identity(session, store, snapshot_id=identity_snapshot_id)
+    proof = await _read_identity(session, store, snapshot_id=identity_snapshot_id, as_of=now)
     document = build_exhibit_disclosure(
         instrument_id=proof.instrument_id,
         identity_snapshot_id=identity_snapshot_id,

@@ -33,10 +33,12 @@ from unit.research.test_sec_exhibits import NOW, archive, exhibit_archives
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("listing_revision", [False, True])
 async def test_normal_exhibit_import_readback_verifies_originals_and_old_cutoff(
     migrated_database_url,
     tmp_path,
     monkeypatch,
+    listing_revision,
 ):
     from nexus.ops.sec_exhibit_local import import_sec_exhibit
 
@@ -65,7 +67,18 @@ async def test_normal_exhibit_import_readback_verifies_originals_and_old_cutoff(
 
     store = Store()
     fmp, sec = archives(tmp_path / "identity", received=NOW.isoformat())
-    identity = await import_identity(
+    importer = import_identity
+    if listing_revision:
+        from integration.test_current_listing_revision import seed
+        from nexus.ops.instrument_identity_local import revise_listing
+
+        identity_factory = session_factory(settings)
+        try:
+            await seed(identity_factory)
+        finally:
+            await identity_factory.kw["bind"].dispose()
+        importer = revise_listing
+    identity = await importer(
         settings,
         symbol="AAPL",
         fmp_archive=fmp,
