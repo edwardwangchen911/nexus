@@ -2437,3 +2437,25 @@ candidate=null、历史资格 false、执行锁定。无模型重跑、迁移或
 防复发：基金目录缺行先查法律结构与实际来源合同；不猜不存在的 series/class，
 也不因 UIT 不是开放式基金就直接永久拒绝。封面/本体来源决定精确上市所，上游粗
 标签不可升级为精确市场证明；当前身份成功不代表历史资格或完整阶段完成。
+
+
+### DIA 独立道琼斯目标身份正常验收与剩余类型边界
+
+DIA 完整 497(b) 本体原件单独确认当前/旧名、DIA、NYSE Arca、UIT、道琼斯工业
+平均指数目标与 DJIA 普通股策略。A87cfe12 经集中审查后集成 main db54b9f，五文件
+净差零。19 UIT 单测通过，包含 SPY/DIA 双向错目标及错封面/旧名拒绝；正常 DIA
+隔离 PG import→strict reader→future/旧 JSON 回归 1 passed。Ruff/Mypy通过，
+真实 DIA 原件 normal load exit0，四份旧 ETF proof 严格重读及 JSON exact 保持。
+
+main import-uit 一次 created、独立 read verified、三种 prepare 对照通过，19 表
+旧行多重集全部保留，仅 Instrument+1、alias+1、artifacts+8、snapshot+1，八备份
+原件绑定齐全，导入无新网络。私有证据：
+outputs/acceptance/etf-identity-inventory/dia-current-identity/acceptance-summary.json。
+当前保留 49 项，20 verified、27 普通股缺证明，GLD/TLT 两项类型尚不支持，
+candidate=null、历史资格 false、执行锁定；未改身份定义、JSON schema 或数据库。
+
+GLD/TLT 目前在 future_identity 的类型守卫处、读取 proof 前就返回
+IDENTITY_TYPE_UNSUPPORTED，与证明缺失不是同一原因。原池包含 non_equity_etf，
+后续 authority loader 也已有同类型映射；不能据此说下游完全不可支持，更不能删池
+或改成 equity_etf 来凑齐。现有计划保留全部 49 项，下一步单独核 TLT 国债基金与
+GLD 黄金信托来源合同，不把故意未支持的消费者类型混为已确认的采集缺失。
