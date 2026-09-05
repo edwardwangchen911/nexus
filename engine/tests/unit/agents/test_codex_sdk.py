@@ -594,13 +594,35 @@ async def test_staged_view_reaches_real_sdk_wire_without_mutating_frozen_inputs(
 
     request, evidence, prompts = _authority()
     wrappers = _view_payload()["frozen_inputs"]
+    wrappers["financial_facts"] = {
+        **wrappers["macro"],
+        "status": "ok",
+        "reason": None,
+        "items": [
+            {
+                "evidence_ref_id": "synthetic-financial-evidence",
+                "fact": "revenue",
+                "value": value,
+                "unit": "USD",
+                "period_start": start,
+                "period_end": end,
+                "period_kind": "duration",
+                "accepted_at": "2025-08-01T00:00:00+00:00",
+                "revision": "v1",
+            }
+            for value, start, end in [
+                ("90.125", "2025-01-01", "2025-03-31"),
+                ("100", "2025-04-01", "2025-06-30"),
+            ]
+        ],
+    }
     if raw_semantics:
-        for index, row in enumerate(wrappers["macro"]["items"]):
+        for index, row in enumerate(wrappers["financial_facts"]["items"]):
             row.update(
                 raw_taxonomy="us-gaap",
                 raw_tag=(
                     "Revenues"
-                    if index % 2
+                    if index == 0
                     else "RevenueFromContractWithCustomerExcludingAssessedTax"
                 ),
             )
@@ -611,6 +633,8 @@ async def test_staged_view_reaches_real_sdk_wire_without_mutating_frozen_inputs(
         executors={
             name: (lambda payload: wrappers["security"])
             if name == "get_security_snapshot"
+            else (lambda payload: wrappers["financial_facts"])
+            if name == "get_financial_facts"
             else (lambda payload: wrappers["macro"])
             for name in ReadOnlyTools.names
         }
@@ -643,6 +667,18 @@ async def test_staged_view_reaches_real_sdk_wire_without_mutating_frozen_inputs(
     model = committee_type(prompts=prompts, tools=tools)
     outputs = [await model.analyze(role, request, evidence, prompts[role]) for role in ROLE_ORDER]
     assert len(outputs) == 8 and wrappers == original
+    for payload, _ in sent:
+        financial = _restore_view(payload["frozen_inputs"])["financial_facts"]
+        assert financial == original["financial_facts"]
+        rows = financial["items"]
+        assert len(rows) == 2
+        if raw_semantics:
+            assert [(row["raw_taxonomy"], row["raw_tag"]) for row in rows] == [
+                ("us-gaap", "Revenues"),
+                ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"),
+            ]
+        else:
+            assert all("raw_taxonomy" not in row and "raw_tag" not in row for row in rows)
     if version == 1:
         assert len(sent) == 1 and "$nexus_view" not in sent[0][0]["frozen_inputs"]
         assert sent[0][0]["frozen_inputs"]["security_snapshot"] == original["security"]
