@@ -2946,3 +2946,9 @@ verified，default/listing/explicit 三种 prepare 精确绑定新 proof_snapsho
 正常产品 CLI 仅一例 import，再正常 read 与 default/listing/explicit 三种 prepare-universe 均成功，新成员精确绑定本次 proof snapshot。显式模式当前 47/49 身份已核实、2 个 `IDENTITY_PROOF_MISSING`；仍保留全部 49 成员、candidate=null、historical_backtest_eligible=false、execution_locked=true。20 个旧业务表行 hash 多重集保留，新增仅 1 instrument、1 alias、4 artifact、1 snapshot。原件 hash 不变，外部请求/模型调用零次，无代码集成或服务重启。
 
 证据位于 `outputs/acceptance/common-stock-current-8k-import-0d28fba/`，安全结论 `acceptance-summary.json`，正常入口回执与精确绑定仅存在私有文件；未输出标的或账户值。
+
+### 隐藏标题身份窄修复正常导入（2026-09-06）
+
+已审 `622883e`/`8d22716` 串行集成为 main `a39a8d7`/`d53dea0`，三文件与 D 最终版本精确一致，复用协调任务 353 unit 与完整集中审查。新分支只识别已证明的唯一无关 hidden title，完整非目标行仍要求 title/ticker/exchange，Member 按 expanded namespace/local 唯一；不放宽全部 CIK、期间和目标同 row/context 绑定。
+
+仅对指定归档一例按主线正常 loader→import→strict read→default/listing/explicit 验证，三种模式目标均精确绑定本次 proof。20 旧表行 hash 多重集与原件 hash 保留，仅新增 1 instrument、1 alias、4 artifact、1 snapshot；显式模式 48/49 已核实、1 个身份缺口，仍全量保留 49 成员、candidate=null、历史资格 false、执行锁定。外部/模型请求零次，不重启服务、不改旧失败记录，不代表核心研究完成。证据：`outputs/acceptance/common-stock-hidden-title-import-d53dea0/acceptance-summary.json` 及同目录私有入口回执。
