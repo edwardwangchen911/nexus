@@ -2864,3 +2864,19 @@ CLI 私有回执、三种 prepare、原件共享预检、前后 hash 和 accepta
 本次三阶段失败之后额外进行了只读无损去重测量：共享 46 个重复长字符串可使
 stage1 allowance 从 26965 降至 24995，仅省 1970；不足覆盖实际累计预留缺口，
 因此没有加入字典协议或压缩框架，也没有更改预算、原始内容或再次调用模型。
+
+### 首次 8-K 替代归档中单项身份恢复
+
+仅使用 common-stock-failed-four-8k-qmCx0V 的 index 3；其他拒绝项和 successor
+未导入。交接的 sec_archive 为相对路径，接收方工作目录不同导致初次只读检查
+找不到目录；“已通过”结论也曾在验证进程结束前提前发出，均在业务零写时更正。
+随后用持久 item-3/sec 绝对路径、原 FMP 绝对路径完成当前主线正常 loader 校验，
+并保存 resolved-source-private.json；未更换、重取或重写原件。
+
+正常 import 一次 created、strict read verified，default/listing/explicit 三种 prepare
+逐项匹配本次新 proof_snapshot_id。新增 1 instrument、1 alias、4 artifacts、1 snapshot，
+19 表旧行多重集完整保留、选中原件字节不变。当前显式身份实测 45 verified、4 缺
+证明、49 成员保留，candidate=null，历史资格 false，执行锁定。该 8-K 仅证明当前
+身份，不构成财务事实、历史 PIT 身份或核心研究完成；外部采集和模型调用均为零。
+证据：outputs/acceptance/common-stock-recovered-item3-import-da9c81a/，包括源路径
+解析、原件预检、唯一导入回执、独立回读、三种 prepare 和前后旧行保护摘要。
