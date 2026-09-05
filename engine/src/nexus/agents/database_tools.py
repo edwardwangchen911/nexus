@@ -248,6 +248,8 @@ class _BoundDatabaseExecutors:
                 {
                     "evidence_ref_id": str(record.evidence_ref_id),
                     "fact": record.canonical_fact,
+                    "raw_taxonomy": record.raw_taxonomy,
+                    "raw_tag": record.raw_tag,
                     "value": format(record.value, "f"),
                     "unit": record.unit,
                     "period_end": record.period_end.isoformat(),

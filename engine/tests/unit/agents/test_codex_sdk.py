@@ -586,13 +586,24 @@ async def test_sdk_keeps_compact_unicode_wire_and_request_hash(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("version", [1, 2, 3])
+@pytest.mark.parametrize("raw_semantics", [False, True])
 async def test_staged_view_reaches_real_sdk_wire_without_mutating_frozen_inputs(
-    monkeypatch, version
+    monkeypatch, version, raw_semantics
 ):
     from nexus.agents import codex_staged
 
     request, evidence, prompts = _authority()
     wrappers = _view_payload()["frozen_inputs"]
+    if raw_semantics:
+        for index, row in enumerate(wrappers["macro"]["items"]):
+            row.update(
+                raw_taxonomy="us-gaap",
+                raw_tag=(
+                    "Revenues"
+                    if index % 2
+                    else "RevenueFromContractWithCustomerExcludingAssessedTax"
+                ),
+            )
     for wrapper in wrappers.values():
         wrapper["portfolio_scope"] = None
     original = deepcopy(wrappers)

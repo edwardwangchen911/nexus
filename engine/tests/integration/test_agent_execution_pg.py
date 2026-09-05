@@ -4572,3 +4572,105 @@ async def test_native_v3_domain_rejection_persists_safe_reason_without_text_or_r
     assert response.status_code == 200
     assert response.json()["data"]["abstention_reason"] == reason
     assert "synthetic-private-canary" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_financial_raw_semantics_reach_sdk_wire_and_respect_old_cutoff(
+    migrated_database_url, monkeypatch
+):
+    from nexus.agents.codex_sdk import CodexCommittee
+    from unit.agents.test_codex_sdk import _sdk
+
+    factory, run = await _prepared_price_run(migrated_database_url)
+    try:
+        async with factory() as session, session.begin():
+            original = await session.scalar(select(FinancialFactRecord))
+            fields = {
+                column.name: getattr(original, column.name)
+                for column in FinancialFactRecord.__table__.columns
+                if column.name not in {"id", "created_at"}
+            }
+            session.add(
+                FinancialFactRecord(
+                    **dict(
+                        fields,
+                        raw_tag="Revenues",
+                        period_start=date(2026, 1, 1),
+                        period_end=date(2026, 3, 31),
+                        value=Decimal("90.125"),
+                    ),
+                    created_at=_NOW - timedelta(days=1),
+                )
+            )
+            # Accepted earlier but appended after this run's cutoff: not old knowledge.
+            session.add(
+                FinancialFactRecord(
+                    **dict(fields, period_start=date(2025, 10, 1), period_end=date(2025, 12, 31)),
+                    created_at=_NOW + timedelta(seconds=1),
+                )
+            )
+            session.add(
+                FinancialFactRecord(
+                    **dict(
+                        fields,
+                        period_start=date(2025, 7, 1),
+                        period_end=date(2025, 9, 30),
+                        accepted_at=_NOW + timedelta(seconds=1),
+                    ),
+                    created_at=_NOW - timedelta(days=1),
+                )
+            )
+        _, thread, _, _ = _sdk(monkeypatch)
+        async with factory() as session:
+            tools = await database_read_only_tools(
+                session, run, allow_fixture_evidence=True, allow_fixture_price_evidence=True
+            )
+            payload = dict(
+                instrument_id=str(_INSTRUMENT_ID),
+                data_snapshot_id=str(_SNAPSHOT_ID),
+                as_of=_NOW,
+                fields=["revenue"],
+            )
+            financial = await tools.execute("get_financial_facts", payload)
+            rows = financial["items"]
+            assert [(row["raw_taxonomy"], row["raw_tag"]) for row in rows] == [
+                ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"),
+                ("us-gaap", "Revenues"),
+            ]
+            assert [row["period_start"] for row in rows] == ["2026-04-01", "2026-01-01"]
+            assert [row["period_end"] for row in rows] == ["2026-06-30", "2026-03-31"]
+            assert [row["value"] for row in rows] == ["100.000000000000", "90.125000000000"]
+            assert all(
+                row["fact"] == "revenue"
+                and row["unit"] == "USD"
+                and row["period_kind"] == "duration"
+                and row["revision"] == "v1"
+                and row["evidence_ref_id"] == str(original.evidence_ref_id)
+                for row in rows
+            )
+            before = json.dumps(financial, sort_keys=True)
+            prompts = load_prompt_assets()
+            evidence = await session.get(ResearchEvidenceRef, original.evidence_ref_id)
+            committee = CodexCommittee(prompts=prompts, tools=tools)
+            await committee.analyze(
+                "orchestrator",
+                ResearchRequest(
+                    instrument_id=_INSTRUMENT_ID, data_snapshot_id=_SNAPSHOT_ID, decision_time=_NOW
+                ),
+                (
+                    EvidenceRef(
+                        source=evidence.source,
+                        object_id=evidence.provider_object_id,
+                        content_hash=evidence.content_hash,
+                        location=evidence.location,
+                        available_at=evidence.available_at,
+                    ),
+                ),
+                prompts["orchestrator"],
+            )
+            thread.run.assert_awaited_once()
+            wire = json.loads(thread.run.call_args.args[0])
+            assert wire["frozen_inputs"]["financial_facts"] == financial
+            assert json.dumps(financial, sort_keys=True) == before
+    finally:
+        await factory.kw["bind"].dispose()
