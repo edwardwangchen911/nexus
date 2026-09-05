@@ -9,7 +9,8 @@ def exhibit_html(*, summary_revenue: str = "1,234", diluted_shares: str = "999")
     def values(current: str, prior: str, *, dollar: bool = False) -> str:
         items = (current, "700", prior, "2,100", "1,900")
         return "".join(
-            f"<td>{'$' if dollar else ''}</td><td>{item}</td><td></td>" for item in items
+            f"<td>{'$' if dollar else ''}</td><td>{item}</td><td></td><td colspan=3></td>"
+            for item in items
         )
 
     return f"""
@@ -17,27 +18,44 @@ def exhibit_html(*, summary_revenue: str = "1,234", diluted_shares: str = "999")
       <p>CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS — UNAUDITED</p>
       <p>(IN MILLIONS, EXCEPT PER SHARE DATA)</p>
       <table id="operations">
-        <tr><td></td><td>Fiscal Quarter Ended</td><td>Three Fiscal Quarters Ended</td></tr>
-        <tr><td></td><td>August 2, 2026</td><td>May 3, 2026</td>
-            <td>August 3, 2025</td><td>August 2, 2026</td><td>August 3, 2025</td></tr>
-        <tr><td>Net revenue</td>{values("1,234", "987", dollar=True)}</tr>
-        <tr><td>Net income</td>{values("123", "98", dollar=True)}</tr>
-        <tr><td>Net income per share:</td></tr>
-        <tr><td>Diluted</td>{values("1.25", "0.98", dollar=True)}</tr>
-        <tr><td>Weighted-average shares used in per share calculations:</td></tr>
-        <tr><td>Diluted</td>{values(diluted_shares, "888")}</tr>
+        <tr><td colspan=3></td><td colspan=3></td><td colspan=15>Fiscal Quarter Ended</td>
+            <td colspan=3></td><td colspan=9>Three Fiscal Quarters Ended</td></tr>
+        <tr><td colspan=3></td><td colspan=3></td><td colspan=3>August 2, 2026</td>
+            <td colspan=3></td><td colspan=3>May 3, 2026</td><td colspan=3></td>
+            <td colspan=3>August 3, 2025</td><td colspan=3></td>
+            <td colspan=3>August 2, 2026</td><td colspan=3></td>
+            <td colspan=3>August 3, 2025</td></tr>
+        <tr><td colspan=3>Net revenue</td><td colspan=3></td>
+            {values("1,234", "987", dollar=True)}</tr>
+        <tr><td colspan=3>Net income</td><td colspan=3></td>{values("123", "98", dollar=True)}</tr>
+        <tr><td colspan=3>Net income per share:</td></tr>
+        <tr><td colspan=3>Diluted</td><td colspan=3></td>{values("1.25", "0.98", dollar=True)}</tr>
+        <tr><td colspan=3>Weighted-average shares used in per share calculations:</td></tr>
+        <tr><td colspan=3>Diluted</td><td colspan=3></td>{values(diluted_shares, "888")}</tr>
       </table>
       <table id="summary">
-        <tr><td></td><td>GAAP</td><td>Non-GAAP</td></tr>
-        <tr><td>(Dollars in millions, except per share data)</td>
-            <td>August 2, 2026</td><td>August 3, 2025</td><td>Change</td>
-            <td>August 2, 2026</td><td>August 3, 2025</td><td>Change</td></tr>
-        <tr><td>Net revenue</td><td>$</td><td>{summary_revenue}</td><td>$</td><td>987</td>
-            <td>25</td><td>%</td><td>$</td><td>1,300</td><td>$</td><td>1,000</td><td>30</td><td>%</td></tr>
-        <tr><td>Net income</td><td>$</td><td>123</td><td>$</td><td>98</td>
-            <td>26</td><td>%</td><td>$</td><td>150</td><td>$</td><td>110</td><td>36</td><td>%</td></tr>
-        <tr><td>Earnings per common share - diluted</td><td>$</td><td>1.25</td>
-            <td>$</td><td>0.98</td><td>28</td><td>%</td><td>$</td><td>1.40</td><td>$</td><td>1.05</td><td>33</td><td>%</td></tr>
+        <tr><td colspan=3></td><td colspan=3></td><td colspan=18>GAAP</td>
+            <td colspan=3></td><td colspan=18>Non-GAAP</td></tr>
+        <tr><td colspan=3>(Dollars in millions, except per share data)</td><td colspan=3></td>
+            <td colspan=3>Q3 26</td><td colspan=3></td>
+            <td colspan=3>Q3 25</td><td colspan=3></td><td colspan=6>Change</td>
+            <td colspan=3></td><td colspan=3>Q3 26</td><td colspan=3></td>
+            <td colspan=3>Q3 25</td><td colspan=3></td><td colspan=6>Change</td></tr>
+        <tr><td colspan=3>Net revenue</td><td colspan=3></td><td>$</td><td>{summary_revenue}</td>
+            <td></td><td colspan=3></td><td>$</td><td>987</td><td></td><td colspan=3></td>
+            <td colspan=3>25</td><td colspan=3>%</td><td colspan=3></td>
+            <td>$</td><td>1,300</td><td></td><td colspan=3></td><td>$</td><td>1,000</td>
+            <td colspan=3>30</td><td colspan=3>%</td></tr>
+        <tr><td colspan=3>Net income</td><td colspan=3></td><td>$</td><td>123</td>
+            <td></td><td colspan=3></td><td>$</td><td>98</td><td></td><td colspan=3></td>
+            <td colspan=3>26</td><td colspan=3>%</td><td colspan=3></td>
+            <td>$</td><td>150</td><td></td><td colspan=3></td><td>$</td><td>110</td>
+            <td colspan=3>36</td><td colspan=3>%</td></tr>
+        <tr><td colspan=3>Earnings per common share - diluted</td><td colspan=3></td>
+            <td>$</td><td>1.25</td><td></td><td colspan=3></td><td>$</td><td>0.98</td>
+            <td></td><td colspan=3></td><td colspan=3>28</td><td colspan=3>%</td><td colspan=3></td>
+            <td>$</td><td>1.40</td><td></td><td colspan=3></td><td>$</td><td>1.05</td>
+            <td colspan=3>33</td><td colspan=3>%</td></tr>
       </table>
     </body></html>
     """.encode()
@@ -100,19 +118,21 @@ def test_rejects_ambiguous_or_semantically_unsupported_tables(damage: str):
             "<p>CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS — UNAUDITED</p></body>".encode(),
         ),
         "duplicate_revenue_row": (
-            b"<tr><td>Net income</td>",
-            b"<tr><td>Net revenue</td><td>1</td></tr><tr><td>Net income</td>",
+            b"<tr><td colspan=3>Net income</td>",
+            b"<tr><td colspan=3>Net revenue</td></tr><tr><td colspan=3>Net income</td>",
         ),
         "cumulative_header_missing": (b"Three Fiscal Quarters Ended", b"Nine Months"),
         "unit_missing": (b"(IN MILLIONS, EXCEPT PER SHARE DATA)", b"(UNITS UNKNOWN)"),
-        "gaap_missing": (b"<td>GAAP</td>", b"<td>Adjusted</td>"),
+        "gaap_missing": (b"<td colspan=18>GAAP</td>", b"<td colspan=18>Adjusted</td>"),
         "value_missing": (b"<td>1.25</td>", b"<td></td>", 1),
         "nested_table": (
             b'<table id="operations">',
-            b'<table id="operations"><tr><td><table><tr><td>noise</td></tr></table>'
-            b"</td></tr>",
+            b'<table id="operations"><tr><td><table><tr><td>noise</td></tr></table></td></tr>',
         ),
-        "hidden_required_row": (b"<tr><td>Net revenue</td>", b'<tr hidden><td>Net revenue</td>'),
+        "hidden_required_row": (
+            b"<tr><td colspan=3>Net revenue</td>",
+            b"<tr hidden><td colspan=3>Net revenue</td>",
+        ),
     }
     if damage in replacements:
         old, new, *count = replacements[damage]
@@ -123,8 +143,8 @@ def test_rejects_ambiguous_or_semantically_unsupported_tables(damage: str):
 
 def test_hidden_and_share_count_diluted_values_cannot_satisfy_eps_row():
     raw = exhibit_html().replace(
-        b"<tr><td>Diluted</td><td>$</td><td>1.25</td>",
-        b'<tr hidden><td>Diluted</td><td>$</td><td>1.25</td>',
+        b"<tr><td colspan=3>Diluted</td><td colspan=3></td><td>$</td><td>1.25</td>",
+        b"<tr hidden><td colspan=3>Diluted</td><td colspan=3></td><td>$</td><td>1.25</td>",
         1,
     )
     with pytest.raises(ValueError, match="SEC_EXHIBIT_QUARTER_METRICS"):
@@ -142,3 +162,61 @@ def test_other_statements_with_the_same_period_headers_are_not_candidates():
         "gaap_net_income",
         "gaap_diluted_eps",
     ]
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (
+            b"<td colspan=18>GAAP</td>\n            <td colspan=3></td>"
+            b"<td colspan=18>Non-GAAP</td>",
+            b"<td colspan=18>Non-GAAP</td>\n            <td colspan=3></td>"
+            b"<td colspan=18>GAAP</td>",
+        ),
+        (
+            b"<td colspan=15>Fiscal Quarter Ended</td>\n            <td colspan=3></td>"
+            b"<td colspan=9>Three Fiscal Quarters Ended</td>",
+            b"<td colspan=15>Three Fiscal Quarters Ended</td>\n            <td colspan=3></td>"
+            b"<td colspan=9>Fiscal Quarter Ended</td>",
+        ),
+        (
+            b"<td colspan=3>Q3 26</td><td colspan=3></td>\n            <td colspan=3>Q3 25</td>",
+            b"<td colspan=3>Q3 24</td><td colspan=3></td>\n            <td colspan=3>Q3 23</td>",
+        ),
+    ],
+)
+def test_rejects_changed_group_or_summary_date_column_binding(old: bytes, new: bytes):
+    with pytest.raises(ValueError, match="SEC_EXHIBIT_QUARTER_METRICS"):
+        parse(exhibit_html().replace(old, new, 1))
+
+
+def test_title_and_unit_must_immediately_describe_the_operations_table():
+    raw = exhibit_html()
+    title = "<p>CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS — UNAUDITED</p>".encode()
+    unit = b"<p>(IN MILLIONS, EXCEPT PER SHARE DATA)</p>"
+    raw = raw.replace(title, b"").replace(unit, b"").replace(b"</body>", title + unit + b"</body>")
+    with pytest.raises(ValueError, match="SEC_EXHIBIT_QUARTER_METRICS"):
+        parse(raw)
+
+
+@pytest.mark.parametrize("bad", [b"", b"not-a-number", b"12,34", b"1,,234"])
+def test_value_cell_cannot_be_filtered_out_or_shift_the_following_columns(bad: bytes):
+    raw = exhibit_html().replace(b"<td>1,234</td>", b"<td>" + bad + b"</td>", 1)
+    with pytest.raises(ValueError, match="SEC_EXHIBIT_QUARTER_METRICS"):
+        parse(raw)
+
+
+def test_rejects_reversed_quarter_dates():
+    raw = exhibit_html().replace(b"August 2, 2026", b"August 2, 2024")
+    with pytest.raises(ValueError, match="SEC_EXHIBIT_QUARTER_METRICS"):
+        parse(raw)
+
+
+def test_visibility_hidden_and_void_tags_cannot_supply_values():
+    raw = exhibit_html().replace(
+        b"<td>1,234</td>",
+        b'<td><span style="visibility:hidden">1,234</span><br></td>',
+        1,
+    )
+    with pytest.raises(ValueError, match="SEC_EXHIBIT_QUARTER_METRICS"):
+        parse(raw)
