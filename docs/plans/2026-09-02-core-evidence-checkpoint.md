@@ -2763,3 +2763,21 @@ snapshot。新增 instruments 2、aliases 2、artifacts 8、snapshots 2；19 表
 成员保留、candidate null、历史资格 false、执行锁定。未处理 item 1，未采集或
 调用模型，不把身份增量当研究或回测完成。私有证据：
 outputs/acceptance/common-stock-twelfth-items23-import-d57a1f9/acceptance-summary.json。
+
+### 收入补录的研究增量与更新经营披露定位
+
+只读对照原 run：补录确实解决“营业收入未直接给出”，但四条收入和原指标的
+最新期间同为 2026-05-03，没有解决“缺少更近时点经营材料”。因此未因字段补齐
+admit 或重跑模型。复用 D common-stock-three-20260905-2nooMG/item-1 当天完整
+submissions（收到于 2026-09-05T08:45:29Z），正常身份 reader、CIK/source URL/
+hash/长度均验证；最新 10-Q 仍是原 2026-06-09 接受的同一份，没有更新 10-K/Q。
+旧 mapping 指向已迁移的 /tmp 路径，实际原件在持久目录；未据此误判资料丢失。
+
+当前元数据列出 9 月 2 日最新 8-K（items 2.02/8.01/9.01），复用该目录定位，
+仅一次固定 SEC 来源 GET 主文，34842 bytes，正常披露提取未截断。Item 2.02
+明确宣布截至 2026-08-02 的第三季度未经审计业绩，具体经营数据引用附件 99.1；
+主文没有经营数值表，另有季度股息事项，并区分 furnished 与 filed。精确同 SEC
+域附件引用已保存但尚未读取，不把附件数值当已知、不自动入库/prepare/model。
+新经营期间与原缺口相关，但主文单独不足以重跑研究。证据在原案例
+sec-projection/research-increment-summary.json、current-metadata-summary.json
+及 latest-operating-disclosure/ 原件、receipt、content-summary.json 和私有附件引用。
