@@ -126,6 +126,24 @@ def validate_gold_originals(
             )
         ):
             raise ValueError
+        for fact in parser.facts:
+            scope = parser.fact_scope[fact["id"]]
+            if scope["parent_fact_id"] or scope["ix_ancestors"] - {
+                "ix:nonnumeric",
+                "ix:header",
+                "ix:hidden",
+            }:
+                raise ValueError
+            if any(key in scope["attrs"] for key in ("target", "tupleref", "order", "xml:base")):
+                raise ValueError
+            if "format" in scope["attrs"] and not (
+                fact["name"] == "dei:SecurityExchangeName"
+                and fact["value"] == "NYSE Arca, Inc."
+                and scope["attrs"]["format"] == "ixt-sec:exchnameen"
+                and parser.namespaces.get("xmlns:ixt-sec")
+                == "http://www.sec.gov/inlineXBRL/transformation/2015-08-31"
+            ):
+                raise ValueError
         facts = {fact["name"]: fact for fact in parser.facts}
         if set(facts) != {
             "dei:EntityCentralIndexKey",

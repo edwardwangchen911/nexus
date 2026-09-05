@@ -63,6 +63,20 @@ and is not required to register under such act.</p><p>Item 1A. Risk Factors Deta
         body = body.replace(
             b'<td><ix:nonNumeric id="exchange"', b'</tr><tr><td><ix:nonNumeric id="exchange"'
         )
+    if change in {"symbol_format", "symbol_target", "cik_format", "cik_target", "cik_tuple"}:
+        fact, attr = change.split("_")
+        attribute = {
+            "format": b'format="unknown:transform"',
+            "target": b'target="other-document"',
+            "tuple": b'tupleRef="other-tuple"',
+        }[attr]
+        body = body.replace(
+            b'id="' + fact.encode() + b'"', b'id="' + fact.encode() + b'" ' + attribute
+        )
+    if change == "ix_ancestor":
+        body = body.replace(b"<table>", b"<ix:unknown><table>").replace(
+            b"</table>", b"</table></ix:unknown>"
+        )
     values[6] = body
     for i in (0, 2, 4, 6):
         receipt = json.loads(values[i + 1])

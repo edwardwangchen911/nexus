@@ -31,6 +31,12 @@ def test_gold_trust_preserves_beneficial_share_and_non_equity_type(change):
         "cross_cik",
         "cross_accession",
         "encoded",
+        "symbol_format",
+        "symbol_target",
+        "cik_format",
+        "cik_target",
+        "cik_tuple",
+        "ix_ancestor",
     ],
 )
 def test_gold_rejects_mismatched_registration_or_gold_subject(change):
