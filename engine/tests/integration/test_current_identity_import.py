@@ -51,7 +51,7 @@ async def test_first_identity_normal_import_readback_and_replay(migrated_databas
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["multi_cik", "dual_listing", "custom_member"])
+@pytest.mark.parametrize("kind", ["multi_cik", "dual_listing", "custom_member", "hidden"])
 async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_json(
     migrated_database_url, tmp_path, kind
 ):
@@ -75,6 +75,10 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
         from helpers.custom_identity import custom_archives
 
         new_fmp, new_sec, taxonomy = custom_archives(tmp_path / "multiple")
+    elif kind == "hidden":
+        from helpers.current_identity_hidden import cover
+
+        new_fmp, new_sec = archives(tmp_path / "multiple", sec=cover())
     else:
         new_fmp, new_sec = archives(
             tmp_path / "multiple",
@@ -108,6 +112,13 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
                     "0000123456",
                     "0000654321",
                 }
+            elif kind == "hidden":
+                assert len(facts) == 7
+                hidden = next(f for f in facts if f["id"] == "preferred-symbol")
+                assert hidden["value"] == "SYN.PA" and not hidden["selected_listing"]
+                assert hidden["display_reference"]["value"] == "SYN PR A*"
+                assert hidden["display_reference"]["matches_fact_value"] is False
+                assert sum(f.get("selected_listing", False) for f in facts) == 3
             elif kind == "custom_member":
                 assert len(stored["artifacts"]) == 4 and len(stored["taxonomy_artifacts"]) == 6
                 assert stored["identity"]["context"]["fields"][1]["value"] == "sample:ExampleMember"
@@ -159,6 +170,20 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
             with pytest.raises(ValueError):
                 module.CustomMemberIdentityProof.model_validate(missing)
             for binding in proof.taxonomy_artifacts[:2]:
+                key = binding.uri.removeprefix("s3://synthetic/")
+                original = store.objects[key]
+                store.objects[key] = original + b"tampered"
+                try:
+                    async with factory() as session:
+                        with pytest.raises(ValueError):
+                            await module.read_current_identity(
+                                session, store, snapshot_id=new.snapshot_id
+                            )
+                finally:
+                    store.objects[key] = original
+        if kind == "hidden":
+            # Both SEC original and its independently bound receipt must survive strict read.
+            for binding in proof.artifacts[2:]:
                 key = binding.uri.removeprefix("s3://synthetic/")
                 original = store.objects[key]
                 store.objects[key] = original + b"tampered"
