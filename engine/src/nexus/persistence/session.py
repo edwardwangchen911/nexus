@@ -14,4 +14,4 @@ def session_factory(settings: EngineSettings) -> async_sessionmaker[AsyncSession
         pool_pre_ping=True,
         isolation_level="READ COMMITTED",
     )
-    return async_sessionmaker(engine, expire_on_commit=False)
+    return async_sessionmaker(engine, expire_on_commit=False, info={"engine_settings": settings})

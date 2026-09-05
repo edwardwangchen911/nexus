@@ -368,11 +368,16 @@ def main() -> int:
             "refresh-disclosure",
             "refresh-fund",
             "project-sec-facts",
+            "import-sec-exhibit",
             "run-once",
         ),
     )
     parser.add_argument("--instrument-id", type=UUID)
     parser.add_argument("--filing-id", type=UUID)
+    parser.add_argument("--identity-snapshot-id", type=UUID)
+    for part in ("submissions", "parent", "exhibit"):
+        parser.add_argument(f"--sec-{part}", type=Path)
+        parser.add_argument(f"--sec-{part}-receipt", type=Path)
     parser.add_argument("--accession")
     parser.add_argument(
         "--form", choices=("6-K", "8-K"), help="Company disclosure form (default: 6-K)"
@@ -398,6 +403,21 @@ def main() -> int:
     args = parser.parse_args()
     root = Path.cwd().resolve()
     try:
+        exhibit_archives = [
+            (getattr(args, f"sec_{part}"), getattr(args, f"sec_{part}_receipt"))
+            for part in ("submissions", "parent", "exhibit")
+        ]
+        exhibit_arguments = [
+            args.identity_snapshot_id, *(p for pair in exhibit_archives for p in pair)
+        ]
+        if args.action == "import-sec-exhibit":
+            if not all(p is not None for p in exhibit_arguments) or any(
+                p is not None
+                for p in (args.as_of, args.instrument_id, args.filing_id, args.accession)
+            ):
+                raise ValueError("SEC_EXHIBIT_ARGUMENTS_INVALID")
+        elif any(p is not None for p in exhibit_arguments):
+            raise ValueError("SEC_EXHIBIT_ARGUMENTS_INVALID")
         if args.filing_id is not None and args.action != "project-sec-facts":
             raise ValueError("SEC_FACT_PROJECTION_ARGUMENTS_INVALID")
         if args.action == "project-sec-facts" and (
@@ -429,7 +449,7 @@ def main() -> int:
             load_model_key=args.action
             not in {
                 "prepare-research", "refresh-research", "refresh-disclosure",
-                "refresh-fund", "project-sec-facts",
+                "refresh-fund", "project-sec-facts", "import-sec-exhibit",
             },
             backend=args.backend,
         )
@@ -490,6 +510,12 @@ def main() -> int:
             from nexus.ops.sec_local import project_saved_sec_facts
 
             result = asyncio.run(project_saved_sec_facts(settings, args.filing_id))
+        elif args.action == "import-sec-exhibit":
+            from nexus.ops.sec_exhibit_local import import_sec_exhibit
+
+            result = asyncio.run(import_sec_exhibit(
+                settings, identity_snapshot_id=args.identity_snapshot_id, archives=exhibit_archives,
+            ))
         elif args.action == "run-once":
             if args.backend == "responses" and settings.openai_api_key is None:
                 raise ValueError("OPENAI_API_KEY_MISSING")

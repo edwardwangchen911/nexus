@@ -238,18 +238,36 @@ async def read_disclosures(
             Filing.instrument_id == instrument_id,
             Filing.created_at <= as_of,
             ResearchEvidenceRef.created_at <= as_of,
-            DataSnapshot.schema_version == SCHEMA_VERSION,
+            DataSnapshot.schema_version.in_((SCHEMA_VERSION, "sec_8k_exhibit_v2")),
             DataSnapshot.created_at <= as_of,
             DataSnapshot.received_at <= as_of,
             DataSnapshot.available_at <= as_of,
         )
         .limit(20)
     )
-    result = {}
+    result: dict[UUID, SecDisclosure] = {}
     for snapshot, evidence, filing in rows:
         try:
-            document = SecDisclosure.model_validate(snapshot.payload)
-        except ValidationError:
+            document: SecDisclosure
+            if snapshot.schema_version == "sec_8k_exhibit_v2":
+                from nexus.research.sec_exhibit_storage import (
+                    configured_exhibit_store,
+                    verify_exhibit_originals,
+                )
+                from nexus.research.sec_exhibits import SecExhibitDisclosure
+
+                document = SecExhibitDisclosure.model_validate(snapshot.payload)
+                store = configured_exhibit_store(session)
+                await verify_exhibit_originals(session, store, document, as_of=as_of)
+                canonical = await store.read_evidence(
+                    f"evidence/sec/{document.accession_number}/{evidence.content_hash}.json",
+                    uri=evidence.location,
+                )
+                if canonical != document.canonical_bytes():
+                    continue
+            else:
+                document = SecDisclosure.model_validate(snapshot.payload)
+        except (ValidationError, ValueError, TypeError, KeyError, OSError):
             continue
         content = document.canonical_bytes()
         digest = hashlib.sha256(content).hexdigest()

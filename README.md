@@ -157,6 +157,18 @@ uv run --package nexus-engine nexus-openai-local setup --backend responses
 `prepare-research` 的新截止；合同收入标签不等于所有收入标签可直接跨期比较。
 无新增依赖或迁移。停用该命令可停止补录；代码回退不删除新增事实或原件，旧截止仍排除晚到行。
 
+已归档的 8-K 与其唯一附件 99.1 可通过正常本地入口导入：
+`nexus-openai-local import-sec-exhibit --identity-snapshot-id <已有身份快照 UUID>`，
+并显式提供 `--sec-submissions`、`--sec-submissions-receipt`、`--sec-parent`、
+`--sec-parent-receipt`、`--sec-exhibit`、`--sec-exhibit-receipt` 六个原件/回执路径。
+回执保留 `source_url`、`sha256`、`byte_length`、`received_at`；附件回执可另外保留
+精确 `parent_sha256`。入口解析本地配置，不加载模型密钥、不联网、不自动准备研究。
+新版独立保存父文和附件，验证正常身份证明、官方目录、唯一 href、原件和实际收到时间。
+附件必须完整包含于 32,000 字符内，超限拒绝导入；原 v1 的 12,000 字符行为不变。
+读取新版会复核原件；损坏或缺失不提供该披露证据。新闻稿不会生成结构化财务事实。
+无新增数据库表或迁移；停用该入口可停止新增，回退应用保留原件和新版本数据，旧版
+读取器不会将新版本误认成旧版披露，也不会改写历史研究。
+
 仅有外国发行人 6-K 文本时，使用 `nexus-openai-local refresh-disclosure --instrument-id <标的 UUID>`。
 美国发行人的 8-K 主文使用同一命令加 `--form 8-K`；默认仍为 6-K。8-K 按实际收到
 正文的时刻进入新研究，SEC 接受时间另行保留。较新或同刻的 8-K/A 暂不支持时明确停止，
