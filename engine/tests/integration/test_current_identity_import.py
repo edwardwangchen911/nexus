@@ -51,7 +51,10 @@ async def test_first_identity_normal_import_readback_and_replay(migrated_databas
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["multi_cik", "dual_listing", "custom_member", "hidden"])
+@pytest.mark.parametrize(
+    "kind",
+    ["multi_cik", "dual_listing", "custom_member", "hidden", "plain_class_a", "class_a_generic"],
+)
 async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_json(
     migrated_database_url, tmp_path, kind
 ):
@@ -75,6 +78,12 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
         from helpers.custom_identity import custom_archives
 
         new_fmp, new_sec, taxonomy = custom_archives(tmp_path / "multiple")
+    elif kind in {"plain_class_a", "class_a_generic"}:
+        from helpers.current_identity_titles import title_cover
+
+        new_fmp, new_sec = archives(
+            tmp_path / "multiple", sec=title_cover(plain=kind == "plain_class_a")
+        )
     elif kind == "hidden":
         from helpers.current_identity_hidden import cover
 
@@ -112,6 +121,25 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
                     "0000123456",
                     "0000654321",
                 }
+            elif kind in {"plain_class_a", "class_a_generic"}:
+                assert len(facts) == 4 and {f["id"] for f in facts} == {
+                    "cik",
+                    "title",
+                    "symbol",
+                    "exchange",
+                }
+                assert stored["identity"]["context"]["id"] == "stock"
+                assert stored["identity"]["sec_title"] == (
+                    "Class A Common Stock" if kind == "plain_class_a" else "Common Stock"
+                )
+                dimensions = [
+                    f["value"]
+                    for f in stored["identity"]["context"]["fields"]
+                    if f["tag"] == "xbrldi:explicitmember"
+                ]
+                assert dimensions == (
+                    [] if kind == "plain_class_a" else ["us-gaap:CommonClassAMember"]
+                )
             elif kind == "hidden":
                 assert len(facts) == 7
                 hidden = next(f for f in facts if f["id"] == "preferred-symbol")
@@ -181,7 +209,7 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
                             )
                 finally:
                     store.objects[key] = original
-        if kind == "hidden":
+        if kind in {"hidden", "plain_class_a", "class_a_generic"}:
             # Both SEC original and its independently bound receipt must survive strict read.
             for binding in proof.artifacts[2:]:
                 key = binding.uri.removeprefix("s3://synthetic/")
