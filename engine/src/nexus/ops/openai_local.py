@@ -23,7 +23,10 @@ from sqlalchemy import select
 from sqlalchemy.engine import make_url
 
 from nexus.agents import codex_token_budget
-from nexus.agents.codex_versions import STRUCTURED_96K_CONFIG_VERSION
+from nexus.agents.codex_versions import (
+    STRUCTURED_96K_CONFIG_VERSION,
+    STRUCTURED_96K_WIRE64K_CONFIG_VERSION,
+)
 from nexus.agents.committee import load_prompt_assets
 from nexus.ops.fosun_local import _localize_compose_endpoints
 from nexus.ops.research_admit_local import admit_local_research
@@ -166,6 +169,7 @@ async def prepare_database(
     strategy_rnd: bool = False,
     structured_synthesis: bool = False,
     aggregate_input_tokens: int = 64000,
+    max_wire_bytes: int = 55808,
 ) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
@@ -174,10 +178,18 @@ async def prepare_database(
     if host is None or host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
     config = dict(_CONFIG)
-    if aggregate_input_tokens not in {64000, 96000} or (
-        aggregate_input_tokens != 64000 and not structured_synthesis
+    if (
+        type(aggregate_input_tokens) is not int
+        or aggregate_input_tokens not in {64000, 96000}
+        or (aggregate_input_tokens != 64000 and not structured_synthesis)
     ):
         raise ValueError("CODEX_AGGREGATE_SETUP_INVALID")
+    if (
+        type(max_wire_bytes) is not int
+        or max_wire_bytes not in {55808, 64000}
+        or (max_wire_bytes != 55808 and aggregate_input_tokens != 96000)
+    ):
+        raise ValueError("CODEX_WIRE_SETUP_INVALID")
     if structured_synthesis and (staged or strategy_rnd):
         raise ValueError("CODEX_STRUCTURED_SETUP_CONFLICT")
     if (
@@ -200,7 +212,9 @@ async def prepare_database(
         version = STAGED_CONFIG_VERSION if staged else CONFIG_VERSION
         if structured_synthesis:
             version = (
-                STRUCTURED_96K_CONFIG_VERSION
+                STRUCTURED_96K_WIRE64K_CONFIG_VERSION
+                if max_wire_bytes == 64000
+                else STRUCTURED_96K_CONFIG_VERSION
                 if aggregate_input_tokens == 96000
                 else STRUCTURED_CONFIG_VERSION
             )
@@ -224,6 +238,8 @@ async def prepare_database(
                 "max_sdk_turns": 3 if staged or structured_synthesis else 1,
             }
         )
+    if max_wire_bytes != 55808:
+        config["max_wire_bytes"] = max_wire_bytes
     config_hash = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
     prompts: list[tuple[str, str, str, str]] = [
         (prompt.role, "local-openai-v1", prompt.content, prompt.content_hash)
@@ -389,6 +405,7 @@ def main() -> int:
     parser.add_argument("--identity-snapshot-id", type=UUID)
     parser.add_argument("--quarter-metrics", action="store_true")
     parser.add_argument("--aggregate-input-tokens", type=int, choices=(64000, 96000), default=64000)
+    parser.add_argument("--max-wire-bytes", type=int, choices=(55808, 64000), default=55808)
     for part in ("submissions", "parent", "exhibit"):
         parser.add_argument(f"--sec-{part}", type=Path)
         parser.add_argument(f"--sec-{part}-receipt", type=Path)
@@ -417,6 +434,13 @@ def main() -> int:
     args = parser.parse_args()
     root = Path.cwd().resolve()
     try:
+        if args.max_wire_bytes != 55808 and (
+            args.action != "setup"
+            or not args.structured_synthesis
+            or args.backend != "codex_sdk"
+            or args.aggregate_input_tokens != 96000
+        ):
+            raise ValueError("CODEX_WIRE_SETUP_INVALID")
         if args.aggregate_input_tokens != 64000 and (
             args.action != "setup" or not args.structured_synthesis or args.backend != "codex_sdk"
         ):
@@ -493,6 +517,11 @@ def main() -> int:
                     **(
                         {"aggregate_input_tokens": args.aggregate_input_tokens}
                         if args.aggregate_input_tokens != 64000
+                        else {}
+                    ),
+                    **(
+                        {"max_wire_bytes": args.max_wire_bytes}
+                        if args.max_wire_bytes != 55808
                         else {}
                     ),
                 )

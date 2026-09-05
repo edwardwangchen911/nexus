@@ -73,7 +73,7 @@ _DRIFT_INSTRUMENT_ID = UUID("0198d500-1000-7000-8000-000000001712")
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_fails", [False, True, "invalid_citation"])
-@pytest.mark.parametrize("staged", [False, True, "v3", "v3_96k"])
+@pytest.mark.parametrize("staged", [False, True, "v3", "v3_96k", "v3_wire64k"])
 async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries(
     migrated_database_url,
     monkeypatch,
@@ -94,18 +94,21 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     await prepare_database(
         settings,
         staged=staged is True,
-        structured_synthesis=staged in {"v3", "v3_96k"},
-        aggregate_input_tokens=96000 if staged == "v3_96k" else 64000,
+        structured_synthesis=staged in {"v3", "v3_96k", "v3_wire64k"},
+        aggregate_input_tokens=96000 if staged in {"v3_96k", "v3_wire64k"} else 64000,
+        max_wire_bytes=64000 if staged == "v3_wire64k" else 55808,
     )
     async with factory() as session, session.begin():
         model = await session.scalar(
             select(AgentModelConfigRecord).where(
                 AgentModelConfigRecord.version
                 == (
-                    "codex-sdk-chatgpt-v3-input96k"
-                    if staged == "v3_96k"
+                    "codex-sdk-chatgpt-v3-input96k-wire64k"
+                    if staged == "v3_wire64k"
+                    else "codex-sdk-chatgpt-v3-input96k"
+                    if staged in {"v3_96k", "v3_wire64k"}
                     else codex_sdk.STRUCTURED_CONFIG_VERSION
-                    if staged in {"v3", "v3_96k"}
+                    if staged in {"v3", "v3_96k", "v3_wire64k"}
                     else codex_sdk.STAGED_CONFIG_VERSION
                     if staged
                     else codex_sdk.CONFIG_VERSION
@@ -152,7 +155,8 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     )
     if staged:
 
-        async def staged_invoke(payload, *, output_model):
+        async def staged_invoke(payload, *, output_model, max_wire_bytes=55808):
+            assert max_wire_bytes == (64000 if staged == "v3_wire64k" else 55808)
             if model_fails is True and payload["stage"] == "critique":
                 raise TimeoutError("synthetic-secret-canary")
             roles = [prompt["role"] for prompt in payload["prompts"]]
@@ -170,7 +174,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                     if item["role"] in roles
                 ]
             }
-            if staged in {"v3", "v3_96k"} and payload["stage"] == "synthesis":
+            if staged in {"v3", "v3_96k", "v3_wire64k"} and payload["stage"] == "synthesis":
                 response = {
                     "synthesis_assessment": {
                         "stance": "buy_candidate",
@@ -197,7 +201,7 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             if model_fails == "invalid_citation" and payload["stage"] == "critique":
                 response["roles"][0]["claims"] = [{"text": "invalid", "citations": [999]}]
             return json.dumps(response), UsageSnapshot(
-                input_tokens=30000 if staged == "v3_96k" else 300, output_tokens=80
+                input_tokens=30000 if staged in {"v3_96k", "v3_wire64k"} else 300, output_tokens=80
             )
 
         invoke.side_effect = staged_invoke
@@ -231,7 +235,11 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             assert research.summary
         if not model_fails:
             assert (run.input_tokens, run.output_tokens) == (
-                (90000, 240) if staged == "v3_96k" else (900, 240) if staged else (300, 80)
+                (90000, 240)
+                if staged in {"v3_96k", "v3_wire64k"}
+                else (900, 240)
+                if staged
+                else (300, 80)
             )
             assert (
                 await session.scalar(
@@ -276,7 +284,9 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
         assert [stage["status"] for stage in trace["stages"]] == (
             ["complete", "unavailable", "unavailable"] if model_fails else ["complete"] * 3
         )
-        assert trace["stages"][0]["input_tokens"] == (30000 if staged == "v3_96k" else 300)
+        assert trace["stages"][0]["input_tokens"] == (
+            30000 if staged in {"v3_96k", "v3_wire64k"} else 300
+        )
         assert trace["stages"][0]["input_hash"] is not None
         assert trace["stages"][0]["frozen_inputs_hash"] is not None
         if not model_fails:
@@ -288,11 +298,13 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
     else:
         assert data["stage_trace"] is None
     if not model_fails:
-        assert data["input_tokens"] == (90000 if staged == "v3_96k" else 900 if staged else 300)
+        assert data["input_tokens"] == (
+            90000 if staged in {"v3_96k", "v3_wire64k"} else 900 if staged else 300
+        )
         assert data["output_tokens"] == (240 if staged else 80)
         assert data["intent"]["stance"] == "watch"
         assert data["intent"]["exposure_action"] == "none"
-        if staged in {"v3", "v3_96k"}:
+        if staged in {"v3", "v3_96k", "v3_wire64k"}:
             assessment = data["intent"]["synthesis_assessment"]
             assert assessment["stance"] == "buy_candidate"
             assert len(assessment["reviews"]) == 2
@@ -340,7 +352,10 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             else "model_usage_uncertain"
         )
         multiplier = 2 if model_fails == "invalid_citation" else 1
-        assert data["input_tokens"] == (30000 if staged == "v3_96k" else 300) * multiplier
+        assert (
+            data["input_tokens"]
+            == (30000 if staged in {"v3_96k", "v3_wire64k"} else 300) * multiplier
+        )
         assert data["output_tokens"] == 80 * multiplier
 
 

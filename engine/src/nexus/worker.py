@@ -15,6 +15,7 @@ from nexus.agents.codex_versions import (
     STAGED_CONFIG_VERSIONS,
     STRUCTURED_CONFIG_VERSIONS,
     aggregate_input_limit,
+    wire_byte_limit,
 )
 from nexus.agents.committee import (
     AgentRole,
@@ -351,7 +352,11 @@ async def _committee(
                 allow_fixture_price_evidence=False,
             ),
             **(
-                {"deadline": deadline, "aggregate_input_tokens": model.max_input_tokens}
+                {
+                    "deadline": deadline,
+                    "aggregate_input_tokens": model.max_input_tokens,
+                    "max_wire_bytes": wire_byte_limit(model.version),
+                }
                 if model.version in STAGED_CONFIG_VERSIONS
                 else {}
             ),

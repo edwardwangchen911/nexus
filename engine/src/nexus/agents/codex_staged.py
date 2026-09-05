@@ -245,10 +245,18 @@ class StagedCodexCommittee(CodexCommittee):
         tools: ReadOnlyToolRegistry,
         deadline: float | None = None,
         aggregate_input_tokens: int = MAX_INPUT_TOKENS,
+        max_wire_bytes: int = 55808,
     ) -> None:
         if type(aggregate_input_tokens) is not int or aggregate_input_tokens not in {64000, 96000}:
             raise ValueError("CODEX_AGGREGATE_INPUT_INVALID")
         super().__init__(prompts=prompts, tools=tools)
+        if (
+            type(max_wire_bytes) is not int
+            or max_wire_bytes not in {55808, 64000}
+            or (max_wire_bytes == 64000 and aggregate_input_tokens != 96000)
+        ):
+            raise ValueError("CODEX_WIRE_LIMIT_INVALID")
+        self._max_wire_bytes = max_wire_bytes
         self._aggregate_input_tokens = aggregate_input_tokens
         # Reserve terminal writes inside the worker-owned aggregate deadline.
         self._deadline = None if deadline is None else deadline - 5
@@ -372,7 +380,7 @@ class StagedCodexCommittee(CodexCommittee):
             ).encode()
         ).hexdigest()
         if (
-            len(wire.encode()) > MAX_INPUT_TOKENS - 8192
+            len(wire.encode()) > self._max_wire_bytes
             or self.usage.input_tokens + estimated_input > self._aggregate_input_tokens
             or self.usage.output_tokens >= MAX_OUTPUT_TOKENS
             or self.usage.provider_calls >= len(STAGES)
@@ -394,7 +402,15 @@ class StagedCodexCommittee(CodexCommittee):
         )
         try:
             async with asyncio.timeout_at(self._deadline):
-                raw, usage = await invoke_codex(payload, output_model=output_model)
+                raw, usage = await invoke_codex(
+                    payload,
+                    output_model=output_model,
+                    **(
+                        {"max_wire_bytes": self._max_wire_bytes}
+                        if self._max_wire_bytes != 55808
+                        else {}
+                    ),
+                )
         except Exception as error:
             self.failure_diagnostic = StageFailureDiagnostic(
                 stage=stage,

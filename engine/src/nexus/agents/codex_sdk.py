@@ -262,18 +262,25 @@ def codex_input_allowance(wire: str, output_schema: JsonObject) -> int:
 
 
 async def invoke_codex(
-    payload: Mapping[str, object], *, output_model: type[BaseModel] = _Batch
+    payload: Mapping[str, object],
+    *,
+    output_model: type[BaseModel] = _Batch,
+    max_wire_bytes: int = 55808,
 ) -> tuple[str, UsageSnapshot]:
     with _invocation_boundary("preflight"):
-        return await _invoke_codex(payload, output_model=output_model)
+        return await _invoke_codex(
+            payload, output_model=output_model, max_wire_bytes=max_wire_bytes
+        )
 
 
 async def _invoke_codex(
-    payload: Mapping[str, object], *, output_model: type[BaseModel]
+    payload: Mapping[str, object], *, output_model: type[BaseModel], max_wire_bytes: int = 55808
 ) -> tuple[str, UsageSnapshot]:
     wire = codex_request_wire(payload)
+    if type(max_wire_bytes) is not int or max_wire_bytes not in {55808, 64000}:
+        raise CodexInvocationError("CODEX_WIRE_LIMIT_INVALID", phase="preflight")
     # Bound submitted context; CLI harness usage is checked after the SDK reports it.
-    if len(wire.encode()) > MAX_INPUT_TOKENS - 8192:
+    if len(wire.encode()) > max_wire_bytes:
         raise CodexInvocationError("CODEX_INPUT_TOO_LARGE", phase="preflight")
     output_schema = codex_output_schema(output_model)
     if codex_input_allowance(wire, output_schema) > MAX_INPUT_TOKENS:

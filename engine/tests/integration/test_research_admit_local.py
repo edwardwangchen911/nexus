@@ -23,7 +23,12 @@ from sqlalchemy import func, select
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "limit,version", [(64000, "codex-sdk-chatgpt-v3"), (96000, "codex-sdk-chatgpt-v3-input96k")]
+    "limit,version",
+    [
+        (64000, "codex-sdk-chatgpt-v3"),
+        (96000, "codex-sdk-chatgpt-v3-input96k"),
+        (96000, "codex-sdk-chatgpt-v3-input96k-wire64k"),
+    ],
 )
 async def test_local_cli_v3_admission_is_explicit_bounded_and_idempotent(
     migrated_database_url, tmp_path, monkeypatch, capsys, limit, version
@@ -33,7 +38,10 @@ async def test_local_cli_v3_admission_is_explicit_bounded_and_idempotent(
     await _seed_authority(factory)
     await openai_local.prepare_database(settings, structured_synthesis=True)
     await openai_local.prepare_database(
-        settings, structured_synthesis=True, aggregate_input_tokens=limit
+        settings,
+        structured_synthesis=True,
+        aggregate_input_tokens=limit,
+        max_wire_bytes=64000 if version.endswith("-wire64k") else 55808,
     )
     await openai_local.prepare_database(settings, staged=True)
     async with factory() as session:
@@ -111,6 +119,9 @@ async def test_normal_setup_preserves_old_versions_and_new_budget_is_never_defau
     await openai_local.prepare_database(settings)
     await openai_local.prepare_database(settings, staged=True)
     await openai_local.prepare_database(settings, structured_synthesis=True)
+    await openai_local.prepare_database(
+        settings, structured_synthesis=True, aggregate_input_tokens=96000
+    )
     async with factory() as session:
         before = [
             dict(row)
@@ -126,6 +137,8 @@ async def test_normal_setup_preserves_old_versions_and_new_budget_is_never_defau
             "--structured-synthesis",
             "--aggregate-input-tokens",
             "96000",
+            "--max-wire-bytes",
+            "64000",
         ],
     )
     for _ in range(2):
@@ -139,7 +152,7 @@ async def test_normal_setup_preserves_old_versions_and_new_budget_is_never_defau
         assert all(row in after for row in before) and len(after) == len(before) + 1
         extra = next(row for row in after if row not in before)
         assert (
-            extra["version"] == "codex-sdk-chatgpt-v3-input96k"
+            extra["version"] == "codex-sdk-chatgpt-v3-input96k-wire64k"
             and extra["max_input_tokens"] == 96000
         )
         admitted = await admit_research_run(
@@ -161,5 +174,6 @@ async def test_normal_setup_preserves_old_versions_and_new_budget_is_never_defau
             "codex-sdk-chatgpt-v2",
             "codex-sdk-chatgpt-v3",
             "codex-sdk-chatgpt-v3-input96k",
+            "codex-sdk-chatgpt-v3-input96k-wire64k",
         }
     await factory.kw["bind"].dispose()

@@ -90,6 +90,18 @@ uv run --package nexus-engine nexus-openai-local setup --backend codex_sdk --str
 仍为 partial/watch/none，不授予方案或执行资格。输入增加后仍须先检查完整请求大小。
 停止选择新版本即可停止新增该预算研究；保留新配置及历史记录，无迁移或新增依赖。
 
+完整正文加季度投影超过旧单请求字节边界时，使用单独变体：
+
+```bash
+uv run --package nexus-engine nexus-openai-local setup --backend codex_sdk --structured-synthesis --aggregate-input-tokens 96000 --max-wire-bytes 64000 --skip-key
+```
+
+此入口登记 `codex-sdk-chatgpt-v3-input96k-wire64k`，配置 hash 包含 64,000 字节边界。
+worker 按冻结版本将边界传到 staged 与实际 SDK invocation；旧 input96k 仍为 55,808
+字节，旧配置不变。单请求 token **预留**仍不超过 64,000，实测按累计 96,000 输入/
+8,192 输出检查并保留全部收到用量；不宣称单次实测消耗能硬截断。其余研究语义、
+三阶段、时限、失败不重试和执行限制均不变。预检须完整保留原件和投影，不截断正文。
+
 研究输入的本地计量使用锁定的 `tiktoken==0.14.0` 和已验哈希的官方公开词表。
 依赖通过既有 `uv sync --locked` 流程同步后，在仓库根目录显式准备一次：
 
