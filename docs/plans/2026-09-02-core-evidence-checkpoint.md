@@ -2485,3 +2485,26 @@ main import-treasury 一次 created、独立 read verified、三种 prepare 对�
 当前保留 49 项，21 verified、27 普通股缺证明、1 GLD 类型未支持；candidate=null、
 历史资格 false、执行锁定。无研究重跑、数据库迁移或不相关服务重启。来源有完整
 证明时补精确类型合同，不混为“采集缺失”，也不为凑齐数目修改资产类型或删池。
+
+
+### 自定义普通股成员十原件完成正常存储与真实验收
+
+D da7b47e 的显式 taxonomy 原件分支在普通单测与审查后，A 正常隔离 PG 首次暴露
+新增 artifact schema 超过现有 varchar(32)；进一步核对发现 snapshot schema 也
+超限。未写入业务库，不加迁移。D f645f74 缩短新增内部标识并以 ORM 实际列长补
+两个回归，外层为 current_custom_member_v1，旧四原件/旧 schema 保持。不能把代码
+审查 Ready 或单测数量当作正常存储已通过；同类边界须从真实字段核对。
+
+main 集成384de39/655d35e/9d3b366，八文件与已审版本净差零。A fcef323 参数化
+正常 PG import→独立 strict reader→future 回归通过，旧 single 原 JSON 保持，
+自定义 QName 原样、artifacts4+taxonomy_artifacts6、缺 binding 与额外 raw/receipt
+损坏拒绝均验证，1 passed。D 原有186单测与补丁37custom单测及静态检查复用。
+
+第六批 item1 已归档的 FMP/SEC/schema/definition/label 原件通过正常显式
+--taxonomy-archive import 一次；独立 read 与两开关 prepare 完成，19 表旧行
+多重集全部保留，仅 Instrument+1、alias+1、artifacts+10、snapshot+1。原拒绝和
+原件不改写，不重采、不重放 item3 或其他旧失败。私有证据：
+outputs/acceptance/common-stock-sixth-item1-custom-f645f74/acceptance-summary.json。
+当前保留49项，22 verified、26普通股缺证明、1GLD类型不支持，candidate null、
+历史资格 false、执行锁定。新成员类型需同 accession 官方引用/namespace/关系与
+标签闭合，不能凭自定义 QName 的字面含义或只看标签放行。
