@@ -214,6 +214,20 @@ async def test_share_class_legal_name_comes_from_exact_sec_binding_with_provider
     "name,replace",
     [
         ("Other Index Fund", None),
+        (
+            "Synthetic Total Stock Index Fund",
+            (
+                b"Synthetic Total Stock Index Fund (the Fund)",
+                b"Synthetic Total Stock Index Fund II (the Fund)",
+            ),
+        ),
+        (
+            "Synthetic Total Stock Index Fund",
+            (
+                b"Synthetic Total Stock Index Fund (the Fund)",
+                b"Synthetic Total Stock Index Fund Preferred (the Fund)",
+            ),
+        ),
         ("Synthetic Total Stock Index Fund", (b"ETF Shares (VTI)", b"ETF Shares (SPY)")),
         ("Synthetic Total Stock Index Fund", (b"U.S. stock market", b"U.S. bond market")),
     ],
@@ -232,6 +246,58 @@ async def test_share_class_mismatch_not_overridden_by_provider_label(name, repla
                 company_name="Synthetic Wrong Provider Label",
                 index_name=name,
                 document=document,
+            ),
+            now=datetime.now(UTC),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change", ["other_prospectus", "other_strategy_subject", "duplicate_objective"]
+)
+async def test_share_class_rejects_mixed_or_duplicate_fund_sections(change):
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    document = share_class_document()
+    if change == "other_prospectus":
+        document += document.replace(b"Synthetic Total Stock", b"Synthetic Other").replace(
+            b"VTI", b"SPY"
+        )
+    elif change == "other_strategy_subject":
+        document = document.replace(
+            b"The Fund tracks an index", b"Synthetic Other Fund tracks an index"
+        )
+    else:
+        document += (
+            b"<p>Investment Objective Other Fund tracks stocks. Fees and Expenses Other.</p>"
+        )
+    with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+        await validate_etf_originals(
+            symbol="VTI",
+            contents=originals(
+                symbol="VTI",
+                company_name="Synthetic Wrong Provider Label",
+                index_name="Synthetic Total Stock Index Fund",
+                document=document,
+            ),
+            now=datetime.now(UTC),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("index_symbol", ["VTI.A", "VTI-A"])
+async def test_share_class_index_requires_entire_ticker(index_symbol):
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+        await validate_etf_originals(
+            symbol="VTI",
+            contents=originals(
+                symbol="VTI",
+                index_symbol=index_symbol,
+                company_name="Synthetic Wrong Provider Label",
+                index_name="Synthetic Total Stock Index Fund",
+                document=share_class_document(),
             ),
             now=datetime.now(UTC),
         )

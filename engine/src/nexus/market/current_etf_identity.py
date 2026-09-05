@@ -72,9 +72,9 @@ def _share_class_identity(
     parser.feed(index.decode("utf-8-sig"))
     index_text = " ".join(" ".join(parser.parts).split())
     match = re.search(
-        rf"Series {series} (.+?) Class/Contract {share_class} ETF Shares {symbol}\b", index_text
+        rf"Series {series} (.+?) Class/Contract {share_class} ETF Shares (\S+)", index_text
     )
-    if not match or not 1 < len(match[1]) < 200:
+    if not match or not 1 < len(match[1]) < 200 or match[2] != symbol:
         raise ValueError
     fund_name = match[1]
     legal_name = fund_name + " ETF Shares"
@@ -82,6 +82,17 @@ def _share_class_identity(
         "Exchange-traded fund shares that are not individually redeemable "
         "and are listed on NYSE Arca"
     )
+    if any(
+        text.count(marker) != 1
+        for marker in (
+            statement,
+            "Investment Objective",
+            "Fees and Expenses",
+            "Principal Investment Strategies",
+            "Principal Risks",
+        )
+    ):
+        raise ValueError
     cover = re.search(
         rf"Summary Prospectus (.+?) {statement} {re.escape(legal_name)} "
         rf"\({re.escape(symbol)}\)",
@@ -93,11 +104,14 @@ def _share_class_identity(
         not cover
         or not objective
         or not strategy
-        or not objective[1].startswith(
-            cover[1] + ", an exchange-traded share class of " + fund_name
+        or re.fullmatch(
+            re.escape(cover[1] + ", an exchange-traded share class of " + fund_name)
+            + r' \(the (?:“Fund”|"Fund"|Fund)\), seeks to track the performance of a '
+            r"benchmark index that measures the investment return of the overall stock market\.",
+            objective[1],
         )
-        or "seeks to track the performance of a benchmark index" not in objective[1]
-        or "investment return of the overall stock market" not in objective[1]
+        is None
+        or not strategy[1].startswith("The Fund ")
         or "investable U.S. stock market" not in strategy[1]
         or "Fund invests at least 80% of its net assets" not in strategy[1]
         or "in the stocks that make up the Target Index" not in strategy[1]

@@ -13,6 +13,7 @@ def originals(
     symbol="IWM",
     company_name="Synthetic Equity Fund",
     index_name="",
+    index_symbol=None,
 ):
     stamp = "2026-01-03T00:00:00+00:00"
     accession = "0000123456-26-000001"
@@ -63,7 +64,7 @@ def originals(
     ).encode()
     index = (
         f"<html><body>Series S000000001 {index_name} Class/Contract {index_class} "
-        f"ETF Shares {symbol} "
+        f"ETF Shares {index_symbol or symbol} "
         f'<a href="{base}sample.htm">497K</a></body></html>'
     ).encode()
     document = (
