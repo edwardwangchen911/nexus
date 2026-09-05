@@ -2024,3 +2024,41 @@ INSTRUMENT_MISSING、TICKER_ALIAS_MISSING、TICKER_ALIAS_MISMATCH。CLI使用同
 REPEATABLE READ/READ ONLY事务；未发布UniverseSnapshot、补写成员或别名，未采集、
 调用模型或运行回测。此结果仅定位现有身份前置缺口，不证明未来发布资格或历史PIT；
 T1仍未闭环，后续需正常身份来源与发布实现。该独立边界不阻塞已验收趋势、多维显示。
+
+
+### 2026-09-05 正常复星刷新身份选择防复发
+
+T1 49成员缺口的接续只读拆分：固定种子期望的49个ID均未在本地主数据找到；
+其中7个symbol有其他ID，均精确匹配既有复星UUID命名空间，42个无历史或当前ticker
+别名。这是命名空间差异与主数据缺口，不证明由下面的刷新缺陷造成。未合并ID、
+补种子、回填别名、发布股票池或改变真实业务库。
+
+正常刷新代码存在独立可复现缺陷：holdings在预载后按symbol任取别名，可能覆盖
+有效映射；ensure仅看valid_from；非持仓订单在Instrument已存在时跳过身份核验。
+修复在原入口共用当前日期、市场、币种、唯一性及expected ID校验，保留下游
+一致性检查。US代码允许现有US_EQUITY_EXCHANGES（含XNAS），不据此认定XNYS上市。
+日期在load时取一次并传到market与broker；新别名从该日开始，不借400日行情窗口
+回填历史身份。股票池effective_from/publication逻辑保持原语义。
+
+隔离PG回归覆盖过期/未来别名、错市场/币种、有限有效期内的唯一当前别名与历史
+别名共存、expected ID漂移、仅订单的过期broker UUID及首次建档。首次建档用例
+真实执行市场入口身份段并提交，再冻结及持久化broker；后续市场证据操作被截断，
+不宣称完整行情链验收。测试时钟固定为synthetic gateway NOW，避免机器日期与
+冻结时间倒置。重叠ticker用例验证现有PG排斥约束；最初冲突fixture报错不算产品RED。
+仅订单用例在修前明确DID NOT RAISE，修后纳入定向回归；其他实际RED分别为未拒绝
+非法别名、选错当前ID或未拒绝ID漂移。没有新增审批、迁移、依赖或真实采集/模型调用。
+
+
+集中审查补查既有港股未成交订单：正常provider优先使用已知映射，原来可只读保存；
+不能因移除跳过逻辑而一律要求US代码。已有Instrument现在按对应code/币种复用
+resolver并核对expected ID，未知新订单仍保留原US-only建档范围。合成HKD现金/持仓/
+已知港股订单经正常读取冻结后验证保存；测试最初缺HKD现金导致对账失败，以及
+尝试更新别名被immutable约束拒绝，均是fixture问题，不记作产品RED或放宽约束。
+
+
+最终验证：10新增身份PG+6既有刷新PG共16 passed；相关32单测passed；Ruff格式/检查、
+Mypy与diffcheck通过。主项目既有配置下另做REPEATABLE READ READ ONLY检查：复用
+最近READY快照的12项已保存持仓身份，当前resolver全部PASS、拒绝0。代码来自现有
+主数据ticker转换，未重新核验上游原始code，故只证明已保存身份集合兼容，不宣称
+新鲜券商刷新验收。没有读取或输出持仓金额/明细，也未新建业务事实。one-shot CLI
+在下次正常调用时使用集成代码；本轮不为此重启运行服务。

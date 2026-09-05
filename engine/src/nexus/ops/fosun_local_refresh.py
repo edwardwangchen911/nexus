@@ -18,7 +18,7 @@ from uuid import UUID, uuid5
 import exchange_calendars as xcals  # type: ignore[import-untyped]
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from nexus.diagnostics.artifacts import ArtifactByteReader
@@ -28,6 +28,7 @@ from nexus.jobs.market_authority import ProviderMarketBinding
 from nexus.market.ingestion import archive_fosun_price_page_raw, ingest_price_page
 from nexus.market.intraday_ingestion import canonical_quote_observation
 from nexus.market.object_store import S3ProviderEvidenceStore
+from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.persistence.models.backtest import (
     ExchangeCalendarAuthorityRecord,
     ExchangeCalendarSessionRecord,
@@ -109,6 +110,7 @@ class _LocalBrokerIdentity:
     sync_run_id: UUID
     instrument_ids: dict[str, UUID]
     previous_cash_flow_watermark: date | None
+    identity_date: date
 
 
 class LocalOrderReadError(RuntimeError):
@@ -348,7 +350,7 @@ async def refresh_local_fosun(
                     frozen=frozen,
                     holdings=holdings,
                     instrument_ids=identity.instrument_ids,
-                    valid_from=request_start_at.date(),
+                    valid_from=identity.identity_date,
                     completed_at=datetime.now(UTC),
                     cash_flow_result=cash_flow_result,
                 )
@@ -543,19 +545,20 @@ async def _load_local_broker_identity(
     if len(portfolios) > 1:
         raise ValueError("LOCAL_PORTFOLIO_SCOPE_AMBIGUOUS")
     portfolio_id = portfolios[0].id if portfolios else new_uuid7()
+    identity_date = datetime.now(UTC).date()
     instrument_ids: dict[str, UUID] = {}
     aliases = await session.execute(
         select(InstrumentAlias.symbol, Instrument.id, Instrument.exchange, Instrument.currency)
         .join(Instrument, Instrument.id == InstrumentAlias.instrument_id)
         .where(
             InstrumentAlias.alias_type == "ticker",
-            InstrumentAlias.valid_from <= datetime.now(UTC).date(),
-            InstrumentAlias.valid_to.is_(None),
+            InstrumentAlias.valid_from <= identity_date,
+            or_(InstrumentAlias.valid_to.is_(None), InstrumentAlias.valid_to >= identity_date),
         )
     )
     for symbol, instrument_id, exchange, currency in aliases:
         code = f"us{symbol}"
-        if exchange not in {"XNYS", "XNAS"} or currency != "USD":
+        if exchange not in US_EQUITY_EXCHANGES or currency != "USD":
             continue
         if _US_PROVIDER_CODE.fullmatch(code) is None:
             continue
@@ -563,16 +566,12 @@ async def _load_local_broker_identity(
             raise ValueError("LOCAL_BROKER_INSTRUMENT_AMBIGUOUS")
         instrument_ids[code] = instrument_id
     for item in holdings:
-        symbol, _exchange = _symbol_and_exchange(item.instrument_code)
-        alias = await session.scalar(
-            select(InstrumentAlias).where(
-                InstrumentAlias.symbol == symbol,
-                InstrumentAlias.alias_type == "ticker",
-            )
+        existing_id = await _resolve_local_instrument(
+            session, item.instrument_code, currency=item.currency, identity_date=identity_date
         )
         instrument_ids[item.instrument_code] = (
-            alias.instrument_id
-            if alias is not None
+            existing_id
+            if existing_id is not None
             else uuid5(_INSTRUMENT_NAMESPACE, item.instrument_code)
         )
     return _LocalBrokerIdentity(
@@ -580,6 +579,7 @@ async def _load_local_broker_identity(
         portfolio_id=portfolio_id,
         sync_run_id=new_uuid7(),
         instrument_ids=instrument_ids,
+        identity_date=identity_date,
         previous_cash_flow_watermark=await session.scalar(
             select(BrokerCashFlowWatermark.provider_business_date).where(
                 BrokerCashFlowWatermark.account_id == account_id
@@ -636,15 +636,27 @@ async def _persist_ready_broker_snapshot(
             raise ValueError("LOCAL_BROKER_INSTRUMENT_MISMATCH")
     codes_by_id = {instrument_id: code for code, instrument_id in instrument_ids.items()}
     for order in frozen.portfolio_snapshot.open_orders:
-        if await session.get(Instrument, order.instrument_id) is not None:
-            continue
         code = codes_by_id.get(order.instrument_id, "")
-        if _US_PROVIDER_CODE.fullmatch(code) is None:
-            raise ValueError("LOCAL_ORDER_INSTRUMENT_UNSUPPORTED")
-        actual_id = await _ensure_instrument(
-            session, code, currency="USD", valid_from=valid_from, expected_id=order.instrument_id
-        )
-        if actual_id != order.instrument_id:
+        instrument = await session.get(Instrument, order.instrument_id)
+        if instrument is not None:
+            order_actual_id = await _resolve_local_instrument(
+                session,
+                code,
+                currency=instrument.currency,
+                identity_date=valid_from,
+                expected_id=order.instrument_id,
+            )
+        else:
+            if _US_PROVIDER_CODE.fullmatch(code) is None:
+                raise ValueError("LOCAL_ORDER_INSTRUMENT_UNSUPPORTED")
+            order_actual_id = await _ensure_instrument(
+                session,
+                code,
+                currency="USD",
+                valid_from=valid_from,
+                expected_id=order.instrument_id,
+            )
+        if order_actual_id != order.instrument_id:
             raise ValueError("LOCAL_BROKER_INSTRUMENT_MISMATCH")
     run = BrokerSyncRun(
         id=frozen.sync_run_id,
@@ -772,7 +784,7 @@ async def _persist_market_snapshot(
             session,
             item.instrument_code,
             currency=item.currency,
-            valid_from=request_start_at.date(),
+            valid_from=identity.identity_date,
             expected_id=expected_id,
         )
         if actual_id != expected_id:
@@ -935,6 +947,57 @@ def _broker_request_counts(frozen: BrokerSyncResult) -> dict[str, int]:
     return counts
 
 
+async def _resolve_local_instrument(
+    session: AsyncSession,
+    code: str,
+    *,
+    currency: str,
+    identity_date: date,
+    expected_id: UUID | None = None,
+) -> UUID | None:
+    """Resolve current identity, never substitute a historical or future ticker."""
+    symbol, exchange = _symbol_and_exchange(code)
+    allowed_exchanges = US_EQUITY_EXCHANGES if exchange == "XNYS" else {"XHKG"}
+    if currency != ("USD" if exchange == "XNYS" else "HKD"):
+        raise ValueError("LOCAL_BROKER_INSTRUMENT_INVALID")
+    aliases = tuple(
+        await session.scalars(
+            select(InstrumentAlias).where(
+                InstrumentAlias.alias_type == "ticker",
+                or_(InstrumentAlias.symbol == symbol, InstrumentAlias.instrument_id == expected_id)
+                if expected_id is not None
+                else InstrumentAlias.symbol == symbol,
+            )
+        )
+    )
+    current = tuple(
+        alias
+        for alias in aliases
+        if alias.valid_from <= identity_date
+        and (alias.valid_to is None or alias.valid_to >= identity_date)
+    )
+    if len(current) > 1:
+        raise ValueError("LOCAL_BROKER_INSTRUMENT_AMBIGUOUS")
+    if not current:
+        if aliases or (
+            expected_id is not None and await session.get(Instrument, expected_id) is not None
+        ):
+            raise ValueError("LOCAL_BROKER_INSTRUMENT_INVALID")
+        return None
+    alias = current[0]
+    instrument = await session.get(Instrument, alias.instrument_id)
+    if (
+        alias.symbol != symbol
+        or instrument is None
+        or instrument.exchange not in allowed_exchanges
+        or instrument.currency != currency
+    ):
+        raise ValueError("LOCAL_BROKER_INSTRUMENT_INVALID")
+    if expected_id is not None and alias.instrument_id != expected_id:
+        raise ValueError("LOCAL_BROKER_INSTRUMENT_MISMATCH")
+    return alias.instrument_id
+
+
 async def _ensure_instrument(
     session: AsyncSession,
     code: str,
@@ -944,15 +1007,11 @@ async def _ensure_instrument(
     expected_id: UUID | None = None,
 ) -> UUID:
     symbol, exchange = _symbol_and_exchange(code)
-    existing = await session.scalar(
-        select(InstrumentAlias).where(
-            InstrumentAlias.symbol == symbol,
-            InstrumentAlias.alias_type == "ticker",
-            InstrumentAlias.valid_from <= valid_from,
-        )
+    existing_id = await _resolve_local_instrument(
+        session, code, currency=currency, identity_date=valid_from, expected_id=expected_id
     )
-    if existing is not None:
-        return existing.instrument_id
+    if existing_id is not None:
+        return existing_id
     instrument_id = expected_id or uuid5(_INSTRUMENT_NAMESPACE, code)
     session.add(
         Instrument(
