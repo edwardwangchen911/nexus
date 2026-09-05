@@ -116,6 +116,29 @@ async def test_normal_prepare_selects_one_latest_revision_and_preserves_old_snap
             )
             assert replay is not None and replay.id == old.id and replay.payload == old_payload
             assert await frozen_sec_refs(session, old.id) == [UUID(first["evidence_ref_id"])]
+        # A different filing must survive the same-accession revision filter.
+        other_contents = []
+        for body, receipt in contents:
+            url = json.loads(receipt)["source_url"].replace(
+                "000000004226000001", "000000004226000002"
+            )
+            other_contents.append(
+                archive(body.replace(b"0000000042-26-000001", b"0000000042-26-000002"), url)
+            )
+        other = await import_sec_exhibit(
+            settings,
+            identity_snapshot_id=identity.snapshot_id,
+            archives=write_archives(tmp_path / "other-filing", other_contents),
+            store=store,
+        )
+        async with factory() as session, session.begin():
+            combined = await prepare_research_snapshot(
+                session, identity.instrument_id, as_of=datetime.now(UTC)
+            )
+            assert set(await frozen_sec_refs(session, combined.id)) == {
+                UUID(second["evidence_ref_id"]),
+                UUID(other["evidence_ref_id"]),
+            }
     finally:
         await factory.kw["bind"].dispose()
 

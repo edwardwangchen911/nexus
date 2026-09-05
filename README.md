@@ -169,6 +169,12 @@ uv run --package nexus-engine nexus-openai-local setup --backend responses
 无新增数据库表或迁移；停用该入口可停止新增，回退应用保留原件和新版本数据，旧版
 读取器不会将新版本误认成旧版披露，也不会改写历史研究。
 
+该命令可显式添加 `--quarter-metrics`，从支持且严格核验的原件表格生成季度收入、
+GAAP 净利润和稀释 EPS 的本期/可比期投影；不支持的布局拒绝该次导入，不猜测币种。
+默认不生成投影，旧序列化与哈希不变。启用后复用原件并新增不可变修订，不生成
+`FinancialFact` 或回填旧研究；新准备的研究按截止时间只选择同一申报的最新修订。
+停用该参数可停止新增投影，既有投影修订仍保留可读。
+
 仅有外国发行人 6-K 文本时，使用 `nexus-openai-local refresh-disclosure --instrument-id <标的 UUID>`。
 美国发行人的 8-K 主文使用同一命令加 `--form 8-K`；默认仍为 6-K。8-K 按实际收到
 正文的时刻进入新研究，SEC 接受时间另行保留。较新或同刻的 8-K/A 暂不支持时明确停止，
