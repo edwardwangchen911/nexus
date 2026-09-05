@@ -621,7 +621,6 @@ def test_class_a_archive_preserves_explicit_class_and_registration_title(tmp_pat
     [
         (b"us-gaap:CommonClassAMember", b"us-gaap:CommonStockMember"),
         (b"us-gaap:CommonClassAMember", b"us-gaap:CommonClassBMember"),
-        (b">Class A Common Stock<", b">Common Stock<"),
         (b">Class A Common Stock<", b">Class B Common Stock<"),
         (b">Class A Common Stock<", b">Class A Common Stock / Class B Common Stock<"),
         (b">Class A Common Stock<", b">Class A Preferred Stock<"),
@@ -666,11 +665,202 @@ def test_class_a_cannot_substitute_another_fmp_symbol_with_same_cik():
 
 def test_plain_context_cannot_imply_a_class_a_member_from_title():
     module = importlib.import_module("nexus.market.current_identity")
+    identity = module.parse_current_common_stock(
+        symbol="AAPL",
+        fmp_raw=profile(),
+        sec_raw=_cover_without_segment().replace(b">Common Stock<", b">Class A Common Stock<"),
+    )
+    assert identity.sec_title == "Class A Common Stock"
+    assert not any(f["tag"] == "xbrldi:explicitmember" for f in identity.context["fields"])
+
+
+def _class_title_compat_cover(plain):
+    if plain:
+        return _cover_without_segment().replace(b">Common Stock<", b">Class A Common Stock<")
+    return _class_a_cover().replace(b">Class A Common Stock<", b">Common Stock<")
+
+
+@pytest.mark.parametrize("plain", [False, True])
+def test_class_title_compat_normal_archive_retains_original_context_and_title(tmp_path, plain):
+    module = importlib.import_module("nexus.market.current_identity")
+    fm, sc = archives(tmp_path, sec=_class_title_compat_cover(plain))
+    identity = module.load_identity_archives(symbol="AAPL", fmp_archive=fm, sec_archive=sc).identity
+    assert identity.sec_title == ("Class A Common Stock" if plain else "Common Stock")
+    dimensions = [
+        f["value"] for f in identity.context["fields"] if f["tag"] == "xbrldi:explicitmember"
+    ]
+    assert dimensions == ([] if plain else ["us-gaap:CommonClassAMember"])
+    assert len(identity.facts) == 4
+
+
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        (b'id="symbol"', b'id="symbol" format="ixt-sec:exchnameen"'),
+        (b'id="exchange"', b'id="exchange" format="unknown:transform"'),
+        (b'id="symbol"', b'id="symbol" target="other"'),
+        (b'id="symbol"', b'id="symbol" tupleRef="other"'),
+        (b"<table>", b'<table xml:base="https://example.invalid/">'),
+        (b">AAPL</ix:nonNumeric>", b'><span hidden="hidden">AAPL</span></ix:nonNumeric>'),
+        (b'<td><ix:nonNumeric id="symbol"', b'<td><ix:exclude><ix:nonNumeric id="symbol"'),
+        (b'<td><ix:nonNumeric id="exchange"', b'</tr><tr><td><ix:nonNumeric id="exchange"'),
+        (b'contextRef="stock">AAPL', b'contextRef="other">AAPL'),
+        (b"http://fasb.org/us-gaap/2025", b"https://example.invalid/gaap"),
+        (
+            b">AAPL</ix:nonNumeric>",
+            b'>AAPL</ix:nonNumeric><ix:nonNumeric id="duplicate" '
+            b'name="dei:TradingSymbol" contextRef="stock">AAPL</ix:nonNumeric>',
+        ),
+    ],
+)
+def test_class_title_compat_rejects_unsafe_target_scope(plain, before, after):
+    raw = _class_title_compat_cover(plain)
+    assert before in raw
+    if after.startswith(b"<td><ix:exclude>"):
+        raw = raw.replace(b">AAPL</ix:nonNumeric></td>", b">AAPL</ix:nonNumeric></ix:exclude></td>")
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL", fmp_raw=profile(), sec_raw=raw.replace(before, after)
+        )
+
+
+def _with_note_row(raw, *, same_context=False, duplicate_target=False):
+    ctx = re.search(rb'<xbrli:context id="stock">.*?</xbrli:context>', raw, re.S)[0]
+    note_ctx = ctx.replace(b'id="stock"', b'id="notes"')
+    note_ctx = re.sub(rb"<xbrli:segment>.*?</xbrli:segment>", b"", note_ctx, flags=re.S)
+    raw = raw.replace(b"</ix:header>", note_ctx + b"</ix:header>")
+    row = re.search(rb"<table><tr>.*?</tr></table>", raw, re.S)[0]
+    note = row.replace(b">Common Stock<", b">Notes due 2030<").replace(
+        b">Class A Common Stock<", b">Notes due 2030<"
+    )
+    for identifier in (b"title", b"symbol", b"exchange"):
+        note = note.replace(b'id="' + identifier + b'"', b'id="note-' + identifier + b'"')
+    if not same_context:
+        note = note.replace(b'contextRef="stock"', b'contextRef="notes"')
+    if not duplicate_target:
+        note = note.replace(b">AAPL<", b">SYN2030<")
+    return raw.replace(b"</body>", note + b"</body>")
+
+
+def test_generic_class_a_target_keeps_separate_notes_out_of_target_proof():
+    module = importlib.import_module("nexus.market.current_identity")
+    identity = module.parse_current_common_stock(
+        symbol="AAPL", fmp_raw=profile(), sec_raw=_with_note_row(_class_title_compat_cover(False))
+    )
+    assert identity.sec_title == "Common Stock"
+    assert len(identity.facts) == 4
+    assert not any(f["id"].startswith("note-") for f in identity.facts)
+
+
+@pytest.mark.parametrize(
+    "plain,same,duplicate", [(True, False, False), (False, True, False), (False, False, True)]
+)
+def test_class_title_compat_does_not_ignore_ambiguous_other_security(plain, same, duplicate):
+    module = importlib.import_module("nexus.market.current_identity")
     with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
         module.parse_current_common_stock(
             symbol="AAPL",
             fmp_raw=profile(),
-            sec_raw=_cover_without_segment().replace(b">Common Stock<", b">Class A Common Stock<"),
+            sec_raw=_with_note_row(
+                _class_title_compat_cover(plain), same_context=same, duplicate_target=duplicate
+            ),
+        )
+
+
+@pytest.mark.parametrize("plain", [False, True])
+def test_class_title_compat_rejects_cik_fact_from_other_period(plain):
+    raw = _class_title_compat_cover(plain)
+    context = re.search(rb'<xbrli:context id="stock">.*?</xbrli:context>', raw, re.S)[0]
+    old = context.replace(b'id="stock"', b'id="issuer"').replace(b"2025-01-01", b"2024-01-01")
+    raw = raw.replace(b"</ix:header>", old + b"</ix:header>").replace(
+        b'contextRef="stock">0000123456', b'contextRef="issuer">0000123456'
+    )
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+
+
+@pytest.mark.parametrize("plain", [False, True])
+def test_class_title_compat_does_not_interpret_unrelated_inline_relationship(plain):
+    raw = _class_title_compat_cover(plain).replace(
+        b"</ix:header>",
+        b'<ix:relationship fromRefs="unrelated-fact" toRefs="unrelated-footnote" '
+        b'arcrole="http://www.xbrl.org/2003/arcrole/fact-footnote" '
+        b'linkRole="http://www.xbrl.org/2003/role/link" order="1"/>'
+        b"</ix:header>",
+    )
+    module = importlib.import_module("nexus.market.current_identity")
+    identity = module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+    assert len(identity.facts) == 4
+
+
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize("reference", ["symbol", "title", "exchange", "cik", "stock"])
+@pytest.mark.parametrize("attribute", ["fromRefs", "toRefs"])
+def test_class_title_compat_rejects_external_relationship_to_identity(plain, reference, attribute):
+    raw = _class_title_compat_cover(plain).replace(
+        b"</ix:header>",
+        f'<ix:relationship {attribute}="unrelated {reference}" order="1"/></ix:header>'.encode(),
+    )
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+
+
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize(
+    "attribute",
+    ['order="1"', 'xml:base="https://example.invalid/"', 'target="other"', 'tupleRef="other"'],
+)
+@pytest.mark.parametrize("node", ["ix:header", "xbrli:entity", "table"])
+def test_class_title_compat_rejects_identity_context_ancestor_or_child_attributes(
+    plain, attribute, node
+):
+    raw = _class_title_compat_cover(plain).replace(
+        f"<{node}>".encode(), f"<{node} {attribute}>".encode()
+    )
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+
+
+@pytest.mark.parametrize("plain", [False, True])
+def test_class_title_compat_rejects_unknown_inline_context_ancestor(plain):
+    raw = (
+        _class_title_compat_cover(plain)
+        .replace(b"<xbrli:context", b"<ix:exclude><xbrli:context")
+        .replace(b"</xbrli:context>", b"</xbrli:context></ix:exclude>")
+    )
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(symbol="AAPL", fmp_raw=profile(), sec_raw=raw)
+
+
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Class B Common Stock",
+        "Class A Common Stock / Class B",
+        "Common Stock Class B",
+        "Capital Stock, par value $0.01 per share",
+        "Not Common Stock",
+        "Common Stock Notes",
+        "Class A Common Stock Preferred",
+        "Class A Common Stock Depositary Shares",
+        "Common Stock Warrants",
+        "Common Stock Fund",
+    ],
+)
+def test_class_title_compat_rejects_conflicting_or_disguised_titles(plain, title):
+    raw = _class_title_compat_cover(plain)
+    old = b">Class A Common Stock<" if plain else b">Common Stock<"
+    module = importlib.import_module("nexus.market.current_identity")
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        module.parse_current_common_stock(
+            symbol="AAPL", fmp_raw=profile(), sec_raw=raw.replace(old, b">" + title.encode() + b"<")
         )
 
 

@@ -134,6 +134,9 @@ class _Cover(HTMLParser):
         self.display_nodes: list[dict[str, Any]] = []
         self.display_active: list[dict[str, Any]] = []
         self.unsupported_scope = False
+        self.context_scope: dict[str, list[tuple[str, dict[str, str | None], int | None]]] = {}
+        self.context_nodes: dict[str, list[tuple[str, str, dict[str, str | None]]]] = {}
+        self.relationships: list[dict[str, str | None]] = []
 
     def handle_decl(self, decl: str) -> None:
         if decl.lower() != "doctype html":
@@ -176,6 +179,10 @@ class _Cover(HTMLParser):
                 node["children"].append((tag, a))
             if any(k in a for k in ("target", "tupleref", "order", "xml:base")):
                 self.unsupported_scope = True
+                if self.active is not None:
+                    self.fact_scope[self.active["id"]]["unsupported_descendant"] = True
+            if tag == "ix:relationship":
+                self.relationships.append(a)
             if "-sec-ix-hidden" in (a.get("style") or "").lower():
                 self.display_active.append(
                     dict(
@@ -192,6 +199,7 @@ class _Cover(HTMLParser):
             if self.context is not None or not identifier:
                 raise invalid()
             self.context = {"id": identifier, "fields": []}
+            self.context_scope[identifier] = list(self.stack)
             self._context_nodes = []
             self._context_extra_text = False
         if self.context is not None:
@@ -247,6 +255,7 @@ class _Cover(HTMLParser):
                 attrs=a,
                 ancestors=list(self.stack),
                 hidden_descendant=False,
+                unsupported_descendant=False,
             )
             self.active = dict(
                 name=a["name"],
@@ -352,6 +361,7 @@ class _Cover(HTMLParser):
             ]:
                 self.legal_contexts.add(self.context["id"])
             self.contexts[self.context["id"]] = self.context
+            self.context_nodes[self.context["id"]] = list(self._context_nodes)
             self.context = None
         self.stack.pop()
 
@@ -727,6 +737,74 @@ def _plain_display_children(children: list[tuple[str, dict[str, str | None]]]) -
     }
 
 
+def _class_title_scope(
+    parser: _Cover,
+    record: list[dict[str, Any]],
+    ciks: list[dict[str, Any]],
+    *,
+    plain: bool,
+    exchange: str,
+) -> None:
+    """Validate only the two new title/context combinations, without rewriting facts."""
+    target_context = record[0]["context"]
+    if (
+        len(ciks) != 1
+        or (plain and len(parser.facts) != 4)
+        or any(
+            f not in record and f not in ciks and f["context"] == target_context
+            for f in parser.facts
+        )
+        or _period(parser.contexts[ciks[0]["context"]]) != _period(parser.contexts[target_context])
+    ):
+        raise invalid()
+    context_ids = {fact["context"] for fact in (*record, *ciks)}
+    bound_ids = context_ids | {fact["id"] for fact in (*record, *ciks)}
+    if any(
+        bound_ids & set((relation.get(key) or "").split())
+        for relation in parser.relationships
+        for key in ("fromrefs", "torefs", "contextref")
+    ):
+        raise invalid()
+    forbidden = {"target", "tupleref", "order", "xml:base"}
+    for context_id in context_ids:
+        ancestors = parser.context_scope[context_id]
+        if (
+            context_id not in parser.plain_contexts | parser.class_contexts
+            or any(
+                t.startswith("ix:") and t not in {"ix:header", "ix:resources"}
+                for t, _, _ in ancestors
+            )
+            or any(forbidden & a.keys() for _, a, _ in ancestors)
+            or any(forbidden & a.keys() for _, _, a in parser.context_nodes[context_id])
+        ):
+            raise invalid()
+    for fact in (*record, *ciks):
+        scope = parser.fact_scope[fact["id"]]
+        allowed_ix = {"ix:nonnumeric"} | ({"ix:header", "ix:hidden"} if fact in ciks else set())
+        if (
+            scope["parent_fact_id"]
+            or scope["hidden_descendant"]
+            or scope["unsupported_descendant"]
+            or scope["ix_ancestors"] - allowed_ix
+            or any(forbidden & a.keys() for _, a, _ in scope["ancestors"])
+            or set(scope["attrs"]) - {"id", "name", "contextref", "format"}
+        ):
+            raise invalid()
+        if fact in record and (
+            not _directly_visible(scope["ancestors"])
+            or sum(t == "tr" for t, _, _ in scope["ancestors"]) != 1
+        ):
+            raise invalid()
+        if "format" in scope["attrs"] and not (
+            fact["name"] == "dei:SecurityExchangeName"
+            and scope["attrs"]["format"] == "ixt-sec:exchnameen"
+            and parser.namespaces.get("xmlns:ixt-sec")
+            == "http://www.sec.gov/inlineXBRL/transformation/2015-08-31"
+            and _EXCHANGES.get(fact["value"]) == exchange
+        ):
+            raise invalid()
+
+
 def parse_current_common_stock(
     *,
     symbol: str,
@@ -845,6 +923,23 @@ def parse_current_common_stock(
             if class_a
             else r"^(?:Common Stock|Common Shares|Ordinary Shares)\b"
         )
+        explicit_plain_class_a = plain_stock and bool(
+            re.match(r"^Class A Common Stock\b", title, re.I)
+        )
+        generic_class_a = class_a and bool(re.match(r"^Common Stock\b", title, re.I))
+        if explicit_plain_class_a or generic_class_a:
+            if expanded is not None:
+                raise invalid()
+            tail = title[len("Class A Common Stock") :] if explicit_plain_class_a else title
+            if re.search(r"\bclass\b", tail, re.I):
+                raise invalid()
+            _class_title_scope(parser, record, ciks, plain=plain_stock, exchange=exchange)
+            title_pattern = (
+                r"^Class A Common Stock\b" if explicit_plain_class_a else r"^Common Stock\b"
+            )
+        elif plain_stock and re.search(r"\bclass\b", title, re.I):
+            # A generic prefix must not smuggle an unproved class in its suffix.
+            raise invalid()
         # Only the fully validated dual-listing CommonStockMember scope can support
         # this neutral legal title; capital stock alone does not prove common equity.
         capital = (
