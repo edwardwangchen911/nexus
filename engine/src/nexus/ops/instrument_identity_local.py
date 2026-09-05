@@ -142,6 +142,7 @@ async def prepare_universe(
     effective_session: date,
     store: IdentityStore | None = None,
     use_listing_revisions: bool = False,
+    use_etf_identities: bool = False,
 ) -> dict[str, object]:
     _local(settings)
     storage = store or S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
@@ -153,6 +154,7 @@ async def prepare_universe(
                 storage,
                 effective_session=effective_session,
                 use_listing_revisions=use_listing_revisions,
+                use_etf_identities=use_etf_identities,
             )
     finally:
         await factory.kw["bind"].dispose()
@@ -220,6 +222,7 @@ def main() -> None:
     revision_reader.add_argument("--snapshot-id", required=True, type=UUID)
     prepare = commands.add_parser("prepare-universe")
     prepare.add_argument("--use-listing-revisions", action="store_true")
+    prepare.add_argument("--use-etf-identities", action="store_true")
     prepare.add_argument("--effective-session", required=True, type=date.fromisoformat)
     prepare.add_argument("--output", required=True, type=Path)
     reader = commands.add_parser("read")
@@ -246,6 +249,7 @@ def main() -> None:
                         settings,
                         effective_session=args.effective_session,
                         use_listing_revisions=args.use_listing_revisions,
+                        use_etf_identities=args.use_etf_identities,
                     )
                 )
                 write_private(args.output, json.dumps(prepared, sort_keys=True).encode())

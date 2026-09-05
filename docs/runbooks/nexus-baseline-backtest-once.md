@@ -217,3 +217,38 @@ reader拒绝早于核验/创建时间的as_of并重验原件、指纹和当前al
 输出listing_exchange和所用proof合同，候选版本独立为us_liquid_listing_revision_v1；
 49项及ETF缺口仍保留，缺任何成员时candidate=null。行情、历史研究、价格与旧v1
 预检未接入该修订，不自动切换。回退时停止显式使用新入口，保留追加事实和原始记录。
+
+### 当前股票 ETF 身份（独立于普通股及历史回测）
+
+`nexus.ops.etf_identity_local` 接收既有 FMP 两文件归档、SEC submissions/index/497K
+及逐响应 receipts、SEC 基金目录原件。仅接纳已绑定 series/class 的股票 ETF，且需
+497K 封面上市信息、该基金的 ETF 法律表述和美国股票投资目标；不扩展至债券、黄金或
+UIT。FMP `AMEX` 仅保留为供应商标签，精确上市交易所来自已绑定 SEC 封面，普通股映射不变。
+
+正常入口（参数指向受保护目录，输出必须是新文件）：
+
+```sh
+.venv/bin/python -m nexus.ops.etf_identity_local --repo-root "$NEXUS_REPO" collect-sec \
+  --symbol IWM --accession "$ACCESSION" --mapping-file "$MAPPING_RAW" \
+  --mapping-archive "$MAPPING_ARCHIVE" --output-dir "$NEW_SEC_ARCHIVE"
+.venv/bin/python -m nexus.ops.etf_identity_local --repo-root "$NEXUS_REPO" import \
+  --symbol IWM --fmp-archive "$FMP_ARCHIVE" --sec-archive "$SEC_ARCHIVE" \
+  --mapping-file "$MAPPING_RAW" --output "$PRIVATE_RESULT"
+.venv/bin/python -m nexus.ops.etf_identity_local --repo-root "$NEXUS_REPO" read \
+  --snapshot-id "$SNAPSHOT_ID"
+```
+
+目录归档的 `mapping-binding.json` 保留原始 key/version_id/hash/stored_at，
+`original_received_at=null`。正常采集/导入先从本地对象存储核验精确版本、原文及
+真实 LastModified；stored_at 不当作上游接收时间。新 DataArtifact 的已知接收时间
+使用原始 FMP/SEC receipt；目录原文及其绑定文件的 received_at/observed_at 是本次
+本地归档接收时间，原 remote receipt 仍未知。proof.checked_at 是本次数据库核验时间，
+不声称历史 PIT 或精确事务提交时间。
+
+正常采集最多一次 submissions、index、正文读取，首个错误即停，保留已收到原件，
+不自动重试。不为已有完整归档再次采集。导入仅支持第一份身份及其幂等重读，已有
+master 冲突拒绝且不覆盖；不发布股票池，不创建研究或订单。
+
+未来池准备显式增加 `--use-etf-identities`，可与 `--use-listing-revisions` 并用；
+默认普通股合同不变，仍保留全部 49 项，任一缺口都不生成可发布候选。没有迁移、
+服务重启或历史回填；关闭该显式读取选项即可恢复原消费者行为，已归档事实不删除。

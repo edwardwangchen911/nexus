@@ -1,0 +1,144 @@
+"""Synthetic fund disclosures, never captured issuer or account records."""
+
+from datetime import UTC, datetime
+
+import pytest
+from helpers.current_etf_identity import originals
+
+
+@pytest.mark.asyncio
+async def test_bound_equity_fund_preserves_coarse_exchange_and_unknown_receipt():
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    result = await validate_etf_originals(symbol="IWM", contents=originals(), now=datetime.now(UTC))
+    assert result.identity.exchange == "ARCX"
+    assert result.identity.fmp_exchange == "AMEX"
+    assert result.identity.asset_type == "equity_etf"
+    assert result.identity.mapping_original_received_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changes",
+    [
+        dict(is_etf=False),
+        dict(exchange="NASDAQ"),
+        dict(index_class="C000000003"),
+        dict(
+            document=b"<html><body>IWM | NYSE Arca Summary Prospectus "
+            b"Underlying Synthetic Equity Fund is an exchange-traded fund.</body></html>"
+        ),
+        dict(
+            document=b"<html><body>FORM 497K Synthetic Equity Fund "
+            b"IWM | NYSE Arca Summary Prospectus "
+            b"Investment Objective tracks bonds. Fees and Expenses "
+            b"Purchase and Sale of Fund Shares The Fund is an exchange-traded fund. "
+            b"Tax Information</body></html>"
+        ),
+    ],
+)
+async def test_inconsistent_or_insufficient_sources_rejected(changes):
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+        await validate_etf_originals(
+            symbol="IWM", contents=originals(**changes), now=datetime.now(UTC)
+        )
+
+
+@pytest.mark.asyncio
+async def test_receipt_tamper_and_unsupported_type():
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    contents = list(originals())
+    contents[5] += b" altered"
+    for symbol, values in [("IWM", tuple(contents)), ("TLT", originals())]:
+        with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+            await validate_etf_originals(symbol=symbol, contents=values, now=datetime.now(UTC))
+
+
+@pytest.mark.asyncio
+async def test_repeated_prospectus_reference_is_not_another_fund():
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    doc = originals()[5].replace(
+        b"Investment Objective", b"See this Summary Prospectus. Investment Objective"
+    )
+    result = await validate_etf_originals(
+        symbol="IWM", contents=originals(document=doc), now=datetime.now(UTC)
+    )
+    assert result.identity.symbol == "IWM"
+
+
+@pytest.mark.asyncio
+async def test_normal_collector_stops_on_first_http_error(monkeypatch, tmp_path):
+    import io
+    import json
+    from types import SimpleNamespace
+
+    import httpx
+    from helpers.current_etf_identity import archives
+    from nexus.ops import etf_identity_local as ops
+    from nexus.settings import EngineSettings
+
+    _, sec, mapping = archives(tmp_path / "source")
+    binding_path = sec / "mapping-binding.json"
+    binding = json.loads(binding_path.read_text())
+    binding.update(
+        key=f"provider/market/raw/sec/2026-01-03/ticker-directory/{binding['sha256']}.json",
+        version_id="synthetic-version",
+    )
+    binding_path.write_text(json.dumps(binding))
+
+    class Client:
+        def get_object(self, **kwargs):
+            assert kwargs["VersionId"] == "synthetic-version"
+            return dict(
+                Body=io.BytesIO(mapping.read_bytes()),
+                LastModified=datetime.fromisoformat(binding["stored_at"]),
+                VersionId="synthetic-version",
+            )
+
+    storage = SimpleNamespace(_prefix="provider/market", _bucket="synthetic", _client=Client())
+    monkeypatch.setattr(ops, "S3ProviderEvidenceStore", lambda *args, **kwargs: storage)
+    calls = []
+
+    def handle(request):
+        calls.append(str(request.url))
+        return httpx.Response(403, content=b"Access denied")
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        ops.httpx,
+        "AsyncClient",
+        lambda **kwargs: original(transport=httpx.MockTransport(handle), **kwargs),
+    )
+    settings = EngineSettings(
+        database_url="postgresql+asyncpg://test:test@127.0.0.1:55436/test"
+    ).model_copy(update={"object_store_endpoint": "http://127.0.0.1:9000"})
+    output = tmp_path / "collected"
+    with pytest.raises(RuntimeError, match="SEC request retry budget exhausted"):
+        await ops.collect_sec(
+            settings,
+            symbol="IWM",
+            accession="0000123456-26-000001",
+            contact="offline@example.invalid",
+            mapping_file=mapping,
+            mapping_archive=sec,
+            output_dir=output,
+        )
+    assert len(calls) == 1
+    assert (output / "response-1.raw").read_bytes() == b"Access denied"
+    assert not (output / "receipts.json").exists()
+    binding["stored_at"] = "2026-01-04T00:00:00+00:00"
+    binding_path.write_text(json.dumps(binding))
+    # The reader compares actual metadata, not a self-reported JSON timestamp.
+    storage._client = SimpleNamespace(
+        get_object=lambda **kwargs: dict(
+            Body=io.BytesIO(mapping.read_bytes()),
+            LastModified=datetime(2026, 1, 3, tzinfo=UTC),
+            VersionId="synthetic-version",
+        )
+    )
+    with pytest.raises(ValueError, match="CURRENT_ETF_MAPPING_ORIGIN_INVALID"):
+        await ops.verify_mapping_origin(storage, mapping_file=mapping, sec_archive=sec)

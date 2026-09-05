@@ -9,8 +9,14 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.backtest.universe import load_us_liquid_v1_definition, require_future_xnys_session
+from nexus.market.current_etf_identity import SOURCE as ETF_SOURCE
+from nexus.market.current_etf_identity_storage import EtfProof, read_current_etf
 from nexus.market.current_identity import SOURCE
-from nexus.market.current_identity_storage import IdentityStore, read_current_identity
+from nexus.market.current_identity_storage import (
+    CurrentIdentityProof,
+    IdentityStore,
+    read_current_identity,
+)
 from nexus.market.current_listing_revision import SOURCE as LISTING_SOURCE
 from nexus.market.current_listing_revision import read_listing_revision
 from nexus.persistence.models.data import DataSnapshot
@@ -27,18 +33,22 @@ async def prepare_future_identity_bindings(
     *,
     effective_session: date,
     use_listing_revisions: bool = False,
+    use_etf_identities: bool = False,
 ) -> dict[str, Any]:
     await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
     cutoff = await session.scalar(select(func.clock_timestamp()))
     assert isinstance(cutoff, datetime)
     require_future_xnys_session(effective_session, cutoff)
     definition = load_us_liquid_v1_definition(effective_session)
+    sources = [SOURCE]
+    if use_listing_revisions:
+        sources.append(LISTING_SOURCE)
+    if use_etf_identities:
+        sources.append(ETF_SOURCE)
     snapshots = await session.scalars(
         select(DataSnapshot)
         .where(
-            DataSnapshot.source.in_(
-                (SOURCE, LISTING_SOURCE) if use_listing_revisions else (SOURCE,)
-            ),
+            DataSnapshot.source.in_(sources),
             DataSnapshot.created_at <= cutoff,
             DataSnapshot.available_at <= cutoff,
             DataSnapshot.received_at <= cutoff,
@@ -66,21 +76,28 @@ async def prepare_future_identity_bindings(
             "binding_basis": "current_source_proof_and_unique_future_ticker",
             "gap": None,
         }
-        if use_listing_revisions:
+        if use_listing_revisions or use_etf_identities:
             binding.update(listing_exchange=None, identity_contract=None)
         snapshot = latest.get(f"identity:{member.symbol}")
-        if member.asset_type != "common_stock":
+        if member.asset_type != "common_stock" and not (
+            use_etf_identities and member.asset_type == "equity_etf"
+        ):
             binding["gap"] = "IDENTITY_TYPE_UNSUPPORTED"
         elif snapshot is None:
             binding["gap"] = "IDENTITY_PROOF_MISSING"
         else:
             try:
+                proof: CurrentIdentityProof | EtfProof
                 proof = (
-                    await read_listing_revision(
-                        session, store, snapshot_id=snapshot.id, as_of=cutoff
+                    await read_current_etf(session, store, snapshot_id=snapshot.id)
+                    if use_etf_identities and snapshot.source == ETF_SOURCE
+                    else (
+                        await read_listing_revision(
+                            session, store, snapshot_id=snapshot.id, as_of=cutoff
+                        )
+                        if use_listing_revisions and snapshot.source == LISTING_SOURCE
+                        else await read_current_identity(session, store, snapshot_id=snapshot.id)
                     )
-                    if use_listing_revisions and snapshot.source == LISTING_SOURCE
-                    else await read_current_identity(session, store, snapshot_id=snapshot.id)
                 )
                 instrument = await session.get(Instrument, proof.instrument_id)
                 if (
@@ -117,7 +134,7 @@ async def prepare_future_identity_bindings(
                         proof_hash=_hash(proof.model_dump(mode="json")),
                         alias_id=str(proof.alias_id),
                     )
-                    if use_listing_revisions:
+                    if use_listing_revisions or use_etf_identities:
                         binding.update(
                             listing_exchange=proof.identity.exchange,
                             identity_contract=snapshot.schema_version,
@@ -131,6 +148,12 @@ async def prepare_future_identity_bindings(
         if use_listing_revisions
         else "us_liquid_current_identity_v1"
     )
+    if use_etf_identities:
+        version = (
+            "us_liquid_etf_listing_revision_v1"
+            if use_listing_revisions
+            else "us_liquid_etf_identity_v1"
+        )
     ready = all(member["gap"] is None for member in members)
     candidate = None
     if ready:
@@ -138,7 +161,9 @@ async def prepare_future_identity_bindings(
             "key": "us_liquid",
             "version": version,
             "source": (
-                "nexus_listing_revision_bindings_v1"
+                "nexus_etf_identity_bindings_v1"
+                if use_etf_identities
+                else "nexus_listing_revision_bindings_v1"
                 if use_listing_revisions
                 else "nexus_current_identity_bindings_v1"
             ),
@@ -152,7 +177,9 @@ async def prepare_future_identity_bindings(
         candidate["content_hash"] = _hash(candidate)
     result = {
         "schema_version": (
-            "future_universe_listing_preparation_v1"
+            "future_universe_etf_preparation_v1"
+            if use_etf_identities
+            else "future_universe_listing_preparation_v1"
             if use_listing_revisions
             else "future_universe_identity_preparation_v1"
         ),
