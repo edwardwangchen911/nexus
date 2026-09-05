@@ -2147,3 +2147,26 @@ SHA256一致，live返回200。配置hash/端口/mount未变，PG/MinIO容器ID�
 未判断成产品解锁，也未重放业务。改读既有snapshots/latest详情并确认true。
 私有前后摘要、源码比对、正常API/BFF响应与运行池绑定结果保存于主项目
 outputs/acceptance/api-refresh-1e0964f，目录0700、文件0600；无原始账户事实入库外输出。
+
+### 2026-09-05 当前身份绑定准备衔接，旧固定股票池合同保留
+
+新增只读future_identity准备函数及正常instrument_identity_local prepare-universe入口，
+复用严格当前来源proof reader和本地配置。旧universe.py/CSV、稳定UUID和v1 hash不改。
+新报告保留49项，绑定实际UUID、alias、proof snapshot/hash、原定义hash与未来session；
+当前及未来ticker须分别唯一有效。独立候选版本us_liquid_current_identity_v1，任一缺口
+candidate=null；ETF明确unsupported，缺proof不凭broker身份存在报合格。不写Universe
+或业务表，不给历史PIT、回测或执行资格。本次319行含136行实现、130行PG测试及说明。
+
+正常入口缺失RED已确认；6新PG与既有身份导入/旧预检合计26项通过，80.49秒。
+覆盖合法非seed broker UUID+真实合成原件proof可绑定而旧预检仍错配、无proof、当前
+过期、未来失效/歧义、原件损坏；49项及ETF保留、旧hash/Universe/proof不变。
+初轮两个夹具试图修改immutable alias而失败，修为初始有效期+既有过去时钟导入
+方式；未改生产不可变约束。Ruff格式/check、Mypy两生产文件和diffcheck通过，集中
+审查无阻塞意见。源码f9d7d38串行集成main ca94c57。
+
+main正常CLI prepare-universe仅执行一次，复用已有ABBV来源证明，退出0：49项中
+1项验证绑定、41项IDENTITY_PROOF_MISSING、7项IDENTITY_TYPE_UNSUPPORTED，整体
+BLOCKED、candidate=null。前后8张相关业务表整行hash一致，执行锁true、历史资格false。
+7个既有broker身份不是7份已验证FMP+SEC proof；没有为它们重采集或补41项建档。
+私有报告与前后摘要在主项目outputs/acceptance/future-identity-ca94c57，0700/0600。
+本片是主线CLI新进程已验收，无常驻服务新增调用路径，不为本片再次替换API镜像。
