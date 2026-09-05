@@ -49,6 +49,75 @@ class CurrentEtfIdentity(BaseModel):
     mapping_original_received_at: None = None
 
 
+class CurrentEtfShareClassIdentity(CurrentEtfIdentity):
+    """SEC legal share-class name stays authoritative; conflicting provider label stays visible."""
+
+    fmp_name: str
+    fmp_name_matches_sec: bool
+
+
+def _share_class_identity(
+    *,
+    text: str,
+    index: bytes,
+    symbol: str,
+    identifier: str,
+    series: str,
+    share_class: str,
+    fmp_name: str,
+    fmp_exchange: str,
+    stored_at: datetime,
+) -> CurrentEtfShareClassIdentity:
+    parser = _VisibleText()
+    parser.feed(index.decode("utf-8-sig"))
+    index_text = " ".join(" ".join(parser.parts).split())
+    match = re.search(
+        rf"Series {series} (.+?) Class/Contract {share_class} ETF Shares {symbol}\b", index_text
+    )
+    if not match or not 1 < len(match[1]) < 200:
+        raise ValueError
+    fund_name = match[1]
+    legal_name = fund_name + " ETF Shares"
+    statement = (
+        "Exchange-traded fund shares that are not individually redeemable "
+        "and are listed on NYSE Arca"
+    )
+    cover = re.search(
+        rf"Summary Prospectus (.+?) {statement} {re.escape(legal_name)} "
+        rf"\({re.escape(symbol)}\)",
+        text[:1200],
+    )
+    objective = re.search(r"Investment Objective (.+?) Fees and Expenses", text)
+    strategy = re.search(r"Principal Investment Strategies (.+?) Principal Risks", text)
+    if (
+        not cover
+        or not objective
+        or not strategy
+        or not objective[1].startswith(
+            cover[1] + ", an exchange-traded share class of " + fund_name
+        )
+        or "seeks to track the performance of a benchmark index" not in objective[1]
+        or "investment return of the overall stock market" not in objective[1]
+        or "investable U.S. stock market" not in strategy[1]
+        or "Fund invests at least 80% of its net assets" not in strategy[1]
+        or "in the stocks that make up the Target Index" not in strategy[1]
+    ):
+        raise ValueError
+    return CurrentEtfShareClassIdentity(
+        symbol=symbol,
+        cik=identifier,
+        series_id=series,
+        class_id=share_class,
+        legal_name=legal_name,
+        fmp_name=fmp_name,
+        fmp_name_matches_sec=fmp_name in {legal_name, cover[1]},
+        fmp_exchange=fmp_exchange,
+        objective=objective[1] + " Principal Investment Strategies " + strategy[1],
+        legal_type_statement=statement,
+        mapping_stored_at=stored_at,
+    )
+
+
 @dataclass(frozen=True)
 class EtfInputs:
     identity: CurrentEtfIdentity
@@ -199,18 +268,29 @@ async def validate_etf_originals(
             or not re.search(r"index composed of [^.]*U\.S\. equities\.", objective[1])
             or len(re.findall(r"\bFORM 497K\b", text)) != 1
         ):
-            raise ValueError
-        identity = CurrentEtfIdentity(
-            symbol=symbol,
-            cik=identifier,
-            series_id=series,
-            class_id=share_class,
-            legal_name=name,
-            fmp_exchange=row["exchange"],
-            objective=objective[1],
-            legal_type_statement=legal[1],
-            mapping_stored_at=stored_at,
-        )
+            identity: CurrentEtfIdentity = _share_class_identity(
+                text=text,
+                index=index,
+                symbol=symbol,
+                identifier=identifier,
+                series=series,
+                share_class=share_class,
+                fmp_name=name,
+                fmp_exchange=row["exchange"],
+                stored_at=stored_at,
+            )
+        else:
+            identity = CurrentEtfIdentity(
+                symbol=symbol,
+                cik=identifier,
+                series_id=series,
+                class_id=share_class,
+                legal_name=name,
+                fmp_exchange=row["exchange"],
+                objective=objective[1],
+                legal_type_statement=legal[1],
+                mapping_stored_at=stored_at,
+            )
         fmp_received = require_utc(datetime.fromisoformat(f["received_at"]))
         sec_received = tuple(
             require_utc(datetime.fromisoformat(r["received_at"])) for r in receipts

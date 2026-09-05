@@ -4,15 +4,24 @@ import json
 from hashlib import sha256
 
 
-def originals(*, document=None, exchange="AMEX", is_etf=True, index_class="C000000002"):
+def originals(
+    *,
+    document=None,
+    exchange="AMEX",
+    is_etf=True,
+    index_class="C000000002",
+    symbol="IWM",
+    company_name="Synthetic Equity Fund",
+    index_name="",
+):
     stamp = "2026-01-03T00:00:00+00:00"
     accession = "0000123456-26-000001"
     base = "https://www.sec.gov/Archives/edgar/data/123456/000012345626000001/"
     fmp = json.dumps(
         [
             dict(
-                symbol="IWM",
-                companyName="Synthetic Equity Fund",
+                symbol=symbol,
+                companyName=company_name,
                 cik="0000123456",
                 currency="USD",
                 exchange=exchange,
@@ -26,7 +35,7 @@ def originals(*, document=None, exchange="AMEX", is_etf=True, index_class="C0000
             source="fmp",
             origin="https://financialmodelingprep.com",
             path="/stable/profile",
-            symbol="IWM",
+            symbol=symbol,
             raw_sha256=sha256(fmp).hexdigest(),
             raw_byte_length=len(fmp),
             received_at=stamp,
@@ -35,7 +44,7 @@ def originals(*, document=None, exchange="AMEX", is_etf=True, index_class="C0000
     mapping = json.dumps(
         dict(
             fields=["cik", "seriesId", "classId", "symbol"],
-            data=[[123456, "S000000001", "C000000002", "IWM"]],
+            data=[[123456, "S000000001", "C000000002", symbol]],
         )
     ).encode()
     submissions = json.dumps(
@@ -53,7 +62,8 @@ def originals(*, document=None, exchange="AMEX", is_etf=True, index_class="C0000
         )
     ).encode()
     index = (
-        f"<html><body>S000000001 {index_class} IWM "
+        f"<html><body>Series S000000001 {index_name} Class/Contract {index_class} "
+        f"ETF Shares {symbol} "
         f'<a href="{base}sample.htm">497K</a></body></html>'
     ).encode()
     document = (
@@ -112,3 +122,18 @@ def archives(root, **changes):
         path.write_bytes(content)
         path.chmod(0o600)
     return fm, sec, mapping
+
+
+def share_class_document():
+    return b"""<html><body>497K 1 example.htm Summary Prospectus Synthetic Total Stock ETF
+Exchange-traded fund shares that are not individually redeemable and are listed on NYSE Arca
+Synthetic Total Stock Index Fund ETF Shares (VTI)
+Investment Objective Synthetic Total Stock ETF, an exchange-traded share class of
+Synthetic Total Stock Index Fund (the Fund), seeks to track the performance of a
+benchmark index that measures the investment return of the overall stock market.
+Fees and Expenses Costs. Principal Investment Strategies
+The Fund tracks an index which represents 100% of the investable U.S. stock market.
+Under normal circumstances, the Fund invests at least 80% of its net assets,
+plus the amount of any borrowings for investment purposes,
+in the stocks that make up the Target Index.
+Principal Risks The investment may lose value.</body></html>"""

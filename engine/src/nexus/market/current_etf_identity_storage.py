@@ -16,6 +16,7 @@ from nexus.market.current_etf_identity import (
     SCHEMA,
     SOURCE,
     CurrentEtfIdentity,
+    CurrentEtfShareClassIdentity,
     EtfInputs,
     member_for,
     validate_etf_originals,
@@ -35,7 +36,7 @@ from nexus.research.fmp_profile_archive import _read
 
 class EtfProof(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
-    identity: CurrentEtfIdentity
+    identity: CurrentEtfShareClassIdentity | CurrentEtfIdentity
     instrument_id: UUID
     alias_id: UUID
     alias_valid_from: date

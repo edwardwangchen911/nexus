@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 
 import pytest
-from helpers.current_etf_identity import originals
+from helpers.current_etf_identity import originals, share_class_document
 
 
 @pytest.mark.asyncio
@@ -189,3 +189,49 @@ async def test_normal_collector_complete_archive_or_first_error(monkeypatch, tmp
     )
     with pytest.raises(ValueError, match="CURRENT_ETF_MAPPING_ORIGIN_INVALID"):
         await ops.verify_mapping_origin(storage, mapping_file=mapping, sec_archive=sec)
+
+
+@pytest.mark.asyncio
+async def test_share_class_legal_name_comes_from_exact_sec_binding_with_provider_conflict_visible():
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    values = originals(
+        symbol="VTI",
+        company_name="Synthetic Wrong Provider Label",
+        index_name="Synthetic Total Stock Index Fund",
+        document=share_class_document(),
+    )
+    result = await validate_etf_originals(symbol="VTI", contents=values, now=datetime.now(UTC))
+    assert result.identity.legal_name == "Synthetic Total Stock Index Fund ETF Shares"
+    assert result.identity.fmp_name == "Synthetic Wrong Provider Label"
+    assert result.identity.fmp_name_matches_sec is False
+    old = await validate_etf_originals(symbol="IWM", contents=originals(), now=datetime.now(UTC))
+    assert "fmp_name" not in old.identity.model_dump()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name,replace",
+    [
+        ("Other Index Fund", None),
+        ("Synthetic Total Stock Index Fund", (b"ETF Shares (VTI)", b"ETF Shares (SPY)")),
+        ("Synthetic Total Stock Index Fund", (b"U.S. stock market", b"U.S. bond market")),
+    ],
+)
+async def test_share_class_mismatch_not_overridden_by_provider_label(name, replace):
+    from nexus.market.current_etf_identity import validate_etf_originals
+
+    document = share_class_document()
+    if replace:
+        document = document.replace(*replace)
+    with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+        await validate_etf_originals(
+            symbol="VTI",
+            contents=originals(
+                symbol="VTI",
+                company_name="Synthetic Wrong Provider Label",
+                index_name=name,
+                document=document,
+            ),
+            now=datetime.now(UTC),
+        )

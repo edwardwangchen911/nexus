@@ -144,3 +144,72 @@ async def test_raw_tamper_rejected_on_read(migrated_database_url, tmp_path):
                 await read_current_etf(s, store, snapshot_id=result.snapshot_id)
     finally:
         await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_share_class_proof_preserves_iwm_serialization_and_name_difference(
+    migrated_database_url, tmp_path
+):
+    from helpers.current_etf_identity import share_class_document
+    from nexus.market.current_etf_identity_storage import EtfProof
+
+    settings = config(migrated_database_url)
+    store = MemoryStore()
+    fm, sec, mapping = archives(tmp_path / "old")
+    first = await import_identity(
+        settings, symbol="IWM", fmp_archive=fm, sec_archive=sec, mapping_file=mapping, store=store
+    )
+    factory = session_factory(settings)
+    try:
+        async with factory() as session:
+            original = (
+                await read_current_etf(session, store, snapshot_id=first.snapshot_id)
+            ).model_dump(mode="json")
+        fm, sec, mapping = archives(
+            tmp_path / "new",
+            symbol="VTI",
+            company_name="Synthetic Wrong Provider Label",
+            index_name="Synthetic Total Stock Index Fund",
+            document=share_class_document(),
+        )
+        new = await import_identity(
+            settings,
+            symbol="VTI",
+            fmp_archive=fm,
+            sec_archive=sec,
+            mapping_file=mapping,
+            store=store,
+        )
+        async with factory() as session:
+            proof = await read_current_etf(session, store, snapshot_id=new.snapshot_id)
+            assert proof.identity.fmp_name_matches_sec is False
+            assert proof.identity.fmp_name == "Synthetic Wrong Provider Label"
+            assert (
+                await read_current_etf(session, store, snapshot_id=first.snapshot_id)
+            ).model_dump(mode="json") == original
+            assert "fmp_name" not in original["identity"]
+            payload = proof.model_dump(mode="json")
+            assert EtfProof.model_validate(payload).model_dump(mode="json") == payload
+            payload["identity"]["unexpected"] = "ignored?"
+            with pytest.raises(ValueError):
+                EtfProof.model_validate(payload)
+        effective = (
+            exchange_calendars.get_calendar("XNYS")
+            .date_to_session(datetime.now(UTC).date() + timedelta(days=7), direction="next")
+            .date()
+        )
+        report = await prepare_universe(
+            settings,
+            effective_session=effective,
+            store=store,
+            use_listing_revisions=True,
+            use_etf_identities=True,
+        )
+        assert len(report["members"]) == 49
+        bound = next(m for m in report["members"] if m["symbol"] == "VTI")
+        assert bound["gap"] is None
+        assert bound["fmp_name_matches_sec"] is False
+        assert bound["legal_name"] != bound["fmp_name"]
+        assert report["candidate"] is None and report["execution_locked"]
+    finally:
+        await factory.kw["bind"].dispose()

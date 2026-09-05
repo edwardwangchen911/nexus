@@ -252,3 +252,12 @@ master 冲突拒绝且不覆盖；不发布股票池，不创建研究或订单�
 未来池准备显式增加 `--use-etf-identities`，可与 `--use-listing-revisions` 并用；
 默认普通股合同不变，仍保留全部 49 项，任一缺口都不生成可发布候选。没有迁移、
 服务重启或历史回填；关闭该显式读取选项即可恢复原消费者行为，已归档事实不删除。
+
+股票ETF份额类别的窄兼容分支另以SEC index的唯一series名称、class的ETF Shares标签、
+正文完整类名/ticker/同基金股票投资目标与策略确认身份。FMP依然核ticker/CIK/USD/isEtf，
+其展示名不充当法律名称；新身份子类型及显式未来准备同时保留legal_name、fmp_name和
+fmp_name_matches_sec，差异不删除、不改名或宣称一致。不接受错series/class/ticker、
+债券目标或另一基金封面；网页检索中尚未正常归档的CUSIP不进入证明。
+这是内部JSON合同增量，旧IWM原proof字段/序列化及默认读取保持兼容；新proof落库后，
+回滚可关闭显式ETF消费者，但必须保留新子类型兼容reader，不直接退回只认旧字段的
+应用或裁剪已存proof。原件仍8份，未增加来源、数据库schema或迁移。
