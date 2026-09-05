@@ -51,7 +51,7 @@ async def test_first_identity_normal_import_readback_and_replay(migrated_databas
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["multi_cik", "dual_listing"])
+@pytest.mark.parametrize("kind", ["multi_cik", "dual_listing", "custom_member"])
 async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_json(
     migrated_database_url, tmp_path, kind
 ):
@@ -70,10 +70,16 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
     factory = session_factory(config)
     store = MemoryStore()
     old_fmp, old_sec = archives(tmp_path / "single")
-    new_fmp, new_sec = archives(
-        tmp_path / "multiple",
-        sec=(multiple_registrant_filing() if kind == "multi_cik" else dual_listing_filing()),
-    )
+    taxonomy = None
+    if kind == "custom_member":
+        from helpers.custom_identity import custom_archives
+
+        new_fmp, new_sec, taxonomy = custom_archives(tmp_path / "multiple")
+    else:
+        new_fmp, new_sec = archives(
+            tmp_path / "multiple",
+            sec=(multiple_registrant_filing() if kind == "multi_cik" else dual_listing_filing()),
+        )
     try:
         old = await ops.import_identity(
             config, store=store, symbol="AAPL", fmp_archive=old_fmp, sec_archive=old_sec
@@ -83,7 +89,12 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
             old_json = json.dumps(old_payload, sort_keys=True)
             assert len(old_payload["identity"]["facts"]) == 4
         new = await ops.import_identity(
-            config, store=store, symbol="AAPL", fmp_archive=new_fmp, sec_archive=new_sec
+            config,
+            store=store,
+            symbol="AAPL",
+            fmp_archive=new_fmp,
+            sec_archive=new_sec,
+            taxonomy_archive=taxonomy,
         )
         assert new.instrument_id == old.instrument_id == stable_instrument_id("AAPL")
         assert new.snapshot_id != old.snapshot_id
@@ -97,6 +108,12 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
                     "0000123456",
                     "0000654321",
                 }
+            elif kind == "custom_member":
+                assert len(stored["artifacts"]) == 4 and len(stored["taxonomy_artifacts"]) == 6
+                assert stored["identity"]["context"]["fields"][1]["value"] == "sample:ExampleMember"
+                assert (await session.get(DataSnapshot, new.snapshot_id)).schema_version == (
+                    "current_custom_member_v1"
+                )
             else:
                 listings = [f for f in facts if "listing_context" in f]
                 assert len(facts) == 7 and len(listings) == 6
@@ -137,6 +154,22 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
         assert prepared["status"] == "BLOCKED" and prepared["candidate"] is None
         assert prepared["execution_locked"] is True
         assert prepared["historical_backtest_eligible"] is False
+        if kind == "custom_member":
+            missing = dict(stored, taxonomy_artifacts=stored["taxonomy_artifacts"][:-1])
+            with pytest.raises(ValueError):
+                module.CustomMemberIdentityProof.model_validate(missing)
+            for binding in proof.taxonomy_artifacts[:2]:
+                key = binding.uri.removeprefix("s3://synthetic/")
+                original = store.objects[key]
+                store.objects[key] = original + b"tampered"
+                try:
+                    async with factory() as session:
+                        with pytest.raises(ValueError):
+                            await module.read_current_identity(
+                                session, store, snapshot_id=new.snapshot_id
+                            )
+                finally:
+                    store.objects[key] = original
         async with factory() as session:
             assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 2
             for model in (UniverseSnapshot, AgentResearchRunRecord, PaperOrderRecord):
