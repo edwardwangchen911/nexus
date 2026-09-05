@@ -2938,3 +2938,11 @@ verified，default/listing/explicit 三种 prepare 精确绑定新 proof_snapsho
 异常沉淀：验收最初少计 normal prepare 生成的组合上下文引用，已核对实际新增来源与生产者，纠正只读断言，未重放导入；首次 DOM 检查误将指标表限定在全文折叠区，而实际表格位于同一附件 section，按已渲染结构纠正选择范围后复核，未把验收定位错误当产品缺陷或重启服务。
 
 本地私有证据目录：`outputs/acceptance/current-trends-real-20260905/latest-operating-disclosure/quarter-metrics-acceptance/`。可分享摘要为 `acceptance-summary.json`、`runtime-summary.json`、`api-summary.json`、`dom-summary.json`、`final-state-summary.json`；原件、身份、API 和输入值只保存在该目录私有文件中，不进入聊天或测试材料。
+
+### 以独立当前 8-K 身份来源补齐一例（2026-09-06）
+
+复用协调任务已收取并经正常 loader 核验的当前 8-K 归档，以及原有 FMP 归档；A 未重新采集、未修改解析器或原 10-Q/失败历史。新来源提供独立当前身份证明，不代表旧新实体继承关系或历史 PIT 已确认。
+
+正常产品 CLI 仅一例 import，再正常 read 与 default/listing/explicit 三种 prepare-universe 均成功，新成员精确绑定本次 proof snapshot。显式模式当前 47/49 身份已核实、2 个 `IDENTITY_PROOF_MISSING`；仍保留全部 49 成员、candidate=null、historical_backtest_eligible=false、execution_locked=true。20 个旧业务表行 hash 多重集保留，新增仅 1 instrument、1 alias、4 artifact、1 snapshot。原件 hash 不变，外部请求/模型调用零次，无代码集成或服务重启。
+
+证据位于 `outputs/acceptance/common-stock-current-8k-import-0d28fba/`，安全结论 `acceptance-summary.json`，正常入口回执与精确绑定仅存在私有文件；未输出标的或账户值。
