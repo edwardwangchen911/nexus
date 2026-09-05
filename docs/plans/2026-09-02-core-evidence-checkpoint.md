@@ -2238,3 +2238,57 @@ verified；未再调用失败的旧import，零新增采集。默认prepare仍�
 私有证据在outputs/acceptance/existing-identity-reuse/listing-revision，0700/0600，包含
 新正常入口结果、默认/显式准备对照、前后hash与安全摘要。当前身份显式reader和
 未来准备已受益；旧行情/研究/价格、旧v1预检不自动切换，不宣告完整T1完成。
+
+### 2026-09-05 首个股票ETF及七项普通股原件完成正常身份入口
+
+当前身份准备的可验证绑定从2增至10（49项保留）：两批六项普通股及第三批已合格
+一项均完成正常CLI导入/独立read；另IWM完成首份股票ETF身份导入。普通股已有身份
+的两项只追加listing revision、保留实际UUID及旧exchange，其余五项新增首份身份。
+此处“可验证绑定”仅指当前身份证据，不代表历史回测资料或研究结论齐全。
+
+普通股源合同修复由D交付、协调任务集中审查、A串行集成：cf018b9→main6f8d355
+接纳严格纯entity/duration上下文，保留旧维度分支并拒未知结构；ae7ae4b→main7d39c7a
+仅补已核实Nasdaq精确名称。分别复用D的58/96与60相关单测、静态结果，不重复全量。
+两批原件此前拒绝的旧validation保留，不把新解析成功回写成旧运行成功。所有导入
+均先在当前主线离线复核来源和现有身份，再调用既有import或revise-listing，无重采。
+
+ETF 2f57f59→main39f5852、4b70077→main88a0d79。复用sec_funds严格绑定
+CIK/series/class/submissions/index/497K，离线reader只回放8份已归档原件，不回网。
+ETF法律类型、该基金股票投资目标、封面上市所来自同一已绑定正文；FMP AMEX保留
+为供应商粗标签，精确上市所ARCX来自SEC封面，不改普通股全局映射。首份ETF导入
+拒绝覆盖任何既有master；仍tick_size未知、historical_backtest_eligible=false、执行锁定。
+已知FMP/SEC时间按原receipt归档；旧基金目录original_received_at仍null，本地入库
+时间不当作remote receipt或历史PIT。正常入口另核验目录S3精确版本、hash、原文、
+版本列表LastModified。复用现有表/对象存储，无迁移、调度、API重启或股票池发布。
+
+ETF最终10合成单测、3隔离PG通过；包括正常collector三响应→正常archive loader、
+首HTTP错误只调用一次并保留失败原件、伪目录时间拒绝、并发幂等、旧master冲突、
+原文篡改、默认与显式未来49项准备。9项已有listing PG通过。5个生产文件Mypy、
+Ruff检查/格式与diffcheck通过；集中审查和时间精度增量复核均Ready。
+
+本轮具体异常及最小防复发：
+- 文本多次引用“Summary Prospectus”并不代表另一基金；错误的单次词频限制已改为
+  精确主体封面绑定，合成重复引用回归覆盖，不为此再次请求原文。
+- S3对象列表时间有毫秒，GetObject HTTP-date仅秒。正常入口使用精确版本列表
+  时间对照，不加模糊容差；毫秒列表/秒级响应与篡改时间均有回归。
+- 不可变alias不能用UPDATE或重叠alias INSERT构造普通成功场景。既有数据库约束
+  已拒绝两种测试造态，最终使用正常并发入口、master冲突及原件篡改验证，无约束放宽。
+- 工具长输出截断不等于采集失败：先核进程和0700/0600原件，确认FMP已有完整归档后
+  复用，不因丢失会话输出重放网络调用。历史“三阶段额外预算”不恢复为当前审批条件。
+
+真实ETF入口import仅一次created、独立read verified，默认及仅listing开关仍不消费
+ETF，新显式--use-etf-identities与listing开关组合正确绑定IWM。ETF本次19表旧行hash
+完全保留，仅Instrument+1/alias+1/artifacts+8/snapshot+1；备份绑定读取识别8份原件。
+普通股三个完成批次的旧行hash也分别全保留，仅追加预期身份/alias/原件/proof。
+最新第三批item2后，两显式开关报告10项已验证，剩33普通股+6ETF：合计37项缺proof、
+2项类型未支持，candidate=null、execution_locked=true；不缩池，也不宣告T1完成。
+
+私有验收（均在main outputs/acceptance）：
+- common-stock-three-import-6f8d355：2 import+1 revision，3独立read。
+- common-stock-next-item2-import-6f8d355及common-stock-next-remaining-import-ae7ae4b：
+  分开串行接入，不重复item2，共2 import+1 revision、3独立read。
+- etf-identity-inventory/current-identity：ETF完整正常入口/三种准备对照/19表hash/8绑定。
+- common-stock-third-item2-import-88a0d79：1 import/read、显式10项绑定。
+
+以上身份消费仅在明确的新CLI/reader生效；未更换常驻API镜像，不自动改旧研究或旧行情。
+剩余身份来源与独立历史T1数据继续分别推进，不要求用户代为协调或再次批准常规读取。
