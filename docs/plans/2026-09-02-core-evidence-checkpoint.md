@@ -2459,3 +2459,29 @@ IDENTITY_TYPE_UNSUPPORTED，与证明缺失不是同一原因。原池包含 non
 后续 authority loader 也已有同类型映射；不能据此说下游完全不可支持，更不能删池
 或改成 equity_etf 来凑齐。现有计划保留全部 49 项，下一步单独核 TLT 国债基金与
 GLD 黄金信托来源合同，不把故意未支持的消费者类型混为已确认的采集缺失。
+
+
+### TLT 国债基金保留非股票分类完成正常身份入口
+
+既有目录精确 TLT/CIK1100663/S000004360/C000012090 与完整 497K 本体的 Nasdaq
+封面、二十年以上美国国债目标、ICE 指数及原文 80%/90% 策略闭合。A a87925e 经
+集中审查后集成 main4ef05e4，八文件净差零。新增独立 Treasury 身份 JSON，保留
+non_equity_etf/US_TREASURY，未更改池定义、资产类别或风险政策。原 import/UIT
+与 import-treasury 双向隔离资产类型；reader 重放原件并核 master/definition 类型。
+GLD 仍类型未支持，默认未来准备语义不变。
+
+63 ETF/UIT 单测通过；正常 TLT 隔离 PG import→strict read→future/default 与
+旧 JSON 回归 1 passed。源文件 Ruff/Mypy 通过；真实 TLT normal loader exit0，
+五份旧真实 ETF proof 严格重读和原 JSON exact 保持。原件中引号内简称空格单独
+适配并回归，股票/公司债目标、错阈值、错份额/ticker、错风险桶及错误入口均拒绝。
+
+main import-treasury 一次 created、独立 read verified、三种 prepare 对照通过。
+19 表旧行多重集全部保留，仅 Instrument+1、alias+1、artifacts+5、snapshot+1；
+导入前按实际 hash 查询确认八原件中目录、目录绑定及同 CIK 的 submissions 原文
+三份已存在，所以仅新增五份。仍有八备份绑定，不覆盖旧原件或重写其收到时间。
+采集阶段 FMP 一次、现有 SEC collector 三次正常完成；验收阶段无新网络。
+私有证据：outputs/acceptance/etf-identity-inventory/tlt-current-identity/acceptance-summary.json。
+
+当前保留 49 项，21 verified、27 普通股缺证明、1 GLD 类型未支持；candidate=null、
+历史资格 false、执行锁定。无研究重跑、数据库迁移或不相关服务重启。来源有完整
+证明时补精确类型合同，不混为“采集缺失”，也不为凑齐数目修改资产类型或删池。
