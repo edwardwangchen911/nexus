@@ -1,6 +1,7 @@
 """Handwritten public-symbol fixtures; no captured issuer/account payloads."""
 
 import json
+import re
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -48,6 +49,41 @@ def filing():
 <td><ix:nonNumeric id="exchange" name="dei:SecurityExchangeName"\
  contextRef="stock">New York Stock Exchange</ix:nonNumeric></td>
 </tr></table></body></html>"""
+
+
+def multiple_registrant_filing():
+    raw = filing().replace(b"<html ", b'<html xmlns:sample="https://example.invalid/2025" ')
+    raw = raw.replace(
+        b'<xbrldi:explicitMember dimension="dei:EntityListingsExchangeAxis">'
+        b"exch:XNYS</xbrldi:explicitMember>",
+        b"",
+    )
+    stock_context = re.search(rb'<xbrli:context id="stock">.*?</xbrli:context>', raw, re.S)[0]
+    primary = re.sub(rb"<xbrli:segment>.*?</xbrli:segment>", b"", stock_context, flags=re.S)
+    primary = primary.replace(b'id="stock"', b'id="primary"')
+    other = primary.replace(b'id="primary"', b'id="other"').replace(
+        b"</xbrli:entity>",
+        b"<xbrli:segment><xbrldi:explicitMember "
+        b'dimension="dei:LegalEntityAxis">sample:OtherMember</xbrldi:explicitMember>'
+        b"</xbrli:segment></xbrli:entity>",
+    )
+    raw = raw.replace(b"</ix:header>", primary + other + b"</ix:header>")
+    raw = raw.replace(b'contextRef="stock">0000123456', b'contextRef="primary">0000123456')
+    return raw.replace(
+        b"</body>",
+        b"""
+<ix:nonNumeric id="primary-name" name="dei:EntityRegistrantName"
+ contextRef="primary">Primary Example</ix:nonNumeric>
+<ix:nonNumeric id="primary-tax" name="dei:EntityTaxIdentificationNumber"
+ contextRef="primary">00-0000001</ix:nonNumeric>
+<ix:nonNumeric id="other-cik" name="dei:EntityCentralIndexKey"
+ contextRef="other">0000654321</ix:nonNumeric>
+<ix:nonNumeric id="other-name" name="dei:EntityRegistrantName"
+ contextRef="other">Other Example</ix:nonNumeric>
+<ix:nonNumeric id="other-tax" name="dei:EntityTaxIdentificationNumber"
+ contextRef="other">00-0000002</ix:nonNumeric>
+</body>""",
+    )
 
 
 def archives(root: Path, *, fmp=None, sec=None, received=None):

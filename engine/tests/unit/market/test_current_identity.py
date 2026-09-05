@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from helpers.current_identity import archives, filing, profile
+from helpers.current_identity import multiple_registrant_filing as _multiple_registrant_cover
 
 
 def test_explicit_same_security_identity():
@@ -475,41 +476,6 @@ def test_plain_context_cannot_imply_a_class_a_member_from_title():
             fmp_raw=profile(),
             sec_raw=_cover_without_segment().replace(b">Common Stock<", b">Class A Common Stock<"),
         )
-
-
-def _multiple_registrant_cover():
-    raw = filing().replace(b"<html ", b'<html xmlns:sample="https://example.invalid/2025" ')
-    raw = raw.replace(
-        b'<xbrldi:explicitMember dimension="dei:EntityListingsExchangeAxis">'
-        b"exch:XNYS</xbrldi:explicitMember>",
-        b"",
-    )
-    stock_context = re.search(rb'<xbrli:context id="stock">.*?</xbrli:context>', raw, re.S)[0]
-    primary = re.sub(rb"<xbrli:segment>.*?</xbrli:segment>", b"", stock_context, flags=re.S)
-    primary = primary.replace(b'id="stock"', b'id="primary"')
-    other = primary.replace(b'id="primary"', b'id="other"').replace(
-        b"</xbrli:entity>",
-        b"<xbrli:segment><xbrldi:explicitMember "
-        b'dimension="dei:LegalEntityAxis">sample:OtherMember</xbrldi:explicitMember>'
-        b"</xbrli:segment></xbrli:entity>",
-    )
-    raw = raw.replace(b"</ix:header>", primary + other + b"</ix:header>")
-    raw = raw.replace(b'contextRef="stock">0000123456', b'contextRef="primary">0000123456')
-    return raw.replace(
-        b"</body>",
-        b"""
-<ix:nonNumeric id="primary-name" name="dei:EntityRegistrantName"
- contextRef="primary">Primary Example</ix:nonNumeric>
-<ix:nonNumeric id="primary-tax" name="dei:EntityTaxIdentificationNumber"
- contextRef="primary">00-0000001</ix:nonNumeric>
-<ix:nonNumeric id="other-cik" name="dei:EntityCentralIndexKey"
- contextRef="other">0000654321</ix:nonNumeric>
-<ix:nonNumeric id="other-name" name="dei:EntityRegistrantName"
- contextRef="other">Other Example</ix:nonNumeric>
-<ix:nonNumeric id="other-tax" name="dei:EntityTaxIdentificationNumber"
- contextRef="other">00-0000002</ix:nonNumeric>
-</body>""",
-    )
 
 
 def test_multiple_registrants_bind_default_entity_without_discarding_other_cik(tmp_path):

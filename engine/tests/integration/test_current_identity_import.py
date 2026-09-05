@@ -2,7 +2,7 @@ import importlib
 from datetime import UTC, datetime
 
 import pytest
-from helpers.current_identity import MemoryStore, archives
+from helpers.current_identity import MemoryStore, archives, multiple_registrant_filing
 from nexus.market.universe import stable_instrument_id
 from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.data import DataSnapshot
@@ -41,6 +41,91 @@ async def test_first_identity_normal_import_readback_and_replay(migrated_databas
             for model in (UniverseSnapshot, AgentResearchRunRecord, PaperOrderRecord):
                 assert await session.scalar(select(func.count()).select_from(model)) == 0
             await module.read_current_identity(session, store, snapshot_id=first.snapshot_id)
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_json(
+    migrated_database_url, tmp_path
+):
+    import json
+    from datetime import timedelta
+    from hashlib import sha256
+
+    import exchange_calendars
+    from nexus.backtest.future_identity import prepare_future_identity_bindings
+
+    module = importlib.import_module("nexus.market.current_identity_storage")
+    ops = importlib.import_module("nexus.ops.instrument_identity_local")
+    config = EngineSettings(database_url=migrated_database_url).model_copy(
+        update={"object_store_endpoint": "http://127.0.0.1:9000"}
+    )
+    factory = session_factory(config)
+    store = MemoryStore()
+    old_fmp, old_sec = archives(tmp_path / "single")
+    new_fmp, new_sec = archives(tmp_path / "multiple", sec=multiple_registrant_filing())
+    try:
+        old = await ops.import_identity(
+            config, store=store, symbol="AAPL", fmp_archive=old_fmp, sec_archive=old_sec
+        )
+        async with factory() as session:
+            old_payload = (await session.get(DataSnapshot, old.snapshot_id)).payload
+            old_json = json.dumps(old_payload, sort_keys=True)
+            assert len(old_payload["identity"]["facts"]) == 4
+        new = await ops.import_identity(
+            config, store=store, symbol="AAPL", fmp_archive=new_fmp, sec_archive=new_sec
+        )
+        assert new.instrument_id == old.instrument_id == stable_instrument_id("AAPL")
+        assert new.snapshot_id != old.snapshot_id
+        async with factory() as session:
+            stored = (await session.get(DataSnapshot, new.snapshot_id)).payload
+            assert stored["identity"]["cik"] == "0000123456"
+            assert len(stored["identity"]["facts"]) == 5
+            assert {
+                f["value"]
+                for f in stored["identity"]["facts"]
+                if f["name"] == "dei:EntityCentralIndexKey"
+            } == {"0000123456", "0000654321"}
+        # Separate transactions force both the new proof and the old JSON through the reader.
+        async with factory() as session:
+            proof = await module.read_current_identity(session, store, snapshot_id=new.snapshot_id)
+            legacy = await module.read_current_identity(session, store, snapshot_id=old.snapshot_id)
+            assert proof.model_dump(mode="json") == stored
+            assert json.dumps(legacy.model_dump(mode="json"), sort_keys=True) == old_json
+            assert proof.identity.cik == "0000123456"
+            assert (
+                json.dumps(
+                    (await session.get(DataSnapshot, old.snapshot_id)).payload, sort_keys=True
+                )
+                == old_json
+            )
+        future = (
+            exchange_calendars.get_calendar("XNYS")
+            .date_to_session(datetime.now(UTC).date() + timedelta(days=7), direction="next")
+            .date()
+        )
+        async with factory() as session:
+            prepared = await prepare_future_identity_bindings(
+                session, store, effective_session=future
+            )
+        bound = next(m for m in prepared["members"] if m["symbol"] == "AAPL")
+        assert bound["gap"] is None
+        assert bound["instrument_id"] == str(new.instrument_id)
+        assert bound["proof_snapshot_id"] == str(new.snapshot_id)
+        assert (
+            bound["proof_hash"]
+            == sha256(
+                json.dumps(stored, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+        )
+        assert prepared["status"] == "BLOCKED" and prepared["candidate"] is None
+        assert prepared["execution_locked"] is True
+        assert prepared["historical_backtest_eligible"] is False
+        async with factory() as session:
+            assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 2
+            for model in (UniverseSnapshot, AgentResearchRunRecord, PaperOrderRecord):
+                assert await session.scalar(select(func.count()).select_from(model)) == 0
     finally:
         await factory.kw["bind"].dispose()
 
