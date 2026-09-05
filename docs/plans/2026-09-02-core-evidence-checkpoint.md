@@ -2922,3 +2922,5 @@ verified，default/listing/explicit 三种 prepare 精确绑定新 proof_snapsho
 验证：入口/旧序列化 31 unit；修订选择及既有 prepare 11 PG；原有附件与新修订 4 PG；增补篡改拒绝、正常 prepare→tools→模拟 SDK 后，新修订文件 2 PG。模拟 SDK 请求仅含最新一份附件及精确投影，未调用真实模型。Ruff 与五个生产文件 Mypy 通过。旧、新读取及重复导入 existing/对象不增均已核验。
 
 当前仅 A 独立工作区接线验证，依赖 D 的季度/累计、GAAP 列绑定修复通过集中审查；未做真实业务导入、服务更新或新研究。解析器此前单测通过不等于财务口径已经完整核验，不据此宣告真实结果可用。
+
+上述切片增量联合核验：D 表列及实际季度绑定修复（56bc5e5、9949262）与消费者 8294a66 已在 A 工作区组合。受保护 API 红测实际复现 strict reader 有投影但 GET 未返回；消费者接入后正常 old/new import→prepare/admit→HMAC GET 的新投影精确匹配、旧 run 完整 DTO 不变。最终相关 56 unit 通过，API/修订/原附件联合 5 PG 通过（19.86s），对象存储为合成边界、API 和严格 reader 均真实，未调用模型或业务导入。新增回归位于 `engine/tests/integration/test_sec_exhibit_quarter_api.py`。此证据仍是隔离验收，不替代主线集成、运行生效或真实页面验收。
