@@ -2658,3 +2658,21 @@ prepare均核本次snapshot，旧item2不重放。实际存储身份与正常原
 私有摘要：outputs/acceptance/common-stock-tenth-items13-title-a0a7045/acceptance-summary.json，
 同目录artifact-preflight-summary.json记录去重。无新采集、模型或API重启，原mapping
 失败与诊断文件保留；身份补证不改变当前研究和策略候选资格。
+
+
+### 同研究补齐进入退出表达式，保持待核验与实际观察分区
+
+A ecbd3a2仅DecisionCard/condition-semantics两文件，经集中Ready串行main5bd918c，
+净差零。进入/退出取intent原数组，失效仍取顶层research.invalidation_conditions；
+共享格式化与证据抽屉，三类均明确“已保存的研究表达式（待核验）”，不把系统构建
+的committee表达式统一称为模型提出。boolean运算符/阈值保持原义，空数组/无intent
+不推导许可，与已有concentration实际求值结果保持分区，不增加uncertainties范围。
+先9失败/3通过确认遗漏，修后4相关文件81通过；typecheck/ESLint通过，协调独立12
+条件单测通过。覆盖v1/v2/v3、三类不同值/原失效取值、真假阈值、空值、静态抽屉、
+旧数据不变及无执行按钮；没有API/schema/producer/v4变更。
+
+原current-trends同run的受保护GET确认旧intent精确保持；BFF→375/1440 DOM三组
+各原表达式、各自证据抽屉/键盘焦点、待核验/实际观察分区、无横溢出和交易控件均
+通过，仅本地GET/HEAD/OPTIONS、blocked0；19业务表旧行精确不变，无模型/采集。
+增量证据在原私有目录current-trends-real-20260905的conditions-api-summary.json、
+conditions-dom-summary.json、conditions-before-hashes.json；未重跑整套趋势验收。
