@@ -11,7 +11,7 @@ from helpers.current_identity import (
 from nexus.market.universe import stable_instrument_id
 from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.data import DataSnapshot
-from nexus.persistence.models.market import InstrumentAlias, UniverseSnapshot
+from nexus.persistence.models.market import Instrument, InstrumentAlias, UniverseSnapshot
 from nexus.persistence.models.paper import PaperOrderRecord
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
@@ -53,7 +53,15 @@ async def test_first_identity_normal_import_readback_and_replay(migrated_databas
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "kind",
-    ["multi_cik", "dual_listing", "custom_member", "hidden", "plain_class_a", "class_a_generic"],
+    [
+        "multi_cik",
+        "dual_listing",
+        "custom_member",
+        "hidden",
+        "plain_class_a",
+        "class_a_generic",
+        "exchange_only",
+    ],
 )
 async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_json(
     migrated_database_url, tmp_path, kind
@@ -84,6 +92,10 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
         new_fmp, new_sec = archives(
             tmp_path / "multiple", sec=title_cover(plain=kind == "plain_class_a")
         )
+    elif kind == "exchange_only":
+        from helpers.current_identity_exchange_only import cover
+
+        new_fmp, new_sec = archives(tmp_path / "multiple", sec=cover())
     elif kind == "hidden":
         from helpers.current_identity_hidden import cover
 
@@ -140,6 +152,21 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
                 assert dimensions == (
                     [] if kind == "plain_class_a" else ["us-gaap:CommonClassAMember"]
                 )
+            elif kind == "exchange_only":
+                assert len(facts) == 5
+                aux = next(f for f in facts if f.get("evidence_role") == "unlinked_exchange")
+                assert aux["value"] == "Chicago Stock Exchange, Inc"
+                assert aux["visible"] is False and aux["identity_linked"] is False
+                assert aux["format"] == "ixt-sec:exchnameen"
+                assert aux["context_evidence"]["id"] == "other"
+                assert {f["value"] for f in facts if f["name"] == "dei:TradingSymbol"} == {"AAPL"}
+                assert [
+                    f["value"]
+                    for f in stored["identity"]["context"]["fields"]
+                    if f["tag"] == "xbrldi:explicitmember"
+                ] == ["exch:XNYS"]
+                assert await session.scalar(select(func.count()).select_from(Instrument)) == 1
+                assert await session.scalar(select(func.count()).select_from(InstrumentAlias)) == 1
             elif kind == "hidden":
                 assert len(facts) == 7
                 hidden = next(f for f in facts if f["id"] == "preferred-symbol")
@@ -209,7 +236,7 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
                             )
                 finally:
                     store.objects[key] = original
-        if kind in {"hidden", "plain_class_a", "class_a_generic"}:
+        if kind in {"hidden", "plain_class_a", "class_a_generic", "exchange_only"}:
             # Both SEC original and its independently bound receipt must survive strict read.
             for binding in proof.artifacts[2:]:
                 key = binding.uri.removeprefix("s3://synthetic/")
