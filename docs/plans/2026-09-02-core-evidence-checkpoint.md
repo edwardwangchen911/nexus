@@ -2781,3 +2781,20 @@ hash/长度均验证；最新 10-Q 仍是原 2026-06-09 接受的同一份，没
 新经营期间与原缺口相关，但主文单独不足以重跑研究。证据在原案例
 sec-projection/research-increment-summary.json、current-metadata-summary.json
 及 latest-operating-disclosure/ 原件、receipt、content-summary.json 和私有附件引用。
+
+### 最新经营新闻稿附件原件与冻结入口缺口
+
+从父 HTML 唯一 99.1 锚点精确取 href，核同 SEC 域/发行人目录/accession，仅首次
+1 GET 保存附件 509673 bytes、hash、实际 receipt 与父 hash，未重取主文/目录。
+附件确含截至 2026-08-02 季度收入、GAAP/non-GAAP 利润和 EPS、经营现金流、
+资本支出与自由现金流；对照 2026-05-03 与 2025-08-03，季度与三季度累计分列。
+表格单位百万（每股除外），头部摘要十亿/每股；资产负债对照 8 月 2 日与上年
+11 月 2 日。指引、股息、已实现业绩分开，保留未经审计及 furnished 非 filed；
+历史 GAAP 调整表存在，预测 non-GAAP 不易调节的声明不能当作 GAAP 数值。
+
+实际可见文本 23151 字符；现有 12000 字符前缀会遗漏后面的经营表、GAAP 调整表
+及现金流表。现有 SecDisclosure 只绑定单份 URL/raw hash，正常 refresh 只取
+primaryDocument，reader 没有父文→精确附件来源链。因此不能把附件替换父文或
+当已存 CompanyFacts 结构化事实；需要窄入口支持后再真实冻结。当前仅私有归档，
+业务写入/prepare/model 均为 0。证据：latest-operating-disclosure/exhibit-99-1/
+content-contract-summary.json、父 href 计划、raw/receipt 及完整可见文本。
