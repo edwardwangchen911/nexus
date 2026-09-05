@@ -3627,6 +3627,53 @@ export interface components {
             /** Valid Until */
             valid_until: null;
         };
+        /** ResearchInputExhibit */
+        ResearchInputExhibit: {
+            /**
+             * Accounting Status
+             * @default unaudited
+             * @constant
+             */
+            accounting_status: "unaudited";
+            /** Excerpt */
+            excerpt: string;
+            /**
+             * Filing Status
+             * @default furnished_not_filed
+             * @constant
+             */
+            filing_status: "furnished_not_filed";
+            /**
+             * Number
+             * @default 99.1
+             * @constant
+             */
+            number: "99.1";
+            /** Parent Href */
+            parent_href: string;
+            /** Parent Raw Content Hash */
+            parent_raw_content_hash: string;
+            /**
+             * Parent Received At
+             * Format: date-time
+             */
+            parent_received_at: string;
+            /** Raw Content Hash */
+            raw_content_hash: string;
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /** Source Url */
+            source_url: string;
+            /**
+             * Truncated
+             * @default false
+             * @constant
+             */
+            truncated: false;
+        };
         /** ResearchInputFact */
         ResearchInputFact: {
             /**
@@ -3683,6 +3730,7 @@ export interface components {
              * Format: uuid
              */
             evidence_ref_id: string;
+            exhibit?: components["schemas"]["ResearchInputExhibit"] | null;
             /** Form */
             form: string;
             /**

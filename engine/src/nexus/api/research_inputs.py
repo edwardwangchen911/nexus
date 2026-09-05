@@ -14,6 +14,7 @@ from nexus.api.action_inputs import project_action_observation
 from nexus.api.schemas.agents import (
     ResearchInputActionObservation,
     ResearchInputCompanyProfile,
+    ResearchInputExhibit,
     ResearchInputFact,
     ResearchInputFiling,
     ResearchInputFundHolding,
@@ -35,13 +36,24 @@ from nexus.research.alpaca_actions_storage import read_action_observations
 from nexus.research.fmp_profile import SOURCE as PROFILE_SOURCE
 from nexus.research.fmp_profile_storage import read_company_profiles
 from nexus.research.fred_storage import read_fred_observations
-from nexus.research.sec_disclosures import read_disclosures
+from nexus.research.sec_disclosures import SecDisclosure, read_disclosures
+from nexus.research.sec_exhibits import SecExhibitDisclosure
 from nexus.research.ssga_distributions import SOURCE, read_distributions
 from nexus.research.ssga_fund_observations import SOURCE as FUND_SOURCE
 from nexus.research.ssga_fund_observations import IssuerFundObservation, read_fund_observations
 from nexus.research.ssga_nav_history import SOURCE as NAV_SOURCE
 from nexus.research.ssga_nav_history import NavObservation
 from nexus.research.ssga_nav_storage import nav_tool_payload, read_nav_histories
+
+
+def _exhibit_input(document: SecDisclosure | None) -> ResearchInputExhibit | None:
+    if not isinstance(document, SecExhibitDisclosure):
+        return None
+    return ResearchInputExhibit(
+        **document.exhibit.model_dump(),
+        parent_received_at=document.originals[1].received_at,
+        parent_raw_content_hash=document.raw_content_hash,
+    )
 
 
 async def read_research_inputs(
@@ -156,6 +168,7 @@ async def read_research_inputs(
                 disclosure_truncated=disclosures[evidence.id].truncated
                 if evidence.id in disclosures
                 else False,
+                exhibit=_exhibit_input(disclosures.get(evidence.id)),
                 source_url=disclosures[evidence.id].source_url
                 if evidence.id in disclosures
                 else None,

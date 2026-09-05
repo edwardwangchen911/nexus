@@ -11,6 +11,7 @@ from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
+from nexus.research.sec_exhibits import ExhibitText
 from nexus.strategy.intents import (
     ResearchClaim,
     ResearchCondition,
@@ -119,6 +120,11 @@ class ResearchRunEnvelope(_StrictAgentSchema):
     meta: SuccessMetaResponse
 
 
+class ResearchInputExhibit(ExhibitText):
+    parent_received_at: AwareDatetime
+    parent_raw_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ResearchInputFiling(_StrictAgentSchema):
     evidence_ref_id: UUID
     source: Literal["sec"] = "sec"
@@ -130,6 +136,7 @@ class ResearchInputFiling(_StrictAgentSchema):
     content_hash: str = Field(pattern="^[0-9a-f]{64}$")
     disclosure_excerpt: str | None = Field(default=None, max_length=12000)
     disclosure_truncated: bool = False
+    exhibit: ResearchInputExhibit | None = None
     source_url: str | None = Field(
         default=None,
         max_length=512,

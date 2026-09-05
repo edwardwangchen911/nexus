@@ -1,21 +1,33 @@
-"""Normal identity/archive import and strict readback, with no research admission."""
+"""Normal archive to tools/SDK/API; only source storage and SDK transport are synthetic."""
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from hashlib import sha256
 from uuid import UUID
 
+import httpx
 import pytest
 from helpers.current_identity import CIK, MemoryStore, archives
+from helpers.portfolio_api import app, headers
+from nexus.agents.codex_sdk import CodexCommittee
+from nexus.agents.committee import load_prompt_assets
+from nexus.agents.database_tools import database_read_only_tools
+from nexus.agents.models import ResearchRequest
+from nexus.agents.persistence import admit_research_run
 from nexus.agents.snapshots import prepare_research_snapshot
+from nexus.api.research_inputs import read_research_inputs
+from nexus.domain.evidence import EvidenceRef
 from nexus.ops.instrument_identity_local import import_identity
+from nexus.ops.openai_local import prepare_database
 from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.data import DataSnapshot
-from nexus.persistence.models.research import FinancialFactRecord
+from nexus.persistence.models.research import FinancialFactRecord, ResearchEvidenceRef
 from nexus.persistence.session import session_factory
 from nexus.research.sec_disclosures import read_disclosures
 from nexus.settings import EngineSettings
 from sqlalchemy import func, select
+from unit.agents.test_codex_sdk import _sdk
 from unit.research.test_sec_exhibits import archive, exhibit_archives
 
 
@@ -23,12 +35,14 @@ from unit.research.test_sec_exhibits import archive, exhibit_archives
 async def test_normal_exhibit_import_readback_verifies_originals_and_old_cutoff(
     migrated_database_url,
     tmp_path,
+    monkeypatch,
 ):
     from nexus.ops.sec_exhibit_local import import_sec_exhibit
 
     settings = EngineSettings(
         database_url=migrated_database_url, object_store_endpoint="http://127.0.0.1:9000"
     )
+    await prepare_database(settings)
 
     class Store(MemoryStore):
         async def put_if_absent(self, *, key, content):
@@ -100,8 +114,67 @@ async def test_normal_exhibit_import_readback_verifies_originals_and_old_cutoff(
                 session, identity.instrument_id, as_of=current
             )
             assert snapshot is not None
+            inputs = await read_research_inputs(
+                session,
+                snapshot_id=snapshot.id,
+                instrument_id=identity.instrument_id,
+                as_of=current,
+            )
+            assert inputs.filings[0].exhibit.excerpt == report.exhibit.excerpt
+            assert inputs.filings[0].exhibit.parent_raw_content_hash == report.raw_content_hash
             for model in (FinancialFactRecord, AgentResearchRunRecord):
                 assert await session.scalar(select(func.count()).select_from(model)) == 0
+            request = ResearchRequest(
+                instrument_id=identity.instrument_id,
+                data_snapshot_id=snapshot.id,
+                decision_time=current,
+            )
+            admitted = await admit_research_run(
+                session,
+                actor_id="test",
+                route="/internal/v1/research-runs",
+                idempotency_key="exhibit-wire",
+                request_hash="0" * 64,
+                request=request,
+                prompt_version_id=None,
+                model_config_id=None,
+                daily_limit_usd=Decimal("3"),
+                now=current,
+            )
+            run_id = admitted.run.id
+            tools = await database_read_only_tools(
+                session, admitted.run, allow_fixture_evidence=False
+            )
+            ref = await session.get(ResearchEvidenceRef, evidence_id)
+            evidence = (
+                EvidenceRef(
+                    source=ref.source,
+                    object_id=ref.provider_object_id,
+                    available_at=ref.available_at,
+                    location=ref.location,
+                    content_hash=ref.content_hash,
+                ),
+            )
+            prompts = load_prompt_assets()
+            _, thread, _, _ = _sdk(monkeypatch)
+            committee = CodexCommittee(prompts=prompts, tools=tools)
+            await committee.analyze("orchestrator", request, evidence, prompts["orchestrator"])
+            wire = json.loads(thread.run.call_args.args[0])
+            sent = wire["frozen_inputs"]["filing_disclosures"]["items"][0]["disclosure"]
+            assert sent["exhibit"]["excerpt"] == report.exhibit.excerpt
+            assert sent["raw_content_hash"] == report.raw_content_hash
+            assert thread.run.await_count == 1
+        application = app(migrated_database_url, now=datetime.now(UTC))
+        application.state.session_factory.configure(info={"sec_exhibit_store": store})
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application),
+            base_url="http://testserver",
+        ) as client:
+            path = f"/internal/v1/research-runs/{run_id}"
+            response = await client.get(path, headers=headers("GET", path))
+            assert response.status_code == 200
+            filing = response.json()["data"]["inputs"]["filings"][0]
+            assert filing["exhibit"]["excerpt"] == report.exhibit.excerpt
         objects = dict(store.objects)
         again = await import_sec_exhibit(
             settings,

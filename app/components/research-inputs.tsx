@@ -118,19 +118,36 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
       <dl className="decision-card__authority">
         <div><dt>申报编号</dt><dd>{filing.accession_number}</dd></div>
         <div><dt>SEC 接受时间</dt><dd>{formatUtc(filing.accepted_at)}</dd></div>
-        <div><dt>本机入库时间</dt><dd>{formatUtc(filing.received_at)}</dd></div>
+        <div><dt>{filing.exhibit ? "资料可用时间" : "本机入库时间"}</dt><dd>{formatUtc(filing.received_at)}</dd></div>
       </dl>
       <details className="portfolio-disclosure"><summary>查看证据版本与哈希</summary>
         <dl className="decision-card__versions"><div><dt>版本</dt><dd>{filing.revision}</dd></div><div><dt>内容 SHA-256</dt><dd>{filing.content_hash}</dd></div></dl>
       </details>
       {filing.disclosure_excerpt ? <>
         <p>文本披露，不是结构化财务指标；不代表完整覆盖，不据此推导财务数值。</p>
-        <details className="portfolio-disclosure"><summary>查看冻结披露正文{filing.disclosure_truncated ? "（节选）" : ""}</summary>
+        <details className="portfolio-disclosure"><summary>{filing.exhibit ? "查看 8-K 父文件正文" : "查看冻结披露正文"}{filing.disclosure_truncated ? "（节选）" : ""}</summary>
           <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{filing.disclosure_excerpt}</p>
           {filing.disclosure_truncated ? <p>正文超出展示上限，完整原文请查看 SEC 来源。</p> : null}
           {filing.source_url ? <a href={filing.source_url} target="_blank" rel="noreferrer">查看 SEC 原文</a> : null}
         </details>
-      </> : ["6-K", "497K"].includes(filing.form) ? <p>披露正文暂不可用，不作为已读取的文本证据。</p> : null}
+        {filing.exhibit ? <>
+          <p>未经审计的业绩新闻稿，以附件提供（furnished），非正式提交（filed）。GAAP／非 GAAP、季度／累计、指引和股息分别阅读，不是结构化财务事实。</p>
+          <dl className="decision-card__authority">
+            <div><dt>父文件收到时间</dt><dd>{formatUtc(filing.exhibit.parent_received_at)}</dd></div>
+            <div><dt>附件收到时间</dt><dd>{formatUtc(filing.exhibit.received_at)}</dd></div>
+          </dl>
+          <details className="portfolio-disclosure"><summary>查看业绩附件 99.1（完整文本）</summary>
+            <p>保留原文表头、期间与单位；百万、十亿、每股金额及已实现业绩与预测不能混用。</p>
+            <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{filing.exhibit.excerpt}</p>
+            <dl className="decision-card__versions">
+              <div><dt>父文件原件 SHA-256</dt><dd>{filing.exhibit.parent_raw_content_hash}</dd></div>
+              <div><dt>附件原件 SHA-256</dt><dd>{filing.exhibit.raw_content_hash}</dd></div>
+            </dl>
+            <a href={filing.exhibit.source_url} target="_blank" rel="noreferrer">查看 SEC 附件原件</a>
+          </details>
+        </> : null}
+      </> : filing.form === "8-K" ? <p>披露正文或附件暂不可用，不作为已读取的文本证据。</p>
+        : ["6-K", "497K"].includes(filing.form) ? <p>披露正文暂不可用，不作为已读取的文本证据。</p> : null}
       {inputs.facts.some((fact) => fact.evidence_ref_id === filing.evidence_ref_id) ? <>
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- The overflow table needs keyboard focus for horizontal scrolling. */}
       <div className="table-scroll" role="region" aria-label={`${filing.form} 财务事实，可横向滚动`} tabIndex={0}>

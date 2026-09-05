@@ -7417,6 +7417,80 @@
         "title": "ResearchInputCompanyProfile",
         "type": "object"
       },
+      "ResearchInputExhibit": {
+        "additionalProperties": false,
+        "properties": {
+          "accounting_status": {
+            "const": "unaudited",
+            "default": "unaudited",
+            "title": "Accounting Status",
+            "type": "string"
+          },
+          "excerpt": {
+            "maxLength": 32000,
+            "minLength": 20,
+            "title": "Excerpt",
+            "type": "string"
+          },
+          "filing_status": {
+            "const": "furnished_not_filed",
+            "default": "furnished_not_filed",
+            "title": "Filing Status",
+            "type": "string"
+          },
+          "number": {
+            "const": "99.1",
+            "default": "99.1",
+            "title": "Number",
+            "type": "string"
+          },
+          "parent_href": {
+            "title": "Parent Href",
+            "type": "string"
+          },
+          "parent_raw_content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Parent Raw Content Hash",
+            "type": "string"
+          },
+          "parent_received_at": {
+            "format": "date-time",
+            "title": "Parent Received At",
+            "type": "string"
+          },
+          "raw_content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Raw Content Hash",
+            "type": "string"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "source_url": {
+            "title": "Source Url",
+            "type": "string"
+          },
+          "truncated": {
+            "const": false,
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "source_url",
+          "parent_href",
+          "raw_content_hash",
+          "received_at",
+          "excerpt",
+          "parent_received_at",
+          "parent_raw_content_hash"
+        ],
+        "title": "ResearchInputExhibit",
+        "type": "object"
+      },
       "ResearchInputFact": {
         "additionalProperties": false,
         "properties": {
@@ -7530,6 +7604,16 @@
             "format": "uuid",
             "title": "Evidence Ref Id",
             "type": "string"
+          },
+          "exhibit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResearchInputExhibit"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "form": {
             "maxLength": 32,
