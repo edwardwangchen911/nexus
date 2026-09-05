@@ -2605,3 +2605,19 @@ future绑定，7facts/旁证display_reference/selected=false保持，SEC原文�
 49项保留、28 verified、21普通股缺证明，candidate null、历史资格 false、执行锁定。
 私有证据：outputs/acceptance/common-stock-eighth-item2-hidden-1eda6ab/acceptance-summary.json。
 无新采集、模型或API重启；此独立身份补证不改变当前趋势研究/多维展示资格。
+
+
+### 第九批三份已有来源复用正常入口完成真实验收
+
+固定49集合内第九批3个unmatched，D已完成正常归档，协调用main正常loader逐项验证，
+目录与文件权限合格。A复用已有PG/解析回归，无代码变化、额外PG或全量单测；main
+c344b00正常loader预检后每项首次import一次，3次独立strictread均verified。
+导入前按12原件hash查库，复用0，因此实际新增artifacts12，并新增instruments3、
+aliases3、snapshots3；19表全部旧行多重集保持，无其他新增行。
+
+default/listing/两开关三个prepare均保存，逐项核对新snapshot绑定且gap为空；各模式
+都保持49项、candidate null、历史资格 false、执行锁定。显式结果31 verified、18
+普通股缺证明。私有摘要：outputs/acceptance/common-stock-ninth-items123-import-c344b00/
+acceptance-summary.json；原件去重见同目录artifact-preflight-summary.json。
+验收0网络/模型，未重启API，不重采或重导入前八批案例。身份补证仍与当前研究及
+多维方案资格分离，不因数量增加宣告真实策略候选或历史回测闭合。
