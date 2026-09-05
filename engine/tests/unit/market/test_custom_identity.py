@@ -5,6 +5,20 @@ from helpers.current_identity import archives
 from helpers.custom_identity import custom_archives
 
 
+@pytest.mark.parametrize("kind", ["artifact", "snapshot"])
+def test_custom_identity_schema_names_fit_actual_persistence_columns(kind):
+    from nexus.market.current_identity_storage import TAXONOMY_SCHEMAS
+    from nexus.market.custom_identity import SCHEMA
+    from nexus.persistence.models.data import DataArtifact, DataSnapshot
+
+    artifact_limit = DataArtifact.__table__.c.schema_version.type.length
+    snapshot_limit = DataSnapshot.__table__.c.schema_version.type.length
+    if kind == "artifact":
+        assert all(len(value) <= artifact_limit for value in TAXONOMY_SCHEMAS)
+    else:
+        assert len(SCHEMA) <= snapshot_limit
+
+
 def test_custom_member_requires_explicit_bound_taxonomy_and_keeps_original_member(tmp_path):
     module = importlib.import_module("nexus.market.custom_identity")
     old = importlib.import_module("nexus.market.current_identity")

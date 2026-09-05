@@ -87,7 +87,7 @@ class CustomMemberIdentityProof(CurrentIdentityProof):
 
 
 TAXONOMY_SCHEMAS = tuple(
-    "sec_identity_taxonomy_" + name + suffix + "_v1"
+    "sec_member_" + name + suffix + "_v1"
     for name in ("schema", "definition", "label")
     for suffix in ("_raw", "_receipt")
 )

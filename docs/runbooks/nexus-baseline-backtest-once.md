@@ -189,7 +189,7 @@ PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.instrument_identity_local \
 label.xml` 及各自的 `*-receipt.json`。随后仅在正常 `import` 命令显式添加
 `--taxonomy-archive '<上述目录>'`；不支持在 `revise-listing` 中隐式启用。
 
-新证明使用 `current_instrument_custom_member_identity_v1`：保留四项 `artifacts`，
+新证明使用 `current_custom_member_v1`：保留四项 `artifacts`，
 另绑定六项 `taxonomy_artifacts`，正常存储读取会重新核验全部十份原件。
 旧四原件证明和 JSON 不变，无数据库迁移。回滚旧程序后无法读取新版本证明；
 应保留兼容读取程序，不能删掉新增原件或字段伪装旧证明。历史回测资格仍为 false，

@@ -33,7 +33,7 @@ from nexus.ops.local_recovery import write_private
 from nexus.providers.fmp_profile import _unique, parse_profile
 from nexus.research.fmp_profile_archive import _read
 
-SCHEMA = "current_instrument_custom_member_identity_v1"
+SCHEMA = "current_custom_member_v1"
 NAMES = ("schema", "definition", "label")
 XL = "{http://www.w3.org/1999/xlink}"
 LINK = "{http://www.xbrl.org/2003/linkbase}"
