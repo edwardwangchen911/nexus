@@ -901,7 +901,7 @@ async def import_current_common_stock(session, store, *, symbol: str, fmp_archiv
 
 返回安全的created/existing状态及非敏感缺口分类；正常CLI明确未发布股票池、未创建研究、执行仍锁定，不输出密钥、请求头或真实账户资料。
 
-- [ ] 先写纯解析红测，再实现最小解析：同股记录通过；同CIK不同证券、股票/债券context调换、重复标签/ID、缺普通股维度、交易所冲突、坏CIK、非布尔FMP标记及未来/篡改receipt拒绝。合成HTML与JSON独立手写，不截取真实个人研究资料。
-- [ ] 写正常import→原件readback→数据库证明/Instrument/alias→精确reader→既有preflight的PG红测；覆盖零主数据首次建档、已有合法身份复用、命名空间冲突不合并、事务失败无部分身份、并发/幂等、旧行hash不变及零Universe/研究/订单新增。示例断言：`assert alias.valid_from == checked_at.date()`、`assert replay.instrument_id == first.instrument_id`、`assert universe_rows_after == universe_rows_before`；期望值不能由被测解析器自行生成。
-- [ ] 最小实现后跑新增unit/PG、相关FMP/SEC及身份回归、Ruff/Mypy/diffcheck；一轮集中审查后串行集成。实际验证只复用已取ABBV原件，通过正常CLI建档并精确重读；再用正常未来session预检确认该成员被消费，其他缺口仍诚实保留，不为凑全绿写入其余成员。
-- [ ] 将正常命令、来源字段、验证及剩余依赖增量写入已有runbook/checkpoint。回滚停止新import入口并保留读取兼容/已存证明及身份；不得删除新事实、回填历史或回退刚修好的券商身份校验。完整T1/B3/经济比较和其余计划条目继续保留。
+- [x] 先写纯解析红测，再实现最小解析：同股记录通过；同CIK不同证券、股票/债券context调换、重复标签/ID、缺普通股维度、交易所冲突、坏CIK、非布尔FMP标记及未来/篡改receipt拒绝。合成HTML与JSON独立手写，不截取真实个人研究资料。
+- [x] 写正常import→原件readback→数据库证明/Instrument/alias→精确reader→既有preflight的PG红测；覆盖零主数据首次建档、已有合法身份复用、命名空间冲突不合并、事务失败无部分身份、并发/幂等、旧行hash不变及零Universe/研究/订单新增。示例断言：`assert alias.valid_from == checked_at.date()`、`assert replay.instrument_id == first.instrument_id`、`assert universe_rows_after == universe_rows_before`；期望值不能由被测解析器自行生成。
+- [x] 最小实现后跑新增unit/PG、相关FMP/SEC及身份回归、Ruff/Mypy/diffcheck；一轮集中审查后串行集成。实际验证只复用已取ABBV原件，通过正常CLI建档并精确重读；再用正常未来session预检确认该成员被消费，其他缺口仍诚实保留，不为凑全绿写入其余成员。
+- [x] 将正常命令、来源字段、验证及剩余依赖增量写入已有runbook/checkpoint。回滚停止新import入口并保留读取兼容/已存证明及身份；不得删除新事实、回填历史或回退刚修好的券商身份校验。完整T1/B3/经济比较和其余计划条目继续保留。

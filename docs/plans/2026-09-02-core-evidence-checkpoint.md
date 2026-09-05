@@ -2062,3 +2062,44 @@ Mypy与diffcheck通过。主项目既有配置下另做REPEATABLE READ READ ONLY
 主数据ticker转换，未重新核验上游原始code，故只证明已保存身份集合兼容，不宣称
 新鲜券商刷新验收。没有读取或输出持仓金额/明细，也未新建业务事实。one-shot CLI
 在下次正常调用时使用集成代码；本轮不为此重启运行服务。
+
+
+### 2026-09-05 有来源的当前普通股首次建档实际验收
+
+正常入口与严格两源身份解析9e00bb8→main faef5b4已集中审查、串行集成；111相关unit、
+34聚焦PG（10新身份/14FMP/10券商身份）通过，最终10新PG及3个数据库时钟边界增量
+通过，Ruff格式/check、Mypy、diffcheck通过。无新表、迁移、依赖或服务重启。
+
+公开固定seed ABBV的FMP profile一次HTTP200，SEC 2025 10-K一次HTTP200；SEC封面
+普通股标题/TradingSymbol/Exchange同一表行和context，CommonStockMember与XNYS
+维度明确，CIK与FMP一致。纽约交易所全称与NYSE缩写按显式映射核对，未从非ETF
+反推普通股。Nasdaq目录一次30秒超时首错停；Alpaca asset origin未配置，零调用。
+两者不再作为本例依赖。SEC原始诊断目录含附加文件，复制相同HTML和原receipt到
+新sec-standard目录供正常loader读取，保留真实received_at，未重新采集或改原件。
+
+主项目正常instrument_identity_local --repo-root import一次返回created，进程正常退出；
+另起正常read入口返回verified。原件、收据、证明、当前身份均精确重验。前后16表
+整行hash集合检查：旧行全部保留，仅instruments+1、instrument_aliases+1、data_artifacts+4、
+data_snapshots+1；Universe/研究/订单未新增或改变，执行锁保留。alias从本次数据库UTC
+核验日开始，tick_size未知；不改历史UUID、不写假持仓、不发布Universe。
+
+既有backtest_once --preflight-universe正常入口随后只读检查未来XNYS session；配置
+按其现有DATABASE_URL合同，由正常load_local_environment组合后仅传子进程，不改
+父进程、不调用历史preflight wrapper。结果仍BLOCKED/member49，保留三类既有缺口；
+固定定义ID现有1个、缺48个，ABBV已被该定义消费。其余7个broker命名空间绑定与
+41个未建档、ETF细分/未来发布/daily选池及多年回测仍未闭合，不影响已验收的趋势
+研究与多维显示，也不提升研究或交易资格。
+
+防复发证据放在最近原因处：SEC accession前缀是提交者而非必然发行人CIK；未知
+嵌套ix事实不能截断普通股标题后隐藏Warrants；命名空间须在根声明且不得靠后置
+兄弟节点补齐；context identifier须归属entity、登记行须归属table。相关反例先红后绿。
+reader另用当前数据库时钟/唯一有效alias重验，过期与后继身份不能沿旧proof获verified。
+SEC collector将实际非200响应拒绝，不写伪HTTP200 receipt；只发一次请求。全局SHA
+相同原件复用已有DataArtifact URI/schema并读回，PG涵盖并发、幂等、事务失败回滚。
+
+验收脚本最初按id归集所有表，在复合键agent_data_snapshot_evidence处只读报错；
+改整行hash multiset后重新只读捕获成功，未重放产品动作或改业务事实。Nasdaq失败
+摘要最初把response count当request count，已更正为1次GET尝试/0响应，不称未调用。
+私有证据位于outputs/acceptance/current-identity-abbv-20260905T031239Z，原件与标准归档
+0700/0600；onboarding下保留正常CLI输出、前后hash和聚合结果。当前证明可被既有
+备份绑定读取器识别4个原件引用；未重跑全备份或另建恢复框架。
