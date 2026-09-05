@@ -2752,3 +2752,14 @@ dom-summary.json、post-dom-summary.json 及私有目标、规划、CLI 回执�
 独立 Shadow ae1aadb 在真实操作完成后合 main 5be1397，三文件净差零；仅显式传
 既定 session_date 并移除重复 as_of。复用 D 104 unit、协调独立 25 query unit 及
 Mypy 通过；修复 ops 传导的两处旧缺参，未运行 Shadow、采集或额外 PG。
+
+### 第十二批两份普通股归档正常导入
+
+仅复用 D common-stock-twelfth-three-VI1e83 的 items 2/3，主线正常 reader 已通过；
+真实预检确认未有别名、8 个唯一原件 hash 且 0 复用。各一次正常 import created、
+独立 strict read verified，default/listing/both 三种 prepare 逐项精确匹配新导入
+snapshot。新增 instruments 2、aliases 2、artifacts 8、snapshots 2；19 表旧行
+多重集保持，D 原归档文件 hash 保持。显式身份 37 verified、12 普通缺证明，49
+成员保留、candidate null、历史资格 false、执行锁定。未处理 item 1，未采集或
+调用模型，不把身份增量当研究或回测完成。私有证据：
+outputs/acceptance/common-stock-twelfth-items23-import-d57a1f9/acceptance-summary.json。
