@@ -187,3 +187,33 @@ PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.instrument_identity_local \
 报告hash固定本次检查结果，不授予发布资格。此入口不写数据库、不修改旧UUID、
 旧定义、股票池或成员，也不生成历史PIT或回测资格。后续发布若实施，须重核当时
 来源及身份，不直接信任这个可编辑的本地报告。停止使用该只读入口即可回退。
+
+## 追加当前上市信息修订
+
+既有身份的上市所与严格双源证明冲突时，可显式追加上市修订；不修改原Instrument、
+alias、旧proof、研究或价格。仅允许上市所差异，类型、币种、风险分类、CIK和已知
+身份标识冲突仍拒绝。输入沿用已取得的同证券FMP/SEC归档，不需要重新采集：
+
+```sh
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.instrument_identity_local \
+  --repo-root "$PWD" revise-listing --symbol '<固定定义普通股代码>' \
+  --fmp-archive '/absolute/private/fmp' --sec-archive '/absolute/private/sec' \
+  --output '/absolute/private/new-listing-revision.json'
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.instrument_identity_local \
+  --repo-root "$PWD" read-listing-revision --snapshot-id '<新修订snapshot UUID>'
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.instrument_identity_local \
+  --repo-root "$PWD" prepare-universe --use-listing-revisions \
+  --effective-session '<未来交易日 YYYY-MM-DD>' \
+  --output '/absolute/private/new-listing-preparation.json'
+```
+
+修订使用独立DataSnapshot合同，保留原exchange和旧记录指纹，存原件绑定及新来源
+上市所；UUID不变。checked_at/effective_at/available_at是数据库事务内实际导入核验
+时间，不是来源接收日期，也不是精确commit时间；不提供任意历史提交可见性还原。
+reader拒绝早于核验/创建时间的as_of并重验原件、指纹和当前alias。相同导入幂等；
+并发按同一身份串行验证，最新证明失效不悄悄回退。当前修订不解释或改写旧字段历史。
+
+默认prepare-universe及旧身份reader仍使用原合同。只有显式启用新修订的准备报告
+输出listing_exchange和所用proof合同，候选版本独立为us_liquid_listing_revision_v1；
+49项及ETF缺口仍保留，缺任何成员时candidate=null。行情、历史研究、价格与旧v1
+预检未接入该修订，不自动切换。回退时停止显式使用新入口，保留追加事实和原始记录。

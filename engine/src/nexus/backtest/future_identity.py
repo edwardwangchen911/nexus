@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.backtest.universe import load_us_liquid_v1_definition, require_future_xnys_session
 from nexus.market.current_identity import SOURCE
 from nexus.market.current_identity_storage import IdentityStore, read_current_identity
+from nexus.market.current_listing_revision import SOURCE as LISTING_SOURCE
+from nexus.market.current_listing_revision import read_listing_revision
 from nexus.persistence.models.data import DataSnapshot
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 
@@ -20,7 +22,11 @@ def _hash(payload: object) -> str:
 
 
 async def prepare_future_identity_bindings(
-    session: AsyncSession, store: IdentityStore, *, effective_session: date
+    session: AsyncSession,
+    store: IdentityStore,
+    *,
+    effective_session: date,
+    use_listing_revisions: bool = False,
 ) -> dict[str, Any]:
     await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
     cutoff = await session.scalar(select(func.clock_timestamp()))
@@ -30,7 +36,9 @@ async def prepare_future_identity_bindings(
     snapshots = await session.scalars(
         select(DataSnapshot)
         .where(
-            DataSnapshot.source == SOURCE,
+            DataSnapshot.source.in_(
+                (SOURCE, LISTING_SOURCE) if use_listing_revisions else (SOURCE,)
+            ),
             DataSnapshot.created_at <= cutoff,
             DataSnapshot.available_at <= cutoff,
             DataSnapshot.received_at <= cutoff,
@@ -58,6 +66,8 @@ async def prepare_future_identity_bindings(
             "binding_basis": "current_source_proof_and_unique_future_ticker",
             "gap": None,
         }
+        if use_listing_revisions:
+            binding.update(listing_exchange=None, identity_contract=None)
         snapshot = latest.get(f"identity:{member.symbol}")
         if member.asset_type != "common_stock":
             binding["gap"] = "IDENTITY_TYPE_UNSUPPORTED"
@@ -65,7 +75,13 @@ async def prepare_future_identity_bindings(
             binding["gap"] = "IDENTITY_PROOF_MISSING"
         else:
             try:
-                proof = await read_current_identity(session, store, snapshot_id=snapshot.id)
+                proof = (
+                    await read_listing_revision(
+                        session, store, snapshot_id=snapshot.id, as_of=cutoff
+                    )
+                    if use_listing_revisions and snapshot.source == LISTING_SOURCE
+                    else await read_current_identity(session, store, snapshot_id=snapshot.id)
+                )
                 instrument = await session.get(Instrument, proof.instrument_id)
                 if (
                     proof.checked_at > cutoff
@@ -101,17 +117,31 @@ async def prepare_future_identity_bindings(
                         proof_hash=_hash(proof.model_dump(mode="json")),
                         alias_id=str(proof.alias_id),
                     )
+                    if use_listing_revisions:
+                        binding.update(
+                            listing_exchange=proof.identity.exchange,
+                            identity_contract=snapshot.schema_version,
+                        )
             except ValueError:
                 binding["gap"] = "IDENTITY_PROOF_INVALID"
         members.append(binding)
 
+    version = (
+        "us_liquid_listing_revision_v1"
+        if use_listing_revisions
+        else "us_liquid_current_identity_v1"
+    )
     ready = all(member["gap"] is None for member in members)
     candidate = None
     if ready:
         candidate = {
             "key": "us_liquid",
-            "version": "us_liquid_current_identity_v1",
-            "source": "nexus_current_identity_bindings_v1",
+            "version": version,
+            "source": (
+                "nexus_listing_revision_bindings_v1"
+                if use_listing_revisions
+                else "nexus_current_identity_bindings_v1"
+            ),
             "source_definition_hash": definition.content_hash,
             "effective_session": effective_session.isoformat(),
             "checked_at": cutoff.isoformat(),
@@ -121,9 +151,13 @@ async def prepare_future_identity_bindings(
         }
         candidate["content_hash"] = _hash(candidate)
     result = {
-        "schema_version": "future_universe_identity_preparation_v1",
+        "schema_version": (
+            "future_universe_listing_preparation_v1"
+            if use_listing_revisions
+            else "future_universe_identity_preparation_v1"
+        ),
         "status": "READY" if ready else "BLOCKED",
-        "candidate_version": "us_liquid_current_identity_v1",
+        "candidate_version": version,
         "source_definition_hash": definition.content_hash,
         "effective_session": effective_session.isoformat(),
         "checked_at": cutoff.isoformat(),

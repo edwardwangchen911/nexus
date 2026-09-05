@@ -25,6 +25,7 @@ from nexus.market.current_identity_storage import (
     import_current_common_stock,
     read_current_identity,
 )
+from nexus.market.current_listing_revision import import_listing_revision, read_listing_revision
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
@@ -136,7 +137,11 @@ async def read_identity(settings: EngineSettings, *, snapshot_id: UUID) -> None:
 
 
 async def prepare_universe(
-    settings: EngineSettings, *, effective_session: date, store: IdentityStore | None = None
+    settings: EngineSettings,
+    *,
+    effective_session: date,
+    store: IdentityStore | None = None,
+    use_listing_revisions: bool = False,
 ) -> dict[str, object]:
     _local(settings)
     storage = store or S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
@@ -144,8 +149,47 @@ async def prepare_universe(
     try:
         async with factory() as session, session.begin():
             return await prepare_future_identity_bindings(
-                session, storage, effective_session=effective_session
+                session,
+                storage,
+                effective_session=effective_session,
+                use_listing_revisions=use_listing_revisions,
             )
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+async def revise_listing(
+    settings: EngineSettings,
+    *,
+    symbol: str,
+    fmp_archive: Path,
+    sec_archive: Path,
+    store: IdentityStore | None = None,
+) -> CurrentIdentityImportResult:
+    _local(settings)
+    storage = store or S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            result = await import_listing_revision(
+                session, storage, symbol=symbol, fmp_archive=fmp_archive, sec_archive=sec_archive
+            )
+        async with factory() as session, session.begin():
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            await read_listing_revision(session, storage, snapshot_id=result.snapshot_id)
+        return result
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+async def read_listing(settings: EngineSettings, *, snapshot_id: UUID) -> None:
+    _local(settings)
+    storage = S3ProviderEvidenceStore(settings, disable_environment_proxies=True)
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            await session.execute(text("SET TRANSACTION READ ONLY"))
+            await read_listing_revision(session, storage, snapshot_id=snapshot_id)
     finally:
         await factory.kw["bind"].dispose()
 
@@ -167,7 +211,15 @@ def main() -> None:
     importer.add_argument("--fmp-archive", type=Path, required=True)
     importer.add_argument("--sec-archive", type=Path, required=True)
     importer.add_argument("--output", type=Path, required=True)
+    revision = commands.add_parser("revise-listing")
+    revision.add_argument("--symbol", required=True)
+    revision.add_argument("--fmp-archive", required=True, type=Path)
+    revision.add_argument("--sec-archive", required=True, type=Path)
+    revision.add_argument("--output", required=True, type=Path)
+    revision_reader = commands.add_parser("read-listing-revision")
+    revision_reader.add_argument("--snapshot-id", required=True, type=UUID)
     prepare = commands.add_parser("prepare-universe")
+    prepare.add_argument("--use-listing-revisions", action="store_true")
     prepare.add_argument("--effective-session", required=True, type=date.fromisoformat)
     prepare.add_argument("--output", required=True, type=Path)
     reader = commands.add_parser("read")
@@ -190,15 +242,19 @@ def main() -> None:
                 if args.output.exists() or args.output.is_symlink():
                     raise ValueError("CURRENT_IDENTITY_NEW_OUTPUT_REQUIRED")
                 prepared = asyncio.run(
-                    prepare_universe(settings, effective_session=args.effective_session)
+                    prepare_universe(
+                        settings,
+                        effective_session=args.effective_session,
+                        use_listing_revisions=args.use_listing_revisions,
+                    )
                 )
                 write_private(args.output, json.dumps(prepared, sort_keys=True).encode())
                 status = str(prepared["status"])
-            elif args.action == "import":
+            elif args.action in {"import", "revise-listing"}:
                 if args.output.exists() or args.output.is_symlink():
                     raise ValueError("CURRENT_IDENTITY_NEW_OUTPUT_REQUIRED")
                 result = asyncio.run(
-                    import_identity(
+                    (revise_listing if args.action == "revise-listing" else import_identity)(
                         settings,
                         symbol=args.symbol,
                         fmp_archive=args.fmp_archive,
@@ -210,7 +266,11 @@ def main() -> None:
                 )
                 status = result.status
             else:
-                asyncio.run(read_identity(settings, snapshot_id=args.snapshot_id))
+                asyncio.run(
+                    (read_listing if args.action == "read-listing-revision" else read_identity)(
+                        settings, snapshot_id=args.snapshot_id
+                    )
+                )
                 status = "verified"
         print(
             json.dumps(
@@ -226,7 +286,9 @@ def main() -> None:
         code = (
             str(error)
             if isinstance(error, ValueError)
-            and re.fullmatch(r"(?:CURRENT_IDENTITY|BACKTEST_UNIVERSE)_[A-Z_]+", str(error))
+            and re.fullmatch(
+                r"(?:CURRENT_IDENTITY|CURRENT_LISTING|BACKTEST_UNIVERSE)_[A-Z_]+", str(error)
+            )
             else "CURRENT_IDENTITY_FAILED"
         )
         print(json.dumps(dict(status="failed", code=code)))
