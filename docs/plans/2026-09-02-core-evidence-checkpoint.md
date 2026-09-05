@@ -1998,3 +1998,20 @@ outputs/acceptance/current-trends-real-20260905，目录0700、文件0600已核�
 本片完成当前趋势资料到一次真实研究结果页面的用户可见闭环；结果仍为partial/watch，
 不是充分证据的不调整结论，也不完成多年回测、真实候选方案或经济比较。后续按优先级
 接多维方案的真实基线与候选缺失原因；多年历史缺口只阻塞其自身，不再作全局总开关。
+
+
+### 2026-09-05 T1 内部股票池未来 session 只读预检
+
+顺序集成80ea372→0a24142、3a40e85→4518835，无冲突；九个涉及路径与owner最终
+3a40e85无净差，seed移动保留原内容，diffcheck通过。复用已审查的43相关单测
+（含离线wheel安装烟测）、10隔离PG、Ruff/Mypy结果，不重复全量测试或重启服务。
+
+主项目正常load_local_environment读取已有配置，仅将已localize的DATABASE_URL传给
+CLI子进程，未调用会注入容器端点的历史preflight wrapper。先只读读取数据库
+clock_timestamp，按已安装XNYS日历选择晚于该UTC日期且尚未开盘的未来session，随后
+正常执行一次backtest_once --preflight-universe --effective-session。实际输出：
+status=BACKTEST_UNIVERSE_PREFLIGHT_BLOCKED，member_count=49，gap_categories为
+INSTRUMENT_MISSING、TICKER_ALIAS_MISSING、TICKER_ALIAS_MISMATCH。CLI使用同一
+REPEATABLE READ/READ ONLY事务；未发布UniverseSnapshot、补写成员或别名，未采集、
+调用模型或运行回测。此结果仅定位现有身份前置缺口，不证明未来发布资格或历史PIT；
+T1仍未闭环，后续需正常身份来源与发布实现。该独立边界不阻塞已验收趋势、多维显示。
