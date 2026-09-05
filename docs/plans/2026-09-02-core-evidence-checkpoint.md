@@ -2676,3 +2676,27 @@ A ecbd3a2仅DecisionCard/condition-semantics两文件，经集中Ready串行main
 通过，仅本地GET/HEAD/OPTIONS、blocked0；19业务表旧行精确不变，无模型/采集。
 增量证据在原私有目录current-trends-real-20260905的conditions-api-summary.json、
 conditions-dom-summary.json、conditions-before-hashes.json；未重跑整套趋势验收。
+
+
+### 独立隐藏交易所旁证保留原义并走正常存储
+
+D4889ea5的exchange-only合同经A完整集中审查：五事实限plain CIK、单可见Common
+Shares三事实同物理tr/XNYS及独立hidden XCHI、同CIK/期间；无class维度，辅助原词、
+format/context保留unlinked，不补ticker、第二上市或CHX别名。52新增分支独立测试
+通过，复用D456unit及24旧JSON+custom兼容。首个独立测试误用A editable旧src造成
+正例失败，核路径并显式PYTHONPATH指向D后52通过；不误报为产品缺陷。
+
+A1673f1c吸收，PG3a60143正常import→stored strictread→future/旧single JSON通过，
+SEC raw/receipt各自损坏拒绝，辅助不新增第二Instrument/Alias，1 passed5.35s。
+Ruff/diffcheck通过；main39337a2/34766be串行集成，四文件净差零。新结果的回滚保留
+兼容reader与辅助原文，不删除旁证，不改旧hash；财务tag修复未混入本片。
+
+
+第十一仅item2正常首次import created、独立strictread verified，default/listing/两开关
+prepare均核本次snapshot。实际保存5事实、单ticker、无class维度及unlinked辅助，
+未给辅助身份。导入前4uniquehash/0复用；实际仅instruments1、aliases1、artifacts4、
+snapshots1新增，19表旧行多重集全部保持。显式35 verified、14普通股缺证明，49保留、
+candidate null、历史资格 false、执行锁定。私有摘要：
+outputs/acceptance/common-stock-eleventh-item2-exchange-4889ea5/acceptance-summary.json；
+同目录artifact-preflight-summary.json保留去重依据。无新采集、模型、API重启，原
+item1/3和两份超限10-Q不重试；局部身份进展不替代研究或候选资格闭合。
