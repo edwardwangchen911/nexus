@@ -8,6 +8,7 @@ from html.parser import HTMLParser
 from typing import Literal, Self
 from uuid import UUID
 
+from botocore.exceptions import BotoCoreError, ClientError  # type: ignore[import-untyped]
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -267,7 +268,9 @@ async def read_disclosures(
                     continue
             else:
                 document = SecDisclosure.model_validate(snapshot.payload)
-        except (ValidationError, ValueError, TypeError, KeyError, OSError):
+        except (
+            ValidationError, ValueError, TypeError, KeyError, OSError, BotoCoreError, ClientError,
+        ):
             continue
         content = document.canonical_bytes()
         digest = hashlib.sha256(content).hexdigest()

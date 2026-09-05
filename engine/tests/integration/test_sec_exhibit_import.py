@@ -8,6 +8,7 @@ from uuid import UUID
 
 import httpx
 import pytest
+from botocore.exceptions import ClientError
 from helpers.current_identity import CIK, MemoryStore, archives
 from helpers.portfolio_api import app, headers
 from nexus.agents.codex_sdk import CodexCommittee
@@ -28,7 +29,7 @@ from nexus.research.sec_disclosures import read_disclosures
 from nexus.settings import EngineSettings
 from sqlalchemy import func, select
 from unit.agents.test_codex_sdk import _sdk
-from unit.research.test_sec_exhibits import archive, exhibit_archives
+from unit.research.test_sec_exhibits import NOW, archive, exhibit_archives
 
 
 @pytest.mark.asyncio
@@ -45,6 +46,13 @@ async def test_normal_exhibit_import_readback_verifies_originals_and_old_cutoff(
     await prepare_database(settings)
 
     class Store(MemoryStore):
+        missing_key = None
+
+        async def read_raw(self, key, *, uri):
+            if key == self.missing_key:
+                raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+            return await super().read_raw(key, uri=uri)
+
         async def put_if_absent(self, *, key, content):
             uri = await super().put_if_absent(key=key, content=content)
             return (
@@ -56,7 +64,7 @@ async def test_normal_exhibit_import_readback_verifies_originals_and_old_cutoff(
             return self.objects[key]
 
     store = Store()
-    fmp, sec = archives(tmp_path / "identity")
+    fmp, sec = archives(tmp_path / "identity", received=NOW.isoformat())
     identity = await import_identity(
         settings,
         symbol="AAPL",
@@ -198,5 +206,12 @@ async def test_normal_exhibit_import_readback_verifies_originals_and_old_cutoff(
                 as_of=datetime.now(UTC),
             )
             assert (await session.get(DataSnapshot, UUID(result["snapshot_id"]))) is not None
+        store.objects = objects
+        store.missing_key = key
+        async with factory() as session:
+            assert not await read_disclosures(
+                session, instrument_id=identity.instrument_id, evidence_ids=(evidence_id,),
+                as_of=datetime.now(UTC),
+            )
     finally:
         await factory.kw["bind"].dispose()
