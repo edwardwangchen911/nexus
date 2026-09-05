@@ -24,6 +24,7 @@ from nexus.providers.sec import SecCompanyFactsClient, SecInstrumentIdentity
 from nexus.providers.sec_http import SecHttpTransport
 from nexus.providers.settings import ProviderWorkerSettings
 from nexus.research.sec_disclosures import SecDisclosure, disclosure_excerpt, persist_disclosure
+from nexus.research.sec_fact_projection import SavedSecEvidenceReader, append_saved_sec_facts
 from nexus.research.sec_funds import fetch_fund_disclosure, resolve_fund
 from nexus.settings import EngineSettings
 
@@ -82,6 +83,32 @@ class _IdentityTransport(SecHttpTransport):
             ):
                 raise ValueError("SEC_LOCAL_ISSUER_MISMATCH")
         return payload
+
+
+async def project_saved_sec_facts(
+    settings: EngineSettings,
+    filing_id: UUID,
+    *,
+    store: SavedSecEvidenceReader | None = None,
+) -> dict[str, object]:
+    """Explicit local repair of missing facts; no collector, prepare, model or old-row writes."""
+    if not settings.database_url or make_url(settings.database_url).host not in _LOOPBACK:
+        raise ValueError("SEC_LOCAL_DATABASE_REQUIRED")
+    if store is None:
+        if urlsplit(settings.object_store_endpoint or "").hostname not in _LOOPBACK:
+            raise ValueError("SEC_LOCAL_OBJECT_STORE_REQUIRED")
+        store = S3ProviderEvidenceStore(settings)
+    factory = session_factory(settings)
+    try:
+        async with factory() as session, session.begin():
+            created = await append_saved_sec_facts(session, filing_id, store)
+        return {
+            "status": "SEC_FACTS_PROJECTED", "facts_created": created,
+            "provider_requests": 0, "model_requests": 0,
+            "execution_locked": True, "research_completed": False,
+        }
+    finally:
+        await factory.kw["bind"].dispose()
 
 
 async def refresh_sec_research(

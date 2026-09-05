@@ -484,6 +484,8 @@ def _normalize_company_fact_entry(
     filed_at = _filing_date_to_utc(_required_string(entry, "filed", "MISSING_FILED_DATE"))
     period_end = _parse_date(_required_string(entry, "end", "MISSING_PERIOD_END"))
     raw_start = entry.get("start")
+    if "start" in entry and not isinstance(raw_start, str):
+        raise SecNormalizationError("INVALID_PERIOD_START")
     period_start = _parse_date(raw_start) if isinstance(raw_start, str) else None
     revision = f"{accession}@{accepted_at.isoformat()}"
     value = entry.get("val")

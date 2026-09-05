@@ -367,10 +367,12 @@ def main() -> int:
             "refresh-research",
             "refresh-disclosure",
             "refresh-fund",
+            "project-sec-facts",
             "run-once",
         ),
     )
     parser.add_argument("--instrument-id", type=UUID)
+    parser.add_argument("--filing-id", type=UUID)
     parser.add_argument("--accession")
     parser.add_argument(
         "--form", choices=("6-K", "8-K"), help="Company disclosure form (default: 6-K)"
@@ -396,6 +398,15 @@ def main() -> int:
     args = parser.parse_args()
     root = Path.cwd().resolve()
     try:
+        if args.filing_id is not None and args.action != "project-sec-facts":
+            raise ValueError("SEC_FACT_PROJECTION_ARGUMENTS_INVALID")
+        if args.action == "project-sec-facts" and (
+            args.filing_id is None
+            or args.as_of is not None
+            or args.instrument_id is not None
+            or args.accession is not None
+        ):
+            raise ValueError("SEC_FACT_PROJECTION_ARGUMENTS_INVALID")
         if args.form is not None and args.action != "refresh-disclosure":
             raise ValueError("SEC_LOCAL_DISCLOSURE_FORM_INVALID")
         if args.structured_synthesis and (args.action != "setup" or args.backend != "codex_sdk"):
@@ -416,7 +427,10 @@ def main() -> int:
         settings = local_settings(
             root,
             load_model_key=args.action
-            not in {"prepare-research", "refresh-research", "refresh-disclosure", "refresh-fund"},
+            not in {
+                "prepare-research", "refresh-research", "refresh-disclosure",
+                "refresh-fund", "project-sec-facts",
+            },
             backend=args.backend,
         )
         if args.action == "setup":
@@ -472,6 +486,10 @@ def main() -> int:
                     fund_accession=args.accession,
                 )
             )
+        elif args.action == "project-sec-facts":
+            from nexus.ops.sec_local import project_saved_sec_facts
+
+            result = asyncio.run(project_saved_sec_facts(settings, args.filing_id))
         elif args.action == "run-once":
             if args.backend == "responses" and settings.openai_api_key is None:
                 raise ValueError("OPENAI_API_KEY_MISSING")

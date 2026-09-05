@@ -131,3 +131,20 @@ def test_saved_accession_rejects_duplicate_identity_fields_in_json():
                 content_hash=digest,
             ),
         )
+
+
+@pytest.mark.parametrize("start", [123, False, None, [], {}])
+def test_saved_duration_does_not_silently_become_instant(start):
+    body = document()
+    body["facts"][0]["fact"]["start"] = start
+    with pytest.raises(sec.SecNormalizationError, match="INVALID_PERIOD_START"):
+        normalize(body)
+
+
+def test_saved_instant_fact_without_start_remains_supported():
+    body = document()
+    body["facts"][0]["tag"] = "Assets"
+    del body["facts"][0]["fact"]["start"]
+    fact = normalize(body)[0]
+    assert fact.canonical_fact == "total_assets"
+    assert fact.period_kind == "instant" and fact.period_start is None
