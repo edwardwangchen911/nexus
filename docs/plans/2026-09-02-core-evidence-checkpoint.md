@@ -2508,3 +2508,53 @@ outputs/acceptance/common-stock-sixth-item1-custom-f645f74/acceptance-summary.js
 当前保留49项，22 verified、26普通股缺证明、1GLD类型不支持，candidate null、
 历史资格 false、执行锁定。新成员类型需同 accession 官方引用/namespace/关系与
 标签闭合，不能凭自定义 QName 的字面含义或只看标签放行。
+
+
+### 第七与第八批各两项普通股复用正常入口完成验收
+
+第七 item1/2 与第八 item1/3 均使用已归档原件和现有 main parser，normal loader
+先复核再首次 import，随后独立 read 与默认/显式 future prepare；无新增代码或采集。
+两批各新增 instruments2、aliases2、artifacts8、snapshots2，每批19表旧行多重集
+全部保留，协调任务亦独立复核。私有摘要分别为：
+outputs/acceptance/common-stock-seventh-items12-import-9d3b366/acceptance-summary.json；
+outputs/acceptance/common-stock-eighth-items13-import-4c264c6/acceptance-summary.json。
+第八结束时49项保留，26 verified、22普通股缺证明、1GLD类型未支持，candidate null、
+历史资格 false、执行锁定。已完成批次不因下一来源异常而重放。
+
+第七 item3 新主体继任：recent 无10-K且 files 空，已有8-K12B与10-Q；股票行归属
+前身 CIK，当前主体 CIK 在另一 LegalEntityAxis。缺少精确继任桥接前保持该项缺口，
+不能以同 ticker 或任一 CIK 出现代替注册行归属，也不称为网络失败。第八 item2 的
+hidden/outside-table ticker 由来源任务独立诊断，不阻塞已合格原件正常验收。
+
+
+### GLD 黄金信托身份解析的来源与语义回归
+
+黄金信托采用独立 non_equity_etf/GOLD 合同：同一10-K注册行的受益份额、GLD、
+NYSE Arca 与同上下文 CIK，结合该信托正文的纽约法投资信托、实物黄金及非1940Act
+注册公司声明；不从税务 grantor 名称推断 UIT，不修改原池类型。八原件已正常归档。
+
+首次真实 loader 暴露 SEC 索引使用 `/ix?doc=` 包装正文链接；只对同源、同CIK和
+同accession精确绑定的正文做本地归一化。新增合法格式先红后绿，外域、多doc、
+跨CIK/accession与编码歧义均拒绝，原索引和正文receipt保持原样，不重新采集。
+集中审查另发现共享 _Cover 的语义检查在普通股分支内执行，GLD直接消费解析结果
+会漏掉未知format/target/ix祖先。GLD本地补全部四事实（包括CIK）的最小检查，
+六例先复现误接受，再全部拒绝；仅允许实际原件中已核对namespace的交易所转换。
+不能因复用底层parser就假设各消费者已执行其完整语义验证。
+
+实现 bc7b359、定向修复2e5fedf。最初ETF/UIT/Gold73单测通过，补齐来源与语义
+恶例后Gold20单测通过；GLD正常入口隔离PG定向复核1 passed，TLT既有路径1 passed，
+Ruff/Mypy通过。修后真实GLD normal loader通过，旧六ETF严格读取与原JSON结构
+roundtrip保持。新增内部JSON子类型，无数据库迁移或依赖；回滚保留兼容reader。
+
+
+协调任务定向复核20 GLD单测通过并Ready，A串行集成main6ad5a3b/d267934，10文件
+与已审版本净差零。首次正常 import-gold created、独立 read verified、default/listing/
+显式ETF三个 prepare 对照通过；保留non_equity_etf/GOLD与gold_bullion。
+19表旧行多重集全部保留，仅 instruments1、aliases1、artifacts8、snapshots1新增，
+8原件绑定均可备份。导入前按hash确认无复用原件、无旧GLD alias；验收未新增采集。
+私有摘要：outputs/acceptance/etf-identity-inventory/gld-current-identity/acceptance-summary.json。
+
+此时49项保留、27 verified、22普通股缺证明、ETF身份缺口0；candidate null、历史
+资格 false、执行锁定。CLI已从main新代码完成验收，未擅自重启现有Web/API；这不是
+历史回测、经济比较或研究内容资格已闭合。下一来源仍按最小合法证据逐项推进，局部
+scope/继任桥接缺口不扩展成全局阻塞，也不恢复额外三阶段预算批准。
