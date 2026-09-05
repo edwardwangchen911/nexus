@@ -4,6 +4,16 @@ import pytest
 from helpers.current_identity import archives
 from helpers.custom_identity import custom_archives
 
+_DOCUMENTATION = (
+    b'<link:label xlink:type="resource" xlink:label="text" '
+    b'xlink:role="http://www.xbrl.org/2003/role/documentation" '
+    b'xml:lang="en-US">Common Stock</link:label>'
+)
+_FALLBACK = [
+    (3, b">Common Stock<", b">Common Stock [Member]<"),
+    (3, b"</link:labelLink>", _DOCUMENTATION + b"</link:labelLink>"),
+]
+
 
 @pytest.mark.parametrize("kind", ["artifact", "snapshot"])
 def test_custom_identity_schema_names_fit_actual_persistence_columns(kind):
@@ -98,13 +108,71 @@ def test_custom_member_requires_explicit_bound_taxonomy_and_keeps_original_membe
         [(3, b'xlink:type="resource"', b'xlink:type="locator"')],
     ],
 )
-def test_custom_member_rejects_unbound_or_ambiguous_semantics(tmp_path, updates):
+@pytest.mark.parametrize("fallback", [False, True])
+def test_custom_member_rejects_unbound_or_ambiguous_semantics(tmp_path, updates, fallback):
     module = importlib.import_module("nexus.market.custom_identity")
-    fm, sc, tx = custom_archives(tmp_path, updates=updates)
+    fm, sc, tx = custom_archives(tmp_path, updates=(_FALLBACK if fallback else []) + updates)
     with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
         module.load_custom_identity_archives(
             symbol="AAPL", fmp_archive=fm, sec_archive=sc, taxonomy_archive=tx
         )
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        (b'/role/label"', b'/role/verboseLabel"'),
+        (b'/role/terseLabel"', b'/role/label"'),
+        (b'/role/documentation"', b'/role/label"'),
+        (b">Common Stock<", b">Common Stock, par value $2<"),
+        (b">Common Stock<", b">Common Stock Class B<"),
+        (b">Common Stock<", b">Preferred Stock<"),
+        (b">Common Stock<", b">Common Stock nonvoting<"),
+        (b">Common Stock<", b"><span>Common Stock</span><"),
+        (b"sample.xsd#sample_ExampleMember", b"sample.xsd#sample_OtherMember"),
+        (b"</link:labelLink>", _DOCUMENTATION + b"</link:labelLink>"),
+    ],
+)
+def test_suffix_fallback_never_trusts_other_roles_or_changed_meaning(tmp_path, before, after):
+    from nexus.market.custom_identity import load_custom_identity_archives
+
+    fm, sc, tx = custom_archives(tmp_path, updates=[*_FALLBACK, (3, before, after)])
+    with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+        load_custom_identity_archives(
+            symbol="AAPL", fmp_archive=fm, sec_archive=sc, taxonomy_archive=tx
+        )
+
+
+@pytest.mark.parametrize("fallback,role", [(False, "label"), (True, "label"), (True, "terseLabel")])
+def test_missing_label_roles_preserve_legacy_but_cannot_authorize_fallback(
+    tmp_path, fallback, role
+):
+    import re
+
+    from helpers.custom_identity import custom_documents
+    from nexus.market.custom_identity import load_custom_identity_archives
+
+    label = custom_documents()[3]
+    if fallback:
+        label = label.replace(b">Common Stock<", b">Common Stock [Member]<")
+    node = next(
+        raw
+        for raw in re.findall(rb"<link:label\s[^>]*>.*?</link:label>", label, re.S)
+        if ("/role/" + role + '"').encode() in raw
+    )
+    fm, sc, tx = custom_archives(
+        tmp_path, updates=[*(_FALLBACK if fallback else []), (3, node, b"")]
+    )
+    if fallback:
+        with pytest.raises(ValueError, match="CURRENT_IDENTITY_"):
+            load_custom_identity_archives(
+                symbol="AAPL", fmp_archive=fm, sec_archive=sc, taxonomy_archive=tx
+            )
+    else:
+        result = load_custom_identity_archives(
+            symbol="AAPL", fmp_archive=fm, sec_archive=sc, taxonomy_archive=tx
+        )
+        assert result.identity.sec_title == "Common Stock"
 
 
 def test_custom_member_rejects_tampered_receipt_or_raw(tmp_path):
@@ -125,8 +193,25 @@ def test_old_archive_json_has_no_custom_default_fields(tmp_path):
     assert all("member_definition" not in f for f in result.identity.facts)
 
 
-def test_normal_archive_cli_preserves_all_six_originals(tmp_path, monkeypatch, capsys):
-    fm, sc, tx = custom_archives(tmp_path)
+@pytest.mark.parametrize(
+    "terse_member,documentation_member",
+    [(False, True), (True, False), (True, True), (False, False)],
+)
+def test_normal_archive_cli_preserves_all_six_originals(
+    tmp_path, monkeypatch, capsys, terse_member, documentation_member
+):
+    title = b"Common Stock"
+    documentation = (
+        b'<link:label xlink:type="resource" xlink:label="text" '
+        b'xlink:role="http://www.xbrl.org/2003/role/documentation" xml:lang="en-US">'
+        + title
+        + (b" [Member]" if documentation_member else b"")
+        + b"</link:label>"
+    )
+    updates = [(3, b"</link:labelLink>", documentation + b"</link:labelLink>")]
+    if terse_member:
+        updates.insert(0, (3, b">Common Stock<", b">Common Stock [Member]<"))
+    fm, sc, tx = custom_archives(tmp_path, updates=updates)
     module = importlib.import_module("nexus.ops.instrument_identity_local")
     destination = tmp_path / "packaged"
     args = [
@@ -158,6 +243,18 @@ def test_normal_archive_cli_preserves_all_six_originals(tmp_path, monkeypatch, c
     assert {p.name: p.read_bytes() for p in tx.iterdir()} == {
         p.name: p.read_bytes() for p in destination.iterdir()
     }
+    from nexus.market.custom_identity import load_custom_identity_archives
+
+    result = load_custom_identity_archives(
+        symbol="AAPL", fmp_archive=fm, sec_archive=sc, taxonomy_archive=destination
+    )
+    baseline = tmp_path / "legacy"
+    baseline.mkdir(mode=0o700)
+    old_fm, old_sc, old_tx = custom_archives(baseline)
+    old = load_custom_identity_archives(
+        symbol="AAPL", fmp_archive=old_fm, sec_archive=old_sc, taxonomy_archive=old_tx
+    )
+    assert result.identity.model_dump_json() == old.identity.model_dump_json()
 
 
 def test_custom_member_distinguishes_domain_edge_from_default_edge(tmp_path):

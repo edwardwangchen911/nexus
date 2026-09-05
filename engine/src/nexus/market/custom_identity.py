@@ -339,7 +339,8 @@ def validate_member_definition(
             )
     if label_arcs != 1 or not resources:
         raise invalid()
-    roles = []
+    roles: dict[str, str] = {}
+    legacy_labels = True
     for resource in resources:
         role = resource.get(XL + "role")
         text = "".join(resource.itertext())
@@ -351,10 +352,22 @@ def validate_member_definition(
         ):
             raise invalid()
         expected = scope["title"] if role == ROLE + "terseLabel" else scope["title"] + " [Member]"
-        if text != expected or role in roles:
+        if role in roles:
             raise invalid()
-        roles.append(role)
+        legacy_labels = legacy_labels and text == expected
+        roles[role] = text
     if ROLE + "terseLabel" not in roles:
+        raise invalid()
+    # XBRL 2.1 section 5.2.2.2.2 Table 8 assigns purposes, not suffix rules,
+    # to label/terseLabel/documentation. Preserve the legacy branch unchanged;
+    # this bounded alternative requires the exact standard name and permits
+    # only the [Member] suffix to vary in the ancillary roles, never meaning.
+    if not legacy_labels and (
+        roles.get(ROLE + "label") != scope["title"] + " [Member]"
+        or any(
+            text not in {scope["title"], scope["title"] + " [Member]"} for text in roles.values()
+        )
+    ):
         raise invalid()
     return {
         **scope,
