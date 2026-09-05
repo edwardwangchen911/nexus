@@ -2952,3 +2952,21 @@ verified，default/listing/explicit 三种 prepare 精确绑定新 proof_snapsho
 已审 `622883e`/`8d22716` 串行集成为 main `a39a8d7`/`d53dea0`，三文件与 D 最终版本精确一致，复用协调任务 353 unit 与完整集中审查。新分支只识别已证明的唯一无关 hidden title，完整非目标行仍要求 title/ticker/exchange，Member 按 expanded namespace/local 唯一；不放宽全部 CIK、期间和目标同 row/context 绑定。
 
 仅对指定归档一例按主线正常 loader→import→strict read→default/listing/explicit 验证，三种模式目标均精确绑定本次 proof。20 旧表行 hash 多重集与原件 hash 保留，仅新增 1 instrument、1 alias、4 artifact、1 snapshot；显式模式 48/49 已核实、1 个身份缺口，仍全量保留 49 成员、candidate=null、历史资格 false、执行锁定。外部/模型请求零次，不重启服务、不改旧失败记录，不代表核心研究完成。证据：`outputs/acceptance/common-stock-hidden-title-import-d53dea0/acceptance-summary.json` 及同目录私有入口回执。
+
+### 96k 版本与请求字节边界：一次真实三阶段研究完成（2026-09-06）
+
+常规同套餐研究调用和合理 token 分配沿用当前用户授权，不再恢复历史“额外三阶段单独批准”。原 64k 是本地累计输入限制，非套餐上限。第一片 `11c41bb` 新增精确版本 `codex-sdk-chatgpt-v3-input96k`，保留历史配置与默认准入；真实 setup 后不可重写该版本。零模型预检发现新综合请求 56,440 字节超过原 55,808 字节限制，而累计预估 77,650 tokens 小于 96k，说明仅调整 token 不足；未删正文、压缩投影或再次调用模型试探。
+
+第二片已审 `fae9b99` 集成为主线 `bd6ae17`，新精确版本 `codex-sdk-chatgpt-v3-input96k-wire64k` 将 64,000 **字节**写入新配置 hash，沿冻结版本传到实际 SDK 调用前检。旧版仍 55,808 字节；单次输入预留不超过 64k tokens、累计实际输入 96k、输出 8,192、最多三次 SDK 调用、既有 deadline 和不自动重试均保留。单次输入预留不是实际输入的硬截断，不混淆字节与 tokens。无依赖、迁移、表结构或权限变更。145 unit 与 5 聚焦 PG 通过，Ruff、五生产文件 Mypy、diffcheck 通过；独立审查复核 wire/aggregate 21 unit。实际 invoke 回归覆盖旧版 55,809 拒绝、新版 64,000 接受/64,001 拒绝，以及 token 预检仍有效；正常 setup/admit/worker/API trace 路径覆盖版本绑定与历史保留。
+
+正常 setup 新版本后，在同一新季度快照上做事务回滚的三阶段零模型预检，使用旧论点文本仅作长度样本、引用在内存对齐新冻结证据，未伪造新角色输出。三个请求分别 54,610 / 55,712 / 56,440 字节，全部通过实际阶段 guard，完整 23,151 字符附件与三季度指标精确相同，23 表行 hash 多重集回滚后完全不变。随后正常 admit 新 run、确认队列仅本次目标且 max_attempts=1，再正常 run-once 一次；不是旧失败 run 的重试。
+
+真实结果 run completed、job succeeded、attempt=1/retry=0，worker 进程 exit 0；累计输入 73,328 / 输出 2,379 tokens，billing_mode=chatgpt_subscription。23 表旧行全部保留，仅新增 run 1、outputs 10、job 1、budget reservation 1、idempotency record 1；未新增订单。仅更新自有本地 API，394 源文件 hash 与主线一致，运行配置不变。API 同 snapshot 的 inputs 与先前冻结输入逐字段相同，三阶段完整且 input/frozen hashes 在，阶段用量与最终总量一致，综合 assessment 存在。
+
+实际 BFF→DOM 在 375/1440 两宽度通过：精确 run/inputs/trace、三阶段完整输出、模型自评和系统状态分离、完整附件尾部/hash/季度表、无横向溢出、无交易按钮、无越界请求。结果仍为 partial/watch、exposure_action=none，不能当作正式方案、执行许可或充分的不调整结论。
+
+内容结构筛查：全部四条反证/审计论点有逐项回应，但模型全标 resolved、自评 sufficient 不等于独立内容审查合格。综合 claims 的引用来源只有组合上下文，尚不足以证明最新季度指标及当前趋势已进入有依据的最终综合；字面值检查仅作为筛查，不以未出现数字推断模型未读。协调任务正在基于已保存私有 DTO 做独立内容判断，无新增模型调用；运行链路完成与原问题答案合格分别记录。
+
+异常与防复发：验收 raw tool 的季度投影在 `disclosure.quarter_metrics`，API 形状在 `exhibit.quarter_metrics`，不能混用而误判产品丢字段；旧第一次预检通过后续 before/after 证明已回滚。Compose 配置中 null 的前密钥字段表示不注入环境，不能以字符串 `None` 与不存在变量比较；按空缺语义核对后配置一致，未修改任何凭据。边界问题已在实际 invoke 和正常 worker 回归覆盖；不新增审批框架或为同一缺口反复消耗模型额度。
+
+私有证据：`outputs/acceptance/current-trends-real-20260905/latest-operating-disclosure/quarter-metrics-acceptance/structured96-wire64k/`。安全摘要为 `preflight/preflight-summary.json`、`final-state-summary.json`、`api-summary.json`、`research-dom-summary.json`、`content-structure-summary.json`；完整 inputs/结果及入口回执仅存私有文件。
