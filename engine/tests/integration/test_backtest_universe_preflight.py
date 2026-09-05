@@ -1,11 +1,13 @@
 """The future internal-universe preflight reads existing master data and writes nothing."""
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from typing import Any, cast
 from uuid import uuid4
 
 import exchange_calendars
@@ -20,20 +22,45 @@ from nexus.persistence.models.market import (
 )
 from nexus.persistence.session import session_factory
 from nexus.settings import EngineSettings
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
-def _future_session() -> date:
-    today = datetime.now(UTC).date()
+async def _database_clock(database_url: str) -> datetime:
+    factory = session_factory(EngineSettings(database_url=database_url))
+    async with factory() as session:
+        cutoff = await session.scalar(select(text("clock_timestamp()")))
+    assert isinstance(cutoff, datetime)
+    return cutoff
+
+
+async def _future_session(database_url: str) -> date:
+    cutoff = await _database_clock(database_url)
     official = exchange_calendars.get_calendar("XNYS")
-    sessions = official.sessions_in_range(today + timedelta(days=1), today + timedelta(days=14))
-    return sessions[0].date()
+    sessions = official.sessions_in_range(cutoff.date(), cutoff.date() + timedelta(days=14))
+    return next(
+        session.date()
+        for session in sessions
+        if official.session_open(session).to_pydatetime() > cutoff
+    )
+
+
+async def _past_session(database_url: str) -> date:
+    cutoff = await _database_clock(database_url)
+    official = exchange_calendars.get_calendar("XNYS")
+    sessions = official.sessions_in_range(cutoff.date() - timedelta(days=14), cutoff.date())
+    return next(
+        session.date()
+        for session in reversed(sessions)
+        if official.session_open(session).to_pydatetime() <= cutoff
+    )
 
 
 async def _seed_master(database_url: str, effective_session: date, problem: str | None) -> None:
     factory = session_factory(EngineSettings(database_url=database_url))
     definition = load_us_liquid_v1_definition(effective_session)
-    created_at = datetime.now(UTC) - timedelta(days=1)
+    database_clock = await _database_clock(database_url)
+    created_at = database_clock - timedelta(days=1)
     async with factory.begin() as session:
         if problem in {"ambiguous_alias", "ambiguous_instrument_alias"}:
             # Simulate a corrupt/legacy store despite the current database exclusion guard.
@@ -49,7 +76,7 @@ async def _seed_master(database_url: str, effective_session: date, problem: str 
             missing_instrument = problem == "missing_instrument" and index == 0
             if not missing_instrument:
                 instrument_created_at = (
-                    datetime.now(UTC) + timedelta(days=1)
+                    database_clock + timedelta(days=1)
                     if problem == "late_instrument" and index == 0
                     else created_at
                 )
@@ -90,7 +117,7 @@ async def _seed_master(database_url: str, effective_session: date, problem: str 
                     valid_from=date(2020, 1, 1),
                     valid_to=None,
                     created_at=(
-                        datetime.now(UTC) + timedelta(days=1)
+                        database_clock + timedelta(days=1)
                         if problem == "late_alias" and index == 0
                         else created_at
                     ),
@@ -132,7 +159,21 @@ async def _seed_master(database_url: str, effective_session: date, problem: str 
                 )
 
 
-async def _counts(database_url: str) -> tuple[int, ...]:
+def _canonical_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _canonical_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_canonical_value(item) for item in value]
+    if isinstance(value, date | datetime):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    return str(value)
+
+
+async def _database_snapshot(database_url: str) -> dict[str, tuple[int, str]]:
     factory = session_factory(EngineSettings(database_url=database_url))
     models = (
         Instrument,
@@ -142,10 +183,48 @@ async def _counts(database_url: str) -> tuple[int, ...]:
         BacktestAuthorityPublicationMarkRecord,
     )
     async with factory() as session:
-        counts: list[int] = []
+        snapshot: dict[str, tuple[int, str]] = {}
         for model in models:
-            counts.append(int(await session.scalar(select(func.count()).select_from(model)) or 0))
-        return tuple(counts)
+            table = model.__table__
+            rows = (
+                await session.execute(select(*table.c).order_by(*table.primary_key.columns))
+            ).mappings()
+            payload = [
+                {key: _canonical_value(value) for key, value in sorted(row.items())} for row in rows
+            ]
+            digest = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            snapshot[table.name] = (len(payload), digest)
+        return snapshot
+
+
+class _ClockGatedSession:
+    def __init__(
+        self,
+        session: AsyncSession,
+        cutoff_read: asyncio.Event,
+        writer_committed: asyncio.Event,
+    ) -> None:
+        self._session = session
+        self._cutoff_read = cutoff_read
+        self._writer_committed = writer_committed
+        self.cutoff: datetime | None = None
+
+    async def execute(self, statement):
+        return await self._session.execute(statement)
+
+    async def scalar(self, statement):
+        value = await self._session.scalar(statement)
+        if "clock_timestamp" in str(statement):
+            assert isinstance(value, datetime)
+            self.cutoff = value
+            self._cutoff_read.set()
+            await self._writer_committed.wait()
+        return value
+
+    async def scalars(self, statement):
+        return await self._session.scalars(statement)
 
 
 async def _cli(database_url: str, effective_session: date):
@@ -168,9 +247,9 @@ async def _cli(database_url: str, effective_session: date):
 async def test_normal_cli_preflight_reads_exact_master_and_changes_no_database_rows(
     migrated_database_url,
 ) -> None:
-    effective_session = _future_session()
+    effective_session = await _future_session(migrated_database_url)
     await _seed_master(migrated_database_url, effective_session, None)
-    before = await _counts(migrated_database_url)
+    before = await _database_snapshot(migrated_database_url)
 
     code, stdout, stderr = await _cli(migrated_database_url, effective_session)
 
@@ -181,19 +260,20 @@ async def test_normal_cli_preflight_reads_exact_master_and_changes_no_database_r
         "member_count": 49,
         "status": "BACKTEST_UNIVERSE_PREFLIGHT_READY",
     }
-    assert await _counts(migrated_database_url) == before
-    assert before[2:4] == (0, 0)
+    assert await _database_snapshot(migrated_database_url) == before
+    assert before[UniverseSnapshot.__tablename__][0] == 0
+    assert before[UniverseMember.__tablename__][0] == 0
     definition = load_us_liquid_v1_definition(effective_session)
     assert b'"AAPL"' not in stdout
     assert str(definition.members[0].instrument_id).encode() not in stdout
-    previous = exchange_calendars.get_calendar("XNYS").previous_session(effective_session).date()
+    previous = await _past_session(migrated_database_url)
     old_code, old_stdout, old_stderr = await _cli(migrated_database_url, previous)
     assert old_code == 1 and old_stdout == b""
     assert json.loads(old_stderr) == {
         "status": "failed",
         "code": "BACKTEST_UNIVERSE_SESSION_NOT_FUTURE",
     }
-    assert await _counts(migrated_database_url) == before
+    assert await _database_snapshot(migrated_database_url) == before
 
 
 @pytest.mark.asyncio
@@ -213,18 +293,20 @@ async def test_normal_cli_preflight_reads_exact_master_and_changes_no_database_r
 async def test_master_gaps_are_classified_without_identity_output_or_writes(
     problem: str, expected: tuple[str, ...], migrated_database_url
 ) -> None:
-    effective_session = _future_session()
+    effective_session = await _future_session(migrated_database_url)
     await _seed_master(migrated_database_url, effective_session, problem)
-    before = await _counts(migrated_database_url)
+    before = await _database_snapshot(migrated_database_url)
     factory = session_factory(EngineSettings(database_url=migrated_database_url))
 
     async with factory() as session, session.begin():
         result = await preflight_us_liquid_v1(session, effective_session)
+        assert await session.scalar(text("SHOW transaction_read_only")) == "on"
+        assert await session.scalar(text("SHOW transaction_isolation")) == "repeatable read"
 
     assert result.status == "BACKTEST_UNIVERSE_PREFLIGHT_BLOCKED"
     assert result.member_count == 49
     assert result.gap_categories == expected
-    assert await _counts(migrated_database_url) == before
+    assert await _database_snapshot(migrated_database_url) == before
     if problem == "missing_alias":
         code, stdout, stderr = await _cli(migrated_database_url, effective_session)
         assert code == 0 and stderr == b""
@@ -234,4 +316,57 @@ async def test_master_gaps_are_classified_without_identity_output_or_writes(
             "status": "BACKTEST_UNIVERSE_PREFLIGHT_BLOCKED",
         }
         assert b'"AAPL"' not in stdout
-        assert await _counts(migrated_database_url) == before
+        assert await _database_snapshot(migrated_database_url) == before
+
+
+@pytest.mark.asyncio
+async def test_preflight_does_not_mix_a_backfilled_master_commit_after_its_cutoff(
+    migrated_database_url,
+) -> None:
+    effective_session = await _future_session(migrated_database_url)
+    definition = load_us_liquid_v1_definition(effective_session)
+    missing = definition.members[0]
+    await _seed_master(migrated_database_url, effective_session, "missing_instrument")
+    factory = session_factory(EngineSettings(database_url=migrated_database_url))
+    cutoff_read = asyncio.Event()
+    writer_committed = asyncio.Event()
+
+    async with factory() as reader, reader.begin():
+        gated = _ClockGatedSession(reader, cutoff_read, writer_committed)
+
+        async def backfill_after_cutoff() -> None:
+            await cutoff_read.wait()
+            assert gated.cutoff is not None
+            backfilled_at = gated.cutoff - timedelta(days=1)
+            async with factory.begin() as writer:
+                writer.add(
+                    Instrument(
+                        id=missing.instrument_id,
+                        asset_type=missing.asset_type,
+                        exchange="XNAS",
+                        currency="USD",
+                        tick_size=Decimal("0.01"),
+                        risk_bucket=missing.risk_bucket,
+                        created_at=backfilled_at,
+                    )
+                )
+                writer.add(
+                    InstrumentAlias(
+                        instrument_id=missing.instrument_id,
+                        symbol=missing.symbol,
+                        alias_type="ticker",
+                        valid_from=date(2020, 1, 1),
+                        valid_to=None,
+                        created_at=backfilled_at,
+                    )
+                )
+            writer_committed.set()
+
+        writer_task = asyncio.create_task(backfill_after_cutoff())
+        result = await preflight_us_liquid_v1(cast(AsyncSession, gated), effective_session)
+        await writer_task
+
+        assert result.status == "BACKTEST_UNIVERSE_PREFLIGHT_BLOCKED"
+        assert result.gap_categories == ("INSTRUMENT_MISSING", "TICKER_ALIAS_MISSING")
+        assert await reader.scalar(text("SHOW transaction_read_only")) == "on"
+        assert await reader.scalar(text("SHOW transaction_isolation")) == "repeatable read"

@@ -2,6 +2,7 @@ import csv
 from datetime import date, timedelta
 from pathlib import Path
 
+import nexus.backtest.universe as universe
 from nexus.market.universe import (
     EQUITY_SECTOR_CODES,
     SectorExposureRecord,
@@ -19,7 +20,7 @@ ETFS = {"SPY", "QQQ", "IWM", "DIA", "VTI", "TLT", "GLD"}
 
 
 def _seed_rows() -> list[dict[str, str]]:
-    seed_path = Path(__file__).resolve().parents[3] / "seed/universe/us_liquid_v1.csv"
+    seed_path = Path(universe.__file__).resolve().parent / "data/us_liquid_v1.csv"
     with seed_path.open(newline="", encoding="utf-8") as seed_file:
         return list(csv.DictReader(seed_file))
 

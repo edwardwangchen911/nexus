@@ -21,7 +21,7 @@ from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.market.universe import stable_instrument_id
 from nexus.persistence.models.market import Instrument, InstrumentAlias
 
-_SEED = Path(__file__).resolve().parents[3] / "seed/universe/us_liquid_v1.csv"
+_SEED = Path(__file__).resolve().parent / "data/us_liquid_v1.csv"
 _FIELDS = (
     "universe_version",
     "instrument_id",
@@ -194,7 +194,7 @@ async def preflight_us_liquid_v1(
     session: AsyncSession, effective_session: date
 ) -> UniversePreflightResult:
     """Check the future candidate against existing master data in a read-only transaction."""
-    await session.execute(text("SET TRANSACTION READ ONLY"))
+    await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
     cutoff = await session.scalar(select(func.clock_timestamp()))
     assert isinstance(cutoff, datetime)
     require_future_xnys_session(effective_session, cutoff)

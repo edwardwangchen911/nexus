@@ -2,6 +2,19 @@
 
 入口复用现有点时数据加载、回测引擎和事务写入器。回测只使用数据库内已有的完整源证据集合；不采集行情、不调用模型、不创建历史股票池、行业或公司行动证据，不连接交易接口。可以单独准备本地库的规范日历、直接运行已有数据包，或从完整源集合装配新数据包再运行。
 
+## 只读预检未来内部股票池
+
+沿用已配置的本地 `DATABASE_URL`，选择尚未开盘的有效 XNYS 交易日：
+
+```sh
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.backtest_once \
+  --preflight-universe --effective-session '<未来交易日 YYYY-MM-DD>'
+```
+
+该模式与其他模式互斥。固定定义随安装包保存在 `nexus/backtest/data/us_liquid_v1.csv`；49 个成员保持原定义，CSV 旧日期不作为发布时间。程序在同一 `REPEATABLE READ, READ ONLY` 事务中核对数据库时钟、已有 Instrument 与唯一有效 ticker alias。等于开盘时刻也拒绝，身份缺失、晚到、错配或歧义分别返回固定缺口分类。
+
+输出仅包含 `status`、`member_count`、`gap_categories`。`BACKTEST_UNIVERSE_PREFLIGHT_READY` 表示本次身份和日期前置通过；`BACKTEST_UNIVERSE_PREFLIGHT_BLOCKED` 表示有明确缺口，两者都没有发布股票池、创建成员、生成回测或启动调度。预检结果不保留未来发布资格，实际发布必须重新核验。当前版本尚未实现发布动作，也不补成过去的 PIT 证据。
+
 ## 单独准备规范日历
 
 使用当前 Python 环境安装的 `exchange_calendars` 生成 XNYS 日历。此模式只接收以下三个参数，与下方两种模式的其他参数互斥：
