@@ -102,3 +102,29 @@ in the Index.
             ]
         )
     return tuple(values)
+
+
+def dia_originals():
+    values = list(originals())
+    values = [raw.replace(b"SPY", b"DIA") for raw in values]
+    values[2] = values[2].replace(
+        b"SYNTHETIC OLD TRUST", b"SYNTHETIC DOW JONES INDUSTRIAL AVERAGE ETF TRUST"
+    )
+    values[6] = values[6].replace(
+        b"Synthetic Old Trust", b"Synthetic Dow Jones Industrial Average SM ETF TRUST"
+    )
+    values[6] = values[6].replace(
+        "S&amp;P 500 Index (the “Index”)".encode(),
+        "Dow Jones Industrial Average (the “DJIA” or “Index”)".encode(),
+    )
+    values[6] = (
+        values[6]
+        .replace(b"included in the Index", b"included in the DJIA")
+        .replace(b"in the Index.", b"in the DJIA.")
+    )
+    for index in (0, 2, 4, 6):
+        receipt = json.loads(values[index + 1])
+        receipt["raw_sha256" if index == 0 else "sha256"] = sha256(values[index]).hexdigest()
+        receipt["raw_byte_length" if index == 0 else "byte_length"] = len(values[index])
+        values[index + 1] = json.dumps(receipt).encode()
+    return tuple(values)

@@ -280,8 +280,9 @@ async def test_nasdaq_normal_import_read_and_future_keep_old_identity_json(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ["SPY", "DIA"])
 async def test_uit_normal_import_read_future_preserves_existing_etf_json(
-    migrated_database_url, tmp_path
+    migrated_database_url, tmp_path, symbol
 ):
     import json
     from datetime import UTC, datetime, timedelta
@@ -289,7 +290,7 @@ async def test_uit_normal_import_read_future_preserves_existing_etf_json(
     import exchange_calendars
     from helpers.current_etf_identity import archives
     from helpers.current_identity import MemoryStore
-    from helpers.current_uit_identity import originals
+    from helpers.current_uit_identity import dia_originals, originals
     from nexus.backtest.future_identity import prepare_future_identity_bindings
     from nexus.market.current_etf_identity_storage import read_current_etf
     from nexus.ops.etf_identity_local import import_identity
@@ -328,13 +329,15 @@ async def test_uit_normal_import_read_future_preserves_existing_etf_json(
             "disclosure.raw",
             "disclosure-receipt.json",
         )
-        for name, raw in zip(names, originals(), strict=True):
+        for name, raw in zip(
+            names, originals() if symbol == "SPY" else dia_originals(), strict=True
+        ):
             path = folder / name
             path.write_bytes(raw)
             path.chmod(0o600)
         new = await import_identity(
             settings,
-            symbol="SPY",
+            symbol=symbol,
             fmp_archive=folder,
             sec_archive=folder,
             mapping_file=None,
@@ -356,7 +359,7 @@ async def test_uit_normal_import_read_future_preserves_existing_etf_json(
             result = await prepare_future_identity_bindings(
                 session, store, effective_session=effective, use_etf_identities=True
             )
-        bound = next(m for m in result["members"] if m["symbol"] == "SPY")
+        bound = next(m for m in result["members"] if m["symbol"] == symbol)
         assert bound["gap"] is None and bound["legal_structure"] == "unit_investment_trust"
         assert bound["listing_exchange"] == "ARCX"
         assert len(result["members"]) == 49 and result["candidate"] is None

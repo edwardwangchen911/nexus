@@ -273,7 +273,7 @@ NASDAQ 股票ETF窄分支以当前目录的精确 CIK/series/class、完整 497K
 回滚继续采用关闭显式消费者并保留兼容 reader，不删除已存证据。无新增迁移或依赖。
 
 
-股票型 UIT 当前身份首个代表仅支持 SPY，使用 `etf_identity_local import-uit`，
+股票型 UIT 当前身份支持已分别验证来源合同的 SPY 与 DIA，使用 `etf_identity_local import-uit`，
 参数为 `--symbol SPY --fmp-archive PATH --sec-archive PATH --output NEW_PATH`。
 FMP 目录仍为 profile.json/receipt.json；SEC 目录为 submissions.raw、
 submissions-receipt.json、filing-index.raw、index-receipt.json、disclosure.raw、
@@ -288,3 +288,8 @@ NYSE 仅保留来源标签。独立子类型保存 `legal_structure=unit_investm
 法律名称/旧名/展示名不互相覆盖。旧三种 ETF JSON 及默认消费者不变，未来准备仍须
 显式 ETF 选项，当前身份不授予历史资格或执行许可。无 schema 迁移；回退停用新入口
 与显式消费，但须保留新 JSON 的兼容 reader 和不可变原件。
+
+DIA 复用八原件显式 import-uit 路径，但校验独立的 Dow Jones Industrial Average
+目标与 DJIA 普通股组合策略；SPY 仍要求 S&P 500，不跨基金替换目标。DIA 旧名中的
+已证实商标 SM 仅在封面旧名的 INDUSTRIAL AVERAGE 与 ETF TRUST 之间规范化，
+原始封面声明与原件仍保留，不全局删字符。无新增 JSON 字段、数据库或迁移。

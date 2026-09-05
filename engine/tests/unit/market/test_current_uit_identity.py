@@ -46,3 +46,56 @@ def test_uit_rejects_changed_custody_or_detached_subject(case):
         values[7] = json.dumps(receipt).encode()
     with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
         validate_uit_originals(symbol="SPY", contents=tuple(values), now=datetime.now(UTC))
+
+
+def test_dia_independent_djia_objective_and_trademarked_former_name():
+    from helpers.current_uit_identity import dia_originals
+
+    proof = validate_uit_originals(symbol="DIA", contents=dia_originals(), now=datetime.now(UTC))
+    assert proof.identity.symbol == "DIA" and proof.identity.exchange == "ARCX"
+    assert "DJIA" in proof.identity.objective and "S&P 500" not in proof.identity.objective
+    assert " SM " not in proof.identity.former_name
+
+
+@pytest.mark.parametrize("case", ["spy_objective", "spy_strategy", "wrong_cover", "wrong_former"])
+def test_dia_rejects_cross_fund_objective_and_identity(case):
+    import json
+    from hashlib import sha256
+
+    from helpers.current_uit_identity import dia_originals
+
+    values = list(dia_originals())
+    if case == "spy_objective":
+        values[6] = values[6].replace(
+            "Dow Jones Industrial Average (the “DJIA” or “Index”)".encode(),
+            "S&amp;P 500 Index (the “Index”)".encode(),
+        )
+    elif case == "spy_strategy":
+        values[6] = values[6].replace(b"included in the DJIA", b"included in the Index")
+    elif case == "wrong_cover":
+        values[6] = values[6].replace(b"DIA", b"SPY")
+    else:
+        values[6] = values[6].replace(b"Average SM", b"Average OTHER")
+    receipt = json.loads(values[7])
+    receipt["sha256"] = sha256(values[6]).hexdigest()
+    receipt["byte_length"] = len(values[6])
+    values[7] = json.dumps(receipt).encode()
+    with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+        validate_uit_originals(symbol="DIA", contents=tuple(values), now=datetime.now(UTC))
+
+
+def test_spy_still_rejects_djia_objective_with_unchanged_own_cover():
+    import json
+    from hashlib import sha256
+
+    values = list(originals())
+    values[6] = values[6].replace(
+        "S&amp;P 500 Index (the “Index”)".encode(),
+        "Dow Jones Industrial Average (the “DJIA” or “Index”)".encode(),
+    )
+    receipt = json.loads(values[7])
+    receipt["sha256"] = sha256(values[6]).hexdigest()
+    receipt["byte_length"] = len(values[6])
+    values[7] = json.dumps(receipt).encode()
+    with pytest.raises(ValueError, match="CURRENT_ETF_IDENTITY_INVALID"):
+        validate_uit_originals(symbol="SPY", contents=tuple(values), now=datetime.now(UTC))

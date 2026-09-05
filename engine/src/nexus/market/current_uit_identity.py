@@ -36,8 +36,8 @@ def _visible(raw: bytes) -> str:
 
 def validate_uit_originals(*, symbol: str, contents: tuple[bytes, ...], now: datetime) -> EtfInputs:
     try:
-        # Only the representative supported by this contract; no inference for other UITs.
-        if symbol != "SPY":
+        # Only independently bound stock-index UIT contracts; no inference for other funds.
+        if symbol not in {"SPY", "DIA"}:
             raise ValueError
         member_for(symbol)
         cutoff = require_utc(now)
@@ -122,30 +122,40 @@ def validate_uit_originals(*, symbol: str, contents: tuple[bytes, ...], now: dat
         text = _visible(document)
         cover = re.search(
             r"Filed Pursuant to Rule 497\(b\) Registration File No\. [0-9-]+ "
-            r"(.+?) \(“SPY” or the “Trust”\) \(formerly, “(.+?)”\) "
+            rf"(.+?) \(“{symbol}” or the “Trust”\) \(formerly, “(.+?)”\) "
             r"\(A Unit Investment Trust\) Principal U\.S\. Listing Exchange for (.+?): "
-            r"NYSE Arca, Inc\. under the symbol “SPY” Prospectus Dated "
+            rf"NYSE Arca, Inc\. under the symbol “{symbol}” Prospectus Dated "
             r"([A-Za-z]+ [0-9]+, [0-9]{4})",
             text[:1400],
         )
+        former = cover[2] if cover else ""
+        if symbol == "DIA":
+            former = re.sub(r"(?<=INDUSTRIAL AVERAGE) SM(?= ETF TRUST)", "", former, flags=re.I)
         if (
             not cover
             or cover[1] != cover[3]
-            or cover[2].casefold() != sub["name"].casefold()
+            or former.casefold() != sub["name"].casefold()
             or text.count("Filed Pursuant to Rule 497(b)") != 1
             or datetime.strptime(cover[4], "%B %d, %Y").date() > accepted.date()
         ):
             raise ValueError
+        index_objective = (
+            "S&P 500 Index (the “Index”)"
+            if symbol == "SPY"
+            else "Dow Jones Industrial Average (the “DJIA” or “Index”)"
+        )
+        strategy_index = "Index" if symbol == "SPY" else "DJIA"
         objective = (
             "SUMMARY Investment Objective The Trust seeks to provide investment results that, "
             "before expenses, correspond generally to the price and yield performance of the "
-            "S&P 500 Index (the “Index”). Fees and Expenses of the Trust"
+            f"{index_objective}. Fees and Expenses of the Trust"
         )
         stocks = (
             "The Trust seeks to achieve its investment objective by holding a portfolio of the "
-            "common stocks that are included in the Index (the “Portfolio”), with the weight of "
+            f"common stocks that are included in the {strategy_index} (the “Portfolio”), "
+            "with the weight of "
             "each stock in the Portfolio substantially corresponding to the weight of such stock "
-            "in the Index."
+            f"in the {strategy_index}."
         )
         if (
             text.count(objective) != 1
@@ -156,7 +166,7 @@ def validate_uit_originals(*, symbol: str, contents: tuple[bytes, ...], now: dat
             symbol=symbol,
             cik=identifier,
             legal_name=cover[1],
-            former_name=cover[2],
+            former_name=former,
             fmp_name=row["companyName"],
             fmp_name_matches_sec=row["companyName"] == cover[1],
             fmp_exchange=row["exchange"],
