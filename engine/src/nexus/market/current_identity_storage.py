@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -25,6 +25,14 @@ from nexus.market.current_identity import (
     load_identity_archives,
     member_for,
     validate_identity_originals,
+)
+from nexus.market.custom_identity import (
+    SCHEMA as CUSTOM_SCHEMA,
+)
+from nexus.market.custom_identity import (
+    CustomIdentityInputs,
+    load_custom_identity_archives,
+    validate_custom_identity_originals,
 )
 from nexus.market.scope import US_EQUITY_EXCHANGES
 from nexus.persistence.models.data import DataArtifact, DataSnapshot
@@ -65,6 +73,63 @@ class CurrentIdentityImportResult:
     status: Literal["created", "existing"]
     instrument_id: UUID
     snapshot_id: UUID
+
+
+class CustomMemberIdentityProof(CurrentIdentityProof):
+    taxonomy_artifacts: tuple[
+        ArtifactBinding,
+        ArtifactBinding,
+        ArtifactBinding,
+        ArtifactBinding,
+        ArtifactBinding,
+        ArtifactBinding,
+    ]
+
+
+TAXONOMY_SCHEMAS = tuple(
+    "sec_identity_taxonomy_" + name + suffix + "_v1"
+    for name in ("schema", "definition", "label")
+    for suffix in ("_raw", "_receipt")
+)
+
+
+async def _archive_taxonomy(
+    session: AsyncSession, store: IdentityStore, inputs: CustomIdentityInputs
+) -> tuple[ArtifactBinding, ...]:
+    result = []
+    for number, content in enumerate(inputs.taxonomy_contents):
+        digest = sha256(content).hexdigest()
+        schema = TAXONOMY_SCHEMAS[number]
+        artifact = await session.scalar(select(DataArtifact).where(DataArtifact.sha256 == digest))
+        if artifact is None:
+            key = f"raw/sec/current-identity/{schema}/{digest}.json"
+            uri = await store.put_if_absent(key=key, content=content)
+            received = inputs.taxonomy_received[number // 2]
+            await session.execute(
+                insert(DataArtifact)
+                .values(
+                    uri=uri,
+                    sha256=digest,
+                    byte_size=len(content),
+                    source="sec",
+                    schema_version=schema,
+                    mime_type="application/json" if number % 2 else "application/xml",
+                    received_at=received,
+                    observed_at=received,
+                    available_at=received,
+                )
+                .on_conflict_do_nothing(index_elements=["sha256"])
+            )
+            artifact = await session.scalar(
+                select(DataArtifact).where(DataArtifact.sha256 == digest)
+            )
+        if artifact is None or artifact.source != "sec" or artifact.schema_version != schema:
+            raise ValueError("CURRENT_IDENTITY_ARTIFACT_CONFLICT")
+        binding = _binding(artifact)
+        if await _read_artifact(store, binding) != content:
+            raise ValueError("CURRENT_IDENTITY_ARTIFACT_INVALID")
+        result.append(binding)
+    return tuple(result)
 
 
 def _binding(artifact: DataArtifact) -> ArtifactBinding:
@@ -244,6 +309,7 @@ async def import_current_common_stock(
     symbol: str,
     fmp_archive: Path,
     sec_archive: Path,
+    taxonomy_archive: Path | None = None,
 ) -> CurrentIdentityImportResult:
     member_for(symbol)
     try:
@@ -254,8 +320,19 @@ async def import_current_common_stock(
             )
             checked_at = await session.scalar(select(func.clock_timestamp()))
             assert isinstance(checked_at, datetime)
-            inputs = load_identity_archives(
-                symbol=symbol, fmp_archive=fmp_archive, sec_archive=sec_archive, now=checked_at
+            inputs: IdentityInputs | CustomIdentityInputs
+            inputs = (
+                load_identity_archives(
+                    symbol=symbol, fmp_archive=fmp_archive, sec_archive=sec_archive, now=checked_at
+                )
+                if taxonomy_archive is None
+                else load_custom_identity_archives(
+                    symbol=symbol,
+                    fmp_archive=fmp_archive,
+                    sec_archive=sec_archive,
+                    taxonomy_archive=taxonomy_archive,
+                    now=checked_at,
+                )
             )
             instrument, alias, created = await _select_identity(
                 session, inputs.identity, checked_at
@@ -272,8 +349,17 @@ async def import_current_common_stock(
                 if proof.instrument_id != instrument.id or proof.alias_id != alias.id:
                     raise ValueError("CURRENT_IDENTITY_MASTER_CONFLICT")
                 return CurrentIdentityImportResult("existing", instrument.id, previous.id)
-            artifacts = await _archive(session, store, inputs)
-            proof = CurrentIdentityProof(
+            custom = isinstance(inputs, CustomIdentityInputs)
+            artifacts = await _archive(
+                session, store, inputs.base if isinstance(inputs, CustomIdentityInputs) else inputs
+            )
+            proof_class = CustomMemberIdentityProof if custom else CurrentIdentityProof
+            extra: dict[str, Any] = (
+                {"taxonomy_artifacts": await _archive_taxonomy(session, store, inputs)}
+                if isinstance(inputs, CustomIdentityInputs)
+                else {}
+            )
+            proof = proof_class(
                 identity=inputs.identity,
                 instrument_id=instrument.id,
                 alias_id=alias.id,
@@ -282,12 +368,13 @@ async def import_current_common_stock(
                 definition_instrument_id=member_for(symbol).instrument_id,
                 sec_url=inputs.sec_url,
                 artifacts=artifacts,
+                **extra,
             )
             snapshot = DataSnapshot(
                 source=SOURCE,
                 provider_object_id=f"identity:{symbol}",
                 revision=inputs.revision,
-                schema_version=SCHEMA,
+                schema_version=CUSTOM_SCHEMA if custom else SCHEMA,
                 observed_at=checked_at,
                 received_at=checked_at,
                 available_at=checked_at,
@@ -305,28 +392,53 @@ async def import_current_common_stock(
 
 async def read_current_identity(
     session: AsyncSession, store: IdentityStore, *, snapshot_id: UUID
-) -> CurrentIdentityProof:
+) -> CurrentIdentityProof | CustomMemberIdentityProof:
     try:
         snapshot = await session.get(DataSnapshot, snapshot_id)
-        if snapshot is None or snapshot.source != SOURCE or snapshot.schema_version != SCHEMA:
+        if (
+            snapshot is None
+            or snapshot.source != SOURCE
+            or snapshot.schema_version not in {SCHEMA, CUSTOM_SCHEMA}
+        ):
             raise ValueError
-        proof = CurrentIdentityProof.model_validate(snapshot.payload)
+        proof = (
+            CustomMemberIdentityProof.model_validate(snapshot.payload)
+            if snapshot.schema_version == CUSTOM_SCHEMA
+            else CurrentIdentityProof.model_validate(snapshot.payload)
+        )
         if (snapshot.observed_at, snapshot.received_at, snapshot.available_at) != (
             proof.checked_at,
         ) * 3:
             raise ValueError
         contents = []
-        for binding in proof.artifacts:
+        bindings = proof.artifacts + (
+            proof.taxonomy_artifacts if isinstance(proof, CustomMemberIdentityProof) else ()
+        )
+        for number, binding in enumerate(bindings):
             artifact = await session.scalar(
                 select(DataArtifact).where(DataArtifact.sha256 == binding.sha256)
             )
             if artifact is None or _binding(artifact) != binding:
                 raise ValueError
+            if number >= 4 and (
+                binding.source != "sec" or binding.schema_version != TAXONOMY_SCHEMAS[number - 4]
+            ):
+                raise ValueError
             contents.append(await _read_artifact(store, binding))
-        inputs = validate_identity_originals(
-            symbol=proof.identity.symbol,
-            contents=(contents[0], contents[1], contents[2], contents[3]),
-            now=proof.checked_at,
+        base_contents = (contents[0], contents[1], contents[2], contents[3])
+        inputs = (
+            validate_custom_identity_originals(
+                symbol=proof.identity.symbol,
+                contents=base_contents,
+                taxonomy_contents=tuple(contents[4:]),
+                now=proof.checked_at,
+            )
+            if isinstance(proof, CustomMemberIdentityProof)
+            else validate_identity_originals(
+                symbol=proof.identity.symbol,
+                contents=base_contents,
+                now=proof.checked_at,
+            )
         )
         if (
             inputs.identity != proof.identity

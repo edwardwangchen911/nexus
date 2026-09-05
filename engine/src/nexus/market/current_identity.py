@@ -521,7 +521,11 @@ def _dual_listing_record(
 
 
 def parse_current_common_stock(
-    *, symbol: str, fmp_raw: bytes, sec_raw: bytes
+    *,
+    symbol: str,
+    fmp_raw: bytes,
+    sec_raw: bytes,
+    _member_definition: dict[str, Any] | None = None,
 ) -> CurrentCommonStockIdentity:
     try:
         member_for(symbol)
@@ -598,9 +602,18 @@ def parse_current_common_stock(
             dimensions == {"us-gaap:StatementClassOfStockAxis": "us-gaap:CommonClassAMember"}
             and stock["context"] in parser.class_contexts
         )
+        custom = (
+            _member_definition is not None
+            and stock["context"] in parser.class_contexts
+            and dimensions == {"us-gaap:StatementClassOfStockAxis": _member_definition["qname"]}
+            and parser.namespaces.get("xmlns:" + _member_definition["qname"].split(":")[0])
+            == _member_definition["namespace"]
+            and expanded is None
+        )
         if (
             not plain_stock
             and not class_a
+            and not custom
             and dimensions
             not in (
                 class_dimension,
@@ -637,6 +650,17 @@ def parse_current_common_stock(
             or _EXCHANGES.get(values["dei:SecurityExchangeName"]) != exchange
         ):
             raise invalid()
+        if _member_definition is not None:
+            if (
+                not custom
+                or title != _member_definition["title"]
+                or re.search(r"\bclass\b", title, re.I)
+            ):
+                raise invalid()
+            record = [
+                dict(f, member_definition=_member_definition) if f["id"] == stock["id"] else f
+                for f in record
+            ]
         return CurrentCommonStockIdentity(
             symbol=symbol,
             cik=identifier,
@@ -674,11 +698,17 @@ class IdentityInputs:
 
 
 def validate_identity_originals(
-    *, symbol: str, contents: tuple[bytes, bytes, bytes, bytes], now: datetime
+    *,
+    symbol: str,
+    contents: tuple[bytes, bytes, bytes, bytes],
+    now: datetime,
+    _member_definition: dict[str, Any] | None = None,
 ) -> IdentityInputs:
     try:
         fmp, fm_receipt, sec, sec_receipt = contents
-        identity = parse_current_common_stock(symbol=symbol, fmp_raw=fmp, sec_raw=sec)
+        identity = parse_current_common_stock(
+            symbol=symbol, fmp_raw=fmp, sec_raw=sec, _member_definition=_member_definition
+        )
         receipts = [
             json.loads(
                 b,
@@ -731,8 +761,21 @@ def validate_identity_originals(
 def load_identity_archives(
     *, symbol: str, fmp_archive: Path, sec_archive: Path, now: datetime | None = None
 ) -> IdentityInputs:
+    cutoff = require_utc(now or datetime.now(UTC))
+    return validate_identity_originals(
+        symbol=symbol,
+        contents=read_identity_archive_contents(
+            symbol=symbol, fmp_archive=fmp_archive, sec_archive=sec_archive, now=cutoff
+        ),
+        now=cutoff,
+    )
+
+
+def read_identity_archive_contents(
+    *, symbol: str, fmp_archive: Path, sec_archive: Path, now: datetime
+) -> tuple[bytes, bytes, bytes, bytes]:
     try:
-        cutoff = require_utc(now or datetime.now(UTC))
+        cutoff = require_utc(now)
         fmp = load_profile_archive(
             fmp_archive, instrument_id=member_for(symbol).instrument_id, symbol=symbol, now=cutoff
         )
@@ -748,10 +791,6 @@ def load_identity_archives(
             raw = _read(fd, match[3], MAX_SEC_BYTES)
         finally:
             os.close(fd)
-        return validate_identity_originals(
-            symbol=symbol,
-            contents=(fmp.originals[0].content, fmp.originals[1].content, raw, receipt),
-            now=cutoff,
-        )
+        return fmp.originals[0].content, fmp.originals[1].content, raw, receipt
     except (OSError, ValueError, TypeError, KeyError, RecursionError) as error:
         raise ValueError("CURRENT_IDENTITY_ARCHIVE_INVALID") from error

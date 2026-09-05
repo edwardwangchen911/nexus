@@ -26,6 +26,7 @@ from nexus.market.current_identity_storage import (
     read_current_identity,
 )
 from nexus.market.current_listing_revision import import_listing_revision, read_listing_revision
+from nexus.market.custom_identity import archive_member_taxonomy
 from nexus.market.object_store import S3ProviderEvidenceStore
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
@@ -116,6 +117,7 @@ async def import_identity(
     symbol: str,
     fmp_archive: Path,
     sec_archive: Path,
+    taxonomy_archive: Path | None = None,
     store: IdentityStore | None = None,
 ) -> CurrentIdentityImportResult:
     _local(settings)
@@ -124,7 +126,12 @@ async def import_identity(
     try:
         async with factory() as session, session.begin():
             result = await import_current_common_stock(
-                session, storage, symbol=symbol, fmp_archive=fmp_archive, sec_archive=sec_archive
+                session,
+                storage,
+                symbol=symbol,
+                fmp_archive=fmp_archive,
+                sec_archive=sec_archive,
+                taxonomy_archive=taxonomy_archive,
             )
         async with factory() as session, session.begin():
             await session.execute(text("SET TRANSACTION READ ONLY"))
@@ -218,10 +225,19 @@ def main() -> None:
     collect = commands.add_parser("collect-sec")
     collect.add_argument("--source-url", required=True)
     collect.add_argument("--output-dir", type=Path, required=True)
+    taxonomy = commands.add_parser("archive-taxonomy")
+    taxonomy.add_argument("--symbol", required=True)
+    taxonomy.add_argument("--fmp-archive", type=Path, required=True)
+    taxonomy.add_argument("--sec-archive", type=Path, required=True)
+    taxonomy.add_argument("--output-dir", type=Path, required=True)
+    for name in ("schema", "definition", "label"):
+        taxonomy.add_argument("--" + name, type=Path, required=True)
+        taxonomy.add_argument("--" + name + "-receipt", type=Path, required=True)
     importer = commands.add_parser("import")
     importer.add_argument("--symbol", required=True)
     importer.add_argument("--fmp-archive", type=Path, required=True)
     importer.add_argument("--sec-archive", type=Path, required=True)
+    importer.add_argument("--taxonomy-archive", type=Path)
     importer.add_argument("--output", type=Path, required=True)
     revision = commands.add_parser("revise-listing")
     revision.add_argument("--symbol", required=True)
@@ -240,7 +256,20 @@ def main() -> None:
     try:
         args = parser.parse_args()
         environment = load_local_environment(args.repo_root, os.environ)
-        if args.action == "collect-sec":
+        if args.action == "archive-taxonomy":
+            archive_member_taxonomy(
+                symbol=args.symbol,
+                fmp_archive=args.fmp_archive,
+                sec_archive=args.sec_archive,
+                output_dir=args.output_dir,
+                originals=tuple(
+                    getattr(args, n + s)
+                    for n in ("schema", "definition", "label")
+                    for s in ("", "_receipt")
+                ),
+            )
+            status = "archived"
+        elif args.action == "collect-sec":
             asyncio.run(
                 collect_sec(
                     source_url=args.source_url,
@@ -273,6 +302,11 @@ def main() -> None:
                         symbol=args.symbol,
                         fmp_archive=args.fmp_archive,
                         sec_archive=args.sec_archive,
+                        **(
+                            {"taxonomy_archive": args.taxonomy_archive}
+                            if args.action == "import"
+                            else {}
+                        ),
                     )
                 )
                 write_private(

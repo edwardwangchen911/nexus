@@ -165,6 +165,36 @@ stable UUID，alias从数据库本次核验UTC日开始，tick_size保留unknown
 回退方式是停止该import入口，保留已提交身份、证明和读取兼容。无需新表、迁移、
 依赖或服务重启；不删事实、改写历史，亦不回退券商刷新身份校验。
 
+### 显式自定义普通股成员定义归档
+
+自定义 `StatementClassOfStockAxis` 成员不因名字含有 Common Stock 而合格。
+必须由原 SEC HTML 引用同 accession 的 schema，再绑定 definition/label linkbase、
+同角色内标准轴到域到成员的关系、精确英文标签及原登记行。解析不自动下载导入的
+taxonomy，也不将自定义 QName 改写为标准成员。
+
+已有官方原件和真实收据时，用正常离线入口封装（六个输入文件须位于私有目录）：
+
+```bash
+PYTHONPATH=engine/src .venv/bin/python -m nexus.ops.instrument_identity_local \
+  --repo-root "$PWD" archive-taxonomy --symbol '<固定定义普通股代码>' \
+  --fmp-archive '<FMP归档目录>' --sec-archive '<SEC正文归档目录>' \
+  --schema '<schema原件>' --schema-receipt '<schema原收据>' \
+  --definition '<definition原件>' --definition-receipt '<definition原收据>' \
+  --label '<label原件>' --label-receipt '<label原收据>' \
+  --output-dir '<新的私有归档目录>'
+```
+
+每份收据使用原 `source_url / received_at / sha256 / byte_length / http_status`，
+不重新生成接收时间。封装前严格离线核验，输出固定 `schema.xml / definition.xml /
+label.xml` 及各自的 `*-receipt.json`。随后仅在正常 `import` 命令显式添加
+`--taxonomy-archive '<上述目录>'`；不支持在 `revise-listing` 中隐式启用。
+
+新证明使用 `current_instrument_custom_member_identity_v1`：保留四项 `artifacts`，
+另绑定六项 `taxonomy_artifacts`，正常存储读取会重新核验全部十份原件。
+旧四原件证明和 JSON 不变，无数据库迁移。回滚旧程序后无法读取新版本证明；
+应保留兼容读取程序，不能删掉新增原件或字段伪装旧证明。历史回测资格仍为 false，
+执行继续锁定。
+
 ## 只读准备未来身份绑定
 
 当既有合法证券使用 broker UUID 时，旧 `us_liquid_v1` 固定 UUID 预检仍按原合同报告
