@@ -2924,3 +2924,17 @@ verified，default/listing/explicit 三种 prepare 精确绑定新 proof_snapsho
 当前仅 A 独立工作区接线验证，依赖 D 的季度/累计、GAAP 列绑定修复通过集中审查；未做真实业务导入、服务更新或新研究。解析器此前单测通过不等于财务口径已经完整核验，不据此宣告真实结果可用。
 
 上述切片增量联合核验：D 表列及实际季度绑定修复（56bc5e5、9949262）与消费者 8294a66 已在 A 工作区组合。受保护 API 红测实际复现 strict reader 有投影但 GET 未返回；消费者接入后正常 old/new import→prepare/admit→HMAC GET 的新投影精确匹配、旧 run 完整 DTO 不变。最终相关 56 unit 通过，API/修订/原附件联合 5 PG 通过（19.86s），对象存储为合成边界、API 和严格 reader 均真实，未调用模型或业务导入。新增回归位于 `engine/tests/integration/test_sec_exhibit_quarter_api.py`。此证据仍是隔离验收，不替代主线集成、运行生效或真实页面验收。
+
+### 季度附件投影主线与真实页面验收（2026-09-06）
+
+主线串行集成至 `e4f24b4`，解析器、存储/选择入口、API 与三个生成契约、Web 的 12 个相关生产/生成文件与已验证工作区精确相同。使用已保存六个原件/回执和既有身份证明，正常 `import-sec-exhibit --quarter-metrics` 一次，再正常 `prepare-research` 一次；未重新采集、未新增模型研究、未改变预算或配置。
+
+真实 strict reader 的三项投影与最终解析器逐字段一致，原件 hash 和未知币种保留；新快照同 accession 仅最新修订，旧披露仍可读。20 个既有业务表的旧行 hash 多重集保留；新增仅 2 个 snapshot、2 个 evidence ref（SEC 与正常准备产生的组合上下文）、1 个 filing，原件 artifact 零新增，FinancialFact、Job、研究 run/output、订单零新增。页面验收后再次核对同一增量，未增加业务副作用。
+
+仅更新 A 所有的本地 API，393 个 Python 源文件与主线逐文件 hash 一致，运行配置未变。数据库、迁移、对象存储均 ready；总健康状态因通用 worker stale 仍 unready，未为只读验收启动 worker。现有主线 Web 开发服务已呈现新组件，无需重启。受保护 API 的新 inputs 与严格读取精确相同；既有旧研究及失败研究的冻结语义、输入、状态、用量不变（兼容新增可选 null 字段），失败研究仍失败且无 intent。
+
+正常 BFF→实际 DOM 在 375/1440 两个宽度均通过：三指标显示与统一 Decimal 格式器一致、本期/可比期末和原表单位一致、币种未确认、完整附件与来源 hash 保留、旧新快照边界仍可见、无整页横向溢出、无交易按钮、无越界请求。真实模型工具尚未消费新投影：工具消费证据仅来自隔离 normal tools/mock SDK 回归，不伪造 run、不回填旧 manifest；本片不等于合格研究、可信不调整结论或正式方案。
+
+异常沉淀：验收最初少计 normal prepare 生成的组合上下文引用，已核对实际新增来源与生产者，纠正只读断言，未重放导入；首次 DOM 检查误将指标表限定在全文折叠区，而实际表格位于同一附件 section，按已渲染结构纠正选择范围后复核，未把验收定位错误当产品缺陷或重启服务。
+
+本地私有证据目录：`outputs/acceptance/current-trends-real-20260905/latest-operating-disclosure/quarter-metrics-acceptance/`。可分享摘要为 `acceptance-summary.json`、`runtime-summary.json`、`api-summary.json`、`dom-summary.json`、`final-state-summary.json`；原件、身份、API 和输入值只保存在该目录私有文件中，不进入聊天或测试材料。
