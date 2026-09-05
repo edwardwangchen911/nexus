@@ -2700,3 +2700,19 @@ candidate null、历史资格 false、执行锁定。私有摘要：
 outputs/acceptance/common-stock-eleventh-item2-exchange-4889ea5/acceptance-summary.json；
 同目录artifact-preflight-summary.json保留去重依据。无新采集、模型、API重启，原
 item1/3和两份超限10-Q不重试；局部身份进展不替代研究或候选资格闭合。
+
+
+### 财务原始标签消费者与空样本假覆盖修正
+
+A62934c9仅在数据库财务工具投影增加已存raw_taxonomy/raw_tag，保留规范事实名、
+金额字符串、期间、单位及证据引用。隔离PG正常工具→真实SDK请求路径（仅替换
+SDK传输）验证两种标签及旧cutoff排除晚创建/晚接受事实；先KeyError失败，修后
+1 passed 6.14s。历史研究输入不回填，未调用真实模型或修改真实业务库。
+
+集中审查发现配套分阶段测试错误复用macro的空items，循环未执行，原来的通过
+不能证明标签传输。c3dfe0b先加入精确标签断言，三个新版分支失败、三个旧版
+分支通过；随后为financial_facts配置独立的两条不同期间/金额合成事实，仅财务
+工具返回该包装，macro保持不可用。v1/v2/v3每次请求逆解后显式核对两行、两种
+标签、完整包装与输入不变；旧版两行不出现新增字段。修后6 passed 6.41s，
+Ruff及diff-check通过。防复发落实在非空数量与精确内容断言，不另加审批或规则。
+消费者代码及修正提交待定向复核/主线集成，不能据此宣称运行中的旧研究已包含标签。
