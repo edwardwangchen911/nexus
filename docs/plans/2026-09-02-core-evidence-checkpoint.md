@@ -2347,3 +2347,46 @@ HTTP policy→合成transport的7例结果，5类白名单分类不透传原文�
 的该读侧常规验收。当前研究partial/watch未给reduce_candidate，不能伪造减仓情景或
 目标。正式候选/经济比较所需方向、策略连续性和价格权威仍单列，身份补证及多年PIT
 不作为整个项目的总开关，也不为重复研究恢复“三阶段额外批准”要求。
+
+
+### 第四批多实体与第五批独立原件完成当前身份入口
+
+第四批 item2 的多法律实体 CIK 绑定修复与回归已集成 main bfe8b87/24d932b，
+隔离正常 import/read/future 入口回归通过；正常真实导入一次及独立读取完成。
+第五批此前未请求的 item3 原件也经原正常入口导入一次、独立读取及显式未来准备完成。
+两批各自核对 19 张表的旧行 hash 多重集均保持，仅各追加 Instrument+1、alias+1、
+artifacts+4、snapshot+1；导入期间没有网络采集、模型调用或历史改写。协调任务对第五批
+summary 和 19 表多重集也独立复核通过。私有证据分别为：
+outputs/acceptance/common-stock-fourth-item2-import-7f8ee4b/acceptance-summary.json；
+outputs/acceptance/common-stock-fifth-item3-import-24d932b/acceptance-summary.json。
+当前显式准备保留全部 49 项，16 项身份验证通过，31 项缺证明、2 项类型不支持；
+candidate=null、执行锁定、历史资格 false。第五批另两项的旧失败不重试，也不由某个
+归档文件的元数据大小推断实际正文大小。
+
+防复发：上下文恢复或工具输出丢失时，先恢复进程结果及已存状态，不重放已提交操作。
+工具尚未返回成功不能汇报验收通过；合成测试通过与真实原件 loader 通过分别记录。
+SEC 索引表头可省略 tr 结束标签，解析须限制在身份表并按显式新行处理，不能用外围
+布局表或过严语法拒绝合格原件；目标行边界、唯一性与原件空值仍须独立回归保护。
+
+
+### QQQ 当前身份正常导入与未知字段保留
+
+593c 76e691c 经协调任务集中审查 Ready 后集成 main 841f416，七文件净差为零。
+当前 XNAS 股票ETF窄分支使用已保存八份原件，正常 loader 实际返回成功后才进入
+导入；原索引 ticker 空单元格保留 null，精确 series/class、当前目录及完整 497K
+封面共同绑定。改制日期只记录原件事实，当前 alias 从本次核验日起，不回填历史。
+
+34 单测及 5 隔离数据库集成测试通过，Ruff 和三源文件 Mypy 通过；表头省略 tr
+结束的合成回归先失败再修复通过，同时保留目标行未闭合、重复区域和代码不符拒绝。
+真实旧 IWM/VTI 两份 proof 的 JSON 完整 round-trip 与严格读取均通过。
+
+main 正常 import 仅一次 created，独立 read verified；默认与仅 listing 仍不消费
+QQQ，双显式开关正常准备绑定 XNAS、空 ticker 及来源依据。19 表旧行全部保留，
+仅 Instrument+1、alias+1、artifacts+6、snapshot+1；八原件绑定中两份目录相关原件
+复用已有存储。没有新网络采集、模型调用、API 重启或迁移。私有验收证据：
+outputs/acceptance/etf-identity-inventory/qqq-current-identity/acceptance-summary.json。
+
+当前显式 49 项中 17 项当前身份验证通过；剩 28 普通股、4 ETF，对应 30 缺证明及
+2 类型不支持。candidate 仍 null、历史回测资格 false、执行锁定，当前身份补证不
+冒充历史适用性、正式研究结论或整个阶段完成。其他基金结构继续按实际原件判定，
+不将 UIT、债券基金或商品信托强行套入本股票ETF合同。
