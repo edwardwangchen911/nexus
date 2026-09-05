@@ -2299,3 +2299,51 @@ CommonStockMember结果不变。122相关单测及静态结果复用D已完成�
 
 以上身份消费仅在明确的新CLI/reader生效；未更换常驻API镜像，不自动改旧研究或旧行情。
 剩余身份来源与独立历史T1数据继续分别推进，不要求用户代为协调或再次批准常规读取。
+
+### 2026-09-05 VTI独立份额身份与名称差异完成真实验收
+
+VTI先查已存SEC基金目录，再从官方497K index确认唯一series/class/ETF Shares路径；
+正常FMP仅1请求、现有ETF collector仅3请求，各原件/receipt落盘，未重采。
+FMP名称带有Morningstar，与SEC完整法律类名不一致。其ticker/CIK/USD/isEtf保持严格
+交叉校验；法律名称由SEC index系列与类、正文封面ticker及同基金美国股票目标/策略
+绑定。供应商名称及fmp_name_matches_sec=false同时进入新identity子类型与显式未来
+准备，不删词、不改原件、不声称名称一致。官方产品页CUSIP虽已网页核对，但未作为
+未归档证据写入持久化绑定。IWM既有分支与序列化未变。
+
+4a94dd2→main37a8d94、88c7d20→main8060952，净差核对一致。新增内部JSON子类型/
+union并非“没有合同变化”：旧proof兼容，新proof落库后须保留兼容reader；回滚可
+关闭显式消费者，不裁字段或删除已存事实。仍8份原件、既有表，无新增来源框架/迁移。
+
+集中审查实际发现并复现三类误接受，统一修复后定向复核Ready：
+- 法律名startswith会接受Fund II/Preferred。精确完整目标句及基金名后的合法分隔
+  替代前缀比较，两例先红后绿，不通过删除后缀或改原文来验收。
+- 证券代码的正则词边界会接受VTI.A/VTI-A。新类行完整空白token等值比较，两例
+  先红后绿；series/class保持完整边界。
+- 第一处匹配会忽略拼接的第二份prospectus/重复目标或另一基金策略。支持模板的
+  法律声明/关键章节要求唯一，策略从同一定义的The Fund开始，三例先红后绿。
+
+最终21 ETF合成unit通过；既有4隔离PG通过并复用，新增future名称差异投影另定向1PG
+通过。Mypy/Ruff/格式/diffcheck通过。root独立运行21unit、收束定向复核，无机械重复
+全量审查。新reader对真实旧IWM DataSnapshot原JSON完整round-trip相等，旧严格reader
+及IWM/VTI两真实archive loader均通过，无业务反例或模型调用。
+
+main8060952正常VTI import仅一次created→独立read verified→默认、仅listing、两开关
+prepare对照完成。默认和仅listing仍不消费VTI；新显式报告绑定ARCX，并保留名称差异。
+19张相关表旧行hash全部保留，仅Instrument+1/alias+1/artifacts+6/snapshot+1；8绑定中
+目录raw和mapping-binding复用IWM两份原件，非少归档。执行锁定、历史资格false，未
+发布股票池、重启API或创建研究。私有证据：
+outputs/acceptance/etf-identity-inventory/vti-current-identity/acceptance-summary.json。
+
+另第四批已合格item1按现有listing revision正常入口完成，实际UUID/旧exchange不变，
+独立read通过，19表旧行保留，仅artifacts+4/snapshot+1；证据
+outputs/acceptance/common-stock-fourth-item1-import-782ef22。当前显式49项共14已验证，
+剩30普通股+5ETF（33缺proof、2类型未支持），candidate仍null，不宣告整体T1完成。
+第四批余两项分别保留多法律实体CIK合同缺口、旧采集失败原因unknown，不重发请求。
+D安全错误分类f245730→main63ab04a已集成、两文件净差为零；复用91unit及真实CLI→
+HTTP policy→合成transport的7例结果，5类白名单分类不透传原文，不能追认旧失败原因。
+
+优先级回核：当前趋势到一次真实研究页面的完成证据、team-delivery §9.25多维有组/
+无组诚实展示均已在主线；真实无group的375/1440 DOM及11类旧行不变已验收，无遗漏
+的该读侧常规验收。当前研究partial/watch未给reduce_candidate，不能伪造减仓情景或
+目标。正式候选/经济比较所需方向、策略连续性和价格权威仍单列，身份补证及多年PIT
+不作为整个项目的总开关，也不为重复研究恢复“三阶段额外批准”要求。
