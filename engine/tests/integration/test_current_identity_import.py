@@ -2,7 +2,12 @@ import importlib
 from datetime import UTC, datetime
 
 import pytest
-from helpers.current_identity import MemoryStore, archives, multiple_registrant_filing
+from helpers.current_identity import (
+    MemoryStore,
+    archives,
+    dual_listing_filing,
+    multiple_registrant_filing,
+)
 from nexus.market.universe import stable_instrument_id
 from nexus.persistence.models.agents import AgentResearchRunRecord
 from nexus.persistence.models.data import DataSnapshot
@@ -46,8 +51,9 @@ async def test_first_identity_normal_import_readback_and_replay(migrated_databas
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["multi_cik", "dual_listing"])
 async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_json(
-    migrated_database_url, tmp_path
+    migrated_database_url, tmp_path, kind
 ):
     import json
     from datetime import timedelta
@@ -64,7 +70,10 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
     factory = session_factory(config)
     store = MemoryStore()
     old_fmp, old_sec = archives(tmp_path / "single")
-    new_fmp, new_sec = archives(tmp_path / "multiple", sec=multiple_registrant_filing())
+    new_fmp, new_sec = archives(
+        tmp_path / "multiple",
+        sec=(multiple_registrant_filing() if kind == "multi_cik" else dual_listing_filing()),
+    )
     try:
         old = await ops.import_identity(
             config, store=store, symbol="AAPL", fmp_archive=old_fmp, sec_archive=old_sec
@@ -81,12 +90,18 @@ async def test_multi_cik_normal_import_stored_read_future_binding_keeps_legacy_j
         async with factory() as session:
             stored = (await session.get(DataSnapshot, new.snapshot_id)).payload
             assert stored["identity"]["cik"] == "0000123456"
-            assert len(stored["identity"]["facts"]) == 5
-            assert {
-                f["value"]
-                for f in stored["identity"]["facts"]
-                if f["name"] == "dei:EntityCentralIndexKey"
-            } == {"0000123456", "0000654321"}
+            facts = stored["identity"]["facts"]
+            if kind == "multi_cik":
+                assert len(facts) == 5
+                assert {f["value"] for f in facts if f["name"] == "dei:EntityCentralIndexKey"} == {
+                    "0000123456",
+                    "0000654321",
+                }
+            else:
+                listings = [f for f in facts if "listing_context" in f]
+                assert len(facts) == 7 and len(listings) == 6
+                assert {f["listing_context"]["id"] for f in listings} == {"stock", "chicago"}
+                assert sum(f["selected_listing"] for f in listings) == 3
         # Separate transactions force both the new proof and the old JSON through the reader.
         async with factory() as session:
             proof = await module.read_current_identity(session, store, snapshot_id=new.snapshot_id)
