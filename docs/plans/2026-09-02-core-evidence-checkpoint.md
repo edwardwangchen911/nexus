@@ -2844,3 +2844,23 @@ UI 原先未映射该终态代码，99e1ef4 → main b1676ab 补一条覆盖现�
 研究未完成、运行上限与未形成意图，无溢出或交易操作，本地只读请求 blocked 0。
 证据在同一私有目录：budget-summary、synthesis-budget-summary、research-api-private、
 research-dom-summary、final-state-summary 以及唯一 admit/run-once 进程回执。
+
+### 第十二批剩余项与第十三、十四批归档导入
+
+复用既有归档：第十二批 item 1 的精确 taxonomy_archive 与第十三、十四批各三项，
+未重新采集。931f856 → main 2c31938，仅兼容同名成员标签的精确 [Member] 后缀
+变化，保留原先标签分支；复用已完成的集中审查和回归。七项正常 CLI import 各
+created 一次、strict read 各 verified，三种 prepare 输出逐项绑定精确新 snapshot。
+新增 7 instruments、7 aliases、34 原件 artifacts、7 snapshots；19 表旧行多重集
+完整保留，源归档字节保持。显式身份 44 verified、5 缺证明，49 成员保留，candidate
+仍 null、historical_backtest_eligible=false、execution_locked=true。
+
+此批只操作本地业务存储和对象存储，外部资料采集与模型调用均为零，不把本地
+对象存储读写称为没有网络 I/O。原验收摘要 network_calls:0 仅指外部来源调用。
+证据：outputs/acceptance/common-stock-final-seven-import-2c31938/，包含逐项正常
+CLI 私有回执、三种 prepare、原件共享预检、前后 hash 和 acceptance-summary。
+该身份增量不是核心研究成功，也不解除历史回测的其他资料前置条件。
+
+本次三阶段失败之后额外进行了只读无损去重测量：共享 46 个重复长字符串可使
+stage1 allowance 从 26965 降至 24995，仅省 1970；不足覆盖实际累计预留缺口，
+因此没有加入字典协议或压缩框架，也没有更改预算、原始内容或再次调用模型。
