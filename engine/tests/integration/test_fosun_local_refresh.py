@@ -19,6 +19,7 @@ from nexus.ops.fosun_local_refresh import (
     _read_broker_facts,
 )
 from nexus.persistence.models.data import ProviderCapability
+from nexus.persistence.models.market import Instrument, InstrumentAlias
 from nexus.persistence.models.portfolio import (
     BrokerCashFlow,
     BrokerSyncRun,
@@ -32,6 +33,30 @@ from nexus.reconciliation.cash_flows import CashFlowSyncResult
 from nexus.reconciliation.facts import canonical_position_hash
 from nexus.settings import EngineSettings
 from sqlalchemy import select
+
+
+async def _seed_sourced_us_identity(session, instrument_id, symbol):
+    session.add(
+        Instrument(
+            id=instrument_id,
+            asset_type="common_stock",
+            exchange="XNAS",
+            currency="USD",
+            tick_size=None,
+            risk_bucket="EQUITY",
+        )
+    )
+    await session.flush()
+    session.add(
+        InstrumentAlias(
+            instrument_id=instrument_id,
+            alias_type="ticker",
+            symbol=symbol,
+            valid_from=date(2020, 1, 1),
+            valid_to=None,
+        )
+    )
+    await session.flush()
 
 
 @pytest.mark.asyncio
@@ -69,6 +94,12 @@ async def test_local_observed_refresh_reaches_database_and_snapshot_api(
     )
     factory = session_factory(_settings(migrated_database_url))
     try:
+        async with factory() as session, session.begin():
+            await _seed_sourced_us_identity(session, instrument_id, "AAPL")
+            if order_code == "usMSFT":
+                await _seed_sourced_us_identity(
+                    session, frozen.portfolio_snapshot.open_orders[0].instrument_id, "MSFT"
+                )
         async with factory() as session, session.begin():
             stored = await _persist_ready_broker_snapshot(
                 session,
@@ -321,6 +352,8 @@ async def test_local_ready_broker_snapshot_is_finalized_atomically(
     )
     factory = session_factory(_settings(migrated_database_url))
     try:
+        async with factory() as session, session.begin():
+            await _seed_sourced_us_identity(session, instrument_id, "AAPL")
         async with factory() as session, session.begin():
             stored = await _persist_ready_broker_snapshot(
                 session,

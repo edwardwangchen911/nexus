@@ -377,3 +377,12 @@ docker compose --env-file infra/.env.local -f infra/compose.yaml --profile app d
 - worker `stale`：确认 worker 正在运行且使用同一数据库/迁移 head；不直接写 heartbeat 表。
 - Provider Job `FROZEN_UNIVERSE_*`：先发布完整 universe，再等待下一次调度；不要手工改 Job payload。
 - Provider evidence `*_CONFLICT`：保留现有版本与对象，停止自动重试并核对上游修订；不要覆盖同摘要对象。
+
+### 缺少美股身份来源
+
+本地刷新返回 `LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED`，表示新出现的美股代码尚无
+可复用身份，不是缺配置或授权。`us` 前缀只表示市场域，不能生成具体上市所、
+证券类型和最小价格单位。先使用有真实来源的现有 `instrument_identity_local` 建档
+入口（见 baseline 运行手册）；该入口当前只覆盖固定定义的普通股，其他类型或
+定义外标的保持明确缺口，不伪造身份。已有合法身份正常复用；已有字段与来源冲突
+时仍拒绝，不覆盖旧行或为了完成刷新更换UUID。订单中首次出现的新美股也适用。

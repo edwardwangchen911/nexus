@@ -2170,3 +2170,36 @@ BLOCKED、candidate=null。前后8张相关业务表整行hash一致，执行锁
 7个既有broker身份不是7份已验证FMP+SEC proof；没有为它们重采集或补41项建档。
 私有报告与前后摘要在主项目outputs/acceptance/future-identity-ca94c57，0700/0600。
 本片是主线CLI新进程已验收，无常驻服务新增调用路径，不为本片再次替换API镜像。
+
+### 2026-09-05 非seed真实身份复用验收定位交易所冲突及防复发
+
+一例既有非seed普通股身份正常来源验收：先查本地归档，缺资料后FMP profile一次、
+官方SEC submissions定位一次、正常collect-sec封面一次，均成功且不重采集。
+选择依据和身份关联仅在私有记录。实际SEC封面含同一可见证券行/context/CIK和
+CommonStockMember，未使用exchange轴。parser不再强制未使用的exch命名空间，
+仅允许class或class+正确exchange两种精确dimensions；显式声明错误、未知轴、
+错证券/交易所仍拒绝，保存原context不补轴。交易所名称白名单原已支持，无修改。
+新增合成反例RED1失败4通过，完整35unit、16相关PG和静态检查通过；新旧真实归档
+解析、原ABBV严格proof重读相等通过。4dacc97已合main fb130a7，未更新常驻API。
+
+main正常import一次返回CURRENT_IDENTITY_MASTER_CONFLICT，未生成结果文件。
+只读确认alias当前唯一、历史同身份、无seed碰撞，原Instrument的具体交易所与
+新双源证明不一致；调用前后16表整行hash完全相同，无新增proof/artifact、身份或
+研究。未自动重试、未换证券继续采集、未放宽_compatible或覆盖旧UUID/字段。
+本例真实“复用→proof→prepare”未完成，来源缺口未减少，不能报成功。
+
+确定性代码缺陷是_symbol_and_exchange把us域直接映射XNYS，_ensure_instrument据此
+生成上市所、common_stock和tick_size。旧单测名为“without_guessing”却正好断言此
+错误映射。现改_symbol_and_market只给US/HK；合法既有身份仍按市场域复用，缺US
+身份在准备与持久化入口SOURCE_REQUIRED拒绝。HK原合同保持。源错误码在正常
+refresh外层精确保留，其他异常仍安全包装；手册说明这是资料缺口而非配置/授权。
+当前代码可证明会产生伪精确字段，旧行精确创建runtime与当时原件因果仍未知，不
+依据当前源码或行时间倒推历史事实；旧身份纠错与冻结消费者影响另行明确。
+
+防复发RED为2市场域unit失败、1无来源新建PG失败；新源码36相关unit通过，三相关
+PG首轮28通过，追加订单独有未知US拒绝PG1通过。新存量交易所冲突PG验证原行不变；
+旧成功PG显式准备合法XNAS身份并保留业务断言。另修旧refresh顺序mock缺identity_date
+字段；正常外层SOURCE_REQUIRED传播先红后绿。Ruff格式/check、Mypy和diffcheck通过。
+保存的12身份经新_ensure强制只读事务全部复用，代码由已有alias重构，非新鲜券商验收。
+私有资料、失败结果、前后hash、兼容性与定位在outputs/acceptance/existing-identity-reuse，
+目录0700/文件0600；没有新来源请求或业务写入来消除冲突。

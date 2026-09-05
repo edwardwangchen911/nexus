@@ -160,6 +160,7 @@ async def test_order_only_expired_broker_identity_rejected(migrated_database_url
     factory = session_factory(settings(migrated_database_url))
     expired_id = uuid5(refresh._INSTRUMENT_NAMESPACE, "usMSFT")
     async with factory() as s, s.begin():
+        await seed(s, start=NOW.date())
         await seed(
             s,
             start=NOW.date() - timedelta(days=500),
@@ -204,10 +205,12 @@ async def persist_frozen(s, identity, frozen, flows):
 
 
 @pytest.mark.asyncio
-async def test_fresh_market_identity_is_current_and_reusable_by_broker(
+async def test_sourced_market_identity_is_current_and_reusable_by_broker(
     migrated_database_url, monkeypatch
 ):
     factory = session_factory(settings(migrated_database_url))
+    async with factory() as s, s.begin():
+        await seed(s, start=NOW.date())
     async with factory() as s:
         identity = await refresh._load_local_broker_identity(s, holdings=(holding(),))
 
@@ -297,3 +300,40 @@ async def test_known_hk_order_identity_is_validated_without_losing_read_support(
             )
 
     assert (await persist()).id == frozen.portfolio_snapshot.id
+
+
+@pytest.mark.asyncio
+async def test_unknown_us_market_cannot_create_listing_identity(migrated_database_url):
+    factory = session_factory(settings(migrated_database_url))
+    try:
+        async with factory() as s, s.begin():
+            with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED"):
+                await refresh._ensure_instrument(s, "usAAPL", currency="USD", valid_from=NOW.date())
+        async with factory() as s:
+            assert await s.scalar(select(Instrument)) is None
+            assert await s.scalar(select(InstrumentAlias)) is None
+            with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED"):
+                await refresh._load_local_broker_identity(s, holdings=(holding(),))
+    finally:
+        await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_unknown_order_only_us_identity_is_not_created(migrated_database_url):
+    from nexus.persistence.models.portfolio import PortfolioSnapshotRecord
+
+    factory = session_factory(settings(migrated_database_url))
+    try:
+        async with factory() as s, s.begin():
+            await seed(s, start=NOW.date())
+        async with factory() as s:
+            identity = await refresh._load_local_broker_identity(s, holdings=(holding(),))
+        frozen, flows = await read_frozen(identity, order_code="usMSFT")
+        with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED"):
+            async with factory() as s, s.begin():
+                await persist_frozen(s, identity, frozen, flows)
+        async with factory() as s:
+            assert len((await s.scalars(select(Instrument))).all()) == 1
+            assert await s.scalar(select(PortfolioSnapshotRecord)) is None
+    finally:
+        await factory.kw["bind"].dispose()

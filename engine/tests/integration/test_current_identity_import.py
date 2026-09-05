@@ -47,7 +47,8 @@ async def test_first_identity_normal_import_readback_and_replay(migrated_databas
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "case", ["legal_existing", "wrong_currency", "expired", "occupied_id", "wrong_cik"]
+    "case",
+    ["legal_existing", "wrong_currency", "wrong_exchange", "expired", "occupied_id", "wrong_cik"],
 )
 async def test_existing_identity_reuse_or_fixed_conflict(migrated_database_url, tmp_path, case):
     from datetime import timedelta
@@ -66,7 +67,7 @@ async def test_existing_identity_reuse_or_fixed_conflict(migrated_database_url, 
                 Instrument(
                     id=identifier,
                     asset_type="common_stock",
-                    exchange="NYSE",
+                    exchange="XNAS" if case == "wrong_exchange" else "NYSE",
                     currency="HKD" if case == "wrong_currency" else "USD",
                     risk_bucket="EQUITY",
                     tick_size=None,

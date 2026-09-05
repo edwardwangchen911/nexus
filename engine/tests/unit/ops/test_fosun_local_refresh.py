@@ -15,7 +15,7 @@ from nexus.ops.fosun_local_refresh import (
     _read_market_snapshot,
     _safe_failure_code,
     _SinglePageBrokerGateway,
-    _symbol_and_exchange,
+    _symbol_and_market,
     _us_holding_codes,
     refresh_local_fosun,
 )
@@ -631,19 +631,19 @@ async def test_provider_failure_never_opens_database_or_overwrites_previous_snap
 
 @pytest.mark.parametrize(
     ("provider_code", "symbol", "exchange"),
-    (("usAAPL", "AAPL", "XNYS"), ("hk00656", "00656.HK", "XHKG")),
+    (("usAAPL", "AAPL", "US"), ("hk00656", "00656.HK", "HK")),
 )
-def test_provider_instrument_codes_are_mapped_without_guessing(
+def test_provider_instrument_codes_identify_market_not_listing_exchange(
     provider_code: str,
     symbol: str,
     exchange: str,
 ) -> None:
-    assert _symbol_and_exchange(provider_code) == (symbol, exchange)
+    assert _symbol_and_market(provider_code) == (symbol, exchange)
 
 
 def test_unsupported_provider_instrument_code_fails_closed() -> None:
     with pytest.raises(ValueError, match="LOCAL_INSTRUMENT_CODE_UNSUPPORTED"):
-        _symbol_and_exchange("AAPL")
+        _symbol_and_market("AAPL")
 
 
 def test_failure_output_only_preserves_fixed_local_error_codes() -> None:

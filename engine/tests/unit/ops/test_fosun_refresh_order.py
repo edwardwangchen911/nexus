@@ -11,7 +11,7 @@ from nexus.providers.broker.gateway_contracts import GatewayResponsePage
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", (None, "market", "broker"))
+@pytest.mark.parametrize("failure", (None, "market", "broker", "identity_source"))
 async def test_refresh_commits_market_before_broker_freeze_without_promoting_failed_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     failure: str | None,
@@ -95,6 +95,7 @@ async def test_refresh_commits_market_before_broker_freeze_without_promoting_fai
             portfolio_id=uuid4(),
             sync_run_id=uuid4(),
             instrument_ids={"usAAPL": instrument_id},
+            identity_date=now.date(),
             previous_cash_flow_watermark=None,
         )
 
@@ -130,6 +131,8 @@ async def test_refresh_commits_market_before_broker_freeze_without_promoting_fai
 
     async def persist_broker(session, **_kwargs):
         assert state["market"] and state["broker_read"]
+        if failure == "identity_source":
+            raise ValueError("LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED")
         session.pending = "broker"
         return SimpleNamespace(status="READY", as_of=datetime.now(UTC))
 
@@ -153,7 +156,10 @@ async def test_refresh_commits_market_before_broker_freeze_without_promoting_fai
     monkeypatch.setattr(
         module, "_broker_request_counts", lambda _: {"cash": 2, "holdings": 2, "orders": 2}
     )
-    if failure:
+    if failure == "identity_source":
+        with pytest.raises(ValueError, match="LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED"):
+            await module.refresh_local_fosun(SimpleNamespace(database_url="synthetic"))
+    elif failure:
         with pytest.raises((ValueError, RuntimeError)):
             await module.refresh_local_fosun(SimpleNamespace(database_url="synthetic"))
     else:

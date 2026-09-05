@@ -328,7 +328,10 @@ async def refresh_local_fosun(
                     authorized_at=datetime.now(UTC),
                 )
         except Exception as error:
-            if isinstance(error, GatewayClientError):
+            if isinstance(error, GatewayClientError) or (
+                isinstance(error, ValueError)
+                and str(error) == "LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED"
+            ):
                 raise
             raise RuntimeError("LOCAL_PERSISTENCE_FAILED") from None
         frozen, cash_flow_result = await _read_broker_facts(
@@ -355,7 +358,10 @@ async def refresh_local_fosun(
                     cash_flow_result=cash_flow_result,
                 )
         except Exception as error:
-            if isinstance(error, GatewayClientError):
+            if isinstance(error, GatewayClientError) or (
+                isinstance(error, ValueError)
+                and str(error) == "LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED"
+            ):
                 raise
             raise RuntimeError("LOCAL_PERSISTENCE_FAILED") from None
         broker_requests = _broker_request_counts(frozen)
@@ -569,6 +575,8 @@ async def _load_local_broker_identity(
         existing_id = await _resolve_local_instrument(
             session, item.instrument_code, currency=item.currency, identity_date=identity_date
         )
+        if existing_id is None and _symbol_and_market(item.instrument_code)[1] == "US":
+            raise ValueError("LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED")
         instrument_ids[item.instrument_code] = (
             existing_id
             if existing_id is not None
@@ -956,9 +964,9 @@ async def _resolve_local_instrument(
     expected_id: UUID | None = None,
 ) -> UUID | None:
     """Resolve current identity, never substitute a historical or future ticker."""
-    symbol, exchange = _symbol_and_exchange(code)
-    allowed_exchanges = US_EQUITY_EXCHANGES if exchange == "XNYS" else {"XHKG"}
-    if currency != ("USD" if exchange == "XNYS" else "HKD"):
+    symbol, market = _symbol_and_market(code)
+    allowed_exchanges = US_EQUITY_EXCHANGES if market == "US" else {"XHKG"}
+    if currency != ("USD" if market == "US" else "HKD"):
         raise ValueError("LOCAL_BROKER_INSTRUMENT_INVALID")
     aliases = tuple(
         await session.scalars(
@@ -1006,21 +1014,23 @@ async def _ensure_instrument(
     valid_from: date,
     expected_id: UUID | None = None,
 ) -> UUID:
-    symbol, exchange = _symbol_and_exchange(code)
+    symbol, market = _symbol_and_market(code)
     existing_id = await _resolve_local_instrument(
         session, code, currency=currency, identity_date=valid_from, expected_id=expected_id
     )
     if existing_id is not None:
         return existing_id
+    if market == "US":
+        raise ValueError("LOCAL_BROKER_INSTRUMENT_SOURCE_REQUIRED")
     instrument_id = expected_id or uuid5(_INSTRUMENT_NAMESPACE, code)
     session.add(
         Instrument(
             id=instrument_id,
             asset_type="common_stock",
-            exchange=exchange,
+            exchange="XHKG",
             currency=currency,
-            tick_size=Decimal("0.001") if exchange == "XHKG" else Decimal("0.01"),
-            risk_bucket="hk_equity" if exchange == "XHKG" else "EQUITY",
+            tick_size=Decimal("0.001"),
+            risk_bucket="hk_equity",
         )
     )
     session.add(
@@ -1275,11 +1285,11 @@ def _daily_window(
     return request_start_at, request_end_at, rows
 
 
-def _symbol_and_exchange(code: str) -> tuple[str, str]:
+def _symbol_and_market(code: str) -> tuple[str, str]:
     if code.startswith("us") and len(code) > 2:
-        return code[2:], "XNYS"
+        return code[2:], "US"
     if code.startswith("hk") and len(code) > 2:
-        return f"{code[2:]}.HK", "XHKG"
+        return f"{code[2:]}.HK", "HK"
     raise ValueError("LOCAL_INSTRUMENT_CODE_UNSUPPORTED")
 
 
