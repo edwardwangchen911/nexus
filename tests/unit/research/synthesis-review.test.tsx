@@ -13,6 +13,22 @@ function openReviews(): HTMLElement {
 }
 
 describe("saved synthesis self-assessment", () => {
+  it.each([
+    ["buy_candidate", "买入候选"], ["reduce_candidate", "减仓候选"],
+    ["watch", "仅观察"], ["hold", "保持观察"],
+  ] as const)("shows saved model %s separately from system watch", (stance, label) => {
+    const research = synthesisResearchData({ stance });
+    const original = JSON.stringify(research);
+    render(<DecisionCard research={research} />);
+    expect(screen.getByText(`模型综合判断（仅供研究）：${label}`)).toBeVisible();
+    expect(screen.getByText("系统最终研究状态：仅观察")).toBeVisible();
+    expect(screen.getByText(/模型方向与审查充分性均不代表独立核验通过/)).toBeVisible();
+    expect(screen.getByText(/“仅观察”也不等于已有充分证据支持不调整/)).toBeVisible();
+    expect(document.querySelector(".decision-card__badges")).toHaveTextContent("仅观察");
+    expect(screen.queryByRole("button", { name: /下单|买入|卖出/ })).not.toBeInTheDocument();
+    expect(JSON.stringify(research)).toBe(original);
+  });
+
   it("distinguishes model sufficiency and resolution from system readiness", () => {
     const research = synthesisResearchData();
     const original = JSON.stringify(research);
@@ -49,6 +65,8 @@ describe("saved synthesis self-assessment", () => {
       expect(within(review).getByText(text)).toBeVisible();
     }
     expect(within(details).getByText("模型自评的审查充分性：有限")).toBeVisible();
+    expect(screen.getByText("模型综合判断（仅供研究）：仅观察")).toBeVisible();
+    expect(screen.getByText("系统最终研究状态：仅观察")).toBeVisible();
   });
 
   it("uses the existing evidence drawer for inert review prose and restores focus", async () => {
@@ -73,12 +91,14 @@ describe("saved synthesis self-assessment", () => {
     await waitFor(() => expect(opener).toHaveFocus());
   });
 
-  it.each(["legacy", "invalid", "missing"])("does not display unverified or absent assessment for %s", (kind) => {
+  it.each(["legacy", "legacy-v2", "invalid", "missing"])("does not display unverified or absent assessment for %s", (kind) => {
     const research = kind === "legacy" ? researchData() : synthesisResearchData();
     if (research.stage_trace && kind === "invalid") research.stage_trace.status = "invalid";
-    if (research.stage_trace && kind === "missing") delete research.stage_trace.stages[0].roles[0].synthesis_assessment;
+    if (research.stage_trace && (kind === "missing" || kind === "legacy-v2")) delete research.stage_trace.stages[0].roles[0].synthesis_assessment;
+    if (research.intent && kind === "legacy-v2") delete research.intent.synthesis_assessment;
     render(<DecisionCard research={research} />);
     expect(screen.queryByText("逐项审查（模型自评）")).not.toBeInTheDocument();
+    expect(screen.queryByText(/模型综合判断（仅供研究）/)).not.toBeInTheDocument();
     expect(screen.queryByText("模型自评的审查充分性：充分")).not.toBeInTheDocument();
   });
 });

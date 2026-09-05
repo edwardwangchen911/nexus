@@ -102,7 +102,7 @@ export function DecisionCard({ research }: { research: Research }): React.ReactE
                 }).join("、")}</p> : null}
                 <ol>{role.claims.map((claim, index) => <li key={index}><p>{claim.text}</p><EvidenceButtons evidenceRefs={claim.evidence_refs} excerpt={claim.text} onOpen={openEvidence} /></li>)}</ol>
                 {stage.stage === "synthesis" && role.role === "portfolio" && role.synthesis_assessment
-                  ? <SynthesisReviews assessment={role.synthesis_assessment} onOpen={openEvidence} /> : null}
+                  ? <SynthesisReviews assessment={role.synthesis_assessment} systemStance={intent?.stance} onOpen={openEvidence} /> : null}
               </section>)}
             </details>
           ))}
@@ -191,11 +191,16 @@ function roleLabel(role: components["schemas"]["RoleVote"]["role"]): string {
   return ({ orchestrator: "编排", fundamental: "基本面", market_state: "市场状态", macro_sector: "宏观行业", bull: "多头", bear: "空头", evidence_audit: "证据审计", portfolio: "组合" } as const)[role];
 }
 
-function SynthesisReviews({ assessment, onOpen }: {
+function SynthesisReviews({ assessment, systemStance, onOpen }: {
   assessment: components["schemas"]["SynthesisAssessment"];
+  systemStance: components["schemas"]["SynthesisAssessment"]["stance"] | undefined;
   onOpen: (evidence: Evidence, excerpt: string | null, opener: HTMLButtonElement) => void;
 }): React.ReactElement {
   return (
+    <>
+      <p>模型综合判断（仅供研究）：{stanceLabels[assessment.stance]}</p>
+      <p>系统最终研究状态：{systemStance ? stanceLabels[systemStance] : "未形成研究意图"}</p>
+      <p role="note">模型方向与审查充分性均不代表独立核验通过，不改变系统使用限制或执行许可；“仅观察”也不等于已有充分证据支持不调整。</p>
     <details className="decision-card__reviews">
       <summary>逐项审查（模型自评）</summary>
       <p role="note">以下是已保存的模型自评，不是独立核验结论；认可异议不等于解决缺口，不改变系统证据状态或执行许可。</p>
@@ -223,6 +228,7 @@ function SynthesisReviews({ assessment, onOpen }: {
         ? <ul>{assessment.uncertainties.map((item, index) => <li key={index}>{item}</li>)}</ul>
         : <p>模型未列出额外不确定性</p>}
     </details>
+    </>
   );
 }
 
