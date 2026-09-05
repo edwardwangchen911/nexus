@@ -2581,3 +2581,27 @@ typecheck/ESLint通过，协调独立13通过。无schema/API、依赖或策略�
 outputs/acceptance/current-trends-real-20260905/model-stance-dom-summary.json，
 及model-stance-before-hashes.json。Web从main热更新生效；API未重启，无迁移、采集
 或研究重跑。本例模型与系统均watch，未伪造减仓候选或三个真实策略方案。
+
+
+### 隐藏旁证保留作用域，经正常存储读取验证
+
+第八 item2 原拒绝由D仅用已有原件定位：目标普通股注册行可见，隐藏ticker属于另一
+独立优先证券行，通过SEC display-reference显示，不能删掉旁证，也不能把该旁证
+用于目标身份。D1eda6ab保留7事实与不相等的原值/展示引用，分别记录selected状态，
+核同主体/期间、独立证券类型、唯一引用、可见范围和XBRL属性；不放宽目标普通股
+必须可见且同注册行的限制。原件、收据、旧拒绝记录及hash均不改写。
+
+A吸收f8faae8并补45e418b正常PG参数节点：真实ops import→独立session严格read→
+future绑定，7facts/旁证display_reference/selected=false保持，SEC原文与receipt
+分别损坏后拒绝；旧single JSON保持。multiCIK/dual/custom/hidden四参数PG全部通过
+13.92s，Ruff通过；复用协调307unit与D15旧JSON+custom兼容检查。两轮集中/定向
+审查Ready后串行集成main8fec615/5907325，四文件净差零。无schema/storage/CLI或
+迁移变更；新增结果的回滚须保留兼容reader，不删除旁证或重写旧hash。
+
+
+同批item1/3不重放，仅item2正常首次import一次、独立read verified与default/listing/
+两开关prepare完成；实际保存7事实、1个非选中隐藏旁证引用、3个选中目标事实。
+19表旧行多重集全部保留，仅instruments1、aliases1、artifacts4、snapshots1新增。
+49项保留、28 verified、21普通股缺证明，candidate null、历史资格 false、执行锁定。
+私有证据：outputs/acceptance/common-stock-eighth-item2-hidden-1eda6ab/acceptance-summary.json。
+无新采集、模型或API重启；此独立身份补证不改变当前趋势研究/多维展示资格。
