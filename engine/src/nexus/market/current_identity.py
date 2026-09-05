@@ -104,7 +104,9 @@ class CurrentCommonStockIdentity(BaseModel):
 class _Cover(HTMLParser):
     """Only the demonstrated inline-XBRL registration row; never resolve remote resources."""
 
-    def __init__(self, *, registrants: bool = False, dual_listing: bool = False) -> None:
+    def __init__(
+        self, *, registrants: bool = False, dual_listing: bool = False, hidden_listing: bool = False
+    ) -> None:
         super().__init__(convert_charrefs=True)
         self.fact_names = _FACTS | _REGISTRANT_FACTS if registrants else _FACTS
         self.stack: list[tuple[str, dict[str, str | None], int | None]] = []
@@ -128,6 +130,10 @@ class _Cover(HTMLParser):
         self.fact_scope: dict[str, dict[str, Any]] = {}
         self.scope_exceptions: set[str] = set()
         self.exchange_contexts: set[str] = set()
+        self.hidden_listing = hidden_listing
+        self.display_nodes: list[dict[str, Any]] = []
+        self.display_active: list[dict[str, Any]] = []
+        self.unsupported_scope = False
 
     def handle_decl(self, decl: str) -> None:
         if decl.lower() != "doctype html":
@@ -163,6 +169,25 @@ class _Cover(HTMLParser):
             row = self.rows
         if tag not in _VOID:
             self.stack.append((tag, a, row))
+        if self.hidden_listing:
+            if self.active is not None and not _directly_visible([(tag, a, row)]):
+                self.fact_scope[self.active["id"]]["hidden_descendant"] = True
+            for node in self.display_active:
+                node["children"].append((tag, a))
+            if any(k in a for k in ("target", "tupleref", "order", "xml:base")):
+                self.unsupported_scope = True
+            if "-sec-ix-hidden" in (a.get("style") or "").lower():
+                self.display_active.append(
+                    dict(
+                        tag=tag,
+                        attrs=a,
+                        row=row,
+                        depth=len(self.stack),
+                        ancestors=list(self.stack),
+                        parts=[],
+                        children=[],
+                    )
+                )
         if tag == "xbrli:context":
             if self.context is not None or not identifier:
                 raise invalid()
@@ -210,7 +235,9 @@ class _Cover(HTMLParser):
             )
             in_table = any(node[0] == "table" for node in self.stack)
             if security and (not in_table or not visible):
-                if not self.dual_listing or a["name"] != "dei:SecurityExchangeName":
+                if not self.hidden_listing and (
+                    not self.dual_listing or a["name"] != "dei:SecurityExchangeName"
+                ):
                     raise invalid()
                 self.scope_exceptions.add(identifier)
             self.fact_scope[identifier] = dict(
@@ -218,6 +245,8 @@ class _Cover(HTMLParser):
                 parent_fact_id=self.parents[-1]["id"] if self.parents else None,
                 ix_ancestors={t for t, _, _ in self.stack if t.startswith("ix:")},
                 attrs=a,
+                ancestors=list(self.stack),
+                hidden_descendant=False,
             )
             self.active = dict(
                 name=a["name"],
@@ -230,6 +259,8 @@ class _Cover(HTMLParser):
             )
 
     def handle_data(self, data: str) -> None:
+        for node in self.display_active:
+            node["parts"].append(data)
         if self.context is not None and self.field is None and data.strip():
             self._context_extra_text = True
         if self.active is not None:
@@ -244,6 +275,10 @@ class _Cover(HTMLParser):
             return
         if not self.stack or self.stack[-1][0] != tag:
             raise invalid()
+        if self.display_active and self.display_active[-1]["depth"] == len(self.stack):
+            node = self.display_active.pop()
+            node["value"] = " ".join("".join(node.pop("parts")).split())
+            self.display_nodes.append(node)
         if tag == "ix:nonnumeric" and self.active is not None:
             self.active["value"] = " ".join("".join(self.active.pop("parts")).split())
             self.facts.append(self.active)
@@ -520,6 +555,178 @@ def _dual_listing_record(
     return next(f for f in record if f["name"] == "dei:TradingSymbol"), record, evidence
 
 
+def _separate_hidden_listing(
+    parser: _Cover, symbols: list[dict[str, Any]], identifier: str, exchange: str
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """One visible common-stock row plus one CSS-linked, non-target preferred row.
+
+    The hidden ticker and its displayed label are separate evidence, not aliases.
+    This exception grants no identity to the ancillary security.
+    """
+    if len(symbols) != 1 or len(parser.facts) != 7 or parser.unsupported_scope:
+        raise invalid()
+    stock = symbols[0]
+    record = [f for f in parser.facts if f["row"] == stock["row"]]
+    ciks = [f for f in parser.facts if f["name"] == "dei:EntityCentralIndexKey"]
+    hidden = [f for f in parser.facts if f["id"] in parser.scope_exceptions]
+    if len(ciks) != 1 or len(hidden) != 1:
+        raise invalid()
+    auxiliary = hidden[0]
+    if (
+        auxiliary["name"] != "dei:TradingSymbol"
+        or auxiliary["value"] == stock["value"]
+        or not auxiliary["value"]
+        or auxiliary["row"] is not None
+        or auxiliary["context"] == stock["context"]
+        or stock["row"] is None
+        or len(record) != 3
+    ):
+        raise invalid()
+    for fact in parser.facts:
+        scope = parser.fact_scope[fact["id"]]
+        ancestors = scope["ancestors"]
+        allowed_ix = {"ix:nonnumeric"}
+        if fact is auxiliary or fact in ciks:
+            allowed_ix |= {"ix:header", "ix:hidden"}
+        if (
+            scope["ix_ancestors"] - allowed_ix
+            or scope["parent_fact_id"]
+            or scope["hidden_descendant"]
+        ):
+            raise invalid()
+        attrs = scope["attrs"]
+        if set(attrs) - {"id", "name", "contextref", "format"}:
+            raise invalid()
+        if "format" in attrs and not (
+            fact["name"] == "dei:SecurityExchangeName"
+            and attrs["format"] == "ixt-sec:exchnameen"
+            and parser.namespaces.get("xmlns:ixt-sec")
+            == "http://www.sec.gov/inlineXBRL/transformation/2015-08-31"
+            and _EXCHANGES.get(fact["value"]) == exchange
+        ):
+            raise invalid()
+        if fact is auxiliary:
+            if "ix:hidden" not in scope["ix_ancestors"]:
+                raise invalid()
+        elif fact not in ciks and (
+            not _directly_visible(ancestors) or sum(t == "tr" for t, _, _ in ancestors) != 1
+        ):
+            raise invalid()
+    stock_context = parser.contexts[stock["context"]]
+    other_context = parser.contexts[auxiliary["context"]]
+    for context in (stock_context, other_context):
+        if context["id"] not in parser.class_contexts:
+            raise invalid()
+    if _context(stock_context, identifier) != {
+        "us-gaap:StatementClassOfStockAxis": "us-gaap:CommonStockMember"
+    }:
+        raise invalid()
+    dims = _context(other_context, identifier)
+    member = re.fullmatch(
+        r"([A-Za-z_][A-Za-z0-9_.-]*):([A-Za-z_][A-Za-z0-9_.-]*Member)",
+        dims.get("us-gaap:StatementClassOfStockAxis", ""),
+    )
+    if member is None or member[1] in {"dei", "us-gaap", "srt", "ix", "xbrli", "xbrldi", "exch"}:
+        raise invalid()
+    namespace = parser.namespaces.get("xmlns:" + member[1]) or ""
+    if re.fullmatch(r"https?://[^\s<>]+", namespace) is None or re.match(
+        r"https?://(?:www\.)?(?:fasb\.org|xbrl\.sec\.gov|xbrl\.org)(?:/|$)", namespace
+    ):
+        raise invalid()
+    if any(
+        _period(context) != _period(stock_context)
+        for context in (other_context, parser.contexts[ciks[0]["context"]])
+    ):
+        raise invalid()
+    other = [f for f in parser.facts if f["context"] == auxiliary["context"] and f is not auxiliary]
+    if (
+        len(other) != 2
+        or {f["name"] for f in other} != {"dei:Security12bTitle", "dei:SecurityExchangeName"}
+        or len({f["row"] for f in other}) != 1
+        or other[0]["row"] in {None, stock["row"]}
+    ):
+        raise invalid()
+    values = {f["name"]: f["value"] for f in other}
+    if (
+        not re.search(r"\bdepositary\b", values["dei:Security12bTitle"], re.I)
+        or not re.search(r"\bpreferred\b", values["dei:Security12bTitle"], re.I)
+        or _EXCHANGES.get(values["dei:SecurityExchangeName"]) != exchange
+    ):
+        raise invalid()
+    links = []
+    for node in parser.display_nodes:
+        refs = re.findall(r"(?:^|;)\s*-sec-ix-hidden\s*:\s*([^;]+)", node["attrs"]["style"], re.I)
+        if any(ref.strip() in {f["id"] for f in parser.facts} for ref in refs):
+            if len(refs) != 1 or refs[0].strip() != auxiliary["id"]:
+                raise invalid()
+            links.append(node)
+    if len(links) != 1:
+        raise invalid()
+    link = links[0]
+    if (
+        link["tag"] != "span"
+        or set(link["attrs"]) != {"style"}
+        or not link["value"]
+        or link["row"] != other[0]["row"]
+        or not _plain_display_children(link["children"])
+        or not _directly_visible(link["ancestors"])
+        or any(t.startswith("ix:") for t, _, _ in link["ancestors"])
+        or sum(t == "tr" for t, _, _ in link["ancestors"]) != 1
+    ):
+        raise invalid()
+    evidence = []
+    for fact in (*record, auxiliary, *other):
+        scope = parser.fact_scope[fact["id"]]
+        proof = dict(
+            fact,
+            listing_context=parser.contexts[fact["context"]],
+            selected_listing=fact in record,
+            visible=scope["visible"],
+            parent_fact_id=None,
+            format=scope["attrs"].get("format"),
+        )
+        if fact is auxiliary:
+            proof["display_reference"] = dict(
+                fact_id=fact["id"],
+                row=link["row"],
+                value=link["value"],
+                matches_fact_value=link["value"] == fact["value"],
+            )
+        evidence.append(proof)
+    return stock, record, evidence
+
+
+def _directly_visible(ancestors: list[tuple[str, dict[str, str | None], int | None]]) -> bool:
+    return not any(
+        t == "ix:hidden"
+        or "hidden" in a
+        or re.search(
+            r"(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse))",
+            a.get("style") or "",
+            re.I,
+        )
+        for t, a, _ in ancestors
+    )
+
+
+def _plain_display_children(children: list[tuple[str, dict[str, str | None]]]) -> bool:
+    # A single demonstrated typography span; never inherit its parent's fact ID.
+    if not children:
+        return True
+    if len(children) != 1:
+        return False
+    tag, attrs = children[0]
+    if tag != "span" or set(attrs) != {"style"}:
+        return False
+    declarations = [part.strip() for part in (attrs["style"] or "").split(";") if part.strip()]
+    return len(declarations) == 4 and set(declarations) == {
+        "color:#000000",
+        "white-space:pre-wrap",
+        "font-kerning:none",
+        "min-width:fit-content",
+    }
+
+
 def parse_current_common_stock(
     *,
     symbol: str,
@@ -538,7 +745,7 @@ def parse_current_common_stock(
         exchange = _EXCHANGES.get(row.get("exchange", ""))
         if exchange not in {"XNYS", "XNAS"} or not 0 < len(sec_raw) <= MAX_SEC_BYTES:
             raise invalid()
-        parser = _Cover(dual_listing=True)
+        parser = _Cover(dual_listing=True, hidden_listing=True)
         parser.feed(sec_raw.decode("utf-8-sig"))
         parser.close()
         if parser.stack or parser.active or parser.parents or parser.context:
@@ -573,7 +780,15 @@ def parse_current_common_stock(
         if parser.scope_exceptions or any(s["parent_fact_id"] for s in parser.fact_scope.values()):
             if len(ciks) != 1:
                 raise invalid()
-            stock, record, expanded = _dual_listing_record(parser, symbols, identifier, exchange)
+            resolver = (
+                _separate_hidden_listing
+                if any(
+                    f["name"] == "dei:TradingSymbol" and f["id"] in parser.scope_exceptions
+                    for f in parser.facts
+                )
+                else _dual_listing_record
+            )
+            stock, record, expanded = resolver(parser, symbols, identifier, exchange)
             if _period(parser.contexts[ciks[0]["context"]]) != _period(
                 parser.contexts[stock["context"]]
             ):
@@ -634,7 +849,7 @@ def parse_current_common_stock(
         # this neutral legal title; capital stock alone does not prove common equity.
         capital = (
             re.fullmatch(r"Capital Stock, par value \$([0-9]*\.[0-9]+) per share", title, re.I)
-            if expanded is not None
+            if expanded is not None and len(symbols) == 2
             else None
         )
         capital_common = capital is not None and any(c in "123456789" for c in capital[1])
