@@ -2195,6 +2195,159 @@
         "title": "EvolutionSuccessMeta",
         "type": "object"
       },
+      "ExhibitQuarterMetric": {
+        "additionalProperties": false,
+        "properties": {
+          "comparable_value": {
+            "title": "Comparable Value",
+            "type": "string"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "null"
+          },
+          "current_value": {
+            "title": "Current Value",
+            "type": "string"
+          },
+          "metric": {
+            "enum": [
+              "net_revenue",
+              "gaap_net_income",
+              "gaap_diluted_eps"
+            ],
+            "title": "Metric",
+            "type": "string"
+          },
+          "row_path": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Row Path",
+            "type": "array"
+          },
+          "scale": {
+            "minimum": 0,
+            "title": "Scale",
+            "type": "integer"
+          },
+          "unit": {
+            "enum": [
+              "millions",
+              "per_share"
+            ],
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "metric",
+          "row_path",
+          "current_value",
+          "comparable_value",
+          "scale",
+          "unit"
+        ],
+        "title": "ExhibitQuarterMetric",
+        "type": "object"
+      },
+      "ExhibitQuarterMetrics": {
+        "additionalProperties": false,
+        "properties": {
+          "accounting_basis": {
+            "const": "gaap",
+            "default": "gaap",
+            "title": "Accounting Basis",
+            "type": "string"
+          },
+          "audit_status": {
+            "const": "unaudited",
+            "default": "unaudited",
+            "title": "Audit Status",
+            "type": "string"
+          },
+          "comparable_column_label": {
+            "title": "Comparable Column Label",
+            "type": "string"
+          },
+          "comparable_period_end": {
+            "format": "date",
+            "title": "Comparable Period End",
+            "type": "string"
+          },
+          "current_column_label": {
+            "title": "Current Column Label",
+            "type": "string"
+          },
+          "current_period_end": {
+            "format": "date",
+            "title": "Current Period End",
+            "type": "string"
+          },
+          "filing_status": {
+            "const": "furnished_not_filed",
+            "default": "furnished_not_filed",
+            "title": "Filing Status",
+            "type": "string"
+          },
+          "metrics": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/ExhibitQuarterMetric"
+              },
+              {
+                "$ref": "#/components/schemas/ExhibitQuarterMetric"
+              },
+              {
+                "$ref": "#/components/schemas/ExhibitQuarterMetric"
+              }
+            ],
+            "title": "Metrics",
+            "type": "array"
+          },
+          "original_unit_label": {
+            "const": "(IN MILLIONS, EXCEPT PER SHARE DATA)",
+            "default": "(IN MILLIONS, EXCEPT PER SHARE DATA)",
+            "title": "Original Unit Label",
+            "type": "string"
+          },
+          "period_scope": {
+            "const": "fiscal_quarter_ended",
+            "default": "fiscal_quarter_ended",
+            "title": "Period Scope",
+            "type": "string"
+          },
+          "raw_content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Raw Content Hash",
+            "type": "string"
+          },
+          "source_kind": {
+            "const": "issuer_exhibit_table",
+            "default": "issuer_exhibit_table",
+            "title": "Source Kind",
+            "type": "string"
+          },
+          "statement_title": {
+            "const": "CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS — UNAUDITED",
+            "default": "CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS — UNAUDITED",
+            "title": "Statement Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "current_period_end",
+          "comparable_period_end",
+          "current_column_label",
+          "comparable_column_label",
+          "raw_content_hash",
+          "metrics"
+        ],
+        "title": "ExhibitQuarterMetrics",
+        "type": "object"
+      },
       "ExperimentDetailEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -7457,6 +7610,16 @@
             "format": "date-time",
             "title": "Parent Received At",
             "type": "string"
+          },
+          "quarter_metrics": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExhibitQuarterMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "raw_content_hash": {
             "pattern": "^[0-9a-f]{64}$",

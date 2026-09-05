@@ -1677,6 +1677,96 @@ export interface components {
              */
             schema_version: "1";
         };
+        /** ExhibitQuarterMetric */
+        ExhibitQuarterMetric: {
+            /** Comparable Value */
+            comparable_value: string;
+            /** Currency */
+            currency?: null;
+            /** Current Value */
+            current_value: string;
+            /**
+             * Metric
+             * @enum {string}
+             */
+            metric: "net_revenue" | "gaap_net_income" | "gaap_diluted_eps";
+            /** Row Path */
+            row_path: string[];
+            /** Scale */
+            scale: number;
+            /**
+             * Unit
+             * @enum {string}
+             */
+            unit: "millions" | "per_share";
+        };
+        /** ExhibitQuarterMetrics */
+        ExhibitQuarterMetrics: {
+            /**
+             * Accounting Basis
+             * @default gaap
+             * @constant
+             */
+            accounting_basis: "gaap";
+            /**
+             * Audit Status
+             * @default unaudited
+             * @constant
+             */
+            audit_status: "unaudited";
+            /** Comparable Column Label */
+            comparable_column_label: string;
+            /**
+             * Comparable Period End
+             * Format: date
+             */
+            comparable_period_end: string;
+            /** Current Column Label */
+            current_column_label: string;
+            /**
+             * Current Period End
+             * Format: date
+             */
+            current_period_end: string;
+            /**
+             * Filing Status
+             * @default furnished_not_filed
+             * @constant
+             */
+            filing_status: "furnished_not_filed";
+            /** Metrics */
+            metrics: [
+                components["schemas"]["ExhibitQuarterMetric"],
+                components["schemas"]["ExhibitQuarterMetric"],
+                components["schemas"]["ExhibitQuarterMetric"]
+            ];
+            /**
+             * Original Unit Label
+             * @default (IN MILLIONS, EXCEPT PER SHARE DATA)
+             * @constant
+             */
+            original_unit_label: "(IN MILLIONS, EXCEPT PER SHARE DATA)";
+            /**
+             * Period Scope
+             * @default fiscal_quarter_ended
+             * @constant
+             */
+            period_scope: "fiscal_quarter_ended";
+            /** Raw Content Hash */
+            raw_content_hash: string;
+            /**
+             * Source Kind
+             * @default issuer_exhibit_table
+             * @constant
+             */
+            source_kind: "issuer_exhibit_table";
+            /**
+             * Statement Title
+             * @default CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS — UNAUDITED
+             * @constant
+             */
+            statement_title: "CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS — UNAUDITED";
+        };
         /** ExperimentDetailEnvelope */
         ExperimentDetailEnvelope: {
             data: components["schemas"]["ExperimentDetailResponse"];
@@ -3658,6 +3748,7 @@ export interface components {
              * Format: date-time
              */
             parent_received_at: string;
+            quarter_metrics?: components["schemas"]["ExhibitQuarterMetrics"] | null;
             /** Raw Content Hash */
             raw_content_hash: string;
             /**

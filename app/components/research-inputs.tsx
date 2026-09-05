@@ -131,7 +131,22 @@ export function ResearchInputs({ inputs, asOf }: { inputs: Inputs; asOf: string 
           {filing.source_url ? <a href={filing.source_url} target="_blank" rel="noreferrer">查看 SEC 原文</a> : null}
         </details>
         {filing.exhibit ? <>
-          <p>未经审计的业绩新闻稿，以附件提供（furnished），非正式提交（filed）。GAAP／非 GAAP、季度／累计、指引和股息分别阅读，不是结构化财务事实。</p>
+          <p>未经审计的业绩新闻稿，以附件提供（furnished），非正式提交（filed）。GAAP／非 GAAP、季度／累计、指引和股息分别阅读。{filing.exhibit.quarter_metrics ? "下列指标是附件表格观察，不是 SEC companyfacts。" : "不是结构化财务事实。"}</p>
+          {filing.exhibit.quarter_metrics ? <>
+            <p>仅核对附件中的三项季度指标，不代表完整财务审查或研究结论合格；未推断季度起始日或计算同比增幅。</p>
+            {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- Keyboard users can scroll the evidence table. */}
+            <div className="table-scroll" role="region" aria-label="附件季度经营指标，可横向滚动" tabIndex={0}>
+              <table aria-label="附件季度经营指标">
+                <thead><tr><th scope="col">指标</th><th scope="col">本期季度末 {filing.exhibit.quarter_metrics.current_period_end}</th><th scope="col">原表可比季度末 {filing.exhibit.quarter_metrics.comparable_period_end}</th><th scope="col">原表单位</th></tr></thead>
+                <tbody>{filing.exhibit.quarter_metrics.metrics.map((metric) => <tr key={metric.metric}>
+                  <th scope="row">{{ net_revenue: "营收", gaap_net_income: "GAAP 净利润", gaap_diluted_eps: "GAAP 稀释每股收益" }[metric.metric]}</th>
+                  <td>{formatDisplayDecimal(metric.current_value)}</td><td>{formatDisplayDecimal(metric.comparable_value)}</td>
+                  <td>{metric.unit === "millions" ? "百万" : "每股金额"} · 币种未确认</td>
+                </tr>)}</tbody>
+              </table>
+            </div>
+            <p>原表单位：{filing.exhibit.quarter_metrics.original_unit_label}。数值展示最多 3 位小数，底层精度保留。</p>
+          </> : null}
           <dl className="decision-card__authority">
             <div><dt>父文件收到时间</dt><dd>{formatUtc(filing.exhibit.parent_received_at)}</dd></div>
             <div><dt>附件收到时间</dt><dd>{formatUtc(filing.exhibit.received_at)}</dd></div>

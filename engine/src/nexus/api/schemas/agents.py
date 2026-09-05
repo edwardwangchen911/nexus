@@ -11,6 +11,7 @@ from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
+from nexus.research.sec_exhibit_quarter_metrics import ExhibitQuarterMetrics
 from nexus.research.sec_exhibits import ExhibitText
 from nexus.strategy.intents import (
     ResearchClaim,
@@ -123,6 +124,7 @@ class ResearchRunEnvelope(_StrictAgentSchema):
 class ResearchInputExhibit(ExhibitText):
     parent_received_at: AwareDatetime
     parent_raw_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    quarter_metrics: ExhibitQuarterMetrics | None = None
 
 
 class ResearchInputFiling(_StrictAgentSchema):

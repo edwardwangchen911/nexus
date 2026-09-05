@@ -53,6 +53,7 @@ def _exhibit_input(document: SecDisclosure | None) -> ResearchInputExhibit | Non
         **document.exhibit.model_dump(),
         parent_received_at=document.originals[1].received_at,
         parent_raw_content_hash=document.raw_content_hash,
+        quarter_metrics=document.quarter_metrics,
     )
 
 
