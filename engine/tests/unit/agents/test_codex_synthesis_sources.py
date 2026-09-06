@@ -27,6 +27,7 @@ async def test_explicit_source_index_binds_returned_citation_without_reordering(
             {"index": i, **ref.model_dump(mode="json")} for i, ref in enumerate(evidence)
         ]
         assert "source, object_id and content_hash" in payload["instructions"]
+        assert "provider_object_id corresponds to top-level object_id" in payload["instructions"]
         batch = _staged_batch("research", ROLE_ORDER[:5])
         for role in batch["roles"]:
             for claim in role["claims"]:

@@ -166,6 +166,11 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
                 assert "Confirming that a gap exists does not resolve it" in prompt["content"]
                 assert "operating disclosures" in prompt["content"]
                 assert "current trends" in prompt["content"]
+                assert "supplied public issuer operating figures" in prompt["content"]
+                assert (
+                    "private account, position or order amounts and quantities" in prompt["content"]
+                )
+                assert "Do not generate target weights or order quantities" in prompt["content"]
             reviewed = (
                 []
                 if payload["stage"] == "research"
