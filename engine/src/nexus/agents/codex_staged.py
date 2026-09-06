@@ -383,7 +383,10 @@ class StagedCodexCommittee(CodexCommittee):
             "In security_snapshot, provider_object_id corresponds to top-level object_id. "
             "Never use a tool-local item position or assume an index by role. A valid "
             "index alone does not establish that its source supports the claim. Exchange "
-            "calendars support trading dates, not revenue, earnings, cash flow or guidance."
+            "calendars support trading dates, not revenue, earnings, cash flow or guidance. "
+            "Preserve quarterly versus cumulative periods, GAAP versus non-GAAP, original "
+            "units and unknown currency. A dollar sign alone does not establish USD; "
+            "name a currency only when explicit frozen evidence supports it."
         )
         payload = project_staged_payload(payload)
         wire = codex_request_wire(payload)

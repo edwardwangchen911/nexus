@@ -28,6 +28,11 @@ async def test_explicit_source_index_binds_returned_citation_without_reordering(
         ]
         assert "source, object_id and content_hash" in payload["instructions"]
         assert "provider_object_id corresponds to top-level object_id" in payload["instructions"]
+        assert (
+            "quarterly versus cumulative periods, GAAP versus non-GAAP" in payload["instructions"]
+        )
+        assert "original units and unknown currency" in payload["instructions"]
+        assert "A dollar sign alone does not establish USD" in payload["instructions"]
         batch = _staged_batch("research", ROLE_ORDER[:5])
         for role in batch["roles"]:
             for claim in role["claims"]:
