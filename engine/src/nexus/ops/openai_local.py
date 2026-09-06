@@ -24,6 +24,7 @@ from sqlalchemy.engine import make_url
 
 from nexus.agents import codex_token_budget
 from nexus.agents.codex_versions import (
+    INLINE_CITATION_CONFIG_VERSION,
     STRUCTURED_96K_CONFIG_VERSION,
     STRUCTURED_96K_WIRE64K_CONFIG_VERSION,
 )
@@ -170,6 +171,7 @@ async def prepare_database(
     structured_synthesis: bool = False,
     aggregate_input_tokens: int = 64000,
     max_wire_bytes: int = 55808,
+    inline_citations: bool = False,
 ) -> None:
     """Register existing prompts and one priced model idempotently, not fake research."""
     if settings.database_url is None:
@@ -178,6 +180,17 @@ async def prepare_database(
     if host is None or host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("OPENAI_LOCAL_DATABASE_REQUIRED")
     config = dict(_CONFIG)
+    if (
+        type(inline_citations) is not bool
+        or inline_citations
+        and (
+            not structured_synthesis
+            or aggregate_input_tokens != 96000
+            or max_wire_bytes != 64000
+            or settings.agent_runtime_mode is not AgentRuntimeMode.CODEX_SDK
+        )
+    ):
+        raise ValueError("CODEX_CITATION_SETUP_INVALID")
     if (
         type(aggregate_input_tokens) is not int
         or aggregate_input_tokens not in {64000, 96000}
@@ -212,7 +225,9 @@ async def prepare_database(
         version = STAGED_CONFIG_VERSION if staged else CONFIG_VERSION
         if structured_synthesis:
             version = (
-                STRUCTURED_96K_WIRE64K_CONFIG_VERSION
+                INLINE_CITATION_CONFIG_VERSION
+                if inline_citations
+                else STRUCTURED_96K_WIRE64K_CONFIG_VERSION
                 if max_wire_bytes == 64000
                 else STRUCTURED_96K_CONFIG_VERSION
                 if aggregate_input_tokens == 96000
@@ -240,6 +255,8 @@ async def prepare_database(
         )
     if max_wire_bytes != 55808:
         config["max_wire_bytes"] = max_wire_bytes
+    if inline_citations:
+        config["inline_citations"] = True
     config_hash = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
     prompts: list[tuple[str, str, str, str]] = [
         (prompt.role, "local-openai-v1", prompt.content, prompt.content_hash)
@@ -416,6 +433,7 @@ def main() -> int:
     parser.add_argument("--quarter-metrics", action="store_true")
     parser.add_argument("--aggregate-input-tokens", type=int, choices=(64000, 96000), default=64000)
     parser.add_argument("--max-wire-bytes", type=int, choices=(55808, 64000), default=55808)
+    parser.add_argument("--inline-citations", action="store_true")
     for part in ("submissions", "parent", "exhibit"):
         parser.add_argument(f"--sec-{part}", type=Path)
         parser.add_argument(f"--sec-{part}-receipt", type=Path)
@@ -444,6 +462,14 @@ def main() -> int:
     args = parser.parse_args()
     root = Path.cwd().resolve()
     try:
+        if args.inline_citations and (
+            args.action != "setup"
+            or not args.structured_synthesis
+            or args.backend != "codex_sdk"
+            or args.aggregate_input_tokens != 96000
+            or args.max_wire_bytes != 64000
+        ):
+            raise ValueError("CODEX_CITATION_SETUP_INVALID")
         if args.max_wire_bytes != 55808 and (
             args.action != "setup"
             or not args.structured_synthesis
@@ -523,6 +549,7 @@ def main() -> int:
                     settings,
                     staged=args.staged,
                     strategy_rnd=args.strategy_rnd,
+                    **({"inline_citations": True} if args.inline_citations else {}),
                     **({"structured_synthesis": True} if args.structured_synthesis else {}),
                     **(
                         {"aggregate_input_tokens": args.aggregate_input_tokens}

@@ -5,11 +5,13 @@ STAGED_CONFIG_VERSION = "codex-sdk-chatgpt-v2"
 STRUCTURED_CONFIG_VERSION = "codex-sdk-chatgpt-v3"
 STRUCTURED_96K_CONFIG_VERSION = "codex-sdk-chatgpt-v3-input96k"
 STRUCTURED_96K_WIRE64K_CONFIG_VERSION = "codex-sdk-chatgpt-v3-input96k-wire64k"
+INLINE_CITATION_CONFIG_VERSION = "codex-sdk-chatgpt-v3-input96k-wire64k-cite1"
 STRUCTURED_CONFIG_VERSIONS = frozenset(
     {
         STRUCTURED_CONFIG_VERSION,
         STRUCTURED_96K_CONFIG_VERSION,
         STRUCTURED_96K_WIRE64K_CONFIG_VERSION,
+        INLINE_CITATION_CONFIG_VERSION,
     }
 )
 STAGED_CONFIG_VERSIONS = STRUCTURED_CONFIG_VERSIONS | {STAGED_CONFIG_VERSION}
@@ -21,7 +23,12 @@ def aggregate_input_limit(version: str) -> int:
         raise ValueError("CODEX_CONFIG_VERSION_INVALID")
     return (
         96000
-        if version in {STRUCTURED_96K_CONFIG_VERSION, STRUCTURED_96K_WIRE64K_CONFIG_VERSION}
+        if version
+        in {
+            STRUCTURED_96K_CONFIG_VERSION,
+            STRUCTURED_96K_WIRE64K_CONFIG_VERSION,
+            INLINE_CITATION_CONFIG_VERSION,
+        }
         else 64000
     )
 
@@ -29,4 +36,12 @@ def aggregate_input_limit(version: str) -> int:
 def wire_byte_limit(version: str) -> int:
     if version not in SDK_CONFIG_VERSIONS:
         raise ValueError("CODEX_CONFIG_VERSION_INVALID")
-    return 64000 if version == STRUCTURED_96K_WIRE64K_CONFIG_VERSION else 55808
+    return (
+        64000
+        if version
+        in {
+            STRUCTURED_96K_WIRE64K_CONFIG_VERSION,
+            INLINE_CITATION_CONFIG_VERSION,
+        }
+        else 55808
+    )
