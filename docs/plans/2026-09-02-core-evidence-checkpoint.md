@@ -2988,3 +2988,21 @@ verified，default/listing/explicit 三种 prepare 精确绑定新 proof_snapsho
 结果仍 partial/watch、exposure_action=none；四项模型审查仍自报 resolved/sufficient，正在对照具体论点独立判断其适用范围与剩余缺口，不能以输出齐全、引用正确或自评充分代替核心问题答案合格。未继续循环调用模型。
 
 证据目录：`outputs/acceptance/current-trends-real-20260905/latest-operating-disclosure/quarter-metrics-acceptance/synthesis-v2/`。安全摘要为 `setup-summary.json`、`preflight/preflight-summary.json`、`final-state-summary.json`、`api-summary.json`、`research-dom-summary.json`、`content-structure-summary.json`、`content-prompt-diagnosis/preflight-summary.json`；完整结果仅在私有 `research-api-private.json`，不复制账户事实到记录或测试材料。
+
+### 新版研究内容复核与研究流动性观察真实交付（2026-09-06）
+
+独立审查确认新版经营引用与综合范围修复有效，运行/来源接线可以验收，但核心研究内容仍不充分：部分 review 理由保留流动性/操作结论限制，却 resolved=true/missing_evidence 空/sufficient；还出现百分比与百分点、季度与累计期间的表述问题。币种需对照明确冻结来源，不能仅凭模型文字或 $ 推定。没有继续仅改提示后循环调用，也未新增关键词语义闸门。
+
+先做零网络可达性核查：严格原 B3 归档 253 根日线均含实际 v/vw，无 turnover 字段，末 20 个预期交易日完整；normalize 保留 Decimal volume、未输出 VWAP，当前趋势只发布 close 系指标。现有 `_adv20` 本来是 20 日 close×volume 均值，days_to_exit 用金额分母，不能直接塞股数或人为新增“必须逐笔成交额”总要求。正式 policy 必须用 `load_diagnostic_source_policy` 按实际时点选择：在组合快照、研究时点及当前均为 v2；仅按 policy 表 key/created_at 取最新得到 v1 不代表正式生效版本。v2 的 Fosun/raw 路径不接当前 Alpaca 补充趋势，且 Fosun ADV 因量单位/缩放未知保持缺失。
+
+按此边界，仅在既有当前趋势增加可选研究流动性投影，未修改正式诊断、PriceBar、策略目标、权限或 policy。后端 `3cc7364` 与 UI/BFF `78b4ae0` 已集中互审，主线为 `822ca32`/`017b65e`，相关文件逐一精确。正常 `--liquidity-observation` 沿原 collection 身份新增不可变 revision；默认旧导入复用旧版、旧字段省略和 canonical hash 保留。固定 query_end 所属窗口最后 20 个 expected session，缺日不补齐、不缩分母，不足或缺日 value=null；完整全零为已知零。界面显示 Decimal 金额代理、USD/交易日和窗口，明确不是精确成交额、正式 ADV20 或退出天数。
+
+验证：63 计算/旧趋势/API 单测、6 正常 CLI 单测、7 原趋势数据库集成测试通过；其中新回归贯穿 normal import→new prepare→真实 tools→HMAC API，覆盖旧 hash/默认重放、原件不变、最新引用、篡改拒绝。六生产文件 Mypy、Ruff、diffcheck 通过。UI/BFF 52 测试、typecheck、聚焦 eslint、build 通过；合法 0/缺日/不足保留，畸形状态不能只因结构 schema 合法而显示。重复单位测试不累加成新验收数。
+
+正常真实导入一次、prepare 一次，23 表旧行 hash 多重集保留；仅新增 1 artifact、2 snapshot、2 evidence ref，金额代理与原件独立 Decimal 计算精确。完整 23,151 字符附件及三项季度指标仍精确；没有采集、模型调用、新研究 run 或订单。复用真实 normal admission/tools 的事务回滚预检，三阶段均含精确新流动性/正文/季度投影，wire 55,918 / 57,272 / 60,253 bytes，综合预留 79,234 < 96k；旧角色文字只作长度样本，不伪造新研究内容，23 表回滚不变。
+
+仅更新自有本地 API，395 Python 源文件与主线精确，配置不变。新快照受保护 API inputs 精确相同，前两份研究完整 DTO 逐字段未变，未回填流动性字段。375/1440 实际 BFF/DOM 显示精确金额/单位/窗口、仅新输入有该观察、新旧快照边界、全文/hash/季度表，无溢出、交易按钮或越界请求；页面后 23 表状态与导入后完全一致。流动性资料在页面可用不等于已被旧研究使用或正式 ADV 缺口已解除，也不作为后续方案的全局门槛。
+
+防复发补在近因：0043 所有权约束要求原 collection object_id，最初后缀方案在真实 PG 红测被拒，改为同身份新 revision，未改迁移。可选字段 model_serializer 返回 dict 注解会把闭合输出 schema 变成开放 object；沿现有无返回注解模式修正并增加序列化 schema 回归，最终生成文件仅 237 行新增，无无关删除。CLI 验收捕获原始结果，不在结果未知时重放导入；构建日志目录依赖先于构建准备，首次未建目录在任何构建/服务变更前失败后才启动。
+
+本地私有证据：`outputs/acceptance/current-trends-real-20260905/latest-operating-disclosure/quarter-metrics-acceptance/liquidity-observation/`。安全摘要为 `acceptance-summary.json`、`preflight/preflight-summary.json`、`api-summary.json`、`dom-summary.json`、`final-state-summary.json`。来源可达性证据在相邻 `synthesis-v2/liquidity-feasibility-summary.json` 与 `liquidity-policy-summary.json`，后者是正式选择结果；原件、计算值、API/输入仅保存在私有文件，不进入聊天或测试。
