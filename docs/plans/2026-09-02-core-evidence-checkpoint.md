@@ -3023,3 +3023,15 @@ verified，default/listing/explicit 三种 prepare 精确绑定新 proof_snapsho
 独立内容审查确认综合经营论点的 content_hash 精确匹配新季度附件，能够区分经营证据与集中度预警，回应价格弱势且未把代理当正式 ADV20；引用接线修复及有边界的研究观察通过验收。报告仍明确缺少替代机会和分散成本比较，未给出有依据的减配目标，不能据此通过完整方案或有证据不调整验收。复合 audit 论点还需逐句核对引用覆盖，不扩建语义分类框架；模型自评 sufficient/resolved 不能替代内容验收。当前系统仍 partial/watch、exposure_action=none、execution_locked=true，不据此宣告方案比较、正式不调整理由或执行完成。失败经验已落实为最接近根因的映射和回归，沿用既有记录，不再新增治理机制或恢复“三阶段预算另批”。
 
 私有证据目录：outputs/acceptance/current-trends-real-20260905/latest-operating-disclosure/quarter-metrics-acceptance/inline-citations/；setup-summary.json、preflight/preflight-summary.json、legacy-reconstruction/preflight-summary.json、final-state-summary.json、api-summary.json、research-dom-summary.json、content-prompt-diagnosis/preflight-summary.json 为安全验收摘要。原始账户与完整研究 DTO 仅存本地私有文件。
+
+### 最新消息单页采集、持久化与市场页验收（2026-09-06）
+
+用户指出实时消息未接入后，代码核查确认既有当前趋势/SEC附件不等于新闻链路。新增正常 `news_local collect` 与 `news_import` 入口，复用现有免费配置凭据和本地 DataArtifact/DataSnapshot/对象存储，无依赖、迁移、权限或调度变更。明确查询当前案例最近7日、截止至少滞后15分钟、单页50条、无重试；此为延迟查询，不能据一次HTTP成功推断免费实时权益、零延迟或全面消息覆盖。官方接口只明确sort采用updated date，本地窗口接纳规则不冒充上游承诺。
+
+实现已主线 `60a236c` → `eb2a866` → `3a60a7e`。新闻原件和收据严格绑定hash/字节数/时间/证券身份，重复导入幂等，新采集追加快照，不回填旧研究。市场页选定标的后显示消息及发布/修订/本机采集时间、来源、原文链接与分页边界；未采集、空页、原件异常分开表达。页面与刷新按钮只读保存数据，不触发供应商或模型。密钥反射拒绝落盘，其余可安全核验的语义拒绝保留rejected原件；导入先预约结果文件，提交结果不明确时要求核对持久化状态，不能伪称无写入。
+
+一次正常真实采集返回50条、has_more=true，随后一次正常导入成功。数据库读侧重新核对两份原件，API/BFF与同一快照精确一致；375/1440页面逐条标题一致、时间和范围说明可见、链接安全、无横向溢出、重新读取200且无外部请求。API本地代码400个源码文件与固定提交精确匹配，环境/端口保持不变，数据库和对象存储进程未重启。既有研究、Job、组合快照、决策、方案和订单8表hash多重集完全保留，执行保持锁定；本次零模型、零券商、零外部写入。页面UI仍是显式采集后的保存视图，实时推送及新消息进入新冻结研究均未完成，不宣称组合方案比较闭环。
+
+验证：20项采集/导入单测；2项隔离PostgreSQL正常导入/幂等/API/损坏/空页/身份验证及1项收据回归；50项前端消息、市场页、BFF边界与路由测试；Ruff、Mypy、typecheck、ESLint、生成客户端一致性、build、diffcheck通过。独立集中审查发现并修复拒绝原件丢失及提交后回执误报两项问题。首次本地收据验证误用了Decimal JSON读取器，已改为保留整数的严格去重读取并通过正常PG路径；验收编排的请求层级/异步聚合错误发生在只读阶段，确认无新请求后修正，未重放采集或导入。
+
+私有证据：`outputs/acceptance/news-real-20260906/`，安全摘要为`database-summary.json`、`api-summary.json`、`dom-summary.json`、`runtime-summary.json`；原件、身份、完整DTO与页面截图留在本地私有文件。正常入口和回滚见`docs/runbooks/news-local.md`。回滚应用版本无需删除快照或修改历史研究。
