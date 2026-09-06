@@ -89,7 +89,10 @@ async def test_single_page_private_receipt(tmp_path: Path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status,body,code", [
-    (429, b'{}', "NEWS_HTTP_FAILED"),
+    (429, b'{}', "NEWS_HTTP_RETRY_BUDGET_EXHAUSTED"),
+    (403, b'{}', "NEWS_HTTP_STATUS_REJECTED"),
+    (200, payload(symbols=["OTHER"]), "NEWS_RESPONSE_INVALID"),
+    (200, json.dumps({"news": [article(), article()]}).encode(), "NEWS_RESPONSE_INVALID"),
     (200, payload(summary="test-secret"), "NEWS_SECRET_REFLECTION"),
     (200, payload(summary="test-secret").replace(b"test-secret", b"test-\\u0073ecret"),
      "NEWS_SECRET_REFLECTION"),
@@ -107,4 +110,12 @@ async def test_failure_no_retry_no_archive(tmp_path, status, body, code):
                 key_id=SecretStr("test-key"), secret=SecretStr("test-secret"), client=client,
                 start=NOW - timedelta(days=2), end=NOW - timedelta(hours=1))
     assert len(requests) == 1
-    assert list(output.iterdir()) == []
+    if code in {"NEWS_WINDOW_RESPONSE_INVALID", "NEWS_RESPONSE_INVALID"}:
+        assert (output / "rejected-raw.json").read_bytes() == body
+        rejected = json.loads((output / "rejected-receipt.json").read_bytes())
+        assert rejected["code"] == code
+        assert rejected["schema"] == "nexus_news_rejected_receipt_v1"
+        assert not (output / "receipt.json").exists()
+        assert (output / "rejected-raw.json").stat().st_mode & 0o777 == 0o600
+    else:
+        assert list(output.iterdir()) == []

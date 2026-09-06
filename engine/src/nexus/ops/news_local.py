@@ -15,7 +15,12 @@ from pydantic import SecretStr
 
 from nexus.ops.fosun_local import load_local_environment
 from nexus.ops.local_recovery import write_private
-from nexus.providers.http import AllowedOrigin, FixedOriginHttpClient, HttpRequestPolicy
+from nexus.providers.http import (
+    AllowedOrigin,
+    FixedOriginHttpClient,
+    HttpPolicyError,
+    HttpRequestPolicy,
+)
 from nexus.providers.news import NewsError, aware, parse_news, validate_symbol
 
 
@@ -69,8 +74,13 @@ async def collect_news(
             ("v1beta1", "news"), query,
             (("APCA-API-KEY-ID", credentials[0]), ("APCA-API-SECRET-KEY", credentials[1])),
         )
-    except Exception as error:
-        raise NewsError("NEWS_HTTP_FAILED") from error
+    except HttpPolicyError as error:
+        allowed = {"STATUS_REJECTED", "REDIRECT_REJECTED", "RETRY_BUDGET_EXHAUSTED",
+                   "DEADLINE_EXCEEDED", "RESPONSE_TOO_LARGE"}
+        code = str(error) if str(error) in allowed else "FAILED"
+        raise NewsError(f"NEWS_HTTP_{code}") from None
+    except Exception:
+        raise NewsError("NEWS_HTTP_FAILED") from None
     finally:
         if owned:
             await transport.aclose()
@@ -85,9 +95,23 @@ async def collect_news(
         raise NewsError("NEWS_RESPONSE_INVALID") from None
     if any(value in decoded for value in credentials):
         raise NewsError("NEWS_SECRET_REFLECTION")
-    page = parse_news(raw, symbol=symbol, received_at=received_at)
-    if any(not start <= item.updated_at <= end for item in page.articles):
-        raise NewsError("NEWS_WINDOW_RESPONSE_INVALID")
+    try:
+        page = parse_news(raw, symbol=symbol, received_at=received_at)
+        if any(not start <= item.updated_at <= end for item in page.articles):
+            raise NewsError("NEWS_WINDOW_RESPONSE_INVALID")
+    except NewsError as error:
+        rejected = {
+            "schema": "nexus_news_rejected_receipt_v1", "code": str(error),
+            "received_at": received_at.isoformat(), "raw_sha256": sha256(raw).hexdigest(),
+            "raw_byte_length": len(raw),
+        }
+        try:
+            write_private(output_dir / "rejected-raw.json", raw)
+            write_private(output_dir / "rejected-receipt.json",
+                          json.dumps(rejected, sort_keys=True).encode())
+        except OSError:
+            raise NewsError("NEWS_ARCHIVE_FAILED") from None
+        raise
     receipt = {
         "schema": "nexus_news_receipt_v1", "source": "alpaca", "symbol": symbol,
         "start": start.isoformat(), "end": end.isoformat(),
