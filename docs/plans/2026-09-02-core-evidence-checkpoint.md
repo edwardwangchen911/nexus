@@ -2970,3 +2970,21 @@ verified，default/listing/explicit 三种 prepare 精确绑定新 proof_snapsho
 异常与防复发：验收 raw tool 的季度投影在 `disclosure.quarter_metrics`，API 形状在 `exhibit.quarter_metrics`，不能混用而误判产品丢字段；旧第一次预检通过后续 before/after 证明已回滚。Compose 配置中 null 的前密钥字段表示不注入环境，不能以字符串 `None` 与不存在变量比较；按空缺语义核对后配置一致，未修改任何凭据。边界问题已在实际 invoke 和正常 worker 回归覆盖；不新增审批框架或为同一缺口反复消耗模型额度。
 
 私有证据：`outputs/acceptance/current-trends-real-20260905/latest-operating-disclosure/quarter-metrics-acceptance/structured96-wire64k/`。安全摘要为 `preflight/preflight-summary.json`、`final-state-summary.json`、`api-summary.json`、`research-dom-summary.json`、`content-structure-summary.json`；完整 inputs/结果及入口回执仅存私有文件。
+
+### 经营引用与最终提示窄修复：正常入口真实验证（2026-09-06）
+
+独立内容审查发现前轮运行完成但内容未验收：fundamental/bull 的经营论点引用交易日历；portfolio 仅用组合上下文，审查理由仍提缺口却全部 resolved/sufficient。先复用已保存 run 零模型重建，三个实际 stage input_hash 精确相同，冻结 portfolio hash 确为旧 `portfolio-v1.md`，其“仅组合上下文”范围与最终跨来源综合冲突。证据数组及直接索引绑定没有本地重排；原 provider 响应未留存，不声称直接观察到原始索引选择。未把提示假设当作数据或 SDK 能力缺失。
+
+已审 `0a2c26a`、`0d43501`、`4fdbda4` 串行集成为 main `48c517c`、`ec19360`、`4290ccb`。新不可变 `local-portfolio-synthesis-v2` 仅由正常 structured setup 登记；旧提示/研究不变。新提示按 stage 区分最终跨来源综合与普通组合上下文职责，现有最新提示选择规则不变，未加 registry 或迁移。structured claims 负责回答原问题，reviews 逐条回应；确认缺口存在不等于解决。显式 index 与 source/object_id/content_hash 帮助匹配真实来源，security_snapshot.provider_object_id 对应顶层 object_id；索引合法不等于内容合格。共同指引保留季度/累计、GAAP/非GAAP、原单位和未知币种，不仅凭 $ 推成 USD。私有账户/订单金额数量与公开发行人经营数字明确区分，仍不生成目标权重和订单数量。无关键词拒绝器、语义分类框架或 partial 升级。
+
+验证：SDK 完整单测与首版索引回归 126 passed；扩展为双来源选择/双顺序后 4 项定向回归通过，未累加重复计数。正常 setup/旧 run manifest 与 frozen prompt 保持、新 prompt 冻结、normal worker 三种结果及实际 payload 已做聚焦 PG；定向澄清后再验证 setup 与成功 worker 两项。Ruff、三生产文件 Mypy、diffcheck 通过，协调任务集中审查并独立复核索引四项。测试验证注册与绑定合同，不宣称自然语言结论通过。
+
+正常真实 setup 仅新增 1 prompt，24 表旧行多重集完全保留，model/config/run 未变。新提示同冻结快照三阶段零模型预检完整正文与季度指标精确，wire 55,342 / 56,277 / 58,752 bytes，累计综合预留 78,451 < 96k；23 表事务回滚后不变。随后同已审模型、套餐、96k-wire64k 配置正常 admit 一次新 run，先核队列仅目标且 max_attempts=1，再 run-once 一次。未重放前轮 run、未重新采集或改旧输入。
+
+实际 run completed、job succeeded、attempt1/retry0、进程 exit0；累计输入 74,460 / 输出 3,213 tokens。23 表旧行保留，仅新增 run1/output10/job1/budget reservation1/idempotency1。自有 API 更新后 394 源文件 hash 精确等于主线，配置不变；API 的同案例冻结 inputs、三完整 stage、输入摘要与阶段/最终用量精确，billing_mode 仍 chatgpt_subscription。375/1440 两宽度实际 BFF/DOM 的 run/inputs/trace、三阶段、综合自评及系统范围、附件全文/hash/季度表均通过，无页面溢出、交易按钮或越界请求。
+
+最终再按新 run 的已保存角色输出零模型重建三个实际请求，hash 全部精确，显式 index 逐项等于冻结 tuple 下标，portfolio hash=v2；实际 wire 55,342 / 56,696 / 59,677 bytes，完整正文和投影未变，23 表回滚不变。fundamental/bull 的四条经营论点现均引用 SEC；综合两条分别引用 SEC 和当前趋势+组合上下文，前轮错源及仅组合摘要问题已有真实改善。
+
+结果仍 partial/watch、exposure_action=none；四项模型审查仍自报 resolved/sufficient，正在对照具体论点独立判断其适用范围与剩余缺口，不能以输出齐全、引用正确或自评充分代替核心问题答案合格。未继续循环调用模型。
+
+证据目录：`outputs/acceptance/current-trends-real-20260905/latest-operating-disclosure/quarter-metrics-acceptance/synthesis-v2/`。安全摘要为 `setup-summary.json`、`preflight/preflight-summary.json`、`final-state-summary.json`、`api-summary.json`、`research-dom-summary.json`、`content-structure-summary.json`、`content-prompt-diagnosis/preflight-summary.json`；完整结果仅在私有 `research-api-private.json`，不复制账户事实到记录或测试材料。
