@@ -221,3 +221,20 @@ def load_prompt_assets() -> Mapping[AgentRole, PromptAsset]:
             content_hash=hashlib.sha256(content.encode()).hexdigest(),
         )
     return prompts
+
+
+def load_portfolio_synthesis_prompt() -> PromptAsset:
+    """Load the immutable cross-source final-role prompt used by normal local setup."""
+    content = (
+        Path(__file__)
+        .with_name("prompts")
+        .joinpath("portfolio-synthesis-v2.md")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
+    return PromptAsset(
+        role="portfolio",
+        version="local-portfolio-synthesis-v2",
+        content=content,
+        content_hash=hashlib.sha256(content.encode()).hexdigest(),
+    )

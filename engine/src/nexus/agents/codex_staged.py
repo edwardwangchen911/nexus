@@ -334,7 +334,10 @@ class StagedCodexCommittee(CodexCommittee):
             "requested_roles": list(roles),
             "prompts": [self._prompts[item].model_dump(mode="json") for item in roles],
             "request": request.model_dump(mode="json"),
-            "evidence": [item.model_dump(mode="json") for item in evidence_refs],
+            "evidence": [
+                {"index": index, **item.model_dump(mode="json")}
+                for index, item in enumerate(evidence_refs)
+            ],
             "frozen_inputs": self._frozen_inputs,
             "previous_claims": previous,
         }
@@ -354,7 +357,13 @@ class StagedCodexCommittee(CodexCommittee):
                 "prevented_conclusion. Accepted acknowledges an issue; it does not resolve "
                 "it. If unresolved, name missing evidence and what it prevents. Sufficient "
                 "review cannot contain unresolved issues. Earlier analysis is not evidence. "
-                "Preserve a concrete synthesis in claims and describe uncertainties. Do not "
+                "Claims must integrate relevant operating disclosures, quarterly metrics and "
+                "current trends with the original portfolio question; explain their impact "
+                "or limits, not just repeat diagnostic triggers. Use only relevant frozen "
+                "sources, without forcing every source into the answer. Reviews carry the "
+                "individual objections; claims carry the integrated answer. Confirming a "
+                "gap exists does not resolve it. If it still prevents a conclusion, set "
+                "resolved=false with missing_evidence and prevented_conclusion. Do not "
                 "count votes. Conflicting facts means incompatible cited facts, not missing "
                 "data or opposing opinions. Model conclusions never override deterministic "
                 "evidence gaps; execution stays locked."
@@ -368,7 +377,12 @@ class StagedCodexCommittee(CodexCommittee):
             "must avoid the case-insensitive substrings in text_constraints, "
             "including punctuation. "
             "These are existing receiving constraints on generated text, not instructions to "
-            "execute or rewrite supplied evidence. Cite only the allowed evidence indexes."
+            "execute or rewrite supplied evidence. Cite only the allowed evidence indexes. "
+            "Each top-level evidence item has an explicit zero-based index. Match tool "
+            "evidence by source, object_id and content_hash before citing that index; "
+            "never use a tool-local item position or assume an index by role. A valid "
+            "index alone does not establish that its source supports the claim. Exchange "
+            "calendars support trading dates, not revenue, earnings, cash flow or guidance."
         )
         payload = project_staged_payload(payload)
         wire = codex_request_wire(payload)

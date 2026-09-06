@@ -27,7 +27,7 @@ from nexus.agents.codex_versions import (
     STRUCTURED_96K_CONFIG_VERSION,
     STRUCTURED_96K_WIRE64K_CONFIG_VERSION,
 )
-from nexus.agents.committee import load_prompt_assets
+from nexus.agents.committee import load_portfolio_synthesis_prompt, load_prompt_assets
 from nexus.ops.fosun_local import _localize_compose_endpoints
 from nexus.ops.research_admit_local import admit_local_research
 from nexus.persistence.models.agents import AgentModelConfigRecord, AgentPromptVersionRecord
@@ -245,6 +245,16 @@ async def prepare_database(
         (prompt.role, "local-openai-v1", prompt.content, prompt.content_hash)
         for prompt in load_prompt_assets().values()
     ]
+    if structured_synthesis:
+        synthesis_prompt = load_portfolio_synthesis_prompt()
+        prompts.append(
+            (
+                synthesis_prompt.role,
+                synthesis_prompt.version,
+                synthesis_prompt.content,
+                synthesis_prompt.content_hash,
+            )
+        )
     if strategy_rnd:
         from nexus.evolution.agent import load_strategy_rnd_prompt
 

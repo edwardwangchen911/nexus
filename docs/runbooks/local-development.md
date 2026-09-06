@@ -71,6 +71,8 @@ uv run --package nexus-engine nexus-openai-local setup --backend codex_sdk --str
 uv run --package nexus-engine nexus-openai-local setup --backend codex_sdk --structured-synthesis --skip-key
 ```
 
+此入口同时不可变登记 `local-portfolio-synthesis-v2` 最终角色提示；旧 `local-openai-v1` 内容和已冻结研究不变。现有准入按角色选择最新提示，因此登记后未来非三阶段研究也会选择新版 portfolio 提示；提示内仅在 `stage=synthesis` 综合跨来源证据，其他调用仍承担原组合上下文职责。回读旧研究仍按原 manifest，不追溯换提示。来源索引有效仅代表引用绑定成功，不代表论点内容已经独立核验。
+
 此入口登记 `codex-sdk-chatgpt-v3`，不创建研究或 Job、不调用模型；与 `--staged`、
 `--strategy-rnd` 互斥。原 `--staged` 仍为 v2，历史配置与研究不升级。研究准入须显式选择
 v3 model config ID，并由 Codex SDK worker 消费；不会自动成为默认研究配置。

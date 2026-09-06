@@ -177,3 +177,91 @@ async def test_normal_setup_preserves_old_versions_and_new_budget_is_never_defau
             "codex-sdk-chatgpt-v3-input96k-wire64k",
         }
     await factory.kw["bind"].dispose()
+
+
+@pytest.mark.asyncio
+async def test_structured_setup_registers_new_synthesis_prompt_without_rewriting_v1(
+    migrated_database_url,
+):
+    from decimal import Decimal
+
+    from nexus.agents.execution_authority import load_frozen_prompts
+    from nexus.agents.models import ResearchRequest
+    from nexus.agents.persistence import admit_research_run
+    from nexus.persistence.models.agents import AgentPromptVersionRecord
+
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    factory = session_factory(settings)
+    await _seed_authority(factory)
+    await openai_local.prepare_database(settings)
+    async with factory() as session:
+        before = [
+            dict(r)
+            for r in (await session.execute(select(AgentPromptVersionRecord.__table__))).mappings()
+        ]
+    async with factory() as session, session.begin():
+        legacy_model = await session.scalar(
+            select(AgentModelConfigRecord).where(
+                AgentModelConfigRecord.version == "codex-sdk-chatgpt-v1"
+            )
+        )
+        legacy = await admit_research_run(
+            session,
+            actor_id="test",
+            route="/internal/v1/research-runs",
+            idempotency_key="old-synthesis-prompt",
+            request_hash="d" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID, data_snapshot_id=_SNAPSHOT_ID, decision_time=_NOW
+            ),
+            prompt_version_id=None,
+            model_config_id=legacy_model.id,
+            daily_limit_usd=Decimal("3"),
+            now=datetime.now(UTC),
+        )
+        legacy_manifest = dict(legacy.run.prompt_manifest)
+        legacy_prompts = await load_frozen_prompts(session, legacy.run)
+        legacy_portfolio = legacy_prompts["portfolio"].id
+    for _ in range(2):
+        await openai_local.prepare_database(settings, structured_synthesis=True)
+    async with factory() as session, session.begin():
+        after = [
+            dict(r)
+            for r in (await session.execute(select(AgentPromptVersionRecord.__table__))).mappings()
+        ]
+        assert all(r in after for r in before) and len(after) == len(before) + 1
+        new = next(r for r in after if r not in before)
+        assert new["role"] == "portfolio" and new["version"] == "local-portfolio-synthesis-v2"
+        model = await session.scalar(
+            select(AgentModelConfigRecord).where(
+                AgentModelConfigRecord.version == "codex-sdk-chatgpt-v3"
+            )
+        )
+        admitted = await admit_research_run(
+            session,
+            actor_id="test",
+            route="/internal/v1/research-runs",
+            idempotency_key="new-synthesis-prompt",
+            request_hash="c" * 64,
+            request=ResearchRequest(
+                instrument_id=_INSTRUMENT_ID, data_snapshot_id=_SNAPSHOT_ID, decision_time=_NOW
+            ),
+            prompt_version_id=None,
+            model_config_id=model.id,
+            daily_limit_usd=Decimal("3"),
+            now=datetime.now(UTC),
+        )
+        frozen = await load_frozen_prompts(session, admitted.run)
+        assert frozen["portfolio"].id == new["id"]
+        assert frozen["portfolio"].content_hash == new["content_hash"]
+        saved_legacy = await session.get(AgentResearchRunRecord, legacy.run.id)
+        assert saved_legacy.prompt_manifest == legacy_manifest
+        old_frozen = await load_frozen_prompts(session, saved_legacy)
+        assert old_frozen["portfolio"].id == legacy_portfolio
+        assert old_frozen["portfolio"].version == "local-openai-v1"
+
+        assert (
+            "only redacted exposure, diagnostic, and proposal-comparison summaries"
+            not in frozen["portfolio"].content
+        )
+    await factory.kw["bind"].dispose()

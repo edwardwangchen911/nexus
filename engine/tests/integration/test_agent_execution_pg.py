@@ -160,6 +160,12 @@ async def test_codex_sdk_worker_persists_one_batch_and_api_usage_without_retries
             if model_fails is True and payload["stage"] == "critique":
                 raise TimeoutError("synthetic-secret-canary")
             roles = [prompt["role"] for prompt in payload["prompts"]]
+            if payload["stage"] == "synthesis" and staged in {"v3", "v3_96k", "v3_wire64k"}:
+                prompt = payload["prompts"][0]
+                assert prompt["version"] == "local-portfolio-synthesis-v2"
+                assert "Confirming that a gap exists does not resolve it" in prompt["content"]
+                assert "operating disclosures" in prompt["content"]
+                assert "current trends" in prompt["content"]
             reviewed = (
                 []
                 if payload["stage"] == "research"
