@@ -79,6 +79,7 @@ async def _build(
     session: AsyncSession,
     archive: ValidatedPriceArchive,
     materialized_at: datetime,
+    include_liquidity_observation: bool = False,
 ) -> CurrentPriceTrend:
     await _identity(session, archive)
     calendar = await load_xnys_calendar_adoption(session, materialized_at)
@@ -86,7 +87,11 @@ async def _build(
         await session.get(DiagnosticPolicy, PURPOSE_POLICY_ID), materialized_at
     )
     return await build_current_price_trend(
-        archive, calendar=calendar, purpose_policy=purpose, materialized_at=materialized_at
+        archive,
+        calendar=calendar,
+        purpose_policy=purpose,
+        materialized_at=materialized_at,
+        include_liquidity_observation=include_liquidity_observation,
     )
 
 
@@ -190,7 +195,9 @@ async def _read_one(
     archive = validate_price_originals(
         originals, instrument_id=instrument_id, now=document.materialized_at
     )
-    rebuilt = await _build(session, archive, document.materialized_at)
+    rebuilt = await _build(
+        session, archive, document.materialized_at, document.liquidity_observation is not None
+    )
     content = document.canonical_bytes()
     if (
         content != rebuilt.canonical_bytes()
@@ -263,6 +270,7 @@ async def persist_current_price_trends(
     archive: ValidatedPriceArchive,
     *,
     store: S3ProviderEvidenceStore,
+    include_liquidity_observation: bool = False,
 ) -> ResearchEvidenceRef:
     """Caller commits; reimports retain the first actual materialization and exact refs."""
     now = datetime.now(UTC)
@@ -284,27 +292,34 @@ async def persist_current_price_trends(
             )
         )
     )
-    if existing:
-        if len(existing) != 1:
-            raise ValueError("CURRENT_TRENDS_EXISTING_INVALID")
+    matching: list[ResearchEvidenceRef] = []
+    for reference in existing:
         documents = await read_current_price_trends(
             session,
             instrument_id=archive.request.instrument_id,
             as_of=datetime.now(UTC),
-            evidence_ids=(existing[0].id,),
+            evidence_ids=(reference.id,),
         )
-        if existing[0].id not in documents:
+        if reference.id not in documents:
             raise ValueError("CURRENT_TRENDS_EXISTING_INVALID")
-        return existing[0]
+        if (
+            documents[reference.id].liquidity_observation is not None
+        ) == include_liquidity_observation:
+            matching.append(reference)
+    if matching:
+        if len(matching) != 1:
+            raise ValueError("CURRENT_TRENDS_EXISTING_INVALID")
+        return matching[0]
     orphan = await session.scalar(
         select(DataSnapshot.id).where(
             DataSnapshot.source == SOURCE,
             DataSnapshot.provider_object_id == provider_object_id,
+            DataSnapshot.revision.not_in([reference.revision for reference in existing]),
         )
     )
     if orphan is not None:
         raise ValueError("CURRENT_TRENDS_EXISTING_INVALID")
-    document = await _build(session, archive, datetime.now(UTC))
+    document = await _build(session, archive, datetime.now(UTC), include_liquidity_observation)
     for item in archive.originals:
         await _artifact(
             session,

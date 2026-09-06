@@ -335,3 +335,130 @@ async def test_raw_comparison_archive_cannot_be_imported_as_split_trends(
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(DataSnapshot)) == 0
         assert await session.scalar(select(func.count()).select_from(ResearchEvidenceRef)) == 0
+
+
+@pytest.mark.asyncio
+async def test_optional_liquidity_import_freezes_new_only_and_reaches_tools_and_api(
+    migrated_database_url, tmp_path, monkeypatch
+):
+    from decimal import Decimal
+
+    from helpers.portfolio_api import app, headers
+    from helpers.research_snapshots import seed_filing
+    from nexus.agents.database_tools import database_read_only_tools
+    from nexus.agents.models import ResearchRequest
+    from nexus.agents.persistence import admit_research_run
+    from nexus.agents.snapshots import prepare_research_snapshot
+    from nexus.ops.alpaca_prices_import import _import_records
+    from nexus.ops.openai_local import prepare_database
+    from nexus.research.current_price_trends_storage import read_current_price_trends
+
+    settings, factory, store, client, archive = await setup_trends(
+        migrated_database_url, tmp_path / "archive", monkeypatch
+    )
+    await prepare_database(
+        EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    )
+    async with factory.begin() as session:
+        await seed_filing(session, instrument_id=INSTRUMENT, seed_instrument=False)
+        old = await _import_records(session, archive, INSTRUMENT, store)
+        old_id = UUID(old["evidence_id"])
+        old_doc = (
+            await read_current_price_trends(
+                session, instrument_id=INSTRUMENT, as_of=datetime.now(UTC), evidence_ids=(old_id,)
+            )
+        )[old_id]
+        old_bytes = old_doc.canonical_bytes()
+        old_objects = dict(client.objects)
+        old_snapshot = await prepare_research_snapshot(session, INSTRUMENT, as_of=datetime.now(UTC))
+        old_payload = json.loads(json.dumps(old_snapshot.payload))
+    async with factory.begin() as session:
+        fresh = await _import_records(session, archive, INSTRUMENT, store, True)
+        fresh_id = UUID(fresh["evidence_id"])
+        assert fresh_id != old_id
+        assert await _import_records(session, archive, INSTRUMENT, store, True) == fresh
+        assert await _import_records(session, archive, INSTRUMENT, store) == old
+        assert len(client.objects) == len(old_objects) + 1
+        assert all(client.objects[k] == v for k, v in old_objects.items())
+        restored = (
+            await read_current_price_trends(
+                session, instrument_id=INSTRUMENT, as_of=datetime.now(UTC), evidence_ids=(old_id,)
+            )
+        )[old_id]
+        assert (
+            restored.canonical_bytes() == old_bytes
+            and "liquidity_observation" not in restored.model_dump(mode="json")
+        )
+        cutoff = datetime.now(UTC)
+        snapshot = await prepare_research_snapshot(session, INSTRUMENT, as_of=cutoff)
+        assert (
+            str(fresh_id) in snapshot.payload["evidence_ids"]
+            and str(old_id) not in snapshot.payload["evidence_ids"]
+        )
+        assert (await session.get(DataSnapshot, old_snapshot.id)).payload == old_payload
+        admission = await admit_research_run(
+            session,
+            actor_id="test",
+            route="/internal/v1/research-runs",
+            idempotency_key="liquidity-new",
+            request_hash="c" * 64,
+            request=ResearchRequest(
+                instrument_id=INSTRUMENT, data_snapshot_id=snapshot.id, decision_time=cutoff
+            ),
+            prompt_version_id=None,
+            model_config_id=None,
+            daily_limit_usd=Decimal("3"),
+            now=cutoff,
+        )
+        tools = await database_read_only_tools(session, admission.run, allow_fixture_evidence=False)
+        result = await tools.execute(
+            "get_price_features",
+            {
+                "instrument_id": str(INSTRUMENT),
+                "data_snapshot_id": str(snapshot.id),
+                "as_of": cutoff.isoformat(),
+                "features": ["close"],
+            },
+        )
+        observation = result["items"][0]["liquidity_observation"]
+        assert observation["value"] == "0" and observation["status"] == "available"
+        assert result["items"][0]["market_price_eligible"] is False
+    path = f"/internal/v1/research-runs/{admission.run_id}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(migrated_database_url)), base_url="http://testserver"
+    ) as client_api:
+        response = await client_api.get(path, headers=headers("GET", path))
+    assert response.status_code == 200
+    projected = response.json()["data"]["inputs"]["current_price_trends"][0]
+    assert (
+        projected["liquidity_observation"] == observation
+        and projected["market_price_eligible"] is False
+    )
+    async with factory.begin() as session:
+        row = await session.scalar(
+            select(DataSnapshot).where(
+                DataSnapshot.revision == fresh["content_hash"],
+                DataSnapshot.source == "alpaca_current_trends",
+            )
+        )
+        payload = json.loads(json.dumps(row.payload))
+        payload["liquidity_observation"]["value"] = "1"
+        await session.execute(text("ALTER TABLE data_snapshots DISABLE TRIGGER USER"))
+        await session.execute(
+            text("UPDATE data_snapshots SET payload=CAST(:payload AS jsonb) WHERE id=:id"),
+            {"payload": json.dumps(payload), "id": row.id},
+        )
+        await session.execute(text("ALTER TABLE data_snapshots ENABLE TRIGGER USER"))
+    async with factory() as session:
+        assert (
+            await read_current_price_trends(
+                session, instrument_id=INSTRUMENT, as_of=datetime.now(UTC), evidence_ids=(fresh_id,)
+            )
+            == {}
+        )
+        assert (
+            await read_current_price_trends(
+                session, instrument_id=INSTRUMENT, as_of=datetime.now(UTC), evidence_ids=(old_id,)
+            )
+        )[old_id].canonical_bytes() == old_bytes
+    await factory.kw["bind"].dispose()

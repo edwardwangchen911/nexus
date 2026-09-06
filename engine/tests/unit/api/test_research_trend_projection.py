@@ -140,3 +140,12 @@ async def test_no_frozen_trend_reference_never_discovers_current_data(monkeypatc
         )
         == ()
     )
+
+
+def test_optional_liquidity_keeps_closed_serialization_schema_and_old_shape():
+    from nexus.api.schemas.agents import ResearchInputPriceTrend
+
+    schema = ResearchInputPriceTrend.model_json_schema(mode="serialization")
+    assert schema["additionalProperties"] is False
+    assert {"features", "liquidity_observation", "source"} <= set(schema["properties"])
+    assert ResearchInputPriceTrend.model_validate(trend()).model_dump(mode="json") == trend()

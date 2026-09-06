@@ -10,7 +10,14 @@ from typing import Any, Literal, Self
 from uuid import UUID
 
 import exchange_calendars  # type: ignore[import-untyped]
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from nexus.agents.price_features import compute_close_features
 from nexus.diagnostics.calendar_policy import XnysCalendarAdoption
@@ -24,6 +31,10 @@ from nexus.providers.market.alpaca import (
 )
 from nexus.providers.market.alpaca_http import load_exact_json
 from nexus.research.alpaca_prices_archive import ValidatedPriceArchive, validate_price_originals
+from nexus.research.liquidity_observation import (
+    LiquidityObservation,
+    calculate_liquidity_observation,
+)
 
 SOURCE = "alpaca_current_trends"
 SCHEMA = "alpaca_current_trends_v1"
@@ -114,6 +125,7 @@ class CurrentPriceTrend(_FrozenModel):
     contiguous_tail_sessions: int = Field(ge=0, le=367)
     missing_sessions: tuple[date, ...] = Field(max_length=367)
     features: dict[str, str | None]
+    liquidity_observation: LiquidityObservation | None = None
     received_at: datetime
     materialized_at: datetime
     available_at: datetime
@@ -137,6 +149,13 @@ class CurrentPriceTrend(_FrozenModel):
         ):
             raise ValueError("CURRENT_TRENDS_DOCUMENT_INVALID")
         return self
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_shape(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value = handler(self)
+        if self.liquidity_observation is None:
+            value.pop("liquidity_observation", None)
+        return value
 
     def canonical_bytes(self) -> bytes:
         value = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
@@ -171,6 +190,7 @@ async def build_current_price_trend(
     calendar: XnysCalendarAdoption,
     purpose_policy: PurposePolicyInput,
     materialized_at: datetime,
+    include_liquidity_observation: bool = False,
 ) -> CurrentPriceTrend:
     clock = require_utc(materialized_at)
     archive = validate_price_originals(
@@ -238,6 +258,11 @@ async def build_current_price_trend(
             for item in archive.originals
         ),
         **trend_metrics(bars, sessions),
+        liquidity_observation=(
+            calculate_liquidity_observation(bars, sessions)
+            if include_liquidity_observation
+            else None
+        ),
     )
     document.canonical_bytes()
     return document

@@ -33,6 +33,7 @@ async def import_trends(
     instrument_id: UUID,
     collection_dir: Path,
     store: S3ProviderEvidenceStore | None = None,
+    include_liquidity_observation: bool = False,
 ) -> dict[str, object]:
     """No collection/model/price authority; caller receives only verified stored evidence."""
     database = make_url(settings.database_url) if settings.database_url else None
@@ -61,7 +62,9 @@ async def import_trends(
     try:
         async with asyncio.timeout(120):
             async with async_sessionmaker(engine, expire_on_commit=False).begin() as session:
-                return await _import_records(session, archive, instrument_id, object_store)
+                return await _import_records(
+                    session, archive, instrument_id, object_store, include_liquidity_observation
+                )
     finally:
         await asyncio.wait_for(engine.dispose(), timeout=10)
 
@@ -71,6 +74,7 @@ async def _import_records(
     archive: ValidatedPriceArchive,
     instrument_id: UUID,
     object_store: S3ProviderEvidenceStore,
+    include_liquidity_observation: bool = False,
 ) -> dict[str, object]:
     await session.execute(
         text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
@@ -81,7 +85,12 @@ async def _import_records(
     )
     if head != CURRENT_MIGRATION_HEAD:
         raise ValueError("CURRENT_TRENDS_SCHEMA_NOT_READY")
-    evidence = await persist_current_price_trends(session, archive, store=object_store)
+    evidence = await persist_current_price_trends(
+        session,
+        archive,
+        store=object_store,
+        include_liquidity_observation=include_liquidity_observation,
+    )
     documents = await read_current_price_trends(
         session, instrument_id=instrument_id, as_of=datetime.now(UTC), evidence_ids=(evidence.id,)
     )
@@ -116,6 +125,11 @@ def main() -> int:
     parser.add_argument("--instrument-id", type=UUID, required=True)
     parser.add_argument("--collection-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--liquidity-observation",
+        action="store_true",
+        help="Freeze a research-only 20-session close-times-volume amount proxy",
+    )
     started_import = False
     try:
         args = parser.parse_args()
@@ -126,7 +140,10 @@ def main() -> int:
         started_import = True
         result = asyncio.run(
             import_trends(
-                settings, instrument_id=args.instrument_id, collection_dir=args.collection_dir
+                settings,
+                instrument_id=args.instrument_id,
+                collection_dir=args.collection_dir,
+                include_liquidity_observation=args.liquidity_observation,
             )
         )
         # DB may already be committed if this local result-file write fails; replay is idempotent.

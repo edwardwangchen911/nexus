@@ -11,6 +11,7 @@ from nexus.api.schemas.integrations import SuccessMetaResponse
 from nexus.domain.decimal import DecimalString
 from nexus.domain.evidence import EvidenceRef
 from nexus.domain.time import require_utc
+from nexus.research.liquidity_observation import LiquidityObservation
 from nexus.research.sec_exhibit_quarter_metrics import ExhibitQuarterMetrics
 from nexus.research.sec_exhibits import ExhibitText
 from nexus.strategy.intents import (
@@ -412,10 +413,19 @@ class ResearchInputPriceTrend(_StrictAgentSchema):
     received_at: AwareDatetime
     available_at: AwareDatetime
     features: ResearchInputPriceTrendFeatures
+    liquidity_observation: LiquidityObservation | None = None
     historical_backtest_eligible: Literal[False]
     market_price_eligible: Literal[False]
     total_return_eligible: Literal[False]
     execution_locked: Literal[True]
+
+    @model_serializer(mode="wrap")
+    # Keep the closed serialization schema, as for the legacy role payload above.
+    def preserve_legacy_shape(self, handler: SerializerFunctionWrapHandler):  # type: ignore[no-untyped-def]
+        value = cast(dict[str, object], handler(self))
+        if self.liquidity_observation is None:
+            value.pop("liquidity_observation", None)
+        return value
 
     @field_validator("received_at", "available_at")
     @classmethod
@@ -424,6 +434,11 @@ class ResearchInputPriceTrend(_StrictAgentSchema):
 
     @model_validator(mode="after")
     def scope_consistency(self) -> "ResearchInputPriceTrend":
+        if self.liquidity_observation is not None and not (
+            self.query_start <= self.liquidity_observation.window_start
+            <= self.liquidity_observation.window_end == self.query_end
+        ):
+            raise ValueError("TREND_LIQUIDITY_WINDOW_INVALID")
         if self.identity_asof > self.received_at.date() or self.revision != self.content_hash:
             raise ValueError("TREND_IDENTITY_INVALID")
         if not self.query_start <= self.query_end <= self.received_at.date():

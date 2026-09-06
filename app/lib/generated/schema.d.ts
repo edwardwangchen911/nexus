@@ -2317,6 +2317,50 @@ export interface components {
             /** Version */
             version: number;
         };
+        /** LiquidityObservation */
+        LiquidityObservation: {
+            /**
+             * Currency
+             * @constant
+             */
+            currency: "USD";
+            /**
+             * Method
+             * @constant
+             */
+            method: "mean_20_session_close_times_volume";
+            /** Missing Sessions */
+            missing_sessions: string[];
+            /** Observed Sessions */
+            observed_sessions: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "available" | "insufficient_sessions" | "missing_sessions";
+            /**
+             * Unit
+             * @constant
+             */
+            unit: "USD_per_trading_session";
+            /** Value */
+            value: string | null;
+            /**
+             * Window End
+             * Format: date
+             */
+            window_end: string;
+            /**
+             * Window Sessions
+             * @constant
+             */
+            window_sessions: 20;
+            /**
+             * Window Start
+             * Format: date
+             */
+            window_start: string;
+        };
         /**
          * MarketBarResponse
          * @description Exact selected-source OHLCV evidence for a semantic chart table.
@@ -4255,6 +4299,7 @@ export interface components {
             identity_asof: string;
             /** Last Observed On */
             last_observed_on: string | null;
+            liquidity_observation?: components["schemas"]["LiquidityObservation"] | null;
             /**
              * Market Price Eligible
              * @constant

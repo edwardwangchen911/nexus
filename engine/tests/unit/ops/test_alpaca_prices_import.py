@@ -55,3 +55,31 @@ def test_output_failure_after_import_reports_unknown_not_unwritten(tmp_path, mon
     output = capsys.readouterr()
     assert '"status": "unknown"' in output.err
     assert "synthetic-private-canary" not in output.out + output.err
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_normal_cli_keeps_liquidity_opt_in(tmp_path, monkeypatch, capsys, enabled):
+    from nexus.ops import alpaca_prices_import as entry
+
+    args = [
+        "alpaca_prices_import",
+        "--instrument-id",
+        "00000000-0000-4000-8000-000000000001",
+        "--collection-dir",
+        str(tmp_path),
+        "--output",
+        str(tmp_path / "result.json"),
+    ]
+    if enabled:
+        args.append("--liquidity-observation")
+    monkeypatch.setattr("sys.argv", args)
+    monkeypatch.setattr(entry, "load_local_environment", lambda *args: {})
+    calls = []
+
+    async def imported(*args, **kwargs):
+        calls.append(kwargs["include_liquidity_observation"])
+        return {"status": "stored_context"}
+
+    monkeypatch.setattr(entry, "import_trends", imported)
+    assert entry.main() == 0 and calls == [enabled]
+    assert '"model_called": false' in capsys.readouterr().out

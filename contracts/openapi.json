@@ -3663,6 +3663,92 @@
         "title": "JobRetryResponse",
         "type": "object"
       },
+      "LiquidityObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "currency": {
+            "const": "USD",
+            "title": "Currency",
+            "type": "string"
+          },
+          "method": {
+            "const": "mean_20_session_close_times_volume",
+            "title": "Method",
+            "type": "string"
+          },
+          "missing_sessions": {
+            "items": {
+              "format": "date",
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Missing Sessions",
+            "type": "array"
+          },
+          "observed_sessions": {
+            "maximum": 20,
+            "minimum": 0,
+            "title": "Observed Sessions",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "insufficient_sessions",
+              "missing_sessions"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "unit": {
+            "const": "USD_per_trading_session",
+            "title": "Unit",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "pattern": "^-?(0|[1-9]\\d*)(\\.\\d+)?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          },
+          "window_end": {
+            "format": "date",
+            "title": "Window End",
+            "type": "string"
+          },
+          "window_sessions": {
+            "const": 20,
+            "title": "Window Sessions",
+            "type": "integer"
+          },
+          "window_start": {
+            "format": "date",
+            "title": "Window Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "method",
+          "status",
+          "value",
+          "currency",
+          "unit",
+          "window_sessions",
+          "observed_sessions",
+          "window_start",
+          "window_end",
+          "missing_sessions"
+        ],
+        "title": "LiquidityObservation",
+        "type": "object"
+      },
       "MarketBarResponse": {
         "additionalProperties": false,
         "description": "Exact selected-source OHLCV evidence for a semantic chart table.",
@@ -8622,6 +8708,16 @@
               }
             ],
             "title": "Last Observed On"
+          },
+          "liquidity_observation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LiquidityObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "market_price_eligible": {
             "const": false,

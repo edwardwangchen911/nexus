@@ -209,7 +209,7 @@ def _project_price_trend(
     }
     return ResearchInputPriceTrend.model_validate({
         **{name: payload[name] for name in ResearchInputPriceTrend.model_fields
-           if name not in provenance},
+           if name not in provenance and (name != "liquidity_observation" or name in payload)},
         **provenance,
     })
 
