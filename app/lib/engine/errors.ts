@@ -889,6 +889,20 @@ function researchTrendsValid(data: Record<string, unknown>): boolean {
     if (String(trend.identity_asof) > String(trend.received_at).slice(0, 10) || trend.revision !== trend.content_hash) return false;
     const start = String(trend.query_start), end = String(trend.query_end);
     if (start > end || end > String(trend.received_at).slice(0, 10)) return false;
+    const liquidity = trend.liquidity_observation;
+    if (liquidity !== undefined && liquidity !== null) {
+      if (!isPlain(liquidity) || !Array.isArray(liquidity.missing_sessions)) return false;
+      const windowStart = String(liquidity.window_start), windowEnd = String(liquidity.window_end);
+      const days = liquidity.missing_sessions as string[];
+      const count = Number(liquidity.observed_sessions), size = count + days.length;
+      if (windowStart < start || windowStart > windowEnd || windowEnd !== end || size > 20
+        || days.some((day, index) => day < windowStart || day > windowEnd || index > 0 && day <= days[index - 1])) return false;
+      if (liquidity.status === "available") {
+        if (!decimalNonnegative(liquidity.value) || count !== 20 || days.length !== 0) return false;
+      } else if (liquidity.value !== null || count >= 20
+        || liquidity.status === "missing_sessions" && (days.length === 0 || size !== 20)
+        || liquidity.status === "insufficient_sessions" && size >= 20) return false;
+    }
     const observed = Number(trend.observed_sessions), expected = Number(trend.expected_sessions);
     const tail = Number(trend.contiguous_tail_sessions), total = Number(trend.missing_sessions_total);
     const missing = trend.missing_sessions as string[];

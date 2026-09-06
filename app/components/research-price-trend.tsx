@@ -5,7 +5,7 @@ import type { components } from "../lib/generated/schema";
 type Trend = components["schemas"]["ResearchInputPriceTrend"];
 
 export function ResearchPriceTrend({ trend }: { trend: Trend }): React.ReactElement {
-  const { features } = trend;
+  const { features, liquidity_observation: liquidity } = trend;
   const price = (value: string | null) => value === null ? "资料不足" : `${formatDisplayDecimal(value)} USD`;
   const missingFeatures = Object.values(features).some((value) => value === null);
   return <section className="decision-card__section" aria-label="拆股调整价格趋势">
@@ -27,6 +27,18 @@ export function ResearchPriceTrend({ trend }: { trend: Trend }): React.ReactElem
     </dl>
     <p>均线分别需要 20／200 个连续收盘，RSI14 需要 15 个，价格波动需要 21 个。年化波动按 20 日简单价格收益率的总体标准差乘 √252，不是期间涨跌幅或总收益波动。</p>
     <p>最多显示 3 位小数，极小非零值显示范围；原始精度不变。资料不授予历史回测、估值或交易价格资格，不形成买卖判断，执行保持锁定。</p>
+    {liquidity ? <section aria-label="成交金额代理观察">
+      <h4>成交金额代理观察</h4>
+      <dl className="decision-card__authority">
+        <div><dt>20 日收盘价×成交量金额代理</dt><dd className="numeric-data">{liquidity.status === "available" && liquidity.value !== null
+          ? `${formatDisplayDecimal(liquidity.value)} USD / 交易日`
+          : liquidity.status === "insufficient_sessions" ? "查询范围不足 20 个交易日" : "窗口内缺少交易日"}</dd></div>
+        <div><dt>金额代理考察窗口</dt><dd>{liquidity.window_start} 至 {liquidity.window_end}</dd></div>
+        <div><dt>窗口实收／目标交易日</dt><dd>{liquidity.observed_sessions} / {liquidity.window_sessions}</dd></div>
+        {liquidity.missing_sessions.length > 0 ? <div><dt>窗口缺失交易日</dt><dd>{liquidity.missing_sessions.join("、")}</dd></div> : null}
+      </dl>
+      <p>固定窗口内每日收盘价乘成交量，再对完整 20 个交易日求均值；不跨缺日补齐，不缩小分母。不是精确成交额、正式 ADV20 或退出天数，不改变估值或交易资格。</p>
+    </section> : null}
     <details className="portfolio-disclosure">
       <summary>趋势证据、身份与缺口</summary>
       <dl className="decision-card__versions">
