@@ -3006,3 +3006,20 @@ verified，default/listing/explicit 三种 prepare 精确绑定新 proof_snapsho
 防复发补在近因：0043 所有权约束要求原 collection object_id，最初后缀方案在真实 PG 红测被拒，改为同身份新 revision，未改迁移。可选字段 model_serializer 返回 dict 注解会把闭合输出 schema 变成开放 object；沿现有无返回注解模式修正并增加序列化 schema 回归，最终生成文件仅 237 行新增，无无关删除。CLI 验收捕获原始结果，不在结果未知时重放导入；构建日志目录依赖先于构建准备，首次未建目录在任何构建/服务变更前失败后才启动。
 
 本地私有证据：`outputs/acceptance/current-trends-real-20260905/latest-operating-disclosure/quarter-metrics-acceptance/liquidity-observation/`。安全摘要为 `acceptance-summary.json`、`preflight/preflight-summary.json`、`api-summary.json`、`dom-summary.json`、`final-state-summary.json`。来源可达性证据在相邻 `synthesis-v2/liquidity-feasibility-summary.json` 与 `liquidity-policy-summary.json`，后者是正式选择结果；原件、计算值、API/输入仅保存在私有文件，不进入聊天或测试。
+
+
+### 工具条目直接绑定引用编号：正常入口与历史兼容验收（2026-09-06）
+
+前轮研究虽已接收最新季度正文和流动性观察，却将新季度经营论点引用到旧 SEC 对象。零模型复原确认三个实际请求哈希不变：工具披露第 0 条对应顶层 evidence[3]，旧披露第 1 条对应 evidence[0]；条目只有 evidence_ref_id，须跨 security_snapshot 再关联完整来源身份，形成可避免的模型输入歧义。这是模型输入接线问题，不是缺少新季度数据、SDK 无能力或需要额外审批。来源同为 SEC 或数字索引合法均不能证明引用对象正确。
+
+最小修复为临时模型视图在工具条目旁增加 citation_index，按 source/object_id/content_hash/available_at 精确关联。未知引用、重复 UUID、冲突身份或歧义目录明确拒绝，不回退为 0；反序两个 SEC 对象及同哈希不同 object 均有回归。仅新配置 codex-sdk-chatgpt-v3-input96k-wire64k-cite1 启用，旧版本默认路径、冻结输入、历史提示与请求格式不变。复用现有配置版本与正常 setup 参数，无新表、迁移、提示版本或审批材料，原 96k/64k 字节/8192 输出/三阶段/单次尝试不变。
+
+配置接线 f7f39e7 和映射 ad0c85f 经集中互审，主线 aeefc1e → 645cbc3 精确集成。142 相关单测与 7 项隔离 PostgreSQL 验证通过，另有旧 wire 固定哈希回归和独立 34 单测复核；Ruff、Mypy、diff check 通过。正常 PG setup 连续两次只注册一个新模型，逐列保留旧模型，无新提示；正常 worker 对新旧版本的成功、超时及非法引用路径均覆盖。
+
+真实 setup 只新增一个模型配置，24 个旧表已有行保留。正常 worker 构造新版本的零模型预检保留完整正文、季度指标和原始工具数据，逐条引用身份精确，最大样本累计估算 79496 小于 96000；23 表事务回滚不变。旧研究按旧版本实际复原的三个请求哈希与已保存记录精确相等，不重标历史。
+
+随后同案例新版本正常 admit + 一次 run-once 已 completed/succeeded，进程退出 0、attempt=1/retry=0，输入 74686 / 输出 3917，保存 10 项输出。23 个旧表已有行保留，仅增加研究、输出、Job、额度预留及幂等记录。API 本地更新后 395 个源码文件精确匹配；同 run/snapshot 完整输入与三阶段经 API/BFF/页面核对，375 与 1440 宽度显示完整附件、季度指标、流动性观察、自评和观察边界，无溢出或交易动作。新研究三个实际请求哈希再次复原精确，字节数 56374/56498/59446；并非用预检样本替代真实输入证明。
+
+独立内容审查确认综合经营论点的 content_hash 精确匹配新季度附件，能够区分经营证据与集中度预警，回应价格弱势且未把代理当正式 ADV20；引用接线修复及有边界的研究观察通过验收。报告仍明确缺少替代机会和分散成本比较，未给出有依据的减配目标，不能据此通过完整方案或有证据不调整验收。复合 audit 论点还需逐句核对引用覆盖，不扩建语义分类框架；模型自评 sufficient/resolved 不能替代内容验收。当前系统仍 partial/watch、exposure_action=none、execution_locked=true，不据此宣告方案比较、正式不调整理由或执行完成。失败经验已落实为最接近根因的映射和回归，沿用既有记录，不再新增治理机制或恢复“三阶段预算另批”。
+
+私有证据目录：outputs/acceptance/current-trends-real-20260905/latest-operating-disclosure/quarter-metrics-acceptance/inline-citations/；setup-summary.json、preflight/preflight-summary.json、legacy-reconstruction/preflight-summary.json、final-state-summary.json、api-summary.json、research-dom-summary.json、content-prompt-diagnosis/preflight-summary.json 为安全验收摘要。原始账户与完整研究 DTO 仅存本地私有文件。
