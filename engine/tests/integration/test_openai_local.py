@@ -98,3 +98,37 @@ async def test_strategy_rnd_setup_preserves_existing_committee_model_versions(
         assert {version: current[version] for version in previous} == previous
         assert "codex-sdk-strategy-rnd-v1" in current
         assert await session.scalar(select(func.count()).select_from(AgentPromptVersionRecord)) == 9
+
+
+@pytest.mark.asyncio
+async def test_inline_setup_is_idempotent_and_preserves_old_config(migrated_database_url):
+    from nexus.ops.openai_local import prepare_database
+
+    settings = EngineSettings(database_url=migrated_database_url, agent_runtime_mode="codex_sdk")
+    options = dict(structured_synthesis=True, aggregate_input_tokens=96000, max_wire_bytes=64000)
+    await prepare_database(settings, **options)
+    factory = session_factory(settings)
+    async with factory() as session:
+        old = await session.scalar(select(AgentModelConfigRecord))
+        before = {column.name: getattr(old, column.name) for column in old.__table__.columns}
+        prompts = await session.scalar(select(func.count()).select_from(AgentPromptVersionRecord))
+    await prepare_database(settings, **options, inline_citations=True)
+    await prepare_database(settings, **options, inline_citations=True)
+    async with factory() as session:
+        models = list(await session.scalars(select(AgentModelConfigRecord)))
+        assert len(models) == 2
+        original = next(row for row in models if row.id == before["id"])
+        assert {
+            column.name: getattr(original, column.name) for column in original.__table__.columns
+        } == before
+        new = next(row for row in models if row.id != before["id"])
+        assert new.version == "codex-sdk-chatgpt-v3-input96k-wire64k-cite1"
+        assert new.config_hash != before["config_hash"]
+        assert new.max_input_tokens == original.max_input_tokens
+        assert new.max_output_tokens == original.max_output_tokens
+        assert (
+            await session.scalar(select(func.count()).select_from(AgentPromptVersionRecord))
+            == prompts
+        )
+        for model_type in (AgentResearchRunRecord, DataSnapshot, Job):
+            assert await session.scalar(select(func.count()).select_from(model_type)) == 0

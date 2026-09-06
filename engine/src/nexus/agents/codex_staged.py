@@ -246,6 +246,7 @@ class StagedCodexCommittee(CodexCommittee):
         deadline: float | None = None,
         aggregate_input_tokens: int = MAX_INPUT_TOKENS,
         max_wire_bytes: int = 55808,
+        inline_citations: bool = False,
     ) -> None:
         if type(aggregate_input_tokens) is not int or aggregate_input_tokens not in {64000, 96000}:
             raise ValueError("CODEX_AGGREGATE_INPUT_INVALID")
@@ -256,6 +257,9 @@ class StagedCodexCommittee(CodexCommittee):
             or (max_wire_bytes == 64000 and aggregate_input_tokens != 96000)
         ):
             raise ValueError("CODEX_WIRE_LIMIT_INVALID")
+        if type(inline_citations) is not bool:
+            raise ValueError("CODEX_INLINE_CITATIONS_INVALID")
+        self._inline_citations = inline_citations
         self._max_wire_bytes = max_wire_bytes
         self._aggregate_input_tokens = aggregate_input_tokens
         # Reserve terminal writes inside the worker-owned aggregate deadline.
@@ -388,7 +392,11 @@ class StagedCodexCommittee(CodexCommittee):
             "units and unknown currency. A dollar sign alone does not establish USD; "
             "name a currency only when explicit frozen evidence supports it."
         )
-        payload = project_staged_payload(payload)
+        payload = (
+            project_staged_payload(payload, inline_citations=True)
+            if self._inline_citations
+            else project_staged_payload(payload)
+        )
         wire = codex_request_wire(payload)
         estimated_input = codex_input_allowance(wire, codex_output_schema(output_model))
         stage_input_hash = codex_request_hash(payload, output_model)

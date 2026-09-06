@@ -59,12 +59,83 @@ def _columns(value: object) -> object:
     return candidate if len(_json(candidate).encode()) < len(_json(items).encode()) else items
 
 
-def project_staged_payload(payload: dict[str, object]) -> dict[str, object]:
+_CITATION_NOTE = (
+    " Tool items carry citation_index bound to the top-level evidence index. "
+    "Use that index for the item's facts or disclosure, not its tool row position. "
+    "Indexes identify sources; they do not prove a claim or resolve an evidence gap."
+)
+
+
+def _inline_citation_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Join verified tool reference ids to exact frozen identities without mutating inputs."""
+
+    def invalid() -> ValueError:
+        return ValueError("CODEX_TOOL_CITATION_BINDING_INVALID")
+
+    inputs, evidence = payload.get("frozen_inputs"), payload.get("evidence")
+    if not isinstance(inputs, dict) or not isinstance(evidence, list):
+        raise invalid()
+    security = inputs.get("security_snapshot")
+    if not isinstance(security, dict) or not isinstance(security.get("items"), list):
+        raise invalid()
+
+    def identity(item: dict[str, object], object_field: str) -> tuple[str, ...]:
+        fields = ("source", object_field, "content_hash", "available_at")
+        if any(not isinstance(item.get(field), str) or not item[field] for field in fields):
+            raise invalid()
+        return tuple(cast(str, item[field]) for field in fields)
+
+    indexes: dict[tuple[str, ...], int] = {}
+    for index, reference in enumerate(evidence):
+        if (
+            not isinstance(reference, dict)
+            or type(reference.get("index")) is not int
+            or reference["index"] != index
+        ):
+            raise invalid()
+        key = identity(reference, "object_id")
+        if key in indexes:
+            raise invalid()
+        indexes[key] = index
+    by_id: dict[str, int] = {}
+    for row in security["items"]:
+        if not isinstance(row, dict):
+            raise invalid()
+        ref_id = row.get("evidence_ref_id")
+        key = identity(row, "provider_object_id")
+        if not isinstance(ref_id, str) or not ref_id or ref_id in by_id or key not in indexes:
+            raise invalid()
+        by_id[ref_id] = indexes[key]
+    annotated: dict[str, object] = {}
+    for name, tool in inputs.items():
+        if not isinstance(tool, dict) or not isinstance(tool.get("items"), list):
+            raise invalid()
+        rows = []
+        for row in tool["items"]:
+            if isinstance(row, dict) and "evidence_ref_id" in row:
+                ref_id = row["evidence_ref_id"]
+                if not isinstance(ref_id, str) or ref_id not in by_id or "citation_index" in row:
+                    raise invalid()
+                rows.append({**row, "citation_index": by_id[ref_id]})
+            else:
+                rows.append(row)
+        annotated[name] = {**tool, "items": rows}
+    instructions = payload.get("instructions")
+    if not isinstance(instructions, str):
+        raise invalid()
+    return {**payload, "frozen_inputs": annotated, "instructions": instructions + _CITATION_NOTE}
+
+
+def project_staged_payload(
+    payload: dict[str, object], *, inline_citations: bool = False
+) -> dict[str, object]:
     """Return a smaller model-facing payload, including its fixed decoding note.
 
     Reserved-key collisions, non-JSON inputs and no net savings preserve the
     complete original payload. Object order is not semantic; array order is.
     """
+    if inline_citations:
+        payload = _inline_citation_payload(payload)
     inputs = payload.get("frozen_inputs")
     instructions = payload.get("instructions")
     if (
